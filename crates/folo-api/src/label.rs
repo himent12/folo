@@ -486,6 +486,9 @@ pub enum LabelEvent {
     Image(LabelImage),
     /// `removed`: an image was deleted.
     Removed(RemovedImage),
+    /// `reload` (payload `{}`): more changed than the stream carries (many images added at once, or this
+    /// subscriber fell behind): load the job's images again.
+    Reload,
     /// `log`: a line of the job's log.
     Log(LogLine),
 }
@@ -505,6 +508,7 @@ impl LabelEvent {
             LabelEvent::Job(_) => "job",
             LabelEvent::Image(_) => "image",
             LabelEvent::Removed(_) => "removed",
+            LabelEvent::Reload => "reload",
             LabelEvent::Log(_) => "log",
         }
     }
@@ -515,6 +519,7 @@ impl LabelEvent {
             LabelEvent::Job(p) => serde_json::to_string(p),
             LabelEvent::Image(p) => serde_json::to_string(p),
             LabelEvent::Removed(p) => serde_json::to_string(p),
+            LabelEvent::Reload => Ok("{}".to_string()),
             LabelEvent::Log(p) => serde_json::to_string(p),
         };
         r.expect("event payloads always serialize")
@@ -527,6 +532,7 @@ impl LabelEvent {
             "job" => serde_json::from_str(data).map(LabelEvent::Job),
             "image" => serde_json::from_str(data).map(LabelEvent::Image),
             "removed" => serde_json::from_str(data).map(LabelEvent::Removed),
+            "reload" => Ok(LabelEvent::Reload),
             "log" => serde_json::from_str(data).map(LabelEvent::Log),
             _ => return None,
         })
@@ -594,6 +600,8 @@ mod tests {
         assert_eq!(LabelEvent::from_sse(ev.name(), &ev.data_json()).unwrap().unwrap(), ev);
         let ev = LabelEvent::Removed(RemovedImage { id: "7".into() });
         assert_eq!(LabelEvent::from_sse("removed", &ev.data_json()).unwrap().unwrap(), ev);
+        assert_eq!(LabelEvent::from_sse("reload", "{}").unwrap().unwrap(), LabelEvent::Reload);
+        assert_eq!((LabelEvent::Reload.name(), LabelEvent::Reload.data_json().as_str()), ("reload", "{}"));
         assert!(LabelEvent::from_sse("later", "{}").is_none());
         assert!(LabelEvent::from_sse("job", "{").unwrap().is_err());
     }

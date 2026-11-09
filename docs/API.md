@@ -691,6 +691,8 @@ exported more than once.
   - `job` `LabelJob`: first, then after every change of the job (status, counts, run progress, usage);
   - `image` `LabelImage`: an image was added, sent to the agent (`labeling`), labeled, failed or edited;
   - `removed` `{ "id" }`: an image was deleted;
+  - `reload` `{}`: more changed than the stream carries, so load the images again (sent instead of one `image`
+    event each when more than 100 images are added at once, and to a client that fell behind the stream);
   - `log` `{ "t", "level", "message" }`: the job's log (calls made, tokens used, boxes dropped, failures).
 
   The stream replays nothing: load the job's images with `GET …/images`, then apply events.
@@ -708,9 +710,12 @@ exported more than once.
   MCP servers, no user or project settings, hooks, skills or `CLAUDE.md`, and no session file; the images go in
   on stdin as a `stream-json` user message. The fixed cost of a call is a few hundred tokens. Codex is started
   as `codex exec` with `--ephemeral --sandbox read-only --ignore-user-config`, FOLO's instructions as the model
-  instructions, the features that add tools switched off, the images as `--image` attachments and the reply
-  shape as `--output-schema`; Codex still sends about 10000 tokens of its own per call, which is why its
-  default batch is larger. Both run in an empty scratch folder and use the account the CLI is signed in with.
+  instructions, web search and the features that add tools switched off, the images as `--image` attachments
+  and the reply shape as `--output-schema` (with `label` limited to the job's classes); that takes a call's fixed
+  cost from about 20000 tokens to about 8000, which are Codex's own and stay, so its default batch is larger.
+  Both run in an empty scratch folder and use the account the CLI is signed in with. Measured with
+  `crates/folo-server/tests/label_live.rs` (Claude Code 2.1.302, codex-cli 0.167.0), eight 320 px images: Claude
+  Code 2 calls and 3500 input tokens in all, Codex 1 call and 9200.
 - A reply's boxes are checked before they are stored: a label that is not one of the job's classes (compared
   without case), a malformed box, or one that is empty after clipping is dropped (the log says how many), and an
   image the reply does not mention is `failed`. A reply that is not the JSON asked for is retried once; then

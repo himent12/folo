@@ -2,8 +2,8 @@
 //!
 //! Implements the contract in `docs/API.md` on axum. Handlers sit on a [`Store`]: [`MockStore`] serves deterministic
 //! synthetic data (`folo serve --mock`), [`RealStore`] serves datasets from disk (read with folo-data, indexed and
-//! cached under the data dir), trains runs with folo-vision's trainer on a background worker, lists their models and
-//! runs inference. The request / response types live in the `folo-api` crate (re-exported as [`api`]) so the CLI and
+//! cached under the data dir), trains runs with folo-vision's trainer on a background worker, lists their models,
+//! runs inference and has coding agents label images ([`label`]). The request / response types live in the `folo-api` crate (re-exported as [`api`]) so the CLI and
 //! FOLO Desktop share them.
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
@@ -12,6 +12,7 @@ pub mod cli;
 mod engine;
 pub mod error;
 mod index;
+pub mod label;
 pub mod mock;
 mod models;
 mod probe;
@@ -216,7 +217,14 @@ impl Server {
             Cors::Any => CorsLayer::permissive(),
             Cors::Loopback => CorsLayer::new()
                 .allow_origin(AllowOrigin::predicate(|o, _| is_loopback_origin(o)))
-                .allow_methods([Method::GET, Method::HEAD, Method::POST, Method::DELETE, Method::OPTIONS])
+                .allow_methods([
+                    Method::GET,
+                    Method::HEAD,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
                 .allow_headers(tower_http::cors::Any)
                 // Readable by page scripts (Studio caches downloaded weights by ETag).
                 .expose_headers([header::ETAG, header::CONTENT_DISPOSITION]),

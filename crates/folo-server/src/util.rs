@@ -1,5 +1,6 @@
-//! Small helpers: hashing, a seeded RNG, RFC 3339 formatting.
+//! Small helpers: hashing, a seeded RNG, RFC 3339 formatting, folder names.
 
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// FNV-1a 64-bit hash of `bytes`.
@@ -137,9 +138,60 @@ pub fn short_id(prefix: &str, h: u64) -> String {
     format!("{prefix}_{:04x}", (mix64(h) >> 48) as u16)
 }
 
+/// A folder name for a display name: lowercase ASCII letters, digits and `-` (at most 48 characters), or
+/// `fallback` when nothing of the name is left.
+pub fn slug(name: &str, fallback: &str) -> String {
+    let mut s = String::new();
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            s.push(c.to_ascii_lowercase());
+        } else if !s.ends_with('-') && !s.is_empty() {
+            s.push('-');
+        }
+    }
+    let s = s.trim_end_matches('-').chars().take(48).collect::<String>();
+    if s.is_empty() { fallback.into() } else { s }
+}
+
+/// Creates a new folder `parent/base`, or `parent/base-2`, `-3`, ... when that is taken, and returns it.
+/// `create_dir` claims the folder atomically, so concurrent callers with the same name never share one.
+pub fn claim_dir(parent: &Path, base: &str) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(parent)?;
+    let mut dir = parent.join(base);
+    let mut n = 1;
+    loop {
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                n += 1;
+                dir = parent.join(format!("{base}-{n}"));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slugs() {
+        assert_eq!(slug("Shapes 1k!", "synthetic"), "shapes-1k");
+        assert_eq!(slug("  --  ", "synthetic"), "synthetic");
+        assert_eq!(slug("a__b", "x"), "a-b");
+    }
+
+    #[test]
+    fn claimed_folders_get_a_suffix_when_taken() {
+        let parent = folo_test_support::TestDir::new("util-claim-dir");
+        let names = ["set", "set-2", "set-3"];
+        for name in names {
+            let dir = claim_dir(&parent.join("datasets"), "set").unwrap();
+            assert!(dir.is_dir());
+            assert_eq!(dir.file_name().unwrap(), name);
+        }
+    }
 
     #[test]
     fn rfc3339_known_values() {
