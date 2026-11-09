@@ -1,7 +1,8 @@
 # CI
 
 `.github/workflows/ci.yml` runs on every PR and on pushes to `main`: `cargo fmt --check` (Linux), `cargo clippy -D
-warnings` and `cargo test --workspace` on Linux and Windows, the web app's `npm ci && npm run check && npm run build`, and
+warnings` and `cargo test --workspace` on Linux and Windows, the web app's `npm ci && npm run check && npm run build` and `npm run qa` (blank sections and overflow at tablet and
+phone sizes, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium), and
 the browser build (`wasm`, Linux: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and
 `scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock`, docs/WASM.md), and ONNX export parity
 (`onnx`, Linux: a Python 3.12 venv with pinned `onnx`, `onnxruntime` and `numpy`, then `cargo test -p folo-cli --test

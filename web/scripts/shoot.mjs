@@ -4,10 +4,13 @@
 //   npm run shoot -- r3 --only runs   (scene names containing "runs")
 //   npm run qa                    -> the checks below only, no screenshots; exits 1 if they find anything (CI runs it)
 // Uses the installed Chrome (playwright-core, channel "chrome"); without one, the Chromium that
-// `npx playwright-core install chromium` downloads. FOLO_SHOOT_BROWSER=chromium forces that one.
+// `npx playwright-core install --only-shell chromium` downloads. FOLO_SHOOT_BROWSER=chromium forces that one.
 // After each scene's setup, the QA lists every element whose content is wider than its box (and the page wider than the
 // viewport), skipping deliberate scrollers, and every blank section: a selected tab or section picker whose content
 // renders nothing, a page with almost nothing under its header. The list prints at the end and goes to qa.txt.
+// --qa runs only those checks, where phone layouts break: every scene at the tablet and mobile sizes it lists, in dark
+// (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model).
+// Each state gets its scene's setup; nothing is captured or saved.
 import { createServer } from 'vite';
 import { chromium } from 'playwright-core';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -44,7 +47,7 @@ if (!qa) {
   mkdirSync(outDir, { recursive: true });
 }
 
-/** Waits (in real time; the page clock is frozen) until every image has decoded, then a beat for layout. */
+/** Waits in real time until every image has decoded, then a beat for layout (and 50 ms of page clock). */
 async function settle(page) {
   for (let i = 0; i < 40; i++) {
     const pending = await page.evaluate(() => [...document.images].filter((im) => !im.complete).length);
