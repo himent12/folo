@@ -361,7 +361,9 @@
      box's target. */
   .runs .check {
     position: relative;
+    /* A real 32 px column: never squeezed below it when the table is tight (tablet). */
     width: 32px;
+    min-width: 32px;
     padding: 0;
   }
 

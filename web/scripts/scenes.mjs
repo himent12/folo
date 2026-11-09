@@ -386,7 +386,7 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
-      else await page.getByRole('radio', { name: 'Config' }).click();
+      else await page.getByRole('tab', { name: 'Config' }).click();
       await page.locator('#config').scrollIntoViewIfNeeded();
       await page.mouse.move(0, 0);
     },
