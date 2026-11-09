@@ -878,7 +878,8 @@ impl FoloApp {
             .flex_col()
             .gap(px(if short { 8. } else { 14. }))
             .px(px(20.))
-            // 16 px past the last control for the footer's fade, so it never dims a control.
+            // Room past the last control (the bottom fade shows only while more of the form lies
+            // below, so at the end every control reads undimmed).
             .pb(px(36.))
             // Errors lead the form, where a failed submit is seen (the dialog scrolls to the top).
             .when_some(error.clone(), |d, e| {
@@ -2091,11 +2092,17 @@ impl FoloApp {
                 // keyboard focus (short ones need neither).
                 let full_name = classes.get(b.class as usize).cloned().unwrap_or_default();
                 let long = crate::ui::may_overflow(&full_name, ty::SM.size, 70.);
-                let focused = long && self.ring(&self.fh(key.clone(), cx), window);
-                let row = div()
-                    .id(SharedString::from(key.clone()))
-                    .when(long, |d| d.tooltip(crate::controls::tip(full_name.clone(), None)))
-                    .when(focused, |d| d.child(crate::controls::focus_tip(&t, full_name.clone(), 30.)))
+                let row = self
+                    .disclose(
+                        div().id(SharedString::from(key.clone())),
+                        &key,
+                        full_name,
+                        long,
+                        30.,
+                        false,
+                        window,
+                        cx,
+                    )
                     .h(px(30.))
                     .px(px(8.))
                     .flex()
@@ -2195,15 +2202,13 @@ impl FoloApp {
                         // The panel's 268 px hold ~33 monospace glyphs (0.6 em each); a longer
                         // path ends in "…" and shows in full on hover.
                         let long = meta.file.chars().count() as f32 * 0.6 * ty::BASE.size > 268.;
-                        div()
-                            .id("insp-file")
-                            .when(long, |d| d.tooltip(crate::controls::tip(meta.file.clone(), None)))
-                            .child(
-                                text(ty::BASE, t.text_primary)
-                                    .font_family(crate::theme::MONO)
-                                    .ellipsis()
-                                    .child(meta.file.clone()),
-                            )
+                        let el = div().id("insp-file");
+                        self.disclose(el, "insp-file", meta.file.clone(), long, 24., true, window, cx).child(
+                            text(ty::BASE, t.text_primary)
+                                .font_family(crate::theme::MONO)
+                                .ellipsis()
+                                .child(meta.file.clone()),
+                        )
                     })
                     .child(
                         div()

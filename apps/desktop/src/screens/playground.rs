@@ -729,12 +729,17 @@ impl FoloApp {
                         let key = format!("det-{i}");
                         // A cut class name shows in full on hover and on keyboard focus.
                         let long = may_overflow(&b.name, ty::SM.size, 68.);
-                        let focused = long && self.ring(&self.fh(key.clone(), cx), window);
-                        let full = b.name.clone();
-                        let row = div()
-                            .id(SharedString::from(key.clone()))
-                            .when(long, |d| d.tooltip(crate::controls::tip(full.clone(), None)))
-                            .when(focused, |d| d.child(crate::controls::focus_tip(&t, full.clone(), 28.)))
+                        let row = self
+                            .disclose(
+                                div().id(SharedString::from(key.clone())),
+                                &key,
+                                b.name.clone(),
+                                long,
+                                28.,
+                                false,
+                                window,
+                                cx,
+                            )
                             .flex_none()
                             .h(px(28.))
                             .px(px(8.))
@@ -1206,7 +1211,9 @@ impl FoloApp {
             cx,
         );
         let note = match (self.play_target, &self.local_gpu) {
-            (None, _) if !local => "Built-in demo · simulated inference".into(),
+            // The caption also says why Local GPU and CPU are off, so keyboard users (whose arrows
+            // skip disabled options) learn it without the tooltip.
+            (None, _) if !local => "Simulated demo · local runs need folo serve".into(),
             (None, _) => format!("On folo serve at {}", self.store.api.describe()),
             (Some(Target::Gpu), Load::Ready(name)) => {
                 format!("In this app, on {}", crate::ui::short_gpu(name))

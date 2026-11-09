@@ -458,6 +458,36 @@ impl FoloApp {
             .into_any_element()
     }
 
+    /// A cut label's disclosure: when `long`, its full text shows on hover (a tooltip) and on
+    /// keyboard focus (a tip `below` px down). Rows that already take focus pass
+    /// `tab_stop: false`; plain text passes `true` and becomes a Tab stop with its own ring, so
+    /// the full text is never pointer-only. Short text gets nothing. Every cut label uses it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn disclose(
+        &self,
+        el: Stateful<Div>,
+        key: &str,
+        full: impl Into<SharedString>,
+        long: bool,
+        below: f32,
+        tab_stop: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        if !long {
+            return el;
+        }
+        let t = theme(cx);
+        let full: SharedString = full.into();
+        let fh = self.fh(key.to_string(), cx);
+        let ring = self.ring(&fh, window);
+        el.relative()
+            .tooltip(tip(full.clone(), None))
+            .when(tab_stop, |d| d.track_focus(&fh))
+            .when(ring && tab_stop, |d| d.child(focus_ring(&t, radius::SM)))
+            .when(ring, |d| d.child(focus_tip(&t, full, below)))
+    }
+
     /// A scroll area's chrome, for the `relative` parent of its scrolling element: the edge fades
     /// (`ui::scroll_edges`) and the overlay thumb. Every scroll area but the page uses it.
     pub fn scroll_chrome(

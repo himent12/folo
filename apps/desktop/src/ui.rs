@@ -683,7 +683,9 @@ pub fn int(n: u64) -> String {
 pub fn share_spare<const N: usize>(spare: f32, cols: [(f32, f32, f32); N]) -> [f32; N] {
     let weights: f32 = cols.iter().map(|c| c.1).sum();
     let share = if weights > 0. { spare.max(0.) / weights } else { 0. };
-    cols.map(|(base, weight, cap)| (base + share * weight).min(cap.max(base)))
+    // Whole pixels: a fractional column width can leave text measured at one width and laid out
+    // at another.
+    cols.map(|(base, weight, cap)| (base + share * weight).min(cap.max(base)).floor())
 }
 
 /// A flex table column on the same rule as `share_spare`, for rows whose cells need no known
@@ -862,7 +864,7 @@ thread_local! {
     static SCROLLED: std::cell::RefCell<Vec<ScrollSeen>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// A scroll area's edge fades: 16 px of its surface `bg` over an edge only while content lies
+/// A scroll area's edge fades: 24 px of its surface `bg` over an edge only while content lies
 /// past it, so a row cut by the edge reads as "more", and at either end the rows show undimmed.
 /// With the thumbs hidden at rest, these are the scroll cue. `inset` keeps them inside a panel's
 /// border, `radius` follows its corners. Every scroll area but the page uses them, through
@@ -871,18 +873,20 @@ pub fn scroll_edges(handle: &ScrollHandle, bg: Hsla, inset: f32, radius: f32) ->
     let y = handle.offset().y;
     let above = y < px(-1.);
     let below = handle.max_offset().height + y > px(1.);
+    // 24 px: its outer 6 px solid, so a row cut at the edge leaves no sliver of glyphs, then an
+    // 18 px ramp (GPUI gradients take two stops, so the solid part is its own band).
     let fade = move |top: bool| {
-        let d = div().absolute().left(px(inset)).right(px(inset)).h(px(16.));
+        let d = div().absolute().left(px(inset)).right(px(inset)).h(px(24.)).flex().overflow_hidden();
         let d = if top {
-            d.top(px(inset)).rounded_t(px(radius))
+            d.top(px(inset)).flex_col().rounded_t(px(radius))
         } else {
-            d.bottom(px(inset)).rounded_b(px(radius))
+            d.bottom(px(inset)).flex_col_reverse().rounded_b(px(radius))
         };
-        d.bg(gpui::linear_gradient(
+        d.child(div().h(px(6.)).flex_none().bg(bg)).child(div().flex_1().bg(gpui::linear_gradient(
             if top { 180. } else { 0. },
             gpui::linear_color_stop(bg, 0.),
             gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
-        ))
+        )))
     };
     above.then(|| fade(true)).into_iter().chain(below.then(|| fade(false)))
 }

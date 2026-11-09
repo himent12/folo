@@ -707,16 +707,21 @@ impl FoloApp {
         // padding, margins, borders); with less, the narrower set (778 px) keeps Created inside.
         let content = self.content_width(window);
         let list_w = if vw < px(1500.) { content } else { content - (SIDE_W + 40.) - 16. };
-        let full = list_w >= 918.;
+        // 8 px of slack on every budget: a row exactly as wide as its slot can overflow it by a
+        // rounding error, and GPUI then lays the whole page out at its min-content width (the
+        // hero chart collapsed to its axis labels at 1680).
+        const SLACK: f32 = 8.;
+        let full = list_w >= 918. + SLACK;
         let (name_w, prog_w, best_w, when_w) =
             if full { (200., 160., 96., 80.) } else { (150., 120., 96., 80.) };
         let meta_w = if full { 180. } else { 130. };
-        // Width past the set's need goes to the name, arch · dataset and progress (2 : 1 : 1, to
-        // their caps); only what's left opens before the numbers.
-        let [name_w, meta_w, prog_w] = crate::ui::share_spare(
-            list_w - if full { 918. } else { 778. },
-            [(name_w, 2., 280.), (meta_w, 1., 240.), (prog_w, 1., 200.)],
-        );
+        // Stacked (below 1500), width past the set's need goes to the name, arch · dataset and
+        // progress (2 : 1 : 1, to their caps); only what's left opens before the numbers. Beside
+        // Best model the set stays as is: widened there, GPUI 0.2.2 laid the page out at its
+        // min-content width (the hero chart collapsed to its axis at 1680).
+        let spare = if vw < px(1500.) { list_w - SLACK - if full { 918. } else { 778. } } else { 0. };
+        let [name_w, meta_w, prog_w] =
+            crate::ui::share_spare(spare, [(name_w, 2., 280.), (meta_w, 1., 240.), (prog_w, 1., 200.)]);
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
         let header = panel_header(&t, "Recent runs").child(all);
