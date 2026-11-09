@@ -2,14 +2,16 @@
 //   npm run shoot                 -> shots/<timestamp>/
 //   npm run shoot -- r3           -> shots/r3/
 //   npm run shoot -- r3 --only runs   (scene names containing "runs")
-// Uses the installed Chrome (playwright-core, channel "chrome"); no browser download.
+//   npm run qa                    -> the checks below only, no screenshots; exits 1 if they find anything (CI runs it)
+// Uses the installed Chrome (playwright-core, channel "chrome"); without one, the Chromium that
+// `npx playwright-core install chromium` downloads. FOLO_SHOOT_BROWSER=chromium forces that one.
 // After each scene's setup, the QA lists every element whose content is wider than its box (and the page wider than the
 // viewport), skipping deliberate scrollers, and every blank section: a selected tab or section picker whose content
 // renders nothing, a page with almost nothing under its header. The list prints at the end and goes to qa.txt.
 import { createServer } from 'vite';
 import { chromium } from 'playwright-core';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { EOL } from 'node:os';
+import { availableParallelism, EOL } from 'node:os';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { scenes } from './scenes.mjs';
@@ -18,8 +20,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 const onlyIdx = args.indexOf('--only');
 const only = onlyIdx >= 0 ? args[onlyIdx + 1] : undefined;
+const qa = args.includes('--qa');
 const round = args.find((a, i) => !a.startsWith('--') && (onlyIdx < 0 || i !== onlyIdx + 1)) ?? new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
 const outDir = resolve(root, 'shots', round);
+const started = Date.now();
 
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
@@ -35,8 +39,10 @@ const server = await createServer({ root, logLevel: 'error', server: { host: '12
 await server.listen();
 const base = (server.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5199/').replace(/\/$/, '');
 
-if (!only) rmSync(outDir, { recursive: true, force: true });
-mkdirSync(outDir, { recursive: true });
+if (!qa) {
+  if (!only) rmSync(outDir, { recursive: true, force: true });
+  mkdirSync(outDir, { recursive: true });
+}
 
 /** Waits (in real time; the page clock is frozen) until every image has decoded, then a beat for layout. */
 async function settle(page) {
@@ -242,108 +248,182 @@ async function blankCheck(page) {
   });
 }
 
-const browser = await chromium.launch({ channel: 'chrome', headless: true });
+/**
+ * The installed Chrome, else the Chromium `npx playwright-core install chromium` downloads (CI's Linux runners have no
+ * Chrome). FOLO_SHOOT_BROWSER=chrome or chromium picks one and fails if it is missing.
+ */
+async function launch() {
+  const want = process.env.FOLO_SHOOT_BROWSER;
+  if (want !== 'chromium') {
+    try {
+      return await chromium.launch({ channel: 'chrome', headless: true });
+    } catch (e) {
+      if (want === 'chrome') throw e;
+    }
+  }
+  try {
+    const b = await chromium.launch({ headless: true });
+    console.log(`Using Playwright's Chromium ${b.version()} (no Chrome, or FOLO_SHOOT_BROWSER=chromium).`);
+    return b;
+  } catch (e) {
+    throw new Error(
+      'No browser: install Chrome, or Playwright\'s Chromium with `npx playwright-core install chromium` ' +
+        `(on Linux its system libraries too: \`npx playwright-core install-deps chromium\`).\n${e instanceof Error ? e.message : e}`,
+    );
+  }
+}
+
+const browser = await launch();
 /** Bold yellow in a terminal (the overflow QA must be impossible to miss). */
 const yellow = (/** @type {string} */ t) => `\u001b[1;33m${t}\u001b[0m`;
 let count = 0;
 const failures = [];
 /** Overflow (`px` > 0) and blank sections (`px` 0), one list. @type {{ name: string, selector: string, px: number, text: string }[]} */
 const overflows = [];
-try {
-  for (const scene of scenes) {
-    for (const theme of scene.themes ?? ['dark', 'light']) {
-      for (const vp of scene.viewports ?? ['desktop', 'mobile']) {
-        const name = `${scene.name}--${theme}--${vp}`;
-        if (only && !name.includes(only)) continue;
-        const context = await browser.newContext({
-          viewport: VIEWPORTS[vp],
-          deviceScaleFactor: vp === 'mobile' ? 2 : 1,
-          colorScheme: theme === 'light' ? 'light' : 'dark',
-          reducedMotion: 'reduce',
-        });
-        const page = await context.newPage();
-        await page.clock.install({ time: FIXED_NOW });
-        await page.addInitScript((t) => {
-          localStorage.setItem('folo.theme', t);
-          localStorage.setItem('folo.shoot', '1');
-        }, theme);
-        page.on('pageerror', (e) => failures.push(`${name}: ${e.message}`));
-        try {
-          await page.goto(`${base}/?mock=1${scene.search ? `&${scene.search}` : ''}#${scene.path}`, { waitUntil: 'networkidle' });
-          await page.evaluate(() => document.fonts.ready);
-          // Let the mock's live run advance a little, deterministically.
-          await page.clock.runFor(scene.advance ?? 2000);
-          if (scene.setup) await scene.setup(page, { vp, theme });
-          await settle(page);
-          // Content cut off or spilling sideways (the page included: wide content must scroll inside its own box).
-          for (const o of await overflowCheck(page)) {
-            overflows.push({ name, ...o });
-            console.warn(`${yellow('! overflow')} ${name}  ${o.selector}  +${o.px}px`);
-          }
-          // A selected section that renders nothing, or a page that is empty under its header.
-          for (const b of await blankCheck(page)) {
-            overflows.push({ name, px: 0, ...b });
-            console.warn(`${yellow('! blank')} ${name}  ${b.selector}`);
-          }
-          const full = scene.fullPage ?? vp !== 'mobile';
-          // Capture what a user sees: from the top, with no stray focus ring on the skip link. For full-page shots the
-          // viewport grows to the document's height, so sticky and fixed bars (top bar, tab bar, docks) sit where they
-          // belong instead of wherever the viewport happened to be when the image was stitched.
-          await page.evaluate(() => {
-            window.scrollTo(0, 0);
-            const a = document.activeElement;
-            if (a instanceof HTMLElement && a.classList.contains('skip')) a.blur();
-          });
-          // Only pages with a visible fixed bar need it; others keep their real viewport (some size to 100dvh).
-          const hasFixedBar = await page.evaluate(() =>
-            [...document.querySelectorAll('body *')].some((el) => {
-              const cs = getComputedStyle(el);
-              const r = el.getBoundingClientRect();
-              return cs.position === 'fixed' && cs.display !== 'none' && cs.visibility !== 'hidden' && r.height > 24 && r.width > 200;
-            }),
-          );
-          if (full && hasFixedBar) {
-            for (let k = 0; k < 2; k++) {
-              const h = await page.evaluate(() => document.documentElement.scrollHeight);
-              const cur = page.viewportSize();
-              if (!cur || cur.height >= h) break;
-              await page.setViewportSize({ width: cur.width, height: Math.min(h, 8000) });
-              await settle(page);
-            }
-          }
-          await page.screenshot({ path: resolve(outDir, `${name}.png`), fullPage: full });
-          count++;
-        } catch (e) {
-          failures.push(`${name}: ${e instanceof Error ? e.message : e}`);
-        } finally {
-          await context.close();
-        }
+
+/**
+ * Opens one scene in one theme and viewport, sets it up, runs both checks and (without --qa) takes the shot.
+ * @param {import('./scenes.mjs').Scene} scene
+ * @param {'dark' | 'light'} theme
+ * @param {'desktop' | 'laptop' | 'tablet' | 'mobile'} vp
+ * @returns {Promise<boolean>} whether the page showed a phone section picker
+ */
+async function shoot(scene, theme, vp) {
+  const name = `${scene.name}--${theme}--${vp}`;
+  const context = await browser.newContext({
+    viewport: VIEWPORTS[vp],
+    deviceScaleFactor: vp === 'mobile' ? 2 : 1,
+    colorScheme: theme === 'light' ? 'light' : 'dark',
+    reducedMotion: 'reduce',
+  });
+  const page = await context.newPage();
+  page.on('pageerror', (e) => failures.push(`${name}: ${e.message}`));
+  let picker = false;
+  try {
+    // An installed clock keeps running in real time, so where a page's timers stand at the check depends on load. --qa
+    // pauses it at FIXED_NOW before the page loads (installed an hour early: pauseAt only moves forward), so time then
+    // moves only by the scenes' runFor, the same on every machine.
+    await page.clock.install({ time: qa ? FIXED_NOW.getTime() - 3_600_000 : FIXED_NOW });
+    if (qa) await page.clock.pauseAt(FIXED_NOW);
+    await page.addInitScript((t) => {
+      localStorage.setItem('folo.theme', t);
+      localStorage.setItem('folo.shoot', '1');
+    }, theme);
+    await page.goto(`${base}/?mock=1${scene.search ? `&${scene.search}` : ''}#${scene.path}`, { waitUntil: 'networkidle' });
+    await page.evaluate(() => document.fonts.ready);
+    // Let the mock's live run advance a little, deterministically.
+    await page.clock.runFor(scene.advance ?? 2000);
+    if (scene.setup) await scene.setup(page, { vp, theme });
+    await settle(page);
+    // Content cut off or spilling sideways (the page included: wide content must scroll inside its own box).
+    for (const o of await overflowCheck(page)) {
+      overflows.push({ name, ...o });
+      console.warn(`${yellow('! overflow')} ${name}  ${o.selector}  +${o.px}px`);
+    }
+    // A selected section that renders nothing, or a page that is empty under its header.
+    for (const b of await blankCheck(page)) {
+      overflows.push({ name, px: 0, ...b });
+      console.warn(`${yellow('! blank')} ${name}  ${b.selector}`);
+    }
+    picker = await page.evaluate(() =>
+      [...document.querySelectorAll('.phone-pick, [role=radiogroup][aria-label="Show"]')].some((el) => el.checkVisibility({ checkVisibilityCSS: true })),
+    );
+    count++;
+    if (qa) return picker;
+    const full = scene.fullPage ?? vp !== 'mobile';
+    // Capture what a user sees: from the top, with no stray focus ring on the skip link. For full-page shots the
+    // viewport grows to the document's height, so sticky and fixed bars (top bar, tab bar, docks) sit where they
+    // belong instead of wherever the viewport happened to be when the image was stitched.
+    await page.evaluate(() => {
+      window.scrollTo(0, 0);
+      const a = document.activeElement;
+      if (a instanceof HTMLElement && a.classList.contains('skip')) a.blur();
+    });
+    // Only pages with a visible fixed bar need it; others keep their real viewport (some size to 100dvh).
+    const hasFixedBar = await page.evaluate(() =>
+      [...document.querySelectorAll('body *')].some((el) => {
+        const cs = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        return cs.position === 'fixed' && cs.display !== 'none' && cs.visibility !== 'hidden' && r.height > 24 && r.width > 200;
+      }),
+    );
+    if (full && hasFixedBar) {
+      for (let k = 0; k < 2; k++) {
+        const h = await page.evaluate(() => document.documentElement.scrollHeight);
+        const cur = page.viewportSize();
+        if (!cur || cur.height >= h) break;
+        await page.setViewportSize({ width: cur.width, height: Math.min(h, 8000) });
+        await settle(page);
       }
     }
+    await page.screenshot({ path: resolve(outDir, `${name}.png`), fullPage: full });
+  } catch (e) {
+    failures.push(`${name}: ${e instanceof Error ? e.message : e}`);
+  } finally {
+    await context.close();
   }
+  return picker;
+}
+
+/** --qa's states, run by a small pool below. @type {(() => Promise<void>)[]} */
+const qaJobs = [];
+try {
+  for (const scene of scenes) {
+    const themes = scene.themes ?? ['dark', 'light'];
+    const viewports = scene.viewports ?? ['desktop', 'mobile'];
+    if (!qa) {
+      for (const theme of themes) {
+        for (const vp of viewports) {
+          if (!only || `${scene.name}--${theme}--${vp}`.includes(only)) await shoot(scene, theme, vp);
+        }
+      }
+      continue;
+    }
+    // --qa: the tablet and phone sizes in dark (or the one theme a scene is made for), and light too behind a picker.
+    const first = themes.includes('dark') ? 'dark' : themes[0];
+    for (const vp of viewports.filter((v) => v === 'tablet' || v === 'mobile')) {
+      if (only && !`${scene.name}--${first}--${vp}`.includes(only)) continue;
+      qaJobs.push(async () => {
+        if ((await shoot(scene, first, vp)) && first === 'dark' && themes.includes('light')) await shoot(scene, 'light', vp);
+      });
+    }
+  }
+  // Each state has its own context and paused clock, so --qa runs several at once: FOLO_QA_JOBS, default up to 8 (most
+  // of a state's time is waiting on the page, not the CPU).
+  const jobs = Math.max(1, Number(process.env.FOLO_QA_JOBS) || Math.min(8, availableParallelism()));
+  await Promise.all(
+    Array.from({ length: jobs }, async () => {
+      for (let job = qaJobs.shift(); job; job = qaJobs.shift()) await job();
+    }),
+  );
 } finally {
   await browser.close();
   await server.close();
 }
 
-console.log(`${count} shots -> ${outDir}`);
-// The QA list (overflow and blank sections): never fails the shoot, but printed last, boxed in yellow, and saved next
-// to the shots.
+const secs = Math.round((Date.now() - started) / 1000);
+console.log(qa ? `QA: ${count} scene states checked in ${secs} s` : `${count} shots -> ${outDir} (${secs} s)`);
+// The QA list (overflow and blank sections): printed last, boxed in yellow. The shoot saves it next to the shots and
+// never fails on it; --qa fails on it.
 const report = resolve(outDir, only ? `qa-${only.replace(/[^\w-]+/g, '_')}.txt` : 'qa.txt');
+// The pool finishes states out of order: list them in scene order.
+const order = (/** @type {string} */ n) => scenes.findIndex((s) => s.name === n.split('--')[0]);
+overflows.sort((a, b) => order(a.name) - order(b.name) || a.name.localeCompare(b.name));
 if (overflows.length) {
   const shots = new Set(overflows.map((o) => o.name)).size;
   const wide = overflows.filter((o) => o.px > 0).length;
-  const head = `SHOOT QA: ${wide} element(s) overflow horizontally, ${overflows.length - wide} blank section(s), in ${shots} shot(s)`;
+  const head = `SHOOT QA: ${wide} element(s) overflow horizontally, ${overflows.length - wide} blank section(s), in ${shots} ${qa ? 'state' : 'shot'}(s)`;
   const lines = overflows.map((o) => {
     const [scene, theme, vp] = o.name.split('--');
     const what = o.px > 0 ? `+${String(o.px).padStart(4)}px` : ' blank';
     return `${scene.padEnd(28)} ${theme.padEnd(5)} ${vp.padEnd(7)} ${what}  ${o.selector}${o.text ? `  "${o.text}"` : ''}`;
   });
-  writeFileSync(report, [head, ...lines, ''].join(EOL));
+  if (!qa) writeFileSync(report, [head, ...lines, ''].join(EOL));
   const bar = '='.repeat(Math.max(head.length, 72));
-  console.warn([yellow(bar), yellow(head), yellow(bar), ...lines, yellow(bar), `(saved to ${report})`].join(EOL));
+  console.warn([yellow(bar), yellow(head), yellow(bar), ...lines, yellow(bar), ...(qa ? [] : [`(saved to ${report})`])].join(EOL));
+  if (qa) process.exitCode = 1;
 } else {
-  rmSync(report, { force: true });
+  if (!qa) rmSync(report, { force: true });
   console.log('Shoot QA: nothing overflows horizontally, no blank sections.');
 }
 if (failures.length) {
