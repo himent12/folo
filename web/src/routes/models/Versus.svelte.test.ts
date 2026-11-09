@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { flushSync, mount, unmount } from 'svelte';
+import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 import { versusYolo26n } from '$lib/benchmarks';
 import Versus from './Versus.svelte';
@@ -34,5 +34,32 @@ describe('Engine speed table', () => {
         expect(col?.textContent).toBe(td.querySelector('.cl')?.textContent);
       }
     });
+  });
+
+  it('qualifies the comparison beside it and names what differs on each affected row', async () => {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+    Element.prototype.scrollIntoView ??= () => {};
+    c = mount(Versus, { target });
+    flushSync();
+    const flagged = [...target.querySelectorAll('tbody tr')]
+      .map((tr) => ({ m: tr.querySelector('.m')?.firstChild?.textContent, flags: [...tr.querySelectorAll('.flag')].map((f) => f.textContent) }))
+      .filter((r) => r.flags.length);
+    expect(flagged).toEqual([
+      { m: 'GPU forward throughput, batch 16', flags: ['precision differs'] },
+      { m: 'GPU end to end, batch 1', flags: ['workload differs'] },
+      { m: 'GPU end-to-end throughput, batch 16', flags: ['precision differs', 'workload differs'] },
+      { m: 'CPU forward, batch 1', flags: ['workload differs'] },
+      { m: 'CPU end to end, batch 1', flags: ['workload differs'] },
+      { m: 'Training peak GPU memory', flags: ['workload differs'] },
+    ]);
+    expect(target.querySelector('.lede .qual')?.textContent).toContain(`6 of ${versusYolo26n.length} rows mix precision or workload conditions`);
+    const how = target.querySelector<HTMLDetailsElement>('details.how')!;
+    expect(how.open).toBe(false);
+    target.querySelector<HTMLButtonElement>('.lede button')!.click();
+    await tick();
+    expect(how.open).toBe(true);
+    expect(document.activeElement).toBe(how.querySelector('summary'));
   });
 });

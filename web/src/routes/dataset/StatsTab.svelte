@@ -1,7 +1,8 @@
 <script lang="ts">
   /**
    * Dataset statistics. A compact health summary comes first: one line per severity (errors, warnings, notes) with a
-   * short summary of its findings and their count on the right edge, each opening to the evidence. Then four numbers, the class balance as the focal chart, the two
+   * short summary of its findings and, on the right edge, what they count (file issues, apart from dataset-wide
+   * observations), each opening to the evidence: every finding under the level's label, its next step under it. Then four numbers, the class balance as the focal chart, the two
    * histograms in ink, and last the `folo dataset check` issues in their own section with severity and kind filters.
    */
   import { tick } from 'svelte';
@@ -21,7 +22,7 @@
   import Panel from '$lib/ui/Panel.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import { swatchStyle } from './swatch';
-  import { bySeverity, countBinLabel, findings, groupSummary, healthChecks, imageCount, reviewCount, reviewLabel, sizeBinLabel, TINY_SIZE, type Severity } from './health';
+  import { bySeverity, countBinLabel, groupCount, groupSummary, healthChecks, healthSummary, imageCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
   let {
     dataset,
@@ -32,13 +33,9 @@
 
   const images = $derived(imageCount(dataset));
   const health = $derived(healthChecks(dataset, stats, counts));
-  const issues = $derived(reviewCount(health));
   const groups = $derived(bySeverity(health));
-  const notes = $derived(groups.find((g) => g.severity === 'info')?.items.length ?? 0);
   const ok = $derived(health.find((h) => h.severity === 'ok'));
-  const summary = $derived(
-    [reviewLabel(issues) ?? 'nothing to fix', notes ? `${notes} ${notes === 1 ? 'note' : 'notes'}` : ''].filter(Boolean).join(' · '),
-  );
+  const summary = $derived(healthSummary(health));
   // Each severity line starts folded: the summary is the point, the evidence one tap away.
   let open = $state<Partial<Record<Severity, boolean>>>({});
 
@@ -92,10 +89,10 @@
             <summary>
               <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
               <span class="hlabel">{g.label}</span>
-              <!-- Folded: a short summary of the findings (units named). Open: the titles head the evidence below. The
-                   count of findings sits on the right edge either way. -->
+              <!-- Folded: a short summary of the findings (units named). Open: the titles head the evidence below. What
+                   they count sits on the right edge either way: file issues, and dataset-wide observations apart. -->
               <span class="htitles">{groupSummary(g)}</span>
-              <span class="hcount num">{findings(g.items.length)}</span>
+              <span class="hcount num">{groupCount(g)}</span>
               <span class="hchev" aria-hidden="true"><ChevronDown size={14} strokeWidth={1.75} /></span>
             </summary>
             <ul class="hitems">
@@ -448,19 +445,19 @@
   details[open] .hchev {
     transform: rotate(180deg);
   }
-  /* The evidence lines up under the titles column: 16 px padding + 16 px icon + 72 px label + two 12 px gaps. */
+  /* The evidence starts at the level label's left edge (16 px padding + 16 px icon + a 12 px gap), not in a gutter
+     past it. */
   .hitems {
     display: grid;
-    gap: var(--space-3);
-    padding: var(--space-1) var(--space-4) var(--space-4) calc(var(--space-16) * 2);
+    gap: var(--space-4);
+    padding: var(--space-1) var(--space-4) var(--space-4) calc(var(--space-4) + 16px + var(--space-3));
   }
-  /* Text on the left at a reading measure, its next step on the right edge (under the count). */
+  /* The title, its body at a 60-character measure, and its next step directly under them, as on phones. */
   .hitems li {
     display: grid;
-    grid-template-columns: minmax(0, 72ch) auto;
-    justify-content: space-between;
-    align-items: start;
-    gap: var(--space-1) var(--space-6);
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: start;
+    gap: var(--space-1);
   }
   .htext {
     display: grid;
@@ -470,6 +467,7 @@
     font-weight: var(--weight-medium);
   }
   .hdetail {
+    max-width: 60ch;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
@@ -477,7 +475,6 @@
   .hacts {
     display: flex;
     flex-wrap: wrap;
-    justify-content: flex-end;
     gap: 0 var(--space-4);
   }
   .haction {
@@ -558,12 +555,6 @@
     }
     details[open] summary .htitles {
       display: none;
-    }
-    .hitems li {
-      grid-template-columns: minmax(0, 1fr);
-    }
-    .hacts {
-      justify-content: flex-start;
     }
     .okrow {
       gap: var(--space-2);

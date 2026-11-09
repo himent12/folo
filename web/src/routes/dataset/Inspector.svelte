@@ -48,10 +48,10 @@
   let vw = $state(0);
   let vh = $state(0);
   // A label (or box) under the pointer or focus is `hovered`; a label clicked to zoom to it stays `selected` until
-  // clicked again or the image changes. The image highlights the hovered box, else the selected one.
+  // clicked again or the image changes. The image draws the two apart, as the Playground does: the hovered box takes
+  // its class fill and chip, the selected one the accent stroke above the rest, which recede.
   let hovered = $state<number | null>(null);
   let selected = $state<number | null>(null);
-  const active = $derived(hovered ?? selected);
 
   const idx = $derived(id ? pager.indexOf(id) : -1);
   const img = $derived(idx >= 0 ? pager.get(idx) : undefined);
@@ -323,7 +323,8 @@
               boxes={img.boxes}
               {classes}
               {only}
-              {active}
+              active={hovered}
+              {selected}
               onhover={(i) => (hovered = i)}
               alt={stem(img.file)}
             />

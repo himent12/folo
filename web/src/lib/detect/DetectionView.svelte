@@ -155,7 +155,7 @@
             class="box"
             class:active={active === i}
             class:selected={selected === i}
-            class:dim={active !== null && active !== i}
+            class:dim={active !== null && active !== i && selected !== i}
             class:recede={selected !== null && selected !== i && active !== i}
             data-box={i}
             style:--c={classColor(b.class)}

@@ -5,15 +5,19 @@
    * percentile band instead, so 80 classes read as one shape instead of spaghetti. Hovering a table row gives its curve
    * the class hue, clicking keeps it highlighted (the selection rule: bg.active and a 2 px accent bar), and a line
    * above the table says so and offers Clear. The legend row above the plot is the readout. Phones hide the precision
-   * and recall columns; tapping a row opens a details row with those two, at their operating point. `view` shows
-   * only the curves or only the table (the phone model page puts them in separate sections); both stay mounted, so a
-   * class picked in the table is still traced when the curves come back.
+   * and recall columns: each row has two controls there, the class name traces its curve (`aria-pressed`) and the
+   * chevron opens a details row with those two at their operating point (`aria-expanded`), with "View curve"
+   * (`onviewcurve`). `view` shows only the curves or only the table (the phone model page puts them in separate
+   * sections); both stay mounted, so a class picked in the table is still traced when the curves come back, and
+   * `onback` puts a way back to the table in the curves' legend row.
    */
   import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { classInk, classStroke } from '$lib/design/classInk.svelte';
   import { metric, num } from '$lib/format';
   import Input from '$lib/ui/Input.svelte';
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Search from '@lucide/svelte/icons/search';
   import { classMetrics, matchesClass, PR_CONTEXT, prEnvelope, trimPrTail } from './pr';
@@ -23,7 +27,18 @@
     ev,
     map50,
     view = 'all',
-  }: { classes: readonly string[]; ev: Evaluation; map50: number | null; view?: 'all' | 'curves' | 'classes' } = $props();
+    onviewcurve,
+    onback,
+  }: {
+    classes: readonly string[];
+    ev: Evaluation;
+    map50: number | null;
+    view?: 'all' | 'curves' | 'classes';
+    /** A details row's "View curve": the class is traced, then the page shows the curves. */
+    onviewcurve?: (cls: number) => void;
+    /** Back to the class table, offered in the curves' legend row (after "View curve"). */
+    onback?: () => void;
+  } = $props();
 
   // Phones get a shorter plot so the table (the legend) starts on the first screen.
   let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
@@ -41,6 +56,13 @@
   let hovered = $state<number | null>(null);
   let selected = $state<number[]>([]);
   const toggle = (i: number) => (selected = selected.includes(i) ? selected.filter((x) => x !== i) : [...selected, i]);
+  /** Phones: the classes whose details row is open (apart from tracing). */
+  let opened = $state<number[]>([]);
+  const disclose = (i: number) => (opened = opened.includes(i) ? opened.filter((x) => x !== i) : [...opened, i]);
+  function viewCurve(i: number) {
+    if (!selected.includes(i)) selected = [...selected, i];
+    onviewcurve?.(i);
+  }
   /** Classes drawn in their hue, in legend order: the selection, then the hovered row. */
   const lit = $derived(hovered !== null && !selected.includes(hovered) ? [...selected, hovered] : selected);
 
@@ -105,6 +127,9 @@
       {/each}
       {#if banded}<span class="item band-key"><span class="swatch-band" aria-hidden="true"></span>10th–90th percentile of classes</span>{/if}
       <!-- Phones' Curves section has no table beside it: the hint and Clear come along. Elsewhere they head the table. -->
+      {#if view === 'curves' && onback}
+        <button type="button" class="clear back" onclick={onback}><ArrowLeft size={14} aria-hidden="true" />Back to Classes</button>
+      {/if}
       {#if view === 'curves'}
         {#if selected.length}
           <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
@@ -150,7 +175,7 @@
           <span>{selected.length} {selected.length === 1 ? 'class' : 'classes'} traced</span>
           <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
         {:else}
-          <span class="hint">Select classes to trace their curves</span>
+          <span class="hint">{narrow ? 'Tap a class to trace its curve, the arrow for its details' : 'Select classes to trace their curves'}</span>
         {/if}
       </p>
     </div>
@@ -179,7 +204,7 @@
         <tbody>
           {#each rows as c (c.class)}
             {@const on = selected.includes(c.class)}
-            {@const open = narrow && on}
+            {@const open = narrow && opened.includes(c.class)}
             <tr
               class="link"
               class:on
@@ -189,21 +214,36 @@
               onclick={() => toggle(c.class)}
             >
               <td>
-                <!-- Wide: a toggle that traces the curve. Phones: it also discloses the details row. -->
-                <button
-                  type="button"
-                  class="cls"
-                  aria-pressed={narrow ? undefined : on}
-                  aria-expanded={narrow ? open : undefined}
-                  aria-controls={narrow ? `pr-detail-${c.class}` : undefined}
-                  onclick={(e) => (e.stopPropagation(), toggle(c.class))}
-                  onfocus={() => (hovered = c.class)}
-                  onblur={() => (hovered = null)}
-                >
-                  <span class="sw" style:background={classInk(c.class)} aria-hidden="true"></span>
-                  <span class="truncate">{name(c.class)}</span>
-                  {#if narrow}<span class="chev" class:open aria-hidden="true"><ChevronDown size={14} /></span>{/if}
-                </button>
+                <!-- The class name traces its curve (a toggle). Phones: the chevron beside it is a separate control that
+                     opens the details row. -->
+                <div class="cls-cell">
+                  <button
+                    type="button"
+                    class="cls"
+                    data-cls={c.class}
+                    aria-pressed={on}
+                    aria-label="Trace {name(c.class)}"
+                    onclick={(e) => (e.stopPropagation(), toggle(c.class))}
+                    onfocus={() => (hovered = c.class)}
+                    onblur={() => (hovered = null)}
+                  >
+                    <span class="sw" style:background={classInk(c.class)} aria-hidden="true"></span>
+                    <span class="truncate">{name(c.class)}</span>
+                  </button>
+                  {#if narrow}
+                    <button
+                      type="button"
+                      class="disc"
+                      data-cls={c.class}
+                      aria-expanded={open}
+                      aria-controls="pr-detail-{c.class}"
+                      aria-label="{name(c.class)} details"
+                      onclick={(e) => (e.stopPropagation(), disclose(c.class))}
+                    >
+                      <span class="chev" class:open aria-hidden="true"><ChevronDown size={14} /></span>
+                    </button>
+                  {/if}
+                </div>
               </td>
               <td class="r">{metric(c.ap50)}</td>
               <td class="r muted">{metric(c.ap50_95)}</td>
@@ -212,7 +252,7 @@
               <td class="r muted">{num(c.instances)}</td>
             </tr>
             {#if open}
-              <tr class="detail" id="pr-detail-{c.class}">
+              <tr class="detail" class:on id="pr-detail-{c.class}">
                 <td colspan={COLS_NARROW}>
                   <dl>
                     {#each classMetrics(c) as d (d.label)}
@@ -220,6 +260,9 @@
                     {/each}
                   </dl>
                   <p class="ctx">{PR_CONTEXT}</p>
+                  {#if onviewcurve}
+                    <button type="button" class="view" onclick={() => viewCurve(c.class)}>View curve<ArrowRight size={14} aria-hidden="true" /></button>
+                  {/if}
                 </td>
               </tr>
             {/if}
@@ -378,31 +421,71 @@
   .cls-h {
     padding-left: calc(var(--space-4) + var(--space-4));
   }
+  .cls-cell {
+    display: flex;
+    align-items: center;
+    min-width: 0;
+  }
   .cls {
     display: flex;
     align-items: center;
     gap: var(--space-2);
+    min-width: 0;
     max-width: 200px;
     text-align: left;
+  }
+  .disc {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    margin-left: auto;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .disc:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+  .back {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: calc(var(--space-2) * -1);
+  }
+  .view {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: 28px;
+    margin-top: var(--space-2);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+  }
+  .view:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line-strong);
   }
   .cls:focus-visible {
     outline-offset: 2px;
   }
   .chev {
     display: inline-flex;
-    margin-left: auto;
-    padding-left: var(--space-1);
-    color: var(--text-tertiary);
     transition: transform var(--dur-fast) var(--ease-standard);
   }
   .chev.open {
     transform: rotate(180deg);
   }
-  /* Phones: every metric of a selected class, under its row (precision and recall have no column there). */
-  /* Indented to the class names (past the swatch), like the Class heading. */
+  /* Phones: every metric of an opened class, under its row (precision and recall have no column there). Indented to
+     the class names (past the swatch), like the Class heading; a traced class keeps its selection fill and bar. */
   tr.detail td {
     height: auto;
     padding: var(--space-2) var(--space-4) var(--space-3) calc(var(--space-4) + var(--space-4));
+  }
+  tr.detail.on td {
     background: var(--bg-active);
     box-shadow: inset 2px 0 0 var(--accent-line);
   }
@@ -477,11 +560,20 @@
     .cls {
       min-height: 44px;
     }
+    .disc {
+      width: 44px;
+      height: 44px;
+      margin-right: calc(var(--space-3) * -1);
+    }
+    .view {
+      min-height: 44px;
+      margin-top: 0;
+    }
   }
   @media (max-width: 767px) {
-    /* The button fills the class cell, so every row's chevron sits on one edge. */
+    /* The trace toggle takes the class cell's width, so every row's chevron sits on one edge. */
     .cls {
-      width: 100%;
+      flex: 1;
       max-width: none;
     }
     .fixed {
@@ -496,10 +588,6 @@
     }
     .c-inst {
       width: 88px;
-    }
-    /* The chevron keeps a gutter to the AP50 column. */
-    .chev {
-      padding-left: var(--space-2);
     }
     .legend,
     .plot,

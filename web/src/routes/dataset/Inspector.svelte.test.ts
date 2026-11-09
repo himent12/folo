@@ -60,4 +60,63 @@ describe('Inspector labels', () => {
     expect(a!.getAttribute('aria-current')).toBeNull();
     pager.dispose();
   });
+
+  it('draws the selected label as the selected box (the others recede) and the hovered one apart from it', async () => {
+    // The boxes are placed in screen pixels: give every element a size, since this DOM does no layout.
+    const cw = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    const chh = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 800 });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', { configurable: true, get: () => 600 });
+    try {
+      // The mock renders its images on a canvas, which this DOM lacks: any URL will do.
+      hub.api.imageUrl = () => Promise.resolve('data:image/png;base64,');
+      const dataset = await hub.api.dataset('ds_fasteners');
+      const pager = new ImagePager(dataset.id, undefined, undefined);
+      const first = await pager.at(0);
+      expect(first?.boxes.length).toBeGreaterThan(2);
+      c = mount(Inspector, {
+        target,
+        props: { pager, classes: dataset.classes, imageId: first!.id, only: null, onnavigate: () => {}, onclose: () => {}, onmissing: () => {} },
+      });
+      // The boxes draw once the image has loaded.
+      const img = await vi.waitFor(() => {
+        flushSync();
+        const el = target.querySelector<HTMLImageElement>('.stage img');
+        if (!el) throw new Error('image not rendered yet');
+        return el;
+      });
+      img.dispatchEvent(new Event('load'));
+      flushSync();
+      const box = (i: number) => target.querySelector<HTMLElement>(`.stage .box[data-box="${i}"]`)!;
+      const labels = [...target.querySelectorAll<HTMLButtonElement>('.labels button')];
+      expect(box(0)).not.toBeNull();
+
+      labels[0]!.click();
+      flushSync();
+      expect(box(0).classList.contains('selected')).toBe(true);
+      for (let i = 1; i < first!.boxes.length; i++) expect(box(i).classList.contains('recede')).toBe(true);
+
+      // Hovering another label: that box takes its hover fill and steps forward; the selection keeps its stroke.
+      labels[0]!.dispatchEvent(new FocusEvent('blur'));
+      labels[2]!.dispatchEvent(new PointerEvent('pointerenter'));
+      flushSync();
+      expect(box(2).classList.contains('active')).toBe(true);
+      expect(box(2).classList.contains('selected')).toBe(false);
+      expect(box(2).classList.contains('recede')).toBe(false);
+      expect(box(0).classList.contains('selected')).toBe(true);
+      expect(box(0).classList.contains('dim')).toBe(false);
+      expect(box(1).classList.contains('recede')).toBe(true);
+
+      // Let go of the selection: nothing recedes.
+      labels[0]!.click();
+      labels[0]!.dispatchEvent(new PointerEvent('pointerleave', { bubbles: true }));
+      target.querySelector('.labels')!.dispatchEvent(new PointerEvent('pointerleave'));
+      flushSync();
+      expect(target.querySelectorAll('.stage .box.selected, .stage .box.recede')).toHaveLength(0);
+      pager.dispose();
+    } finally {
+      if (cw) Object.defineProperty(HTMLElement.prototype, 'clientWidth', cw);
+      if (chh) Object.defineProperty(HTMLElement.prototype, 'clientHeight', chh);
+    }
+  });
 });

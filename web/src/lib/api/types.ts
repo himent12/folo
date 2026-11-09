@@ -202,6 +202,19 @@ export interface Model {
 
 export type ExportFormat = 'folo-f16' | 'onnx';
 
+/**
+ * `folo export`'s ONNX switches (docs/API.md, export; docs/CLI.md, ONNX export), ONNX only. Servers that implement
+ * them list `export_onnx_switches` in `SystemInfo.features`.
+ */
+export interface OnnxSwitches {
+  /** Decode boxes and class scores in the graph instead of the raw head outputs. */
+  decode?: boolean;
+  /** Symbolic batch, height and width (any batch, sides in multiples of 32). */
+  dynamic?: boolean;
+  /** f16 weights, input, activations and outputs. */
+  half?: boolean;
+}
+
 /** Precision–recall curve of one class at IoU 0.5, sampled at 101 recall points (0.00..1.00). */
 export interface PrCurve {
   class: number;

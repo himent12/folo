@@ -23,6 +23,9 @@
     only?: ReadonlySet<number> | null;
     active?: number | null;
     onhover?: (i: number | null) => void;
+    /** Passed through to DetectionView: the selected box (accent stroke, the others recede). */
+    selected?: number | null;
+    onselect?: (i: number) => void;
     fit?: 'contain' | 'cover';
     compact?: boolean;
     alt?: string;

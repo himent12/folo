@@ -9,6 +9,8 @@
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
   Arch,
+  Box,
+  ClassMetrics,
   CreateDataset,
   CreateSyntheticDataset,
   Dataset,
@@ -16,26 +18,25 @@ import type {
   DatasetImagesQuery,
   DatasetIssues,
   DatasetIssuesQuery,
-  IssueCounts,
   ExportFormat,
   ExportResult,
   Health,
+  IssueCounts,
+  LogLine,
   Model,
+  ModelEval,
+  OnnxSwitches,
   PredictBox,
   PredictInput,
   PredictOptions,
   Prediction,
   Run,
+  RunLogs,
   RunMetrics,
   RunSamples,
   Sample,
   SystemInfo,
   TrainConfig,
-  Box,
-  ClassMetrics,
-  LogLine,
-  ModelEval,
-  RunLogs,
 } from '../types';
 import { image, imageIndex, indices, issues, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
 import { synthEvaluation, toModelEval } from './evaluation';
@@ -294,6 +295,7 @@ export class MockApi implements Api {
         cpu: { name: 'AMD Ryzen 9 7950X 16-Core Processor', threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
         gpus: this.#gpus(),
+        features: ['export_onnx_switches'],
       };
     }, 60);
   }
@@ -479,12 +481,17 @@ export class MockApi implements Api {
     }, 180);
   }
 
-  exportModel(id: string, format: ExportFormat): Promise<ExportResult> {
+  exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches): Promise<ExportResult> {
     return this.#call(() => {
       const m = this.#models().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
-      const ext = format === 'onnx' ? 'onnx' : 'f16.folo';
-      return { path: `D:/folo/models/${m.name}.${ext}`, bytes: Math.round(m.params * (format === 'onnx' ? 4.1 : 2.03)) };
+      const on = { decode: !!switches?.decode, dynamic: !!switches?.dynamic, half: !!switches?.half };
+      if (format !== 'onnx' && (on.decode || on.dynamic || on.half))
+        throw new ApiError(400, 'invalid_body', 'decode, dynamic and half apply to ONNX exports only.');
+      // The real server's names (docs/API.md): `<name>-f16.folo`, `<name>.onnx`, `<name>-f16.onnx` with `half`.
+      const file = format === 'onnx' ? `${m.name}${on.half ? '-f16' : ''}.onnx` : `${m.name}-f16.folo`;
+      const perParam = format === 'onnx' ? (on.half ? 2.05 : 4.1) : 2.03;
+      return { path: `D:/folo/exports/${file}`, bytes: Math.round(m.params * perParam) };
     }, 1200);
   }
 

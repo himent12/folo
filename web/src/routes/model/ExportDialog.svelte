@@ -1,15 +1,16 @@
 <script lang="ts">
   /**
    * Export a model to a deployable file: pick a format and run it on the server. The f16 file can then be downloaded
-   * to this computer (GET /api/models/{id}/weights?format=f16); ONNX has no download endpoint, so its path on the
-   * server is shown, and the dialog says so.
+   * to this computer (GET /api/models/{id}/weights?format=f16), under the name the server gave it; ONNX has no
+   * download endpoint, so its path on the server is shown, and the dialog says so. Servers that list
+   * `export_onnx_switches` in /api/system's `features` get folo export's three ONNX switches as checkboxes.
    */
   import Check from '@lucide/svelte/icons/check';
   import Copy from '@lucide/svelte/icons/copy';
   import Download from '@lucide/svelte/icons/download';
   import { HttpApi } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
-  import type { ExportFormat, ExportResult, Model } from '$lib/api/types';
+  import type { ExportFormat, ExportResult, Model, OnnxSwitches } from '$lib/api/types';
   import { bytes } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -23,7 +24,7 @@
     {
       value: 'folo-f16',
       label: 'FOLO f16',
-      ext: '.f16.folo',
+      ext: '.folo',
       desc: 'Native weights in half precision. Loads instantly in folo predict and folo serve.',
       bytesPerParam: 2.03,
     },
@@ -31,12 +32,37 @@
       value: 'onnx',
       label: 'ONNX',
       ext: '.onnx',
-      desc: 'Open standard, float32 graph for ONNX Runtime, TensorRT or OpenVINO.',
+      desc: 'Open standard graph for ONNX Runtime, TensorRT or OpenVINO. float32 unless you pick half precision.',
       bytesPerParam: 4.1,
     },
   ];
 
+  /** folo export's ONNX switches (docs/CLI.md, ONNX export); off is its default. */
+  const switchOptions: { key: keyof OnnxSwitches; label: string; desc: string }[] = [
+    { key: 'decode', label: 'Decode boxes in the graph', desc: 'Outputs boxes and class scores instead of the raw head. NMS still runs outside.' },
+    { key: 'dynamic', label: 'Dynamic input size', desc: 'Any batch, and any height and width in multiples of 32.' },
+    { key: 'half', label: 'Half precision (f16)', desc: 'f16 weights, input and outputs: about half the file size.' },
+  ];
+
   let format = $state<ExportFormat>('folo-f16');
+  let switches = $state<Required<OnnxSwitches>>({ decode: false, dynamic: false, half: false });
+  /** Whether the server takes the switches (older ones would ignore them): asked once the dialog opens. */
+  let switchesOk = $state(false);
+  $effect(() => {
+    if (!open) return;
+    let live = true;
+    hub.api.system().then(
+      (s) => {
+        if (live) switchesOk = !!s.features?.includes('export_onnx_switches');
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  });
+  /** The estimate follows the switches: an f16 ONNX file is about half the size. */
+  const perParam = (f: (typeof formats)[number]) => (f.value === 'onnx' && switchesOk && switches.half ? 2.05 : f.bytesPerParam);
   /** The format of the finished export (the radio may not be shown any more). */
   let done = $state<ExportFormat | null>(null);
   let phase = $state<'idle' | 'running' | 'done' | 'error'>('idle');
@@ -45,9 +71,11 @@
     phase === 'running'
       ? `Exporting ${model.name}…`
       : phase === 'done' && result
-        ? `Export finished: ${result.path.split('/').pop()}, ${bytes(result.bytes, prefs.units)}.`
+        ? `Export finished: ${result.path.split('/').pop() ?? result.path}, ${bytes(result.bytes, prefs.units)}.`
         : '',
   );
+  /** The file's name as the server wrote it, which is also the name it downloads under. */
+  const fileName = $derived(result ? (result.path.split('/').pop() ?? result.path) : '');
   let error = $state<unknown>(null);
   let copied = $state(false);
   let run = 0;
@@ -57,7 +85,7 @@
     phase = 'running';
     error = null;
     try {
-      const r = await hub.api.exportModel(model.id, format);
+      const r = await hub.api.exportModel(model.id, format, format === 'onnx' && switchesOk ? { ...switches } : undefined);
       if (id !== run) return;
       result = r;
       done = format;
@@ -82,7 +110,7 @@
     }
   }
 
-  /** Saves the f16 file through the browser (the server names it). The demo's models have no file to save. */
+  /** Saves the f16 file through the browser, under the server's file name. The demo's models have no file to save. */
   function download() {
     const api = hub.api;
     if (!(api instanceof HttpApi)) {
@@ -91,7 +119,7 @@
     }
     const a = document.createElement('a');
     a.href = api.weightsUrl(model.id);
-    a.download = `${model.name}-f16.folo`;
+    a.download = fileName;
     a.rel = 'noopener';
     a.click();
   }
@@ -99,6 +127,7 @@
   function reset() {
     run++;
     done = null;
+    switches = { decode: false, dynamic: false, half: false };
     phase = 'idle';
     result = null;
     error = null;
@@ -117,11 +146,6 @@
         <span>Export finished</span>
         <span class="size num">{bytes(result.bytes, prefs.units)}</span>
       </div>
-      {#if done === 'folo-f16'}
-        <div class="get">
-          <Button icon={Download} onclick={download}>Download {model.name}-f16.folo</Button>
-        </div>
-      {/if}
       <div class="where">
         <span class="where-label">On the server</span>
         <div class="path">
@@ -149,11 +173,26 @@
             <span class="opt-top">
               <span class="opt-name">{f.label}</span>
               <span class="ext mono">{f.ext}</span>
-              <span class="est num">≈ {bytes(model.params * f.bytesPerParam, prefs.units)}</span>
+              <span class="est num">≈ {bytes(model.params * perParam(f), prefs.units)}</span>
             </span>
             <span class="opt-desc">{f.desc}</span>
           </span>
         </label>
+        {#if f.value === 'onnx' && format === 'onnx' && switchesOk}
+          <!-- folo export's switches, under the format they belong to. -->
+          <div class="switches" role="group" aria-label="ONNX options">
+            {#each switchOptions as o (o.key)}
+              <label class="sw-opt">
+                <input type="checkbox" bind:checked={switches[o.key]} />
+                <span class="box" aria-hidden="true"><Check size={12} strokeWidth={2.5} /></span>
+                <span class="opt-text">
+                  <span class="sw-name">{o.label}</span>
+                  <span class="opt-desc">{o.desc}</span>
+                </span>
+              </label>
+            {/each}
+          </div>
+        {/if}
       {/each}
     </fieldset>
     {#if phase === 'running'}
@@ -168,8 +207,14 @@
 
   {#snippet footer()}
     {#if phase === 'done'}
+      <!-- The f16 file's next step is Download, the one primary; Done only closes. ONNX has nothing to download. -->
       <Button variant="ghost" onclick={reset}>Export another</Button>
-      <Button variant="primary" onclick={() => (open = false)}>Done</Button>
+      {#if done === 'folo-f16'}
+        <Button variant="ghost" onclick={() => (open = false)}>Done</Button>
+        <Button variant="primary" icon={Download} onclick={download}>Download</Button>
+      {:else}
+        <Button variant="primary" onclick={() => (open = false)}>Done</Button>
+      {/if}
     {:else}
       <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
       <Button variant="primary" icon={Download} loading={phase === 'running'} onclick={start}>
@@ -358,8 +403,55 @@
   .note .mono {
     color: var(--text-secondary);
   }
-  .get {
+  /* The ONNX switches hang under their format, indented to its text (12 px padding + 14 px radio + 12 px gap). */
+  .switches {
+    display: grid;
+    padding: 0 var(--space-3) var(--space-1) calc(var(--space-6) + 14px);
+  }
+  .sw-opt {
+    position: relative;
     display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+    padding: var(--space-1) 0;
+    cursor: pointer;
+  }
+  .box {
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 14px;
+    height: 14px;
+    margin-top: 3px; /* grid-ok: centres the 14 px box on the 20 px line */
+    border-radius: var(--radius-xs);
+    /* The empty box marks the option: line.control (>= 3:1 on every surface). */
+    border: 1px solid var(--line-control);
+    background: var(--bg-inset);
+    color: transparent;
+    transition:
+      background-color var(--dur-fast) var(--ease-standard),
+      border-color var(--dur-fast) var(--ease-standard);
+  }
+  .sw-opt:hover .box {
+    border-color: var(--line-control-hover);
+  }
+  input:checked + .box {
+    border-color: var(--text-primary);
+    background: var(--text-primary);
+    color: var(--bg-panel);
+  }
+  input:focus-visible + .box {
+    outline: var(--size-focus-ring) solid var(--focus);
+    outline-offset: 2px;
+  }
+  @media (pointer: coarse) {
+    .sw-opt {
+      min-height: 44px;
+      align-items: center;
+    }
+    .box {
+      margin-top: 0;
+    }
   }
   .where {
     display: grid;

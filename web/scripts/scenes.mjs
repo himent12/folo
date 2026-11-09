@@ -272,6 +272,8 @@ export const scenes = [
   },
   {
     // The box-size histogram with a bin pinned by a tap (phones) or under the mouse: the readout row states its count.
+    // Both are sent as pointer events on the plot: the shot scrolls to the top first, which would take a real mouse off
+    // the chart and end its hover.
     name: 'dataset-histogram',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: true,
@@ -279,17 +281,14 @@ export const scenes = [
     setup: async (page, { vp }) => {
       await until(page, '#ds-size svg');
       const svg = page.locator('#ds-size svg[role=img]');
-      await svg.scrollIntoViewIfNeeded();
-      const box = await svg.boundingBox();
-      if (!box) return;
-      const at = { x: box.x + box.width * 0.22, y: box.y + box.height * 0.6 };
-      // The shot's context has no touch screen: a phone's tap is sent as touch pointer events.
-      if (vp === 'mobile')
-        await svg.evaluate((el, p) => {
-          for (const type of ['pointerdown', 'pointerup'])
-            el.dispatchEvent(new PointerEvent(type, { clientX: p.x, clientY: p.y, pointerType: 'touch', bubbles: true }));
-        }, at);
-      else await page.mouse.move(at.x, at.y);
+      await svg.evaluate((el, touch) => {
+        const r = el.getBoundingClientRect();
+        const p = { clientX: r.left + r.width * 0.22, clientY: r.top + r.height * 0.6, bubbles: true };
+        const types = touch ? ['pointerdown', 'pointerup'] : ['pointermove'];
+        for (const type of types) el.dispatchEvent(new PointerEvent(type, { ...p, pointerType: touch ? 'touch' : 'mouse' }));
+      }, vp === 'mobile');
+      // The readout row switches from the total to the bin.
+      await page.locator('#ds-size .readout.at').waitFor({ state: 'visible', timeout: 3000 });
       await page.clock.runFor(300);
     },
   },
@@ -367,18 +366,19 @@ export const scenes = [
     },
   },
   {
-    // A label clicked (selected: bg.active + accent bar, aria-current, the image zoomed to its box) while another
-    // is hovered (a lighter neutral step), so the two states show side by side.
+    // A label clicked (selected: bg.active + accent bar, aria-current, the image zoomed to its box: the box takes the
+    // 3 px accent stroke and the others recede) while another is hovered (a lighter neutral step; its box takes its
+    // class fill and chip), so the two states show side by side.
     name: 'dataset-inspector-selected',
     path: '/datasets/ds_fasteners',
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     fullPage: false,
     setup: async (page) => {
       await page.locator('.cell img.loaded').first().waitFor();
       await page.locator('.cell').nth(1).click();
       await page.locator('dialog[open] .stage img.loaded').waitFor();
       await page.locator('dialog[open] .labels button').nth(0).click();
-      await page.locator('dialog[open] .labels button').nth(2).hover();
+      await page.locator('dialog[open] .labels button').nth(1).hover();
       await page.waitForTimeout(300);
     },
   },
@@ -426,7 +426,8 @@ export const scenes = [
     setup: (page) => until(page, '#pr svg'),
   },
   {
-    // Phones: the Classes section with one class opened (its details row).
+    // Phones: the Classes section (the metrics folded to one line) with one class traced and its details row opened:
+    // two controls per row, the name traces, the chevron opens.
     name: 'model-phone-classes',
     path: '/models/m_fast_n',
     viewports: ['mobile'],
@@ -435,10 +436,26 @@ export const scenes = [
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Classes' }).click();
       await page.locator('#pr button.cls').first().click();
+      await page.locator('#pr button.disc').first().click();
     },
   },
   {
-    // Phones: the Confusion section, with its column range and miss summary.
+    // Phones: a class's "View curve" switched to Curves with the class traced, and the way back to Classes.
+    name: 'model-phone-curve',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.locator('#pr button.disc').nth(2).click();
+      await page.locator('#pr tr.detail button', { hasText: 'View curve' }).click();
+      await until(page, '#pr .legend .back');
+      await page.clock.runFor(500);
+    },
+  },
+  {
+    // Phones: the Confusion section opens on the ranked confusions and misses, the matrix one step away.
     name: 'model-phone-confusion',
     path: '/models/m_fast_n',
     viewports: ['mobile'],
@@ -446,11 +463,24 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Confusion' }).click();
+      await until(page, '#cm .rk');
+    },
+  },
+  {
+    // Phones: "Explore the matrix": the full matrix with its column range, the overview map and the miss summary.
+    name: 'model-phone-matrix',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('button', { name: 'Explore the matrix' }).click();
       await until(page, '#cm .cell');
     },
   },
   {
-    // Phones: a reduced 13-column matrix (top 12 classes + Other) that scrolls sideways.
+    // Phones: a reduced 13-column matrix (top 12 classes + Other) that scrolls sideways, behind "Explore the matrix".
     name: 'model-coco-phone',
     path: '/models/m_coco_s',
     viewports: ['mobile'],
@@ -458,6 +488,7 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('button', { name: 'Explore the matrix' }).click();
       await until(page, '#cm .cell');
     },
   },
@@ -479,11 +510,11 @@ export const scenes = [
     },
   },
   {
-    // The f16 export finished: a Download button for the file, and where it sits on the server.
+    // The f16 export finished: Download (the primary) for the file, by the name it has on the server.
     name: 'model-export-done',
     path: '/models/m_shapes_s',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       if (vp === 'mobile') {
         await until(page, 'button[aria-label="More model actions"]');
@@ -499,6 +530,28 @@ export const scenes = [
     },
   },
   {
+    // ONNX picked on a server with the export switches: decode, dynamic and half as checkboxes under it.
+    name: 'model-export-onnx-options',
+    path: '/models/m_shapes_s',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] label:has-text("ONNX")').first().click();
+      await until(page, 'dialog[open] .switches');
+      await page.locator('dialog[open] .switches label').first().click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // ONNX has no download endpoint: the dialog says so next to the server path.
     name: 'model-export-onnx',
     path: '/models/m_shapes_s',
@@ -508,7 +561,7 @@ export const scenes = [
       await until(page, 'button:has-text("Export")');
       await page.locator('button:has-text("Export")').first().click();
       await until(page, 'dialog[open] fieldset');
-      await page.locator('dialog[open] label:has-text("ONNX")').click();
+      await page.locator('dialog[open] label:has-text("ONNX")').first().click();
       await page.locator('dialog[open] footer button:has-text("Export")').click();
       await until(page, 'dialog[open] .where');
     },
@@ -545,7 +598,7 @@ export const scenes = [
     name: 'models-engine-how',
     path: '/models',
     fullPage: true,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       // The panel lives in the collapsed Engine benchmarks fold: open that, then its own "How this was measured".
       await until(page, 'details.bench > summary');
