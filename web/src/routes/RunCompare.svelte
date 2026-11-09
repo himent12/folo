@@ -393,7 +393,7 @@
               </tr>
               <tr>
                 <td class="k">Precision · recall</td>
-                {#each chosen as r (r.id)}
+                {#each shown as r (r.id)}
                   {@const v = bestVal(r)}
                   <td class="num">
                     {#if v}{metric(v.precision)} · {metric(v.recall)}<span class="pr-at">{v.best_f1_conf != null ? `conf ${conf(v.best_f1_conf)}` : 'best-F1 conf'} · ep {r.best?.epoch}</span>{:else}—{/if}

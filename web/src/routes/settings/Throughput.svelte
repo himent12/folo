@@ -28,11 +28,14 @@
     return () => clearInterval(t);
   });
 
-  /** "640 px · batch 16 · f32", and where it was measured when that is not this server's adapter. */
+  /**
+   * "640 px · batch 16 · f32" / "640 px · f16 · tensor cores", and where it was measured when that is not this server's
+   * adapter. A prediction row is one precision with tensor cores on or off: the two are separate measurements.
+   */
   function setting(r: TrainThroughput | InferThroughput): string {
     const parts = [`${r.imgsz} px`];
     if ('amp' in r) parts.push(`batch ${r.batch}`, r.amp ? 'amp' : 'f32');
-    else parts.push(r.precision);
+    else parts.push(r.precision, ...(r.tensor_cores ? ['tensor cores'] : []));
     if (r.device === 'cpu') parts.push('CPU');
     return parts.join(' · ');
   }
@@ -102,7 +105,7 @@
         <div class="tp-group">
           <h3 class="tp-h">{title}</h3>
           <ul aria-label={title}>
-            {#each list as r (`${r.device}/${r.measured_on}/${r.arch}/${r.imgsz}/${'amp' in r ? `${r.batch}/${r.amp}` : r.precision}`)}
+            {#each list as r (`${r.device}/${r.measured_on}/${r.arch}/${r.imgsz}/${'amp' in r ? `${r.batch}/${r.amp}` : `${r.precision}/${r.tensor_cores}`}`)}
               {@const other = elsewhere(r)}
               <li class="tp-row">
                 <div class="tp-what">

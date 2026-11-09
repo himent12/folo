@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { ApiError, hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
+import type { RunEstimate } from '$lib/api/types';
 import { parse, router } from '$lib/router.svelte';
 import { page } from '$lib/shell/crumbs.svelte';
 import RunNew from './RunNew.svelte';
@@ -705,6 +706,50 @@ describe('New run: the estimate', () => {
     // The latency column is the reference throughout.
     expect(target.querySelector('.a-v.here')).toBeNull();
     expect(target.querySelector('p.ref')?.textContent).toContain("each size's reference");
+  });
+
+  describe('asks again 300 ms after the settings settle, whether or not the last one was answered', () => {
+    afterEach(() => vi.useRealTimers());
+
+    function type(...values: string[]) {
+      const el = target.querySelector<HTMLInputElement>('input#epochs')!;
+      for (const v of values) {
+        el.value = v;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        flushSync();
+      }
+    }
+
+    /** Opens the form with the server's estimate answered by `answer`, then waits for the first ask (sent at once). */
+    async function firstAsk(answer: () => Promise<RunEstimate>) {
+      hub.api = api = new MockApi('normal', 0);
+      const ask = vi.spyOn(api, 'estimateRun').mockImplementation(answer);
+      await open();
+      await until(() => ask.mock.calls.length === 1, 'the first estimate');
+      return ask;
+    }
+
+    async function debounced(ask: MockInstance<MockApi['estimateRun']>) {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      type('1', '12', '120');
+      expect(ask).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(299);
+      expect(ask).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ask).toHaveBeenCalledTimes(2);
+      expect(ask.mock.calls[1]![0].epochs).toBe(120);
+    }
+
+    it('while the first one is still out', async () => {
+      const ask = await firstAsk(() => new Promise(() => {}));
+      await debounced(ask);
+    });
+
+    it('after the server refused the first one', async () => {
+      const ask = await firstAsk(() => Promise.reject(new ApiError(500, 'internal', 'estimator crashed')));
+      await until(() => target.querySelector('.summary .how-note')?.textContent?.includes('could not estimate'), 'the reference figures');
+      await debounced(ask);
+    });
   });
 
   it("marks folo-n's latency as measured on this GPU and names it under the table", async () => {

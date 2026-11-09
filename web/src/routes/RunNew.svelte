@@ -401,12 +401,15 @@
     ...(e2e ? { head: 'o2o' as const } : {}),
   });
 
-  // The server's estimate (POST /api/runs/estimate, feature `run_estimate`), asked again 300 ms after the settings
-  // stop changing; the last answer stays up meanwhile. Its errors are the form's own (a missing device, weights of
-  // another size), already said at their fields: the reference figures stand in.
+  // The server's estimate (POST /api/runs/estimate, feature `run_estimate`): the first asked at once, every later one
+  // 300 ms after the settings stop changing, whether or not the last one was answered (a slow or failing server is not
+  // asked once per keystroke); the last answer stays up meanwhile. Its errors are the form's own (a missing device,
+  // weights of another size), already said at their fields: the reference figures stand in.
   const canEstimate = $derived(hasFeature(system.data, 'run_estimate'));
   let served = $state.raw<{ key: string; est: RunEstimate } | null>(null);
   let estimating = $state(false);
+  /** Whether an estimate has been asked for yet (not state: it only sets the next one's delay). */
+  let asked = false;
   const estKey = $derived(JSON.stringify({ ...config, name: '' }));
   $effect(() => {
     const key = estKey;
@@ -419,7 +422,8 @@
     const ctrl = new AbortController();
     estimating = true;
     const t = setTimeout(
-      () =>
+      () => {
+        asked = true;
         hub.api.estimateRun(body, ctrl.signal).then(
           (e) => {
             if (ctrl.signal.aborted) return;
@@ -431,8 +435,9 @@
             served = null;
             estimating = false;
           },
-        ),
-      untrack(() => served) ? 300 : 0,
+        );
+      },
+      asked ? 300 : 0,
     );
     return () => {
       clearTimeout(t);

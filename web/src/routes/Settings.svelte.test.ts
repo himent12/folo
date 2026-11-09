@@ -6,6 +6,7 @@ import { MockApi } from '$lib/api/mock';
 import { prefs } from '$lib/prefs.svelte';
 import { parse, router } from '$lib/router.svelte';
 import Settings from './Settings.svelte';
+import Throughput from './settings/Throughput.svelte';
 
 let target: HTMLElement;
 let c: ReturnType<typeof mount> | undefined;
@@ -67,5 +68,23 @@ describe('Settings', () => {
     const report = target.querySelector<HTMLDetailsElement>('#system details.report')!;
     expect(report.open).toBe(false);
     expect(report.querySelector('summary')?.textContent).toBe('Driver report');
+  });
+});
+
+describe('Settings › Throughput', () => {
+  it('lists f16 with and without tensor cores as two rows, each saying which', async () => {
+    const api = new MockApi('normal', 0);
+    const table = await api.throughput();
+    const row = table.inference.find((r) => r.device === table.device && r.precision === 'f32')!;
+    const f16 = { ...row, arch: 'folo-n' as const, imgsz: 640, precision: 'f16' as const, source: 'measured' as const, samples: 3 };
+    api.throughput = async () => ({ ...table, training: [], inference: [{ ...f16, tensor_cores: false }, { ...f16, tensor_cores: true, latency_ms: 2.5 }] });
+    hub.api = api;
+    c = mount(Throughput, { target });
+    const rows = await until(() => {
+      const r = [...target.querySelectorAll('ul[aria-label="Predictions, end to end"] .tp-row')];
+      return r.length ? r : null;
+    }, 'the prediction rows');
+    expect(rows.map((r) => r.querySelector('.tp-set')?.textContent)).toEqual(['640 px · f16', '640 px · f16 · tensor cores']);
+    expect(rows.map((r) => r.querySelector('.tp-val p')?.textContent)).toEqual([expect.any(String), '2.50 ms']);
   });
 });
