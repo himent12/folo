@@ -194,6 +194,7 @@
       {#snippet actions()}
         <!-- The precise reading, one step away: the plain line above is what most readers need. -->
         <InfoButton
+          chart
           label="How box size is measured"
           text="Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. One bar per size range, finer near the 5% tiny-box line; a bar's height is its number of boxes."
         />

@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import InfoRegion from './InfoRegion.svelte';
+  import { provideInfoSlot } from './infoSlot.svelte';
 
   interface Props {
     title?: string;
@@ -18,6 +20,9 @@
   }
 
   let { title, meta, actions, children, pad = 'md', divided = false, class: klass = '', id, as = 'h2' }: Props = $props();
+  // A chart's ⓘ in the header opens its definition here on phones, under the heading (ui/infoSlot).
+  const uid = $props.id();
+  const info = provideInfoSlot(`${uid}-info`);
 </script>
 
 <section class="panel pad-{pad} {klass}" aria-labelledby={title && id ? `${id}-title` : undefined} {id}>
@@ -30,6 +35,7 @@
       {/if}
       {#if actions}<div class="actions">{@render actions()}</div>{/if}
     </header>
+    {#if actions}<InfoRegion slot={info} />{/if}
   {/if}
   {#if children}<div class="body">{@render children()}</div>{/if}
 </section>
@@ -108,14 +114,14 @@
   .pad-md .body {
     padding: 0 var(--space-4) var(--space-4);
   }
-  .pad-md header.divided + .body,
+  .pad-md header.divided ~ .body,
   .pad-md > .body:first-child {
     padding-top: var(--space-4);
   }
   .pad-sm .body {
     padding: 0 var(--space-3) var(--space-3);
   }
-  .pad-sm header.divided + .body,
+  .pad-sm header.divided ~ .body,
   .pad-sm > .body:first-child {
     padding-top: var(--space-3);
   }

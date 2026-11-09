@@ -25,6 +25,8 @@
    * tertiary with dash patterns); hue is reserved for entities (runs in Compare, classes).
    */
   import InfoButton from '$lib/ui/InfoButton.svelte';
+  import InfoRegion from '$lib/ui/InfoRegion.svelte';
+  import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
@@ -43,6 +45,8 @@
   import Meta from '$lib/ui/Meta.svelte';
   import Select from '$lib/ui/Select.svelte';
   import { media } from '$lib/design/tokens';
+  // The loss terms' ⓘ opens in place on phones (ui/infoSlot), under the chart's heading.
+  const lossInfo = provideInfoSlot('run-chart-info');
 
   let {
     run,
@@ -463,7 +467,7 @@
             {#if tab === 'loss'}
               <!-- What the terms mean, for anyone who has not trained a detector before: a tap, a click or Enter opens
                    it (ui/InfoButton). -->
-              <InfoButton label="What the loss terms mean">
+              <InfoButton chart label="What the loss terms mean">
                 <span class="terms-list">
                   {#each LOSS_TERMS as [term, means] (term)}<span><b>{term}</b>: {means}</span>{/each}
                 </span>
@@ -483,6 +487,8 @@
             {/if}
           </div>
         </header>
+        <!-- Phones: the loss terms' ⓘ opens here, between the heading and the legend's readout, not over the plot. -->
+        <InfoRegion slot={lossInfo} />
         {#if loading}
           <ChartSkeleton {height} />
         {:else}
@@ -709,6 +715,9 @@
     display: grid;
     gap: var(--space-2);
     min-width: 0;
+    /* The in-place ⓘ region (phones) on the chart's own edges; the grid's gap spaces it. */
+    --info-inset: 0;
+    --info-after: 0;
   }
   /* Phones, queued: the frame as one 48 px line that opens it. */
   .pending {

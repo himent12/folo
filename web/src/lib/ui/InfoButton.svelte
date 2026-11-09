@@ -7,10 +7,16 @@
    *   position next to the button, collision-aware like the tooltip), so it shows over a modal dialog too.
    * - `controls`: an inline disclosure the page renders itself under `open` (Model's metric help, a block under the KPI
    *   strip); the button toggles it and Escape or a tap outside both closes it.
+   * - `chart`: an ⓘ over a chart. On phones its definition opens in place, between the chart's heading and its readout
+   *   (the frame's ./InfoRegion: ui/Panel provides one), so it never covers the plot it explains; wider screens keep the
+   *   anchored popover. Every ⓘ in a chart's header takes it (DESIGN_DIRECTION §2.12).
    * `trigger` puts words in place of the icon (New run's "30 steps / epoch", dotted underline).
    */
   import Info from '@lucide/svelte/icons/info';
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
+  import { media } from '$lib/design/tokens';
+  import { infoSlot } from './infoSlot.svelte';
   import { boundsFor, placeTip, popovers, type Side } from './tooltip';
 
   let {
@@ -18,7 +24,8 @@
     text,
     children,
     trigger,
-    controls,
+    controls: controlsProp,
+    chart = false,
     open = $bindable(false),
     side = 'bottom',
     class: klass = '',
@@ -30,6 +37,8 @@
     trigger?: Snippet;
     /** Id of an inline region the page shows while `open` (disclosure mode: no popover). */
     controls?: string;
+    /** Over a chart: on phones the definition opens in place under the chart's heading, not over the plot. */
+    chart?: boolean;
     open?: boolean;
     side?: Side;
     class?: string;
@@ -37,6 +46,19 @@
 
   const uid = $props.id();
   const popId = `${uid}-info`;
+  // A chart's ⓘ on a phone: a disclosure of the frame's in-place region (./infoSlot), filled while open.
+  const slot = chart ? infoSlot() : undefined;
+  const phone = new MediaQuery(media.phone, false);
+  const inPlace = $derived(!!slot && phone.current);
+  const controls = $derived(inPlace ? slot!.id : controlsProp);
+  const me = {};
+  $effect(() => {
+    if (!slot) return;
+    const release = () => untrack(() => slot.content?.owner === me && (slot.content = null));
+    if (inPlace && open) slot.content = { owner: me, text, children };
+    else release();
+    return release;
+  });
   let btn: HTMLButtonElement;
   let pop = $state<HTMLElement>();
   const native = popovers();
