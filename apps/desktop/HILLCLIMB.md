@@ -1465,3 +1465,51 @@ Round 35 changes:
 - **Controls:**
   - Segment counts the caller marks ("All 9") use tertiary tabular digits.
   - The thumbnail slider ends in image glyphs.
+
+## Round 35
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 8 | 9 | 8 | 8 | 8 | 9 | 8 | 9 | 9 | 8 | 8 | 8.4 |
+| GPT-6.1 Sol | 9 | 8 | 8 | 9 | 8 | 8 | 8 | 9 | 8 | 8 | 8 | 8 | 8.3 |
+
+Both reviewers' top defect was the Playground latency legend: the full stage names clipped "NMS 0.2 ms" at the rail edge at 1280. The code review found the same at 960. The entries now wrap whole; this was fixed on #102 before merge.
+
+Opus flagged:
+- Wide word gaps wherever inline code appears (`ui::rich` laid out one flex item per word).
+- A stop dialog whose commit weighed no more than "Keep training".
+- Ctrl Enter shown beside Cancel.
+- Three near-identical grey latency stages.
+- Segmented controls still on the weaker edge beside `line.control` inputs.
+- A confusion matrix whose small errors all read as alarm.
+- An Overview chart without the run page's header rule.
+
+Sol flagged:
+- Selects and segments that don't take focus on click.
+- Ctrl+O bypassing Open image's disabled rule.
+- An off-switch hover that weakened the track.
+- Faint selected segments.
+- Unexplained architecture letters.
+- "30 commands" for a list that holds datasets, runs and models.
+- A seconds-precise reference estimate.
+
+The engine's dogfood-2 fixes (#99) moved the GPU wait into inference. Desktop passes the engine's timings through, so its Local GPU split is right without a change.
+
+Round 36 changes:
+- **Text:** `ui::rich` is one styled text run (Geist, with code spans in Geist Mono on a chip fill), so word spacing is body spacing.
+- **Stop dialog:** the commit is a new `DangerCommit` button, the Danger tint with a danger edge. A solid red fill fails AA with white text in both themes, and there's no on-danger token.
+- **New run:**
+  - Ctrl Enter follows Queue training.
+  - The Architecture helper names the size ("folo-s, small · …").
+  - Estimates are in whole minutes ("≈ 10 min").
+- **Latency:**
+  - Inference is in secondary ink; the other two stages are tertiary at two strengths, with 8 px swatches.
+  - The third stage is "Postprocess", as the engine and Studio name it.
+- **Controls:**
+  - Segmented containers and selected segments are on `line.control`.
+  - Off-switch hover and press strengthen the track.
+  - Selects and segments take focus on click.
+- **Ctrl+O and the palette** share Open image's rule (`open_image_blocked`) and say why when blocked.
+- **Confusion matrix:** the error ramp is linear from a 0.1 floor, replacing the square root that lifted 1–4 % toward full red.
+- **Overview:** the chart section opens on a full-width rule.
+- **Palette:** the unfiltered count says "items".
