@@ -422,7 +422,7 @@ impl FoloModel {
     /// branch plus, in a `head = "o2o"` model, the one-to-one branch ([`HeadOutput::o2o`]). In eval mode
     /// BatchNorm uses its running statistics and only the [`FoloModel::head_mode`] branch runs.
     pub fn forward(&self, x: &Tensor) -> Result<HeadOutput> {
-        self.forward_impl(x, None, self.head_mode)
+        self.forward_in_pool(x, self.head_mode)
     }
 
     /// [`FoloModel::forward`] in eval mode with the `mode` branch, whatever [`FoloModel::head_mode`] says
@@ -435,7 +435,17 @@ impl FoloModel {
                 self.config.head
             )));
         }
-        self.forward_impl(x, None, mode)
+        self.forward_in_pool(x, mode)
+    }
+
+    /// [`FoloModel::forward_impl`] without a trace, on a CPU from inside the rayon pool ([`folo_core::cpu::in_pool`]):
+    /// its hundred-odd parallel kernels then start on a worker instead of each waking the pool from outside.
+    fn forward_in_pool(&self, x: &Tensor, mode: HeadMode) -> Result<HeadOutput> {
+        if x.device().is_cpu() {
+            folo_core::cpu::in_pool(|| self.forward_impl(x, None, mode))
+        } else {
+            self.forward_impl(x, None, mode)
+        }
     }
 
     /// [`FoloModel::forward`], calling `trace(layer, output)` with the output of every layer 0–22 of

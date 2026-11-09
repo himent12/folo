@@ -32,6 +32,54 @@ pub fn take_buffer(n: usize) -> Vec<f32> {
     alloc_uninit(n)
 }
 
+/// Run `f` on a worker of folo-core's CPU pool (the calling thread waits for it), under the calling thread's grad
+/// mode and autocast state, and return its result.
+///
+/// A CPU forward pass makes a hundred or so parallel calls. Each started from a thread outside a rayon pool is
+/// injected into the pool's queue, and the caller then sleeps until a worker wakes it; started from a worker,
+/// it is pushed on that worker's own queue and the worker takes part in it. Running the whole pass on a worker
+/// pays the injection once (a 64x400x64 GEMM, a 1x1 conv at 20x20, on 8 threads: 28 → 17 µs).
+///
+/// The pool is a dedicated one (as many threads as the global pool), not the global pool: grad mode and
+/// autocast are per thread, and while `f` waits for its parallel work its worker runs other jobs of the same
+/// pool. In the global pool those could be anybody's (a training step on rayon, say) and would see `f`'s state.
+/// The dedicated pool only runs `in_pool` bodies, which set their state themselves, and the work they fan out,
+/// which either never reads it (kernels) or sets it too (the detector head's branches). Already on a worker of any
+/// rayon pool, or with a one-thread pool, `f` runs right here.
+pub fn in_pool<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    if rayon::current_thread_index().is_some() {
+        return f();
+    }
+    let Some(pool) = cpu_pool() else {
+        return f();
+    };
+    let (grad, cast) = (crate::is_grad_enabled(), crate::autocast_dtype());
+    pool.install(move || {
+        let _g = crate::autograd::grad_mode(grad);
+        let _c = crate::autocast::autocast_as(cast);
+        f()
+    })
+}
+
+/// The pool of [`in_pool`], built on first use with the global pool's thread count (`None` for one thread, or if
+/// the threads cannot be spawned: `f` then runs on the caller).
+fn cpu_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        let n = rayon::current_num_threads();
+        (n > 1)
+            .then(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n)
+                    .thread_name(|i| format!("folo-cpu-{i}"))
+                    .build()
+                    .ok()
+            })
+            .flatten()
+    })
+    .as_ref()
+}
+
 /// Element count above which kernels go parallel.
 pub(crate) const PAR_MIN: usize = 1 << 15;
 /// Elements per parallel task for streaming kernels.
@@ -349,9 +397,7 @@ impl Backend for CpuBackend {
         let bd = bias.map(|b| contiguous_f32(&b, "conv2d")).transpose()?;
         if !out.is_empty() {
             // Bias and activation are applied to each finished block of the output, while it is in cache.
-            let epi = |ch: usize, v: &mut [f32]| {
-                elementwise::bias_act_inplace(act, bd.as_ref().map_or(0.0, |b| b[ch]), v)
-            };
+            let epi = gemm::BiasAct { bias: bd.as_deref(), act };
             let fused = bd.is_some() || act.is_some();
             conv::conv2d_forward_parts(
                 conv::ConvInput { parts: &parts },
@@ -359,7 +405,7 @@ impl Backend for CpuBackend {
                 &mut out,
                 &g,
                 false,
-                fused.then_some(&epi as conv::ChannelEpilogue<'_>),
+                fused.then_some(epi),
             );
         }
         Ok(f32_storage(out))

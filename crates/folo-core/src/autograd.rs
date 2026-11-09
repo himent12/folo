@@ -53,6 +53,13 @@ pub fn no_grad() -> NoGradGuard {
     NoGradGuard { prev, _not_send: PhantomData }
 }
 
+/// Set this thread's grad mode to `enabled` until the returned guard is dropped (carries a caller's mode
+/// onto another thread, see [`crate::cpu::in_pool`]).
+pub(crate) fn grad_mode(enabled: bool) -> NoGradGuard {
+    let prev = GRAD_ENABLED.with(|g| g.replace(enabled));
+    NoGradGuard { prev, _not_send: PhantomData }
+}
+
 /// Run `f` with grad recording disabled.
 pub fn with_no_grad<R>(f: impl FnOnce() -> R) -> R {
     let _g = no_grad();
