@@ -328,14 +328,14 @@ pub fn paint_image_with_boxes(
                             o.dilate(px(2.)).intersects(c) && !within
                         })
                     };
-                    let spots: Vec<Point<Pixels>> = candidates.iter().copied().chain(inside).collect();
+                    let spots = candidates.iter().copied().chain(inside);
                     let open = |o: &Point<Pixels>| fits(*o) && free(&Bounds::new(*o, size(cw, ch)));
-                    // First a spot clear of every other outline; in a cluster with none, any free spot.
-                    let free_spot = spots
-                        .iter()
-                        .copied()
-                        .find(|o| open(o) && !crosses(&Bounds::new(*o, size(cw, ch))))
-                        .or_else(|| spots.iter().copied().find(open));
+                    // First a spot clear of every other outline (skipped on very dense images, where
+                    // it costs a scan of every box per spot); in a cluster with none, any free spot.
+                    let free_spot = (order.len() <= 256)
+                        .then(|| spots.clone().find(|o| open(o) && !crosses(&Bounds::new(*o, size(cw, ch)))))
+                        .flatten()
+                        .or_else(|| spots.clone().find(open));
                     // Nowhere free: skip this chip (the selected box's chip always shows), so two
                     // chips never paint over each other.
                     let Some(origin) = free_spot.or_else(|| {

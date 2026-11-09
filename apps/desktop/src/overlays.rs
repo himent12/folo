@@ -607,7 +607,9 @@ impl FoloApp {
         if self.amp_blocked(DEVICES[device]).is_some()
             && self.focus.borrow().get("nr-amp").is_some_and(|f| f.is_focused(window))
         {
-            let prev = self.fh("nr-close", cx);
+            // The control before it in Schedule: the learning rate, or the optimizer when Auto
+            // sets the rate (the field is read-only then).
+            let prev = if opt == 0 { self.fh("nr-opt", cx) } else { f.lr_input.read(cx).focus_handle(cx) };
             window.focus(&prev);
         }
         let label =
