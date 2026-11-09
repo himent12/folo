@@ -135,9 +135,9 @@
               </thead>
               <tbody>
                 {#if offline}
-                  <TableState cols={6} rows={4}><p class="quiet">Recent runs show here once the server answers.</p></TableState>
+                  <TableState cols={6}><p class="quiet">Recent runs show here once the server answers.</p></TableState>
                 {:else if runs.error && !runs.data}
-                  <TableState cols={6} rows={4}><ErrorState error={runs.error} retry={() => runs.refresh()} /></TableState>
+                  <TableState cols={6}><ErrorState error={runs.error} retry={() => runs.refresh()} /></TableState>
                 {:else if !runs.data}
                   {#each [0, 1, 2, 3, 4, 5] as i (i)}
                     <tr aria-hidden="true">
@@ -150,7 +150,7 @@
                     </tr>
                   {/each}
                 {:else if recent.length === 0}
-                  <TableState cols={6} rows={4}>
+                  <TableState cols={6}>
                     <EmptyState icon={Activity} title="No runs yet" description="Runs you start appear here with their progress and best mAP." />
                   </TableState>
                 {:else}
@@ -471,9 +471,13 @@
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
-  /* Wide screens: Recent runs and Best model share a row (they end together), and Datasets runs across the full
-     width under both, its datasets side by side, instead of hanging below the side column alone. */
+  /* Wide screens: Recent runs and Best model share a row as equal-height panels (they end together in every state:
+     loaded, loading, empty, error), and Datasets runs across the full width under both, its datasets side by side,
+     instead of hanging below the side column alone. */
   @media (min-width: 1200px) {
+    .cols {
+      align-items: stretch;
+    }
     .col-main,
     .col-side {
       display: contents;
@@ -504,11 +508,6 @@
     /* Model entries carry three lines and a score: two columns keep them readable (and pairs even). */
     .models {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-  @media (max-width: 767px) {
-    .hide-sm {
-      display: none;
     }
   }
 </style>

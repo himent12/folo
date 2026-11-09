@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Dataset, DatasetStats } from '$lib/api/types';
-import { bySeverity, countBinLabel, healthChecks, reviewCount, shareBelow, sizeBinLabel } from './health';
+import { bySeverity, countBinLabel, groupSummary, healthChecks, reviewCount, reviewLabel, shareBelow, sizeBinLabel } from './health';
 
 const ds = (over: Partial<Dataset> = {}): Dataset => ({
   id: 'ds_x',
@@ -80,7 +80,8 @@ describe('healthChecks with the check counts', () => {
   it('adds the check warnings, with their issues to list', () => {
     const h = healthChecks(ds(), st(), counts(0, 4));
     const w = h.find((x) => x.id === 'check-warnings');
-    expect(w?.title).toBe('4 dataset check warnings');
+    expect(w?.title).toBe('4 file issues from the dataset check');
+    expect(w?.short).toBe('4 file issues');
     expect(w?.issues).toBe('warning');
     expect(reviewCount(h)).toBe(1);
   });
@@ -126,5 +127,19 @@ describe('bySeverity', () => {
       ['Notes', ['empty']],
     ]);
     expect(bySeverity(healthChecks(ds(), st()))).toEqual([]);
+  });
+});
+
+describe('summary copy', () => {
+  it('names the unit of every count: findings to review, files, boxes', () => {
+    expect(reviewLabel(0)).toBeUndefined();
+    expect(reviewLabel(1)).toBe('1 finding to review');
+    expect(reviewLabel(3)).toBe('3 findings to review');
+  });
+
+  it('folds a severity into a complete short line, not the joined titles', () => {
+    const h = healthChecks(ds(), st({ box_size_hist: { edges: [0, 0.05, 1], counts: [1050, 1950] } }), { error: 0, warning: 3, info: 0, by_kind: {} });
+    const warnings = bySeverity(h).find((g) => g.severity === 'warning')!;
+    expect(groupSummary(warnings)).toBe('3 file issues · 35% tiny boxes');
   });
 });

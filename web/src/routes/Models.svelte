@@ -193,10 +193,10 @@
           </tr>
         </thead>
         {#if models.error && !models.data}
-          <tbody><TableState cols={cols.length} rows={10}><ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" /></TableState></tbody>
+          <tbody><TableState cols={cols.length}><ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" /></TableState></tbody>
         {:else if models.data?.length === 0}
           <tbody>
-            <TableState cols={cols.length} rows={10}>
+            <TableState cols={cols.length}>
               <EmptyState icon={Box} title="No models yet" description="A training run saves its best weights here when it finishes.">
                 {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
               </EmptyState>
@@ -204,7 +204,7 @@
           </tbody>
         {:else if models.data && shownCount === 0}
           <tbody>
-            <TableState cols={cols.length} rows={10}>
+            <TableState cols={cols.length}>
               <EmptyState icon={Search} title="No models match" description="Try another dataset or search term.">
                 {#snippet actions()}<Button size="sm" onclick={() => ((dsFilter = 'all'), (query = ''))}>Clear filters</Button>{/snippet}
               </EmptyState>
@@ -503,16 +503,6 @@
   }
   .rows {
     display: none;
-  }
-  @media (max-width: 1279px) {
-    .hide-lg {
-      display: none;
-    }
-  }
-  @media (max-width: 1023px) {
-    .hide-md {
-      display: none;
-    }
   }
   @media (max-width: 767px) {
     /* Phones show the grouped rows below; the table frame stays only to hold an empty or error state. */

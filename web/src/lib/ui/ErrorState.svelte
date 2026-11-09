@@ -9,6 +9,7 @@
   import { isOom, oomDetail } from '$lib/oom';
   import { href } from '$lib/router.svelte';
   import Button from './Button.svelte';
+  import { isOffline } from './offline';
 
   let {
     error,
@@ -28,7 +29,7 @@
   } = $props();
 
   // Connection failures look the same everywhere: what was tried, and both ways out (retry, settings).
-  const offline = $derived(error instanceof ApiError && error.code === 'network');
+  const offline = $derived(isOffline(error));
   const heading = $derived(offline ? "Can't reach the FOLO server" : title);
   // Out of GPU memory says so plainly; the driver's report goes with the technical details.
   const oom = $derived(!offline && isOom(error));

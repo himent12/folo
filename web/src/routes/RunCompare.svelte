@@ -25,6 +25,7 @@
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { niceDomain, unitDomain } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
+  import { defaultAxis, LENGTH_RATIO, lengthRatio, runX } from '$lib/charts/runAxis';
   import { deviceName, duration, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -51,7 +52,6 @@
     return new Map<string, RunMetrics>(out);
   });
 
-  let x = $state<'epoch' | 'progress'>('epoch');
   let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
   $effect(() => {
     const mq = matchMedia('(max-width: 767px)');
@@ -62,6 +62,17 @@
   let cursor = $state<number | null>(null);
 
   const chosen = $derived(ids.map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
+  // Runs of very different lengths (23 vs 150 epochs) would crush the short ones into the start of an epoch axis: then
+  // the axis defaults to "% of run" (each run over its own length, ../lib/charts/runAxis), and the control says so.
+  let xChoice = $state<Axis | null>(null);
+  const x = $derived<Axis>(xChoice ?? defaultAxis(chosen));
+  const xAuto = $derived(xChoice === null && x === 'progress');
+  const ratio = $derived(Math.round(lengthRatio(chosen)));
+  const xOptions = $derived<{ value: Axis; label: string }[]>([
+    { value: 'epoch', label: 'By epoch' },
+    { value: 'progress', label: xAuto ? '% of run · auto' : '% of run' },
+  ]);
+  const xWhy = $derived(lengthRatio(chosen) > LENGTH_RATIO ? (xAuto ? `Run lengths differ ${ratio}×, so x is % of each run's own length.` : `Run lengths differ ${ratio}×: % of run puts each over its own length.`) : '');
   // Colours follow the run, not its position: removing one run never repaints the others.
   let slots = $state<Record<string, number>>({});
   $effect(() => {
@@ -78,6 +89,7 @@
       slots = next;
     });
   });
+  type Axis = 'epoch' | 'progress';
   // Run slots: sky and amber first (the most distinct pair, for the common two-run comparison), then magenta and teal.
   // No four hues stay apart for every colour-vision type, so slots 3 and 4 also get a line pattern.
   const RUN_SLOTS = [1, 2, 3, 4];
@@ -97,7 +109,7 @@
         label: r.name,
         color: color(r.id),
         pattern: SLOT_PATTERN[slotOf(r.id)],
-        points: eps.map((e) => ({ x: x === 'epoch' ? e.epoch : (e.epoch / r.epochs) * 100, y: f(e) })),
+        points: eps.map((e) => ({ x: runX(e.epoch, r, x), y: f(e) })),
       };
     });
 
@@ -155,6 +167,7 @@
     const from = startOf(r);
     return from ? `fine-tuned from ${from}` : 'from scratch';
   };
+  const setX = (v: Axis) => (xChoice = v);
 
   const rows = $derived<[string, (r: Run) => string][]>([
     ['Dataset', (r) => datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id],
@@ -238,7 +251,7 @@
              one caveat that changes how to read it, then the plot. The longer explanation sits in the disclosure. -->
         <header class="c-row">
           <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-          <Segmented size="sm" label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'By epoch' }, { value: 'progress', label: '% of run' }]} />
+          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={xOptions} />
         </header>
         {@render chips()}
         {#if !sameData && chosen.length > 1}<p class="caveat">Different datasets: scores are not directly comparable</p>{/if}
@@ -250,19 +263,21 @@
           </summary>
           <div class="about-body">
             {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
-            <p>Colours follow the run, not its rank. Tap a run to keep its line in front.</p>
+            {#if xWhy}<p>{xWhy}</p>{/if}
+            <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
+              started (fine-tuned or from scratch).</p>
             <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>
           </div>
         </details>
       {:else}
         {@render chips()}
         <p class="note">
-          Press a run to keep its line in front.{#if !sameData && chosen.length > 1}{' '}Different datasets: compare the shape of the
-            curves, not their values.{/if}
+          Press a run to keep its line in front.{#if xWhy}{' '}{xWhy}{/if}{#if !sameData && chosen.length > 1}{' '}Different datasets:
+            compare the shape of the curves, not their values.{/if}
         </p>
         <header class="c-head">
           <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-          <Segmented size="sm" label="X axis" bind:value={x} options={[{ value: 'epoch', label: 'By epoch' }, { value: 'progress', label: '% of run' }]} />
+          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={xOptions} />
         </header>
         {@render plot()}
       {/if}
@@ -342,6 +357,7 @@
     </div>
     {#each chosen as r (r.id)}
       {@const v = valueOf(r.id)}
+      {@const from = startOf(r)}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <span
         class="chip"
@@ -362,8 +378,9 @@
         ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
         <span class="v num">{v === null ? '—' : metric(v)}</span>
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
-             toggle's lower half (clicks pass through to it) and runs on under the value. -->
-        <span class="from" class:tuned={!!r.config.weights} title={startLine(r)}>{startLine(r)}</span>
+             toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it only in Edit,
+             on a full-width line of its own. -->
+        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}fine-tuned from <span class="mono src">{from}</span>{:else}from scratch{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
           <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -539,6 +556,10 @@
   .from.tuned {
     color: var(--text-secondary);
   }
+  .from .src {
+    font-size: var(--type-sm-size);
+    white-space: nowrap;
+  }
   .acts {
     grid-column: 3;
     grid-row: 1 / 3;
@@ -605,8 +626,9 @@
     color: var(--text-secondary);
   }
   @media (max-width: 767px) {
-    /* Phones: a compact legend above the plot, one 44 px row per run (key, name over how it started, value), so
-       every run is named before the curves; open / remove appear with Edit. */
+    /* Phones: a compact legend above the plot, one 44 px row per run (key, name, value), so every run is named and
+       the plot with its axis still sits in the first screen. Edit adds open / remove and, on a full-width line of its
+       own, how each run started. */
     .chips {
       grid-template-columns: minmax(0, 1fr);
       gap: 0;
@@ -645,24 +667,35 @@
       border-radius: 0;
     }
     .chips .chip .key {
-      min-height: 52px;
+      grid-row: 1;
+      align-items: center;
+      min-height: 44px;
       margin-left: 0;
-      padding: var(--space-2) 0 0;
+      padding: 0;
+    }
+    .chips .chip .key:hover {
+      background: none;
+    }
+    .chips .chip .key i {
+      margin-top: 0;
     }
     .chips .chip .v {
-      grid-row: 1 / 3;
+      grid-row: 1;
       align-self: center;
       padding-top: 0;
     }
+    /* Edit: the start line under the whole row, past the key; the identifier keeps whole and ellipsizes (title has it). */
     .chips .chip .from {
-      grid-column: 1;
-      padding-bottom: var(--space-2);
-      white-space: normal;
+      grid-column: 1 / -1;
+      margin-top: calc(-1 * var(--space-2));
+      padding: 0 0 var(--space-2) var(--space-6);
     }
+    .chips:not(.managing) .chip .from,
     .chips:not(.managing) .chip .acts {
       display: none;
     }
     .chips.managing .chip .acts {
+      grid-row: 1;
       grid-template-columns: 44px 44px;
     }
     .chips .chip .open,

@@ -32,3 +32,31 @@ export function binAt(bars: readonly { x: number; w: number }[], px: number): nu
   });
   return best;
 }
+
+/**
+ * Bars on a linear value axis from px `x0` to `x1` covering `[edges[0], xMax]`, each at its true width. When the last
+ * bin is open-ended (its upper edge past `xMax`), it is set apart: the axis breaks for `gap` px before it, and it is
+ * drawn `xMax − its lower edge` wide at the same scale (so its area is still its count). `mainEnd` is where the
+ * continuous axis stops; `tail` says whether the last bar is set apart.
+ */
+export function proportionalBars(
+  edges: readonly number[],
+  xMax: number,
+  x0: number,
+  x1: number,
+  gap: number,
+): { bars: { x: number; w: number }[]; mainEnd: number; tail: boolean } {
+  const n = Math.max(0, edges.length - 1);
+  const lo0 = edges[0] ?? 0;
+  const hi = Math.min(edges[n] ?? 1, xMax);
+  const lastLo = edges[n - 1] ?? lo0;
+  const tail = n > 0 && (edges[n] ?? 0) > hi && lastLo < hi;
+  const k = (x1 - x0 - (tail ? gap : 0)) / Math.max(1e-12, hi - lo0);
+  const at = (v: number) => x0 + (Math.min(Math.max(v, lo0), hi) - lo0) * k;
+  const bars = Array.from({ length: n }, (_, i) => {
+    const a = at(edges[i] ?? 0);
+    const w = Math.max(1, at(edges[i + 1] ?? 0) - a);
+    return tail && i === n - 1 ? { x: a + gap, w } : { x: a, w };
+  });
+  return { bars, mainEnd: tail ? at(lastLo) : x1, tail };
+}

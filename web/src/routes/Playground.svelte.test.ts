@@ -42,7 +42,7 @@ afterEach(() => {
 });
 
 describe('Playground: a failed prediction', () => {
-  it('shows the error under the image, says so in the caption and moves focus to it', async () => {
+  it('shows the error once, under the image, and moves focus to it', async () => {
     await run('oom', 'm_shapes_s');
     const notice = await until(() => target.querySelector('.notice'), 'the notice');
     // Under the image, not over it: the stage holds only the image.
@@ -51,14 +51,47 @@ describe('Playground: a failed prediction', () => {
     const title = notice.querySelector<HTMLElement>('.title')!;
     expect(title.textContent).toBe('Prediction failed');
     expect(document.activeElement).toBe(title);
-    expect(target.querySelector('.vfoot')?.textContent?.replace(/\s+/g, ' ').trim()).toContain('Prediction failed·out of GPU memory');
-    expect(target.querySelector('.vfoot')?.textContent).not.toContain('Waiting');
+    // One authoritative block: the caption under it adds only which model ran where.
+    const foot = target.querySelector('.vfoot')?.textContent?.replace(/\s+/g, ' ').trim();
+    expect(foot).not.toContain('Prediction failed');
+    expect(foot).not.toContain('out of GPU memory');
+    expect(foot).toContain('shapes-s-best on the server');
+    expect(foot).not.toContain('Waiting');
+    // The detections panel says why it is empty.
+    expect(target.querySelector('#pg-panel .placeholder')?.textContent?.trim()).toBe('No detections: the last prediction failed.');
     // The ways out: this browser first (primary), then the smaller model, then Retry.
     expect([...notice.querySelectorAll('button')].map((b) => b.textContent?.trim()).filter((t) => t !== 'Technical details')).toEqual([
       'Run in this browser',
       'Use shapes-n-best folo-n',
       'Retry',
     ]);
+  });
+});
+
+describe('Playground on a phone', () => {
+  const width = window.innerWidth;
+  afterEach(() => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width });
+  });
+
+  it('puts a failed prediction above the image, so it is in the first screen', async () => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 390 });
+    await run('oom', 'm_shapes_s');
+    const notice = await until(() => target.querySelector('.notice'), 'the notice');
+    expect(notice.nextElementSibling?.classList.contains('stage')).toBe(true);
+    expect(notice.previousElementSibling?.classList.contains('vbar')).toBe(true);
+  });
+
+  it('opens Thresholds with Confidence as the first row of the sheet', async () => {
+    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 390 });
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    const btn = [...target.querySelectorAll<HTMLButtonElement>('.more-btn button')].find((b) => b.textContent?.includes('Thresholds'))!;
+    btn.click();
+    const sheet = await until(() => target.querySelector('#pg-more'), 'the sheet');
+    expect([...sheet.querySelectorAll('.slider label')].map((l) => l.textContent)).toEqual(['Confidence', 'Overlap (IoU)', 'Max detections']);
+    // The pinned Confidence under the image steps out while the sheet holds it.
+    expect(target.querySelector('.qconf')?.classList.contains('covered')).toBe(true);
   });
 });
 
@@ -77,7 +110,7 @@ describe('Playground: detections', () => {
   it('describes IoU as suppression', async () => {
     await run('normal', 'm_hard_s');
     await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
-    expect(target.querySelector('.thresholds')?.textContent).toContain('Suppress lower-scoring boxes of the same class above this overlap.');
+    expect(target.querySelector('.thresholds')?.textContent).toContain('Suppress same-class overlaps above this.');
     expect(target.querySelector('.thresholds')?.textContent).not.toContain('Merge');
   });
 });

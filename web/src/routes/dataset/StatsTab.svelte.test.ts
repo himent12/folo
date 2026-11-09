@@ -37,4 +37,18 @@ describe('Dataset stats: health findings', () => {
     await tick();
     expect(document.activeElement?.id).toBe('ds-check-title');
   });
+
+  it('folds each severity into a complete summary with its count of findings, and names the units', async () => {
+    const dataset = await hub.api.dataset('ds_shapes_hard');
+    const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
+    c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, onclass: () => {} } });
+    flushSync();
+    const line = (sev: string) => {
+      const s = target.querySelector(`#ds-health li.${sev} summary`);
+      return { sum: s?.querySelector('.htitles')?.textContent?.trim(), count: s?.querySelector('.hcount')?.textContent?.trim() };
+    };
+    expect(line('warning')).toEqual({ sum: '3 file issues · 35% tiny boxes', count: '2 findings' });
+    expect(line('danger')).toEqual({ sum: '3 broken label files', count: '1 finding' });
+    expect(target.querySelector('#ds-health')?.textContent).toContain('3 findings to review');
+  });
 });

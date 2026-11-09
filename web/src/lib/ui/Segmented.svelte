@@ -20,8 +20,20 @@
     iconOnly = false,
     onchange,
     id,
-  }: { options: Option[]; value: T; label: string; size?: 'sm' | 'md'; iconOnly?: boolean; onchange?: (v: T) => void; id?: string } =
-    $props();
+    invalid = false,
+    describedby,
+  }: {
+    options: Option[];
+    value: T;
+    label: string;
+    size?: 'sm' | 'md';
+    iconOnly?: boolean;
+    onchange?: (v: T) => void;
+    id?: string;
+    /** In error: a danger edge and focus ring (base.css); pair it with a Field error and `describedby`. */
+    invalid?: boolean;
+    describedby?: string;
+  } = $props();
 
   let root: HTMLDivElement;
 
@@ -55,7 +67,17 @@
   }
 </script>
 
-<div class="seg {size}" {id} role="radiogroup" aria-label={label} bind:this={root} {onkeydown} tabindex="-1">
+<div
+  class="seg {size}"
+  {id}
+  role="radiogroup"
+  aria-label={label}
+  aria-invalid={invalid || undefined}
+  aria-describedby={describedby}
+  bind:this={root}
+  {onkeydown}
+  tabindex="-1"
+>
   {#each options as o (o.value)}
     {@const on = o.value === value}
     <button
@@ -84,7 +106,8 @@
     padding: 2px;
     border-radius: var(--radius-md);
     background: var(--bg-inset);
-    border: 1px solid var(--line-subtle);
+    /* --seg-edge is set by an invalid group (base.css). */
+    border: 1px solid var(--seg-edge, var(--line-subtle));
     max-width: 100%;
     justify-self: start;
     overflow-x: auto;
@@ -92,7 +115,7 @@
   }
   :global([data-theme='light']) .seg {
     background: var(--bg-active);
-    border-color: transparent;
+    border-color: var(--seg-edge, transparent);
   }
   .seg:focus {
     outline: none;

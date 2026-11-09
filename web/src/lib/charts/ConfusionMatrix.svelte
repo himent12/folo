@@ -2,8 +2,8 @@
   /**
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
-   * by position, not hue), counts on hover. In light, the ramp starts at the first non-zero share: an empty cell is the
-   * panel with a hairline grid, so most of a large matrix is not a grey chequerboard. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
+   * by position, not hue), counts on hover. An empty cell is the panel with a hairline grid; any share above zero starts
+   * at a clearly visible first step (./confusionInk), so a 2 % confusion never looks like nothing. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
    * cell into view and makes it the active cell, whose counts the readout states. A matrix that scrolls sideways
    * (phones) also gets a whole-matrix overview: every cell as a small square and a band over the columns in view. A tap
    * on it brings those columns into view; cells are picked in the full matrix, whose cells are large enough to hit.
@@ -14,6 +14,8 @@
   import { CONFUSION_FLIP } from './confusionInk';
   // Cell labels are pure white or black, switched near the ramp's luminance crossover (see ./confusionInk).
   const flip = $derived(CONFUSION_FLIP[prefs.resolvedTheme]);
+  /** With sparse labels, the smallest share that is labelled. */
+  const SPARSE_MIN = 0.05;
 
   let {
     classes,
@@ -29,8 +31,8 @@
     matrix: number[][];
     label?: string;
     /**
-     * Label only cells of at least 10% that are at least 32 px wide, so dense matrices don't run numerals together;
-     * the readout still gives every value on hover or focus.
+     * Label only cells of at least 5% that are at least 32 px wide, so dense matrices don't run numerals together;
+     * every cell still states its value in its accessible name and in the readout on hover or focus.
      */
     sparseLabels?: boolean;
     /**
@@ -225,7 +227,7 @@
           onclick={() => (hovered = pinned = { r, c })}
           onkeydown={() => {}}
         >
-          {#if v >= (sparseLabels ? 0.1 : 0.005)}<span class:hi={v > flip}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
+          {#if v >= (sparseLabels ? SPARSE_MIN : 0.005)}<span class:hi={v > flip}>{(v * 100).toFixed(v >= 0.1 ? 0 : 1)}</span>{/if}
         </div>
       {/each}
     </div>
@@ -248,6 +250,17 @@
 <style>
   .row {
     display: contents;
+  }
+  /* The ramp's first step and span (RAMP in ./confusionInk): lighter in light, where white makes any grey loud. */
+  .cell,
+  .ov-cell,
+  .ramp {
+    --cm-start: 20%;
+    --cm-span: 74%;
+  }
+  :global([data-theme='light']) :is(.cell, .ov-cell, .ramp) {
+    --cm-start: 12%;
+    --cm-span: 82%;
   }
   .cm {
     display: grid;
@@ -343,8 +356,9 @@
     display: grid;
     place-items: center;
     border-radius: 3px;
-    /* One ramp from the plot well to full ink, perceptually even (oklab). */
-    background: color-mix(in oklab, var(--text-primary) calc(var(--v) * 90% + 4%), var(--bg-inset));
+    /* One ramp in ink over the panel, perceptually even (oklab), from a visible first step to 94 %. Empty cells
+       override it below. */
+    background: color-mix(in oklab, var(--text-primary) calc(var(--v) * var(--cm-span) + var(--cm-start)), var(--bg-panel));
     font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
@@ -360,13 +374,14 @@
       display: none;
     }
   }
-  /* Light: no objects at all is the panel itself, edged by the hairline grid; the ramp begins at the first object. */
-  :global([data-theme='light']) .cell.zero {
+  /* No objects at all is the panel itself, edged by the hairline grid (both themes); the ramp begins at the first
+     object. */
+  .cell.zero {
     background: var(--bg-panel);
     box-shadow: inset 0 0 0 1px var(--line-subtle);
   }
   .cell.hl,
-  :global([data-theme='light']) .cell.zero.hl {
+  .cell.zero.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
   /* The active cell (tapped, or pointed at from a summary): a selection stroke; keyboard focus has its own ring. */
@@ -434,9 +449,9 @@
     touch-action: manipulation;
   }
   .ov-cell {
-    fill: color-mix(in oklab, var(--text-primary) calc(var(--v) * 90% + 4%), var(--bg-inset));
+    fill: color-mix(in oklab, var(--text-primary) calc(var(--v) * var(--cm-span) + var(--cm-start)), var(--bg-panel));
   }
-  :global([data-theme='light']) .ov-cell.zero {
+  .ov-cell.zero {
     fill: var(--bg-panel);
     stroke: var(--line-subtle);
     stroke-width: 1;
@@ -475,15 +490,12 @@
     align-items: flex-start;
     gap: var(--space-3);
   }
-  /* The empty-cell key exists only where empty cells differ from the ramp's start (light). */
+  /* Empty cells are not on the ramp: they get their own key. */
   .none-key {
-    display: none;
+    display: inline-flex;
     align-items: center;
     gap: var(--space-1);
     white-space: nowrap;
-  }
-  :global([data-theme='light']) .none-key {
-    display: inline-flex;
   }
   .none-key i {
     width: 12px;
@@ -503,8 +515,8 @@
     border-radius: 2px;
     background: linear-gradient(
       to right in oklab,
-      color-mix(in oklab, var(--text-primary) 4%, var(--bg-inset)),
-      color-mix(in oklab, var(--text-primary) 94%, var(--bg-inset))
+      color-mix(in oklab, var(--text-primary) var(--cm-start), var(--bg-panel)),
+      color-mix(in oklab, var(--text-primary) 94%, var(--bg-panel))
     );
   }
   .ticks {

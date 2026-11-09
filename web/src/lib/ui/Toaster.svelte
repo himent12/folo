@@ -120,7 +120,7 @@
       right: var(--space-4);
       left: var(--space-4);
       width: auto;
-      bottom: calc(var(--tabbar-h) + var(--space-4) + env(safe-area-inset-bottom));
+      bottom: calc(var(--tabbar-h) + var(--dock-h) + var(--space-4) + env(safe-area-inset-bottom));
     }
   }
 </style>

@@ -148,10 +148,10 @@
     <form id="{uid}-form" class="panel" onsubmit={submit} novalidate>
       {#if mode === 'folder'}
         <Field label="Folder" for="{uid}-path" error={show(errs.path)} hint="Absolute path on the machine running folo serve. Files are never modified.">
-          <Input id="{uid}-path" bind:value={path} placeholder="D:/data/my-dataset" icon={FolderOpen} class="mono-input" autocomplete="off" spellcheck={false} invalid={!!show(errs.path)} />
+          <Input id="{uid}-path" bind:value={path} placeholder="D:/data/my-dataset" icon={FolderOpen} class="mono-input" autocomplete="off" spellcheck={false} invalid={!!show(errs.path)} aria-describedby={show(errs.path) ? `${uid}-path-error` : `${uid}-path-hint`} />
         </Field>
         <Field label="Name" for="{uid}-name" error={show(errs.name)}>
-          <Input id="{uid}-name" bind:value={name} placeholder={derivedName || 'my-dataset'} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} />
+          <Input id="{uid}-name" bind:value={name} placeholder={derivedName || 'my-dataset'} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} aria-describedby={show(errs.name) ? `${uid}-name-error` : undefined} />
         </Field>
         <Field label="Format" hint={format === 'auto' ? 'Detects data.yaml (YOLO) or annotations/*.json (COCO).' : undefined}>
           <Segmented
@@ -166,7 +166,7 @@
         </Field>
       {:else}
         <Field label="Name" for="{uid}-sname" error={show(errs.name)}>
-          <Input id="{uid}-sname" bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} />
+          <Input id="{uid}-sname" bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} aria-describedby={show(errs.name) ? `${uid}-sname-error` : undefined} />
         </Field>
         <Field label="Classes" for="{uid}-classes" error={show(errs.classes)} hint="Press Enter or comma to add. Up to 16.">
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -184,6 +184,8 @@
               onkeydown={onClassKey}
               onblur={() => classDraft.trim() && addClasses(classDraft)}
               placeholder={classes.length ? '' : 'circle, square, …'}
+              aria-invalid={!!show(errs.classes) || undefined}
+              aria-describedby={show(errs.classes) ? `${uid}-classes-error` : `${uid}-classes-hint`}
               autocomplete="off"
               spellcheck={false}
             />
@@ -191,10 +193,10 @@
         </Field>
         <div class="row">
           <Field label="Images" for="{uid}-images" error={show(errs.images)}>
-            <Input id="{uid}-images" type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.images)} />
+            <Input id="{uid}-images" type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.images)} aria-describedby={show(errs.images) ? `${uid}-images-error` : undefined} />
           </Field>
           <Field label="Seed" for="{uid}-seed" error={show(errs.seed)}>
-            <Input id="{uid}-seed" type="number" min={0} step={1} bind:value={seed} invalid={!!show(errs.seed)} />
+            <Input id="{uid}-seed" type="number" min={0} step={1} bind:value={seed} invalid={!!show(errs.seed)} aria-describedby={show(errs.seed) ? `${uid}-seed-error` : undefined} />
           </Field>
         </div>
         <Field label="Image size" hint="Square images, {imgsz} × {imgsz} px. 80% train, 20% val.">
@@ -260,7 +262,8 @@
     padding: 4px;
     border-radius: var(--radius-md);
     background: var(--bg-inset);
-    border: 1px solid var(--line-default);
+    /* An input's edge (line.control), drawn like ui/Input: an invalid draft turns the edge and the ring danger. */
+    border: 1px solid var(--line-control);
     cursor: text;
     transition:
       border-color var(--dur-fast) var(--ease-standard),
@@ -270,14 +273,16 @@
     background: var(--bg-panel);
   }
   .chips:hover {
-    border-color: var(--line-strong);
+    border-color: var(--line-control-hover);
   }
   .chips:focus-within {
     border-color: var(--focus);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
   }
   .chips.invalid {
-    border-color: var(--danger-solid);
+    --line-control: var(--danger-solid);
+    --line-control-hover: var(--danger-solid);
+    --focus: var(--danger-solid);
   }
   .chip {
     display: inline-flex;

@@ -4,14 +4,15 @@
 import type { Arch } from '$lib/api/types';
 import { e2eMs, modelSize } from '$lib/benchmarks';
 
+// `size` is the letter shown in the model list, uppercase (a lowercase l reads as I or | in Geist).
 // Sizes and latency are measured where docs/BENCHMARKS.md has them (n, s); `ms` is absent otherwise. The other sizes'
 // params and GFLOPs are docs/MODEL.md's table (few classes, 640 px).
 export const arches: { arch: Arch; size: string; params: number; flops: number; ms?: number; note: string }[] = [
-  { arch: 'folo-n', size: 'n', params: modelSize['folo-n']!.params, flops: modelSize['folo-n']!.gflops, ms: e2eMs['folo-n'], note: 'Fastest; edge devices, quick tries.' },
-  { arch: 'folo-s', size: 's', params: modelSize['folo-s']!.params, flops: modelSize['folo-s']!.gflops, ms: e2eMs['folo-s'], note: 'The default: fast and accurate.' },
-  { arch: 'folo-m', size: 'm', params: 20_050_000, flops: 68.0, note: 'More accuracy on busy scenes.' },
-  { arch: 'folo-l', size: 'l', params: 25_310_000, flops: 86.9, note: 'High accuracy; a strong GPU.' },
-  { arch: 'folo-x', size: 'x', params: 56_880_000, flops: 195.3, note: 'Best accuracy; the most memory.' },
+  { arch: 'folo-n', size: 'N', params: modelSize['folo-n']!.params, flops: modelSize['folo-n']!.gflops, ms: e2eMs['folo-n'], note: 'Fastest; edge devices, quick tries.' },
+  { arch: 'folo-s', size: 'S', params: modelSize['folo-s']!.params, flops: modelSize['folo-s']!.gflops, ms: e2eMs['folo-s'], note: 'The default: fast and accurate.' },
+  { arch: 'folo-m', size: 'M', params: 20_050_000, flops: 68.0, note: 'More accuracy on busy scenes.' },
+  { arch: 'folo-l', size: 'L', params: 25_310_000, flops: 86.9, note: 'High accuracy; a strong GPU.' },
+  { arch: 'folo-x', size: 'X', params: 56_880_000, flops: 195.3, note: 'Best accuracy; the most memory.' },
 ];
 
 const gpuImgsPerS: Record<Arch, number> = { 'folo-n': 520, 'folo-s': 320, 'folo-m': 170, 'folo-l': 130, 'folo-x': 70 };

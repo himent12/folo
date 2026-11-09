@@ -3,12 +3,14 @@
    * Vertical bars for a histogram (`edges` + `counts`). By default every bin gets the same width; `proportional` places
    * bins on a linear value axis instead, so unequal bins keep their true widths (bar heights are then densities, so
    * each bar's area is its count, and `yLabel` should say what the height is). The readout row above the plot is the
-   * legend, as on the line charts: the total at rest, the bin under the cursor on hover. Touch: a tap or a sideways
+   * legend, as on the line charts: the total at rest, the bin under the cursor on hover. An open-ended last bin
+   * (reaching past `xMax`) is set apart after a break in the axis and labelled "≥ its lower edge"; it is drawn
+   * `xMax − lower edge` wide at the same scale, so its area is still its count. Touch: a tap or a sideways
    * scrub pins a bin until it is tapped again, a tap lands outside or Escape (./pin). Keyboard: arrow keys.
    */
   import { scaleLinear } from 'd3-scale';
   import { ticks as niceTicks } from './downsample';
-  import { binAt, binDensities } from './histogram';
+  import { binAt, binDensities, proportionalBars } from './histogram';
   import { TouchGesture, type PinAction } from './pin';
 
   let {
@@ -40,7 +42,7 @@
     unit?: string;
     /** Bin widths proportional to their value span (a linear x axis labelled at the bin edges). */
     proportional?: boolean;
-    /** Proportional mode: where the x axis ends; a last bin reaching past it is drawn open-ended up to here. */
+    /** Proportional mode: where the x axis ends; a last bin reaching past it is drawn apart, open-ended, up to here. */
     xMax?: number;
     /** Proportional mode: x-axis label of an edge value. */
     edgeLabel?: (v: number) => string;
@@ -70,13 +72,21 @@
   const y = $derived(scaleLinear().domain([0, max]).nice(4).range([height - m.bottom, m.top]));
   const yt = $derived(niceTicks(0, y.domain()[1] ?? max, 3));
   const bw = $derived(counts.length ? (width - m.left - m.right) / counts.length : 0);
-  const xv = $derived(scaleLinear().domain([lo0, hiN]).range([m.left, width - m.right]).clamp(true));
+  // The open-ended last bin, set apart: the axis breaks for `TAIL_GAP` px before it.
+  const TAIL_GAP = 12;
+  const lastLo = $derived(edges[edges.length - 2] ?? 0);
+  const tailClipped = $derived(proportional && (edges[edges.length - 1] ?? 0) > hiN && lastLo < hiN);
+  const xv = $derived(
+    scaleLinear()
+      .domain([lo0, hiN])
+      .range([m.left, width - m.right - (tailClipped ? TAIL_GAP : 0)])
+      .clamp(true),
+  );
+  const layout = $derived(proportionalBars(edges, hiN, m.left, width - m.right, TAIL_GAP));
+  /** Where the continuous axis ends (the tail's lower edge when it is set apart). */
+  const mainEnd = $derived(proportional ? layout.mainEnd : width - m.right);
   /** Left edge and width of bar i in px. */
-  const bar = (i: number) => {
-    if (!proportional) return { x: m.left + i * bw, w: bw };
-    const a = xv(edges[i] ?? 0);
-    return { x: a, w: Math.max(1, xv(edges[i + 1] ?? 0) - a) };
-  };
+  const bar = (i: number) => (proportional ? (layout.bars[i] ?? { x: m.left, w: 0 }) : { x: m.left + i * bw, w: bw });
   /** Pixel x of a value: linear in proportional mode, interpolated inside its bin otherwise. */
   const xAt = (v: number) => {
     if (proportional) return xv(v);
@@ -174,17 +184,21 @@
   }
   // One notation per axis: all ticks in thousands once the axis reaches 1,000; zero is always plain "0".
   const tickFmt = (v: number) => (v !== 0 && (y.domain()[1] ?? 0) >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(+v.toFixed(2)));
-  // Proportional mode labels the edges, skipping any closer than 28 px to the previous label.
-  const lastLo = $derived(edges[edges.length - 2] ?? 0);
-  const tailClipped = $derived(proportional && (edges[edges.length - 1] ?? 0) > hiN && lastLo < hiN);
+  // Proportional mode labels the bin edges, skipping any closer than 28 px to the previous label; the main axis's end
+  // (the tail's lower edge) is labelled only when it clears the tail's own "≥" label.
+  const tailBar = $derived(tailClipped ? bar(counts.length - 1) : null);
+  const tailMid = $derived(tailBar ? tailBar.x + tailBar.w / 2 : Infinity);
   const edgeTicks = $derived.by(() => {
     if (!proportional) return [];
     const out: number[] = [];
     let last = -Infinity;
     for (const e of edges) {
       if (e > hiN) break;
-      if (tailClipped && e === lastLo) break;
       const px = xv(e);
+      if (tailClipped && e >= lastLo) {
+        if (e === lastLo && px - last >= 28 && tailMid - px >= 36) out.push(e);
+        break;
+      }
       if (px - last >= 28) {
         out.push(e);
         last = px;
@@ -229,7 +243,8 @@
     >
       {#if yLabel}<text class="y-label" x="0" y="8" dy="0.32em" text-anchor="start">{yLabel}</text>{/if}
       {#each yt as t (t)}
-        <line class="grid" x1={m.left} x2={width - m.right} y1={y(t)} y2={y(t)} />
+        <line class="grid" x1={m.left} x2={mainEnd} y1={y(t)} y2={y(t)} />
+        {#if tailBar}<line class="grid" x1={tailBar.x} x2={tailBar.x + tailBar.w} y1={y(t)} y2={y(t)} />{/if}
         <text class="tick" x={m.left - 8} y={y(t)} dy="0.32em" text-anchor="end">{tickFmt(t)}</text>
       {/each}
       {#each counts as c, i (i)}
@@ -249,8 +264,8 @@
           <text class="tick" x={m.left + i * bw + bw / 2} y={height - 6} text-anchor="middle">{name(i)}</text>
         {/if}
       {/each}
-      {#if tailClipped}
-        <text class="tick" x={(xv(lastLo) + xv(hiN)) / 2} y={height - 6} text-anchor="middle">≥{edgeLabel ? edgeLabel(lastLo) : lastLo}</text>
+      {#if tailBar}
+        <text class="tick" x={tailMid} y={height - 6} text-anchor="middle">≥{edgeLabel ? edgeLabel(lastLo) : lastLo}</text>
       {/if}
       {#each edgeTicks as e (e)}
         <text class="tick" x={xv(e)} y={height - 6} text-anchor={e === lo0 ? 'start' : 'middle'}>{edgeLabel ? edgeLabel(e) : e}</text>
@@ -261,7 +276,8 @@
         <!-- The label sits on the threshold's lower side: "tiny" names what lies left of the line. -->
         <text class="marker-label" x={mx - 4} y={m.top + 8} text-anchor="end">{marker.label}</text>
       {/if}
-      <line class="axis" x1={m.left} x2={width - m.right} y1={height - m.bottom} y2={height - m.bottom} />
+      <line class="axis" x1={m.left} x2={mainEnd} y1={height - m.bottom} y2={height - m.bottom} />
+      {#if tailBar}<line class="axis" x1={tailBar.x} x2={tailBar.x + tailBar.w} y1={height - m.bottom} y2={height - m.bottom} />{/if}
     </svg>
   {/if}
 </div>
