@@ -1402,9 +1402,18 @@ impl FoloApp {
                                             } else {
                                                 t.text_secondary
                                             })
-                                            // Windows paths read with `/`, as everywhere else in
-                                            // the app; other text is left as it is.
-                                            .child(log_text(&l.message)),
+                                            // Fields wrap as whole units, a space apart; a field
+                                            // longer than the column still wraps inside itself.
+                                            .flex()
+                                            .flex_wrap()
+                                            .gap_x(px(7.))
+                                            .children(log_fields(&l.message).into_iter().map(|f| {
+                                                let long = f.chars().count() > 36;
+                                                div()
+                                                    .max_w_full()
+                                                    .when(!long, |d| d.whitespace_nowrap())
+                                                    .child(f)
+                                            })),
                                     )
                             })),
                     )
@@ -1577,26 +1586,18 @@ fn pr_floor(low: f32) -> f32 {
 
 /// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
 /// (a letter, `:`, a separator) change, so a Unix path or escaped text with `\` keeps it.
-/// A log message as shown: Windows paths with `/`, and every space before a number (or a unit
-/// after one) no-break, so a wrapped line breaks between fields, never inside "mAP50 0.745".
-fn log_text(s: &str) -> String {
+/// A log message as shown: Windows paths with `/`, split into its " · " fields, each but the
+/// last keeping its dot. Rows lay the fields out unbroken in a wrapping row, so a long entry
+/// breaks between fields, never inside "mAP50 0.745" (GPUI's wrapper breaks before any
+/// non-word character, so a no-break space can't hold a pair together).
+fn log_fields(s: &str) -> Vec<String> {
     let s = slash_paths(s);
-    let c: Vec<char> = s.chars().collect();
-    // A unit: one or two letters, then the end or a non-letter ("14.3 s", "6 ms").
-    let unit_at = |i: usize| {
-        let n = c[i..].iter().take_while(|x| x.is_alphabetic()).count();
-        (1..=2).contains(&n)
-    };
-    c.iter()
+    let parts: Vec<&str> = s.split(" · ").collect();
+    let n = parts.len();
+    parts
+        .into_iter()
         .enumerate()
-        .map(|(i, &ch)| {
-            let joins = ch == ' '
-                && i > 0
-                && i + 1 < c.len()
-                && ((c[i + 1].is_ascii_digit() && c[i - 1] != '·')
-                    || (c[i - 1].is_ascii_digit() && unit_at(i + 1)));
-            if joins { '\u{a0}' } else { ch }
-        })
+        .map(|(i, f)| if i + 1 < n { format!("{f} ·") } else { f.to_string() })
         .collect()
 }
 
@@ -1618,9 +1619,9 @@ const LOG_LINE: f32 = 21.;
 mod tests {
     #[test]
     fn log_lines_break_between_fields() {
-        let t = super::log_text("epoch 32/100 · mAP50-95 0.594 · mAP50 0.745 · 14.3 s");
-        assert_eq!(t, "epoch\u{a0}32/100 · mAP50-95\u{a0}0.594 · mAP50\u{a0}0.745 · 14.3\u{a0}s");
-        assert_eq!(super::log_text("loaded 3 classes"), "loaded\u{a0}3 classes");
+        let f = super::log_fields("epoch 32/100 · mAP50-95 0.594 · mAP50 0.745 · 14.3 s");
+        assert_eq!(f, ["epoch 32/100 ·", "mAP50-95 0.594 ·", "mAP50 0.745 ·", "14.3 s"]);
+        assert_eq!(super::log_fields("loaded 3 classes"), ["loaded 3 classes"]);
     }
 
     #[test]
