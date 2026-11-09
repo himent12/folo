@@ -1773,3 +1773,36 @@ Round 43 changes:
 - **Switches:** a 36 × 28 target, and their labels toggle too.
 - **Skeleton:** KPI strip +8 px, chart −6 px.
 - **Scenarios:** `new-run+amp` and `playground+nms` (40 shots).
+
+## Round 43
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.0 |
+| GPT-6.1 Sol | 8.5 |
+
+The new `playground-nms` shot exposed a real defect in both reviews: detections with no class name. The demo carried ground-truth classes 3 and 4 through a 3-class model, so the name lookup returned "" and nothing guarded against an empty name.
+
+Opus also found that dimmed chips still painted over matching boxes' strokes. Placement was fixed in round 43, but paint order still followed placement.
+
+Both reviewers asked for:
+- One-line e2e tags in the tables, where Models had a cramped second line.
+- Larger help-icon and slider targets.
+- The Playground picker naming the head even without metrics.
+- The latency breakdown fitting at 1280 × 800 when the NMS slider shows.
+- New run's switches beside their labels.
+
+The code review of #118 found nothing blocking. The switch to `Model.head` (#117) was reviewed with it:
+- `model_e2e` reads the model's own head.
+- The model page says "trained in f16" from `trained_with.amp`.
+
+Round 44 changes:
+- **Detections:**
+  - The demo predicts only classes the model knows.
+  - A nameless detection reads "class N".
+- **viz:** paints a group at a time (dimmed, matching, selected), each group's boxes then its chips.
+- **Tags:** a compact "e2e" tag beside the architecture in Models and Best models.
+- **Picker:** names architecture and head always, and mAP when the model has been evaluated.
+- **Targets:** help icons and sliders get 28 px targets within their old footprint.
+- **Playground:** inline sliders whenever both show.
+- **New run:** switch rows keep to the left column. Mixed precision help says "same speed at 640 px".
