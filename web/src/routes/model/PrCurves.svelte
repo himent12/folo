@@ -11,7 +11,9 @@
    * (`onviewcurve`) is the selection bar's, once a class is traced. `view` shows only the curves or only the table: the model page renders them as two panels (the
    * curves beside the Details rail, the table in a row of its own; on a phone, two sections) that share `selected` and
    * `hovered` (bindable), so a class picked or pointed at in the table is traced in the other panel's curves, and
-   * `onback` puts a way back to the table in the curves' legend row. `fill` lets the plot grow to the panel's height
+   * `onback` puts a way back to the table in the curves' selection bar. The legend row is a readout only (names and
+   * values); on a phone, what acts on the selection (the way back, Clear) sits in a selection bar held under the section
+   * picker, as on the Classes section (DESIGN_DIRECTION §2.12). `fill` lets the plot grow to the panel's height
    * (a panel stretched to its row), from a 300 px plot.
    */
   import type { Evaluation } from '$lib/api/evaluation';
@@ -45,7 +47,7 @@
     view?: 'all' | 'curves' | 'classes';
     /** A details row's "View curve": the class is traced, then the page shows the curves. */
     onviewcurve?: (cls: number) => void;
-    /** Back to the class table, offered in the curves' legend row (after "View curve"). */
+    /** Back to the class table, offered in the curves' selection bar (after "View curve"). */
     onback?: () => void;
     /** The plot takes the height left in its panel (at least 300 px). */
     fill?: boolean;
@@ -131,6 +133,23 @@
 
 <div class="pr">
   <div class="part" class:off={view === 'classes'}>
+    <!-- Phones' Curves section has no table beside it: its selection bar, held under the section picker, says what is
+         traced and carries the way back and Clear, so the legend below stays a readout. -->
+    {#if view === 'curves' && narrow}
+      <div class="tools bar">
+        <p class="pick num" aria-live="polite">
+          {#if selected.length}
+            <span>{selected.length} {selected.length === 1 ? 'class' : 'classes'} traced</span>
+          {:else}
+            <span class="hint">Tap a class in Classes to trace its curve</span>
+          {/if}
+          {#if onback}
+            <button type="button" class="view back" onclick={onback}><ArrowLeft size={14} aria-hidden="true" />Back to Classes</button>
+          {/if}
+          {#if selected.length}<button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>{/if}
+        </p>
+      </div>
+    {/if}
     <!-- At rest the legend states each curve's AP50 (a summary of the whole curve); under the cursor it switches to a
          readout, marked by the cursor's own glyph: the precision at that recall. -->
     <div class="legend" class:reading={cursor !== null}>
@@ -144,17 +163,6 @@
         <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
       {/each}
       {#if banded}<span class="item band-key"><span class="swatch-band" aria-hidden="true"></span>10th–90th percentile of classes</span>{/if}
-      <!-- Phones' Curves section has no table beside it: the hint and Clear come along. Elsewhere they head the table. -->
-      {#if view === 'curves' && onback}
-        <button type="button" class="clear back" onclick={onback}><ArrowLeft size={14} aria-hidden="true" />Back to Classes</button>
-      {/if}
-      {#if view === 'curves'}
-        {#if selected.length}
-          <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
-        {:else if hovered === null && narrow}
-          <span class="hint">Tap a class in Classes to trace its curve.</span>
-        {/if}
-      {/if}
       {#if many && !modeInHeader}
         <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show band' : 'All curves'}</button>
 
@@ -171,8 +179,6 @@
         xTicks={6}
         yTicks={5}
         legend={false}
-        xLabel="Recall"
-        yLabel="Precision"
         bind:cursor
         empty="No correct detections yet: precision is 0 at every recall."
         label="Precision-recall curves at IoU 0.5 for {classes.length} classes and the mean over all classes"
@@ -504,11 +510,8 @@
     color: var(--text-primary);
     background: var(--bg-hover);
   }
-  .back {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    margin-left: calc(var(--space-2) * -1);
+  .view.back {
+    margin-top: 0;
   }
   .view {
     display: inline-flex;

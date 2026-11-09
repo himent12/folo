@@ -44,6 +44,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
   import Ident from '$lib/ui/Ident.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
 
@@ -74,8 +75,9 @@
     { value: 'epoch', label: 'By epoch' },
     { value: 'progress', label: 'By progress' },
   ];
-  // The normalised axis names itself; chosen for you, it also says why.
-  const xLabel = $derived(x === 'progress' ? (xAuto ? '% of planned epochs · plans differ in length' : '% of planned epochs') : undefined);
+  // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
+  // normalised axis names its unit; chosen for you, it also says why.
+  const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto ? ' · plans differ in length' : ''}` : 'by epoch');
   let hint = $state<string | null>(null);
   // Colours follow the run, not its position: removing one run never repaints the others.
   let slots = $state<Record<string, number>>({});
@@ -149,9 +151,9 @@
   // Runs that all scored low get a zoomed axis whose caption names the full 0–1 scale (./domain UNIT_ZOOM_BELOW).
   const zoomed = $derived(!!metricDef.unit && !!extent && unitTop(extent[1]) < UNIT_ZOOM_BELOW);
   // The plot itself is at least 360 px tall from 768 px up, so four curves that climb together still separate; phones
-  // a 210 px plot. LineChart's margins add 8 px on top (24 under an axis caption) and 22 px below (36 under an x name).
+  // a 210 px plot. LineChart's margins add 8 px on top (24 under the zoom caption) and 22 px below.
   const plotPx = $derived(narrow ? 210 : 360);
-  const height = $derived(plotPx + (zoomed ? 24 : 8) + (xLabel ? 36 : 22));
+  const height = $derived(plotPx + (zoomed ? 24 : 8) + 22);
   // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.64, not bunched in a 0–1 axis.
   const fit = $derived(extent ? (metricDef.unit ? unitDomain(extent[1], plotPx) : niceDomain(extent[0], extent[1])) : undefined);
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
@@ -262,8 +264,11 @@
     return () => ro.disconnect();
   });
 
-  /** The side-by-side table's setting column, and the narrowest a run column gets before the table scrolls. */
+  /** The side-by-side table's setting column (104 px two at a time on phones), and the narrowest a run column gets before
+   *  the table scrolls. Set on the header row, the one row a fixed table takes its widths from, so the columns hold the
+   *  same widths from the first render whatever the pager does (DESIGN_DIRECTION §2.7). */
   const SETTING_COL = 152;
+  const PAIR_SETTING_COL = 104;
   const RUN_COL_MIN = 136;
 
   // Phones compare two runs at a time: a baseline (the pinned run, else the first) and one other, fully in view and
@@ -307,6 +312,8 @@
           <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
         </header>
+        <!-- The normalised axis's unit, under the header's controls (an epoch axis needs no word: the control says it). -->
+        {#if x === 'progress'}<p class="qual phone">{xQual}</p>{/if}
         {@render chips()}
         {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         {@render plot()}
@@ -329,7 +336,11 @@
         <!-- One line, and only when it changes how to read the plot; the axis names itself (and why it was chosen). -->
         {#if !sameData && chosen.length > 1}<p class="caveat">{DATA_CAVEAT}</p>{/if}
         <header class="c-head">
-          <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
+          <span class="c-what">
+            <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
+            <!-- The header qualifier: what the x axis is ("by epoch", "by progress, % of planned epochs"). -->
+            <span class="qual">{xQual}</span>
+          </span>
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
         </header>
         {@render plot()}
@@ -364,19 +375,21 @@
           </p>
         {/if}
         <div class="scroll" class:more={tableMore} bind:this={tableEl} onscroll={measureTable}>
-          <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. -->
+          <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. The widths
+               live on the header row (no colgroup, whose keyed columns could outlive a page of runs), so the setting
+               column is fixed and the run columns share the rest equally from the first render. -->
           <table class="table fixed" class:two={pairMode} style:min-width={pairMode ? undefined : `${SETTING_COL + chosen.length * RUN_COL_MIN}px`}>
-            <colgroup>
-              <col class="c-set" style:width={pairMode ? undefined : `${SETTING_COL}px`} />
-              {#each shown as r (r.id)}<col />{/each}
-            </colgroup>
             <thead>
               <tr>
-                <th></th>
+                <th style:width="{pairMode ? PAIR_SETTING_COL : SETTING_COL}px"></th>
                 {#each shown as r (r.id)}
+                  <!-- The key in a column of its own beside the name, so a name that wraps (at its hyphens) keeps its
+                       left edge and never squeezes the key. -->
                   <th>
-                    <span class="th" style:--c={fill(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class:truncate={!pairMode}>{r.name}</span></span>
-                    {#if pairMode && r === base}<span class="base-tag">Baseline</span>{/if}
+                    <span class="th" style:--c={fill(r.id)}
+                      ><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
+                      >{#if pairMode && r === base}<span class="base-tag">Baseline</span>{/if}</span
+                    >
                   </th>
                 {/each}
               </tr>
@@ -398,7 +411,9 @@
                 {#each shown as r (r.id)}
                   {@const v = bestVal(r)}
                   <td class="num">
-                    {#if v}{metric(v.precision)} · {metric(v.recall)}<span class="pr-at">{v.best_f1_conf != null ? `conf ${conf(v.best_f1_conf)}` : 'best-F1 conf'} · ep {r.best?.epoch}</span>{:else}—{/if}
+                    {#if v}{metric(v.precision)} · {metric(v.recall)}<span class="pr-at"
+                        ><Meta><span>{v.best_f1_conf != null ? `conf ${conf(v.best_f1_conf)}` : 'best-F1 conf'}</span><span>ep {r.best?.epoch}</span></Meta></span
+                      >{:else}—{/if}
                   </td>
                 {/each}
               </tr>
@@ -411,9 +426,10 @@
                     {@const off = offBase(r, f)}
                     <td class="num cfg" class:diff={!pairMode || off} class:same={pairMode && r !== base && !off}
                       class:base={pairMode && r === base}
-                      >{#if off}<span class="chg" aria-hidden="true"></span>{/if}{@render cell(f(r))}{#if off}<span class="sr-only"
-                          >, differs from the baseline</span
-                        >{/if}</td
+                      >{#if off}<span class="chg-row"><span class="chg" aria-hidden="true"></span><span
+                            >{@render cell(f(r))}<span class="sr-only">, differs from the baseline</span></span
+                          ></span
+                        >{:else}{@render cell(f(r))}{/if}</td
                     >
                   {/each}
                 </tr>
@@ -443,7 +459,7 @@
   {/if}
 </Page>
 
-{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}{v.value}{/if}{#if v.note}<span class="note">{v.note}</span>{/if}{/snippet}
+{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" data-fact>{v.value}</span>{/if}{#if v.note}<span class="note" data-fact>{v.note}</span>{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -509,11 +525,11 @@
       xInteger={x === 'epoch'}
       yDomain={fit?.domain}
       yTickValues={fit?.ticks}
+      yDecimals={fit?.decimals}
       curve="monotone"
       valueFormat={(v) => metric(v)}
       xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
       xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
-      {xLabel}
       yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
       bind:cursor
       bind:hint
@@ -781,15 +797,12 @@
   .pair .more:hover {
     color: var(--text-primary);
   }
-  /* Two run columns share what the setting column leaves; the setting labels keep one column on every page. */
-  table.two .c-set {
-    width: 104px;
-  }
-  /* Nothing truncates: labels and run names wrap, and the two headers start on one line. */
+  /* Nothing truncates: labels and run names wrap (a name at its hyphens, a word only when it is longer than the
+     column), and the two headers start on one line. */
   table.two th,
   table.two td {
     white-space: normal;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
     vertical-align: top;
   }
   table.two th {
@@ -797,25 +810,34 @@
     padding-block: var(--space-2);
   }
   table.two .th {
-    align-items: baseline;
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    align-items: start;
   }
+  /* On the name's first line (16 px line). */
   table.two .th i {
-    transform: translateY(-3px);
+    margin-top: 6px;
   }
   .base-tag {
-    display: block;
+    grid-column: 2;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);
   }
+  /* A changed value: the dot hangs in the cell's padding, on the value's first line, so changed and unchanged values
+     share one left edge and the dot never wraps away from its value. */
+  .chg-row {
+    display: block;
+    position: relative;
+  }
   .chg {
-    display: inline-block;
+    position: absolute;
+    left: -10px; /* grid-ok: a 6 px dot 4 px before the text */
+    top: 8px;
     width: 6px;
     height: 6px;
-    margin-right: var(--space-1-5);
     border-radius: 50%;
     background: var(--text-primary);
-    vertical-align: 2px;
   }
   td.same {
     color: var(--text-tertiary);
@@ -889,19 +911,10 @@
       align-self: center;
       padding-top: 0;
     }
-    /* At rest: two name / value pairs per row, each pair a 44 px toggle; Edit goes back to one run per row, with open,
-       remove and how each run started. Legend text is 12 px; the value keeps the body size. */
-    .chips:not(.managing) {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      column-gap: var(--space-3);
-    }
-    .chips:not(.managing) .chip {
-      margin-inline: 0;
-      padding: 0 0 0 var(--space-2);
-    }
-    .chips:not(.managing) .chip:nth-of-type(2) {
-      border-top-width: 1px;
-    }
+    /* One run per 44 px row, its whole name on the left and the value on the right with how the line ended on the same
+       line ("0.494 · failed"), so every row keeps one height and no name is cut beside a visible sibling ("shapes-hard-s"
+       next to "shapes-hard-m"). Edit adds open, remove and how each run started. Legend text is 12 px; the value keeps
+       the body size. */
     .chips:not(.managing) .chip .key {
       gap: 6px;
     }
@@ -912,19 +925,7 @@
       font-size: var(--type-sm-size);
     }
     .chips:not(.managing) .chip .v {
-      min-width: 2.8em;
       padding-right: 0;
-    }
-    /* The status word under the value (right-aligned), so the name keeps the row's width. */
-    .chips .chip .v {
-      display: grid;
-      justify-items: end;
-    }
-    .chips .chip .st {
-      line-height: var(--type-sm-line);
-    }
-    .chips .chip .st .sep {
-      display: none;
     }
     /* Edit: the start line under the whole row, past the key; the identifier keeps whole and ellipsizes (title has it). */
     .chips .chip .from {
@@ -1018,6 +1019,22 @@
     padding-top: var(--space-3);
     border-top: 1px solid var(--line-subtle);
   }
+  .c-what {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
+    min-width: 0;
+  }
+  /* The chart's header qualifier, as on every chart: tertiary, 12 px. */
+  .qual {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .qual.phone {
+    margin-top: calc(-1 * var(--space-1));
+  }
   .fold td {
     padding-top: 0;
     padding-bottom: 0;
@@ -1089,6 +1106,15 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* A setting is a fact: the request beside its value moves, whole, to a line of its own rather than lose its end;
+     the value itself ("360 steps") stays whole. */
+  .fixed td.cfg {
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  .val {
+    white-space: nowrap;
+  }
   .th {
     display: inline-flex;
     align-items: center;
@@ -1137,8 +1163,8 @@
     font-size: var(--type-sm-size);
   }
   /* The request beside what the run resolved it to ("(auto)", "(requested 0.01)"), and where P · R were read. */
+  /* After a space (where a narrow column breaks, so a wrapped note starts on the value's edge, not indented). */
   .note {
-    margin-left: var(--space-1);
     /* It wraps as a whole, never inside "(requested 0.01)". */
     white-space: nowrap;
     font-size: var(--type-sm-size);

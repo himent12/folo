@@ -2,11 +2,16 @@
 // empty) and is re-fitted at most once per epoch, so a live chart never jitters as steps arrive (§2.9). Values are
 // never tweened. Every y axis holds 3–5 ticks (§2.4): more gridlines read as a texture rather than a scale. A log axis
 // is the exception: its 1-2-5 values sit unevenly, so up to six of them still read as a scale (MAX_LOG_TICKS).
+// **One tick rule at every width**: a domain's step and decimals come from the domain alone, never from the plot's
+// height, so the same 0–0.86 reads 0.0 · 0.2 · 0.4 · 0.6 · 0.8 on a desktop and on a phone. A plot too short for every
+// tick keeps every second (or fifth) one of the same step, with the same decimals (0.0 · 0.4 · 0.8), never a new step.
 
 export interface Fit {
   domain: [number, number];
   /** Tick values inside the domain: niceDomain's end exactly on its top; unitDomain's top may sit a little above. */
   ticks: number[];
+  /** Decimals of the domain's tick step: every label of this axis takes them, however many ticks a plot shows. */
+  decimals: number;
 }
 
 /** Gridlines closer than this (px) read as a texture rather than a scale. */
@@ -57,11 +62,11 @@ function fitSteps(lo: number, hi: number, steps: readonly number[], gapOk: (gaps
     if (!loose || span(c) < span(loose) - 1e-12) loose = c;
   }
   const f = best ?? loose;
-  if (!f) return { domain: [lo, hi], ticks: [lo, hi] };
+  if (!f) return { domain: [lo, hi], ticks: [lo, hi], decimals: stepDecimals(hi - lo) };
   const d = stepDecimals(f.step);
   const t: number[] = [];
   for (let k = f.a; k <= f.b; k++) t.push(+(k * f.step).toFixed(d));
-  return { domain: [t[0]!, t[t.length - 1]!], ticks: t };
+  return { domain: [t[0]!, t[t.length - 1]!], ticks: t, decimals: d };
 }
 
 /**
@@ -91,24 +96,33 @@ export function unitTop(max: number): number {
 /** Whether a fitted 0–1 axis is zoomed in (its top under UNIT_ZOOM_BELOW). */
 export const unitZoomed = (fit: Fit | null | undefined) => !!fit && fit.domain[1] < UNIT_ZOOM_BELOW - 1e-9;
 
+/** How many of a step's ticks a short plot skips to keep its gridlines MIN_GAP apart: every 2nd, else every 5th. */
+const THIN = [1, 2, 5];
+
 /**
  * A 0–1 metric (mAP, precision, recall): from 0 (which keeps the scale honest) up to `unitTop(max)`, so the data fills
- * the plot. The gridlines take the nice step whose highest tick comes nearest that top in 3–5 ticks at least MIN_GAP
- * apart (the smaller step on a tie); the top itself need not be a tick (0–0.65 reads 0 · 0.2 · 0.4 · 0.6).
+ * the plot. The gridlines take the nice step whose highest tick comes nearest that top in 3–5 ticks (the smaller step
+ * on a tie); the top itself need not be a tick (0–0.65 reads 0 · 0.2 · 0.4 · 0.6). The step depends on the domain
+ * only: a plot too short for its ticks `MIN_GAP` apart keeps every 2nd (else 5th) one of them, same step, same
+ * decimals, so a phone and a desktop read one scale.
  */
 export function unitDomain(max: number, plotPx: number): Fit {
   const top = unitTop(max);
   let best: { step: number; n: number } | null = null;
   for (const step of UNIT_STEPS) {
     const n = Math.floor(top / step + 1e-9) + 1;
-    if (n < MIN_TICKS || n > MAX_TICKS || (plotPx * step) / top < MIN_GAP) continue;
+    if (n < MIN_TICKS || n > MAX_TICKS) continue;
     if (!best || (n - 1) * step > (best.n - 1) * best.step + 1e-9) best = { step, n };
   }
-  // A plot too short for three gridlines: its base and its top.
-  if (!best) return { domain: [0, top], ticks: [0, top] };
+  // A top too small for three nice ticks: its base and its top.
+  if (!best) return { domain: [0, top], ticks: [0, top], decimals: stepDecimals(top) };
   const { step, n } = best;
   const d = stepDecimals(step);
-  return { domain: [0, top], ticks: Array.from({ length: n }, (_, k) => +(k * step).toFixed(d)) };
+  const all = Array.from({ length: n }, (_, k) => +(k * step).toFixed(d));
+  const every = THIN.find((k) => k < n && (plotPx * step * k) / top >= MIN_GAP);
+  // Not even every fifth tick fits: the base and the highest tick, still at this step's decimals.
+  const ticks = every ? all.filter((_, k) => k % every === 0) : [0, all[n - 1]!];
+  return { domain: [0, top], ticks, decimals: d };
 }
 
 /**
@@ -116,7 +130,7 @@ export function unitDomain(max: number, plotPx: number): Fit {
  * plot starts and ends on a gridline, in 3–5 ticks.
  */
 export function niceDomain(lo: number, hi: number): Fit {
-  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { domain: [0, 1], ticks: [0, 0.25, 0.5, 0.75, 1] };
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return { domain: [0, 1], ticks: [0, 0.25, 0.5, 0.75, 1], decimals: 2 };
   if (hi <= lo) hi = lo + (Math.abs(lo) || 1);
   return fitSteps(lo, hi, candidates(hi - lo));
 }

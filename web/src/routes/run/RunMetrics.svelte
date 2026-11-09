@@ -205,7 +205,7 @@
     const [lo, hi] = extent;
     let next: Fit & { log?: boolean };
     if (unit) next = unitDomain(hi, plotPx);
-    else if (tab === 'loss' && scale === 'log') next = { domain: logDomain(lo, hi), ticks: [], log: true };
+    else if (tab === 'loss' && scale === 'log') next = { domain: logDomain(lo, hi), ticks: [], decimals: 0, log: true };
     // Throughput starts at 0 (a rate), with a little headroom over its peak.
     else if (tab === 'ips') next = niceDomain(0, hi * 1.05);
     else next = niceDomain(lo, hi);
@@ -474,6 +474,7 @@
               xInteger
               yDomain={fit?.domain}
               yTickValues={fit && !fit.log ? fit.ticks : undefined}
+              yDecimals={fit && !fit.log ? fit.decimals : undefined}
               yLog={tab === 'loss' && scale === 'log'}
               yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
               valueFormat={tab === 'lr' ? (v) => (v / 10 ** lrExp).toFixed(2) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}

@@ -336,6 +336,7 @@
       <ul class="rows" class:choosing>
         {#each shown as r (r.id)}
           {@const on = selected.includes(r.id)}
+          {@const cause = failureCause(r)}
           <li class:on>
             <label class="r-check">
               <input
@@ -348,9 +349,12 @@
             </label>
             <a class="r-main" href={href(`/runs/${r.id}`)}>
               <span class="r-text">
-                <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate">{r.name}</span></span>
-                <!-- With the checkboxes in, the dataset steps out so the cause and progress keep the line. -->
-                <span class="r-meta num truncate"><Meta line><span>{failureCause(r) ?? (placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : STATUS[r.status])}</span><span>{r.epoch}/{r.epochs}</span>{#if !choosing}<span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>{/if}</Meta></span>
+                <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate" title={r.name}>{r.name}</span></span>
+                <!-- A failure's cause is a line of its own (it is the news), with the epoch and the whole dataset under it;
+                     otherwise the status leads that line. Lines wrap whole items, so no fact is cut (DESIGN_DIRECTION
+                     §2.3). With the checkboxes in, the dataset steps out. -->
+                {#if cause}<span class="r-cause" data-fact>{cause}</span>{/if}
+                <span class="r-meta num"><Meta>{#if !cause}<span>{placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : STATUS[r.status]}</span>{/if}<span>{r.epoch}/{r.epochs}</span>{#if !choosing}<span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>{/if}</Meta></span>
               </span>
               <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
@@ -590,6 +594,7 @@
       width: 44px;
       height: 56px;
     }
+    /* 56 px at least; a row that grows a line (a failure's cause) keeps 8 px above and below its text. */
     .r-main {
       flex: 1;
       min-width: 0;
@@ -597,6 +602,7 @@
       align-items: center;
       gap: var(--space-3);
       min-height: 56px;
+      padding-block: var(--space-2);
     }
     .r-text {
       flex: 1;
@@ -613,9 +619,15 @@
       gap: var(--space-2);
       min-width: 0;
     }
-    .r-meta {
+    .r-meta,
+    .r-cause {
       font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
       color: var(--text-tertiary);
+    }
+    /* What went wrong, in words, over the epoch and dataset: secondary ink, the status's dot already says failed. */
+    .r-cause {
+      color: var(--text-secondary);
     }
     .sk .r-text {
       gap: var(--space-2);

@@ -340,7 +340,7 @@
                 <a href={href(`/models/${m.id}`)}>
                   <span class="m-main">
                     <span class="name truncate">{m.name}</span>
-                    <span class="m-meta num truncate"><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{compact(m.params)}</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
+                    <span class="m-meta num"><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{compact(m.params)}</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
                   </span>
                   <span class="m-side"><span class="num map">{#if best.has(m.id)}<span class="best">best</span>{/if}<span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                 </a>

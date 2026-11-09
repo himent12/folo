@@ -3,7 +3,9 @@
 // spots allowing the label over its own line (never another's); finally the clear gutter right of the plot: as one
 // column in the order of the lines' ends when the caller says where the plot ends (so two lines ending together get
 // neighbouring labels), else at the free height nearest its end, at most MAX_REACH px away. A line that ends at the
-// plot's right edge goes straight to that column. Labels keep `gap` px between them. Every label is anchored to its
+// plot's right edge goes straight to that column. Labels keep at least LABEL_GAP (12 px) between their drawn boxes, a
+// box being the label's measured width by its 16 px line (`LABEL_H`, the 12 px text's own line box, not the glyphs'
+// height), so the clear space a reader sees is the space the rule names. Every label is anchored to its
 // line's end marker: one that does not sit right beside it gets a leader from the marker to the label's nearest edge
 // (`leaderOf`), so a label never floats free over another line. A label with no free spot within reach is left out:
 // the end marker's shape and the legend's status word still say how the line ended.
@@ -34,11 +36,17 @@ export interface Placed {
 }
 
 export interface PlaceOptions {
-  /** Clear space between two labels' boxes, px (default 2 × pad). */
+  /** Clear space between two labels' boxes, px: LABEL_GAP, or more (a smaller value is raised to it). */
   gap?: number;
   /** How far right of the plot the gutter column starts when a label there sits off its line's end (room for a leader). */
   lead?: number;
 }
+
+/** The least clear space between two end labels' boxes, px (DESIGN_DIRECTION §2.4). */
+export const LABEL_GAP = 12;
+
+/** A label's box height, px: the 16 px line of the 12 px label text, as the browser draws it. */
+export const LABEL_H = 16;
 
 /** A label whose box is further than this (px) from its line's end marker gets a leader. */
 const BESIDE = 8;
@@ -72,7 +80,7 @@ type Pt = { x: number; y: number };
 /** Approximate width of `text` at the chart's 12 px label size. */
 export const labelWidth = (text: string) => text.length * 6.8 + 4;
 
-const H = 14;
+const H = LABEL_H;
 
 /** Whether segment a–b crosses (or lies in) the box (Liang–Barsky clipping). */
 function segmentHits(a: Pt, b: Pt, r: Box): boolean {
@@ -114,7 +122,7 @@ export function placeEndLabels(
   gutter?: number,
   opts: PlaceOptions = {},
 ): Placed[] {
-  const gap = opts.gap ?? 2 * pad;
+  const gap = Math.max(opts.gap ?? LABEL_GAP, LABEL_GAP);
   const taken: Box[] = [];
   const spots = new Map<number, Box>();
   const placed = new Map<number, Placed>();

@@ -821,7 +821,7 @@ export const scenes = [
       // Trace the third class, then the selection bar's View curve (the one place it lives).
       await page.locator('#per-class button.cls').nth(2).click();
       await page.locator('#per-class .to-curve').click();
-      await until(page, '#pr .legend .back');
+      await until(page, '#pr .tools .back');
       await page.clock.runFor(500);
     },
   },

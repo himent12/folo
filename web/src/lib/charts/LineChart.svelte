@@ -71,7 +71,7 @@
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { labelWidth, leaderOf, placeEndLabels } from './endLabels';
+  import { LABEL_GAP, labelWidth, leaderOf, placeEndLabels } from './endLabels';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
@@ -89,6 +89,9 @@
     yLog?: boolean;
     /** Y tick values, when the caller fitted the domain itself (./domain): the ticks end exactly on its top. */
     yTickValues?: number[];
+    /** Decimals of every y label, when the caller fitted the domain (`Fit.decimals`): a short plot that shows every
+     *  second tick keeps the step's decimals, so one domain reads the same at every width. */
+    yDecimals?: number;
     curve?: 'linear' | 'monotone';
     xFormat?: (x: number) => string;
     /** Tick labels on y. Default: as many decimals as the tick step needs ("6", "0.5", "0.25"). */
@@ -148,6 +151,7 @@
     yDomain,
     yLog = false,
     yTickValues: yTickProp,
+    yDecimals,
     curve = 'linear',
     xFormat: xFormatProp,
     yFormat: yFormatProp,
@@ -222,12 +226,12 @@
   const yMinor = $derived(yLog && !yTickProp ? logMinors(yExtent[0], yExtent[1]) : []);
 
   // Decimals follow the tick step, so a 0..6 axis reads "0 2 4 6", a 0..1 axis "0 0.5 1" and quarter steps
-  // "0.25 0.50"; log ticks use 3 digits.
+  // "0.25 0.50"; a fitted domain's own decimals win (`yDecimals`), as its ticks may skip steps; log ticks use 3 digits.
   const yFormat = $derived.by(() => {
     if (yFormatProp) return yFormatProp;
     if (yLog) return (v: number) => String(+v.toPrecision(3));
     const step = yTickValues.length > 1 ? Math.abs(yTickValues[1]! - yTickValues[0]!) : 1;
-    const d = Math.min(6, stepDecimals(step));
+    const d = Math.min(6, yDecimals ?? stepDecimals(step));
     return (v: number) => v.toFixed(d);
   });
   const fmtValue = $derived(valueFormat ?? yFormatProp ?? ((v: number) => String(+v.toFixed(3))));
@@ -344,8 +348,6 @@
     });
   });
 
-  /** End labels keep at least this much clear space between their boxes, so a stack of them never touches. */
-  const LABEL_GAP = 12;
   /** How far right of the plot the label column moves when it needs leaders: short ones, fanning from each line's end. */
   const LEAD = 14;
   /** Where a leader starts: just outside the line's end marker (the live ring is wider), px from its centre. */
