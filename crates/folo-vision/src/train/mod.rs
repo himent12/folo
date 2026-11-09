@@ -17,8 +17,14 @@
 //!   FORMAT.md checkpoints, written atomically), and early stopping after `patience` epochs without a gain.
 //! - **Events**: docs/API.md's `status`, `step` (rate-limited), `epoch` and `log` objects go to an [`EventSink`]
 //!   and, when the run has a directory, every one of them (every step) to `metrics.jsonl`.
-//! - **Resume** ([`Trainer::resume`]) restores the model, EMA, optimizer, schedule and early-stopping state from
-//!   an epoch-boundary checkpoint; the following steps are bit-identical to an uninterrupted run.
+//! - **Mixed precision** (`amp`, §8.8): the forward runs under [`folo_core::autocast`] (f16 activations, convs
+//!   and matrix products on the GPU's tensor cores), the loss in f32 on f32 copies of the head outputs, backward on
+//!   the loss times a dynamic loss scale ([`GradScaler`]); at the end of a window the gradients are unscaled and
+//!   clipped and, if any is not finite, the step is skipped (no `t` advance, the scale backs off). Master weights,
+//!   optimizer state, BatchNorm statistics and the EMA stay f32. Needs a GPU context with tensor cores
+//!   ([`amp_support`]).
+//! - **Resume** ([`Trainer::resume`]) restores the model, EMA, optimizer, schedule, loss scaler and early-stopping
+//!   state from an epoch-boundary checkpoint; the following steps are bit-identical to an uninterrupted run.
 //!
 //! Run directory layout (when [`TrainOptions::run_dir`] is set): `config.json` (the resolved config and the
 //! derived schedule numbers), `metrics.jsonl`, `weights/{last,best}.folo` and `samples/epoch_NNN.json` (the
@@ -48,7 +54,7 @@ use folo_nn::io::{BestState, CheckpointParts, Metrics, ModelConfig, ModelFile, R
 use folo_nn::optim::{
     AdamW, GradAccumulator, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
 };
-use folo_nn::{DecayKind, EmaState, LrSchedule, ModelEma, Module, RunningStats};
+use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module, RunningStats, ScaleUpdate};
 
 use crate::error::{Error, Result};
 use crate::loss::{LossConfig, LossItems, detection_loss, targets_from_normalized};
@@ -120,6 +126,52 @@ pub fn schedule_warnings(
         ));
     }
     out
+}
+
+/// Checkpoint metadata key (docs/FORMAT.md) of a mixed-precision run's loss scaler: [`GradScaler::to_json`].
+pub const AMP_KEY: &str = "folo.amp";
+
+/// Consecutive optimizer steps skipped for non-finite gradients that fail a mixed-precision run (§8.8): by then the
+/// loss scale has backed off by `2^50`, so the gradients are not finite at any scale.
+pub const MAX_AMP_SKIPS: usize = 50;
+
+/// Whether a run on `device` can use mixed precision (`amp`): a GPU whose folo-gpu context has tensor cores (on
+/// the RTX 4080 SUPER, Vulkan with `FOLO_GPU_TENSOR_CORES=1`, which `folo train --amp` requests itself and
+/// `folo serve --tensor-cores` for the server). Switches them on if they were switched off at run time. Anything
+/// else is `not_supported`, naming why: the f16 gradient kernels exist without tensor cores too, but they bring no
+/// speed (on Ada, non-tensor f16 arithmetic is no faster than f32), so AMP refuses to run there.
+pub fn amp_support(device: Device) -> Result<()> {
+    amp_check(device, true)
+}
+
+/// [`amp_support`]'s answer without switching anything on: what `/api/system` reports before a run (a context
+/// whose tensor cores were switched off at run time qualifies, since a run switches them back on).
+pub fn amp_available(device: Device) -> Result<()> {
+    amp_check(device, false)
+}
+
+fn amp_check(device: Device, activate: bool) -> Result<()> {
+    let why = if device.is_cpu() {
+        "the run is on the CPU".to_string()
+    } else {
+        match folo_gpu::context_for(device) {
+            None => format!("{device} has no folo-gpu context"),
+            Some(ctx) if ctx.can_enable_tensor_cores() && (!activate || ctx.set_tensor_cores(true)) => {
+                return Ok(());
+            }
+            Some(ctx) => format!("{device} has tensor cores {}", ctx.tensor_cores_status()),
+        }
+    };
+    Err(amp_not_supported(&why))
+}
+
+/// The `not_supported` error [`amp_support`] returns, naming `why` (for example `gpu:0 has tensor cores off
+/// (...)`); public so a stand-in for the trainer (folo-server's mock) words it the same.
+pub fn amp_not_supported(why: &str) -> Error {
+    Error::NotSupported(format!(
+        "mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): {why}; train \
+         without amp (f32), or on such a GPU (`folo train --amp` asks for them; start `folo serve --tensor-cores`)"
+    ))
 }
 
 /// Early stopping (§8.7): record `fitness` of 0-based epoch `e` in `best`. Returns `(improved, stop)`: whether it
@@ -267,6 +319,9 @@ pub struct Trainer {
     /// The last checkpoint this trainer wrote or resumed from, and the epochs it holds (named when a lost GPU
     /// device fails the run).
     last_saved: Option<(PathBuf, u32)>,
+    /// The loss scaler of a mixed-precision run (`amp`). Its skip streak (fails the run at [`MAX_AMP_SKIPS`]) is
+    /// part of the checkpointed state.
+    scaler: Option<GradScaler>,
 }
 
 impl Trainer {
@@ -352,9 +407,20 @@ impl Trainer {
         t.sched = r.schedule;
         // Whether the run started from weights is not recorded, so a resume repeats only the warmup warning.
         t.warnings = schedule_warnings(&t.cfg, &t.sched, t.data.train.len(), false);
+        if t.scaler.is_some() {
+            let v = file.metadata().extra.get(AMP_KEY).ok_or_else(|| {
+                Error::Config(format!(
+                    "{}: a mixed-precision run's checkpoint without {AMP_KEY}",
+                    path.display()
+                ))
+            })?;
+            t.scaler = Some(GradScaler::from_json(v)?);
+        }
         t.epoch = u32::try_from(r.epoch).map_err(|_| Error::Config("folo.epoch out of range".into()))?;
         t.best = r.best;
         t.extra_meta = file.metadata().extra.clone();
+        // Written afresh by `save_checkpoint` when the run has a scaler.
+        t.extra_meta.remove(AMP_KEY);
         t.last_saved = Some((path.to_path_buf(), t.epoch));
         t.consecutive_bad = match file.metadata().extra.get(NONFINITE_STREAK_KEY) {
             Some(v) => v
@@ -418,6 +484,9 @@ impl Trainer {
             }
         }
 
+        if cfg.amp {
+            amp_support(device)?;
+        }
         let mconf = ModelConfig::new(cfg.scale()?, nc)?;
         let mut init = Rng::seed(cfg.seed);
         let mut model = FoloModel::with_rng(mconf.clone(), &mut init)?;
@@ -486,6 +555,7 @@ impl Trainer {
             None => None,
         };
         let emitter = Emitter::new(opts.events, file, opts.step_interval, (cfg.epochs, nb as u64));
+        let scaler = cfg.amp.then(GradScaler::new);
         Ok(Trainer {
             cfg,
             data,
@@ -512,6 +582,7 @@ impl Trainer {
             consecutive_bad: 0,
             extra_meta: BTreeMap::new(),
             last_saved: None,
+            scaler,
         })
     }
 
@@ -575,6 +646,11 @@ impl Trainer {
         &self.warnings
     }
 
+    /// The loss scaler of a mixed-precision run (`amp`): the current scale and the steps skipped so far.
+    pub fn loss_scaler(&self) -> Option<&GradScaler> {
+        self.scaler.as_ref()
+    }
+
     /// The flag [`TrainOptions::stop`] that stops this run.
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         self.stop.clone()
@@ -636,7 +712,7 @@ impl Trainer {
                     LogLevel::Error,
                     format!("run failed ({}): {}", e.code(), folo_api::codes::cap(&summary, 120)),
                 );
-                self.emitter.status(RunStatus::Failed, Some(summary));
+                self.emitter.failed(e.code(), summary);
             }
         }
         r
@@ -686,6 +762,19 @@ impl Trainer {
         );
         for w in &self.warnings {
             self.emitter.log(LogLevel::Warn, w.clone());
+        }
+        if let Some(s) = &self.scaler {
+            self.emitter.log(
+                LogLevel::Info,
+                format!(
+                    "mixed precision: f16 activations, convolutions and matrix products on tensor cores, f32 master \
+                     weights, loss and BatchNorm statistics; loss scale {} (×{} every {} finite steps, ×{} on overflow)",
+                    s.scale(),
+                    s.growth_factor(),
+                    s.growth_interval(),
+                    s.backoff_factor()
+                ),
+            );
         }
         if self.data.val.is_empty() {
             self.emitter.log(
@@ -807,6 +896,7 @@ impl Trainer {
         let mut sum = [0f64; 3];
         let (mut finite_batches, mut window_finite) = (0usize, false);
         let (epoch_start, mut epoch_images) = (Instant::now(), 0usize);
+        let skipped_before = self.scaler.as_ref().map_or(0, GradScaler::skipped_steps);
         // On a folo-gpu device the loader delivers u8 pixels and a feeder thread stages each batch while the
         // previous step runs; the step then only encodes the copy and the conversion.
         let ctx = folo_gpu::context_for(self.device);
@@ -828,13 +918,25 @@ impl Trainer {
             let lr = self.sched.lr_at(self.sched.step(), &self.opt.groups()[decay]);
 
             let snapshot = RunningStats::capture(&self.model)?;
-            let out = self.model.forward(&x)?;
+            let out = {
+                let _amp = self.scaler.is_some().then(folo_core::autocast);
+                self.model.forward(&x)?
+            };
             drop(x);
-            let loss = detection_loss(&out.box_raw, &out.cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
+            // Mixed precision: the loss (assigner, BCE, CIoU + DFL) runs in f32 on f32 copies of the f16 head.
+            let f32_head = |t: &folo_core::Tensor| t.to_dtype(folo_core::DType::F32);
+            let (box_raw, cls_raw) = (f32_head(&out.box_raw)?, f32_head(&out.cls_raw)?);
+            let loss = detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &self.loss_cfg)?;
+            drop((box_raw, cls_raw));
             let finite = loss.is_finite() && RunningStats::all_finite(&self.model)?;
             let items = loss.items;
             if finite {
-                let grads = loss.total.backward()?;
+                let grads = match &self.scaler {
+                    // The scale is a power of two, so the scaled loss (and every gradient before f16 rounding) is
+                    // exact.
+                    Some(s) => loss.total.mul_scalar(s.scale() as f32)?.backward()?,
+                    None => loss.total.backward()?,
+                };
                 drop(loss);
                 drop(out);
                 self.acc.add(&grads)?;
@@ -870,7 +972,7 @@ impl Trainer {
             }
             if (k + 1).is_multiple_of(acc_n) || k + 1 == nb {
                 if window_finite {
-                    self.optimizer_step()?;
+                    self.optimizer_step(e, k)?;
                 }
                 self.acc.zero();
                 window_finite = false;
@@ -905,15 +1007,55 @@ impl Trainer {
         if finite_batches == 0 {
             return Err(Error::Failed(format!("epoch {} had no finite batch", e + 1)));
         }
+        if let Some(s) = &self.scaler {
+            self.emitter.log(
+                LogLevel::Info,
+                format!(
+                    "epoch {}: loss scale {}, {} optimizer steps skipped for gradient overflow ({} in the run)",
+                    e + 1,
+                    s.scale(),
+                    s.skipped_steps() - skipped_before,
+                    s.skipped_steps()
+                ),
+            );
+        }
         let f = finite_batches as f64;
         let (b, c, d) = ((sum[0] / f) as f32, (sum[1] / f) as f32, (sum[2] / f) as f32);
         Ok(Some(folo_api::Loss { box_: b, cls: c, dfl: d, total: b + c + d }))
     }
 
-    /// §8.3's end-of-window step: schedule, clip, optimizer, EMA, `t += 1`.
-    fn optimizer_step(&mut self) -> Result<()> {
+    /// §8.3's end-of-window step: schedule, clip, optimizer, EMA, `t += 1`. With mixed precision (§8.8) the
+    /// gradients are unscaled before clipping, and a window whose gradients are not all finite skips the step
+    /// (`t`, the optimizer and the EMA unchanged) and backs the loss scale off: one readback of a single flag.
+    /// `(e, k)` name the window's last batch in the log.
+    fn optimizer_step(&mut self, e: u32, k: usize) -> Result<()> {
         self.sched.apply(self.opt.as_mut());
-        if self.cfg.clip_grad_norm > 0.0 {
+        if let Some(scaler) = &mut self.scaler {
+            let finite = self.acc.unscale_clip(scaler.inv_scale(), self.cfg.clip_grad_norm)?;
+            let scale = scaler.scale();
+            if scaler.update(!finite) == ScaleUpdate::BackedOff {
+                let (streak, now) = (scaler.skip_streak() as usize, scaler.scale());
+                self.emitter.log(
+                    LogLevel::Info,
+                    format!(
+                        "epoch {} batch {}: gradient overflow at loss scale {scale}; optimizer step skipped, loss \
+                         scale {now} ({} skipped in the run)",
+                        e + 1,
+                        k + 1,
+                        scaler.skipped_steps()
+                    ),
+                );
+                if streak >= MAX_AMP_SKIPS {
+                    return Err(Error::Failed(format!(
+                        "{MAX_AMP_SKIPS} consecutive optimizer steps had non-finite gradients at every loss scale \
+                         down to {now} (epoch {}, batch {}); train without amp, lower lr0 or check the data",
+                        e + 1,
+                        k + 1
+                    )));
+                }
+                return Ok(());
+            }
+        } else if self.cfg.clip_grad_norm > 0.0 {
             self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
         }
         self.opt.step(&self.acc)?;
@@ -1020,6 +1162,9 @@ impl Trainer {
         meta.created = Some(rfc3339_now());
         meta.extra = self.extra_meta.clone();
         meta.extra.insert(NONFINITE_STREAK_KEY.into(), self.consecutive_bad.to_string());
+        if let Some(s) = &self.scaler {
+            meta.extra.insert(AMP_KEY.into(), s.to_json());
+        }
         let mut streams = BTreeMap::new();
         // Every random draw after initialisation is derived from (seed, epoch, ...), so the seed is the whole
         // RNG state; the init stream is recorded for completeness.

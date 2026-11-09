@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
-    BBox, Dataset, DatasetFormat, ExportResult, ExportSpec, GpuInfo, ImagePage, ImageSize, LogLine, Model,
-    ModelEval, PredictResponse, RegisterDataset, Run, RunMetrics, RunSamples, Sample, ScoredBox, Splits,
-    SyntheticDataset, TrainConfig, ValReport, ValRequest,
+    BBox, Capabilities, Dataset, DatasetFormat, ExportResult, ExportSpec, GpuInfo, ImagePage, ImageSize,
+    LogLine, Model, ModelEval, PredictResponse, RegisterDataset, Run, RunMetrics, RunSamples, Sample,
+    ScoredBox, Splits, SyntheticDataset, TrainConfig, ValReport, ValRequest,
 };
 use folo_vision::PredictConfig;
 use serde::{Deserialize, Serialize};
@@ -645,6 +645,10 @@ impl Store for RealStore {
 
     fn gpus(&self) -> Vec<GpuInfo> {
         engine::gpus()
+    }
+
+    fn capabilities(&self) -> Option<Capabilities> {
+        Some(engine::capabilities())
     }
 
     fn data_dir(&self) -> Option<&Path> {

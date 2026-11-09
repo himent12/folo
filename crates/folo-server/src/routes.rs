@@ -109,12 +109,19 @@ async fn health(State(st): State<AppState>) -> Json<Health> {
 
 async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
     let probe = st.probe.clone();
-    let (cpu, memory) = tokio::task::spawn_blocking(move || probe.sample())
-        .await
-        .map_err(|e| Error::internal(format!("task failed: {e}")))?;
+    let store = st.store.clone();
+    let ((cpu, memory), capabilities) =
+        tokio::task::spawn_blocking(move || (probe.sample(), store.capabilities()))
+            .await
+            .map_err(|e| Error::internal(format!("task failed: {e}")))?;
     let data_dir = st.store.data_dir().map(folo_api::json::path);
     let features = vec![folo_api::FEATURE_EXPORT_ONNX_SWITCHES.to_string()];
-    Ok(Json(SystemResponse { system: SystemInfo { cpu, memory, gpus: st.store.gpus() }, data_dir, features }))
+    Ok(Json(SystemResponse {
+        system: SystemInfo { cpu, memory, gpus: st.store.gpus() },
+        data_dir,
+        features,
+        capabilities,
+    }))
 }
 
 // ---- datasets ----------------------------------------------------------------------------------------------------

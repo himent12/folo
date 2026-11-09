@@ -66,6 +66,11 @@ pub struct TrainConfig {
     pub ema: bool,
     /// Global gradient-norm clip; `0` disables it.
     pub clip_grad_norm: f64,
+    /// Mixed-precision training (docs/MODEL.md §8.8): `F16` activations and convolutions / matrix products on the
+    /// GPU's tensor cores with `F32` master weights, optimizer state, BatchNorm statistics, loss and EMA, and
+    /// dynamic loss scaling. Needs a GPU whose context has tensor cores (folo-gpu's cooperative matrices); anything
+    /// else fails with `not_supported`.
+    pub amp: bool,
     /// Stop after this many epochs without a fitness gain.
     pub patience: u32,
     /// Seed of the initial weights, the epoch order and the augmentation.
@@ -100,6 +105,7 @@ impl Default for TrainConfig {
             nbs: 64,
             ema: true,
             clip_grad_norm: 10.0,
+            amp: false,
             patience: 100,
             seed: 0,
             workers: default_workers(),
@@ -151,6 +157,7 @@ impl TrainConfig {
                 folo_api::Optimizer::Adamw => OptimizerChoice::Adamw,
             },
             lr0: f32_decimal(c.lr0),
+            amp: c.amp,
             seed: c.seed,
             augment: AugmentConfig {
                 mosaic: a.mosaic,

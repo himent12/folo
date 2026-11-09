@@ -666,6 +666,29 @@ mod tests {
         }
     }
 
+    /// `folo_info` carries the store's `capabilities` (the same object as `/api/system`) and names `amp` in its
+    /// summary.
+    #[tokio::test]
+    async fn folo_info_reports_capabilities() {
+        use folo_server::mock::MockTensorCores;
+        for (tc, amp) in [(MockTensorCores::On, true), (MockTensorCores::None, false)] {
+            let store = Arc::new(MockStore::new().with_tensor_cores(tc));
+            let want = store.capabilities();
+            let opts = Options {
+                data_dir: std::env::temp_dir(),
+                read_only: false,
+                confine: false,
+                device: "cpu".into(),
+            };
+            let server = FoloMcp::new(store, None, opts);
+            let info = server.inner.info().await.unwrap();
+            assert_eq!(info.capabilities, want);
+            assert_eq!(info.capabilities.as_ref().unwrap().amp.available, amp);
+            let v = serde_json::to_value(&info).unwrap();
+            assert!(v["capabilities"]["amp"].get("reason").is_some(), "{v}");
+        }
+    }
+
     #[tokio::test]
     async fn dropped_watchers_release_their_event_streams() {
         let store = Arc::new(MockStore::new());

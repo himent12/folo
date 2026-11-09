@@ -496,6 +496,11 @@ impl Store {
                     if st.error.is_some() {
                         r.error = st.error;
                     }
+                    // The code drives the failure's recovery (not_supported → no Resume, AMP off), so
+                    // a live failure needn't wait for the run list's refresh.
+                    if st.error_code.is_some() {
+                        r.error_code = st.error_code;
+                    }
                     if !st.status.is_active() {
                         r.eta_s = None;
                     }

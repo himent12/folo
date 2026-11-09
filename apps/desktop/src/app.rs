@@ -246,6 +246,8 @@ pub struct NewRunForm {
     pub lr_invalid: bool,
     pub close_input: Entity<TextInput>,
     pub close_invalid: bool,
+    /// Mixed-precision training (f16 on tensor cores). Sent only for a GPU device.
+    pub amp: bool,
     _subs: Vec<Subscription>,
     pub submitting: bool,
     pub error: Option<ApiError>,
@@ -287,6 +289,7 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
         c.seed = b.seed;
         c.augment.hsv = b.augment.hsv;
         c.augment.translate = b.augment.translate;
+        // Not `amp`: the form shows it (prefilled from the base) and the CPU guard decides it.
     }
     c
 }
@@ -1539,6 +1542,7 @@ impl FoloApp {
             f.fliplr = config.augment.fliplr;
             f.close_mosaic = config.augment.close_mosaic as f32;
             f.scale = config.augment.scale;
+            f.amp = config.amp;
             f.note = note;
             f.base = Some(config.clone());
             let input = f.name.clone();
@@ -1663,6 +1667,7 @@ impl FoloApp {
             lr_input,
             close_input,
             close_invalid: false,
+            amp: false,
             epochs_invalid: false,
             lr_invalid: false,
             _subs: subs,
@@ -1717,6 +1722,8 @@ impl FoloApp {
                     ..Augment::default()
                 },
                 seed: 0,
+                // The CPU has no tensor cores: the switch is inert there and never sent.
+                amp: form.amp && DEVICES[form.device] != "cpu",
             },
         );
         let _ = window;
@@ -1905,6 +1912,11 @@ impl FoloApp {
     }
 
     pub fn play_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        // Also after a picker that opened while models were there, if they've gone since.
+        if let Some(why) = self.open_image_blocked() {
+            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+            return;
+        }
         let name: SharedString =
             path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
         let n2 = name.to_string();
@@ -2043,7 +2055,31 @@ impl FoloApp {
         );
     }
 
+    /// Why Open image can't run now, if it can't: the model list failed (with the runs list too:
+    /// not connected) or is still loading, or there's no model yet. Only the models decide: a
+    /// failed runs list alone doesn't stop inference. The button, Ctrl+O and the palette share this.
+    pub fn open_image_blocked(&self) -> Option<&'static str> {
+        if self.store.models.error().is_some() {
+            Some(if self.store.runs.error().is_some() {
+                "Not connected"
+            } else {
+                "Models didn't load: retry under Best models"
+            })
+        } else if self.store.models.ready().is_none() {
+            Some("Loading models…")
+        } else if self.store.models.ready().is_some_and(|m| m.is_empty()) {
+            Some("Train a model first")
+        } else {
+            None
+        }
+    }
+
     pub fn pick_image(&mut self, cx: &mut Context<Self>) {
+        // The shortcut and palette obey the button's rule, and say why.
+        if let Some(why) = self.open_image_blocked() {
+            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+            return;
+        }
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -2806,6 +2842,11 @@ impl Render for FoloApp {
                     );
                     return;
                 }
+                // A drop obeys Open image's rule (and says why) before it navigates anywhere.
+                if let Some(why) = this.open_image_blocked() {
+                    this.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+                    return;
+                }
                 if let Some(p) = paths.paths().first().cloned() {
                     this.navigate(Route::Playground, w, cx);
                     this.play_file(p, cx);
@@ -3242,12 +3283,15 @@ mod retry_tests {
             weights: Some("runs/a/best.folo".into()),
             augment: Augment { hsv: [0.1, 0.2, 0.3], translate: 0.25, ..Augment::default() },
             seed: 42,
+            amp: true,
         };
         let edited = TrainConfig {
             name: "a-2".into(),
             weights: None,
             seed: 0,
             augment: Augment::default(),
+            // The form turned mixed precision off (the CPU, or the user): the base must not undo it.
+            amp: false,
             ..base.clone()
         };
         let out = carry_over(Some(&base), edited.clone());
@@ -3256,6 +3300,7 @@ mod retry_tests {
         assert_eq!(out.augment.hsv, [0.1, 0.2, 0.3]);
         assert_eq!(out.augment.translate, 0.25);
         assert_eq!(out.name, "a-2");
+        assert!(!out.amp);
         // A fresh form keeps its own values.
         assert_eq!(carry_over(None, edited.clone()), edited);
     }

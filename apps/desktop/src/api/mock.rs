@@ -443,6 +443,7 @@ impl MockBackend {
             weights: None,
             augment: Augment::default(),
             seed: 0,
+            amp: false,
         };
         let gpu = "NVIDIA GeForce RTX 4080 SUPER (vulkan)".to_string();
         struct Spec {
@@ -616,6 +617,7 @@ impl MockBackend {
                         },
                         model_id: s.model.map(Into::into),
                         error: s.error.map(Into::into),
+                        error_code: s.error.map(|_| "training_failed".into()),
                         config: s.config,
                     },
                     curve,
@@ -1018,6 +1020,7 @@ impl Backend for MockBackend {
                 },
                 model_id: None,
                 error: None,
+                error_code: None,
                 config,
             },
             curve,

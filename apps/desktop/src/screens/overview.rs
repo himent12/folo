@@ -86,17 +86,7 @@ impl FoloApp {
         };
         // One rule for Open image: it needs a model to run (not connected, still loading or none
         // yet, it says why, as New run beside it does).
-        let open_blocked = if self.store.runs.error().is_some() {
-            Some("Not connected")
-        } else if self.store.models.error().is_some() {
-            Some("Models didn't load: retry under Best models")
-        } else if self.store.models.ready().is_none() {
-            Some("Loading models…")
-        } else if self.store.models.ready().is_some_and(|m| m.is_empty()) {
-            Some("Train a model first")
-        } else {
-            None
-        };
+        let open_blocked = self.open_image_blocked();
         let open = if let Some(why) = open_blocked {
             self.button_disabled(
                 "ov-open",
@@ -203,6 +193,8 @@ impl FoloApp {
         // Short windows trade chart height for the sections below.
         // Short windows (620 px minimum): a lower plot, so two Recent runs rows show under the hero.
         let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
+        // The card's padding (tighter with the short chart); the chart section's rule spans it.
+        let card_pad = if hero_h < 120. { 12. } else { 16. };
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
         let ds = self
@@ -452,15 +444,22 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(if hero_h < 120. { 8. } else { 16. }))
-                    .p(px(if hero_h < 120. { 12. } else { 16. }))
+                    .p(px(card_pad))
                     .child(kpis)
                     .child(
+                        // The chart section opens on a full-width rule, as the run page's chart
+                        // panels open under their header's.
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
                             .gap(px(4.))
+                            .mx(px(-card_pad))
+                            .px(px(card_pad))
+                            .pt(px(card_pad))
+                            .border_t_1()
+                            .border_color(t.line_subtle)
                             .child(
                                 // Title, then the legend on its own left-aligned row, as on
                                 // the run dashboard's charts.
@@ -1088,8 +1087,11 @@ impl FoloApp {
                                 .child(n.to_string()),
                         ),
                 )
+                // Shrinks to its third of the row, so the body (one text run) wraps inside it.
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap(px(2.))
@@ -1098,7 +1100,7 @@ impl FoloApp {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(title.to_string()),
                         )
-                        .child(rich(&t, ty::SM, t.text_tertiary, body).justify_start()),
+                        .child(rich(&t, ty::SM, t.text_tertiary, body).text_left()),
                 )
         };
         let steps = panel(&t)
@@ -1123,19 +1125,19 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(12.))
-                    .child(div().flex_1().child(step(
+                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "1",
                         "Add a dataset",
                         "Point FOLO at a YOLO folder, or generate one with `folo dataset synth`",
                         true,
                     )))
-                    .child(div().flex_1().child(step(
+                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "2",
                         "Train a model",
                         "Start a run; loss, mAP and throughput stream in live.",
                         false,
                     )))
-                    .child(div().flex_1().child(step(
+                    .child(div().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "3",
                         "Try it",
                         "Open any image in the Playground and tune the thresholds.",

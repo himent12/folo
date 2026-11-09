@@ -58,6 +58,17 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
     Some(score)
 }
 
+/// A reference estimate's duration, as precise as it is: whole minutes ("≈ 10 min", "≈ 1 h 25 min"),
+/// seconds only under a minute.
+fn rough_duration(secs: f64) -> String {
+    let m = (secs / 60.).round() as u64;
+    match m {
+        0 => format!("{:.0} s", secs.max(1.)),
+        1..60 => format!("{m} min"),
+        _ => format!("{} h {} min", m / 60, m % 60),
+    }
+}
+
 /// Rough training cost of a configuration on this machine: (seconds, VRAM GiB).
 pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -> (f64, f32) {
     const GFLOPS: [f32; 5] = [6.6, 21.5, 48.0, 104.0, 165.0];
@@ -236,7 +247,7 @@ impl FoloApp {
         let items = self.filtered_palette();
         let n = items.len();
         let p = self.palette.as_ref().unwrap();
-        // With no query the list is every command; with one it is matches.
+        // With no query the list is every item (commands, datasets, runs, models); with one, matches.
         let searching = !p.query.trim().is_empty();
         let selected = p.selected.min(n.saturating_sub(1));
         let input = p.input.clone();
@@ -433,7 +444,7 @@ impl FoloApp {
                             .child(text(ty::XS, t.text_tertiary).tnum().child(if searching {
                                 format!("{n} results")
                             } else {
-                                format!("{n} commands")
+                                format!("{n} items")
                             })),
                     ),
             );
@@ -683,6 +694,7 @@ impl FoloApp {
         let note = self.new_run.as_ref().and_then(|f| f.note.clone());
         let flip_slider = self.slider("nr-fliplr", fliplr, 0., 1., 0.05, window, cx).into_any_element();
         let close_mosaic = self.new_run.as_ref().map_or(10., |f| f.close_mosaic);
+        let amp = self.new_run.as_ref().is_some_and(|f| f.amp);
         let close_slider = self
             .slider("nr-close", close_mosaic, 0., 30f32.max(close_mosaic), 1., window, cx)
             .into_any_element();
@@ -812,12 +824,17 @@ impl FoloApp {
                 cx,
             )
         });
+        let size_help = short.then(|| {
+            self.help_icon("nr-help-size", "Pixels; images are letterboxed to a square.", window, cx)
+        });
         let labelled = |name: &str, help: AnyElement, control: AnyElement| {
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(div().flex().items_center().gap(px(4.)).child(label(name)).child(help))
+                // As tall as a plain label row (the icon overhangs), so a field with help lines up with
+                // its neighbour without.
+                .child(div().h(px(16.)).flex().items_center().gap(px(4.)).child(label(name)).child(help))
                 .child(control)
                 .into_any_element()
         };
@@ -896,13 +913,25 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Architecture",
                         arch_seg,
-                        Some(format!("{} · {}", ARCHS[arch].as_str(), PARAMS[arch])),
+                        // The letter's size named, so the five choices read without knowing FOLO.
+                        Some(format!(
+                            "{}, {} · {}",
+                            ARCHS[arch].as_str(),
+                            ["nano", "small", "medium", "large", "extra large"][arch],
+                            PARAMS[arch]
+                        )),
                     )))
-                    .child(div().flex_1().child(field(
-                        "Image size",
-                        size_seg,
-                        (!short).then(|| "Pixels; images are letterboxed to a square".into()),
-                    ))),
+                    .child(
+                        div().flex_1().child(match size_help {
+                            Some(h) => labelled("Image size", h, size_seg),
+                            None => field(
+                                "Image size",
+                                size_seg,
+                                Some("Pixels; images are letterboxed to a square".into()),
+                            )
+                            .into_any_element(),
+                        }),
+                    ),
             )
             .child(
                 div()
@@ -1037,6 +1066,48 @@ impl FoloApp {
                         ),
                     ),
             )
+            // Mixed precision: f16 on tensor cores. Whether the server's GPU has them shows only when
+            // the run starts (it fails with not_supported), so the requirement is stated here.
+            .child({
+                let on_cpu = DEVICES[device] == "cpu";
+                let amp_on = amp && !on_cpu;
+                let switch = self
+                    .switch(
+                        "nr-amp",
+                        amp_on,
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            if let Some(f) = this.new_run.as_mut()
+                                && !on_cpu
+                            {
+                                f.amp = !f.amp;
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .into_any_element();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(label("Mixed precision"))
+                            .child(text(ty::XS, t.text_tertiary).child(if on_cpu {
+                                "Off on the CPU: it needs a GPU with tensor cores"
+                            } else {
+                                "Trains in f16 on tensor cores; needs folo serve --tensor-cores"
+                            })),
+                    )
+                    .child(switch)
+            })
             .child(section("Augmentation"))
             .child(
                 div()
@@ -1104,7 +1175,7 @@ impl FoloApp {
                             .child(if cpu {
                                 "CPU selected · no time estimate".to_string()
                             } else if fits {
-                                format!("≈ {} · ≈ {vram:.1} GiB GPU memory", crate::api::time::duration(secs))
+                                format!("≈ {} · ≈ {vram:.1} GiB GPU memory", rough_duration(secs))
                             } else {
                                 // No adapter name here: it can be long enough to reach the buttons.
                                 format!("≈ {vram:.0} GiB needed, {gpu_gb:.0} GiB on this GPU")
@@ -1186,9 +1257,10 @@ impl FoloApp {
                     .flex_none()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().mr(px(4.)).child(shortcut(&t, &["Ctrl", "Enter"])))
                     .child(cancel)
-                    .child(start),
+                    .child(start)
+                    // Ctrl Enter triggers the button it follows.
+                    .child(shortcut(&t, &["Ctrl", "Enter"])),
             );
         self.dialog_frame(
             &t,
@@ -1401,7 +1473,7 @@ impl FoloApp {
         let stop = self.button(
             "stop-confirm",
             "Stop run",
-            Btn::Danger,
+            Btn::DangerCommit,
             Some("icons/stop.svg"),
             window,
             cx,
@@ -2142,6 +2214,13 @@ impl FoloApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rough_durations() {
+        assert_eq!(super::rough_duration(576.), "10 min");
+        assert_eq!(super::rough_duration(25.), "25 s");
+        assert_eq!(super::rough_duration(5100.), "1 h 25 min");
+    }
+
     use super::*;
 
     #[test]

@@ -474,6 +474,7 @@ impl SimRun {
             device: self.device.clone(),
             model_id: self.current_model(&snap),
             error: self.error(snap.status),
+            error_code: self.error(snap.status).map(|_| "training_failed".to_string()),
         }
     }
 
