@@ -275,6 +275,25 @@ export const scenes = [
       await page.locator('.amp .switch').click();
       await page.locator('.summary details.cli > summary').click();
       await page.locator('.summary details.cli').scrollIntoViewIfNeeded();
+      // The estimate for these settings lands (300 ms after the last change, then the server's answer), so the Summary
+      // is current; run-new-estimate-updating shows the moment before.
+      await page.clock.runFor(1000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The settings just changed and their estimate is still out: the last answer stays, dimmed to tertiary in the
+    // Summary and the dock, and the basis line reads "Updating…" with a spinner (a figure is current or marked as not).
+    name: 'run-new-estimate-updating',
+    path: '/runs/new',
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      await page.clock.runFor(1000);
+      await until(page, '.summary .est-how summary');
+      if (await page.locator('#arch-pick').isVisible()) await page.locator('#arch-pick button', { hasText: 'N' }).click();
+      else await page.locator('input[name="arch"][value="folo-n"]').check({ force: true });
+      await until(page, '.est-how.stale');
       await page.mouse.move(0, 0);
     },
   },

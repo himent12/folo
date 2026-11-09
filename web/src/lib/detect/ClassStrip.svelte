@@ -104,6 +104,11 @@
     text-decoration: none;
     cursor: pointer;
   }
+  /* Full width by hand: a button's content box shrink-wraps its children, even block ones. */
+  .cs-head,
+  .cs-line {
+    width: 100%;
+  }
   .cs-head {
     display: flex;
     align-items: center;

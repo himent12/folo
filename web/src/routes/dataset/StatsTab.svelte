@@ -64,7 +64,7 @@
   const listsEmpty = $derived(findings.some((h) => h.id === 'empty'));
   const listsBroken = $derived(findings.some((h) => h.id === 'broken'));
   const perImage = $derived(images ? (stats.boxes / images).toFixed(1) : '—');
-  // The busiest images' bin, "up to 20+": the highest boxes-per-image bin that holds an image.
+  // The busiest images' bin ("busiest 16–31"): the highest boxes-per-image bin that holds an image.
   const perImageMax = $derived.by(() => {
     const h = stats.boxes_per_image_hist;
     for (let i = h.counts.length - 1; i >= 0; i--)
@@ -179,7 +179,7 @@
       <div class="kpi">
         <span class="k-label">Boxes per image</span>
         <span class="k-value num">{perImage}</span>
-        <span class="k-sub num">{perImageMax ? `mean · up to ${perImageMax}` : 'mean'}</span>
+        <span class="k-sub num">{perImageMax ? `mean · busiest ${perImageMax}` : 'mean'}</span>
       </div>
     {:else}
       <div class="kpi">

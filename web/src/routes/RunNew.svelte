@@ -837,7 +837,7 @@
   {#if !onCpu && gpu && !gpuMem}<p class="calib">This GPU’s memory size isn’t reported.</p>{/if}
   {#if scale > 1 && !onCpu}<p class="calib">Scaled up from the failed run's settings, which did not fit.</p>{/if}
   {#if !onCpu && gpuMem}
-    <div class="vram" aria-hidden="true"><i class={vramLevel} style:width={pct2(Math.min(1, vramPct))}></i></div>
+    <div class="vram" class:stale={estStale} aria-hidden="true"><i class={vramLevel} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
   <!-- Warnings in the rail are one-line callouts: the status's icon in its hue, the words and the Why? link in ink, no
        tinted fill (fills are for banners), right above Start. -->
@@ -1322,7 +1322,12 @@
         {:else}
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
             <Meta>
-              <span class:rough={shown.rough || !estReady} class:stale={estStale}>{estReady ? timeRange(shown.lo, shown.hi) : 'Estimating…'}</span>
+              <!-- Kept while these settings' answer is out: dimmed, with the spinner the Summary's "Updating…" carries. -->
+              <span class:rough={shown.rough || !estReady} class:stale={estStale}
+                >{#if estReady && estStale}<span class="dock-spin"><Spinner size={12} /></span>{/if}{estReady
+                  ? timeRange(shown.lo, shown.hi)
+                  : 'Estimating…'}</span
+              >
               <!-- Over the memory: the figure against the GPU's in ink, and the verdict with its mark in the rail's one
                    severity. -->
               {#if estReady && !onCpu && gpu}<span class:stale={estStale}
@@ -1850,6 +1855,11 @@
   .est-how.stale .how-list dd {
     color: var(--text-tertiary);
   }
+  .dock-spin {
+    display: inline-flex;
+    margin-right: var(--space-1);
+    vertical-align: -2px;
+  }
   .updating {
     display: inline-flex;
     align-items: center;
@@ -2044,6 +2054,10 @@
   }
   .vram i.danger {
     background: var(--danger-solid);
+  }
+  /* The meter draws the same kept figure (`estStale`): tertiary with it, whatever its level. */
+  .vram.stale i {
+    background: var(--text-tertiary);
   }
   .ds-pick {
     display: none;
