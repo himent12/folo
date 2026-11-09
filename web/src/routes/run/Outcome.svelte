@@ -3,9 +3,12 @@
    * A finished run's outcome as one line under the header (status mark, what happened, the next action); it wraps
    * rather than grows into a card. A failure keeps its cause in full, since it decides what to do next, except out of
    * GPU memory: that is said plainly, with the smaller settings to retry with as actions and the driver's report one
-   * step away.
+   * step away. A queued run leads with what it waits for and when it should start. The trainer's warning that a run is
+   * too short to learn from (./warnings) is one callout of its own, never a toast.
    */
+  import type { Snippet } from 'svelte';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import Clock from '@lucide/svelte/icons/clock';
   import Play from '@lucide/svelte/icons/play';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
@@ -16,18 +19,32 @@
   import { isOom, oomDetail, oomFixes, retryPath } from '$lib/oom';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
+  import { sentences, suggestedEpochs } from './warnings';
 
   let {
     run,
     elapsed,
     resuming = false,
     onresume,
-  }: { run: Run; elapsed: number | null; resuming?: boolean; onresume: () => void } = $props();
+    waiting,
+    warnings = [],
+  }: {
+    run: Run;
+    elapsed: number | null;
+    resuming?: boolean;
+    onresume: () => void;
+    /** A queued run: what it waits for and when it should start. */
+    waiting?: Snippet;
+    /** The trainer's schedule warnings, as it wrote them (./warnings). */
+    warnings?: string[];
+  } = $props();
 
   // Out of GPU memory: the same config fails again, so the ways out are smaller settings (a new run), most likely first.
   const oom = $derived(run.status === 'failed' && isOom(run.error));
   const fixes = $derived(oom ? oomFixes(run.config) : []);
   const driver = $derived(oom ? oomDetail(run.error) : null);
+  /** "Train for at least N epochs" from the trainer: the warning's action opens New run with N filled in. */
+  const suggested = $derived(suggestedEpochs(warnings));
 </script>
 
 {#if run.status === 'failed' && oom}
@@ -80,6 +97,31 @@
     </p>
     <div class="c-acts"><Button size="sm" icon={Play} loading={resuming} onclick={onresume}>Resume</Button></div>
   </div>
+{:else if run.status === 'queued' && waiting}
+  <!-- The dependency and the start estimate lead; the empty frames below stay compact until there is data. -->
+  <div class="callout neutral" role="status">
+    <Clock size={16} aria-hidden="true" />
+    <p class="c-text"><span class="c-title">Waiting to start</span> <span class="c-msg">{@render waiting()}</span></p>
+  </div>
+{/if}
+
+{#if warnings.length}
+  <!-- The trainer's own sentences (cause, then what to do), under one plain title; New run like this opens the form
+       with this run's settings, where the epochs or the weights can change. -->
+  <div class="callout warning stack" role="note" aria-label="Schedule warning">
+    <TriangleAlert size={16} aria-hidden="true" />
+    <div class="c-text">
+      <p class="c-title">This run may be too short to learn</p>
+      {#each warnings as w (w)}<p class="c-msg w-msg">{sentences(w)}</p>{/each}
+    </div>
+    <div class="c-acts">
+      {#if suggested && suggested > run.config.epochs}
+        <Button size="sm" icon={RotateCcw} href={href(`${retryPath(run.id)}&epochs=${suggested}`)}>Train {suggested} epochs</Button>
+      {:else}
+        <Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button>
+      {/if}
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -106,6 +148,18 @@
   }
   .neutral > :global(svg) {
     color: var(--text-tertiary);
+  }
+  .warning > :global(svg) {
+    color: var(--warning-text);
+  }
+  /* The engine's sentences, one paragraph each, at a readable measure under the title. */
+  .w-msg {
+    display: block;
+    max-width: 80ch;
+    margin-top: var(--space-1);
+  }
+  .warning .c-title {
+    display: block;
   }
   .c-text {
     min-width: 0;
@@ -206,6 +260,17 @@
       margin-top: 2px;
       font-size: var(--type-sm-size);
       line-height: var(--type-sm-line);
+    }
+    /* Stacked actions (the out-of-memory fixes): one under the other across the callout, all at one size, the
+       primary first, so none wraps to an odd width. */
+    .callout.stack:has(.c-msg) .c-acts {
+      grid-column: 1 / -1;
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .callout.stack .c-acts > :global(.btn) {
+      --h: var(--control-lg);
+      font-size: var(--type-base-size);
     }
     /* Success is a one-line summary with its action; the best epoch is in the tiles below. */
     .c-msg.brief {

@@ -13,3 +13,13 @@ export const CONFUSION_FLIP = { dark: 0.41, light: 0.49 } as const;
 
 /** Where a cell of value `v` sits on the ramp, as the ink share mixed into the panel; 0 for an empty cell. */
 export const rampShare = (v: number, theme: 'dark' | 'light') => (v > 0 ? RAMP[theme].start + v * (RAMP[theme].end - RAMP[theme].start) : 0);
+
+/**
+ * A share of the true class as the matrix writes it, one rule everywhere (cells, readout, summaries): whole
+ * percentages, "<1" for a share above zero that rounds below 1, and "" for no objects at all. No "%" sign: callers
+ * add it where the text needs it.
+ */
+export function sharePct(v: number): string {
+  if (!(v > 0)) return '';
+  return v < 0.005 ? '<1' : String(Math.max(1, Math.round(v * 100)));
+}

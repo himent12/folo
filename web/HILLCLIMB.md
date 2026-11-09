@@ -37,6 +37,10 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r15 | Claude Opus 5.5 (57 sheets, 6 full-size) | 8 | 7.5 | 8 | 8 | 8 | 7.5 | 8 | 7.5 | 8 | 8 | 8 | 8 | 7.5 |
 | r16 | GPT-6.1 Sol (78 sheets, 32 full-size) | 8 | 8.5 | 8.5 | 8 | 8 | 8 | 8.5 | 8.5 | 9 | 8.5 | 7.5 | 8 | 7.5 |
 | r16 | Claude Opus 5.5 (78 sheets, 7 full-size) | 8 | 8 | 8.5 | 8 | 7.5 | 8.5 | 8.5 | 7.5 | 8.5 | 8 | 7.5 | 8 | 7.5 |
+| r17 | GPT-6.1 Sol (90 sheets, 34 full-size) | 8 | 9 | 9 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8 |
+| r17 | Claude Opus 5.5 (90 sheets, ~18 full-size) | 8 | 8 | 8.5 | 8 | 7.5 | 8 | 8.5 | 8 | 8.5 | 8 | 7.5 | 8 | 7.5 |
+| r18 | GPT-6.1 Sol (109 sheets, 30 full-size) | 8.5 | 8.5 | 9 | 9 | 9 | 8 | 8 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8 |
+| r18 | Claude Opus 5.5 (109 sheets, 16 full-size) | 8 | 8 | 8.5 | 8.5 | 8.5 | 7.5 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 7.5 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -58,6 +62,8 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r12 | 8 ↓ | 8.5 ↑ | 8.5 | 8.5 ↑ | 8.5 | 8.5 ↑ | 8 ↓ | 8.5 ↑ | 8.5 | 8.5 | 8 | 8.5 | 8 |
 | r15 | 8 | 7.5 ↓ | 8 ↓ | 8 ↓ | 8 ↓ | 7.5 ↓ | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 8 ↓ | 8 | 8 ↓ | 7.5 |
 | r16 | 8 | 8 ↑ | 8.5 ↑ | 8 | 7.5 ↓ | 8 ↑ | 8.5 ↑ | 7.5 | 8.5 ↑ | 8 | 7.5 ↓ | 8 | 7.5 |
+| r17 | 8 | 8 | 8.5 | 8 | 7.5 | 8 | 8.5 | 8 ↑ | 8.5 | 8 | 7.5 | 8 | 7.5 |
+| r18 | 8 | 8 | 8.5 | 8.5 ↑ | 8.5 ↑ | 7.5 ↓ | 8 ↓ | 8 | 8.5 | 8.5 ↑ | 8 ↑ | 8 | 7.5 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -98,3 +104,18 @@ images drawn as box outlines before they load, the Playground failure below the 
 "Detections appear here"), state frames held at desktop height on phones, Compare (faded or hidden series, short runs
 crushed on a 0–150 epoch axis), the confusion matrix ramp (invisible low cells in dark), the loss chart's two control
 groups, and header actions that move between pages at 1024.
+
+r17 (#103: shared column hiding, invalid fields, states in frame, Compare z-order and progress axis, confusion ramp,
+one loss control, thumbnails that load): Sol's first three 9s (typography, colour, spacing), Sol's minimum up to 8.
+Opus holds the floor at 7.5 on 5 (states) and 11 (responsiveness), on bugs rather than taste: the inspector never draws
+the selected box (`selected` not passed through DatasetImage), Runs clips at 820 once a run is selected (the checkbox
+column appears), and the Playground out-of-memory state loses focus and scroll at 1024. From r18 the shoot reports
+horizontal overflow per scene, and every round gets a bug pass over the sheets before the reviewers see them.
+
+r18 (#107: inspector selection, Runs at 820, the overflow check in the shoot (clean), engine short-run warnings, ONNX
+switches, one-row phone headers, the shortcuts switch): Sol's best round (five 9s: colour, spacing, states,
+consistency; nothing under 8), and the r17 bugs are gone (5 and 11 up to 8.5 / 8). The floor moved to 6 (data
+visualisation, 7.5): the 3–5 tick cap made the PR curves' quarter steps read "0.3 / 0.8" because PrCurves forced one
+decimal (fixed before merge, 97ff017), plus the box-size histogram's uneven bins and colliding end labels. 7 dropped
+to 8 on copy: four names for "from scratch", batches vs optimizer steps, the engine's warning as a technical
+paragraph.

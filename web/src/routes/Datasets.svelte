@@ -10,7 +10,7 @@
   import { ago, compact, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
-  import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -25,6 +25,8 @@
   import { imageCount } from './dataset/health';
 
   setCrumbs({ label: 'Datasets' });
+  // The header's create action is the one in the top-right corner (the top bar's New run steps aside).
+  ownCreateAction();
 
   // The list endpoint has no stats; fetch each dataset for its class balance and box count.
   const datasets = new Resource(async (s) => {
@@ -66,6 +68,8 @@
 <Page title="Datasets">
   <!-- One fixed line: the counts live in the toolbar, so nothing here changes as the list loads. -->
   {#snippet sub()}<span>YOLO and COCO folders registered with the server.</span>{/snippet}
+  <!-- Phones: one header row, this line beside Add dataset. -->
+  {#snippet subPhone()}<span>YOLO and COCO folders.</span>{/snippet}
   {#snippet actions()}
     <Gate reason={offline ? OFFLINE_REASON : null}>
       {#snippet children(why)}

@@ -79,7 +79,7 @@
         <span class="truncate num">{deviceText}</span>
       {:else}
         <!-- The trailing span takes the place of the device, which phones hide. -->
-        <span>&#8203;<Skeleton inline w="min(280px, 60vw)" h="10px" /></span><span></span>
+        <span>&#8203;<Skeleton inline w="min(280px, 48vw)" h="10px" /></span><span></span>
       {/if}
     </p>
     <div class="cta">

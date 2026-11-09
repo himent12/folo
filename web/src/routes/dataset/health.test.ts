@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Dataset, DatasetStats } from '$lib/api/types';
-import { bySeverity, countBinLabel, groupSummary, healthChecks, reviewCount, reviewLabel, shareBelow, sizeBinLabel } from './health';
+import { bySeverity, countBinLabel, groupCount, groupSummary, healthChecks, healthSummary, reviewCount, reviewFiles, reviewLabel, shareBelow, sizeBinLabel } from './health';
 
 const ds = (over: Partial<Dataset> = {}): Dataset => ({
   id: 'ds_x',
@@ -91,6 +91,12 @@ describe('healthChecks with the check counts', () => {
     const broken = healthChecks(ds(), st({ broken_labels: 3 }), counts(3, 0));
     expect(broken.map((x) => x.id)).toEqual(['broken']);
     expect(broken[0]?.issues).toBe('error');
+    // Label errors of every kind are the broken files; only image errors (unreadable, missing) are a finding of their own.
+    const labels = healthChecks(ds(), st({ broken_labels: 3 }), { ...counts(3, 0), by_kind: { broken_label: 1, class_overflow: 1, out_of_range_box: 1 } });
+    expect(labels.map((x) => x.id)).toEqual(['broken']);
+    const mixed = healthChecks(ds(), st({ broken_labels: 3 }), { ...counts(5, 0), by_kind: { broken_label: 3, corrupt_image: 1, missing_image: 1 } });
+    expect(mixed.map((x) => x.id)).toEqual(['broken', 'check-errors']);
+    expect(mixed.map((x) => x.files)).toEqual([3, 2]);
   });
 
   it('stays as before without counts (older servers)', () => {
@@ -131,10 +137,25 @@ describe('bySeverity', () => {
 });
 
 describe('summary copy', () => {
-  it('names the unit of every count: findings to review, files, boxes', () => {
+  it('names the unit of every count: issue categories, file issues, notes', () => {
     expect(reviewLabel(0)).toBeUndefined();
-    expect(reviewLabel(1)).toBe('1 finding to review');
-    expect(reviewLabel(3)).toBe('3 findings to review');
+    expect(reviewLabel(1)).toBe('1 issue category');
+    expect(reviewLabel(3)).toBe('3 issue categories');
+  });
+
+  it('counts file issues apart from dataset-wide observations, on the panel and on each severity line', () => {
+    const h = healthChecks(
+      ds(),
+      st({ broken_labels: 3, empty_images: 20, box_size_hist: { edges: [0, 0.05, 1], counts: [1050, 1950] } }),
+      { error: 3, warning: 3, info: 20, by_kind: {} },
+    );
+    expect(reviewCount(h)).toBe(3);
+    expect(reviewFiles(h)).toBe(6);
+    expect(healthSummary(h)).toBe('3 issue categories · 6 file issues · 1 note');
+    expect(bySeverity(h).map(groupCount)).toEqual(['3 file issues', '3 file issues · 1 dataset-wide', '1 dataset-wide']);
+    // Nothing to fix: no file count, the notes still named.
+    expect(healthSummary(healthChecks(ds(), st({ empty_images: 1 })))).toBe('nothing to fix · 1 note');
+    expect(healthSummary(healthChecks(ds(), st({ broken_labels: 1 })))).toBe('1 issue category · 1 file issue');
   });
 
   it('folds a severity into a complete short line, not the joined titles', () => {

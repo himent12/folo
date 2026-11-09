@@ -12,8 +12,8 @@
 <script lang="ts">
   /**
    * An image with detection boxes drawn over it in screen pixels (crisp at any size). Boxes: a 2 px class-colour
-   * stroke inside a 1 px dark halo; label chips with the class name (and score) sit on the top-left corner, or
-   * elsewhere next to their own box (see ./chips).
+   * stroke inside a 1 px dark halo (2 px in compact thumbnails); label chips with the class name (and score) sit on the
+   * top-left corner, or elsewhere next to their own box (see ./chips).
    * Ground truth, when given, is drawn dashed underneath the predictions: in the class colour at full size, neutral and
    * just outside the prediction's stroke in compact thumbnails (where the two would otherwise coincide).
    */
@@ -155,7 +155,7 @@
             class="box"
             class:active={active === i}
             class:selected={selected === i}
-            class:dim={active !== null && active !== i}
+            class:dim={active !== null && active !== i && selected !== i}
             class:recede={selected !== null && selected !== i && active !== i}
             data-box={i}
             style:--c={classColor(b.class)}
@@ -271,19 +271,23 @@
     opacity: 0.85;
     pointer-events: none;
   }
+  /* Thumbnails: a thin stroke on a small, often pale photo (amber on beige, sky on blue-grey), so its halo is 2 px, the
+     inner pixel darker, and every class edge holds against the local background. */
   .compact .box {
     margin: -1.5px; /* grid-ok: equals the stroke width */
     border-width: 1.5px;
-    box-shadow: 0 0 0 1px var(--class-halo);
+    box-shadow:
+      0 0 0 1px var(--class-halo),
+      0 0 0 2px var(--class-halo);
   }
   /* Thumbnails: a prediction and its matching truth share a class colour and nearly the same rectangle, so a coloured
      dash would vanish under the solid stroke. Truth is neutral there (white dashes in their dark halo) and ringed just
-     outside the prediction's stroke and halo, so a match reads as two marks and a miss as a lone white ring. */
+     outside the prediction's stroke and its 2 px halo, so a match reads as two marks and a miss as a lone white ring. */
   .compact .box.truth {
     margin: 0;
     border: 0;
     outline: 1px dashed #ffffff;
-    outline-offset: 2.5px;
+    outline-offset: 3.5px;
     opacity: 1;
   }
   .chip {

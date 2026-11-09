@@ -103,7 +103,7 @@
     {:else}
       <div class="grid" aria-busy={images.loading}>
         {#if !images.data || images.loading}
-          {#each { length: 12 } as _, i (i)}<Skeleton h="auto" r="var(--radius-sm)" class="thumb-sk" />{/each}
+          {#each { length: 12 } as _, i (i)}<Skeleton h="auto" r="var(--radius-sm)" class="thumb-sk" image />{/each}
         {:else}
           {#each images.data.images as img (img.id)}
             <button type="button" class="thumb" onclick={() => pick(img)} aria-label="Use {img.file}" title={img.file}>

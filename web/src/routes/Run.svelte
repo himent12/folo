@@ -30,6 +30,7 @@
   import PerClass from './run/PerClass.svelte';
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
+  import { scheduleWarnings } from './run/warnings';
 
   const id = $derived(router.route.params.id ?? '');
   const live = new LiveRun(() => id || null);
@@ -50,6 +51,11 @@
     return live.epochs.length;
   });
   const elapsed = $derived(run?.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
+  // The trainer's "too short to learn" warnings, from the log (./run/warnings): one callout, never a toast.
+  const warnings = $derived.by(() => {
+    void live.version;
+    return scheduleWarnings(live.logs);
+  });
 
   let section = $state<'samples' | 'classes' | 'logs' | 'config'>('samples');
   let stopOpen = $state(false);
@@ -93,6 +99,8 @@
       if (run.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${run.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${run.model_id}`) });
     }
+    // Phones: the queued run's one action keeps its one name, in the menu (the status and its time keep the row).
+    if (run.status === 'queued') out.push({ label: 'Remove from queue', icon: X, danger: true, onclick: () => (stopOpen = true) });
     if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
     return out;
   });
@@ -115,13 +123,13 @@
 
 </script>
 
-<!-- A queued run renders the page it will fill: KPIs at "—", the chart's axes with one line saying what it waits
-     for, and the config in its rail (states live in the loaded frame). -->
+<!-- A queued run leads with what it waits for and when it should start (the callout under the header); the frames it
+     will fill stay compact until there is data, and the config is in its rail. -->
 {#snippet waiting()}
   {#if ahead}
-    Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}
+    Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
   {:else}
-    Starts as soon as the device is free
+    Starts as soon as the device is free.
   {/if}
 {/snippet}
 
@@ -208,9 +216,8 @@
       {#if run.status === 'running'}
         <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
       {:else if run.status === 'queued'}
-        <!-- Phones: the short label, so the status and its time keep one line beside it. -->
+        <!-- Phones: in the ⋯ menu under the same name, so the status and its time keep one line beside it. -->
         <span class="wide-only"><Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button></span>
-        <span class="phone-only"><Button variant="ghost" icon={X} aria-label="Remove from queue" onclick={() => (stopOpen = true)}>Remove</Button></span>
       {:else if !active}
         <span class="wide-only"><Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
       {/if}
@@ -218,9 +225,19 @@
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>
     {/snippet}
 
-    <Outcome {run} {elapsed} {resuming} onresume={resume} />
+    <Outcome {run} {elapsed} {resuming} onresume={resume} waiting={queuedOnly ? waiting : undefined} {warnings} />
 
-    <RunMetrics {run} steps={live.steps} epochs={live.epochs} version={live.version} loading={live.loading} waiting={queuedOnly ? waiting : undefined} />
+    <!-- Phones: while another section is picked, the chart folds to its one-line readout so that section starts in
+         the first screen. -->
+    <RunMetrics
+      {run}
+      steps={live.steps}
+      epochs={live.epochs}
+      version={live.version}
+      loading={live.loading}
+      queued={queuedOnly}
+      folded={section !== 'samples'}
+    />
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a sticky rail on the right. -->
     <!-- Below 960 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
@@ -258,7 +275,7 @@
   >
     {#snippet footer()}
       <Button onclick={() => (stopOpen = false)}>{run.status === 'queued' ? 'Keep it queued' : 'Keep training'}</Button>
-      <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove' : 'Stop run'}</Button>
+      <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? 'Remove from queue' : 'Stop run'}</Button>
     {/snippet}
   </Dialog>
   <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm">

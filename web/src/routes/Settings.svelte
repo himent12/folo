@@ -11,12 +11,15 @@
   import { prefs, type ThemePref, type Units } from '$lib/prefs.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { showShortcuts } from '$lib/shell/shortcuts';
   import Button from '$lib/ui/Button.svelte';
   import Field from '$lib/ui/Field.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
+  import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import Switch from '$lib/ui/Switch.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import ThemePreview from './settings/ThemePreview.svelte';
 
@@ -103,11 +106,6 @@
   let units = $state<Units>(prefs.units);
   const sample = 5_600_000_000;
 
-  // ---- shortcuts ----
-  /** Opens the shortcuts dialog the way the shell does: the `?` key. */
-  function showShortcuts() {
-    window.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true }));
-  }
 </script>
 
 <Page title="Settings" narrow>
@@ -124,14 +122,11 @@
                 <p class="s-title">Live <span class="mono faint">folo serve {hub.version}</span></p>
                 <p class="s-desc">Connected to <span class="mono">{hub.serverUrl}</span>.</p>
               {:else if hub.mode === 'mock'}
-                <p class="s-title">Demo data</p>
+                <!-- What it means for the user, in one line; why (the address, the endpoint) is in Technical details. -->
+                <p class="s-title">Using demo data</p>
                 <p class="s-desc">
-                  {#if hub.reason === 'forced'}
-                    The address has <span class="mono">?mock=1</span>, so Studio uses its built-in demo server.
-                  {:else}
-                    Could not reach <span class="mono">{hub.serverUrl}</span>, so Studio shows built-in demo data. Start
-                    <span class="mono">folo serve</span> or point Studio at it below.
-                  {/if}
+                  {#if hub.reason === 'forced'}Sample runs, datasets and models.{:else}No server answered.
+                    Start <span class="mono">folo serve</span> or enter its address below.{/if}
                 </p>
               {:else}
                 <p class="s-title">Connecting…</p>
@@ -143,9 +138,7 @@
           <Field
             label="Server URL"
             for="server-url"
-            hint={origin
-              ? `Empty means this page's own address: requests go to ${origin}/api. Enter a URL only to reach a folo serve elsewhere.`
-              : "Empty means this page's own address. Enter a URL only to reach a folo serve elsewhere."}
+            hint="Leave blank to use this server."
             error={invalid ? 'Use a full address like http://127.0.0.1:7878.' : null}
           >
             <div class="url-row">
@@ -177,6 +170,23 @@
               {/if}
             </div>
           {/if}
+
+          <details class="tech">
+            <summary>Technical details</summary>
+            <dl>
+              <dt>Requests go to</dt>
+              <dd class="mono">{hub.serverUrl}/api</dd>
+              {#if hub.mode === 'mock'}
+                <dt>Demo data</dt>
+                <dd>
+                  {#if hub.reason === 'forced'}On because the address has <span class="mono">?mock=1</span>; remove it to
+                    connect to a server.{:else}Shown because <span class="mono">{hub.serverUrl}</span> did not answer.{/if}
+                </dd>
+              {/if}
+              <dt>A blank URL</dt>
+              <dd>Uses the address this page was served from{origin ? ` (${origin})` : ''}.</dd>
+            </dl>
+          </details>
 
           <div class="row-actions">
             <!-- The primary action only once there is something to save; reconnecting as is stays secondary. -->
@@ -230,12 +240,23 @@
       </Panel>
 
       <Panel title="Keyboard shortcuts" id="shortcuts" divided>
-        <div class="setting">
-          <div class="setting-text">
-            <p>Press <Kbd keys="?" /> anywhere for all shortcuts</p>
-            <p class="note">Navigation, the command palette and actions on the current screen.</p>
+        <div class="stack">
+          <div class="setting">
+            <div class="setting-text">
+              <p>
+                {#if keyPrefs.singleKeys}Press <Kbd keys="?" /> anywhere for all shortcuts{:else}All shortcuts{/if}
+              </p>
+              <p class="note">Navigation, the command palette and actions on the current screen.</p>
+            </div>
+            <Button onclick={showShortcuts}>Show shortcuts</Button>
           </div>
-          <Button onclick={showShortcuts}>Show shortcuts</Button>
+          <div class="sep"></div>
+          <Switch
+            label="Single-key shortcuts"
+            hint="N, G then a letter, [, ? and J / K / X in lists. Turn off if you use speech input or press keys by accident; Ctrl or ⌘ K and the arrow keys keep working."
+            checked={keyPrefs.singleKeys}
+            onchange={(v) => (keyPrefs.singleKeys = v)}
+          />
         </div>
       </Panel>
 
@@ -401,6 +422,66 @@
   }
   .x {
     font-weight: var(--weight-semibold);
+  }
+  /* The mechanics (endpoint, why demo data is on), folded: the first screen says what it means, not how. */
+  .tech {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .tech summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    width: max-content;
+    cursor: pointer;
+    list-style: none;
+  }
+  .tech summary::-webkit-details-marker {
+    display: none;
+  }
+  .tech summary::before {
+    content: '';
+    width: 5px;
+    height: 5px;
+    margin: 0 2px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .tech[open] summary::before {
+    transform: rotate(45deg);
+  }
+  .tech summary:hover {
+    color: var(--text-secondary);
+  }
+  .tech dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--space-1) var(--space-4);
+    margin-top: var(--space-2);
+  }
+  .tech dd {
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  @media (pointer: coarse) {
+    .tech summary {
+      min-height: 44px;
+    }
+  }
+  @media (max-width: 767px) {
+    .tech dl {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0;
+    }
+    .tech dd + dt {
+      margin-top: var(--space-2);
+    }
+  }
+  .sep {
+    border-top: 1px solid var(--line-subtle);
   }
   .row-actions {
     display: flex;

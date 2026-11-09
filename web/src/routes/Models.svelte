@@ -148,6 +148,8 @@
 <Page title="Models">
   <!-- One fixed line: the counts live in the toolbar, so nothing here changes as the list loads. -->
   {#snippet sub()}<span>Trained weights and imported <span class="mono">.folo</span> files, ranked per evaluation dataset.</span>{/snippet}
+  <!-- Phones: one line, so the list starts 16 px under it. -->
+  {#snippet subPhone()}<span>Ranked per evaluation dataset.</span>{/snippet}
 
   {#if !models.error && (!models.data || models.data.length > 0)}
     <div class="toolbar">
@@ -285,7 +287,7 @@
                 <li>
                   <span class="row-sk">
                     <span class="m-main"><span class="l-name"><Skeleton w="55%" h="14px" /></span><span class="l-meta"><Skeleton w="75%" h="10px" /></span></span>
-                    <span class="m-side"><span class="l-name"><Skeleton w="40px" h="14px" /></span><span class="l-meta"><Skeleton w="56px" h="10px" /></span></span>
+                    <span class="m-side"><span class="l-name"><Skeleton w="40px" h="14px" /></span></span>
                   </span>
                 </li>
               {/each}
@@ -293,9 +295,13 @@
           </section>
         {/each}
       {/if}
-      {#each groups as g (g.key)}
+      {#each groups as g, gi (g.key)}
         <section aria-label={g.label}>
-          <h2 class="m-group">{g.label} <span class="faint num">{g.rows.length}</span></h2>
+          <!-- The value column is named once, on the first group's header, not under every value. -->
+          <h2 class="m-group">
+            {g.label} <span class="faint num">{g.rows.length}</span>
+            {#if gi === 0}<span class="m-col">mAP50-95</span>{/if}
+          </h2>
           <ul>
             {#each g.rows as m (m.id)}
               <li>
@@ -304,10 +310,7 @@
                     <span class="name truncate">{m.name}</span>
                     <span class="m-meta truncate"><span class="mono">{m.arch}</span> · <span class="num">{m.imgsz} px · {compact(m.params)} · {bytes(m.bytes, prefs.units)}</span></span>
                   </span>
-                  <span class="m-side">
-                    <span class="num map">{metric(m.metrics?.map50_95)}</span>
-                    <span class="m-cap">mAP50-95</span>
-                  </span>
+                  <span class="m-side"><span class="num map"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                 </a>
               </li>
             {/each}
@@ -323,7 +326,7 @@
       <summary>
         <span class="chev" aria-hidden="true"></span>
         <span class="b-title">Engine benchmarks</span>
-        <span class="b-sum">folo-n leads YOLO26n on {benchLead} of {versusYolo26n.length} measurements, same GPU</span>
+        <span class="b-sum">folo-n leads YOLO26n on {benchLead} of {versusYolo26n.length} measurements, same GPU · mixed precision and workloads</span>
       </summary>
       <div class="b-body"><Versus /></div>
     </details>
@@ -587,8 +590,7 @@
     .l-meta {
       height: 16px;
     }
-    .m-side .l-name,
-    .m-side .l-meta {
+    .m-side .l-name {
       justify-content: flex-end;
     }
     .m-meta {
@@ -601,9 +603,9 @@
       justify-items: end;
       flex-shrink: 0;
     }
-    .m-cap {
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
+    .m-col {
+      margin-left: auto;
+      font-weight: var(--weight-regular);
       color: var(--text-tertiary);
     }
   }

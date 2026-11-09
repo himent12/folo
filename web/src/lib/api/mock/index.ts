@@ -3,12 +3,14 @@
 //
 // Scenarios (`?scenario=`): `normal` (default), `empty` (nothing registered yet), `error` (every call fails),
 // `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
-// `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), for screenshots of
-// those states.
+// `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
+// finished 5-epoch run the trainer warns is too short to learn from), for screenshots of those states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
   Arch,
+  Box,
+  ClassMetrics,
   CreateDataset,
   CreateSyntheticDataset,
   Dataset,
@@ -16,26 +18,25 @@ import type {
   DatasetImagesQuery,
   DatasetIssues,
   DatasetIssuesQuery,
-  IssueCounts,
   ExportFormat,
   ExportResult,
   Health,
+  IssueCounts,
+  LogLine,
   Model,
+  ModelEval,
+  OnnxSwitches,
   PredictBox,
   PredictInput,
   PredictOptions,
   Prediction,
   Run,
+  RunLogs,
   RunMetrics,
   RunSamples,
   Sample,
   SystemInfo,
   TrainConfig,
-  Box,
-  ClassMetrics,
-  LogLine,
-  ModelEval,
-  RunLogs,
 } from '../types';
 import { image, imageIndex, indices, issues, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
 import { synthEvaluation, toModelEval } from './evaluation';
@@ -57,7 +58,7 @@ import {
 } from './runs';
 import { COCO80 } from './coco';
 
-export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged';
+export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged' | 'short-run';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -86,7 +87,7 @@ function config(name: string, dataset_id: string, arch: Arch, epochs: number, ex
 const DEVICE = `${GPU_NAME} (vulkan)`;
 const FASTENER_EASE = [1.05, 1.1, 1.12, 0.92, 0.78, 1.0, 0.85, 0.7];
 
-function profiles(t0: number): RunProfile[] {
+function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
   const live = t0 - 222_000;
   const names = (id: string) => [...(specs.find((s) => s.id === id)?.classes ?? [])];
   const list: Omit<RunProfile, 'classNames'>[] = [
@@ -213,6 +214,27 @@ function profiles(t0: number): RunProfile[] {
       modelId: 'm_shapes_n',
       device: 'cpu (AMD Ryzen 9 7950X)',
     },
+    // `short-run`: 125 optimizer steps from scratch, so the trainer warns it is too short (and its warmup too long).
+    ...(scenario === 'short-run'
+      ? [
+          {
+            id: 'run_s5q1',
+            name: 'shapes-quick',
+            config: config('shapes-quick', 'ds_shapes', 'folo-n', 5, { batch: 32 }),
+            classes: 3,
+            classEase: [1.04, 1.0, 0.95],
+            stepsPerEpoch: 25,
+            epochSeconds: 6,
+            mapMax: 0.3,
+            tau: 40,
+            imgsPerS: 540,
+            createdAt: t0 - 2 * HOUR,
+            startedAt: t0 - 2 * HOUR + 2_000,
+            terminal: { status: 'completed' as const, atEpoch: 5 },
+            device: DEVICE,
+          },
+        ]
+      : []),
   ];
   return list.map((p) => ({ ...p, classNames: names(p.config.dataset_id) }));
 }
@@ -236,7 +258,7 @@ export class MockApi implements Api {
     readonly latency = 140,
   ) {
     this.#t0 = Date.now();
-    this.#runs = scenario === 'empty' ? [] : profiles(this.#t0);
+    this.#runs = scenario === 'empty' ? [] : profiles(this.#t0, scenario);
     this.#datasets = scenario === 'empty' ? [] : [...specs];
   }
 
@@ -294,6 +316,7 @@ export class MockApi implements Api {
         cpu: { name: 'AMD Ryzen 9 7950X 16-Core Processor', threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
         gpus: this.#gpus(),
+        features: ['export_onnx_switches'],
       };
     }, 60);
   }
@@ -479,12 +502,17 @@ export class MockApi implements Api {
     }, 180);
   }
 
-  exportModel(id: string, format: ExportFormat): Promise<ExportResult> {
+  exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches): Promise<ExportResult> {
     return this.#call(() => {
       const m = this.#models().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
-      const ext = format === 'onnx' ? 'onnx' : 'f16.folo';
-      return { path: `D:/folo/models/${m.name}.${ext}`, bytes: Math.round(m.params * (format === 'onnx' ? 4.1 : 2.03)) };
+      const on = { decode: !!switches?.decode, dynamic: !!switches?.dynamic, half: !!switches?.half };
+      if (format !== 'onnx' && (on.decode || on.dynamic || on.half))
+        throw new ApiError(400, 'invalid_body', 'decode, dynamic and half apply to ONNX exports only.');
+      // The real server's names (docs/API.md): `<name>-f16.folo`, `<name>.onnx`, `<name>-f16.onnx` with `half`.
+      const file = format === 'onnx' ? `${m.name}${on.half ? '-f16' : ''}.onnx` : `${m.name}-f16.folo`;
+      const perParam = format === 'onnx' ? (on.half ? 2.05 : 4.1) : 2.03;
+      return { path: `D:/folo/exports/${file}`, bytes: Math.round(m.params * perParam) };
     }, 1200);
   }
 

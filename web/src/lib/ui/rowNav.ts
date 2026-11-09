@@ -1,8 +1,10 @@
 // Keyboard rows for list tables (Runs, Models, Datasets): one roving tab stop over the rows, J / K and ↓ / ↑ move it,
 // Home / End jump, Enter opens the row (its click), and an optional `toggle` answers X (select for compare). J or K
-// pressed while nothing on the page has focus enters the list at its first row, as in Linear.
+// pressed while nothing on the page has focus enters the list at its first row, as in Linear. With single-key shortcuts
+// off (Settings, ui/keyPrefs) the letters do nothing; the arrows, Home, End and Enter keep working on a focused row.
 
 import { isTyping } from '$lib/keys';
+import { keyPrefs } from './keyPrefs.svelte';
 
 export interface RowNavOptions {
   /** X on a focused row (e.g. toggle its Compare selection). */
@@ -32,6 +34,8 @@ export function stepRow(rows: HTMLElement[], from: HTMLElement | null, delta: nu
 }
 
 const MOVES: Record<string, number | 'first' | 'last'> = { j: 1, ArrowDown: 1, k: -1, ArrowUp: -1, Home: 'first', End: 'last' };
+/** The letters among the keys above (and X), which the single-key preference turns off. */
+const LETTERS = new Set(['j', 'k', 'x']);
 
 /** Svelte action for the element holding the rows (a table, or a list). */
 export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
@@ -55,6 +59,7 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
     // Only the row itself: keys inside its checkbox or link keep their own meaning.
     if (!row || row !== e.target || !root.contains(row)) return;
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    if (LETTERS.has(key) && !keyPrefs.singleKeys) return;
     const move = MOVES[key];
     if (move !== undefined) {
       e.preventDefault();
@@ -79,7 +84,7 @@ export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
   // J / K with nothing focused enters the list (the page's other single keys live in shell/shortcuts.ts).
   const onwindowkey = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) return;
-    if (document.querySelector('dialog[open]')) return;
+    if (!keyPrefs.singleKeys || document.querySelector('dialog[open]')) return;
     const k = e.key.toLowerCase();
     if (k !== 'j' && k !== 'k') return;
     const active = document.activeElement;

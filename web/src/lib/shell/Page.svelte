@@ -6,6 +6,10 @@
    * length of the lead and meta lines (which run the full width under and above it). Below 768 px a page passes its
    * secondary actions as `more`: they are buttons on wider screens and one ⋯ menu on phones, beside `actions` (the
    * primary, which keeps a short word there).
+   *
+   * Phones, one row (DESIGN_DIRECTION §10 / §12): a page that passes `subPhone` (a short meta line, one line at most)
+   * gets it in place of `sub`, with the primary and the ⋯ menu on its right, so the first content sits 16 px under it
+   * instead of under a second row of full-width buttons.
    */
   import type { Snippet } from 'svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -14,6 +18,7 @@
   let {
     title,
     sub,
+    subPhone,
     actions,
     more = [],
     moreLabel = 'More actions',
@@ -26,6 +31,8 @@
     title: string;
     /** A meta line under the title (snippet for rich content). */
     sub?: Snippet;
+    /** Phones: a short meta line (one line, ellipsis as a guard) in place of `sub`; the header becomes one row. */
+    subPhone?: Snippet;
     /** The page's own actions (its primary last). */
     actions?: Snippet;
     /** Secondary actions: secondary buttons before `actions` from 768 px up, one ⋯ menu after them on phones. */
@@ -44,16 +51,17 @@
 
   const hasActions = $derived(!!actions || more.length > 0);
   /** Only the title: on phones the top bar shows it, so the header takes no room and content starts at the gutter. */
-  const bare = $derived(!sub && !hasActions && !lead);
+  const bare = $derived(!sub && !subPhone && !hasActions && !lead);
 </script>
 
 <div class="page" class:wide class:narrow>
-  <header class:inline={inlineActions} class:bare>
+  <header class:inline={inlineActions} class:one-row={!!subPhone} class:bare>
     <div class="titles">
       {#if lead}<div class="lead">{@render lead()}</div>{/if}
       <!-- Route changes move focus here (App), so the new page is announced by its name. -->
       <h1 tabindex="-1" data-route-focus>{title}</h1>
-      {#if sub}<div class="sub">{@render sub()}</div>{/if}
+      {#if sub}<div class="sub" class:wide-only={!!subPhone}>{@render sub()}</div>{/if}
+      {#if subPhone}<div class="sub phone-only">{@render subPhone()}</div>{/if}
     </div>
     {#if hasActions}
       <div class="actions">
@@ -148,7 +156,8 @@
   .more-wide {
     display: contents;
   }
-  .more-phone {
+  .more-phone,
+  .phone-only {
     display: none;
   }
   @keyframes in {
@@ -190,6 +199,27 @@
     header.inline .actions {
       flex-wrap: nowrap;
       flex-shrink: 0;
+    }
+    /* One row: the short meta line on the left (one line), the primary and the ⋯ menu on the right, centred on it. */
+    header.one-row {
+      flex-wrap: nowrap;
+      align-items: center;
+    }
+    header.one-row .titles {
+      flex: 1;
+    }
+    header.one-row .actions {
+      flex-wrap: nowrap;
+      flex-shrink: 0;
+    }
+    .wide-only {
+      display: none;
+    }
+    .sub.phone-only {
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     /* A title-only header leaves no empty slot (and no gap after it): the first content sits 16 px under the bar. */
     header.bare,

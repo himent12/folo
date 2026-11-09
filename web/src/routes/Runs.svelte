@@ -11,7 +11,7 @@
   import { failureCause } from '$lib/oom';
   import { tooltip } from '$lib/ui/tooltip';
   import { href, router } from '$lib/router.svelte';
-  import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
@@ -30,6 +30,8 @@
   import { origin } from '$lib/lineage';
 
   setCrumbs({ label: 'Runs' });
+  // The header's create action is the one in the top-right corner (the top bar's New run steps aside).
+  ownCreateAction();
 
   type Filter = 'all' | 'active' | 'completed' | 'failed';
   const groups: Record<Filter, RunStatus[]> = {
@@ -91,15 +93,19 @@
 
 <Page title="Runs">
   {#snippet sub()}<span>Training runs, newest first. Select up to four to compare their curves.</span>{/snippet}
+  <!-- Phones: one header row (this line and New run); Compare lives in the list's own header row, by the checkboxes. -->
+  {#snippet subPhone()}<span>Training runs, newest first.</span>{/snippet}
   {#snippet actions()}
     {#if runs.data?.length !== 0}
-      <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
-        {#snippet children(why)}
-          <Button icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
-            Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
-          </Button>
-        {/snippet}
-      </Gate>
+      <span class="compare">
+        <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
+          {#snippet children(why)}
+            <Button icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+              Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+            </Button>
+          {/snippet}
+        </Gate>
+      </span>
       <Gate reason={offline ? OFFLINE_REASON : null}>
         {#snippet children(why)}
           <Button variant="primary" icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>
@@ -146,7 +152,7 @@
             <th class="r">Best mAP50-95</th>
             <th class="hide-lg">mAP trend</th>
             <th class="r hide-xl">Duration</th>
-            <th class="r hide-sm">Created</th>
+            <th class="r hide-md">Created</th>
           </tr>
         </thead>
         <tbody>
@@ -165,7 +171,7 @@
                 <td class="r"><Skeleton w="72px" h="12px" /></td>
                 <td class="hide-lg"><Skeleton w="96px" h="12px" /></td>
                 <td class="r hide-xl"><Skeleton w="48px" h="12px" /></td>
-                <td class="r hide-sm"><Skeleton w="56px" h="12px" /></td>
+                <td class="r hide-md"><Skeleton w="56px" h="12px" /></td>
               </tr>
             {/each}
           {:else if runs.data.length === 0}
@@ -225,7 +231,7 @@
                 </td>
                 <td class="hide-lg"><RunSpark run={r} width={96} /></td>
                 <td class="r num faint hide-xl">{r.status === 'queued' ? '—' : duration(elapsed(r))}</td>
-                <td class="r faint hide-sm">{ago(r.created)}</td>
+                <td class="r faint hide-md">{ago(r.created)}</td>
               </tr>
             {/each}
           {/if}
@@ -238,7 +244,14 @@
         <button type="button" class="pick" aria-pressed={choosing} onclick={() => (choosing ? ((picking = false), (selected = [])) : (picking = true))}
           >{choosing ? 'Cancel' : 'Select to compare'}</button
         >
-        <span aria-hidden="true">Best mAP50-95</span>
+        {#if choosing}
+          {#if selected.length >= 2}
+            <a class="pick go" href={href(`/runs/compare?ids=${selected.join(',')}`)}>Compare <span class="num">{selected.length}</span></a>
+          {:else}
+            <span class="pick-why">Select 2–4</span>
+          {/if}
+        {/if}
+        <span class="col" aria-hidden="true">Best mAP50-95</span>
       </div>
       <ul class="rows" class:choosing>
         {#each shown as r (r.id)}
@@ -271,6 +284,9 @@
 </Page>
 
 <style>
+  .compare {
+    display: contents;
+  }
   .toolbar {
     display: flex;
     align-items: center;
@@ -384,6 +400,13 @@
       height: 48px;
     }
   }
+  /* Below 1024 Created hides too (.hide-md) and the bar narrows, so the table fits from 768 px up, checkbox column
+     included (its width is reserved whether or not any run is selected). */
+  @media (max-width: 1023px) {
+    .prog {
+      width: 112px;
+    }
+  }
   @media (max-width: 767px) {
     /* Phones show the stacked rows below; the table frame stays only to hold an empty or error state. */
     .scroll:not(.state),
@@ -420,8 +443,19 @@
     .rows:not(.choosing) li {
       padding-left: var(--space-4);
     }
+    .compare {
+      display: none;
+    }
+    .col {
+      margin-left: auto;
+    }
+    .pick-why {
+      color: var(--text-tertiary);
+    }
     .pick {
-      margin-right: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-1);
       height: 44px;
       color: var(--text-secondary);
       font-size: var(--type-sm-size);
@@ -429,7 +463,8 @@
       text-decoration-color: var(--line-strong);
       text-underline-offset: 3px;
     }
-    .pick[aria-pressed='true'] {
+    .pick[aria-pressed='true'],
+    .pick.go {
       color: var(--text-primary);
     }
     .rows li:last-child {

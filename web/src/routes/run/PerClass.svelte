@@ -67,7 +67,7 @@
                   <span aria-label="{c.delta > 0 ? 'up' : 'down'} {Math.abs(c.delta).toFixed(3)}">{c.delta > 0 ? '▲' : '▼'}&#8201;{Math.abs(c.delta).toFixed(3)}</span>
                 {:else}<span aria-label="no change">·</span>{/if}
               </td>
-              <td class="bar-col"><span class="bar"><span style:width="{c.map50_95 * 100}%" style:background={classInk(c.class)}></span></span></td>
+              <td class="bar-col"><span class="bar"><span style:width="{c.map50_95 * 100}%"></span></span></td>
               {#if !compact}
                 <td class="r num">{c.map50.toFixed(3)}</td>
                 <td class="r num faint">{c.precision.toFixed(3)}</td>
@@ -90,10 +90,10 @@
     gap: var(--space-3);
     padding: var(--space-4);
   }
+  /* The state-height rule (DESIGN_DIRECTION §2.8): the header, then one compact line with the panel's padding. */
   .none {
-    padding: var(--space-6) var(--space-4);
+    padding: 0 var(--space-4) var(--space-4);
     color: var(--text-tertiary);
-    text-align: center;
   }
   .cls {
     display: inline-flex;
@@ -136,11 +136,20 @@
     white-space: normal;
     line-height: var(--type-sm-line);
   }
+  /* The table rule: one neutral inline bar. The class hue stays on the swatch; the bar is ink, primary on the
+     hovered row (the rows select nothing). */
   .bar span {
     display: block;
     height: 100%;
     border-radius: 2px;
-    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
-    transition: width var(--dur-chart) var(--ease-standard);
+    background: var(--text-tertiary);
+    transition:
+      width var(--dur-chart) var(--ease-standard),
+      background-color var(--dur-fast) var(--ease-standard);
+  }
+  @media (hover: hover) {
+    tr:hover .bar span {
+      background: var(--text-primary);
+    }
   }
 </style>

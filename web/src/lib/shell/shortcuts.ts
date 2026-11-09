@@ -1,6 +1,8 @@
-// Global keyboard shortcuts. Two-key "go to" sequences (G then R) like Linear and GitHub.
+// Global keyboard shortcuts. Two-key "go to" sequences (G then R) like Linear and GitHub. The single-character ones
+// (everything but Mod+K) can be turned off in Settings (ui/keyPrefs).
 
 import { isTyping } from '$lib/keys';
+import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
 import { sidebar } from './sidebarState.svelte';
 import { router } from '$lib/router.svelte';
 import { mainNav, settingsNav } from './nav';
@@ -8,6 +10,13 @@ import { mainNav, settingsNav } from './nav';
 export interface ShortcutHandlers {
   palette: () => void;
   shortcuts: () => void;
+}
+
+/** Opens the shortcuts dialog from anywhere (Settings' button), whether or not the `?` key is on. */
+export const SHOW_SHORTCUTS = 'folo:shortcuts';
+
+export function showShortcuts() {
+  window.dispatchEvent(new Event(SHOW_SHORTCUTS));
 }
 
 export const shortcutList: { keys: string; label: string; group: string }[] = [
@@ -37,7 +46,7 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
       return;
     }
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || isTyping(e)) return;
-    if (document.querySelector('dialog[open]')) return;
+    if (!keyPrefs.singleKeys || document.querySelector('dialog[open]')) return;
     const k = e.key.toLowerCase();
     if (pendingG && Date.now() - pendingG < 1200) {
       pendingG = 0;
@@ -64,6 +73,11 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
     }
   };
 
+  const onshow = () => h.shortcuts();
   window.addEventListener('keydown', onkeydown);
-  return () => window.removeEventListener('keydown', onkeydown);
+  window.addEventListener(SHOW_SHORTCUTS, onshow);
+  return () => {
+    window.removeEventListener('keydown', onkeydown);
+    window.removeEventListener(SHOW_SHORTCUTS, onshow);
+  };
 }

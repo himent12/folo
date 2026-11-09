@@ -179,7 +179,8 @@
         </Panel>
       </div>
       <div class="col-side">
-        <Panel title="Best model per dataset" pad="none" id="best-models">
+        <!-- The top model of each dataset (named above each row); the metric is named once, here, not under every value. -->
+        <Panel title="Best models" meta="mAP50-95" pad="none" id="best-models">
           {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
           {#if offline}
             <p class="quiet pad">The best model of each dataset shows here.</p>
@@ -196,7 +197,7 @@
                       <span class="l-20"><Skeleton w="128px" h="12px" /></span>
                       <span class="l-20"><Skeleton w="152px" h="10px" /></span>
                     </span>
-                    <span class="m-map"><span class="l-20 end"><Skeleton w="40px" h="12px" /></span><span class="l-16 end"><Skeleton w="56px" h="10px" /></span></span>
+                    <span class="m-map"><span class="l-20 end"><Skeleton w="40px" h="12px" /></span></span>
                   </span>
                 </li>
               {/each}
@@ -213,10 +214,7 @@
                       <span class="m-name truncate">{m.name}</span>
                       <span class="m-sub num">{m.arch} · {m.classes.length} classes · {bytes(m.bytes, prefs.units)}</span>
                     </span>
-                    <span class="m-map">
-                      <span class="num">{metric(m.metrics?.map50_95)}</span>
-                      <span class="m-cap">mAP50-95</span>
-                    </span>
+                    <span class="m-map"><span class="num"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
                   </a>
                 </li>
               {/each}
@@ -264,9 +262,11 @@
 </Page>
 
 <style>
+  /* One reading measure (720 px): each step's actions sit under its sentence, not at the far edge of a wide row. */
   .onboard {
     display: grid;
     gap: var(--space-5);
+    max-width: 720px;
     padding: var(--space-6);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
@@ -288,7 +288,7 @@
   }
   .steps li {
     display: grid;
-    grid-template-columns: 28px 1fr auto;
+    grid-template-columns: 28px 1fr;
     align-items: center;
     gap: var(--space-3);
     padding: var(--space-3) var(--space-4) var(--space-3) var(--space-3);
@@ -326,19 +326,15 @@
     color: var(--bg-panel);
   }
   .ob-actions {
+    grid-column: 2;
     display: flex;
     gap: var(--space-2);
     flex-wrap: wrap;
+    margin-top: var(--space-1);
   }
   @media (max-width: 767px) {
     .onboard {
       padding: var(--space-4);
-    }
-    .steps li {
-      grid-template-columns: 28px 1fr;
-    }
-    .ob-actions {
-      grid-column: 2;
     }
   }
   /* Two independent stacks, so a short side panel never leaves a hole in a shared row. */
@@ -370,8 +366,7 @@
   .l-16 {
     height: 16px;
   }
-  .l-20.end,
-  .l-16.end {
+  .l-20.end {
     justify-content: flex-end;
   }
   .run-name {
@@ -391,7 +386,9 @@
     gap: var(--space-2);
     width: 120px;
   }
+  /* The count never shrinks under its text ("150/150"); the bar takes what is left. */
   .prog span {
+    flex-shrink: 0;
     font-size: var(--type-sm-size);
     min-width: 46px;
     text-align: right;
@@ -436,11 +433,6 @@
   }
   .m-map .num {
     font-weight: var(--weight-medium);
-  }
-  .m-cap {
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
   }
   .dslist {
     padding: 0 var(--space-2) var(--space-2);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import raw from '../../../../design/tokens.json?raw';
-import { CONFUSION_FLIP, rampShare } from './confusionInk';
+import { CONFUSION_FLIP, rampShare, sharePct } from './confusionInk';
 
 const tokens = JSON.parse(raw);
 
@@ -55,4 +55,17 @@ describe('confusion-matrix ramp', () => {
       expect(contrast(cell(0.001), panel)).toBeGreaterThanOrEqual(theme === 'dark' ? 1.5 : 1.3);
     });
   }
+});
+
+describe('sharePct', () => {
+  it('writes whole percentages, "<1" for small shares and nothing for none', () => {
+    expect(sharePct(0)).toBe('');
+    expect(sharePct(0.001)).toBe('<1');
+    expect(sharePct(0.0049)).toBe('<1');
+    expect(sharePct(0.006)).toBe('1');
+    expect(sharePct(0.083)).toBe('8');
+    expect(sharePct(0.085)).toBe('9');
+    expect(sharePct(0.79)).toBe('79');
+    expect(sharePct(1)).toBe('100');
+  });
 });

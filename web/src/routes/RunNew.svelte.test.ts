@@ -151,7 +151,8 @@ describe('New run after running out of GPU memory', () => {
     expect(note.textContent?.replace(/\s+/g, ' ')).toContain('shapes-hard-m ran out of GPU memory at batch 32. Now batch 16.');
     expect(target.querySelector('#batch [aria-checked="true"]')?.textContent?.trim()).toBe('16');
     const batchField = target.querySelector('#batch')!.closest('.field')!;
-    expect(batchField.querySelector('.was')?.textContent).toBe('was 32');
+    // Beside the new value ("16 · was 32"), not at the far end of the label row.
+    expect(batchField.querySelector('.with-was .was')?.textContent).toBe('was 32');
     // 960 px is kept from the failed run; the image size field is not marked.
     expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
     expect(target.querySelector('#imgsz')!.closest('.field')!.querySelector('.was')).toBeNull();
@@ -172,33 +173,79 @@ describe('New run: short runs', () => {
     flushSync();
   }
 
-  it('warns when warmup takes most of the run, and offers enough epochs', async () => {
+  function choose(id: string, value: string) {
+    const sel = target.querySelector<HTMLSelectElement>(`select#${id}`)!;
+    sel.querySelector<HTMLOptionElement>(`option[value="${value}"]`)!.selected = true;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+  }
+
+  it("warns as the trainer does about a short run from scratch, and offers the epochs that clear it", async () => {
     await open();
     expect(target.querySelector('.short')).toBeNull();
-    // fasteners: 1,920 train images at batch 16 are 30 optimizer steps an epoch; 5 epochs are 150, 100 of them warmup.
+    // fasteners: 1,920 train images at batch 16 are 30 optimizer steps an epoch; 5 epochs are 150, W = 90 of them.
     type('epochs', 5);
     const warn = await until(() => target.querySelector('.summary .short'));
-    expect(warn.textContent).toContain("Warmup takes 100 of the run's 150 optimizer steps");
-    expect(target.querySelector('.dock-warn')?.textContent).toBe('Mostly warmup');
+    const text = warn.textContent!.replace(/\s+/g, ' ');
+    expect(text).toContain('Only 150 optimizer steps (5 epochs × 30, batch 16 × accumulate 4).');
+    expect(text).toContain('expect an mAP near 0');
+    expect(text).toContain("Warmup takes 90 of the 150 steps");
+    expect(target.querySelector('.dock-warn')?.textContent).toBe('Too few steps');
+    // One fix for both: 200 steps need 7 epochs.
     warn.querySelector<HTMLButtonElement>('button.fix')!.click();
     flushSync();
     expect(target.querySelector<HTMLInputElement>('input#epochs')!.value).toBe('7');
     expect(target.querySelector('.short')).toBeNull();
   });
 
-  it('keeps mosaic in a short run, and warns when close mosaic is set to cover all of it', async () => {
+  it('warns about a mostly-warmup run from trained weights too, but not about its length', async () => {
+    await open();
+    await until(() => target.querySelectorAll('select#weights option').length > 1, 'weights to start from');
+    choose('weights', target.querySelectorAll<HTMLOptionElement>('select#weights option')[1]!.value);
+    type('epochs', 5);
+    const warn = await until(() => target.querySelector('.summary .short'));
+    expect(warn.textContent).not.toContain('optimizer steps (');
+    expect(warn.textContent).toContain("Warmup takes 90 of the 150 steps");
+    expect(target.querySelector('.dock-warn')?.textContent).toBe('Mostly warmup');
+    warn.querySelector<HTMLButtonElement>('button.fix')!.click();
+    flushSync();
+    expect(target.querySelector<HTMLInputElement>('input#epochs')!.value).toBe('6');
+    expect(target.querySelector('.short')).toBeNull();
+  });
+
+  it('keeps mosaic in a short run: close mosaic is capped at half the run, as the trainer caps it', async () => {
     await open();
     type('epochs', 8);
     // Close mosaic follows the run: at most half of it.
     expect(target.querySelector<HTMLInputElement>('input#close')!.value).toBe('4');
-    expect(target.querySelector('.short')).toBeNull();
     type('close', 8);
-    const warn = await until(() => target.querySelector('.summary .short'));
-    expect(warn.textContent).toContain('Close mosaic covers all 8 epochs');
-    warn.querySelector<HTMLButtonElement>('button.fix')!.click();
+    // Not a warning any more: the trainer keeps mosaic on for half the run, and the field says so.
+    expect(target.querySelector('#close-hint')?.textContent).toBe('At most half the run: mosaic closes for the last 4 epochs.');
+    type('epochs', 100);
+    expect(target.querySelector('#close-hint')?.textContent).toBe('Train the last N epochs without mosaic to settle the boxes.');
+  });
+});
+
+describe('New run on a phone', () => {
+  const width = window.innerWidth;
+  const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
+  afterEach(() => setWidth(width));
+
+  it('picks the size from a segmented control and folds the full comparison behind "Compare sizes"', async () => {
+    setWidth(390);
+    await open();
+    const pick = target.querySelector('#arch-pick')!;
+    expect([...pick.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual(['N', 'S', 'M', 'L', 'X']);
+    expect(target.querySelector('.a-sel')?.textContent).toBe('folo-s The default: fast and accurate.');
+    expect(target.querySelector('.a-specs')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('9.46M params · 21.6 GFLOPs · 7.87 ms');
+    const compare = target.querySelector<HTMLDetailsElement>('details.a-compare')!;
+    expect(compare.open).toBe(false);
+    expect(compare.querySelectorAll('.arch')).toHaveLength(5);
+    pick.querySelectorAll('button')[2]!.click();
     flushSync();
-    expect(target.querySelector<HTMLInputElement>('input#close')!.value).toBe('4');
-    expect(target.querySelector('.short')).toBeNull();
+    expect(target.querySelector('.a-sel')?.textContent).toBe('folo-m More accuracy on busy scenes.');
+    expect(target.querySelector('.a-specs')?.textContent).toContain('latency not measured yet');
+    expect(compare.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-m');
   });
 });
 
@@ -285,5 +332,12 @@ describe('New run: the form', () => {
     unmount(c!);
     c = undefined;
     expect(document.documentElement.hasAttribute('data-dock')).toBe(false);
+  });
+});
+
+describe('New run from a link', () => {
+  it("takes the epochs a short run's warning suggests", async () => {
+    await open('?from=run_a2f0&epochs=40');
+    await until(() => target.querySelector<HTMLInputElement>('input#epochs')?.value === '40', 'epochs 40');
   });
 });

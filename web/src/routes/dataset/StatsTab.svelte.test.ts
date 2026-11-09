@@ -38,7 +38,7 @@ describe('Dataset stats: health findings', () => {
     expect(document.activeElement?.id).toBe('ds-check-title');
   });
 
-  it('folds each severity into a complete summary with its count of findings, and names the units', async () => {
+  it('folds each severity into a complete summary with what it counts, and names the units', async () => {
     const dataset = await hub.api.dataset('ds_shapes_hard');
     const counts = (await hub.api.datasetIssues('ds_shapes_hard', { limit: 1 })).counts;
     c = mount(StatsTab, { target, props: { dataset, stats: dataset.stats!, counts, onclass: () => {} } });
@@ -47,8 +47,9 @@ describe('Dataset stats: health findings', () => {
       const s = target.querySelector(`#ds-health li.${sev} summary`);
       return { sum: s?.querySelector('.htitles')?.textContent?.trim(), count: s?.querySelector('.hcount')?.textContent?.trim() };
     };
-    expect(line('warning')).toEqual({ sum: '3 file issues · 35% tiny boxes', count: '2 findings' });
-    expect(line('danger')).toEqual({ sum: '3 broken label files', count: '1 finding' });
-    expect(target.querySelector('#ds-health')?.textContent).toContain('3 findings to review');
+    expect(line('warning')).toEqual({ sum: '3 file issues · 35% tiny boxes', count: '3 file issues · 1 dataset-wide' });
+    // shapes-hard's 3 check errors are all label errors (broken_label, class_overflow, out_of_range_box): the 3 broken files.
+    expect(line('danger')).toEqual({ sum: '3 broken label files', count: '3 file issues' });
+    expect(target.querySelector('#ds-health')?.textContent).toContain('3 issue categories · 6 file issues · 1 note');
   });
 });

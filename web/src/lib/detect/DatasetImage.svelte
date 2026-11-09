@@ -23,6 +23,9 @@
     only?: ReadonlySet<number> | null;
     active?: number | null;
     onhover?: (i: number | null) => void;
+    /** Passed through to DetectionView: the selected box (accent stroke, the others recede). */
+    selected?: number | null;
+    onselect?: (i: number) => void;
     fit?: 'contain' | 'cover';
     compact?: boolean;
     alt?: string;
@@ -87,7 +90,7 @@
     {...rest}
   />
   {#if phase === 'loading'}
-    <span class="cover"><Skeleton w="100%" h="100%" r="0" /></span>
+    <span class="cover"><Skeleton w="100%" h="100%" r="0" image /></span>
   {:else if phase === 'error'}
     <span class="cover failed">
       <ImageOff size={16} strokeWidth={1.75} aria-hidden="true" />

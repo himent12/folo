@@ -47,7 +47,7 @@ export const scenes = [
     // The loss chart: total in ink, box / cls / dfl in their design/README.md hues (amber, violet dashed, teal dotted).
     name: 'run-loss',
     path: '/runs/run_c19a',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       const tab = page.locator('[data-tab="loss"]');
       if (await tab.isVisible()) await tab.click();
@@ -57,7 +57,7 @@ export const scenes = [
     },
   },
   {
-    // The phone layout below the fold: the metrics instrument, then one section at a time (here: per-class results).
+    // Phones, one section at a time (here: per-class results): the chart folds to its one-line readout above it.
     name: 'run-live-phone-classes',
     path: '/runs/run_7d1e',
     advance: 4000,
@@ -65,10 +65,11 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.mouse.move(0, 0);
     },
   },
   // run_a2f0 ran out of GPU memory: the plain cause, the smaller settings as actions, the driver's report folded.
-  { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
     name: 'run-failed-report',
     path: '/runs/run_a2f0',
@@ -112,8 +113,8 @@ export const scenes = [
     },
   },
   {
-    // A short run on fasteners (5 epochs, 1,920 images): warmup would take 100 of its 150 optimizer steps. The Summary
-    // warns with the fix; below 960 px the dock says so too.
+    // A short run on fasteners from scratch (5 epochs, 1,920 images): 150 optimizer steps, 90 of them warmup. The Summary
+    // warns as the trainer does (schedule_warnings) with one fix; below 960 px the dock says so too.
     name: 'run-new-short',
     path: '/runs/new',
     fullPage: false,
@@ -157,6 +158,17 @@ export const scenes = [
       await page.locator('#sec-aug input[type="range"]').first().focus();
       await until(page, '.aug-row.focused');
       await page.clock.runFor(500);
+    },
+  },
+  {
+    // Phones: the size is a segmented pick with the chosen model in words; the five-row comparison opens on demand.
+    name: 'run-new-compare-sizes',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, 'details.a-compare > summary');
+      await page.locator('details.a-compare > summary').click();
     },
   },
   {
@@ -215,9 +227,58 @@ export const scenes = [
       await page.locator('button.manage').click();
     },
   },
-  { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
+  // Nothing picked: the inline empty state with the standard secondary "Add run…" button.
+  { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'mobile'] },
   // A queued run in the loaded frame: KPIs at "—", the chart's axes with what it waits for, the config in its rail.
-  { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'mobile'] },
+  // A queued run: the dependency and start estimate lead, the empty frames stay compact until there is data.
+  { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  {
+    // A 5-epoch run from scratch: the trainer's warnings that it is too short to learn, as one callout.
+    name: 'run-short-warning',
+    path: '/runs/run_s5q1',
+    search: 'scenario=short-run',
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+  },
+  {
+    // Phones: with Logs picked, the chart folds to its one-line readout, so the log starts in the first screen.
+    name: 'run-phone-logs',
+    path: '/runs/run_7d1e',
+    advance: 4000,
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await page.getByRole('radio', { name: 'Logs' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Keyboard focus on a chart: the readout row says how to read it.
+    name: 'chart-key-hint',
+    path: '/runs/run_c19a',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      const svg = page.locator('#run-chart svg[role="img"]').first();
+      await svg.scrollIntoViewIfNeeded();
+      await page.keyboard.press('Tab');
+      await svg.focus();
+      await page.locator('#run-chart .legend .note.hint').waitFor({ state: 'visible', timeout: 3000 });
+    },
+  },
+  {
+    // A touch screen: the first chart of the session says "Tap to pin a value" (Compare: in its readout row).
+    name: 'chart-touch-hint',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.clock.runFor(2000);
+      await until(page, '.chips-head .at.hint');
+    },
+  },
   {
     // The loss chart's one control open: smoothing and y scale behind a single button.
     name: 'run-loss-options',
@@ -272,6 +333,8 @@ export const scenes = [
   },
   {
     // The box-size histogram with a bin pinned by a tap (phones) or under the mouse: the readout row states its count.
+    // Both are sent as pointer events on the plot: the shot scrolls to the top first, which would take a real mouse off
+    // the chart and end its hover.
     name: 'dataset-histogram',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: true,
@@ -279,17 +342,14 @@ export const scenes = [
     setup: async (page, { vp }) => {
       await until(page, '#ds-size svg');
       const svg = page.locator('#ds-size svg[role=img]');
-      await svg.scrollIntoViewIfNeeded();
-      const box = await svg.boundingBox();
-      if (!box) return;
-      const at = { x: box.x + box.width * 0.22, y: box.y + box.height * 0.6 };
-      // The shot's context has no touch screen: a phone's tap is sent as touch pointer events.
-      if (vp === 'mobile')
-        await svg.evaluate((el, p) => {
-          for (const type of ['pointerdown', 'pointerup'])
-            el.dispatchEvent(new PointerEvent(type, { clientX: p.x, clientY: p.y, pointerType: 'touch', bubbles: true }));
-        }, at);
-      else await page.mouse.move(at.x, at.y);
+      await svg.evaluate((el, touch) => {
+        const r = el.getBoundingClientRect();
+        const p = { clientX: r.left + r.width * 0.22, clientY: r.top + r.height * 0.6, bubbles: true };
+        const types = touch ? ['pointerdown', 'pointerup'] : ['pointermove'];
+        for (const type of types) el.dispatchEvent(new PointerEvent(type, { ...p, pointerType: touch ? 'touch' : 'mouse' }));
+      }, vp === 'mobile');
+      // The readout row switches from the total to the bin.
+      await page.locator('#ds-size .readout.at').waitFor({ state: 'visible', timeout: 3000 });
       await page.clock.runFor(300);
     },
   },
@@ -333,6 +393,20 @@ export const scenes = [
     },
   },
   {
+    // Small thumbnails of pastel photos: every class stroke (amber on beige, sky on blue-grey) holds in its 2 px halo.
+    name: 'dataset-images-pastel',
+    path: '/datasets/ds_shapes_hard',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.evaluate(() => localStorage.setItem('folo.datasets.density', 's'));
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.clock.runFor(2000);
+      await page.locator('.cell img.loaded').nth(6).waitFor();
+      await page.waitForTimeout(400);
+    },
+  },
+  {
     name: 'dataset-plain',
     path: '/datasets/ds_fasteners',
     fullPage: false,
@@ -367,18 +441,19 @@ export const scenes = [
     },
   },
   {
-    // A label clicked (selected: bg.active + accent bar, aria-current, the image zoomed to its box) while another
-    // is hovered (a lighter neutral step), so the two states show side by side.
+    // A label clicked (selected: bg.active + accent bar, aria-current, the image zoomed to its box: the box takes the
+    // 3 px accent stroke and the others recede) while another is hovered (a lighter neutral step; its box takes its
+    // class fill and chip), so the two states show side by side.
     name: 'dataset-inspector-selected',
     path: '/datasets/ds_fasteners',
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     fullPage: false,
     setup: async (page) => {
       await page.locator('.cell img.loaded').first().waitFor();
       await page.locator('.cell').nth(1).click();
       await page.locator('dialog[open] .stage img.loaded').waitFor();
       await page.locator('dialog[open] .labels button').nth(0).click();
-      await page.locator('dialog[open] .labels button').nth(2).hover();
+      await page.locator('dialog[open] .labels button').nth(1).hover();
       await page.waitForTimeout(300);
     },
   },
@@ -426,7 +501,8 @@ export const scenes = [
     setup: (page) => until(page, '#pr svg'),
   },
   {
-    // Phones: the Classes section with one class opened (its details row).
+    // Phones: the Classes section (the metrics folded to one line) with one class traced and its details row opened:
+    // two controls per row, the name traces, the chevron opens.
     name: 'model-phone-classes',
     path: '/models/m_fast_n',
     viewports: ['mobile'],
@@ -435,10 +511,26 @@ export const scenes = [
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Classes' }).click();
       await page.locator('#pr button.cls').first().click();
+      await page.locator('#pr button.disc').first().click();
     },
   },
   {
-    // Phones: the Confusion section, with its column range and miss summary.
+    // Phones: a class's "View curve" switched to Curves with the class traced, and the way back to Classes.
+    name: 'model-phone-curve',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.locator('#pr button.disc').nth(2).click();
+      await page.locator('#pr tr.detail button', { hasText: 'View curve' }).click();
+      await until(page, '#pr .legend .back');
+      await page.clock.runFor(500);
+    },
+  },
+  {
+    // Phones: the Confusion section opens on the ranked confusions and misses, the matrix one step away.
     name: 'model-phone-confusion',
     path: '/models/m_fast_n',
     viewports: ['mobile'],
@@ -446,11 +538,24 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Confusion' }).click();
+      await until(page, '#cm .rk');
+    },
+  },
+  {
+    // Phones: "Explore the matrix": the full matrix with its column range, the overview map and the miss summary.
+    name: 'model-phone-matrix',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('button', { name: 'Explore the matrix' }).click();
       await until(page, '#cm .cell');
     },
   },
   {
-    // Phones: a reduced 13-column matrix (top 12 classes + Other) that scrolls sideways.
+    // Phones: a reduced 13-column matrix (top 12 classes + Other) that scrolls sideways, behind "Explore the matrix".
     name: 'model-coco-phone',
     path: '/models/m_coco_s',
     viewports: ['mobile'],
@@ -458,6 +563,7 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('radio', { name: 'Confusion' }).click();
+      await page.getByRole('button', { name: 'Explore the matrix' }).click();
       await until(page, '#cm .cell');
     },
   },
@@ -479,11 +585,11 @@ export const scenes = [
     },
   },
   {
-    // The f16 export finished: a Download button for the file, and where it sits on the server.
+    // The f16 export finished: Download (the primary) for the file, by the name it has on the server.
     name: 'model-export-done',
     path: '/models/m_shapes_s',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       if (vp === 'mobile') {
         await until(page, 'button[aria-label="More model actions"]');
@@ -499,6 +605,28 @@ export const scenes = [
     },
   },
   {
+    // ONNX picked on a server with the export switches: decode, dynamic and half as checkboxes under it.
+    name: 'model-export-onnx-options',
+    path: '/models/m_shapes_s',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] label:has-text("ONNX")').first().click();
+      await until(page, 'dialog[open] .switches');
+      await page.locator('dialog[open] .switches label').first().click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // ONNX has no download endpoint: the dialog says so next to the server path.
     name: 'model-export-onnx',
     path: '/models/m_shapes_s',
@@ -508,7 +636,7 @@ export const scenes = [
       await until(page, 'button:has-text("Export")');
       await page.locator('button:has-text("Export")').first().click();
       await until(page, 'dialog[open] fieldset');
-      await page.locator('dialog[open] label:has-text("ONNX")').click();
+      await page.locator('dialog[open] label:has-text("ONNX")').first().click();
       await page.locator('dialog[open] footer button:has-text("Export")').click();
       await until(page, 'dialog[open] .where');
     },
@@ -545,7 +673,7 @@ export const scenes = [
     name: 'models-engine-how',
     path: '/models',
     fullPage: true,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       // The panel lives in the collapsed Engine benchmarks fold: open that, then its own "How this was measured".
       await until(page, 'details.bench > summary');
@@ -561,7 +689,7 @@ export const scenes = [
     name: 'playground-oom',
     path: '/playground?model=m_shapes_s',
     search: 'scenario=oom',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, 'button.sample');
       await page.locator('button.sample').first().click();
@@ -577,7 +705,7 @@ export const scenes = [
     name: 'playground-no-webgpu',
     path: '/playground?model=m_hard_s',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await page.addInitScript(() => {
         delete (/** @type {any} */ (Navigator.prototype)).gpu;
@@ -624,7 +752,7 @@ export const scenes = [
   {
     name: 'playground-json',
     path: '/playground?model=m_hard_s',
-    viewports: ['desktop'],
+    viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page) => {
       await playgroundResult(page);
       await page.locator('#pg-json').click();
@@ -751,11 +879,11 @@ export const scenes = [
     },
   },
   {
+    // Every group, General to Datasets: two columns where wide, one with an edge shadow on phones.
     name: 'shortcuts-open',
     fullPage: false,
     path: '/runs',
-    themes: ['dark'],
-    viewports: ['desktop'],
+    viewports: ['desktop', 'mobile'],
     setup: async (page) => {
       await page.keyboard.press('Shift+?');
     },
@@ -788,4 +916,61 @@ export const scenes = [
     },
   },
   { name: 'not-found', path: '/nope', viewports: ['desktop', 'mobile'] },
+  {
+    // Thumbnails still loading: a raised fill with faint viewfinder corners, not a flat dark photo.
+    name: 'dataset-images-loading',
+    path: '/datasets/ds_fasteners',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      // Hold every image at "loading" (a src that never arrives), then ask the grid for a fresh set of thumbnails.
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.evaluate(() => {
+        Object.defineProperty(HTMLImageElement.prototype, 'src', { set() {}, get: () => '', configurable: true });
+        const set = Element.prototype.setAttribute;
+        Element.prototype.setAttribute = function (name, value) {
+          if (!(this instanceof HTMLImageElement && name === 'src')) set.call(this, name, value);
+        };
+      });
+      await page.goto(page.url().replace('ds_fasteners', 'ds_shapes_hard'));
+      await until(page, '.dsimg[aria-busy="true"] .cover');
+    },
+  },
+  {
+    // Connection says what it means ("Using demo data", "Leave blank to use this server"); the mechanics are folded.
+    name: 'settings-connection-details',
+    path: '/settings',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.locator('details.tech summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
+    name: 'shortcuts-off',
+    path: '/settings',
+    fullPage: false,
+    themes: ['light'],
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('switch', { name: /Single-key shortcuts/ }).click({ force: true });
+      await page.getByRole('button', { name: 'Show shortcuts' }).click();
+      await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    // Phones: two runs picked; Compare sits in the list's own header row, by the checkboxes.
+    name: 'runs-compare-phone',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, '.rows li');
+      await page.getByRole('button', { name: 'Select to compare' }).click();
+      await page.locator('.rows li .r-check').nth(1).click();
+      await page.locator('.rows li .r-check').nth(2).click();
+    },
+  },
 ];
