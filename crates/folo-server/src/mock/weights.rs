@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use axum::body::Bytes;
-use folo_api::{Head, Model};
+use folo_api::{Head, Model, ModelPrecision};
 use folo_core::rng::Rng;
 use folo_nn::io::{FloatDType, ModelConfig, ModelFile, write_weights};
 use folo_vision::FoloModel;
@@ -32,9 +32,10 @@ impl MockWeights {
         MockWeights { born: SystemTime::now(), files: Mutex::default() }
     }
 
-    /// The weights of `model` in `format`.
+    /// The weights of `model` in `format`. An f16 model's stored file is the f16 export, as for a real one.
     pub(super) fn get(&self, model: &Model, format: WeightsFormat) -> Result<Weights> {
-        let (bytes, etag) = self.file(&model.classes, model.imgsz, model.head, format)?;
+        let file = if model.precision == Some(ModelPrecision::F16) { WeightsFormat::F16 } else { format };
+        let (bytes, etag) = self.file(&model.classes, model.imgsz, model.head, file)?;
         Ok(Weights {
             len: bytes.len() as u64,
             body: WeightsBody::Bytes(bytes),
