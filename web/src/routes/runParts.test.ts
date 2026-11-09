@@ -18,8 +18,9 @@ describe('Compare: startFrom', () => {
 
 describe('Run metrics: lrParts', () => {
   it('splits a learning rate into a short value and its power of ten', () => {
-    expect(lrParts(3.42e-4)).toEqual({ value: '3.42', unit: '× 10⁻⁴' });
-    expect(lrParts(0.01)).toEqual({ value: '1.00', unit: '× 10⁻²' });
+    expect(lrParts(3.42e-4)).toEqual({ value: '3.42', unit: '× 10⁻⁴', exp: '−4' });
+    expect(lrParts(0.01)).toEqual({ value: '1.00', unit: '× 10⁻²', exp: '−2' });
+    expect(lrParts(25)).toEqual({ value: '2.50', unit: '× 10¹', exp: '1' });
     expect(lrParts(null)).toEqual({ value: '—' });
     expect(lrParts(0)).toEqual({ value: '0' });
   });

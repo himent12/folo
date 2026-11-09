@@ -6,6 +6,7 @@
   import Button from '$lib/ui/Button.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
+  import { logPieces } from './logTokens';
 
   let { logs, version, live }: { logs: LogLine[]; version: number; live: boolean } = $props();
 
@@ -62,7 +63,10 @@
       <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable region must be keyboard reachable) -->
       <div class="log" bind:this={box} {onscroll} role="log" aria-live={live ? 'polite' : 'off'} aria-label="Training log" tabindex="0">
         {#each shown as l, i (i)}
-          <p class="line {l.level}"><span class="t">{clock(l.t)}</span><span class="lv">{l.level}</span><span class="m">{l.message}</span></p>
+          <!-- The message wraps only at spaces, each `key value` pair and flag whole (./logTokens). -->
+          <p class="line {l.level}"><span class="t">{clock(l.t)}</span><span class="lv">{l.level}</span><span class="m"
+              >{#each logPieces(l.message) as p, j (j)}{#if p.space}{p.text}{:else}<span class="w" class:long={p.long}>{p.text}</span>{/if}{/each}</span
+            ></p>
         {:else}
           <p class="empty">No log lines{level !== 'all' ? ` at ${level} level` : ''} yet.</p>
         {/each}
@@ -100,7 +104,15 @@
     gap: var(--space-3);
     padding: 0 var(--space-4);
   }
+  /* Wrap at spaces only: a piece (a word, a `key value` pair, a flag and its value) never breaks inside, except one
+     too long for any line, as a last resort. */
   .m {
+    white-space: pre-wrap;
+  }
+  .w {
+    white-space: nowrap;
+  }
+  .w.long {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }

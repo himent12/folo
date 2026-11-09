@@ -1,6 +1,7 @@
 // Fitted y domains for run charts. A domain is "nice" (it ends on a tick) and is re-fitted at most once per epoch, so
 // a live chart never jitters as steps arrive (web/DESIGN_DIRECTION.md §2.9). Values are never tweened. Every y axis
-// holds 3–5 ticks (§2.4): more gridlines read as a texture rather than a scale.
+// holds 3–5 ticks (§2.4): more gridlines read as a texture rather than a scale. A log axis is the exception: its 1-2-5
+// values sit unevenly, so up to six of them still read as a scale (MAX_LOG_TICKS).
 
 export interface Fit {
   domain: [number, number];
@@ -103,8 +104,15 @@ export function capTicks(lo: number, hi: number, max = MAX_TICKS): number[] {
 }
 
 /**
- * Log ticks: the 1-2-5 values in the domain when at most MAX_TICKS of them fit; otherwise the outermost of them and the powers of ten
- * between them (every other power if those are still too many), so the scale reads in decades and both ends are named.
+ * The most labels a log axis takes: its 1-2-5 values sit at uneven spacing, so six of them (0.2 · 0.5 · 1 · 2 · 5 · 10)
+ * still read as a scale where six linear gridlines would read as a texture.
+ */
+export const MAX_LOG_TICKS = 6;
+
+/**
+ * Log ticks: the 1-2-5 values in the domain when at most MAX_LOG_TICKS of them fit; otherwise the outermost of them and
+ * the powers of ten between them (every other power if those are still too many), so the scale reads in decades and
+ * both ends are named.
  */
 export function logTicks(lo: number, hi: number): number[] {
   // A log axis needs a positive, finite range.
@@ -118,16 +126,16 @@ export function logTicks(lo: number, hi: number): number[] {
       all.push(v);
       if (m === 1) decades.push(v);
     }
-  if (all.length <= MAX_TICKS) return all;
+  if (all.length <= MAX_LOG_TICKS) return all;
   const ends = (inner: number[]) => [...new Set([all[0]!, ...inner, all[all.length - 1]!])].sort((a, b) => a - b);
   let t = ends(decades);
-  for (let k = 2; t.length > MAX_TICKS; k++) t = ends(decades.filter((_, i) => i % k === 0));
+  for (let k = 2; t.length > MAX_LOG_TICKS; k++) t = ends(decades.filter((_, i) => i % k === 0));
   return t;
 }
 
 /**
  * The unlabelled gridlines of a log axis: the 1-2-5 values in the domain that `logTicks` leaves without a label, so a
- * decade-labelled axis (0.2, 1, 10) still shows its 0.5, 2 and 5 and reads as a scale, not three uneven ticks.
+ * decade-labelled axis (0.01, 0.1, 1, 10) still shows its 2s and 5s and reads as a scale, not a few uneven ticks.
  */
 export function logMinors(lo: number, hi: number): number[] {
   const labelled = new Set(logTicks(lo, hi));

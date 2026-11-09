@@ -12,7 +12,8 @@
   /**
    * The loss chart's one control: a compact button naming the current view ("EMA 0.9 · Log") that opens a small panel
    * with the two choices behind it, smoothing and y scale, as native radio groups (arrow keys move within a group, Tab
-   * between them). Escape or a click outside closes it and focus returns to the button.
+   * between them). Escape or a click outside closes it and focus returns to the button. On phones the panel is a bottom
+   * sheet over a scrim, like the other phone menus, so it never floats over the chart's legend.
    */
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Check from '@lucide/svelte/icons/check';
@@ -96,7 +97,11 @@
     <ChevronDown size={14} strokeWidth={1.75} aria-hidden="true" />
   </button>
   {#if open}
+    <!-- Phones: the scrim behind the sheet; a tap on it closes the sheet. -->
+    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions (Escape closes it too) -->
+    <div class="scrim" aria-hidden="true" onclick={() => hide()}></div>
     <div class="panel" id="{uid}-panel" role="dialog" aria-label="Loss view" tabindex="-1">
+      <p class="sheet-title" aria-hidden="true">Loss view</p>
       {@render group('smoothing', 'Smoothing', SMOOTHING, smoothing, (v) => (smoothing = v as Smoothing))}
       {@render group('scale', 'Y scale', SCALE, scale, (v) => (scale = v as Scale))}
     </div>
@@ -155,8 +160,11 @@
     margin: 0;
     min-width: 0;
   }
-  fieldset + fieldset {
-    padding-top: var(--space-1);
+  /* A hairline between the groups, on the second one's caption (a fieldset's own border would run through it). */
+  fieldset + fieldset legend {
+    width: 100%;
+    margin-top: var(--space-1);
+    padding-top: var(--space-2);
     border-top: 1px solid var(--line-subtle);
   }
   legend {
@@ -194,20 +202,13 @@
     outline: 2px solid var(--focus);
     outline-offset: -2px;
   }
-  /* The chosen option: the one selection rule (bg.active and a 2 px accent bar), plus a check mark. */
+  /* The chosen option of a radio group in a menu: its check mark, in ink (the lime bar is for selected rows in lists). */
   .opt.on {
-    background: var(--bg-active);
     color: var(--text-primary);
   }
-  .opt.on::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 4px;
-    bottom: 4px;
-    width: 2px;
-    border-radius: 1px;
-    background: var(--accent-line);
+  .scrim,
+  .sheet-title {
+    display: none;
   }
   @media (pointer: coarse) {
     .trigger {
@@ -221,6 +222,50 @@
     from {
       opacity: 0;
       transform: translateY(-2px);
+    }
+  }
+  @media (max-width: 767px) {
+    /* Phones: a bottom sheet over a scrim (as Dialog's phone sheets), clear of the home indicator. */
+    .scrim {
+      display: block;
+      position: fixed;
+      inset: 0;
+      z-index: var(--z-dialog);
+      background: var(--bg-scrim);
+      animation: fade var(--dur-slow) var(--ease-out);
+    }
+    .panel {
+      position: fixed;
+      top: auto;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: var(--z-dialog);
+      min-width: 0;
+      padding: var(--space-2) var(--space-2) calc(var(--space-4) + env(safe-area-inset-bottom));
+      border-width: 1px 0 0;
+      border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+      box-shadow: var(--shadow-lg);
+      animation: sheet var(--dur-slow) var(--ease-out);
+    }
+    .sheet-title {
+      display: block;
+      padding: var(--space-2) var(--space-3) var(--space-1);
+      font-size: var(--type-md-size);
+      line-height: var(--type-md-line);
+      font-weight: var(--weight-medium);
+      color: var(--text-primary);
+    }
+  }
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes sheet {
+    from {
+      opacity: 0;
+      transform: translateY(24px);
     }
   }
 </style>

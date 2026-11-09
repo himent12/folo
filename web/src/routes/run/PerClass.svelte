@@ -49,8 +49,9 @@
           <tr>
             <th>Class</th>
             <th class="r">AP50-95</th>
-            <!-- The symbol keeps the header on one line at every width; the full name is its tooltip and accessible name. -->
-            <th class="r delta-h" use:tooltip={'Change in AP50-95 since the previous epoch'}><span aria-hidden="true">Δ</span><span class="sr-only">Change in AP50-95 since the previous epoch</span></th>
+            <!-- "Δ prev" keeps the header short and on one line at every width; the full name is its tooltip and
+                 accessible name. -->
+            <th class="r delta-h" use:tooltip={'Change since the previous epoch'}><span aria-hidden="true">Δ prev</span><span class="sr-only">Change since the previous epoch</span></th>
             <th class="bar-col"><span class="sr-only">AP50-95 bar</span></th>
             {#if !compact}
               <th class="r">AP50</th>
@@ -121,9 +122,9 @@
     color: var(--text-tertiary);
   }
   .bar-col {
-    width: 30%;
+    width: 28%;
     /* Low enough that the table fits the rail at 960 px (about 278 px wide). */
-    min-width: 48px;
+    min-width: 40px;
   }
   .bar {
     display: block;

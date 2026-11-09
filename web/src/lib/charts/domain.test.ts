@@ -75,16 +75,18 @@ describe('capTicks', () => {
 describe('logTicks', () => {
   it('keeps the 1-2-5 ticks when they fit, else the ends and the decades', () => {
     expect(logTicks(1, 10)).toEqual([1, 2, 5, 10]);
-    // The loss chart's 0.2–10: six 1-2-5 values would be six gridlines; both ends and the decade between stay.
-    expect(logTicks(0.2, 10)).toEqual([0.2, 1, 10]);
+    // The loss chart's 0.2–10: all six 1-2-5 values are labelled, each with its gridline.
+    expect(logTicks(0.2, 10)).toEqual([0.2, 0.5, 1, 2, 5, 10]);
+    // Seven or more: both ends and the decades between.
     expect(logTicks(0.1, 100)).toEqual([0.1, 1, 10, 100]);
     expect(logTicks(0.001, 1000)).toEqual([0.001, 0.1, 10, 1000]);
-    // A domain that is not on a 1-2-5 value is labelled at the outermost ones inside it.
-    expect(logTicks(0.15, 12)).toEqual([0.2, 1, 10]);
+    // A domain that is not on a 1-2-5 value is labelled at the ones inside it.
+    expect(logTicks(0.15, 12)).toEqual([0.2, 0.5, 1, 2, 5, 10]);
   });
 
   it('keeps the unlabelled 1-2-5 values as minor gridlines', () => {
-    expect(logMinors(0.2, 10)).toEqual([0.5, 2, 5]);
+    expect(logMinors(0.2, 10)).toEqual([]);
+    expect(logMinors(0.01, 10)).toEqual([0.02, 0.05, 0.2, 0.5, 2, 5]);
     expect(logMinors(1, 10)).toEqual([]);
     expect(logMinors(0.1, 100)).toEqual([0.2, 0.5, 2, 5, 20, 50]);
     expect(logMinors(0, 1)).toEqual([]);
