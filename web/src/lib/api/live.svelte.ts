@@ -184,6 +184,10 @@ export class LiveRun {
         }
         this.logs = mergeLogs(logs.lines, this.logs);
         this.loading = false;
+        // The history just applied is current: no longer "last known" (DESIGN_DIRECTION §2.8).
+        this.#heard = Date.now();
+        // Still down (a retry of the load got through): the view is last known as of now.
+        if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? this.#heard : null;
         this.#bump();
       };
 
@@ -211,8 +215,10 @@ export class LiveRun {
           if (s === 'open') {
             clearTimeout(lostTimer);
             lostTimer = undefined;
-            this.#heard = Date.now();
-            this.lost = null;
+            // A stream that was lost is open again, but what the view holds is still from before the outage: it stays
+            // "last known" until the reconnect's history load applies or the stream reports progress (a step, a
+            // status), not merely because the connection came back.
+            if (this.lost === null) this.#heard = Date.now();
           } else if (s === 'reconnecting' && this.lost === null && lostTimer === undefined) {
             // Timed from the first error: EventSource reports one per failed retry, which must not restart the grace.
             const heard = this.#heard;
@@ -225,6 +231,7 @@ export class LiveRun {
         status: ({ status, error, steps_per_epoch, epochs }) => {
           if (closed) return;
           this.#heard = Date.now();
+          this.lost = null;
           this.#statusSeq++;
           this.#lastStatus = { status, error };
           // Finished → active again: the run was resumed (here or elsewhere).
@@ -265,6 +272,7 @@ export class LiveRun {
         step: (s) => {
           if (closed) return;
           this.#heard = Date.now();
+          this.lost = null;
           const last = this.steps[this.steps.length - 1];
           if (this.#replay) {
             // The new attempt's step: it replaces whatever is held from it on (the server's rule).

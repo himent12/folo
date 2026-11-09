@@ -86,13 +86,43 @@ describe('LiveRun ordering', () => {
     expect(live.lost).toBeNull();
     await vi.advanceTimersByTimeAsync(1000);
     expect(live.lost).toBe(heard);
+    // Back, but what the view holds is from before the outage until the reconnect's history load applies; a slow
+    // (or failing) load keeps it last known.
+    metrics = deferred<RunMetrics>();
     handlers.connection?.('open');
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(live.lost).toBe(heard);
+    metrics.resolve({ steps: [step(1), step(2), step(3), step(4)], epochs: [] });
+    await vi.advanceTimersByTimeAsync(0);
     expect(live.lost).toBeNull();
     // A blip shorter than the grace never shows.
     handlers.connection?.('reconnecting');
     await vi.advanceTimersByTimeAsync(STREAM_GRACE_MS - 100);
     handlers.connection?.('open');
     await vi.advanceTimersByTimeAsync(1000);
+    expect(live.lost).toBeNull();
+    stop();
+  });
+
+  it('calls a reopened stream current again on its first step, even while the history load is still pending', async () => {
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_7d1e');
+    });
+    flushSync();
+    metrics.resolve({ steps: [], epochs: [] });
+    handlers.connection?.('open');
+    await vi.advanceTimersByTimeAsync(0);
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(STREAM_GRACE_MS);
+    expect(live.lost).not.toBeNull();
+    metrics = deferred<RunMetrics>();
+    handlers.connection?.('open');
+    handlers.reconnect?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.lost).not.toBeNull();
+    handlers.step?.(step(9));
     expect(live.lost).toBeNull();
     stop();
   });

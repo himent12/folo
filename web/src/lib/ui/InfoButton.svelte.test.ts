@@ -62,6 +62,36 @@ describe('InfoButton', () => {
     done();
   });
 
+  it('stays on screen when its fold opens: placed again, scrolling within the room it has', () => {
+    const { button, done } = setup({ text: 'Loss: how wrong the model is.', how: 'A long method.' });
+    const pop = document.getElementById(button.getAttribute('aria-controls')!)!;
+    // A 600 px tall window, the button low on it; the popover 120 px tall, 500 px once its fold is open.
+    const inner = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 600 });
+    let natural = 120;
+    const rect = (x: number, y: number, w: number, h: number) => ({ x, y, left: x, top: y, width: w, height: h, right: x + w, bottom: y + h }) as DOMRect;
+    button.getBoundingClientRect = () => rect(300, 400, 24, 24);
+    pop.getBoundingClientRect = () => rect(0, 0, 320, pop.style.maxHeight ? parseFloat(pop.style.maxHeight) : natural);
+    flushSync();
+    button.click();
+    flushSync();
+    const y = () => Number(pop.style.translate.split(' ')[1]!.replace('px', ''));
+    expect(y()).toBeGreaterThanOrEqual(424);
+    expect(pop.style.maxHeight).toBe('');
+    natural = 500;
+    const fold = pop.querySelector('details')!;
+    fold.open = true;
+    fold.dispatchEvent(new Event('toggle'));
+    const height = parseFloat(pop.style.maxHeight);
+    expect(height).toBeLessThan(500);
+    expect(y()).toBeGreaterThanOrEqual(0);
+    expect(y() + height).toBeLessThanOrEqual(600);
+    // Above the button (the side with more room), its foot by the button.
+    expect(y() + height).toBeLessThanOrEqual(400);
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: inner });
+    done();
+  });
+
   it('drives an inline disclosure the page renders (Model’s metric help)', () => {
     const region = document.createElement('dl');
     region.id = 'metric-help';

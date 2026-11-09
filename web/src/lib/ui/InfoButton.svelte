@@ -78,11 +78,22 @@
   /** Puts the open popover next to its button (fixed coordinates, set before the frame paints). */
   function place() {
     if (!pop || !open) return;
+    // Measured at its natural height (the open fold may have made it taller), keeping where its own scroll was.
+    const scrolled = pop.scrollTop;
+    pop.style.maxHeight = '';
     const r = btn.getBoundingClientRect();
     const t = pop.getBoundingClientRect();
     // The tooltip's bounds, 12 px further in: a card keeps the page's 16 px gutter on a phone and a panel's padding.
     const b = boundsFor(btn, t.width + 24);
     const p = placeTip(r, t, side, { ...b, left: b.left + 12, right: b.right - 12 });
+    // Taller than the room on either side: it keeps the side and scrolls within what fits (above: its foot stays by
+    // the button).
+    const over = Math.max(0, p.y + t.height - b.bottom, b.top - p.y);
+    if (over > 0) {
+      pop.style.maxHeight = `${Math.floor(t.height - over)}px`;
+      if (p.side === 'top') p.y += over;
+    }
+    pop.scrollTop = scrolled;
     pop.style.translate = `${p.x}px ${p.y}px`;
   }
 
@@ -192,7 +203,8 @@
   {#if how}
     <!-- Closed each time the definition opens: the short line is what most readers need. -->
     {#key open}
-      <details class="info-how">
+      <!-- Opening the fold makes the popover taller: placed again, so it stays on screen (it scrolls past the viewport). -->
+      <details class="info-how" ontoggle={place}>
         <summary>{howLabel}</summary>
         <span class="info-how-body">{#if typeof how === 'string'}{how}{:else}{@render how()}{/if}</span>
       </details>
@@ -263,7 +275,8 @@
     font-weight: var(--weight-regular);
     text-align: left;
     white-space: normal;
-    overflow: visible;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     z-index: var(--z-tooltip);
   }
   .info-text {
