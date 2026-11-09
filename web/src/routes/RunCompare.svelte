@@ -687,7 +687,7 @@
   .chip:hover {
     border-color: var(--line-strong);
   }
-  /* The run kept in front: the one selection rule (bg.active and a 2 px accent bar). */
+  /* The run kept in front: the one selection rule (bg.active and the 2 px ink bar). */
   .chip.pinned {
     background: var(--bg-active);
   }
@@ -699,7 +699,7 @@
     bottom: -1px;
     width: 2px;
     border-radius: var(--radius-md) 0 0 var(--radius-md);
-    background: var(--accent-line);
+    background: var(--text-primary);
   }
   /* The legend entry is the toggle: key and name, over both lines of the card. */
   .key {

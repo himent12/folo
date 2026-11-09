@@ -462,7 +462,7 @@
     width: 14px;
     height: 14px;
     margin: 0;
-    /* Neutral: a selected row's lime is its leading bar alone (the fill is ink, the check inverted). */
+    /* Neutral: a selected row is marked in ink: its leading bar, the fill and the inverted check. */
     accent-color: var(--text-primary);
     cursor: pointer;
   }
@@ -611,7 +611,7 @@
     }
     .rows li.on {
       background: var(--bg-active);
-      box-shadow: inset 2px 0 0 var(--accent-line);
+      box-shadow: var(--select-bar);
     }
     /* The ⋯ slot: on every row while any row has a menu (empty where it has none), so values share one right edge. */
     .r-menu {

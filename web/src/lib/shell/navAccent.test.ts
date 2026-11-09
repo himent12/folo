@@ -26,4 +26,11 @@ describe('navigation', () => {
     expect(css).toContain('--bg-active');
     expect(css).not.toContain('--accent');
   });
+
+  it('marks a selected list row with the ink bar, never the accent (the shared selection rule in base.css)', () => {
+    const base = readFileSync(resolve(process.cwd(), 'src/lib/design/base.css'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const rule = base.match(/:where\(\.table\) tbody tr:is\(\.on, \[aria-selected='true'\]\) > :first-child \{[^}]*\}/)?.[0] ?? '';
+    expect(rule).toContain('var(--select-bar)');
+    expect(rule).not.toContain('--accent');
+  });
 });

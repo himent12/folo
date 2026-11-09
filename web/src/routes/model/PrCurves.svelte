@@ -4,7 +4,7 @@
    * Precision-recall curves with the per-class table as their legend. Every class is a 1 px context line
    * (`--chart-context`, >= 3:1 on the panel) and the mean over all classes a heavier line in ink; many classes are a
    * percentile band instead, so 80 classes read as one shape instead of spaghetti. Hovering a table row gives its curve
-   * the class hue, clicking keeps it highlighted (the selection rule: bg.active and a 2 px accent bar), and a line
+   * the class hue, clicking keeps it highlighted (the selection rule: bg.active and the 2 px ink bar), and a line
    * above the table says so and offers Clear. The legend row above the plot is the readout. Phones hide the precision
    * and recall columns: each row has two controls there, the class name traces its curve (`aria-pressed`) and the
    * chevron opens a details row with those two at their operating point (`aria-expanded`); "View curve"
@@ -468,7 +468,7 @@
     overflow-x: auto;
     border-top: 1px solid var(--line-subtle);
   }
-  /* The selection rule: a neutral bg.active fill and a 2 px accent bar on the row's leading edge. Hover is a lighter
+  /* The selection rule: a neutral bg.active fill and the 2 px ink bar on the row's leading edge. Hover is a lighter
      neutral step, and adds to the fill of a selected row, so the two stay distinct. */
   tr.hot {
     background: var(--bg-hover);
@@ -480,7 +480,7 @@
     background: linear-gradient(var(--bg-hover), var(--bg-hover)), var(--bg-active);
   }
   tr.on td:first-child {
-    box-shadow: inset 2px 0 0 var(--accent-line);
+    box-shadow: var(--select-bar);
   }
   /* The heading starts where the names do, past the swatch (8 px) and its gap (8 px). */
   .cls-h {
@@ -556,7 +556,7 @@
   }
   tr.detail.on td {
     box-shadow:
-      inset 2px 0 0 var(--accent-line),
+      var(--select-bar),
       inset 0 1px 0 var(--line-subtle);
   }
   .detail dl {

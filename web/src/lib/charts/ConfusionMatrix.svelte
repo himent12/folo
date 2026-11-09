@@ -485,10 +485,11 @@
   .cell.zero.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
-  /* The active cell (tapped, or pointed at from a summary): a selection stroke; keyboard focus has its own ring. */
+  /* The active cell (tapped, or pointed at from a summary): the selection's 2 px ink stroke (never lime, §2.7);
+     keyboard focus has its own ring. */
   .cell.pin:not(:focus-visible) {
     box-shadow:
-      inset 0 0 0 2px var(--accent-line),
+      inset 0 0 0 2px var(--text-primary),
       inset 0 0 0 3px var(--bg-panel);
   }
   /* Low cells sit near the well, high cells near the ink; the label takes the far extreme (labelHigh in ./confusionInk). */

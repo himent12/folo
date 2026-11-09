@@ -1349,16 +1349,16 @@
   .arch:hover {
     border-color: var(--line-strong);
   }
-  /* Selection: a strong edge on a neutral fill and a small ink check; lime stays for the Start button and focus.
-     (bg.selected is lime-tinted, for selected rows; a chosen card is a static choice, so it stays neutral.) */
+  /* Selection: a strong edge on a neutral fill and a small ink check; lime stays for the Start button and focus,
+     never a selection state (DESIGN_DIRECTION §2.7). */
   .card.on {
     border-color: var(--line-strong);
     background: var(--bg-active);
   }
-  /* A model size is a row in a list: the one selection rule, bg.active and a 2 px accent bar, plus the check. */
+  /* A model size is a row in a list: the one selection rule, bg.active and the 2 px ink bar, plus the check. */
   .arch.on {
     background: var(--bg-active);
-    box-shadow: inset 2px 0 0 var(--accent-line);
+    box-shadow: var(--select-bar);
   }
   .tick {
     display: grid;
