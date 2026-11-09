@@ -160,7 +160,10 @@ impl FoloApp {
                                     .dataset_summary(&r.config.dataset_id)
                                     .map_or(r.config.dataset_id.clone(), |d| d.name.clone())
                             })
-                            .map_or("Evaluation dataset unknown".to_string(), |d| format!("on {d}"));
+                            .map_or("Evaluation dataset unknown".to_string(), |d| format!("on {d}"))
+                            // Then the weights as stored, so an f16 export reads as one by its record,
+                            // not its name.
+                            + &model_storage(m).map_or(String::new(), |s| format!(" · {s}"));
                         let row = cols(div().id(SharedString::from(key.clone())))
                             .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 48.)))
                             .h(px(48.))
@@ -288,9 +291,11 @@ impl FoloApp {
             });
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
-                "{} px · {} classes{} · created {created}",
+                "{} px · {} classes{}{} · created {created}",
                 m.imgsz,
                 m.classes.len(),
+                // The weights as stored (precision, fused), when the record says.
+                model_storage(&m).map_or(String::new(), |s| format!(" · {s} weights")),
                 // How it was trained, when the record says (`trained_with`; exports have none).
                 if m.trained_with.is_some_and(|w| w.amp) { " · trained in f16" } else { "" },
             )));

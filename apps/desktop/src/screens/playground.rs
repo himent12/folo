@@ -625,9 +625,10 @@ impl FoloApp {
                     // What's running, without opening the menu: architecture, input size and head.
                     .when_some(model.as_ref(), |d, m| {
                         d.child(text(ty::XS, t.text_tertiary).child(format!(
-                            "{} · {} px · {}",
+                            "{} · {} px{} · {}",
                             m.arch.as_str(),
                             m.imgsz,
+                            model_storage(m).map_or(String::new(), |s| format!(" · {s}")),
                             if e2e { "end-to-end, no NMS" } else { "boxes filtered by NMS" }
                         )))
                     })
