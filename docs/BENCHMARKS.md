@@ -175,6 +175,39 @@ launch-bound there.
 Note on f32: PyTorch's default fp32 lets cuDNN use TF32 for convolutions. A strict-f32 FOLO kernel should be compared
 against the `fp32-strict` rows. The default-fp32 rows are what users actually get from the incumbent.
 
+## Accuracy
+
+Speed only counts at comparable accuracy, so this section tracks FOLO's accuracy on real data.
+
+**COCO val2017** ([examples/coco](../examples/coco/README.md); `folo val --coco`, pycocotools-exact, cross-checked on
+the same detections with pycocotools itself, all 12 stats equal to 6e-16). folo-n trained from scratch for 50 epochs
+(8.7 h on the RTX 4080 SUPER), uploaded as `folo-n-coco` (draft release `weights-v1`):
+
+| model | params | training | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| folo-n, f32 | 2.6 M | **50 epochs from scratch**, FOLO trainer | **0.314** | 0.455 | 0.339 | 0.144 | 0.335 | 0.458 |
+| folo-n, f16 (`--half`) | 2.6 M | the same weights | 0.314 | 0.455 | 0.339 | 0.144 | 0.335 | 0.458 |
+| YOLO11n (Ultralytics, published) | 2.6 M | Ultralytics recipe (not given on its model page) | 0.395 | | | | | |
+| YOLO26n (Ultralytics, published) | 2.4 M | 150 epochs Objects365-v1, then 245 epochs COCO, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.409 (e2e 0.401) | | | | | |
+
+**This is not like for like:** YOLO26n's number comes from more data (Objects365 pretraining), a longer schedule and a
+tuned recipe (YOLO11n's is not documented on its model page), and the architectures differ. The gap cannot be split
+into those causes. The FOLO run ended
+at its schedule's floor, not at a plateau: mAP50-95 rose every epoch, by 0.0009 per epoch over the last five. The
+comparison FOLO still owes is an equal-budget one. Until that run exists, FOLO's accuracy
+on COCO is **behind the published nano models by 0.08–0.10 AP**, and the speed rows above should be read with that
+in mind.
+
+**Transfer: R6** ([examples/r6](../examples/r6/README.md#fine-tuning-from-coco), 2 classes, 2030 train frames,
+`folo val` mAP50-95 of `best.folo` at 640 px). Fine-tuning from `folo-n-coco` against the same budget from scratch:
+
+| folo-n, 100 epochs | r6-clean test | r6-fresh (held out) |
+|---|---:|---:|
+| from scratch | 0.350 | 0.118 |
+| from `folo-n-coco` | **0.441** | **0.201** |
+| from scratch, 410 epochs | 0.397 | 0.130 |
+| Ultralytics YOLO26, COCO-pretrained, 1280 px (r6yolo README, not one to one) | 0.45–0.58 | 0.40–0.565 |
+
 ## FOLO on the GPU
 
 `cargo bench -p folo-vision --bench gpu` ([`crates/folo-vision/benches/gpu.rs`](../crates/folo-vision/benches/gpu.rs);

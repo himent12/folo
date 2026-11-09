@@ -4,6 +4,8 @@ A real-data run on the GPU trainer: folo-n (and folo-s, [below](#folo-s)) traine
 `r6-clean` dataset (YOLO format, classes `0 body`, `1 Head`; 2030 train / 203 val / 93 test frames of 1080p gameplay,
 of which only about 756 train frames are unique), evaluated on its test split and on the held-out `r6-fresh` set
 (291 frames from 10 YouTube channels that appear nowhere in the training pool; **test only, never trained on**).
+[Fine-tuning from COCO](#fine-tuning-from-coco) starts folo-n from the COCO-pretrained `folo-n-coco` instead and
+reaches 0.441 on r6-clean test and 0.201 on r6-fresh in 100 epochs.
 
 The datasets live outside the repo (`C:\Users\himent\Documents\r6yolo\data`, read-only); the run used copies on
 `D:/folo-data/r6/` (with the absolute `path:` line removed from the copy of `r6-fresh/data.yaml`).
@@ -113,6 +115,70 @@ On 756 unique frames the larger model barely moves the r6-clean numbers: test mA
 somewhat better to the new footage: r6-fresh rises from 0.130 to 0.148, with Heads from 0.053 to 0.079, and precision
 at the operating point improves from 0.36 to 0.54. As with folo-n, the ceiling here is the data and the 640 input, not
 the model size. The pretrained YOLO26s fine-tuned at 1280 reaches 0.547 on r6-clean test.
+
+## Fine-tuning from COCO
+
+The same folo-n, started from the COCO-pretrained `folo-n-coco` (examples/coco: 50 epochs from scratch on COCO,
+val2017 AP 0.314) instead of random weights. The control trains from scratch with the same flags, seed and budget:
+**100 epochs each**.
+
+```sh
+folo weights pull folo-n-coco                     # draft release weights-v1 (examples/coco, Publish)
+cargo folo train --data D:/folo-data/r6/r6-clean --weights folo-n-coco --imgsz 640 --epochs 100 --batch 16 --seed 0 \
+  --device gpu:0 --workers 12 --project D:/folo-data/runs-r6-coco --name r6-coco-ft-100
+cargo folo train --data D:/folo-data/r6/r6-clean --model folo-n --imgsz 640 --epochs 100 --batch 16 --seed 0 \
+  --device gpu:0 --workers 12 --project D:/folo-data/runs-r6-coco --name r6-scratch-100
+# evaluated like the runs above: folo val --model <run>/weights/best.folo --data D:/folo-data/r6/<r6-clean|r6-fresh> --split test
+```
+
+100 epochs is short enough that `auto` picks AdamW at lr0 0.001667 for both (3200 optimizer steps ≤ 10,000), with
+100 warmup steps and mosaic closed for the last 10 epochs. `--weights folo-n-coco` resolves the name to the pulled
+file in `~/.folo/weights/` and logs `transferred 366 of 417 tensors`. The backbone, neck and box branch come from
+COCO, and so does the class branch's first depthwise conv (`dw0`, which only depends on the input channels). The rest
+of the class branch starts fresh, not just its last layer. Its width is `max(C_P3, min(nc, 100))` (docs/MODEL.md), 80
+for COCO and 64 for R6's two classes, so `pw0`, `dw1`, `pw1` (each a conv and its BatchNorm) and `out` change shape:
+17 tensors per level, all 51 skipped tensors. Ultralytics' Detect head has the same width rule, so its shape-matched
+transfer skips the corresponding layers.
+
+2026-11-08 on the RTX 4080 SUPER, about 44 min of epochs each (13–37 s per epoch, loader-bound on a shared CPU). The
+two started side by side, but together they filled the card's memory (15.7 of 16 GB) and slowed to 100–230 s per
+epoch. The
+fine-tune was stopped after epoch 7 (`folo stop`), resumed bit-exactly from `last.folo` after the control had finished,
+and ran alone from then on. Neither run is affected in its results, only in its wall clock.
+
+| epoch | from scratch: val mAP50 | val mAP50-95 | from folo-n-coco: val mAP50 | val mAP50-95 |
+|---:|---:|---:|---:|---:|
+| 1 | 0.000 | 0.000 | 0.498 | 0.266 |
+| 5 | 0.191 | 0.080 | 0.633 | 0.361 |
+| 10 | 0.345 | 0.165 | 0.673 | 0.394 |
+| 25 | 0.552 | 0.300 | 0.697 | 0.401 |
+| 50 | 0.631 | 0.367 | 0.728 | 0.434 |
+| 75 | 0.646 | 0.374 | 0.743 | 0.446 |
+| 83 | 0.644 | 0.367 | **0.755** | **0.453** (best) |
+| 89 | **0.659** | **0.380** (best) | 0.759 | 0.443 |
+| 100 | 0.644 | 0.373 | 0.754 | 0.446 |
+
+The fine-tune reaches val mAP50-95 0.35 at epoch 5; the from-scratch run gets there at epoch 45. After one epoch it is
+already where the from-scratch run is at epoch 18.
+
+| best.folo (EMA, 640 px) | r6-clean test mAP50 | mAP50-95 | body | Head | r6-fresh (held out) mAP50 | mAP50-95 | body | Head | fresh P / R |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| from scratch, 100 epochs | 0.657 | 0.350 | 0.458 | 0.241 | 0.265 | 0.118 | 0.189 | 0.047 | 0.411 / 0.299 |
+| from scratch, 410 epochs ([above](#results-bestfolo-ema-640-px)) | 0.710 | 0.397 | 0.497 | 0.297 | 0.260 | 0.130 | 0.207 | 0.053 | 0.360 / 0.331 |
+| folo-s from scratch, 300 epochs ([above](#folo-s)) | 0.729 | 0.395 | 0.501 | 0.289 | 0.297 | 0.148 | 0.217 | 0.079 | 0.535 / 0.285 |
+| **from folo-n-coco, 100 epochs** | **0.749** | **0.441** | **0.569** | **0.314** | **0.405** | **0.201** | **0.297** | **0.105** | **0.619 / 0.387** |
+
+(The 410-epoch row was re-evaluated with the same binary and reproduces the numbers above exactly.)
+
+Pretraining is the biggest single gain on this data so far:
+- **r6-clean test:** +0.091 mAP50-95 over the same 100-epoch budget from scratch (0.350 → 0.441), and +0.044 over the
+  410-epoch from-scratch run, in a quarter of the epochs. That is level with the r6yolo README's COCO-pretrained
+  YOLO26 `exp-7` (0.452), which was fine-tuned at 1280 px.
+- **r6-fresh, the held-out footage:** 0.118 → **0.201** (+70%). The 410-epoch run reached 0.130, and folo-s 0.148.
+  Heads roughly double (0.047 → 0.105), and precision at the operating point rises from 0.41 to 0.62. Features
+  learned on 118k varied COCO images transfer to new channels better than anything learned from ~756 unique R6 frames.
+- It is still far from the incumbent on r6-fresh: 0.40–0.565 there, with pretraining and 1280 px input, distilled
+  on up to 26,000 frames. The far, tiny Heads at 640 px remain the limit.
 
 ## Predictions (folo-n)
 

@@ -13,8 +13,9 @@ plus training, evaluation and export. You drive it from one `folo` binary, an HT
 - **Runs in the browser.** The same detector compiles to wasm and runs on WebGPU in the page (about 14 ms for folo-n
   at 640 in Chrome).
 
-> **Status: early (v0.1).** The detector trains and infers on CPU and GPU, and it passes its convergence gate. There
-> are no pretrained weights yet. See [Project status](#project-status).
+> **Status: early (v0.1).** The detector trains and infers on CPU and GPU, and it passes its convergence gate.
+> COCO-pretrained folo-n weights now exist (`folo-n-coco`, val2017 AP 0.314 after 50 epochs from scratch) as a
+> **draft** release, not public yet. See [Project status](#project-status).
 
 ## Why FOLO: the numbers
 
@@ -33,6 +34,11 @@ the method, the raw JSON and how much noise to expect.
 | GPU end to end, batch 16 | **722 img/s** (f32) | 615 img/s (fp16) / 536 (fp32) | FOLO faster than both |
 | CPU forward, batch 1, f32 | **21.4 ms** (28 threads, contended machine) | 22.8 ms (8 threads) | FOLO slightly faster |
 | CPU end to end, batch 1 | 26.9 ms | **24.8 ms** | FOLO behind |
+
+Accuracy is a separate question: on COCO val2017, folo-n reaches AP 0.314 after a 50-epoch from-scratch run, against
+0.409 published for yolo26n, which was pretrained on Objects365 and then trained 245 epochs on COCO
+([examples/coco](examples/coco/README.md), docs/BENCHMARKS.md, Accuracy). No equal-budget comparison has been run
+yet, so how much of that gap is data and schedule rather than the model or the trainer is not known.
 
 FOLO is not ahead everywhere: the CPU end-to-end path (letterbox, decode and NMS around the forward) is still behind, and
 the CPU numbers were measured on a contended machine, so treat them as upper bounds. f16 inference and the full trainer loop (data loader included) have not been benchmarked against the incumbent yet.
@@ -193,13 +199,17 @@ What works today (v0.1):
 - folo-n/s/m/l/x, trained from scratch on CPU or GPU, with resume, EMA, mosaic and the usual augmentations. On the
   shapes gate it reaches mAP50 0.980 / mAP50-95 0.896. On a real 2,030-frame dataset folo-n reaches 0.397 mAP50-95
   on the test split, trained from scratch ([examples/r6](examples/r6/README.md)).
+- COCO-pretrained weights: `folo-n-coco`, folo-n trained from scratch on COCO for 50 epochs, val2017 AP 0.314 /
+  AP50 0.455 (pycocotools-exact, [examples/coco](examples/coco/README.md)). It is uploaded as a **draft** GitHub
+  release (`weights-v1`), so for now only repository writers can `folo weights pull` it. Fine-tuned from it, R6
+  reaches 0.441 test / 0.201 held-out mAP50-95 in 100 epochs (0.350 / 0.118 from scratch).
 - YOLO and COCO datasets: reading, stats, checks and conversion. mAP that matches pycocotools.
 - `val`, `predict` and export to `.folo` (f32 or f16, a safetensors-compatible format) and ONNX (opset 17, f32 or
   f16, optional in-graph decode and dynamic shapes; parity-tested in onnxruntime).
 - `folo serve` (Studio and the HTTP API), `folo mcp`, in-browser inference, and release builds and install scripts.
 
 Not yet:
-- pretrained weights;
+- public pretrained weights (the release is a draft), or a COCO comparison with the incumbent at equal budget;
 - f16 compute on the GPU;
 - `folo bench`;
 - a published release.
