@@ -36,6 +36,7 @@ pub const ALL: &[&str] = &[
     "run-live+light",
     "run-live+hover",
     "run-done",
+    "run-done+bottom",
     "run-failed",
     "new-run",
     "new-run+amp",
@@ -132,6 +133,11 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         "run-done" => {
             app.route = Route::Run("run_52e8".into());
             app.sample_view = SampleView::Both;
+            // The page's end: the log and the run's configuration (precision, head, the resolved
+            // optimizer, the capped close-mosaic phase).
+            if s.has("bottom") {
+                app.scroll_end_pending = 60;
+            }
         }
         "run-failed" => app.route = Route::Run("run_e4f0".into()),
         "new-run" => {

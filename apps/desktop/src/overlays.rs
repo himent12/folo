@@ -1053,12 +1053,18 @@ impl FoloApp {
                                 ))
                                 // Which epochs those are (the label already says what they do).
                                 .child(text(ty::SM, t.text_tertiary).child({
+                                    // As the engine runs it: capped at half the run.
                                     let last = epochs.round().max(1.) as u32;
-                                    let n = (close_mosaic.round() as u32).min(last);
+                                    let asked = close_mosaic.round() as u32;
+                                    let n = crate::api::capped_close_mosaic(asked, last);
+                                    let capped = if n < asked { " (capped at half the run)" } else { "" };
                                     match n {
-                                        0 => "Off: mosaic all the way through".to_string(),
-                                        1 => format!("Epoch {last} trains on whole images"),
-                                        _ => format!("Epochs {}–{last} train on whole images", last - n + 1),
+                                        // Mosaic off (Advanced): every epoch is on whole images.
+                                        _ if mosaic <= 0. => "Mosaic is off: every epoch trains on whole images".to_string(),
+                                        0 if asked == 0 => "Off: mosaic all the way through".to_string(),
+                                        0 => "Too short a run: mosaic all the way through".to_string(),
+                                        1 => format!("Epoch {last} trains on whole images{capped}"),
+                                        _ => format!("Epochs {}–{last} train on whole images{capped}", last - n + 1),
                                     }
                                 })),
                         ),
