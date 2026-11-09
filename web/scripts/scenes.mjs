@@ -344,12 +344,13 @@ export const scenes = [
   },
   {
     // Keyboard focus on a chart: the readout row says how to read it.
+    // From the tablet tier up: phones and touch-only devices get no key hint.
     name: 'chart-key-hint',
     path: '/runs/run_c19a',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'tablet'],
     setup: async (page) => {
-      const svg = page.locator('#run-chart svg[role="img"]').first();
+      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
       await svg.scrollIntoViewIfNeeded();
       await page.keyboard.press('Tab');
       await svg.focus();
@@ -459,6 +460,8 @@ export const scenes = [
       await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/shapes');
       await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
       await until(page, 'text=Already registered as shapes');
+      // Stop the page clock (the shoot's runs in real time) so the toast is still up when the thumbnails have loaded.
+      await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 100);
       // The thumbnails render in real time (the page clock, which would close the toast, stays put).
       await page.locator('.cell img.loaded').nth(17).waitFor({ timeout: 15000 }).catch(() => {});
     },
@@ -1005,10 +1008,11 @@ export const scenes = [
   },
   {
     // Every group, General to Datasets: two columns where wide, one with an edge shadow on phones.
+    // Touch-only devices (phones) get no shortcuts reference (DESIGN_DIRECTION §9): a laptop's narrow tier instead.
     name: 'shortcuts-open',
     fullPage: false,
     path: '/runs',
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'laptop'],
     setup: async (page) => {
       await page.keyboard.press('Shift+?');
     },
@@ -1031,7 +1035,7 @@ export const scenes = [
     fullPage: false,
     setup: async (page) => {
       // Scroll the chart into view first: the pointer cannot hover outside the viewport. Then require the tooltip.
-      const svg = page.locator('#run-chart svg[role="img"]').first();
+      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
       await svg.scrollIntoViewIfNeeded();
       const box = await svg.boundingBox();
       if (!box) throw new Error('chart-hover: no chart');

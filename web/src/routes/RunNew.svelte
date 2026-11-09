@@ -369,6 +369,7 @@
     { k: 'colour', v: trim(augment.hsv[1]), changed: augment.hsv[1] !== defaults.hsv[1] },
     { k: 'close mosaic', v: String(augment.close_mosaic), changed: augment.close_mosaic !== defaults.close_mosaic },
   ]);
+  const augChanged = $derived(augLine.filter((it) => it.changed));
 
   const config = $derived<TrainConfig>({
     name: name.trim(),
@@ -822,8 +823,16 @@
           {/snippet}
           <button type="button" class="aug-toggle" aria-expanded={augShown} aria-controls="aug-body" onclick={() => (augOpen = !augShown)}>
             <ChevronRight size={14} aria-hidden="true" />
-            <span class="aug-line num">
+            <span class="aug-line num wide-only">
               {#each augLine as it, i (it.k)}{#if i > 0}<span class="sep" aria-hidden="true">·</span>{/if}<span class:changed={it.changed}>{it.k} {it.v}</span>{/each}
+            </span>
+            <!-- Phones: the seven settings never fit one line, so the line says what was changed, wrapping whole items. -->
+            <span class="aug-line num phone-only">
+              {#if augChanged.length}
+                <span>{augChanged.length} changed</span>{#each augChanged as it (it.k)}<span class="sep" aria-hidden="true">·</span><span class="changed">{it.k} {it.v}</span>{/each}
+              {:else}
+                <span>All {augLine.length} settings at their defaults</span>
+              {/if}
             </span>
             <span class="aug-verb">{augShown ? 'Hide' : 'Edit'}</span>
           </button>
@@ -1525,6 +1534,23 @@
   .aug-line .sep {
     margin-inline: var(--space-1-5);
     color: var(--text-tertiary);
+  }
+  .aug-line.phone-only {
+    display: none;
+  }
+  @media (max-width: 767px) {
+    .aug-line.wide-only {
+      display: none;
+    }
+    /* Whole items wrap; none is cut. */
+    .aug-line.phone-only {
+      display: block;
+      padding-block: var(--space-2);
+      white-space: normal;
+    }
+    .aug-line.phone-only > span {
+      white-space: nowrap;
+    }
   }
   .aug-line .changed {
     color: var(--text-primary);

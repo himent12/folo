@@ -75,6 +75,8 @@
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
+  import { MediaQuery } from 'svelte/reactivity';
+  import { media } from '$lib/design/tokens';
 
   interface Props {
     series: Series[];
@@ -403,10 +405,12 @@
   }
 
   // Reading hints in the readout row (./hint): "← → to inspect" while the plot has keyboard focus, and on a touch
-  // screen "Tap to pin a value" on the first chart of the session, until it is tapped. A mouse gets neither.
+  // screen "Tap to pin a value" on the first chart of the session, until it is tapped. A mouse gets neither, and the
+  // phone tier and touch-only devices get no key hint (no arrow keys to press there).
   let keyFocus = $state(false);
+  const keyless = new MediaQuery(`${media.phone}, (hover: none) and (pointer: coarse)`, false);
   let tapHint = $state(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches && claimOnce(TAP_HINT_KEY));
-  const hintText = $derived(hasData ? chartHint({ reading: hover !== null, keyFocus, tap: tapHint }) : null);
+  const hintText = $derived(hasData ? chartHint({ reading: hover !== null, keyFocus: keyFocus && !keyless.current, tap: tapHint }) : null);
   $effect(() => {
     hint = hintText;
   });
@@ -615,7 +619,8 @@
         bind:this={svgEl}
         {width}
         {height}
-        role="img"
+        role="group"
+        aria-roledescription="chart"
         aria-label={label}
         tabindex={hasData ? 0 : -1}
         {onpointermove}

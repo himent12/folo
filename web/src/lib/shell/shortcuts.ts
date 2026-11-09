@@ -20,6 +20,12 @@ export function showShortcuts() {
 }
 
 /**
+ * A touch-only device (`(hover: none) and (pointer: coarse)`: a phone or tablet without a mouse). It gets no shortcuts
+ * reference (DESIGN_DIRECTION §9): no palette entry, no "Show shortcuts", and `?` does not open it.
+ */
+export const touchOnly = () => typeof matchMedia !== 'undefined' && matchMedia('(hover: none) and (pointer: coarse)').matches;
+
+/**
  * Every shortcut the reference lists. `single`: a single-character key that Settings can turn off (ui/keyPrefs); the
  * rest (Mod+K, the arrow keys and Enter of a focused list or chart, the image inspector's own keys) always work.
  */
@@ -67,6 +73,7 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
       return;
     }
     if (e.key === '?') {
+      if (touchOnly()) return;
       e.preventDefault();
       h.shortcuts();
     } else if (e.key === '[') {
@@ -78,7 +85,7 @@ export function installShortcuts(h: ShortcutHandlers): () => void {
     }
   };
 
-  const onshow = () => h.shortcuts();
+  const onshow = () => !touchOnly() && h.shortcuts();
   window.addEventListener('keydown', onkeydown);
   window.addEventListener(SHOW_SHORTCUTS, onshow);
   return () => {

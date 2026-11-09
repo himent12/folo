@@ -61,7 +61,7 @@ describe('LossOptions', () => {
     const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
     afterEach(() => setWidth(width));
 
-    it('is the shared modal sheet: visible Close and Done, Tab stays inside, choices apply at once, focus returns', async () => {
+    it('is the shared modal sheet: one dismiss (Close), radio marks, Tab stays inside, choices apply at once, focus returns', async () => {
       HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
         this.open = true;
       };
@@ -83,9 +83,10 @@ describe('LossOptions', () => {
       const dialog = document.querySelector<HTMLDialogElement>('dialog')!;
       expect(dialog.open).toBe(true);
       expect(target.querySelector('div[role="dialog"]')).toBeNull();
-      expect(dialog.querySelector('button[aria-label="Close"]')).not.toBeNull();
-      const done = [...dialog.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Done')!;
-      expect(done).toBeDefined();
+      const done = dialog.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!;
+      expect(done).not.toBeNull();
+      expect([...dialog.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Done')).toBe(false);
+      expect(dialog.querySelectorAll('.opt .mark')).toHaveLength(6);
       const checked = dialog.querySelector<HTMLInputElement>('input:checked')!;
       expect(document.activeElement).toBe(checked);
       // Tab out of a group does not dismiss it.

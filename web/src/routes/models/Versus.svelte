@@ -273,9 +273,9 @@
     }
     .vs tbody tr {
       display: grid;
-      /* The lead ("20% less memory", or "Different conditions" over its difference) keeps its width; the two values
-         share the rest. */
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) max-content;
+      /* One column template for every row, so folo-n, YOLO26n and the lead sit on the same three edges all the way
+         down (a content-sized lead column would move them row by row); the lead's column is the widest. */
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr);
       gap: var(--space-1) var(--space-3);
       padding: var(--space-3) var(--space-4);
       border-bottom: 1px solid var(--line-subtle);
@@ -283,7 +283,9 @@
     .vs tbody tr:last-child {
       border-bottom: 0;
     }
+    /* Rows grow with their lines (the table's fixed row height would let a note run into the divider). */
     .vs tbody :is(td, th) {
+      height: auto;
       padding: 0;
       border: 0;
     }
@@ -294,6 +296,9 @@
     }
     .vs .r {
       text-align: left;
+    }
+    .vs .lead {
+      white-space: normal;
     }
     .cl {
       display: block;

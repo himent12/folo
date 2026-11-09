@@ -43,6 +43,16 @@ describe('single-key shortcuts preference', () => {
     go.mockRestore();
   });
 
+  it('touch-only devices get no shortcuts reference: ? does nothing', () => {
+    const mm = vi.spyOn(window, 'matchMedia').mockImplementation(
+      (q: string) => ({ matches: q.includes('hover: none'), media: q, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList,
+    );
+    key('?');
+    showShortcuts();
+    expect(shortcuts).not.toHaveBeenCalled();
+    mm.mockRestore();
+  });
+
   it('off: ?, N and G sequences do nothing; Mod+K still opens the palette', () => {
     keyPrefs.singleKeys = false;
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});

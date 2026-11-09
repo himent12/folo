@@ -23,9 +23,10 @@
   import { rememberFocus } from '$lib/ui/focus';
   import { highlight, rank } from './commands';
   import { mainNav, settingsNav } from './nav';
+  import { touchOnly as isTouchOnly } from './shortcuts';
 
   let { open = $bindable(false), onshortcuts }: { open?: boolean; onshortcuts: () => void } = $props();
-  const touchOnly = typeof matchMedia !== 'undefined' && matchMedia('(hover: none) and (pointer: coarse)').matches;
+  const touchOnly = isTouchOnly();
 
   interface Item {
     id: string;
