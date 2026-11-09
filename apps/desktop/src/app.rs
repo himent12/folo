@@ -1953,6 +1953,7 @@ impl FoloApp {
             cx.drop_image(old.image, None);
         }
         self.play_pred = Load::Idle;
+        self.play_pred_pending = false;
         self.play_pred_for = None;
         self.play_hover = None;
         self.play_zoom = 1.0;
@@ -3004,6 +3005,7 @@ impl FoloApp {
         self.hold_loading = false;
         self.store.gpu_util.clear();
         self.play_pred = Load::Idle;
+        self.play_pred_pending = false;
         self.play_model = None;
         self.retry_all(cx);
     }

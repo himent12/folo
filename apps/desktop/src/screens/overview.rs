@@ -84,6 +84,8 @@ impl FoloApp {
         // yet, it says why, as New run beside it does).
         let open_blocked = if self.store.runs.error().is_some() {
             Some("Not connected")
+        } else if self.store.models.error().is_some() {
+            Some("Models didn't load: retry under Best models")
         } else if self.store.models.ready().is_none() {
             Some("Loading models…")
         } else if self.store.models.ready().is_some_and(|m| m.is_empty()) {
@@ -942,6 +944,32 @@ impl FoloApp {
                         )
                         .into_any_element()
                     }))
+                    .into_any_element()
+            }
+            // A failed list says so and can be fetched again (it would otherwise read as loading
+            // forever: nothing else retries a failed load).
+            Load::Failed(e) => {
+                let retry = self.button(
+                    "ov-models-retry",
+                    "Retry",
+                    Btn::Secondary,
+                    Some("icons/refresh-cw.svg"),
+                    window,
+                    cx,
+                    act(|this, _, cx| {
+                        this.store.models = Load::Idle;
+                        this.ensure_core(cx);
+                        cx.notify();
+                    }),
+                );
+                div()
+                    .p(px(16.))
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(px(8.))
+                    .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message.clone()))
+                    .child(retry)
                     .into_any_element()
             }
             _ => loading_rows(&t, "ov-models", 5).into_any_element(),

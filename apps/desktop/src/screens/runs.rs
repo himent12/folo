@@ -899,8 +899,9 @@ impl FoloApp {
         let low = d.precision.iter().chain(d.recall.iter()).map(|p| p.1).fold(f32::INFINITY, f32::min);
         let floor = pr_floor(low);
         pr.y_range = Some((floor, 1.));
-        // Three labels (floor, middle, 1.00): the lower row's plot is under 180 px, where five crowd.
-        // A raised floor is labelled, so the axis never reads as starting at 0.
+        // From 0: three labels (0, 0.50, 1.00), as the lower row's plot is under 180 px, where five
+        // crowd. A raised floor (0.4 or more) labels every 0.2 from it, at most four, so the axis
+        // never reads as starting at 0.
         pr.y_ticks = 2;
         if floor > 0. {
             // Every 0.2 from the floor: 0.40 / 0.60 / 0.80 / 1.00 at most (the grid the other
@@ -1058,9 +1059,11 @@ impl FoloApp {
         // The legend value reads on its own, normalised ("6.58×10⁻³", "1.00×10⁻⁴": its own power,
         // not the axis's, so it never shows "0.10×10⁻³").
         let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
-            Some(_) if x > 0. => {
+            // In f64: a tiny valid rate (1e-40) would overflow 10^-p in f32.
+            Some(_) if x > 0. && x.is_finite() => {
+                let x = x as f64;
                 let p = x.log10().floor() as i32;
-                format!("{:.2}×10{}", x * 10f32.powi(-p), crate::charts::superscript(p))
+                format!("{:.2}×10{}", x * 10f64.powi(-p), crate::charts::superscript(p))
             }
             _ => format!("{x:.4}"),
         });
