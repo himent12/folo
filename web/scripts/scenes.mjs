@@ -80,6 +80,23 @@ export const scenes = [
     },
   },
   {
+    // The loss terms opened by a click (a tap on phones, Enter or Space from the keyboard): ui/InfoButton's popover.
+    name: 'run-loss-terms',
+    path: '/runs/run_c19a',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
+      const tab = page.locator('[data-tab="loss"]');
+      if (await tab.isVisible()) await tab.click();
+      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      await page.clock.runFor(500);
+      await page.getByRole('button', { name: 'What the loss terms mean' }).click();
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(300);
+    },
+  },
+  {
     // Phones, one section at a time (here: per-class results): the chart folds to its one-line readout above it.
     name: 'run-live-phone-classes',
     path: '/runs/run_7d1e',
@@ -236,15 +253,16 @@ export const scenes = [
     },
   },
   {
-    // The Summary's schedule in plain words ("30 steps / epoch"); the batches behind it in a tooltip, here hovered.
+    // The Summary's schedule in plain words ("30 steps / epoch"); the batches behind it in a popover, here clicked.
     name: 'run-new-steps',
     path: '/runs/new',
     fullPage: false,
     viewports: ['desktop', 'laptop'],
     setup: async (page) => {
-      await until(page, '.summary .steps');
-      await page.locator('.summary .steps').hover();
-      await page.clock.runFor(600);
+      await until(page, '.summary button.steps');
+      await page.locator('.summary button.steps').click();
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(300);
     },
   },
   {
@@ -317,6 +335,20 @@ export const scenes = [
       await until(page, '.dock-est');
       await page.locator('.dock-est').click();
       await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    // The Summary sheet's "30 steps / epoch" opened by a tap: the batches behind it in a popover over the sheet (top
+    // layer), never behind the modal.
+    name: 'run-new-summary-steps',
+    fullPage: false,
+    path: '/runs/new',
+    viewports: ['tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.dock-est');
+      await page.locator('.dock-est').click();
+      await page.locator('dialog[open] button.steps').click();
+      await page.clock.runFor(300);
     },
   },
   {
@@ -537,6 +569,19 @@ export const scenes = [
   },
   { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
+    // Box size's ⓘ opened by a click or tap: the definition in a popover under it (the whole page, so the panel shows).
+    name: 'dataset-stats-box-size',
+    path: '/datasets/ds_shapes_hard?tab=stats',
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button[aria-label="How box size is measured"]');
+      await page.locator('button[aria-label="How box size is measured"]').click();
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(300);
+    },
+  },
+  {
     // The health line opened: every finding, its evidence and next step.
     name: 'dataset-health-open',
     path: '/datasets/ds_shapes_hard?tab=stats',
@@ -692,6 +737,20 @@ export const scenes = [
       // carries a highlight of a state the scene does not show (round 22's stray "rivet" row was this hover).
       await page.mouse.move(0, 0);
       await page.waitForTimeout(200);
+    },
+  },
+  {
+    // A tooltip inside the inspector (a modal dialog): Zoom in hovered, its key hint drawn over the dialog.
+    name: 'dataset-inspector-tooltip',
+    path: '/datasets/ds_fasteners',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.locator('.cell').nth(1).click();
+      await page.locator('dialog[open] .stage img.loaded').waitFor();
+      await page.locator('dialog[open] button[aria-label="Zoom in"]:visible').first().hover();
+      await page.clock.runFor(600);
     },
   },
   {
@@ -901,6 +960,30 @@ export const scenes = [
       await until(page, 'dialog[open] fieldset');
       await page.locator('dialog[open] footer button:has-text("Export")').click();
       await until(page, 'dialog[open] .done');
+    },
+  },
+  {
+    // Download asked for in the demo: the dialog says there is no file in its own status region (above the footer),
+    // never in a toast behind the modal.
+    name: 'model-export-demo-download',
+    path: '/models/m_shapes_s',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] footer button:has-text("Export")').click();
+      await until(page, 'dialog[open] .where');
+      await page.locator('dialog[open] footer button:has-text("Download")').click();
+      await until(page, 'dialog[open] .dialog-status [data-notice]');
+      await page.mouse.move(0, 0);
     },
   },
   {

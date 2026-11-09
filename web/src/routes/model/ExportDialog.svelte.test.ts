@@ -95,7 +95,7 @@ describe('ExportDialog', () => {
     expect(target.ownerDocument.querySelector('dialog')?.textContent).toContain('Export finished');
     expect(success).not.toHaveBeenCalled();
     // Without the toast, a live region in the dialog announces it.
-    const live = target.ownerDocument.querySelectorAll('dialog [role="status"]');
+    const live = target.ownerDocument.querySelectorAll('dialog p[role="status"]');
     expect(live).toHaveLength(1);
     expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.1 MiB.');
   });

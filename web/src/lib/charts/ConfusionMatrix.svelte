@@ -515,9 +515,22 @@
   .jump:hover {
     background: var(--bg-hover);
   }
+  /* A 44 px tall hit area around the 28 px link on any pointer, as the chevrons have (its label makes it wider than
+     44); touch makes the box itself 44 px. */
+  .jump {
+    position: relative;
+  }
+  .jump::after {
+    content: '';
+    position: absolute;
+    inset: -8px 0;
+  }
   @media (pointer: coarse) {
     .jump {
       min-height: 44px;
+    }
+    .jump::after {
+      content: none;
     }
   }
   .ov-side {

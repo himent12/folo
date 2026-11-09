@@ -125,9 +125,10 @@
               imgsz: Number(imgsz),
               seed: seed ?? 0,
             });
+      // The dialog closes first: what was added is said over the dataset's page it opens.
+      open = false;
       if (before.some((d) => d.id === ds.id)) toast.info(`Already registered as ${ds.name}`, 'That folder is in the list; opening it.');
       else toast.success(mode === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready', `${ds.name} · ${ds.splits.train + ds.splits.val + ds.splits.test} images`);
-      open = false;
       router.go(`/datasets/${ds.id}`);
     } catch (err) {
       error = err;

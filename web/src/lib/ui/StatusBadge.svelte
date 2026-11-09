@@ -92,7 +92,8 @@
     background: var(--c);
     outline: 1px solid var(--c);
     outline-offset: 1px;
-    animation: pulse 1s var(--ease-out) infinite;
+    --pulse: var(--c);
+    animation: live-pulse 2.4s var(--ease-out) infinite;
   }
   .completed {
     --c: var(--success-text);
@@ -140,16 +141,8 @@
   .plain.running {
     color: var(--text-primary);
   }
-  /* The live heartbeat: a 1 Hz ring that leaves the dot and fades (the dot itself and every value hold still). Off under
-     reduced motion; the ringed dot and the word still say "running". */
-  @keyframes pulse {
-    0% {
-      box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 55%, transparent);
-    }
-    100% {
-      box-shadow: 0 0 0 4px transparent;
-    }
-  }
+  /* The live heartbeat (`live-pulse`, base.css): one ring every 2.4 s; off under reduced motion, where the ringed dot
+     and the word still say "running". */
   @media (prefers-reduced-motion: reduce) {
     .running .dot {
       animation: none;

@@ -16,6 +16,7 @@
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
+  import { DialogStatus } from '$lib/ui/feedback.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import Menu, { type MenuItem } from '$lib/ui/Menu.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -123,6 +124,7 @@
   // ---------- header actions ----------
   async function copyPath() {
     if (!d) return;
+    // page-level: the header's Copy path, outside any dialog.
     try {
       await navigator.clipboard.writeText(d.path);
       toast.success('Path copied', d.path);
@@ -133,6 +135,8 @@
 
   let confirmDelete = $state(false);
   let deleting = $state(false);
+  /** A failed delete says so in its dialog, which stays open for another try (the toaster sits behind the modal). */
+  const deleteStatus = new DialogStatus();
   async function remove() {
     if (!d) return;
     deleting = true;
@@ -142,7 +146,7 @@
       toast.success('Dataset removed', `${d.name} is no longer registered. Files on disk were not touched.`);
       router.go('/datasets');
     } catch (e) {
-      toast.error(e, 'Could not remove the dataset');
+      deleteStatus.error(e, 'Could not delete the dataset');
     } finally {
       deleting = false;
     }
@@ -336,13 +340,14 @@
       onnavigate={(im) => setQuery({ image: im })}
       onclose={() => setQuery({ image: null })}
       onmissing={(im) => {
+        // page-level: a linked image that is not in this view; the inspector closes on the next line.
         toast.info('Image not in this view', `${im} does not match the current filters.`);
         setQuery({ image: null });
       }}
     />
   {/if}
 
-  <Dialog bind:open={confirmDelete} title="Delete dataset?" size="sm">
+  <Dialog bind:open={confirmDelete} title="Delete dataset?" size="sm" status={deleteStatus}>
     <p class="confirm">
       <b>{d.name}</b> will be unregistered from FOLO. The files in <span class="mono">{d.path}</span> stay on disk, and runs that used it keep their results.
     </p>

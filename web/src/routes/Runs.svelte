@@ -36,6 +36,7 @@
   import type { QueueRequest } from '$lib/api/types';
   import { moveQueued, queueItems, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle } from './run/queueActions';
   import Dialog from '$lib/ui/Dialog.svelte';
+  import { DialogStatus } from '$lib/ui/feedback.svelte';
   import X from '@lucide/svelte/icons/x';
   import { toast } from '$lib/ui/toast.svelte';
 
@@ -92,6 +93,8 @@
   /** The waiting run Remove from queue asks about (the same confirm as on its own page). */
   let removing = $state<Run | null>(null);
   let removeBusy = $state(false);
+  /** Its failure shows in the confirm, which stays open; the success toasts once it has closed. */
+  const removeStatus = new DialogStatus();
   async function removeQueued() {
     const r = removing;
     if (!r) return;
@@ -99,10 +102,11 @@
     try {
       await hub.api.stopRun(r.id);
       removing = null;
+      // page-level: the confirm closed on the line above.
       toast.success(`Removed ${r.name} from the queue`);
       void runs.refresh();
     } catch (e) {
-      toast.error(e, `Could not remove ${r.name}`);
+      removeStatus.error(e, `Could not remove ${r.name} from the queue`);
     } finally {
       removeBusy = false;
     }
@@ -389,7 +393,7 @@
   {/if}
 </Page>
 
-<Dialog open={!!removing} onclose={() => (removing = null)} title={removing ? removeTitle(removing.name) : ''} description={REMOVE_DESCRIPTION} size="sm">
+<Dialog open={!!removing} onclose={() => (removing = null)} status={removeStatus} title={removing ? removeTitle(removing.name) : ''} description={REMOVE_DESCRIPTION} size="sm">
   {#snippet footer()}
     <Button onclick={() => (removing = null)}>Keep it queued</Button>
     <Button variant="destructive" icon={X} loading={removeBusy} onclick={removeQueued}>{REMOVE_LABEL}</Button>

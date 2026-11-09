@@ -1,3 +1,8 @@
+<script lang="ts" module>
+  /** Whether a page has rendered yet in this session: only the first fades in (see `.enter`). */
+  let entered = false;
+</script>
+
 <script lang="ts">
   /**
    * Standard page frame: title row (title, optional meta line and actions) above the content.
@@ -52,9 +57,13 @@
   const hasActions = $derived(!!actions || more.length > 0);
   /** Only the title: on phones the top bar shows it, so the header takes no room and content starts at the gutter. */
   const bare = $derived(!sub && !subPhone && !hasActions && !lead);
+  // The app's first page fades in as Studio appears; moving between pages after that is immediate (a fade on every
+  // route change decorates a move the person already made, and makes a list feel slow to arrive).
+  const enter = !entered;
+  entered = true;
 </script>
 
-<div class="page" class:wide class:narrow>
+<div class="page" class:wide class:narrow class:enter>
   <header class:inline={inlineActions} class:one-row={!!subPhone} class:bare>
     <div class="titles">
       {#if lead}<div class="lead">{@render lead()}</div>{/if}
@@ -90,6 +99,8 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-5);
+  }
+  .page.enter {
     animation: in var(--dur-slow) var(--ease-out);
   }
   .page.wide {

@@ -43,7 +43,7 @@
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import { toast } from '$lib/ui/toast.svelte';
-  import { tooltip } from '$lib/ui/tooltip';
+  import InfoButton from '$lib/ui/InfoButton.svelte';
   import { VULKAN } from './settings/capabilities';
   import { HEAD_LABEL } from './run/resolved';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
@@ -163,6 +163,7 @@
   });
   $effect(() => {
     if (source.error && !untrack(() => prefilled)) {
+      // page-level: loading the run to copy, before any dialog opens.
       toast.error(source.error, 'Could not load the run to copy');
       prefilled = true;
     }
@@ -279,7 +280,7 @@
   );
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
-  /** The batches behind the steps, for the Summary's tooltip and its accessible description: one line in the rail. */
+  /** The batches behind the steps, in the Summary's popover (ui/InfoButton): one line in the rail. */
   const batchesOf = $derived(`${num(est.stepsPerEpoch)} ${est.stepsPerEpoch === 1 ? 'batch' : 'batches'} of ${batchN}`);
   const stepsWhy = $derived(sched.accumulate > 1 ? `${batchesOf}; ${sched.accumulate} per optimizer step.` : `${batchesOf}, one step each.`);
   // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
@@ -530,10 +531,12 @@
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (!valid || submitting) return;
+    // The Summary sheet closes first: the start's result is the page's (a toast, or the Device field's message).
     sumOpen = false;
     submitting = true;
     try {
       const run = await hub.api.createRun(config);
+      // page-level: the sheet is closed (above).
       toast.success(`Started ${run.name}`, `${run.epochs} epochs of ${run.config.arch} on ${dataset?.name}.`);
       router.go(`/runs/${run.id}`);
     } catch (err) {
@@ -546,6 +549,7 @@
         // The adapters may have changed (an eGPU unplugged): list them again, and show the field with its message.
         void system.refresh();
         void jump('device');
+        // page-level: the sheet closed when the form was sent.
       } else toast.error(err, 'Could not start the run');
     } finally {
       submitting = false;
@@ -558,6 +562,7 @@
     document.getElementById('device')?.focus();
   }
 
+  // page-level: the Summary rail's Copy command (the phone sheet holds no copy control).
   async function copy(text: string, done: string) {
     try {
       await navigator.clipboard.writeText(text);
@@ -660,12 +665,13 @@
     </dl>
   {:else}
   <dl class="est">
-    <!-- The trainer's count (the short-run warning's unit). The batches behind it: a tooltip on hover and focus (which
-         also describes the value to a screen reader), and read after it in browse mode. -->
+    <!-- The trainer's count (the short-run warning's unit). The batches behind it, one tap, click or Enter away
+         (ui/InfoButton: the value is its button; a popover over the Summary sheet too). -->
     <dt>Schedule</dt>
     <dd class="num sched">
-      <!-- svelte-ignore a11y_no_noninteractive_tabindex: focusable so keyboard users get the tooltip too. -->
-      <span class="steps" tabindex="0" use:tooltip={stepsWhy}>{num(sched.stepsPerEpoch)} steps <span class="faint">/ epoch</span></span><span class="sr-only">. {stepsWhy}</span>
+      <InfoButton label="How the steps are counted" text={stepsWhy} side="top" class="steps"
+        >{#snippet trigger()}{num(sched.stepsPerEpoch)} steps <span class="faint">/ epoch</span>{/snippet}</InfoButton
+      >
     </dd>
     <!-- A range, never one precise figure; a rough one (low confidence) in secondary ink. What it stands on is the
          line under it, which opens the phases behind it. -->
@@ -1658,15 +1664,9 @@
       min-height: 44px;
     }
   }
-  /* The steps carry their batches in a tooltip: focusable, so the value keeps room for its focus ring. */
+  /* The steps open their batches (ui/InfoButton): a button, so the value keeps room for its focus ring. */
   .est dd.sched {
     overflow: visible;
-  }
-  .steps {
-    border-radius: var(--radius-xs);
-    text-decoration: underline dotted var(--line-strong);
-    text-underline-offset: 3px;
-    cursor: help;
   }
   /* A switch field (Mixed precision, End-to-end): the Switch is the label's line, its track at the field's right edge,
      and the label reads as every field label (text.secondary, medium), also while only the control is disabled. */

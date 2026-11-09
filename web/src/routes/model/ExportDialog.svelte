@@ -25,6 +25,7 @@
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
+  import { DialogStatus } from '$lib/ui/feedback.svelte';
   import { toast } from '$lib/ui/toast.svelte';
 
   let { model, open = $bindable(false) }: { model: Model; open?: boolean } = $props();
@@ -111,6 +112,8 @@
   const previewName = $derived(format === 'onnx' ? onnxName : fileName);
   let error = $state<unknown>(null);
   let copied = $state(false);
+  /** Results inside the open dialog (a blocked copy, the demo's missing file) show in its status region, not a toast. */
+  const status = new DialogStatus();
   let run = 0;
 
   /**
@@ -174,7 +177,7 @@
       copied = true;
       setTimeout(() => (copied = false), 1600);
     } catch {
-      toast.info('Copy failed', 'Your browser blocked clipboard access; select the path and copy it by hand.');
+      status.error(new Error('Your browser blocked clipboard access; select the path and copy it by hand.'), 'Could not copy the path');
     }
   }
 
@@ -182,7 +185,7 @@
   function download() {
     const api = hub.api;
     if (!(api instanceof HttpApi)) {
-      toast.info('Nothing to download in the demo', 'Demo models are not real networks, so they have no weights file.');
+      status.info('Nothing to download in the demo', 'Demo models are not real networks, so they have no weights file.');
       return;
     }
     const a = document.createElement('a');
@@ -194,6 +197,7 @@
 
   function reset() {
     run++;
+    status.clear();
     done = null;
     switches = { decode: false, dynamic: false, half: false };
     phase = 'idle';
@@ -204,7 +208,7 @@
   }
 </script>
 
-<Dialog bind:open title="Export model" description="Write {model.name} to a file you can deploy." onclose={reset}>
+<Dialog bind:open title="Export model" description="Write {model.name} to a file you can deploy." onclose={reset} {status}>
   <!-- One live region that stays in the dialog, so the start and the end of an export are both announced (the toast is
        held back while the dialog is open). Failures announce themselves through ErrorState's alert. -->
   <p class="sr-only" role="status">{announcement}</p>

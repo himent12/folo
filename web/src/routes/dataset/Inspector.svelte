@@ -22,9 +22,10 @@
   import { classColor } from '$lib/design/tokens';
   import { num } from '$lib/format';
   import Button from '$lib/ui/Button.svelte';
+  import DialogStatusRegion from '$lib/ui/DialogStatus.svelte';
+  import { DialogStatus } from '$lib/ui/feedback.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
-  import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import type { ImagePager } from './pager.svelte';
   import { swatchStyle } from './swatch';
@@ -72,6 +73,13 @@
       dialog.focus();
     }
     else if (!id && dialog.open) dialog.close();
+  });
+
+  /** A copy's result, said beside the path in the dialog (the toaster sits behind the modal); it is about one image. */
+  const status = new DialogStatus();
+  $effect(() => {
+    void id;
+    status.clear();
   });
 
   // Resolve a linked id that is not loaded yet.
@@ -306,9 +314,9 @@
   async function copyFile(f: string) {
     try {
       await navigator.clipboard.writeText(f);
-      toast.success('Path copied', f);
+      status.success('Path copied', f);
     } catch {
-      toast.error(new Error('The browser blocked clipboard access.'), 'Could not copy the path');
+      status.error(new Error('The browser blocked clipboard access; select the path and copy it by hand.'), 'Could not copy the path');
     }
   }
 </script>
@@ -355,7 +363,9 @@
   </header>
 
   <div class="body">
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex: the canvas takes focus so Shift + arrows can pan it. -->
+    <!-- An image viewer, not an image: a focusable group that takes keys (pan, zoom, step), so never role="img" (whose
+         content is flattened to its name); its keys are its description. -->
+    <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions: the viewer takes focus so its keys work. -->
     <div
       class="viewport"
       class:zoomed={z > 1}
@@ -363,7 +373,8 @@
       bind:this={viewport}
       bind:clientWidth={vw}
       bind:clientHeight={vh}
-      role="img"
+      role="group"
+      aria-roledescription="image viewer"
       tabindex="0"
       aria-label={img ? `${stem(img.file)} with ${img.boxes.length} labelled boxes` : 'Loading image'}
       aria-describedby="insp-keys"
@@ -496,6 +507,7 @@
             <dt>ID</dt>
             <dd class="mono">{img.id}</dd>
           </dl>
+          <DialogStatusRegion {status} class="copy-status" />
         </section>
       {/if}
     </aside>
@@ -793,6 +805,10 @@
   }
   dd {
     overflow-wrap: anywhere;
+  }
+  /* The copy's result, under the image's facts and beside the button that made it. */
+  section :global(.copy-status.on) {
+    margin-top: var(--space-2);
   }
   .path {
     position: relative;

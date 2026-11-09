@@ -1,5 +1,8 @@
 // `use:tooltip={'Text'}` or `use:tooltip={{ text, keys: 'G R', side: 'right' }}`: a small tooltip on hover (after
 // a short delay) and on keyboard focus. One shared element, positioned with fixed coordinates, so it never clips.
+// It renders in the anchor's own context: inside the open modal dialog that holds the anchor (the dataset inspector,
+// New run's Summary sheet), as a manual popover in the top layer, so it is never drawn behind the dialog and stays
+// hoverable there (everything outside a modal dialog is inert); elsewhere in <body>.
 // The node may be a wrapper (a span around a component's button): focus inside it shows the tooltip, and the
 // description goes on the focusable element, which is what assistive technology reads. A tooltip shown by hover stays
 // while the pointer moves onto it (WCAG 1.4.13, hoverable): leaving the trigger or the tooltip hides it after a short
@@ -65,10 +68,10 @@ export function placeTip(anchor: Box, size: { width: number; height: number }, s
 }
 
 /**
- * The box a tooltip stays inside: the viewport, narrowed to the anchor's panel (a rail, a card) when the tooltip fits
- * across it, so it never runs past the panel's edge onto the canvas beside it.
+ * The box a tooltip (or ui/InfoButton's popover) stays inside: the viewport, narrowed to the anchor's panel (a rail, a
+ * card) when the tooltip fits across it, so it never runs past the panel's edge onto the canvas beside it.
  */
-function boundsFor(node: HTMLElement, width: number): Box {
+export function boundsFor(node: HTMLElement, width: number): Box {
   const vw = document.documentElement.clientWidth || window.innerWidth;
   const vh = window.innerHeight;
   const view = { left: EDGE, top: EDGE, right: vw - EDGE, bottom: vh - EDGE };
@@ -94,15 +97,27 @@ const leave = () => {
   hideTimer = setTimeout(() => hideCurrent?.(), GRACE_MS);
 };
 
-function ensure(): HTMLDivElement {
-  if (tip) return tip;
-  tip = document.createElement('div');
-  tip.className = 'folo-tooltip';
-  tip.setAttribute('role', 'tooltip');
-  tip.id = 'folo-tooltip';
-  tip.addEventListener('pointerenter', () => clearTimeout(hideTimer));
-  tip.addEventListener('pointerleave', leave);
-  document.body.appendChild(tip);
+/** Whether this browser has the Popover API (the top layer); without it the tooltip relies on its z-index. */
+export const popovers = () => typeof HTMLElement !== 'undefined' && 'showPopover' in HTMLElement.prototype;
+
+/**
+ * The shared element, moved into `host` (the open dialog that holds the anchor, else <body>) and shown there. A modal
+ * dialog sits in the top layer and makes the rest of the page inert, so a tooltip outside it would be drawn behind it
+ * and could not be hovered: inside it, as a popover, it is drawn above the dialog and above its clipping edge.
+ */
+function mount(host: HTMLElement): HTMLDivElement {
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.className = 'folo-tooltip';
+    tip.setAttribute('role', 'tooltip');
+    tip.id = 'folo-tooltip';
+    if (popovers()) tip.popover = 'manual';
+    tip.addEventListener('pointerenter', () => clearTimeout(hideTimer));
+    tip.addEventListener('pointerleave', leave);
+  }
+  // Moving an open popover hides it; it is shown again below.
+  if (tip.parentElement !== host) host.appendChild(tip);
+  if (popovers() && !tip.matches(':popover-open')) tip.showPopover();
   return tip;
 }
 
@@ -138,7 +153,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     const delay = immediate || Date.now() - lastHide < 300 ? 0 : 450;
     showTimer = setTimeout(() => {
       if (!o || !node.isConnected) return;
-      const el = ensure();
+      const el = mount(node.closest<HTMLElement>('dialog[open]') ?? document.body);
       el.textContent = o.text;
       if (o.keys) {
         const k = document.createElement('span');
@@ -174,6 +189,7 @@ export function tooltip(node: HTMLElement, opts: TooltipOptions) {
     if (tip && 'show' in tip.dataset) {
       delete tip.dataset.show;
       lastHide = Date.now();
+      if (popovers() && tip.matches(':popover-open')) tip.hidePopover();
     }
     document.removeEventListener('keydown', onKey);
     release(described);

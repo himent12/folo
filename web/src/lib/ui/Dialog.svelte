@@ -1,11 +1,15 @@
 <script lang="ts">
   /**
    * Modal dialog on the native <dialog> element: top layer, focus trap, Escape and an inert page come for free.
-   * Clicking the backdrop closes it.
+   * Clicking the backdrop closes it. Results of actions taken inside it (a copy, a failed confirm) show in its own status
+   * region above the footer (`status`, ui/DialogStatus), never as a toast: the toaster sits outside the modal. What it
+   * renders reports there through `feedback()` (ui/feedback.svelte.ts).
    */
   import X from '@lucide/svelte/icons/x';
   import type { Snippet } from 'svelte';
   import Button from './Button.svelte';
+  import DialogStatusRegion from './DialogStatus.svelte';
+  import { DialogStatus, provideStatus } from './feedback.svelte';
   import { rememberFocus } from './focus';
 
   let {
@@ -16,6 +20,7 @@
     footer,
     size = 'md',
     onclose,
+    status = new DialogStatus(),
     class: klass = '',
   }: {
     open?: boolean;
@@ -25,12 +30,16 @@
     footer?: Snippet;
     size?: 'sm' | 'md' | 'lg';
     onclose?: () => void;
+    /** Where results of actions in the dialog are said; pass one to report from the component that owns the dialog. */
+    status?: DialogStatus;
     /** Extra classes on the <dialog>, e.g. to set a width of its own. */
     class?: string;
   } = $props();
 
   const uid = $props.id();
   let el: HTMLDialogElement;
+  // svelte-ignore state_referenced_locally: one region for the dialog's life; children find it through feedback().
+  provideStatus(status);
 
   // Focus returns to the opener on close (browsers that restore it themselves are left alone).
   let restore: (() => void) | null = null;
@@ -47,6 +56,7 @@
 
   function onDialogClose() {
     open = false;
+    status.clear();
     onclose?.();
     restore?.();
     restore = null;
@@ -83,6 +93,7 @@
       <Button variant="ghost" size="sm" icon={X} aria-label="Close" onclick={() => el.close()} />
     </header>
     {#if children}<div class="body">{@render children()}</div>{/if}
+    <DialogStatusRegion {status} class="status" />
     {#if footer}<footer>{@render footer()}</footer>{/if}
   </div>
 </dialog>
@@ -163,6 +174,10 @@
       linear-gradient(var(--line-strong), transparent) top / 100% 16px no-repeat scroll,
       linear-gradient(transparent, var(--line-strong)) bottom / 100% 16px no-repeat scroll,
       var(--bg-overlay);
+  }
+  /* The status region sits between the body and the footer, so a result is in view however far the body scrolls. */
+  .frame > :global(.status.on) {
+    padding: 0 var(--space-5) var(--space-4);
   }
   footer {
     display: flex;

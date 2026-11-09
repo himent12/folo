@@ -5,7 +5,6 @@
   import Download from '@lucide/svelte/icons/download';
   import Copy from '@lucide/svelte/icons/copy';
   import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
-  import Info from '@lucide/svelte/icons/info';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { tick } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
@@ -24,6 +23,7 @@
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
+  import InfoButton from '$lib/ui/InfoButton.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Menu from '$lib/ui/Menu.svelte';
   import Panel from '$lib/ui/Panel.svelte';
@@ -268,9 +268,7 @@
   {#snippet kHelp()}
     <!-- What the four numbers mean: one place in every layout, after the strip's first label (the strip and the phone's
          2 × 2 grid alike), so it never lands on whichever cell happens to be last or top-right. -->
-    <button type="button" class="k-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
-      ><Info size={14} aria-hidden="true" /></button
-    >
+    <InfoButton label="What these metrics mean" controls="metric-help" bind:open={helpOpen} class="k-help" />
   {/snippet}
   {#snippet metricHelp()}
     <dl class="k-body" id="metric-help">
@@ -760,21 +758,10 @@
     min-width: 0;
     overflow: visible;
   }
-  .k-help {
-    position: relative;
-    flex-shrink: 0;
-    display: inline-grid;
-    place-items: center;
-    width: 20px;
-    height: 20px;
-    margin: -2px 0;
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-  }
-  .k-help:hover,
-  .k-help[aria-expanded='true'] {
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  /* The 24 px ⓘ sits in a 16 px label line without deepening it. */
+  dt :global(.k-help),
+  .k-label :global(.k-help) {
+    margin: -4px 0;
   }
   .k-body {
     grid-column: 1 / -1;
@@ -1336,13 +1323,6 @@
     .detail {
       grid-template-columns: minmax(0, 1fr);
       grid-template-areas: 'pr' 'cls' 'rail';
-    }
-  }
-  @media (pointer: coarse) {
-    .k-help::after {
-      content: '';
-      position: absolute;
-      inset: -12px;
     }
   }
   @media (max-width: 767px) {

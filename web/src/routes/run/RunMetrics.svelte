@@ -24,9 +24,9 @@
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
    * tertiary with dash patterns); hue is reserved for entities (runs in Compare, classes).
    */
+  import InfoButton from '$lib/ui/InfoButton.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
-  import Info from '@lucide/svelte/icons/info';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
@@ -323,9 +323,12 @@
   ]);
   /** The legend's note: the latest value's epoch, per epoch for validation metrics, per step for the rest. */
   /** The loss terms in plain words (DESIGN_DIRECTION §2.3: no jargon without its definition). */
-  const LOSS_TERMS =
-    'Box: how far predicted boxes are from the true ones. Classification (cls): how wrong the class scores are. ' +
-    'Distribution focal (dfl): how sharply each box edge is placed. EMA 0.9: smoothing; a higher value reacts more slowly.';
+  const LOSS_TERMS: [term: string, means: string][] = [
+    ['Box', 'how far predicted boxes are from the true ones.'],
+    ['Classification (cls)', 'how wrong the class scores are.'],
+    ['Distribution focal (dfl)', 'how sharply each box edge is placed.'],
+    ['EMA 0.9', 'smoothing; a higher value reacts more slowly.'],
+  ];
   const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
 
   // The last epochs train without mosaic (the hatched end of the progress bar): marked where they start, on every chart.
@@ -368,7 +371,7 @@
   />
 {/snippet}
 
-<section class="metrics" aria-label="Run metrics">
+<section class="metrics" aria-label="Run metrics" data-tip-bounds>
   {#if queued && narrow}
     <!-- Phones, queued: one line until there is something to chart; the banner above says when it starts. -->
     <button type="button" class="pending" aria-expanded={queuedOpen} aria-controls="run-metrics-body" onclick={() => (queuedOpen = !queuedOpen)}>
@@ -440,12 +443,13 @@
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
                  segmented group. -->
             {#if tab === 'loss'}
-              <!-- What the terms mean, for anyone who has not trained a detector before: on hover and focus, and read
-                   with the button. -->
-              <button type="button" class="terms" aria-label="What the loss terms mean" aria-describedby="loss-terms" use:tooltip={LOSS_TERMS}
-                ><Info size={14} aria-hidden="true" /></button
-              >
-              <span class="sr-only" id="loss-terms">{LOSS_TERMS}</span>
+              <!-- What the terms mean, for anyone who has not trained a detector before: a tap, a click or Enter opens
+                   it (ui/InfoButton). -->
+              <InfoButton label="What the loss terms mean">
+                <span class="terms-list">
+                  {#each LOSS_TERMS as [term, means] (term)}<span><b>{term}</b>: {means}</span>{/each}
+                </span>
+              </InfoButton>
               <LossOptions bind:smoothing bind:scale />
             {/if}
             {#if live && run.status !== 'queued'}
@@ -794,17 +798,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .terms {
+  .terms-list {
     display: grid;
-    place-items: center;
-    width: var(--control-sm);
-    height: var(--control-sm);
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-  }
-  .terms:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
+    gap: var(--space-1);
   }
   .ctl {
     display: flex;
