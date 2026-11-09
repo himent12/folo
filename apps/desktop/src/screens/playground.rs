@@ -748,7 +748,8 @@ impl FoloApp {
                             [
                                 ("Preprocess", p.timing.preprocess_ms, c_pre),
                                 ("Inference", p.timing.inference_ms, c_model),
-                                ("NMS", p.timing.postprocess_ms, c_nms),
+                                // The engine's postprocess: box decoding and NMS (named as Studio names it).
+                                ("Postprocess", p.timing.postprocess_ms, c_nms),
                             ]
                             .into_iter()
                             .map(|(n, v, c)| {
