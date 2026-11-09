@@ -34,9 +34,17 @@
   let phase = $state<'loading' | 'ready' | 'error'>('loading');
   let attempt = $state(0);
   let el = $state<HTMLElement>();
-  // Inside a button or link (a picker thumbnail) Retry cannot be a button of its own: it stays a pointer target that
-  // keeps the click from the tile, and the tile itself remains the keyboard path.
-  const nested = $derived(!!el?.parentElement?.closest('button, a[href]'));
+  // Inside a button or link (a picker thumbnail) Retry cannot be a button of its own. While the image is unavailable
+  // the tile itself retries instead of picking (click, Enter or Space alike; an unavailable image cannot be picked),
+  // and "Retry" is part of the tile's accessible name, so keyboard and screen-reader users get the same action.
+  const host = $derived(el?.parentElement?.closest<HTMLElement>('button, a[href]') ?? null);
+  const nested = $derived(!!host);
+  $effect(() => {
+    const h = host;
+    if (!h || phase !== 'error') return;
+    h.addEventListener('click', retry, { capture: true });
+    return () => h.removeEventListener('click', retry, { capture: true });
+  });
 
   $effect(() => {
     void attempt;
@@ -79,8 +87,8 @@
       <ImageOff size={16} strokeWidth={1.75} aria-hidden="true" />
       <span class="msg">Image unavailable</span>
       {#if nested}
-        <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-        <span class="retry" aria-hidden="true" onclickcapture={retry}>Retry</span>
+        <!-- The tile is the control (see `host` above): this is its label. -->
+        <span class="retry">Retry</span>
       {:else}
         <button type="button" class="retry" onclickcapture={retry} onkeydowncapture={(e) => e.stopPropagation()}>Retry</button>
       {/if}

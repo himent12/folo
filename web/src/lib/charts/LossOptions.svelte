@@ -45,8 +45,9 @@
     open = false;
     if (refocus) trigger?.focus();
   }
+  // On the whole control, not just the panel: Escape also closes it from the trigger (after Shift+Tab back to it).
   function onkeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
+    if (open && e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
       hide();
@@ -79,7 +80,8 @@
   </fieldset>
 {/snippet}
 
-<div class="lo" bind:this={root} {onfocusout}>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="lo" bind:this={root} {onfocusout} {onkeydown}>
   <button
     bind:this={trigger}
     type="button"
@@ -94,7 +96,7 @@
     <ChevronDown size={14} strokeWidth={1.75} aria-hidden="true" />
   </button>
   {#if open}
-    <div class="panel" id="{uid}-panel" role="dialog" aria-label="Loss view" tabindex="-1" {onkeydown}>
+    <div class="panel" id="{uid}-panel" role="dialog" aria-label="Loss view" tabindex="-1">
       {@render group('smoothing', 'Smoothing', SMOOTHING, smoothing, (v) => (smoothing = v as Smoothing))}
       {@render group('scale', 'Y scale', SCALE, scale, (v) => (scale = v as Scale))}
     </div>

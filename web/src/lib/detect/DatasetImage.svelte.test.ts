@@ -94,16 +94,29 @@ describe('DatasetImage', () => {
     expect(target.querySelector('.box')).toBeNull();
   });
 
-  it('inside a button, keeps Retry out of the tab order and the click from the tile', async () => {
+  it('inside a button, the failed tile retries instead of picking, by pointer or keyboard', async () => {
     const url = render(async () => {
       throw new Error('offline');
     }, 'button');
+    // The picker's handler, delegated as Svelte delegates onclick: it sees a click only once it bubbles past the tile.
     const onclick = vi.fn();
-    target.addEventListener('click', onclick);
+    document.body.addEventListener('click', onclick);
     const failed = await until(() => target.querySelector('.failed'), 'the failure');
     expect(failed.querySelector('button')).toBeNull();
-    failed.querySelector<HTMLElement>('.retry')!.click();
+    // The tile is the one control, and its name says what it does now.
+    const tile = target;
+    expect(tile.textContent).toContain('Image unavailable');
+    expect(tile.textContent).toContain('Retry');
+    expect(failed.querySelector('[aria-hidden="true"].retry')).toBeNull();
+    // Enter / Space on a button fire click: activating the tile retries and never reaches the picker.
+    tile.click();
     expect(onclick).not.toHaveBeenCalled();
     await until(() => url.mock.calls.length === 2, 'a second attempt');
+    // Clicking the Retry label itself does the same.
+    await until(() => target.querySelector('.failed'), 'the failure again');
+    target.querySelector<HTMLElement>('.retry')!.click();
+    expect(onclick).not.toHaveBeenCalled();
+    await until(() => url.mock.calls.length === 3, 'a third attempt');
+    document.body.removeEventListener('click', onclick);
   });
 });

@@ -166,13 +166,22 @@ describe('LineChart layering and ticks', () => {
 
   it('pulses the best ring when its pulse count goes up, and not before', () => {
     const marker = { x: 2, y: 0.2, label: 'best', quiet: true, color: 'lime' };
+    const props = $state({ series, label: 'best', markers: [marker] as (typeof marker & { pulse?: number })[] });
+    const { target, c } = mountAt(props);
+    expect(target.querySelector('.marker .ring')).toBeTruthy();
+    expect(target.querySelector('.marker .pulse')).toBeNull();
+    props.markers = [{ ...marker, pulse: 1 }];
+    flushSync();
+    expect(target.querySelector('.marker .pulse')).toBeTruthy();
+    unmount(c);
+  });
+
+  it('does not replay a pulse it was mounted with (a tab switch, a finished run)', () => {
+    const marker = { x: 2, y: 0.2, label: 'best', quiet: true, color: 'lime', pulse: 3 };
     const { target, c } = mountAt({ series, label: 'best', markers: [marker] });
     expect(target.querySelector('.marker .ring')).toBeTruthy();
     expect(target.querySelector('.marker .pulse')).toBeNull();
     unmount(c);
-    const again = mountAt({ series, label: 'best', markers: [{ ...marker, pulse: 1 }] });
-    expect(again.target.querySelector('.marker .pulse')).toBeTruthy();
-    unmount(again.c);
   });
 
   it('keeps the axes around an empty plot and states its one line', () => {

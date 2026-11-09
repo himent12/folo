@@ -47,7 +47,7 @@
 </script>
 
 <script lang="ts">
-  import { tick, type Snippet } from 'svelte';
+  import { tick, untrack, type Snippet } from 'svelte';
   import { scaleLinear, scaleLog } from 'd3-scale';
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
@@ -129,6 +129,8 @@
     highlight = null,
     endDots = false,
   }: Props = $props();
+  // A pulse the chart was mounted with is old news (a tab switch, a return to a finished run): only a newer one plays.
+  const pulseBase = untrack(() => Math.max(0, ...markers.map((m) => m.pulse ?? 0)));
 
   const uid = $props.id();
   let width = $state(0);
@@ -600,7 +602,7 @@
           {#each markers as m (m.label + m.x)}
             {#if m.x >= xExtent[0] && m.x <= xExtent[1]}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
-                {#if m.pulse}
+                {#if m.pulse && m.pulse > pulseBase}
                   {#key m.pulse}<circle class="pulse" r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />{/key}
                 {/if}
                 <circle class="ring" r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />

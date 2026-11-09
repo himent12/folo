@@ -37,4 +37,22 @@ describe('LossOptions', () => {
     expect(document.activeElement).toBe(button);
     unmount(c);
   });
+
+  it('closes on Escape from its button too (after Shift+Tab back from the panel)', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(LossOptions, { target, props: { smoothing: '0.9' as const, scale: 'log' as const } });
+    flushSync();
+    const button = target.querySelector<HTMLButtonElement>('button.trigger')!;
+    button.click();
+    flushSync();
+    await tick();
+    button.focus();
+    button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    flushSync();
+    expect(target.querySelector('[role="dialog"]')).toBeNull();
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(button);
+    unmount(c);
+  });
 });
