@@ -885,7 +885,10 @@ impl FoloApp {
         } else {
             r.epoch.max(1) as f32
         };
-        let closing = (r.epochs.saturating_sub(r.config.augment.close_mosaic)) as f32;
+        // Where mosaic closes, as the engine runs it (the capped value: 7 of a 15-epoch run's
+        // asked-for 10, docs/DOGFOOD-3 S2).
+        let close_n = r.close_mosaic_epochs();
+        let closing = r.epochs.saturating_sub(close_n) as f32;
         // One annotation band: the schedule (close mosaic) and what went wrong (failure). The best
         // epoch is a dot on its series, with the value in the legend.
         let close_marker =
@@ -901,11 +904,14 @@ impl FoloApp {
             c.x_name = "epoch";
             c.x_fmt = |v| format!("{v:.0}");
             // Named on the first chart only; the others keep the line.
-            c.markers = vec![if id == "run-map" || id == "run-loss" {
-                close_marker.clone()
+            // No switch to mark when mosaic never closes, or is off throughout.
+            c.markers = if close_n == 0 || close_n >= r.epochs {
+                Vec::new()
+            } else if id == "run-map" || id == "run-loss" {
+                vec![close_marker.clone()]
             } else {
-                Marker { label: SharedString::default(), ..close_marker.clone() }
-            }];
+                vec![Marker { label: SharedString::default(), ..close_marker.clone() }]
+            };
             // Values live in each panel's legend; the plot keeps only the cursor and dots.
             c.readout = false;
             // Same x ticks in all four charts.
@@ -1509,7 +1515,27 @@ impl FoloApp {
             .flex_col()
             .child(kv(&t, "Dataset", mono_v(ds_name.to_string())))
             .child(kv(&t, "Architecture", mono_v(c.arch.as_str().to_string())))
-            .child(kv(&t, "Pretrained weights", mono_v(c.weights.clone().unwrap_or_else(|| "none".into()))))
+            // The start model by name (the config holds its id).
+            .child(kv(
+                &t,
+                "Pretrained weights",
+                mono_v(c.weights.as_deref().map_or("none".into(), |w| {
+                    self.store
+                        .models
+                        .ready()
+                        .and_then(|ms| ms.iter().find(|m| m.id == w))
+                        .map_or(w.to_string(), |m| m.name.clone())
+                })),
+            ))
+            .child(kv(
+                &t,
+                "Head",
+                mono_v(if c.head == crate::api::Head::O2o {
+                    "end-to-end (no NMS)".into()
+                } else {
+                    "one-to-many + NMS".into()
+                }),
+            ))
             .child(kv(&t, "Seed", mono_v(c.seed.to_string())));
         let col2 = div()
             .flex_1()
@@ -1518,16 +1544,41 @@ impl FoloApp {
             .child(kv(&t, "Epochs", mono_v(c.epochs.to_string())))
             .child(kv(&t, "Batch", mono_v(c.batch.to_string())))
             .child(kv(&t, "Image size", mono_v(format!("{} px", c.imgsz))))
-            .child(kv(&t, "Device", mono_v(c.device.clone())));
+            .child(kv(&t, "Device", mono_v(c.device.clone())))
+            .child(kv(&t, "Precision", mono_v(if c.amp { "mixed (f16)".into() } else { "f32".into() })));
         let col3 = div()
             .flex_1()
             .flex()
             .flex_col()
-            .child(kv(&t, "Optimizer", mono_v(format!("{} · lr0 {}", c.optimizer.label(), c.lr0))))
+            // What the run trains with (`Run.resolved`): Auto's pick and its rate, not "auto · 0.01".
+            .child(kv(
+                &t,
+                "Optimizer",
+                mono_v(match &r.resolved {
+                    Some(s) => {
+                        let opt = match s.optimizer {
+                            crate::api::ResolvedOptimizer::Sgd => "SGD",
+                            crate::api::ResolvedOptimizer::Adamw => "AdamW",
+                        };
+                        let how = if c.optimizer == crate::api::Optimizer::Auto { " (auto)" } else { "" };
+                        format!("{opt}{how} · lr0 {}", fmt_rate(s.lr0))
+                    }
+                    None => format!("{} · lr0 {}", c.optimizer.label(), c.lr0),
+                }),
+            ))
             .child(kv(
                 &t,
                 "Mosaic · close",
-                mono_v(format!("{:.1} · last {} epochs", a.mosaic, a.close_mosaic)),
+                mono_v({
+                    let n = r.close_mosaic_epochs();
+                    if a.mosaic <= 0. {
+                        "off".to_string()
+                    } else if n < a.close_mosaic {
+                        format!("{:.1} · last {n} epochs ({} capped at half)", a.mosaic, a.close_mosaic)
+                    } else {
+                        format!("{:.1} · last {n} epochs", a.mosaic)
+                    }
+                }),
             ))
             .child(kv(&t, "Mixup · flip", mono_v(format!("{:.2} · {:.2}", a.mixup, a.fliplr))))
             .child(kv(
@@ -1595,6 +1646,12 @@ fn pr_floor(low: f32) -> f32 {
 fn log_fields(s: &str) -> Vec<String> {
     let s = slash_paths(s);
     s.split(" · ").enumerate().map(|(i, f)| if i > 0 { format!("· {f}") } else { f.to_string() }).collect()
+}
+
+/// A learning rate as typed (up to six decimals, no trailing zeros): 0.001667, 0.01.
+fn fmt_rate(v: f64) -> String {
+    let s = format!("{v:.6}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive

@@ -488,6 +488,9 @@ pub struct FoloApp {
     pub nr_estimate_last: Option<crate::api::RunEstimate>,
     /// Bumped on every new estimate key (and on an invalid entry): only the latest settle timer asks.
     pub nr_estimate_gen: u64,
+    /// Frames left to keep the page scrolled to its end (a review scene of a page's bottom): the
+    /// page grows as its data lays out, so the end is pinned for a while, not once.
+    pub scroll_end_pending: u8,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
     pub toast_hover: Option<u64>,
@@ -638,6 +641,7 @@ impl FoloApp {
             nr_estimate: None,
             nr_estimate_last: None,
             nr_estimate_gen: 0,
+            scroll_end_pending: 0,
             toasts: Vec::new(),
             toast_hover: None,
             toasts_expanded: false,
@@ -2244,6 +2248,10 @@ impl FoloApp {
             .dataset_summary(&r.config.dataset_id)
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         let mut rest = vec![ds, crate::ui::device_label(&r.device)];
+        // Precision is part of what trains (the e2e tag names the head).
+        if r.config.amp {
+            rest.push("mixed precision".into());
+        }
         if let Some(s) = r.started.as_deref().and_then(crate::api::time::parse) {
             rest.push(format!("started {}", crate::api::time::ago(s, self.store.api.now())));
         }
@@ -2933,6 +2941,12 @@ impl Render for FoloApp {
         if std::mem::take(&mut self.restore_pending) {
             self.restore_focus(window);
         }
+        if self.scroll_end_pending > 0 {
+            self.scroll_end_pending -= 1;
+            let max = self.page_scroll.max_offset().height;
+            self.page_scroll.set_offset(gpui::point(px(0.), -max));
+            window.request_animation_frame();
+        }
         if self.open_new_run_pending && self.store.datasets.ready().is_some_and(|d| !d.is_empty()) {
             self.open_new_run_pending = false;
             self.open_new_run(None, window, cx);
@@ -3574,6 +3588,14 @@ mod form_tests {
 #[cfg(test)]
 mod tests {
     use super::parse_close;
+
+    #[test]
+    fn close_mosaic_capped_as_the_engine_runs_it() {
+        // docs/DOGFOOD-3 S2: a 15-epoch run asked for 10 closes mosaic for the last 7.
+        assert_eq!(crate::api::capped_close_mosaic(10, 15), 7);
+        assert_eq!(crate::api::capped_close_mosaic(10, 100), 10);
+        assert_eq!(crate::api::capped_close_mosaic(10, 1), 0);
+    }
 
     #[test]
     fn close_mosaic_bounded_by_epochs() {

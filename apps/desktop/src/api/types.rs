@@ -74,9 +74,28 @@ impl Label for Optimizer {
 pub trait RunExt {
     /// Fraction of all training steps done, 0..=1.
     fn progress(&self) -> f32;
+    /// Epochs at the end trained without mosaic, as the engine runs them: the server's resolved
+    /// value, else `augment.close_mosaic` capped at half the run (docs/MODEL.md §8.4); every epoch
+    /// when mosaic is off.
+    fn close_mosaic_epochs(&self) -> u32;
+}
+
+/// `close_mosaic` as the engine applies it to `epochs` (capped at half the run).
+pub fn capped_close_mosaic(close_mosaic: u32, epochs: u32) -> u32 {
+    close_mosaic.min(epochs / 2)
 }
 
 impl RunExt for Run {
+    fn close_mosaic_epochs(&self) -> u32 {
+        if self.config.augment.mosaic <= 0. {
+            return self.epochs;
+        }
+        self.resolved
+            .as_ref()
+            .and_then(|r| r.close_mosaic)
+            .unwrap_or_else(|| capped_close_mosaic(self.config.augment.close_mosaic, self.epochs))
+    }
+
     fn progress(&self) -> f32 {
         let total = (self.epochs as u64 * self.steps_per_epoch).max(1);
         (self.step as f64 / total as f64).clamp(0.0, 1.0) as f32
