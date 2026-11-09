@@ -614,6 +614,9 @@ async fn queue_stop_resume_and_restart() {
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "stoppy", 12).await;
+    // Runs wait after each epoch until stopped (or the hold is lifted), so the stops below always land before a
+    // run could finish on its own.
+    s.hold_runs_after_epochs(true);
 
     // One run at a time: the second waits in the queue, and stopping it there is immediate.
     let a: Run = ok(&app, post_json("/api/runs", tiny(&ds, 3))).await;
@@ -644,6 +647,7 @@ async fn queue_stop_resume_and_restart() {
     assert!((1..3).contains(&a1.epoch), "{}", a1.epoch);
     assert!(a1.model_id.is_some(), "stopped after a validated epoch");
     err(&app, post(&format!("/api/runs/{}/stop", a.id)), StatusCode::CONFLICT, "run_not_active").await;
+    s.hold_runs_after_epochs(false);
 
     // Resume: same id, the stored config (only `device` may change), on to the last epoch.
     let resume = |fields: Value| post_json("/api/runs", fields);
@@ -673,7 +677,8 @@ async fn queue_stop_resume_and_restart() {
     assert!(logs.lines.iter().any(|l| l.message.starts_with("resumed from")));
     err(&app, resume(json!({ "resume_run_id": a.id })), StatusCode::CONFLICT, "run_not_resumable").await;
 
-    // A run that was never trained resumes from scratch.
+    // A run that was never trained resumes from scratch (held after its first epoch, for the shutdown below).
+    s.hold_runs_after_epochs(true);
     let (status, body) = send(&app, resume(json!({ "resume_run_id": b.id }))).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     let mut sse_b = Events::open(&app, &b.id).await;
@@ -741,6 +746,8 @@ async fn queue_moves_and_resolved_config() {
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "queued", 12).await;
+    // Runs wait after each epoch until stopped, so every run below is still active when the test stops it.
+    s.hold_runs_after_epochs(true);
     let mv = |id: &str, body: Value| post_json(&format!("/api/runs/{id}/queue"), body);
     let run = |id: &str| {
         let (app, id) = (app.clone(), id.to_string());
@@ -867,22 +874,73 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     }
     let t = TempDir::new("gpu");
     let home = t.0.join("home");
-    let s = Arc::new(RealStore::open(home.clone()).recheck_every(Duration::ZERO));
+    // Inference memory is released after 300 ms idle, the predictors after 600 ms (30 s and 5 min by default).
+    let s = Arc::new(
+        RealStore::open(home.clone())
+            .recheck_every(Duration::ZERO)
+            .gpu_idle_release(Duration::from_millis(300), Duration::from_millis(600)),
+    );
     let app = app(&s);
     let ds = dataset(&app, "gpu", 12).await;
-    let mut cfg = tiny(&ds, 1);
+    // A run stopped after its first epoch (so it has a model): held there until the stop.
+    s.hold_runs_after_epochs(true);
+    let mut cfg = tiny(&ds, 3);
     cfg["device"] = json!("auto");
     let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
     let gpu = folo_gpu::GpuContext::shared().unwrap().summary().name.clone();
     assert!(run.device.starts_with(&gpu), "{} on {gpu}", run.device);
     let mut sse = Events::open(&app, &run.id).await;
+    sse.until_epoch().await;
+    // Queued behind it while it trains: a fine-tune whose weights file is gone by the time it starts, so its
+    // trainer fails after placing the model on the GPU. Its buffers are released too.
+    let zoo = home.join("models");
+    std::fs::create_dir_all(&zoo).unwrap();
+    let mut seed = folo_vision::FoloModel::with_rng(
+        folo_nn::io::ModelConfig::new("n", 2).unwrap(),
+        &mut folo_core::rng::Rng::seed(4),
+    )
+    .unwrap();
+    seed.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    seed.save(zoo.join("seed.folo")).unwrap();
+    let models = ok::<ModelList>(&app, get("/api/models")).await.models;
+    let seed_id = models.iter().find(|m| m.source == Some(ModelSource::File)).unwrap().id.clone();
+    let mut doomed = tiny(&ds, 1);
+    doomed["device"] = json!("auto");
+    doomed["weights"] = json!(seed_id);
+    let doomed: Run = ok(&app, post_json("/api/runs", doomed)).await;
+    assert_eq!(doomed.status, RunStatus::Queued);
+    std::fs::remove_file(zoo.join("seed.folo")).unwrap();
+    ok::<Run>(&app, post(&format!("/api/runs/{}/stop", run.id))).await;
+    let events = sse.until_status(&["completed", "failed", "stopped"]).await;
+    assert_eq!(events.last().unwrap().1["status"], "stopped", "{events:?}");
+    let mut sse = Events::open(&app, &doomed.id).await;
     let events = sse.until_status(&["completed", "failed"]).await;
-    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    assert_eq!(events.last().unwrap().1["status"], "failed", "{events:?}");
+    // Both runs gave their pooled buffers back before they were reported finished (the other tests of this binary
+    // train on the CPU, so nothing else fills the pool meanwhile).
+    let system: SystemResponse = ok(&app, get("/api/system")).await;
+    let pool = system.gpu_pool.expect("the run used the GPU");
+    eprintln!("after the run: {pool:?}");
+    assert_eq!((pool.device.as_str(), pool.cached_bytes), ("gpu:0", 0), "{pool:?}");
+    assert!(pool.peak_live_bytes > pool.live_bytes, "{pool:?}");
     let model_id = ok::<Run>(&app, get(&format!("/api/runs/{}", run.id))).await.model_id.unwrap();
     let p = json!({ "model_id": model_id, "dataset_id": ds.id, "image_id": "0", "conf": 0.001 });
     let r: PredictResponse = ok(&app, post_json("/api/predict", p)).await;
     assert_eq!(r.device, "gpu:0");
     assert!(!r.boxes.is_empty());
+    let busy = ok::<SystemResponse>(&app, get("/api/system")).await.gpu_pool.unwrap();
+    assert!(busy.cached_bytes > 0 && busy.live_bytes > 0, "a prediction caches its buffers: {busy:?}");
+    // Idle: the cache goes back to the driver, then the predictor (its weights) too.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let idle = loop {
+        let now = ok::<SystemResponse>(&app, get("/api/system")).await.gpu_pool.unwrap();
+        if now.cached_bytes == 0 && now.live_bytes < busy.live_bytes {
+            break now;
+        }
+        assert!(std::time::Instant::now() < deadline, "never released: {now:?} (busy {busy:?})");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    eprintln!("idle after a prediction: {idle:?} (busy {busy:?})");
     let system: SystemInfo = ok(&app, get("/api/system")).await;
     assert_eq!(system.gpus.first().map(|g| g.name.as_str()), Some(gpu.as_str()));
     // A one-second probe there measures the peak GPU memory too.
@@ -899,7 +957,9 @@ async fn no_runs_start_after_shutdown() {
     let s = store(&t.0.join("home"));
     let app = app(&s);
     let ds = dataset(&app, "tiny", 4).await;
-    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    // Held after its first epoch of two, so the stop always wins (it cannot complete first).
+    s.hold_runs_after_epochs(true);
+    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
     ok::<Run>(&app, post(&format!("/api/runs/{}/stop", stopped.id))).await;
     let s2 = s.clone();
     tokio::task::spawn_blocking(move || s2.shutdown()).await.unwrap();
@@ -911,34 +971,132 @@ async fn no_runs_start_after_shutdown() {
     assert_eq!(s.list_runs().unwrap().len(), 1, "a refused run is not created");
 }
 
-/// A run the trainer refuses asynchronously keeps the engine's error code: an `amp` run on the CPU fails with
-/// `not_supported` in its final `status` event and in `Run.error_code`, not as a bare message.
+/// An `amp` run this server cannot train (here: on the CPU) is refused when it is submitted, with `501
+/// not_supported` and the same reason `/api/system`'s `capabilities.amp` gives, before anything is queued or written;
+/// resuming a mixed-precision run is refused the same way.
 #[tokio::test(flavor = "multi_thread")]
-async fn amp_run_without_tensor_cores_fails_with_not_supported() {
+async fn amp_run_without_tensor_cores_is_refused_up_front() {
     let t = TempDir::new("amp");
-    let s = store(&t.0.join("home"));
+    let home = t.0.join("home");
+    let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "amp", 4).await;
     let mut cfg = tiny(&ds, 1);
     cfg["amp"] = json!(true);
-    let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
-    assert!(run.config.amp && run.error_code.is_none());
-    let mut sse = Events::open(&app, &run.id).await;
+    let e =
+        err(&app, post_json("/api/runs", cfg.clone()), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
+    assert!(e.message.contains("tensor cores") && e.message.contains("on the CPU"), "{}", e.message);
+    let hint = e.hint.unwrap();
+    assert!(hint.contains("`amp: false`") && hint.contains("--tensor-cores"), "{hint}");
+    assert!(s.list_runs().unwrap().is_empty(), "nothing was queued");
+    assert!(!home.join("runs").exists() || std::fs::read_dir(home.join("runs")).unwrap().next().is_none());
+    // The estimate is not refused (it answers what such a run would take where it can run).
+    let _: RunEstimate = ok(&app, post_json("/api/runs/estimate", cfg)).await;
+
+    // Mixed-precision runs from a server that had tensor cores (their `amp` flag set in run.json): a stopped one is
+    // refused on resume with resume advice (`amp` must match), but only once it would otherwise resume; a completed
+    // one stays `run_not_resumable`.
+    // `done` is held after its epoch, so `stopped` waits in the queue behind it and stops there.
+    s.hold_runs_after_epochs(true);
+    let done: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    let stopped_now: Run = ok(&app, post(&format!("/api/runs/{}/stop", stopped.id))).await;
+    assert_eq!(stopped_now.status, RunStatus::Stopped, "stopped while queued");
+    s.hold_runs_after_epochs(false);
+    let mut sse = Events::open(&app, &done.id).await;
     let events = sse.until_status(&["completed", "failed"]).await;
-    let last = &events.last().unwrap().1;
-    assert_eq!(
-        (last["status"].as_str(), last["error_code"].as_str()),
-        (Some("failed"), Some("not_supported"))
-    );
-    assert!(last["error"].as_str().unwrap().contains("tensor cores"), "{last}");
-    let got: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
-    assert_eq!((got.status, got.error_code.as_deref()), (RunStatus::Failed, Some("not_supported")));
-    // The code survives a store restart (it is part of the persisted run).
+    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    drop(sse);
     drop(app);
     tokio::task::spawn_blocking(move || s.shutdown()).await.unwrap();
-    let app = self::app(&store(&t.0.join("home")));
-    let again: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
-    assert_eq!(again.error_code.as_deref(), Some("not_supported"));
+    for id in [&stopped.id, &done.id] {
+        let p = home.join("runs").join(id).join("run.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        v["run"]["config"]["amp"] = json!(true);
+        std::fs::write(&p, v.to_string()).unwrap();
+    }
+    let s = store(&home);
+    let app = self::app(&s);
+    let resume = |id: &str| post_json("/api/runs", json!({ "resume_run_id": id }));
+    let e = err(&app, resume(&stopped.id), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
+    let hint = e.hint.unwrap();
+    assert!(hint.contains("resumes in it") && !hint.contains("`amp: false`"), "{hint}");
+    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", stopped.id))).await.status, RunStatus::Stopped);
+    err(&app, resume(&done.id), StatusCode::CONFLICT, "run_not_resumable").await;
+    // A field that differs is still `invalid_config`, checked before amp.
+    let bad = json!({ "resume_run_id": stopped.id, "epochs": 7 });
+    err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
+}
+
+/// Published weights downloaded with `folo weights pull` list as models (id = the published name, `source:
+/// published`) when the store is given the weights cache, and fine-tune by name; the run takes the weights'
+/// architecture whatever `arch` says. A published name that is not downloaded is `model_not_found` with the pull
+/// command as the hint.
+#[tokio::test(flavor = "multi_thread")]
+async fn published_weights_list_as_models_and_fine_tune_by_name() {
+    let t = TempDir::new("published");
+    let home = t.0.join("home");
+    let cache = t.0.join("weights");
+    std::fs::create_dir_all(&cache).unwrap();
+    let mut m = folo_vision::FoloModel::with_rng(
+        folo_nn::io::ModelConfig::new("n", 3).unwrap(),
+        &mut folo_core::rng::Rng::seed(9),
+    )
+    .unwrap();
+    m.set_classes(vec!["a".into(), "b".into(), "c".into()]).unwrap();
+    m.save(cache.join("folo-n-coco.folo")).unwrap();
+
+    // Without the cache the name is unknown, and the hint says how to get it there.
+    let plain = store(&home);
+    let e = err(&self::app(&plain), get("/api/models/folo-n-coco"), StatusCode::NOT_FOUND, "model_not_found")
+        .await;
+    assert!(e.hint.unwrap().contains("folo weights pull folo-n-coco"));
+    drop(plain);
+
+    let s = Arc::new(
+        RealStore::open(home.clone()).recheck_every(Duration::ZERO).device("cpu").published_weights(&cache),
+    );
+    let app = app(&s);
+    let models = ok::<ModelList>(&app, get("/api/models")).await.models;
+    let published: Vec<&Model> = models.iter().filter(|m| m.source == Some(ModelSource::Published)).collect();
+    assert_eq!(published.len(), 1, "{models:?}");
+    let p = published[0];
+    assert_eq!((p.id.as_str(), p.name.as_str(), p.arch), ("folo-n-coco", "folo-n-coco", Arch::N));
+    assert!(p.about.as_deref().is_some_and(|a| a.contains("COCO")) && p.run_id.is_none());
+    assert_eq!(p.path.as_deref(), Some(folo_api::json::path(cache.join("folo-n-coco.folo")).as_str()));
+    assert_eq!(ok::<Model>(&app, get("/api/models/folo-n-coco")).await, *p);
+    // Downloadable but not downloaded.
+    let e = err(&app, get("/api/models/folo-n-coco-f16"), StatusCode::NOT_FOUND, "model_not_found").await;
+    assert!(e.message.contains("not downloaded"), "{}", e.message);
+    assert!(e.hint.unwrap().contains("folo weights pull folo-n-coco-f16"));
+
+    // A fine-tune by name, with a mismatching `arch`: the run trains folo-n.
+    let ds = dataset(&app, "pub", 8).await;
+    let mut cfg = tiny(&ds, 1);
+    cfg["weights"] = json!("folo-n-coco");
+    cfg["arch"] = json!("folo-s");
+    let est: RunEstimate = ok(&app, post_json("/api/runs/estimate", cfg.clone())).await;
+    let cli = est.cli.unwrap();
+    assert!(cli.contains(" --weights folo-n-coco ") && !cli.contains("--model"), "{cli}");
+    // tiny: close_mosaic 1 on a 1-epoch run, capped at half the run.
+    assert_eq!(est.close_mosaic, 0);
+    let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
+    assert_eq!((run.config.arch, run.config.weights.as_deref()), (Arch::N, Some("folo-n-coco")));
+    // The run's command names the published weights and the dataset's folder on this machine.
+    let c: CliCommand = ok(&app, get(&format!("/api/runs/{}/cli", run.id))).await;
+    let at = |flag: &str| c.argv.iter().position(|a| a == flag).map(|i| c.argv[i + 1].as_str());
+    assert_eq!((at("--weights"), at("--head")), (Some("folo-n-coco"), Some("o2m")), "{}", c.cli);
+    assert!(at("--data").is_some_and(|d| std::path::Path::new(d).is_dir()), "{}", c.cli);
+    let mut sse = Events::open(&app, &run.id).await;
+    let events = sse.until_status(&["completed", "failed"]).await;
+    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    let done: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
+    assert_eq!(done.resolved.unwrap().close_mosaic, Some(0));
+    let model: Model = ok(&app, get(&format!("/api/models/{}", done.model_id.unwrap()))).await;
+    assert!(model.path.unwrap().ends_with("/weights/best.folo"));
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", run.id))).await;
+    let transferred = |l: &&LogLine| l.message.contains("transferred") && l.message.contains("folo-n-coco");
+    assert!(logs.lines.iter().any(|l| transferred(&l)), "{:?}", logs.lines);
 }
 
 /// `bytes` (a `.folo` file) with metadata `key` set to `value` (removed for `None`); the tensor data is kept.

@@ -694,6 +694,7 @@ mod tests {
                 read_only: false,
                 confine: false,
                 device: "cpu".into(),
+                published_weights: None,
             };
             let server = FoloMcp::new(store, None, opts);
             let info = server.inner.info().await.unwrap();
@@ -712,6 +713,7 @@ mod tests {
             read_only: false,
             confine: false,
             device: "cpu".into(),
+            published_weights: None,
         };
         let server = FoloMcp::new(store.clone(), None, opts);
         let uris = vec![FoloUri::Run("run_3c02".into()), FoloUri::Metrics("run_3c02".into())];

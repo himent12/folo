@@ -136,7 +136,7 @@ export function capabilities(scenario: Scenario): Capabilities {
             // folo_vision::train::amp_not_supported
             reason:
               `mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): gpu:0 has tensor cores ${status}; ` +
-              'train without amp (f32), or on such a GPU (`folo train --amp` asks for them; start `folo serve --tensor-cores`)',
+              'train without amp (f32), or on such a GPU (`folo train --amp` asks for them; start `folo serve` or `folo mcp` with `--tensor-cores`)',
           },
   };
 }

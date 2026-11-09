@@ -836,7 +836,8 @@ Opt-in (`amp = true`, `folo train --amp`; default `false`), as `torch.autocast` 
   overflow: the scale does not change the forward.
 - **Hardware**: tensor cores (folo-gpu's cooperative matrices: `shader-f16`, 16×16×16 f16 → f32, 32-wide subgroups;
   the RTX 4080 SUPER on Vulkan) are required, and `folo train --amp` requests them. Anything else (the CPU, a GPU
-  without them, a `folo serve` started without `--tensor-cores`) fails with `not_supported` before training starts:
+  without them, a `folo serve` or `folo mcp` started without `--tensor-cores`) is `not_supported` before training
+  starts (the server refuses the run when it is submitted):
   f16 without tensor cores computes no faster than f32 on current GPUs, so AMP does not silently fall back.
 - **Accuracy**: on the §10.6 shapes run, AMP reaches the same mAP as f32 (docs/BENCHMARKS.md has the curves). The
   first steps of a run usually overflow at `2^16` and are skipped while the scale backs off (2–5 steps).

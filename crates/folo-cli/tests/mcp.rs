@@ -26,10 +26,17 @@ struct Client {
 }
 
 fn spawn(args: &[&str], inline: Option<&'static str>) -> Client {
+    // No published weights unless a test puts some there (the machine's own ~/.folo/weights would list as models).
+    spawn_with_weights(args, inline, &std::env::temp_dir().join("folo-mcp-test-no-weights"))
+}
+
+/// [`spawn`] with `FOLO_WEIGHTS_DIR` (the `folo weights` cache, listed as published models) set to `weights`.
+fn spawn_with_weights(args: &[&str], inline: Option<&'static str>, weights: &std::path::Path) -> Client {
     let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
         .arg("mcp")
         .args(args)
         .env("RUST_LOG", "warn")
+        .env("FOLO_WEIGHTS_DIR", weights)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -1153,6 +1160,17 @@ fn real_store_end_to_end() {
     assert!(
         e["hint"].as_str().unwrap().contains("cpu") && !e["message"].as_str().unwrap().contains("--device")
     );
+    // Mixed precision this server cannot train is refused at once (not started, then failed), with a hint for an MCP
+    // client: the switch, or how to restart `folo mcp` with tensor cores.
+    let mut amp = tiny(1, "amp");
+    amp["amp"] = json!(true);
+    let e = c.tool_error("train", amp, "not_supported");
+    let hint = e["hint"].as_str().unwrap();
+    assert!(
+        hint.contains("`amp: false`") && hint.contains("`folo mcp`") && hint.contains("--tensor-cores"),
+        "{e}"
+    );
+    assert_eq!(c.ok("list_runs", json!({}))["total"], 0, "nothing was started");
 
     // Train, following the run through its resource subscription (fed by the run's live events).
     let t = checked(&mut c, &schemas, "train", tiny(2, "tiny-n"));
@@ -1177,6 +1195,13 @@ fn real_store_end_to_end() {
         ids.contains(&model_id.as_str()) && ids.contains(&format!("{model_id}-last").as_str()),
         "{ids:?}"
     );
+    // A fine-tune takes the weights' architecture: an explicit other `arch` is refused, as the CLI refuses
+    // `--model` with `--weights`.
+    let mut other = tiny(1, "other-arch");
+    other["weights"] = json!(model_id);
+    other["arch"] = json!("folo-s");
+    let e = c.tool_error("train", other, "invalid_config");
+    assert!(e["message"].as_str().unwrap().contains("folo-n"), "{e}");
 
     let val = checked(&mut c, &schemas, "val", json!({ "model_id": model_id, "dataset_id": ds_id }));
     assert_eq!((val["split"].as_str(), val["images"].as_u64()), (Some("val"), Some(2)));
@@ -1235,14 +1260,14 @@ fn real_store_end_to_end() {
     let x = checked(&mut c, &schemas, "export", json!({ "model_id": model_id, "format": "onnx" }));
     assert!(x["path"].as_str().unwrap().ends_with(".onnx"), "{x}");
     assert_eq!(std::fs::metadata(x["path"].as_str().unwrap()).unwrap().len(), x["bytes"].as_u64().unwrap());
-    // The ONNX switches: f16 weights make the file about half the size, and name it -f16.
+    // The ONNX switches: f16 weights make the file about half the size, and name it -f16 (-decoded-f16 decoded).
     let h = checked(
         &mut c,
         &schemas,
         "export",
         json!({ "model_id": model_id, "format": "onnx", "half": true, "decode": true, "dynamic": true }),
     );
-    assert!(h["path"].as_str().unwrap().ends_with("-f16.onnx"), "{h}");
+    assert!(h["path"].as_str().unwrap().ends_with("-decoded-f16.onnx"), "{h}");
     assert!(h["bytes"].as_u64().unwrap() < x["bytes"].as_u64().unwrap() * 3 / 4, "{h} vs {x}");
     c.tool_error(
         "export",
@@ -1393,4 +1418,51 @@ fn proxy_mode_forwards_to_folo_serve() {
     );
     c.tool_error("list_datasets", json!({}), "server_unreachable");
     c.finish();
+}
+
+/// Published weights in the `folo weights` cache (`FOLO_WEIGHTS_DIR`) are models in embedded mode: listed with
+/// `source: published` and the registry's `about`, and `train { weights: "folo-n-coco" }` fine-tunes from them.
+#[test]
+fn published_weights_are_models() {
+    let dir = tmp_dir("published");
+    let weights = dir.join("weights");
+    std::fs::create_dir_all(&weights).unwrap();
+    let home = dir.join("home");
+    let mut c =
+        spawn_with_weights(&["--data-dir", home.to_str().unwrap(), "--device", "cpu"], None, &weights);
+    init_old(&mut c);
+    let ds = c.ok(
+        "create_synthetic_dataset",
+        json!({ "name": "pub", "images": 8, "imgsz": 64, "classes": ["circle", "square"], "seed": 5 }),
+    );
+    let ds_id = ds["id"].as_str().unwrap().to_string();
+    // Not downloaded yet: the hint is the pull command.
+    let cfg = json!({ "dataset_id": ds_id, "weights": "folo-n-coco", "epochs": 1, "batch": 4, "imgsz": 64,
+                      "device": "cpu", "augment": { "close_mosaic": 1 } });
+    let e = c.tool_error("train", cfg.clone(), "model_not_found");
+    assert!(e["hint"].as_str().unwrap().contains("folo weights pull folo-n-coco"), "{e}");
+    // "Downloaded": a tiny run's weights stand in for the release asset.
+    let t = c.ok(
+        "train",
+        json!({ "dataset_id": ds_id, "epochs": 1, "batch": 4, "imgsz": 64, "device": "cpu",
+                                  "augment": { "close_mosaic": 1 } }),
+    );
+    let run_id = t["run_id"].as_str().unwrap().to_string();
+    let done =
+        wait_run(&mut c, &run_id, 120, |s| !matches!(s["status"].as_str(), Some("queued" | "running")));
+    assert_eq!(done["status"], "completed", "{done}");
+    let best = home.join("runs").join(&run_id).join("weights/best.folo");
+    std::fs::copy(best, weights.join("folo-n-coco.folo")).unwrap();
+    let models = c.ok("list_models", json!({}));
+    let p = models["items"].as_array().unwrap().iter().find(|m| m["id"] == "folo-n-coco").cloned();
+    let p = p.unwrap_or_else(|| panic!("not listed: {models}"));
+    assert_eq!((p["source"].as_str(), p["arch"].as_str()), (Some("published"), Some("folo-n")), "{p}");
+    assert!(p["about"].as_str().unwrap().contains("COCO"), "{p}");
+    let t = c.ok("train", cfg);
+    let status = c.ok("run_status", json!({ "run_id": t["run_id"] }));
+    assert_eq!(status["config"]["weights"], "folo-n-coco", "{status}");
+    let done = wait_run(&mut c, t["run_id"].as_str().unwrap(), 120, |s| {
+        !matches!(s["status"].as_str(), Some("queued" | "running"))
+    });
+    assert_eq!(done["status"], "completed", "{done}");
 }

@@ -201,6 +201,11 @@ impl RunEntry {
         self.state.lock().unwrap().file.dataset.clone()
     }
 
+    /// The weights file the run started from (`TrainConfig.weights` resolved when it was created).
+    pub fn weights(&self) -> Option<PathBuf> {
+        self.state.lock().unwrap().file.weights.clone()
+    }
+
     /// The run folder.
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -388,6 +393,28 @@ pub struct Runs {
     /// so the two never share the device.
     gate: Mutex<()>,
     throughput: Arc<Throughput>,
+    /// Test support ([`Runs::hold_after_epochs`]).
+    hold: Arc<EpochHold>,
+}
+
+/// Test support: while `on`, a run's trainer waits after each epoch (its checkpoint written and its `epoch` event
+/// sent) until the hold is lifted or the run is asked to stop, so a test's stop always lands before the next epoch.
+/// After the last epoch there is no next one: a run stopped there still completes, so tests stop runs that have
+/// epochs left.
+#[derive(Default)]
+struct EpochHold {
+    on: Mutex<bool>,
+    lifted: Condvar,
+}
+
+impl EpochHold {
+    /// Blocks while the hold is on and `stop` is unset (a stop does not signal the condvar, so it is polled).
+    fn wait(&self, stop: &AtomicBool) {
+        let mut on = self.on.lock().unwrap_or_else(|p| p.into_inner());
+        while *on && !stop.load(Ordering::Relaxed) {
+            on = self.lifted.wait_timeout(on, Duration::from_millis(20)).unwrap_or_else(|p| p.into_inner()).0;
+        }
+    }
 }
 
 impl Runs {
@@ -407,12 +434,18 @@ impl Runs {
                     }
                 };
                 let mut file = file;
-                // Runs from before `Run.resolved`: the trainer's config.json has the same numbers.
-                if file.run.resolved.is_none() {
-                    file.run.resolved = std::fs::read(d.join("config.json"))
+                // Runs from before `Run.resolved` (or its `close_mosaic`): the trainer's config.json has the same
+                // numbers.
+                if file.run.resolved.as_ref().is_none_or(|r| r.close_mosaic.is_none()) {
+                    let from_config = std::fs::read(d.join("config.json"))
                         .ok()
                         .and_then(|b| serde_json::from_slice(&b).ok())
                         .and_then(|v| folo_vision::train::ResolvedOptim::from_run_config(&v));
+                    match (&mut file.run.resolved, from_config) {
+                        (Some(r), Some(c)) => r.close_mosaic = c.close_mosaic,
+                        (r @ None, c) => *r = c,
+                        _ => {}
+                    }
                 }
                 file.run.queue_position = None;
                 let id = file.run.id.clone();
@@ -448,6 +481,7 @@ impl Runs {
             gate: Mutex::new(()),
             throughput,
             activity: AtomicU64::new(0),
+            hold: Arc::default(),
         })
     }
 
@@ -738,8 +772,9 @@ impl Runs {
                 }
                 st.claimed = true;
             }
-            let ran =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&entry, &self.throughput)));
+            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                execute(&entry, &self.throughput, &self.hold)
+            }));
             *entry.measure.lock().unwrap() = None;
             let mut st = entry.state.lock().unwrap();
             let internal = || Some("internal".to_string());
@@ -763,6 +798,13 @@ impl Runs {
             self.activity.fetch_add(1, Ordering::SeqCst);
             self.idle.notify_all();
         }
+    }
+
+    /// Test support: while `on`, every run waits after each epoch until this is turned off or the run is asked to
+    /// stop ([`EpochHold`]), so a test can stop a run that would otherwise finish first.
+    pub fn hold_after_epochs(&self, on: bool) {
+        *self.hold.on.lock().unwrap_or_else(|p| p.into_inner()) = on;
+        self.hold.lifted.notify_all();
     }
 
     /// Requests a stop: a queued run stops at once, a running one after its current batch (keeping the last
@@ -868,7 +910,21 @@ impl Runs {
             )
             .hint("omit the fields, or start a new run (with `weights` to start from this run's model)"));
         }
-        engine::resolve(&wanted.device)?;
+        let device = engine::resolve(&wanted.device)?;
+        // A mixed-precision run resumes in mixed precision (`amp` must match): refused before it is queued where this
+        // server cannot train it, as a new run is.
+        if wanted.amp
+            && let Err(err) = folo_vision::train::amp_available(device)
+        {
+            let mut err = engine::engine_error(err);
+            err.body.hint = Some(
+                "the run trained in mixed precision and resumes in it: resume it on a server with tensor cores \
+                 (`folo serve --tensor-cores` / `folo mcp --tensor-cores` on a GPU that has them), or start a new \
+                 f32 run with `weights` set to its model"
+                    .into(),
+            );
+            return Err(err);
+        }
         if !Path::new(&st.file.dataset.path).exists() {
             return Err(Error::not_found("dataset", &st.file.dataset.id)
                 .hint(format!("the run's dataset is gone from {}", st.file.dataset.path)));
@@ -1040,15 +1096,20 @@ fn read_metrics(path: &Path) -> RunMetrics {
 }
 
 /// Trains one run on the worker thread.
-fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>) {
+fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>, hold: &Arc<EpochHold>) {
     let (config, dataset, weights) = {
         let st = e.state.lock().unwrap();
         (st.file.run.config.clone(), st.file.dataset.clone(), st.file.weights.clone())
     };
-    let trainer = build(e, &config, &dataset, weights);
+    let trainer = build(e, &config, &dataset, weights, hold);
     let mut trainer = match trainer {
         Ok(t) => t,
         Err((code, msg)) => {
+            // A trainer that failed after placing its model (weights that do not load, a dataset error after the
+            // model was built) left its buffers in the pool too.
+            if let Ok(device) = engine::resolve(&config.device) {
+                engine::release_gpu_memory(device);
+            }
             e.log(LogLevel::Error, msg.clone());
             e.state.lock().unwrap().outcome = Some((RunStatus::Failed, Some(msg), Some(code)));
             return;
@@ -1092,6 +1153,10 @@ fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>) {
     if let Err(err) = trainer.run() {
         tracing::warn!(run = %e.id, "training failed: {err}");
     }
+    drop(trainer);
+    // The run's model, optimizer state, EMA and activations are back in the pool now; hand them to the driver
+    // before the run is reported finished, so the next job on this GPU (a CLI run, another process) has its memory.
+    engine::release_gpu_memory(device);
 }
 
 fn build(
@@ -1099,10 +1164,12 @@ fn build(
     config: &TrainConfig,
     dataset: &DatasetRef,
     weights: Option<PathBuf>,
+    hold: &Arc<EpochHold>,
 ) -> std::result::Result<Trainer, (String, String)> {
     let device =
         engine::resolve(&config.device).map_err(|err| (err.body.code.to_string(), err.body.message))?;
     let opts = folo_data::OpenOptions { format: data_format(dataset.format), verify_images: true };
+    let format = opts.format;
     let ds = folo_data::open_with(Path::new(&dataset.path), &opts)
         .map_err(|err| ("data_error".to_string(), format!("opening the dataset {}: {err}", dataset.path)))?;
     if ds.train.is_empty() {
@@ -1113,22 +1180,29 @@ fn build(
         val: Arc::new(ds.split(Split::Val).clone()),
         classes: ds.classes.clone(),
     };
-    let sink = e.clone();
+    let (sink, hold, stop) = (e.clone(), hold.clone(), e.stop.clone());
     let opts = TrainOptions {
         run_dir: Some(e.dir.clone()),
-        events: Some(Box::new(move |ev: &RunEvent| sink.on_event(ev))),
+        events: Some(Box::new(move |ev: &RunEvent| {
+            sink.on_event(ev);
+            if matches!(ev, RunEvent::Epoch(_)) {
+                hold.wait(&stop);
+            }
+        })),
         stop: e.stop.clone(),
         weights,
         ..TrainOptions::default()
     };
     let last = e.dir.join("weights").join("last.folo");
     let t = if last.is_file() {
-        let overrides = ResumeOverrides { workers: None, device: Some(device.to_string()) };
+        let overrides =
+            ResumeOverrides { workers: None, device: Some(device.to_string()), data_format: Some(format) };
         Trainer::resume(&last, data, opts, overrides)
     } else {
         let mut cfg = folo_vision::TrainConfig::from_api(config);
         cfg.device = device.to_string();
         cfg.dataset = dataset.id.clone();
+        cfg.data_format = format;
         Trainer::new(cfg, data, opts)
     };
     t.map_err(|err| (err.code().to_string(), err.summary()))

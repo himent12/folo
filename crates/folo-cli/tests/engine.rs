@@ -133,7 +133,14 @@ fn train_val_predict_export_with_json() {
     let done = lines.last().unwrap();
     assert_eq!(done["event"], "done");
     // Timings are rounded to 0.1 µs, so they print with at most 4 decimals (no f64 noise).
-    let timings = preds.iter().map(|p| &p["timing"]).chain([&done["mean_timing"]]);
+    let timings = preds.iter().map(|p| &p["timing"]).chain([&done["mean_timing"], &done["first_timing"]]);
+    // The first image (pipeline warm-up) is reported apart and left out of the mean.
+    assert_eq!(done["first_timing"], preds[0]["timing"], "{done}");
+    if preds.len() > 1 {
+        let rest: f64 = preds[1..].iter().map(|p| p["timing"]["total_ms"].as_f64().unwrap()).sum();
+        let mean = done["mean_timing"]["total_ms"].as_f64().unwrap();
+        assert!((mean - rest / (preds.len() - 1) as f64).abs() < 1e-3, "{done}");
+    }
     for (k, v) in timings.flat_map(|t| t.as_object().unwrap()) {
         let decimals = v.to_string().split_once('.').map_or(0, |(_, d)| d.len());
         assert!(v.as_f64().unwrap() >= 0.0 && decimals <= 4, "{k}: {v}");
@@ -167,7 +174,7 @@ fn train_val_predict_export_with_json() {
     let out = root.join("tiny-f16.folo");
     let (code, lines, stderr) = folo(&["export", "--json", "--model", s(&best), "--output", s(&out)]);
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!((lines[0]["dtype"].as_str(), lines[0]["source"].as_str()), (Some("F16"), Some("ema")));
+    assert_eq!((lines[0]["dtype"].as_str(), lines[0]["source"].as_str()), (Some("f16"), Some("ema")));
     assert!(lines[0]["bytes"].as_u64().unwrap() < std::fs::metadata(&best).unwrap().len() / 4);
     let (code, _, stderr) = folo(&["predict", "--json", "--model", s(&out), s(&images.join("000008.png"))]);
     assert_eq!(code, 0, "{stderr}");
@@ -233,7 +240,7 @@ fn train_val_predict_export_with_json() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     let r = &lines[0];
-    assert!(r["path"].as_str().unwrap().ends_with("best-f16.onnx"), "{r}");
+    assert!(r["path"].as_str().unwrap().ends_with("best-decoded-f16.onnx"), "{r}");
     assert_eq!(
         r["outputs"][0],
         serde_json::json!({
@@ -425,4 +432,107 @@ fn stop_resume_and_epoch_only_records() {
     assert_eq!(lines.iter().filter(|l| l["event"] == "epoch").count() as u64, 6 - finished);
     assert_eq!(lines.last().unwrap()["status"], "completed");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `--format` picks the labels of a folder that has both YOLO (`data.yaml`) and COCO (`annotations/`) labels, and a
+/// resume reads the folder the same way without repeating it (the checkpoint keeps it).
+#[test]
+fn format_picks_the_labels_and_resume_keeps_it() {
+    use std::io::BufRead;
+    let root = std::env::temp_dir().join(format!("folo-cli-format-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let data = root.join("both");
+    let cfg = SyntheticConfig {
+        images: 16,
+        classes: vec!["circle".into(), "square".into()],
+        imgsz: 64,
+        vary_aspect: false,
+        val_fraction: 0.25,
+        ..SyntheticConfig::default()
+    };
+    write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
+    // The same images as COCO, next to the YOLO labels, with one class renamed so the two read differently.
+    let conv = root.join("conv");
+    let (code, _, stderr) = folo(&["dataset", "convert", s(&data), s(&conv), "--to", "coco", "--json"]);
+    assert_eq!(code, 0, "{stderr}");
+    std::fs::create_dir_all(data.join("annotations")).unwrap();
+    for e in std::fs::read_dir(conv.join("annotations")).unwrap().flatten() {
+        let text = std::fs::read_to_string(e.path()).unwrap().replace("\"circle\"", "\"ring\"");
+        std::fs::write(data.join("annotations").join(e.file_name()), text).unwrap();
+    }
+    let project = root.join("runs");
+    let run = project.join("coco");
+    // Runs `folo train` with `args` and stops it after its first epoch; returns the final record.
+    let train_one_epoch = |args: &[&str]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+            .args(["train", "--json", "--device", "cpu", "--workers", "1"])
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut last = Value::Null;
+        for line in stdout.lines() {
+            let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if v["event"] == "epoch" && last["event"] != "epoch" {
+                let (code, _, stderr) = folo(&["stop", "--json", s(&run)]);
+                assert_eq!(code, 0, "{stderr}");
+            }
+            last = v;
+        }
+        assert!(child.wait().unwrap().success());
+        last
+    };
+    let last = train_one_epoch(&[
+        "--data",
+        s(&data),
+        "--format",
+        "coco",
+        "--imgsz",
+        "64",
+        "--batch",
+        "4",
+        "--epochs",
+        "6",
+        "--project",
+        s(&project),
+        "--name",
+        "coco",
+    ]);
+    assert_eq!(last["status"], "stopped", "{last}");
+    let config: Value =
+        serde_json::from_str(&std::fs::read_to_string(run.join("config.json")).unwrap()).unwrap();
+    assert_eq!(config["classes"], serde_json::json!(["ring", "square"]), "read as COCO");
+    // A checkpoint from before `data_format` (auto): resumed once with --format coco, which its later checkpoints
+    // keep, so the next resume needs no --format either.
+    let ckpt = run.join("weights/last.folo");
+    set_train_key(&ckpt, "data_format", serde_json::json!("auto"));
+    let last = train_one_epoch(&["--resume", s(&ckpt), "--format", "coco"]);
+    assert_eq!(last["status"], "stopped", "{last}");
+    // Resumed without --format: still COCO (as auto, the folder reads as YOLO, with another class list).
+    let (code, lines, stderr) = folo(&["train", "--json", "--resume", s(&ckpt), "--json-events", "epoch"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(lines.last().unwrap()["status"], "completed", "{:?}", lines.last());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Sets `key` of the `folo.train` config stored in the checkpoint at `path` (its header only; the tensor data, whose
+/// offsets are relative to the end of the header, is kept).
+fn set_train_key(path: &Path, key: &str, value: Value) {
+    let bytes = std::fs::read(path).unwrap();
+    let n = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let mut header: Value = serde_json::from_slice(&bytes[8..8 + n]).unwrap();
+    let meta = header["__metadata__"].as_object_mut().unwrap();
+    let mut train: Value = serde_json::from_str(meta["folo.train"].as_str().unwrap()).unwrap();
+    train[key] = value;
+    meta.insert("folo.train".into(), Value::String(train.to_string()));
+    let mut h = serde_json::to_vec(&header).unwrap();
+    while !h.len().is_multiple_of(8) {
+        h.push(b' ');
+    }
+    let mut out = (h.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(&h);
+    out.extend_from_slice(&bytes[8 + n..]);
+    std::fs::write(path, out).unwrap();
 }

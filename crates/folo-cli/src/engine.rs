@@ -6,13 +6,17 @@ use crate::output::{CliError, ExitCode};
 
 /// Open a dataset folder or YAML/JSON file. Returns the dataset and a short name for it (the folder name, or the
 /// YAML's folder for `data.yaml`).
-pub fn open_dataset(arg: &str) -> Result<(folo_data::LoadedDataset, String), CliError> {
+pub fn open_dataset(
+    arg: &str,
+    format: folo_data::Format,
+) -> Result<(folo_data::LoadedDataset, String), CliError> {
     let path = Path::new(arg);
     if !path.exists() {
         return Err(CliError::new(ExitCode::NotFound, "dataset_not_found", format!("{arg} does not exist"))
             .hint("pass a YOLO / COCO dataset folder or its data.yaml"));
     }
-    let ds = folo_data::open(path).map_err(|e| {
+    let opts = folo_data::OpenOptions { format, ..folo_data::OpenOptions::default() };
+    let ds = folo_data::open_with(path, &opts).map_err(|e| {
         CliError::new(ExitCode::Runtime, "invalid_dataset", e.to_string())
             .hint("see docs/DATA.md for the supported layouts")
     })?;
