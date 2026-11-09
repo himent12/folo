@@ -112,3 +112,18 @@ describe('holdDomain', () => {
     expect(h.value.domain).toEqual([0, 400]);
   });
 });
+
+describe('tiny ranges', () => {
+  it('keeps sub-micro ticks distinct (a small learning rate)', () => {
+    const f = niceDomain(0, 9e-7);
+    expect(f.domain[1]).toBeGreaterThan(f.domain[0]);
+    expect(new Set(f.ticks).size).toBe(f.ticks.length);
+    expect(f.ticks.length).toBeGreaterThanOrEqual(3);
+    expect(f.ticks[f.ticks.length - 1]).toBeGreaterThanOrEqual(9e-7);
+    const t = capTicks(0, 9e-7);
+    expect(new Set(t).size).toBe(t.length);
+    expect(stepDecimals(2e-7)).toBe(7);
+    expect(stepDecimals(0.25)).toBe(2);
+    expect(stepDecimals(5)).toBe(0);
+  });
+});

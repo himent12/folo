@@ -18,8 +18,15 @@ const MANTISSAS = [1, 2, 2.5, 5];
 
 /** Decimals a tick step needs: "0.25" two, "0.2" one, "5" none. */
 export function stepDecimals(step: number): number {
-  for (let d = 0; d <= 8; d++) if (Math.abs(step * 10 ** d - Math.round(step * 10 ** d)) < 1e-6) return d;
-  return 8;
+  if (!(step > 0) || !Number.isFinite(step)) return 0;
+  // From the step's own magnitude, with a relative tolerance: a tiny step (a learning rate of 2e-7) needs 7 decimals,
+  // never 0, which would collapse every tick onto the same value.
+  const first = Math.max(0, -Math.floor(Math.log10(step)));
+  for (let d = first; d <= first + 8; d++) {
+    const x = step * 10 ** d;
+    if (Math.abs(x - Math.round(x)) < 1e-6 * Math.max(1, Math.abs(x))) return d;
+  }
+  return first + 8;
 }
 
 /** Nice steps around `span / MAX_TICKS`, smallest first. */

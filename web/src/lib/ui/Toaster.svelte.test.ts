@@ -13,6 +13,7 @@ let c: ReturnType<typeof mount> | undefined;
 afterEach(() => {
   if (c) unmount(c);
   c = undefined;
+  toast.hold(false);
   for (const t of toast.items) toast.dismiss(t.id);
   document.body.innerHTML = '';
 });
@@ -70,5 +71,30 @@ describe('Toaster and focus', () => {
     close.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 60));
     expect(toast.items.some((t) => t.id === id)).toBe(true);
+  });
+
+  it('a toast shown while the stack is held waits too', async () => {
+    setup();
+    toast.show({ tone: 'info', title: 'First', timeout: 0 });
+    flushSync();
+    const close = document.querySelector<HTMLButtonElement>('.toast .close')!;
+    close.focus();
+    close.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
+    const later = toast.show({ tone: 'info', title: 'Later', timeout: 20 });
+    await new Promise((r) => setTimeout(r, 60));
+    expect(toast.items.some((t) => t.id === later)).toBe(true);
+  });
+
+  it('closing another toast by mouse leaves keyboard focus in the one that holds it', () => {
+    const field = setup();
+    toast.show({ tone: 'info', title: 'A', timeout: 0 });
+    toast.show({ tone: 'info', title: 'B', timeout: 0 });
+    flushSync();
+    const [closeA, closeB] = [...document.querySelectorAll<HTMLButtonElement>('.toast .close')];
+    closeA!.focus();
+    closeA!.dispatchEvent(new FocusEvent('focusin', { bubbles: true, relatedTarget: field }));
+    closeB!.click();
+    flushSync();
+    expect(document.activeElement).toBe(closeA);
   });
 });

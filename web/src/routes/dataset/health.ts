@@ -149,6 +149,19 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       issues: 'error',
       files: s.broken_labels,
     });
+    // The check's other errors (unreadable images, …) count too, once: its broken_label issues are the files above.
+    const other = counts ? counts.error - (counts.by_kind.broken_label ?? s.broken_labels) : 0;
+    if (other > 0) {
+      out.push({
+        id: 'check-errors',
+        severity: 'danger',
+        title: `${int(other)} other file ${other === 1 ? 'error' : 'errors'} from the dataset check`,
+        short: `${int(other)} other file ${other === 1 ? 'error' : 'errors'}`,
+        detail: 'Images that cannot be read are left out of training. Fix or remove them.',
+        issues: 'error',
+        files: other,
+      });
+    }
   } else if (counts && counts.error > 0) {
     out.push({
       id: 'check-errors',

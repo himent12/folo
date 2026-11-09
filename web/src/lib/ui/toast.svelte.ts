@@ -20,12 +20,14 @@ class Toasts {
   items = $state<Toast[]>([]);
   #id = 0;
   #timers = new Map<number, ReturnType<typeof setTimeout>>();
+  /** While the pointer or focus is in the stack: no timers run and nothing is evicted (a held toast stays put). */
+  #held = false;
 
   show(t: Omit<Toast, 'id' | 'timeout'> & { timeout?: number }): number {
     const id = ++this.#id;
     const toast: Toast = { timeout: t.tone === 'error' ? 8000 : 4000, ...t, id };
-    this.items = [...this.items.slice(-3), toast];
-    if (toast.timeout > 0) this.#timers.set(id, setTimeout(() => this.dismiss(id), toast.timeout));
+    this.items = this.#held ? [...this.items, toast] : [...this.items.slice(-3), toast];
+    if (toast.timeout > 0 && !this.#held) this.#timers.set(id, setTimeout(() => this.dismiss(id), toast.timeout));
     return id;
   }
 
@@ -51,12 +53,15 @@ class Toasts {
     this.items = this.items.filter((t) => t.id !== id);
   }
 
-  /** Pause auto-dismiss while the pointer is over the stack. */
+  /** Pause auto-dismiss (and eviction) while the pointer or focus is in the stack; new toasts wait too. */
   hold(on: boolean) {
+    if (on === this.#held) return;
+    this.#held = on;
     if (on) {
       for (const t of this.#timers.values()) clearTimeout(t);
       this.#timers.clear();
     } else {
+      this.items = this.items.slice(-4);
       for (const t of this.items) if (t.timeout > 0) this.#timers.set(t.id, setTimeout(() => this.dismiss(t.id), 2500));
     }
   }

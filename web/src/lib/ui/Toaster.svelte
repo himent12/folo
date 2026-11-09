@@ -34,8 +34,9 @@
 
   function close(id: number, run?: () => void) {
     run?.();
-    // The action may have moved focus itself (e.g. opened a page): then it is not ours to place.
-    const inside = el.contains(document.activeElement);
+    // Only the toast that holds focus hands it back: closing another (by mouse) leaves focus, and the hold, where they
+    // are. The action may also have moved focus itself (e.g. opened a page): then it is not ours to place.
+    const inside = !!el.querySelector(`[data-toast="${id}"]`)?.contains(document.activeElement);
     toast.dismiss(id);
     if (!inside) return;
     focused = false;
@@ -59,7 +60,7 @@
   <ol aria-live="polite">
     {#each toast.items as t (t.id)}
       {@const Icon = icons[t.tone]}
-      <li class="toast {t.tone}" role={t.tone === 'error' ? 'alert' : 'status'} transition:fly={{ y: 8, duration: motion(160), easing: cubicOut }}>
+      <li class="toast {t.tone}" data-toast={t.id} role={t.tone === 'error' ? 'alert' : 'status'} transition:fly={{ y: 8, duration: motion(160), easing: cubicOut }}>
         <span class="icon"><Icon size={16} strokeWidth={1.75} /></span>
         <div class="text">
           <p class="title">{t.title}</p>

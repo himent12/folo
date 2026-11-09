@@ -156,6 +156,8 @@
       { kind: 'missed', title: 'Missed', rows: all.filter((e) => e.kind === 'missed').slice(0, RANK_MAX) },
     ].filter((g) => g.rows.length);
   });
+  /** Any confusion or miss at all, counting the classes too small to rank (fewer than 20 objects). */
+  const anyErrors = $derived(!!ev && rankConfusions(ev.confusion, 1, 1).length > 0);
   /** A ranked line's cell in the shown matrix (null when its class is folded into Other). */
   function cellOf(e: ConfusionEntry): { r: number; c: number } | null {
     if (!cm) return null;
@@ -172,8 +174,17 @@
       cmExplore = true;
       await tick();
     }
+    // The pressed line is gone with the list: focus lands on the cell, or (a class folded into Other) on the way back.
     if (at) matrixView?.reveal(at.r, at.c);
+    else focusBack();
   }
+  /** Phones: the whole matrix, focus on its way back to the list (the pressed button is gone with the list). */
+  async function openMatrix() {
+    cmExplore = true;
+    await tick();
+    focusBack();
+  }
+  const focusBack = () => document.querySelector<HTMLElement>('#cm .to-list')?.focus({ preventScroll: true });
   /** Back from the matrix to the ranked list, keeping the reader's place at the section's top. */
   async function closeMatrix() {
     cmExplore = false;
@@ -505,11 +516,15 @@
               {/each}
             </ol>
           {:else}
-            <p class="none">No class is confused with another or missed.</p>
+            <p class="none">
+              {anyErrors
+                ? 'No class has the 20 objects it takes to rank its confusions here; the matrix shows every cell.'
+                : 'No class is confused with another or missed.'}
+            </p>
           {/each}
           <div class="rank-foot">
-            {#if missed}<p><span class="num">{sharePct(missed.v)}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
-            <Button class="explore" onclick={() => (cmExplore = true)}>Explore the matrix</Button>
+            {#if missed}<p><span class="num">{sharePct(missed.v) || '0'}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
+            <Button class="explore" onclick={openMatrix}>Explore the matrix</Button>
           </div>
         {:else if cm}
           {#if phone.current}
@@ -546,7 +561,7 @@
                           <button type="button" class="go" title="Show in the matrix" onclick={() => reveal(at)}>{@render worst()}</button>
                         {:else}{@render worst()}{/if}<span class="sep" aria-hidden="true">·</span>
                       {/if}<span
-                        class="num">{sharePct(missed.v)}%</span> overall
+                        class="num">{sharePct(missed.v) || '0'}%</span> overall
                     </dd>
                   </div>
                 {/if}
