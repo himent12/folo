@@ -715,11 +715,12 @@
             <Button class="explore" onclick={openMatrix}>Explore the matrix</Button>
           </div>
         {:else if cm}
-          <!-- The matrix at its own size (cells up to 48 px) with a sticky rail beside it taking the rest of the width:
-               what goes wrong most, ranked (each line shows its cell), and how to read the matrix. With under 300 px
-               left beside the matrix the rail wraps under it; a rail 560 px or wider sets its two lists side by side.
-               Phones lead with the matrix alone: the lists are the step back. -->
-          <div class="cm-layout">
+          <!-- One layout whatever the class count (DESIGN_DIRECTION, Model detail): from the laptop tier the matrix on
+               the left 8 columns (cells up to 48 px) and a sticky rail on the right 4, what goes wrong most as two
+               ranked lists stacked (each line shows its cell), then how to read the matrix; under 5 classes, 6 + 6.
+               Tablets: the matrix, the two lists side by side under it. Phones lead with the lists; the matrix is a
+               step away. -->
+          <div class="cm-layout" class:few={cm.classes.length < 5}>
             <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" minCell={32} maxCell={48} scale /></div>
             <div class="cm-rail">
               <div class="rail-in">
@@ -1177,10 +1178,8 @@
     gap: var(--space-2);
     padding: 0 var(--space-4) var(--space-4);
   }
-  /* The matrix takes the width its cells want (up to 48 px each); the rail follows 32 px after it and takes the rest,
-     sticking under the top bar while a tall matrix scrolls past. Decided by the width left, never by class count: the
-     lists sit beside the matrix whenever their 280 px fits (a pair, its counts and its share on one line), and only
-     wrap under it at full width where it does not (many classes at the laptop tier, phones). */
+  /* Under the laptop tier the matrix takes the width its cells want (up to 48 px each) and the rail wraps under it at
+     full width, its two lists side by side where 560 px allows. */
   .cm-layout {
     display: flex;
     flex-wrap: wrap;
@@ -1213,6 +1212,34 @@
     }
     .rail-in .cm-notes {
       grid-column: 1 / -1;
+    }
+  }
+  /* From the laptop tier, one layout for 3 classes or 80 (round 26: a 3-class matrix beside lists spread as three
+     columns over 1160 px, an 8-class one beside them stacked): the matrix on 8 of the page grid's 12 columns, the rail
+     on 4, its lists stacked and the notes under them; under 5 classes the small matrix and the rail share 6 + 6. The
+     rail sticks under the top bar while a tall matrix scrolls past. */
+  @media (min-width: 1024px) {
+    .cm-layout {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: var(--space-4);
+    }
+    .cm-main {
+      grid-column: span 8;
+    }
+    .cm-rail {
+      grid-column: span 4;
+    }
+    .cm-layout.few .cm-main,
+    .cm-layout.few .cm-rail {
+      grid-column: span 6;
+    }
+    .cm-layout .rail-in {
+      grid-template-columns: minmax(0, 1fr);
+      gap: var(--space-5);
+    }
+    .cm-layout .rail-in .cm-notes {
+      grid-column: auto;
     }
   }
   /* A ranked list: 32 px rows (the pair, its counts, its share); each line shows its cell in the matrix. */

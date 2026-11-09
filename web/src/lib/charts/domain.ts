@@ -78,6 +78,30 @@ export const UNIT_ZOOM_BELOW = 0.25;
 /** The y-axis caption of a zoomed 0–1 axis: the scale it was cut from. */
 export const UNIT_ZOOM_NOTE = 'Zoomed in · full scale 0–1';
 
+/**
+ * A precision-recall plot whose every class keeps precision above `above` for recall below `below` is a flat line on
+ * the top edge of a 0–1 frame (round 26: a near-perfect three-class model, three-quarters of the plot empty). Its y axis
+ * is zoomed to [`floor`, 1] and says so (UNIT_ZOOM_NOTE), and the plot is PR_ZOOM.plotPx tall (`prDomain`).
+ */
+export const PR_ZOOM = { below: 0.95, above: 0.9, floor: 0.8, plotPx: 200 } as const;
+
+/**
+ * The y axis of a precision-recall plot: null for the natural 0–1 frame, or the zoomed [PR_ZOOM.floor, 1] when every
+ * curve with data stays above PR_ZOOM.above for recall under PR_ZOOM.below (the drop at the very end of recall is cut
+ * at the baseline). `curves` are the classes' curves without their zero padding (recall on x, precision on y).
+ */
+export function prDomain(curves: readonly (readonly { x: number; y: number }[])[]): Fit | null {
+  let any = false;
+  for (const c of curves)
+    for (const p of c) {
+      if (!(p.x < PR_ZOOM.below)) continue;
+      if (!(p.y > PR_ZOOM.above)) return null;
+      any = true;
+    }
+  if (!any) return null;
+  return { domain: [PR_ZOOM.floor, 1], ticks: [0.8, 0.85, 0.9, 0.95, 1], decimals: 2 };
+}
+
 /** Nice tick steps for a 0–1 metric, smallest first. */
 const UNIT_STEPS = [0.001, 0.002, 0.0025, 0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5];
 
@@ -137,6 +161,58 @@ export function unitDomain(max: number, plotPx: number): Fit {
   // Not even every fifth tick fits: the base and the highest tick, still at this step's decimals.
   const ticks = every ? all.filter((_, k) => k % every === 0) : [0, all[n - 1]!];
   return { domain: [0, top], ticks, decimals: d };
+}
+
+/**
+ * The share of a comparison's values a fitted floor may leave under it (`unitFitDomain`): the climb of the first
+ * epochs, which every run shares and nobody compares (round 26: runs spending 70 % of their length between 0.45 and
+ * 0.61 drawn on 0–0.6, the differences in the top quarter).
+ */
+export const FIT_BELOW = 0.3;
+/** Room under a fitted floor's percentile, as a share of the span above it, before the floor is rounded down. */
+const FIT_HEADROOM = 0.05;
+/** A floor under this share of the top cuts too little to be worth naming: the axis starts at 0 instead. */
+const FIT_MIN_FLOOR = 0.3;
+
+/**
+ * Compare's "Fit" axis for a 0–1 metric: from the values' FIT_BELOW percentile (never above any line's last value, so
+ * every end marker shows), less FIT_HEADROOM, rounded down to a tick of the step, up to `unitTop(max)`. The step and
+ * ticks follow `unitDomain`'s rule (the same nice steps, 3–5 ticks, the highest floor and then the top tick nearest the
+ * top, thinned for a short plot with the same decimals), so a fitted axis reads 0.4 · 0.5 · 0.6 at every width. A
+ * floor that would sit at or near 0 (`FIT_MIN_FLOOR`) gives `unitDomain` itself. The chart says a fitted axis's floor
+ * in its qualifier ("y from 0.40", `fitFloorNote`), since the line's early climb is cut at the baseline.
+ */
+export function unitFitDomain(values: readonly number[], ends: readonly number[], max: number, plotPx: number): Fit {
+  const top = unitTop(max);
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return unitDomain(max, plotPx);
+  let low = sorted[Math.floor(FIT_BELOW * (sorted.length - 1))]!;
+  for (const e of ends) if (Number.isFinite(e)) low = Math.min(low, e);
+  const want = low - (top - low) * FIT_HEADROOM;
+  if (!(want > top * FIT_MIN_FLOOR)) return unitDomain(max, plotPx);
+  let best: { step: number; a: number; n: number } | null = null;
+  for (const step of UNIT_STEPS) {
+    const a = Math.floor(want / step + 1e-9);
+    const n = Math.floor(top / step + 1e-9) - a + 1;
+    if (n < MIN_TICKS || n > MAX_TICKS) continue;
+    const lo = a * step;
+    const blo = best ? best.a * best.step : -Infinity;
+    if (!best || lo > blo + 1e-9 || (Math.abs(lo - blo) <= 1e-9 && (n - 1) * step > (best.n - 1) * best.step + 1e-9)) best = { step, a, n };
+  }
+  if (!best || best.a * best.step < top * FIT_MIN_FLOOR) return unitDomain(max, plotPx);
+  const { step, a, n } = best;
+  const d = stepDecimals(step);
+  const lo = +(a * step).toFixed(d);
+  const all = Array.from({ length: n }, (_, k) => +((a + k) * step).toFixed(d));
+  const every = THIN.find((k) => k < n && (plotPx * step * k) / (top - lo) >= MIN_GAP);
+  const ticks = every ? all.filter((_, k) => k % every === 0) : [lo, all[n - 1]!];
+  return { domain: [lo, top], ticks, decimals: d };
+}
+
+/** A fitted axis's floor in words for the chart's qualifier ("y from 0.40"), or null for an axis from 0. */
+export function fitFloorNote(fit: Fit | null | undefined, decimals = 2): string | null {
+  if (!fit || !(fit.domain[0] > 0)) return null;
+  return `y from ${fit.domain[0].toFixed(Math.max(decimals, fit.decimals))}`;
 }
 
 /**

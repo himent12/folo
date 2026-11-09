@@ -76,6 +76,19 @@ export const scenes = [
   // The live run at the moment run-live shows it (the same `advance`), so the two screens' epoch and progress agree.
   { name: 'overview', path: '/', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // A class-balance strip is one disclosure: opened, each class's name, box count and share, largest first.
+    name: 'datasets-class-balance',
+    path: '/datasets',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      const strip = page.locator('.cs-btn:visible').first();
+      await strip.waitFor();
+      await strip.click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
@@ -449,6 +462,19 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '.chip .key');
       await page.getByRole('button', { name: 'About the progress axis' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Phones: the y axis's choice (Fit / From 0) in How to read this, the control row having no room; From 0 chosen,
+    // so the plot shows the whole climb and the y caption no floor.
+    name: 'run-compare-yaxis-phone',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, '.chip .key');
+      await page.locator('details.about > summary').click();
+      await page.locator('.about-axis').getByRole('radio', { name: 'From 0' }).click();
       await page.mouse.move(0, 0);
     },
   },
@@ -1073,6 +1099,52 @@ export const scenes = [
       await page.locator('#pr .t-chip').nth(1).click();
       await page.locator('#pr .t-chip').nth(3).click();
       await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A quiet grey PR curve identified where it is drawn: the pointer near it picks out its class, which takes its hue
+    // and its name and precision in the readout ("Click to trace"). Phones: a tap, and the readout offers Trace.
+    name: 'model-pr-pick',
+    path: '/models/m_fast_n',
+    keepScroll: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    fullPage: false,
+    setup: async (page, { vp }) => {
+      await until(page, '#pr svg');
+      await page.locator('#pr').scrollIntoViewIfNeeded();
+      // A point three-quarters along the third grey curve, in page coordinates.
+      const at = await page.locator('#pr path.line.context').nth(2).evaluate((p) => {
+        const path = /** @type {SVGPathElement} */ (p);
+        const pt = path.getPointAtLength(path.getTotalLength() * 0.75);
+        const r = /** @type {SVGSVGElement} */ (path.ownerSVGElement).getBoundingClientRect();
+        return { x: r.left + pt.x, y: r.top + pt.y };
+      });
+      if (vp !== 'mobile') {
+        await page.mouse.move(at.x, at.y);
+        return;
+      }
+      await page.locator('#pr svg[aria-roledescription=chart]').evaluate((svg, a) => {
+        for (const type of ['pointerdown', 'pointerup'])
+          svg.dispatchEvent(new PointerEvent(type, { pointerType: 'touch', clientX: a.x, clientY: a.y, bubbles: true }));
+      }, at);
+      await page.clock.runFor(100);
+    },
+  },
+  {
+    // Wider screens trace classes as phones do: Trace a class opens the classes as chips under the readout row, the
+    // traced first; two traced here.
+    name: 'model-trace-wide',
+    path: '/models/m_fast_n',
+    keepScroll: true,
+    viewports: ['desktop', 'laptop', 'tablet'],
+    fullPage: false,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.locator('#pr button.trace').click();
+      await page.locator('#pr .t-chip').nth(1).click();
+      await page.locator('#pr .t-chip').nth(3).click();
+      await page.mouse.move(0, 0);
+      await page.locator('#pr').scrollIntoViewIfNeeded();
     },
   },
   {

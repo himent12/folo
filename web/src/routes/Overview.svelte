@@ -270,14 +270,15 @@
           {:else}
             <ul class="dslist" use:balanced={{ n: Math.min(6, datasets.data.length), min: 280 }}>
               {#each datasets.data.slice(0, 6) as d (d.id)}
-                <li>
+                <!-- The link covers the card (a stretched link); the class balance, its own disclosure, sits above it. -->
+                <li class="d-card">
                   <a href={href(`/datasets/${d.id}`)}>
                     <span class="d-row">
                       <span class="d-name truncate">{d.name}</span>
                       <span class="d-nums num"><Meta line><span>{compact(total(d))} images</span><span>{d.classes.length} classes</span></Meta></span>
                     </span>
-                    {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
                   </a>
+                  {#if d.stats}<span class="d-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
                 </li>
               {/each}
             </ul>
@@ -502,16 +503,39 @@
   .dslist {
     padding: 0 var(--space-2) var(--space-2);
   }
-  .dslist a,
+  .d-card,
   .d-sk {
+    position: relative;
     display: grid;
     gap: 6px;
     padding: var(--space-2);
     border-radius: var(--radius-md);
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  .dslist a:hover {
+  .d-card:has(> a:hover) {
     background: var(--bg-hover);
+  }
+  .d-card > a {
+    display: block;
+    min-width: 0;
+  }
+  /* The ring goes round the card the link covers. */
+  .d-card:has(> a:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .d-card > a:focus-visible {
+    outline: none;
+  }
+  .d-card > a::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  .d-strip {
+    position: relative;
+    z-index: 1;
   }
   .d-row {
     display: flex;

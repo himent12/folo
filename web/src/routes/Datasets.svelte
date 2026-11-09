@@ -74,7 +74,6 @@
   /** Rows to head (or their skeleton): the column heads show; with none the frame holds the state alone. */
   const hasRows = $derived(datasets.data ? shown.length > 0 : !datasets.error);
 
-  const classTip = (d: Dataset) => `${d.classes.length} classes: ${d.classes.join(', ')}`;
 </script>
 
 <Page title="Datasets">
@@ -169,7 +168,7 @@
                 <td class="r num muted">{num(d.splits.train)}</td>
                 <td class="r num muted">{num(d.splits.val)}</td>
                 <td class="r num muted">{num(d.splits.test)}</td>
-                <td title={classTip(d)}>
+                <td>
                   {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} />{:else}
 <span class="faint">—</span>{/if}
                 </td>
@@ -188,15 +187,16 @@
     {#if shown.length}
       <ul class="rows" aria-label="Datasets">
         {#each shown as d (d.id)}
-          <li>
+          <!-- The link covers the row (a stretched link); the class balance, its own disclosure, sits above it. -->
+          <li class="m-row">
             <a href={href(`/datasets/${d.id}`)}>
               <span class="m-main">
                 <span class="name truncate">{d.name}</span>
                 <span class="m-meta m-total num"><Meta><span>{num(imageCount(d))} images</span><span>{d.classes.length} classes</span></Meta></span>
                 <span class="m-meta num"><Meta><span>{num(d.splits.train)} train</span><span>{num(d.splits.val)} val</span><span>{num(d.splits.test)} test</span></Meta></span>
               </span>
-              {#if d.stats}<span class="m-side"><span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span></span>{/if}
             </a>
+            {#if d.stats}<span class="m-side"><span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span></span>{/if}
           </li>
         {/each}
       </ul>
@@ -272,15 +272,26 @@
     .rows li + li {
       border-top: 1px solid var(--line-subtle);
     }
-    .rows a,
+    .rows .m-row,
     .rows .row-sk {
+      position: relative;
       display: flex;
       align-items: center;
       gap: var(--space-3);
       min-height: 56px;
       padding: var(--space-2) var(--space-4);
     }
-    .rows a:active {
+    .m-row > a {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+    }
+    .m-row > a::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+    }
+    .m-row:has(> a:active) {
       background: var(--bg-hover);
     }
     .m-main {
@@ -301,6 +312,8 @@
       color: var(--text-secondary);
     }
     .m-side {
+      position: relative;
+      z-index: 1;
       display: grid;
       justify-items: end;
       gap: var(--space-1);

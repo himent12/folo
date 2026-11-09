@@ -953,7 +953,9 @@
             <div class="cards" role="radiogroup" aria-label="Dataset" aria-invalid={errors.dataset ? 'true' : undefined} use:balanced={{ n: datasets.data.length, min: 184, gap: 8 }}>
               {#each datasets.data as d (d.id)}
                 {@const on = d.id === datasetId}
-                <label class="card" class:on>
+                <!-- The label covers the card (a stretched label); the class balance, its own disclosure, sits above it. -->
+                <div class="card" class:on>
+                  <label class="c-hit">
                   <input type="radio" name="dataset" value={d.id} bind:group={datasetId} class="sr-only" />
                   <!-- Selection adds a mark and takes no fact away: the check before the name, the format kept. -->
                   <span class="c-top"
@@ -963,8 +965,9 @@
                   >
                   <!-- Breaks only between the parts, and a wrapped line never ends on "·" (ui/Meta). -->
                   <span class="c-meta num"><Meta><span>{compact(d.splits.train)} train</span><span>{compact(d.splits.val)} val</span><span>{d.classes.length} classes</span></Meta></span>
-                  {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
-                </label>
+                  </label>
+                  {#if d.stats}<span class="c-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
+                </div>
               {/each}
             </div>
           {/if}
@@ -1406,10 +1409,25 @@
     margin-right: var(--space-1);
     vertical-align: -2px;
   }
-  .card:has(:focus-visible),
+  .card:has(input:focus-visible),
   .arch:has(:focus-visible) {
     outline: 2px solid var(--focus);
     outline-offset: 2px;
+  }
+  .c-hit {
+    display: grid;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .c-hit::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  .c-strip {
+    position: relative;
+    z-index: 1;
   }
   .c-top {
     display: flex;

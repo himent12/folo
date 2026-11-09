@@ -27,7 +27,16 @@ export interface ChipBounds {
   maxY: number;
 }
 
-export type ChipSide = 'above' | 'inside' | 'below';
+export type ChipSide = 'above' | 'inside' | 'below' | 'beside';
+
+export interface ChipOptions {
+  /**
+   * Small views (phones): a chip goes inside its box's top edge when it fits there (the box at least the chip's width
+   * plus 4 px and two chips tall), and outside only otherwise; and a chip never covers another box: with no slot free
+   * of boxes and chips it is hidden, and shows when its box is tapped (selected) or hovered.
+   */
+  small?: boolean;
+}
 
 export interface Placement {
   /** Offset of the chip from the box's top-left. */
@@ -43,14 +52,16 @@ export interface Placement {
 
 /**
  * `chipH` is the chip height (16 px, 14 px on small views).
- * A chip only ever sits next to its own box: above it, inside its top edge, or hung below it (with a leader), each
- * optionally slid sideways a little (or along the box's own top / bottom edge). The preferred slot is above at the
- * left edge, then a sideways nudge, then inside (for boxes tall enough to carry a chip), then below. Slots that cover
- * another box (other than one containing this box) lose to any slot that does not. A chip never overlaps an earlier
+ * A chip only ever sits next to its own box: above it, inside its top edge, hung below it (with a leader), each
+ * optionally slid sideways a little (or along the box's own top / bottom edge), or flipped to its left or right side.
+ * The preferred slot is above at the left edge, then a sideways nudge, then inside (for boxes tall enough to carry a
+ * chip), then below; on a small view (`opts.small`) inside comes first when the chip fits there, a chip may also flip to
+ * the box's side, and no slot may cover another box. Slots that cover another box (other than one containing this box) lose to any slot that
+ * does not. A chip never overlaps an earlier
  * chip: when no adjacent slot is free the label is hidden (shown on hover / selection) instead of moving far away.
  * Earlier boxes win, so callers pass them highest priority first. Always clamped to the visible image.
  */
-export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHIP_H): (Placement | null)[] {
+export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHIP_H, opts: ChipOptions = {}): (Placement | null)[] {
   const H = chipH;
   const maxY = b.maxY - H;
   const placed: { x: number; y: number; w: number }[] = [];
@@ -75,18 +86,35 @@ export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHI
     const rows: { side: ChipSide; y: number; rank: number }[] = [];
     const above = box.y - H - 1;
     if (above >= b.minY) rows.push({ side: 'above', y: above, rank: 0 });
-    // Inside the top edge covers the top of the object: fine for a tall box, a last resort for a short one.
+    // Inside the top edge covers the top of the object: fine for a tall box, a last resort for a short one. On a small
+    // view, a box the chip fits inside takes it there first.
     const short = own !== null && own.h < 2 * H;
-    rows.push({ side: 'inside', y: Math.max(b.minY, Math.min(maxY, box.y)), rank: short ? 3 : 1 });
+    const fitsIn = own !== null && own.w >= box.w + 4 && !short;
+    rows.push({ side: 'inside', y: Math.max(b.minY, Math.min(maxY, box.y)), rank: opts.small && fitsIn ? -1 : short ? 3 : 1 });
     if (own) {
       const below = box.y + own.h + BELOW_GAP;
       if (below <= maxY) rows.push({ side: 'below', y: below, rank: 2 });
+      // Small views: flipped to the box's side, level with its top (or its bottom), touching its edge, where nothing
+      // above, inside or below is free (round 26: "hexagon 0.33" over the circle box beside it).
+      if (opts.small) for (const y of new Set([own.y, own.y + own.h - H])) if (y >= b.minY && y <= maxY) rows.push({ side: 'beside', y, rank: 2.5 });
     }
 
     type Cand = { x: number; y: number; side: ChipSide; cost: number };
     let best: Cand | null = null;
     let fallback: Cand | null = null;
     for (const row of rows) {
+      if (row.side === 'beside') {
+        // Left or right of the box, never clamped back over it.
+        for (const x of [own!.x - box.w - 3, own!.x + own!.w + 3]) {
+          if (x < b.minX || x + box.w > b.maxX) continue;
+          const cv = covers(x, row.y);
+          const cost = cv * 100 + row.rank * 10;
+          const cand: Cand = { x, y: row.y, side: 'beside', cost };
+          if (!fallback || cost < fallback.cost) fallback = cand;
+          if (!hits(x, row.y, box.w) && !cv && (!best || cost < best.cost)) best = cand;
+        }
+        continue;
+      }
       const xs = new Set([x0]);
       if (own) {
         // Sideways candidates: aligned to the box's right edge, and just clear of each chip or box in the way.
@@ -104,10 +132,12 @@ export function placeChips(boxes: (ChipBox | null)[], b: ChipBounds, chipH = CHI
           if ((nudge > MAX_NUDGE && !along) || overlap < Math.min(8, own.w)) continue;
         }
         // A cover outweighs any rank; a nudge costs half a rank step, growing slightly with distance.
-        const cost = covers(x, row.y) * 100 + row.rank * 10 + (nudge > 0 ? 5 + nudge / 100 : 0);
+        const cv = covers(x, row.y);
+        const cost = cv * 100 + row.rank * 10 + (nudge > 0 ? 5 + nudge / 100 : 0);
         const cand: Cand = { x, y: row.y, side: row.side, cost };
         if (!fallback || cost < fallback.cost) fallback = cand;
-        if (!hits(x, row.y, box.w) && (!best || cost < best.cost)) best = cand;
+        // A small view never lets a chip cover another box: it waits for a tap instead.
+        if (!hits(x, row.y, box.w) && (!opts.small || !cv) && (!best || cost < best.cost)) best = cand;
       }
     }
     // `rows` always holds the inside slot, so a fallback exists.

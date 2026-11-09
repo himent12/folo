@@ -29,7 +29,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
-  import { niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
+  import { fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
@@ -167,14 +167,31 @@
   // Runs that all scored low get a zoomed axis whose caption names the full 0–1 scale (./domain UNIT_ZOOM_BELOW).
   const zoomed = $derived(!!metricDef.unit && !!extent && unitTop(extent[1]) < UNIT_ZOOM_BELOW);
   // The plot itself is at least 360 px tall from 768 px up, so four curves that climb together still separate; phones
-  // a 210 px plot. LineChart's margins add 8 px on top (24 under the zoom caption) and 22 px below.
+  // a 210 px plot. LineChart's margins add 8 px on top (24 under a y caption) and 22 px below.
   const plotPx = $derived(narrow ? 210 : 360);
-  const height = $derived(plotPx + (zoomed ? 24 : 8) + 22);
-  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.7, not bunched in a 0–1 axis. Where
-  // the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`).
-  const fit = $derived(
-    extent ? (metricDef.unit ? unitDomain(narrow ? extent[1] : withLabelRow(extent[1], plotPx), plotPx) : niceDomain(extent[0], extent[1])) : undefined,
-  );
+  // The y axis: "Fit" (the default) starts under the values the runs spend most of their length in, so the differences
+  // people came to compare fill the plot (round 26: 0–0.6 with the runs between 0.45 and 0.61, in its top quarter);
+  // "From 0" shows the whole climb. The top is fitted either way (./domain).
+  type YAxis = 'fit' | 'zero';
+  let yAxis = $state<YAxis>('fit');
+  const Y_OPTIONS: { value: YAxis; label: string }[] = [
+    { value: 'fit', label: 'Axis: Fit' },
+    { value: 'zero', label: 'Axis: From 0' },
+  ];
+  const ys = $derived(series.flatMap((s) => s.points.map((p) => p.y)));
+  const lastYs = $derived(series.map((s) => s.points.at(-1)?.y ?? NaN));
+  // Where the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`).
+  const fit = $derived.by(() => {
+    if (!extent) return undefined;
+    if (!metricDef.unit) return niceDomain(yAxis === 'zero' ? Math.min(0, extent[0]) : extent[0], extent[1]);
+    const max = narrow ? extent[1] : withLabelRow(extent[1], plotPx);
+    return yAxis === 'fit' ? unitFitDomain(ys, lastYs, max, plotPx) : unitDomain(max, plotPx);
+  });
+  /** A fitted axis's floor, said where the axis is named ("y from 0.40"), as a zoomed axis says its full scale. */
+  const floorNote = $derived(fitFloorNote(fit, metricDef.unit ? 2 : 0));
+  // Phones have no header qualifier: the floor goes in the y caption, after the zoom note.
+  const yCaption = $derived([zoomed ? UNIT_ZOOM_NOTE : '', narrow && floorNote ? floorNote : ''].filter(Boolean).join(' · ') || undefined);
+  const height = $derived(plotPx + (yCaption ? 24 : 8) + 22);
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
   function valueOf(id: string): number | null {
     const pts = series.find((s) => s.id === id)?.points ?? [];
@@ -386,6 +403,14 @@
             <span>How to read this</span>
           </summary>
           <div class="about-body">
+            <!-- The y axis's choice: the control row has no room for it on a phone. -->
+            <div class="about-axis">
+              <p>{floorNote ? `The y axis starts at ${fit!.domain[0].toFixed(Math.max(2, fit!.decimals))}, under where the runs spend most of their length.` : 'The y axis starts at 0.'}</p>
+              <Segmented size="sm" label="Y axis" bind:value={yAxis} options={[
+                { value: 'fit', label: 'Fit' },
+                { value: 'zero', label: 'From 0' },
+              ]} />
+            </div>
             {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
             <p>Each line ends in its run's status: a lime dot while it trains, a square where it was stopped, a cross
               where it failed.</p>
@@ -402,10 +427,14 @@
         <header class="c-head">
           <span class="c-what">
             <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-            <!-- The header qualifier: what the x axis is ("by epoch", "by progress, % of planned epochs"). -->
-            <span class="qual">{xQual}</span>
+            <!-- The header qualifier: what the x axis is ("by epoch", "by progress, % of planned epochs"), and where a
+                 fitted y axis starts ("y from 0.40"). -->
+            <span class="qual">{floorNote ? `${xQual} · ${floorNote}` : xQual}</span>
           </span>
-          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
+          <span class="c-ctl">
+            <Select size="sm" label="Y axis" bind:value={yAxis} options={Y_OPTIONS} />
+            <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
+          </span>
         </header>
         {@render plot()}
       {/if}
@@ -637,7 +666,7 @@
       valueFormat={(v) => metric(v)}
       xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
       xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
-      yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
+      yLabel={yCaption}
       bind:cursor
       bind:hint
       legend={false}
@@ -1127,6 +1156,17 @@
     gap: var(--space-3);
     padding-top: var(--space-3);
     border-top: 1px solid var(--line-subtle);
+  }
+  /* The chart's controls, right: the y axis's choice, then the x axis's. */
+  .c-ctl {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .about-axis {
+    display: grid;
+    gap: var(--space-2);
+    justify-items: start;
   }
   .c-what {
     display: flex;

@@ -88,8 +88,10 @@
   });
 
   const shown = (b: ViewBox) => !only || only.has(b.class);
-  // Small views (phones) get smaller chips. Boxes under 20 px on screen keep their label for hover/selection (a chip
-  // would cover the object); their chips are placed and clamped but reserve no slot, so they never push others around.
+  // Small views (phones) get smaller chips, inside their box when they fit there, and never over another box (./chips).
+  // Boxes under 20 px on screen keep their label for a tap (selection) or hover (a chip would cover the object), as
+  // does a box whose chip has no free slot; their chips are placed and clamped but reserve no slot, so they never push
+  // others around.
   const small = $derived(cw > 0 && cw < 480);
   const chipH = $derived(small ? 14 : CHIP_H);
   const tiny = (b: ViewBox) => !!geo && Math.min(b.x2 - b.x1, b.y2 - b.y1) * geo.s < 20;
@@ -122,6 +124,8 @@
         maxY: Math.min(ch, g.oy + height * g.s) - 2,
       },
       chipH,
+      // Phones: inside the box when the chip fits, outside otherwise, and never over another box (./chips).
+      { small },
     );
   });
 
@@ -185,13 +189,15 @@
             {#if labels && !compact && ((!chips[i]?.hidden && !tiny(b)) || active === i || selected === i)}
               {@const c = chips[i]}
               <!-- With viewfinder corners, the chip steps 8 px further from the box so it never covers them. -->
-              {@const clear = selected === i && small32(b) && !c?.inside ? (c?.side === 'below' ? 8 : -8) : 0}
+              {@const corners = selected === i && small32(b) && !c?.inside}
+              {@const clear = corners && c?.side !== 'beside' ? (c?.side === 'below' ? 8 : -8) : 0}
+              {@const clearX = corners && c?.side === 'beside' ? (c.dx < 0 ? -8 : 8) : 0}
               {#if c && c.leader > 0}
                 <!-- Hung below its box: a leader from the box's bottom stroke keeps ownership readable. -->
                 {@const bh = (b.y2 - b.y1) * geo.s}
                 <span class="leader" style:left="{Math.max(0, c.dx + 6) - 2}px" style:top="{bh + 2}px" style:height="{c.dy - bh - 4 + clear}px"></span>
               {/if}
-              <span class="chip" class:inside={c?.inside} class:below={c?.side === 'below'} style:left="{(c?.dx ?? 0) - 2}px" style:top="{(c?.dy ?? -17) - 2 + clear}px">
+              <span class="chip" class:inside={c?.inside} class:below={c?.side === 'below'} style:left="{(c?.dx ?? 0) - 2 + clearX}px" style:top="{(c?.dy ?? -17) - 2 + clear}px">
                 {name(b.class)}{#if scores && b.score !== undefined}<span class="score">{b.score.toFixed(2)}</span>{/if}
               </span>
             {/if}
