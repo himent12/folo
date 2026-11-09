@@ -65,7 +65,12 @@ fn main() {
             })
             .collect();
         let med = median(&mut t);
-        println!("{:<38} median {med:>7.2} ms   p10 {:>7.2}   min {:>7.2}", "forward 640 b1 (fused)", t[t.len() / 10], t[0]);
+        println!(
+            "{:<38} median {med:>7.2} ms   p10 {:>7.2}   min {:>7.2}",
+            "forward 640 b1 (fused)",
+            t[t.len() / 10],
+            t[0]
+        );
         if layers {
             layer_times(&fwd, &x, iters);
         }

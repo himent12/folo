@@ -9,15 +9,15 @@
 # -Affinity  hex mask of logical CPUs ("" = all). On an i7-14700KF: 5555 = one thread on each of the 8 P-cores,
 #            55 = 4 P-cores, 4 = one P-core, FFFF = both threads of every P-core
 # -Priority  process priority class (High by default: it takes cores back from background builds)
-# -Env       extra NAME=value pairs for the benchmark
+# -Env       extra NAME=value pairs for the benchmark, separated by `;`
 # Each run prints its own output, then `busy`: the CPU time of everything else over the run's wall time, in cores.
 param(
-    [string[]]$Runs,
+    [string]$Runs,
     [int]$Rounds = 3,
     [int]$Threads = 0,
     [string]$Affinity = "",
     [string]$Priority = "High",
-    [string[]]$Env = @(),
+    [string]$Env = "",
     [string]$ExeArgs = "--bench"
 )
 
@@ -27,13 +27,13 @@ function Idle {
 }
 
 if ($Threads -gt 0) { $env:RAYON_NUM_THREADS = "$Threads" }
-foreach ($e in $Env) {
+foreach ($e in ($Env.Split(';') | Where-Object { $_ })) {
     $k, $v = $e.Split('=', 2)
     Set-Item "env:$k" $v
 }
 $cpus = [Environment]::ProcessorCount
 for ($r = 1; $r -le $Rounds; $r++) {
-    foreach ($run in $Runs) {
+    foreach ($run in ($Runs.Split(';') | Where-Object { $_ })) {
         $label, $exe = $run.Split('=', 2)
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $exe

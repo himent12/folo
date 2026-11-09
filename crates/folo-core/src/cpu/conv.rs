@@ -1,10 +1,11 @@
 //! conv2d forward and backward: implicit-im2col GEMM, with direct paths for 1x1 and depthwise convolutions.
 
+use rayon::prelude::*;
+
 use super::elementwise::SendPtr;
 use super::gemm::{
     BiasAct, ColumnMap, NR, Operand, RowPtrs, Strided, gemm, gemm_ex, gemm_rows, pack_rows_into_panels,
 };
-use super::par;
 use crate::backend::Conv2dParams;
 #[cfg(any(target_arch = "x86_64", test))]
 use crate::backend::UnaryOp;
@@ -203,7 +204,7 @@ struct ShiftedRows {
 }
 
 impl ShiftedRows {
-    fn new(planes: &[&[f32]], g: &ConvGeom, threads: usize) -> Self {
+    fn new(planes: &[&[f32]], g: &ConvGeom, parallel: bool) -> Self {
         let [sy, sx] = g.p.stride;
         let [ph, pw] = g.p.padding;
         let [dy, dx] = g.p.dilation;
@@ -227,7 +228,7 @@ impl ShiftedRows {
         // Valid outputs read inside their plane; the dropped columns of the last row may run up to `wq`
         // floats past it (into the next plane, or this slack).
         let mut buf = super::alloc_uninit(planes.len() * per_ci + wq + NR);
-        let fill = |ci: usize, dst: &mut [f32]| {
+        let fill = |(ci, dst): (usize, &mut [f32])| {
             let src = planes[ci];
             if sx == 1 {
                 for &(a, _, s) in &phases {
@@ -296,11 +297,14 @@ impl ShiftedRows {
         let (body, slack) = buf.split_at_mut(planes.len() * per_ci);
         slack.fill(0.0);
         // A copy this size takes tens of microseconds: in parallel only when it is large, a few channels a task.
-        let threads = if body.len() >= SHIFTED_PAR_MIN { threads } else { 1 };
-        let per_task = SHIFTED_TASK.div_ceil(per_ci);
-        par::for_each_chunk_mut(body, per_task * per_ci, threads, |t, chunk| {
-            chunk.chunks_mut(per_ci).enumerate().for_each(|(c, dst)| fill(t * per_task + c, dst))
-        });
+        if parallel && body.len() >= SHIFTED_PAR_MIN {
+            let per_task = SHIFTED_TASK.div_ceil(per_ci);
+            body.par_chunks_mut(per_task * per_ci).enumerate().for_each(|(t, chunk)| {
+                chunk.chunks_mut(per_ci).enumerate().for_each(|(c, dst)| fill((t * per_task + c, dst)))
+            });
+        } else {
+            body.chunks_mut(per_ci).enumerate().for_each(fill);
+        }
         // Where each tap's run starts within a channel's block.
         let mut taps = Vec::with_capacity(g.kh * g.kw);
         for ky in 0..g.kh {
@@ -420,16 +424,17 @@ fn for_each_image(
     flops: usize,
     f: impl Fn(usize, &mut [f32], usize) + Sync,
 ) {
-    let threads = par::threads();
+    let threads = rayon::current_num_threads();
     if per_image == 0 {
         return;
     }
-    if flops >= IMAGE_PAR_FLOPS || n == 1 || threads == 1 {
+    if flops >= IMAGE_PAR_FLOPS || n == 1 {
         for (img, o) in out.chunks_mut(per_image).enumerate() {
             f(img, o, threads);
         }
     } else {
-        par::for_each_chunk_mut(out, per_image, threads, |img, o| f(img, o, 1));
+        let share = threads.div_ceil(n).max(1);
+        out.par_chunks_mut(per_image).enumerate().for_each(|(img, o)| f(img, o, share));
     }
 }
 
@@ -475,7 +480,7 @@ pub(crate) fn conv2d_forward_parts(
             let rows = epi.map(|e| e.rows_from(grp * og));
             // Pointwise convs pack B (a plain copy); every other conv reads shifted rows in place.
             if !accumulate && !g.is_pointwise() {
-                let sr = ShiftedRows::new(planes, g, threads);
+                let sr = ShiftedRows::new(planes, g, threads > 1);
                 let b = RowPtrs { rows: &sr.rows, n: sr.n };
                 gemm_rows(og, kdim, &a, &b, c, sr.map, threads, rows);
                 super::recycle(sr.buf);
@@ -527,8 +532,7 @@ fn small_c_forward(
     let avx2 = std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma");
     let rows = g.n * g.oh;
     // Up to four output rows (of every channel) per task, and about four tasks per thread when rows allow.
-    let threads = par::threads();
-    let band = (rows / (4 * threads)).clamp(1, 4);
+    let band = (rows / (4 * rayon::current_num_threads())).clamp(1, 4);
     let optr = SendPtr(out.as_mut_ptr());
     let task = |t: usize| {
         let optr = &optr;
@@ -561,7 +565,11 @@ fn small_c_forward(
         }
     };
     let tasks = rows.div_ceil(band);
-    par::for_each(tasks, if 2 * g.n * g.o * ohw * k >= SMALL_C_PAR_FLOPS { threads } else { 1 }, task);
+    if 2 * g.n * g.o * ohw * k >= SMALL_C_PAR_FLOPS {
+        (0..tasks).into_par_iter().for_each(task);
+    } else {
+        (0..tasks).for_each(task);
+    }
 }
 
 /// The `K x owp` taps of output row `oy`: `gat[kk * owp + ox]` is the input element that tap
@@ -697,7 +705,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
     // channel) are built in blocks of 8 so that both the reads of W and the writes stay in L1.
     let khw = g.kh * g.kw;
     let mut flipped = super::alloc_uninit(g.c * og * khw);
-    let block = |b: usize, dst: &mut [f32]| {
+    let block = |(b, dst): (usize, &mut [f32])| {
         let rows = dst.len() / (og * khw);
         for oi in 0..og {
             for r in 0..rows {
@@ -711,8 +719,11 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
             }
         }
     };
-    let threads = if flipped.len() >= super::PAR_MIN { par::threads() } else { 1 };
-    par::for_each_chunk_mut(&mut flipped, 8 * og * khw, threads, block);
+    if flipped.len() >= super::PAR_MIN {
+        flipped.par_chunks_mut(8 * og * khw).enumerate().for_each(block);
+    } else {
+        flipped.chunks_mut(8 * og * khw).enumerate().for_each(block);
+    }
     let (dh, dw) = (g.p.dilation[0], g.p.dilation[1]);
     let tg = ConvGeom {
         n: g.n,
@@ -747,20 +758,20 @@ fn backward_input_col2im(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
             let a = Strided::lhs(wt, grp * og * kdim, 1, kdim);
             let b = Strided::rhs(gy, (img * g.o + grp * og) * ohw, ohw, 1);
             gemm_ex(kdim, ohw, og, &a, &b, &mut col, ohw, false, threads, None);
-            col2im(&col, &mut gx_img[grp * cg * hw..(grp + 1) * cg * hw], g, threads);
+            col2im(&col, &mut gx_img[grp * cg * hw..(grp + 1) * cg * hw], g, threads > 1);
         }
         super::recycle(col);
     });
 }
 
 /// Accumulate the unfolded gradient `col` (`[cg*kh*kw, ohw]`) into the input planes of one group.
-fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, threads: usize) {
+fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, parallel: bool) {
     let (khw, ohw, hw) = (g.kh * g.kw, g.ohw(), g.h * g.w);
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
     let (hi, wi) = (g.h as isize, g.w as isize);
-    let plane = |ci: usize, gxp: &mut [f32]| {
+    let plane = |(ci, gxp): (usize, &mut [f32])| {
         for r in 0..khw {
             let (ky, kx) = ((r / g.kw) as isize, (r % g.kw) as isize);
             let crow = &col[(ci * khw + r) * ohw..(ci * khw + r + 1) * ohw];
@@ -780,7 +791,11 @@ fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, threads: usize) {
             }
         }
     };
-    par::for_each_chunk_mut(gx, hw, threads, plane);
+    if parallel {
+        gx.par_chunks_mut(hw).enumerate().for_each(plane);
+    } else {
+        gx.chunks_mut(hw).enumerate().for_each(plane);
+    }
 }
 
 /// Gradient with respect to the weight, written into `gw` (zeroed, `[O, C/groups, KH, KW]`).
@@ -891,9 +906,8 @@ fn depthwise_forward(
     #[cfg(target_arch = "x86_64")]
     let fast = avx2 && g.p.stride == [1, 1];
     let total = g.n * g.o;
-    let threads = par::threads();
-    let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * threads)).max(1);
-    par::for_each_chunk_mut(out, per_task * ohw, threads, |t, ops| {
+    let per_task = DW_TASK_OUTPUTS.div_ceil(ohw).min(total.div_ceil(4 * rayon::current_num_threads())).max(1);
+    out.par_chunks_mut(per_task * ohw).enumerate().for_each(|(t, ops)| {
         #[cfg(target_arch = "x86_64")]
         let mut pad = Vec::new();
         for (p, op) in ops.chunks_mut(ohw).enumerate() {
@@ -1039,7 +1053,7 @@ fn depthwise_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
-    par::for_each_chunk_mut(gx, hw, par::threads(), |plane, gxp| {
+    gx.par_chunks_mut(hw).enumerate().for_each(|(plane, gxp)| {
         let (img, ic) = (plane / g.c, plane % g.c);
         for oc in ic * mult..(ic + 1) * mult {
             let gp = &gy[(img * g.o + oc) * ohw..][..ohw];
@@ -1083,7 +1097,7 @@ fn depthwise_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom
     let (sh, sw) = (g.p.stride[0] as isize, g.p.stride[1] as isize);
     let (ph, pw) = (g.p.padding[0] as isize, g.p.padding[1] as isize);
     let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
-    par::for_each_chunk_mut(gw, khw, par::threads(), |oc, gk| {
+    gw.par_chunks_mut(khw).enumerate().for_each(|(oc, gk)| {
         let ic = oc / mult;
         for img in 0..g.n {
             let xp = &x[(img * g.c + ic) * hw..][..hw];
@@ -1146,9 +1160,9 @@ mod small_c_tests {
         for (img, out_img) in out.chunks_mut(g.o * ohw).enumerate() {
             let planes = x.planes(img, hw);
             let a = Strided::lhs(wt, 0, kdim, 1);
-            let sr = ShiftedRows::new(&planes, g, par::threads());
+            let sr = ShiftedRows::new(&planes, g, true);
             let b = RowPtrs { rows: &sr.rows, n: sr.n };
-            gemm_rows(g.o, kdim, &a, &b, out_img, sr.map, par::threads(), epi);
+            gemm_rows(g.o, kdim, &a, &b, out_img, sr.map, rayon::current_num_threads(), epi);
         }
     }
 
