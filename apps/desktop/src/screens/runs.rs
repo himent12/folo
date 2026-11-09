@@ -745,12 +745,16 @@ impl FoloApp {
                     last.map_or("–".into(), |e| format!("{:.3}", e.val.recall)),
                 ))
                 // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
-                // P/R chart below states the match rule, so the tile's line fits at 1280.
-                .child(text(ty::SM, t.text_tertiary).ellipsis().child(pr_caption(
-                    last.and_then(|e| e.val.best_f1_conf),
-                    "val",
-                    false,
-                ))),
+                // P/R chart below states the match rule, so the tile's line fits at 1280. Clipped,
+                // not ellipsized: GPUI 0.2.2's truncation shortens the text's run in place, and a later
+                // untruncated measure in the same layout then slices inside the "·" and panics.
+                .child(
+                    text(ty::SM, t.text_tertiary).whitespace_nowrap().overflow_hidden().child(pr_caption(
+                        last.and_then(|e| e.val.best_f1_conf),
+                        "val",
+                        false,
+                    )),
+                ),
             div()
                 .flex()
                 .flex_col()
