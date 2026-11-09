@@ -705,7 +705,8 @@ impl FoloApp {
         // Full width (stacked, below 1500) or from 1680 (the content cap gives ~976 px beside Best
         // model), the name and dataset columns take the room instead of a dead band; 1500–1680,
         // beside Best model, the narrower set.
-        let full = vw < px(1500.) || vw >= px(1680.);
+        // (Below 1100 even stacked the list is ~870 px: the narrower set keeps Created inside.)
+        let full = (vw >= px(1100.) && vw < px(1500.)) || vw >= px(1680.);
         let (name_w, prog_w, best_w, when_w) =
             if full { (200., 160., 96., 80.) } else { (150., 120., 96., 80.) };
         let meta_w = if full { 180. } else { 130. };

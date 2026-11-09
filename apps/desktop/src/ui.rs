@@ -808,12 +808,19 @@ impl ThumbGeo {
 pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut gpui::Window) {
     let Some(g) = ThumbGeo::of(handle) else { return };
     // An overlay thumb: shown while dragged, while the pointer is over its area, and for a moment
-    // after the content scrolls; otherwise the content has the space to itself.
+    // after the content scrolls; otherwise the content has the space to itself. Movement is
+    // recorded on every paint, whatever else shows the thumb.
+    let scrolled = recently_scrolled(handle);
     let over = handle.bounds().contains(&window.mouse_position());
-    if !(hot || over || recently_scrolled(handle)) {
+    if !(hot || over || scrolled) {
         return;
     }
-    let color = crate::theme::alpha(t.text_tertiary, if hot { 0.7 } else { 0.45 });
+    // Shown only by a recent scroll: keep painting until that lapses, so it hides on time.
+    if scrolled && !hot && !over {
+        window.request_animation_frame();
+    }
+    // 3:1 against the surface in both themes (45 % read about 1.9:1).
+    let color = crate::theme::alpha(t.text_tertiary, if hot { 1.0 } else { 0.8 });
     window.paint_quad(
         fill(Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.))), color)
             .corner_radii(px(2.)),
@@ -836,6 +843,11 @@ fn recently_scrolled(handle: &ScrollHandle) -> bool {
     SCROLLED.with(|s| {
         let mut s = s.borrow_mut();
         match s.iter_mut().find(|(k, _, _)| *k == key) {
+            // A jump back to the top is a page change resetting its scroll, not the user scrolling.
+            Some(e) if (e.1 - y).abs() > 0.5 && y.abs() < 0.5 => {
+                *e = (key, y, now - std::time::Duration::from_secs(1));
+                false
+            }
             Some(e) if (e.1 - y).abs() > 0.5 => {
                 *e = (key, y, now);
                 true
