@@ -1221,7 +1221,7 @@ impl Backend for MockBackend {
         {
             return Err(ApiError::new(
                 "invalid_body",
-                "imgsz must be a multiple of 32 in 64..=1280, batch 1..=64",
+                "imgsz must be a multiple of 32 in 64..=1280, batch 1..=64, budget_s 1..=10",
             ));
         }
         // Near the reference, a little off, as a real probe lands.
@@ -1329,26 +1329,50 @@ impl Backend for MockBackend {
             if config.augment.mosaic <= 0. { epochs } else { config.augment.close_mosaic.min(epochs / 2) };
         let startup = 6.0;
         let (device, here) = if cpu { ("cpu", CPU_NAME) } else { ("gpu:0", GPU_NAME) };
-        let measured = self
+        // The basis (docs/API.md): the measured row of this device with the run's arch, image
+        // size, batch and precision; else the nearest measured row on it by compute (the same
+        // precision preferred), carried over by the reference's ratio between the two settings
+        // (the reference has no batch dependence); else the reference itself.
+        let rows: Vec<TrainThroughput> = self
             .measured
             .lock()
             .unwrap()
             .0
             .iter()
-            .find(|t| {
-                t.device == device
-                    && t.measured_on == here
-                    && t.arch == config.arch
-                    && t.imgsz == config.imgsz
-                    && t.batch == config.batch
-                    && t.amp == config.amp
+            .filter(|t| t.device == device && t.measured_on == here)
+            .cloned()
+            .collect();
+        let compute =
+            |arch: Arch, imgsz: u32| (imgsz as f64).powi(2) / reference_train(arch, 640, false, false);
+        let want = compute(config.arch, config.imgsz);
+        let exact = rows.iter().find(|t| {
+            t.arch == config.arch && t.imgsz == config.imgsz && t.batch == config.batch && t.amp == config.amp
+        });
+        let nearest = exact.or_else(|| {
+            rows.iter().min_by(|a, b| {
+                let d = |t: &TrainThroughput| {
+                    (compute(t.arch, t.imgsz) / want).ln().abs() + if t.amp == config.amp { 0. } else { 10. }
+                };
+                d(a).total_cmp(&d(b))
             })
-            .cloned();
+        });
+        // (row, rate carried to this config, within 4x compute with the same precision)
+        let measured = nearest.map(|m| {
+            let carried = if exact.is_some() {
+                m.imgs_per_s
+            } else {
+                m.imgs_per_s * reference_train(config.arch, config.imgsz, config.amp, cpu)
+                    / reference_train(m.arch, m.imgsz, m.amp, cpu)
+            };
+            let near = m.amp == config.amp && (compute(m.arch, m.imgsz) / want).ln().abs() <= 4f64.ln();
+            (m.clone(), carried, near)
+        });
+        let exact = exact.is_some();
         let ref_epoch_s = secs / epochs as f64;
         // Validation stays at the reference rate (the table's rows time training).
         let val_s = ref_epoch_s * 0.08;
         let (rate, train_s) = match &measured {
-            Some(m) => (m.imgs_per_s, train as f64 / m.imgs_per_s.max(1e-6)),
+            Some((_, r, _)) => (*r, train as f64 / r.max(1e-6)),
             None => (train as f64 / (ref_epoch_s * 0.92), ref_epoch_s * 0.92),
         };
         let epoch_s = train_s + val_s;
@@ -1369,13 +1393,20 @@ impl Backend for MockBackend {
         let device_name = here.to_string();
         // An exact measured row: high confidence from 3 samples (±10 %), else medium (-20 / +30 %);
         // the reference: low (-30 / +50 %).
+        // Confidence and range as docs/API.md has them: an exact row, high from 3 samples (±10 %)
+        // else medium (-20 / +30 %); a carried row within 4x the compute with the same precision,
+        // medium (-25 / +40 %); further, low (-40 / +80 %); the reference, low (-30 / +60 %).
         let (source, confidence, lo, hi) = match &measured {
-            Some(m) if m.samples >= 3 => (ThroughputSource::Measured, Confidence::High, 0.9, 1.1),
-            Some(_) => (ThroughputSource::Measured, Confidence::Medium, 0.8, 1.3),
-            None => (ThroughputSource::Reference, Confidence::Low, 0.7, 1.5),
+            Some((m, _, _)) if exact && m.samples >= 3 => {
+                (ThroughputSource::Measured, Confidence::High, 0.9, 1.1)
+            }
+            Some(_) if exact => (ThroughputSource::Measured, Confidence::Medium, 0.8, 1.3),
+            Some((_, _, true)) => (ThroughputSource::Measured, Confidence::Medium, 0.75, 1.4),
+            Some(_) => (ThroughputSource::Measured, Confidence::Low, 0.6, 1.8),
+            None => (ThroughputSource::Reference, Confidence::Low, 0.7, 1.6),
         };
         let basis = match &measured {
-            Some(m) => EstimateBasis {
+            Some((m, _, _)) => EstimateBasis {
                 source: ThroughputSource::Measured,
                 arch: m.arch,
                 imgsz: m.imgsz,
@@ -1384,12 +1415,22 @@ impl Backend for MockBackend {
                 measured_on: m.measured_on.clone(),
                 samples: m.samples,
                 updated: m.updated.clone(),
-                exact: true,
-                note: format!(
-                    "Measured on this machine at these settings ({} {}).",
-                    m.samples,
-                    if m.samples == 1 { "sample" } else { "samples" }
-                ),
+                exact,
+                note: if exact {
+                    format!(
+                        "Measured on this machine at these settings ({} {}).",
+                        m.samples,
+                        if m.samples == 1 { "sample" } else { "samples" }
+                    )
+                } else {
+                    format!(
+                        "Carried from {} at {} px, batch {}{} measured on this machine, by the reference's ratio.",
+                        m.arch.as_str(),
+                        m.imgsz,
+                        m.batch,
+                        if m.amp { " (mixed precision)" } else { "" }
+                    )
+                },
             },
             None => EstimateBasis {
                 source: ThroughputSource::Reference,
@@ -1414,7 +1455,8 @@ impl Backend for MockBackend {
             batches_per_epoch: train.div_ceil(config.batch.max(1) as u64),
             epochs,
             phases,
-            val_imgs_per_s: val as f64 / (epoch_s * 0.08),
+            // The rate the phases' validation time is at (val_images / val_imgs_per_s = val_s).
+            val_imgs_per_s: val as f64 / val_s.max(1e-6),
             startup_s: startup,
             est_epoch_s: epoch_s,
             est_total_s: secs + startup,

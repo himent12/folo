@@ -740,10 +740,6 @@ impl FoloApp {
         if route == self.route {
             return;
         }
-        // Settings shows the throughput table as the server has it now.
-        if route == Route::Settings && !self.throughput.is_loading() {
-            self.throughput = Load::Idle;
-        }
         let prev = std::mem::replace(&mut self.route, route);
         self.history.push(prev);
         if self.history.len() > 50 {
@@ -772,6 +768,10 @@ impl FoloApp {
     }
 
     fn after_navigate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Settings shows the throughput table as the server has it now (also when going back).
+        if self.route == Route::Settings && !self.throughput.is_loading() {
+            self.throughput = Load::Idle;
+        }
         self.page_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.chart_hover = None;
         self.export_open = false;

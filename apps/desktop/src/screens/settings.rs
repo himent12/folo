@@ -352,8 +352,9 @@ impl FoloApp {
                 .and_then(|s| s.gpus.iter().find(|g| g.ordinal == ordinal).map(|g| g.name.clone()))
                 .or_else(|| table.as_ref().filter(|tb| tb.device == device).map(|tb| tb.device_name.clone()))
         };
-        // Measured on this device's current hardware (unknown hardware counts as here).
-        let here = |device: &str, on: &str| current(device).is_none_or(|c| c == on);
+        // Measured on this device's current hardware, confirmed: a device the server no longer
+        // has (or doesn't name) keeps the row's attribution.
+        let here = |device: &str, on: &str| current(device).is_some_and(|c| c == on);
         let (n_train, n_infer) = table.as_ref().map_or((0, 0), |tb| {
             let measured = |s: ThroughputSource| s == ThroughputSource::Measured;
             (
