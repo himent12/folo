@@ -109,7 +109,10 @@ pub fn run(job: &Job, plan: &Plan) {
             std::thread::sleep(WATCH);
             if saved.elapsed() >= SAVE_EVERY && run.unsaved.swap(false, Ordering::AcqRel) {
                 saved = Instant::now();
-                run.save(&job.lock());
+                // A write that failed is tried again at the next interval, not forgotten.
+                if !run.save(&job.lock()) {
+                    run.unsaved.store(true, Ordering::Release);
+                }
             }
         }
     });
@@ -323,11 +326,9 @@ impl Run<'_> {
         self.job.emit_job(&state);
     }
 
-    /// Writes `job.json`; a failure is logged (the labels stay in memory, and the next save tries again).
-    fn save(&self, state: &super::job::State) {
-        if let Err(e) = self.job.save(state) {
-            tracing::warn!(job = %self.job.id, "{e}");
-        }
+    /// Writes `job.json` and says whether that worked; a failure is logged (the labels stay in memory).
+    fn save(&self, state: &super::job::State) -> bool {
+        self.job.save(state).inspect_err(|e| tracing::warn!(job = %self.job.id, "{e}")).is_ok()
     }
 
     /// Closes the run: its outcome, the job idle again.

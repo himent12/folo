@@ -232,11 +232,29 @@ impl Piped {
 /// full pipe, and none of them is waited for without a limit: a process the child left behind may hold its pipes
 /// open, but not this call (after [`PIPE_GRACE`], what was read is the output, and that process is killed too).
 pub fn run(
-    mut cmd: Command,
+    cmd: Command,
     stdin: Option<Vec<u8>>,
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Output, AgentError> {
+    let ended = run_to_end(cmd, stdin, timeout, cancel)?;
+    Ok(Output { success: ended.outcome?, stdout: ended.stdout.text(), stderr: ended.stderr.text() })
+}
+
+/// A child that has ended, or was ended: whether it succeeded, and its pipes.
+struct Ended {
+    outcome: Result<bool, AgentError>,
+    stdout: Arc<Piped>,
+    stderr: Arc<Piped>,
+}
+
+/// [`run`], up to the point where the child (and what it started, if that had to be killed) is gone.
+fn run_to_end(
+    mut cmd: Command,
+    stdin: Option<Vec<u8>>,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> Result<Ended, AgentError> {
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -245,8 +263,13 @@ pub fn run(
         return Err(AgentError::Cancelled);
     }
     let program = cmd.get_program().to_string_lossy().into_owned();
-    let mut child = cmd.spawn().map_err(|e| AgentError::Unavailable(format!("starting `{program}`: {e}")))?;
-    let tree = Tree::of(&child);
+    let unavailable = |e: std::io::Error| AgentError::Unavailable(format!("starting `{program}`: {e}"));
+    let mut child = cmd.spawn().map_err(unavailable)?;
+    let tree = Tree::start(&child).map_err(|e| {
+        let _ = child.kill();
+        let _ = child.wait();
+        unavailable(e)
+    })?;
     if let Some(bytes) = stdin {
         let mut pipe = child.stdin.take().expect("stdin is piped");
         // A child that exits early closes the pipe; its exit status tells the story, not the write error.
@@ -257,7 +280,7 @@ pub fn run(
     let deadline = Instant::now() + timeout;
     // The child's exit status and when it was seen.
     let mut exited: Option<(bool, Instant)> = None;
-    let ended = loop {
+    let outcome = loop {
         if exited.is_none() {
             match child.try_wait() {
                 Ok(Some(status)) => exited = Some((status.success(), Instant::now())),
@@ -274,11 +297,11 @@ pub fn run(
             _ => std::thread::sleep(POLL),
         }
     };
-    if ended.is_err() || !(stdout.ended() && stderr.ended()) {
+    if outcome.is_err() || !(stdout.ended() && stderr.ended()) {
         // Whatever still runs (the child, or what it started and left holding a pipe) goes.
         tree.kill(&mut child);
     }
-    Ok(Output { success: ended?, stdout: stdout.text(), stderr: stderr.text() })
+    Ok(Ended { outcome, stdout, stderr })
 }
 
 /// The last non-empty line of `text`, shortened: what a CLI's error output boils down to.
@@ -351,32 +374,27 @@ mod tests {
 
     #[test]
     fn a_process_left_holding_the_pipes_neither_holds_the_call_nor_outlives_it() {
-        // A script that starts a second one in the background (it inherits the output pipes), prints and exits.
-        // The second one would write a marker file five seconds later.
-        let dir = folo_test_support::TestDir::new("label-agent-orphan");
-        let marker = dir.join("marker");
-        let cmd = if cfg!(windows) {
-            let late = "@echo off\r\nping -n 6 127.0.0.1 > NUL\r\necho late > \"%~dp0marker\"\r\n";
-            std::fs::write(dir.join("late.cmd"), late).unwrap();
-            let main = "@echo off\r\nstart /B \"\" cmd /C \"%~dp0late.cmd\"\r\necho done\r\n";
-            std::fs::write(dir.join("main.cmd"), main).unwrap();
-            Command::new(dir.join("main.cmd"))
+        // A shell that starts a process in the background, prints and exits. The process lives for two minutes
+        // and has the shell's output pipes, which stay open for as long as anything holds them: their end is
+        // the proof that nothing of the call is left.
+        const LEFT_BEHIND_S: u64 = 120;
+        let script = if cfg!(windows) {
+            format!("start /B ping -n {LEFT_BEHIND_S} 127.0.0.1 > NUL & echo done")
         } else {
-            let main = "(sleep 5; echo late > \"$(dirname \"$0\")/marker\") &\necho done\n";
-            std::fs::write(dir.join("main.sh"), main).unwrap();
-            let mut cmd = Command::new("sh");
-            cmd.arg(dir.join("main.sh"));
-            cmd
+            format!("sleep {LEFT_BEHIND_S} & echo done")
         };
         let t0 = Instant::now();
-        let out = run(cmd, None, Duration::from_secs(60), &AtomicBool::new(false)).unwrap();
-        assert!(out.success, "{}", out.stderr);
-        assert_eq!(out.stdout.trim(), "done");
-        // The call came back once the grace for the pipes was over, not when the second script would have ended...
-        assert!(t0.elapsed() < Duration::from_millis(4500), "waited {:?} for the pipes", t0.elapsed());
-        // ... and the second script was killed with it: its marker never appears.
-        std::thread::sleep(Duration::from_millis(6500).saturating_sub(t0.elapsed()));
-        assert!(!marker.exists(), "the process left behind was not killed");
+        let ended =
+            run_to_end(shell(&script), None, Duration::from_secs(60), &AtomicBool::new(false)).unwrap();
+        // The call is back long before that process would have ended, with what the shell printed...
+        assert_eq!(ended.outcome, Ok(true));
+        assert_eq!(ended.stdout.text().trim(), "done");
+        assert!(t0.elapsed() < Duration::from_secs(30), "the call waited {:?} for the pipes", t0.elapsed());
+        // ... and the process went with it: its pipes reach their end.
+        while !(ended.stdout.ended() && ended.stderr.ended()) {
+            assert!(t0.elapsed() < Duration::from_secs(60), "the process left behind was not killed");
+            std::thread::sleep(POLL);
+        }
     }
 
     #[test]

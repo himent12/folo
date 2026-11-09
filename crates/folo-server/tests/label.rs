@@ -131,6 +131,10 @@ impl Agent for Scripted {
             Some(Step::Until(_)) | None => {
                 if let Some(Step::Until(open)) = &step {
                     while !open.load(Ordering::SeqCst) {
+                        // A test that fails before it opens the gate ends the run instead (the store's drop).
+                        if req.cancel.load(Ordering::Relaxed) {
+                            return Err(AgentError::Cancelled);
+                        }
                         std::thread::sleep(Duration::from_millis(5));
                     }
                 }
