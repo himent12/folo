@@ -14,6 +14,10 @@ name: release
 #   folo-x86_64-pc-windows-msvc.zip, folo-x86_64-unknown-linux-gnu.tar.gz, folo-aarch64-apple-darwin.tar.gz,
 #   folo-desktop-x86_64-pc-windows-msvc.zip, each with a `<asset>.sha256`, plus SHA256SUMS.
 # Each CLI archive holds one folder `folo-<target>/` with the binary, README.md and the licenses.
+#
+# Runners: as in ci.yml, the repo variables RUNS_ON_LINUX / RUNS_ON_WINDOWS (a JSON runs-on value) select FOLO's
+# self-hosted runners, falling back to GitHub-hosted ones when unset. macOS has no self-hosted runner: it always uses
+# GitHub-hosted macos-latest, and FOLO_RELEASE_MACOS=false skips it (docs/RELEASE.md, Runners).
 
 on:
   push:
@@ -30,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       macos:
-        description: Also build aarch64-apple-darwin (macOS runner minutes are billed at 10x on private repos)
+        description: Also build aarch64-apple-darwin (GitHub-hosted, 10x minutes; FOLO_RELEASE_MACOS=false overrides)
         type: boolean
         default: true
       tag:
@@ -47,10 +51,13 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Ubuntu 22.04 (glibc 2.35, the Linux floor), pinned by digest: the Linux CLI is built and install-tested in it.
+  UBUNTU_2204: ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.plan.outputs.version }}
       prerelease: ${{ steps.plan.outputs.prerelease }}
@@ -63,8 +70,12 @@ jobs:
           EVENT: ${{ github.event_name }}
           # The tag being released (push) or rehearsed (workflow_dispatch's `tag`, may be empty).
           TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
-          # Tag builds include macOS unless the repository variable FOLO_RELEASE_MACOS is "false"; PRs never do.
-          MACOS: ${{ github.event_name == 'workflow_dispatch' && inputs.macos || github.event_name == 'push' && vars.FOLO_RELEASE_MACOS != 'false' }}
+          # Tag builds and dispatches (unless `macos` is off) include macOS; PRs never do. The repository variable
+          # FOLO_RELEASE_MACOS=false skips it everywhere, e.g. while GitHub-hosted runners are unavailable.
+          MACOS: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch' && inputs.macos) && vars.FOLO_RELEASE_MACOS != 'false' }}
+          # JSON runs-on values for the matrix (empty: GitHub-hosted, see the fallbacks below).
+          RUNS_ON_LINUX: ${{ vars.RUNS_ON_LINUX }}
+          RUNS_ON_WINDOWS: ${{ vars.RUNS_ON_WINDOWS }}
         run: |
           set -euo pipefail
           # The single source of truth: [workspace.package] version in the root Cargo.toml.
@@ -75,12 +86,20 @@ jobs:
             exit 1
           fi
           case "$version" in *-*) prerelease=true ;; *) prerelease=false ;; esac
-          # ubuntu-22.04 (glibc 2.35) rather than ubuntu-latest so the Linux binary runs on older distributions.
+          # Each entry's runs-on is a JSON string for fromJSON, like ci.yml's. The hosted Linux fallback is
+          # ubuntu-22.04 (glibc 2.35) so the binary runs on older distributions; the cli job checks that floor on
+          # every runner, since the self-hosted ones are Ubuntu 24.04.
           # macOS is optional: a failed macOS build does not block the release (continue-on-error).
-          include='[{"target":"x86_64-pc-windows-msvc","os":"windows-latest","exe":".exe","optional":false},
-                    {"target":"x86_64-unknown-linux-gnu","os":"ubuntu-22.04","exe":"","optional":false}]'
+          linux=${RUNS_ON_LINUX:-'"ubuntu-22.04"'}
+          windows=${RUNS_ON_WINDOWS:-'"windows-latest"'}
+          for v in "$linux" "$windows"; do
+            jq -e . >/dev/null <<<"$v" || { echo "::error::runs-on variable is not JSON: $v"; exit 1; }
+          done
+          include=$(jq -cn --arg linux "$linux" --arg windows "$windows" '[
+            {target: "x86_64-pc-windows-msvc", "runs-on": $windows, exe: ".exe", optional: false},
+            {target: "x86_64-unknown-linux-gnu", "runs-on": $linux, exe: "", optional: false}]')
           if [ "$MACOS" = true ]; then
-            include=$(jq -c '. + [{"target":"aarch64-apple-darwin","os":"macos-latest","exe":"","optional":true}]' <<<"$include")
+            include=$(jq -c '. + [{target: "aarch64-apple-darwin", "runs-on": "\"macos-latest\"", exe: "", optional: true}]' <<<"$include")
           fi
           {
             echo "version=$version"
@@ -88,21 +107,29 @@ jobs:
             echo "matrix=$(jq -c '{include: .}' <<<"$include")"
             echo "tag=$TAG"
           } >> "$GITHUB_OUTPUT"
-          echo "FOLO $version ($EVENT, tag: ${TAG:-none}, macOS: $MACOS)" >> "$GITHUB_STEP_SUMMARY"
+          echo "FOLO $version ($EVENT, tag: ${TAG:-none}, macOS: $MACOS, Linux: $linux, Windows: $windows)" >> "$GITHUB_STEP_SUMMARY"
 
   # FOLO Studio with folo-wasm (docs/WASM.md) in it, so the embedded Playground can run models in the browser:
   # scripts/build-wasm.sh writes web/public/folo-wasm/ (SIMD128, wasm-opt -O3) and `vite build` copies it to dist/.
   web:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 45
     env:
       # Pinned: binaryen's wasm-opt, verified against the release's published checksum.
       BINARYEN_VERSION: "133"
       BINARYEN_SHA256: 2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489
     steps:
       - uses: actions/checkout@v4
+      # Release builds start from an empty target dir on every runner (no rust-cache, no CI target dir), so nothing
+      # stale from earlier builds reaches a shipped binary; the runner deletes RUNNER_TEMP after the job.
+      - name: fresh target dir
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/folo-release-target" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+      # Both tools are installed per job (wasm-bindgen pinned to Cargo.lock and checksummed by install-action,
+      # wasm-opt pinned and checksummed below), so self-hosted runners need nothing preinstalled.
       - name: wasm-bindgen CLI matching Cargo.lock
         run: echo "WASM_BINDGEN_VERSION=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)" >> "$GITHUB_ENV"
       - uses: taiki-e/install-action@v2
@@ -150,7 +177,8 @@ jobs:
   cli:
     name: cli (${{ matrix.target }})
     needs: [plan, web]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ fromJSON(matrix.runs-on) }}
+    timeout-minutes: 90
     continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
@@ -169,15 +197,64 @@ jobs:
         with:
           name: web-dist
           path: web/dist
+      # A fresh target dir (see the web job) and a throwaway FOLO_HOME, so the smoke test never reads the runner
+      # account's own ~/.folo (the self-hosted Windows runner is the developer account, docs/CI.md).
+      - name: fresh target and data dirs
+        run: |
+          tmp=$RUNNER_TEMP
+          if [ "$RUNNER_OS" = Windows ]; then tmp=$(cygpath -m "$tmp"); fi
+          echo "CARGO_TARGET_DIR=$tmp/folo-release-target" >> "$GITHUB_ENV"
+          echo "FOLO_HOME=$tmp/folo-home" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # The self-hosted Windows host occasionally crashes rustc: tools/ci-retry.sh retries once on a crash only.
       - name: build
-        run: cargo build --release --locked -p folo-cli --features embed-web --target "$TARGET"
+        if: runner.os != 'Linux'
+        env:
+          ATTEMPTS: ${{ runner.environment == 'self-hosted' && runner.os == 'Windows' && '2' || '1' }}
+        run: bash tools/ci-retry.sh cargo build --release --locked -p folo-cli --features embed-web --target "$TARGET"
+      # Linux links inside Ubuntu 22.04 (gcc, glibc 2.35) whatever the runner's distribution (self-hosted: 24.04),
+      # with this job's Rust toolchain mounted read-only. Linked against a newer glibc, std's weak pidfd_* imports
+      # pick up a GLIBC_2.39 version that makes the loader warn on every start on older systems. apt runs as root,
+      # cargo as the runner's user, so every file in the workspace and target dir stays the runner's.
+      - name: build (linux, in Ubuntu 22.04)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_TARGET_DIR"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+            -v "$CARGO_TARGET_DIR:$CARGO_TARGET_DIR" \
+            -v "$(rustc --print sysroot):/opt/rust:ro" \
+            -e CARGO_TARGET_DIR -e CARGO_TERM_COLOR -e FOLO_GIT_SHA -e TARGET \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            "$UBUNTU_2204" bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends gcc libc6-dev ca-certificates > /dev/null
+              exec setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups \
+                env HOME=/tmp/home CARGO_HOME=/tmp/cargo PATH="/opt/rust/bin:$PATH" \
+                cargo build --release --locked -p folo-cli --features embed-web --target "$TARGET"'
+      # The binary must run on glibc 2.35 (Ubuntu 22.04). Weak references count too: the loader warns about them.
+      - name: glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          floor=2.35
+          syms=$(objdump -T "$CARGO_TARGET_DIR/$TARGET/release/folo" | grep 'GLIBC_[0-9]')
+          need=$(grep -o 'GLIBC_[0-9][0-9.]*' <<<"$syms" | cut -c7- | sort -uV | tail -n 1)
+          echo "highest glibc symbol version: $need (floor $floor)"
+          if [ "$(printf '%s\n%s\n' "$need" "$floor" | sort -V | tail -n 1)" != "$floor" ]; then
+            grep -F "GLIBC_$need" <<<"$syms"
+            echo "::error::folo needs glibc $need, newer than the supported floor $floor"
+            exit 1
+          fi
       - name: smoke test
         run: |
           set -euo pipefail
-          exe="target/$TARGET/release/folo$EXE"
+          exe="$CARGO_TARGET_DIR/$TARGET/release/folo$EXE"
           "$exe" --version
           "$exe" doctor --json > doctor.json
           grep -q '"web_source":"embedded"' doctor.json || { cat doctor.json; exit 1; }
@@ -202,10 +279,11 @@ jobs:
           set -euo pipefail
           name="folo-$TARGET"
           mkdir -p "pkg/$name" dist
-          cp "target/$TARGET/release/folo$EXE" README.md LICENSE-MIT LICENSE-APACHE "pkg/$name/"
+          cp "$CARGO_TARGET_DIR/$TARGET/release/folo$EXE" README.md LICENSE-MIT LICENSE-APACHE "pkg/$name/"
           if [ "$RUNNER_OS" = Windows ]; then
             archive="$name.zip"
-            (cd pkg && 7z a -tzip -bso0 "../dist/$archive" "$name")
+            # Windows' own bsdtar writes the zip (7-Zip is not on the self-hosted runner).
+            (cd pkg && "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -a -c -f "../dist/$archive" "$name")
           else
             archive="$name.tar.gz"
             tar -C pkg -czf "dist/$archive" "$name"
@@ -223,7 +301,8 @@ jobs:
   # A separate job: a desktop failure never blocks the CLI release (the release job only requires `cli`).
   desktop:
     needs: plan
-    runs-on: windows-latest
+    runs-on: ${{ fromJSON(vars.RUNS_ON_WINDOWS || '"windows-latest"') }}
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
@@ -242,18 +321,24 @@ jobs:
             echo "::error::apps/desktop/Cargo.toml has version $desktop, the workspace has $VERSION"
             exit 1
           fi
+      # A fresh target dir, as in the cli job.
+      - name: fresh target dir
+        if: steps.desktop.outputs.present == 'true'
+        run: echo "CARGO_TARGET_DIR=$(cygpath -m "$RUNNER_TEMP")/folo-desktop-release-target" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         if: steps.desktop.outputs.present == 'true'
       - name: build
         if: steps.desktop.outputs.present == 'true'
-        run: cargo build --profile dist --locked --manifest-path apps/desktop/Cargo.toml
+        env:
+          ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
+        run: bash tools/ci-retry.sh cargo build --profile dist --locked --manifest-path apps/desktop/Cargo.toml
       - name: smoke test
         if: steps.desktop.outputs.present == 'true'
         env:
           VERSION: ${{ needs.plan.outputs.version }}
         run: |
           set -euo pipefail
-          exe=apps/desktop/target/dist/folo-desktop.exe
+          exe=$CARGO_TARGET_DIR/dist/folo-desktop.exe
           test "$("$exe" --version | tr -d '\r')" = "folo-desktop $VERSION"
           "$exe" --help | grep -q 'Usage: folo-desktop'
       - name: package
@@ -262,8 +347,8 @@ jobs:
           set -euo pipefail
           archive=folo-desktop-x86_64-pc-windows-msvc.zip
           mkdir -p pkg dist
-          cp apps/desktop/target/dist/folo-desktop.exe LICENSE-MIT LICENSE-APACHE pkg/
-          (cd pkg && 7z a -tzip -bso0 "../dist/$archive" ./*)
+          cp "$CARGO_TARGET_DIR/dist/folo-desktop.exe" LICENSE-MIT LICENSE-APACHE pkg/
+          (cd pkg && "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -a -c -f "../dist/$archive" ./*)
           cd dist
           sum=$(sha256sum "$archive")
           printf '%s  %s\n' "${sum%% *}" "$archive" > "$archive.sha256"
@@ -279,10 +364,15 @@ jobs:
     needs: [plan, cli, desktop]
     # Runs even when `desktop` failed; needs every required CLI build (optional legs use continue-on-error).
     if: ${{ !cancelled() && needs.cli.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
+      # No checkout here, so on a self-hosted runner the workspace still holds whatever an earlier job left in it:
+      # start from an empty dist/ so only this run's assets are checked and released.
+      - name: empty dist
+        run: rm -rf dist
       - uses: actions/download-artifact@v4
         with:
           pattern: cli-*
@@ -372,14 +462,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: linux
+            runs-on: ${{ vars.RUNS_ON_LINUX || '"ubuntu-22.04"' }}
+          - os: windows
+            runs-on: ${{ vars.RUNS_ON_WINDOWS || '"windows-latest"' }}
+    name: install-test (${{ matrix.os }})
+    runs-on: ${{ fromJSON(matrix.runs-on) }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: release-${{ needs.plan.outputs.version }}
           path: assets
+      # A throwaway FOLO_HOME, as in the cli job.
+      - name: fresh data dir
+        shell: bash
+        run: echo "FOLO_HOME=$RUNNER_TEMP/folo-home" >> "$GITHUB_ENV"
       - name: install.sh
         if: runner.os != 'Windows'
         run: |
@@ -392,6 +492,18 @@ jobs:
           cp -r assets bad && echo junk >> bad/folo-x86_64-unknown-linux-gnu.tar.gz
           if sh scripts/install.sh --base-url "$PWD/bad" --dir "$RUNNER_TEMP/bad"; then exit 1; fi
           test ! -e "$RUNNER_TEMP/bad/folo"
+      # The installed binary on the oldest supported glibc, whatever the runner's own distribution is. It must start
+      # silently: a dynamic loader warning (e.g. a missing weak symbol version) on stderr fails the check.
+      - name: folo on Ubuntu 22.04
+        if: runner.os != 'Windows'
+        run: |
+          set -eu
+          docker run --rm -v "$RUNNER_TEMP/bin:/opt/folo:ro" "$UBUNTU_2204" sh -c '
+            set -eu
+            /opt/folo/folo --version 2> /tmp/stderr
+            if [ -s /tmp/stderr ]; then cat /tmp/stderr; echo "folo --version wrote to stderr"; exit 1; fi
+            /opt/folo/folo doctor --json > /tmp/doctor.json
+            grep -q "\"web_source\":\"embedded\"" /tmp/doctor.json || { cat /tmp/doctor.json; exit 1; }'
       - name: install.ps1
         if: runner.os == 'Windows'
         shell: powershell
