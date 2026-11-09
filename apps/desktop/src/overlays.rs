@@ -510,7 +510,11 @@ impl FoloApp {
                                                 .flex()
                                                 .flex_col()
                                                 .gap(px(4.))
-                                                .child(text(ty::LG, t.text_primary).child(title.to_string()))
+                                                .child(
+                                                    text(ty::XL, t.text_primary)
+                                                        .font_weight(FontWeight::SEMIBOLD)
+                                                        .child(title.to_string()),
+                                                )
                                                 .when_some(subtitle, |d, s| {
                                                     d.child(text(ty::SM, t.text_secondary).child(s))
                                                 }),
@@ -716,9 +720,9 @@ impl FoloApp {
                 ("SGD", "0.01".to_string())
             } else {
                 let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
-                // Its six decimals, shown to three significant figures (0.00111, 0.000119).
-                let digits = (2 - lr.log10().floor() as i32).clamp(0, 6) as usize;
-                ("AdamW", format!("{lr:.digits$}"))
+                // Its six decimals, written as the run dashboard writes rates (1.11×10⁻³).
+                let p = lr.log10().floor() as i32;
+                ("AdamW", format!("{:.2}×10{}", lr * 10f64.powi(-p), crate::charts::superscript(p)))
             }
         });
         // The adapter behind "GPU 0", named as the other screens name it.
@@ -967,7 +971,9 @@ impl FoloApp {
                                             .flex()
                                             .items_center()
                                             .rounded(px(radius::MD))
-                                            .bg(t.bg_inset)
+                                            // A value, not an input: an outline, no well.
+                                            .border_1()
+                                            .border_color(t.line_subtle)
                                             .child(text(ty::SM, t.text_tertiary).tnum().child(
                                                 match &auto_pick {
                                                     Some((_, lr)) => format!("Auto · {lr}"),

@@ -46,7 +46,11 @@ asked for it, the next for "Copy command"; its tooltip names the command); the n
 "Show N earlier · Dismiss all" (the only way to the folded toasts and to clear them); log-scale loss ticks thinned at
 small sizes are counted from the top power, so the top is labelled; the Throughput sparkline is a glance, capped
 (160 px in the strip, 240 in the wrapped grid at minimum size): one round called it a noise band at full width, the
-next an empty band when capped.
+next an empty band when capped; the PR legend keeps its "P @ best F1" column beside AP50 (one round asked to add R
+there, the next to drop P as a repeat of the class table); the learning-rate legend value is written in the axis's
+power ("0.10×10⁻³"), so a card has one power and the value still reads alone (the dogfood report asked for that);
+New run's section heads stay 14 px semibold and the dialog title is 20 px semibold above them (one round asked for
+larger heads, the next said they outweighed the title).
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed

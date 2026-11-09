@@ -596,24 +596,42 @@ impl FoloApp {
                             cx.notify();
                         }))
                     })
-                    .child(
-                        text(
-                            ty::SM,
-                            if on {
-                                t.text_primary
-                            } else if dead {
-                                t.text_disabled
-                            } else {
-                                t.text_secondary
-                            },
-                        )
-                        // One weight either way: a Medium selected label is wider and nudged its
-                        // neighbours; the raised fill and primary ink mark the selection.
-                        .font_weight(FontWeight::NORMAL)
-                        .whitespace_nowrap()
-                        .tnum()
-                        .child(label.to_string()),
-                    )
+                    .child({
+                        // A trailing count ("All 9") is metadata: tertiary tabular digits after the name.
+                        let (name, count) = match label.rsplit_once(' ') {
+                            Some((n, c))
+                                if !c.is_empty() && c.chars().all(|ch| ch.is_ascii_digit() || ch == ',') =>
+                            {
+                                (n, Some(c))
+                            }
+                            _ => (*label, None),
+                        };
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(6.))
+                            .child(
+                                text(
+                                    ty::SM,
+                                    if on {
+                                        t.text_primary
+                                    } else if dead {
+                                        t.text_disabled
+                                    } else {
+                                        t.text_secondary
+                                    },
+                                )
+                                // One weight either way: a Medium selected label is wider and nudged
+                                // its neighbours; the raised fill and primary ink mark the selection.
+                                .font_weight(FontWeight::NORMAL)
+                                .whitespace_nowrap()
+                                .tnum()
+                                .child(name.to_string()),
+                            )
+                            .children(count.map(|c| {
+                                text(ty::SM, t.text_tertiary).tnum().whitespace_nowrap().child(c.to_string())
+                            }))
+                    })
             }))
     }
 

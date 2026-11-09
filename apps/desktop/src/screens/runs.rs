@@ -1056,14 +1056,12 @@ impl FoloApp {
         // In the axis's power of ten ("× 10⁻³" is printed once, on the axis).
         let lr_hi = (d.lr_max * 1.15).max(1e-4);
         let lr_pow = crate::charts::axis_pow(0., lr_hi, 3);
-        // The legend value reads on its own, normalised ("6.58×10⁻³", "1.00×10⁻⁴": its own power,
-        // not the axis's, so it never shows "0.10×10⁻³").
+        // The legend value is in the axis's power, written out ("6.58×10⁻³", "0.10×10⁻³"): one
+        // power per card, and the value still reads on its own (the dogfood report's ask).
         let lr_value = crate::charts::value_at(&d.lr, hover, 0., total).map(|x| match lr_pow {
-            // In f64: a tiny valid rate (1e-40) would overflow 10^-p in f32.
-            Some(_) if x > 0. && x.is_finite() => {
-                let x = x as f64;
-                let p = x.log10().floor() as i32;
-                format!("{:.2}×10{}", x * 10f64.powi(-p), crate::charts::superscript(p))
+            // In f64: a tiny valid rate would overflow 10^-p in f32.
+            Some(p) if x.is_finite() => {
+                format!("{:.2}×10{}", x as f64 * 10f64.powi(-p), crate::charts::superscript(p))
             }
             _ => format!("{x:.4}"),
         });
