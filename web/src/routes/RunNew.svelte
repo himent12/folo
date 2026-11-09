@@ -14,11 +14,13 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Arch, Augment, DatasetImage, Device, Optimizer, TrainConfig } from '$lib/api/types';
+  import type { Arch, Augment, DatasetImage, Device, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
   import { IMGSZ_STEPS, isOom } from '$lib/oom';
   import { prefs } from '$lib/prefs.svelte';
+  import { REF_CPU, REF_GPU } from '$lib/reference';
+  import { basisLine, confidenceLine, hasFeature, latencyMs, latencyRange, measuredLatency, timeRange, updatedWords } from '$lib/throughput';
   import { href, router } from '$lib/router.svelte';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import { dock } from '$lib/shell/dock';
@@ -52,6 +54,8 @@
 
   /** Where the architectures' reference latency was measured (docs/BENCHMARKS.md). */
   const LATENCY_REF = 'RTX 4080 SUPER · 640 px · f32 · end to end';
+  /** The same, where the line already says 640 px and end to end. */
+  const REF_WHERE = 'RTX 4080 SUPER · f32';
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery(media.phone, false);
 
@@ -118,6 +122,8 @@
   const system = new Resource((s) => hub.api.system(s));
   const models = new Resource((s) => hub.api.models(s));
   const runs = new Resource((s) => hub.api.runs(s));
+  // This server's measured speed (GET /api/system/throughput), where it has one: measured latency in the size table.
+  const tp = new Resource((s) => (hasFeature(system.data, 'throughput') ? hub.api.throughput(s).catch(() => null) : Promise.resolve(null)));
 
   // Prefill from an earlier run (?from=run_x, e.g. "Retry with batch 32"). Loaded through the hub, so it waits for
   // the real server instead of asking the mock that answers before the connection settles.
@@ -217,9 +223,7 @@
     if (!untrack(() => imgszChosen)) imgsz = String(d ?? 640);
   });
 
-  // Estimates are rough (architecture constants, a reference GPU): show them with matching precision.
-  const roughDuration = (s: number) =>
-    s < 3600 ? `~${Math.max(1, Math.round(s / 60))} min` : `~${(s / 3600).toFixed(s < 36000 ? 1 : 0)} h`;
+  // Estimates are ranges (lib/throughput `timeRange`); memory is one figure, in the app's one size format.
   const roughBytes = (b: number) => `~${bytes(b, prefs.units)}`;
 
   /** Number inputs bind `null` when cleared; accept only finite whole numbers in range. */
@@ -263,7 +267,14 @@
     return x ? `f16 on tensor cores: about ${x.toFixed(1)}× faster, 40% less memory.` : 'f16 on tensor cores: faster, about 40% less memory.';
   });
 
-  const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu, ampOn));
+  /** Epochs without mosaic as the trainer runs them: every epoch when mosaic is 0, else at most half the run. */
+  const closeRun = $derived(augment.mosaic <= 0 ? epochs : closeMosaicEpochs(augment.close_mosaic, epochs));
+  /** This server's device is the reference machine's, so the reference's narrower range applies. */
+  const refMachine = $derived(onCpu ? system.data?.cpu.name === REF_CPU : gpu?.name === REF_GPU);
+  /** The local estimate: docs/BENCHMARKS.md's reference, while the server's loads or where it has none. */
+  const est = $derived(
+    estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu, ampOn, { valImages: dataset?.splits.val ?? 0, closeEpochs: closeRun, sameMachine: refMachine }),
+  );
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
   /** The batches behind the steps, for the Summary's tooltip and its accessible description: one line in the rail. */
@@ -294,8 +305,6 @@
     if (!c || !gpuMem || c.device === 'cpu') return 1;
     return oomScale(estimate(c.arch, dataset?.splits.train ?? 0, c.epochs, c.batch, c.imgsz, false).vramBytes, gpuMem);
   });
-  const vram = $derived(est.vramBytes * scale);
-  const vramPct = $derived(gpuMem ? vram / gpuMem : 0);
 
   // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field in
   // one line built from the devices this machine lists now, until another device is picked. The server's own words
@@ -355,6 +364,8 @@
   /** Close mosaic as the trainer applies it: at most half the run. */
   const closeEff = $derived(errors.close || errors.epochs ? null : closeMosaicEpochs(augment.close_mosaic, epochs));
   const selArch = $derived(arches.find((a) => a.arch === arch));
+  /** The sizes this server has measured end to end at 640 px (their latency replaces the reference in the table). */
+  const latHere = $derived(arches.filter((a) => measuredLatency(tp.data, a.arch)));
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
 
@@ -389,6 +400,84 @@
     // Left out for the default (missing means `o2m`, docs/API.md), so older servers see the request they know.
     ...(e2e ? { head: 'o2o' as const } : {}),
   });
+
+  // The server's estimate (POST /api/runs/estimate, feature `run_estimate`), asked again 300 ms after the settings
+  // stop changing; the last answer stays up meanwhile. Its errors are the form's own (a missing device, weights of
+  // another size), already said at their fields: the reference figures stand in.
+  const canEstimate = $derived(hasFeature(system.data, 'run_estimate'));
+  let served = $state.raw<{ key: string; est: RunEstimate } | null>(null);
+  let estimating = $state(false);
+  const estKey = $derived(JSON.stringify({ ...config, name: '' }));
+  $effect(() => {
+    const key = estKey;
+    const body = { ...config, name: config.name || 'estimate' };
+    if (!canEstimate || !dataset || !isInt(epochs, 1, 10000) || errors.close) {
+      served = null;
+      return;
+    }
+    if (untrack(() => served?.key) === key) return;
+    const ctrl = new AbortController();
+    estimating = true;
+    const t = setTimeout(
+      () =>
+        hub.api.estimateRun(body, ctrl.signal).then(
+          (e) => {
+            if (ctrl.signal.aborted) return;
+            served = { key, est: e };
+            estimating = false;
+          },
+          () => {
+            if (ctrl.signal.aborted) return;
+            served = null;
+            estimating = false;
+          },
+        ),
+      untrack(() => served) ? 300 : 0,
+    );
+    return () => {
+      clearTimeout(t);
+      ctrl.abort();
+    };
+  });
+  /** What the Summary and the dock show: the server's estimate when there is one, else the reference's. */
+  const shown = $derived.by(() => {
+    const r = served?.est;
+    if (r)
+      return {
+        lo: r.est_total_s_low,
+        hi: r.est_total_s_high,
+        vram: r.est_peak_vram_bytes ?? 0,
+        vramMeasured: r.vram_source === 'measured',
+        basis: basisLine(r),
+        rough: r.confidence === 'low',
+        how: confidenceLine(r),
+        phases: r.phases,
+        // A measured basis whose validation rate is still the reference's says so on that line.
+        val: { images: r.val_images, rate: r.val_imgs_per_s, reference: r.basis.source === 'measured' && r.val_source === 'reference' },
+        startup: r.startup_s,
+        updated: r.basis.source === 'measured' && r.basis.updated ? updatedWords(r.basis) : null,
+      };
+    return {
+      lo: est.lowSeconds,
+      hi: est.highSeconds,
+      vram: est.vramBytes,
+      vramMeasured: false,
+      basis: refMachine ? `Reference figures, same ${onCpu ? 'CPU' : 'GPU'} model` : 'Reference figures, not measured here',
+      rough: true,
+      how: !canEstimate
+        ? "This server does not estimate runs: docs/BENCHMARKS.md's figures, carried over to these settings."
+        : estimating
+          ? "Loading this server's estimate."
+          : "This server could not estimate these settings: docs/BENCHMARKS.md's figures, carried over to them.",
+      phases: est.phases,
+      val: { images: est.valImages, rate: est.valImgsPerS, reference: false },
+      startup: est.startupS,
+      updated: null,
+    };
+  });
+  // Measured peaks need no scaling: only the reference model is corrected by a failed run.
+  const vram = $derived(shown.vram * (shown.vramMeasured ? 1 : scale));
+  const vramPct = $derived(gpuMem ? vram / gpuMem : 0);
 
   const cliParts = $derived(
     [
@@ -544,7 +633,32 @@
       <!-- svelte-ignore a11y_no_noninteractive_tabindex: focusable so keyboard users get the tooltip too. -->
       <span class="steps" tabindex="0" use:tooltip={stepsWhy}>{num(sched.stepsPerEpoch)} steps <span class="faint">/ epoch</span></span><span class="sr-only">. {stepsWhy}</span>
     </dd>
-    <dt>Est. time</dt><dd class="num">{roughDuration(est.totalSeconds)} <span class="faint">(~{num(Math.round(est.imgsPerS / 10) * 10, 0)} img/s)</span></dd>
+    <!-- A range, never one precise figure; a rough one (low confidence) in secondary ink. What it stands on is the
+         line under it, which opens the phases behind it. -->
+    <dt>Est. time</dt><dd class="num" class:rough={shown.rough} aria-busy={estimating || undefined}>{timeRange(shown.lo, shown.hi)}</dd>
+    <dd class="basis">
+      <details class="est-how">
+        <summary><span>{shown.basis}</span><ChevronRight size={12} strokeWidth={2} aria-hidden="true" /></summary>
+        <!-- One row each, the value at the right; on a narrow rail it wraps under its label, still at the right. -->
+        <dl class="how-list num">
+          {#each shown.phases as p (p.phase)}
+            <div>
+              <dt>{num(p.epochs)} {p.epochs === 1 ? 'epoch' : 'epochs'}, {p.phase === 'mosaic' ? 'mosaic' : 'no mosaic'}</dt>
+              <dd>{num(p.epoch_s, p.epoch_s < 10 ? 1 : 0)} s each · {num(p.train_imgs_per_s)} img/s</dd>
+            </div>
+          {/each}
+          <div>
+            <dt>Validation{shown.val.reference ? ', reference' : ''}</dt>
+            <dd>{num(shown.val.images)} images · {num(shown.val.rate)} img/s</dd>
+          </div>
+          <div><dt>First epoch</dt><dd>+{num(shown.startup, 1)} s startup</dd></div>
+          {#if !onCpu && gpu}
+            <div><dt>Peak GPU memory</dt><dd>{shown.vramMeasured ? 'measured here' : 'reference model'}</dd></div>
+          {/if}
+        </dl>
+        <p class="how-note">{shown.how}{#if shown.updated}{' '}Last measured {shown.updated}.{/if}</p>
+      </details>
+    </dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
       <dd class="num" class:warn={vramPct > 0.9}>{roughBytes(vram)} <span class="faint">/ {gpuMem ? bytes(gpuMem, prefs.units) : 'GPU memory unknown'}</span></dd>
@@ -607,6 +721,7 @@
     <div class="a-head" aria-hidden="true"><span class="a-head-lead">Size</span><span>Params</span><span>GFLOPs</span><span>Latency</span><span></span></div>
     {#each arches as a (a.arch)}
       {@const on = a.arch === arch}
+      {@const here = measuredLatency(tp.data, a.arch)}
       <label class="arch" class:on>
         <input type="radio" name="arch" value={a.arch} bind:group={arch} class="sr-only" />
         <span class="a-size">{a.size}</span>
@@ -614,13 +729,21 @@
         <span class="a-note">{a.note}</span>
         <span class="a-v num">{compact(a.params)}</span>
         <span class="a-v num">{num(a.flops, 1)}</span>
-        {#if a.ms !== undefined}<span class="a-v num">{num(a.ms, 2)} ms</span>{:else}<span class="a-v faint" title="Not measured yet">—</span>{/if}
+        {#if here}<span class="a-v num here">{num(here.latency_ms, 2)} ms</span>{:else if a.ms !== undefined}<span class="a-v num">{num(a.ms, 2)} ms</span>{:else}<span class="a-v faint" title="Not measured yet">—</span>{/if}
         <span class="tick" aria-hidden="true">{#if on}<Check size={14} strokeWidth={2.25} />{/if}</span>
       </label>
     {/each}
   </div>
-  <!-- At most two lines: what the figure is (the architecture's reference, not this device or these weights). -->
-  <p class="ref">Latency: each size's reference, {LATENCY_REF}. A dash: not measured yet.</p>
+  <!-- At most two lines: what each figure is. Measured on this server where it has predicted with that size (named in
+       words, not only by weight), the architecture's reference elsewhere; never these weights' own timing. -->
+  {#if latHere.length}
+    <p class="ref">
+      Latency at 640 px, end to end: measured on this GPU for {latHere.map((a) => a.arch).join(', ')}; the
+      {latHere.length === 1 ? 'others are' : 'rest are'} the reference, {REF_WHERE}. A dash: not measured yet.
+    </p>
+  {:else}
+    <p class="ref">Latency: each size's reference, {LATENCY_REF}. A dash: not measured yet.</p>
+  {/if}
 {/snippet}
 
 {#snippet estimates(withName: boolean)}
@@ -691,7 +814,13 @@
                 <p class="a-specs num">{compact(selArch.params)} params · {num(selArch.flops, 1)} GFLOPs</p>
                 <!-- The architecture's reference figure, named as one, with where it was measured under it: not this
                      device, not these weights. -->
-                {#if selArch.ms !== undefined}
+                {@const here = measuredLatency(tp.data, selArch.arch)}
+                {#if here}
+                  <!-- Measured on this server first, its spread and count beside it; the reference stays, secondary. -->
+                  <p class="a-lat num">Latency <span class="a-lat-v">{latencyMs(here.latency_ms)}</span> measured here</p>
+                  <p class="a-specs num">{latencyRange(here.latency_ms_low, here.latency_ms_high)} · {num(here.samples)} predictions · 640 px · {here.precision} · end to end</p>
+                  {#if selArch.ms !== undefined}<p class="a-specs num">Reference {latencyMs(selArch.ms)} · {REF_WHERE}</p>{/if}
+                {:else if selArch.ms !== undefined}
                   <p class="a-lat num">Reference latency <span class="a-lat-v">{num(selArch.ms, 2)} ms</span></p>
                   <p class="a-specs">{LATENCY_REF}</p>
                 {:else}
@@ -943,7 +1072,7 @@
         {:else}
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
             <Meta>
-              <span>{roughDuration(est.totalSeconds)}</span>
+              <span class:rough={shown.rough}>{timeRange(shown.lo, shown.hi)}</span>
               {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} GPU memory</span>{/if}
               {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.scratch ? 'Too short to learn' : 'Mostly warmup'}</span>{/if}
               {#if dataset}<span class="faint"><Meta line><span>{dataset.name}</span><Ident value={arch} /></Meta></span>{/if}
@@ -1117,6 +1246,10 @@
     color: var(--text-secondary);
   }
   .arch.on .a-v.num {
+    color: var(--text-primary);
+  }
+  /* Measured on this server: ink in every row (the note under the table names these sizes in words). */
+  .a-v.num.here {
     color: var(--text-primary);
   }
   .ref {
@@ -1384,6 +1517,81 @@
   }
   .est dd.warn {
     color: var(--warning-text);
+  }
+  /* A rough estimate (nothing close measured here) reads one step quieter than a measured one. */
+  .est dd.rough {
+    color: var(--text-secondary);
+  }
+  /* What the time stands on: one quiet line under it, across the row, opening the phases behind it. */
+  .est dd.basis {
+    grid-column: 1 / -1;
+    margin-top: -2px;
+    overflow: visible;
+    white-space: normal;
+  }
+  .est-how summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    max-width: 100%;
+    border-radius: var(--radius-xs);
+    color: var(--text-tertiary);
+    cursor: pointer;
+    list-style: none;
+  }
+  .est-how summary::-webkit-details-marker {
+    display: none;
+  }
+  .est-how summary > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .est-how summary :global(svg) {
+    flex-shrink: 0;
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .est-how[open] summary :global(svg) {
+    transform: rotate(90deg);
+  }
+  .est-how summary:hover {
+    color: var(--text-secondary);
+  }
+  .how-list {
+    display: grid;
+    gap: 2px;
+    margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-md);
+    background: var(--bg-inset);
+    text-align: left;
+  }
+  .how-list > div {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0 var(--space-3);
+  }
+  .how-list dt {
+    color: var(--text-tertiary);
+  }
+  .how-list dd {
+    margin-left: auto;
+    color: var(--text-secondary);
+    text-align: right;
+    white-space: nowrap;
+  }
+  .how-note {
+    margin-top: var(--space-2);
+    text-align: left;
+    color: var(--text-tertiary);
+    text-wrap: pretty;
+  }
+  @media (pointer: coarse) {
+    .est-how summary {
+      min-height: 44px;
+    }
   }
   /* The steps carry their batches in a tooltip: focusable, so the value keeps room for its focus ring. */
   .est dd.sched {

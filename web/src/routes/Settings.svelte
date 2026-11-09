@@ -30,6 +30,8 @@
   import { toast } from '$lib/ui/toast.svelte';
   import { capabilityRows, deviceSummary, driverReport, type CapState } from './settings/capabilities';
   import ThemePreview from './settings/ThemePreview.svelte';
+  import Throughput from './settings/Throughput.svelte';
+  import { hasFeature } from '$lib/throughput';
 
   setCrumbs({ label: 'Settings' });
 
@@ -320,6 +322,10 @@
             {#if capRows.some((c) => c.raw)}
               <!-- The server's words, verbatim, for an issue or a terminal: folded, and copied whole. -->
               <DriverReport {report} />
+            {/if}
+            {#if hasFeature(sys.data, 'throughput')}
+              <!-- What this server has measured of its own speed (servers before #130 list no such feature). -->
+              <Throughput benchmark={hasFeature(sys.data, 'benchmark')} />
             {/if}
           </div>
         </Panel>

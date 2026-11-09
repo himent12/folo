@@ -288,6 +288,7 @@ describe('New run: mixed precision', () => {
   const cli = () => target.querySelector('.cli code')!.textContent!;
   const row = () => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === 'Mixed precision');
   const time = () => [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. time')!.nextElementSibling!.textContent;
+  const basis = () => target.querySelector('.summary .est-how > summary')?.textContent;
 
   it('is off by default; on, the run, the Summary and the command say so, and the estimate is faster', async () => {
     hub.api = api = new MockApi('normal', 0);
@@ -304,12 +305,14 @@ describe('New run: mixed precision', () => {
     expect(s.getAttribute('aria-describedby')).toBe('amp-hint');
     expect(row()?.querySelector('.rv-v')?.textContent).toBe('Off');
     expect(cli()).not.toContain('--amp');
+    await until(() => basis()?.startsWith('Measured'), "the server's estimate");
     const f32 = time();
     s.click();
     flushSync();
     expect(row()?.querySelector('.rv-v')?.textContent).toBe('On');
     expect(cli()).toContain('--amp');
-    expect(time()).not.toBe(f32);
+    // The server's estimate follows once the settings settle (folo-s amp was never measured: carried over).
+    await until(() => time() !== f32, 'the new estimate');
     const create = vi.spyOn(api, 'createRun');
     await start();
     expect(create.mock.calls[0]![0].amp).toBe(true);
@@ -647,5 +650,69 @@ describe('New run from a link', () => {
   it("takes the epochs a short run's warning suggests", async () => {
     await open('?from=run_a2f0&epochs=40');
     await until(() => target.querySelector<HTMLInputElement>('input#epochs')?.value === '40', 'epochs 40');
+  });
+});
+
+describe('New run: the estimate', () => {
+  const timeDd = () => [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. time')?.nextElementSibling;
+  const time = () => timeDd()?.textContent ?? '';
+  const basis = () => target.querySelector('.summary .est-how > summary')?.textContent ?? '';
+  const rough = () => timeDd()?.classList.contains('rough');
+
+  it("shows the server's estimate as a range, says it was measured on this GPU, and lists its phases", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const ask = vi.spyOn(api, 'estimateRun');
+    await open();
+    await until(() => basis().startsWith('Measured'), "the server's estimate");
+    // folo-s at 640, batch 16, f32 is a measured row of the mock: the narrow range of a high confidence.
+    expect(basis()).toBe('Measured on this GPU · 226 samples');
+    expect(time()).toMatch(/^\d+–\d+ min$/);
+    expect(rough()).toBe(false);
+    const body = ask.mock.calls.at(-1)![0];
+    expect([body.arch, body.imgsz, body.batch, body.amp]).toEqual(['folo-s', 640, 16, false]);
+    const rows = [...target.querySelectorAll('.summary .how-list dt')].map((d) => d.textContent);
+    expect(rows).toEqual(['90 epochs, mosaic', '10 epochs, no mosaic', 'Validation', 'First epoch', 'Peak GPU memory']);
+    expect(target.querySelector('.summary .how-note')?.textContent).toContain('these very settings');
+    // The dock says the same range and calls memory GPU memory.
+    expect(target.querySelector('.dock-est')?.textContent).toContain(time());
+    expect(target.querySelector('.dock-est')?.textContent).toContain('GPU memory');
+    expect(target.querySelector('.dock-est')?.textContent).not.toContain('VRAM');
+  });
+
+  it('asks again when the settings change, and calls a size it never measured rough', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    await until(() => basis().startsWith('Measured'), "the server's estimate");
+    const radio = target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-x"]')!;
+    radio.click();
+    flushSync();
+    await until(() => basis().startsWith('Scaled'), 'the folo-x estimate');
+    expect(basis()).toBe('Scaled from folo-s at 640 px on this GPU');
+    // folo-x is 9x folo-s's compute: low confidence, the value one step quieter.
+    expect(rough()).toBe(true);
+  });
+
+  it('falls back to the reference figures on a server without run_estimate, and says so', async () => {
+    hub.api = api = new MockApi('no-throughput', 0);
+    const ask = vi.spyOn(api, 'estimateRun');
+    await open();
+    await until(() => basis(), 'the estimate');
+    expect(basis()).toBe('Reference figures, same GPU model');
+    expect(time()).toMatch(/^\d+–\d+ min$/);
+    expect(rough()).toBe(true);
+    expect(target.querySelector('.summary .how-note')?.textContent).toContain('does not estimate runs');
+    expect(ask).not.toHaveBeenCalled();
+    // The latency column is the reference throughout.
+    expect(target.querySelector('.a-v.here')).toBeNull();
+    expect(target.querySelector('p.ref')?.textContent).toContain("each size's reference");
+  });
+
+  it("marks folo-n's latency as measured on this GPU and names it under the table", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    const here = await until(() => target.querySelector('.a-v.here'), 'the measured latency');
+    expect(here.textContent).toBe('5.90 ms');
+    expect(here.closest('label')?.querySelector('input')?.value).toBe('folo-n');
+    expect(target.querySelector('p.ref')?.textContent?.replace(/\s+/g, ' ')).toMatch(/measured on this GPU for folo-n; the others are the reference/);
   });
 });

@@ -1,56 +1,85 @@
-// Rough training estimates for the New run form. Calibrated loosely against the mock and an RTX 4080-class GPU;
-// they are hints ("about 9 minutes", "about 7 GiB"), labelled as estimates in the UI.
+// Training estimates for the New run form where the server has none (`run_estimate` missing from /api/system's
+// features) or while its answer loads: docs/BENCHMARKS.md's reference figures, the same ones the server falls back
+// to, carried over to the run's settings the same way (lib/reference.ts). Shown as a range, labelled as reference.
 
 import type { Arch } from '$lib/api/types';
-import { e2eMs, modelSize } from '$lib/benchmarks';
+import { e2eMs } from '$lib/benchmarks';
+import { archSpec, REF_STARTUP_S, referenceRates, referenceSpread, referenceVram } from '$lib/reference';
 
 // `size` is the letter shown in the model list, uppercase (a lowercase l reads as I or | in Geist).
 // Sizes and latency are measured where docs/BENCHMARKS.md has them (n, s); `ms` is absent otherwise. The other sizes'
 // params and GFLOPs are docs/MODEL.md's table (few classes, 640 px).
 export const arches: { arch: Arch; size: string; params: number; flops: number; ms?: number; note: string }[] = [
-  { arch: 'folo-n', size: 'N', params: modelSize['folo-n']!.params, flops: modelSize['folo-n']!.gflops, ms: e2eMs['folo-n'], note: 'Fastest; edge devices, quick tries.' },
-  { arch: 'folo-s', size: 'S', params: modelSize['folo-s']!.params, flops: modelSize['folo-s']!.gflops, ms: e2eMs['folo-s'], note: 'The default: fast and accurate.' },
-  { arch: 'folo-m', size: 'M', params: 20_050_000, flops: 68.0, note: 'More accuracy on busy scenes.' },
-  { arch: 'folo-l', size: 'L', params: 25_310_000, flops: 86.9, note: 'High accuracy; a strong GPU.' },
-  { arch: 'folo-x', size: 'X', params: 56_880_000, flops: 195.3, note: 'Best accuracy; the most memory.' },
+  { arch: 'folo-n', size: 'N', params: archSpec['folo-n'].params, flops: archSpec['folo-n'].gflops, ms: e2eMs['folo-n'], note: 'Fastest; edge devices, quick tries.' },
+  { arch: 'folo-s', size: 'S', params: archSpec['folo-s'].params, flops: archSpec['folo-s'].gflops, ms: e2eMs['folo-s'], note: 'The default: fast and accurate.' },
+  { arch: 'folo-m', size: 'M', params: archSpec['folo-m'].params, flops: archSpec['folo-m'].gflops, note: 'More accuracy on busy scenes.' },
+  { arch: 'folo-l', size: 'L', params: archSpec['folo-l'].params, flops: archSpec['folo-l'].gflops, note: 'High accuracy; a strong GPU.' },
+  { arch: 'folo-x', size: 'X', params: archSpec['folo-x'].params, flops: archSpec['folo-x'].gflops, note: 'Best accuracy; the most memory.' },
 ];
-
-const gpuImgsPerS: Record<Arch, number> = { 'folo-n': 520, 'folo-s': 320, 'folo-m': 170, 'folo-l': 130, 'folo-x': 70 };
-const gibPerImage: Record<Arch, number> = { 'folo-n': 0.11, 'folo-s': 0.19, 'folo-m': 0.36, 'folo-l': 0.47, 'folo-x': 0.8 };
 
 /**
  * Mixed precision (`amp`) against f32, measured on the training step (docs/BENCHMARKS.md, Mixed-precision training:
  * batch 16 at 640 on an RTX 4080 SUPER): speed for the sizes measured, and the peak memory, about 40% less for both.
  */
 export const AMP_SPEEDUP: Partial<Record<Arch, number>> = { 'folo-n': 1.24, 'folo-s': 1.61 };
-const AMP_MEMORY = 0.6;
 
 export interface Estimate {
   /** Batches an epoch (`ceil(N / batch)`); the optimizer steps are fewer when batches accumulate (`warmup`). */
   stepsPerEpoch: number;
+  /** Training images per second with mosaic (the headline rate). */
   imgsPerS: number;
   epochSeconds: number;
   totalSeconds: number;
+  /** The range around `totalSeconds` (docs/API.md's spread for a reference estimate). */
+  lowSeconds: number;
+  highSeconds: number;
   vramBytes: number;
+  /** As the server's `RunEstimate.phases`: the mosaic epochs, then the close-mosaic ones. */
+  phases: { phase: 'mosaic' | 'close_mosaic'; epochs: number; train_imgs_per_s: number; epoch_s: number }[];
+  valImages: number;
+  valImgsPerS: number;
+  startupS: number;
+}
+
+export interface EstimateOptions {
+  /** Validation images an epoch (the val split; the training split when it has none, as the trainer does). */
+  valImages?: number;
+  /** Epochs without mosaic at the end (already capped at half the run; every epoch when mosaic is 0). */
+  closeEpochs?: number;
+  /** Whether this server's device is the reference machine's (an RTX 4080 SUPER, or its i7-14700KF on the CPU). */
+  sameMachine?: boolean;
 }
 
 /**
- * `amp`: mixed precision on the GPU. Its speed-up applies only where it was measured (`AMP_SPEEDUP`); its memory saving
- * to the activations (the per-image part).
+ * The server's reference estimate (docs/API.md, POST /api/runs/estimate): each epoch trains at its phase's rate and
+ * validates at the validation rate; the first adds the startup. `amp`: mixed precision on the GPU.
  */
-export function estimate(arch: Arch, trainImages: number, epochs: number, batch: number, imgsz: number, cpu: boolean, amp = false): Estimate {
-  const area = (imgsz / 640) ** 2;
+export function estimate(arch: Arch, trainImages: number, epochs: number, batch: number, imgsz: number, cpu: boolean, amp = false, opts: EstimateOptions = {}): Estimate {
   const mixed = amp && !cpu;
-  const imgsPerS = (gpuImgsPerS[arch] / area) * (cpu ? 1 / 14 : 1) * (mixed ? (AMP_SPEEDUP[arch] ?? 1) : 1);
-  const epochSeconds = trainImages / imgsPerS + Math.min(30, trainImages * 0.002 + 1);
-  const params = arches.find((a) => a.arch === arch)?.params ?? 10_000_000;
-  const vram = 0.6 * 2 ** 30 + params * 16 + batch * area * gibPerImage[arch] * 2 ** 30 * (mixed ? AMP_MEMORY : 1);
+  const r = referenceRates(arch, imgsz, mixed, cpu);
+  const e = Number.isFinite(epochs) && epochs > 0 ? Math.floor(epochs) : 0;
+  const close = Math.max(0, Math.min(e, opts.closeEpochs ?? 0));
+  const val = (opts.valImages ?? 0) > 0 ? opts.valImages! : trainImages;
+  const valS = val / r.val;
+  const phases = [
+    { phase: 'mosaic' as const, epochs: e - close, train_imgs_per_s: r.mosaic, epoch_s: trainImages / r.mosaic + valS },
+    { phase: 'close_mosaic' as const, epochs: close, train_imgs_per_s: r.close, epoch_s: trainImages / r.close + valS },
+  ].filter((p) => p.epochs > 0);
+  const train = phases.reduce((t, p) => t + p.epochs * p.epoch_s, 0);
+  const total = REF_STARTUP_S + train;
+  const [lo, hi] = referenceSpread(opts.sameMachine ?? false);
   return {
     stepsPerEpoch: Math.max(1, Math.ceil(trainImages / Math.max(1, batch))),
-    imgsPerS,
-    epochSeconds,
-    totalSeconds: epochSeconds * epochs,
-    vramBytes: cpu ? 0 : vram,
+    imgsPerS: r.mosaic,
+    epochSeconds: e > 0 ? train / e : 0,
+    totalSeconds: total,
+    lowSeconds: total * (1 + lo),
+    highSeconds: total * (1 + hi),
+    vramBytes: cpu ? 0 : referenceVram(arch, imgsz, batch, mixed),
+    phases,
+    valImages: val,
+    valImgsPerS: r.val,
+    startupS: REF_STARTUP_S,
   };
 }
 

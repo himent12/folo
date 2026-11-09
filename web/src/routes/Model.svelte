@@ -18,6 +18,7 @@
   import { sharePct } from '$lib/charts/confusionInk';
   import { classInk } from '$lib/design/classInk.svelte';
   import { ago, atBestF1, bytes, compact, conf, date, metric, num } from '$lib/format';
+  import { latencyMs, latencyRange, loadThroughput, measuredLatency } from '$lib/throughput';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -71,6 +72,8 @@
 
   // PR curves, confusion matrix and per-class metrics from GET /api/models/{id}/eval.
   const evaluation = new Resource((s) => hub.api.modelEval(id, s));
+  // This server's measured latency for the architecture (GET /api/system/throughput), where it has predicted with it.
+  const tp = new Resource((s) => loadThroughput(hub.api, s));
   const ev = $derived(evaluation.data ? fromModelEval(evaluation.data) : null);
 
   // Large class sets (COCO) get a readable matrix of the most frequent classes.
@@ -447,6 +450,7 @@
 
       <aside class="rail" class:off={!showing('details')} aria-label="Model details">
         {#snippet detailList(two: boolean)}
+          {@const here = measuredLatency(tp.data, m.arch, m.imgsz)}
           <dl class="details" class:two id="model-details">
             <div class="kv">
               <dt>Architecture</dt>
@@ -530,12 +534,24 @@
               <dt>Created</dt>
               <dd>{date(m.created)}</dd>
             </div>
-            <!-- The architecture's number (docs/BENCHMARKS.md), never this model's timing: the label says whose it is,
-                 and the conditions sit beside the value. Last, apart from the facts about this model. -->
+            <!-- The architecture's number, never this model's own timing: measured on this server where it has
+                 predicted with the architecture at the model's size (its spread and count beside it), the reference
+                 (docs/BENCHMARKS.md) otherwise or under it. The label says whose it is; the conditions sit beside the
+                 value. Last, apart from the facts about this model. -->
             <div class="kv wide ref">
-              <dt>Architecture reference latency</dt>
-              <dd class="latency">
-                {#if latency(m) !== undefined}
+              <dt>{here ? 'Architecture latency on this server' : 'Architecture reference latency'}</dt>
+              {#if here}
+                <dd class="latency">
+                  <span class="num">{latencyMs(here.latency_ms)}</span>
+                  <span class="faint num">measured here · {latencyRange(here.latency_ms_low, here.latency_ms_high)} · {num(here.samples)} predictions · {m.imgsz} px · {here.precision}</span>
+                </dd>
+              {/if}
+              <dd class="latency" class:second={!!here}>
+                {#if here && latency(m) !== undefined}
+                  <span class="faint num">Reference {latency(m)!.toFixed(2)} ms · <Ident value={m.arch} /> · 640 px · RTX 4080 SUPER</span>
+                {:else if here}
+                  <span class="faint">No reference for <Ident value={m.arch} /> yet</span>
+                {:else if latency(m) !== undefined}
                   <span class="num">{latency(m)!.toFixed(2)} ms</span>
                   <span class="faint"><Meta><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta></span>
                 {:else}
@@ -1279,6 +1295,9 @@
   .latency .faint {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+  }
+  .latency.second {
+    margin-top: 2px;
   }
   .classes {
     display: flex;

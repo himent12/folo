@@ -2,6 +2,7 @@
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
 import { comparable, unlike, versusYolo26n } from '$lib/benchmarks';
+import { MockApi } from '$lib/api/mock';
 import Versus from './Versus.svelte';
 
 let c: ReturnType<typeof mount> | undefined;
@@ -77,5 +78,36 @@ describe('Engine speed table', () => {
     await tick();
     expect(how.open).toBe(true);
     expect(document.activeElement).toBe(how.querySelector('summary'));
+  });
+
+  it("adds this server's own folo-n figures as a group of their own, said to be measured here and compared with nothing", async () => {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    const table = await new MockApi('normal', 0).throughput();
+    c = mount(Versus, { target, props: { table } });
+    flushSync();
+    const groups = target.querySelectorAll('table.vs tbody');
+    expect(groups).toHaveLength(2);
+    // The reference rows are unchanged; the lede says which they are.
+    expect(groups[0]!.querySelectorAll('tr')).toHaveLength(versusYolo26n.length);
+    expect(target.querySelector('.lede')?.textContent).toContain("the reference figures, with this server's own folo-n figures last");
+    const here = groups[1]!;
+    expect(here.querySelector('.here-h')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Measured on this server RTX 4080 SUPER');
+    const rows = [...here.querySelectorAll('tr:not(.here-h)')];
+    expect(rows.map((tr) => [...tr.querySelectorAll('td')].map((td) => td.lastChild?.textContent))).toEqual([
+      ['5.90 ms', 'not run here', 'Measured here'],
+      ['212 img/s', 'not run here', 'Measured here'],
+    ]);
+    // Each value still names its metric and column.
+    for (const td of here.querySelectorAll('td')) expect(target.querySelector(`#${td.getAttribute('headers')!.split(' ')[1]}`)?.getAttribute('scope')).toBe('col');
+  });
+
+  it('shows only the reference without a table (older servers)', () => {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(Versus, { target, props: { table: null } });
+    flushSync();
+    expect(target.querySelectorAll('table.vs tbody')).toHaveLength(1);
+    expect(target.querySelector('.lede')?.textContent).not.toContain('this server');
   });
 });

@@ -5,12 +5,16 @@
 // `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
 // `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
 // finished 5-epoch run the trainer warns is too short to learn from), `tensor-cores-off` and `no-tensor-cores` (no
-// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`) and `finishing` (the live run reaches its
-// last epoch 3 s after load, for the toast that says so), for screenshots of those states.
+// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), `finishing` (the live run reaches its
+// last epoch 3 s after load, for the toast that says so) and `no-throughput` (a server from before measured throughput:
+// no `throughput`, `run_estimate` or `benchmark` feature, and those endpoints answer 404), for screenshots of those
+// states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
   Arch,
+  BenchmarkReport,
+  BenchmarkRequest,
   Box,
   Capabilities,
   ClassMetrics,
@@ -36,10 +40,12 @@ import type {
   QueueRequest,
   Run,
   RunLogs,
+  RunEstimate,
   RunMetrics,
   RunSamples,
   Sample,
   SystemInfo,
+  ThroughputTable,
   TrainConfig,
 } from '../types';
 import { image, imageIndex, indices, issues, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
@@ -65,6 +71,7 @@ import {
 import { COCO80 } from './coco';
 import { applyQueueMove } from '../queue';
 import { onnxFileName } from '../client';
+import { CPU_NAME, MockThroughput } from './throughput';
 
 export type Scenario =
   | 'normal'
@@ -76,7 +83,8 @@ export type Scenario =
   | 'short-run'
   | 'tensor-cores-off'
   | 'no-tensor-cores'
-  | 'finishing';
+  | 'finishing'
+  | 'no-throughput';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -334,6 +342,10 @@ export class MockApi implements Api {
   #subs = new Map<string, Set<RunEventHandlers>>();
   /** Those log lines, kept for `/logs`. */
   #notes = new Map<string, LogLine[]>();
+  #throughput: MockThroughput;
+  /** Runs created through the API: while one is queued or running, a benchmark probe answers `409 run_active`. */
+  #created = new Set<string>();
+  #probing = false;
 
   constructor(
     readonly scenario: Scenario = 'normal',
@@ -342,6 +354,7 @@ export class MockApi implements Api {
     this.#t0 = Date.now();
     this.#runs = scenario === 'empty' ? [] : profiles(this.#t0, scenario);
     this.#datasets = scenario === 'empty' ? [] : [...specs];
+    this.#throughput = new MockThroughput(this.#t0);
     this.#queue = this.#runs
       .filter((p) => p.startedAt === null && !p.terminal)
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -428,13 +441,52 @@ export class MockApi implements Api {
     return this.#call(() => {
       const t = Date.now() / 1000;
       return {
-        cpu: { name: 'AMD Ryzen 9 7950X 16-Core Processor', threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
+        cpu: { name: CPU_NAME, threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
         gpus: this.#gpus(),
-        features: ['export_onnx_switches', 'queue_control', 'weights_onnx'],
+        features:
+          this.scenario === 'no-throughput'
+            ? ['export_onnx_switches', 'queue_control', 'weights_onnx']
+            : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark'],
         capabilities: capabilities(this.scenario),
       };
     }, 60);
+  }
+
+  /** A server from before these endpoints: an unknown route. */
+  #noRoute(path: string): ApiError {
+    return new ApiError(404, 'not_found', `No route for ${path}.`);
+  }
+
+  throughput(): Promise<ThroughputTable> {
+    return this.#call(() => {
+      if (this.scenario === 'no-throughput') throw this.#noRoute('GET /api/system/throughput');
+      return this.#throughput.table();
+    }, 80);
+  }
+
+  /** About 1.5 s, the shortest a real probe takes (docs/API.md: the budget, 1–10 s, plus setup). */
+  async benchmark(body: BenchmarkRequest = {}): Promise<BenchmarkReport> {
+    if (this.scenario === 'no-throughput') return this.#call(() => Promise.reject(this.#noRoute('POST /api/system/benchmark')));
+    const busy = () => {
+      const now = Date.now();
+      const active = this.#runs.find((p) => this.#created.has(p.id) && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
+      if (this.#probing) return new ApiError(409, 'run_active', 'A benchmark probe is already running.', 'Wait for it to finish.');
+      if (active) return new ApiError(409, 'run_active', `Run ${active.name} is ${progressAt(active, now).status}.`, 'Measure when it has finished, or stop it first.');
+      return null;
+    };
+    const err = busy();
+    if (err) return this.#call(() => Promise.reject(err), 60);
+    this.#probing = true;
+    const t = Date.now();
+    try {
+      if (this.scenario === 'loading') return await new Promise<BenchmarkReport>(() => {});
+      if (this.latency > 0) await sleep(1500);
+      if (this.scenario === 'error') throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+      return this.#throughput.probe(body, Date.now(), (Date.now() - t) / 1000);
+    } finally {
+      this.#probing = false;
+    }
   }
 
   // ---------- datasets ----------
@@ -720,10 +772,23 @@ export class MockApi implements Api {
         device: c.device === 'cpu' ? 'cpu (AMD Ryzen 9 7950X)' : DEVICE,
       }, ds.splits.train);
       this.#runs.unshift(p);
+      this.#created.add(p.id);
       this.#queue.push(p.id);
       this.#schedule(now);
       return this.#toRun(p, now);
     }, 300);
+  }
+
+  estimateRun(c: TrainConfig): Promise<RunEstimate> {
+    return this.#call(() => {
+      if (this.scenario === 'no-throughput') throw this.#noRoute('POST /api/runs/estimate');
+      // The same checks as POST /api/runs; nothing is created.
+      const ds = this.#spec(c.dataset_id);
+      const gpu = /^gpu:(\d+)$/.exec(c.device);
+      if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(c.device);
+      if (c.weights && !this.#models().some((m) => m.id === c.weights)) throw new ApiError(404, 'model_not_found', `No model with id ${c.weights}.`);
+      return this.#throughput.estimate(c, ds.splits.train, ds.splits.val);
+    }, 120);
   }
 
   /** `404 device_not_found` in the real server's words. */
