@@ -963,30 +963,6 @@ export const scenes = [
     },
   },
   {
-    // Download asked for in the demo: the dialog says there is no file in its own status region (above the footer),
-    // never in a toast behind the modal.
-    name: 'model-export-demo-download',
-    path: '/models/m_shapes_s',
-    fullPage: false,
-    viewports: ['desktop', 'mobile'],
-    setup: async (page, { vp }) => {
-      if (vp === 'mobile') {
-        await until(page, 'button[aria-label="More model actions"]');
-        await page.locator('button[aria-label="More model actions"]').click();
-        await page.getByRole('menuitem', { name: 'Export' }).click();
-      } else {
-        await until(page, 'button:has-text("Export")');
-        await page.locator('button:has-text("Export")').first().click();
-      }
-      await until(page, 'dialog[open] fieldset');
-      await page.locator('dialog[open] footer button:has-text("Export")').click();
-      await until(page, 'dialog[open] .where');
-      await page.locator('dialog[open] footer button:has-text("Download")').click();
-      await until(page, 'dialog[open] .dialog-status [data-notice]');
-      await page.mouse.move(0, 0);
-    },
-  },
-  {
     // ONNX picked on a server with the export switches: decode, dynamic and half as checkboxes under it.
     name: 'model-export-onnx-options',
     path: '/models/m_shapes_s',

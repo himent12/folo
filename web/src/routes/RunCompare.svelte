@@ -459,7 +459,7 @@
   {/if}
 </Page>
 
-{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" data-fact>{v.value}</span>{/if}{#if v.note}<span class="note" data-fact>{v.note}</span>{/if}{/snippet}
+{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<span class="note" data-fact>{v.note}</span>{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -1112,7 +1112,9 @@
     white-space: normal;
     overflow-wrap: break-word;
   }
-  .val {
+  /* A short value ("360 steps", "0.000833") stays whole; a value in words ("Mixed precision (f16)", "End-to-end (no
+     NMS)") wraps at its spaces in a narrow column, never cut. */
+  .val.whole {
     white-space: nowrap;
   }
   .th {
