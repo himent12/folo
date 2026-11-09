@@ -2644,7 +2644,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(8.))
                     .child(dot(t.accent_fill(), 6., true, "mini"))
-                    .child(text(ty::SM, t.text_primary).w(px(140.)).truncate().child(r.name.clone()))
+                    .child(text(ty::SM, t.text_primary).w(px(140.)).ellipsis().child(r.name.clone()))
                     .child(div().flex_1())
                     .child(
                         text(ty::XS, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
@@ -2732,7 +2732,7 @@ impl FoloApp {
             })
             .when(!compact, |d| {
                 d.child(div().size(px(6.)).rounded_full().bg(color))
-                    .child(text(ty::XS, t.text_tertiary).truncate().child(label))
+                    .child(text(ty::XS, t.text_tertiary).ellipsis().child(label))
             });
         self.bind(el, "connection", 0., window, cx, act(|this, w, cx| this.navigate(Route::Settings, w, cx)))
     }

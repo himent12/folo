@@ -183,9 +183,9 @@ impl FoloApp {
                                     cx.stop_propagation();
                                 }
                             }))
-                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())).child(text(ty::XS, t.text_tertiary).w(px(name_w)).truncate().child(eval_on)))
+                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).ellipsis().child(m.name.clone())).child(text(ty::XS, t.text_tertiary).w(px(name_w)).ellipsis().child(eval_on)))
                             .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))))
-                            .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
+                            .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().ellipsis().child(run.trim_start_matches("from ").to_string())))
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| text(ty::SM, t.text_primary).tnum().child(f3(mm.map50_95)))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
                             .when(params_col, |d| d.child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")))))
@@ -336,8 +336,8 @@ impl FoloApp {
         let mm = m.metrics;
         // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
         let op_point = match mm.as_ref().and_then(|x| x.best_f1_conf) {
-            Some(c) => format!("at conf {} (best F1) · IoU 0.50", fmt_conf(c)),
-            None => "best F1 · IoU 0.50".to_string(),
+            Some(c) => format!("at conf {} (best F1)", fmt_conf(c)),
+            None => "at the best-F1 confidence".to_string(),
         };
         // The dataset the headline numbers were measured on (the run's), named beside them.
         // The split evaluation used: validation, or train when the dataset has no validation
@@ -388,7 +388,7 @@ impl FoloApp {
                                 .tnum()
                                 .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
                         )
-                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().truncate().child(
+                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().ellipsis().child(
                             match &head_ds {
                                 Some((d, split)) => format!("IoU 0.50–0.95 · {d} {split}"),
                                 None => "IoU 0.50–0.95 · validation split".to_string(),
@@ -409,7 +409,14 @@ impl FoloApp {
                 "Precision / Recall",
                 mm.as_ref().map_or("–".into(), |x| format!("{:.3} / {:.3}", x.precision, x.recall)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).whitespace_nowrap().truncate().child(op_point.clone())),
+                // Two deliberate lines: where on the curve, then the match rule.
+                Some(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(op_point.clone()))
+                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child("IoU 0.50")),
+                ),
             )))
             .child(vline(&t))
             .child(tile(small(
@@ -867,7 +874,7 @@ impl FoloApp {
                                 text(ty::SM, if pinned { t.text_primary } else { t.text_secondary })
                                     .w(px(if pinned { 54. } else { 68. }))
                                     .flex_none()
-                                    .truncate()
+                                    .ellipsis()
                                     .child(name),
                             )
                             .when(pinned, |d| d.child(icon("icons/pin.svg", 12., t.text_secondary))),
@@ -1240,7 +1247,7 @@ impl FoloApp {
                         .flex_none()
                         .pr(px(8.))
                         .text_right()
-                        .truncate()
+                        .ellipsis()
                         .child(if r == n - 1 {
                             // Its denominator differs from the class rows': all false positives.
                             if norm { "Share of all FP".to_string() } else { "False positives".to_string() }
@@ -1547,7 +1554,7 @@ impl FoloApp {
                                 text(ty::BASE, t.text_primary)
                                     .w(px(if pinned { 148. } else { 168. }))
                                     .flex_none()
-                                    .truncate()
+                                    .ellipsis()
                                     .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
                             )
                             // The same pin as the PR legend's pinned row.

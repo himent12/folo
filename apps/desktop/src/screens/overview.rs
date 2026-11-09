@@ -849,7 +849,7 @@ impl FoloApp {
                                         text(ty::SM, t.text_primary)
                                             .font_weight(FontWeight::MEDIUM)
                                             .w_full()
-                                            .truncate()
+                                            .ellipsis()
                                             .child(r.name.clone()),
                                     )
                                     .when(!wide, |d| d.child(meta(name_w))),
@@ -999,7 +999,7 @@ impl FoloApp {
                                 text(ty::SM, t.text_secondary)
                                     .w(px(120.))
                                     .flex_none()
-                                    .truncate()
+                                    .ellipsis()
                                     .child(ds_name.clone()),
                             )
                             // Its best model, then the same compact e2e tag as the Models table.
@@ -1014,7 +1014,7 @@ impl FoloApp {
                                         text(ty::SM, t.text_primary)
                                             .font_weight(FontWeight::MEDIUM)
                                             .min_w_0()
-                                            .truncate()
+                                            .ellipsis()
                                             .child(m.name.clone()),
                                     )
                                     .when(self.model_e2e(&m), |d| {
@@ -1291,7 +1291,7 @@ impl FoloApp {
                                 .font_family(crate::theme::MONO)
                                 .flex_1()
                                 .min_w_0()
-                                .truncate()
+                                .ellipsis()
                                 .child(CMDS[i]),
                         )
                         .children(copy[i].take()),

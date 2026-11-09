@@ -197,7 +197,7 @@ impl FoloApp {
         let path_el = || {
             text(ty::SM, t.text_tertiary)
                 .font_family(crate::theme::MONO)
-                .truncate()
+                .ellipsis()
                 .child(display_path(&ds.path))
         };
         let title = div()
@@ -216,7 +216,7 @@ impl FoloApp {
                     .child(
                         text(ty::XL, t.text_primary)
                             .max_w(px(if window.viewport_size().width < px(1280.) { 300. } else { 560. }))
-                            .truncate()
+                            .ellipsis()
                             .child(ds.name.clone()),
                     ),
             )
@@ -829,7 +829,7 @@ impl FoloApp {
                                             .child(
                                                 text(ty::XS, gpui::hsla(0., 0., 1., 0.75))
                                                     .tnum()
-                                                    .truncate()
+                                                    .ellipsis()
                                                     .child(what),
                                             ),
                                     ),
@@ -932,7 +932,7 @@ impl FoloApp {
                             .items_center()
                             .gap(px(8.))
                             .child(crate::ui::class_swatch(&t, i as u32, 8.))
-                            .child(text(ty::SM, t.text_secondary).truncate().child(name.clone())),
+                            .child(text(ty::SM, t.text_secondary).ellipsis().child(name.clone())),
                     )
                     .child(
                         div().flex_1().h(px(16.)).rounded(px(3.)).bg(t.bg_inset).child(

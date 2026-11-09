@@ -255,7 +255,7 @@ impl FoloApp {
                                 text(ty::SM, t.text_primary)
                                     .font_weight(FontWeight::MEDIUM)
                                     .w(px(148.))
-                                    .truncate()
+                                    .ellipsis()
                                     .child(r.name.clone()),
                             ),
                     )
@@ -277,7 +277,7 @@ impl FoloApp {
                             text(ty::SM, t.text_secondary)
                                 .w(px(120.))
                                 .flex_none()
-                                .truncate()
+                                .ellipsis()
                                 .child(ds.clone()),
                         )
                     })

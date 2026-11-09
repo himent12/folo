@@ -330,14 +330,14 @@ impl FoloApp {
                         .flex_shrink()
                         .min_w(px(80.))
                         .max_w(px(360.))
-                        .truncate()
+                        .ellipsis()
                         .child(it.title),
                     )
                     .child(
                         text(ty::SM, if on { t.text_secondary } else { t.text_tertiary })
                             .flex_1()
                             .min_w_0()
-                            .truncate()
+                            .ellipsis()
                             .child(it.detail),
                     )
                     .when(!it.keys.is_empty(), |d| d.child(shortcut(&t, it.keys)))
@@ -945,7 +945,7 @@ impl FoloApp {
                                     .child(label("Dataset"))
                                     .children(
                                         summary.map(|s| {
-                                            text(ty::XS, t.text_tertiary).tnum().truncate().child(s)
+                                            text(ty::XS, t.text_tertiary).tnum().ellipsis().child(s)
                                         }),
                                     ),
                             )
@@ -1078,7 +1078,7 @@ impl FoloApp {
                         t.text_secondary,
                     ))
                     .child(text(ty::MD, t.text_primary).font_weight(FontWeight::SEMIBOLD).child("Advanced"))
-                    .child(text(ty::XS, t.text_tertiary).min_w_0().truncate().child(adv_summary.clone()));
+                    .child(text(ty::XS, t.text_tertiary).min_w_0().ellipsis().child(adv_summary.clone()));
                 self.bind(
                     hdr,
                     "nr-adv",
@@ -2130,7 +2130,7 @@ impl FoloApp {
                     .child(
                         text(ty::SM, t.text_primary)
                             .w(px(70.))
-                            .truncate()
+                            .ellipsis()
                             .child(classes.get(b.class as usize).cloned().unwrap_or_default()),
                     )
                     .child(
@@ -2206,7 +2206,7 @@ impl FoloApp {
                     .child(
                         text(ty::BASE, t.text_primary)
                             .font_family(crate::theme::MONO)
-                            .truncate()
+                            .ellipsis()
                             .child(meta.file.clone()),
                     )
                     .child(

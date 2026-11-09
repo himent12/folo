@@ -229,9 +229,9 @@ pub fn cell2(t: &Theme, primary: impl Into<SharedString>, secondary: impl Into<S
         .flex_col()
         .min_w_0()
         .child(
-            text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).truncate().child(primary.into()),
+            text(ty::BASE, t.text_primary).font_weight(FontWeight::MEDIUM).ellipsis().child(primary.into()),
         )
-        .child(text(ty::XS, t.text_tertiary).truncate().child(secondary.into()))
+        .child(text(ty::XS, t.text_tertiary).ellipsis().child(secondary.into()))
 }
 
 /// Table header cell.

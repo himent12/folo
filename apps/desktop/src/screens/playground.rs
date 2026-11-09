@@ -325,7 +325,7 @@ impl FoloApp {
                                         text(ty::SM, t.text_tertiary)
                                             .min_w_0()
                                             .flex_shrink()
-                                            .truncate()
+                                            .ellipsis()
                                             .child(p),
                                     )
                                     .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
@@ -366,7 +366,7 @@ impl FoloApp {
                                         .child(
                                             text(ty::SM, t.text_primary)
                                                 .w(px(width.min(budget).ceil()))
-                                                .truncate()
+                                                .ellipsis()
                                                 .child(file),
                                         )
                                 }),
@@ -757,7 +757,7 @@ impl FoloApp {
                                 }
                             }))
                             .child(crate::ui::class_swatch(&t, b.class, 8.))
-                            .child(text(ty::SM, t.text_primary).w(px(68.)).truncate().child(b.name.clone()))
+                            .child(text(ty::SM, t.text_primary).w(px(68.)).ellipsis().child(b.name.clone()))
                             // Size tells apart two boxes of the same class.
                             .child(
                                 // On the active row's fill, tertiary falls under AA: secondary there.
@@ -840,7 +840,7 @@ impl FoloApp {
                                             .flex_none()
                                             .child(if simulated { "Simulated latency" } else { "Latency" }),
                                     )
-                                    .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().truncate().child(
+                                    .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().ellipsis().child(
                                         // The demo has no device of its own to name.
                                         if simulated {
                                             "one image".to_string()

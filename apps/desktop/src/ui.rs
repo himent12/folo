@@ -241,6 +241,18 @@ pub fn model_storage(m: &crate::api::Model) -> Option<String> {
     Some(if m.fused == Some(true) { format!("{p}, fused") } else { p.to_string() })
 }
 
+/// Truncation that ends in "…" wherever the element sits. GPUI 0.2.2's `truncate()` measures
+/// no-wrap text once at its unbounded width and keeps that, so a flex-sized text clips without
+/// an ellipsis; wrapping text clamped to one line re-measures at each width and truncates there.
+/// Every truncated text uses this (a test keeps `.truncate()` out).
+pub trait Ellipsis: Styled + Sized {
+    fn ellipsis(self) -> Self {
+        self.overflow_hidden().whitespace_normal().line_clamp(1).text_ellipsis()
+    }
+}
+
+impl<T: Styled> Ellipsis for T {}
+
 /// One metadata line: `lead` (an architecture, say), an optional tag right after it, then the rest
 /// as " · "-joined text. The line owns its separators (4 px either side of each dot) and only the
 /// rest gives way, with a real ellipsis, so every meta line spaces and truncates alike.
@@ -252,17 +264,26 @@ pub fn meta_row(
     rest: &[String],
 ) -> Div {
     let rest: Vec<&str> = rest.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+    let last = rest.len().saturating_sub(1);
+    // Every part its own element with a dot between: one spacing rule for every separator. The
+    // row fills its parent, so the last part's ellipsis has a width to work against.
     div()
+        .w_full()
         .flex()
         .items_center()
         .gap(px(4.))
         .min_w_0()
         .child(text(size, color).flex_none().whitespace_nowrap().child(lead.into()))
         .children(tag)
-        .when(!rest.is_empty(), |d| {
-            d.child(text(size, color).flex_none().child("·"))
-                .child(text(size, color).flex_1().min_w_0().truncate().child(rest.join(" · ")))
-        })
+        .children(rest.into_iter().enumerate().flat_map(|(i, part)| {
+            let part_el = if i == last {
+                // The room left, ending in "…" (see `Ellipsis`).
+                text(size, color).flex_1().min_w_0().ellipsis().child(part.to_string())
+            } else {
+                text(size, color).flex_none().whitespace_nowrap().child(part.to_string())
+            };
+            [text(size, color).flex_none().child("·"), part_el]
+        }))
 }
 
 /// The compact end-to-end tag in tables (the title rows carry the full badge and its help).
@@ -657,6 +678,28 @@ pub fn f3(v: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncation_goes_through_ellipsis() {
+        // GPUI's `truncate()` clips flex-sized text without an ellipsis; `Ellipsis::ellipsis` doesn't.
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut bad = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else if p.extension().is_some_and(|x| x == "rs")
+                    && p.file_name().is_some_and(|n| n != "ui.rs")
+                    && std::fs::read_to_string(&p).unwrap().contains(".truncate()")
+                {
+                    bad.push(p.file_name().unwrap().to_string_lossy().to_string());
+                }
+            }
+        }
+        assert!(bad.is_empty(), ".truncate() in {bad:?}: use .ellipsis()");
+    }
 
     #[test]
     fn confidences_keep_a_meaningful_third_decimal() {
