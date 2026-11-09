@@ -188,6 +188,23 @@ pub const FEATURE_QUEUE_CONTROL: &str = "queue_control";
 /// invalid_query`).
 pub const FEATURE_WEIGHTS_ONNX: &str = "weights_onnx";
 
+/// [`SystemResponse::features`]: `GET /api/runs/{id}/cli` exists ([`CliCommand`]) and `RunEstimate.cli` is set.
+pub const FEATURE_RUN_CLI: &str = "run_cli";
+
+/// [`SystemResponse::features`]: the Studio this server serves includes the in-browser runtime (folo-wasm,
+/// docs/WASM.md), so its Playground can run models with WebGPU or the wasm CPU.
+pub const FEATURE_WEB_WASM: &str = "web_wasm";
+
+/// `GET /api/runs/{id}/cli`: the `folo train` command that trains a run's config on this machine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct CliCommand {
+    /// The command line, arguments quoted for a POSIX shell or PowerShell (single quotes where needed).
+    pub cli: String,
+    /// The same command as separate arguments (`argv[0]` is `folo`), for clients that spawn it without a shell.
+    pub argv: Vec<String>,
+}
+
 /// CPU name, logical thread count and current utilisation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -639,6 +656,10 @@ pub struct Model {
     /// What published weights are (the line `folo weights list` prints); absent for other models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub about: Option<String>,
+    /// The weights file on the server's machine (`/` separators): what `folo train --weights`, `val --model` and
+    /// `export --model` take there. Left out by the mock server and older servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// [`Model::source`].
@@ -1183,6 +1204,11 @@ pub struct ResolvedTrain {
     pub warmup_momentum: f64,
     /// The bias group's LR at the start of warmup (`0` under `auto`).
     pub warmup_bias_lr: f64,
+    /// Close-mosaic epochs the run trains with: `TrainConfig.augment.close_mosaic` capped at half the run
+    /// (docs/MODEL.md §8.4), so mosaic is off for the last `close_mosaic` epochs. Left out by servers older than the
+    /// field and for runs recorded before it whose `config.json` lacks the value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub close_mosaic: Option<u32>,
 }
 
 /// [`ResolvedTrain::optimizer`].

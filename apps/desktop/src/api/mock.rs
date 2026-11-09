@@ -369,6 +369,7 @@ impl MockBackend {
             fused: Some(false),
             source: Some(folo_api::ModelSource::Run),
             about: None,
+            path: None,
         };
         let mut models = vec![
             model(
@@ -1498,6 +1499,8 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
         warmup_epochs: 3.0,
         warmup_momentum: 0.8,
         warmup_bias_lr: if auto { 0.0 } else { 0.1 },
+        // The trainer's cap: at most half the run.
+        close_mosaic: Some(config.augment.close_mosaic.min(config.epochs / 2)),
     }
 }
 

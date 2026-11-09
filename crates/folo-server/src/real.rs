@@ -25,10 +25,10 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
-    BBox, BenchmarkReport, BenchmarkRequest, Capabilities, Dataset, DatasetFormat, ExportResult, ExportSpec,
-    GpuInfo, GpuPool, ImagePage, ImageSize, InferPrecision, LogLine, Model, ModelEval, PredictResponse,
-    RegisterDataset, Run, RunEstimate, RunMetrics, RunSamples, Sample, ScoredBox, Splits, SyntheticDataset,
-    ThroughputTable, TrainConfig, ValReport, ValRequest,
+    BBox, BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, Dataset, DatasetFormat, ExportResult,
+    ExportSpec, GpuInfo, GpuPool, ImagePage, ImageSize, InferPrecision, LogLine, Model, ModelEval,
+    PredictResponse, RegisterDataset, Run, RunEstimate, RunMetrics, RunSamples, Sample, ScoredBox, Splits,
+    SyntheticDataset, ThroughputTable, TrainConfig, ValReport, ValRequest,
 };
 use folo_core::Device;
 use folo_vision::PredictConfig;
@@ -248,6 +248,14 @@ impl Entry {
                 State::Failed(e) => return Err(e.clone()),
             }
         }
+    }
+}
+
+/// What `folo train --weights` takes for model `m` on this machine: a published model's name, else its file.
+fn cli_weights(m: &ModelRef) -> String {
+    match m.model.source {
+        Some(folo_api::ModelSource::Published) => m.model.id.clone(),
+        _ => folo_api::json::path(&m.path),
     }
 }
 
@@ -523,7 +531,7 @@ impl RealStore {
                             Some(run.id.clone()),
                             metrics,
                         );
-                        out.push(ModelRef { model, path, dataset: Some(e.dataset()) });
+                        out.push(ModelRef::new(model, path, Some(e.dataset())));
                     }
                     Err(err) => tracing::warn!("skipping {}: {err}", path.display()),
                 }
@@ -854,16 +862,23 @@ impl Store for RealStore {
             return Err(bad("the dataset has no training images".into()));
         }
         // A fine-tune trains the weights' architecture (see create_run).
-        if let Some(w) = &config.weights {
-            config.arch = self.model(w)?.model.arch;
-        }
+        let weights = match &config.weights {
+            Some(w) => {
+                let m = self.model(w)?;
+                config.arch = m.model.arch;
+                Some(m)
+            }
+            None => None,
+        };
         // The same checks as POST /api/runs, the settings first (on the CPU).
         let mut check = folo_vision::TrainConfig::from_api(&config);
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
         let device = engine::resolve(&config.device)?;
         let (train, val) = (idx.splits.train, idx.splits.val);
-        Ok(self.throughput.estimate(&EstimateInput {
+        let cli =
+            crate::cli::train_command(&config, &e.reg().path, weights.as_ref().map(cli_weights).as_deref());
+        let mut estimate = self.throughput.estimate(&EstimateInput {
             device: engine::device_id(device),
             arch: config.arch,
             imgsz: config.imgsz,
@@ -874,7 +889,21 @@ impl Store for RealStore {
             close_mosaic_epochs: check.augment.close_mosaic_epochs(config.epochs),
             train_images: train,
             val_images: if val == 0 { train } else { val },
-        }))
+        });
+        estimate.cli = Some(cli.cli);
+        Ok(estimate)
+    }
+
+    fn run_cli(&self, id: &str) -> Result<CliCommand> {
+        let e = self.runs.get(id)?;
+        let config = e.run().config;
+        // A published model by its name; any other by the file the run started from.
+        let weights = match (&config.weights, e.weights()) {
+            (Some(w), _) if folo_api::weights::find(w).is_some() => Some(w.clone()),
+            (_, Some(p)) => Some(folo_api::json::path(&p)),
+            _ => None,
+        };
+        Ok(crate::cli::train_command(&config, &e.dataset().path, weights.as_deref()))
     }
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {

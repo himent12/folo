@@ -467,11 +467,15 @@ or inconsistent. IDs group findings by surface:
 - `memory_bytes: 0` for Vulkan adapters **deferred** (wgpu does not report it).
 
 **Studio**
-- S1: the CLI command for fine-tunes (needs `Model.path` or a server-built command).
+- S1: the CLI command for fine-tunes (needs `Model.path` or a server-built command). **Server side done** by
+  `fix/dogfood-3`: `RunEstimate.cli`, `GET /api/runs/{id}/cli` (`{ cli, argv }`, feature `run_cli`) and
+  `Model.path`; the "Start from" list gets published models (`source: published`). Studio to switch over.
 - S3: use `POST /api/runs/estimate`; no CPU warning or zero schedule before `/api/system` arrives.
-- S2: the capped close-mosaic phase on the progress bar.
+- S2: the capped close-mosaic phase on the progress bar. **Server side done** by `fix/dogfood-3`:
+  `Run.resolved.close_mosaic` and `RunEstimate.close_mosaic` carry the capped value.
 - S4: precision, head, `resolved` optimizer and LR, and the start model's name on the run page and in Compare.
-- S5: path URLs to hash routes; WebGPU / CPU disabled when the build lacks the runtime; queue controls (#129).
+- S5: path URLs to hash routes; WebGPU / CPU disabled when the build lacks the runtime (**server side done** by
+  `fix/dogfood-3`: `/api/system` lists the `web_wasm` feature when the served build has it); queue controls (#129).
 
 **Desktop**
 - D1 / S2: the close-mosaic marker at the capped epoch; precision and head in the run header.

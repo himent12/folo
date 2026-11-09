@@ -12,10 +12,10 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
-    API_VERSION, BenchmarkReport, BenchmarkRequest, DatasetList, ExportSpec, Health, ImagePage, IssuePage,
-    LogLevel, LogLine, ModelList, OnnxSwitches, PredictRequest, QueueRequest, RegisterDataset, RunEstimate,
-    RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo, SystemResponse, ThroughputTable,
-    TrainConfig, ValReport, ValRequest,
+    API_VERSION, BenchmarkReport, BenchmarkRequest, CliCommand, DatasetList, ExportSpec, Health, ImagePage,
+    IssuePage, LogLevel, LogLine, ModelList, OnnxSwitches, PredictRequest, QueueRequest, RegisterDataset,
+    RunEstimate, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo, SystemResponse,
+    ThroughputTable, TrainConfig, ValReport, ValRequest,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -61,6 +61,7 @@ pub fn api() -> Router<AppState> {
         .route("/runs", get(list_runs).post(create_run))
         .route("/runs/estimate", post(estimate_run))
         .route("/runs/{id}", get(get_run).delete(delete_run))
+        .route("/runs/{id}/cli", get(run_cli))
         .route("/runs/{id}/stop", post(stop_run))
         .route("/runs/{id}/queue", post(move_run))
         .route("/runs/{id}/metrics", get(run_metrics))
@@ -129,9 +130,15 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
         folo_api::FEATURE_THROUGHPUT,
         folo_api::FEATURE_RUN_ESTIMATE,
         folo_api::FEATURE_BENCHMARK,
+        folo_api::FEATURE_RUN_CLI,
     ]
     .map(String::from)
     .to_vec();
+    let features = if st.web_wasm {
+        features.into_iter().chain([folo_api::FEATURE_WEB_WASM.to_string()]).collect()
+    } else {
+        features
+    };
     Ok(Json(SystemResponse {
         system: SystemInfo { cpu, memory, gpus: st.store.gpus() },
         data_dir,
@@ -425,6 +432,10 @@ async fn estimate_run(
 
 async fn get_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
     Ok(Json(st.store.get_run(&id)?).into_response())
+}
+
+async fn run_cli(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<CliCommand>> {
+    Ok(Json(blocking(&st, move |s| s.run_cli(&id)).await?))
 }
 
 async fn stop_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {

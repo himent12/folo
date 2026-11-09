@@ -183,6 +183,14 @@ pub struct ModelRef {
     pub dataset: Option<DatasetRef>,
 }
 
+impl ModelRef {
+    /// A model and its file; `Model.path` is the file (`/` separators).
+    pub fn new(mut model: Model, path: PathBuf, dataset: Option<DatasetRef>) -> ModelRef {
+        model.path = Some(folo_api::json::path(&path));
+        ModelRef { model, path, dataset }
+    }
+}
+
 /// Builds the API record of a weights file. `metrics` are used as given (`None` = unknown). The source is `run`
 /// with a `run_id`, else `file` (published weights set theirs after).
 pub fn model_of(
@@ -195,6 +203,8 @@ pub fn model_of(
     Model {
         source: Some(if run_id.is_some() { ModelSource::Run } else { ModelSource::File }),
         about: None,
+        // Set by `ModelRef::new`.
+        path: None,
         id,
         name,
         arch: meta.arch,
@@ -279,7 +289,7 @@ impl Models {
                         model_of(p.name.to_string(), p.name.to_string(), &meta, None, meta.metrics);
                     model.source = Some(ModelSource::Published);
                     model.about = Some(p.about.to_string());
-                    out.push(ModelRef { model, path, dataset: None });
+                    out.push(ModelRef::new(model, path, None));
                 }
                 Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
             }
@@ -405,7 +415,7 @@ impl Models {
                     let name =
                         path.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
                     let model = model_of(file_model_id(&path), name, &meta, None, meta.metrics);
-                    out.push(ModelRef { model, path, dataset: None });
+                    out.push(ModelRef::new(model, path, None));
                 }
                 Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
             }

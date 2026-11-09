@@ -405,6 +405,12 @@ export interface ResolvedTrain {
   close_mosaic?: number;
 }
 
+/** GET /api/runs/{id}/cli (servers list `run_cli`): the run's `folo train` command on the server's machine. */
+export interface CliCommand {
+  cli: string;
+  argv: string[];
+}
+
 /** POST /api/runs/{id}/queue: exactly one of `action` and `position` (1-based). Servers list `queue_control`. */
 export type QueueRequest = { action: 'top' | 'up' | 'down' | 'bottom' | 'start' } | { position: number };
 
@@ -657,6 +663,8 @@ export interface RunEstimate {
   val_source: ThroughputSource;
   est_peak_vram_bytes: number | null;
   vram_source: ThroughputSource | null;
+  /** Close-mosaic epochs after the cap at half the run (0 from older servers). */
+  close_mosaic?: number;
   /** The `folo train` command for these settings, built by the server (requested of the API); missing = none. */
   cli?: string | null;
 }

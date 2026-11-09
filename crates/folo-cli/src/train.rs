@@ -20,6 +20,13 @@ use crate::output::{CliError, ExitCode, Out};
 pub const STOP_FILE: &str = "stop";
 
 pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
+    if args.hsv.len() != 3 {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!("--hsv takes three gains h,s,v (e.g. 0.015,0.7,0.4), got {}", args.hsv.len()),
+        ));
+    }
     // Mixed precision needs tensor cores, which the GPU device must be created with: ask before anything creates
     // the shared context (also when resuming a mixed-precision run without repeating --amp).
     if args.amp || args.resume.as_deref().is_some_and(checkpoint_uses_amp) {
@@ -153,40 +160,7 @@ fn start(
     };
     let suffix = arch.strip_prefix("folo-").unwrap_or(&arch).to_string();
     let name = args.name.clone().unwrap_or_else(|| format!("{ds_name}-{suffix}"));
-    let mut cfg = TrainConfig {
-        name: name.clone(),
-        dataset: absolute(data_arg),
-        arch,
-        epochs: args.epochs,
-        batch: args.batch as usize,
-        imgsz: args.imgsz,
-        device: args.device.clone(),
-        optimizer: match args.optimizer {
-            OptimizerArg::Auto => OptimizerChoice::Auto,
-            OptimizerArg::Sgd => OptimizerChoice::Sgd,
-            OptimizerArg::Adamw => OptimizerChoice::Adamw,
-        },
-        lr0: folo_vision::train::f32_decimal(args.lr0),
-        lrf: args.lrf,
-        cos_lr: args.cos_lr,
-        amp: args.amp,
-        head: args.head.map_or(weights_head, Into::into),
-        warmup_epochs: args.warmup_epochs,
-        patience: args.patience,
-        seed: args.seed,
-        workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
-        augment: AugmentConfig {
-            mosaic: args.mosaic,
-            mixup: args.mixup,
-            hsv: [args.hsv[0], args.hsv[1], args.hsv[2]],
-            fliplr: args.fliplr,
-            scale: args.scale,
-            translate: args.translate,
-            close_mosaic: args.close_mosaic,
-            ..AugmentConfig::default()
-        },
-        ..TrainConfig::default()
-    };
+    let mut cfg = config_of(args, name.clone(), absolute(data_arg), arch, weights_head);
     // Validate before creating the run folder, so a typo leaves nothing behind.
     cfg.validate().map_err(engine_error)?;
     let data = train_data(&ds)?;
@@ -211,6 +185,51 @@ fn start(
             discard_if_empty(&run_dir, out);
             Err(engine_error(e))
         }
+    }
+}
+
+/// The trainer's config of `folo train` with `args`, the run `name`, the `dataset` path, the architecture `arch`
+/// (the weights' when fine-tuning) and the head a run without `--head` gets (the weights file's, else o2m).
+fn config_of(
+    args: &TrainArgs,
+    name: String,
+    dataset: String,
+    arch: String,
+    default_head: folo_vision::model::HeadMode,
+) -> TrainConfig {
+    TrainConfig {
+        name,
+        dataset,
+        arch,
+        epochs: args.epochs,
+        batch: args.batch as usize,
+        imgsz: args.imgsz,
+        device: args.device.clone(),
+        optimizer: match args.optimizer {
+            OptimizerArg::Auto => OptimizerChoice::Auto,
+            OptimizerArg::Sgd => OptimizerChoice::Sgd,
+            OptimizerArg::Adamw => OptimizerChoice::Adamw,
+        },
+        lr0: folo_vision::train::f32_decimal(args.lr0),
+        lrf: args.lrf,
+        cos_lr: args.cos_lr,
+        amp: args.amp,
+        head: args.head.map_or(default_head, Into::into),
+        warmup_epochs: args.warmup_epochs,
+        patience: args.patience,
+        seed: args.seed,
+        workers: args.workers.unwrap_or_else(folo_vision::train::default_workers),
+        augment: AugmentConfig {
+            mosaic: args.mosaic,
+            mixup: args.mixup,
+            hsv: [args.hsv[0], args.hsv[1], args.hsv[2]],
+            fliplr: args.fliplr,
+            scale: args.scale,
+            translate: args.translate,
+            close_mosaic: args.close_mosaic,
+            ..AugmentConfig::default()
+        },
+        ..TrainConfig::default()
     }
 }
 
@@ -663,5 +682,58 @@ mod tests {
         assert_eq!(dirs.len(), 8);
         assert!(dirs.contains(&project.join("shapes-n")) && dirs.contains(&project.join("shapes-n8")));
         let _ = std::fs::remove_dir_all(&project);
+    }
+
+    /// The server's `folo train` command (`RunEstimate.cli`, `GET /api/runs/{id}/cli`) parses with the real
+    /// arguments, and maps to the trainer config the server builds from the same `TrainConfig` (`from_api`).
+    #[test]
+    fn server_cli_commands_train_the_servers_config() {
+        use clap::Parser;
+        use folo_vision::model::HeadMode;
+        let base: folo_api::TrainConfig =
+            serde_json::from_value(json!({ "dataset_id": "ds_1", "name": "r6-n" })).unwrap();
+        let mut all = base.clone();
+        all.name = "my run 'two'".into();
+        all.arch = folo_api::Arch::S;
+        (all.epochs, all.batch, all.imgsz, all.seed) = (37, 8, 320, 7);
+        all.device = "gpu:0".into();
+        all.optimizer = folo_api::Optimizer::Sgd;
+        all.lr0 = 0.0123;
+        all.amp = true;
+        all.head = folo_api::Head::O2o;
+        all.augment = folo_api::Augment {
+            mosaic: 0.5,
+            mixup: 0.15,
+            hsv: [0.0, 0.25, 0.333],
+            fliplr: 0.0,
+            scale: 0.9,
+            translate: 0.05,
+            close_mosaic: 3,
+        };
+        let mut adamw = base.clone();
+        adamw.optimizer = folo_api::Optimizer::Adamw;
+        let data = "C:/data sets/r6";
+        // (config, --weights, the head of the weights file: the CLI's default without --head)
+        let cases = [
+            (base.clone(), None, HeadMode::O2m),
+            (all.clone(), None, HeadMode::O2m),
+            (adamw, None, HeadMode::O2m),
+            (base.clone(), Some("folo-n-coco"), HeadMode::O2o),
+            (all.clone(), Some("D:/folo/runs/run_1a2b/weights/best.folo"), HeadMode::O2o),
+        ];
+        for (api, weights, file_head) in cases {
+            let cmd = folo_server::cli::train_command(&api, data, weights);
+            let cli =
+                crate::cli::Cli::try_parse_from(&cmd.argv).unwrap_or_else(|e| panic!("{}: {e}", cmd.cli));
+            let crate::cli::Command::Train(args) = cli.command else { panic!("not train: {}", cmd.cli) };
+            assert_eq!(args.data.as_deref(), Some(data), "{}", cmd.cli);
+            assert_eq!(args.weights.as_deref(), weights, "{}", cmd.cli);
+            // With --weights the CLI takes the architecture from the file; the server already set it to the weights'.
+            let arch = if weights.is_some() { api.arch.as_str().to_string() } else { args.model.clone() };
+            let got = super::config_of(&args, args.name.clone().unwrap(), data.into(), arch, file_head);
+            let mut want = folo_vision::TrainConfig::from_api(&api);
+            (want.dataset, want.workers) = (data.into(), got.workers);
+            assert_eq!(got, want, "{}", cmd.cli);
+        }
     }
 }

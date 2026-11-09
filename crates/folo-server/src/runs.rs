@@ -201,6 +201,11 @@ impl RunEntry {
         self.state.lock().unwrap().file.dataset.clone()
     }
 
+    /// The weights file the run started from (`TrainConfig.weights` resolved when it was created).
+    pub fn weights(&self) -> Option<PathBuf> {
+        self.state.lock().unwrap().file.weights.clone()
+    }
+
     /// The run folder.
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -407,12 +412,18 @@ impl Runs {
                     }
                 };
                 let mut file = file;
-                // Runs from before `Run.resolved`: the trainer's config.json has the same numbers.
-                if file.run.resolved.is_none() {
-                    file.run.resolved = std::fs::read(d.join("config.json"))
+                // Runs from before `Run.resolved` (or its `close_mosaic`): the trainer's config.json has the same
+                // numbers.
+                if file.run.resolved.as_ref().is_none_or(|r| r.close_mosaic.is_none()) {
+                    let from_config = std::fs::read(d.join("config.json"))
                         .ok()
                         .and_then(|b| serde_json::from_slice(&b).ok())
                         .and_then(|v| folo_vision::train::ResolvedOptim::from_run_config(&v));
+                    match (&mut file.run.resolved, from_config) {
+                        (Some(r), Some(c)) => r.close_mosaic = c.close_mosaic,
+                        (r @ None, c) => *r = c,
+                        _ => {}
+                    }
                 }
                 file.run.queue_position = None;
                 let id = file.run.id.clone();

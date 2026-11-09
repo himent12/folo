@@ -204,8 +204,8 @@ pub struct TrainArgs {
     /// Mixup augmentation probability.
     #[arg(long, default_value_t = 0.0)]
     pub mixup: f32,
-    /// HSV jitter gains h,s,v.
-    #[arg(long, value_delimiter = ',', num_args = 3, default_values_t = [0.015, 0.7, 0.4])]
+    /// HSV jitter gains h,s,v (`--hsv 0.015,0.7,0.4` or `--hsv 0.015 0.7 0.4`).
+    #[arg(long, value_delimiter = ',', num_args = 1..=3, default_values_t = [0.015, 0.7, 0.4])]
     pub hsv: Vec<f32>,
     /// Horizontal flip probability.
     #[arg(long, default_value_t = 0.5)]

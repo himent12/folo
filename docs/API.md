@@ -54,7 +54,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
   the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
   below; older servers accept and ignore them), `queue_control` (`POST /api/runs/{id}/queue`, `Run.queue_position`
-  and `queue` events), `weights_onnx` (`/weights?format=onnx`; older servers answer `400 invalid_query`). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
+  and `queue` events), `weights_onnx` (`/weights?format=onnx`; older servers answer `400 invalid_query`), `run_cli` (`GET /api/runs/{id}/cli`
+  and `RunEstimate.cli`), `web_wasm` (the Studio this server serves includes the in-browser runtime, folo-wasm,
+  so its Playground can run models with WebGPU or the wasm CPU; left out for a build without it, or without a
+  web app). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
   `memory_bytes` is `0` and `util` `null`.
@@ -189,7 +192,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   A file pulled while the server runs lists at once. A published name that is not downloaded is `404
   model_not_found` with `folo weights pull <name>` as the hint.
   `source` (additive, left out by older servers): `run` (a run's `best` / `last`), `file` (`<data dir>/models`) or
-  `published`; `about` only for published weights.
+  `published`; `about` only for published weights. `path` (additive): the weights file on the server's machine, `/`
+  separators, what `folo train --weights`, `val --model` and `export --model` take there (left out by the mock).
 - `GET /api/models/{id}` → `Model`
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none, see Split fallback below), for the PR curves and confusion matrix of the Models view:
@@ -431,7 +435,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "weight_decay": 0.0005,       // of the decay group, after the batch scaling weight_decay · batch · accumulate / nbs
   "batch": 16, "accumulate": 4, "nbs": 64,  // gradients of `accumulate` batches per optimizer step (≈ nbs images)
   "optimizer_steps_per_epoch": 13,
-  "warmup_iters": 100, "warmup_epochs": 3.0, "warmup_momentum": 0.8, "warmup_bias_lr": 0.0 }
+  "warmup_iters": 100, "warmup_epochs": 3.0, "warmup_momentum": 0.8, "warmup_bias_lr": 0.0,
+  "close_mosaic": 7 }           // close-mosaic epochs after the cap at half the run (docs/MODEL.md §8.4): mosaic is
+                               // off for the last `close_mosaic` epochs; left out for runs older than the field
+                               // whose config.json lacks `close_mosaic_epochs`
 // Run.resolved is set when the trainer is built (by the time the `running` status is sent: fetch the run then),
 // recomputed on resume, and read from the run folder's config.json for runs recorded before the field; it stays
 // null for runs whose trainer never started (stopped while queued, failed to build). Mock runs fill it once they
@@ -521,6 +528,18 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   - `est_peak_vram_bytes` (GPU only, `null` on the CPU): the measured peak of a row with the run's device, arch,
     imgsz and amp at the nearest batch, scaled to the run's batch by the reference model; else the reference model (16
     bytes per parameter plus the activations per image, docs/BENCHMARKS.md). `vram_source` says which.
+  - `close_mosaic`: the close-mosaic epochs after the cap (the `close_mosaic` phase's epochs; `Run.resolved` has the
+    same number once the run is built).
+  - `cli`: the `folo train` command that trains this config on the server's machine (see `GET /api/runs/{id}/cli`).
+- `GET /api/runs/{id}/cli` → `{ "cli": "folo train --data D:/data/r6 --weights folo-n-coco --head o2m --epochs 15
+  --amp", "argv": ["folo", "train", ...] }`: the CLI command of a run's config, built from the same `TrainConfig`
+  mapping the server trains with (a test parses it with the real `folo` arguments and compares the configs).
+  `--data` is the dataset's folder on the server's machine; `--weights` is the published name for published weights,
+  else the `.folo` file the run started from (so no `--model`: the CLI takes the architecture from the weights,
+  and `--head` is always given, since the CLI's default is the weights file's head); settings equal to the
+  defaults are left out. `cli` quotes arguments with spaces or shell characters in single quotes (POSIX shells and
+  PowerShell), `argv` is the same command unquoted, for spawning without a shell. `run_not_found` for an unknown run;
+  the mock server answers too, with made-up weights paths.
 - `POST /api/system/benchmark` body `BenchmarkRequest` (all optional: `{ "arch": "folo-n", "imgsz": 320, "batch":
   16, "amp": false, "budget_s": 4 }`) → `BenchmarkReport`. An explicit quick probe on the server's inference device
   (`--device`): the trainer on a synthetic shapes split for 60% of `budget_s` (the first 30% of that is warm-up and

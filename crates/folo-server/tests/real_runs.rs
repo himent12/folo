@@ -1049,6 +1049,7 @@ async fn published_weights_list_as_models_and_fine_tune_by_name() {
     let p = published[0];
     assert_eq!((p.id.as_str(), p.name.as_str(), p.arch), ("folo-n-coco", "folo-n-coco", Arch::N));
     assert!(p.about.as_deref().is_some_and(|a| a.contains("COCO")) && p.run_id.is_none());
+    assert_eq!(p.path.as_deref(), Some(folo_api::json::path(cache.join("folo-n-coco.folo")).as_str()));
     assert_eq!(ok::<Model>(&app, get("/api/models/folo-n-coco")).await, *p);
     // Downloadable but not downloaded.
     let e = err(&app, get("/api/models/folo-n-coco-f16"), StatusCode::NOT_FOUND, "model_not_found").await;
@@ -1060,11 +1061,25 @@ async fn published_weights_list_as_models_and_fine_tune_by_name() {
     let mut cfg = tiny(&ds, 1);
     cfg["weights"] = json!("folo-n-coco");
     cfg["arch"] = json!("folo-s");
+    let est: RunEstimate = ok(&app, post_json("/api/runs/estimate", cfg.clone())).await;
+    let cli = est.cli.unwrap();
+    assert!(cli.contains(" --weights folo-n-coco ") && !cli.contains("--model"), "{cli}");
+    // tiny: close_mosaic 1 on a 1-epoch run, capped at half the run.
+    assert_eq!(est.close_mosaic, 0);
     let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
     assert_eq!((run.config.arch, run.config.weights.as_deref()), (Arch::N, Some("folo-n-coco")));
+    // The run's command names the published weights and the dataset's folder on this machine.
+    let c: CliCommand = ok(&app, get(&format!("/api/runs/{}/cli", run.id))).await;
+    let at = |flag: &str| c.argv.iter().position(|a| a == flag).map(|i| c.argv[i + 1].as_str());
+    assert_eq!((at("--weights"), at("--head")), (Some("folo-n-coco"), Some("o2m")), "{}", c.cli);
+    assert!(at("--data").is_some_and(|d| std::path::Path::new(d).is_dir()), "{}", c.cli);
     let mut sse = Events::open(&app, &run.id).await;
     let events = sse.until_status(&["completed", "failed"]).await;
     assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    let done: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
+    assert_eq!(done.resolved.unwrap().close_mosaic, Some(0));
+    let model: Model = ok(&app, get(&format!("/api/models/{}", done.model_id.unwrap()))).await;
+    assert!(model.path.unwrap().ends_with("/weights/best.folo"));
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", run.id))).await;
     let transferred = |l: &&LogLine| l.message.contains("transferred") && l.message.contains("folo-n-coco");
     assert!(logs.lines.iter().any(|l| transferred(&l)), "{:?}", logs.lines);

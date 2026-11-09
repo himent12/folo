@@ -15,8 +15,8 @@ use std::sync::{Arc, RwLock};
 
 use axum::http::StatusCode;
 use folo_api::{
-    AmpSupport, Arch, BBox, BenchmarkReport, BenchmarkRequest, Capabilities, ClassMetrics, Dataset,
-    DatasetFormat, DatasetIssue, ExportFormat, ExportResult, ExportSpec, GpuBackend, GpuInfo, Head,
+    AmpSupport, Arch, BBox, BenchmarkReport, BenchmarkRequest, Capabilities, ClassMetrics, CliCommand,
+    Dataset, DatasetFormat, DatasetIssue, ExportFormat, ExportResult, ExportSpec, GpuBackend, GpuInfo, Head,
     ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval, ModelMetrics, ModelPrecision,
     ModelSource, PhaseKind, PrCurve, PredictResponse, RegisterDataset, Run, RunEstimate, RunSamples, Sample,
     ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, ThroughputTable, TrainConfig, TrainedWith,
@@ -586,6 +586,12 @@ impl MockTensorCores {
     }
 }
 
+/// What `folo train --weights` would take for mock model `id`: a published name as it is, else a made-up file under
+/// the mock data dir (mock models have no files).
+fn mock_weights(id: &str) -> String {
+    if folo_api::weights::find(id).is_some() { id.to_string() } else { format!("~/.folo/models/{id}.folo") }
+}
+
 /// The mock GPU.
 const MOCK_GPU: &str = "NVIDIA GeForce RTX 4080 SUPER";
 
@@ -827,6 +833,7 @@ impl MockStore {
                     fused: Some(false),
                     source: Some(ModelSource::Run),
                     about: None,
+                    path: None,
                 };
                 let basis = EvalBasis::new(&run, entry);
                 if mid == "m_53d1" {
@@ -950,6 +957,7 @@ impl MockStore {
                 fused: Some(false),
                 source: Some(ModelSource::Run),
                 about: None,
+                path: None,
             });
         }
         out.sort_by(|a, b| b.created.cmp(&a.created).then(a.id.cmp(&b.id)));
@@ -1030,7 +1038,12 @@ impl Store for MockStore {
             ..folo_data::AugmentConfig::default()
         };
         let device = if config.device == "cpu" { throughput::cpu() } else { throughput::gpu() };
-        Ok(self.throughput.estimate(&crate::throughput::EstimateInput {
+        let cli = crate::cli::train_command(
+            &config,
+            &ds.meta().path,
+            config.weights.as_deref().map(mock_weights).as_deref(),
+        );
+        let mut estimate = self.throughput.estimate(&crate::throughput::EstimateInput {
             device,
             arch: config.arch,
             imgsz: config.imgsz,
@@ -1041,7 +1054,9 @@ impl Store for MockStore {
             close_mosaic_epochs: augment.close_mosaic_epochs(config.epochs),
             train_images: splits.train,
             val_images: if splits.val == 0 { splits.train } else { splits.val },
-        }))
+        });
+        estimate.cli = Some(cli.cli);
+        Ok(estimate)
     }
 
     /// Answers at once with numbers near the table's (or the reference's): no device is used. Refused while a run
@@ -1351,6 +1366,12 @@ impl Store for MockStore {
 
     fn get_run(&self, id: &str) -> Result<Run> {
         Ok(self.run(id)?.0.to_api())
+    }
+
+    fn run_cli(&self, id: &str) -> Result<CliCommand> {
+        let (run, ds) = self.run(id)?;
+        let weights = run.config.weights.as_deref().map(mock_weights);
+        Ok(crate::cli::train_command(&run.config, &ds.meta().path, weights.as_deref()))
     }
 
     fn stop_run(&self, id: &str) -> Result<Run> {
