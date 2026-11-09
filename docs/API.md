@@ -11,13 +11,13 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 
 ## Conventions
 - Creating endpoints answer `201 Created` with the new object; deletes answer `204 No Content`; everything else `200`.
-- Request bodies are JSON (`Content-Type: application/json`) except multipart uploads to `/api/predict`. Unknown
-  fields are ignored; missing optional fields take the defaults listed here.
+- Request bodies are JSON (`Content-Type: application/json`) except multipart uploads (`/api/predict`,
+  `/api/label/jobs/{id}/images`). Unknown fields are ignored; missing optional fields take the defaults listed here.
 - Responses are gzip-compressed when the client sends `Accept-Encoding: gzip` (never images, SSE or weights
   files: `application/octet-stream`).
 - CORS: by default only browser origins on `localhost`, `127.0.0.1` or `[::1]` (any port, e.g. the Vite dev server
   on :5173) may call the API; `folo serve --cors-any` allows every origin. Because browsers send simple form POSTs
-  without a preflight, state-changing requests (`POST`, `DELETE`) whose `Origin` header is neither such a loopback
+  without a preflight, state-changing requests (`POST`, `PUT`, `DELETE`) whose `Origin` header is neither such a loopback
   origin nor the server itself are refused with `403 forbidden_origin`. Requests without `Origin` (curl, agents,
   FOLO Desktop) are unaffected.
 - Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`, or the copy embedded in `embed-web`
@@ -34,10 +34,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 |---|---|---|
 | 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
-| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
+| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue |
-| 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, 2 MiB elsewhere) |
+| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job (or an image in an agent call) while its agent run is active; stopping one without a run |
+| 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict` and image uploads to a labeling job, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
 | 500 | `internal` | a bug or an IO failure |
@@ -57,7 +57,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   and `queue` events), `weights_onnx` (`/weights?format=onnx`; older servers answer `400 invalid_query`), `run_cli` (`GET /api/runs/{id}/cli`
   and `RunEstimate.cli`), `web_wasm` (the Studio this server serves includes the in-browser runtime, folo-wasm,
   so its Playground can run models with WebGPU or the wasm CPU; left out for a build without it, or without a
-  web app). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
+  web app), `agent_labeling` (the `/api/label` endpoints, Agent labeling below). `folo mcp --server` refuses the
+  export switches without `export_onnx_switches`.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
   `memory_bytes` is `0` and `util` `null`.
@@ -623,6 +624,146 @@ run does not block it, runs created through the API do).
   "training": TrainThroughput, "inference": InferThroughput }   // the rows after the probe
 ```
 
+## Agent labeling
+Turns a set of unlabeled images into a detection dataset: a coding-agent CLI on the server's machine (**Claude
+Code**, `claude`, or **Codex**, `codex`) looks at the images and draws the boxes, a person reviews and corrects
+them, and the labeled images become a YOLO dataset that trains like any other. Servers with these endpoints list
+`agent_labeling` in `/api/system`'s `features` (real mode only: the mock answers `501 not_implemented`).
+
+A **labeling job** holds the images, the class list, the instructions for the agent and the labels so far. It is
+long-lived: images can be added, labeled in several agent runs (also by different agents), corrected by hand and
+exported more than once.
+
+- `GET /api/label/agents` → `{ "agents": [LabelAgent] }`: Claude Code, then Codex, each with whether its CLI is
+  installed. The server looks for `claude` / `codex` on its `PATH` (`FOLO_CLAUDE_BIN` / `FOLO_CODEX_BIN` name
+  another executable) and runs `--version`; the result is cached for 60 s. `available` says nothing about being
+  signed in: a run finds that out on its first call and fails with the CLI's own message.
+- `GET /api/label/jobs` → `{ "jobs": [LabelJob] }` (newest first)
+- `POST /api/label/jobs` body `{ "name", "classes": ["car", "person"], "instructions"?: "", "path"?: "D:/photos" }`
+  → `201 LabelJob`. `name` must not be blank (at most 100 characters); `classes`: 1 to 80 distinct, non-blank
+  names of at most 64 characters (no line breaks, `,` or `:`; they are compared without case); `instructions`:
+  at most 4000 characters. With `path`, the images of that folder are added as by `POST …/images`
+  (`path_not_found` creates nothing). Anything else wrong is `400 invalid_body`, naming the field.
+- `GET /api/label/jobs/{id}` → `LabelJob`
+- `PUT /api/label/jobs/{id}` body `{ "name"?, "classes"?, "instructions"? }` → `LabelJob`. Absent fields stay.
+  Boxes refer to classes by position, so once the job has boxes `classes` may only rename or append (a shorter
+  list is `400 invalid_body`). `409 label_job_active` while an agent run is active.
+- `DELETE /api/label/jobs/{id}` → `204`: removes the job, its uploaded images and its labels (never files added
+  from a folder, and never a dataset made from it). `409 label_job_active` while a run is active.
+
+**Images**
+- `POST /api/label/jobs/{id}/images` → `{ "added": [LabelImage], "skipped": [{ "file", "reason" }], "job": LabelJob }`.
+  Either `multipart/form-data` with one `image` file part per image (JPEG, PNG, BMP, WebP; up to 64 MiB per
+  request, so a client sends a large set in several requests; the files are stored in the job's folder), or JSON
+  `{ "path": "D:/photos" }` for a folder on the server's machine (searched recursively, in path order; or one
+  image file), whose images are read in place, not copied. A file that is not a readable image, an upload with
+  the bytes of an image the job already has, or a folder image it already has (the same file) is listed in
+  `skipped` with the reason instead of failing the request; so is everything past the job's limit of 10000
+  images. File names are unique within a job: a second `a.jpg` becomes `a-2.jpg`. `404 path_not_found` for a
+  missing folder. Images may be added while a run is active (they wait for the next run).
+- `GET /api/label/jobs/{id}/images?status=pending|labeling|labeled|failed&offset=0&limit=100` →
+  `{ "total", "images": [LabelImage] }`, in the order the images were added. `limit` defaults to 100 and is capped
+  at 1000; `total` counts all matches before `offset` / `limit`; any other `status` is `400 invalid_query`.
+- `GET /api/label/jobs/{id}/images/{image_id}` → the image bytes; `?thumb=256` as for dataset images.
+- `PUT /api/label/jobs/{id}/images/{image_id}` body `{ "boxes": [Box] }` → `LabelImage`: labels drawn by hand.
+  They replace the image's boxes; the image becomes `labeled` with `source: "manual"` (an empty list labels it
+  as a background image). Boxes are clipped to the image; one with a `class` outside the job's classes, a
+  non-finite coordinate, or less than a pixel left after clipping is `400 invalid_body`, as are more than 1000
+  boxes. `409 label_job_active` while the image waits for, or is in, an agent call of the active run (other
+  images of a running job can be edited).
+- `DELETE /api/label/jobs/{id}/images/{image_id}` → `204` (an uploaded image's file is deleted too). `409
+  label_job_active` as for `PUT`.
+
+**Asking an agent**
+- `POST /api/label/jobs/{id}/start` body `StartLabeling` → `LabelJob` (`status: "running"`, with the new `run`).
+  Only `agent` is required. The run labels the `scope` (`unlabeled`, the default: `pending` and `failed`
+  images; `all`: every image, replacing existing labels, hand-drawn ones too), or exactly `image_ids`. `note` (at
+  most 2000 characters) is an extra instruction for this run only: the way to tell the agent what its last
+  labels got wrong. Errors: `422 invalid_body` (an unknown `agent`), `400 invalid_body` (a `model` with characters
+  outside `A-Z a-z 0-9 . _ : / - [ ]` or over 100 of them, `batch` outside `1..=16`, `parallel` outside `1..=8`,
+  an unknown image id, nothing to label), `501 not_supported` (the agent's CLI is not installed; the hint says
+  how to get it), `409 label_job_active` (a run is already active).
+- `POST /api/label/jobs/{id}/stop` → `LabelJob` (`stopping`, then `idle` with `run.outcome: "stopped"`). The agent
+  calls in flight are killed and their images keep the state they had. `409 label_job_not_active` when no run
+  is active.
+- `GET /api/label/jobs/{id}/events` → SSE stream, as for runs (a `: keep-alive` comment every 15 s; open until
+  the job is deleted or the server shuts down; unknown event names must be ignored):
+  - `job` `LabelJob`: first, then after every change of the job (status, counts, run progress, usage);
+  - `image` `LabelImage`: an image was added, sent to the agent (`labeling`), labeled, failed or edited;
+  - `removed` `{ "id" }`: an image was deleted;
+  - `log` `{ "t", "level", "message" }`: the job's log (calls made, tokens used, boxes dropped, failures).
+
+  The stream replays nothing: load the job's images with `GET …/images`, then apply events.
+- `GET /api/label/jobs/{id}/logs?limit=500` → `{ "lines": [{ "t", "level", "message" }] }`: the job's log history
+  (the `log` events), as `GET /api/runs/{id}/logs`.
+
+**How a run works** (and what it costs)
+- The run splits its images into batches (`batch` images per agent call: Claude Code 4, Codex 8 by default) and
+  keeps `parallel` calls (default 3) in flight. Each call is **one model request with no tools**: the images are
+  attached to the prompt (downscaled to at most 1024 px on the long side and re-encoded as JPEG, so a call costs
+  about 1000 input tokens per image whatever the files' size), and the reply is one JSON object with a box list
+  per image. Coordinates in the reply are relative (`0..1000` of the image's width and height), so they are
+  independent of the downscaling; the server converts them to pixels of the original image.
+- Claude Code is started as `claude -p` with its system prompt replaced by FOLO's labeling prompt, no tools, no
+  MCP servers, no user or project settings, hooks, skills or `CLAUDE.md`, and no session file; the images go in
+  on stdin as a `stream-json` user message. The fixed cost of a call is a few hundred tokens. Codex is started
+  as `codex exec` with `--ephemeral --sandbox read-only --ignore-user-config`, FOLO's instructions as the model
+  instructions, the features that add tools switched off, the images as `--image` attachments and the reply
+  shape as `--output-schema`; Codex still sends about 10000 tokens of its own per call, which is why its
+  default batch is larger. Both run in an empty scratch folder and use the account the CLI is signed in with.
+- A reply's boxes are checked before they are stored: a label that is not one of the job's classes (compared
+  without case), a malformed box, or one that is empty after clipping is dropped (the log says how many), and an
+  image the reply does not mention is `failed`. A reply that is not the JSON asked for is retried once; then
+  its images are `failed` with the reason.
+- A run never burns tokens on a broken setup: when the CLI cannot be started or exits with an error (not signed
+  in, an unknown model, a rate limit), or three calls in a row time out (5 minutes each) or return garbage, the
+  run ends with `outcome: "failed"`, the CLI's message in `run.error` and the images it did not get to
+  unchanged. `POST …/start` again continues with what is left.
+- `usage` adds up what the CLIs report per call. `cost_usd` is Claude Code's own figure (list prices, also on a
+  subscription); Codex reports none.
+
+**Making the dataset**
+- `POST /api/label/jobs/{id}/dataset` body `{ "name"?, "val_fraction"?: 0.2, "seed"?: 0 }` → `201 Dataset` with
+  `stats`. Writes the job's `labeled` images as a YOLO dataset into `<data dir>/datasets/<name>` (the name
+  lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken, as for synthetic datasets) and registers it:
+  `images/{train,val}/` (the files copied byte for byte), `labels/{train,val}/<stem>.txt` and a `data.yaml` with
+  the job's classes. `pending` and `failed` images are left out; a labeled image without boxes is a background
+  image (an empty label file). The images are shuffled with `seed` and `round(n · val_fraction)` of them go to
+  `val` (`val_fraction` in `0..=0.5`, else `400 invalid_body`; at least one image always stays in `train`).
+  `name` defaults to the job's. `400 invalid_dataset` when no image is labeled, `409 label_job_active` while a
+  run is active. The job keeps existing and remembers the dataset as `dataset_id`; exporting again makes
+  another dataset.
+
+```jsonc
+// LabelAgent
+{ "id": "claude|codex", "name": "Claude Code", "available": true, "version": "2.1.302" | null,
+  "models": [{ "id": "sonnet", "label": "Sonnet" }],   // suggestions; `model` takes any name the CLI accepts
+  "default_model": "sonnet" | null,                    // null: the CLI's own default
+  "hint": null | "Install Claude Code (https://claude.com/claude-code) and sign in with `claude`, or ..." }
+// LabelJob
+{ "id": "lb_3f9a", "name": "street", "classes": ["car", "person"], "instructions": "Label every ...",
+  "created": "...", "status": "idle|running|stopping",
+  "counts": { "images": 120, "pending": 20, "labeled": 96, "failed": 4, "boxes": 513 },
+  "run": LabelRun | null,        // the active run, else the most recent one
+  "usage": LabelUsage,           // every run of the job
+  "dataset_id": "ds_8f2c" | null }
+// LabelRun
+{ "agent": "claude", "model": "sonnet" | null, "effort": "low|medium|high", "started": "...",
+  "finished": "..." | null, "total": 24, "done": 16, "failed": 0,   // images of this run
+  "outcome": null | "completed|stopped|failed", "error": null | "...", "hint"?: "...", "usage": LabelUsage }
+// LabelUsage
+{ "calls": 4, "input_tokens": 18400, "cached_input_tokens": 3252, "output_tokens": 5100, "cost_usd": 0.021 | null }
+// LabelImage
+{ "id": "17", "file": "IMG_0042.jpg", "width": 1920, "height": 1080,
+  "status": "pending|labeling|labeled|failed",
+  "boxes": [Box],                       // pixel xyxy; kept while the image is labeled again
+  "source": null | "agent|manual",      // who drew `boxes`
+  "error": null | "..." }               // why the last agent call failed
+// StartLabeling (only agent is required; the rest shows the defaults)
+{ "agent": "claude", "model": null, "effort": "low", "scope": "unlabeled", "image_ids": null, "note": "",
+  "batch": null, "parallel": null }
+```
+
 ## Real mode
 `folo serve` without `--mock` keeps its state in the data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`):
 - `datasets.json`: the registry (`id`, `name`, `path`, `format`, `created`, and a snapshot of `classes` and
@@ -640,7 +781,13 @@ run does not block it, runs created through the API do).
   were added, removed or edited. Datasets whose folder no longer exists are left out of the list (but stay in the
   registry).
 - `cache/thumbs/<id>/`: thumbnails, keyed by the image's path, size, modification time and the requested side.
-- `datasets/<name>/`: synthetic datasets. `DELETE /api/datasets/{id}` removes the dataset's caches, never its files.
+- `datasets/<name>/`: synthetic datasets and the datasets made from labeling jobs. `DELETE /api/datasets/{id}`
+  removes the dataset's caches, never its files.
+- `label/<job id>/`: one folder per labeling job: `job.json` (the job, its images and their boxes, rewritten
+  atomically after every change), `images/` (uploaded files; folder imports stay where they are) and `log.jsonl`.
+  Its thumbnails are in `cache/thumbs/<job id>/`. On start every job is listed again, `idle`: a run a previous
+  process left active is closed as `stopped` (its finished images keep their labels). On shutdown the active
+  runs' agent calls are killed.
 
 - `runs/<id>/`: one folder per training run: `run.json` (the `Run` plus the dataset reference, rewritten atomically
   on every status change and after every epoch), `log.jsonl` (every log line, as `/logs` returns them),
@@ -709,3 +856,5 @@ start, except live-run timestamps):
   is the real exporter's graph of the generated `.folo` file. `POST /api/datasets` scans real folders; `POST /api/datasets/synthetic` makes a procedural
   dataset. Predictions are deterministic in the image bytes (or dataset image) and the model. `POST /api/val` derives
   per-class metrics from the model's metrics (deterministic per model, dataset and split).
+- Agent labeling (`/api/label/…`) answers `501 not_implemented` and `agent_labeling` is not in `features`: the
+  mock never starts an agent CLI. Studio's own in-browser mock simulates a job for UI work.
