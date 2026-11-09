@@ -159,6 +159,7 @@
   .legend .short {
     display: none;
   }
+  /* Container queries, not tiers: the panel's width depends on the rail beside it, so the key shortens by its own width. */
   @container (max-width: 640px) {
     .legend .long {
       display: none;

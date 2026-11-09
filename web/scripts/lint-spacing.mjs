@@ -6,11 +6,11 @@
 // Type sizes come from the scale: a `font-size` in px is flagged (use var(--type-*-size), or em for a size relative to
 // its text). A deliberate exception carries `/* grid-ok */` on its line.
 //
-// Layout tiers (design/tokens.json `breakpoint`, design/README.md): every width in an `@media` query, and every
-// `(min-width: …)` / `(max-width: …)` string in script (matchMedia), is a tier boundary written one way:
-// `(min-width: 768px)` / `(max-width: 767px)`, and the same for 1024 and 1280. Any other width, unit or the range
-// syntax (`width < 768px`) fails. A component that needs its own threshold uses a container query (not linted) or an
-// intrinsic layout, with a comment saying why.
+// Layout tiers (design/tokens.json `breakpoint`, design/README.md): every width in an `@media` query is a tier
+// boundary written one way: `(min-width: 768px)` / `(max-width: 767px)`, and the same for 1024 and 1280. Any other
+// width, unit or the range syntax (`width < 768px`) fails. Script never spells a width query (matchMedia, MediaQuery):
+// it uses `media` from $lib/design/tokens, generated from the same tokens. A component that needs its own threshold
+// uses a container query (not linted) or an intrinsic layout, with a comment saying why.
 //
 // Text-size floor: text is at least `type.sm` (12 px). `--type-xs-*` (11 px) is for chart tick labels only and
 // `--type-micro-*` (10 px) for label chips drawn on images and keycaps' secondary marks. Every use of either step's

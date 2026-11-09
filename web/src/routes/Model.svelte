@@ -105,7 +105,7 @@
   let matrixView = $state<ConfusionMatrix>();
   let exportOpen = $state(false);
   // Below the desktop tier the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
-  const narrow = new MediaQuery(media.upToDesktop, false);
+  const narrow = new MediaQuery(media.upToLaptop, false);
   let detailsOpen = $state(false);
   // Phones: after the headline metrics, one section at a time (as on the run page) instead of a 4,000 px column.
   const phone = new MediaQuery(media.phone, false);
@@ -1192,6 +1192,9 @@
     .k-body {
       grid-template-columns: minmax(0, 1fr);
     }
+  }
+  /* Tablets and phones: the rail stacks under the main column (as on Run and New run). */
+  @media (max-width: 1023px) {
     .detail {
       grid-template-columns: minmax(0, 1fr);
       align-items: start;

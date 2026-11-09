@@ -336,6 +336,8 @@
     flex-wrap: wrap;
     margin-top: var(--space-1);
   }
+  /* A container query, not a tier: the onboarding card sits in the content column, whose width depends on the sidebar
+     as much as on the viewport; three steps need 840 px of it. */
   @container (min-width: 840px) {
     .steps {
       grid-template-columns: repeat(3, minmax(0, 1fr));
