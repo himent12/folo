@@ -1258,7 +1258,7 @@ impl FoloApp {
                         }
                         if view != SampleView::Truth {
                             boxes.extend(smp.pred.iter().filter(|p| p.score >= 0.3).map(|p| DrawBox {
-                                // Class and score where the cell has room (viz drops the name below 140 px).
+                                // Class and score where the cell has room (viz drops the score below 140 px).
                                 label: classes.get(p.class as usize).cloned().map(Into::into),
                                 score: Some(p.score),
                                 ..DrawBox::new(p.class, p.x1, p.y1, p.x2, p.y2)
@@ -1276,7 +1276,12 @@ impl FoloApp {
                         square.style().aspect_ratio = Some(1.0);
                         // Each sample is a Tab stop: click or Enter opens it in the inspector (the
                         // image in full, its labels, and the dataset to walk from it).
-                        let (ds, image) = (smp.dataset_id.clone(), smp.image_id.clone());
+                        let (ds, image, run) = (smp.dataset_id.clone(), smp.image_id.clone(), r.id.clone());
+                        if self.ring(&self.fh(format!("smp-{n}"), cx), window) {
+                            self.hint_keys(
+                                "Enter opens the sample in the inspector, with this epoch's predictions",
+                            );
+                        }
                         let tile = div()
                             .id(SharedString::from(format!("smp-{n}")))
                             .flex_1()
@@ -1287,16 +1292,22 @@ impl FoloApp {
                             .child(
                                 square
                                     .relative()
-                                    // Over an image a fill wouldn't show: the edge answers instead.
+                                    // Over an image a fill wouldn't show: the edge answers instead
+                                    // (1 px on hover, 2 px while pressed, inside the tile so nothing
+                                    // moves).
                                     .child(
                                         div()
+                                            .id(SharedString::from(format!("smp-edge-{n}")))
                                             .absolute()
                                             .inset_0()
                                             .rounded(px(radius::MD))
-                                            .border_1()
+                                            .border_2()
                                             .border_color(gpui::transparent_black())
                                             .group_hover(SharedString::from(format!("smp-{n}")), |s| {
-                                                s.border_color(t.line_strong)
+                                                s.border_1().border_color(t.line_strong)
+                                            })
+                                            .group_active(SharedString::from(format!("smp-{n}")), |s| {
+                                                s.border_2().border_color(t.text_secondary)
                                             }),
                                     ),
                             )
@@ -1307,7 +1318,9 @@ impl FoloApp {
                             radius::MD,
                             window,
                             cx,
-                            act(move |this, w, cx| this.open_sample(ds.clone(), image.clone(), w, cx)),
+                            act(move |this, w, cx| {
+                                this.open_sample(ds.clone(), image.clone(), run.clone(), w, cx)
+                            }),
                         )
                         .into_any_element()
                     })
@@ -1384,6 +1397,9 @@ impl FoloApp {
         // The scrollback is one Tab stop: arrows step a line, Page Up/Down a screen, Home/End the ends.
         let log_fh = self.fh("log-scroll", cx);
         let log_ring = self.ring(&log_fh, window);
+        if log_ring {
+            self.hint_keys("↑ ↓ a line · PgUp / PgDn a screen · Home / End the first and last lines");
+        }
         let log_chrome = self.scroll_chrome(self.log_scroll.clone(), t.bg_inset, 0., 0., cx);
         let body = match self.store.logs.get(&r.id) {
             Some(Load::Ready(lines)) => {
@@ -1656,8 +1672,10 @@ impl FoloApp {
             .child(kv(
                 &t,
                 "HSV · scale",
+                // Each strength named (the hue's needs three decimals, so the others aren't read as
+                // the same precision).
                 mono_v(format!(
-                    "{:.3}/{:.2}/{:.2} · {}",
+                    "h {:.3} · s {:.2} · v {:.2} · {}",
                     a.hsv[0],
                     a.hsv[1],
                     a.hsv[2],

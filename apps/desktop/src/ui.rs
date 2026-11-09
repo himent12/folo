@@ -142,7 +142,12 @@ pub fn chart_section(
         .flex()
         .flex_col()
         .min_w_0()
-        .child(panel_header(t, title).child(caption(t, sub)).when(short, |d| d.h(px(32.))))
+        .child(
+            // A caption's power of ten ("× 10⁻³") in the same raised run as every value's.
+            panel_header(t, title)
+                .child(sci(ty::SM, t.text_tertiary, sub.to_string()).font_weight(FontWeight::MEDIUM))
+                .when(short, |d| d.h(px(32.))),
+        )
         .child(
             div()
                 .h(px(if short { 24. } else { 28. }))
@@ -667,7 +672,7 @@ pub fn legend_value(t: &Theme, name: &str, color: Hsla, dashed: bool, value: Opt
         .gap(px(5.))
         .child(swatch)
         .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(name.to_string()))
-        .when_some(value, |d, v| d.child(text(ty::SM, t.text_primary).tnum().whitespace_nowrap().child(v)))
+        .when_some(value, |d, v| d.child(sci(ty::SM, t.text_primary, v)))
 }
 
 /// A class swatch: a small square in the class colour.
@@ -772,6 +777,9 @@ pub fn count_si(n: u64) -> (String, &'static str) {
 /// A learning rate, one way everywhere: 0.01 and up as typed ("0.01", "0.0125"); below that in
 /// its power of ten ("1.11×10⁻³"), as the learning-rate chart's legend writes it.
 pub fn fmt_lr(v: f64) -> String {
+    // Seven significant digits first: a rate that was an `f32` (0.01 is 0.0099999998 widened)
+    // reads as the value it was typed as.
+    let v = format!("{v:.6e}").parse::<f64>().unwrap_or(v);
     if v != 0. && v.abs() < 0.01 {
         return crate::charts::in_pow(v, v.abs().log10().floor() as i32);
     }
@@ -784,11 +792,12 @@ pub fn fmt_lr(v: f64) -> String {
 /// one is plain `text`.
 pub fn sci(size: TypeStep, color: Hsla, s: String) -> Div {
     const SUP: &str = "⁻⁰¹²³⁴⁵⁶⁷⁸⁹";
-    let Some(at) = s.find("×10") else { return text(size, color).tnum().child(s) };
-    let head_end = at + "×10".len();
+    // "1.11×10⁻³" in values, "× 10⁻³" in a chart's caption.
+    let found = ["×10", "× 10"].iter().find_map(|p| s.find(p).map(|at| at + p.len()));
+    let Some(head_end) = found else { return text(size, color).tnum().whitespace_nowrap().child(s) };
     let exp_len: usize = s[head_end..].chars().take_while(|c| SUP.contains(*c)).map(char::len_utf8).sum();
     if exp_len == 0 {
-        return text(size, color).tnum().child(s);
+        return text(size, color).tnum().whitespace_nowrap().child(s);
     }
     let exp: String = s[head_end..head_end + exp_len]
         .chars()
@@ -944,32 +953,58 @@ thread_local! {
     static SCROLLED: std::cell::RefCell<Vec<ScrollSeen>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// A scroll area's edge fades: 24 px of its surface `bg` over an edge only while content lies
-/// past it, so a row cut by the edge reads as "more", and at either end the rows show undimmed.
-/// With the thumbs hidden at rest, these are the scroll cue. Absolute children sit inside a
-/// parent's border already, so `inset` is extra room, and `radius` is the parent's inner radius.
-/// Every scroll area, the page included, uses them, through `FoloApp::scroll_chrome`.
-pub fn scroll_edges(handle: &ScrollHandle, bg: Hsla, inset: f32, radius: f32) -> impl Iterator<Item = Div> {
-    let y = handle.offset().y;
-    let above = y < px(-1.);
-    let below = handle.max_offset().height + y > px(1.);
-    // 24 px: the gradient holds its full colour for the outer 6 px (its first stop at 25%), so a
-    // row cut at the edge leaves no sliver of glyphs, then ramps out. It paints its own rounded
-    // corners (`overflow_hidden` would clip square).
-    let fade = move |top: bool| {
-        let d = div().absolute().left(px(inset)).right(px(inset)).h(px(24.));
-        let d = if top {
-            d.top(px(inset)).rounded_t(px(radius))
-        } else {
-            d.bottom(px(inset)).rounded_b(px(radius))
-        };
-        d.bg(gpui::linear_gradient(
-            if top { 180. } else { 0. },
-            gpui::linear_color_stop(bg, 0.25),
-            gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
-        ))
-    };
-    above.then(|| fade(true)).into_iter().chain(below.then(|| fade(false)))
+/// Edge fades over a scroll area where more content lies past it (thumbs being hidden at
+/// rest, the cue that there's more).
+pub fn scroll_edges(
+    handle: &ScrollHandle,
+    bg: Hsla,
+    inset: f32,
+    radius: f32,
+) -> impl Iterator<Item = gpui::Canvas<()>> {
+    // Read at paint time, after this frame's layout set the scroll extent: a fade decided while
+    // building the frame used the last frame's extent, so a window's first frames (and a still
+    // capture) showed no fade over content below the fold.
+    let h = handle.clone();
+    let painter = gpui::canvas(
+        |_, _, _| (),
+        move |b, _, window, _| {
+            let y = h.offset().y;
+            let above = y < px(-1.);
+            let below = h.max_offset().height + y > px(1.);
+            // 24 px: the gradient holds its full colour for the outer 6 px (its first stop at
+            // 25%), so a row cut at the edge leaves no sliver of glyphs, then ramps out. It
+            // paints its own rounded corners.
+            let (inset, r) = (px(inset), px(radius));
+            let w = b.size.width - inset * 2.;
+            let fade = |top: bool| {
+                let at = if top { b.top() + inset } else { b.bottom() - inset - px(24.) };
+                let corners = if top {
+                    gpui::Corners { top_left: r, top_right: r, ..Default::default() }
+                } else {
+                    gpui::Corners { bottom_left: r, bottom_right: r, ..Default::default() }
+                };
+                gpui::quad(
+                    Bounds::new(point(b.left() + inset, at), size(w, px(24.))),
+                    corners,
+                    gpui::linear_gradient(
+                        if top { 180. } else { 0. },
+                        gpui::linear_color_stop(bg, 0.25),
+                        gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
+                    ),
+                    px(0.),
+                    gpui::transparent_black(),
+                    gpui::BorderStyle::default(),
+                )
+            };
+            if above {
+                window.paint_quad(fade(true));
+            }
+            if below {
+                window.paint_quad(fade(false));
+            }
+        },
+    );
+    std::iter::once(painter.absolute().top_0().left_0().size_full())
 }
 
 /// Whether `handle`'s content moved in the last 800 ms.
@@ -1064,6 +1099,9 @@ mod format_tests {
         assert_eq!(fmt_lr(0.001111), "1.11×10⁻³");
         assert_eq!(fmt_lr(0.001), "1.00×10⁻³");
         assert_eq!(fmt_lr(1e-7), "1.00×10⁻⁷");
+        // An f32 rate widened: 0.01 stays "0.01", not "10.00×10⁻³".
+        assert_eq!(fmt_lr(0.01_f32 as f64), "0.01");
+        assert_eq!(fmt_lr(0.001111_f32 as f64), "1.11×10⁻³");
         assert_eq!(fmt_aug(1.0), "1.00");
         assert_eq!(fmt_scale(0.5), "±0.50");
     }

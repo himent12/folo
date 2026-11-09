@@ -173,6 +173,9 @@ pub struct Inspector {
     pub hover_box: Option<usize>,
     /// An image to land on once the dataset's image list is in (opened from a run's sample).
     pub want: Option<String>,
+    /// Opened from a run's samples: that run and the view it was in. Images that are among its
+    /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
+    pub sample: Option<(String, SampleView)>,
 }
 
 /// Close mosaic: a whole number of epochs, at most the run's length.
@@ -496,6 +499,9 @@ pub struct FoloApp {
     /// Frames left in which the focused control scrolls into the page's view once laid out (a
     /// scenario that opens on keyboard focus below the fold).
     pub reveal_pending: u8,
+    /// The keys of the control that has keyboard focus, set while the page renders and shown in a
+    /// strip under the page (never over its content, and in view at any window size).
+    pub key_hint: RefCell<Option<SharedString>>,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
     pub toast_hover: Option<u64>,
@@ -648,6 +654,7 @@ impl FoloApp {
             nr_estimate_gen: 0,
             scroll_end_pending: 0,
             reveal_pending: 0,
+            key_hint: RefCell::new(None),
             toasts: Vec::new(),
             toast_hover: None,
             toasts_expanded: false,
@@ -691,6 +698,11 @@ impl FoloApp {
     pub fn fh(&self, key: impl Into<SharedString>, cx: &mut Context<Self>) -> FocusHandle {
         let key = key.into();
         self.focus.borrow_mut().entry(key).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone()
+    }
+
+    /// Names the keys of the focused control in the strip under the page (see `key_hint`).
+    pub fn hint_keys(&self, keys: impl Into<SharedString>) {
+        *self.key_hint.borrow_mut() = Some(keys.into());
     }
 
     /// Keyboard focus is on this handle and should show a ring.
@@ -2941,6 +2953,24 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
 }
 
 /// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
+/// The strip under the page that names the focused control's keys: 32 px, a hairline above,
+/// a keyboard glyph and the keys.
+fn key_hint_strip(t: &Theme, keys: SharedString) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("key-hint")
+        .flex_none()
+        .h(px(32.))
+        .px(px(16.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .border_t_1()
+        .border_color(t.line_subtle)
+        .bg(t.bg_panel)
+        .child(crate::ui::icon("icons/keyboard.svg", 14., t.text_tertiary))
+        .child(crate::ui::text(ty::SM, t.text_secondary).whitespace_nowrap().child(keys))
+}
+
 pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
     let off = tsize::FOCUS_OFFSET + tsize::FOCUS_RING;
     div()
@@ -2981,7 +3011,10 @@ impl Render for FoloApp {
         self.ensure_core(cx);
         let titlebar = self.titlebar(window, cx).into_any_element();
         let sidebar = self.sidebar(window, cx).into_any_element();
+        *self.key_hint.borrow_mut() = None;
         let page = self.page(window, cx);
+        // A dialog or the inspector owns the keys: the page's hint stands down.
+        let key_hint = self.key_hint.borrow_mut().take().filter(|_| self.kb && !self.modal_open());
         let overlays = self.overlays(window, cx);
         div()
             .id("root")
@@ -3154,7 +3187,8 @@ impl Render for FoloApp {
                             .min_h_0()
                             .relative()
                             .child(page),
-                    ),
+                    )
+                    .when_some(key_hint, |d, h| d.child(key_hint_strip(&t, h))),
             )
             .children(overlays)
     }
@@ -3308,6 +3342,7 @@ impl FoloApp {
             drag_from: None,
             hover_box: None,
             want: None,
+            sample: None,
         });
         self.inspector_return = window.focused(cx);
         window.focus(&self.inspector_focus);
@@ -3320,13 +3355,16 @@ impl FoloApp {
         &mut self,
         dataset: String,
         image: String,
+        run: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.ensure_dataset(&dataset, cx);
+        let view = self.sample_view;
         self.open_inspector(dataset, 0, window, cx);
         if let Some(i) = self.inspector.as_mut() {
             i.want = Some(image);
+            i.sample = Some((run, view));
         }
     }
 

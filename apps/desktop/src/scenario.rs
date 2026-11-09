@@ -33,6 +33,7 @@ pub const ALL: &[&str] = &[
     "dataset+filter",
     "inspector",
     "inspector+light",
+    "inspector+sample",
     "runs",
     "run-live",
     "run-live+light",
@@ -119,6 +120,17 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             if s.has("filter") {
                 app.ds_split = Some(crate::api::Split::Val);
                 app.ds_class = Some(3);
+            }
+        }
+        // Opened from a finished run's sample: its predictions over the dashed labels.
+        "inspector" if s.has("sample") => {
+            app.route = Route::Run("run_52e8".into());
+            app.sample_view = SampleView::Both;
+            if let Ok(smp) = app.store.api.samples("run_52e8", None)
+                && let Some(x) = smp.samples.get(2).cloned()
+            {
+                app.store.samples.insert("run_52e8".into(), Load::Ready(smp));
+                app.open_sample(x.dataset_id, x.image_id, "run_52e8".into(), window, cx);
             }
         }
         "inspector" => {
@@ -212,14 +224,11 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     ]
     .into_iter()
     .find(|(part, _)| s.has(part));
-    if let Some((part, key)) = focus {
-        if part == "canvas-focus" {
-            // Zoomed, so the arrows pan (the hint says so).
-            app.play_zoom = 2.0;
-        }
+    if let Some((_, key)) = focus {
         app.kb = true;
         app.focus_key(key, window, cx);
-        app.reveal_pending = 30;
+        // Enough frames for the async lists (samples, the eval) to land and lay out.
+        app.reveal_pending = 90;
     }
     let _ = Load::<()>::Idle;
 }

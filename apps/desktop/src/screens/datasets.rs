@@ -772,6 +772,9 @@ impl FoloApp {
                         };
                         let dsid = ds_id.to_string();
                         let focused = this.fh(key.clone(), cx).is_focused(window);
+                        if focused && this.kb {
+                            this.hint_keys("Arrows move between images · Enter opens one in the inspector");
+                        }
                         let el = div()
                             .id(SharedString::from(key.clone()))
                             // Everything it holds, by class, on hover and keyboard focus (labels a

@@ -543,23 +543,12 @@ impl FoloApp {
                         )
                     })
                     .when(canvas_ring, |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .left(px(12.))
-                                .bottom(px(12.))
-                                .px(px(8.))
-                                .py(px(3.))
-                                .rounded(px(radius::SM))
-                                .bg(t.bg_overlay)
-                                .border_1()
-                                .border_color(t.line_default)
-                                .child(text(ty::SM, t.text_secondary).child(if zoom > 1.0 {
-                                    "Arrows pan · Shift ×4 · + − zoom · 0 fits"
-                                } else {
-                                    "+ − zoom · then arrows pan · 0 fits"
-                                })),
-                        )
+                        self.hint_keys(if zoom > 1.0 {
+                            "Arrows pan · Shift ×4 · + − zoom · 0 fits"
+                        } else {
+                            "+ − zoom · arrows pan when zoomed · 0 fits"
+                        });
+                        d
                     }),
             )
             .into_any_element()

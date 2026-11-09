@@ -332,10 +332,14 @@ impl FoloApp {
         // gap in, whatever the chart's height. Four equal tracks (a grid, so a tile's padding and
         // divider can't make it wider than the others) with 1 px dividers, like the run, model and
         // dataset strips.
+        // Every tile insets its content by the card's padding (the strip itself has none at the
+        // sides), so the four labels step evenly across the card and the first lines up with the
+        // header's name.
         let tile = |first: bool, body| {
             div()
                 .min_w_0()
-                .when(!first, |d| d.border_l_1().border_color(t.line_subtle).pl(px(16.)))
+                .pl(px(card_pad))
+                .when(!first, |d| d.border_l_1().border_color(t.line_subtle))
                 .child(body)
         };
         let kpis = div()
@@ -419,7 +423,7 @@ impl FoloApp {
                     .bg(t.bg_inset)
                     .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
             )
-            .child(div().w_full().px(px(card_pad)).py(px(card_pad_y)).child(kpis))
+            .child(div().w_full().py(px(card_pad_y)).child(kpis))
             // The chart section is the run page's chart card without its frame: a header row on a
             // full-width rule, the legend row, then the plot, so the two screens' charts read alike.
             .child(div().w_full().min_w_0().border_t_1().border_color(t.line_subtle).child(
@@ -649,7 +653,7 @@ impl FoloApp {
     /// narrow column set (778 px, plus 8 of slack) in what Best model leaves. A row wider than
     /// its slot makes GPUI lay the whole page out at its min-content width.
     fn tables_beside(&self, window: &Window) -> bool {
-        window.viewport_size().width >= px(1500.) && self.content_width(window) - (SIDE_W + 40.) - 16. >= 786.
+        window.viewport_size().width >= px(1500.) && self.content_width(window) - (SIDE_W + 40.) - 16. >= 806.
     }
 
     fn recent_runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -659,7 +663,7 @@ impl FoloApp {
         let created = true;
         // The list's width: the content (stacked) or what Best model leaves beside it.
         // The wider name and dataset columns need 918 px (812 of columns, six 12 px gaps, row
-        // padding, margins, borders); with less, the narrower set (778 px) keeps Created inside.
+        // padding, margins, borders); with less, the narrower set (798 px) keeps Created inside.
         let content = self.content_width(window);
         let beside = self.tables_beside(window);
         let list_w = if beside { content - (SIDE_W + 40.) - 16. } else { content };
@@ -676,7 +680,7 @@ impl FoloApp {
         // progress (2 : 1 : 1, to their caps); only what's left opens before the numbers. Beside
         // Best model the set stays as is: widened there, GPUI 0.2.2 laid the page out at its
         // min-content width (the hero chart collapsed to its axis at 1680).
-        let spare = if beside { 0. } else { list_w - SLACK - if full { 918. } else { 778. } };
+        let spare = if beside { 0. } else { list_w - SLACK - if full { 918. } else { 798. } };
         let [name_w, meta_w, prog_w] =
             crate::ui::share_spare(spare, [(name_w, 2., 280.), (meta_w, 1., 240.), (prog_w, 1., 200.)]);
         let now = self.store.api.now();

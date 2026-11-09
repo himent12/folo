@@ -1006,6 +1006,9 @@ impl FoloApp {
                 .iter()
                 .any(|c| focused(&format!("pr-chip-{}", c.class)) || focused(&format!("pc-row-{}", c.class)))
         };
+        if self.kb && row_focused() {
+            self.hint_keys("Enter pins the class on the Precision–recall chart (again to unpin)");
+        }
         let pr_hint = if self.kb && focused("pr-chart") {
             "← → inspect recall · Esc clears"
         } else if self.kb && row_focused() {
@@ -1509,13 +1512,11 @@ impl FoloApp {
                             "Counts of objects and unmatched detections. Hover or focus a cell to read it."
                         }),
                     }))
-                    // The grid is one Tab stop: with keyboard focus, how to move in it.
+                    // The grid is one Tab stop: with keyboard focus, how to move in it (in the strip
+                    // under the page, as every keyed control says it).
                     .when(ring, |d| {
-                        d.child(
-                            div()
-                                .pt(px(2.))
-                                .child(text(ty::SM, t.text_tertiary).child("Arrows move · Home / End row ends · Esc clears")),
-                        )
+                        self.hint_keys("Arrows move the cell · Home / End row ends · Esc clears");
+                        d
                     })
                     .child(
                         div().pt(px(4.)).child(
@@ -1546,6 +1547,16 @@ impl FoloApp {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = theme(cx);
+        // The class column fits the longest name (swatch, gap, name, room for the pin), 120 to 240
+        // px; the four metric columns share the rest, so the bars start right after the names.
+        let longest = ev
+            .per_class
+            .iter()
+            .filter_map(|c| m.classes.get(c.class as usize))
+            .map(|n| f32::from(crate::charts::text_width(window, n, ty::BASE.size)))
+            .fold(0f32, f32::max);
+        let name_w = longest.ceil().min(CLASS_NAME_MAX);
+        let class_col = (8. + 8. + name_w + 16. + 24.).clamp(120., 240.);
         // The column head doubles as the table's title row.
         let head = div()
             .flex()
@@ -1555,10 +1566,7 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            // The class column is a fixed 240; the four metric columns share the rest equally,
-            // their bars taking the spare width, so no gap opens between a name and its numbers
-            // however wide the window.
-            .child(div().w(px(CLASS_COL)).flex_none().child(th(&t, "Class")))
+            .child(div().w(px(class_col)).flex_none().child(th(&t, "Class")))
             .child(metric_col().justify_end().child(th(&t, "AP50")))
             .child(metric_col().justify_end().child(th(&t, "AP50-95")))
             .child(metric_col().justify_end().child(th(&t, "Precision")))
@@ -1613,7 +1621,7 @@ impl FoloApp {
                     }))
                     .child(
                         div()
-                            .w(px(CLASS_COL))
+                            .w(px(class_col))
                             .flex_none()
                             .flex()
                             .items_center()
@@ -1621,7 +1629,7 @@ impl FoloApp {
                             .child(crate::ui::class_swatch(&t, c.class, 8.))
                             .child(
                                 text(ty::BASE, t.text_primary)
-                                    .w(px(if pinned { 148. } else { 168. }))
+                                    .w(px(name_w + 1.))
                                     .flex_none()
                                     .ellipsis()
                                     .child(m.classes.get(c.class as usize).cloned().unwrap_or_default()),
@@ -1652,8 +1660,8 @@ impl FoloApp {
     }
 }
 
-/// The per-class table's class column (swatch, a name to 168 px, a pin).
-const CLASS_COL: f32 = 240.;
+/// The widest a class name gets in the per-class table before it ends in "…".
+const CLASS_NAME_MAX: f32 = 168.;
 
 /// A per-class metric column: equal shares of the width after the class column, at least 120.
 fn metric_col() -> gpui::Div {

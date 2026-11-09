@@ -348,32 +348,11 @@ impl FoloApp {
                 cx.notify();
             }))
             .when(ring, |d| {
-                // The keys, pinned to the window's bottom right rather than under the group: a
-                // group taller than the window (the run page at its minimum size) would hide them
-                // below the fold.
-                let vp = window.viewport_size();
-                d.child(focus_ring(&t, radius::LG)).child(
-                    gpui::deferred(
-                        gpui::anchored()
-                            .anchor(gpui::Corner::BottomRight)
-                            .position_mode(gpui::AnchoredPositionMode::Window)
-                            .position(gpui::point(vp.width - px(24.), vp.height - px(16.)))
-                            .child(
-                                div()
-                                    .px(px(8.))
-                                    .py(px(3.))
-                                    .rounded(px(radius::SM))
-                                    .bg(t.bg_overlay)
-                                    .border_1()
-                                    .border_color(t.line_default)
-                                    .shadow(t.shadow_md())
-                                    .child(text(ty::SM, t.text_secondary).child(
-                                        "← → inspect · Shift ×10 · Home / End · PgUp / PgDn scroll · Esc clears",
-                                    )),
-                            ),
-                    )
-                    .with_priority(1),
-                )
+                // The keys go in the strip under the page: in view at any size, over no chart.
+                self.hint_keys(
+                    "← → inspect · Shift ×10 · Home / End · PgUp / PgDn scroll the page · Esc clears",
+                );
+                d.child(focus_ring(&t, radius::LG))
             })
             .into_any_element()
     }

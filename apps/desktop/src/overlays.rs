@@ -443,6 +443,8 @@ impl FoloApp {
                             .border_t_1()
                             .border_color(t.line_subtle)
                             .bg(t.bg_raised)
+                            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+                            .rounded_b(px(radius::XL - 1.))
                             .child(
                                 div()
                                     .flex()
@@ -1554,6 +1556,8 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle)
             .bg(t.bg_raised)
+            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+            .rounded_b(px(radius::XL - 1.))
             .child(estimate_line.flex_1())
             .child(
                 div()
@@ -1732,6 +1736,8 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle)
             .bg(t.bg_raised)
+            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+            .rounded_b(px(radius::XL - 1.))
             .child(cancel)
             .child(go);
         self.dialog_frame(
@@ -1810,6 +1816,8 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle)
             .bg(t.bg_raised)
+            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+            .rounded_b(px(radius::XL - 1.))
             .child(cancel)
             .child(stop);
         self.dialog_frame(
@@ -2090,7 +2098,16 @@ impl FoloApp {
             .image(&ds_id, &meta.id, ImgKind::Full, cx)
             .or_else(|| self.image(&ds_id, &meta.id, ImgKind::Thumb, cx));
         let dims = (meta.width as f32, meta.height as f32);
-        let boxes: Vec<DrawBox> = meta
+        // Opened from a run's samples: this image's predictions at that epoch, if it is one of them.
+        let sample_ctx = self.inspector.as_ref().and_then(|i| i.sample.clone());
+        let sample_preds = sample_ctx.as_ref().and_then(|(run, _)| {
+            let s = self.store.samples.get(run)?.ready()?;
+            let smp = s.samples.iter().find(|x| x.image_id == meta.id)?;
+            Some((s.epoch, smp.pred.clone()))
+        });
+        let show_preds = sample_ctx.as_ref().is_some_and(|(_, v)| *v != crate::app::SampleView::Truth);
+        let preds = sample_preds.as_ref().filter(|_| show_preds);
+        let mut boxes: Vec<DrawBox> = meta
             .boxes
             .iter()
             .enumerate()
@@ -2098,9 +2115,35 @@ impl FoloApp {
                 label: classes.get(b.class as usize).cloned().map(Into::into),
                 highlight: hover == Some(i),
                 dim: hover.is_some_and(|h| h != i),
+                // With predictions over them, the labels are drawn as the run page draws ground
+                // truth: dashed, no chip (the list beside names them).
+                truth: preds.is_some() && hover != Some(i),
                 ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
             })
             .collect();
+        if let Some((_, ps)) = preds {
+            // After the labels, so a label row's index is still its box's.
+            boxes.extend(ps.iter().filter(|p| p.score >= 0.3).map(|p| DrawBox {
+                label: classes.get(p.class as usize).cloned().map(Into::into),
+                score: Some(p.score),
+                dim: hover.is_some(),
+                ..DrawBox::new(p.class, p.x1, p.y1, p.x2, p.y2)
+            }));
+        }
+        // What the image shows, said beside it: the run, the epoch, and how each kind is drawn.
+        let sample_line: Option<(String, String)> = sample_ctx.as_ref().map(|(run, _)| {
+            let name = self.store.run(run).map_or(run.clone(), |r| r.name.clone());
+            match (&sample_preds, show_preds) {
+                (Some((epoch, _)), true) => (
+                    format!("{name} · epoch {epoch}"),
+                    "Predictions ≥ 0.30 solid · labels dashed".to_string(),
+                ),
+                (Some((epoch, _)), false) => {
+                    (format!("{name} · epoch {epoch}"), "Labels (the run page's view)".to_string())
+                }
+                (None, _) => (name, "Not one of this run's samples: labels only".to_string()),
+            }
+        });
         let bounds_cell = self.insp_view.clone();
         // A pan pushed past the edge is stored clamped, so reversing it responds at once.
         if let (Some(b), Some(i)) = (bounds_cell.get(), self.inspector.as_mut()) {
@@ -2359,7 +2402,17 @@ impl FoloApp {
                             .child(badge(&t, meta.split.label(), Tone::Neutral))
                             .child(badge(&t, format!("{} × {}", meta.width, meta.height), Tone::Neutral))
                             .child(badge(&t, format!("{} boxes", meta.boxes.len()), Tone::Neutral)),
-                    ),
+                    )
+                    .when_some(sample_line, |d, (run, how)| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(text(ty::SM, t.text_secondary).ellipsis().child(run))
+                                .child(text(ty::SM, t.text_tertiary).child(how)),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -2404,7 +2457,16 @@ impl FoloApp {
                         div()
                             .flex()
                             .items_center()
-                            .child(div().w(px(96.)).flex_none().flex().items_center().gap(px(4.)).child(keys))
+                            .child(
+                                div()
+                                    .w(px(96.))
+                                    .flex_none()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(keys),
+                            )
                             // At 12 px the longest hint needs two lines in the 300 px panel: it
                             // wraps inside its column rather than running past the edge.
                             .child(
@@ -2422,8 +2484,17 @@ impl FoloApp {
                         .gap(px(6.))
                         .border_t_1()
                         .border_color(t.line_subtle)
-                        .child(row(shortcut(&t, &["←", "→"]).into_any_element(), "previous / next"))
-                        .child(row(shortcut(&t, &["PgUp", "PgDn"]).into_any_element(), "previous / next"))
+                        // Both pairs step the same way: one row, the pairs stacked in the key column.
+                        .child(row(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .child(shortcut(&t, &["←", "→"]))
+                                .child(shortcut(&t, &["PgUp", "PgDn"]))
+                                .into_any_element(),
+                            "previous / next",
+                        ))
                         .child(row(
                             div()
                                 .flex()
