@@ -882,15 +882,15 @@
       display: none;
     }
     /* A scroller says so (DESIGN_DIRECTION §2.12): the edge with more behind it fades over 48 px, wide enough that the
-       cut chip reads as passing under the edge, and the end carries a chevron. */
+       cut chip reads as passing under the edge, and the end carries a chevron on clear ground (the fade ends before it). */
     .jump:global([data-fade='end']) {
-      mask-image: linear-gradient(to right, #000 calc(100% - 64px), transparent calc(100% - 16px));
+      mask-image: linear-gradient(to right, #000 calc(100% - 80px), transparent calc(100% - 32px));
     }
     .jump:global([data-fade='start']) {
       mask-image: linear-gradient(to left, #000 calc(100% - 48px), transparent);
     }
     .jump:global([data-fade='both']) {
-      mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 64px), transparent calc(100% - 16px));
+      mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 80px), transparent calc(100% - 32px));
     }
     .jump-more {
       position: absolute;
