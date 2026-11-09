@@ -540,7 +540,10 @@ impl FoloApp {
             .border_color(crate::theme::alpha(t.danger_solid, 0.35))
             .child(icon("icons/circle-x.svg", 18., t.danger_solid))
             .child(
+                // Shrinks beside the icon, so a long backend message wraps inside the banner.
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap(px(4.))

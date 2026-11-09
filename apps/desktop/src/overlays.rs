@@ -823,12 +823,17 @@ impl FoloApp {
                 cx,
             )
         });
+        let size_help = short.then(|| {
+            self.help_icon("nr-help-size", "Pixels; images are letterboxed to a square.", window, cx)
+        });
         let labelled = |name: &str, help: AnyElement, control: AnyElement| {
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
-                .child(div().flex().items_center().gap(px(4.)).child(label(name)).child(help))
+                // As tall as a plain label row (the icon overhangs), so a field with help lines up with
+                // its neighbour without.
+                .child(div().h(px(16.)).flex().items_center().gap(px(4.)).child(label(name)).child(help))
                 .child(control)
                 .into_any_element()
         };
@@ -915,11 +920,17 @@ impl FoloApp {
                             PARAMS[arch]
                         )),
                     )))
-                    .child(div().flex_1().child(field(
-                        "Image size",
-                        size_seg,
-                        (!short).then(|| "Pixels; images are letterboxed to a square".into()),
-                    ))),
+                    .child(
+                        div().flex_1().child(match size_help {
+                            Some(h) => labelled("Image size", h, size_seg),
+                            None => field(
+                                "Image size",
+                                size_seg,
+                                Some("Pixels; images are letterboxed to a square".into()),
+                            )
+                            .into_any_element(),
+                        }),
+                    ),
             )
             .child(
                 div()

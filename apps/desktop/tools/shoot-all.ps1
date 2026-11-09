@@ -27,11 +27,11 @@ foreach ($s in $scenarios) {
 }
 if ($Only.Count -eq 0) {
     # Minimum window size (960 x 620).
-    foreach ($s in @("overview", "run-live", "dataset", "playground", "models", "new-run")) {
-        Shoot $s @{ Width = 960; Height = 620; Out = (Join-Path $Dir "$s-min.png") }
+    foreach ($s in @("overview", "overview+empty", "run-live", "dataset", "playground", "models", "new-run")) {
+        Shoot $s @{ Width = 960; Height = 620; Out = (Join-Path $Dir "$($s -replace '\+', '-')-min.png") }
     }
     # Large window (1680 x 1050).
-    foreach ($s in @("overview", "run-live")) {
-        Shoot $s @{ Width = 1680; Height = 1050; Out = (Join-Path $Dir "$s-wide.png") }
+    foreach ($s in @("overview", "overview+empty", "run-live")) {
+        Shoot $s @{ Width = 1680; Height = 1050; Out = (Join-Path $Dir "$($s -replace '\+', '-')-wide.png") }
     }
 }

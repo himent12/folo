@@ -618,7 +618,13 @@ impl FoloApp {
                         conf.into_any_element(),
                         conf_help,
                     ))
-                    .child(field("IoU", format!("{:.2}", self.play_iou), iou.into_any_element(), iou_help))
+                    // "NMS IoU": the suppression overlap, not the evaluation's IoU 0.50.
+                    .child(field(
+                        "NMS IoU",
+                        format!("{:.2}", self.play_iou),
+                        iou.into_any_element(),
+                        iou_help,
+                    ))
             });
 
         let active = self.play_active(window, cx);
@@ -704,11 +710,11 @@ impl FoloApp {
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
-                // One neutral ramp; the model step strongest without shouting.
-                // Inference (the bulk) in secondary ink, the two short stages in tertiary at two
-                // strengths, so the segments and their swatches tell apart.
+                // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary, and
+                // Postprocess an outline (a faint fill in a tertiary edge), in the bar and its key
+                // alike, so the two short stages tell apart at a glance.
                 let (c_pre, c_model, c_nms) =
-                    (t.text_tertiary, t.text_secondary, crate::theme::alpha(t.text_tertiary, 0.55));
+                    (t.text_tertiary, t.text_secondary, crate::theme::alpha(t.text_tertiary, 0.3));
                 let timing_el = div()
                     .w_full()
                     .flex()
@@ -723,10 +729,27 @@ impl FoloApp {
                             .flex()
                             .justify_between()
                             .items_baseline()
+                            .gap(px(8.))
                             .child(
-                                text(ty::SM, t.text_secondary)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child("Latency"),
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_baseline()
+                                    .gap(px(6.))
+                                    .child(
+                                        text(ty::SM, t.text_secondary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .flex_none()
+                                            .child("Latency"),
+                                    )
+                                    .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().truncate().child(
+                                        format!(
+                                            "{} · {:.0} fps",
+                                            device_name(&p.device, self.store.system.ready()),
+                                            1000. / total
+                                        ),
+                                    )),
                             )
                             .child(metric(&t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::XS)),
                     )
@@ -739,7 +762,9 @@ impl FoloApp {
                             .overflow_hidden()
                             .child(seg(p.timing.preprocess_ms, c_pre))
                             .child(seg(p.timing.inference_ms, c_model))
-                            .child(seg(p.timing.postprocess_ms, c_nms)),
+                            .child(
+                                seg(p.timing.postprocess_ms, c_nms).border_1().border_color(t.text_tertiary),
+                            ),
                     )
                     .child(
                         // Whole entries wrap (the 280 px rail fits two of three stage names a line);
@@ -759,36 +784,33 @@ impl FoloApp {
                                     .items_center()
                                     .gap(px(5.))
                                     .whitespace_nowrap()
-                                    .child(swatch(c, 8.))
+                                    .child(swatch(c, 8.).when(n == "Postprocess", |d| {
+                                        d.border_1().border_color(t.text_tertiary)
+                                    }))
                                     .child(text(ty::XS, t.text_tertiary).child(n))
                                     .child(text(ty::XS, t.text_secondary).tnum().child(format!("{v:.1} ms")))
                             }),
                         ),
-                    )
-                    .child(text(ty::XS, t.text_tertiary).tnum().child(format!(
-                        "{} · {:.0} fps at this size",
-                        device_name(&p.device, self.store.system.ready()),
-                        1000. / total
-                    )));
+                    );
                 timing = Some(timing_el.into_any_element());
                 div()
                     .flex()
                     .flex_col()
                     .flex_none()
                     // While a rerun (an IoU change) is out, the rows are the previous answer: say so.
-                    .child(panel_header(&t, "Detections").child(text(ty::XS, t.text_tertiary).tnum().child(
-                        if self.play_pred_pending {
+                    .child(panel_header(&t, "Detections").h(px(32.)).child(
+                        text(ty::XS, t.text_tertiary).tnum().child(if self.play_pred_pending {
                             "Updating…".to_string()
                         } else if hidden > 0 {
                             format!("{} shown · {hidden} below threshold", vis.len())
                         } else {
                             vis.len().to_string()
-                        },
-                    )))
+                        }),
+                    ))
                     .child(
                         div()
                             .px(px(8.))
-                            .py(px(6.))
+                            .py(px(4.))
                             .flex()
                             .flex_col()
                             .gap(px(1.))
@@ -796,7 +818,7 @@ impl FoloApp {
                                 // Column labels, on the rows' grid: swatch + class, box size, confidence.
                                 d.child(
                                     div()
-                                        .h(px(24.))
+                                        .h(px(20.))
                                         .px(px(8.))
                                         .flex()
                                         .items_center()
@@ -858,7 +880,9 @@ impl FoloApp {
             Load::Loading => div()
                 .flex_none()
                 .child(
-                    panel_header(&t, "Detections").child(text(ty::XS, t.text_tertiary).child("Detecting…")),
+                    panel_header(&t, "Detections")
+                        .h(px(32.))
+                        .child(text(ty::XS, t.text_tertiary).child("Detecting…")),
                 )
                 .child(loading_rows(&t, "det", 4))
                 .into_any_element(),
