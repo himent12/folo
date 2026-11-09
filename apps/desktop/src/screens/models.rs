@@ -62,7 +62,8 @@ impl FoloApp {
             let side = if vw < px(1120.) { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR };
             let pad = if self.narrow { 16. } else { 24. };
             let content = (f32::from(vw) - side - 2. * pad).min(tsize::CONTENT_MAX);
-            let fixed = [110., 130., 72., 72., 84.].iter().sum::<f32>()
+            // Architecture is 150 px (its "folo-s · 640 px" plus the e2e tag).
+            let fixed = [150., 130., 72., 72., 84.].iter().sum::<f32>()
                 + if wide { 150. } else { 0. }
                 + if params_col { 72. } else { 0. };
             let columns = 6. + f32::from(u8::from(wide)) + f32::from(u8::from(params_col));
@@ -78,7 +79,7 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Model").flex_1().min_w(px(200.)))
-            .child(th(&t, "Architecture").w(px(110.)).flex_none())
+            .child(th(&t, "Architecture").w(px(150.)).flex_none())
             .when(wide, |d| d.child(th(&t, "From run").w(px(150.)).flex_none()))
             .child(self.sort_th("map", "mAP50-95", 130., true, window, cx))
             .child(self.sort_th("map50", "mAP50", 72., true, window, cx))
@@ -165,7 +166,7 @@ impl FoloApp {
                                 }
                             }))
                             .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())))
-                            .child(div().w(px(110.)).flex_none().flex().flex_col().child(text(ty::SM, t.text_secondary).tnum().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(text(ty::XS, t.text_tertiary).child("end-to-end"))))
+                            .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t))))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))

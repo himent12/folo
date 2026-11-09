@@ -996,6 +996,10 @@ impl FoloApp {
                     )
                     .into_any_element();
                 div()
+                    // The left column's width (the 16 px gap halved off), so the switch sits by its
+                    // label, not across a two-column dialog.
+                    .w(gpui::relative(0.5))
+                    .pr(px(8.))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -1156,6 +1160,10 @@ impl FoloApp {
                     .into_any_element()
                 };
                 div()
+                    // The left column's width (the 16 px gap halved off), so the switch sits by its
+                    // label, not across a two-column dialog.
+                    .w(gpui::relative(0.5))
+                    .pr(px(8.))
                     .flex()
                     .items_center()
                     .justify_between()
@@ -1186,7 +1194,7 @@ impl FoloApp {
                                     // The server confirmed it can; an older one can't say, so the need is stated.
                                     None if self.store.capabilities.is_some() => {
                                         text(ty::XS, t.text_tertiary).whitespace_normal().child(
-                                            "Trains in f16 on this server's tensor cores, in about 40% less GPU memory",
+                                            "Trains in f16 on this server's tensor cores: about 40% less GPU memory, same speed at 640 px",
                                         )
                                     }
                                     None => rich(

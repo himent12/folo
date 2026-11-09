@@ -519,11 +519,14 @@ impl FoloApp {
                 .map(|m| {
                     (
                         SharedString::from(m.name.clone()),
-                        m.metrics.as_ref().map(|x| {
-                            // End-to-end named in the picker: it's why the NMS row changes.
-                            let e2e = if self.model_e2e(m) { " · end-to-end" } else { "" };
-                            SharedString::from(format!("{}{e2e} · {:.3}", m.arch.as_str(), x.map50_95))
-                        }),
+                        // Architecture and head always (end-to-end is why the NMS row changes);
+                        // mAP when the model has been evaluated.
+                        Some(SharedString::from(format!(
+                            "{}{}{}",
+                            m.arch.as_str(),
+                            if self.model_e2e(m) { " · end-to-end" } else { "" },
+                            m.metrics.as_ref().map_or(String::new(), |x| format!(" · {:.3}", x.map50_95)),
+                        ))),
                     )
                 })
                 .collect(),
@@ -548,6 +551,9 @@ impl FoloApp {
         let iou_help = self.help_icon("help-iou", "Non-max suppression drops a weaker box that overlaps a stronger one by more than this. Changing it reruns the model.", window, cx);
         // Short windows: a tighter control block, so more detection rows show without scrolling.
         let tight = window.viewport_size().height < px(700.);
+        // Sliders on one line ("label · slider · value") in short windows, and whenever both show,
+        // so the latency breakdown fits at 1280 x 800.
+        let inline = tight || !e2e;
         let field = |label: &str, value: String, control: AnyElement, help: AnyElement| {
             let name = div()
                 .flex()
@@ -558,7 +564,7 @@ impl FoloApp {
                 )
                 .child(help);
             let value = text(ty::SM, t.text_primary).tnum().child(value);
-            if tight {
+            if inline {
                 // One row each: name, slider, value.
                 div()
                     .flex()

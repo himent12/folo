@@ -203,6 +203,16 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> i
 }
 
 /// Tinted label chip, 20 px tall.
+/// The compact end-to-end tag in tables (the title rows carry the full badge and its help).
+pub fn e2e_tag(t: &Theme) -> Div {
+    div()
+        .flex_none()
+        .px(px(4.))
+        .rounded(px(crate::theme::radius::XS))
+        .bg(t.bg_active)
+        .child(text(ty::XS, t.text_secondary).child("e2e"))
+}
+
 pub fn badge(t: &Theme, label: impl Into<SharedString>, tone: Tone) -> Div {
     let (bg, fg, _) = tone.colors(t);
     text(ty::XS, fg)

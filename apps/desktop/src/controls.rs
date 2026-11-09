@@ -384,7 +384,10 @@ impl FoloApp {
         let el = div()
             .id(SharedString::from(key.to_string()))
             .relative()
-            .size(px(20.))
+            // A 28 px target in the 20 px it takes in the row (the margin gives the 8 px back).
+            .size(px(28.))
+            .m(px(-4.))
+            .flex_none()
             .flex()
             .items_center()
             .justify_center()
@@ -397,7 +400,7 @@ impl FoloApp {
                 // Anchored under the icon and kept 8 px inside the window (an icon near the right
                 // edge would otherwise push it out), like `focus_tip`.
                 d.child(
-                    div().absolute().top(px(24.)).left(px(-8.)).child(
+                    div().absolute().top(px(28.)).left(px(-4.)).child(
                         gpui::deferred(
                             gpui::anchored().snap_to_window_with_margin(px(8.)).child(
                                 div()
@@ -853,7 +856,9 @@ impl FoloApp {
             .track_focus(&fh)
             .relative()
             .w_full()
-            .h(px(20.))
+            // A 28 px target in the 20 px it takes in the layout (the margin gives 8 px back).
+            .h(px(28.))
+            .my(px(-4.))
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
@@ -906,7 +911,7 @@ impl FoloApp {
                     .absolute()
                     .left_0()
                     .right_0()
-                    .top(px(8.5))
+                    .top(px(12.5))
                     .h(px(3.))
                     .rounded_full()
                     // The rail is the control's only mark: line.control (3:1), not a separator line.
@@ -931,7 +936,7 @@ impl FoloApp {
                         .absolute()
                         .left(relative(f))
                         .ml(px(-7.))
-                        .top(px(3.))
+                        .top(px(7.))
                         .size(px(14.))
                         .rounded_full()
                         .bg(if dragging { t.accent_fill() } else { gpui::white() })

@@ -966,13 +966,23 @@ impl FoloApp {
                             )
                             // Architecture and size (400 px column at every width; the parameter
                             // count didn't fit).
-                            .child(div().flex_1().min_w_0().child(
-                                text(ty::XS, t.text_tertiary).w(px(88.)).truncate().child(format!(
-                                    "{} · {} px",
-                                    m.arch.as_str(),
-                                    m.imgsz
-                                )),
-                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    // Whole ("folo-s · 640 px"), then the tag.
+                                    .child(
+                                        text(ty::XS, t.text_tertiary)
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .child(format!("{} · {} px", m.arch.as_str(), m.imgsz)),
+                                    )
+                                    // The same compact tag as the Models table.
+                                    .when(self.model_e2e(&m), |d| d.child(e2e_tag(&t))),
+                            )
                             .child(div().w(px(96.)).flex_none().flex().justify_end().child(bar_value(
                                 &t,
                                 map,

@@ -119,20 +119,38 @@ pub fn paint_image_with_boxes(
         order.sort_by_key(|b| (b.highlight as u8, !b.dim as u8));
         // Label chips already placed, so later chips can step around them.
         let mut placed: Vec<Bounds<Pixels>> = Vec::new();
-        // Two passes: every box first, then every label chip, so no box stroke covers a chip.
+        // Each box's chip, by its index in `order`, once placed.
+        let mut chips: Vec<Option<Chip>> = order.iter().map(|_| None).collect();
+        // The boxes that matter (not dimmed): a dimmed box's chip keeps off them, so their strokes
+        // never cross its text; with nowhere clear, a dimmed box goes unlabelled.
+        let strong: Vec<Bounds<Pixels>> = order
+            .iter()
+            .filter(|b| !b.dim && !b.truth)
+            .map(|b| Bounds::from_corners(to(b.x1, b.y1), to(b.x2, b.y2)))
+            .collect();
+        let group = |b: &DrawBox| (b.highlight, b.dim);
+        // Two passes. First the chips are placed, the selected and matching boxes first, so they
+        // claim the free spots before dimmed ones (a class filter must not leave its own boxes
+        // unlabelled). Then everything paints a group at a time, dimmed first and the selected
+        // last: a group's boxes, then its chips, so no stroke covers a chip of its own group and a
+        // dimmed chip never sits over a matching box.
         for pass in 0..2 {
-            // Boxes paint dimmed first, so the highlighted one sits on top; chips are placed the
-            // other way round, so the selected and matching boxes claim the free spots before
-            // dimmed ones (a class filter must not leave its own boxes unlabelled).
-            let seq: Vec<&DrawBox> =
-                if pass == 0 { order.clone() } else { order.iter().rev().copied().collect() };
-            for &b in &seq {
+            let n = order.len();
+            let seq: Vec<usize> = if pass == 0 { (0..n).rev().collect() } else { (0..n).collect() };
+            for &i in &seq {
+                let b = order[i];
+                // Painting: the previous group is done, so its chips go on before this one starts.
+                if pass == 1 && i > 0 && group(order[i - 1]) != group(b) {
+                    for c in chips[..i].iter_mut().filter_map(Option::take) {
+                        c.paint(window, cx);
+                    }
+                }
                 let color = t.class(b.class);
                 let a = if b.dim { 0.3 } else { 1.0 };
                 let p1 = to(b.x1, b.y1);
                 let p2 = to(b.x2, b.y2);
                 let r = Bounds::from_corners(p1, p2);
-                if pass == 0 {
+                if pass == 1 {
                     if b.truth {
                         // Ground truth: thin outline in the class colour over a halo, no label chip.
                         window.paint_quad(quad(
@@ -179,7 +197,7 @@ pub fn paint_image_with_boxes(
                 // Cropped out of view (Fill): no chip floating over someone else's pixels.
                 let visible = r.intersect(&bounds);
                 let off_view = visible.size.width < px(4.) || visible.size.height < px(4.);
-                if pass == 1
+                if pass == 0
                     && !b.truth
                     && labels
                     && !small
@@ -269,7 +287,10 @@ pub fn paint_image_with_boxes(
                     let fits = |o: Point<Pixels>| {
                         o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
                     };
-                    let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.dilate(px(2.)).intersects(c));
+                    let free = |c: &Bounds<Pixels>| {
+                        !placed.iter().any(|p| p.dilate(px(2.)).intersects(c))
+                            && !(b.dim && strong.iter().any(|s| s.dilate(px(2.)).intersects(c)))
+                    };
                     // More spots down the inside of the box, one chip height (+2 px) apart, only
                     // while they stay inside it: a chip below its box would read as another's.
                     let inside = (1..4)
@@ -292,21 +313,46 @@ pub fn paint_image_with_boxes(
                     };
                     let chip = Bounds::new(origin, size(cw, ch));
                     placed.push(chip);
-                    // Dimmed chips fade their fill with the box; the text stays readable.
-                    window.paint_quad(fill(chip, chip_bg).corner_radii(px(tokens::radius::XS)));
                     let (ty_, lh) =
                         if compact { (origin.y + px(1.), px(12.)) } else { (origin.y + px(1.5), px(13.)) };
-                    let _ = name_line.paint(point(origin.x + px(5.), ty_), lh, window, cx);
-                    let _ = score_line.paint(
-                        point(origin.x + px(5.) + name_line.width + gap, ty_),
+                    chips[i] = Some(Chip {
+                        bounds: chip,
+                        bg: chip_bg,
+                        name: name_line,
+                        score: score_line,
+                        gap,
+                        ty: ty_,
                         lh,
-                        window,
-                        cx,
-                    );
+                    });
                 }
             }
         }
+        // The last group's chips.
+        for c in chips.iter_mut().filter_map(Option::take) {
+            c.paint(window, cx);
+        }
     });
+}
+
+/// A placed label chip, painted after its group's boxes.
+struct Chip {
+    bounds: Bounds<Pixels>,
+    bg: Hsla,
+    name: gpui::ShapedLine,
+    score: gpui::ShapedLine,
+    gap: Pixels,
+    ty: Pixels,
+    lh: Pixels,
+}
+
+impl Chip {
+    fn paint(self, window: &mut Window, cx: &mut gpui::App) {
+        // Dimmed chips fade their fill with the box; the text stays readable.
+        window.paint_quad(fill(self.bounds, self.bg).corner_radii(px(tokens::radius::XS)));
+        let x = self.bounds.origin.x + px(5.);
+        let _ = self.name.paint(point(x, self.ty), self.lh, window, cx);
+        let _ = self.score.paint(point(x + self.name.width + self.gap, self.ty), self.lh, window, cx);
+    }
 }
 
 fn rgba(v: u32) -> Hsla {
