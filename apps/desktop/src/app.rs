@@ -1907,6 +1907,11 @@ impl FoloApp {
     }
 
     pub fn play_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        // Also after a picker that opened while models were there, if they've gone since.
+        if let Some(why) = self.open_image_blocked() {
+            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+            return;
+        }
         let name: SharedString =
             path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
         let n2 = name.to_string();
@@ -2830,6 +2835,11 @@ impl Render for FoloApp {
                         Some("Then drop the image again.".into()),
                         cx,
                     );
+                    return;
+                }
+                // A drop obeys Open image's rule (and says why) before it navigates anywhere.
+                if let Some(why) = this.open_image_blocked() {
+                    this.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
                     return;
                 }
                 if let Some(p) = paths.paths().first().cloned() {
