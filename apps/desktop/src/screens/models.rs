@@ -464,11 +464,12 @@ impl FoloApp {
         let body = match self.store.evals.get(id) {
             Some(Load::Ready(ev)) => {
                 let ev = ev.clone();
-                // Side by side only while the PR panel keeps 520 px beside the matrix (46 %, 440 px
-                // minimum), so its plot stays ~240 px wide; else one above the other.
+                // Side by side only while the PR panel keeps 600 px beside the matrix (46 %, 440 px
+                // minimum): its plot and side legend both fit. Else one above the other, each full
+                // width (at the 1200 content cap that's below a ~1430 px window).
                 let stacked = {
                     let row = self.content_width(window) - 16.;
-                    row - (row * 0.46).max(440.) < 520.
+                    row - (row * 0.46).max(440.) < 600.
                 };
                 let pr = self.pr_panel(&m, &ev, window, cx);
                 let cm = self.confusion_panel(&m, &ev, window, cx);
@@ -996,13 +997,6 @@ impl FoloApp {
             "Hover a class to isolate it · click to pin"
         };
 
-        // The panel's width, as the page lays it out (full width when stacked, else 54 % of the
-        // row): under 600 px the class legend goes below the plot, so the plot keeps the width.
-        let legend_below = {
-            let row = self.content_width(window) - 16.;
-            let stacked = row - (row * 0.46).max(440.) < 520.;
-            (if stacked { row + 16. } else { row * 0.54 }) < 600.
-        };
         panel(&t)
             .flex_1()
             .flex()
@@ -1011,7 +1005,6 @@ impl FoloApp {
             .child(
                 div()
                     .flex()
-                    .when(legend_below, |d| d.flex_col())
                     .child(div().flex_1().min_w_0().child(self.chart_group(
                         "pr-chart",
                         0.01,
@@ -1023,12 +1016,10 @@ impl FoloApp {
                     )))
                     .child(
                         div()
-                            .when(!legend_below, |d| d.w(px(252.)))
+                            .w(px(252.))
                             .flex_none()
                             .p(px(8.))
                             .pt(px(12.))
-                            // Below the plot: inset like the plot, a little air before the panel edge.
-                            .when(legend_below, |d| d.max_w(px(360.)).pt(px(0.)).pb(px(12.)).px(px(16.)))
                             .flex()
                             .flex_col()
                             .gap(px(2.))

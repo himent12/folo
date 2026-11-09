@@ -26,11 +26,26 @@ pub struct DrawBox {
     pub truth: bool,
     pub highlight: bool,
     pub dim: bool,
+    /// One of a set that shares one chip: the first of them the painter can label (largest first,
+    /// as placement runs) takes it, and the rest stay unnamed (a filtered thumbnail names one match).
+    pub one_of: bool,
 }
 
 impl DrawBox {
     pub fn new(class: u32, x1: f32, y1: f32, x2: f32, y2: f32) -> Self {
-        Self { class, x1, y1, x2, y2, label: None, score: None, truth: false, highlight: false, dim: false }
+        Self {
+            class,
+            x1,
+            y1,
+            x2,
+            y2,
+            label: None,
+            score: None,
+            truth: false,
+            highlight: false,
+            dim: false,
+            one_of: false,
+        }
     }
 }
 
@@ -140,6 +155,8 @@ pub fn paint_image_with_boxes(
             .map(|b| Bounds::from_corners(to(b.x1, b.y1), to(b.x2, b.y2)))
             .collect();
         let group = |b: &DrawBox| (b.highlight, b.dim);
+        // Whether a `one_of` box has its chip yet.
+        let mut one_done = false;
         // Two passes. First the chips are placed, the selected and matching boxes first, so they
         // claim the free spots before dimmed ones (a class filter must not leave its own boxes
         // unlabelled). Then everything paints a group at a time, dimmed first and the selected
@@ -228,6 +245,7 @@ pub fn paint_image_with_boxes(
                 if pass == 0
                     && !b.truth
                     && labels
+                    && !(b.one_of && one_done)
                     && !small
                     && !off_view
                     && (b.label.is_some() || b.score.is_some())
@@ -407,6 +425,7 @@ pub fn paint_image_with_boxes(
                     placed.push(chip);
                     let (ty_, lh) =
                         if compact { (origin.y + px(1.), px(12.)) } else { (origin.y + px(1.5), px(13.)) };
+                    one_done |= b.one_of;
                     chips[i] = Some(Chip {
                         bounds: chip,
                         bg: chip_bg,
