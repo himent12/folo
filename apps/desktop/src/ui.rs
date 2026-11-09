@@ -228,10 +228,21 @@ pub fn fmt_conf(c: f32) -> String {
     if three.ends_with('0') { format!("{c:.2}") } else { three }
 }
 
-/// One inference's total latency as every readout writes it: "6.4 ms", or "Sim. 6.4 ms" when the
+/// One inference's total latency as every readout writes it: "6.4 ms", or "6.4 ms simulated" when the
 /// built-in demo simulated it.
 pub fn latency_text(ms: f64, simulated: bool) -> String {
-    if simulated { format!("Sim. {ms:.1} ms") } else { format!("{ms:.1} ms") }
+    if simulated { format!("{ms:.1} ms simulated") } else { format!("{ms:.1} ms") }
+}
+
+/// An action inside a line of text ("Show them ›", "Use 0.31 (best F1) ›"): secondary ink and a
+/// trailing chevron, so every inline action reads as one at rest, not only on hover.
+pub fn inline_link(t: &Theme, label: impl Into<SharedString>) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(2.))
+        .child(text(ty::XS, t.text_secondary).child(label.into()))
+        .child(icon("icons/chevron-right.svg", 12., t.text_secondary))
 }
 
 /// How a model's weights are stored, from its own record (`precision`, `fused`): "f16, fused",

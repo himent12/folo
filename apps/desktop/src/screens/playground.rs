@@ -670,10 +670,9 @@ impl FoloApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
-                            .child(
-                                text(ty::XS, t.text_secondary)
-                                    .child(format!("Use {} (best F1)", fmt_conf(c))),
-                            );
+                            // The shared inline-link look; -4 px so its text ends on the value above.
+                            .mr(px(-4.))
+                            .child(inline_link(&t, format!("Use {} (best F1)", fmt_conf(c))));
                         d.child(row.child(self.bind(
                             link,
                             "play-best-conf",
