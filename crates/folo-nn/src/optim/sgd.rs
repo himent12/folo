@@ -6,7 +6,8 @@ use folo_core::backend::OptimStep;
 use folo_core::{DType, Device, Tensor};
 
 use super::{
-    GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, take_state, validate_groups,
+    GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, step_many, take_state,
+    validate_groups,
 };
 use crate::{Error, Result};
 
@@ -128,7 +129,19 @@ impl Optimizer for Sgd {
         // Warmup can give a momentum-free group a non-zero momentum: give it buffers first.
         self.ensure_buffers(|g| g.momentum > 0.0)?;
         let (groups, bufs) = (&self.groups, &self.bufs);
+        let sgd = |gi: usize| {
+            let g = &groups[gi];
+            let (lr, momentum, weight_decay) = (g.lr as f32, g.momentum as f32, g.weight_decay as f32);
+            OptimStep::Sgd { lr, momentum, weight_decay, nesterov: g.nesterov }
+        };
+        let state = |gi: usize, pi: usize| -> Vec<&Tensor> {
+            bufs[gi][pi].as_ref().filter(|_| groups[gi].momentum as f32 != 0.0).into_iter().collect()
+        };
+        let done = step_many("sgd", groups, grads, sgd, state)?;
         for_each_param(groups, |gi, pi| {
+            if done[gi] {
+                return Ok(());
+            }
             let grp = &groups[gi];
             let (name, p) = &grp.params[pi];
             let Some(g) = grads.grad(p) else { return Ok(()) };

@@ -27,8 +27,8 @@
 use std::sync::{Arc, OnceLock};
 
 use folo_core::backend::{
-    Backend, BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, OptimStep, Pool2dParams, ReduceOp,
-    RunningUpdate, UnaryOp, View,
+    Backend, BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, OptimItem, OptimStep, Pool2dParams,
+    ReduceOp, RunningUpdate, UnaryOp, View,
 };
 use folo_core::{
     CpuStorage, DType as CoreDType, Device, DeviceStorage, Error, Layout, Result, Shape, Storage, Tensor,
@@ -293,6 +293,36 @@ fn conv_label(d: &Conv2dDesc) -> String {
         "{}->{} k{} s{} g{} {}x{}x{} {:?}",
         d.c_in, d.c_out, d.win.kernel.0, d.win.stride.0, d.groups, d.n, d.h, d.w, d.dtype
     )
+}
+
+/// The fused update kernel's form of an optimizer step, if it has one.
+fn optim_update(step: &OptimStep) -> Option<OptimUpdate> {
+    Some(match *step {
+        OptimStep::Sgd { lr, momentum, weight_decay, nesterov } => {
+            OptimUpdate::Sgd { lr, momentum, weight_decay, nesterov }
+        }
+        OptimStep::AdamW {
+            decay,
+            beta1,
+            one_minus_beta1,
+            beta2,
+            one_minus_beta2,
+            step_size,
+            bc2_sqrt,
+            eps,
+        } => OptimUpdate::AdamW {
+            decay,
+            beta1,
+            one_minus_beta1,
+            beta2,
+            one_minus_beta2,
+            step_size,
+            bc2_sqrt,
+            eps,
+        },
+        OptimStep::Axpby { a, b } => OptimUpdate::Axpby { a, b },
+        _ => return None,
+    })
 }
 
 /// The conv epilogue's form of a fused activation, if it has one.
@@ -1117,37 +1147,44 @@ impl Backend for GpuBackend {
     ) -> Result<()> {
         let n = grad.layout.numel();
         let _p = profile::scope(|| "optim".to_string());
-        let u = match *step {
-            OptimStep::Sgd { lr, momentum, weight_decay, nesterov } => {
-                OptimUpdate::Sgd { lr, momentum, weight_decay, nesterov }
-            }
-            OptimStep::AdamW {
-                decay,
-                beta1,
-                one_minus_beta1,
-                beta2,
-                one_minus_beta2,
-                step_size,
-                bc2_sqrt,
-                eps,
-            } => OptimUpdate::AdamW {
-                decay,
-                beta1,
-                one_minus_beta1,
-                beta2,
-                one_minus_beta2,
-                step_size,
-                bc2_sqrt,
-                eps,
-            },
-            OptimStep::Axpby { a, b } => OptimUpdate::Axpby { a, b },
-            _ => return Err(Error::NotSupported { op: "optimizer_step", backend: BACKEND_NAME }),
-        };
+        let u =
+            optim_update(step).ok_or(Error::NotSupported { op: "optimizer_step", backend: BACKEND_NAME })?;
         let gd = self.dense(&grad)?;
         let p = self.storage_buf(param)?;
         let s0 = state.first().map(|s| self.storage_buf(s)).transpose()?;
         let s1 = state.get(1).map(|s| self.storage_buf(s)).transpose()?;
         optim::optimizer_step(&self.ctx, &u, p, gd.raw(), s0, s1, n).core()
+    }
+
+    fn optimizer_step_many(&self, items: &mut [OptimItem<'_>], step: &OptimStep) -> Result<()> {
+        let _p = profile::scope(|| "optim_many".to_string());
+        let u = optim_update(step)
+            .ok_or(Error::NotSupported { op: "optimizer_step_many", backend: BACKEND_NAME })?;
+        let grads = items.iter().map(|it| self.dense(&it.grad)).collect::<Result<Vec<_>>>()?;
+        let mut many = Vec::with_capacity(items.len());
+        for (it, g) in items.iter().zip(&grads) {
+            many.push(optim::ManyItem {
+                p: self.storage_buf(it.param)?,
+                g: g.raw(),
+                s0: it.state.first().map(|s| self.storage_buf(s)).transpose()?,
+                s1: it.state.get(1).map(|s| self.storage_buf(s)).transpose()?,
+                n: it.grad.layout.numel(),
+            });
+        }
+        optim::optimizer_step_many(&self.ctx, &u, &many).core()
+    }
+
+    fn unscale_check_many(
+        &self,
+        xs: &mut [&mut Storage],
+        ns: &[usize],
+        factor: f32,
+        flag: &mut Storage,
+    ) -> Result<()> {
+        let _p = profile::scope(|| "unscale_many".to_string());
+        let bufs =
+            xs.iter().zip(ns).map(|(x, &n)| Ok((self.storage_buf(x)?, n))).collect::<Result<Vec<_>>>()?;
+        optim::unscale_check_many(&self.ctx, &bufs, factor, self.storage_buf(flag)?).core()
     }
 
     fn unscale_check(&self, x: &mut Storage, n: usize, factor: f32, flag: &mut Storage) -> Result<()> {

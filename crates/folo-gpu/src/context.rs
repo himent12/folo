@@ -230,6 +230,8 @@ pub struct Capabilities {
     pub max_workgroups_per_dim: u32,
     /// Uniform buffer offset alignment.
     pub uniform_align: u32,
+    /// Storage buffers one kernel can bind.
+    pub max_storage_buffers: u32,
 }
 
 struct UniformChunk {
@@ -565,6 +567,7 @@ impl GpuContext {
             max_workgroup_storage: dl.max_compute_workgroup_storage_size,
             max_workgroups_per_dim: dl.max_compute_workgroups_per_dimension,
             uniform_align: dl.min_uniform_buffer_offset_alignment,
+            max_storage_buffers: dl.max_storage_buffers_per_shader_stage,
         };
         let profiler = profile.then(|| Mutex::new(Profiler::new(&device, &queue)));
         let dummy = device.create_buffer(&wgpu::BufferDescriptor {

@@ -56,11 +56,13 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 - `Sgd`: L2 (coupled) decay, `buf = μ·buf + g` (zero-initialised, so the first step is `buf = g`), Nesterov
   `p −= lr·(g + μ·buf)`. `AdamW`: decoupled decay `p *= 1 − lr·wd`, bias-corrected moments, global step counter.
   Both skip parameters without a gradient, update CPU tensors with fused per-element loops (parallel over
-  parameters for large steps), use one fused update kernel per parameter on the GPU (`Tensor::optimizer_step_`,
-  same op order), and fall back to tensor ops with the same arithmetic elsewhere.
+  parameters for large steps), update each parameter group on the GPU with one multi-tensor call
+  (`Tensor::optimizer_step_many_`: 16 parameters per dispatch, the per-element op order of the single-parameter
+  kernel `Tensor::optimizer_step_`, which is the fallback), and fall back to tensor ops with the same arithmetic
+  elsewhere.
 - `GradAccumulator` sums gradients over a window of backward passes into private buffers (reused across windows),
   implements `GradSource` for the step, and does MODEL.md's global-norm clipping (`clip_grad_norm`). On the GPU a pass
-  adds with one fused `buf = buf + g` kernel per parameter, and clipping stays on the device: the norm (in `f32`) and
+  adds with one multi-tensor `buf = buf + g` call (16 buffers per dispatch), and clipping stays on the device: the norm (in `f32`) and
   the factor `max_norm / (n + 1e-6)` (or 1) are device scalars that scale every buffer, so no value is read back
   (`clip_grad_norm` then returns NaN instead of the norm).
 - Mixed precision: `GradAccumulator::unscale_clip(inv_scale, max_norm)` unscales the accumulated gradients, clips
@@ -79,8 +81,9 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   `to_json()` / `from_json()`, exact round trip). The scale stays within `[MIN_SCALE, MAX_SCALE] = [2^-126, 2^126]`
   (`usable_scale`: it and its inverse are normal f32 values); restored states outside it are refused.
 - `amp::unscale_(tensors, inv_scale)`: multiplies private gradient buffers by `1 / S` in place and returns whether all
-  are finite. On a device each buffer takes one fused `Tensor::unscale_check_` kernel that also raises a shared
-  device flag, read back once; elsewhere tensor ops.
+  are finite. On a device the buffers take one multi-tensor `Tensor::unscale_check_many_` call (16 per dispatch,
+  else one `Tensor::unscale_check_` kernel each) that also raises a shared device flag, read back once; elsewhere
+  tensor ops.
 - The forward side is folo-core's `autocast` (docs/ARCHITECTURE.md); layers need no changes: `Conv2d` and
   `ConvBnAct` call `conv2d_with`, which autocast runs in f16 against the f32 weights, and `BatchNorm2d`'s fused GPU
   path takes f16 activations with its f32 parameters and statistics (its dγ, dβ are f32, dx f16).
@@ -91,7 +94,8 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   iteration `t`; the `bias` group warms up from `warmup_bias_lr`), `opt.step(..)`, `sched.advance()`.
   `contract()` / `from_contract()` are `folo.sched`.
 - `ModelEma<M>` keeps a second instance of the model (eval mode, no grad, on the source's device) and updates every
-  parameter and floating buffer with `d = decay · (1 − exp(−updates / tau))` (a fused `a·p + b·g` kernel on the GPU).
+  parameter and floating buffer with `d = decay · (1 − exp(−updates / tau))` (on the GPU one multi-tensor
+  `a·p + b·g` call for all of them, 16 per dispatch).
   The object-safe `EmaState` trait is what checkpoints use.
 
 ## `.folo` files (`folo_nn::io`)

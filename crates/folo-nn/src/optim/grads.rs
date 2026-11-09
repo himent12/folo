@@ -44,8 +44,24 @@ impl GradAccumulator {
     /// Add the gradients of one backward pass.
     pub fn add(&mut self, grads: &Grads) -> Result<()> {
         let _g = no_grad();
+        // On a device, every `buf += g` in one multi-tensor update (16 per dispatch on the GPU).
+        let mut summed = false;
+        if self.slots.iter().any(|s| s.valid && !s.param.device().is_cpu()) {
+            let (mut bufs, mut gs) = (Vec::new(), Vec::new());
+            for s in self.slots.iter().filter(|s| s.valid) {
+                if let Some(g) = grads.get(&s.param) {
+                    bufs.push(s.buf.as_ref().expect("valid slot has a buffer"));
+                    gs.push(g);
+                }
+            }
+            let none = vec![Vec::new(); bufs.len()];
+            summed = Tensor::optimizer_step_many_(&bufs, &gs, &none, &OptimStep::Axpby { a: 1.0, b: 1.0 })?;
+        }
         for s in &mut self.slots {
             let Some(g) = grads.get(&s.param) else { continue };
+            if s.valid && summed {
+                continue;
+            }
             if s.valid {
                 let buf = s.buf.as_ref().expect("valid slot has a buffer");
                 // One fused in-place `buf = buf + g` where the backend has it (the GPU), else a tensor op.

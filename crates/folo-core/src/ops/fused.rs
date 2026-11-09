@@ -394,4 +394,144 @@ impl Tensor {
             Err(e) => Err(e),
         }
     }
+
+    /// [`Tensor::optimizer_step_`] for many parameters with one update: `params[i]` from `grads[i]` with the state
+    /// tensors `states[i]`, through the backend's multi-tensor kernel
+    /// ([`crate::backend::Backend::optimizer_step_many`]; the GPU updates 16 tensors per dispatch). The arithmetic
+    /// per element is that of `optimizer_step_`. Returns `Ok(false)`, touching nothing, when the backend has no
+    /// such kernel or any tensor does not fit one (as for `optimizer_step_`, and every tensor on one device, no
+    /// storage used twice in the whole call); the caller then updates them one by one.
+    pub fn optimizer_step_many_(
+        params: &[&Tensor],
+        grads: &[&Tensor],
+        states: &[Vec<&Tensor>],
+        step: &OptimStep,
+    ) -> Result<bool> {
+        const OP: &str = "optimizer_step_many_";
+        if params.len() != grads.len() || params.len() != states.len() {
+            return Err(Error::invalid_arg(
+                OP,
+                format!("{} parameters, {} gradients, {} states", params.len(), grads.len(), states.len()),
+            ));
+        }
+        let Some(first) = params.first() else { return Ok(true) };
+        let mutated = params.iter().copied().chain(states.iter().flatten().copied());
+        if is_grad_enabled() && mutated.clone().any(|t| t.requires_grad()) {
+            return Err(Error::Autograd(format!(
+                "{OP}: in-place update of a tensor that requires grad; run it under no_grad()"
+            )));
+        }
+        for s in states {
+            let want = match step {
+                OptimStep::Sgd { .. } => s.len() <= 1,
+                OptimStep::AdamW { .. } => s.len() == 2,
+                OptimStep::Axpby { .. } => s.is_empty(),
+            };
+            if !want || s.len() != states[0].len() {
+                return Err(Error::invalid_arg(OP, format!("{} state tensors do not fit {step:?}", s.len())));
+            }
+        }
+        let dev = first.device();
+        for ((p, g), s) in params.iter().zip(grads).zip(states) {
+            let n = p.numel();
+            let fits = |t: &Tensor| {
+                t.dtype() == DType::F32
+                    && t.device() == dev
+                    && t.shape() == p.shape()
+                    && t.layout().contiguous_range() == Some(0..n)
+            };
+            if g.shape() != p.shape() || g.dtype() != DType::F32 || g.device() != dev || !fits(p) {
+                return Ok(false);
+            }
+            if !s.iter().all(|t| fits(t)) {
+                return Ok(false);
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        if !mutated
+            .clone()
+            .chain(grads.iter().copied())
+            .all(|t| seen.insert(std::sync::Arc::as_ptr(t.cell())))
+        {
+            return Ok(false);
+        }
+        let b = first.backend()?;
+        let r = {
+            let gr: Vec<_> = grads.iter().map(|g| g.cell().read()).collect();
+            let mut pw: Vec<_> = params.iter().map(|p| p.cell().write_unversioned()).collect();
+            let mut sw: Vec<Vec<_>> =
+                states.iter().map(|s| s.iter().map(|t| t.cell().write_unversioned()).collect()).collect();
+            let mut items: Vec<crate::backend::OptimItem<'_>> = pw
+                .iter_mut()
+                .zip(&gr)
+                .zip(grads)
+                .zip(sw.iter_mut())
+                .map(|(((p, gs), g), s)| crate::backend::OptimItem {
+                    param: p,
+                    grad: crate::backend::View::new(gs, g.layout()),
+                    state: s.iter_mut().map(|t| &mut **t).collect(),
+                })
+                .collect();
+            let r = b.optimizer_step_many(&mut items, step);
+            // Bump versions only if the backend may have written, so a fallback keeps existing graphs valid.
+            if !matches!(&r, Err(e) if unsupported(e)) {
+                for t in mutated {
+                    t.cell().mark_modified();
+                }
+            }
+            r
+        };
+        match r {
+            Ok(()) => Ok(true),
+            Err(e) if unsupported(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// [`Tensor::unscale_check_`] for many tensors into one flag, through the backend's multi-tensor kernel
+    /// ([`crate::backend::Backend::unscale_check_many`]). Returns `Ok(false)`, touching nothing, when the backend
+    /// has no such kernel or any tensor does not fit (as for `unscale_check_`, every tensor on the flag's device
+    /// and no storage used twice); the caller then takes them one by one.
+    pub fn unscale_check_many_(xs: &[&Tensor], factor: f32, flag: &Tensor) -> Result<bool> {
+        const OP: &str = "unscale_check_many_";
+        if is_grad_enabled() && (flag.requires_grad() || xs.iter().any(|t| t.requires_grad())) {
+            return Err(Error::Autograd(format!(
+                "{OP}: in-place update of a tensor that requires grad; run it under no_grad()"
+            )));
+        }
+        let fits = flag.dtype() == DType::U32
+            && flag.numel() == 1
+            && flag.layout().contiguous_range() == Some(0..1)
+            && xs.iter().all(|t| {
+                t.dtype() == DType::F32
+                    && t.device() == flag.device()
+                    && t.layout().contiguous_range() == Some(0..t.numel())
+            });
+        let mut seen = std::collections::HashSet::new();
+        if !fits || !xs.iter().copied().chain([flag]).all(|t| seen.insert(std::sync::Arc::as_ptr(t.cell()))) {
+            return Ok(false);
+        }
+        if xs.is_empty() {
+            return Ok(true);
+        }
+        let b = flag.backend()?;
+        let r = {
+            let mut xw: Vec<_> = xs.iter().map(|t| t.cell().write_unversioned()).collect();
+            let mut fw = flag.cell().write_unversioned();
+            let mut xm: Vec<&mut crate::Storage> = xw.iter_mut().map(|g| &mut **g).collect();
+            let ns: Vec<usize> = xs.iter().map(|t| t.numel()).collect();
+            let r = b.unscale_check_many(&mut xm, &ns, factor, &mut fw);
+            if !matches!(&r, Err(e) if unsupported(e)) {
+                for t in xs.iter().copied().chain([flag]) {
+                    t.cell().mark_modified();
+                }
+            }
+            r
+        };
+        match r {
+            Ok(()) => Ok(true),
+            Err(e) if unsupported(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
 }
