@@ -2,7 +2,8 @@
 //! `cargo bench -p folo-vision --bench gpu` (`FOLO_BENCH_SCALES=n,s` picks scales, default `n,s`;
 //! `FOLO_BENCH_PRECISION=f32,f16,f16tc` the inference precisions, default all three, f16 only where the GPU
 //! computes in it and `f16tc` (f16 on tensor cores) only with `FOLO_GPU_TENSOR_CORES=1` on an adapter that has them;
-//! `FOLO_BENCH_SECTIONS=forward,predict,train` the sections, default all).
+//! `FOLO_BENCH_SECTIONS=forward,predict,train` the sections, default all; `FOLO_BENCH_TRAIN=f32,amp` the
+//! training precisions, default both, `amp` only on a context with tensor cores).
 //!
 //! Per scale, 80 classes, 640×640, untrained (seed-0) weights, inference in f32 and f16 (half precision: f16
 //! weights and activations, f32 accumulation; the input is f16 too, and the predictor letterboxes into f16):
@@ -19,6 +20,9 @@
 //!   forward (fused BatchNorm + SiLU kernels), the detection loss (assigner and terms as GPU kernels, one
 //!   readback of the reported items),
 //!   backward, SGD (momentum 0.937, Nesterov, weight decay on the decay group). 3 warm-up steps, median of 10.
+//!   **amp** (mixed precision, docs/MODEL.md §8.8) is the incumbent's `autocast` + `GradScaler` step: the forward
+//!   under `folo_core::autocast` (f16 on tensor cores), the loss in f32, backward of the loss times the loss scale,
+//!   the gradients unscaled and checked for overflow on the GPU (one flag readback), SGD, the scaler update.
 //! - **peak memory**: the buffer pool's peak live bytes over the measured calls (PyTorch's
 //!   `max_memory_allocated` counterpart, in pool size classes, which round up by at most 25%).
 //!
@@ -30,11 +34,11 @@ use std::time::{Duration, Instant};
 
 use folo_core::backend::synchronize;
 use folo_core::rng::Rng;
-use folo_core::{Device, Tensor, no_grad};
+use folo_core::{DType, Device, Tensor, no_grad};
 use folo_data::{Image, Letterbox, LetterboxOptions};
 use folo_gpu::GpuContext;
-use folo_nn::Module;
-use folo_nn::optim::{Optimizer, Sgd, StandardGroups};
+use folo_nn::optim::{GradAccumulator, Optimizer, Sgd, StandardGroups};
+use folo_nn::{GradScaler, Module};
 use folo_vision::boxes::Xyxy;
 use folo_vision::loss::{ImageTargets, LossConfig, detection_loss, detection_loss_host};
 use folo_vision::model::{FoloModel, ModelConfig};
@@ -221,16 +225,20 @@ fn bench_infer(scale: &str, dev: Device, ctx: &GpuContext, prec: Precision, tc: 
     }
 }
 
-/// The training step of folo-`scale` (f32).
-fn bench_train(scale: &str, dev: Device, ctx: &GpuContext) {
+/// The training step of folo-`scale`, f32 or mixed precision (`amp`).
+fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     let cfg = ModelConfig::new(scale, 80).expect("config");
     let rng = &mut Rng::seed(1);
-    println!("\nfolo-{scale} training");
+    let label = if amp { "amp" } else { "f32" };
+    println!("\nfolo-{scale} training ({label})");
     println!("  [gpu load before train: {}]", gpu_load());
     let mut model = FoloModel::new(cfg).expect("model");
     model.to_device(dev).expect("to_device");
     let groups = StandardGroups::from_module(&model).into_groups(0.01, 0.937, 5e-4);
     let mut opt = Sgd::new(groups).expect("sgd");
+    let mut acc = GradAccumulator::new(&model.parameters());
+    let mut scaler = GradScaler::new();
+    let mut skipped = 0;
     let x = Tensor::rand_uniform([16, 3, 640, 640], 0.0, 1.0, rng).to_device(dev).expect("upload");
     let targets: Vec<ImageTargets> = (0..16)
         .map(|_| {
@@ -257,24 +265,44 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext) {
             }
         };
         let t0 = Instant::now();
-        let out = model.forward(&x).expect("forward");
+        let out = {
+            let _a = amp.then(folo_core::autocast);
+            model.forward(&x).expect("forward")
+        };
+        let (box_raw, cls_raw) =
+            (out.box_raw.to_dtype(DType::F32).unwrap(), out.cls_raw.to_dtype(DType::F32).unwrap());
         sync(split);
         let t1 = Instant::now();
         let loss = if host {
-            detection_loss_host(&out.box_raw, &out.cls_raw, &out.anchors, &targets, &lcfg)
+            detection_loss_host(&box_raw, &cls_raw, &out.anchors, &targets, &lcfg)
         } else {
-            detection_loss(&out.box_raw, &out.cls_raw, &out.anchors, &targets, &lcfg)
+            detection_loss(&box_raw, &cls_raw, &out.anchors, &targets, &lcfg)
         }
         .expect("loss");
         sync(split);
         let t2 = Instant::now();
-        let grads = loss.total.backward().expect("backward");
-        drop(out);
-        drop(loss);
+        let total =
+            if amp { loss.total.mul_scalar(scaler.scale() as f32).unwrap() } else { loss.total.clone() };
+        let grads = total.backward().expect("backward");
+        drop((out, box_raw, cls_raw, total, loss));
         sync(split);
         let t3 = Instant::now();
-        opt.step(&grads).expect("step");
-        drop(grads);
+        if amp {
+            // `scaler.step(opt)`: unscale, the overflow check (one readback), the step unless it overflowed.
+            acc.zero();
+            acc.add(&grads).expect("accumulate");
+            drop(grads);
+            let finite = acc.unscale_clip(scaler.inv_scale(), 0.0).expect("unscale");
+            if finite {
+                opt.step(&acc).expect("step");
+            } else {
+                skipped += 1;
+            }
+            scaler.update(!finite);
+        } else {
+            opt.step(&grads).expect("step");
+            drop(grads);
+        }
         sync(true);
         (t0.elapsed(), [t1 - t0, t2 - t1, t3 - t2, t3.elapsed()])
     };
@@ -286,7 +314,7 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext) {
     ctx.reset_peak_memory();
     let s = stats((0..10).map(|_| step(false, false).0).collect());
     let peak = ctx.pool_stats().peak_live_bytes;
-    row("train step b16 (f32, SGD)", &s, 16);
+    row(&format!("train step b16 ({label}, SGD)"), &s, 16);
     let mut split = |host: bool| {
         step(true, host);
         let runs: Vec<[Duration; 4]> = (0..10).map(|_| step(true, host).1).collect();
@@ -296,11 +324,16 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext) {
     let (f, l, b, o) = split(false);
     println!(
         "    split (medians, each phase synchronised): forward {f:.1} ms, loss {l:.1} ms, backward {b:.1} ms, \
-         SGD {o:.1} ms; {} dispatches and {} submissions per step; peak {:.0} MiB",
+         {} {o:.1} ms; {} dispatches and {} submissions per step; peak {:.0} MiB",
+        if amp { "unscale + check + SGD" } else { "SGD" },
         (w1.dispatches - w0.dispatches) / 3,
         (w1.submissions - w0.submissions) / 3,
         mib(peak)
     );
+    if amp {
+        println!("    loss scale {} after {skipped} skipped steps", scaler.scale());
+        return;
+    }
     let (_, l, b, _) = split(true);
     println!("    host assigner instead (detection_loss_host): loss {l:.1} ms, backward {b:.1} ms");
 }
@@ -318,6 +351,7 @@ fn main() {
     println!("folo-vision GPU bench on {} ({}, driver {})", s.name, s.backend, s.driver);
     let scales = std::env::var("FOLO_BENCH_SCALES").unwrap_or_else(|_| "n,s".into());
     let sections = std::env::var("FOLO_BENCH_SECTIONS").unwrap_or_else(|_| "forward,predict,train".into());
+    let train = std::env::var("FOLO_BENCH_TRAIN").unwrap_or_else(|_| "f32,amp".into());
     // `(precision, on tensor cores)` per entry.
     let precisions: Vec<(Precision, bool)> = std::env::var("FOLO_BENCH_PRECISION")
         .unwrap_or_else(|_| "f32,f16,f16tc".into())
@@ -345,8 +379,19 @@ fn main() {
             bench_infer(scale, dev, &ctx, prec, on, &sections);
         }
         ctx.set_tensor_cores(tc);
-        if sections.contains("train") {
-            bench_train(scale, dev, &ctx);
+        if !sections.contains("train") {
+            continue;
+        }
+        for p in train.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            match p {
+                "f32" => bench_train(scale, dev, &ctx, false),
+                "amp" if ctx.caps().coop_f16 && ctx.set_tensor_cores(true) => {
+                    bench_train(scale, dev, &ctx, true);
+                    ctx.set_tensor_cores(tc);
+                }
+                "amp" => println!("\nfolo-{scale} training (amp): skipped ({})", ctx.tensor_cores_status()),
+                p => panic!("FOLO_BENCH_TRAIN: f32 and / or amp, got `{p}`"),
+            }
         }
     }
 }

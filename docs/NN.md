@@ -63,9 +63,25 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   adds with one fused `buf = buf + g` kernel per parameter, and clipping stays on the device: the norm (in `f32`) and
   the factor `max_norm / (n + 1e-6)` (or 1) are device scalars that scale every buffer, so no value is read back
   (`clip_grad_norm` then returns NaN instead of the norm).
+- Mixed precision: `GradAccumulator::unscale_clip(inv_scale, max_norm)` unscales the accumulated gradients, clips
+  them and returns whether all are finite, with one readback on the GPU: with clipping the unscale is folded into the
+  clip factors and the finiteness check is the clipping norm itself (the overflow-safe sum makes it non-finite
+  exactly when a gradient is); without, it is `amp::unscale_` (below).
 - Recipe helpers: `accumulate_steps(nbs, batch)`, `effective_weight_decay`, `auto_optimizer` (§8.2 `auto`).
 - `Optimizer::contract()` / `apply_contract()` / `state_tensors()` / `load_state()` are the `folo.optim` contract
   and `optim.*` tensors of FORMAT.md.
+
+## Mixed precision (`folo_nn::amp`)
+- `GradScaler`: dynamic loss scaling as `torch.cuda.amp.GradScaler` (docs/MODEL.md §8.8): `scale()` (initially
+  `2^16`), `inv_scale()`, `update(found_inf)` (a skip backs off ×0.5 and restarts the count; 2000 finite steps in a
+  row grow ×2) returning `ScaleUpdate::{Kept, Grew, BackedOff}`, `skipped_steps()`, and the `folo.amp` checkpoint
+  entry (`contract()` / `from_contract()`, `to_json()` / `from_json()`, exact round trip).
+- `amp::unscale_(tensors, inv_scale)`: multiplies private gradient buffers by `1 / S` in place and returns whether all
+  are finite. On a device each buffer takes one fused `Tensor::unscale_check_` kernel that also raises a shared
+  device flag, read back once; elsewhere tensor ops.
+- The forward side is folo-core's `autocast` (docs/ARCHITECTURE.md); layers need no changes: `Conv2d` and
+  `ConvBnAct` call `conv2d_with`, which autocast runs in f16 against the f32 weights, and `BatchNorm2d`'s fused GPU
+  path takes f16 activations with its f32 parameters and statistics (its dγ, dβ are f32, dx f16).
 
 ## Schedule and EMA
 - `LrSchedule::new(kind, epochs, steps_per_epoch, lrf, warmup_epochs, warmup_bias_lr, warmup_momentum)` computes

@@ -70,9 +70,14 @@ fn gen_pool(spec: &Spec) -> String {
              @group(0) @binding(3) var<storage, read_write> YI: array<u32>;\n",
         ),
         1 => s.push_str(
-            "@group(0) @binding(1) var<storage, read> X: array<f32>;\n\
+            "@group(0) @binding(1) var<storage, read> X: array<T>;\n\
              @group(0) @binding(2) var<storage, read> IDX: array<u32>;\n\
-             @group(0) @binding(3) var<storage, read_write> Y: array<f32>;\n",
+             @group(0) @binding(3) var<storage, read_write> Y: array<T>;\n",
+        ),
+        // Upsample backward: f32 or f16 (T), summed in f32.
+        6 => s.push_str(
+            "@group(0) @binding(1) var<storage, read> X: array<T>;\n\
+             @group(0) @binding(2) var<storage, read_write> Y: array<T>;\n",
         ),
         _ => s.push_str(
             "@group(0) @binding(1) var<storage, read> X: array<f32>;\n\
@@ -150,7 +155,7 @@ fn gen_pool(spec: &Spec) -> String {
                       \x20 for (var oy = i32(first_out(iy, kh, sh, ph)); oy <= yb; oy++) {\n\
                       \x20   for (var ox = i32(first_out(ix, kw, sw, pw)); ox <= xb; ox++) {\n\
                       \x20     let o = gbase + u32(oy) * ow + u32(ox);\n\
-                      \x20     if (IDX[2u * o] == own) { acc += X[o]; }\n\
+                      \x20     if (IDX[2u * o] == own) { acc += f32(X[o]); }\n\
                       \x20   }\n\
                       \x20 }\n"
                 }
@@ -181,11 +186,11 @@ fn gen_pool(spec: &Spec) -> String {
                 }
                 _ => {
                     "  for (var a = 0u; a < kh; a++) {\n\
-                      \x20   for (var b = 0u; b < kw; b++) { acc += X[gbase + (iy * kh + a) * ow + ix * kw + b]; }\n\
+                      \x20   for (var b = 0u; b < kw; b++) { acc += f32(X[gbase + (iy * kh + a) * ow + ix * kw + b]); }\n\
                       \x20 }\n"
                 }
             };
-            format!("{head}{rest}  Y[i] = acc;\n")
+            format!("{head}{rest}  Y[i] = T(acc);\n")
         }
     };
     s.push_str(&body);
@@ -267,7 +272,8 @@ pub fn max_pool2d_indices(
     Ok((oh, ow))
 }
 
-/// Gradient of [`max_pool2d_indices`]: `gx[p, i] = Σ g[p, o]` over the outputs `o` whose index is `i`.
+/// Gradient of [`max_pool2d_indices`]: `gx[p, i] = Σ g[p, o]` over the outputs `o` whose index is `i`. `g` and
+/// `gx` are stored as `dtype` (f32 or f16; the sum is f32).
 pub fn max_pool2d_backward(
     ctx: &GpuContext,
     g: &wgpu::Buffer,
@@ -275,13 +281,15 @@ pub fn max_pool2d_backward(
     gx: &wgpu::Buffer,
     (planes, h, w): (usize, usize, usize),
     win: &Pool2d,
+    dtype: DType,
 ) -> Result<()> {
+    check_dtype(ctx, dtype, "max_pool2d_backward")?;
     let (oh, ow) = win.output(h, w)?;
     let n = prod(&[planes, oh, ow])?;
-    check_buf(g, n, DType::F32, "max_pool2d_backward grad")?;
+    check_buf(g, n, dtype, "max_pool2d_backward grad")?;
     check_buf(indices, prod(&[n, 2])?, DType::F32, "max_pool2d_backward indices")?;
     let total = prod(&[planes, h, w])?;
-    check_buf(gx, total, DType::F32, "max_pool2d_backward output")?;
+    check_buf(gx, total, dtype, "max_pool2d_backward output")?;
     launch(
         ctx,
         &POOL_BW_IDX,
@@ -292,7 +300,7 @@ pub fn max_pool2d_backward(
         win.kernel,
         win.stride,
         win.padding,
-        false,
+        dtype == DType::F16,
     )
 }
 
@@ -376,17 +384,21 @@ pub fn adaptive_avg_pool2d_backward(
 }
 
 /// Gradient of nearest upsampling by integer factors `(sh, sw)`: each input element sums its `sh × sw` block
-/// of `g` (`planes × h·sh × w·sw`) into `gx` (`planes × h × w`).
+/// of `g` (`planes × h·sh × w·sw`) into `gx` (`planes × h × w`), both stored as `dtype` (f32 or f16; the sum
+/// is f32).
 pub fn upsample_nearest2d_backward(
     ctx: &GpuContext,
     g: &wgpu::Buffer,
     gx: &wgpu::Buffer,
     (planes, h, w): (usize, usize, usize),
     (sh, sw): (usize, usize),
+    dtype: DType,
 ) -> Result<()> {
+    check_dtype(ctx, dtype, "upsample_nearest2d_backward")?;
     let (oh, ow) = (prod(&[h, sh])?, prod(&[w, sw])?);
-    check_buf(g, prod(&[planes, oh, ow])?, DType::F32, "upsample_backward grad")?;
+    check_buf(g, prod(&[planes, oh, ow])?, dtype, "upsample_backward grad")?;
     let total = prod(&[planes, h, w])?;
-    check_buf(gx, total, DType::F32, "upsample_backward output")?;
-    launch(ctx, &POOL, 6, &[g, gx], total, (h, w, oh, ow), (sh, sw), (1, 1), (0, 0), false)
+    check_buf(gx, total, dtype, "upsample_backward output")?;
+    let half = dtype == DType::F16;
+    launch(ctx, &POOL, 6, &[g, gx], total, (h, w, oh, ow), (sh, sw), (1, 1), (0, 0), half)
 }

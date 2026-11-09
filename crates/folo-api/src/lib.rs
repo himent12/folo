@@ -734,6 +734,10 @@ pub struct TrainConfig {
     /// RNG seed.
     #[serde(default)]
     pub seed: u64,
+    /// Mixed-precision training (f16 on GPU tensor cores, docs/MODEL.md §8.8). Needs a GPU whose context has tensor
+    /// cores (`folo serve --tensor-cores`); otherwise the run fails with `not_supported`.
+    #[serde(default)]
+    pub amp: bool,
 }
 
 fn default_epochs() -> u32 {

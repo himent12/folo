@@ -68,6 +68,7 @@ All values are strings; structured values are JSON encoded into a string.
 | `folo.rng` | checkpoint | JSON: `{ "algo": "<generator name from folo_core::rng, e.g. xoshiro256pp>", "seed": <u64>, "streams": { "<stream name>": "<state as lowercase hex of the generator's state words, little-endian>" } }`. Stream names are defined by the trainer (e.g. `data`, `augment`, `init`) |
 | `folo.epoch` | checkpoint | number of completed epochs. In v1, checkpoints are written only at epoch boundaries, so no within-epoch loader position is stored |
 | `folo.metrics` | no | JSON: best validation metrics `{ "map50", "map50_95", "precision", "recall" }` |
+| `folo.amp` | checkpoint, if `folo.train` has `"amp": true` | JSON: the loss scaler of a mixed-precision run (docs/MODEL.md §8.8), `{ "scale": 16384.0, "growth_factor": 2.0, "backoff_factor": 0.5, "growth_interval": 2000, "growth_tracker": <finite steps since the last growth or backoff, below growth_interval>, "skipped_steps": <steps skipped for overflow in the run> }`. Every scale the default factors reach from `2^16` is a power of two, so the number round-trips exactly and a resume continues bit-exactly. A mixed-precision checkpoint without it does not resume |
 | `folo.best` | checkpoint | JSON: early-stopping state `{ "epoch": <best epoch, -1 if none>, "fitness": <best fitness, null if none> }`, see docs/MODEL.md (validation schedule) |
 | `folo.created` | no | RFC 3339 timestamp |
 | `folo.version` | no | FOLO version that wrote the file |

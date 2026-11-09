@@ -504,3 +504,137 @@ fn conv_routing_matches_regular_kernel() {
         assert!((p - t).abs() <= 2e-3 * (1.0 + p.abs()), "[{i}] regular {p} vs tensor cores {t}");
     }
 }
+
+// ----- conv gradients (mixed-precision training) ----------------------------------------------------------------
+
+/// f64 reference gradients of the conv `d` for the output gradient `g`: `(gx, gw)`, or their absolute-term sums
+/// with `abs` (for the error bounds).
+fn cpu_conv_grads(d: &Conv2dDesc, x: &[f32], w: &[f32], g: &[f32], abs: bool) -> (Vec<f32>, Vec<f32>) {
+    let (oh, ow) = d.output().unwrap();
+    let (kh, kw) = d.win.kernel;
+    let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
+    let mut gx = vec![0f64; x.len()];
+    let mut gw = vec![0f64; w.len()];
+    let f = |p: f64| if abs { p.abs() } else { p };
+    for n in 0..d.n {
+        for co in 0..d.c_out {
+            let grp = co / cout_g;
+            for oy in 0..oh {
+                for ox in 0..ow {
+                    let gv = g[((n * d.c_out + co) * oh + oy) * ow + ox] as f64;
+                    for ci in 0..cin_g {
+                        for ky in 0..kh {
+                            for kx in 0..kw {
+                                let iy = (oy * d.win.stride.0 + ky * d.win.dilation.0) as isize
+                                    - d.win.padding.0 as isize;
+                                let ix = (ox * d.win.stride.1 + kx * d.win.dilation.1) as isize
+                                    - d.win.padding.1 as isize;
+                                if iy < 0 || ix < 0 || iy >= d.h as isize || ix >= d.w as isize {
+                                    continue;
+                                }
+                                let xi =
+                                    ((n * d.c_in + grp * cin_g + ci) * d.h + iy as usize) * d.w + ix as usize;
+                                let wi = ((co * cin_g + ci) * kh + ky) * kw + kx;
+                                gx[xi] += f(gv * w[wi] as f64);
+                                gw[wi] += f(gv * x[xi] as f64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let cast = |v: Vec<f64>| v.into_iter().map(|s| s as f32).collect();
+    (cast(gx), cast(gw))
+}
+
+/// Both gradients of the f16 conv `d` (input gradient f16; weight gradient as `w_out`) against the f64 reference,
+/// on tensor cores (`tc`) or the regular kernels.
+fn run_conv_grads(ctx: &GpuContext, d: &Conv2dDesc, w_out: DType, tc: bool, seed: u64) {
+    ctx.set_tensor_cores(tc);
+    let mut rng = Rng::new(seed);
+    let (oh, ow) = d.output().unwrap();
+    let (kh, kw) = d.win.kernel;
+    let x = f16_round(&rng.vec(d.n * d.c_in * d.h * d.w, -1.0, 1.0));
+    let w = f16_round(&rng.vec(d.c_out * (d.c_in / d.groups) * kh * kw, -1.0, 1.0));
+    let g = f16_round(&rng.vec(d.n * d.c_out * oh * ow, -1.0, 1.0));
+    let (want_x, want_w) = cpu_conv_grads(d, &x, &w, &g, false);
+    let (sum_x, sum_w) = cpu_conv_grads(d, &x, &w, &g, true);
+    let (gx, gw, gg) =
+        (upload(ctx, &x, DType::F16), upload(ctx, &w, DType::F16), upload(ctx, &g, DType::F16));
+    let dx = GpuTensor::empty(ctx, &[x.len()], DType::F16).unwrap();
+    let dw = GpuTensor::empty(ctx, &[w.len()], w_out).unwrap();
+    conv::conv2d_backward_input(ctx, d, gg.raw(), gw.raw(), dx.raw()).unwrap();
+    conv::conv2d_backward_weight_as(ctx, d, gx.raw(), gg.raw(), dw.raw(), w_out).unwrap();
+    assert_eq!(ctx.tensor_cores(), tc, "{}", ctx.tensor_cores_status());
+    let ident = |d: &Conv2dDesc| Conv2dDesc { act: UnaryOp::Identity, ..d.clone() };
+    let kx = d.c_out / d.groups * kh * kw;
+    let tol_x: Vec<f64> =
+        want_x.iter().zip(&sum_x).map(|(&y, &s)| bound(y, s as f64, kx, 0.0, DType::F16)).collect();
+    let kw_ = d.n * oh * ow;
+    let tol_w: Vec<f64> =
+        want_w.iter().zip(&sum_w).map(|(&y, &s)| bound(y, s as f64, kw_, 0.0, w_out)).collect();
+    let what = format!("{:?} tensor cores {tc}", ident(d));
+    assert_within(&dx.to_vec().unwrap(), &want_x, &tol_x, &format!("input gradient of {what}"));
+    assert_within(&dw.to_vec().unwrap(), &want_w, &tol_w, &format!("weight gradient ({w_out:?}) of {what}"));
+}
+
+#[test]
+fn coop_conv_gradients() {
+    let (ctx, _g) = coop!();
+    let s1 = Window2d::square(3, 1, 1);
+    let s2 = Window2d::square(3, 2, 1);
+    let p1 = Window2d::square(1, 1, 0);
+    let dil = Window2d { kernel: (3, 3), stride: (1, 1), padding: (2, 2), dilation: (2, 2) };
+    let rect = Window2d { kernel: (1, 3), stride: (2, 1), padding: (0, 1), dilation: (1, 1) };
+    let cases = [
+        // folo-n / s: 3×3 s1 p1 and s2 p1, the 3-channel stem, 1×1 (input gradient as a GEMM), ragged channels.
+        cdesc(2, 16, 20, 20, 32, 1, s1),
+        cdesc(2, 16, 13, 17, 32, 1, s2),
+        cdesc(1, 3, 33, 31, 16, 1, s2),
+        cdesc(2, 24, 7, 9, 40, 1, p1),
+        cdesc(3, 20, 11, 10, 70, 1, s1),
+        cdesc(1, 130, 6, 6, 33, 1, p1),
+        // Dilation, rectangular kernels, a strided 1×1, groups, depthwise (direct kernels).
+        cdesc(1, 8, 12, 9, 24, 1, dil),
+        cdesc(2, 5, 7, 8, 12, 1, rect),
+        cdesc(2, 6, 9, 9, 4, 1, Window2d::square(1, 2, 0)),
+        cdesc(2, 16, 10, 10, 32, 2, s1),
+        cdesc(2, 32, 10, 10, 32, 32, s1),
+        // A long weight-gradient reduction (split-K: N·OH·OW = 6400) with a wide M.
+        cdesc(4, 16, 40, 40, 128, 1, s1),
+    ];
+    for (i, d) in cases.iter().enumerate() {
+        for tc in [true, false] {
+            for w_out in [DType::F32, DType::F16] {
+                run_conv_grads(&ctx, d, w_out, tc, 100 + i as u64);
+            }
+        }
+    }
+    ctx.set_tensor_cores(true);
+}
+
+/// The weight gradient's f32 output takes f16 gradients whose products sum past the f16 range (an f16 result
+/// would overflow) and keeps them finite.
+#[test]
+fn coop_weight_gradient_f32_output_does_not_overflow() {
+    let (ctx, _g) = coop!();
+    let d = cdesc(4, 8, 32, 32, 16, 1, Window2d::square(3, 1, 1));
+    let x = vec![60000f32; d.n * d.c_in * d.h * d.w];
+    let g = vec![60000f32; d.n * d.c_out * d.h * d.w];
+    let (gx, gg) = (upload(&ctx, &x, DType::F16), upload(&ctx, &g, DType::F16));
+    let dw = GpuTensor::empty(&ctx, &[d.c_out * d.c_in * 9], DType::F32).unwrap();
+    conv::conv2d_backward_weight_as(&ctx, &d, gx.raw(), gg.raw(), dw.raw(), DType::F32).unwrap();
+    let got = dw.to_vec().unwrap();
+    // The centre tap sees every pixel: 4 · 32 · 32 · 60000² = 1.47e13.
+    let centre = got[4];
+    assert!((centre / 1.47456e13 - 1.0).abs() < 1e-3, "{centre}");
+    assert!(got.iter().all(|v| v.is_finite()));
+    // An f32 conv's weight gradient cannot be written as f16.
+    let f32_conv = Conv2dDesc { dtype: DType::F32, ..d.clone() };
+    let x32 = upload(&ctx, &x, DType::F32);
+    let g32 = upload(&ctx, &g, DType::F32);
+    assert!(
+        conv::conv2d_backward_weight_as(&ctx, &f32_conv, x32.raw(), g32.raw(), dw.raw(), DType::F16).is_err()
+    );
+}

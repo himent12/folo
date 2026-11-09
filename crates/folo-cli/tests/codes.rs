@@ -89,6 +89,7 @@ fn every_error_code_is_in_the_shared_vocabulary() {
         "invalid_weights",
         "internal",
         "not_implemented",
+        "not_supported",
         "device_not_found",
         "training_failed",
         "gpu_out_of_memory",

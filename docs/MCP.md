@@ -133,7 +133,7 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 | `register_dataset` | `{ name, path, format?: "auto"\|"yolo"\|"coco" }` | `Dataset`; a folder registered before (same canonical path) returns that dataset (the summary says "already registered") |
 | `create_synthetic_dataset` | `{ name, images?: 1000 (max 100000), classes?: string[], imgsz?: 640, seed?: 0 }` | `Dataset` |
 | `list_models` | paging | page of `{ id, name, arch, imgsz, classes, metrics }` |
-| `train` | `TrainConfig` (docs/API.md; `dataset_id` required), or `{ resume_run_id }` (other fields optional and must match the run) | `{ run_id, status }` |
+| `train` | `TrainConfig` (docs/API.md; `dataset_id` required), or `{ resume_run_id }` (other fields optional and must match the run). `amp: true` (mixed precision) needs GPU tensor cores: `FOLO_GPU_TENSOR_CORES=1` for `folo mcp`, `--tensor-cores` for the `folo serve` it proxies; the run fails with `not_supported` otherwise | `{ run_id, status }` |
 | `run_status` | `{ run_id, log_lines?: 20 (max 200) }` | `Run`, plus `last_step`, `last_epoch` and `log` (the last `log_lines` log lines; older ones are dropped first if the result would exceed 32 KB) |
 | `list_runs` | `{ status?: string }` + paging | page of `Run` summaries |
 | `stop_run` | `{ run_id }` | `Run` |

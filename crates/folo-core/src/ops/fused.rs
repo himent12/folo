@@ -154,7 +154,9 @@ impl Tensor {
     /// `y = act((x − mean) · invstd · weight + bias)` with the batch mean and the biased variance. `running`
     /// is `(running_mean, running_var, momentum)`: both `[C]`, contiguous, updated in place (their storage
     /// version is bumped) with PyTorch's rule and the unbiased variance. The result is **not** recorded by
-    /// autograd: wrap it with [`Tensor::custom_op`] and [`Tensor::batch_norm_act_train_backward`].
+    /// autograd: wrap it with [`Tensor::custom_op`] and [`Tensor::batch_norm_act_train_backward`]. `self` (and `y`)
+    /// may be `F16` on a backend that computes in it (mixed precision); the parameters, the running statistics and
+    /// the returned `mean` / `invstd` are `F32`.
     pub fn batch_norm_act_train(
         &self,
         weight: &Tensor,
@@ -169,7 +171,9 @@ impl Tensor {
         if n * h * w == 0 {
             return Err(Error::invalid_shape(OP, self.shape(), "needs at least one value per channel"));
         }
-        self.check_f32(OP)?;
+        // The data may be `F16` where the backend computes in it (mixed precision); parameters and statistics are
+        // always `F32`.
+        self.check_float(OP)?;
         let mut params = vec![weight, bias];
         if let Some((rm, rv, _)) = running {
             params.extend([rm, rv]);
@@ -247,8 +251,12 @@ impl Tensor {
                 rhs: grad.shape().clone(),
             });
         }
-        for t in [self, grad, weight, bias, mean, invstd] {
+        self.check_float(OP)?;
+        grad.check_float_like(self, OP)?;
+        for t in [weight, bias, mean, invstd] {
             t.check_f32(OP)?;
+        }
+        for t in [grad, weight, bias, mean, invstd] {
             self.check_same_device(t, OP)?;
         }
         for t in [weight, bias, mean, invstd] {
@@ -335,6 +343,48 @@ impl Tensor {
                 for t in std::iter::once(self).chain(state.iter().copied()) {
                     t.cell().mark_modified();
                 }
+            }
+            r
+        };
+        match r {
+            Ok(()) => Ok(true),
+            Err(e) if unsupported(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Mixed precision: `self *= factor` in place with one fused kernel
+    /// ([`crate::backend::Backend::unscale_check`]), setting `flag` (a one-element `U32` tensor on the same
+    /// device) to a nonzero value if any result is not finite; `flag` is never cleared, so one flag can collect
+    /// several tensors. Returns `Ok(false)`, touching nothing, when the backend has no such kernel or the tensors
+    /// do not fit it (`self` not `F32` or not contiguous from the start of its storage, `flag` not a contiguous
+    /// one-element `U32`, the two sharing a storage); the caller then uses tensor ops. Like the other in-place
+    /// updates it refuses a tensor that requires grad outside `no_grad` and bumps the versions it writes.
+    pub fn unscale_check_(&self, factor: f32, flag: &Tensor) -> Result<bool> {
+        const OP: &str = "unscale_check_";
+        if is_grad_enabled() && (self.requires_grad() || flag.requires_grad()) {
+            return Err(Error::Autograd(format!(
+                "{OP}: in-place update of a tensor that requires grad; run it under no_grad()"
+            )));
+        }
+        let fits = self.dtype() == DType::F32
+            && self.layout().contiguous_range() == Some(0..self.numel())
+            && flag.dtype() == DType::U32
+            && flag.numel() == 1
+            && flag.layout().contiguous_range() == Some(0..1)
+            && flag.device() == self.device()
+            && !self.same_storage(flag);
+        if !fits {
+            return Ok(false);
+        }
+        let b = self.backend()?;
+        let r = {
+            let mut xw = self.cell().write_unversioned();
+            let mut fw = flag.cell().write_unversioned();
+            let r = b.unscale_check(&mut xw, self.numel(), factor, &mut fw);
+            if !matches!(&r, Err(e) if unsupported(e)) {
+                self.cell().mark_modified();
+                flag.cell().mark_modified();
             }
             r
         };

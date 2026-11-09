@@ -20,6 +20,11 @@
 //!   reduction, `M = C_out/groups`, `N = C_in/groups·KH·KW`, split along `K` into partial slabs when the
 //!   output alone has too few tiles to fill the GPU, then summed. Depthwise convs have a direct kernel that
 //!   reduces each tap in workgroup memory.
+//!
+//! Gradients take f32 or f16 operands (f32 accumulation either way; mixed-precision training). With tensor cores
+//! on, the f16 input and weight gradients run on [`coop`]'s `CONV_MODE` 2 / 3 kernels (1×1 input gradients as a
+//! GEMM over the transposed weight), and the weight gradient can be written as f32 directly
+//! ([`conv2d_backward_weight_as`]).
 
 use super::{check_buf, prod};
 use crate::DType;
@@ -270,9 +275,9 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
     if spec.get_u32("MODE", 0) == 0 {
         // Params: 0 = input elements, 1 = H, 2 = W, 3 = OH, 4 = OW, 5 = C_in.
         s.push_str(
-            "@group(0) @binding(1) var<storage, read> G: array<f32>;\n\
-             @group(0) @binding(2) var<storage, read> Wt: array<f32>;\n\
-             @group(0) @binding(3) var<storage, read_write> GX: array<f32>;\n\
+            "@group(0) @binding(1) var<storage, read> G: array<T>;\n\
+             @group(0) @binding(2) var<storage, read> Wt: array<T>;\n\
+             @group(0) @binding(3) var<storage, read_write> GX: array<T>;\n\
              @compute @workgroup_size(256)\n\
              fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
              \x20       @builtin(local_invocation_index) lid: u32) {\n\
@@ -295,19 +300,19 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
              \x20       if (tw < 0) { continue; }\n\
              \x20       let uw = u32(tw);\n\
              \x20       if (uw % SW != 0u || uw / SW >= ow) { continue; }\n\
-             \x20       acc = fma(G[gbase + (uh / SH) * ow + uw / SW], Wt[wbase + ky * KW + kx], acc);\n\
+             \x20       acc = fma(f32(G[gbase + (uh / SH) * ow + uw / SW]), f32(Wt[wbase + ky * KW + kx]), acc);\n\
              \x20     }\n\
              \x20   }\n\
              \x20 }\n\
-             \x20 GX[i] = acc;\n}\n",
+             \x20 GX[i] = T(acc);\n}\n",
         );
         return s;
     }
     // Params: 0 = C_out, 1 = chunks S, 2 = pixels per chunk, 3 = N·OH·OW, 4 = OH·OW, 5 = OW, 6 = H, 7 = W.
     // Output: partial[s][co][tap].
     s.push_str(
-        "@group(0) @binding(1) var<storage, read> G: array<f32>;\n\
-         @group(0) @binding(2) var<storage, read> X: array<f32>;\n\
+        "@group(0) @binding(1) var<storage, read> G: array<T>;\n\
+         @group(0) @binding(2) var<storage, read> X: array<T>;\n\
          @group(0) @binding(3) var<storage, read_write> OUT: array<f32>;\n\
          var<workgroup> red: array<f32, 256>;\n\
          @compute @workgroup_size(256)\n\
@@ -328,7 +333,7 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
          \x20   let cin = cout / MULT; let ci = co / MULT;\n\
          \x20   for (var p = p0 + lid; p < p1; p += 256u) {\n\
          \x20     let n = p / ohow; let r = p % ohow;\n\
-         \x20     let gv = G[(n * cout + co) * ohow + r];\n\
+         \x20     let gv = f32(G[(n * cout + co) * ohow + r]);\n\
          \x20     let base = (n * cin + ci) * h * w;\n\
          \x20     let iy0 = i32((r / ow) * SH) - PH; let ix0 = i32((r % ow) * SW) - PW;\n",
     );
@@ -340,7 +345,7 @@ fn gen_depthwise_grad(spec: &Spec) -> String {
         for kx in 0..kw {
             let t = ky * kw + kx;
             s.push_str(&format!(
-                "        {{ let ix = ix0 + {}; if (ix >= 0 && ix < i32(w)) {{ acc{t} = fma(gv, X[row + u32(ix)], acc{t}); }} }}\n",
+                "        {{ let ix = ix0 + {}; if (ix >= 0 && ix < i32(w)) {{ acc{t} = fma(gv, f32(X[row + u32(ix)]), acc{t}); }} }}\n",
                 kx as i64 * spec.get_u32("DW", 1) as i64
             ));
         }
@@ -371,12 +376,15 @@ const MAX_DEPTHWISE_TAPS: usize = 49;
 const MAX_PARTIAL_ELEMS: usize = 16 << 20;
 
 fn check_grad_desc(ctx: &GpuContext, d: &Conv2dDesc) -> Result<(usize, usize)> {
-    if d.dtype != DType::F32 {
-        return Err(crate::error::GpuError::DType { op: "conv2d backward", dtype: d.dtype });
-    }
     check_dtype(ctx, d.dtype, "conv2d backward")?;
     d.validate()?;
     d.output()
+}
+
+/// Whether an f16 gradient of `d` runs on tensor cores: the context has them on, and the conv is not depthwise
+/// (those have direct kernels).
+fn coop_grad(ctx: &GpuContext, d: &Conv2dDesc) -> bool {
+    d.dtype == DType::F16 && ctx.tensor_cores() && !d.is_depthwise()
 }
 
 fn conv_spec(spec: Spec, d: &Conv2dDesc) -> Spec {
@@ -396,8 +404,10 @@ fn conv_spec(spec: Spec, d: &Conv2dDesc) -> Spec {
 }
 
 /// Gradient of [`conv2d`] with respect to its input. `d` describes the forward problem (its bias and
-/// activation are ignored; f32 only). `grad`: `[N, C_out, OH, OW]`, `weight`: `[C_out, C_in/groups, KH, KW]`,
-/// `gx`: `[N, C_in, H, W]` (fully written).
+/// activation are ignored). `grad`: `[N, C_out, OH, OW]`, `weight`: `[C_out, C_in/groups, KH, KW]`,
+/// `gx`: `[N, C_in, H, W]` (fully written), all stored as `d.dtype`: f32, or f16 with f32 accumulation (on
+/// tensor cores when the context has them on, as a transposed-conv implicit GEMM or, for 1×1 convs, a GEMM over
+/// the transposed weight; otherwise the regular kernels).
 pub fn conv2d_backward_input(
     ctx: &GpuContext,
     d: &Conv2dDesc,
@@ -406,27 +416,29 @@ pub fn conv2d_backward_input(
     gx: &wgpu::Buffer,
 ) -> Result<()> {
     let (oh, ow) = check_grad_desc(ctx, d)?;
+    let dt = d.dtype;
     let (kh, kw) = d.win.kernel;
     let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
     let total = prod(&[d.n, d.c_in, d.h, d.w])?;
-    check_buf(grad, prod(&[d.n, d.c_out, oh, ow])?, DType::F32, "conv2d_backward_input grad")?;
-    check_buf(weight, prod(&[d.c_out, cin_g, kh, kw])?, DType::F32, "conv2d_backward_input weight")?;
-    check_buf(gx, total, DType::F32, "conv2d_backward_input output")?;
+    check_buf(grad, prod(&[d.n, d.c_out, oh, ow])?, dt, "conv2d_backward_input grad")?;
+    check_buf(weight, prod(&[d.c_out, cin_g, kh, kw])?, dt, "conv2d_backward_input weight")?;
+    check_buf(gx, total, dt, "conv2d_backward_input output")?;
     if total == 0 {
         return Ok(());
     }
     if d.c_out * oh * ow == 0 {
-        ctx.clear(gx, DType::F32.bytes(total));
+        ctx.clear(gx, dt.bytes(total));
         return Ok(());
     }
     let (hw_in, hw_out, khkw) = (d.h * d.w, oh * ow, kh * kw);
     if d.is_depthwise() {
-        let spec = d.win.spec().u32("MULT", (d.c_out / d.c_in) as u32).u32("MODE", 0);
+        let spec = d.win.spec().u32("MULT", (d.c_out / d.c_in) as u32).u32("MODE", 0).f16(dt == DType::F16);
         let k = ctx.kernel(&DEPTHWISE_GRAD, spec)?;
         let p = Params::new().uz(total)?.uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?.uz(d.c_in)?;
         return ctx.dispatch(&k, &[grad, weight, gx], &p, ctx.grid_1d(total as u64, 256)?);
     }
-    if d.is_pointwise() {
+    let coop = coop_grad(ctx, d);
+    if d.is_pointwise() && !coop {
         // gx[n, g] = W[g]^T · G[n, g].
         let mut g = GemmDesc::new(cin_g, hw_in, cout_g, true, false, d.n);
         g.batch = (d.n, d.groups);
@@ -436,18 +448,12 @@ pub fn conv2d_backward_input(
         g.a = BatchStrides { offset: 0, outer: 0, inner: cout_g * cin_g };
         g.b = BatchStrides { offset: 0, outer: d.c_out * hw_in, inner: cout_g * hw_in };
         g.c = BatchStrides { offset: 0, outer: d.c_in * hw_in, inner: cin_g * hw_in };
+        g.dtype = dt;
         return gemm::gemm(ctx, &g, weight, grad, None, gx);
     }
     // A[g][ci][(co, kh, kw)] = W[g * cout_g + co][ci][kh, kw].
-    let wt = ctx.alloc(DType::F32.bytes(prod(&[d.c_out, cin_g, khkw])?))?;
-    super::layout::permute(
-        ctx,
-        weight,
-        wt.raw(),
-        &[d.groups, cout_g, cin_g, khkw],
-        &[0, 2, 1, 3],
-        DType::F32,
-    )?;
+    let wt = ctx.alloc(dt.bytes(prod(&[d.c_out, cin_g, khkw])?))?;
+    super::layout::permute(ctx, weight, wt.raw(), &[d.groups, cout_g, cin_g, khkw], &[0, 2, 1, 3], dt)?;
     let k_dim = cout_g * khkw;
     let mut g = GemmDesc::new(cin_g, hw_in, k_dim, false, false, d.n);
     g.batch = (d.n, d.groups);
@@ -457,6 +463,19 @@ pub fn conv2d_backward_input(
     g.a = BatchStrides { offset: 0, outer: 0, inner: cin_g * k_dim };
     g.b = BatchStrides { offset: 0, outer: d.c_out * hw_out, inner: cout_g * hw_out };
     g.c = BatchStrides { offset: 0, outer: d.c_in * hw_in, inner: cin_g * hw_in };
+    g.dtype = dt;
+    if coop {
+        // A 1×1 conv (stride 1, no padding) has the same view as a plain GEMM over the transposed weight.
+        let done = if d.is_pointwise() {
+            coop::encode_gemm(ctx, &g, DType::F16, wt.raw(), grad, ctx.dummy(), gx, None)?
+        } else {
+            coop::encode_conv_backward_input(ctx, d, &g, wt.raw(), grad, gx)?
+        };
+        if done {
+            return Ok(());
+        }
+        // The tensor-core kernel failed to build (tensor cores are off now): the regular kernel below.
+    }
     let cfg = gemm::pick_config(ctx, &g);
     gemm::check_config(ctx, cfg)?;
     let check = !g.m.is_multiple_of(cfg.bm as usize)
@@ -480,8 +499,7 @@ pub fn conv2d_backward_input(
     ctx.dispatch(&kernel, &[wt.raw(), grad, ctx.dummy(), gx], &p, groups)
 }
 
-/// Gradient of [`conv2d`] with respect to its weight. `d` describes the forward problem (f32 only).
-/// `x`: `[N, C_in, H, W]`, `grad`: `[N, C_out, OH, OW]`, `gw`: `[C_out, C_in/groups, KH, KW]` (fully written).
+/// Gradient of [`conv2d`] with respect to its weight, written as `d.dtype`: [`conv2d_backward_weight_as`].
 pub fn conv2d_backward_weight(
     ctx: &GpuContext,
     d: &Conv2dDesc,
@@ -489,36 +507,70 @@ pub fn conv2d_backward_weight(
     grad: &wgpu::Buffer,
     gw: &wgpu::Buffer,
 ) -> Result<()> {
+    conv2d_backward_weight_as(ctx, d, x, grad, gw, d.dtype)
+}
+
+/// Gradient of [`conv2d`] with respect to its weight. `d` describes the forward problem. `x`:
+/// `[N, C_in, H, W]` and `grad`: `[N, C_out, OH, OW]` are stored as `d.dtype` (f32, or f16 with f32
+/// accumulation, on tensor cores when the context has them on); `gw`: `[C_out, C_in/groups, KH, KW]` (fully
+/// written) as `out`, which is f32 or `d.dtype` (mixed precision keeps f32 master weights, so an f16 conv's
+/// weight gradient can be written straight to f32 without an f16 rounding or overflow in between). Split-K
+/// partial sums are f32.
+pub fn conv2d_backward_weight_as(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    x: &wgpu::Buffer,
+    grad: &wgpu::Buffer,
+    gw: &wgpu::Buffer,
+    out: DType,
+) -> Result<()> {
     let (oh, ow) = check_grad_desc(ctx, d)?;
+    if out != DType::F32 && out != d.dtype {
+        return Err(crate::error::GpuError::DType { op: "conv2d_backward_weight output", dtype: out });
+    }
+    let dt = d.dtype;
     let (kh, kw) = d.win.kernel;
     let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
     let khkw = kh * kw;
     let wn = prod(&[d.c_out, cin_g, khkw])?;
-    check_buf(x, prod(&[d.n, d.c_in, d.h, d.w])?, DType::F32, "conv2d_backward_weight input")?;
-    check_buf(grad, prod(&[d.n, d.c_out, oh, ow])?, DType::F32, "conv2d_backward_weight grad")?;
-    check_buf(gw, wn, DType::F32, "conv2d_backward_weight output")?;
+    check_buf(x, prod(&[d.n, d.c_in, d.h, d.w])?, dt, "conv2d_backward_weight input")?;
+    check_buf(grad, prod(&[d.n, d.c_out, oh, ow])?, dt, "conv2d_backward_weight grad")?;
+    check_buf(gw, wn, out, "conv2d_backward_weight output")?;
     if wn == 0 {
         return Ok(());
     }
     let (ohow, np) = (oh * ow, prod(&[d.n, oh, ow])?);
     if np == 0 {
-        ctx.clear(gw, DType::F32.bytes(wn));
+        ctx.clear(gw, out.bytes(wn));
         return Ok(());
     }
+    // f32 partials (several chunks, or an f16 result) end in a column reduction or a cast into `gw`.
+    let finish = |tmp: &crate::GpuBuffer, parts: usize| -> Result<()> {
+        if parts > 1 {
+            let op = super::reduce::ReduceOp::Sum;
+            super::reduce::reduce_as(ctx, op, (tmp.raw(), DType::F32), (gw, out), 1, parts, wn)
+        } else {
+            super::layout::cast(ctx, tmp.raw(), gw, wn, true)
+        }
+    };
     if d.is_depthwise() && khkw <= MAX_DEPTHWISE_TAPS {
         // Enough workgroups to fill the GPU, at least 4096 pixels each.
         let chunks =
             1024usize.div_ceil(d.c_out).clamp(1, np.div_ceil(4096)).min(MAX_PARTIAL_ELEMS / wn).max(1);
         let ps = np.div_ceil(chunks);
         let chunks = np.div_ceil(ps);
-        let tmp = if chunks > 1 { Some(ctx.alloc(DType::F32.bytes(prod(&[chunks, wn])?))?) } else { None };
-        let out = tmp.as_ref().map_or(gw, |t| t.raw());
-        let spec = d.win.spec().u32("MULT", (d.c_out / d.c_in) as u32).u32("MODE", 1);
+        let tmp = if chunks > 1 || out != DType::F32 {
+            Some(ctx.alloc(DType::F32.bytes(prod(&[chunks, wn])?))?)
+        } else {
+            None
+        };
+        let target = tmp.as_ref().map_or(gw, |t| t.raw());
+        let spec = d.win.spec().u32("MULT", (d.c_out / d.c_in) as u32).u32("MODE", 1).f16(dt == DType::F16);
         let k = ctx.kernel(&DEPTHWISE_GRAD, spec)?;
         let p = Params::new().uz(d.c_out)?.uz(chunks)?.uz(ps)?.uz(np)?.uz(ohow)?.uz(ow)?.uz(d.h)?.uz(d.w)?;
-        ctx.dispatch(&k, &[grad, x, out], &p, ctx.grid_1d((d.c_out * chunks) as u64 * 256, 256)?)?;
+        ctx.dispatch(&k, &[grad, x, target], &p, ctx.grid_1d((d.c_out * chunks) as u64 * 256, 256)?)?;
         if let Some(t) = &tmp {
-            super::reduce::reduce(ctx, super::reduce::ReduceOp::Sum, t.raw(), gw, 1, chunks, wn)?;
+            finish(t, chunks)?;
         }
         return Ok(());
     }
@@ -531,6 +583,10 @@ pub fn conv2d_backward_weight(
     g.a = BatchStrides { offset: 0, outer: 0, inner: cout_g * ohow };
     g.b = BatchStrides { offset: 0, outer: 0, inner: cin_g * d.h * d.w };
     g.c = BatchStrides { offset: 0, outer: 0, inner: cout_g * ncols };
+    g.dtype = dt;
+    if coop_grad(ctx, d) && coop::encode_conv_backward_weight(ctx, d, &g, out, grad, x, gw)? {
+        return Ok(());
+    }
     let cfg = gemm::pick_config(ctx, &g);
     gemm::check_config(ctx, cfg)?;
     let bk = cfg.bk as usize;
@@ -540,8 +596,10 @@ pub fn conv2d_backward_weight(
         512usize.div_ceil(tiles).min(np.div_ceil(16 * bk)).min(MAX_PARTIAL_ELEMS / wn).min(65535 / d.groups);
     let ks = np.div_ceil(want.max(1)).next_multiple_of(bk);
     let splits = np.div_ceil(ks);
+    // The kernel writes `C` as f32 for partial slabs and for an f32 result of f16 inputs.
+    let c_f32 = splits > 1 || out == DType::F32;
     let tmp = if splits > 1 { Some(ctx.alloc(DType::F32.bytes(prod(&[splits, wn])?))?) } else { None };
-    let out = tmp.as_ref().map_or(gw, |t| t.raw());
+    let target = tmp.as_ref().map_or(gw, |t| t.raw());
     let check = !cout_g.is_multiple_of(cfg.bm as usize)
         || !ncols.is_multiple_of(cfg.bn as usize)
         || !np.is_multiple_of(bk);
@@ -553,7 +611,8 @@ pub fn conv2d_backward_weight(
         .bool("TRANS_B", false)
         .bool("CHECK", check)
         .u32("CONV_MODE", 3)
-        .bool("SPLIT", splits > 1);
+        .bool("SPLIT", splits > 1)
+        .bool("OUT_F32", c_f32 && dt == DType::F16);
     let kernel = ctx.kernel(&GEMM, conv_spec(spec, d))?;
     let p = gemm_params(&g)?
         .at(24)
@@ -572,9 +631,9 @@ pub fn conv2d_backward_weight(
         cout_g.div_ceil(cfg.bm as usize) as u32,
         u32::try_from(d.groups * splits).unwrap_or(u32::MAX),
     ];
-    ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), out], &p, groups)?;
+    ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), target], &p, groups)?;
     if let Some(t) = &tmp {
-        super::reduce::reduce(ctx, super::reduce::ReduceOp::Sum, t.raw(), gw, 1, splits, wn)?;
+        finish(t, splits)?;
     }
     Ok(())
 }

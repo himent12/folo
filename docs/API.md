@@ -41,7 +41,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
 | 500 | `internal` | a bug or an IO failure |
-| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs) |
+| 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (a training run with `"amp": true` without GPU tensor cores fails with it in `Run.error`) |
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
@@ -254,7 +254,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "lr0": 0.01, "weights": null, // or a model id to fine-tune from
   "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5, "scale": 0.5, "translate": 0.1,
                "close_mosaic": 10 },
-  "seed": 0 }
+  "seed": 0,
+  "amp": false }               // mixed-precision training (docs/MODEL.md §8.8): f16 on GPU tensor cores, f32 master
+                               // weights; needs `folo serve --tensor-cores` on a GPU with them, else the run fails
+                               // with `not_supported`
 // An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: epochs 1..=10000,
 // batch 1..=1024, imgsz a multiple of 32 in 32..=4096 (real mode trains at 64 or more), 0 < lr0 < 10.
 // POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.

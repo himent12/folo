@@ -790,6 +790,31 @@ augmentation: resize as above and pad to a square `s × s` (§9.2) only.
   `folo.best` (FORMAT.md; `fitness` is `null` while it is −∞), so a resume continues the same patience count.
 - v1 reports training losses only (API `Epoch.train_loss`). Validation loss is not computed.
 
+### 8.8 Mixed precision (`amp`)
+Opt-in (`amp = true`, `folo train --amp`; default `false`), as `torch.autocast` + `torch.cuda.amp.GradScaler`:
+- **Forward** under folo-core's `autocast`: every conv and matrix product runs in f16 on the GPU's tensor cores
+  (f16 operands, f32 accumulation) with f16 copies of the weights, so activations are f16; softmax runs in f32.
+  BatchNorm takes the f16 activations with f32 γ, β and running statistics; its batch statistics and every sum are
+  f32 (§2.1 unchanged otherwise). The head outputs are cast to f32 and the loss (§7, assigner included) is f32.
+- **Backward** of `L · S`, where `S` is the loss scale (a power of two): the input gradients of the convs are f16
+  (tensor cores), their weight gradients are written straight to f32, so the **master weights, the optimizer state
+  (§8.2), the gradient accumulation (§8.3) and the EMA (§8.5) stay f32**.
+- **At the end of a window**, before clipping: the gradients are unscaled (`· 1 / S`; with clipping on, the factor is
+  folded into the clip factor) and checked: if any is not finite, the window takes **no optimizer step** (as a window
+  of non-finite batches, §8.3: `t`, `optim.__step`, `sched.__step` and `ema.__updates` unchanged) and the step is
+  counted and logged. The check is done on the GPU; the step waits for one flag.
+- **Dynamic loss scaling**: `S = 2^16` at the start; a skipped step multiplies it by 0.5, and 2000 finite steps in a
+  row multiply it by 2 (PyTorch's defaults). The scaler state (`S`, the growth count, the skipped steps) is the
+  checkpoint's `folo.amp` (FORMAT.md), so a resume is bit-exact. 50 skipped steps in a row (the scale has backed off
+  by `2^50`) fail the run. A non-finite *loss* (an f16 forward overflow) is a non-finite batch (§8.3), not an
+  overflow: the scale does not change the forward.
+- **Hardware**: tensor cores (folo-gpu's cooperative matrices: `shader-f16`, 16×16×16 f16 → f32, 32-wide subgroups;
+  the RTX 4080 SUPER on Vulkan) are required, and `folo train --amp` requests them. Anything else (the CPU, a GPU
+  without them, a `folo serve` started without `--tensor-cores`) fails with `not_supported` before training starts:
+  f16 without tensor cores computes no faster than f32 on current GPUs, so AMP does not silently fall back.
+- **Accuracy**: on the §10.6 shapes run, AMP reaches the same mAP as f32 (docs/BENCHMARKS.md has the curves). The
+  first steps of a run usually overflow at `2^16` and are skipped while the scale backs off (2–5 steps).
+
 ## 9. Inference
 
 ### 9.1 Fusion

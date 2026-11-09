@@ -443,6 +443,7 @@ impl MockBackend {
             weights: None,
             augment: Augment::default(),
             seed: 0,
+            amp: false,
         };
         let gpu = "NVIDIA GeForce RTX 4080 SUPER (vulkan)".to_string();
         struct Spec {

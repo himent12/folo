@@ -257,6 +257,8 @@ export interface TrainConfig {
   weights: string | null;
   augment: Augment;
   seed: number;
+  /** Mixed-precision training (docs/MODEL.md §8.8); missing from older servers (= false). */
+  amp?: boolean;
 }
 
 export interface Run {

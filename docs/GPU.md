@@ -135,7 +135,7 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | softmax / log_softmax | `kernels::reduce::softmax`, `softmax_rows` | f32, f16 (f32 max, sum and exponentials) | last dim, one workgroup per row, max-shifted |
 | GEMM | `kernels::gemm::gemm` | f32, f16 | `alpha·op(A)·op(B) (+ row/col bias) → act`; A, Aᵀ, B, Bᵀ; two-level batch with arbitrary offsets and strides (stride 0 broadcasts); f16 storage with f32 accumulation |
 | conv2d | `kernels::conv::conv2d` | f32, f16 | NCHW; stride, padding, dilation, groups; fused bias + activation. Implicit GEMM, a pointwise GEMM fast path for 1×1, and a direct depthwise kernel |
-| tensor-core GEMM / conv2d | `kernels::coop::{gemm, conv2d}` | f16 in; f16 or f32 out | cooperative matrices (16×16×16, f32 accumulation), the same GEMM / implicit-GEMM conv contract and fused `alpha` + bias + activation; `gemm::gemm` and `conv::conv2d` route f16 problems here when the context has [tensor cores](#tensor-cores-cooperative-matrices) on |
+| tensor-core GEMM / conv2d | `kernels::coop::{gemm, conv2d}` | f16 in; f16 or f32 out | cooperative matrices (16×16×16, f32 accumulation), the same GEMM / implicit-GEMM conv contract and fused `alpha` + bias + activation; `gemm::gemm` and `conv::conv2d` route f16 problems here when the context has [tensor cores](#tensor-cores-cooperative-matrices) on, and so do the f16 conv gradients (`CONV_MODE` 2 / 3, split-K, below) |
 | max_pool2d | `kernels::pooling::max_pool2d` | f32, f16 | kernel / stride / padding / dilation; padding never wins (−∞); floor mode |
 | upsample_nearest2d | `kernels::layout::upsample_nearest2d` | f32, f16 | any output size; `src = dst · in / out`, as in PyTorch `nearest` |
 | concat | `kernels::layout::copy_rows` | f32, f16 | any dim, via row-blocked copies; a single block becomes a buffer copy; f16 blocks need even lengths and offsets |
@@ -151,10 +151,11 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | split reduce | `kernels::reduce::reduce_split` | f32, f16 | long reductions over few outputs (BatchNorm statistics) in two passes; the partials between them are f32 |
 | softmax (any dim) | `kernels::reduce::softmax_dim` | f32, f16 | rows kernel for the last dim, a column kernel otherwise |
 | top-k | `kernels::reduce::topk` | f32 → (f32, i64) | sorted, ties by index, `total_cmp` order; one thread per row |
-| pooling + gradients | `kernels::pool_grad::*` | f32 (max pooling with indices also f16) | max pooling with indices and its gather backward, avg / adaptive avg pooling and backward, upsample backward |
-| conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight}` | f32 | implicit GEMM (`CONV_MODE` 2 / 3) with split-K for the weight gradient, a transposed-A GEMM for 1×1 input gradients, direct depthwise kernels |
-| train-mode BatchNorm + activation | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | f32 | NCHW, statistics over `N·H·W`. Forward: per-(channel, chunk) Welford partials merged with Chan's formula, a per-channel finalize (mean, `invstd`, the running-statistics update in place), then `act(x · scale + shift)`; backward: partial sums of `dz` and `dz · x̂` with the activation's derivative at the recomputed pre-activation, a finalize (`dγ`, `dβ`), then `dx`. Identity, SiLU or ReLU; 3 dispatches each way |
+| pooling + gradients | `kernels::pool_grad::*` | f32 (max pooling with indices, its backward and the upsample backward also f16, summed in f32) | max pooling with indices and its gather backward, avg / adaptive avg pooling and backward, upsample backward |
+| conv2d gradients | `kernels::conv::{conv2d_backward_input, conv2d_backward_weight, conv2d_backward_weight_as}` | f32, f16 (f32 accumulation; the weight gradient also f16 → f32) | implicit GEMM (`CONV_MODE` 2 / 3) with split-K for the weight gradient, a transposed-A GEMM for 1×1 input gradients, direct depthwise kernels. f16 runs on tensor cores when they are on (1×1 input gradients as a GEMM over the once-transposed weight), else on the regular generator with f16 storage; split-K partials are f32 either way |
+| train-mode BatchNorm + activation | `kernels::norm::{batch_norm_forward, batch_norm_backward}` | f32 or f16 data (`BnDesc::dtype`); parameters, statistics and sums f32 | NCHW, statistics over `N·H·W`. Forward: per-(channel, chunk) Welford partials merged with Chan's formula, a per-channel finalize (mean, `invstd`, the running-statistics update in place), then `act(x · scale + shift)`; backward: partial sums of `dz` and `dz · x̂` with the activation's derivative at the recomputed pre-activation, a finalize (`dγ`, `dβ`), then `dx`. Identity, SiLU or ReLU; 3 dispatches each way |
 | optimizer updates | `kernels::optim::optimizer_step` | f32 | in place, one thread per element: SGD (momentum, Nesterov, coupled decay), AdamW (decoupled decay, bias corrections), and `p = a·p + b·g` for EMAs, in the op order of folo-nn's CPU loops |
+| unscale + overflow check | `kernels::optim::unscale_check` | f32 | mixed precision's loss-scaler step: `x *= 1 / S` in place and an `atomicOr` into a shared `u32` flag when a result is inf or NaN (exponent bits all set); one dispatch per gradient buffer, one flag readback per optimizer step |
 | task-aligned assigner | `kernels::detect::assign` | f32 / u32 | docs/MODEL.md §7.3 on the raw head outputs, five dispatches: DFL decode of every anchor; one workgroup per gt that scans its candidates, scores `u = max(CIoU, 0)` and `m = score^α · u^β` and keeps its top k by `(m desc, anchor asc)` (per-thread sorted lists merged by a k-round tournament); two atomic passes for the conflicts (largest `u`, then the smallest gt index); the soft targets `t = m · u_max / (m_max + eps)` per gt and a dense per-anchor `(label, t)` map. Same decisions as `folo_vision::assign` |
 | detection loss | `kernels::detect::{bce_forward, bce_backward, box_terms, combine}` | f32 | §7.4: BCE over every logit against the dense targets, each element formed whole; CIoU + DFL per positive (softmax expectation, both terms and their hand-written backward in one thread); a one-workgroup fixed-order reduction to the reported items, the total and the backward scales. `exp`, `ln(1 + x)` and `atan` are written out in plain arithmetic (folo-core's `fast_exp`, an atanh series, Cephes `atanf`), since WGSL only promises an absolute error of 2^-21 for `log` near 1 |
 | letterbox | `kernels::vision::letterbox_rgb8` | u8 → f32, f16 (the f32 value rounded once) | one thread per canvas pixel: the padding grey, or the resized image sampled with folo-data's `ResizePlan` (integer box prefilter computed on the fly, then 11-bit fixed-point bilinear taps uploaded by the host), in integers, times `scale`: bit-exact with the CPU letterbox. Prefilter blocks whose sum could overflow u32 are refused (the caller letterboxes on the host) |
@@ -231,14 +232,26 @@ regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
 
 - **Opt-in, then capability.** A context uses them only when asked (`FOLO_GPU_TENSOR_CORES=1`,
   `GpuOptions::tensor_cores`, `folo_gpu::request_tensor_cores()` before the shared context exists, or
-  `--tensor-cores` on `folo predict` / `val` / `serve`) **and** the adapter reports a 16×16×16 f16 × f16 → f32
+  `--tensor-cores` on `folo predict` / `val` / `serve`, `folo train --amp`) **and** the adapter reports a 16×16×16 f16 × f16 → f32
   configuration (`adapter.cooperative_matrix_properties()`), `shader-f16`, subgroups and 32-wide subgroups. The
   RTX 4080 SUPER on Vulkan has them (driver 621.01); DX12, Metal and the browser do not in wgpu 30.
 - **Self-test, then routing.** The device is created with the experimental feature, then a probe fragment and a
   ragged GEMM (70×90×75, row bias + SiLU, f16 and f32 output) run against the CPU before `caps().coop_f16` is set.
   After that, `gemm::gemm` and `conv::conv2d` send every f16 problem to the tensor-core kernel (1×1 stride-1 convs
-  as its GEMM, other non-depthwise convs as its implicit-GEMM conv). Depthwise convs, f32 and every gradient keep
-  the regular kernels; so do calls with an explicit `TileConfig`.
+  as its GEMM, other non-depthwise convs as its implicit-GEMM conv), and `conv::conv2d_backward_input` /
+  `conv2d_backward_weight_as` send f16 gradients to its `CONV_MODE` 2 / 3 kernels (mixed-precision training,
+  below). Depthwise convs and f32 keep the regular kernels; so do calls with an explicit `TileConfig`.
+- **Gradients (mixed-precision training).** `CONV_MODE` 2 is the input gradient as a transposed conv (each
+  invocation owns an input pixel; the `B` tile gathers the output-gradient pixels that read it, `A` is the weight
+  permuted once to `[groups, C_in/g, C_out/g, KH·KW]`; 1×1 convs are the plain tensor-core GEMM over that permuted
+  weight). `CONV_MODE` 3 is the weight gradient with `K = N·OH·OW` (the `A` rows are output-gradient planes read
+  across images, the `B` tile the image gathered as a transposed im2col), tiles picked by `M = C_out/groups` alone
+  and `SPLIT` cutting `K` into chunks (one z-layer each; each chunk writes an f32 partial slab, a column reduction
+  sums them) until about 512 workgroups run. The loop bounds derive from `workgroup_id` and uniforms, so they stay
+  uniform. The weight gradient is written as f32 (straight to the f32 master weight, no f16 rounding or
+  overflow) or f16. `src/tests/coop.rs` checks both against an f64 CPU reference with the bound below, on every conv
+  shape folo-n / s use plus dilation, rectangular kernels, groups, depthwise and a split-K case, with tensor cores
+  and with the regular f16 kernels.
 - **Fallback.** Anything unexpected leaves the regular kernels in place: an adapter without the configuration, a
   device that refuses the feature (it is created again without it), a failed self-test (the experimental device is
   dropped and the context rebuilt on a plain one), or a tensor-core kernel
@@ -394,8 +407,13 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   `Tensor::to_dtype_` converts a storage in place (the dtype lives in the storage cell, like the device), so
   folo-nn's `Module::to_dtype(F16)` turns a fused model into an f16 one; folo-vision's `Predictor::new_f16` /
   `folo predict --half` build on it. With [tensor cores](#tensor-cores-cooperative-matrices) on, the matmuls and
-  convs among them run on the tensor-core kernels. Gradient kernels stay f32-only and refuse f16 (`UnsupportedDType`): f16 is
-  for inference. Without `shader-f16` folo-core refuses f16 compute (`DTypeMismatch`) and the predictor falls back
+  convs among them run on the tensor-core kernels. **Mixed-precision training** (folo-core's `autocast`, docs/MODEL.md §8.8)
+  adds the f16 gradients it needs: conv2d input and weight gradients (tensor cores when on; the weight gradient
+  written as f32 through `Backend::conv2d_backward_weight_as`), the fused BatchNorm on f16 data with f32
+  parameters and statistics, the max-pooling and nearest-upsampling gradients, and the elementwise gradients (the
+  strided kernel was f16 already). The other gradient kernels (average pooling, the index-op scatters) refuse f16
+  (`UnsupportedDType`); the detector does not use them. `src/tests/amp.rs` checks the BatchNorm, pooling and
+  upsampling gradients and the autocast conv / matmul against f32 on the same f16-rounded operands. Without `shader-f16` folo-core refuses f16 compute (`DTypeMismatch`) and the predictor falls back
   to f32 (`predict::f16_unavailable` says why). `src/tests/f16.rs` checks every such op on f16 GPU tensors
   against the f32 CPU on the same f16-rounded inputs (`1e-3` relative for single roundings, `2e-3` plus a small
   absolute term for accumulations), and `crates/folo-vision/tests/gpu_f16.rs` the detector (decoded boxes and
@@ -472,18 +490,18 @@ of batch-1 inference.
 `cargo bench -p folo-vision --bench gpu` runs the real detector (fused inference forward, end-to-end predict,
 training step, peak memory); its numbers and the comparison with Ultralytics are in
 [BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640: 2.99 ms batch-1 forward, 1385–1461 img/s
-at batch 16, 5.18 ms / 722 img/s end to end through the predictor at batch 1 / 16, 219 img/s training step at batch 16 (143 before the loss moved to the GPU), 3.5 GiB training peak. The fused kernels' effect on the training step:
+at batch 16, 5.18 ms / 722 img/s end to end through the predictor at batch 1 / 16, 219 img/s training step at batch 16 (143 before the loss moved to the GPU), 3.5 GiB training peak; with mixed precision (`--amp`, f16 on tensor cores) 307 img/s against 247 f32 in the same quiet session, at 2.0 GiB. The fused kernels' effect on the training step:
 the SGD update went from 62 ms (about ten elementwise dispatches and copies per parameter) to 5 ms with the fused
 update kernel.
 
 ## Known limitations / follow-ups
 
-- **Tensor cores are opt-in and inference-only.** Without `FOLO_GPU_TENSOR_CORES` / `--tensor-cores` the f16
+- **Tensor cores are opt-in.** Without `FOLO_GPU_TENSOR_CORES` / `--tensor-cores` / `folo train --amp` the f16
   GEMM and convs keep f32 tiles and f32 FMAs (f16 saves memory traffic, not arithmetic: on Ada, non-tensor f16
-  math is no faster than f32). Training does not use them yet: mixed-precision training (f16 forward and backward
-  GEMMs on tensor cores, f32 master weights, loss scaling) needs f16 variants of the gradient convs
-  (`CONV_MODE` 2 / 3) and an `--amp` trainer path, a follow-up. The transposed-operand tensor-core GEMMs scatter
-  into workgroup memory with scalar stores and are 15–40% slower than the plain layout.
+  math is no faster than f32), which is why mixed-precision training refuses to run without them. The
+  transposed-operand tensor-core GEMMs scatter into workgroup memory with scalar stores and are 15–40% slower than
+  the plain layout (the attention products use them). The weight-gradient gather divides by the runtime `OH·OW`
+  per element; incremental index tracking would save integer work.
 - The f16 depthwise conv is slower than the f32 one (2-byte scalar loads); vectorising it is a follow-up.
 - Timings are wall-clock; GPU timestamp queries would make small-kernel numbers more precise.
 - `max_pool2d` has no `ceil_mode`; upsampling is nearest-only.

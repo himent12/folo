@@ -251,6 +251,8 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let split = spec.get_bool("SPLIT");
     let bias = spec.get_u32("BIAS_KIND", 0);
     let f16 = spec.is_f16();
+    // `OUT_F32`: f16 operands but an f32 `C` (the weight gradient's f32 partial slabs / f32 result).
+    let c_f16 = f16 && !spec.get_bool("OUT_F32");
     let wgx = bn / tn;
     let wgy = bm / tm;
     let threads = wgx * wgy;
@@ -275,7 +277,7 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     let _ = writeln!(s, "@group(0) @binding(1) var<storage, read> A: array<{}>;", wgsl_ty(f16, va));
     let _ = writeln!(s, "@group(0) @binding(2) var<storage, read> B: array<{}>;", wgsl_ty(f16, vb && !conv));
     s.push_str("@group(0) @binding(3) var<storage, read> BIAS: array<T>;\n");
-    let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> C: array<{}>;", wgsl_ty(f16, vc));
+    let _ = writeln!(s, "@group(0) @binding(4) var<storage, read_write> C: array<{}>;", wgsl_ty(c_f16, vc));
     let _ = writeln!(s, "var<workgroup> As: array<array<vec4<f32>, {bm4}>, {}>;", 2 * bk);
     let _ = writeln!(s, "var<workgroup> Bs: array<array<vec4<f32>, {bn4}>, {}>;", 2 * bk);
     let _ = writeln!(s, "@compute @workgroup_size({wgx}, {wgy}, 1)");
@@ -600,12 +602,12 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                 }
                 s.push_str("      v = unary4(ACT, v, act_alpha);\n");
                 if vc {
-                    let cast = if f16 { "vec4<f16>(v)" } else { "v" };
+                    let cast = if c_f16 { "vec4<f16>(v)" } else { "v" };
                     let _ =
                         writeln!(s, "      if (col < N) {{ C[(offC + row * ldc + col) / 4u] = {cast}; }}");
                 } else {
                     for c in 0..4 {
-                        let cast = if f16 { format!("f16(v[{c}])") } else { format!("v[{c}]") };
+                        let cast = if c_f16 { format!("f16(v[{c}])") } else { format!("v[{c}]") };
                         let _ = writeln!(
                             s,
                             "      if (col + {c}u < N) {{ C[offC + row * ldc + col + {c}u] = {cast}; }}"

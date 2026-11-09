@@ -80,7 +80,8 @@ pub struct ServeArgs {
     #[arg(long, env = "FOLO_PRECISION", default_value = "f32")]
     pub precision: String,
     /// Run f16 inference and evaluation (`--precision f16`) on the GPU's tensor cores (wgpu's experimental
-    /// cooperative matrices); the regular kernels are used where they are not available.
+    /// cooperative matrices); the regular kernels are used where they are not available. Training runs with
+    /// `"amp": true` need it (they fail with `not_supported` without tensor cores).
     #[arg(long, env = "FOLO_GPU_TENSOR_CORES", value_parser = clap::builder::BoolishValueParser::new())]
     pub tensor_cores: bool,
 }
@@ -174,6 +175,11 @@ pub struct TrainArgs {
     /// Cosine instead of linear learning-rate decay.
     #[arg(long)]
     pub cos_lr: bool,
+    /// Mixed-precision training: f16 activations, convolutions and matrix products on the GPU's tensor cores, f32
+    /// master weights, loss and BatchNorm statistics, dynamic loss scaling. Needs a GPU with tensor cores
+    /// (cooperative matrices; asked for automatically); anything else is `not_supported`.
+    #[arg(long)]
+    pub amp: bool,
     /// Warmup length in epochs.
     #[arg(long, default_value_t = 3.0)]
     pub warmup_epochs: f64,

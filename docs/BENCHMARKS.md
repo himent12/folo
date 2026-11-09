@@ -164,9 +164,9 @@ model size.
 | 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **722 img/s** f32 (beats both; was 299); f16 +7–13% over f32 under load (427–456 vs 375–401 img/s back to back); tensor cores 548 img/s back to back under 67–81% load (regular f16 436, f32 367 in the same session) | 394 img/s f32 (yolo26s 446 fp16: behind; beats its 317 fp32; was 226); tensor cores 328 img/s back to back under load (regular f16 249), not measured quietly yet |
 | 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **21.4 ms** (fused, 28 threads, with 44–76% CPU load from other jobs; 35.8 ms for `main` in the same session; `cargo bench -p folo-vision --bench model`) | |
 | 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | 26.9 ms (the predictor on a `u8` image, 28 threads, same contended run as row 7: behind) | |
-| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32 | **219 img/s** (73.0 ms; beats; 143 before the loss moved to the GPU) | **109 img/s** (146.6 ms; yolo26s 105 fp32: beats; was 68) |
+| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **219 img/s** f32 (73.0 ms; beats; 143 before the loss moved to the GPU); **307 img/s AMP** (52.2 ms, `--amp` on tensor cores; beats 252; f32 247 in the same quiet session, see [Mixed-precision training](#mixed-precision-training-amp)) | **109 img/s** f32 (146.6 ms; yolo26s 105 fp32: beats; was 68); **183 img/s AMP** (87.5 ms; yolo26s AMP 188: ties) |
 | 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32 | | |
-| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32 | **3474 MiB** (train step; yolo26n train step 4517: beats) | **6541 MiB** (yolo26s train step 8245: beats) |
+| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32, and AMP | **3474 MiB** (train step; yolo26n train step 4517: beats); **2022 MiB AMP** (yolo26n AMP train step 2646, trainer 2435: beats) | **6541 MiB** (yolo26s train step 8245: beats); **3713 MiB AMP** (yolo26s AMP 4614: beats) |
 
 For yolo26s and yolo26m, read the same bars from the tables below. Rows 1, 3, 9 and 10 are the headline targets,
 because FOLO starts in f32. Row 1 is where a native engine should win by the widest margin, since the incumbent is
@@ -298,14 +298,82 @@ three precisions ran back to back in one process per scale:
   [Half precision](#half-precision-f16)): shapes folo-n mAP50 0.98057 → 0.98057, mAP50-95 0.90090 → 0.90097; R6
   folo-n 0.69663 → 0.69843 / 0.40876 → 0.40849; R6 folo-s 0.70704 → 0.70705 / 0.42228 → 0.42320. Every gap is
   within 0.002 (largest 0.0018, R6 folo-n mAP50).
-- **Training** does not use tensor cores yet (no `--amp`): the gradient convs are f32-only. That is the follow-up
-  for row 9's AMP bar (252 img/s).
+- **Training** uses them with `--amp`: see [Mixed-precision training](#mixed-precision-training-amp).
+
+### Mixed-precision training (AMP)
+
+`folo train --amp` (docs/MODEL.md §8.8): the forward under folo-core's `autocast` (f16 activations, every conv and
+matrix product on tensor cores with f32 accumulation, softmax in f32), the loss in f32, backward of the loss times a
+dynamic loss scale (the conv input gradients f16 on tensor cores, the weight gradients written straight to f32), then
+the unscale and overflow check on the GPU (one fused kernel per gradient buffer, one flag readback), SGD on the f32
+master weights. `cargo bench -p folo-vision --bench gpu` with `FOLO_GPU_TENSOR_CORES=1` runs it after the f32 step
+(`FOLO_BENCH_TRAIN=f32,amp`, the default): the incumbent's `autocast` + `GradScaler` step, on the same fixed batch of
+16 at 640 with 8 boxes per image, 3 warm-up steps, median of 10. Branch `train/amp`, 2026-11-08. **Quiet window**:
+`nvidia-smi` showed 0% from other processes before each section (the COCO training job was idle), and f32 and AMP
+ran back to back in one process per scale.
+
+| train step b16, 640 | f32 median (img/s) | AMP median (img/s) | AMP / f32 | split f32: fwd / loss / bwd / step (ms) | split AMP: fwd / loss / bwd / unscale + check + step (ms) | peak f32 / AMP | incumbent AMP |
+|---|---|---|---|---|---|---|---|
+| folo-n | 64.78 ms (247) | **52.19 ms (307)** | 1.24x | 16.3 / 0.7 / 49.8 / 4.4 | 12.8 / 0.8 / 29.0 / 7.1 | 3467 / **2022 MiB** | yolo26n 63.3 ms (252), 2646 MiB |
+| folo-s | 140.63 ms (114) | **87.51 ms (183)** | 1.61x | 36.1 / 0.7 / 103.9 / 4.7 | 23.3 / 0.8 / 60.1 / 8.0 | 6520 / **3713 MiB** | yolo26s 85.2 ms (188), 4614 MiB |
+
+- **Against the bars**: folo-n's AMP step beats yolo26n's (307 vs 252 img/s, +22%) at 24% less memory (2022 vs
+  2646 MiB); folo-s ties yolo26s (183 vs 188 img/s, inside the ±10% run-to-run noise) at 20% less memory. folo-n
+  and folo-s do 19% / 3% more FLOPs than yolo26n / s.
+- **Where it comes from**: the backward is 1.7x faster (tensor-core input and weight gradients, half the bytes in every
+  elementwise and BatchNorm pass), the forward 1.3–1.5x. The step phase costs 2.7–3.3 ms more than f32's SGD: the
+  copies into the gradient buffers, the unscale-and-check kernels and the one wait for the overflow flag. The first
+  version checked overflow with tensor ops (about 900 more dispatches per step): 23.5 ms for that phase and 257 img/s.
+- The f32 step measured 247 img/s here against the 219 in the table above (an earlier, busier session); only the
+  same-session ratio is the AMP result.
+- The scaler skipped 2 (folo-n) and 3 (folo-s) of the 13 steps for overflow at the start (scale 2^16 → 2^14 / 2^13);
+  the skipped steps are in the median like any other.
+
+**Accuracy: the shapes gate** (docs/MODEL.md §10.6, examples/shapes: folo-n, 320 px, 30 epochs, batch 16, seed 0,
+`--device gpu:0`), f32 and `--amp` back to back on this branch (0–1% other GPU load before each run):
+
+| | gate first met | final mAP50 | final mAP50-95 | best mAP50-95 (epoch) | non-finite batches | steps skipped for overflow | wall clock |
+|---|---|---|---|---|---|---|---|
+| f32 | epoch 10 (0.932 / 0.782) | 0.978 | 0.898 | 0.8979 (29) | 0 | | 182 s |
+| AMP | epoch 9 (0.924 / 0.763) | 0.981 | **0.899** | 0.8992 (30) | 0 | 6, all in epoch 1 (scale 2^16 → 2^10, then stable) | 200 s |
+
+Final mAP50-95 0.8992 vs 0.8978 (+0.0014; the bound is 0.01), so AMP **passes** the gate with the f32 result. Curves
+(epoch: train loss, mAP50, mAP50-95; f32 | AMP):
+
+| epoch | f32 loss | f32 mAP50 | f32 mAP50-95 | AMP loss | AMP mAP50 | AMP mAP50-95 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 12.883 | 0.000 | 0.000 | 13.322 | 0.000 | 0.000 |
+| 2 | 8.974 | 0.123 | 0.054 | 9.775 | 0.074 | 0.028 |
+| 3 | 6.338 | 0.319 | 0.179 | 6.670 | 0.278 | 0.149 |
+| 4 | 5.013 | 0.502 | 0.342 | 5.191 | 0.492 | 0.319 |
+| 5 | 4.253 | 0.634 | 0.465 | 4.333 | 0.619 | 0.448 |
+| 6 | 3.766 | 0.799 | 0.623 | 3.795 | 0.731 | 0.556 |
+| 7 | 3.405 | 0.861 | 0.654 | 3.382 | 0.871 | 0.702 |
+| 8 | 3.140 | 0.899 | 0.721 | 3.113 | 0.872 | 0.674 |
+| 9 | 2.983 | 0.895 | 0.741 | 2.990 | 0.924 | 0.763 |
+| 10 | 2.830 | 0.932 | 0.782 | 2.825 | 0.936 | 0.795 |
+| 12 | 2.610 | 0.949 | 0.804 | 2.614 | 0.941 | 0.796 |
+| 14 | 2.463 | 0.964 | 0.819 | 2.472 | 0.960 | 0.831 |
+| 16 | 2.338 | 0.966 | 0.836 | 2.323 | 0.968 | 0.828 |
+| 18 | 2.271 | 0.963 | 0.853 | 2.258 | 0.970 | 0.860 |
+| 20 | 2.213 | 0.974 | 0.865 | 2.200 | 0.976 | 0.868 |
+| 22 | 2.148 | 0.971 | 0.862 | 2.132 | 0.977 | 0.873 |
+| 24 | 2.083 | 0.977 | 0.883 | 2.075 | 0.979 | 0.885 |
+| 26 | 1.820 | 0.977 | 0.887 | 1.817 | 0.981 | 0.888 |
+| 28 | 1.759 | 0.979 | 0.897 | 1.751 | 0.981 | 0.892 |
+| 30 | 1.737 | 0.978 | 0.898 | 1.734 | 0.981 | 0.899 |
+
+The AMP curve trails by a fraction of an epoch early on (its first 6 steps were skipped while the scale backed off)
+and tracks f32 within run-to-run noise from epoch 7. **Speed on this run**: at 320 px the step is a quarter of the
+640 px one and the epoch is bound by the data loader, validation and per-dispatch overhead, so AMP gives no speedup
+here (200 vs 182 s wall clock; the per-window overflow wait and the autocast casts cost more than the smaller GEMMs
+save). The 640 px training step above is where AMP pays.
 
 **Verdict.** folo-n beats the incumbent on batch-1 forward latency (2.99 vs 4.95 ms), end to end at batch 1 (5.18
 vs 6.92 ms) and batch 16 (722 vs 615 img/s fp16 / 536 fp32), on the training step (219 vs 202 img/s in strict f32
-against TF32 convolutions) and on training memory (3.5 vs 4.4 GiB). It ties batch-16 forward throughput (1385–1461
+against TF32 convolutions; 307 vs 252 img/s with AMP) and on training memory (3.5 vs 4.4 GiB; 2.0 vs 2.6 GiB with AMP). It ties batch-16 forward throughput (1385–1461
 vs 1454 img/s) while doing 19% more FLOPs. folo-s beats yolo26s end to end at batch 1 (7.87 vs 8.59 ms) and on the
-training step (109 vs 105 img/s fp32), ties batch-16 forward, and is behind on batch-1 forward (5.5 vs 4.9 ms) and
+training step (109 vs 105 img/s fp32; ties with AMP, 183 vs 188), ties batch-16 forward, and is behind on batch-1 forward (5.5 vs 4.9 ms) and
 batch-16 end to end against fp16 (394 vs 446 img/s; it beats the fp32 317).
 
 ## FOLO on the CPU

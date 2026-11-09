@@ -279,13 +279,18 @@ fn model_conversion_in_place() {
     assert!(y.to_dtype_(DType::F16).is_err());
 }
 
+/// The f16 gradients mixed-precision training uses run (the conv's here, tested for accuracy in `amp.rs` and
+/// `coop.rs`); the ones it does not use still refuse f16 (average pooling's).
 #[test]
-fn gradients_refuse_f16() {
+fn gradients_in_f16() {
     let dev = dev16!();
     let x = randn(&[1, 2, 6, 6], 21).to_device(dev).unwrap().to_dtype(DType::F16).unwrap().requires_grad_();
-    let w = randn(&[3, 2, 3, 3], 22).to_device(dev).unwrap().to_dtype(DType::F16).unwrap();
+    let w = randn(&[3, 2, 3, 3], 22).to_device(dev).unwrap().to_dtype(DType::F16).unwrap().requires_grad_();
     let y = x.conv2d(&w, None, 1, 1, 1, 1).unwrap().sum_all().unwrap();
-    let Err(e) = y.backward() else { panic!("f16 conv backward is refused") };
+    let g = y.backward().unwrap();
+    assert_eq!((g.get(&x).unwrap().dtype(), g.get(&w).unwrap().dtype()), (DType::F16, DType::F16));
+    let y = x.avg_pool2d(2, 2, 0).unwrap().sum_all().unwrap();
+    let Err(e) = y.backward() else { panic!("f16 average-pooling backward is refused") };
     assert!(matches!(e, Error::UnsupportedDType { dtype: DType::F16, .. }), "{e}");
 }
 

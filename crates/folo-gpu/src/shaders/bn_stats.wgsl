@@ -1,7 +1,8 @@
-// Pass 1 of train-mode BatchNorm: per (channel, chunk) Welford partials (count, mean, M2) of NCHW X.
+// Pass 1 of train-mode BatchNorm: per (channel, chunk) Welford partials (count, mean, M2) of NCHW X (f32 or f16,
+// T; the statistics are f32).
 // Grid: (chunks, C). Params: 0 = C, 1 = hw, 2 = N·hw, 3 = chunk length, 4 = chunks, 5 = 256 / hw,
 // 6 = 256 % hw. PART is [C, chunks, 3].
-@group(0) @binding(1) var<storage, read> X: array<f32>;
+@group(0) @binding(1) var<storage, read> X: array<T>;
 @group(0) @binding(2) var<storage, read_write> PART: array<f32>;
 
 @compute @workgroup_size(256)
@@ -18,7 +19,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     var w = bn_walk_start(start, lid, hw);
     loop {
         if (w.e >= end) { break; }
-        let v = X[(w.n * channels + c) * hw + w.i];
+        let v = f32(X[(w.n * channels + c) * hw + w.i]);
         cnt += 1.0;
         let d = v - mean;
         mean += d / cnt;
