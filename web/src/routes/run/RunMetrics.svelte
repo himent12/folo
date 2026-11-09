@@ -18,6 +18,7 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { fade } from 'svelte/transition';
   import { motion } from '$lib/ui/motion';
+  import { pageKeys } from '$lib/shell/pageCommands.svelte';
   /**
    * The run's metrics as one instrument: the epoch progress, a row of KPI tabs (each with its current value) and the one
    * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones
@@ -295,6 +296,14 @@
   const xMark = $derived(mosaicOff ? { x: run.epochs - run.config.augment.close_mosaic, label: 'mosaic off' } : undefined);
   const current = $derived(tabs.find((t) => t.id === tab)!);
 
+
+  // 1–6 pick a metric tab from anywhere on the page (a single-key shortcut: off with the others in Settings).
+  pageKeys((k) => {
+    const t = /^[1-9]$/.test(k) ? tabs[Number(k) - 1] : undefined;
+    if (!t) return false;
+    tab = t.id;
+    return true;
+  });
 
   function onkeydown(e: KeyboardEvent) {
     const i = tabs.findIndex((t) => t.id === tab);

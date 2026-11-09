@@ -9,6 +9,7 @@
   import Logo from './Logo.svelte';
   import { mainNav, settingsNav, type NavItem } from './nav';
   import { reducedMotion } from '$lib/ui/motion';
+  import { tooltip } from '$lib/ui/tooltip';
 
   let { footer, live }: { footer?: Snippet<[boolean]>; live?: Snippet<[boolean]> } = $props();
 
@@ -35,7 +36,8 @@
       class="item"
       class:active
       aria-current={active ? 'page' : undefined}
-      title={collapsed ? n.label : undefined}
+      aria-label={collapsed ? n.label : undefined}
+      use:tooltip={collapsed ? { text: n.label, keys: keyPrefs.singleKeys ? n.keys : undefined, side: 'right' } : null}
     >
       <n.icon size={16} strokeWidth={1.75} aria-hidden="true" />
       <span class="label">{n.label}</span>
@@ -69,7 +71,7 @@
       class="collapse"
       onclick={() => sidebar.toggle()}
       aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      title={collapsed ? 'Expand sidebar  [' : 'Collapse sidebar  ['}
+      use:tooltip={{ text: collapsed ? 'Expand sidebar' : 'Collapse sidebar', keys: keyPrefs.singleKeys ? '[' : undefined, side: collapsed ? 'right' : 'top' }}
     >
       {#if collapsed}<PanelLeftOpen size={16} strokeWidth={1.75} />{:else}<PanelLeftClose
           size={16}

@@ -94,3 +94,39 @@ describe('CommandPalette actions on entities', () => {
     expect(options()[0]).toMatch(/^Switch theme/);
   });
 });
+
+describe('CommandPalette with no query', () => {
+  const key = (input: HTMLElement, k: string) => {
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+    flushSync();
+  };
+  const selected = () => document.querySelector('[role="option"][aria-selected="true"] .label')?.textContent?.trim();
+
+  it('wraps the selection at both ends', () => {
+    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+    const first = selected();
+    key(input, 'ArrowUp');
+    const last = options().at(-1);
+    expect(selected()).toBe(last);
+    key(input, 'ArrowDown');
+    expect(selected()).toBe(first);
+  });
+
+  it('lists the page commands first, then the items chosen last', async () => {
+    localStorage.setItem('folo.palette.recent', JSON.stringify(['nav-models']));
+    const { pageCommandList } = await import('./pageCommands.svelte');
+    const stop = vi.fn();
+    pageCommandList.items = [{ id: 'stop', label: 'Stop fasteners-s', icon: (await import('@lucide/svelte/icons/square')).default, run: stop }];
+    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
+    flushSync();
+    const groups = [...document.querySelectorAll('.group')].map((g) => g.textContent?.trim());
+    expect(groups.slice(0, 3)).toEqual(['This page', 'Recent', 'Go to']);
+    expect(options().slice(0, 2)).toEqual(['Stop fasteners-s', 'Models']);
+    key(document.querySelector<HTMLInputElement>('input[role="combobox"]')!, 'Enter');
+    expect(stop).toHaveBeenCalledOnce();
+    pageCommandList.items = [];
+    localStorage.removeItem('folo.palette.recent');
+  });
+});

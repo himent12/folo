@@ -3,6 +3,8 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
+  import Copy from '@lucide/svelte/icons/copy';
+  import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
   import Info from '@lucide/svelte/icons/info';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { tick } from 'svelte';
@@ -43,6 +45,16 @@
 
   // The source run, its dataset and the model it was fine-tuned from (its `weights`), for the provenance links.
   const runId = $derived(model.data?.run_id ?? null);
+  // The palette's This page: the header's actions and the id.
+  pageCommands((): PageCommand[] => {
+    const m = model.data;
+    if (!m) return [];
+    return [
+      { id: 'model-export', label: `Export ${m.name}`, match: ['Export model', 'ONNX'], icon: Download, run: () => (exportOpen = true) },
+      { id: 'model-try', label: `Try ${m.name} in Playground`, match: ['Try model'], icon: ScanSearch, run: () => router.go(`/playground?model=${encodeURIComponent(m.id)}`) },
+      { id: 'model-copy-id', label: 'Copy model id', match: [m.id], icon: Copy, run: () => void copyText(m.id, 'model id') },
+    ];
+  });
   const context = new Resource<{ run: Run | null; dataset: Dataset | null; parent: Model | null }>(async (s) => {
     const rid = runId;
     if (!rid) return { run: null, dataset: null, parent: null };

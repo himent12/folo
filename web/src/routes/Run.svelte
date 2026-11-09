@@ -33,6 +33,10 @@
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
   import { scheduleWarnings } from './run/warnings';
+  import Copy from '@lucide/svelte/icons/copy';
+  import Play from '@lucide/svelte/icons/play';
+  import { isOom } from '$lib/oom';
+  import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
 
   const id = $derived(router.route.params.id ?? '');
   const live = new LiveRun(() => id || null);
@@ -115,6 +119,20 @@
   });
 
   // Resume: the same run continues from weights/last.folo (POST /api/runs with resume_run_id, docs/API.md).
+  // The palette's This page: the state action the header shows (Stop, Resume), Compare and the id.
+  pageCommands((): PageCommand[] => {
+    const r = run;
+    if (!r) return [];
+    const out: PageCommand[] = [];
+    if (r.status === 'running') out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: Square, run: () => (stopOpen = true) });
+    // As the run's banner: anything but out of memory continues from the last checkpoint.
+    if (r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error)))
+      out.push({ id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() });
+    out.push({ id: 'run-compare', label: `Compare ${r.name}`, match: ['Compare run'], icon: GitCompare, run: () => router.go(`/runs/compare?ids=${r.id}`) });
+    out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
+    return out;
+  });
+
   let resuming = $state(false);
   async function resume() {
     if (!run) return;
