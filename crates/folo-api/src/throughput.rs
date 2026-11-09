@@ -265,6 +265,10 @@ pub struct RunEstimate {
     /// there, published weights by name; docs/API.md, CLI command). Left out by older servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli: Option<String>,
+    /// What the run would cost on its `compute` offer; absent for a run on this machine and for an offer without
+    /// a price.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<crate::CostEstimate>,
 }
 
 /// `POST /api/system/benchmark` body. Every field has a default.

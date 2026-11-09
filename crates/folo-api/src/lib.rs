@@ -9,11 +9,13 @@
 
 use serde::{Deserialize, Serialize};
 
+mod cloud;
 pub mod codes;
 pub mod json;
 mod throughput;
 pub mod weights;
 
+pub use cloud::*;
 pub use throughput::*;
 
 /// API version string reported in [`Health::api`].
@@ -1005,6 +1007,10 @@ pub struct TrainConfig {
     /// one-to-one branch, trained with dual assignment; the model predicts end to end without NMS).
     #[serde(default)]
     pub head: Head,
+    /// Train on a cloud connection instead of this machine (docs/CLOUD.md); `null` or missing trains here, on
+    /// `device`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<Compute>,
 }
 
 /// The detection head of a model (docs/MODEL.md §6.6), `TrainConfig.head`.
@@ -1167,6 +1173,9 @@ pub struct Run {
     /// 1-based place in the training queue while the run waits there (`1` starts next), else `null`.
     #[serde(default)]
     pub queue_position: Option<u32>,
+    /// Where a cloud run (`config.compute`) executes and how far it is; absent for runs on this machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<RunCloud>,
 }
 
 /// [`Run::resolved`]: the settings a run actually trains with, after `optimizer: auto` and the batch scaling of
@@ -1404,8 +1413,12 @@ pub struct Sample {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RunLogs {
-    /// The most recent log lines, oldest first.
+    /// The most recent log lines, oldest first (with `after`: the lines after that many).
     pub lines: Vec<LogLine>,
+    /// Lines in the run's whole log, so `after: total` asks for what comes next; 0 from servers that predate the
+    /// field.
+    #[serde(default)]
+    pub total: u64,
 }
 
 /// SSE `status` payload.
@@ -1489,6 +1502,8 @@ pub enum RunEvent {
     Log(LogLine),
     /// `queue`.
     Queue(QueueEvent),
+    /// `cloud`: the run's [`RunCloud`] after it changed (a new phase, transfer progress, cost).
+    Cloud(RunCloud),
 }
 
 impl RunEvent {
@@ -1500,6 +1515,7 @@ impl RunEvent {
             RunEvent::Epoch(_) => "epoch",
             RunEvent::Log(_) => "log",
             RunEvent::Queue(_) => "queue",
+            RunEvent::Cloud(_) => "cloud",
         }
     }
 
@@ -1511,6 +1527,7 @@ impl RunEvent {
             RunEvent::Epoch(p) => serde_json::to_string(p),
             RunEvent::Log(p) => serde_json::to_string(p),
             RunEvent::Queue(p) => serde_json::to_string(p),
+            RunEvent::Cloud(p) => serde_json::to_string(p),
         };
         r.expect("event payloads always serialize")
     }
@@ -1524,6 +1541,7 @@ impl RunEvent {
             "epoch" => serde_json::from_str(data).map(RunEvent::Epoch),
             "log" => serde_json::from_str(data).map(RunEvent::Log),
             "queue" => serde_json::from_str(data).map(RunEvent::Queue),
+            "cloud" => serde_json::from_str(data).map(RunEvent::Cloud),
             _ => return None,
         })
     }
