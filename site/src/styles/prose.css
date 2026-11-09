@@ -365,7 +365,13 @@
 }
 
 .prose td {
-  min-width: 96px;
+  min-width: 8em;
+}
+
+/* Identifiers in cells break only where they naturally can (spaces, hyphens), never inside a word: a narrow screen
+   scrolls the table sideways instead of shredding `forbidden_origin` into fragments. */
+.prose td code {
+  overflow-wrap: normal;
 }
 
 .prose td:first-child {

@@ -143,6 +143,6 @@ table {
   font-weight: var(--weight-medium);
 }
 
-.eyebrow-accent {
-  color: var(--accent-text);
+.eyebrow-strong {
+  color: var(--text-secondary);
 }

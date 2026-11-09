@@ -129,6 +129,7 @@ function moveActive(by: number) {
 }
 
 $('.search-trigger')?.addEventListener('click', openSearch);
+$('.search-close')?.addEventListener('click', () => dialog?.close());
 input?.addEventListener('input', () => void runSearch());
 input?.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {

@@ -123,7 +123,7 @@ export function renderLanding(md: MarkdownIt, page: ParsedPage, slug: string): L
   const docs = relUrl(slug, slugFor('docs/QUICKSTART.md'));
   const hero = `<section class="hero" aria-labelledby="hero-title">
   <div class="hero-text">
-    ${eyebrow ? `<p class="eyebrow eyebrow-accent">${escapeHtml(eyebrow)}</p>` : ''}
+    ${eyebrow ? `<p class="eyebrow eyebrow-strong">${escapeHtml(eyebrow)}</p>` : ''}
     <h1 id="hero-title">${escapeHtml(headline)}</h1>
     ${leadRest ? `<p class="hero-lead">${escapeHtml(leadRest.charAt(0).toUpperCase() + leadRest.slice(1))}</p>` : ''}
     <div class="hero-actions">
