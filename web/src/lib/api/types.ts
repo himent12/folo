@@ -41,6 +41,16 @@ export interface SystemInfo {
   features?: string[];
   /** What `device: auto` runs can use (f16, tensor cores, amp); absent from older servers. */
   capabilities?: Capabilities;
+  /** FOLO's GPU buffer pool, once the server has used the GPU; absent otherwise and from older servers. */
+  gpu_pool?: GpuPool;
+}
+
+/** GPU memory held by FOLO's buffer pool (released after a run and when inference is idle). */
+export interface GpuPool {
+  device: string;
+  live_bytes: number;
+  cached_bytes: number;
+  peak_live_bytes: number;
 }
 
 /** `/api/system`'s `capabilities` (docs/API.md). A `reason` is null exactly when the feature is usable. */
@@ -233,6 +243,10 @@ export interface Model {
    * only through `$lib/trainCli` `modelPath`.
    */
   path?: string;
+  /** `run`, a `file` under the models folder, or `published` weights from `folo weights pull` (id = the name). */
+  source?: 'run' | 'file' | 'published';
+  /** What published weights are; absent for other models. */
+  about?: string;
 }
 
 /** `Model.trained_with`. */

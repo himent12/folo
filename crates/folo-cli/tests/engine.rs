@@ -133,7 +133,14 @@ fn train_val_predict_export_with_json() {
     let done = lines.last().unwrap();
     assert_eq!(done["event"], "done");
     // Timings are rounded to 0.1 µs, so they print with at most 4 decimals (no f64 noise).
-    let timings = preds.iter().map(|p| &p["timing"]).chain([&done["mean_timing"]]);
+    let timings = preds.iter().map(|p| &p["timing"]).chain([&done["mean_timing"], &done["first_timing"]]);
+    // The first image (pipeline warm-up) is reported apart and left out of the mean.
+    assert_eq!(done["first_timing"], preds[0]["timing"], "{done}");
+    if preds.len() > 1 {
+        let rest: f64 = preds[1..].iter().map(|p| p["timing"]["total_ms"].as_f64().unwrap()).sum();
+        let mean = done["mean_timing"]["total_ms"].as_f64().unwrap();
+        assert!((mean - rest / (preds.len() - 1) as f64).abs() < 1e-3, "{done}");
+    }
     for (k, v) in timings.flat_map(|t| t.as_object().unwrap()) {
         let decimals = v.to_string().split_once('.').map_or(0, |(_, d)| d.len());
         assert!(v.as_f64().unwrap() >= 0.0 && decimals <= 4, "{k}: {v}");
@@ -167,7 +174,7 @@ fn train_val_predict_export_with_json() {
     let out = root.join("tiny-f16.folo");
     let (code, lines, stderr) = folo(&["export", "--json", "--model", s(&best), "--output", s(&out)]);
     assert_eq!(code, 0, "{stderr}");
-    assert_eq!((lines[0]["dtype"].as_str(), lines[0]["source"].as_str()), (Some("F16"), Some("ema")));
+    assert_eq!((lines[0]["dtype"].as_str(), lines[0]["source"].as_str()), (Some("f16"), Some("ema")));
     assert!(lines[0]["bytes"].as_u64().unwrap() < std::fs::metadata(&best).unwrap().len() / 4);
     let (code, _, stderr) = folo(&["predict", "--json", "--model", s(&out), s(&images.join("000008.png"))]);
     assert_eq!(code, 0, "{stderr}");
@@ -233,7 +240,7 @@ fn train_val_predict_export_with_json() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     let r = &lines[0];
-    assert!(r["path"].as_str().unwrap().ends_with("best-f16.onnx"), "{r}");
+    assert!(r["path"].as_str().unwrap().ends_with("best-decoded-f16.onnx"), "{r}");
     assert_eq!(
         r["outputs"][0],
         serde_json::json!({

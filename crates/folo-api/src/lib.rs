@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod codes;
 pub mod json;
 mod throughput;
+pub mod weights;
 
 pub use throughput::*;
 
@@ -99,6 +100,31 @@ pub struct SystemResponse {
     /// older than this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Capabilities>,
+    /// FOLO's GPU buffer pool on this server, when the GPU is in use (absent before the server touched it, on a
+    /// CPU-only server, in mock mode and from servers older than this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_pool: Option<GpuPool>,
+}
+
+/// [`SystemResponse::gpu_pool`]: the GPU memory FOLO's buffer pool holds. A finished run gives its cached buffers
+/// back to the driver, and so does inference once it has been idle for a while, so with nothing running
+/// `cached_bytes` drops to 0.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GpuPool {
+    /// The device, e.g. `gpu:0`.
+    #[serde(default)]
+    pub device: String,
+    /// Bytes in buffers in use (loaded models, a run's tensors).
+    #[serde(default)]
+    pub live_bytes: u64,
+    /// Bytes in free buffers kept for reuse.
+    #[serde(default)]
+    pub cached_bytes: u64,
+    /// The largest `live_bytes` since the last training run or benchmark probe started (since start-up before
+    /// one).
+    #[serde(default)]
+    pub peak_live_bytes: u64,
 }
 
 /// [`SystemResponse::capabilities`]: what the device `device: auto` resolves to can do. Every field defaults, so a
@@ -605,6 +631,27 @@ pub struct Model {
     /// `"true"` / `"false"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fused: Option<bool>,
+    /// Where the model comes from: a run, a file under the server's models folder, or published weights
+    /// downloaded with `folo weights pull` (their id is the published name, e.g. `folo-n-coco`). Left out by older
+    /// servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<ModelSource>,
+    /// What published weights are (the line `folo weights list` prints); absent for other models.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub about: Option<String>,
+}
+
+/// [`Model::source`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ModelSource {
+    /// The `best.folo` / `last.folo` of a run.
+    Run,
+    /// A `.folo` file under `<data dir>/models`.
+    File,
+    /// Published weights from the local `folo weights` cache ([`weights::cache_dir`]).
+    Published,
 }
 
 /// [`Model::precision`]: the floating dtype a model's weights are stored in.
@@ -1637,6 +1684,12 @@ mod tests {
             data_dir: None,
             features: vec![],
             capabilities: Some(Capabilities::default()),
+            gpu_pool: Some(GpuPool {
+                device: "gpu:0".into(),
+                live_bytes: 1,
+                cached_bytes: 2,
+                peak_live_bytes: 3,
+            }),
         };
         let back: SystemInfo = serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
         assert_eq!(back, new.system);

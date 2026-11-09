@@ -18,8 +18,8 @@ use folo_api::{
     AmpSupport, Arch, BBox, BenchmarkReport, BenchmarkRequest, Capabilities, ClassMetrics, Dataset,
     DatasetFormat, DatasetIssue, ExportFormat, ExportResult, ExportSpec, GpuBackend, GpuInfo, Head,
     ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval, ModelMetrics, ModelPrecision,
-    PhaseKind, PrCurve, PredictResponse, RegisterDataset, Run, RunEstimate, RunSamples, Sample, ScoredBox,
-    Split, Splits, SyntheticDataset, TensorCoreSupport, ThroughputTable, TrainConfig, TrainedWith,
+    ModelSource, PhaseKind, PrCurve, PredictResponse, RegisterDataset, Run, RunEstimate, RunSamples, Sample,
+    ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, ThroughputTable, TrainConfig, TrainedWith,
 };
 
 use crate::error::{Error, Result};
@@ -825,6 +825,8 @@ impl MockStore {
                     // A run's checkpoint.
                     precision: Some(ModelPrecision::F32),
                     fused: Some(false),
+                    source: Some(ModelSource::Run),
+                    about: None,
                 };
                 let basis = EvalBasis::new(&run, entry);
                 if mid == "m_53d1" {
@@ -839,6 +841,7 @@ impl MockStore {
                             trained_with: None,
                             precision: Some(ModelPrecision::F16),
                             fused: Some(true),
+                            source: Some(ModelSource::File),
                             ..base.clone()
                         },
                     });
@@ -945,6 +948,8 @@ impl MockStore {
                 }),
                 precision: Some(ModelPrecision::F32),
                 fused: Some(false),
+                source: Some(ModelSource::Run),
+                about: None,
             });
         }
         out.sort_by(|a, b| b.created.cmp(&a.created).then(a.id.cmp(&b.id)));
@@ -1270,6 +1275,22 @@ impl Store for MockStore {
     fn create_run(&self, mut config: TrainConfig) -> Result<Run> {
         let ds = self.dataset(&config.dataset_id)?;
         self.validate(&config)?;
+        // As the real store: a fine-tune takes the weights' architecture, and `amp` is refused up front where
+        // `capabilities.amp` says it is unavailable.
+        if let Some(w) = &config.weights {
+            config.arch = self.get_model(w)?.arch;
+        }
+        if config.amp && (config.device == "cpu" || self.tensor_cores != MockTensorCores::On) {
+            let why = if config.device == "cpu" {
+                "the run is on the CPU".to_string()
+            } else {
+                format!(
+                    "gpu:0 has tensor cores {}",
+                    self.tensor_cores.capabilities().tensor_cores.reason.unwrap_or_default()
+                )
+            };
+            return Err(crate::engine::engine_error(folo_vision::train::amp_not_supported(&why)));
+        }
         let meta = ds.meta();
         if meta.classes.is_empty() || meta.splits.train == 0 {
             return Err(Error::new(

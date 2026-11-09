@@ -318,6 +318,9 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
     let device = predictor.device().to_string();
     let precision = predictor.precision();
     let (mut boxes, mut failed) = (0usize, 0usize);
+    // The first image's timing (it includes pipeline compilation and the first allocations) and the sum over the
+    // rest: the mean leaves the first out once there are others.
+    let mut first: Option<[f64; 4]> = None;
     let mut sum = [0f64; 4];
     let t_all = Instant::now();
     for (i, (path, _)) in images.iter().enumerate() {
@@ -336,9 +339,13 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         p.timing.preprocess_ms += decode_ms;
         p.timing.total_ms += decode_ms;
         let ti = p.timing;
-        for (s, v) in sum.iter_mut().zip([ti.preprocess_ms, ti.inference_ms, ti.postprocess_ms, ti.total_ms])
-        {
-            *s += v;
+        let parts = [ti.preprocess_ms, ti.inference_ms, ti.postprocess_ms, ti.total_ms];
+        if first.is_none() {
+            first = Some(parts);
+        } else {
+            for (s, v) in sum.iter_mut().zip(parts) {
+                *s += v;
+            }
         }
         boxes += p.detections.len();
         let mut saved = None;
@@ -385,25 +392,32 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
             ti.total_ms
         ));
     }
-    let n = (images.len() - failed).max(1) as f64;
+    let done = images.len() - failed;
+    if done == 1 {
+        sum = first.unwrap_or_default();
+    }
+    let n = done.saturating_sub(1).max(1) as f64;
     // Rounded like the per-image timings (`folo_api::json::round_ms`): `49.0546`, not `49.054555000000015`.
     let mean = |i: usize| folo_api::json::round_ms(sum[i] / n);
+    let first_ms = |i: usize| first.map(|f| folo_api::json::round_ms(f[i]));
     out.record(&json!({
         "event": "done",
         "images": images.len() - failed,
         "failed": failed,
         "boxes": boxes,
         "mean_timing": { "preprocess_ms": mean(0), "inference_ms": mean(1), "postprocess_ms": mean(2), "total_ms": mean(3) },
+        "first_timing": first.map(|_| json!({ "preprocess_ms": first_ms(0), "inference_ms": first_ms(1), "postprocess_ms": first_ms(2), "total_ms": first_ms(3) })),
         "seconds": t_all.elapsed().as_secs_f64(),
         "saved_to": args.save,
     }));
     out.human(format!(
-        "{} images, {boxes} boxes; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}){}",
-        images.len() - failed,
+        "{} images, {boxes} boxes; mean {:.1} ms (pre {:.1}, inference {:.1}, post {:.1}{}){}",
+        done,
         sum[3] / n,
         sum[0] / n,
         sum[1] / n,
         sum[2] / n,
+        if done > 1 { "; the first image, with warm-up, left out" } else { "" },
         args.save
             .as_ref()
             .map_or(String::new(), |d| format!("; annotated images in {}", folo_api::json::path(d)))
@@ -442,13 +456,18 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     if args.batch == Some(0) {
         return Err(CliError::new(ExitCode::Usage, "usage", "--batch must be at least 1"));
     }
+    // A decoded graph is named apart from the raw one: `<name>-decoded.onnx` (`-decoded-f16` with --half).
     let (dtype, suffix, ext) = match args.format {
         ExportFormatArg::FoloF16 => (FloatDType::F16, "-f16", "folo"),
         ExportFormatArg::Folo => (FloatDType::F32, "-fused", "folo"),
         ExportFormatArg::Weights => (FloatDType::F32, "-weights", "folo"),
+        ExportFormatArg::Onnx if args.half && args.decode => (FloatDType::F16, "-decoded-f16", "onnx"),
         ExportFormatArg::Onnx if args.half => (FloatDType::F16, "-f16", "onnx"),
+        ExportFormatArg::Onnx if args.decode => (FloatDType::F32, "-decoded", "onnx"),
         ExportFormatArg::Onnx => (FloatDType::F32, "", "onnx"),
     };
+    // The record's dtype is lowercase, as `val` and `predict` write it.
+    let dtype_name = dtype.as_str().to_ascii_lowercase();
     let file = ModelFile::open(&args.model).map_err(|e| weights_error(&args.model, e))?;
     if args.format == ExportFormatArg::Weights && file.metadata().fused {
         return Err(CliError::new(
@@ -558,7 +577,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             "path": folo_api::json::path(&output),
             "bytes": x.bytes.len(),
             "format": "onnx",
-            "dtype": dtype.as_str(),
+            "dtype": dtype_name,
             "fused": true,
             "source": source,
             "arch": meta.arch,
@@ -579,7 +598,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             folo_api::json::path(&args.model),
             folo_api::json::path(&output),
             onnx::OPSET,
-            dtype.as_str(),
+            dtype_name,
             x.bytes.len() as f64 / 1e6,
             onnx::INPUT,
             shape(&x.inputs[0]),
@@ -608,7 +627,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             ExportFormatArg::Weights => "weights",
             _ => "folo",
         },
-        "dtype": dtype.as_str(),
+        "dtype": dtype_name,
         "fused": fused,
         "source": source,
         "arch": meta.arch,
@@ -619,7 +638,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
         "Exported the {source} weights of {} ({}, {}) to {} ({:.1} MB)",
         folo_api::json::path(&args.model),
         if fused { "fused" } else { "unfused" },
-        dtype.as_str(),
+        dtype_name,
         folo_api::json::path(&output),
         bytes as f64 / 1e6
     ));

@@ -625,4 +625,9 @@ pub struct McpArgs {
     /// else the CPU), cpu or gpu:<n>. Training runs use their own `device` setting.
     #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]
     pub device: String,
+    /// Embedded mode: ask for the GPU's tensor cores, as `folo serve --tensor-cores` does, so `train` with
+    /// `"amp": true` (mixed precision) can run and f16 inference uses them (the same as FOLO_GPU_TENSOR_CORES=1).
+    /// With --server, the `folo serve` decides.
+    #[arg(long, env = "FOLO_GPU_TENSOR_CORES", value_parser = clap::builder::BoolishValueParser::new())]
+    pub tensor_cores: bool,
 }

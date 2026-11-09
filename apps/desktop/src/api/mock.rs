@@ -367,6 +367,8 @@ impl MockBackend {
             trained_with: None,
             precision: Some(folo_api::ModelPrecision::F32),
             fused: Some(false),
+            source: Some(folo_api::ModelSource::Run),
+            about: None,
         };
         let mut models = vec![
             model(
@@ -872,6 +874,7 @@ impl Backend for MockBackend {
             data_dir: None,
             features: vec!["queue_control".into(), "weights_onnx".into()],
             capabilities: Some(capabilities),
+            gpu_pool: None,
         })
     }
 

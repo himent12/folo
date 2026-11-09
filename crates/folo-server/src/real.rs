@@ -19,13 +19,14 @@
 //! - `throughput.json`: the measured throughput table ([`crate::throughput`]).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
     BBox, BenchmarkReport, BenchmarkRequest, Capabilities, Dataset, DatasetFormat, ExportResult, ExportSpec,
-    GpuInfo, ImagePage, ImageSize, InferPrecision, LogLine, Model, ModelEval, PredictResponse,
+    GpuInfo, GpuPool, ImagePage, ImageSize, InferPrecision, LogLine, Model, ModelEval, PredictResponse,
     RegisterDataset, Run, RunEstimate, RunMetrics, RunSamples, Sample, ScoredBox, Splits, SyntheticDataset,
     ThroughputTable, TrainConfig, ValReport, ValRequest,
 };
@@ -51,6 +52,111 @@ pub const RECHECK_EVERY: Duration = Duration::from_secs(5);
 pub const MAX_SYNTHETIC_IMAGES: u64 = 100_000;
 /// How long [`Store::shutdown`] waits for the active run to stop at a batch boundary.
 pub const SHUTDOWN_WAIT: Duration = Duration::from_secs(60);
+/// The GPU buffer pool's cached buffers go back to the driver after this long without a prediction, validation,
+/// evaluation or benchmark probe, while no run is queued or training ([`RealStore::gpu_idle_release`]; a finished
+/// run releases its own at once).
+pub const GPU_IDLE_RELEASE: Duration = Duration::from_secs(30);
+/// Cached predictors (loaded models, [`crate::engine::PREDICTOR_CACHE`]) are dropped after this long without any
+/// of those, so an idle server holds no model memory either.
+pub const PREDICTOR_IDLE: Duration = Duration::from_secs(300);
+
+/// When the store last used the GPU for inference, and how many such calls are in flight; read by the idle sweeper
+/// ([`spawn_idle_sweeper`]).
+struct GpuIdle {
+    started: Instant,
+    /// Milliseconds after `started` at which the last inference call ended.
+    last_ms: AtomicU64,
+    active: AtomicUsize,
+    /// This store's inference used the GPU since the pool was last released (so a store that runs on the CPU never
+    /// touches the process's GPU pool, which another store in the same process may be using).
+    gpu_used: AtomicBool,
+    release_after_ms: AtomicU64,
+    predictors_after_ms: AtomicU64,
+}
+
+impl GpuIdle {
+    fn new() -> GpuIdle {
+        GpuIdle {
+            started: Instant::now(),
+            last_ms: AtomicU64::new(0),
+            active: AtomicUsize::new(0),
+            gpu_used: AtomicBool::new(false),
+            release_after_ms: AtomicU64::new(GPU_IDLE_RELEASE.as_millis() as u64),
+            predictors_after_ms: AtomicU64::new(PREDICTOR_IDLE.as_millis() as u64),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    /// Marks an inference call in flight until the guard drops (its end is then the last use).
+    fn using(self: &Arc<Self>) -> GpuUse {
+        self.active.fetch_add(1, Ordering::SeqCst);
+        GpuUse(self.clone())
+    }
+}
+
+impl GpuUse {
+    /// The call runs on `device`: a GPU's pool is released once inference is idle.
+    fn on(&self, device: Device) {
+        if !device.is_cpu() {
+            self.0.gpu_used.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// An inference call in flight ([`GpuIdle::using`]).
+struct GpuUse(Arc<GpuIdle>);
+
+impl Drop for GpuUse {
+    fn drop(&mut self) {
+        self.0.last_ms.store(self.0.now_ms(), Ordering::SeqCst);
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Releases inference memory once the store has been idle: the GPU pool's cached buffers after
+/// [`GPU_IDLE_RELEASE`], the cached predictors after [`PREDICTOR_IDLE`]; never while an inference call is in flight
+/// or a run is queued or training, and only after this store's inference used the GPU. The thread ends with the
+/// store.
+fn spawn_idle_sweeper(idle: Weak<GpuIdle>, predictors: Weak<Predictors>, runs: Weak<Runs>) {
+    let spawned = std::thread::Builder::new().name("folo-gpu-idle".into()).spawn(move || {
+        // The last use the predictors were dropped after.
+        let mut dropped = None;
+        loop {
+            let tick = match idle.upgrade() {
+                Some(g) => g.release_after_ms.load(Ordering::Relaxed).clamp(50, 10_000) / 2,
+                None => return,
+            };
+            std::thread::sleep(Duration::from_millis(tick));
+            let (Some(g), Some(predictors), Some(runs)) =
+                (idle.upgrade(), predictors.upgrade(), runs.upgrade())
+            else {
+                return;
+            };
+            if g.active.load(Ordering::SeqCst) > 0 || runs.busy() {
+                continue;
+            }
+            let last = g.last_ms.load(Ordering::SeqCst);
+            let since = g.now_ms().saturating_sub(last);
+            if since >= g.predictors_after_ms.load(Ordering::Relaxed) && dropped != Some(last) {
+                dropped = Some(last);
+                if predictors.clear() {
+                    // GPU models' buffers are in the pool now: release them too.
+                    g.gpu_used.store(true, Ordering::SeqCst);
+                }
+            }
+            if since >= g.release_after_ms.load(Ordering::Relaxed) && g.gpu_used.swap(false, Ordering::SeqCst)
+            {
+                engine::release_gpu_memory(Device::Gpu(0));
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        tracing::warn!("could not start the GPU idle sweeper: {e}");
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Registration {
@@ -142,7 +248,8 @@ pub struct RealStore {
     recheck_every: Duration,
     runs: Arc<Runs>,
     models: Models,
-    predictors: Predictors,
+    predictors: Arc<Predictors>,
+    idle: Arc<GpuIdle>,
     device: String,
     precision: folo_vision::Precision,
     throughput: Arc<Throughput>,
@@ -183,13 +290,17 @@ impl RealStore {
         let throughput = Arc::new(Throughput::open(data_dir.join(crate::throughput::FILE)));
         let runs = Runs::open(data_dir.join("runs"), throughput.clone());
         let models = Models::new(data_dir.clone());
+        let predictors = Arc::new(Predictors::default());
+        let idle = Arc::new(GpuIdle::new());
+        spawn_idle_sweeper(Arc::downgrade(&idle), Arc::downgrade(&predictors), Arc::downgrade(&runs));
         RealStore {
             data_dir,
             entries: RwLock::new(entries),
             recheck_every: RECHECK_EVERY,
             runs,
             models,
-            predictors: Predictors::default(),
+            predictors,
+            idle,
             device: "auto".into(),
             precision: folo_vision::Precision::F32,
             throughput,
@@ -208,6 +319,22 @@ impl RealStore {
     /// CPU; `cpu`; `gpu:<n>`). Training uses each run's `TrainConfig.device`.
     pub fn device(mut self, device: impl Into<String>) -> RealStore {
         self.device = device.into();
+        self
+    }
+
+    /// Lists the published weights downloaded into `dir` as models (`Model.source: published`, id = the published
+    /// name), so `TrainConfig.weights: "folo-n-coco"` works as `folo train --weights folo-n-coco` does. `folo serve`
+    /// and `folo mcp` pass [`folo_api::weights::cache_dir`]; by default none are listed.
+    pub fn published_weights(mut self, dir: impl Into<PathBuf>) -> RealStore {
+        self.models.set_published(Some(dir.into()));
+        self
+    }
+
+    /// Changes how long inference may be idle before the GPU pool's cached buffers are released (default
+    /// [`GPU_IDLE_RELEASE`]) and the cached predictors dropped (default [`PREDICTOR_IDLE`]).
+    pub fn gpu_idle_release(self, pool: Duration, predictors: Duration) -> RealStore {
+        self.idle.release_after_ms.store(pool.as_millis() as u64, Ordering::Relaxed);
+        self.idle.predictors_after_ms.store(predictors.as_millis() as u64, Ordering::Relaxed);
         self
     }
 
@@ -399,6 +526,7 @@ impl RealStore {
     fn all_models(&self) -> Vec<ModelRef> {
         let mut all = self.run_models();
         all.extend(self.models.scan());
+        all.extend(self.models.published());
         all.sort_by(|a, b| b.model.created.cmp(&a.model.created).then_with(|| a.model.id.cmp(&b.model.id)));
         all
     }
@@ -412,7 +540,37 @@ impl RealStore {
         {
             return Ok(m);
         }
+        if let Some(p) = folo_api::weights::find(id) {
+            return self.models.published_model(id).ok_or_else(|| self.published_not_found(p));
+        }
         self.models.scan().into_iter().find(|m| m.model.id == id).ok_or_else(|| Error::not_found("model", id))
+    }
+
+    /// `model_not_found` for published weights that are not downloaded (or that this store does not list).
+    fn published_not_found(&self, p: &folo_api::weights::Published) -> Error {
+        let (message, hint) = match self.models.published_dir() {
+            Some(dir) => (
+                format!(
+                    "published weights '{}' are not downloaded ({} does not exist)",
+                    p.name,
+                    folo_api::json::path(dir.join(p.asset))
+                ),
+                format!(
+                    "run `folo weights pull {}` on the server's machine; it lists as model `{}` from then on, \
+                     no restart needed",
+                    p.name, p.name
+                ),
+            ),
+            None => (
+                format!("model '{}' does not exist (this server does not list published weights)", p.name),
+                format!(
+                    "copy the file `folo weights pull {}` downloads into <data dir>/models; list_models (MCP) or \
+                     GET /api/models then lists it",
+                    p.name
+                ),
+            ),
+        };
+        Error::new(StatusCode::NOT_FOUND, "model_not_found", message).hint(hint)
     }
 
     /// The dataset `/eval` validates `m` on and its index fingerprint: its run's dataset (the registered copy when
@@ -658,6 +816,10 @@ impl Store for RealStore {
         Some(engine::capabilities())
     }
 
+    fn gpu_pool(&self) -> Option<GpuPool> {
+        engine::gpu_pool()
+    }
+
     fn data_dir(&self) -> Option<&Path> {
         Some(&self.data_dir)
     }
@@ -671,7 +833,7 @@ impl Store for RealStore {
         Ok(self.throughput.table(&auto, &devices))
     }
 
-    fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
+    fn estimate_run(&self, mut config: TrainConfig) -> Result<RunEstimate> {
         let e = self.entry(&config.dataset_id)?;
         let idx = self.fresh_index(&e)?;
         let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
@@ -681,8 +843,9 @@ impl Store for RealStore {
         if idx.splits.train == 0 {
             return Err(bad("the dataset has no training images".into()));
         }
+        // A fine-tune trains the weights' architecture (see create_run).
         if let Some(w) = &config.weights {
-            self.model(w)?;
+            config.arch = self.model(w)?.model.arch;
         }
         // The same checks as POST /api/runs, the settings first (on the CPU).
         let mut check = folo_vision::TrainConfig::from_api(&config);
@@ -706,7 +869,9 @@ impl Store for RealStore {
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {
         crate::probe::check(&req)?;
+        let _gpu = self.idle.using();
         let device = engine::resolve(&self.device)?;
+        _gpu.on(device);
         let _gate = self.runs.probe_gate()?;
         crate::probe::run(&req, device, self.precision, &self.throughput)
     }
@@ -840,9 +1005,11 @@ impl Store for RealStore {
     }
 
     fn model_eval(&self, id: &str) -> Result<ModelEval> {
+        let _gpu = self.idle.using();
         let m = self.model(id)?;
         let (ds, key) = self.eval_dataset(&m)?;
         let device = engine::resolve(&self.device)?;
+        _gpu.on(device);
         self.models.eval(&m, &ds, key.as_deref(), device)
     }
 
@@ -878,8 +1045,14 @@ impl Store for RealStore {
         if idx.splits.train == 0 {
             return Err(bad("the dataset has no training images".into()));
         }
+        // Fine-tuning takes the weights' architecture, as `folo train --weights` does (`arch` would otherwise build
+        // another model and transfer almost nothing into it).
         let weights = match &config.weights {
-            Some(w) => Some(self.model(w)?.path),
+            Some(w) => {
+                let m = self.model(w)?;
+                config.arch = m.model.arch;
+                Some(m.path)
+            }
             None => None,
         };
         // The settings first (on the CPU), so a rejected config never initialises a GPU.
@@ -887,6 +1060,11 @@ impl Store for RealStore {
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
         let device = engine::resolve(&config.device)?;
+        // `amp` is checked here, as `folo train --amp` checks it, rather than failing the queued run: the same
+        // answer `/api/system`'s `capabilities.amp` gives (the trainer's own check, without switching anything on).
+        if config.amp {
+            folo_vision::train::amp_available(device).map_err(engine_error)?;
+        }
         let ds = self.dataset_ref(&e);
         if config.name.trim().is_empty() {
             config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
@@ -896,6 +1074,12 @@ impl Store for RealStore {
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
+        // A mixed-precision run resumes in mixed precision: refused here when this server cannot (see create_run).
+        let config = self.runs.get(id)?.run().config;
+        if config.amp {
+            let device = fields.get("device").and_then(|v| v.as_str()).unwrap_or(&config.device);
+            folo_vision::train::amp_available(engine::resolve(device)?).map_err(engine_error)?;
+        }
         self.runs.resume(id, fields)
     }
 
@@ -940,6 +1124,7 @@ impl Store for RealStore {
     }
 
     fn predict(&self, input: PredictInput) -> Result<PredictResponse> {
+        let _gpu = self.idle.using();
         let path = match &input.source {
             PredictSource::Dataset { dataset_id, image_id } => {
                 let e = self.entry(dataset_id)?;
@@ -949,6 +1134,7 @@ impl Store for RealStore {
         };
         let m = self.model(&input.model_id)?;
         let device = engine::resolve(&self.device)?;
+        _gpu.on(device);
         // Throughput samples: only a warm predictor's calls with no run queued or training from before the decode
         // (it counts in `total_ms`) to the end, and none taken up or let go meanwhile.
         let activity = self.runs.activity();
@@ -1018,11 +1204,13 @@ impl Store for RealStore {
     }
 
     fn val(&self, req: ValRequest) -> Result<ValReport> {
+        let _gpu = self.idle.using();
         let m = self.model(&req.model_id)?;
         let e = self.entry(&req.dataset_id)?;
         // Waits for an index still being built, so a dataset that cannot be read fails here.
         self.fresh_index(&e)?;
         let device = engine::resolve(&self.device)?;
+        _gpu.on(device);
         let (ds, p) = (self.dataset_ref(&e), self.precision);
         crate::models::val(&m, &ds, req.split, req.imgsz, req.conf, req.iou, device, p)
     }

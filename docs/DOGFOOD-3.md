@@ -108,7 +108,7 @@ or inconsistent. IDs group findings by surface:
 
 ### Across surfaces
 
-#### X1. `folo serve` keeps its training runs' GPU memory after they finish (annoying, high)
+#### X1. `folo serve` keeps its training runs' GPU memory after they finish (annoying, high; fixed by `fix/dogfood-3`)
 - **Repro:**
   1. `folo serve --data-dir D:/folo-dogfood3/studio --port 7979 --tensor-cores`.
   2. Train two R6 fine-tunes through it (MCP proxy, `amp: true`, 15 epochs each) and let both complete.
@@ -122,7 +122,7 @@ or inconsistent. IDs group findings by surface:
 - **Fix:** drop or trim the GPU buffer pool when the worker goes idle, or after each run. Also report the server's
   current pool size in `/api/system`, so Studio can show it. Engine / server.
 
-#### X2. Published weights are CLI-only (annoying)
+#### X2. Published weights are CLI-only (annoying; fixed by `fix/dogfood-3`)
 - **Repro:**
   - MCP: `train { "dataset_id": "ds_ba61", "weights": "folo-n-coco" }` returns `model_not_found` "model
     'folo-n-coco' does not exist", with the hint "list_models … lists the models that exist".
@@ -201,13 +201,13 @@ or inconsistent. IDs group findings by surface:
 - **Now:** paths go through `folo_api::json::path`, and the cached `done` record has both fields.
 - **Test:** `tests/pretrained.rs` asserts the paths and the cached record.
 
-#### C3. Export naming and casing (polish)
+#### C3. Export naming and casing (polish; fixed by `fix/dogfood-3`, except `-e2e`)
 - **Decode name:** `export --format onnx --decode` next to an existing raw `best.onnx` writes `best-2.onnx`.
   `--half` gets `-f16`, but `--decode` gets no suffix, so the raw and decoded graphs are told apart only by a
   counter. Suggest `<name>-decoded.onnx`, and `-e2e` for an o2o model.
 - **dtype casing:** the export record says `"dtype": "F32"`, while `val` and `predict` say `"f32"`.
 
-#### C4. `folo doctor` says AMP is "not available" on a machine where `folo train --amp` works (polish)
+#### C4. `folo doctor` says AMP is "not available" on a machine where `folo train --amp` works (polish; fixed by `fix/dogfood-3`)
 - `amp  not available: … gpu:0 has tensor cores off (not requested …)`.
 - The line is right about `device: auto` servers. A newcomer reads it as "this GPU can't". Say "available with
   `--amp` (it asks for tensor cores); `folo serve` needs `--tensor-cores`".
@@ -224,7 +224,7 @@ or inconsistent. IDs group findings by surface:
 
 ### MCP
 
-#### M1. AMP over MCP: no way to ask for tensor cores, accepted then failed, CLI-only advice (annoying)
+#### M1. AMP over MCP: no way to ask for tensor cores, accepted then failed, CLI-only advice (annoying; fixed by `fix/dogfood-3`)
 - **Embedded:** `folo mcp --data-dir D` reports `amp.available: false` ("tensor cores off (not requested …)").
   `train { amp: true }` returns "started run_868f", then the run fails. Its message advises "`folo train --amp`
   asks for them; start `folo serve --tensor-cores`". `folo mcp` has no `--tensor-cores` flag; only
@@ -236,7 +236,7 @@ or inconsistent. IDs group findings by surface:
   hint (`FOLO_GPU_TENSOR_CORES=1` in the server's `env`, or `amp: false`).
 - **Fix:** engine / MCP.
 
-#### M2. `train` accepts `weights` together with `arch` (polish)
+#### M2. `train` accepts `weights` together with `arch` (polish; fixed by `fix/dogfood-3`)
 - `train { arch: "folo-n", weights: "m_d849e303" }` is accepted. The CLI makes `--model` with `--weights` a usage
   error, because the weights decide the architecture. Reject it, or say in the summary that `arch` was ignored.
 
@@ -432,18 +432,39 @@ or inconsistent. IDs group findings by surface:
 - **Test** `folo-mcp docs_name_every_tool`: the tool count in four docs and llms.txt's list follow `TOOLS`.
 
 ## For the orchestrator
-**Engine / CLI / MCP / server**
-- X1: free or trim the GPU buffer pool when a run ends or the server is idle; report the pool size in `/api/system`.
-- X2: published weights in Studio and MCP (list the cached ones as models, or accept names in `TrainConfig.weights`).
-- M1: `folo mcp --tensor-cores` (or self-requested tensor cores for `amp`); `train` checks `amp` synchronously.
-- X4: resized-image cache or DCT-scaled JPEG decode for large frames under mosaic; the per-epoch time split
-  (report 2's X3).
-- X3 follow-up: leave the first epoch's startup out of the ETA's rate, as the throughput table does.
-- X5 follow-up: leave the first image out of `predict`'s `mean_timing`, or report medians.
-- C3 (export `-decoded` / `-e2e` names, `dtype` casing), C4 (doctor's AMP line), C5 (transfer log wording), M2
-  (`weights` + `arch`), M3 (a filtered throughput resource, `$defs` for `ResolvedTrain`, class names in per-class
-  metrics), P2 follow-up (`predict --square` or a note).
-- `memory_bytes: 0` for Vulkan adapters (S3 shows "GPU memory unknown"): fill it where wgpu or the OS can tell.
+**Engine / CLI / MCP / server** (status after the `fix/dogfood-3` PR)
+- X1 **fixed**: a finished run gives the pool back to the driver before it is reported finished
+  (`GpuContext::release_memory`: the cached buffers, the cap back to the live bytes, the uniform arena, then a wait
+  so wgpu frees them now), inference does after 30 s idle and drops its cached predictors after 5 min; `/api/system`
+  reports `gpu_pool` (live, cached, peak bytes). Measured with
+  `nvidia-smi` around a `folo serve` that trained folo-n at 640 px, batch 16, 4 epochs on 320 synthetic images:
+  idle server after the run **8260 MiB** in use on main (1608 MiB before the run: 6.65 GB held), **2101 MiB** with
+  the fix (1398 before: 0.70 GB, the device, its pipelines and the driver allocator's retained blocks;
+  `gpu_pool.cached_bytes` 0); the run's peak live bytes were 3.5 GB.
+- X2 **fixed**: `folo serve` and `folo mcp` list the published weights in the `folo weights` cache as models (id =
+  the published name, `source: published`, `about`), so `train { weights: "folo-n-coco" }` works over HTTP, MCP and
+  Studio's "Start from"; a name that is not downloaded is `model_not_found` with `folo weights pull <name>` as the
+  hint. The COCO metrics are not in the file (`metrics: null`); the `about` line points to examples/coco.
+- M1 **fixed**: `folo mcp --tensor-cores` (tensor cores must be asked for before the GPU is first used, so a start-up
+  flag rather than a runtime toggle); `POST /api/runs`, MCP `train` and resuming refuse an `amp` run synchronously
+  with `501 not_supported` (the same check as `/api/system`'s `capabilities.amp`), and MCP's hint names `amp: false`
+  or the `folo mcp` / `folo serve` restart with `--tensor-cores`.
+- X4 **deferred** (folo-data: resized cache or DCT-scaled decode, the per-epoch time split).
+- X3 follow-up **deferred** (first epoch's startup in the ETA).
+- X5 follow-up **fixed**: `predict --json`'s `mean_timing` leaves the first image out (with two or more) and
+  `first_timing` reports it.
+- C3 **fixed**: `--decode` exports are `<name>-decoded.onnx` (`-decoded-f16` with `--half`), in the CLI and the
+  server's export; the export record's `dtype` is lowercase (`f32` / `f16`). `-e2e` for o2o models **deferred**.
+- C4 **fixed**: doctor's `amp` line says "available … `folo train --amp` asks for tensor cores itself; `folo serve`
+  and `folo mcp` need `--tensor-cores`" when the adapter has them and only the request is missing.
+- C5 transfer wording **fixed**: "transferred N of M tensors from F; the other K keep their fresh initialisation (S of
+  the file's tensors were not used: another shape, such as the class outputs of another class list, or not part of
+  this model)". The `--half` latency note **deferred**.
+- M2 **fixed**: a fine-tune takes the weights' architecture on the server too (it built `arch` and transferred
+  almost nothing into it); MCP `train` with an explicit `arch` that differs from the weights' is `invalid_config`.
+- M3 **deferred** (filtered throughput resource, `$defs` for `ResolvedTrain`, class names in per-class metrics).
+- P2 follow-up (`predict --square` or a note) **deferred**.
+- `memory_bytes: 0` for Vulkan adapters **deferred** (wgpu does not report it).
 
 **Studio**
 - S1: the CLI command for fine-tunes (needs `Model.path` or a server-built command).

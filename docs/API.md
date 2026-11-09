@@ -41,7 +41,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
 | 500 | `internal` | a bug or an IO failure |
-| 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (a training run with `"amp": true` without GPU tensor cores fails with it in `Run.error`) |
+| 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (`POST /api/runs` with `"amp": true` where `capabilities.amp.available` is false: refused before anything is queued, with the same reason and a hint) |
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
@@ -49,7 +49,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
   "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches", "queue_control", "weights_onnx"],
-  "capabilities"?: Capabilities }`
+  "capabilities"?: Capabilities, "gpu_pool"?: { "device", "live_bytes", "cached_bytes", "peak_live_bytes" } }`
   (`util` in `0..1`; CPU utilisation is measured since the previous call. `data_dir` is the real server's
   `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
   the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
@@ -79,7 +79,16 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   for that device; `amp.reason` is the `not_supported` message such a run would fail with, `null` when available.
   Every field has a default, so clients parse objects from older and newer servers; servers older than this field
   leave out `capabilities`. Studio and Desktop can disable the Mixed precision switch when `amp.available` is
-  false and show `amp.reason`.
+  false and show `amp.reason`. `POST /api/runs` (and MCP `train`) refuse such a run with `501 not_supported`
+  (`amp.reason` as the message) before anything is queued.
+- `gpu_pool` (real mode, once the server has used the GPU): FOLO's GPU buffer pool. `live_bytes` are buffers in
+  use (loaded predictors, a run's tensors), `cached_bytes` free buffers kept for reuse, `peak_live_bytes` the most
+  in use since the last run or benchmark probe started. A finished run gives its cached buffers back to the driver
+  before its final `status` event, and inference (`/api/predict`, `/api/val`, `/eval`, probes) does after 30 s
+  without a request while no run is queued or training; the cached predictors (loaded models) are dropped after
+  5 minutes of that. So an idle server holds no pooled GPU memory (`cached_bytes` 0, `live_bytes` 0 once the
+  predictors are gone), and other processes on the GPU get it back. Absent in mock mode, on a CPU-only server and
+  from servers older than the field.
 
 ## Datasets
 - `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
@@ -172,6 +181,15 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   wrong). Clients read a `precision` value they do not know as unknown too, so a later dtype is additive. Metadata
   comes from the file's header alone (the first `8 + N` bytes, docs/FORMAT.md), never the tensor data, read once
   per file version; a file whose header is invalid is skipped with a warning in the server log.
+  **Published weights:** `folo serve` and `folo mcp` also list the published weights downloaded with `folo weights
+  pull` (the `folo weights` cache: `$FOLO_WEIGHTS_DIR`, else `<FOLO_HOME or ~/.folo>/weights`, whatever the
+  `--data-dir`; docs/CLI.md, Weights). Their id and name are the published name (`folo-n-coco`), `source` is
+  `published` and `about` is the line `folo weights list` prints, so `TrainConfig.weights: "folo-n-coco"`, predict,
+  val, eval and export take the name everywhere a model id goes (Studio's "Start from", MCP `train { weights }`).
+  A file pulled while the server runs lists at once. A published name that is not downloaded is `404
+  model_not_found` with `folo weights pull <name>` as the hint.
+  `source` (additive, left out by older servers): `run` (a run's `best` / `last`), `file` (`<data dir>/models`) or
+  `published`; `about` only for published weights.
 - `GET /api/models/{id}` → `Model`
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none, see Split fallback below), for the PR curves and confusion matrix of the Models view:
@@ -241,8 +259,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   the fused EMA weights to `<data dir>/exports/`: `folo-f16` as f16 `.folo` (as `folo export` does, docs/FORMAT.md)
   to `<model name>-f16.folo`; `onnx` as an ONNX graph (opset 17) to `<model name>.onnx`, with the defaults of
   `folo export --format onnx` (docs/CLI.md, ONNX export): f32, a fixed batch of 1, the model's training imgsz
-  (square), and the raw head outputs `box_raw` / `cls_raw`, unless a switch says otherwise (`half` writes
-  `<model name>-f16.onnx`). Names get `-2`, `-3`, ... when taken (exports never
+  (square), and the raw head outputs `box_raw` / `cls_raw`, unless a switch says otherwise (`decode` writes
+  `<model name>-decoded.onnx`, `half` `<model name>-f16.onnx`, both `-decoded-f16.onnx`, as `folo export` names
+  them). Names get `-2`, `-3`, ... when taken (exports never
   overwrite). `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
   part (no FOLO v1 model hits this).
 - `GET /api/models/{id}/weights` (optional `?format=f16|onnx`) → the model's `.folo` file (docs/FORMAT.md), for loading
@@ -370,13 +389,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 { "name": "", "dataset_id": "ds_8f2c", "arch": "folo-n", "epochs": 100, "batch": 16, "imgsz": 640,
   "device": "auto",            // auto | cpu | gpu:<n>
   "optimizer": "auto",         // auto | sgd | adamw
-  "lr0": 0.01, "weights": null, // or a model id to fine-tune from
+  "lr0": 0.01, "weights": null, // or a model id to fine-tune from (a published name such as "folo-n-coco" too);
+                               // the run then trains the weights' architecture, whatever `arch` says
   "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5, "scale": 0.5, "translate": 0.1,
                "close_mosaic": 10 },
   "seed": 0,
   "amp": false,                // mixed-precision training (docs/MODEL.md §8.8): f16 on GPU tensor cores, f32 master
-                               // weights; needs `folo serve --tensor-cores` on a GPU with them, else the run fails
-                               // with `not_supported`
+                               // weights; needs `folo serve --tensor-cores` on a GPU with them, else POST /api/runs
+                               // answers `501 not_supported` (nothing is queued)
   "head": "o2m" }              // o2m | o2o: o2o adds the NMS-free one-to-one head (docs/MODEL.md §6.6), trained with
                                // dual assignment; the run's models then predict and validate without NMS (predict
                                // and val pick the head from the model, no request field needed). Additive: missing

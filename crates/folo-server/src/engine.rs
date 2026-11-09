@@ -40,7 +40,11 @@ pub fn engine_error(e: folo_vision::Error) -> Error {
         }
         E::Unsupported(_) => Error::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", msg),
         E::NotSupported(_) => Error::new(StatusCode::NOT_IMPLEMENTED, "not_supported", msg)
-            .hint("train without `amp`, or start `folo serve --tensor-cores` on a GPU with tensor cores"),
+            .hint(
+                "set `amp: false` to train in f32, or restart this server with tensor cores (`folo serve \
+                 --tensor-cores`, or FOLO_GPU_TENSOR_CORES=1) on a GPU that has them; GET /api/system's \
+                 `capabilities.amp` says when amp is available",
+            ),
         _ if e.code() == "invalid_weights" => {
             Error::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_weights", msg)
         }
@@ -240,6 +244,36 @@ pub fn tensor_cores_on(device: Device) -> bool {
     folo_gpu::context_for(device).is_some_and(|c| c.tensor_cores())
 }
 
+/// Gives the GPU buffer pool of `device` back to the driver ([`folo_gpu::GpuContext::release_memory`]): after a
+/// training run, and when inference has been idle for a while ([`crate::real::RealStore`]). Nothing for the CPU or a
+/// device whose context was never created.
+pub fn release_gpu_memory(device: Device) {
+    let Some(ctx) = (!device.is_cpu()).then(|| folo_gpu::context_for(device)).flatten() else { return };
+    match ctx.release_memory() {
+        Ok(bytes) if bytes > 0 => {
+            tracing::debug!(
+                "released {:.1} MiB of pooled GPU memory on {device}",
+                bytes as f64 / (1 << 20) as f64
+            )
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("releasing GPU memory on {device}: {e}"),
+    }
+}
+
+/// `/api/system`'s `gpu_pool`: the buffer pool of the GPU `device: auto` uses, when its context exists (never
+/// created by this call).
+pub fn gpu_pool() -> Option<folo_api::GpuPool> {
+    let ctx = folo_gpu::context_for(Device::Gpu(0))?;
+    let s = ctx.pool_stats();
+    Some(folo_api::GpuPool {
+        device: Device::Gpu(0).to_string(),
+        live_bytes: s.live_bytes,
+        cached_bytes: s.cached_bytes,
+        peak_live_bytes: s.peak_live_bytes,
+    })
+}
+
 /// Opens `.folo` weights for inference (EMA when present, fused, eval mode) on `device` at `precision`
 /// ([`effective_precision`]: f16 only where the device computes in it).
 pub fn open_model(path: &Path, device: Device, precision: Precision) -> Result<FoloModel> {
@@ -332,6 +366,13 @@ impl Predictors {
             entries.remove(0);
         }
         Ok(p)
+    }
+
+    /// Drops every cached predictor (inference has been idle; [`crate::real::PREDICTOR_IDLE`]). Returns whether one
+    /// of them was on a GPU.
+    pub fn clear(&self) -> bool {
+        let dropped = std::mem::take(&mut *self.entries.lock().unwrap());
+        dropped.iter().any(|(_, d, _, _)| !d.is_cpu())
     }
 
     /// Drops every cached predictor of `path` (its file was replaced or deleted).

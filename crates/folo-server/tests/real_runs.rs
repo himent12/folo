@@ -867,7 +867,12 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     }
     let t = TempDir::new("gpu");
     let home = t.0.join("home");
-    let s = Arc::new(RealStore::open(home.clone()).recheck_every(Duration::ZERO));
+    // Inference memory is released after 300 ms idle, the predictors after 600 ms (30 s and 5 min by default).
+    let s = Arc::new(
+        RealStore::open(home.clone())
+            .recheck_every(Duration::ZERO)
+            .gpu_idle_release(Duration::from_millis(300), Duration::from_millis(600)),
+    );
     let app = app(&s);
     let ds = dataset(&app, "gpu", 12).await;
     let mut cfg = tiny(&ds, 1);
@@ -878,11 +883,31 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     let mut sse = Events::open(&app, &run.id).await;
     let events = sse.until_status(&["completed", "failed"]).await;
     assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    // The finished run gave its pooled buffers back before it was reported finished (the other tests of this binary
+    // train on the CPU, so nothing else fills the pool meanwhile).
+    let system: SystemResponse = ok(&app, get("/api/system")).await;
+    let pool = system.gpu_pool.expect("the run used the GPU");
+    eprintln!("after the run: {pool:?}");
+    assert_eq!((pool.device.as_str(), pool.cached_bytes), ("gpu:0", 0), "{pool:?}");
+    assert!(pool.peak_live_bytes > pool.live_bytes, "{pool:?}");
     let model_id = ok::<Run>(&app, get(&format!("/api/runs/{}", run.id))).await.model_id.unwrap();
     let p = json!({ "model_id": model_id, "dataset_id": ds.id, "image_id": "0", "conf": 0.001 });
     let r: PredictResponse = ok(&app, post_json("/api/predict", p)).await;
     assert_eq!(r.device, "gpu:0");
     assert!(!r.boxes.is_empty());
+    let busy = ok::<SystemResponse>(&app, get("/api/system")).await.gpu_pool.unwrap();
+    assert!(busy.cached_bytes > 0 && busy.live_bytes > 0, "a prediction caches its buffers: {busy:?}");
+    // Idle: the cache goes back to the driver, then the predictor (its weights) too.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let idle = loop {
+        let now = ok::<SystemResponse>(&app, get("/api/system")).await.gpu_pool.unwrap();
+        if now.cached_bytes == 0 && now.live_bytes < busy.live_bytes {
+            break now;
+        }
+        assert!(std::time::Instant::now() < deadline, "never released: {now:?} (busy {busy:?})");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    eprintln!("idle after a prediction: {idle:?} (busy {busy:?})");
     let system: SystemInfo = ok(&app, get("/api/system")).await;
     assert_eq!(system.gpus.first().map(|g| g.name.as_str()), Some(gpu.as_str()));
     // A one-second probe there measures the peak GPU memory too.
@@ -911,34 +936,83 @@ async fn no_runs_start_after_shutdown() {
     assert_eq!(s.list_runs().unwrap().len(), 1, "a refused run is not created");
 }
 
-/// A run the trainer refuses asynchronously keeps the engine's error code: an `amp` run on the CPU fails with
-/// `not_supported` in its final `status` event and in `Run.error_code`, not as a bare message.
+/// An `amp` run this server cannot train (here: on the CPU) is refused when it is submitted, with `501
+/// not_supported` and the same reason `/api/system`'s `capabilities.amp` gives, before anything is queued or written;
+/// resuming a mixed-precision run is refused the same way.
 #[tokio::test(flavor = "multi_thread")]
-async fn amp_run_without_tensor_cores_fails_with_not_supported() {
+async fn amp_run_without_tensor_cores_is_refused_up_front() {
     let t = TempDir::new("amp");
-    let s = store(&t.0.join("home"));
+    let home = t.0.join("home");
+    let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "amp", 4).await;
     let mut cfg = tiny(&ds, 1);
     cfg["amp"] = json!(true);
+    let e =
+        err(&app, post_json("/api/runs", cfg.clone()), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
+    assert!(e.message.contains("tensor cores") && e.message.contains("on the CPU"), "{}", e.message);
+    let hint = e.hint.unwrap();
+    assert!(hint.contains("`amp: false`") && hint.contains("--tensor-cores"), "{hint}");
+    assert!(s.list_runs().unwrap().is_empty(), "nothing was queued");
+    assert!(!home.join("runs").exists() || std::fs::read_dir(home.join("runs")).unwrap().next().is_none());
+    // The estimate is not refused (it answers what such a run would take where it can run).
+    let _: RunEstimate = ok(&app, post_json("/api/runs/estimate", cfg)).await;
+}
+
+/// Published weights downloaded with `folo weights pull` list as models (id = the published name, `source:
+/// published`) when the store is given the weights cache, and fine-tune by name; the run takes the weights'
+/// architecture whatever `arch` says. A published name that is not downloaded is `model_not_found` with the pull
+/// command as the hint.
+#[tokio::test(flavor = "multi_thread")]
+async fn published_weights_list_as_models_and_fine_tune_by_name() {
+    let t = TempDir::new("published");
+    let home = t.0.join("home");
+    let cache = t.0.join("weights");
+    std::fs::create_dir_all(&cache).unwrap();
+    let mut m = folo_vision::FoloModel::with_rng(
+        folo_nn::io::ModelConfig::new("n", 3).unwrap(),
+        &mut folo_core::rng::Rng::seed(9),
+    )
+    .unwrap();
+    m.set_classes(vec!["a".into(), "b".into(), "c".into()]).unwrap();
+    m.save(cache.join("folo-n-coco.folo")).unwrap();
+
+    // Without the cache the name is unknown, and the hint says how to get it there.
+    let plain = store(&home);
+    let e = err(&self::app(&plain), get("/api/models/folo-n-coco"), StatusCode::NOT_FOUND, "model_not_found")
+        .await;
+    assert!(e.hint.unwrap().contains("folo weights pull folo-n-coco"));
+    drop(plain);
+
+    let s = Arc::new(
+        RealStore::open(home.clone()).recheck_every(Duration::ZERO).device("cpu").published_weights(&cache),
+    );
+    let app = app(&s);
+    let models = ok::<ModelList>(&app, get("/api/models")).await.models;
+    let published: Vec<&Model> = models.iter().filter(|m| m.source == Some(ModelSource::Published)).collect();
+    assert_eq!(published.len(), 1, "{models:?}");
+    let p = published[0];
+    assert_eq!((p.id.as_str(), p.name.as_str(), p.arch), ("folo-n-coco", "folo-n-coco", Arch::N));
+    assert!(p.about.as_deref().is_some_and(|a| a.contains("COCO")) && p.run_id.is_none());
+    assert_eq!(ok::<Model>(&app, get("/api/models/folo-n-coco")).await, *p);
+    // Downloadable but not downloaded.
+    let e = err(&app, get("/api/models/folo-n-coco-f16"), StatusCode::NOT_FOUND, "model_not_found").await;
+    assert!(e.message.contains("not downloaded"), "{}", e.message);
+    assert!(e.hint.unwrap().contains("folo weights pull folo-n-coco-f16"));
+
+    // A fine-tune by name, with a mismatching `arch`: the run trains folo-n.
+    let ds = dataset(&app, "pub", 8).await;
+    let mut cfg = tiny(&ds, 1);
+    cfg["weights"] = json!("folo-n-coco");
+    cfg["arch"] = json!("folo-s");
     let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
-    assert!(run.config.amp && run.error_code.is_none());
+    assert_eq!((run.config.arch, run.config.weights.as_deref()), (Arch::N, Some("folo-n-coco")));
     let mut sse = Events::open(&app, &run.id).await;
     let events = sse.until_status(&["completed", "failed"]).await;
-    let last = &events.last().unwrap().1;
-    assert_eq!(
-        (last["status"].as_str(), last["error_code"].as_str()),
-        (Some("failed"), Some("not_supported"))
-    );
-    assert!(last["error"].as_str().unwrap().contains("tensor cores"), "{last}");
-    let got: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
-    assert_eq!((got.status, got.error_code.as_deref()), (RunStatus::Failed, Some("not_supported")));
-    // The code survives a store restart (it is part of the persisted run).
-    drop(app);
-    tokio::task::spawn_blocking(move || s.shutdown()).await.unwrap();
-    let app = self::app(&store(&t.0.join("home")));
-    let again: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
-    assert_eq!(again.error_code.as_deref(), Some("not_supported"));
+    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", run.id))).await;
+    let transferred = |l: &&LogLine| l.message.contains("transferred") && l.message.contains("folo-n-coco");
+    assert!(logs.lines.iter().any(|l| transferred(&l)), "{:?}", logs.lines);
 }
 
 /// `bytes` (a `.folo` file) with metadata `key` set to `value` (removed for `None`); the tensor data is kept.

@@ -937,6 +937,8 @@ impl Inner {
                 trained_with: m.trained_with,
                 precision: m.precision,
                 fused: m.fused,
+                source: m.source,
+                about: m.about,
             })
             .collect();
         let page = page_of(items, a.cursor.as_deref(), a.limit)?;
@@ -952,6 +954,9 @@ impl Inner {
                 id.as_str().ok_or_else(|| invalid_arguments("resume_run_id must be a string"))?.to_string();
             return self.resume(id, args).await;
         }
+        // An explicit `arch` next to `weights` (a fine-tune takes the weights' architecture, as `folo train --weights`
+        // does) must name that architecture.
+        let explicit_arch = args.get("arch").and_then(|v| v.as_str()).map(str::to_string);
         // A TrainConfig value the trainer cannot use (`arch: "folo-q"`, a negative `epochs`) is `invalid_config`,
         // as in the CLI and `POST /api/runs`' range checks; a missing `dataset_id` stays `invalid_arguments`.
         let a: TrainArgs = parse_args(args).map_err(|mut e| {
@@ -965,7 +970,22 @@ impl Inner {
         })?;
         check_name("name", &a.config.name)?;
         self.ensure_dataset(&a.config.dataset_id).await?;
-        let run = self.blocking(move |s| s.create_run(a.config)).await?;
+        if let (Some(arch), Some(w)) = (explicit_arch, a.config.weights.clone()) {
+            let model = self.blocking(move |s| s.get_model(&w)).await?;
+            if model.arch.as_str() != arch {
+                return Err(Error::new(
+                    http::StatusCode::BAD_REQUEST,
+                    "invalid_config",
+                    format!(
+                        "arch is {arch}, but the weights {} are {}: a fine-tune takes the weights' architecture",
+                        model.id,
+                        model.arch.as_str()
+                    ),
+                )
+                .hint("leave `arch` out when `weights` is set (or set it to the weights' arch)"));
+            }
+        }
+        let run = self.blocking(move |s| s.create_run(a.config)).await.map_err(|e| self.amp_hint(e))?;
         // Embedded runs end with this process, so they are stopped on disconnect; proxied runs belong to the
         // `folo serve` (and Studio) and outlive the session.
         if self.proxy.is_none() {
@@ -983,12 +1003,34 @@ impl Inner {
         out(&TrainResult { run_id: run.id, status: run.status }, summary)
     }
 
+    /// A `not_supported` from `train` (an `amp` run this server cannot train: no tensor cores, or the CPU) gets a
+    /// hint an MCP client can act on: the switch, or how to restart this server with tensor cores.
+    fn amp_hint(&self, mut e: Error) -> Error {
+        if e.body.code != "not_supported" {
+            return e;
+        }
+        let restart = match &self.proxy {
+            Some(p) => format!("restart the `folo serve` at {} with `--tensor-cores`", p.base()),
+            None if self.mock => "this mock server's tensor cores are off".to_string(),
+            None => {
+                "restart this MCP server with tensor cores: add `--tensor-cores` to `folo mcp`'s args (or \
+                     FOLO_GPU_TENSOR_CORES=1 to its `env`) in the MCP client's config"
+                    .to_string()
+            }
+        };
+        e.body.hint = Some(format!(
+            "set `amp: false` to train in f32 (or `device: \"auto\"` if the run asked for the CPU), or {restart}; \
+             folo_info's `capabilities.amp` says when amp is available"
+        ));
+        e
+    }
+
     async fn resume(&self, id: String, args: JsonObject) -> Result<Output, Error> {
         let rid = id.clone();
         let dataset_id = self.blocking(move |s| Ok(s.get_run(&rid)?.config.dataset_id)).await?;
         self.ensure_dataset(&dataset_id).await?;
         let rid = id.clone();
-        let run = self.blocking(move |s| s.resume_run(&rid, &args)).await?;
+        let run = self.blocking(move |s| s.resume_run(&rid, &args)).await.map_err(|e| self.amp_hint(e))?;
         if self.proxy.is_none() {
             let mut created = self.created_runs.lock().unwrap();
             if !created.contains(&run.id) {

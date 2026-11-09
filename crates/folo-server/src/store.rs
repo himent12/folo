@@ -7,9 +7,9 @@
 use std::path::Path;
 
 use folo_api::{
-    BenchmarkReport, BenchmarkRequest, Capabilities, Dataset, ExportResult, ExportSpec, GpuInfo, LogLine,
-    Model, ModelEval, PredictResponse, RegisterDataset, Run, RunEstimate, RunEvent, RunMetrics, RunSamples,
-    Split, StatusEvent, SyntheticDataset, ThroughputTable, TrainConfig, ValReport, ValRequest,
+    BenchmarkReport, BenchmarkRequest, Capabilities, Dataset, ExportResult, ExportSpec, GpuInfo, GpuPool,
+    LogLine, Model, ModelEval, PredictResponse, RegisterDataset, Run, RunEstimate, RunEvent, RunMetrics,
+    RunSamples, Split, StatusEvent, SyntheticDataset, ThroughputTable, TrainConfig, ValReport, ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -285,6 +285,10 @@ pub trait Store: Send + Sync + 'static {
     /// What runs with `device: auto` can use, for `/api/system`'s `capabilities` (`None`: not reported). May block
     /// (the real store creates the GPU context on first use).
     fn capabilities(&self) -> Option<Capabilities> {
+        None
+    }
+    /// FOLO's GPU buffer pool, for `/api/system`'s `gpu_pool` (`None`: no GPU in use, or the mock store).
+    fn gpu_pool(&self) -> Option<GpuPool> {
         None
     }
     /// The data dir to report in `/api/system` (`None`: the mock store).

@@ -1092,6 +1092,10 @@ fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>) {
     if let Err(err) = trainer.run() {
         tracing::warn!(run = %e.id, "training failed: {err}");
     }
+    drop(trainer);
+    // The run's model, optimizer state, EMA and activations are back in the pool now; hand them to the driver
+    // before the run is reported finished, so the next job on this GPU (a CLI run, another process) has its memory.
+    crate::engine::release_gpu_memory(device);
 }
 
 fn build(
