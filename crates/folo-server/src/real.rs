@@ -876,8 +876,12 @@ impl Store for RealStore {
         check.validate().map_err(engine_error)?;
         let device = engine::resolve(&config.device)?;
         let (train, val) = (idx.splits.train, idx.splits.val);
-        let cli =
-            crate::cli::train_command(&config, &e.reg().path, weights.as_ref().map(cli_weights).as_deref());
+        let cli = crate::cli::train_command(
+            &config,
+            &e.reg().path,
+            e.reg().format,
+            weights.as_ref().map(cli_weights).as_deref(),
+        );
         let mut estimate = self.throughput.estimate(&EstimateInput {
             device: engine::device_id(device),
             arch: config.arch,
@@ -903,7 +907,8 @@ impl Store for RealStore {
             (_, Some(p)) => Some(folo_api::json::path(&p)),
             _ => None,
         };
-        Ok(crate::cli::train_command(&config, &e.dataset().path, weights.as_deref()))
+        let ds = e.dataset();
+        Ok(crate::cli::train_command(&config, &ds.path, ds.format, weights.as_deref()))
     }
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {

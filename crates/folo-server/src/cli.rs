@@ -3,22 +3,39 @@
 //! terminal on the server's machine. `crates/folo-cli`'s tests parse it with the real `folo` arguments and compare the
 //! resulting config with the server's.
 
-use folo_api::{CliCommand, Head, Optimizer, TrainConfig};
+use folo_api::{CliCommand, DatasetFormat, Head, Optimizer, TrainConfig};
 
-/// The command that trains `config` on the dataset at `data` (a path on the server's machine), starting from
-/// `weights` (a `.folo` path there, or a published name; `None` trains from scratch).
+/// The command that trains `config` on the dataset at `data` (a path on the server's machine) read as `format`
+/// (the registered format: `--format` unless it is `auto`), starting from `weights` (a `.folo` path there, or a
+/// published name; `None` trains from scratch).
 ///
 /// Settings equal to the CLI's defaults are left out (they are the API's defaults too). With `weights` the
 /// architecture is the weights' (the CLI refuses `--model` with `--weights`), and the head is always given: the CLI
-/// defaults to the weights file's head, the API to `o2m`.
-pub fn train_command(config: &TrainConfig, data: &str, weights: Option<&str>) -> CliCommand {
+/// defaults to the weights file's head, the API to `o2m`. A value that starts with `-` (a run named `--amp`) is
+/// attached as `--flag=value`, so it is never read as a flag.
+pub fn train_command(
+    config: &TrainConfig,
+    data: &str,
+    format: DatasetFormat,
+    weights: Option<&str>,
+) -> CliCommand {
     let d: TrainConfig =
         serde_json::from_value(serde_json::json!({ "dataset_id": "" })).expect("TrainConfig has defaults");
-    let mut argv: Vec<String> = ["folo", "train", "--data", data].map(String::from).to_vec();
+    let mut argv: Vec<String> = ["folo", "train"].map(String::from).to_vec();
     let mut arg = |flag: &str, value: String| {
-        argv.push(format!("--{flag}"));
-        argv.push(value);
+        if value.starts_with('-') {
+            argv.push(format!("--{flag}={value}"));
+        } else {
+            argv.push(format!("--{flag}"));
+            argv.push(value);
+        }
     };
+    arg("data", data.to_string());
+    match format {
+        DatasetFormat::Auto => {}
+        DatasetFormat::Yolo => arg("format", "yolo".into()),
+        DatasetFormat::Coco => arg("format", "coco".into()),
+    }
     match weights {
         Some(w) => arg("weights", w.to_string()),
         None if config.arch != d.arch => arg("model", config.arch.as_str().to_string()),
@@ -80,15 +97,26 @@ pub fn train_command(config: &TrainConfig, data: &str, weights: Option<&str>) ->
     CliCommand { cli: shell_join(&argv), argv }
 }
 
-/// `argv` as one command line: arguments with characters a shell treats specially are single-quoted (`'` inside
-/// as `'\''`), which POSIX shells and PowerShell both read, unless the argument itself holds a `'`.
+/// `argv` as one command line that POSIX shells and PowerShell both read back as `argv`. An argument with
+/// characters either shell treats specially is single-quoted; one that holds a `'` is double-quoted instead, when it
+/// has none of the characters double quotes expand in either shell (`$`, a backtick, `"`, a backslash, `!`). Only
+/// an argument with both falls back to POSIX quoting (`'\''`), which PowerShell does not read; `argv` is exact
+/// either way.
 pub fn shell_join(argv: &[String]) -> String {
     argv.iter().map(|a| quote(a)).collect::<Vec<_>>().join(" ")
 }
 
 fn quote(a: &str) -> String {
-    let plain = !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=,+".contains(c));
-    if plain { a.to_string() } else { format!("'{}'", a.replace('\'', "'\\''")) }
+    let plain = !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:=".contains(c));
+    if plain {
+        a.to_string()
+    } else if !a.contains('\'') {
+        format!("'{a}'")
+    } else if !a.contains(['$', '`', '"', '\\', '!']) {
+        format!("\"{a}\"")
+    } else {
+        format!("'{}'", a.replace('\'', r"'\''"))
+    }
 }
 
 #[cfg(test)]
@@ -96,20 +124,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_left_out_and_paths_quoted() {
+    fn defaults_are_left_out_and_arguments_quoted() {
         let mut c: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
-        let cmd = train_command(&c, "D:/data/r6", None);
+        let cmd = train_command(&c, "D:/data/r6", DatasetFormat::Auto, None);
         assert_eq!(cmd.cli, "folo train --data D:/data/r6");
         c.name = "r6 n".into();
         c.amp = true;
         c.augment.hsv = [0.0, 0.5, 0.25];
-        let cmd = train_command(&c, "C:/Users/a b/data", Some("folo-n-coco"));
+        let cmd = train_command(&c, "C:/Users/a b/data", DatasetFormat::Coco, Some("folo-n-coco"));
         assert_eq!(
             cmd.cli,
-            "folo train --data 'C:/Users/a b/data' --weights folo-n-coco --name 'r6 n' --head o2m --hsv 0,0.5,0.25 \
-             --amp"
+            "folo train --data 'C:/Users/a b/data' --format coco --weights folo-n-coco --name 'r6 n' --head o2m \
+             --hsv '0,0.5,0.25' --amp"
         );
         assert_eq!(cmd.argv[3], "C:/Users/a b/data");
-        assert_eq!(quote("it's"), r"'it'\''s'");
+        // A value that looks like a flag is attached.
+        c.name = "--amp".into();
+        let cmd = train_command(&c, "d", DatasetFormat::Auto, None);
+        assert!(cmd.argv.contains(&"--name=--amp".to_string()), "{:?}", cmd.argv);
+    }
+
+    #[test]
+    fn quoting_reads_the_same_in_posix_shells_and_powershell() {
+        assert_eq!(quote("D:/a-b_c.folo"), "D:/a-b_c.folo");
+        assert_eq!(quote("a b"), "'a b'");
+        assert_eq!(quote("0,0.5"), "'0,0.5'", "a bare comma list is an array in PowerShell");
+        assert_eq!(quote("it's"), "\"it's\"");
+        assert_eq!(quote("it's $HOME"), r"'it'\''s $HOME'");
+        assert_eq!(quote(""), "''");
     }
 }

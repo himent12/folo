@@ -1041,6 +1041,7 @@ impl Store for MockStore {
         let cli = crate::cli::train_command(
             &config,
             &ds.meta().path,
+            ds.meta().format,
             config.weights.as_deref().map(mock_weights).as_deref(),
         );
         let mut estimate = self.throughput.estimate(&crate::throughput::EstimateInput {
@@ -1371,7 +1372,7 @@ impl Store for MockStore {
     fn run_cli(&self, id: &str) -> Result<CliCommand> {
         let (run, ds) = self.run(id)?;
         let weights = run.config.weights.as_deref().map(mock_weights);
-        Ok(crate::cli::train_command(&run.config, &ds.meta().path, weights.as_deref()))
+        Ok(crate::cli::train_command(&run.config, &ds.meta().path, ds.meta().format, weights.as_deref()))
     }
 
     fn stop_run(&self, id: &str) -> Result<Run> {

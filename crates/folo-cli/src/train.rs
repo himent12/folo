@@ -136,7 +136,7 @@ fn start(
     nb: Arc<AtomicU64>,
 ) -> Result<(Trainer, PathBuf), CliError> {
     let data_arg = args.data.as_deref().expect("clap requires --data without --resume");
-    let (ds, ds_name) = open_dataset(data_arg)?;
+    let (ds, ds_name) = open_dataset(data_arg, crate::dataset::format_of(args.format))?;
     let mut weights = None;
     let mut weights_head = folo_vision::model::HeadMode::O2m;
     // Initial weights: --weights, or --model naming a .folo file or published weights rather than an arch.
@@ -301,7 +301,7 @@ fn resume(
             .hint("pass --data with the dataset the run was started on"));
         }
     };
-    let (ds, _) = open_dataset(&data_arg)?;
+    let (ds, _) = open_dataset(&data_arg, crate::dataset::format_of(args.format))?;
     let data = train_data(&ds)?;
     let epochs = stored.epochs;
     let opts = TrainOptions {
@@ -315,7 +315,8 @@ fn resume(
 }
 
 /// Flags a resume may change: where and how fast it runs, where its data is, and how it reports.
-const RESUME_MAY_CHANGE: &[&str] = &["resume", "data", "workers", "device", "json_events", "project"];
+const RESUME_MAY_CHANGE: &[&str] =
+    &["resume", "data", "format", "workers", "device", "json_events", "project"];
 
 /// With `--resume`, every other flag given on the command line must repeat the run's stored setting (as MCP
 /// and `POST /api/runs` require): a changed one is `invalid_config`, naming the flag and both values.
@@ -363,7 +364,7 @@ fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Result<(), CliE
             )
             .hint(format!(
                 "leave {flag} out to resume the run as it was started (only --workers, --device, --data, \
-                 --project and --json-events may change), or start a new run from its weights with --model \
+                 --format, --project and --json-events may change), or start a new run from its weights with --model \
                  <run>/weights/best.folo"
             )));
         }
@@ -712,22 +713,34 @@ mod tests {
         };
         let mut adamw = base.clone();
         adamw.optimizer = folo_api::Optimizer::Adamw;
+        // A name that looks like a flag.
+        let mut flaglike = base.clone();
+        flaglike.name = "--amp".into();
         let data = "C:/data sets/r6";
-        // (config, --weights, the head of the weights file: the CLI's default without --head)
+        let (auto, coco) = (folo_api::DatasetFormat::Auto, folo_api::DatasetFormat::Coco);
+        // (config, registered format, --weights, the head of the weights file: the CLI's default without --head)
         let cases = [
-            (base.clone(), None, HeadMode::O2m),
-            (all.clone(), None, HeadMode::O2m),
-            (adamw, None, HeadMode::O2m),
-            (base.clone(), Some("folo-n-coco"), HeadMode::O2o),
-            (all.clone(), Some("D:/folo/runs/run_1a2b/weights/best.folo"), HeadMode::O2o),
+            (base.clone(), auto, None, HeadMode::O2m),
+            (all.clone(), coco, None, HeadMode::O2m),
+            (adamw, folo_api::DatasetFormat::Yolo, None, HeadMode::O2m),
+            (flaglike, auto, None, HeadMode::O2m),
+            (base.clone(), auto, Some("folo-n-coco"), HeadMode::O2o),
+            (all.clone(), coco, Some("D:/folo/runs/run_1a2b/weights/best.folo"), HeadMode::O2o),
         ];
-        for (api, weights, file_head) in cases {
-            let cmd = folo_server::cli::train_command(&api, data, weights);
+        for (api, format, weights, file_head) in cases {
+            let cmd = folo_server::cli::train_command(&api, data, format, weights);
             let cli =
                 crate::cli::Cli::try_parse_from(&cmd.argv).unwrap_or_else(|e| panic!("{}: {e}", cmd.cli));
             let crate::cli::Command::Train(args) = cli.command else { panic!("not train: {}", cmd.cli) };
             assert_eq!(args.data.as_deref(), Some(data), "{}", cmd.cli);
             assert_eq!(args.weights.as_deref(), weights, "{}", cmd.cli);
+            // Read as the server reads the registered dataset (runs.rs `data_format`).
+            let want_format = match format {
+                folo_api::DatasetFormat::Auto => folo_data::Format::Auto,
+                folo_api::DatasetFormat::Yolo => folo_data::Format::Yolo,
+                folo_api::DatasetFormat::Coco => folo_data::Format::Coco,
+            };
+            assert_eq!(crate::dataset::format_of(args.format), want_format, "{}", cmd.cli);
             // With --weights the CLI takes the architecture from the file; the server already set it to the weights'.
             let arch = if weights.is_some() { api.arch.as_str().to_string() } else { args.model.clone() };
             let got = super::config_of(&args, args.name.clone().unwrap(), data.into(), arch, file_head);

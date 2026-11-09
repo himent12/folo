@@ -142,6 +142,9 @@ pub struct TrainArgs {
     /// Dataset: a folder (YOLO or COCO) or a data.yaml.
     #[arg(long, required_unless_present = "resume")]
     pub data: Option<String>,
+    /// Format of --data: auto (detect from the files), or yolo / coco for a folder that has both.
+    #[arg(long, value_enum, default_value_t = FormatArg::Auto)]
+    pub format: FormatArg,
     /// Architecture (folo-n, folo-s, folo-m, folo-l, folo-x), or .folo weights / a published name to fine-tune.
     #[arg(long, visible_alias = "arch", default_value = "folo-n")]
     pub model: String,
@@ -223,7 +226,7 @@ pub struct TrainArgs {
     #[arg(long, default_value = "runs")]
     pub project: PathBuf,
     /// Continue an interrupted run from its checkpoint (runs/<name>/weights/last.folo). The run's stored settings
-    /// are used: only --workers, --device, --data, --project and --json-events may differ, other flags must match or
+    /// are used: only --workers, --device, --data, --format, --project and --json-events may differ, other flags must match or
     /// be left out. A run that completed cannot be resumed; start a new run with --model <run>/weights/best.folo
     /// instead.
     #[arg(long)]

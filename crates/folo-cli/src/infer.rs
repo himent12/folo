@@ -76,7 +76,7 @@ fn precision_of(model: &FoloModel) -> Precision {
 
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let model = open_model(&args.model, &args.device, args.half, args.tensor_cores)?;
-    let (ds, _) = open_dataset(&args.data)?;
+    let (ds, _) = open_dataset(&args.data, folo_data::Format::Auto)?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
         SplitArg::Val => Split::Val,
