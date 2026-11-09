@@ -749,6 +749,13 @@ impl FoloApp {
         .detach();
     }
 
+    /// Fetch the model list again after it failed (nothing else retries a failed load).
+    pub fn retry_models(&mut self, cx: &mut Context<Self>) {
+        self.store.models = Load::Idle;
+        self.ensure_core(cx);
+        cx.notify();
+    }
+
     pub fn ensure_core(&mut self, cx: &mut Context<Self>) {
         if self.store.runs.needs_fetch() {
             self.store.runs = Load::Loading;
