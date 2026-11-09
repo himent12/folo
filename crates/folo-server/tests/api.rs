@@ -1098,6 +1098,20 @@ async fn mock_queue_control() {
         }
     }
 
+    // Moves are logged: in `/logs`, and live on the moved run's stream.
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{c}/logs"))).await;
+    let msgs: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
+    assert!(msgs.contains(&"moved in the queue to position 1 of 3"), "{msgs:?}");
+    assert!(msgs.contains(&"start requested: starting now"), "{msgs:?}");
+    let r: Run = ok(&app, mv(&b, json!({ "action": "down" }))).await;
+    assert_eq!(r.queue_position, Some(2));
+    let mut logged = false;
+    while !logged {
+        let evs = read_events(&mut events, 1, Duration::from_secs(3)).await;
+        assert!(!evs.is_empty(), "no log event for the move");
+        logged = evs.iter().any(|(n, d)| n == "log" && d.contains("queue position unchanged (2 of 2)"));
+    }
+
     // Errors: a running or finished run, bad bodies, unknown runs.
     let e = err(&app, mv(&c, json!({ "action": "top" })), StatusCode::CONFLICT, "run_not_queued").await;
     assert!(e.message.contains("running"), "{}", e.message);

@@ -413,6 +413,8 @@ pub struct SimRun {
     timeline: Timeline,
     hub: Mutex<Hub>,
     deleted: AtomicBool,
+    /// Log lines of actions outside the timeline (queue moves), in the order they happened.
+    notes: Mutex<Vec<LogLine>>,
 }
 
 impl SimRun {
@@ -442,6 +444,18 @@ impl SimRun {
             timeline,
             hub: Mutex::default(),
             deleted: AtomicBool::new(false),
+            notes: Mutex::default(),
+        }
+    }
+
+    /// Logs an action outside the timeline (a queue move): kept for `/logs` and sent to live subscribers.
+    pub fn note(&self, level: LogLevel, message: String) {
+        let line = LogLine { t: rfc3339(unix_now()), level, message };
+        self.notes.lock().unwrap().push(line.clone());
+        // Under the hub lock, as the ticker sends, so the line is ordered with the run's other events.
+        let hub = self.hub.lock().unwrap();
+        if let Some(tx) = &hub.tx {
+            let _ = tx.send(RunEvent::Log(line));
         }
     }
 
@@ -714,6 +728,9 @@ impl SimRun {
         if let (Some(m), Some(t)) = (self.msg_end(&snap), snap.finished) {
             out.push(line(t, m));
         }
+        // Queue moves, merged in by time (the sort is stable, so lines of the same second keep their order).
+        out.extend(self.notes.lock().unwrap().iter().cloned());
+        out.sort_by(|a, b| a.t.cmp(&b.t));
         out
     }
 

@@ -214,6 +214,11 @@ async fn mock_weights_are_a_real_folo_n_file() {
     assert!(is_onnx(&bh) && bh.len() < bx.len());
     assert!(header(&hh, header::CONTENT_DISPOSITION).ends_with("-f16.onnx\""));
     assert_ne!(header(&hh, header::ETAG), etagx);
+    // An f16 model (its stored file is the f16 export) still downloads ONNX as ONNX.
+    let (status, h53, b53, _) = send(&app, get("/api/models/m_53d2/weights?format=onnx", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(is_onnx(&b53), "not a .folo file under an .onnx name");
+    assert!(header(&h53, header::CONTENT_DISPOSITION).ends_with(".onnx\""));
 
     assert_eq!(
         error_code(&app, "/api/models/m_none/weights", StatusCode::NOT_FOUND).await,

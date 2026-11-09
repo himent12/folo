@@ -397,24 +397,24 @@ impl Runs {
 
     /// Every run, newest first, with its place in the queue.
     pub fn list(&self) -> Vec<Run> {
-        let entries = self.entries();
-        let waiting: Vec<String> = self.queue.lock().unwrap().runs.iter().map(|e| e.id.clone()).collect();
-        entries
-            .iter()
-            .map(|e| {
-                let mut r = e.run();
-                r.queue_position = position_in(&waiting, &e.id);
-                r
-            })
-            .collect()
+        self.entries().iter().map(|e| self.record(e)).collect()
     }
 
     /// The API record of run `id` with its place in the queue ([`Run::queue_position`]).
     pub fn snapshot(&self, id: &str) -> Result<Run> {
         let e = self.get(id)?;
-        let mut r = e.run();
-        r.queue_position = self.position(&e.id);
-        Ok(r)
+        Ok(self.record(&e))
+    }
+
+    /// `e`'s record and its place in the queue, read together (its state, then the queue: the order `stop` and
+    /// `move_queued` lock them in), so a run that has a place is `queued`: the worker takes a run off the queue
+    /// before it can report `running`, and a stop removes it from the queue under its state lock.
+    fn record(&self, e: &RunEntry) -> Run {
+        let st = e.state.lock().unwrap();
+        let mut r = st.file.run.clone();
+        let q = self.queue.lock().unwrap();
+        r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
+        r
     }
 
     /// The 1-based place of run `id` among the waiting runs.
@@ -833,11 +833,6 @@ fn not_queued(id: &str, status: RunStatus) -> Error {
     };
     Error::conflict("run_not_queued", format!("run '{id}' {what}, not waiting in the queue"))
         .hint("only runs waiting in the queue (with a queue_position) can be moved")
-}
-
-/// The 1-based place of `id` in `waiting` (the queue's run ids, front first).
-fn position_in(waiting: &[String], id: &str) -> Option<u32> {
-    waiting.iter().position(|w| w == id).map(|i| i as u32 + 1)
 }
 
 fn shutting_down() -> Error {

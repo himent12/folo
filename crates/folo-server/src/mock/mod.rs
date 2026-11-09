@@ -1211,19 +1211,30 @@ impl Store for MockStore {
     fn move_run(&self, id: &str, mv: QueueMove) -> Result<Run> {
         let (run, _) = self.run(id)?;
         let moved = runs::move_waiting(&mut self.queue.lock().unwrap(), id, mv);
-        if moved.is_none() {
-            let status = run.to_api().status;
-            let what = match status {
-                folo_api::RunStatus::Queued => "is not in the training queue".to_string(),
-                s => format!("is {}", serde_json::to_value(s).unwrap().as_str().unwrap_or("finished")),
+        if let Some((from, to, waiting)) = moved {
+            let after = run.to_api();
+            let place = format!("{} of {waiting}", to + 1);
+            let message = match mv {
+                QueueMove::Start if after.status == folo_api::RunStatus::Running => {
+                    "start requested: starting now".to_string()
+                }
+                QueueMove::Start => {
+                    format!(
+                        "start requested: moved to the front ({place}); it starts when the active run ends"
+                    )
+                }
+                _ if from == to => format!("queue position unchanged ({place})"),
+                _ => format!("moved in the queue to position {place}"),
             };
-            return Err(Error::conflict(
-                "run_not_queued",
-                format!("run '{id}' {what}, not waiting in the queue"),
-            )
-            .hint("only runs waiting in the queue (with a queue_position) can be moved"));
+            run.note(folo_api::LogLevel::Info, message);
+            return Ok(after);
         }
-        Ok(run.to_api())
+        let what = match run.to_api().status {
+            folo_api::RunStatus::Queued => "is not in the training queue".to_string(),
+            s => format!("is {}", serde_json::to_value(s).unwrap().as_str().unwrap_or("finished")),
+        };
+        Err(Error::conflict("run_not_queued", format!("run '{id}' {what}, not waiting in the queue"))
+            .hint("only runs waiting in the queue (with a queue_position) can be moved"))
     }
 
     fn delete_run(&self, id: &str) -> Result<()> {

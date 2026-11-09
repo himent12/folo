@@ -33,9 +33,13 @@ impl MockWeights {
         MockWeights { born: SystemTime::now(), files: Mutex::default() }
     }
 
-    /// The weights of `model` in `format`. An f16 model's stored file is the f16 export, as for a real one.
+    /// The weights of `model` in `format`. An f16 model's stored file is the f16 export, as for a real one (its
+    /// `f16` and `onnx` downloads are made as for any other model).
     pub(super) fn get(&self, model: &Model, format: WeightsFormat) -> Result<Weights> {
-        let file = if model.precision == Some(ModelPrecision::F16) { WeightsFormat::F16 } else { format };
+        let file = match format {
+            WeightsFormat::Stored if model.precision == Some(ModelPrecision::F16) => WeightsFormat::F16,
+            f => f,
+        };
         let (bytes, etag) = self.file(&model.classes, model.imgsz, model.head, file)?;
         Ok(Weights {
             len: bytes.len() as u64,

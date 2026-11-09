@@ -298,7 +298,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     run_not_queued` (its message says whether it is starting, running or finished); `404 run_not_found` as usual.
     Moves never change a run's status.
   - Every change of the queue (a run queued, resumed, moved, taken by the worker, stopped or deleted while it
-    waits) sends each waiting run a `queue` SSE event with its place, and the moved run gets a `log` line. Mock
+    waits) sends each waiting run a `queue` SSE event with its place (the mock: each run whose place changed, see
+    the event), and the moved run gets a `log` line (also in `/logs`). Mock
     mode: runs created through the API share one training slot the same way (the seeded looping run `run_3c02` is
     outside the queue).
 - `DELETE /api/runs/{id}` → `204` (`409 run_active` while `queued`, `running` or `stopping`). Real mode removes the run
@@ -325,7 +326,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   - `queue` `{ "position": 2, "waiting": 3 }`: the run's place in the training queue (`Run.queue_position`) and
     how many runs wait there, it included; sent to every waiting run after each change of the queue (see `POST
     /api/runs/{id}/queue`), in order with its other events (a run's last `queue` event comes before its `running`
-    status). Servers older than the event never send it.
+    status). The events carry state, not changes: a client keeps the latest one (or re-reads the run). The mock
+    derives them from its schedule every 100 ms, so it sends one when a waiting run's place or the count changed,
+    and changes within one tick coalesce. Servers older than the event never send it.
 
   The stream starts with a `status` event and replays nothing else (use `/metrics` and `/logs` for history). A `: keep-alive`
   comment is sent every 15 s. The stream stays open after the run finishes (so `EventSource` does not reconnect in a
