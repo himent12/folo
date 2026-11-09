@@ -129,13 +129,13 @@
     color: var(--text-primary);
   }
   .str {
-    color: var(--chart-2);
+    color: var(--chart-text-2);
   }
   .num {
-    color: var(--chart-4);
+    color: var(--chart-text-4);
   }
   .lit {
-    color: var(--chart-3);
+    color: var(--chart-text-3);
   }
   .punct {
     color: var(--text-tertiary);

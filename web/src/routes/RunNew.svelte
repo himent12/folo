@@ -57,7 +57,7 @@
   /** Where the architectures' reference latency was measured (docs/BENCHMARKS.md). */
   const LATENCY_REF = 'RTX 4080 SUPER · 640 px · f32 · end to end';
   /** The same, where the line already says 640 px and end to end. */
-  const REF_WHERE = 'RTX 4080 SUPER · f32';
+  const REF_WHERE = 'RTX 4080 SUPER, f32';
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery(media.phone, false);
 
@@ -301,6 +301,8 @@
     return out;
   });
   const was = (key: string) => oomChanges.find((x) => x.key === key)?.was;
+  /** A sentence that starts with a change: "Batch 16, 480 px" (an architecture or a device keeps its own case). */
+  const capital = (t: string) => t.replace(/^batch/, 'Batch');
   // The estimate is rough; when it thought the failed settings fit, it is scaled up until they no longer do.
   // The run page forecasts its fixes with the same correction (lib/oom), so the retry it offers is shown here as fitting.
   const scale = $derived(oomRun ? oomCalibration(oomRun.config, gpuMem) : 1);
@@ -363,8 +365,6 @@
   /** Close mosaic as the trainer applies it: at most half the run. */
   const closeEff = $derived(errors.close || errors.epochs ? null : closeMosaicEpochs(augment.close_mosaic, epochs));
   const selArch = $derived(arches.find((a) => a.arch === arch));
-  /** The sizes this server has measured end to end at 640 px (their latency replaces the reference in the table). */
-  const latHere = $derived(arches.filter((a) => measuredLatency(tp.data, a.arch)));
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
 
@@ -499,6 +499,11 @@
    */
   const vramLevel = $derived(onCpu || !gpuMem ? null : vramPct > 1 ? ('danger' as const) : vramPct > 0.9 ? ('warning' as const) : null);
   const noFit = $derived(vramLevel === 'danger');
+  /**
+   * Whether these settings fit the GPU: `fits`, `no` (forecast over its memory) or `unknown` (the adapter does not report
+   * its memory, so nothing can be checked); null on the CPU, where GPU memory does not apply.
+   */
+  const vramFit = $derived(onCpu ? null : !gpuMem ? ('unknown' as const) : noFit ? ('no' as const) : ('fits' as const));
 
   // Settings forecast not to fit: the one primary becomes the change that fits ("Use batch 8"), chosen by lib/oom's
   // `fitFix` from the same forecast as the figure above (the server's estimate, else the reference model) with 10% of
@@ -652,15 +657,23 @@
   }
 </script>
 
+<!-- A value stays in ink; a problem with it is the danger mark before it (DESIGN_DIRECTION §2.6: status hue on the
+     mark, never on the value), and the row's reason is the line under the summary. -->
+{#snippet rvValue(value: string, warn: boolean, mono: boolean)}
+  <span class="rv-end">
+    {#if warn}<CircleAlert class="rv-mark" size={14} strokeWidth={2} aria-hidden="true" />{/if}<span class="rv-v" class:mono>{value}</span>
+  </span>
+{/snippet}
+
 {#snippet reviewList(withName: boolean)}
   <ul class="review" aria-label="Settings">
     {#if withName}
-      <li><button type="button" class="rv" class:warn={!!errors.name} onclick={() => jump('name')}><span class="rv-k">Run name</span><span class="rv-v">{name.trim() || '—'}</span></button></li>
+      <li><button type="button" class="rv" class:warn={!!errors.name} onclick={() => jump('name')} aria-label="Run name: {name.trim() || 'none'}{errors.name ? ', needs attention' : ''}. Edit"><span class="rv-k">Run name</span>{@render rvValue(name.trim() || '—', !!errors.name, false)}</button></li>
     {/if}
     {#each review as r (r.key)}
       <li>
-        <button type="button" class="rv" class:warn={r.warn} onclick={() => jump(r.key)} aria-label="{r.label}: {r.value}. Edit">
-          <span class="rv-k">{r.label}</span><span class="rv-v" class:mono={r.mono}>{r.value}</span>
+        <button type="button" class="rv" class:warn={r.warn} onclick={() => jump(r.key)} aria-label="{r.label}: {r.value}{r.warn ? ', needs attention' : ''}. Edit">
+          <span class="rv-k">{r.label}</span>{@render rvValue(r.value, !!r.warn, !!r.mono)}
         </button>
       </li>
     {/each}
@@ -774,7 +787,7 @@
   <!-- One specification row per size, the column header on the same grid (subgrid), so every value sits
        under its heading at every width. -->
   <div class="arches" role="radiogroup" aria-label="Model size">
-    <div class="a-head" aria-hidden="true"><span class="a-head-lead">Size</span><span>Params</span><span>GFLOPs</span><span>Latency</span><span></span></div>
+    <div class="a-head" aria-hidden="true"><span class="a-head-lead">Size</span><span>Params</span><span>GFLOPs</span><span class="a-head-lat">Latency</span><span></span></div>
     {#each arches as a (a.arch)}
       {@const on = a.arch === arch}
       {@const here = measuredLatency(tp.data, a.arch)}
@@ -785,21 +798,20 @@
         <span class="a-note">{a.note}</span>
         <span class="a-v num">{compact(a.params)}</span>
         <span class="a-v num">{num(a.flops, 1)}</span>
-        {#if here}<span class="a-v num here">{num(here.latency_ms, 2)} ms</span>{:else if a.ms !== undefined}<span class="a-v num">{num(a.ms, 2)} ms</span>{:else}<span class="a-v faint" title="Not measured yet">—</span>{/if}
+        <!-- Each figure says where it comes from in its own cell (a tertiary word), so the caption under the table
+             stays one line: "measured" on this GPU, "reference" for the architecture's benchmark. A dash is
+             explained once, in the caption (DESIGN_DIRECTION 23), its word slot kept empty so dashes and figures share
+             one edge. -->
+        {#if here}<span class="a-v lat"><span class="num here">{num(here.latency_ms, 2)} ms</span><span class="a-src">measured</span></span
+          >{:else if a.ms !== undefined}<span class="a-v lat"><span class="num">{num(a.ms, 2)} ms</span><span class="a-src">reference</span></span
+          >{:else}<span class="a-v lat"><span class="faint" title="Not measured yet">—</span><span class="a-src" aria-hidden="true"></span></span>{/if}
         <span class="tick" aria-hidden="true">{#if on}<Check size={14} strokeWidth={2.25} />{/if}</span>
       </label>
     {/each}
   </div>
-  <!-- At most two lines: what each figure is. Measured on this server where it has predicted with that size (named in
-       words, not only by weight), the architecture's reference elsewhere; never these weights' own timing. -->
-  {#if latHere.length}
-    <p class="ref">
-      Latency at 640 px, end to end: measured on this GPU for {latHere.map((a) => a.arch).join(', ')}; the
-      {latHere.length === 1 ? 'others are' : 'rest are'} the reference, {REF_WHERE}. A dash: not measured yet.
-    </p>
-  {:else}
-    <p class="ref">Latency: each size's reference, {LATENCY_REF}. A dash: not measured yet.</p>
-  {/if}
+  <!-- One line: what the column measures and where the reference comes from; each cell names its own source. Never
+       these weights' own timing. -->
+  <p class="ref num"><Meta><span>Latency at 640 px, end to end</span><span>reference: {REF_WHERE}</span><span>—: not measured yet</span></Meta></p>
 {/snippet}
 
 {#snippet estimates(withName: boolean)}
@@ -826,7 +838,11 @@
           <TriangleAlert size={16} aria-hidden="true" />
           <span>
             <a class="link" href={href(`/runs/${oomRun.id}`)}>{oomRun.name}</a> ran out of GPU memory at
-            {#if oomChanges.length}{oomChanges.map((x) => x.was).join(', ')}. Now {oomChanges.map((x) => x.now).join(', ')}.{:else}batch {oomRun.config.batch}, {oomRun.config.imgsz} px. These are the same settings: lower the batch or image size, or pick a smaller model.{/if}
+            {#if oomChanges.length}{oomChanges.map((x) => x.was).join(', ')}.
+              <!-- "Now …" claims a fix only when the forecast above says it fits; otherwise it says the change is not
+                   enough, and the rail's one primary ("Use batch 8") is the change that is. A GPU that does not report
+                   its memory gets the figure and says the fit cannot be checked, never a fix it cannot vouch for. -->
+              {#if vramFit === 'no'}{capital(oomChanges.map((x) => x.now).join(', '))} still won't fit: {roughBytes(vram)} of {bytes(gpuMem, prefs.units)}.{:else if vramFit === 'fits'}Now <span class="nowrap">{oomChanges.map((x) => x.now).join(', ')} · {roughBytes(vram)}</span>{vramLevel === 'warning' ? `, close to this GPU's ${bytes(gpuMem, prefs.units)}` : ''}.{:else if vramFit === 'unknown'}Now <span class="nowrap">{oomChanges.map((x) => x.now).join(', ')} · {roughBytes(vram)}</span> · this GPU doesn't report its memory, so the fit can't be checked.{:else}Now {oomChanges.map((x) => x.now).join(', ')}.{/if}{:else}batch {oomRun.config.batch}, {oomRun.config.imgsz} px. These are the same settings: lower the batch or image size, or pick a smaller model.{/if}
           </span>
         </p>
       {/if}
@@ -849,8 +865,12 @@
                 {@const on = d.id === datasetId}
                 <label class="card" class:on>
                   <input type="radio" name="dataset" value={d.id} bind:group={datasetId} class="sr-only" />
-                  <span class="c-top"><span class="c-name">{d.name}</span><span class="c-fmt">{d.format}</span></span>
-                  {#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}
+                  <!-- Selection adds a mark and takes no fact away: the check before the name, the format kept. -->
+                  <span class="c-top"
+                    ><span class="c-name">{#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}{d.name}</span><span class="c-fmt"
+                      >{d.format}</span
+                    ></span
+                  >
                   <!-- Breaks only between the parts, and a wrapped line never ends on "·" (ui/Meta). -->
                   <span class="c-meta num"><Meta><span>{compact(d.splits.train)} train</span><span>{compact(d.splits.val)} val</span><span>{d.classes.length} classes</span></Meta></span>
                   {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
@@ -1106,6 +1126,9 @@
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
               <p class="cli-shell">In {SHELL}:</p>
+              <!-- A line with a placeholder is a template, not a command: said above it, on its Copy and in the
+                   confirmation, so nothing calls it runnable while it holds "<path to …>". -->
+              {#if cliPlaceholder}<p class="cli-req"><TriangleAlert size={14} aria-hidden="true" />Weights path required</p>{/if}
               <div class="cli-body">
                 <!-- One flag a line, ended by PowerShell's line continuation (a backtick); a line too long for the rail wraps at a space and hangs deeper than the flags. -->
                 <code aria-describedby={cliPlaceholder ? 'cli-note' : undefined}
@@ -1114,7 +1137,16 @@
                         >{:else}{p}{/if}{i < cliParts.length - 1 ? ' `' : ''}</span
                     >{/each}</code
                 >
-                <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(cli, 'Command copied')} /></span>
+                <span class="cli-copy"
+                  >{#if cliPlaceholder}<Button size="sm" variant="ghost" icon={Copy} aria-label="Copy template" title="Copy template" onclick={() => copy(cli, 'Template copied: replace the weights path')} />{:else}<Button
+                      size="sm"
+                      variant="ghost"
+                      icon={Copy}
+                      aria-label="Copy command"
+                      title="Copy command"
+                      onclick={() => copy(cli, 'Command copied')}
+                    />{/if}</span
+                >
               </div>
               {#if cliPlaceholder}<p class="cli-note" id="cli-note">Put the path of {cliPlaceholder} on the server in its place: this server does not report it.</p>{/if}
             </details>
@@ -1243,12 +1275,9 @@
     color: var(--text-primary);
   }
   .card .tick {
-    position: absolute;
-    top: 12px;
-    right: 12px;
-  }
-  .card.on .c-fmt {
-    visibility: hidden;
+    display: inline-grid;
+    margin-right: var(--space-1);
+    vertical-align: -2px;
   }
   .card:has(:focus-visible),
   .arch:has(:focus-visible) {
@@ -1276,7 +1305,7 @@
      A subgrid's edge tracks hold its border and padding, so the first and last are 12 + 1 px wider than their content. */
   .arches {
     display: grid;
-    grid-template-columns: 28px auto minmax(0, 1fr) repeat(3, 64px) 28px;
+    grid-template-columns: 28px auto minmax(0, 1fr) repeat(2, 64px) auto 28px;
     column-gap: var(--space-3);
     row-gap: var(--space-1);
   }
@@ -1296,6 +1325,13 @@
   .a-head-lead {
     grid-column: 1 / 4;
     text-align: left;
+  }
+  /* The latency column holds a figure and its source word side by side: its heading starts where the column does
+     (phones stack the word under its figure, right-aligned, and keep the heading on the right). */
+  @media (min-width: 768px) {
+    .a-head-lat {
+      text-align: left;
+    }
   }
   .arch {
     min-height: 36px;
@@ -1326,19 +1362,28 @@
     text-align: right;
     white-space: nowrap;
   }
-  .a-v.num {
+  .a-v.num,
+  .lat .num {
     color: var(--text-secondary);
   }
-  .arch.on .a-v.num {
+  .arch.on .a-v.num,
+  .arch.on .lat .num {
     color: var(--text-primary);
   }
-  /* Measured on this server: ink in every row (the note under the table names these sizes in words). */
-  .a-v.num.here {
+  /* Measured on this server: ink in every row (its cell says "measured"). */
+  .lat .num.here {
     color: var(--text-primary);
   }
+  /* The figure's source, one step quieter than the figure, in a slot of one width so the figures keep one edge. */
+  .a-src {
+    display: inline-block;
+    min-width: 10ch;
+    margin-left: var(--space-2);
+    text-align: left;
+    color: var(--text-tertiary);
+  }
+  /* A caption, not a paragraph: one meta line under the table (it wraps whole items on phones). */
   .ref {
-    max-inline-size: var(--measure);
-    text-wrap: pretty;
     margin-top: var(--space-2);
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
@@ -1574,8 +1619,15 @@
     white-space: nowrap;
     color: var(--text-primary);
   }
-  .rv.warn .rv-v {
-    color: var(--danger-text);
+  .rv-end {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .rv-end :global(.rv-mark) {
+    flex-shrink: 0;
+    color: var(--danger-solid);
   }
   .layout :global([data-jumped]) {
     outline: 2px solid var(--focus);
@@ -2013,6 +2065,21 @@
     max-width: 100%;
     text-indent: 0;
   }
+  /* "Weights path required": the template's state, above the line it qualifies, its mark in the warning hue. */
+  .cli-req {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+  }
+  .cli-req > :global(svg) {
+    flex-shrink: 0;
+    color: var(--warning-text);
+  }
   .cli-note {
     margin-top: var(--space-2);
     color: var(--text-tertiary);
@@ -2219,8 +2286,15 @@
     }
     /* Model rows: the note gives way (it sits under the rows) so the three specs keep their columns; 44 px rows. */
     .arches {
-      grid-template-columns: 28px minmax(0, 1fr) repeat(3, 52px) 28px;
+      grid-template-columns: 28px minmax(0, 1fr) repeat(2, 52px) auto 28px;
       column-gap: var(--space-2);
+    }
+    /* The source word under its figure: the row grows a line rather than squeeze the size's name. */
+    .a-src {
+      display: block;
+      min-width: 0;
+      margin-left: 0;
+      text-align: right;
     }
     .a-head-lead {
       grid-column: 1 / 3;

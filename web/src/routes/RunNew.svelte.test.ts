@@ -151,7 +151,8 @@ describe('New run after running out of GPU memory', () => {
   it('names what failed and what changed, and marks the changed field', async () => {
     await open('?from=run_a2f0&batch=16');
     const note = await until(() => target.querySelector('.oom-note'));
-    expect(note.textContent?.replace(/\s+/g, ' ')).toContain('shapes-hard-m ran out of GPU memory at batch 32. Now batch 16.');
+    // Batch 16 is still forecast over the GPU's memory: the note says so, never "Now batch 16" as if it were the fix.
+    expect(note.textContent?.replace(/\s+/g, ' ')).toMatch(/shapes-hard-m ran out of GPU memory at batch 32\. Batch 16 still won't fit: ~26\.\d GiB of 16\.0 GiB\./);
     expect(target.querySelector('#batch [aria-checked="true"]')?.textContent?.trim()).toBe('16');
     const batchField = target.querySelector('#batch')!.closest('.field')!;
     // Beside the new value ("16 · was 32"), not at the far end of the label row.
@@ -159,6 +160,25 @@ describe('New run after running out of GPU memory', () => {
     // 960 px is kept from the failed run; the image size field is not marked.
     expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
     expect(target.querySelector('#imgsz')!.closest('.field')!.querySelector('.was')).toBeNull();
+  });
+  it('says "Now" with the figure only when the change fits (the run page retry link)', async () => {
+    await open('?from=run_a2f0&batch=8');
+    const note = await until(() => (target.querySelector('.oom-note')?.textContent?.includes('Now') ? target.querySelector('.oom-note') : null), 'the note');
+    expect(note!.textContent?.replace(/\s+/g, ' ')).toMatch(/at batch 32\. Now batch 8 · ~13\.\d GiB\./);
+  });
+  it("gives the figure and says the fit can't be checked where the GPU doesn't report its memory (memory_bytes 0)", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const sys = api.system.bind(api);
+    vi.spyOn(api, 'system').mockImplementation(async () => {
+      const r = await sys();
+      return { ...r, gpus: r.gpus.map((g) => ({ ...g, memory_bytes: 0 })) };
+    });
+    // Batch 16 is forecast over the mock's 16 GiB elsewhere; with no size reported, neither "fits" nor "won't fit".
+    await open('?from=run_a2f0&batch=16');
+    const note = await until(() => (target.querySelector('.oom-note')?.textContent?.includes('Now') ? target.querySelector('.oom-note') : null), 'the note');
+    const text = note!.textContent!.replace(/\s+/g, ' ');
+    expect(text).toMatch(/at batch 32\. Now batch 16 · ~[\d.]+ GiB · this GPU doesn't report its memory, so the fit can't be checked\./);
+    expect(text).not.toContain("won't fit");
   });
   it('makes the change that fits the one primary while the settings are forecast not to fit, and Start a secondary', async () => {
     hub.api = api = new MockApi('normal', 0);
@@ -684,7 +704,8 @@ describe('New run: the form', () => {
     await open();
     const rows = [...target.querySelectorAll('.arch')];
     expect(rows.map((r) => r.querySelector('.a-size')?.textContent)).toEqual(['N', 'S', 'M', 'L', 'X']);
-    expect(rows.slice(2).map((r) => r.querySelectorAll('.a-v')[2]?.textContent)).toEqual(['—', '—', '—']);
+    expect(rows.slice(2).map((r) => r.querySelectorAll('.a-v')[2]?.textContent?.trim())).toEqual(['—', '—', '—']);
+    // The dash is explained once, under the table, not in every row (DESIGN_DIRECTION 23).
     expect(target.querySelector('.arches')?.textContent).not.toContain('not measured');
   });
 
@@ -765,8 +786,8 @@ describe('New run: the estimate', () => {
     expect(target.querySelector('.summary .how-note')?.textContent).toContain('does not estimate runs');
     expect(ask).not.toHaveBeenCalled();
     // The latency column is the reference throughout.
-    expect(target.querySelector('.a-v.here')).toBeNull();
-    expect(target.querySelector('p.ref')?.textContent).toContain("each size's reference");
+    expect(target.querySelector('.lat .here')).toBeNull();
+    expect([...target.querySelectorAll('.a-src')].map((s) => s.textContent).filter(Boolean)).toEqual(['reference', 'reference']);
   });
 
   describe('asks again 300 ms after the settings settle, whether or not the last one was answered', () => {
@@ -813,13 +834,22 @@ describe('New run: the estimate', () => {
     });
   });
 
-  it("marks folo-n's latency as measured on this GPU and names it under the table", async () => {
+  it("marks folo-n's latency as measured on this GPU in its own cell, the others as the reference", async () => {
     hub.api = api = new MockApi('normal', 0);
     await open();
-    const here = await until(() => target.querySelector('.a-v.here'), 'the measured latency');
+    const here = await until(() => target.querySelector('.lat .here'), 'the measured latency');
     expect(here.textContent).toBe('5.90 ms');
-    expect(here.closest('label')?.querySelector('input')?.value).toBe('folo-n');
-    expect(target.querySelector('p.ref')?.textContent?.replace(/\s+/g, ' ')).toMatch(/measured on this GPU for folo-n; the others are the reference/);
+    const row = here.closest('label')!;
+    expect(row.querySelector('input')?.value).toBe('folo-n');
+    expect(row.querySelector('.a-src')?.textContent).toBe('measured');
+    const s = target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-s"]')!.closest('label')!;
+    expect(s.querySelector('.a-src')?.textContent).toBe('reference');
+    // The caption under the table is one meta line, not a paragraph explaining each row.
+    expect([...target.querySelectorAll('p.ref .ui-meta > span')].map((s) => s.textContent)).toEqual([
+      'Latency at 640 px, end to end',
+      'reference: RTX 4080 SUPER, f32',
+      '—: not measured yet',
+    ]);
   });
 });
 

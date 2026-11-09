@@ -38,6 +38,9 @@
   import { HEAD_LABEL } from './run/resolved';
   import Logs from './run/Logs.svelte';
   import Outcome from './run/Outcome.svelte';
+  import Callout from './run/Callout.svelte';
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
+  import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
   import PerClass from './run/PerClass.svelte';
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -55,6 +58,10 @@
   const datasets = new Resource((s) => hub.api.datasets(s));
   const run = $derived(live.run);
   const dataset = $derived(run ? datasets.data?.find((d) => d.id === run.config.dataset_id) : undefined);
+  // A dataset with no validation images trains and validates on its training split (docs/API.md, Split fallback): the
+  // page says so once, as the Model page does, and its titles name that split rather than "Validation".
+  const evalOn = $derived(runEvalSource(dataset));
+  const splitNotice = $derived(evalOn ? fallbackNotice(evalOn) : null);
 
   $effect(() => {
     setCrumbs({ label: 'Runs', path: '/runs' }, { label: run?.name ?? id });
@@ -139,6 +146,7 @@
   /** Where the run started: "From scratch", or the model / file it was fine-tuned from (one reading, $lib/lineage). */
   /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
   const stacked = new MediaQuery(media.upToLaptop, false);
+  const phone = new MediaQuery(media.phone, false);
   const lineage = $derived(run ? origin(run.config.weights, models.data ?? []) : null);
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
@@ -200,7 +208,7 @@
   /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
   const later = $derived([
     { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
-    { name: 'Samples', what: 'Predictions on 16 validation images after every epoch' },
+    { name: 'Samples', what: `Predictions on 16 ${scoresTitle(evalOn).toLowerCase()} images after every epoch` },
     { name: 'Per class', what: `AP for each of ${dataset?.classes.length ?? 'its'} classes` },
     { name: 'Logs', what: "The trainer's output, live" },
   ]);
@@ -389,11 +397,16 @@
       system={system.data ?? (system.error ? null : undefined)}
     />
 
+    {#if splitNotice && !waitingLayout}
+      <Callout tone="warning" icon={TriangleAlert} title={splitNotice.title} role="note" label="Evaluation split">{splitNotice.why}</Callout>
+    {/if}
+
     {#if waitingLayout}
       <!-- Waiting: the config as asked for, beside the queue and what the run will have. Nothing here is an
-           empty frame, and no panel stretches to its neighbour's height. -->
+           empty frame, and no panel stretches to its neighbour's height. Below 1024 px the queue leads; phones show
+           the config's essentials, the rest folded (the work before the reference). -->
       <div class="waiting">
-        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} /></div>
+        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} essential={phone.current} /></div>
         <div class="w-side">
           {#if place !== null && queue.length}
             <Panel title="Queue" meta="{waitingCount} waiting" pad="none" id="queue">
@@ -433,6 +446,7 @@
       loading={live.loading}
       queued={queuedOnly}
       folded={section !== 'samples'}
+      {evalOn}
     />
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right, the two
@@ -455,7 +469,7 @@
     </div>
     <div class="detail" data-show={section} id="run-sec-panel" role={stacked.current ? 'tabpanel' : undefined} aria-labelledby={stacked.current ? `run-sec-${section}` : undefined}>
       <div class="main-col">
-        <div class="part" data-part="samples"><Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} /></div>
+        <div class="part" data-part="samples"><Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} title="{scoresTitle(evalOn)} samples" /></div>
         <div class="part" data-part="logs"><Logs logs={live.logs} version={live.version} live={active} /></div>
       </div>
       <aside class="rail" aria-label="Per-class results and config">
@@ -740,9 +754,10 @@
       order: -1;
     }
   }
-  /* Phones: the callout above says the place and what it waits for; the config is the page. */
+  /* Phones: the callout (the place and what it waits for), the queue, then the config's essentials; what the run will
+     have once it trains waits for that (Run's sections show it then). */
   @media (max-width: 767px) {
-    .w-side {
+    .w-side :global(#later) {
       display: none;
     }
   }
@@ -763,6 +778,12 @@
   }
   .q-row:first-child {
     border-top: 0;
+  }
+  /* Each name is a link: a 44 px row on touch screens. */
+  @media (pointer: coarse) {
+    .q-row {
+      height: 44px;
+    }
   }
   .q-n {
     color: var(--text-tertiary);

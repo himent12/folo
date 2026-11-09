@@ -1,6 +1,7 @@
 // Turns `GET /api/models/{id}/eval` into what the Model view draws: chart points per class, a mean curve and
 // per-class rows with instance counts (the confusion matrix row sums: every true object lands in exactly one cell).
 
+import { evalSource, matrixAt, type EvalSource, type MatrixAt } from '$lib/evaluated';
 import type { ModelEval } from './types';
 
 export interface ClassEvaluation {
@@ -24,6 +25,10 @@ export interface Evaluation {
   images: number;
   /** The confidence per-class precision and recall are taken at (`/eval`'s `best_f1_conf`); null when unknown. */
   bestF1Conf: number | null;
+  /** What was evaluated: the dataset and the split actually used (`$lib/evaluated` words it). */
+  source: EvalSource;
+  /** The confusion matrix's own thresholds (not `bestF1Conf`, not the NMS settings); null when the server does not say. */
+  matrixAt: MatrixAt | null;
 }
 
 export function fromModelEval(e: ModelEval): Evaluation {
@@ -42,7 +47,16 @@ export function fromModelEval(e: ModelEval): Evaluation {
     recall: c.recall,
     instances: (e.confusion[c.class] ?? []).reduce((a, b) => a + b, 0),
   }));
-  return { perClass, curves, mean, confusion: e.confusion, images: e.images, bestF1Conf: e.best_f1_conf ?? null };
+  return {
+    perClass,
+    curves,
+    mean,
+    confusion: e.confusion,
+    images: e.images,
+    bestF1Conf: e.best_f1_conf ?? null,
+    source: evalSource(e),
+    matrixAt: matrixAt(e),
+  };
 }
 
 /**

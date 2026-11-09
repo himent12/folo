@@ -421,7 +421,7 @@
   .k-sub {
     font-size: var(--type-sm-size);
     line-height: 16px;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -537,7 +537,7 @@
   /* Tablets and phones: the histograms stack, each at full width; Health takes the full width too. The KPI captions
      take their short form (the split counts are in the page header's meta line), so every cell stays one line, and the
      folded Health line its findings' fewest words (`tiny`: "3 broken · 3 warnings · 35% tiny · 42 empty"), so it
-     stays one line on a tablet. */
+     stays one line on a tablet (phones set them in two columns, below). */
   @media (max-width: 1023px) {
     .two {
       grid-template-columns: minmax(0, 1fr);
@@ -550,15 +550,16 @@
     }
   }
   @media (max-width: 767px) {
-    /* Phones, at rest: the title and Details on the first line, the severity summaries wrapping under them. Open, the
-       heading and its count fit the one line. */
+    /* Phones, at rest: the title and Details on the first line; under them the findings in two columns, one per cell,
+       on the panel's 12 px rhythm (12 under the title, 12 between rows), so four findings read as a 2 × 2 block, never
+       a full line with one finding left over under it. Open, the heading and its count fit the one line. */
     details:not([open]) summary {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       grid-template-areas:
         'title more'
         'sum sum';
-      gap: var(--space-1) var(--space-3);
+      gap: var(--space-3);
       padding-block: var(--space-2) var(--space-3);
     }
     .h-title {
@@ -569,7 +570,9 @@
     }
     .h-sum {
       grid-area: sum;
-      gap: var(--space-1) var(--space-3);
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-3);
     }
     .h-sev {
       white-space: normal;

@@ -287,9 +287,7 @@
     /* An input's edge (line.control), drawn like ui/Input: an invalid draft turns the edge and the ring danger. */
     border: 1px solid var(--line-control);
     cursor: text;
-    transition:
-      border-color var(--dur-fast) var(--ease-standard),
-      box-shadow var(--dur-fast) var(--ease-standard);
+    transition: border-color var(--dur-fast) var(--ease-standard);
   }
   :global([data-theme='light']) .chips {
     background: var(--bg-panel);
@@ -297,9 +295,11 @@
   .chips:hover {
     border-color: var(--line-control-hover);
   }
-  .chips:focus-within {
-    border-color: var(--focus);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
+  /* The field's frame takes the global ring while its draft input has keyboard focus, like ui/Input (§2.9); a chip's
+     remove button keeps its own ring, so the frame is not ringed for it. */
+  .chips:has(input:focus-visible) {
+    outline: var(--size-focus-ring) solid var(--focus);
+    outline-offset: var(--size-focus-offset);
   }
   .chips.invalid {
     --line-control: var(--danger-solid);

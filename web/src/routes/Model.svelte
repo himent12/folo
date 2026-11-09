@@ -6,6 +6,7 @@
   import Copy from '@lucide/svelte/icons/copy';
   import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import { tick } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { hub } from '$lib/api/index.svelte';
@@ -16,6 +17,7 @@
   import ConfusionMatrix from '$lib/charts/ConfusionMatrix.svelte';
   import { sharePct } from '$lib/charts/confusionInk';
   import { classInk } from '$lib/design/classInk.svelte';
+  import { evaluatedOn, fallbackNotice, matrixCounted, matrixVsPr, metricsLabel, sourceShort, splitWord, type EvalSource } from '$lib/evaluated';
   import { ago, atBestF1, bytes, compact, conf, date, metric, num } from '$lib/format';
   import { latencyMs, latencyRange, loadThroughput, measuredLatency } from '$lib/throughput';
   import { prefs } from '$lib/prefs.svelte';
@@ -37,6 +39,7 @@
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import PrCurves from './model/PrCurves.svelte';
+  import Callout from './run/Callout.svelte';
   import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
   // The head and precision in the words Run's Config and Compare use.
   import { HEAD_LABEL, PRECISION_LABEL } from './run/resolved';
@@ -76,7 +79,41 @@
   const evaluation = new Resource((s) => hub.api.modelEval(id, s));
   // This server's measured latency for the architecture (GET /api/system/throughput), where it has predicted with it.
   const tp = new Resource((s) => loadThroughput(hub.api, s));
-  const ev = $derived(evaluation.data ? fromModelEval(evaluation.data) : null);
+  const ev = $derived.by(() => {
+    if (!evaluation.data) return null;
+    const e = fromModelEval(evaluation.data);
+    // An older server leaves the dataset out; /eval runs on the run's (docs/API.md), so its name stands in. The split
+    // stays unknown: a missing split is not `val`.
+    const ds = context.data?.dataset;
+    if (ds && e.source.datasetId === null && e.source.datasetName === null) e.source = { ...e.source, datasetId: ds.id, datasetName: ds.name };
+    return e;
+  });
+  /**
+   * What the page's numbers were measured on. Before the evaluation loads (or when it fails), the run's dataset: its
+   * validation split, or its training split when it has no validation images, as training and /eval both fall back.
+   */
+  const source = $derived.by((): EvalSource => {
+    if (ev) return ev.source;
+    const ds = context.data?.dataset ?? null;
+    if (!ds) return { datasetId: null, datasetName: null, split: null, fallback: null };
+    const empty = ds.splits.val === 0;
+    return {
+      datasetId: ds.id,
+      datasetName: ds.name,
+      split: empty ? 'train' : 'val',
+      fallback: empty ? { requested: 'val', reason: 'empty_split', message: '' } : null,
+    };
+  });
+  /** Said once on the page, under the headline metrics, when the numbers are not on the validation split. */
+  const notice = $derived(fallbackNotice(source));
+  // The curves' qualifier names what was evaluated ("fasteners · validation split · IoU 0.5"); phones keep the split.
+  const prMeta = $derived.by(() => {
+    const where = phone.current ? (source.split ? `${splitWord(source.split)} split` : null) : sourceShort(source);
+    return `${where ?? 'precision by recall'} · IoU 0.5`;
+  });
+  // The matrix's own thresholds and what it counted, never precision and recall's operating point.
+  const matrixLine = $derived(ev ? matrixCounted(source, ev.images, ev.matrixAt) : '');
+  const matrixHow = $derived(ev ? matrixVsPr(ev.matrixAt, atBestF1(ev.bestF1Conf)) : '');
 
   // Large class sets (COCO) get a readable matrix of the most frequent classes.
   const CM_MAX = 12;
@@ -221,9 +258,11 @@
     { label: 'Precision', value: m.metrics?.precision, sub: atBestF1(m.metrics?.best_f1_conf) },
     { label: 'Recall', value: m.metrics?.recall, sub: atBestF1(m.metrics?.best_f1_conf) },
   ];
-  // Phones: the four numbers as one compact 2 × 2 summary in every section (Curves too), so it never changes shape
-  // between sections and each section starts on the first screen; what they mean is behind the ⓘ.
-  const kpiGrid = $derived(phone.current);
+  // Phones: the work before the summary (DESIGN_DIRECTION 12). The section picker sits right under the header, so it
+  // never moves between sections; Curves, the overview, opens on the 2 × 2 grid, and the other sections on one line,
+  // the headline and "All metrics", which unfolds the same grid. What the numbers mean is behind the grid's ⓘ.
+  let kpiOpen = $state(false);
+  const kpiFolded = $derived(phone.current && section !== 'curves');
   /**
    * How the weights are stored (the file's folo.dtype and folo.fused, docs/API.md): "f16 · fused, inference only".
    * Null when the server does not say; a dtype this client has no name for reads as unknown, as the API asks.
@@ -289,9 +328,7 @@
       <div>
         <dt>Evaluated on</dt>
         <dd>
-          {#if context.data?.dataset}The validation split of {context.data.dataset.name}{:else}The validation split of the model's dataset{/if}{ev
-            ? ` (${num(ev.images)} images)`
-            : ''}, at {m.imgsz} px, {head === 'o2o' ? 'end to end (the one-to-one head, no NMS)' : 'with NMS IoU 0.7'}.
+          {evaluatedOn(source, ev ? ev.images : null)}, at {m.imgsz} px, {head === 'o2o' ? 'end to end (the one-to-one head, no NMS)' : 'with NMS IoU 0.7'}.
         </dd>
       </div>
     </dl>
@@ -341,21 +378,10 @@
     {/snippet}
 
     <!-- One strip of numbers in ink: the headline metric, then the ones that support it, each with a short qualifier;
-         the ⓘ opens what they mean. Phones: a 2 × 2 summary of label over value, the headline first. -->
-    {#if kpiGrid}
-      <section class="kpi-grid num" aria-label="Validation metrics">
-        <dl class="kg">
-          {#each kpis(m) as k, i (k.label)}
-            <div class="kg-cell" class:hero={i === 0}>
-              <dt>{k.label}{#if i === 0}{@render kHelp()}{/if}</dt>
-              <dd>{metric(k.value)}</dd>
-            </div>
-          {/each}
-        </dl>
-        {#if helpOpen}{@render metricHelp()}{/if}
-      </section>
-    {:else}
-    <section class="kpis" aria-label="Validation metrics">
+         the ⓘ opens what they mean. Phones: a 2 × 2 summary of label over value, the headline first, inside the
+         sections (below). -->
+    {#if !phone.current}
+    <section class="kpis" aria-label={metricsLabel(source)}>
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
           <span class="k-label"><span class="truncate">{k.label}</span>{#if i === 0}{@render kHelp()}{/if}</span>
@@ -367,6 +393,11 @@
     </section>
     {/if}
 
+    {#if notice}
+      <!-- Once on the page, in every layout and phone section: these are not validation numbers. -->
+      <Callout tone="warning" icon={TriangleAlert} title={notice.title} role="note" label="Evaluation split">{notice.why}</Callout>
+    {/if}
+
     {#if phone.current}
       <!-- Stays reachable under the top bar while a section scrolls. -->
       <div class="phone-pick" bind:offsetHeight={pickH}>
@@ -376,6 +407,29 @@
 
     <!-- The parts, in one frame: on phones it is the sections' tab panel; wider, a column with the page's own gap. -->
     <div class="parts" id="model-sec-panel" role={phone.current ? 'tabpanel' : undefined} aria-labelledby={phone.current ? `model-sec-${section}` : undefined}>
+    {#if phone.current}
+      <!-- Phones: the summary heads its section. Curves shows the grid; elsewhere one line that unfolds it. -->
+      <section class="kpi-grid num" class:folded={kpiFolded} aria-label={metricsLabel(source)}>
+        {#if kpiFolded}
+          <button type="button" class="kpi-line" aria-expanded={kpiOpen} aria-controls="kpi-cells" onclick={() => (kpiOpen = !kpiOpen)}>
+            <span class="kl-name">mAP50-95</span>
+            <span class="kl-value">{metric(m.metrics?.map50_95)}</span>
+            <span class="kl-verb">All metrics <ChevronDown size={14} aria-hidden="true" /></span>
+          </button>
+        {/if}
+        {#if !kpiFolded || kpiOpen}
+          <dl class="kg" id="kpi-cells">
+            {#each kpis(m) as k, i (k.label)}
+              <div class="kg-cell" class:hero={i === 0}>
+                <dt>{k.label}{#if i === 0}{@render kHelp()}{/if}</dt>
+                <dd>{metric(k.value)}</dd>
+              </div>
+            {/each}
+          </dl>
+          {#if helpOpen}{@render metricHelp()}{/if}
+        {/if}
+      </section>
+    {/if}
 
     <!-- Evidence beside reference: the curves (8 columns) and the Details rail (4) stretch to one height, the plot
          taking what the rail adds; the per-class table, the curves' legend, follows in a row of its own. Up to 1199 px
@@ -387,7 +441,7 @@
       style:--pick-bottom={phone.current ? `calc(var(--size-topbar) + var(--space-2) + ${pickH}px)` : undefined}
     >
       <div class="main-col" class:off={!showing('curves')}>
-        <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
+        <Panel title="Precision–recall" meta={prMeta} pad="none" id="pr">
           <!-- Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps one
                line in the laptop's narrower column. -->
           {#snippet actions()}
@@ -513,6 +567,21 @@
                 {/if}
               </dd>
             </div>
+            <!-- What the curves, the per-class table and the matrix were measured on (/eval's provenance). -->
+            <div class="kv">
+              <dt>Evaluated on</dt>
+              <!-- The dataset as the value, the split and its images under it, so the row keeps the rail's alignment. -->
+              <dd class="evald">
+                {#if source.datasetName && source.datasetId}
+                  <a class="link" href={href(`/datasets/${encodeURIComponent(source.datasetId)}`)}>{source.datasetName}</a>
+                {:else if source.datasetName}
+                  <span>{source.datasetName}</span>
+                {/if}
+                <span class="num" class:faint={!!source.datasetName}
+                  >{source.split ? `${splitWord(source.split)} split` : 'split not reported'}{ev ? `, ${num(ev.images)} ${ev.images === 1 ? 'image' : 'images'}` : ''}</span
+                >
+              </dd>
+            </div>
             {#if lineage}
               <div class="kv">
                 <dt>Started from</dt>
@@ -542,17 +611,17 @@
               {#if here}
                 <dd class="latency">
                   <span class="num">{latencyMs(here.latency_ms)}</span>
-                  <span class="faint num">measured here · {latencyRange(here.latency_ms_low, here.latency_ms_high)} · {num(here.samples)} predictions · {m.imgsz} px · {here.precision}</span>
+                  <Meta class="figs num"><span>measured here</span><span>{latencyRange(here.latency_ms_low, here.latency_ms_high)}</span><span>{num(here.samples)} predictions</span><span>{m.imgsz} px</span><span>{here.precision}</span></Meta>
                 </dd>
               {/if}
               <dd class="latency" class:second={!!here}>
                 {#if here && latency(m) !== undefined}
-                  <span class="faint num">Reference {latency(m)!.toFixed(2)} ms · <Ident value={m.arch} /> · 640 px · RTX 4080 SUPER</span>
+                  <Meta class="figs num"><span>Reference {latency(m)!.toFixed(2)} ms</span><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span></Meta>
                 {:else if here}
                   <span class="faint">No reference for <Ident value={m.arch} /> yet</span>
                 {:else if latency(m) !== undefined}
                   <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                  <span class="faint"><Meta><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta></span>
+                  <Meta class="figs"><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span><span>end to end</span></Meta>
                 {:else}
                   <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
                 {/if}
@@ -621,7 +690,7 @@
             </p>
           {/each}
           <div class="rank-foot">
-            {#if missed}<p><span class="num">{sharePct(missed.v) || '0'}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
+            <p>{#if missed}<span class="num">{sharePct(missed.v) || '0'}%</span> of all objects missed overall.{' '}{/if}{matrixLine}</p>
             <Button class="explore" onclick={openMatrix}>Explore the matrix</Button>
           </div>
         {:else if cm}
@@ -666,13 +735,14 @@
                   {/each}
                 {/if}
                 <div class="cm-notes">
-                  {#if missed && !phone.current}<p><span class="num strong">{sharePct(missed.v) || '0'}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
-                  <p>Each row is one true class, split by what the model predicted for its objects. The diagonal is right;
-                    the background column is objects it missed.</p>
+                  {#if missed && !phone.current}<p><span class="num strong">{sharePct(missed.v) || '0'}%</span> of all objects missed overall.</p>{/if}
+                  <p>{matrixLine} Each row is one true class, split by what the model predicted for its objects. The diagonal
+                    is right; the background column is objects it missed.</p>
                   <details class="how">
                     <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
                     <div class="how-body">
-                      <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5, in whole percentages ("&lt;1"
+                      <p>{matrixHow}</p>
+                      <p>Each row sums to 100% of that class's ground-truth boxes, in whole percentages ("&lt;1"
                         under half a percent). A cell too small for its number shows a dot instead; hover, tap or focus any cell
                         for its count. An empty cell had no objects at all.</p>
                       <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
@@ -735,6 +805,10 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* The caption is read ("at conf 0.39 (best F1)"): secondary, like every KPI caption (ui/Stat, Run's tabs). */
+  .k-sub {
+    color: var(--text-secondary);
   }
   .kpis {
     position: relative;
@@ -824,7 +898,8 @@
     line-height: 40px;
     letter-spacing: var(--type-3xl-tracking);
   }
-  /* Phones, every section: a compact 2 × 2 summary in the strip's frame, mAP50-95 first. Each cell is its label over
+  /* Phones, the head of the Curves section (folded to one line in the others): a compact 2 × 2 summary in the strip's
+     frame, mAP50-95 first. Each cell is its label over
      its value, the cells parted by hairlines (1 px gaps over the line colour); the ⓘ sits in the top-right corner, and
      what the numbers mean opens under the grid. */
   .kpi-grid {
@@ -883,6 +958,49 @@
   .kpi-grid .k-body {
     border-top: 1px solid var(--line-subtle);
   }
+  /* Folded (every phone section but Curves): one 48 px line in the grid's frame, the headline's label and value on
+     the left and the verb that unfolds the four cells on the right. */
+  .kpi-line {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    width: 100%;
+    min-height: 48px;
+    padding: var(--space-3) var(--space-4);
+    text-align: left;
+  }
+  .kpi-line:focus-visible {
+    outline-offset: -2px;
+  }
+  .kl-name {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .kl-value {
+    font-size: var(--type-lg-size);
+    line-height: 24px;
+    letter-spacing: var(--type-lg-tracking);
+    font-weight: var(--weight-semibold);
+  }
+  .kl-verb {
+    display: inline-flex;
+    align-self: center;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: auto;
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .kl-verb :global(svg) {
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .kpi-line[aria-expanded='true'] .kl-verb :global(svg) {
+    transform: rotate(180deg);
+  }
+  .kpi-line + .kg {
+    border-top: 1px solid var(--line-subtle);
+  }
   /* Phones' confusion list: two-line 56 px rows (the pair and its share, then the counts behind it). */
   .rank-h {
     display: flex;
@@ -938,7 +1056,7 @@
     padding-left: calc(8px + var(--space-2));
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
   }
   .rank-foot {
     display: grid;
@@ -1222,6 +1340,19 @@
   .two .classes {
     justify-content: flex-start;
   }
+  .evald {
+    display: grid;
+    justify-items: end;
+    text-align: right;
+  }
+  .evald .faint {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
+  .two .evald {
+    justify-items: start;
+    text-align: left;
+  }
   .d-line {
     display: flex;
     align-items: center;
@@ -1282,16 +1413,22 @@
     padding-top: var(--space-3);
     border-top: 1px solid var(--line-subtle);
   }
+  /* The value, then each line of its conditions as its own meta line: items wrap whole, so a fact ("RTX 4080 SUPER")
+     never breaks inside (dd's overflow-wrap would split it). Figures people read are secondary (§2.3). */
   .latency {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0 var(--space-2);
+    display: grid;
+    justify-items: start;
+    gap: 2px;
     text-align: left;
+    overflow-wrap: normal;
   }
-  .latency .faint {
+  .latency .faint,
+  .latency :global(.figs) {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+  }
+  .latency :global(.figs) {
+    color: var(--text-secondary);
   }
   .latency.second {
     margin-top: 2px;
@@ -1318,11 +1455,12 @@
       grid-template-columns: minmax(0, 1fr);
     }
   }
-  /* Tablets and phones: the rail stacks under the main column (as on Run and New run). */
+  /* Tablets: the rail is folded to one line of facts (Details ›), so it sits right under the KPI strip, the reference
+     before the evidence, never under a long per-class table. Phones show it as a section of its own. */
   @media (max-width: 1023px) {
     .detail {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-areas: 'pr' 'cls' 'rail';
+      grid-template-areas: 'rail' 'pr' 'cls';
     }
   }
   @media (max-width: 767px) {

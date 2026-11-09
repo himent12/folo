@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runProgress, stepsPerEpoch } from './progress';
+import { progressText, runProgress, stepsPerEpoch } from './progress';
 import type { Step } from './types';
 
 const step = (step: number, epoch: number) => ({ step, epoch }) as Step;
@@ -29,5 +29,16 @@ describe('stepsPerEpoch', () => {
   it('is 0 while nothing tells', () => {
     expect(stepsPerEpoch({ steps_per_epoch: 0 }, [step(1, 1), step(2, 1)])).toBe(0);
     expect(stepsPerEpoch({ steps_per_epoch: 0 })).toBe(0);
+  });
+});
+
+describe('progressText', () => {
+  it('is whole percents rounded down, so screens a moment apart read the same value', () => {
+    const at = (step: number) => progressText({ step, epoch: 38, epochs: 100, steps_per_epoch: 120, status: 'running' });
+    // 37.5% (Overview) and 37.9% (the run page, a second later) both read "37%".
+    expect(at(4500)).toBe('37%');
+    expect(at(4548)).toBe('37%');
+    expect(at(4560)).toBe('38%');
+    expect(progressText({ step: 12000, epoch: 100, epochs: 100, steps_per_epoch: 120, status: 'completed' })).toBe('100%');
   });
 });

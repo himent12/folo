@@ -47,6 +47,8 @@ export const LABEL_GAP = 12;
 
 /** A label's box height, px: the 16 px line of the 12 px label text, as the browser draws it. */
 export const LABEL_H = 16;
+/** The narrowest plot that draws direct labels: below it (every phone) the legend carries names, values and status. */
+export const END_LABELS_MIN = 560;
 
 /** A label whose box is further than this (px) from its line's end marker gets a leader. */
 const BESIDE = 8;

@@ -46,11 +46,11 @@ describe('ConfigPanel', () => {
   it('shows the resolved optimizer, LR, accumulation and warmup as the truth', () => {
     // fasteners: 1920 images at batch 16 over 100 epochs is 3000 iterations: AdamW at 0.002 · 5 / (4 + 8).
     const r = rows(resolveTrain(config, 1920, 8, 120));
-    expect(r['Optimizer']?.textContent).toBe('AdamW(auto)');
+    expect(r['Optimizer']?.textContent).toBe('AdamW (auto)');
     expect(r['Optimizer']?.querySelector('.mono')?.textContent).toBe('AdamW');
-    expect(r['Initial LR']?.textContent).toBe('0.000833(requested 0.01)');
+    expect(r['Initial LR']?.textContent).toBe('0.000833 (requested 0.01)');
     expect(r['Batch × accumulate']?.textContent).toBe('16 × 4 = 64');
-    expect(r['Warmup']?.textContent).toBe('360 steps(3 epochs)');
+    expect(r['Warmup']?.textContent).toBe('360 steps (3 epochs)');
     expect(r['LR decay']?.textContent).toBe('Linear to 1%');
     expect(r['Betas']?.textContent).toBe('0.9 · 0.999');
     expect(r['Weight decay']?.textContent).toBe('0.0005');
@@ -68,8 +68,8 @@ describe('ConfigPanel', () => {
   it('shows the capped close mosaic, the precision and the head (DOGFOOD-3 S2, S4)', () => {
     const short = { ...config, epochs: 15, amp: true, head: 'o2o' as const };
     const r = rows(resolveTrain(short, 1920, 8, 120), short);
-    expect(r['Close mosaic']?.textContent).toBe('last 7 epochs(requested 10)');
-    expect(r['Close mosaic']?.querySelector('.note')?.textContent).toBe('(requested 10)');
+    expect(r['Close mosaic']?.textContent).toBe('last 7 epochs (requested 10)');
+    expect(r['Close mosaic']?.querySelector('.ui-note')?.textContent).toBe('(requested 10)');
     expect(r['Precision']?.textContent).toBe('Mixed precision (f16)');
     expect(r['Head']?.textContent).toBe('End-to-end (no NMS)');
     // The defaults are said too.
@@ -77,5 +77,37 @@ describe('ConfigPanel', () => {
     expect(d['Close mosaic']?.textContent).toBe('last 10 epochs');
     expect(d['Precision']?.textContent).toBe('f32');
     expect(d['Head']?.textContent).toBe('NMS (one-to-many)');
+  });
+});
+
+describe('ConfigPanel: the work before the reference', () => {
+  function mountWith(props: Record<string, unknown>) {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(ConfigPanel, { target, props: { config, resolved: resolveTrain(config, 1920, 8, 120), ...props } });
+    flushSync();
+    const lists = [...target.querySelectorAll('dl')];
+    /** The settings of each list, the folded ones marked by their disclosure's title. */
+    return lists.map((dl) => ({
+      fold: dl.closest('details')?.querySelector('summary')?.textContent ?? null,
+      group: dl.querySelector('.group')?.textContent ?? null,
+      keys: [...dl.querySelectorAll('dt')].map((dt) => dt.textContent?.trim()),
+    }));
+  }
+
+  it('shows a phone the six settings that say what will train, the rest folded', () => {
+    const lists = mountWith({ essential: true, resolved: null });
+    expect(lists[0]).toEqual({ fold: null, group: null, keys: ['Dataset', 'Model', 'Epochs', 'Batch', 'Image size', 'Device'] });
+    expect(lists.slice(1).map((l) => l.fold)).toEqual(['More training settings', 'Augmentation']);
+    expect(target.querySelectorAll('details[open]')).toHaveLength(0);
+  });
+
+  it('balances the two columns: setup on the left, the optimizer over augmentation on the right', () => {
+    const lists = mountWith({});
+    expect(lists.map((l) => l.group)).toEqual(['Training', 'Optimizer', 'Augmentation']);
+    const left = lists[0]!.keys.length;
+    const right = lists[1]!.keys.length + lists[2]!.keys.length;
+    // The right column carries one heading more: within a few rows of the left, never a hollow of six.
+    expect(Math.abs(left - right)).toBeLessThanOrEqual(3);
   });
 });

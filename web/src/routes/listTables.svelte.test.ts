@@ -118,7 +118,7 @@ describe('list tables: headers and columns hide together', () => {
 describe('list tables: one geometry in every state', () => {
   // Every column but the flexible ones carries its width on the header row, which loading, empty, error and loaded
   // share, so a column sits at the same x in each (round 21: runs-empty and models-empty set their columns apart).
-  const FLEX: Record<string, string[]> = { Runs: ['Run'], Models: ['Model'], Datasets: ['Path', 'Class balance'] };
+  const FLEX: Record<string, string[]> = { Runs: ['Run'], Models: ['Model'], Datasets: ['Class balance'] };
   for (const [name, page, path, sel] of LISTS) {
     for (const scenario of ['normal', 'empty', 'loading', 'error'] as const) {
       it(`${name} (${scenario}): every header but ${FLEX[name]!.join(' and ')} has a fixed width`, async () => {
@@ -130,7 +130,7 @@ describe('list tables: one geometry in every state', () => {
           return t;
         });
         const loose = [...table.querySelectorAll<HTMLElement>('thead th')]
-          .filter((th) => !th.classList.contains('check') && !th.style.width)
+          .filter((th) => !th.classList.contains('check') && !th.classList.contains('rest') && !th.style.width)
           .map((th) => th.textContent?.trim());
         expect(loose).toEqual(FLEX[name]);
       });

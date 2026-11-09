@@ -9,6 +9,8 @@
   import { feedback } from './feedback.svelte';
 
   let { report }: { report: string } = $props();
+  // One record per line of the server's report (blank lines dropped: the gaps between blocks part them).
+  const records = $derived(report.split(/\r?\n/).filter((l) => l.trim() !== ''));
   // The page's toaster, or the status region of the dialog this report sits in.
   const notify = feedback();
 
@@ -22,16 +24,20 @@
   }
 </script>
 
+<!-- Open, Copy sits on the heading's row at the right, so the report below takes the panel's full width; each of the
+     server's records (one line of its report) is a block of its own with a gap after it, and a wrapped line hangs
+     deeper than its first (DESIGN_DIRECTION 21). -->
 <details class="report">
   <summary><ChevronRight size={12} strokeWidth={2} aria-hidden="true" />Driver report</summary>
-  <div class="body">
-    <pre aria-label="Driver report">{report}</pre>
-    <Button size="sm" variant="ghost" icon={Copy} aria-label="Copy driver report" onclick={copy}>Copy</Button>
-  </div>
+  <span class="copy-at"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy driver report" onclick={copy}>Copy</Button></span>
+  <pre class="body" aria-label="Driver report">{#each records as r, i (i)}{#if i}{'\n'}{/if}<span class="rec">{r}</span>{/each}</pre>
 </details>
 
 <style>
   .report {
+    --sum-h: var(--control-sm);
+    position: relative;
+    min-width: 0;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
@@ -40,6 +46,7 @@
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
+    min-height: var(--sum-h);
     cursor: pointer;
     list-style: none;
     border-radius: var(--radius-sm);
@@ -56,30 +63,42 @@
   .report[open] summary :global(svg) {
     transform: rotate(90deg);
   }
+  /* On the heading's row, centred on it, at the report's right edge. */
+  .copy-at {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    height: var(--sum-h);
+  }
+  /* The report is the server's prose, not a command: it wraps between words (inside a long one only if it must). */
   .body {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: start;
-    gap: var(--space-2);
+    gap: var(--space-3);
     margin-top: var(--space-2);
-    padding: var(--space-2) var(--space-1) var(--space-2) var(--space-3);
+    padding: var(--space-3);
     border-radius: var(--radius-md);
     background: var(--bg-inset);
     border: 1px solid var(--line-subtle);
-  }
-  /* The report is the server's prose, not a command: it wraps (between words; inside a long one only if it must). */
-  pre {
-    padding-top: 2px;
     font-family: var(--font-mono);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
+    /* The newline between records stays in the text (a copied selection keeps one record per line) and collapses
+       here: the grid's gap parts them. */
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  .rec {
+    display: block;
     white-space: pre-wrap;
-    overflow-wrap: anywhere;
+    padding-left: 2ch;
+    text-indent: -2ch;
   }
   @media (pointer: coarse) {
-    summary {
-      min-height: 44px;
+    .report {
+      --sum-h: 44px;
     }
   }
 </style>

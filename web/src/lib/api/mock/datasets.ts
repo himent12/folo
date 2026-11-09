@@ -1,5 +1,5 @@
-// Mock datasets: three procedurally generated detection datasets. Every image (size, boxes, classes) is a pure
-// function of (dataset, index), so the grid, stats, samples and predictions agree with each other.
+// Mock datasets: four procedurally generated detection datasets (one with no validation split). Every image (size,
+// boxes, classes) is a pure function of (dataset, index), so the grid, stats, samples and predictions agree.
 
 import type { Box, Dataset, DatasetImage, DatasetIssue, DatasetStats, Split } from '../types';
 import { gauss, hash, range, rng, weighted } from './rng';
@@ -90,6 +90,26 @@ export const specs: MockDatasetSpec[] = [
     brokenLabels: 3,
     createdAgoS: 86400 * 2 + 3600 * 5,
     style: 'shapes',
+  },
+  {
+    // A quick hand-made set with no validation images: Health says so, and /eval of a model with its classes falls
+    // back to its training split (docs/API.md, Split fallback; the Model page's `model-eval-train-fallback` scene).
+    id: 'ds_fasteners_mini',
+    name: 'fasteners-mini',
+    path: 'D:/data/fasteners-mini',
+    format: 'yolo',
+    classes: ['bolt', 'nut'],
+    classWeights: [11, 9],
+    classShape: ['long', 'round'],
+    splits: { train: 24, val: 0, test: 0 },
+    width: 1024,
+    height: 768,
+    meanBoxes: 6,
+    emptyRate: 0,
+    sizeRange: [0.08, 0.3],
+    brokenLabels: 0,
+    createdAgoS: 86400 * 4 + 3600 * 7,
+    style: 'fasteners',
   },
 ];
 

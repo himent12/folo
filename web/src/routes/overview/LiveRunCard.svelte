@@ -4,13 +4,15 @@
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import { LiveRun } from '$lib/api/live.svelte';
   import type { Dataset, Run } from '$lib/api/types';
-  import LineChart from '$lib/charts/LineChart.svelte';
+  import LineChart, { type Marker } from '$lib/charts/LineChart.svelte';
+  import { BestPulse } from '$lib/charts/bestPulse';
   import { unitDomain, unitZoomed, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import { runProgress } from '$lib/api/progress';
+  import { progressText, runProgress } from '$lib/api/progress';
   import { eta, lr, metric, num } from '$lib/format';
   import { deviceLine } from './device';
+  import { runEvalSource, scoresTitle } from '$lib/evaluated';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Progress from '$lib/ui/Progress.svelte';
@@ -39,7 +41,7 @@
       map: [
         // One run, so ink rather than a hue (hue identifies entities): the focal metric solid with the page's one area
         // fill; the secondary a 1 px tertiary dash, so the focal series reads first.
-        { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50_95 })) },
+        { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, end: 'live' as const, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50_95 })) },
         { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, thin: true, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50 })) },
       ],
       lastStep: live.steps[live.steps.length - 1],
@@ -63,6 +65,17 @@
   const zoomed = $derived(unitZoomed(fit));
   const horizon = $derived<[number, number]>(run ? [0, Math.max(1, lastEpoch)] : [0, 1]);
   const progress = $derived(run ? runProgress(run) : 0);
+
+  // The focal chart's vocabulary, as on the run page (run/RunMetrics): the best epoch a lime ring, pulsed once when a
+  // new best lands, and the line's end the live mark (a ringed dot).
+  const pulser = new BestPulse();
+  let pulse = $state(0);
+  $effect.pre(() => {
+    pulse = pulser.see(run?.best?.epoch ?? null, run?.status === 'running');
+  });
+  const best = $derived<Marker[]>(
+    run?.best ? [{ x: run.best.epoch, y: run.best.map50_95, label: 'best', color: 'var(--accent-line)', quiet: true, pulse }] : [],
+  );
 
   // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
@@ -108,7 +121,7 @@
         <Progress value={progress} size="sm" label="Training progress" />
         <p class="eta num">
           {#if run}
-            <span>{(progress * 100).toFixed(1)}%</span>
+            <span>{progressText(run)}</span>
             <span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : '—'}</span>
           {:else}
             <span>&#8203;<Skeleton inline w="40px" h="10px" /></span><span>&#8203;<Skeleton inline w="64px" h="10px" /></span>
@@ -126,7 +139,7 @@
     <div class="chart">
       <!-- "Latest · ep N" is said once: in the legend's note where the legend has room for it; on phones in the title,
            so the legend holds only the two series and their values, on one row. -->
-      <p class="chart-title">Validation mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : 'by epoch, so far'}</span></p>
+      <p class="chart-title">{scoresTitle(runEvalSource(dataset))} mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : `by epoch, so far${run?.best ? ` · ○ best at ep ${run.best.epoch}` : ''}`}</span></p>
       {#if !run || live.loading}
         <ChartSkeleton height={chartH} />
       {:else}
@@ -142,8 +155,10 @@
           valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
+          markers={best}
+          endDots
           legendNote={narrow ? undefined : lastEpoch ? `Latest · ep ${lastEpoch}` : 'Latest'}
-          label="Validation mAP by epoch"
+          label="{scoresTitle(runEvalSource(dataset))} mAP by epoch"
           empty="Waiting for the first validation…"
         />
       {/if}
@@ -294,6 +309,14 @@
     }
     header {
       padding: var(--space-3) var(--space-3) var(--space-2) var(--space-4);
+    }
+    /* The meta line runs under the CTA too: beside it, "dataset · arch · 640 px · batch 16" left "batch 16" alone on a
+       second line at 390 px (round 23). Open run stays on the title's row. */
+    .cta {
+      grid-row: 1;
+    }
+    .meta {
+      grid-column: 1 / -1;
     }
     .meta :global(.dev),
     .meta > span:last-child:not(:first-child) {

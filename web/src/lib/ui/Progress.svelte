@@ -11,7 +11,7 @@
   role="progressbar"
   aria-valuemin={0}
   aria-valuemax={100}
-  aria-valuenow={Math.round(v * 100)}
+  aria-valuenow={Math.floor(v * 100 + 1e-9)}
   aria-label={label}
 >
   <div class="fill" style:transform="scaleX({v})"></div>

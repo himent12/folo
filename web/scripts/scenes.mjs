@@ -47,6 +47,20 @@ async function openEstimate(page, vp, served) {
   await page.mouse.move(0, 0);
 }
 
+/**
+ * Presses Tab until `selector` holds focus, as a keyboard user reaches it (so `:focus-visible` is the keyboard's).
+ * @param {import('playwright-core').Page} page
+ * @param {string} selector
+ */
+async function tabTo(page, selector, max = 60) {
+  await until(page, selector);
+  for (let i = 0; i < max; i++) {
+    if (await page.evaluate((sel) => !!document.activeElement?.matches(sel), selector)) return;
+    await page.keyboard.press('Tab');
+  }
+  throw new Error(`Tab never reached ${selector}`);
+}
+
 /** Starts New run on a GPU the mock then reports gone (404 device_not_found) and waits for the Device error. */
 async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
   // An <option> is never "visible": wait for it to exist, running the mock's clock meanwhile.
@@ -59,7 +73,8 @@ async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
 
 /** @type {Scene[]} */
 export const scenes = [
-  { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // The live run at the moment run-live shows it (the same `advance`), so the two screens' epoch and progress agree.
+  { name: 'overview', path: '/', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -124,22 +139,35 @@ export const scenes = [
     },
   },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
+  // A run on fasteners-mini, which has no validation images: every epoch was scored on the training split, so the page
+  // says so once ("Evaluated on the training split") and its titles name that split, never "Validation".
+  { name: 'run-train-split', path: '/runs/run_m1n1', search: 'scenario=train-split', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // A retry of the out-of-memory run at batch 16, still forecast not to fit (~26.9 / 16 GiB): the note says what
-    // failed and what changed, the figure, meter and line are danger, "Use batch 8" is the one primary and Start a
-    // secondary; the phone dock says "~26.9 GiB / 16.0 GiB · Likely won't fit" beside "Use batch 8".
+    // The run page's retry, followed as a person would: shapes-hard-m ran out of GPU memory, its callout offers the
+    // largest batch the forecast fits ("Retry with batch 8 · ~13.6 GiB"), and that link opens New run with it. The
+    // note says what failed and what changed, with the figure ("Now batch 8 · ~13.6 GiB"), and Start is the primary.
     name: 'run-new-oom-retry',
-    path: '/runs/new?from=run_a2f0&batch=16',
+    path: '/runs/run_a2f0',
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
-    setup: (page) => until(page, '.start .btn.primary:has-text("Use batch")'),
+    setup: async (page) => {
+      const retry = page.locator('a.btn.primary', { hasText: 'Retry with' }).first();
+      await until(page, 'a.btn.primary:has-text("Retry with")');
+      await retry.click();
+      await until(page, '.oom-note');
+      await until(page, '.summary .est-how > summary');
+      await page.clock.runFor(500);
+      await page.mouse.move(0, 0);
+    },
   },
   {
-    // The run page's retry ("Retry with batch 8 · ~13.6 GiB"): forecast to fit, so Start is the primary.
-    name: 'run-new-oom-fitted',
-    path: '/runs/new?from=run_a2f0&batch=8',
+    // A preset that is still too big (batch 16, ~26.9 / 16 GiB): the note says the change is not enough rather than
+    // "Now batch 16", the figure, meter and line are danger, "Use batch 8" is the one primary and Start a secondary;
+    // the phone dock says "~26.9 GiB / 16.0 GiB · Likely won't fit" beside "Use batch 8".
+    name: 'run-new-oom-still-over',
+    path: '/runs/new?from=run_a2f0&batch=16',
     viewports: ['desktop', 'mobile'],
-    setup: (page) => until(page, '.oom-note'),
+    setup: (page) => until(page, '.start .btn.primary:has-text("Use batch")'),
   },
   {
     // Start on a GPU that went away (404 device_not_found): the cause and the adapters at the Device field.
@@ -373,11 +401,12 @@ export const scenes = [
   // Plans of 100 and 150 epochs: the x axis stays "By epoch"; each line ends in its run's status mark.
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // "By progress": every run over its planned epochs, so the failed and stopped runs end where they ended.
+    // "By progress": every run over its planned epochs, so the failed and stopped runs end where they ended. On a tablet
+    // the longer qualifier wraps under the metric tabs and the axis control stays on their row, as with "By epoch".
     name: 'run-compare-progress',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '.chip .key');
       await page.getByRole('radio', { name: 'By progress' }).click();
@@ -397,7 +426,8 @@ export const scenes = [
     },
   },
   {
-    // Phones: Edit turns the compact two-column legend into one run per row with open and remove.
+    // Phones: Edit opens a sheet, one run per row with how it started, open and remove, then Add run; the legend stays
+    // two columns of keys.
     name: 'run-compare-edit',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
@@ -405,6 +435,23 @@ export const scenes = [
     setup: async (page) => {
       await until(page, 'button.manage');
       await page.locator('button.manage').click();
+      await page.locator('dialog[open]').waitFor();
+      await page.clock.runFor(500);
+    },
+  },
+  {
+    // Phones: the fourth run's line kept in front while the third is the table's baseline: emphasis and baseline are
+    // separate choices, and the baseline holds while other lines are brought forward.
+    name: 'run-compare-baseline-phone',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#cmp-table .pair');
+      await page.getByRole('button', { name: 'Next run' }).click();
+      await page.locator('#cmp-table .set-base').click();
+      await page.locator('.chip .key').nth(3).click();
+      await page.mouse.move(0, 0);
     },
   },
   // Nothing picked: the inline empty state with the standard secondary "Add run…" button.
@@ -565,6 +612,45 @@ export const scenes = [
     setup: async (page) => {
       await page.getByRole('button', { name: 'Add dataset' }).first().click();
       await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    // Keyboard focus on fields: the one global 2 px ring on the field's frame (a text field), on a native select, and
+    // on the class chips' frame, never a lime edge or halo (DESIGN_DIRECTION §2.9).
+    name: 'datasets-add-focus',
+    path: '/datasets',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Add dataset' }).first().click();
+      await page.locator('dialog[open]').waitFor();
+      await page.getByRole('tab', { name: 'Generate sample set' }).click();
+      await tabTo(page, 'dialog[open] .chips input');
+    },
+  },
+  {
+    name: 'run-new-focus-field',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      await page.locator('input#name').focus();
+      await page.keyboard.press('Shift+Tab');
+      await tabTo(page, 'input#name');
+    },
+  },
+  {
+    name: 'run-new-focus-select',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'select#weights');
+      await page.locator('select#weights').focus();
+      await page.keyboard.press('Shift+Tab');
+      await tabTo(page, 'select#weights');
+      await page.evaluate(() => window.scrollTo(0, 0));
     },
   },
   { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -841,13 +927,23 @@ export const scenes = [
     },
   },
   {
+    // fasteners-mini-n, imported, evaluated on fasteners-mini, which has no validation images: /eval fell back to the
+    // training split (docs/API.md, Split fallback). The page says so once, under the metrics, and names the training
+    // split wherever it names what was evaluated (the curves' meta, the per-class footer, Details, the matrix).
+    name: 'model-eval-train-fallback',
+    path: '/models/m_mini_n',
+    viewports: ['desktop', 'mobile'],
+    fullPage: true,
+    setup: (page, { vp }) => until(page, vp === 'mobile' ? '#pr svg' : '#cm .cell'),
+  },
+  {
     name: 'model-coco',
     path: '/models/m_coco_s',
     viewports: ['desktop', 'laptop'],
     setup: (page) => until(page, '#cm .cell'),
   },
   {
-    // Phones, whole page: the KPI hero row, the section picker, then the Curves section.
+    // Phones, whole page: the section picker under the header, then the Curves section headed by the 2 × 2 KPI grid.
     name: 'model-phone',
     path: '/models/m_fast_n',
     viewports: ['mobile'],
@@ -1117,6 +1213,20 @@ export const scenes = [
       await playgroundResult(page);
       await page.getByRole('button', { name: 'Thresholds' }).click();
       await page.locator('#pg-more').waitFor();
+    },
+  },
+  {
+    // Tablets: Confidence and Overlap stay in the strip under the half-height image; More settings opens Max detections
+    // and the display toggles in the same non-modal sheet, over the detections.
+    name: 'playground-more-tablet',
+    path: '/playground?model=m_hard_s',
+    viewports: ['tablet'],
+    fullPage: false,
+    setup: async (page) => {
+      await playgroundResult(page);
+      await page.getByRole('button', { name: 'More settings' }).click();
+      await page.locator('#pg-more').waitFor();
+      await page.clock.runFor(500);
     },
   },
   {

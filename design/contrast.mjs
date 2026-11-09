@@ -37,6 +37,9 @@ function rules(theme) {
     { fg: 'chart.label', on: ['bg.panel', 'bg.inset'], min: TEXT },
     ...(light ? tokens.color.light.chart.series.map((_, i) => ({ fg: `chart.series.${i}`, on: ['bg.panel', 'bg.inset'], min: MARK })) : []),
     { fg: 'chart.context', on: ['bg.panel'], min: MARK },
+    // Series-coloured text (direct labels, JSON tokens, any 12-13 px text in a series hue) is chart.text, text on
+    // every surface: a series' line ink is a mark (3:1) and too light for small text in light.
+    ...tokens.color[theme].chart.text.map((_, i) => ({ fg: `chart.text.${i}`, on: SURFACES, min: TEXT })),
   ];
 }
 

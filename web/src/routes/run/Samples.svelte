@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Validation samples: the same 16 images every epoch, predictions (solid, class colour) over ground truth (dashed,
+   * Evaluation samples (lib/evaluated `scoresTitle`): the same 16 images every epoch, predictions (solid, class colour) over ground truth (dashed,
    * neutral in the thumbnails). Follows the
    * latest epoch while the run is live; pick any earlier epoch to see how detections improved.
    */
@@ -17,8 +17,20 @@
   import Slider from '$lib/ui/Slider.svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { media } from '$lib/design/tokens';
+  import { scoresTitle } from '$lib/evaluated';
 
-  let { runId, classes, epochsDone }: { runId: string; classes: string[]; epochsDone: number } = $props();
+  let {
+    runId,
+    classes,
+    epochsDone,
+    title = `${scoresTitle(null)} samples`,
+  }: {
+    runId: string;
+    classes: string[];
+    epochsDone: number;
+    /** "Validation samples", or the split they are really from ("Training-split samples", lib/evaluated `scoresTitle`). */
+    title?: string;
+  } = $props();
 
   let pick = $state<string>('latest');
   let show = $state<'both' | 'pred' | 'truth'>('both');
@@ -64,7 +76,7 @@
 </script>
 
 <!-- The epoch picker names the epoch, so phones drop the meta that repeats it (title and picker then share a row). -->
-<Panel title="Validation samples" meta={samples.data && !phone.current ? `epoch ${samples.data.epoch}` : undefined} id="samples">
+<Panel {title} meta={samples.data && !phone.current ? `epoch ${samples.data.epoch}` : undefined} id="samples">
   <!-- Before the first validation there is nothing to filter: the frame holds only its one line. -->
   {#snippet actions()}
     {#if epochsDone > 0}<div class="ctl">

@@ -29,13 +29,14 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
+  import { scoresTitle, type EvalSource } from '$lib/evaluated';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
   import { holdDomain, logDomain, niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
-  import { runProgress, stepsPerEpoch } from '$lib/api/progress';
+  import { progressText, runProgress, stepsPerEpoch } from '$lib/api/progress';
   import { effectiveCloseMosaic } from './resolved';
   import { conf, duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
@@ -51,6 +52,7 @@
     loading,
     queued = false,
     folded = false,
+    evalOn = null,
   }: {
     run: Run;
     steps: Step[];
@@ -62,6 +64,8 @@
      * one-line "Metrics appear when training starts" that opens it.
      */
     queued?: boolean;
+    /** What the epochs' scores are on (lib/evaluated `runEvalSource`): the titles name the split when it is not validation. */
+    evalOn?: EvalSource | null;
     /** Phones: another section is picked, so the chart folds to its one-line readout (it opens on a tap). */
     folded?: boolean;
   } = $props();
@@ -129,22 +133,28 @@
     return steps.map((s) => ({ x: s.step / spe, y: f(s) }));
   };
 
+  /**
+   * How the focal line ends, in StatusBadge's marks (LineChart `end`): a ringed dot while the run trains, a square once
+   * stopped, a cross when it failed, a plain dot when it completed. With the lime ring on the best epoch this is the
+   * focal chart's vocabulary, shared with Overview's live card.
+   */
+  const endMark = $derived(run.status === 'running' ? ('live' as const) : run.status === 'stopped' ? ('stopped' as const) : run.status === 'failed' ? ('failed' as const) : undefined);
   const series = $derived.by((): Series[] => {
     void version;
     switch (tab) {
       case 'map':
         return [
-          { id: 'm95', label: 'mAP50-95', color: INK, area: true, points: ep((e) => e.val.map50_95) },
+          { id: 'm95', label: 'mAP50-95', color: INK, area: true, end: endMark, points: ep((e) => e.val.map50_95) },
           { id: 'm50', label: 'mAP50', color: INK2, pattern: 'dash', points: ep((e) => e.val.map50) },
         ];
       case 'map50':
         return [
-          { id: 'm50', label: 'mAP50', color: INK, area: true, points: ep((e) => e.val.map50) },
+          { id: 'm50', label: 'mAP50', color: INK, area: true, end: endMark, points: ep((e) => e.val.map50) },
           { id: 'm95', label: 'mAP50-95', color: INK2, pattern: 'dash', points: ep((e) => e.val.map50_95) },
         ];
       case 'pr':
         return [
-          { id: 'p', label: 'Precision', color: INK, points: ep((e) => e.val.precision) },
+          { id: 'p', label: 'Precision', color: INK, end: endMark, points: ep((e) => e.val.precision) },
           { id: 'r', label: 'Recall', color: INK2, pattern: 'dash', points: ep((e) => e.val.recall) },
         ];
       case 'loss': {
@@ -272,10 +282,10 @@
       value: metric(lastEpoch?.val.map50_95),
       caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
       capShort: run.best ? `best · ep ${run.best.epoch}` : 'not yet',
-      title: 'Validation mAP50-95',
+      title: `${scoresTitle(evalOn)} mAP50-95`,
       qualifier: run.best ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
     },
-    { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: latestEp, capShort: latestShort, title: 'Validation mAP50', qualifier: 'by epoch' },
+    { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: latestEp, capShort: latestShort, title: `${scoresTitle(evalOn)} mAP50`, qualifier: 'by epoch' },
     {
       id: 'pr',
       label: 'Precision · Recall',
@@ -398,7 +408,7 @@
       </div>
       {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {closeN} {closeN === 1 ? 'epoch' : 'epochs'}, trained without mosaic.</span>{/if}
       <span class="cap num">
-        {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{(progress * 100).toFixed(1)}%</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
+        {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{progressText(run)}</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
     <!-- Queued: the tabs read "—" until the first step, so the frame is the one a running run fills. -->
@@ -485,6 +495,7 @@
               xTitle={epochTitle}
               curve={unit ? 'monotone' : 'linear'}
               markers={best}
+              endDots={unit}
               {xMark}
               yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
               {legendNote}
@@ -626,10 +637,12 @@
     line-height: 0;
     vertical-align: baseline;
   }
+  /* A tab's caption holds figures people read ("best 0.604 · ep 150", "warmup 360 steps · linear"): secondary, not
+     the tertiary of labels people skim (DESIGN_DIRECTION §2.3). */
   .cap {
     font-size: var(--type-sm-size);
     line-height: 16px;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -751,7 +764,7 @@
   .r-c {
     flex: 1;
     min-width: 0;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

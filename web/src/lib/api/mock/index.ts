@@ -5,7 +5,7 @@
 // `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
 // `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
 // finished 5-epoch run the trainer warns is too short to learn from), `tensor-cores-off` and `no-tensor-cores` (no
-// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), `finishing` (the live run reaches its
+// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), `train-split` (adds a finished run on a dataset with no validation images), `finishing` (the run training reaches its
 // last epoch 3 s after load, for the toast that says so) and `no-throughput` (a server from before measured throughput:
 // no `throughput`, `run_estimate` or `benchmark` feature, and those endpoints answer 404), for screenshots of those
 // states.
@@ -44,6 +44,7 @@ import type {
   RunMetrics,
   RunSamples,
   Sample,
+  Split,
   SystemInfo,
   ThroughputTable,
   TrainConfig,
@@ -84,6 +85,8 @@ export type Scenario =
   | 'tensor-cores-off'
   | 'no-tensor-cores'
   | 'finishing'
+  // A finished run on fasteners-mini, which has no validation images: it validated on its training split.
+  | 'train-split'
   | 'no-throughput'
   // A Studio build without folo-wasm: /api/system does not list `web_wasm`, so Playground's browser choices are off.
   | 'no-wasm';
@@ -328,10 +331,45 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
         ]
       : []),
   ];
-  // `finishing`: the live run started so long ago that it completes 3 s from now, and does not loop.
-  const finish = (p: Omit<RunProfile, 'classNames'>) =>
-    scenario === 'finishing' && p.id === 'run_7d1e' ? { ...p, loop: false, startedAt: t0 - p.config.epochs * p.epochSeconds * 1000 + 3000 } : p;
-  return list.map(finish).map((p) => withResolved({ ...p, classNames: names(p.config.dataset_id) }));
+  // `finishing`: the run in the training slot completes 3 s from now. It is a run of its own, shapes-hard-n, not the
+  // demo's live fasteners-s (epoch 38 of 100 on every other screen), so the toast that says it finished, with its real
+  // best epoch, contradicts nothing another shot shows; fasteners-s is not in this scenario.
+  const finishing: Omit<RunProfile, 'classNames'> = {
+    id: 'run_e6b9',
+    name: 'shapes-hard-n',
+    config: config('shapes-hard-n', 'ds_shapes_hard', 'folo-n', 60),
+    classes: 6,
+    classEase: [1.1, 1.05, 1, 0.82, 0.95, 0.75],
+    stepsPerEpoch: 250,
+    epochSeconds: 6,
+    mapMax: 0.52,
+    tau: 12,
+    imgsPerS: 520,
+    createdAt: t0 - 60 * 6000 - 5000,
+    startedAt: t0 - 60 * 6000 + 3000,
+    device: DEVICE,
+  };
+  // `train-split`: a fine-tune on fasteners-mini (24 training images, none for validation), so every epoch's scores are
+  // on its training split; the run page says so and names that split (the `run-train-split` scene).
+  const trainSplit: Omit<RunProfile, 'classNames'> = {
+    id: 'run_m1n1',
+    name: 'fasteners-mini-n',
+    config: config('fasteners-mini-n', 'ds_fasteners_mini', 'folo-n', 60, { weights: 'm_fast_n' }),
+    classes: 2,
+    classEase: [1.02, 0.97],
+    stepsPerEpoch: optimizerSteps(24, 16),
+    epochSeconds: 2.5,
+    mapMax: 0.74,
+    tau: 9,
+    imgsPerS: 480,
+    createdAt: t0 - 3 * HOUR,
+    startedAt: t0 - 3 * HOUR + 2_000,
+    terminal: { status: 'completed', atEpoch: 60 },
+    device: DEVICE,
+  };
+  const all =
+    scenario === 'finishing' ? [...list.filter((p) => p.id !== 'run_7d1e'), finishing] : scenario === 'train-split' ? [...list, trainSplit] : list;
+  return all.map((p) => withResolved({ ...p, classNames: names(p.config.dataset_id) }));
 }
 
 /** The profile with `resolved`: what the real trainer resolves its config to on its dataset's training split. */
@@ -681,6 +719,24 @@ export class MockApi implements Api {
         trained_with: null,
         precision: 'f32',
         fused: false,
+      });      // An imported file with fasteners-mini's classes: /eval runs on that dataset (the first with its classes, as a
+      // real server picks one), which has no validation images, so on its training split.
+      out.push({
+        id: 'm_mini_n',
+        name: 'fasteners-mini-n',
+        arch: 'folo-n',
+        imgsz: 640,
+        classes: ['bolt', 'nut'],
+        params: archInfo['folo-n'].params,
+        flops_g: archInfo['folo-n'].flops,
+        bytes: Math.round(archInfo['folo-n'].params * 2.06),
+        created: new Date(this.#t0 - 4 * DAY).toISOString(),
+        run_id: null,
+        metrics: { map50: 0.912, map50_95: 0.701, precision: 0.884, recall: 0.861, best_f1_conf: 0.402 },
+        head: 'o2m',
+        trained_with: { amp: false, imgsz: 640, epochs: 60 },
+        precision: 'f32',
+        fused: false,
       });
     }
     return out.sort((a, b) => b.created.localeCompare(a.created));
@@ -709,17 +765,40 @@ export class MockApi implements Api {
       if (p) {
         const best = bestOf(p, Math.floor(progressAt(p, Date.now()).done));
         perClass = best ? epochAt(p, best.epoch - 1).val.per_class : null;
-        const ds = this.#datasets.find((d) => d.id === p.config.dataset_id);
-        if (ds) {
-          const share = ds.splits.val / Math.max(1, total(ds));
-          instances = stats(ds).class_counts.map((c) => c * share);
-          images = ds.splits.val;
-        }
       }
+      // The run's dataset; an imported model's, the first with its classes (as a real server picks it).
+      const same = (a: readonly string[]) => a.length === m.classes.length && a.every((c, i) => c === m.classes[i]);
+      const ds = p ? this.#datasets.find((d) => d.id === p.config.dataset_id) : this.#datasets.find((d) => same(d.classes));
+      // Its val split, its train split when val is empty (docs/API.md, Split fallback).
+      const split: Split = ds && ds.splits.val === 0 ? 'train' : 'val';
+      if (ds) {
+        const share = ds.splits[split] / Math.max(1, total(ds));
+        instances = stats(ds).class_counts.map((c) => c * share);
+        images = ds.splits[split];
+      }
+      const evaluation = toModelEval(synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass, instances }), images);
+      // folo-s-coco80 has no dataset here: a real server answers 404 (no registered dataset has its 80 classes). The
+      // demo keeps its curves and answers as a server from before the provenance fields, which leaves them out.
+      if (!ds) return { ...evaluation, best_f1_conf: m.metrics?.best_f1_conf ?? null };
       // The same operating point as the model's metrics (the epoch that wrote its weights), as on folo-server's mock.
       return {
-        ...toModelEval(synthEvaluation({ seed: m.id, classes: m.classes, metrics: m.metrics, perClass, instances }), images),
+        ...evaluation,
         best_f1_conf: m.metrics?.best_f1_conf ?? null,
+        dataset_id: ds.id,
+        dataset_name: ds.name,
+        split,
+        // folo_api::SplitFallback::empty_split's sentence.
+        split_fallback:
+          split === 'val'
+            ? null
+            : {
+                requested: 'val',
+                reason: 'empty_split',
+                message: `dataset '${ds.name}' has no val images, so this is its train split (${images} images): training-set numbers, not held-out ones`,
+              },
+        // folo-vision's EvalConfig defaults (docs/METRICS.md §7), not the NMS settings or best_f1_conf.
+        confusion_conf: 0.25,
+        confusion_iou: 0.45,
       };
     }, 180);
   }
@@ -924,10 +1003,14 @@ export class MockApi implements Api {
       const ds = this.#spec(p.config.dataset_id);
       const quality = done > 0 ? epochAt(p, e).val.map50_95 : 0;
       const samples: Sample[] = [];
-      // A fixed set of up to 16 validation images, spread evenly over the split.
-      const n = Math.min(16, ds.splits.val);
+      // A fixed set of up to 16 validation images, spread evenly over the split; a dataset with no validation images
+      // validates on its training split (docs/API.md, Split fallback), so its samples come from there.
+      const fromTrain = ds.splits.val === 0;
+      const pool = fromTrain ? ds.splits.train : ds.splits.val;
+      const first = fromTrain ? 0 : ds.splits.train;
+      const n = Math.min(16, pool);
       for (let i = 0; i < n; i++) {
-        const index = ds.splits.train + Math.floor((i * ds.splits.val) / n);
+        const index = first + Math.floor((i * pool) / n);
         const img = image(ds, index);
         samples.push({
           image_id: img.id,

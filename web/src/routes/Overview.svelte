@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { runProgress } from '$lib/api/progress';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import Activity from '@lucide/svelte/icons/activity';
   import Box from '@lucide/svelte/icons/box';
@@ -162,12 +163,12 @@
                     <tr class="link" onclick={() => router.go(`/runs/${r.id}`)}>
                       <td>
                         <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                        <span class="sub"><Meta line><span>{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id}</span><Ident value={r.config.arch} /></Meta></span>
+                        <span class="sub"><Meta line><span class="ds">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id}</span><Ident value={r.config.arch} /></Meta></span>
                       </td>
                       <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                       <td class="hide-sm">
                         <div class="prog">
-                          <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
+                          <Progress value={runProgress(r)} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
                           <span class="num faint">{r.epoch}/{r.epochs}</span>
                         </div>
                       </td>
@@ -516,6 +517,13 @@
     /* Model entries carry three lines and a score: two columns keep them readable (and pairs even). */
     .models {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  /* Phones: every Recent runs row is one height, a name over one meta line. The dataset goes (the run's own page has
+     it), so a long one ("shapes-hard") never wraps its row's meta onto a second line (DESIGN_DIRECTION §2.12). */
+  @media (max-width: 767px) {
+    .sub :global(.ds) {
+      display: none;
     }
   }
 </style>

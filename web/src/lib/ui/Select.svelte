@@ -71,11 +71,7 @@
   select:hover {
     border-color: var(--line-control-hover);
   }
-  select:focus-visible {
-    outline: none;
-    border-color: var(--focus);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
-  }
+  /* Focus: the global :focus-visible ring (base.css), never a halo or a lime edge of its own (§2.9). */
   select:disabled {
     opacity: 0.5;
     cursor: not-allowed;
