@@ -138,10 +138,6 @@ pub fn panel_header(t: &Theme, title: &str) -> Div {
         .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child(title.to_string()))
 }
 
-pub fn hairline(t: &Theme) -> Div {
-    div().h(px(1.)).w_full().flex_none().bg(t.line_subtle)
-}
-
 pub fn vline(t: &Theme) -> Div {
     div().w(px(1.)).h_full().flex_none().bg(t.line_subtle)
 }

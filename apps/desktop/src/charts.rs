@@ -336,6 +336,13 @@ pub fn in_pow(x: f64, p: i32) -> String {
     format!("{v:.digits$}×10{}", superscript(p))
 }
 
+/// A label's start, kept between `lo` and `hi` (its last fitting start). Unlike `clamp`, a span
+/// narrower than the label (a chart mid-resize, laid out at a few px) pins it to `lo` rather
+/// than panicking.
+fn clamp_in(v: Pixels, lo: Pixels, hi: Pixels) -> Pixels {
+    v.min(hi).max(lo)
+}
+
 /// An exponent in superscript digits ("-3" → "⁻³").
 pub fn superscript(p: i32) -> String {
     p.to_string()
@@ -1021,7 +1028,7 @@ fn paint_line_chart(
         .and_then(|f| cursor_x(&spec.series, x0 + (x1 - x0) * f, x1 - x0))
         .map(|v| {
             let w = text_width(window, &chip_label(spec, v), label_size) + px(10.);
-            let left = (sx(v) - w / 2.).clamp(plot.left() - px(4.), plot.right() - w);
+            let left = clamp_in(sx(v) - w / 2., plot.left() - px(4.), plot.right() - w);
             (left, left + w)
         });
     for v in &xt {
@@ -1031,7 +1038,7 @@ fn paint_line_chart(
         let w = text_width(window, &l, label_size);
         // Centred on its tick (the end labels too: "0.00" / "1.00" flush with the tick read as
         // belonging beside it); only the chart's own edges push a label inward.
-        let lx = (x - w / 2.).clamp(bounds.left(), bounds.right() - w);
+        let lx = clamp_in(x - w / 2., bounds.left(), bounds.right() - w);
         if chip_span.is_some_and(|(cl, cr)| lx < cr + px(4.) && lx + w > cl - px(4.)) {
             continue;
         }
@@ -1224,7 +1231,7 @@ fn paint_line_chart(
         let l = chip_label(spec, snap);
         let w = text_width(window, &l, label_size) + px(10.);
         let chip = Bounds::new(
-            point((cx_px - w / 2.).clamp(plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),
+            point(clamp_in(cx_px - w / 2., plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),
             size(w, px(16.)),
         );
         window.paint_quad(fill(chip, t.text_primary).corner_radii(px(3.)));

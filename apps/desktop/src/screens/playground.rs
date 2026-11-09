@@ -1143,8 +1143,16 @@ impl FoloApp {
                             // Inputs first (the model, its settings, an image to try), then the
                             // results and their latency.
                             .children(picker)
-                            .child(hairline(&t))
-                            .child(detections)
+                            // The rule above the results is the block's own top border: a separate
+                            // 1 px child at a fractional device offset (1.5x) could paint nothing.
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_col()
+                                    .border_t_1()
+                                    .border_color(t.line_subtle)
+                                    .child(detections),
+                            )
                             .children(timing)
                             // Breathing room after the last row (the fade below shows only while more
                             // lies under it); 8 px, so the rail fits without a scroll at 1280 × 800.
