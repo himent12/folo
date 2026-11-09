@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Arch, ExportFormat, ExportResult, ExportSpec, Model, ModelEval, ModelMetrics, PrCurve, ValReport,
-    ValTiming,
+    Arch, ExportFormat, ExportResult, ExportSpec, Head, Model, ModelEval, ModelMetrics, PrCurve, TrainedWith,
+    ValReport, ValTiming,
 };
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
@@ -46,6 +46,27 @@ pub struct FileMeta {
     pub created: String,
     /// `folo.metrics`.
     pub metrics: Option<ModelMetrics>,
+    /// `folo.config`'s head.
+    pub head: Head,
+    /// From `folo.train`, when the file has it.
+    pub trained_with: Option<TrainedWith>,
+}
+
+/// The parts of `folo.train` (the trainer's resolved config) that [`TrainedWith`] shows. Files written before
+/// mixed precision have no `amp`.
+#[derive(Deserialize)]
+struct TrainMeta {
+    #[serde(default)]
+    amp: bool,
+    imgsz: u32,
+    epochs: u32,
+}
+
+/// [`TrainedWith`] from a file's `folo.train`; `None` when it is missing or unreadable (the key is informational,
+/// so a file with an odd one still lists).
+fn trained_with(train: Option<&String>) -> Option<TrainedWith> {
+    let t: TrainMeta = serde_json::from_str(train?).ok()?;
+    Some(TrainedWith { amp: t.amp, imgsz: t.imgsz, epochs: t.epochs })
 }
 
 /// GFLOPs per image at 640 px (docs/MODEL.md §3, 80 classes); the class count changes them by well under 1%.
@@ -98,6 +119,8 @@ fn read_meta(path: &Path) -> Result<FileMeta> {
             precision: x.precision as f32,
             recall: x.recall as f32,
         }),
+        head: if m.config.has_o2o() { Head::O2o } else { Head::O2m },
+        trained_with: trained_with(m.extra.get("folo.train")),
     })
 }
 
@@ -132,6 +155,8 @@ pub fn model_of(
         created: meta.created.clone(),
         run_id,
         metrics,
+        head: meta.head,
+        trained_with: meta.trained_with,
     }
 }
 
