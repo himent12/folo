@@ -5,6 +5,7 @@ import { hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import { prefs } from '$lib/prefs.svelte';
 import { parse, router } from '$lib/router.svelte';
+import { undescribedFields } from '$lib/ui/fieldA11y';
 import Settings from './Settings.svelte';
 import Throughput from './settings/Throughput.svelte';
 
@@ -38,6 +39,14 @@ afterEach(() => {
 });
 
 describe('Settings', () => {
+  it('describes the server URL field by its hint', () => {
+    hub.api = new MockApi('normal', 0);
+    c = mount(Settings, { target });
+    flushSync();
+    expect(target.querySelector('#server-url')!.getAttribute('aria-describedby')).toBe('server-url-hint');
+    expect(undescribedFields(target)).toEqual([]);
+  });
+
   it('jumps to a section from the strip below 1024 px: every section listed, focus moved onto the one chosen', async () => {
     hub.api = new MockApi('normal', 0);
     c = mount(Settings, { target });

@@ -4,9 +4,16 @@
    * mark the control invalid (`invalid` on Input / Select / Segmented) while `error` is set. The error carries a danger
    * icon as well as its colour, so it is never red text alone. Where a valid value can be derived from what was typed,
    * `fix` offers it as one click after the message ("Try my-dataset"), an inline action in ink.
+   *
+   * The message shown is the control's accessible description, with no wiring by the caller: Field publishes its id
+   * and the error state (`ui/field`), and Input, Select, Segmented, Switch and Slider take them into `aria-describedby`
+   * and `aria-invalid` (DESIGN_DIRECTION §2.11). Without `for` the messages still get ids, from the Field's own.
    */
   import type { Snippet } from 'svelte';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
+  import { setField } from './field';
+
+  const uid = $props.id();
 
   let {
     label,
@@ -27,6 +34,16 @@
     /** A one-click correction shown after the error: `label` is the whole button text ("Try my-dataset"). */
     fix?: { label: string; apply: () => void } | null;
   } = $props();
+
+  const base = $derived(htmlFor ?? `field-${uid}`);
+  setField({
+    get describedby() {
+      return error ? `${base}-error` : hint ? `${base}-hint` : undefined;
+    },
+    get invalid() {
+      return !!error;
+    },
+  });
 </script>
 
 <div class="field" class:invalid={!!error}>
@@ -36,13 +53,13 @@
   </div>
   {@render children()}
   {#if error}
-    <p class="msg error" id={htmlFor ? `${htmlFor}-error` : undefined} role="alert">
+    <p class="msg error" id="{base}-error" role="alert">
       <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span
         >{error}{#if fix}{' '}<button type="button" class="fix" onclick={fix.apply}>{fix.label}</button>{/if}</span
       >
     </p>
   {:else if hint}
-    <p class="msg" id={htmlFor ? `${htmlFor}-hint` : undefined}>{#each hint.split('`') as text, i (i)}{#if i % 2}<code>{text}</code>{:else}{text}{/if}{/each}</p>
+    <p class="msg" id="{base}-hint">{#each hint.split('`') as text, i (i)}{#if i % 2}<code>{text}</code>{:else}{text}{/if}{/each}</p>
   {/if}
 </div>
 

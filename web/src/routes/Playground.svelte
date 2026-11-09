@@ -106,6 +106,8 @@
     const dsById = new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d]));
     return modelChoices(models.data, (m) => scoreContext(m, runById, dsById));
   });
+  /** The chosen model's score and what it is on, under the select: "mAP 0.606 · shapes-hard, validation split". */
+  const pickedMeta = $derived(choices.find((c) => c.model.id === modelId)?.meta ?? null);
   const ranked = $derived(choices.map((c) => c.model));
   const queryModel = $derived(router.route.query.get('model'));
   let pickedModel = $state<string | null>(null);
@@ -712,15 +714,20 @@
 <!-- The model and where it runs: on the title row from 1024 px up, a toolbar row under the title below that. -->
 {#snippet pickers()}
   {#if ranked.length}
+    <!-- Closed, the select shows the model's name alone; its score and everything the score is on wrap in the meta line
+         under it (never cut at the select's edge), which is also its description. The open list keeps the groups and
+         each option's context. -->
     <div class="model-pick">
       <span class="pick-label">Model</span>
       <Select
         label="Model"
         value={modelId ?? ''}
-        options={choices.map((c) => ({ value: c.model.id, label: c.label, group: c.group }))}
+        options={choices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short }))}
         onchange={chooseModel}
+        describedby={pickedMeta ? 'model-meta' : undefined}
       />
       {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
+      {#if pickedMeta}<p class="pick-meta num" id="model-meta">{pickedMeta}</p>{/if}
     </div>
     <div class="runon" role="group" aria-label="Run on" aria-describedby={runOnNote ? 'runon-note' : undefined}>
       <span class="pick-label" aria-hidden="true">Run on</span>
@@ -1048,11 +1055,20 @@
 <DatasetPicker bind:open={pickerOpen} prefer={classes} onpick={(ds, img) => setSource({ kind: 'dataset', ds, img })} onclose={() => (seg = source?.kind ?? 'file')} />
 
 <style>
+  /* Label, select and open button on one row; the score's meta line under the select, wrapping, never cut. */
   .model-pick {
-    display: flex;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-1) var(--space-2);
     width: 400px;
+  }
+  .pick-meta {
+    grid-column: 2 / -1;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+    text-wrap: pretty;
   }
   /* Below 1024 px: one full-width toolbar row under the title; the model select takes what Run on leaves (a choice
      that is off says why in its tip and on the image panel's status line, never in a note that wraps the row). */
@@ -1075,12 +1091,17 @@
     display: contents;
   }
   .model-pick :global(.select) {
-    flex: 1;
+    min-width: 0;
   }
   .runon {
     display: flex;
     align-items: center;
     gap: var(--space-2);
+  }
+  /* On the title row, Run on sits on the model select's row, not centred on the select and its meta line together. */
+  .model-pick + .runon {
+    align-self: flex-start;
+    min-height: var(--control-md);
   }
   .pick-label {
     color: var(--text-tertiary);

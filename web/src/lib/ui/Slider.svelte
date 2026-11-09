@@ -1,6 +1,9 @@
 <script lang="ts">
   /** A labelled range slider with a live value readout. Native <input type=range>, so keyboard and AT work. */
+  import { describedBy, getField } from './field';
+
   const uid = $props.id();
+  const field = getField();
   let {
     label,
     value = $bindable(),
@@ -43,7 +46,7 @@
     bind:value
     oninput={() => oninput?.(value)}
     style:--pct="{pct}%"
-    aria-describedby={hint ? `${id}-hint` : undefined}
+    aria-describedby={describedBy(hint && `${id}-hint`, field?.describedby)}
   />
   {#if hint}<p class="hint" id="{id}-hint">{hint}</p>{/if}
 </div>

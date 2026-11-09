@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { HTMLInputAttributes } from 'svelte/elements';
+  import { describedBy, getField } from './field';
   import type { IconType } from './types';
 
   interface Props extends Omit<HTMLInputAttributes, 'value' | 'size'> {
@@ -20,14 +21,24 @@
     size = 'md',
     el = $bindable(),
     class: klass = '',
+    'aria-describedby': ownDescribedby,
     ...rest
   }: Props = $props();
+
+  // An enclosing Field's hint or error describes the input and its error marks it, with no wiring by the caller.
+  const field = getField();
 </script>
 
 <!-- aria-invalid on the input styles the frame (base.css): a danger edge, a danger focus ring. -->
 <div class="input {size} {klass}" class:has-icon={!!Icon}>
   {#if Icon}<span class="icon"><Icon size={14} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
-  <input bind:this={el} bind:value aria-invalid={invalid || undefined} {...rest} />
+  <input
+    bind:this={el}
+    bind:value
+    aria-invalid={invalid || field?.invalid || undefined}
+    aria-describedby={describedBy(ownDescribedby, field?.describedby)}
+    {...rest}
+  />
   {#if suffix}<span class="suffix">{suffix}</span>{/if}
 </div>
 

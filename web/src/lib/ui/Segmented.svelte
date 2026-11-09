@@ -1,5 +1,6 @@
 <script lang="ts" generics="T extends string">
   /** A segmented control (radio group). Arrow keys move the selection, as in native radio groups. */
+  import { describedBy, getField } from './field';
   import { tooltip } from './tooltip';
   import type { IconType } from './types';
 
@@ -36,11 +37,13 @@
     id?: string;
     /** In error: a danger edge and focus ring (base.css); pair it with a Field error and `describedby`. */
     invalid?: boolean;
+    /** More ids to describe it by; an enclosing Field's hint or error is added on its own (`ui/field`). */
     describedby?: string;
     /** The whole group off (a list toolbar over an empty or failed list keeps its place, DESIGN_DIRECTION §2.8). */
     disabled?: boolean;
   } = $props();
 
+  const field = getField();
   let root: HTMLDivElement;
 
   function select(v: T) {
@@ -78,8 +81,8 @@
   {id}
   role="radiogroup"
   aria-label={label}
-  aria-invalid={invalid || undefined}
-  aria-describedby={describedby}
+  aria-invalid={invalid || field?.invalid || undefined}
+  aria-describedby={describedBy(describedby, field?.describedby)}
   aria-disabled={disabled || undefined}
   bind:this={root}
   {onkeydown}

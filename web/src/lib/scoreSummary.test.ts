@@ -126,6 +126,12 @@ describe('modelChoices', () => {
       ['Training split of fasteners-mini', 'mini-run · mAP 0.740 on fasteners-mini · training split'],
       ['Imported · split unknown', 'mini-n · mAP 0.701 · split unknown'],
     ]);
+    // Closed, a select shows the name alone; the score and all of its context go in the meta line under it.
+    expect(c.map((x) => [x.short, x.meta])).toEqual([
+      ['fast-a', 'mAP 0.600 · fasteners, validation split'],
+      ['mini-run', 'mAP 0.740 · fasteners-mini, training split'],
+      ['mini-n', 'mAP 0.701 · imported, split unknown'],
+    ]);
   });
 });
 

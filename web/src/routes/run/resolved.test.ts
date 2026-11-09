@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { resolveTrain } from '$lib/api/mock/runs';
-import { batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, headSetting, lrSetting, momentumSetting, optimizerSetting, precisionSetting, settingText, warmupSetting } from './resolved';
+import { accumulationText, batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, headSetting, lrSetting, momentumSetting, optimizerSetting, precisionSetting, settingText, effectiveBatchSetting, warmupSetting } from './resolved';
 
 const config = { optimizer: 'auto', lr0: 0.01, batch: 8, epochs: 30, augment: { close_mosaic: 10 } } as TrainConfig;
 
@@ -33,8 +33,10 @@ describe('Run › Config wording', () => {
   it('shows what the run trains with, the request beside it', () => {
     expect(optimizerSetting(config, r)).toEqual({ value: 'AdamW', note: '(auto)' });
     expect(settingText(lrSetting(config, r))).toBe('0.001429 (requested 0.01)');
-    expect(batchSetting(config, r).value).toBe('8 × 8 = 64');
-    expect(settingText(warmupSetting(r))).toBe('100 steps (6.3 epochs)');
+    expect(batchSetting(config, r).value).toBe('8');
+    expect(settingText(effectiveBatchSetting(r))).toBe('64 (8 × 8)');
+    expect(accumulationText(4, 16)).toBe('4 batches per optimizer step · effective batch 64');
+    expect(settingText(warmupSetting(r))).toBe('100 optimizer steps (6.3 epochs)');
     expect(decaySetting(r).value).toBe('Linear to 1%');
     expect(momentumSetting(r)).toEqual(['Betas', { value: '0.9 · 0.999' }]);
   });

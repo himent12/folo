@@ -6,6 +6,7 @@ import { MockApi } from '$lib/api/mock';
 import type { RunEstimate } from '$lib/api/types';
 import { parse, router } from '$lib/router.svelte';
 import { page } from '$lib/shell/crumbs.svelte';
+import { undescribedFields } from '$lib/ui/fieldA11y';
 import RunNew from './RunNew.svelte';
 
 let api: MockApi;
@@ -275,7 +276,7 @@ describe('New run: short runs', () => {
     type('epochs', 5);
     const warn = await until(() => target.querySelector('.summary .short'));
     // One line, a callout without a fill; the reasons and the fix behind "Why?".
-    expect(warn.querySelector('p.callout')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Too short to learn: 150 steps. Why?');
+    expect(warn.querySelector('p.callout')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Too short to learn: 150 optimizer steps. Why?');
     expect(warn.querySelector('button.fix')).toBeNull();
     expect(warn.querySelector('.short-why')).toBeNull();
     const more = warn.querySelector<HTMLButtonElement>('button.more')!;
@@ -285,10 +286,10 @@ describe('New run: short runs', () => {
     expect(more.getAttribute('aria-expanded')).toBe('true');
     const why = warn.querySelector(`#${more.getAttribute('aria-controls')}`)!;
     const text = why.textContent!.replace(/[ \t\n]+/g, ' ');
-    expect(text).toContain('5 epochs × 30 steps. From scratch, a detector needs a few hundred');
+    expect(text).toContain('5 epochs × 30 optimizer steps. From scratch, a detector needs a few hundred');
     // "0" never ends up alone on a line, and the prose names no config keys.
     expect(text).toContain('expect an mAP near 0.');
-    expect(text).toContain('Warmup takes 90 of the 150 steps');
+    expect(text).toContain('Warmup takes 90 of the 150 optimizer steps');
     expect(text).not.toMatch(/lr0|warmup_epochs/);
     expect(target.querySelector('.dock-warn')?.textContent).toBe('Too short to learn');
     // The trainer's own count, ceil(200 / 30) = 7, which also clears the warmup warning.
@@ -304,11 +305,11 @@ describe('New run: short runs', () => {
     choose('weights', target.querySelectorAll<HTMLOptionElement>('select#weights option')[1]!.value);
     type('epochs', 5);
     const warn = await until(() => target.querySelector('.summary .short'));
-    expect(warn.querySelector('p.callout span')?.textContent?.trim()).toBe('Mostly warmup: 90 of 150 steps.');
+    expect(warn.querySelector('p.callout span')?.textContent?.trim()).toBe('Mostly warmup: 90 of 150 optimizer steps.');
     warn.querySelector<HTMLButtonElement>('button.more')!.click();
     flushSync();
     expect(warn.textContent).not.toContain('Too short');
-    expect(warn.textContent).toContain('Warmup takes 90 of the 150 steps');
+    expect(warn.textContent).toContain('Warmup takes 90 of the 150 optimizer steps');
     expect(target.querySelector('.dock-warn')?.textContent).toBe('Mostly warmup');
     warn.querySelector<HTMLButtonElement>('button.fix')!.click();
     flushSync();
@@ -337,7 +338,9 @@ describe('New run: the schedule in the Summary', () => {
     expect(est.querySelector('dt')?.textContent).toBe('Schedule');
     // The value is the button: a tap, a click, Enter or Space opens the batches behind it (touch has no hover).
     const steps = est.querySelector<HTMLButtonElement>('dd button.steps')!;
-    expect(steps.textContent).toBe('30 steps / epoch. How the steps are counted');
+    expect(steps.textContent).toBe('30 optimizer steps / epoch. How the steps are counted');
+    // Beside it, the batches that make one optimizer step, never "per step" for a batch.
+    expect(est.querySelector('dd.sched-acc')?.textContent).toBe('4 batches per optimizer step · effective batch 64');
     expect(steps.getAttribute('aria-expanded')).toBe('false');
     const why = () => document.getElementById(steps.getAttribute('aria-controls')!)?.textContent?.trim();
     steps.click();
@@ -347,11 +350,12 @@ describe('New run: the schedule in the Summary', () => {
     const line = document.getElementById(steps.getAttribute('aria-controls')!)!;
     expect(line.tagName).toBe('DD');
     expect(est.contains(line)).toBe(true);
-    expect(why()).toBe('120 batches of 16; 4 per optimizer step.');
+    expect(why()).toBe('120 batches of 16 an epoch, 4 to each optimizer step.');
     // Batch 64 is one batch a step.
     target.querySelector<HTMLButtonElement>('#batch button[role="radio"]:nth-child(4)')!.click();
     flushSync();
-    expect(why()).toBe('30 batches of 64, one step each.');
+    expect(why()).toBe('30 batches of 64 an epoch, one optimizer step each.');
+    expect(est.querySelector('dd.sched-acc')).toBeNull();
   });
 
   it("matches the short-run scenario's run: shapes at batch 32 for 5 epochs suggests its 16 epochs", async () => {
@@ -362,7 +366,7 @@ describe('New run: the schedule in the Summary', () => {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
     const warn = await until(() => target.querySelector('.summary .short'));
-    expect(warn.querySelector('p.callout span')?.textContent?.trim()).toBe('Too short to learn: 65 steps.');
+    expect(warn.querySelector('p.callout span')?.textContent?.trim()).toBe('Too short to learn: 65 optimizer steps.');
     warn.querySelector<HTMLButtonElement>('button.more')!.click();
     flushSync();
     expect(warn.querySelector('button.fix')?.textContent).toBe('Train 16 epochs');
@@ -688,6 +692,23 @@ describe('New run: image size', () => {
 });
 
 describe('New run: the form', () => {
+  it('describes every control by the hint or error under it (Batch size and Image size included)', async () => {
+    await open();
+    target.querySelector<HTMLDetailsElement>('#sec-train details.advanced')!.open = true;
+    flushSync();
+    expect(undescribedFields(target)).toEqual([]);
+    const batch = target.querySelector('#batch')!.getAttribute('aria-describedby')!;
+    expect(document.getElementById(batch)?.textContent).toBe('Images per batch. Lower it if GPU memory runs out.');
+    expect(target.querySelector('#imgsz')!.getAttribute('aria-describedby')).toBe('imgsz-hint');
+    // Invalid, the error replaces the hint.
+    const el = target.querySelector<HTMLInputElement>('input#seed')!;
+    el.value = '-1';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(undescribedFields(target)).toEqual([]);
+    expect(el.getAttribute('aria-describedby')).toBe('seed-error');
+  });
+
   it('ties an invalid field to its message with aria-invalid and aria-describedby', async () => {
     await open();
     const el = target.querySelector<HTMLInputElement>('input#epochs')!;
@@ -1010,13 +1031,25 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     await start();
     const msg = await until(() => target.querySelector('#amp-error'), 'the refusal');
     expect(msg.getAttribute('role')).toBe('alert');
-    expect(msg.textContent).toMatch(/^Start was refused: Mixed-precision training \(amp\) needs a GPU with tensor cores/);
     expect(err).not.toHaveBeenCalled();
-    // The capabilities read again: the switch is off with the way to turn tensor cores on, and Start trains in f32.
+    // The capabilities read again: one short cause, then the ways out, and the cause is said once.
     await until(() => target.querySelector('#amp-why'), 'the remedy');
-    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server; restart it with them on:');
+    expect(msg.textContent?.trim()).toBe('Mixed precision is unavailable: tensor cores are off on this server.');
+    expect(target.querySelector('#amp-why')?.textContent).toBe('Or restart the server with tensor cores on:');
+    expect(target.querySelector('.amp pre.line')?.textContent).toBe('folo serve --tensor-cores');
+    // The server's whole message, folded and copyable, never inline.
+    const report = target.querySelector<HTMLDetailsElement>('.amp details.report')!;
+    expect(report.open).toBe(false);
+    expect(report.querySelector('pre')?.textContent).toMatch(/^Mixed-precision training \(amp\) needs a GPU with tensor cores/i);
+    expect(msg.textContent).not.toMatch(/FOLO_GPU_TENSOR_CORES|--amp/);
     expect(target.querySelector<HTMLInputElement>('input#amp')!.disabled).toBe(true);
     expect(target.querySelector('#start-why')).toBeNull();
+    // Full precision is one click, and answers the refusal.
+    const full = [...target.querySelectorAll<HTMLButtonElement>('.amp button')].find((b) => b.textContent?.trim() === 'Train in full precision')!;
+    full.click();
+    flushSync();
+    expect(target.querySelector('#amp-error')).toBeNull();
+    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server; restart it with them on:');
   });
 
   it('holds Start while the switch is still on after a refusal, and lets go once it is off', async () => {
@@ -1029,7 +1062,8 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     await start();
     await until(() => target.querySelector('#amp-error'), 'the refusal');
     expect(target.querySelector('#start-why')?.textContent).toBe('Mixed precision: Not available on this server now.');
-    expect(target.querySelector('#amp-hint')?.textContent).toBe('Turn it off to train in f32.');
+    expect(target.querySelector('#amp-error')?.textContent?.trim()).toBe('Mixed precision is unavailable: the server cannot use it now.');
+    expect([...target.querySelectorAll('.amp button')].some((b) => b.textContent?.trim() === 'Train in full precision')).toBe(true);
     sw.click();
     flushSync();
     expect(target.querySelector('#amp-error')).toBeNull();

@@ -21,6 +21,7 @@
   import Ident from '$lib/ui/Ident.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Meta from '$lib/ui/Meta.svelte';
+  import { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import type { IconType } from '$lib/ui/types';
   import { rememberFocus } from '$lib/ui/focus';
@@ -129,7 +130,7 @@
       id: `run-${x.id}`,
       group: 'Runs',
       label: x.name,
-      hint: [failureCause(x) ? 'failed, out of GPU memory' : x.status, { ident: x.config.arch }, `epoch ${x.epoch}/${x.epochs}`],
+      hint: [failureCause(x) ? 'Failed, out of GPU memory' : STATUS_LABEL[x.status], { ident: x.config.arch }, `epoch ${x.epoch}/${x.epochs}`],
       icon: Activity,
       run: go(`/runs/${x.id}`),
     }));
@@ -280,6 +281,9 @@
       {#each grouped as g (g.group)}
         <li role="presentation" class="group group-label">{g.group}</li>
         {#each g.items as { item, n } (item.id)}
+          <!-- The keys are the combobox's (arrows and Enter on the input, aria-activedescendant): an option never takes
+               focus, so it has no key handler of its own; the pointer can also choose it. -->
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
           <li
             id="pi-{item.id}"
             role="option"
@@ -289,7 +293,6 @@
             data-n={n}
             onpointermove={() => (index = n)}
             onclick={() => choose(item)}
-            onkeydown={() => {}}
           >
             <item.icon size={16} strokeWidth={1.75} aria-hidden="true" />
             <!-- The name and its hint share one block: the hint sits right of the name while both fit and drops, whole, to

@@ -15,7 +15,7 @@
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Arch, Augment, Dataset, DatasetImage, Device, Model, Optimizer, Run, RunEstimate, TrainConfig } from '$lib/api/types';
-  import { modelChoices, scoreContext, scoreText } from '$lib/scoreSummary';
+  import { modelChoices, scoreContext, scoreMeta, scoreText } from '$lib/scoreSummary';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
@@ -45,9 +45,9 @@
   import Meta from '$lib/ui/Meta.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import InfoButton from '$lib/ui/InfoButton.svelte';
-  import CodeText from '$lib/ui/CodeText.svelte';
+  import DriverReport from '$lib/ui/DriverReport.svelte';
   import { VULKAN } from './settings/capabilities';
-  import { HEAD_LABEL, optimizerLabel } from './run/resolved';
+  import { HEAD_LABEL, accumulationText, optimizerLabel } from './run/resolved';
   import { balanced } from '$lib/ui/balancedGrid';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
   import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
@@ -194,6 +194,14 @@
   });
   const weightChoices = $derived(modelChoices(weightOptions, scoreCtx));
   const picked = $derived(weights === 'none' ? undefined : startable.find((m) => m.id === weights));
+  /** Start from's hint: the picked weights' score with all of its context, and what published weights are. */
+  const startHint = $derived.by(() => {
+    if (!picked) return 'Fine-tuning from a trained model converges much faster.';
+    // Published weights lead with what they are; trained ones are their score.
+    const meta = scoreMeta(picked.metrics?.map50_95, scoreCtx(picked));
+    const parts = isPublished(picked) ? [picked.about, meta] : [meta];
+    return parts.filter(Boolean).join(' · ') || 'Fine-tuning from a trained model converges much faster.';
+  });
   /** Published weights picked: the run's size is theirs, said under the size picker. */
   const pickedPublished = $derived(picked && isPublished(picked) ? picked : null);
   $effect(() => {
@@ -266,28 +274,45 @@
   // older servers), and off where a run would fail with `not_supported`: one plain sentence, the command that works
   // (ui/Remedy: the shell, one unwrapped copyable line), the server's own words kept verbatim behind "Driver report".
   const caps = $derived(system.data?.capabilities);
-  const ampBlock = $derived.by((): { why: string; shell?: string; command?: string; raw?: string } | null => {
+  // Each reason has two forms: `why`, the field's sentence while nothing was refused, and `cause`, the short clause a
+  // refusal leads with ("Mixed precision is unavailable: tensor cores are off on this server."); `restart` introduces
+  // the command under a refusal, so the cause is never said twice.
+  type AmpBlock = { why: string; cause: string; restart?: string; shell?: string; command?: string; raw?: string };
+  const ampBlock = $derived.by((): AmpBlock | null => {
     if (!caps) return null;
-    if (device === 'cpu') return { why: 'The CPU has no tensor cores. Pick a GPU to train in mixed precision.' };
+    if (device === 'cpu') return { why: 'The CPU has no tensor cores. Pick a GPU to train in mixed precision.', cause: 'the CPU has no tensor cores' };
     // Auto on a server without a usable GPU is the CPU too: no GPU advice.
-    if (device === 'auto' && caps.device === 'cpu') return { why: 'This server has no usable GPU, so runs train on the CPU in f32.' };
+    if (device === 'auto' && caps.device === 'cpu') return { why: 'This server has no usable GPU, so runs train on the CPU in f32.', cause: 'this server has no usable GPU' };
     // `capabilities` describe the device `auto` resolves to; another GPU is left to the server.
     if (caps.amp.available || (device !== 'auto' && device !== caps.device)) return null;
     const raw = caps.amp.reason ?? caps.tensor_cores.reason ?? undefined;
     const t = caps.tensor_cores;
     if (t.available && !t.enabled) {
-      if (/self-test/i.test(t.reason ?? '')) return { why: "The server's tensor-core self-test failed. Train in f32 on this GPU.", raw };
-      return { why: 'Tensor cores are off on this server; restart it with them on:', command: 'folo serve --tensor-cores', raw };
+      if (/self-test/i.test(t.reason ?? '')) return { why: "The server's tensor-core self-test failed. Train in f32 on this GPU.", cause: "the server's tensor-core self-test failed", raw };
+      return {
+        why: 'Tensor cores are off on this server; restart it with them on:',
+        cause: 'tensor cores are off on this server',
+        restart: 'Or restart the server with tensor cores on:',
+        command: 'folo serve --tensor-cores',
+        raw,
+      };
     }
     if (!t.available) {
       // docs/GPU.md: wgpu has cooperative matrices on Vulkan only (NVIDIA tensor cores through SPV_KHR_cooperative_matrix;
       // an RTX 4080 SUPER has them there), none on DX12 or Metal. So only an NVIDIA RTX card seen through DX12 has a way.
       const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === caps.device);
       if (g?.backend === 'dx12' && /nvidia/i.test(g.name) && /\brtx\b/i.test(g.name))
-        return { why: 'DirectX 12 does not reach this GPU’s tensor cores; restart the server on Vulkan.', shell: 'PowerShell', command: `${VULKAN} --tensor-cores`, raw };
-      return { why: 'This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.', raw };
+        return {
+          why: 'DirectX 12 does not reach this GPU’s tensor cores; restart the server on Vulkan.',
+          cause: 'DirectX 12 does not reach this GPU’s tensor cores',
+          restart: 'Or restart the server on Vulkan:',
+          shell: 'PowerShell',
+          command: `${VULKAN} --tensor-cores`,
+          raw,
+        };
+      return { why: 'This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.', cause: 'this GPU has no tensor cores FOLO can use', raw };
     }
-    return { why: 'Not available on this server. Train in f32 on this GPU.', raw };
+    return { why: 'Not available on this server. Train in f32 on this GPU.', cause: 'the server cannot use them now', raw };
   });
   const ampOn = $derived(amp && !!caps && !ampBlock);
   /** What the switch does, with the speed measured for this size (docs/BENCHMARKS.md), where there is one. */
@@ -309,7 +334,11 @@
   /** The batches behind the steps, opened under the Summary's Schedule row (ui/InfoButton): one line in the rail. */
   const batchesOf = $derived(`${num(est.stepsPerEpoch)} ${est.stepsPerEpoch === 1 ? 'batch' : 'batches'} of ${batchN}`);
   let stepsOpen = $state(false);
-  const stepsWhy = $derived(sched.accumulate > 1 ? `${batchesOf}; ${sched.accumulate} per optimizer step.` : `${batchesOf}, one step each.`);
+  const stepsWhy = $derived(
+    sched.accumulate > 1
+      ? `${batchesOf} an epoch, ${sched.accumulate} to each optimizer step.`
+      : `${batchesOf} an epoch, one optimizer step each.`,
+  );
   // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
   const estReady = $derived(!!dataset && (system.data !== undefined || system.error !== undefined));
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
@@ -620,6 +649,12 @@
     }
   }
 
+  /** A refusal's first way out: train without mixed precision. One click; the refusal is answered, so it goes. */
+  function fullPrecision() {
+    amp = false;
+    ampRefused = null;
+  }
+
   /** The way out of a device the server cannot use: Auto, then back to the field. */
   function useAuto() {
     device = 'auto';
@@ -743,9 +778,12 @@
     <dt>Schedule</dt>
     <dd class="num sched">
       <InfoButton label="How the steps are counted" controls="{where}-steps-why" bind:open={stepsOpen} class="steps"
-        >{#snippet trigger()}{num(sched.stepsPerEpoch)} steps <span class="faint">/ epoch</span>{/snippet}</InfoButton
+        >{#snippet trigger()}{num(sched.stepsPerEpoch)} optimizer steps <span class="faint">/ epoch</span>{/snippet}</InfoButton
       >
     </dd>
+    <!-- Batches accumulate into one optimizer step below a batch of 64 (docs/MODEL.md §8.3): said beside the schedule,
+         in the one wording Run's Config and Compare use (run/resolved `accumulationText`), never "per step" for a batch. -->
+    {#if sched.accumulate > 1}<dd class="sched-acc num">{accumulationText(sched.accumulate, batchN)}</dd>{/if}
     {#if stepsOpen}<dd class="steps-why" id="{where}-steps-why">{stepsWhy}</dd>{/if}
     <!-- A range, never one precise figure; a rough one (low confidence) in secondary ink. What it stands on is the
          line under it, which opens the phases behind it. -->
@@ -805,17 +843,17 @@
     <div class="short">
       <p class="callout">
         <TriangleAlert size={14} aria-hidden="true" />
-        <span>{#if short.scratch}Too short to learn: {num(short.steps)} steps.{:else}Mostly warmup: {num(short.warmup)} of {num(short.steps)} steps.{/if}</span>
+        <span>{#if short.scratch}Too short to learn: {num(short.steps)} optimizer steps.{:else}Mostly warmup: {num(short.warmup)} of {num(short.steps)} optimizer steps.{/if}</span>
         <button type="button" class="more" aria-expanded={shortWhy} aria-controls="{where}-short-why" onclick={() => (shortWhy = !shortWhy)}>Why?</button>
       </p>
       {#if shortWhy}
         <div class="short-why" id="{where}-short-why">
           {#if short.scratch}
             <!-- Two short sentences: the batches behind the steps open under the Schedule row. -->
-            <p>{num(epochs)} epochs × {num(short.stepsPerEpoch)} steps. From scratch, a detector needs a few hundred, so expect an mAP near&nbsp;0.</p>
+            <p>{num(epochs)} epochs × {num(short.stepsPerEpoch)} optimizer steps. From scratch, a detector needs a few hundred, so expect an mAP near&nbsp;0.</p>
           {/if}
           {#if short.warmupHeavy}
-            <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks late.</p>
+            <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} optimizer steps, so the learning rate peaks late.</p>
           {/if}
           <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
         </div>
@@ -964,22 +1002,24 @@
             {@render archTable()}
           {/if}
           <div class="row2">
-            <!-- Published weights' hint is what they are (`Model.about`), also each option's tooltip. -->
-            <Field label="Start from" for="weights" hint={pickedPublished?.about ?? 'Fine-tuning from a trained model converges much faster.'} error={errors.weights}>
+            <!-- Closed, the select names the weights alone; their score and what it is on are the hint under it (never
+                 cut at the select's edge), with published weights' own description (`Model.about`, also each option's
+                 tooltip). The open list keeps the groups and each option's context. -->
+            <Field label="Start from" for="weights" hint={startHint} error={errors.weights}>
               <Select
                 id="weights"
                 bind:value={weights}
                 onchange={pickWeights}
                 invalid={!!errors.weights}
-                describedby={errors.weights ? 'weights-error' : 'weights-hint'}
                 options={[
                   { value: 'none', label: 'From scratch' },
-                  ...weightChoices.map((c) => ({ value: c.model.id, label: c.label, group: c.group })),
+                  ...weightChoices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short })),
                   ...publishedOptions.map((m) => ({
                     value: m.id,
                     label: m.metrics ? `${m.name} · ${scoreText(m.metrics.map50_95, scoreCtx(m))}` : m.name,
                     group: 'Published weights',
                     title: m.about,
+                    short: m.name,
                   })),
                 ]}
               />
@@ -990,9 +1030,9 @@
         <Panel title="3 · Training" id="sec-train">
           <div class="fields">
             <Field label="Epochs" for="epochs" error={errors.epochs}>
-              <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} aria-describedby={errors.epochs ? 'epochs-error' : undefined} suffix="epochs" />
+              <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} suffix="epochs" />
             </Field>
-            <Field label="Batch size" for="batch" hint="Per step. Lower it if you run out of GPU memory.">
+            <Field label="Batch size" for="batch" hint="Images per batch. Lower it if GPU memory runs out.">
               <!-- A retry's change sits beside the new value: "16 · was 32". -->
               <span class="with-was">
                 <Segmented id="batch" label="Batch size" bind:value={batch} options={withValue(BATCHES, batch).map((v) => ({ value: v, label: v }))} />
@@ -1021,7 +1061,7 @@
                 id="device"
                 bind:value={device}
                 invalid={!!deviceMsg}
-                describedby={deviceMsg ? 'device-error' : undefined}
+                describedby={deviceMsg ? 'device-error' : 'device-hint'}
                 options={[
                   { value: 'auto', label: `Auto${gpu ? ` · ${deviceName(gpu.name)}` : ''}` },
                   ...(system.data?.gpus ?? []).map((g) => ({ value: `gpu:${g.ordinal}`, label: `gpu:${g.ordinal} · ${deviceName(g.name)}` })),
@@ -1044,7 +1084,7 @@
                   {/if}
                 </div>
               {:else}
-                <p class="dev-hint">Auto prefers the GPU over the CPU.</p>
+                <p class="dev-hint" id="device-hint">Auto prefers the GPU over the CPU.</p>
               {/if}
             </div>
             {#if caps}
@@ -1061,16 +1101,21 @@
                   describedby={ampErr ? 'amp-error' : ampBlock ? 'amp-why' : 'amp-hint'}
                 />
                 {#if ampErr}
-                  <!-- The server's own words, where the setting is (never a toast), as one plain sentence. -->
+                  <!-- A refusal, where the setting is (never a toast): one short cause, then the ways out (full precision,
+                       one click; or the restart command), then the server's whole message folded and copyable. -->
                   <p class="sw-err" id="amp-error" role="alert">
-                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Start was refused: <CodeText text={sentence(ampErr.message)} /></span>
+                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Mixed precision is unavailable: {ampBlock?.cause ?? 'the server cannot use it now'}.</span>
                   </p>
-                {/if}
-                {#if ampBlock}
-                  <!-- After a refusal the report would repeat the message above it. -->
-                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampErr ? undefined : ampBlock.raw} /></div>
-                {:else if ampErr}
-                  <p class="sw-hint" id="amp-hint">Turn it off to train in f32.</p>
+                  <div class="sw-why amp-ways">
+                    <div class="cta-row"><Button size="sm" onclick={fullPrecision}>Train in full precision</Button></div>
+                    {#if ampBlock?.command}
+                      <Remedy compact id="amp-why" cause={ampBlock.restart ?? 'Or restart the server:'} shell={ampBlock.shell} command={ampBlock.command} report={ampErr.message} />
+                    {:else}
+                      <DriverReport report={ampErr.message} />
+                    {/if}
+                  </div>
+                {:else if ampBlock}
+                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampBlock.raw} /></div>
                 {:else}
                   <p class="sw-hint" id="amp-hint">{ampHint}</p>
                 {/if}
@@ -1084,10 +1129,10 @@
               <Select id="opt" bind:value={optimizer} options={(['auto', 'sgd', 'adamw'] as const).map((value) => ({ value, label: optimizerLabel(value) }))} />
             </Field>
             <Field label="Initial learning rate" for="lr0" error={errors.lr0} hint="Warmup 3 epochs, then cosine to 1%.">
-              <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!errors.lr0} aria-describedby={errors.lr0 ? 'lr0-error' : 'lr0-hint'} />
+              <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!errors.lr0} />
             </Field>
             <Field label="Seed" for="seed" hint="Same seed, same run." error={errors.seed}>
-              <Input id="seed" type="number" min="0" step="1" bind:value={seed} invalid={!!errors.seed} aria-describedby={errors.seed ? 'seed-error' : 'seed-hint'} />
+              <Input id="seed" type="number" min="0" step="1" bind:value={seed} invalid={!!errors.seed} />
             </Field>
             <!-- TrainConfig.head `o2o` (docs/MODEL.md §6.6); the cost measured on the shapes gate (docs/BENCHMARKS.md). -->
             <div class="field sw-field">
@@ -1156,7 +1201,7 @@
                     : 'Train the last N epochs without mosaic to settle the boxes.'}
                   error={errors.close}
                 >
-                  <Input id="close" type="number" min="0" step="1" max={epochs} bind:value={augment.close_mosaic} oninput={() => (closeEdited = true)} suffix="epochs" invalid={!!errors.close} aria-describedby={errors.close ? 'close-error' : 'close-hint'} />
+                  <Input id="close" type="number" min="0" step="1" max={epochs} bind:value={augment.close_mosaic} oninput={() => (closeEdited = true)} suffix="epochs" invalid={!!errors.close} />
                 </Field>
               </div>
             </div>
@@ -1178,7 +1223,7 @@
           <div class="sum">
             <div class="sum-col">
               <Field label="Run name" for="name" error={errors.name}>
-                <Input id="name" bind:value={name} oninput={() => (nameEdited = true)} invalid={!!errors.name} aria-describedby={errors.name ? 'name-error' : undefined} spellcheck="false" autocomplete="off" />
+                <Input id="name" bind:value={name} oninput={() => (nameEdited = true)} invalid={!!errors.name} spellcheck="false" autocomplete="off" />
               </Field>
               {@render reviewList(false)}
             </div>
@@ -1831,6 +1876,13 @@
   .est dd.sched {
     overflow: visible;
   }
+  /* Accumulation, beside the schedule: a meta line under its value, across the row, wrapping rather than cut. */
+  .est dd.sched-acc {
+    grid-column: 1 / -1;
+    margin-top: -2px;
+    color: var(--text-tertiary);
+    white-space: normal;
+  }
   /* The batches behind the steps: one quiet line under the row, at the value's right edge, across the row. */
   .est dd.steps-why {
     grid-column: 1 / -1;
@@ -1856,6 +1908,15 @@
   .fields > .sw-field > .sw-why {
     align-self: start;
     min-width: 0;
+  }
+  /* Under a refusal: the one-click way out, then the command and the folded report (ui/Remedy). */
+  .amp-ways {
+    display: grid;
+    gap: var(--space-3);
+    justify-items: start;
+  }
+  .amp-ways > :global(.remedy) {
+    justify-self: stretch;
   }
   /* Start's refusal at the field (`501 not_supported`): danger ink with its icon, never red text alone (§2.11). */
   .sw-err {
