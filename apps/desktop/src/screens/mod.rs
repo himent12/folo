@@ -84,11 +84,26 @@ impl FoloApp {
         let draw: Vec<DrawBox> = if boxes {
             let classes =
                 self.store.dataset_summary(dataset).map(|d| d.classes.as_slice()).unwrap_or_default();
+            // Filtered, a tile at rest names one box: the filtered class's largest, so every tile
+            // reads the same way (a hovered or focused tile names them all).
+            let named = focus.filter(|_| !reveal).and_then(|c| {
+                meta.boxes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.class == c)
+                    .max_by(|(_, a), (_, b)| {
+                        ((a.x2 - a.x1) * (a.y2 - a.y1)).total_cmp(&((b.x2 - b.x1) * (b.y2 - b.y1)))
+                    })
+                    .map(|(i, _)| i)
+            });
             meta.boxes
                 .iter()
-                .map(|b| DrawBox {
+                .enumerate()
+                .map(|(i, b)| DrawBox {
                     dim: focus.is_some_and(|c| c != b.class),
-                    label: classes.get(b.class as usize).map(|n| SharedString::from(n.clone())),
+                    label: (named.is_none() || named == Some(i) || focus.is_some_and(|c| c != b.class))
+                        .then(|| classes.get(b.class as usize).map(|n| SharedString::from(n.clone())))
+                        .flatten(),
                     ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
                 })
                 .collect()

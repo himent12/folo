@@ -1277,8 +1277,14 @@ impl FoloApp {
                     .gap(px(8.))
                     .p(px(16.))
                     .child(div().flex().items_start().gap(px(8.)).children(tiles))
+                    // The caption says what the tiles show, view by view.
                     .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                        "Epoch {epoch} · 8 of 16 fixed validation images · predictions with score ≥ 0.30"
+                        "Epoch {epoch} · 8 of 16 fixed validation images · {}",
+                        match view {
+                            SampleView::Predictions => "predictions with score ≥ 0.30",
+                            SampleView::Truth => "ground-truth labels",
+                            SampleView::Both => "ground truth and predictions with score ≥ 0.30",
+                        }
                     )))
                     .into_any_element()
             }
@@ -1581,17 +1587,18 @@ fn pr_floor(low: f32) -> f32 {
     if f < 0.4 { 0. } else { f.min(0.8) }
 }
 
-/// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
-/// (a letter, `:`, a separator) change, so a Unix path or escaped text with `\` keeps it.
 /// A log message as shown: Windows paths with `/`, split into its " · " fields, each but the
-/// first led by its dot (a wrapped line starts "· mAP50 0.745" instead of ending on "·"). Rows lay the fields out unbroken in a wrapping row, so a long entry
-/// breaks between fields, never inside "mAP50 0.745" (GPUI's wrapper breaks before any
-/// non-word character, so a no-break space can't hold a pair together).
+/// first led by its dot (a wrapped line starts "· mAP50 0.745" instead of ending on "·").
+/// Rows lay the fields out unbroken in a wrapping row, so a long entry breaks between fields,
+/// never inside "mAP50 0.745" (GPUI's wrapper breaks before any non-word character, so a
+/// no-break space can't hold a pair together).
 fn log_fields(s: &str) -> Vec<String> {
     let s = slash_paths(s);
     s.split(" · ").enumerate().map(|(i, f)| if i > 0 { format!("· {f}") } else { f.to_string() }).collect()
 }
 
+/// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
+/// (a letter, `:`, a separator) change, so a Unix path or escaped text with `\` keeps it.
 fn slash_paths(s: &str) -> String {
     let drive = |w: &str| {
         let b = w.trim_start_matches(['"', '\'', '(']).as_bytes();

@@ -996,6 +996,13 @@ impl FoloApp {
             "Hover a class to isolate it · click to pin"
         };
 
+        // The panel's width, as the page lays it out (full width when stacked, else 54 % of the
+        // row): under 600 px the class legend goes below the plot, so the plot keeps the width.
+        let legend_below = {
+            let row = self.content_width(window) - 16.;
+            let stacked = row - (row * 0.46).max(440.) < 520.;
+            (if stacked { row + 16. } else { row * 0.54 }) < 600.
+        };
         panel(&t)
             .flex_1()
             .flex()
@@ -1004,6 +1011,7 @@ impl FoloApp {
             .child(
                 div()
                     .flex()
+                    .when(legend_below, |d| d.flex_col())
                     .child(div().flex_1().min_w_0().child(self.chart_group(
                         "pr-chart",
                         0.01,
@@ -1015,7 +1023,8 @@ impl FoloApp {
                     )))
                     .child(
                         div()
-                            .w(px(252.))
+                            .when(!legend_below, |d| d.w(px(252.)))
+                            .when(legend_below, |d| d.max_w(px(360.)).pt(px(0.)).pb(px(12.)).px(px(16.)))
                             .flex_none()
                             .p(px(8.))
                             .pt(px(12.))
