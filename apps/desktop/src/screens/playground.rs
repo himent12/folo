@@ -387,11 +387,9 @@ impl FoloApp {
                     // The built-in demo's number is simulated, and says so wherever it shows.
                     .when_some(self.play_pred.ready().map(|p| p.timing.total_ms), |d, ms| {
                         let sim = self.play_target.is_none() && !self.store.api.local_inference();
-                        d.child(text(ty::XS, t.text_secondary).flex_none().tnum().child(if sim {
-                            format!("Sim. {ms:.1} ms")
-                        } else {
-                            format!("{ms:.1} ms")
-                        }))
+                        d.child(
+                            text(ty::XS, t.text_secondary).flex_none().tnum().child(latency_text(ms, sim)),
+                        )
                         .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
                     })
                     .when_some(count, |d, n| {
@@ -874,19 +872,11 @@ impl FoloApp {
                     .child(panel_header(&t, "Detections").h(px(32.)).child(
                         text(ty::XS, t.text_tertiary).tnum().child(if self.play_pred_pending {
                             "Updating…".to_string()
+                        // The total latency reads in the toolbar at every size; the count stays a count.
+                        } else if hidden > 0 {
+                            format!("{} shown · {hidden} below threshold", vis.len())
                         } else {
-                            let n = if hidden > 0 {
-                                format!("{} shown · {hidden} below threshold", vis.len())
-                            } else {
-                                vis.len().to_string()
-                            };
-                            // Short windows: the latency breakdown may scroll away below, so its total
-                            // rides here too (said to be simulated in the demo, as the section is).
-                            match (tight, simulated) {
-                                (true, true) => format!("{n} · {:.1} ms simulated", p.timing.total_ms),
-                                (true, false) => format!("{n} · {:.1} ms", p.timing.total_ms),
-                                _ => n,
-                            }
+                            vis.len().to_string()
                         }),
                     ))
                     .child(

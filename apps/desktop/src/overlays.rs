@@ -484,6 +484,9 @@ impl FoloApp {
             let s = &self.dialog_scroll;
             s.max_offset().height + s.offset().y > px(1.)
         };
+        // Scrolled: a hairline under the fixed header, so rows passing beneath it read as scrolled
+        // away, not cut.
+        let scrolled = self.dialog_scroll.offset().y < px(-1.);
         crate::ui::appear(
             div()
                 .absolute()
@@ -545,6 +548,12 @@ impl FoloApp {
                                         .min_h_0()
                                         .flex()
                                         .flex_col()
+                                        .border_t_1()
+                                        .border_color(if scrolled {
+                                            t.line_subtle
+                                        } else {
+                                            gpui::transparent_black()
+                                        })
                                         .child(
                                             div()
                                                 .id("dialog-body")

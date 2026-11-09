@@ -2097,6 +2097,16 @@ impl FoloApp {
         format!("{} · {ds}", r.config.arch.as_str())
     }
 
+    /// A run's subtitle, the same in the Overview hero and on its page: identity, device, start.
+    pub fn run_subtitle(&self, r: &Run) -> String {
+        let device = crate::ui::device_label(&r.device);
+        let now = self.store.api.now();
+        match r.started.as_deref().and_then(crate::api::time::parse) {
+            Some(s) => format!("{} · {device} · started {}", self.run_meta(r), crate::api::time::ago(s, now)),
+            None => format!("{} · {device}", self.run_meta(r)),
+        }
+    }
+
     /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own
     /// record says (`Model.head`, from its folo.config), so imported and orphaned models read right.
     pub fn model_e2e(&self, m: &Model) -> bool {

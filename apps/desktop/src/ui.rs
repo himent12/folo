@@ -203,6 +203,12 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> i
 }
 
 /// Tinted label chip, 20 px tall.
+/// One inference's total latency as every readout writes it: "6.4 ms", or "Sim. 6.4 ms" when the
+/// built-in demo simulated it.
+pub fn latency_text(ms: f64, simulated: bool) -> String {
+    if simulated { format!("Sim. {ms:.1} ms") } else { format!("{ms:.1} ms") }
+}
+
 /// How a model's weights are stored, from its own record (`precision`, `fused`): "f16, fused",
 /// "f32", or `None` when the server doesn't say. Every surface that names it uses this.
 pub fn model_storage(m: &crate::api::Model) -> Option<String> {
