@@ -930,3 +930,105 @@ describe('New run: DOGFOOD-3', () => {
     expect(summary.split('This GPU’s memory size isn’t reported.')).toHaveLength(2);
   });
 });
+
+describe('New run: published weights (server PR #140)', () => {
+  const sel = () => target.querySelector<HTMLSelectElement>('select#weights')!;
+  function choose(value: string) {
+    sel().querySelector<HTMLOptionElement>(`option[value="${value}"]`)!.selected = true;
+    sel().dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+  }
+  const arch = () => target.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value;
+
+  it('lists them in a group of their own whatever the size, with what they are as the tooltip', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    expect(arch()).toBe('folo-s');
+    const group = await until(() => sel().querySelector('optgroup'), 'the published group');
+    expect(group.getAttribute('label')).toBe('Published weights');
+    const opt = group.querySelector<HTMLOptionElement>('option[value="folo-n-coco"]')!;
+    expect(opt.textContent).toBe('folo-n-coco · mAP 0.314');
+    expect(opt.title).toMatch(/^folo-n trained from scratch on COCO/);
+    // The run models of the chosen size stay outside the group.
+    expect(sel().querySelector('option[value="m_shapes_s"]')?.parentElement).toBe(sel());
+  });
+
+  it('take their size when picked, say so, and drop out when another size is picked', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    await until(() => sel().querySelector('option[value="folo-n-coco"]'), 'the published weights');
+    choose('folo-n-coco');
+    expect(arch()).toBe('folo-n');
+    expect(sel().value).toBe('folo-n-coco');
+    expect(target.querySelector('.a-from')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+      "folo-n, from folo-n-coco. The run trains the weights' size; another size starts from scratch.",
+    );
+    expect(target.querySelector('#weights-hint')?.textContent).toMatch(/^folo-n trained from scratch on COCO/);
+    const rv = (k: string) => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === k)?.querySelector('.rv-v')?.textContent;
+    expect(rv('Model')).toBe('folo-n');
+    expect(rv('Start from')).toBe('folo-n-coco');
+    // The command names them as the server does, by their published name.
+    await until(() => target.querySelector('.cli code')?.textContent?.includes('--weights folo-n-coco'), 'the command');
+    const create = vi.spyOn(api, 'createRun');
+    await start();
+    expect(create.mock.calls[0]![0]).toMatchObject({ arch: 'folo-n', weights: 'folo-n-coco' });
+    if (c) unmount(c);
+    c = undefined;
+
+    await open();
+    await until(() => sel().querySelector('option[value="folo-n-coco"]'), 'the published weights');
+    choose('folo-n-coco');
+    target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-m"]')!.click();
+    flushSync();
+    expect(sel().value).toBe('none');
+    expect(target.querySelector('.a-from')).toBeNull();
+  });
+});
+
+describe('New run: the server’s figures and refusals (server PR #140)', () => {
+  it("says the server's close-mosaic count for these settings where it sends one", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const real = api.estimateRun.bind(api);
+    vi.spyOn(api, 'estimateRun').mockImplementation(async (body) => ({ ...(await real(body)), close_mosaic: 3 }));
+    await open();
+    await until(() => target.querySelector('#close-hint')?.textContent?.includes('last 3 epochs'), "the server's count");
+    expect(target.querySelector('#close-hint')?.textContent).toBe('At most half the run: mosaic closes for the last 3 epochs.');
+  });
+
+  it('shows a 501 for mixed precision at its field, not as a toast, with what works now', async () => {
+    hub.api = api = new MockApi('amp-refused', 0);
+    const { toast } = await import('$lib/ui/toast.svelte');
+    const err = vi.spyOn(toast, 'error');
+    await open();
+    const sw = await until(() => target.querySelector<HTMLInputElement>('input#amp'), 'the switch');
+    sw.click();
+    flushSync();
+    await start();
+    const msg = await until(() => target.querySelector('#amp-error'), 'the refusal');
+    expect(msg.getAttribute('role')).toBe('alert');
+    expect(msg.textContent).toMatch(/^Start was refused: Mixed-precision training \(amp\) needs a GPU with tensor cores/);
+    expect(err).not.toHaveBeenCalled();
+    // The capabilities read again: the switch is off with the way to turn tensor cores on, and Start trains in f32.
+    await until(() => target.querySelector('#amp-why'), 'the remedy');
+    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server; restart it with them on:');
+    expect(target.querySelector<HTMLInputElement>('input#amp')!.disabled).toBe(true);
+    expect(target.querySelector('#start-why')).toBeNull();
+  });
+
+  it('holds Start while the switch is still on after a refusal, and lets go once it is off', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    vi.spyOn(api, 'createRun').mockRejectedValue(new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores'));
+    await open();
+    const sw = await until(() => target.querySelector<HTMLInputElement>('input#amp'), 'the switch');
+    sw.click();
+    flushSync();
+    await start();
+    await until(() => target.querySelector('#amp-error'), 'the refusal');
+    expect(target.querySelector('#start-why')?.textContent).toBe('Mixed precision: Not available on this server now.');
+    expect(target.querySelector('#amp-hint')?.textContent).toBe('Turn it off to train in f32.');
+    sw.click();
+    flushSync();
+    expect(target.querySelector('#amp-error')).toBeNull();
+    expect(target.querySelector('#start-why')).toBeNull();
+  });
+});

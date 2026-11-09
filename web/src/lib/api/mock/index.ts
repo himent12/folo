@@ -6,9 +6,11 @@
 // `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
 // finished 5-epoch run the trainer warns is too short to learn from), `tensor-cores-off` and `no-tensor-cores` (no
 // mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), `train-split` (adds a finished run on a dataset with no validation images), `finishing` (the run training reaches its
-// last epoch 3 s after load, for the toast that says so) and `no-throughput` (a server from before measured throughput:
-// no `throughput`, `run_estimate` or `benchmark` feature, and those endpoints answer 404), for screenshots of those
-// states.
+// last epoch 3 s after load, for the toast that says so), `no-throughput` (a server from before measured throughput:
+// no `throughput`, `run_estimate`, `benchmark` or `run_cli` feature, and those endpoints answer 404) and `amp-refused`
+// (the server restarted without tensor cores after the page loaded: `/api/system` said mixed precision was available,
+// `POST /api/runs` refuses it with `501 not_supported`, and `/api/system` says so from then on), for screenshots of
+// those states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
@@ -18,6 +20,7 @@ import type {
   Box,
   Capabilities,
   ClassMetrics,
+  CliCommand,
   CreateDataset,
   CreateSyntheticDataset,
   Dataset,
@@ -27,6 +30,7 @@ import type {
   DatasetIssuesQuery,
   ExportFormat,
   ExportResult,
+  GpuPool,
   Health,
   IssueCounts,
   LogLine,
@@ -73,6 +77,7 @@ import { COCO80 } from './coco';
 import { applyQueueMove } from '../queue';
 import { onnxFileName } from '../client';
 import { CPU_NAME, MockThroughput } from './throughput';
+import { trainCommand } from '../../trainCli';
 
 export type Scenario =
   | 'normal'
@@ -88,6 +93,7 @@ export type Scenario =
   // A finished run on fasteners-mini, which has no validation images: it validated on its training split.
   | 'train-split'
   | 'no-throughput'
+  | 'amp-refused'
   // A Studio build without folo-wasm: /api/system does not list `web_wasm`, so Playground's browser choices are off.
   | 'no-wasm';
 
@@ -143,6 +149,14 @@ export function capabilities(scenario: Scenario): Capabilities {
           },
   };
 }
+/** folo-server's hint on `501 not_supported` (engine::engine_error), verbatim. */
+const AMP_HINT =
+  'set `amp: false` to train in f32, or restart this server with tensor cores (`folo serve --tensor-cores`, or ' +
+  "FOLO_GPU_TENSOR_CORES=1) on a GPU that has them; GET /api/system's `capabilities.amp` says when amp is available";
+
+/** What `folo weights list` says of folo-n-coco (folo_api::weights::PUBLISHED), its `Model.about`. */
+const COCO_ABOUT = 'folo-n trained from scratch on COCO train2017 at 640 px (EMA weights, f32, unfused: fine-tune or predict); examples/coco';
+
 const FASTENER_EASE = [1.05, 1.1, 1.12, 0.92, 0.78, 1.0, 0.85, 0.7];
 
 function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
@@ -495,9 +509,31 @@ export class MockApi implements Api {
     return gpus;
   }
 
+  /**
+   * FOLO's GPU buffer pool (`gpu_pool`), as a real server reports it once it has used the GPU: the training run's
+   * tensors in use and a few freed buffers kept for reuse; between runs the cache is given back and only the last run's
+   * peak stays. Absent from a server that never used the GPU (`empty`) and from older ones (`no-throughput`).
+   */
+  #gpuPool(): GpuPool | undefined {
+    if (this.scenario === 'empty' || this.scenario === 'no-throughput') return undefined;
+    const training = this.#runs.some((p) => progressAt(p, Date.now()).status === 'running');
+    const peak = Math.round(5.31 * 2 ** 30);
+    return training
+      ? { device: 'gpu:0', live_bytes: Math.round(4.62 * 2 ** 30), cached_bytes: Math.round(0.88 * 2 ** 30), peak_live_bytes: peak }
+      : { device: 'gpu:0', live_bytes: 0, cached_bytes: 0, peak_live_bytes: peak };
+  }
+
+  /** `amp-refused`: set by the refused run; `/api/system` then says what the restarted server can do. */
+  #ampRefused = false;
+
+  #capabilities(): Capabilities {
+    return capabilities(this.#ampRefused ? 'tensor-cores-off' : this.scenario);
+  }
+
   system(): Promise<SystemInfo> {
     return this.#call(() => {
       const t = Date.now() / 1000;
+      const pool = this.#gpuPool();
       return {
         cpu: { name: CPU_NAME, threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
@@ -505,11 +541,12 @@ export class MockApi implements Api {
         features: [
           ...(this.scenario === 'no-throughput'
             ? ['export_onnx_switches', 'queue_control', 'weights_onnx']
-            : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark']),
+            : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli']),
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
         ],
-        capabilities: capabilities(this.scenario),
+        capabilities: this.#capabilities(),
+        ...(pool ? { gpu_pool: pool } : {}),
       };
     }, 60);
   }
@@ -684,6 +721,7 @@ export class MockApi implements Api {
         trained_with: { amp: p.config.amp ?? false, imgsz: p.config.imgsz, epochs: p.config.epochs },
         precision: 'f32',
         fused: false,
+        source: 'run',
       });
     }
     // fasteners-n's f16 export, kept as a model (docs/API.md: the mock's m_53d2): fused, f16, no training record.
@@ -698,6 +736,7 @@ export class MockApi implements Api {
         trained_with: null,
         precision: 'f16',
         fused: true,
+        source: 'file',
       });
     }
     if (this.scenario !== 'empty') {
@@ -719,7 +758,30 @@ export class MockApi implements Api {
         trained_with: null,
         precision: 'f32',
         fused: false,
-      });      // An imported file with fasteners-mini's classes: /eval runs on that dataset (the first with its classes, as a
+        source: 'file',
+      });
+      // Published weights from `folo weights pull folo-n-coco` (docs/API.md, Published weights): listed by their name,
+      // with what they are; their metrics are the COCO val2017 figures FOLO publishes (docs/BENCHMARKS.md).
+      out.push({
+        id: 'folo-n-coco',
+        name: 'folo-n-coco',
+        arch: 'folo-n',
+        imgsz: 640,
+        classes: [...COCO80],
+        params: archInfo['folo-n'].params,
+        flops_g: archInfo['folo-n'].flops,
+        bytes: Math.round(archInfo['folo-n'].params * 4.03),
+        created: new Date(this.#t0 - 9 * DAY).toISOString(),
+        run_id: null,
+        metrics: { map50: 0.455, map50_95: 0.314, precision: 0.583, recall: 0.427, best_f1_conf: null },
+        head: 'o2m',
+        trained_with: { amp: false, imgsz: 640, epochs: 50 },
+        precision: 'f32',
+        fused: false,
+        source: 'published',
+        about: COCO_ABOUT,
+      });
+      // An imported file with fasteners-mini's classes: /eval runs on that dataset (the first with its classes, as a
       // real server picks one), which has no validation images, so on its training split.
       out.push({
         id: 'm_mini_n',
@@ -737,6 +799,7 @@ export class MockApi implements Api {
         trained_with: { amp: false, imgsz: 640, epochs: 60 },
         precision: 'f32',
         fused: false,
+        source: 'file',
       });
     }
     return out.sort((a, b) => b.created.localeCompare(a.created));
@@ -842,9 +905,57 @@ export class MockApi implements Api {
     return this.#call(() => this.#toRun(this.#profile(id), Date.now()));
   }
 
-  createRun(c: TrainConfig): Promise<Run> {
+  /**
+   * What the server does to a request's weights before it trains (folo-server's create_run): they must exist, and a
+   * fine-tune trains their architecture, as `folo train --weights` does.
+   */
+  #withWeights(c: TrainConfig): TrainConfig {
+    if (!c.weights) return c;
+    const m = this.#models().find((x) => x.id === c.weights);
+    if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${c.weights}.`);
+    return { ...c, arch: m.arch };
+  }
+
+  /**
+   * `501 not_supported` for an `amp` run this server cannot train (docs/API.md): refused before anything is queued,
+   * with `capabilities.amp.reason` as the message, as the real server and folo-server's mock do.
+   */
+  #checkAmp(c: TrainConfig) {
+    if (!c.amp) return;
+    // `amp-refused`: the server was restarted without tensor cores since the page asked.
+    if (this.scenario === 'amp-refused') this.#ampRefused = true;
+    const caps = this.#capabilities();
+    if (c.device !== 'cpu' && caps.amp.available) return;
+    const reason =
+      c.device === 'cpu'
+        ? 'mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): the run is on the CPU; train without amp (f32), or on such a GPU'
+        : (caps.amp.reason ?? 'mixed-precision training (amp) is not available on this server');
+    throw new ApiError(501, 'not_supported', reason, AMP_HINT);
+  }
+
+  /**
+   * `folo train` for `c` as the server writes it (`RunEstimate.cli`, `GET /api/runs/{id}/cli`, quoted for PowerShell):
+   * published weights by their name, another model by its file under the data dir (made up: mock models have no
+   * files, as on folo-server's mock).
+   */
+  #cli(c: TrainConfig): CliCommand {
+    const ds = this.#spec(c.dataset_id);
+    const m = c.weights ? this.#models().find((x) => x.id === c.weights) : undefined;
+    const cmd = trainCommand(c, ds.path, m && m.source !== 'published' ? { ...m, path: `D:/folo/models/${m.name}.folo` } : m);
+    return { cli: cmd.line, argv: ['folo', ...cmd.argv] };
+  }
+
+  runCli(id: string): Promise<CliCommand> {
     return this.#call(() => {
-      const ds = this.#spec(c.dataset_id);
+      if (this.scenario === 'no-throughput') throw this.#noRoute(`GET /api/runs/${id}/cli`);
+      return this.#cli(this.#profile(id).config);
+    }, 80);
+  }
+
+  createRun(body: TrainConfig): Promise<Run> {
+    return this.#call(() => {
+      const ds = this.#spec(body.dataset_id);
+      const c = this.#withWeights(body);
       // `gpu-unplugged`: the second adapter goes away as soon as a run asks for it.
       if (this.scenario === 'gpu-unplugged' && c.device === 'gpu:1') this.#unplugged = true;
       const gpu = /^gpu:(\d+)$/.exec(c.device);
@@ -852,6 +963,7 @@ export class MockApi implements Api {
       // The real server's body error for a head it does not know (serde: `o2m` or `o2o`; missing means `o2m`).
       if (c.head !== undefined && c.head !== 'o2m' && c.head !== 'o2o')
         throw new ApiError(400, 'invalid_body', `field \`head\`: unknown variant \`${String(c.head)}\`, expected \`o2m\` or \`o2o\``);
+      this.#checkAmp(c);
       const now = Date.now();
       const id = `run_${(hash(c.name + now + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
       const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);
@@ -881,15 +993,15 @@ export class MockApi implements Api {
     }, 300);
   }
 
-  estimateRun(c: TrainConfig): Promise<RunEstimate> {
+  estimateRun(body: TrainConfig): Promise<RunEstimate> {
     return this.#call(() => {
       if (this.scenario === 'no-throughput') throw this.#noRoute('POST /api/runs/estimate');
       // The same checks as POST /api/runs; nothing is created.
-      const ds = this.#spec(c.dataset_id);
-      const gpu = /^gpu:(\d+)$/.exec(c.device);
-      if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(c.device);
-      if (c.weights && !this.#models().some((m) => m.id === c.weights)) throw new ApiError(404, 'model_not_found', `No model with id ${c.weights}.`);
-      return this.#throughput.estimate(c, ds.splits.train, ds.splits.val);
+      const ds = this.#spec(body.dataset_id);
+      const gpu = /^gpu:(\d+)$/.exec(body.device);
+      if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(body.device);
+      const c = this.#withWeights(body);
+      return { ...this.#throughput.estimate(c, ds.splits.train, ds.splits.val), cli: this.#cli(c).cli };
     }, 120);
   }
 

@@ -4,6 +4,7 @@
 import type {
   BenchmarkReport,
   BenchmarkRequest,
+  CliCommand,
   CreateDataset,
   CreateSyntheticDataset,
   Dataset,
@@ -98,6 +99,11 @@ export interface Api {
    */
   resumeRun(id: string, device?: string): Promise<Run>;
   deleteRun(id: string): Promise<void>;
+  /**
+   * `GET /api/runs/{id}/cli` (feature `run_cli`): the run's `folo train` command on the server's machine, quoted for
+   * PowerShell (`cli`), and its exact arguments (`argv`).
+   */
+  runCli(id: string, signal?: AbortSignal): Promise<CliCommand>;
   /**
    * `POST /api/runs/{id}/queue`: moves a run that waits in the training queue (servers list `queue_control`). `start`
    * puts it at the front; FOLO never interrupts the active run, so it starts once the slot is free. A run the worker
@@ -265,6 +271,9 @@ export class HttpApi implements Api {
   }
   moveRun(id: string, req: QueueRequest) {
     return this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/queue`, req);
+  }
+  runCli(id: string, signal?: AbortSignal) {
+    return this.#req<CliCommand>('GET', `/runs/${encodeURIComponent(id)}/cli`, undefined, signal);
   }
   runMetrics(id: string, signal?: AbortSignal, every?: number) {
     return this.#req<RunMetrics>('GET', `/runs/${encodeURIComponent(id)}/metrics${qs({ every })}`, undefined, signal);

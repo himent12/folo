@@ -48,6 +48,15 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
     expect(weightsRef('m_x', undefined)).toEqual({ kind: 'placeholder', value: '<path to m_x.folo>', file: 'm_x.folo' });
   });
 
+  it('names published weights by their published name, as the server does', () => {
+    const coco = model({ id: 'folo-n-coco', name: 'folo-n-coco', source: 'published', about: 'folo-n trained on COCO' });
+    const c = trainCommand(ft({ weights: 'folo-n-coco' }), 'D:/r6', coco);
+    expect(c.line).toBe('folo train --data D:/r6 --weights folo-n-coco --epochs 15 --batch 16 --imgsz 640 --head o2m --name r6-n-2');
+    expect(c.placeholder).toBeNull();
+    // Even where the server also reports its cached file: the name is what the CLI looks up.
+    expect(weightsRef('folo-n-coco', { ...coco, path: 'C:/Users/me/.folo/weights/folo-n-coco.folo' })).toEqual({ kind: 'path', value: 'folo-n-coco' });
+  });
+
   it('trains from scratch with --model, leaving out what the CLI defaults to', () => {
     expect(trainCommand(base, 'D:/r6').line).toBe('folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --name r6-s');
   });
@@ -126,6 +135,12 @@ const cases: { name: string; config: TrainConfig; data: string; model?: Model }[
   { name: 'a Windows path', config: { ...base, arch: 'folo-l' }, data: 'D:\\data\\shapes' },
   { name: 'an apostrophe in the dataset path and the name', config: { ...base, name: "Bob's r6" }, data: "D:/O'Brien/data" },
   { name: 'an apostrophe in the weights path', config: ft(), data: 'D:/r6', model: model({ path: "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo" }) },
+  {
+    name: 'fine-tune from published weights',
+    config: ft({ weights: 'folo-n-coco' }),
+    data: 'D:/folo-dogfood3/r6',
+    model: model({ id: 'folo-n-coco', name: 'folo-n-coco', source: 'published' }),
+  },
 ];
 
 describe('the CLI fixture (crates/folo-cli/tests/studio_cli.rs)', () => {
@@ -141,7 +156,7 @@ describe('the CLI fixture (crates/folo-cli/tests/studio_cli.rs)', () => {
         expect: {
           data,
           model: config.weights ? null : config.arch,
-          weights: config.weights ? (m?.path ?? null) : null,
+          weights: config.weights ? (weightsRef(config.weights, m).value ?? null) : null,
           epochs: config.epochs,
           batch: config.batch,
           imgsz: config.imgsz,

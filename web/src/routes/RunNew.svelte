@@ -14,7 +14,7 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Arch, Augment, DatasetImage, Device, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
+  import type { Arch, Augment, DatasetImage, Device, Model, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
@@ -176,14 +176,31 @@
 
   const dataset = $derived(datasets.data?.find((d) => d.id === datasetId));
 
-  // Pretrained weights must match the architecture; switching size drops an incompatible choice. Fused weights (an
-  // export) load for inference only, so they are never a starting point.
-  const weightOptions = $derived((models.data ?? []).filter((m) => m.arch === arch && m.fused !== true));
+  // A fine-tune trains the weights' own architecture (docs/API.md, TrainConfig.weights), so the weights listed are the
+  // chosen size's and switching size drops another size's choice. Published weights (`folo weights pull`, `source:
+  // published`) are listed whatever the size, in a group of their own: picking them sets the size to theirs. Fused
+  // weights (an export) load for inference only, so they are never a starting point.
+  const isPublished = (m: Model) => m.source === 'published';
+  const startable = $derived((models.data ?? []).filter((m) => m.fused !== true));
+  const weightOptions = $derived(startable.filter((m) => !isPublished(m) && m.arch === arch));
+  const publishedOptions = $derived(startable.filter(isPublished));
+  const picked = $derived(weights === 'none' ? undefined : startable.find((m) => m.id === weights));
+  /** Published weights picked: the run's size is theirs, said under the size picker. */
+  const pickedPublished = $derived(picked && isPublished(picked) ? picked : null);
   $effect(() => {
-    const opts = weightOptions;
+    const a = arch;
+    const list = startable;
     if (!models.data) return;
-    if (untrack(() => weights) !== 'none' && !opts.some((m) => m.id === untrack(() => weights))) weights = 'none';
+    const w = untrack(() => weights);
+    if (w === 'none') return;
+    const m = list.find((x) => x.id === w);
+    if (!m || m.arch !== a) weights = 'none';
   });
+  /** Start from picked: published weights of another size bring their size (the size picker follows). */
+  function pickWeights(id: string) {
+    const m = startable.find((x) => x.id === id);
+    if (m && isPublished(m) && m.arch !== arch) arch = m.arch;
+  }
   const gpu = $derived(system.data?.gpus[0]);
 
   // The suggested name is unique among existing runs (dataset-size, then -2, -3, …), so runs stay tellable apart.
@@ -307,6 +324,13 @@
   // The run page forecasts its fixes with the same correction (lib/oom), so the retry it offers is shown here as fitting.
   const scale = $derived(oomRun ? oomCalibration(oomRun.config, gpuMem) : 1);
 
+  // Start answered `501 not_supported` for mixed precision: the server cannot train that way after all (restarted
+  // without tensor cores since it said it could). Its message stays at the Mixed precision field until the switch or
+  // the device changes; the capabilities are read again, so the field shows what works now (off, with the remedy).
+  // While the switch is still on, Start waits (a field in error gates the form).
+  let ampRefused = $state<{ device: string; message: string } | null>(null);
+  const ampErr = $derived(ampRefused && ampRefused.device === device ? ampRefused : null);
+
   // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field in
   // one line built from the devices this machine lists now, until another device is picked. The server's own words
   // (they name its backends) fold into the field's technical details.
@@ -329,9 +353,10 @@
     seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
     dataset: !dataset ? 'Pick a dataset.' : null,
-    weights: weights !== 'none' && !weightOptions.some((m) => m.id === weights) ? 'Pick weights of the same model size.' : null,
+    weights: weights !== 'none' && picked?.arch !== arch ? 'Pick weights of the same model size.' : null,
     // The field says what to pick; the line beside Start only names the problem and leads there.
     device: deviceErr ? `${devWord(device)} is not available.` : null,
+    amp: ampErr && ampOn ? 'Not available on this server now.' : null,
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
   const FIELD: Record<keyof typeof errors, string> = {
@@ -343,6 +368,7 @@
     dataset: 'Dataset',
     weights: 'Start from',
     device: 'Device',
+    amp: 'Mixed precision',
   };
   const JUMP: Record<keyof typeof errors, Jump> = {
     name: 'name',
@@ -353,6 +379,7 @@
     dataset: 'data',
     weights: 'weights',
     device: 'device',
+    amp: 'amp',
   };
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = $derived.by(() => {
@@ -362,8 +389,6 @@
   const showWhy = $derived(!valid && !!why && prefilled);
   // The trainer's own short-run warnings (too few steps from scratch, mostly warmup): not errors, a warning with the fix.
   const short = $derived(errors.epochs ? null : shortRun(dataset?.splits.train ?? 0, epochs, batchN, weights === 'none'));
-  /** Close mosaic as the trainer applies it: at most half the run. */
-  const closeEff = $derived(errors.close || errors.epochs ? null : closeMosaicEpochs(augment.close_mosaic, epochs));
   const selArch = $derived(arches.find((a) => a.arch === arch));
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
@@ -453,6 +478,15 @@
       clearTimeout(t);
       ctrl.abort();
     };
+  });
+  /**
+   * Close mosaic as the trainer applies it: the server's count for these settings (`RunEstimate.close_mosaic`), else
+   * the trainer's cap of the request (at most half the run), which the server's agrees with.
+   */
+  const closeEff = $derived.by(() => {
+    if (errors.close || errors.epochs) return null;
+    const n = served?.key === estKey ? served.est.close_mosaic : undefined;
+    return typeof n === 'number' && Number.isFinite(n) ? n : closeMosaicEpochs(augment.close_mosaic, epochs);
   });
   /** What the Summary and the dock show: the server's estimate when there is one, else the reference's. */
   const shown = $derived.by(() => {
@@ -565,6 +599,11 @@
         void system.refresh();
         void jump('device');
         // page-level: the sheet closed when the form was sent.
+      } else if (err instanceof ApiError && err.code === 'not_supported' && config.amp) {
+        // At the field, not a toast: the message, then what the server can do now (the capabilities read again).
+        ampRefused = { device, message: err.message };
+        void system.refresh();
+        void jump('amp');
       } else toast.error(err, 'Could not start the run');
     } finally {
       submitting = false;
@@ -612,7 +651,7 @@
     {
       key: 'weights',
       label: 'Start from',
-      value: weights === 'none' ? 'From scratch' : (weightOptions.find((m) => m.id === weights)?.name ?? weights),
+      value: weights === 'none' ? 'From scratch' : (picked?.name ?? weights),
       mono: weights !== 'none',
       warn: !!errors.weights,
     },
@@ -881,6 +920,13 @@
         </Panel>
 
         <Panel title="2 · Model" id="sec-model" meta={was('model') ? `was ${oomRun?.config.arch}` : undefined}>
+          {#if pickedPublished}
+            <!-- Published weights set the size (a fine-tune trains the weights' own): said where the size is picked. -->
+            <p class="a-from" role="status">
+              <Ident value={pickedPublished.arch} />, from <Ident value={pickedPublished.name} />.
+              <span class="faint">The run trains the weights' size; another size starts from scratch.</span>
+            </p>
+          {/if}
           {#if phone.current}
             <!-- Phones: the size as one segmented pick and the chosen model in words; the full comparison folds away. -->
             <div class="a-pick">
@@ -912,13 +958,24 @@
             {@render archTable()}
           {/if}
           <div class="row2">
-            <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster." error={errors.weights}>
+            <!-- Published weights' hint is what they are (`Model.about`), also each option's tooltip. -->
+            <Field label="Start from" for="weights" hint={pickedPublished?.about ?? 'Fine-tuning from a trained model converges much faster.'} error={errors.weights}>
               <Select
                 id="weights"
                 bind:value={weights}
+                onchange={pickWeights}
                 invalid={!!errors.weights}
                 describedby={errors.weights ? 'weights-error' : 'weights-hint'}
-                options={[{ value: 'none', label: 'From scratch' }, ...weightOptions.map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` }))]}
+                options={[
+                  { value: 'none', label: 'From scratch' },
+                  ...weightOptions.map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` })),
+                  ...publishedOptions.map((m) => ({
+                    value: m.id,
+                    label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}`,
+                    group: 'Published weights',
+                    title: m.about,
+                  })),
+                ]}
               />
             </Field>
           </div>
@@ -989,9 +1046,25 @@
                    where the server cannot train in mixed precision, why not and what to do) under it. Only the control
                    is disabled; the label keeps the field labels' colour. Hidden when the server does not say. -->
               <div class="field sw-field amp" class:off={!!ampBlock}>
-                <Switch id="amp" label="Mixed precision" checked={ampOn} onchange={(v) => (amp = v)} disabled={!!ampBlock} describedby={ampBlock ? 'amp-why' : 'amp-hint'} />
+                <Switch
+                  id="amp"
+                  label="Mixed precision"
+                  checked={ampOn}
+                  onchange={(v) => ((amp = v), (ampRefused = null))}
+                  disabled={!!ampBlock}
+                  describedby={ampErr ? 'amp-error' : ampBlock ? 'amp-why' : 'amp-hint'}
+                />
+                {#if ampErr}
+                  <!-- The server's own words, where the setting is (never a toast), as one plain sentence. -->
+                  <p class="sw-err" id="amp-error" role="alert">
+                    <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>Start was refused: {sentence(ampErr.message, true)}</span>
+                  </p>
+                {/if}
                 {#if ampBlock}
-                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampBlock.raw} /></div>
+                  <!-- After a refusal the report would repeat the message above it. -->
+                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampErr ? undefined : ampBlock.raw} /></div>
+                {:else if ampErr}
+                  <p class="sw-hint" id="amp-hint">Turn it off to train in f32.</p>
                 {:else}
                   <p class="sw-hint" id="amp-hint">{ampHint}</p>
                 {/if}
@@ -1749,6 +1822,31 @@
   .fields > .sw-field > .sw-why {
     align-self: start;
     min-width: 0;
+  }
+  /* Start's refusal at the field (`501 not_supported`): danger ink with its icon, never red text alone (§2.11). */
+  .sw-err {
+    display: flex;
+    gap: var(--space-1);
+    align-items: flex-start;
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--danger-text);
+    text-wrap: pretty;
+    overflow-wrap: anywhere;
+  }
+  /* As a Field's error: the icon on the first line's centre (16 px line, 14 px icon). */
+  .sw-err :global(svg) {
+    flex: none;
+    margin-top: 1px;
+  }
+  /* Published weights set the size: one line above the picker, the identifiers mono (ui/Ident). */
+  .a-from {
+    margin-bottom: var(--space-3);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    text-wrap: pretty;
   }
   .sw-hint {
     font-size: var(--type-sm-size);

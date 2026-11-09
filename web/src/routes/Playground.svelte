@@ -21,7 +21,7 @@
   import { classColor, media } from '$lib/design/tokens';
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
-  import { BrowserEngine, hasWebGpu, NO_WASM, PHASE_TEXT, probeWasm, wasmFromSystem, type Backend } from '$lib/inference/browser.svelte';
+  import { BrowserEngine, hasWebGpu, NO_WASM, PHASE_TEXT, probeWasm, servedBy, wasmFromSystem, type Backend } from '$lib/inference/browser.svelte';
   import { metric, ms, num, sentence } from '$lib/format';
   import { isOom } from '$lib/oom';
   import { href, router } from '$lib/router.svelte';
@@ -253,8 +253,10 @@
   // The probe is asked on each visit, again when the server reconnects (`system` is read again) and when the browser
   // comes back online: an unknown answer (offline) is never kept (lib/inference `probeWasm`).
   let probed = $state<boolean | null>(null);
+  /** The server's word on its own build counts for this page only when it served it. */
+  const fromServer = $derived(wasmFromSystem(system.data, servedBy(hub.serverUrl)));
   $effect(() => {
-    if (hub.api.mock || wasmFromSystem(system.data) !== null) return;
+    if (hub.api.mock || fromServer !== null) return;
     let live = true;
     const ask = () => void probeWasm().then((v) => live && (probed = v));
     ask();
@@ -264,7 +266,7 @@
       window.removeEventListener('online', ask);
     };
   });
-  const wasm = $derived(wasmFromSystem(system.data) ?? (hub.api.mock ? (system.data ? false : null) : probed));
+  const wasm = $derived(fromServer ?? (hub.api.mock ? (system.data ? false : null) : probed));
   /** Why the browser backends are off, or null when they are offered. */
   const browserOff = $derived(wasm === false ? NO_WASM : null);
   $effect(() => {
