@@ -51,6 +51,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # Ubuntu 22.04 (glibc 2.35, the Linux floor), pinned by digest: the Linux CLI is built and install-tested in it.
+  UBUNTU_2204: ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
 
 jobs:
   plan:
@@ -208,18 +210,44 @@ jobs:
           targets: ${{ matrix.target }}
       # The self-hosted Windows host occasionally crashes rustc: tools/ci-retry.sh retries once on a crash only.
       - name: build
+        if: runner.os != 'Linux'
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && runner.os == 'Windows' && '2' || '1' }}
         run: bash tools/ci-retry.sh cargo build --release --locked -p folo-cli --features embed-web --target "$TARGET"
-      # The binary must run on glibc 2.35 (Ubuntu 22.04) even when built on a newer system (self-hosted: 24.04).
+      # Linux links inside Ubuntu 22.04 (gcc, glibc 2.35) whatever the runner's distribution (self-hosted: 24.04),
+      # with this job's Rust toolchain mounted read-only. Linked against a newer glibc, std's weak pidfd_* imports
+      # pick up a GLIBC_2.39 version that makes the loader warn on every start on older systems. apt runs as root,
+      # cargo as the runner's user, so every file in the workspace and target dir stays the runner's.
+      - name: build (linux, in Ubuntu 22.04)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_TARGET_DIR"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" -w "$GITHUB_WORKSPACE" \
+            -v "$CARGO_TARGET_DIR:$CARGO_TARGET_DIR" \
+            -v "$(rustc --print sysroot):/opt/rust:ro" \
+            -e CARGO_TARGET_DIR -e CARGO_TERM_COLOR -e FOLO_GIT_SHA -e TARGET \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            "$UBUNTU_2204" bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update -qq
+              apt-get install -y -qq --no-install-recommends gcc libc6-dev ca-certificates > /dev/null
+              exec setpriv --reuid="$HOST_UID" --regid="$HOST_GID" --clear-groups \
+                env HOME=/tmp/home CARGO_HOME=/tmp/cargo PATH="/opt/rust/bin:$PATH" \
+                cargo build --release --locked -p folo-cli --features embed-web --target "$TARGET"'
+      # The binary must run on glibc 2.35 (Ubuntu 22.04). Weak references count too: the loader warns about them.
       - name: glibc floor
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           floor=2.35
-          need=$(objdump -T "$CARGO_TARGET_DIR/$TARGET/release/folo" | grep -o 'GLIBC_[0-9][0-9.]*' | cut -c7- | sort -uV | tail -n 1)
+          syms=$(objdump -T "$CARGO_TARGET_DIR/$TARGET/release/folo" | grep 'GLIBC_[0-9]')
+          need=$(grep -o 'GLIBC_[0-9][0-9.]*' <<<"$syms" | cut -c7- | sort -uV | tail -n 1)
           echo "highest glibc symbol version: $need (floor $floor)"
           if [ "$(printf '%s\n%s\n' "$need" "$floor" | sort -V | tail -n 1)" != "$floor" ]; then
+            grep -F "GLIBC_$need" <<<"$syms"
             echo "::error::folo needs glibc $need, newer than the supported floor $floor"
             exit 1
           fi
@@ -442,9 +470,6 @@ jobs:
     name: install-test (${{ matrix.os }})
     runs-on: ${{ fromJSON(matrix.runs-on) }}
     timeout-minutes: 20
-    env:
-      # Ubuntu 22.04 (glibc 2.35, the Linux floor), pinned by digest.
-      UBUNTU_2204: ubuntu:22.04@sha256:076e7bf82319619f28dd0aa9c02ab34b055ad37100395b4f49a2ffba04fb5e11
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -467,14 +492,16 @@ jobs:
           cp -r assets bad && echo junk >> bad/folo-x86_64-unknown-linux-gnu.tar.gz
           if sh scripts/install.sh --base-url "$PWD/bad" --dir "$RUNNER_TEMP/bad"; then exit 1; fi
           test ! -e "$RUNNER_TEMP/bad/folo"
-      # The installed binary on the oldest supported glibc, whatever the runner's own distribution is.
+      # The installed binary on the oldest supported glibc, whatever the runner's own distribution is. It must start
+      # silently: a dynamic loader warning (e.g. a missing weak symbol version) on stderr fails the check.
       - name: folo on Ubuntu 22.04
         if: runner.os != 'Windows'
         run: |
           set -eu
           docker run --rm -v "$RUNNER_TEMP/bin:/opt/folo:ro" "$UBUNTU_2204" sh -c '
             set -eu
-            /opt/folo/folo --version
+            /opt/folo/folo --version 2> /tmp/stderr
+            if [ -s /tmp/stderr ]; then cat /tmp/stderr; echo "folo --version wrote to stderr"; exit 1; fi
             /opt/folo/folo doctor --json > /tmp/doctor.json
             grep -q "\"web_source\":\"embedded\"" /tmp/doctor.json || { cat /tmp/doctor.json; exit 1; }'
       - name: install.ps1

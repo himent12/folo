@@ -72,13 +72,13 @@ git push origin :refs/tags/dryrun-0.2.0 && git tag -d dryrun-0.2.0     # once th
 |---|---|---|
 | `plan` | Linux | the version, the tag check (tag builds, and dispatches with `tag`) and the build matrix |
 | `web` | Linux | `web/dist`: folo-wasm first (`scripts/build-wasm.sh` with SIMD128, wasm-bindgen-cli at the `Cargo.lock` version, binaryen's `wasm-opt` pinned by version and checksum), then `npm ci && npm run build`; fails unless `dist/folo-wasm/` has the module. Shared with every CLI build |
-| `cli` | Windows, Linux, macOS (hosted `macos-latest`) | `folo-<target>.zip` (Windows) / `.tar.gz`: a `folo-<target>/` folder with the binary (built with `--features embed-web`), `README.md` and the licenses |
+| `cli` | Windows, Linux (built in an `ubuntu:22.04` container), macOS (hosted `macos-latest`) | `folo-<target>.zip` (Windows) / `.tar.gz`: a `folo-<target>/` folder with the binary (built with `--features embed-web`), `README.md` and the licenses |
 | `desktop` | Windows | `folo-desktop-x86_64-pc-windows-msvc.zip` with `folo-desktop.exe`, built with `--profile dist` (thin LTO, one codegen unit; apps/desktop's plain `release` profile is the faster-building development one) (skipped while `apps/desktop/Cargo.toml` does not exist) |
 | `release` | Linux | checks every `.sha256`, writes `SHA256SUMS`, uploads everything as the `release-<version>` artifact, creates the draft release (tags only) or previews it (dispatches with `tag`) |
-| `install-test` | Linux, Windows | runs `scripts/install.sh` / `scripts/install.ps1` against those assets (`--base-url`), checks the installed `folo` (and `folo-desktop`), checks that a tampered archive is refused, and runs the installed Linux `folo` in an `ubuntu:22.04` container (pinned by digest) |
+| `install-test` | Linux, Windows | runs `scripts/install.sh` / `scripts/install.ps1` against those assets (`--base-url`), checks the installed `folo` (and `folo-desktop`), checks that a tampered archive is refused, and runs the installed Linux `folo` in an `ubuntu:22.04` container, where it must start without loader warnings |
 
-Targets: `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` (runs on glibc 2.35 and newer: the build fails if
-the binary needs a newer glibc symbol version, checked with `objdump -T`) and `aarch64-apple-darwin` (macOS 11+).
+Targets: `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` (runs on glibc 2.35 and newer, see below) and
+`aarch64-apple-darwin` (macOS 11+).
 The macOS build is optional: it can fail without blocking the release, and tag builds and dispatches skip it when
 the repository variable `FOLO_RELEASE_MACOS` is `false`. The desktop job is separate for the same reason; the
 release goes out with whatever desktop build succeeded.
@@ -104,9 +104,16 @@ writes the chosen `runs-on` into each CLI matrix entry, and its summary lists th
 - **Tools.** The jobs install what they need: the Rust toolchain and targets (`dtolnay/rust-toolchain`),
   wasm-bindgen-cli at the `Cargo.lock` version (`taiki-e/install-action`, checksummed), binaryen's `wasm-opt`
   (pinned and checksummed) and Node 22 (`actions/setup-node`). They rely on the runner for `bash`, `curl`, `tar`,
-  `sha256sum`, `jq` (Linux), `objdump` (Linux), `docker` (Linux, the Ubuntu 22.04 check) and `gh` (Linux, the
-  `release` job); the boat sandboxes and the hosted images have them. Windows zips are written with Windows' own
+  `sha256sum`, `jq` (Linux), `objdump` (Linux), `docker` (Linux: the Ubuntu 22.04 build and check, with network
+  access for apt and crates.io) and `gh` (Linux, the `release` job); the boat sandboxes and the hosted images have them. Windows zips are written with Windows' own
   `tar.exe` (bsdtar), so 7-Zip is not needed.
+- **glibc 2.35.** The Linux CLI is linked inside an `ubuntu:22.04` container (pinned by digest; `gcc` and
+  `libc6-dev` from apt, the job's Rust toolchain mounted read-only, cargo running as the runner's user), so it gets
+  Ubuntu 22.04's glibc whatever the runner runs. Linked on the 24.04 sandboxes, std's weak `pidfd_spawnp` /
+  `pidfd_getpid` imports carry a `GLIBC_2.39` version, and the loader then prints ``weak version `GLIBC_2.39' not
+  found`` on every start on older systems. Two checks hold the line: the `cli` job fails when `objdump -T` shows any
+  symbol version above 2.35 (weak ones included), and `install-test` runs the installed binary in `ubuntu:22.04` and
+  fails if `folo --version` writes anything to stderr.
 - **Windows retries.** The Windows `cargo build` steps run through `tools/ci-retry.sh`, which retries once on the
   self-hosted dev PC when rustc crashes (docs/CI.md, Unstable self-hosted Windows host).
 - **Isolation.** The CLI smoke test and the install test use a throwaway `FOLO_HOME` in `$RUNNER_TEMP`, so they
