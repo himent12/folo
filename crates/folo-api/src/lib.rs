@@ -576,6 +576,26 @@ pub struct Model {
     pub run_id: Option<String>,
     /// Validation metrics of these weights, if known.
     pub metrics: Option<ModelMetrics>,
+    /// Detection head (docs/MODEL.md §6.6), from the file's `folo.config`: `o2o` models predict with the NMS-free
+    /// one-to-one branch. Additive: older servers leave it out, which reads as `o2m`.
+    #[serde(default)]
+    pub head: Head,
+    /// How the weights were trained, from the file's `folo.train` (training checkpoints have it); `null` for files
+    /// without it (exports, imported weights). Additive: missing reads as `null`.
+    #[serde(default)]
+    pub trained_with: Option<TrainedWith>,
+}
+
+/// [`Model::trained_with`]: the few training settings a front end shows next to a model.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TrainedWith {
+    /// Mixed-precision training (`TrainConfig.amp`, docs/MODEL.md §8.8).
+    pub amp: bool,
+    /// Training image size.
+    pub imgsz: u32,
+    /// Planned epochs (`TrainConfig.epochs`; a stopped run trained fewer).
+    pub epochs: u32,
 }
 
 /// Detection metrics.
@@ -1387,6 +1407,28 @@ mod tests {
         };
         let back: SystemInfo = serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
         assert_eq!(back, new.system);
+    }
+
+    #[test]
+    fn model_head_and_trained_with_are_additive() {
+        // A server older than `head` and `trained_with`.
+        let old = r#"{"id":"m_1","name":"a","arch":"folo-n","imgsz":640,"classes":["x"],"params":1,"flops_g":1.0,
+            "bytes":1,"created":"2026-01-01T00:00:00Z","run_id":null,"metrics":null}"#;
+        let m: Model = serde_json::from_str(old).unwrap();
+        assert_eq!((m.head, m.trained_with), (Head::O2m, None));
+        // `trained_with` is sent as `null`, not left out; both round-trip.
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["head"], "o2m");
+        assert!(v.as_object().unwrap().contains_key("trained_with") && v["trained_with"].is_null(), "{v}");
+        let m = Model {
+            head: Head::O2o,
+            trained_with: Some(TrainedWith { amp: true, imgsz: 512, epochs: 80 }),
+            ..m
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["head"], "o2o");
+        assert_eq!(v["trained_with"], serde_json::json!({ "amp": true, "imgsz": 512, "epochs": 80 }));
+        assert_eq!(serde_json::from_value::<Model>(v).unwrap(), m);
     }
 
     #[test]

@@ -348,8 +348,10 @@ impl MockBackend {
             created: time::format(h(hours)),
             run_id: Some(run.into()),
             metrics: Some(ModelMetrics { map50: m[0], map50_95: m[1], precision: m[2], recall: m[3] }),
+            head: folo_api::Head::O2m,
+            trained_with: None,
         };
-        let models = vec![
+        let mut models = vec![
             model(
                 "m_44c0",
                 "shapes-hard-s-best",
@@ -429,6 +431,11 @@ impl MockBackend {
                 [0.661, 0.402, 0.712, 0.584],
             ),
         ];
+        // shapes-hard-s-best comes from the end-to-end, mixed-precision run below: its record says so.
+        if let Some(m) = models.iter_mut().find(|m| m.id == "m_44c0") {
+            m.head = folo_api::Head::O2o;
+            m.trained_with = Some(folo_api::TrainedWith { amp: true, imgsz: 640, epochs: 120 });
+        }
 
         let cfg = |name: &str, ds: &str, arch: &str, epochs, batch, imgsz, device: &str, lr0| TrainConfig {
             name: name.into(),
@@ -486,7 +493,12 @@ impl MockBackend {
             },
             Spec {
                 id: "run_52e8",
-                config: cfg("shapes-hard-s", "ds_3b91", "folo-s", 120, 32, 640, "gpu:0", 0.01),
+                // The end-to-end head (no NMS) in mixed precision, so its model shows both.
+                config: TrainConfig {
+                    head: Head::O2o,
+                    amp: true,
+                    ..cfg("shapes-hard-s", "ds_3b91", "folo-s", 120, 32, 640, "gpu:0", 0.01)
+                },
                 status: RunStatus::Completed,
                 step: 120 * 100,
                 spe: 100,

@@ -121,7 +121,12 @@ pub fn paint_image_with_boxes(
         let mut placed: Vec<Bounds<Pixels>> = Vec::new();
         // Two passes: every box first, then every label chip, so no box stroke covers a chip.
         for pass in 0..2 {
-            for &b in &order {
+            // Boxes paint dimmed first, so the highlighted one sits on top; chips are placed the
+            // other way round, so the selected and matching boxes claim the free spots before
+            // dimmed ones (a class filter must not leave its own boxes unlabelled).
+            let seq: Vec<&DrawBox> =
+                if pass == 0 { order.clone() } else { order.iter().rev().copied().collect() };
+            for &b in &seq {
                 let color = t.class(b.class);
                 let a = if b.dim { 0.3 } else { 1.0 };
                 let p1 = to(b.x1, b.y1);
@@ -196,7 +201,7 @@ pub fn paint_image_with_boxes(
                     } else if b.dim {
                         // Muted but opaque (a translucent chip over a photo can't be read): the
                         // class tint on the panel colour, text picked for contrast on it.
-                        let muted = crate::theme::over(t.bg_panel, alpha(color, 0.4));
+                        let muted = crate::theme::over(t.bg_panel, alpha(color, 0.25));
                         (muted, t.readable_on(muted))
                     } else {
                         (color, chip_text)
@@ -232,6 +237,14 @@ pub fn paint_image_with_boxes(
                             None,
                         );
                     }
+                    // A name-only chip wider than the view would run off it: none (the inspector
+                    // and the detection list name the box in full). The selected box keeps its chip.
+                    if score.is_empty()
+                        && !b.highlight
+                        && name_line.width + px(10.) > bounds.size.width - px(4.)
+                    {
+                        continue;
+                    }
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
                     let cw = name_line.width + gap + score_line.width + px(10.);
                     let ch = px(if compact { 14. } else { 16. });
@@ -257,10 +270,13 @@ pub fn paint_image_with_boxes(
                         o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
                     };
                     let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.dilate(px(2.)).intersects(c));
-                    // More spots down the inside of the box, one chip height (+2 px) apart.
-                    let inside = (1..4).map(|k| {
-                        point(clamp_x(r.left() + px(1.)), r.top() + px(1.) + (ch + px(2.)) * k as f32)
-                    });
+                    // More spots down the inside of the box, one chip height (+2 px) apart, only
+                    // while they stay inside it: a chip below its box would read as another's.
+                    let inside = (1..4)
+                        .map(|k| {
+                            point(clamp_x(r.left() + px(1.)), r.top() + px(1.) + (ch + px(2.)) * k as f32)
+                        })
+                        .filter(|o| o.y + ch <= r.bottom() - px(1.));
                     let free_spot = candidates
                         .iter()
                         .copied()

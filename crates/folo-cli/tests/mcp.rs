@@ -563,6 +563,15 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     checked(c, &schemas, "export", json!({ "model_id": model_id, "format": "onnx" }));
     let models = checked(c, &schemas, "list_models", json!({ "limit": 2 }));
     assert_eq!(models["items"].as_array().unwrap().len(), 2);
+    // Head and training settings, as on the API's Model (mock: shapes-s is o2o, r6-n trained with AMP).
+    let models = checked(c, &schemas, "list_models", json!({ "limit": 200 }));
+    let item = |id: &str| models["items"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap().clone();
+    assert_eq!(
+        (item("m_31ab")["head"].clone(), item("m_31aa")["head"].clone()),
+        (json!("o2o"), json!("o2m"))
+    );
+    assert_eq!(item("m_53d1")["trained_with"], json!({ "amp": true, "imgsz": 640, "epochs": 80 }));
+    assert!(item("m_53d2")["trained_with"].is_null());
     let runs = checked(c, &schemas, "list_runs", json!({ "status": "completed" }));
     assert!(runs["items"].as_array().unwrap().iter().all(|r| r["status"] == "completed"));
     let cmp = checked(c, &schemas, "compare_runs", json!({ "run_ids": [run_id, "run_2b02"] }));

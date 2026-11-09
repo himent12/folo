@@ -52,7 +52,8 @@ power ("0.10×10⁻³"), so a card has one power and the value still reads alone
 New run's section heads stay 14 px semibold and the dialog title is 20 px semibold above them (one round asked for
 larger heads, the next said they outweighed the title). The run page's "Precision / Recall" card and the model page's
 "Precision–recall" card are different charts: two metrics over epochs, and one curve of precision against recall.
-Their names differ on purpose.
+Their names differ on purpose. The first-run Overview is capped at 1040 px and left-aligned like Settings. One round said the uncapped
+cards stretched three short steps across 1,600 px, the next asked them to fill a wide window.
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed

@@ -248,6 +248,8 @@ pub struct NewRunForm {
     pub close_invalid: bool,
     /// Mixed-precision training (f16 on tensor cores). Sent only for a GPU device.
     pub amp: bool,
+    /// The NMS-free end-to-end head (`head: o2o`); off is the default one-to-many head.
+    pub e2e: bool,
     _subs: Vec<Subscription>,
     pub submitting: bool,
     pub error: Option<ApiError>,
@@ -289,9 +291,7 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
         c.seed = b.seed;
         c.augment.hsv = b.augment.hsv;
         c.augment.translate = b.augment.translate;
-        // Not `amp`: the form shows it (prefilled from the base) and the CPU guard decides it.
-        // `head` is not in the form: a retry keeps the base run's.
-        c.head = b.head;
+        // Not `amp` nor `head`: the form shows both (prefilled from the base).
     }
     c
 }
@@ -1552,6 +1552,7 @@ impl FoloApp {
             f.close_mosaic = config.augment.close_mosaic as f32;
             f.scale = config.augment.scale;
             f.amp = config.amp;
+            f.e2e = config.head == Head::O2o;
             f.note = note;
             f.base = Some(config.clone());
             let input = f.name.clone();
@@ -1677,6 +1678,7 @@ impl FoloApp {
             close_input,
             close_invalid: false,
             amp: false,
+            e2e: false,
             epochs_invalid: false,
             lr_invalid: false,
             _subs: subs,
@@ -1735,7 +1737,7 @@ impl FoloApp {
                 seed: 0,
                 // Only where it can run: not the CPU, nor a server that says it can't.
                 amp: form.amp && amp_ok,
-                head: Default::default(),
+                head: if form.e2e { Head::O2o } else { Head::O2m },
             },
         );
         let _ = window;
@@ -2066,6 +2068,16 @@ impl FoloApp {
             },
         );
     }
+
+    /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own
+    /// record says (`Model.head`, from its folo.config), so imported and orphaned models read right.
+    pub fn model_e2e(&self, m: &Model) -> bool {
+        m.head == Head::O2o
+    }
+
+    /// The help shown wherever a model or run is marked end-to-end.
+    pub const E2E_HELP: &'static str =
+        "End-to-end: predicts boxes directly, without non-maximum suppression (NMS)";
 
     /// Why Mixed precision can't be used for a run on `device` (an entry of `DEVICES`), if it can't:
     /// the CPU, or the server's own answer (`capabilities.amp`, the message such a run would fail
@@ -3335,6 +3347,9 @@ mod retry_tests {
         assert_eq!(out.augment.translate, 0.25);
         assert_eq!(out.name, "a-2");
         assert!(!out.amp);
+        // The form's head stands (it shows the base's and may change it).
+        let o2o = TrainConfig { head: crate::api::Head::O2o, ..edited.clone() };
+        assert_eq!(carry_over(Some(&base), o2o).head, crate::api::Head::O2o);
         // A fresh form keeps its own values.
         assert_eq!(carry_over(None, edited.clone()), edited);
     }

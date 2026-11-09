@@ -239,14 +239,22 @@ impl FoloApp {
                             cx.stop_propagation();
                         }
                     }))
+                    // A name that may be cut shows in full on hover (and on focus, above).
                     .child(
-                        div().flex_1().min_w(px(180.)).child(
-                            text(ty::SM, t.text_primary)
-                                .font_weight(FontWeight::MEDIUM)
-                                .w(px(180.))
-                                .truncate()
-                                .child(r.name.clone()),
-                        ),
+                        div()
+                            .id(SharedString::from(format!("rn-{}", r.id)))
+                            .flex_1()
+                            .min_w(px(180.))
+                            .when(crate::ui::may_overflow(&r.name, ty::SM.size, 180.), |d| {
+                                d.tooltip(crate::controls::tip(r.name.clone(), None))
+                            })
+                            .child(
+                                text(ty::SM, t.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .w(px(180.))
+                                    .truncate()
+                                    .child(r.name.clone()),
+                            ),
                     )
                     .child(
                         text(ty::SM, t.text_secondary).w(px(64.)).flex_none().child(r.config.arch.as_str()),
@@ -390,9 +398,12 @@ impl FoloApp {
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         let started = r.started.as_deref().and_then(time::parse).map(|s| time::ago(s, now));
         let device = crate::ui::device_label(&r.device);
+        // The architecture; an end-to-end head is a badge by the title, as on the model page.
+        let arch = r.config.arch.as_str().to_string();
+        let e2e = r.config.head == crate::api::Head::O2o;
         let subtitle = text(ty::BASE, t.text_secondary).child(match started {
-            Some(s) => format!("{} · {ds_name} · {device} · started {s}", r.config.arch.as_str()),
-            None => format!("{} · {ds_name} · {device}", r.config.arch.as_str()),
+            Some(s) => format!("{arch} · {ds_name} · {device} · started {s}"),
+            None => format!("{arch} · {ds_name} · {device}"),
         });
 
         let mut actions = Vec::new();
@@ -494,7 +505,17 @@ impl FoloApp {
             .items_center()
             .gap(px(12.))
             .child(text(ty::XL, t.text_primary).child(r.name.clone()))
-            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)));
+            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)))
+            .when(e2e, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(badge(&t, "end-to-end", Tone::Neutral))
+                        .child(self.help_icon("run-head-help", FoloApp::E2E_HELP, window, cx)),
+                )
+            });
         let header = detail_header(&t, title, subtitle, actions);
 
         let mut body = div().flex().flex_col().gap(px(16.));

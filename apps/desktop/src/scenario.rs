@@ -38,11 +38,13 @@ pub const ALL: &[&str] = &[
     "run-done",
     "run-failed",
     "new-run",
+    "new-run+amp",
     "stop-confirm",
     "models",
     "model",
     "model+light",
     "playground",
+    "playground+nms",
     "playground+empty",
     "playground+light",
     "settings",
@@ -141,6 +143,13 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         // The form needs the dataset list; load it synchronously from the frozen mock.
         app.store.datasets = app.store.api.datasets().into();
         app.open_new_run(Some("ds_3b91"), window, cx);
+        if s.has("amp") {
+            // Mixed precision on, scrolled to the dialog's end: the switch and the f16 estimate.
+            if let Some(f) = app.new_run.as_mut() {
+                f.amp = true;
+            }
+            app.dialog_scroll.set_offset(gpui::point(gpui::px(0.), gpui::px(-4000.)));
+        }
     }
     if screen == "toast" {
         app.toast_with(
@@ -161,7 +170,8 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     }
     if screen == "playground" && !s.has("empty") {
         app.store.models = app.store.api.models().into();
-        app.play_model = Some("m_44c0".into());
+        // shapes-hard-s-best is end-to-end (no NMS row); `+nms` shows a model with the IoU slider.
+        app.play_model = Some(if s.has("nms") { "m_31aa" } else { "m_44c0" }.into());
         app.play_conf = 0.35;
         app.play_hover = Some(0);
         app.play_dataset_image("ds_3b91", "img_03417", cx);
