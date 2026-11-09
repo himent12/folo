@@ -174,6 +174,18 @@
           </li>
         {/each}
       </ul>
+    {:else if !datasets.data && !datasets.error}
+      <!-- Phones, loading: the rows' shape (name over one meta line, the image count on the right). -->
+      <ul class="rows" aria-hidden="true">
+        {#each [0, 1, 2] as i (i)}
+          <li>
+            <span class="row-sk">
+              <span class="m-main"><Skeleton w="55%" h="14px" /><Skeleton w="75%" h="10px" /></span>
+              <span class="m-side"><Skeleton w="48px" h="14px" /></span>
+            </span>
+          </li>
+        {/each}
+      </ul>
     {/if}
   </Panel>
 </Page>
@@ -214,7 +226,8 @@
     .rows li + li {
       border-top: 1px solid var(--line-subtle);
     }
-    .rows a {
+    .rows a,
+    .rows .row-sk {
       display: flex;
       align-items: center;
       gap: var(--space-3);
@@ -228,6 +241,9 @@
       flex: 1;
       min-width: 0;
       display: grid;
+    }
+    .row-sk .m-main {
+      gap: var(--space-2);
     }
     .m-meta {
       font-size: var(--type-sm-size);

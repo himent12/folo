@@ -867,6 +867,8 @@ export const scenes = [
   { name: 'runs-empty', path: '/runs', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   // Empty and error states sit in the table frame (header row, the message inside, a few rows tall).
   { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'runs-loading', path: '/runs', search: 'scenario=loading', viewports: ['desktop', 'tablet', 'mobile'] },
+  { name: 'datasets-loading', path: '/datasets', search: 'scenario=loading', viewports: ['desktop', 'tablet', 'mobile'] },
   { name: 'datasets-error', path: '/datasets', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     // Offline: the create action is disabled and says why on hover (and to assistive tech).

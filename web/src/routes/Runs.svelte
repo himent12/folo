@@ -127,7 +127,7 @@
 
   <Panel pad="none">
     <!-- One table frame for every state: the header row stays, and an empty or failed list says so inside it. -->
-    <div class="scroll" class:state={!runs.data?.length || shown.length === 0}>
+    <div class="scroll" class:state={runs.data ? shown.length === 0 : !!runs.error}>
       <!-- Row checkboxes show on hover and focus, on selected rows, and on every row once one is selected (picking). -->
       <table
         class="table runs"
@@ -276,6 +276,18 @@
             {#if r.status === 'running'}
               <span class="r-prog" aria-hidden="true" style:transform="scaleX({runProgress(r)})"></span>
             {/if}
+          </li>
+        {/each}
+      </ul>
+    {:else if !runs.data && !runs.error}
+      <!-- Phones, loading: the stacked rows' shape (name over one meta line, the score on the right). -->
+      <ul class="rows sk" aria-hidden="true">
+        {#each [0, 1, 2, 3, 4] as i (i)}
+          <li>
+            <span class="r-main">
+              <span class="r-text"><Skeleton w="55%" h="14px" /><Skeleton w="75%" h="10px" /></span>
+              <span class="r-end"><Skeleton w="40px" h="14px" /></span>
+            </span>
           </li>
         {/each}
       </ul>
@@ -477,6 +489,9 @@
     .r-meta {
       font-size: var(--type-sm-size);
       color: var(--text-tertiary);
+    }
+    .sk .r-text {
+      gap: var(--space-2);
     }
     .r-end {
       flex-shrink: 0;
