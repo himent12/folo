@@ -148,7 +148,6 @@
         xDomain={[0, 1]}
         yDomain={[0, 1]}
         xFormat={(x) => x.toFixed(1)}
-        yFormat={(y) => y.toFixed(1)}
         valueFormat={(y) => y.toFixed(3)}
         xTicks={6}
         yTicks={5}
