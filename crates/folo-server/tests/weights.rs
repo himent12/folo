@@ -180,6 +180,20 @@ async fn mock_weights_are_a_real_folo_n_file() {
     assert_eq!(status, StatusCode::OK);
     assert!(load(&o2o).metadata().config.has_o2o() && !meta.config.has_o2o());
 
+    // Every model's file has the dtype and fusing its record says: the f16 export (m_53d2) is served as fused F16.
+    let (_, _, list, _) = send(&app, get("/api/models", &[])).await;
+    let list: ModelList = serde_json::from_slice(&list).unwrap();
+    let mut f16_models = 0;
+    for m in &list.models {
+        let (status, _, b, _) = send(&app, get(&format!("/api/models/{}/weights", m.id), &[])).await;
+        assert_eq!(status, StatusCode::OK);
+        let meta = load(&b).metadata().clone();
+        let dtype = if meta.dtype == FloatDType::F16 { ModelPrecision::F16 } else { ModelPrecision::F32 };
+        assert_eq!((m.precision, m.fused), (Some(dtype), Some(meta.fused)), "{}", m.id);
+        f16_models += usize::from(dtype == ModelPrecision::F16);
+    }
+    assert_eq!(f16_models, 1);
+
     assert_eq!(
         error_code(&app, "/api/models/m_none/weights", StatusCode::NOT_FOUND).await,
         "model_not_found"

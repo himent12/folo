@@ -8,12 +8,13 @@ use std::sync::{Arc, Mutex};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Arch, ExportFormat, ExportResult, ExportSpec, Head, Model, ModelEval, ModelMetrics, PrCurve, TrainedWith,
-    ValReport, ValTiming,
+    Arch, ExportFormat, ExportResult, ExportSpec, Head, Model, ModelEval, ModelMetrics, ModelPrecision,
+    PrCurve, TrainedWith, ValReport, ValTiming,
 };
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
-use folo_nn::io::{FloatDType, Namespace};
+use folo_nn::io::safetensors::Container;
+use folo_nn::io::{FloatDType, Metadata, Namespace};
 use folo_vision::NmsConfig;
 use folo_vision::export::onnx::{self, OnnxOptions};
 use folo_vision::val::{ValConfig, val_metrics, validate};
@@ -50,6 +51,30 @@ pub struct FileMeta {
     pub head: Head,
     /// From `folo.train`, when the file has it.
     pub trained_with: Option<TrainedWith>,
+    /// `folo.dtype`, when the file has a known one.
+    pub precision: Option<ModelPrecision>,
+    /// `folo.fused`, unless its value is unknown.
+    pub fused: Option<bool>,
+}
+
+/// [`Model::precision`] from a file's `folo.dtype`: `None` when it is missing (a file from another writer; FOLO's
+/// always writes it) or not one this server knows.
+fn precision(dtype: Option<&str>) -> Option<ModelPrecision> {
+    match dtype? {
+        "F32" => Some(ModelPrecision::F32),
+        "F16" => Some(ModelPrecision::F16),
+        _ => None,
+    }
+}
+
+/// [`Model::fused`] from a file's `folo.fused`: writers leave the key out of unfused files (docs/FORMAT.md), so a
+/// missing key is `false`; a value other than `"true"` / `"false"` is unknown.
+fn fused(fused: Option<&str>) -> Option<bool> {
+    match fused {
+        None | Some("false") => Some(false),
+        Some("true") => Some(true),
+        Some(_) => None,
+    }
 }
 
 /// The parts of `folo.train` (the trainer's resolved config) that [`TrainedWith`] shows. Files written before
@@ -90,11 +115,31 @@ fn is_buffer(name: &str) -> bool {
     name.ends_with("running_mean") || name.ends_with("running_var") || name.ends_with("num_batches_tracked")
 }
 
+/// Reads only the file's header: the listing reads every file once per version, and a run checkpoint is several
+/// times the size of its weights. The tensor data is checked when the file is loaded.
 fn read_meta(path: &Path) -> Result<FileMeta> {
-    let file = engine::read_model_file(path)?;
-    let m = file.metadata();
-    let params = file
-        .tensor_infos()
+    let header = Container::read_header(path).map_err(|e| match e {
+        folo_nn::Error::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => Error::new(
+            StatusCode::NOT_FOUND,
+            "model_not_found",
+            format!("{} no longer exists", path.display()),
+        ),
+        e => nn_error(e),
+    })?;
+    let mut map = header.metadata.unwrap_or_default();
+    let precision = precision(map.get("folo.dtype").map(String::as_str));
+    let fused = fused(map.get("folo.fused").map(String::as_str));
+    // An unknown dtype or fused flag leaves that field unknown; the file still lists (loading it says what is
+    // wrong), so the metadata is parsed without the key.
+    if precision.is_none() {
+        map.remove("folo.dtype");
+    }
+    if fused.is_none() {
+        map.remove("folo.fused");
+    }
+    let m = &Metadata::from_map(&map).map_err(nn_error)?;
+    let params = header
+        .tensors
         .iter()
         .filter(|t| Namespace::of(&t.name) == Namespace::Model && !is_buffer(&t.name))
         .map(|t| t.shape.iter().product::<usize>() as u64)
@@ -121,6 +166,8 @@ fn read_meta(path: &Path) -> Result<FileMeta> {
         }),
         head: if m.config.has_o2o() { Head::O2o } else { Head::O2m },
         trained_with: trained_with(m.extra.get("folo.train")),
+        precision,
+        fused,
     })
 }
 
@@ -157,6 +204,8 @@ pub fn model_of(
         metrics,
         head: meta.head,
         trained_with: meta.trained_with,
+        precision: meta.precision,
+        fused: meta.fused,
     }
 }
 
@@ -534,5 +583,19 @@ mod tests {
         ] {
             assert_eq!(t(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn precision_and_fused_read_their_keys_leniently() {
+        assert_eq!(precision(Some("F32")), Some(ModelPrecision::F32));
+        assert_eq!(precision(Some("F16")), Some(ModelPrecision::F16));
+        for unknown in [None, Some("BF16"), Some("f16"), Some("")] {
+            assert_eq!(precision(unknown), None, "{unknown:?}");
+        }
+        assert_eq!(
+            (fused(None), fused(Some("false")), fused(Some("true"))),
+            (Some(false), Some(false), Some(true))
+        );
+        assert_eq!((fused(Some("yes")), fused(Some("TRUE"))), (None, None));
     }
 }

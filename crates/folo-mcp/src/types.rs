@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use folo_api::{
     Arch, BBox, BestEpoch, Capabilities, DatasetFormat, DatasetIssue, Epoch, ExportFormat, GpuInfo, Head,
-    IssueCounts, IssueSeverity, LogLine, Loss, ModelMetrics, Run, RunStatus, Split, Splits, Step,
-    TrainConfig, TrainedWith, ValMetrics,
+    IssueCounts, IssueSeverity, LogLine, Loss, ModelMetrics, ModelPrecision, Run, RunStatus, Split, Splits,
+    Step, TrainConfig, TrainedWith, ValMetrics,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -478,6 +478,12 @@ pub struct ModelSummary {
     pub head: Head,
     /// Training settings from the file's `folo.train` (`null` for exports and imported weights).
     pub trained_with: Option<TrainedWith>,
+    /// Stored weight dtype (`folo.dtype`): `f16` for half-precision exports. Left out when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub precision: Option<ModelPrecision>,
+    /// Conv+BN fused (`folo.fused`, an inference-only export); run checkpoints are unfused. Left out when unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fused: Option<bool>,
 }
 
 /// CPU of the machine running `folo mcp`.

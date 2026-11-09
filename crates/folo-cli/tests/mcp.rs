@@ -572,6 +572,9 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     );
     assert_eq!(item("m_53d1")["trained_with"], json!({ "amp": true, "imgsz": 640, "epochs": 80 }));
     assert!(item("m_53d2")["trained_with"].is_null());
+    // Stored dtype and fusing (mock: m_53d2 is the fused f16 export of m_53d1's checkpoint).
+    assert_eq!((&item("m_53d2")["precision"], &item("m_53d2")["fused"]), (&json!("f16"), &json!(true)));
+    assert_eq!((&item("m_53d1")["precision"], &item("m_53d1")["fused"]), (&json!("f32"), &json!(false)));
     let runs = checked(c, &schemas, "list_runs", json!({ "status": "completed" }));
     assert!(runs["items"].as_array().unwrap().iter().all(|r| r["status"] == "completed"));
     let cmp = checked(c, &schemas, "compare_runs", json!({ "run_ids": [run_id, "run_2b02"] }));

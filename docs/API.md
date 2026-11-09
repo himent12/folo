@@ -162,6 +162,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   file's `folo.train` (docs/FORMAT.md: training checkpoints, so run models and checkpoints copied into `models/`):
   its `amp`, `imgsz` and `epochs` (the planned epochs; `amp` is `false` for files from before mixed precision);
   `null` for files without it (`folo export` / `folo-f16` exports, imported weights) or with one that does not parse.
+  `precision` is the stored weight dtype, `folo.dtype` (docs/FORMAT.md): `f32` (run checkpoints, f32 exports) or
+  `f16` (`folo-f16` exports); `fused` is `folo.fused` (`true` for exports, whose Conv+BN are fused and
+  which load for inference only; writers leave the key out of unfused files, so a missing key is `false`). Both are
+  left out of the object (not `null`) when unknown: a file without `folo.dtype` (FOLO's writer always sets it), a
+  dtype or `folo.fused` value this server has no name for (such a file still lists, and loading it says what is
+  wrong). Clients read a `precision` value they do not know as unknown too, so a later dtype is additive. Metadata
+  comes from the file's header alone (the first `8 + N` bytes, docs/FORMAT.md), never the tensor data, read once
+  per file version; a file whose header is invalid is skipped with a warning in the server log.
 - `GET /api/models/{id}` → `Model`
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none), for the PR curves and confusion matrix of the Models view:
@@ -217,7 +225,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "created": "...", "run_id": "run_7d1e" | null,
   "metrics": { "map50": 0.91, "map50_95": 0.74, "precision": 0.9, "recall": 0.86 } | null,
   "head": "o2m|o2o",                                        // additive: missing (older servers) = "o2m"
-  "trained_with": { "amp": false, "imgsz": 640, "epochs": 100 } | null }  // additive: missing = null
+  "trained_with": { "amp": false, "imgsz": 640, "epochs": 100 } | null,  // additive: missing = null
+  "precision"?: "f32|f16",                                  // additive: missing (older servers) = unknown
+  "fused"?: false }                                         // additive: missing (older servers) = unknown
 ```
 
 ## Training runs
@@ -411,10 +421,12 @@ start, except live-run timestamps):
   deterministic `clipped_box` / `duplicate_image` warnings.
 - Models: six (`m_31aa`, `m_31ab`, `m_42c1`, `m_42c2`, `m_53d1`, `m_53d2`), each linked to its run (`head` and
   `trained_with` match the run's config: `m_31ab` / `run_1a02` is an `o2o` model, `m_53d1` / `run_3c01` was trained
-  with `amp`, and `m_53d2`, its f16 export, has `trained_with: null`), with
+  with `amp`, and `m_53d2`, its f16 export, has `trained_with: null`; `m_53d2` is `precision: "f16"`,
+  `fused: true`, every other model `"f32"` and `false`), with
   deterministic `/eval` results consistent with its metrics (smooth PR curves, a mostly diagonal confusion matrix).
   `/weights` serves a real, loadable `.folo` file: always the **folo-n** architecture (whatever the model's `arch`)
-  with the model's classes, `imgsz` and `head` and deterministic random weights (about 10 MB, 5 MB as `f16`), generated on
+  with the model's classes, `imgsz` and `head` and deterministic random weights (about 10 MB, 5 MB as `f16`; an
+  `f16` model's file as stored is its fused f16 export, matching its `precision` and `fused`), generated on
   the first request and kept in memory, so the in-browser path works in mock mode (it detects nothing useful).
   `Last-Modified` is the server's start time.
 - Runs: four completed, one stopped (`run_2b02`), one failed with an out-of-memory error (`run_2b03`), all with full

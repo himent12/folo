@@ -350,6 +350,8 @@ impl MockBackend {
             metrics: Some(ModelMetrics { map50: m[0], map50_95: m[1], precision: m[2], recall: m[3] }),
             head: folo_api::Head::O2m,
             trained_with: None,
+            precision: Some(folo_api::ModelPrecision::F32),
+            fused: Some(false),
         };
         let mut models = vec![
             model(
