@@ -1692,7 +1692,7 @@ mod matrix_tests {
     #[test]
     fn error_cells_keep_their_label_readable() {
         for t in [Theme::new(Mode::Dark), Theme::new(Mode::Light)] {
-            for frac in [0., 0.25, 0.5, 0.75, 1.] {
+            for frac in (0..=100).map(|i| i as f32 / 100.) {
                 let cell = over(t.bg_panel, alpha(t.danger_solid, super::err_alpha(frac)));
                 let c = contrast(t.readable_on(cell), cell);
                 assert!(c >= 4.5, "{:?} error cell at {frac}: {c:.2}:1", t.mode);
