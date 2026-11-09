@@ -73,6 +73,9 @@ Larger images cost more, up to a cap: images are scaled down to at most 1024 px 
 sent, so a 12-megapixel photo costs what a 1024 px one does. The boxes come back in relative coordinates and are
 stored in pixels of the original file.
 
+The fixed cost is per call, however few images it has: asking Codex again about a single image costs its 8000
+tokens for that one image, where Claude Code's call costs little more than the image.
+
 A run stops spending as soon as spending is pointless. If the CLI is missing, signed out, refuses the model or
 hits a rate limit, the run ends on that call with the CLI's own message, and the images it did not reach stay as
 they were. A reply that cannot be read is asked for once more, never in a loop. Three calls in a row that time
@@ -102,6 +105,8 @@ Codex's default model is already good at low effort. On clean synthetic shapes
 
 To measure your own setup, run that test against the real CLIs:
 `cargo test -p folo-server --test label_live -- --ignored --nocapture` (`FOLO_LABEL_LIVE_MODEL` picks a model).
+`npm run label-smoke` in `web/` drives the whole flow through Studio against a running `folo serve` and a real
+agent, with a folder of your own images, and prints what the agent reported using.
 
 ## Getting better labels
 - Write the instructions for someone who has never seen your data. Name look-alikes ("vans count as car"), say
