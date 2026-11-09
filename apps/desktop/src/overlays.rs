@@ -1931,7 +1931,7 @@ impl FoloApp {
                 // The class column is 70 px: a name that may not fit shows in full on hover and on
                 // keyboard focus (short ones need neither).
                 let full_name = classes.get(b.class as usize).cloned().unwrap_or_default();
-                let long = full_name.chars().count() > 8;
+                let long = crate::ui::may_overflow(&full_name, ty::SM.size, 70.);
                 let focused = long && self.ring(&self.fh(key.clone(), cx), window);
                 let row = div()
                     .id(SharedString::from(key.clone()))

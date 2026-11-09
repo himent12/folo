@@ -117,14 +117,19 @@ impl FoloApp {
         let nothing_yet = no_ds
             && self.store.runs.ready().is_some_and(|r| r.is_empty())
             && self.store.models.ready().is_some_and(|m| m.is_empty());
-        // One rule for the header: actions show once the page has loaded and has a body of its own
+        // One rule for the header: actions show once the page has settled and has a body of its own
         // to act on. First run (the getting-started panel's "Add dataset" is the call to action),
-        // not connected (the error panel's Retry is) and loading show none, so nothing flashes in
-        // disabled and then vanishes.
-        let loaded = self.store.runs.ready().is_some()
-            && self.store.models.ready().is_some()
-            && self.store.datasets.ready().is_some();
-        let actions = if nothing_yet || !loaded { Vec::new() } else { actions };
+        // not connected (the error panel's Retry is) and still loading show none, so nothing
+        // flashes in disabled and then vanishes. A list that failed has settled: each action then
+        // says for itself whether it can run (a failed models list doesn't hide New run).
+        let pending = [
+            self.store.runs.ready().is_none() && self.store.runs.error().is_none(),
+            self.store.models.ready().is_none() && self.store.models.error().is_none(),
+            self.store.datasets.ready().is_none() && self.store.datasets.error().is_none(),
+        ]
+        .contains(&true);
+        let hide = nothing_yet || pending || self.store.runs.error().is_some();
+        let actions = if hide { Vec::new() } else { actions };
         let header = page_header(&t, "Overview", text(ty::BASE, t.text_secondary).child(subtitle), actions);
 
         if let Some(e) = self.store.runs.error().cloned() {

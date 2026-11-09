@@ -642,7 +642,7 @@ impl FoloApp {
                         let color = t.class(b.class);
                         let key = format!("det-{i}");
                         // A cut class name shows in full on hover and on keyboard focus.
-                        let long = b.name.chars().count() > 9;
+                        let long = may_overflow(&b.name, ty::SM.size, 68.);
                         let focused = long && self.ring(&self.fh(key.clone(), cx), window);
                         let full = b.name.clone();
                         let row = div()
@@ -712,11 +712,11 @@ impl FoloApp {
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
-                // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary at 70 %
-                // (a step below it, still 3:1 on the panel), and Postprocess an outline (a faint fill
-                // in a tertiary edge), in the bar and its key alike.
+                // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary a step
+                // below it (70 % dark, 80 % light: each 3:1 on its panel), and Postprocess an outline
+                // (a faint fill in a tertiary edge), in the bar and its key alike.
                 let (c_pre, c_model, c_nms) = (
-                    crate::theme::alpha(t.text_tertiary, 0.7),
+                    crate::theme::alpha(t.text_tertiary, if t.is_dark() { 0.7 } else { 0.8 }),
                     t.text_secondary,
                     crate::theme::alpha(t.text_tertiary, 0.3),
                 );
