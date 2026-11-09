@@ -958,7 +958,9 @@ impl FoloApp {
                     best.into_iter().map(|(ds, m)| (name_of(&ds), m)).collect();
                 // Models, but none to rank yet: unevaluated, imported, or their runs still loading.
                 if models.is_empty() {
-                    let body = if self.store.runs.ready().is_none() {
+                    let body = if self.store.runs.error().is_some() {
+                        "Runs didn't load, so the datasets models were trained on aren't known: retry above."
+                    } else if self.store.runs.ready().is_none() {
                         "Waiting for runs to say which dataset each model was trained on."
                     } else {
                         "Evaluated models trained here show up per dataset."
