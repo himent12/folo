@@ -938,6 +938,19 @@ export const scenes = [
     setup: (page, { vp }) => until(page, vp === 'mobile' ? '#pr svg' : '#cm .cell'),
   },
   {
+    // The Details rail is sticky (DESIGN_DIRECTION §2.2): scrolled to the per-class table, it holds under the top bar
+    // beside it, so the space under it in the full-page shot is the room it travels in.
+    name: 'model-detail-scrolled',
+    path: '/models/m_fast_n',
+    viewports: ['desktop', 'laptop'],
+    fullPage: false,
+    setup: async (page) => {
+      await until(page, '#cm .cell');
+      await page.locator('.cls-part').first().evaluate((el) => el.scrollIntoView({ block: 'end' }));
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // Laptop: the details fold into one line above the matrix; opened here, they list in two columns. Phones: the
     // Details section.
     name: 'model-detail-details',

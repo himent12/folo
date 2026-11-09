@@ -1208,7 +1208,7 @@
   .th-name {
     max-width: 100%;
   }
-  #cmp-table thead th {
+  .fixed thead th {
     height: auto;
     padding-block: var(--space-2);
     vertical-align: top;

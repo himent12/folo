@@ -139,7 +139,7 @@ describe('Compare runs on a phone: two at a time', () => {
 });
 
 describe('Compare: the side by side reads against its baseline', () => {
-  it('marks each dataset's best, sets values equal to the baseline's in tertiary, and keeps the keys to the chips', async () => {
+  it("marks each dataset's best, sets values equal to the baseline's in tertiary, and keeps the keys to the chips", async () => {
     const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 4);
     setWidth(1440);
     router.route = parse(`#/runs/compare?ids=${runs.map((r) => r.id).join(',')}`);

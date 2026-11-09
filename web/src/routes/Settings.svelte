@@ -279,8 +279,8 @@
               />
               <span class="preview">
                 {#if t.value === 'system'}
-                  <span class="split dark-half"><ThemePreview theme="dark" /></span>
-                  <span class="split light-half"><ThemePreview theme="light" /></span>
+                  <!-- Both themes, each a whole window of its own: dark on the left, light on the right, a 1 px seam. -->
+                  <span class="split"><ThemePreview theme="dark" /><span class="seam"></span><ThemePreview theme="light" /></span>
                 {:else}
                   <ThemePreview theme={t.value} />
                 {/if}
@@ -667,13 +667,16 @@
     outline: var(--size-focus-ring) solid var(--focus);
     outline-offset: 4px;
   }
+  /* System: the dark window and the light one side by side, split down the middle by a line.default seam (round 25's
+     diagonal black-and-white cut read as neither theme). */
   .split {
     position: absolute;
     inset: 0;
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr);
   }
-  .light-half {
-    clip-path: polygon(100% 0, 100% 100%, 0 100%);
+  .seam {
+    background: var(--line-default);
   }
   /* Every card reserves the "Current" line under its name, so the three names sit at one height whichever is chosen
      (round 24: only the chosen card's label grew a line). */
