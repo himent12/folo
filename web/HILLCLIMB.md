@@ -45,6 +45,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r19 | Claude Opus 5.5 (120 sheets, 23 full-size) | 7.5 | 7.5 | 8 | 7.5 | 7 | 8 | 7.5 | 8 | 8.5 | 8 | 6.5 | 7.5 | 6.5 |
 | r20 | GPT-6.1 Sol (128 sheets, 36 full-size) | 8.5 | 8.5 | 9 | 9 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8 |
 | r20 | Claude Opus 5.5 (128 sheets, 11 full-size) | 8 | 8 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8 |
+| r21 | GPT-6.1 Sol (134 sheets, 30 full-size) | 8 | 9 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 8 | 8.5 | 8 |
+| r21 | Claude Opus 5.5 (134 sheets, ~106 full-size) | 7.5 | 8 | 8 | 7.5 | 8 | 7.5 | 7.5 | 7.5 | 8 | 8.5 | 8 | 8 | 7.5 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -70,6 +72,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r18 | 8 | 8 | 8.5 | 8.5 ↑ | 8.5 ↑ | 7.5 ↓ | 8 ↓ | 8 | 8.5 | 8.5 ↑ | 8 ↑ | 8 | 7.5 |
 | r19 | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 7.5 ↓ | 7 ↓ | 8 ↑ | 7.5 ↓ | 8 | 8 ↓ | 8 ↓ | 6.5 ↓ | 7.5 ↓ | 6.5 |
 | r20 | 8 ↑ | 8 ↑ | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8 |
+| r21 | 7.5 ↓ | 8 | 8 ↓ | 7.5 ↓ | 8 ↓ | 7.5 ↓ | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 8.5 | 8 ↓ | 8 ↓ | 7.5 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -141,3 +144,13 @@ at different heights, mono used for ids in some places but not others, the theme
 data visualisation (Sol 8: Compare's "By progress" divides live runs by their planned epochs but stopped ones by
 their actual epochs; benchmark ratios stated across different conditions). Round 21 pairs the structural work (one
 set of breakpoint tiers and a text-size floor, both linted; QA in CI) with the reviewers' items.
+
+r21 (#126: layout tiers and the text floor, linted; QA in CI; Ident, --line-panel, Remedy, collision-aware tooltips;
+#123's stored precision): Sol rose (2, 3 and 10 at 9, min 8 on 1 and 11), but Opus opened about 106 full-size shots
+through four sub-reviewers and listed about 40 small rough edges, so its lines fell half a point (min 7.5 on 1, 4, 6, 7
+and 8). The causes it names are systemic rather than per-screen: panels holding an empty state stretch to their
+neighbour (queued Logs, Playground's tablet drop zone, Settings' gap); y domains that leave two-thirds of a plot
+empty; detection overlays too heavy in thumbnails and a selection that does not stand out; counts and names that
+disagree between places (Health's issues vs checks, a checkpoint's name vs its id); KPI values off their baseline;
+lime on the active nav icon. Round 22 takes them as rules, plus #129 (operating point, resolved config, queue
+control, ONNX).
