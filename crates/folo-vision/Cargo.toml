@@ -53,3 +53,7 @@ harness = false
 [[bench]]
 name = "head"
 harness = false
+
+[[bench]]
+name = "cpu_e2e"
+harness = false

@@ -35,7 +35,9 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   stride phases, so every `(channel, ky, kx)` row of B is a contiguous run of that copy, read in place by a variant
   of the micro-kernel through a row-pointer table (a few dropped columns per output row; planes are spaced an odd
   number of cache lines apart so the rows do not alias in L1). Pointwise convs pack B as a plain copy; depthwise
-  convs have a direct (AVX2-dispatched) kernel. Bias and activation run as an epilogue on each finished output
+  convs have a direct (AVX2-dispatched) kernel, and so do convs with at most 4 input channels (the 3-channel stem:
+  per output row the `c·kh·kw` taps are gathered into L1 and every output channel is that many FMAs per pixel in
+  the GEMM's order, bit for bit the GEMM result, without the per-channel phase copy). Bias and activation run as an epilogue on each finished output
   block (`Tensor::conv2d_act`, used by fused `ConvBnAct` blocks and by eval-mode blocks under `no_grad`); SiLU there
   is an 8-lane AVX2 `x · sigmoid(x)` with relative error below `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
@@ -206,8 +208,11 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   one image, square for a batch), forward, decode, NMS, rescale to the original image, with a preprocess /
   inference / postprocess timing split. On a GPU the raw `u8` images are uploaded and letterboxed there
   (bit-exact with the CPU letterbox) and only the decoded candidates come back: one upload per image, one queue of
-  work, one small readback. On the CPU the head's six branch chains run side by side and the neck's Concat layers
-  are never written (`C3k2::forward_cat`).
+  work, one small readback. On the CPU the letterbox is one fused pass per image (`Letterbox::apply_planar_f32`:
+  resize, padding and `/ 255` straight into planar f32, rows in parallel) into an input buffer from folo-core's
+  buffer cache, the head's six branch chains run side by side, the neck's Concat layers are never written
+  (`C3k2::forward_cat`), and the decode reads the head outputs in place and extracts candidates in blocks of 1024
+  anchors in parallel.
 - **ONNX export** (`folo_vision::export::onnx`): `FoloModel::to_onnx` turns a fused model into an opset-17 graph
   that mirrors `forward` op for op (raw head outputs, or the MODEL.md §6.4 decode in the graph, which for an `o2o`
   model ends in the §6.6 top-k: end-to-end `[B, K, 6]` detections; fixed or dynamic

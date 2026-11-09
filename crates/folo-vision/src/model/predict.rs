@@ -15,6 +15,10 @@ use crate::nms::{Candidate, Detection, NmsConfig, nms_candidates, postprocess, t
 /// this many candidates of every image come back in one readback; an image with more takes a second one.
 pub const CANDIDATE_READBACK: usize = 1024;
 
+/// Anchors per task of the CPU candidate extraction ([`HeadOutput::detections`] on the CPU): 8400 anchors at
+/// 640 px make nine blocks, and a block's running class maximum (4 KiB) stays in L1.
+const CPU_DECODE_BLOCK: usize = 1024;
+
 /// One image's decoded output, in network-input pixels (no letterbox inverse).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImagePrediction {
@@ -164,31 +168,35 @@ impl HeadOutput {
         }
     }
 
-    /// The CPU half of [`HeadOutput::detections`]: straight from the channel-major outputs, a running maximum
-    /// of the class logits per anchor, then the full single-label extraction (sigmoid of every class, first
-    /// maximum, `> conf`) and the DFL decode only for anchors whose largest logit could pass. The sigmoid is
-    /// monotonic, so a skipped anchor has no score above `conf` (a NaN first score never passes either).
-    /// `None` for shapes the full path should report.
+    /// The CPU half of [`HeadOutput::detections`]: straight from the channel-major outputs (borrowed, not
+    /// copied), a running maximum of the class logits per anchor, then the full single-label extraction
+    /// (sigmoid of every class, first maximum, `> conf`) and the DFL decode only for anchors whose largest logit
+    /// could pass. The sigmoid is monotonic, so a skipped anchor has no score above `conf` (a NaN first score
+    /// never passes either). Like the GPU candidate kernel, anchors are processed in independent blocks
+    /// ([`CPU_DECODE_BLOCK`]) on the rayon pool, and the blocks' candidates are joined in anchor order, so the
+    /// result does not depend on the split. `None` for shapes (or dtypes) the full path should report.
     fn detections_on_cpu(&self, nms: &NmsConfig) -> Result<Option<Vec<Vec<Detection>>>> {
         let (b, a, nc, rm) = (self.batch(), self.num_anchors(), self.num_classes, self.reg_max);
         if self.box_raw.dims() != [b, 4 * rm, a] || self.cls_raw.dims() != [b, nc, a] || a == 0 || nc == 0 {
             return Ok(None);
         }
-        let (reg, cls) = (self.box_raw.contiguous()?, self.cls_raw.contiguous()?);
-        let (reg, cls) = (reg.to_vec::<f32>()?, cls.to_vec::<f32>()?);
+        if self.box_raw.dtype() != DType::F32 || self.cls_raw.dtype() != DType::F32 {
+            return Ok(None);
+        }
         let anchors = &self.anchors;
-        let image = |i: usize| -> Vec<Detection> {
-            let cl = &cls[i * nc * a..(i + 1) * nc * a];
-            let rg = &reg[i * 4 * rm * a..(i + 1) * 4 * rm * a];
-            let mut best = cl[..a].to_vec();
+        // The candidates among anchors `j0..j1` of one image.
+        let block = |cl: &[f32], rg: &[f32], j0: usize, j1: usize| -> Vec<Candidate> {
+            let mut best = [0f32; CPU_DECODE_BLOCK];
+            let best = &mut best[..j1 - j0];
+            best.copy_from_slice(&cl[j0..j1]);
             for row in cl.chunks_exact(a).skip(1) {
-                for (m, &v) in best.iter_mut().zip(row) {
+                for (m, &v) in best.iter_mut().zip(&row[j0..j1]) {
                     *m = m.max(v);
                 }
             }
             let mut cands = Vec::new();
             let mut bins = vec![0f32; rm];
-            for (j, &m) in best.iter().enumerate() {
+            for (j, &m) in (j0..j1).zip(best.iter()) {
                 // A margin of a few ulp, so even a libm `exp` that is not monotonic cannot skip a candidate;
                 // the exact test follows.
                 let may_pass = sigmoid(m) * (1.0 + 1e-6) + 1e-30 > nms.conf;
@@ -218,9 +226,26 @@ impl HeadOutput {
                 let bbox = dist2bbox(d, anchors.points[j]).scale(st, st);
                 cands.push(Candidate { anchor: j as u32, class: bc as u32, score: bs, bbox });
             }
-            self.finish_candidates(&cands, nms)
+            cands
         };
-        Ok(Some((0..b).into_par_iter().map(image).collect()))
+        let blocks = a.div_ceil(CPU_DECODE_BLOCK);
+        let dets = self.box_raw.with_f32_slice(|reg| {
+            self.cls_raw.with_f32_slice(|cls| {
+                (0..b)
+                    .into_par_iter()
+                    .map(|i| {
+                        let cl = &cls[i * nc * a..(i + 1) * nc * a];
+                        let rg = &reg[i * 4 * rm * a..(i + 1) * 4 * rm * a];
+                        let parts: Vec<Vec<Candidate>> = (0..blocks)
+                            .into_par_iter()
+                            .map(|t| block(cl, rg, t * CPU_DECODE_BLOCK, ((t + 1) * CPU_DECODE_BLOCK).min(a)))
+                            .collect();
+                        self.finish_candidates(&parts.concat(), nms)
+                    })
+                    .collect()
+            })
+        })??;
+        Ok(Some(dets))
     }
 
     /// The anchors as `[3, A]` on `dev`: point x, point y (grid units), stride.

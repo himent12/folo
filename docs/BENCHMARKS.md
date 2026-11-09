@@ -162,8 +162,8 @@ model size.
 | 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **behind under load, no quiet measurement yet**: 1264 img/s pipelined on tensor cores under 68–85% load, against 790 regular f16 and 744 f32 in the same session (+60% over regular f16, see [Tensor cores](#tensor-cores-f16)) | behind under load: 554 img/s on tensor cores (regular f16 339; yolo26s 1159) |
 | 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **5.18 ms** f32 (beats; was 8.69); f16 ties f32 (8.5–9.4 vs 9.1–9.6 ms under load); tensor cores 8.35 ms median, 6.95 ms back to back under load (regular f16 8.67 / 9.38) | **7.87 ms** (yolo26s 8.59: beats; was 10.91); tensor cores 9.37 ms under load (regular f16 13.69) |
 | 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **722 img/s** f32 (beats both; was 299); f16 +7–13% over f32 under load (427–456 vs 375–401 img/s back to back); tensor cores 548 img/s back to back under 67–81% load (regular f16 436, f32 367 in the same session) | 394 img/s f32 (yolo26s 446 fp16: behind; beats its 317 fp32; was 226); tensor cores 328 img/s back to back under load (regular f16 249), not measured quietly yet |
-| 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **21.4 ms** (fused, 28 threads, with 44–76% CPU load from other jobs; 35.8 ms for `main` in the same session; `cargo bench -p folo-vision --bench model`) | |
-| 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | 26.9 ms (the predictor on a `u8` image, 28 threads, same contended run as row 7: behind). The NMS-free head does not close it: 26.59 vs 26.66 ms with NMS on the same trained model ([NMS-free head](#nms-free-head-o2o)) | |
+| 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **21.4 ms** (fused, 28 threads, with 44–76% CPU load from other jobs; 35.8 ms for `main` in the same session; `cargo bench -p folo-vision --bench model`). Branch `perf/cpu-e2e`: **18.4–18.7 ms** at High priority with 9–13 cores busy elsewhere (`main` 19.3–19.6 in the same session) | |
+| 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | **18.5–19.0 ms** (beats; `main` 23.1–23.7 ms in the same session, alternated, High priority, 9–13 cores busy elsewhere; High priority takes cores back from the background jobs, while the incumbent bar ran at normal priority with 4.3 cores busy, so the like-for-like reading is the quietest normal-priority round: **21.7 ms** vs `main`'s 25.1, also under the bar; see [End to end at batch 1](#end-to-end-at-batch-1)). Was 26.9 ms (the predictor on a `u8` image, 28 threads, same contended run as row 7). The NMS-free head does not change it: 26.59 vs 26.66 ms with NMS on the same trained model ([NMS-free head](#nms-free-head-o2o)) | |
 | 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **219 img/s** f32 (73.0 ms; beats; 143 before the loss moved to the GPU); **307 img/s AMP** (52.2 ms, `--amp` on tensor cores; beats 252; f32 247 in the same quiet session, see [Mixed-precision training](#mixed-precision-training-amp)) | **109 img/s** f32 (146.6 ms; yolo26s 105 fp32: beats; was 68); **183 img/s AMP** (87.5 ms; yolo26s AMP 188: ties) |
 | 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32 | | |
 | 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32, and AMP | **3474 MiB** (train step; yolo26n train step 4517: beats); **2022 MiB AMP** (yolo26n AMP train step 2646, trainer 2435: beats) | **6541 MiB** (yolo26s train step 8245: beats); **3713 MiB AMP** (yolo26s AMP 4614: beats) |
@@ -431,8 +431,9 @@ Honest reading: **at predict settings the NMS-free head buys nothing measurable*
 differences are inside the run-to-run noise of the shared machine (the GPU b16 one even goes the other way). With
 a confidence threshold of 0.25 a trained model leaves a few candidates per image (4–5 here), and NMS over them takes
 microseconds. The post-processing time is the decode (the per-anchor class maximum and the DFL boxes of the
-candidates), which both heads pay. The CPU end-to-end gap to yolo26n (row 8: 26.9 vs 24.8 ms) is in the forward
-pass and letterbox, not in NMS, so this head does not close it. The quieter rerun's 24.58 ms is a 4-class model on
+candidates), which both heads pay. The CPU end-to-end gap to yolo26n (row 8 at the time: 26.9 vs 24.8 ms) was in
+the forward pass and letterbox, not in NMS, so this head did not close it ([End to end at batch
+1](#end-to-end-at-batch-1) did). The quieter rerun's 24.58 ms is a 4-class model on
 easy images with a lighter machine load, not row 8's 80-class setting, and its 0.55 ms gap between the heads is ten
 times the post-processing difference, i.e. noise.
 
@@ -490,8 +491,56 @@ Under 97–100% load at High process priority the forward was 19.9 ms at 28 thre
   side, the SiLU epilogue is AVX2 (error ≤ 5e-7 relative, tested), depthwise planes are AVX2, max pooling is
   separable, and the CPU decode looks only at candidate anchors.
 
-Row 7 is beaten even under that load; row 8 (end to end, 24.8 ms) is not yet: about 5 ms over the forward is
-letterbox, decode and NMS on a contended machine.
+Row 7 is beaten even under that load; row 8 (end to end, 24.8 ms) was not: about 5 ms over the forward was
+letterbox, decode and NMS on a contended machine. The next section closes it.
+
+### End to end at batch 1
+
+`cargo bench -p folo-vision --bench cpu_e2e` ([`benches/cpu_e2e.rs`](../crates/folo-vision/benches/cpu_e2e.rs)):
+folo-n, 80 classes, untrained (seed 0), fused, f32, 28 threads, predict defaults; `Predictor::predict` on a decoded
+`u8` RGB image, like Ultralytics' CPU `e2e` rows (640×640 frames), plus a 1280×720 frame (resized and padded to
+640×384) and the 640×640 frame again with 20 ms of idle time before every call (a 30 fps camera: the rayon workers
+are asleep when the call starts). Medians of 100 calls after 5 warm-up calls, with the predictor's own
+preprocess / inference / postprocess split. Branch `perf/cpu-e2e`, 2026-11-09. **Never quiet**: another agent's
+training job (CPU data loading) and other agents' builds used **9–13 cores** during every High-priority run and
+up to 16 at normal priority (the CPU time of all other processes over the run's wall time). `main` and the branch were built from the same bench file in
+separate target directories and alternated run by run, three rounds each. At High process priority the rounds
+agree within 0.5 ms:
+
+| 28 threads, High priority | e2e 640×640 | pre / inf / post | e2e 1280×720 | pre / inf / post | 640×640 after 20 ms idle | forward alone |
+|---|---|---|---|---|---|---|
+| `main` | 23.11 / 23.52 / 23.71 ms | 2.0 / 19.2 / 2.2 | 18.16–18.39 ms | 1.5–2.0 / 14.9–15.5 / 1.1–1.5 | 23.41–23.51 ms | 19.34–19.57 ms |
+| this branch | **18.53 / 18.87 / 18.95 ms** | **0.18 / 18.5 / 0.10** | **14.98–15.30 ms** | **0.40 / 14.6 / 0.08** | 18.85–19.07 ms | 18.44–18.74 ms |
+
+At normal priority the same machine swings 2–3x between runs (medians of 22–245 ms for either build as other jobs
+burst). In the quietest round (about 6 cores busy elsewhere; the first version of the load sampler miscounted
+exiting processes, so this one is approximate) `main` measured 25.08 ms and the branch **21.65 ms**. Across seven
+alternated normal-priority rounds the branch's 640×640 preprocess and postprocess stayed at 0.19–0.39 /
+0.12–0.19 ms, against `main`'s 1.5–2.6 / 1.3–2.3 ms. The 20 ms idle row costs 0.1 ms of preprocess over back-to-back calls in both
+builds, so waking the pool is not a factor. Thread count, High priority: 37.2 / 29.4 / 22.8 / 19.4 ms at 8 / 16 /
+20 / 28 threads, so 28 stays the default (FOLO's per-thread GEMM efficiency is below oneDNN's, whose 8 threads run
+the forward in 22.8 ms; that is the next CPU lever).
+
+What changed (results are bit for bit `main`'s; every new kernel has a bit-exactness test against the path it
+replaces):
+- **Fused letterbox** (`Letterbox::apply_planar_f32` in folo-data): resize, padding and `u8 → f32 / 255` in one
+  pass, rows in parallel, straight into the input tensor, with no intermediate canvas and no serial
+  interleaved-to-planar loop. The resize rows come from the same code as `resize_into` (`RowResizer`), so it is bit
+  for bit `apply` + the old conversion. The input buffer comes from folo-core's buffer cache instead of a fresh
+  4.9 MB `vec!` every call (whose first-touch page faults cost as much as the copy). Preprocess at 640×640:
+  2.0 → 0.18 ms.
+- **Box prefilter** (the ≥ 2x downscale before bilinear, e.g. 1280×720 → 640×360): one `u32` vertical sum per output
+  row, then a multiply-shift rounding division that is exact for blocks up to 65536 pixels (tested against the `u64`
+  reference, which still handles larger blocks). 1280×720 preprocess: 1.5–2.0 → 0.40 ms.
+- **CPU decode**: the head outputs are read in place (`with_f32_slice`) instead of copied (4.8 MB per call), and the
+  candidate extraction runs over blocks of 1024 anchors in parallel (the CPU counterpart of the GPU candidate
+  kernel), joined in anchor order. Postprocess: 2.2 → 0.10 ms.
+- **Stem conv** (3 → 16, 3×3, stride 2 at 640): a direct kernel for convs with at most 4 input channels. Per output
+  row the 27 taps are gathered into L1, and each output channel is 27 FMAs per pixel in the GEMM's order, so the
+  output is bit for bit the GEMM path's. The shifted-rows path filled its phase copy with one task per input channel
+  (three tasks). The stem layer: 1.46 → 0.41 ms, so the forward is about 1 ms faster.
+- Not changed, after measuring: the rayon pool (the idle row above); NMS (a few microseconds at predict settings);
+  the head's `cat` of the six branch outputs (0.3 ms, bandwidth-bound).
 
 **Next optimisations**, by expected gain:
 1. **Backward kernels** (two thirds of the training step now that the loss is on the device): a stride-phase
