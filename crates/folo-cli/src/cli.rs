@@ -119,6 +119,10 @@ pub struct DoctorArgs {
     /// Built web app folder to check [default: web/dist].
     #[arg(long)]
     pub web_dir: Option<PathBuf>,
+    /// Ask for the tensor-core kernels, as `folo serve --tensor-cores` does, so `capabilities` shows what that
+    /// server would report (the same as FOLO_GPU_TENSOR_CORES=1).
+    #[arg(long, env = "FOLO_GPU_TENSOR_CORES", value_parser = clap::builder::BoolishValueParser::new())]
+    pub tensor_cores: bool,
 }
 
 /// Optimizer.

@@ -276,11 +276,15 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
     // Whether the Studio `folo serve` would serve can run models in the browser (its Playground's WebGPU / CPU).
     // (`folo serve` does not serve a folder without index.html at all.)
     let served_wasm = if web_source == "embedded" { embedded_wasm } else { web_ready && web_wasm };
+    if args.tensor_cores {
+        folo_gpu::context::request_tensor_cores();
+    }
     let options = folo_gpu::GpuOptions::from_env();
     let adapters = folo_gpu::GpuContext::enumerate(&options);
-    // Creating the device proves the default adapter works and shows which one FOLO picks.
-    let selected =
-        folo_gpu::GpuContext::with_options(&options).map(|c| (c.summary().clone(), c.tensor_cores_status()));
+    // Creating the device (the shared one, as `folo serve` does for `device: auto`) proves the default adapter
+    // works and shows which one FOLO picks.
+    let capabilities = folo_server::system::capabilities();
+    let selected = folo_gpu::GpuContext::shared().map(|c| (c.summary().clone(), c.tensor_cores_status()));
     let gpus: Vec<_> = adapters
         .iter()
         .map(|a| {
@@ -323,6 +327,7 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         "gpus": gpus,
         "gpu_detection": "wgpu",
         "gpu_selected": selected_json,
+        "capabilities": capabilities,
         "web_dist": { "path": web_dir, "exists": web_exists, "index_html": web_ready, "folo_wasm": web_wasm },
         "web_embedded": { "present": embedded.is_some(), "files": embedded.unwrap_or(0), "folo_wasm": embedded_wasm },
         "web_source": web_source,
@@ -356,6 +361,11 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         }
         Err(e) => out.human(format!("gpu       no usable adapter: {e}")),
     }
+    let amp = match &capabilities.amp.reason {
+        None => format!("mixed-precision training (amp) available on {}", capabilities.device),
+        Some(why) => format!("not available: {why}"),
+    };
+    out.human(format!("amp       {amp}"));
     let web = if web_ready {
         "built".to_string()
     } else if web_exists {

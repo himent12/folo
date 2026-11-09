@@ -23,6 +23,9 @@ pub const ENV_NO_F16: &str = "FOLO_GPU_NO_F16";
 /// (`FOLO_GPU_TENSOR_CORES=1`); see [`GpuOptions::tensor_cores`].
 pub const ENV_TENSOR_CORES: &str = "FOLO_GPU_TENSOR_CORES";
 
+/// [`GpuContext::tensor_cores_status`] of a context created without [`GpuOptions::tensor_cores`].
+pub const TENSOR_CORES_NOT_REQUESTED: &str = "off (not requested: FOLO_GPU_TENSOR_CORES=1 or --tensor-cores)";
+
 /// Set by [`request_tensor_cores`]: contexts built from [`GpuOptions::from_env`] opt in even without
 /// [`ENV_TENSOR_CORES`].
 static TENSOR_CORES_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -481,7 +484,7 @@ impl GpuContext {
         if options.enable_f16 && adapter.features().contains(wgpu::Features::SHADER_F16) {
             features |= wgpu::Features::SHADER_F16;
         }
-        let mut status = String::from("off (not requested: FOLO_GPU_TENSOR_CORES=1 or --tensor-cores)");
+        let mut status = String::from(TENSOR_CORES_NOT_REQUESTED);
         let want_coop = options.tensor_cores
             && match crate::kernels::coop::unavailable_reason(&adapter, features) {
                 None => true,

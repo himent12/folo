@@ -4,8 +4,9 @@
 use std::collections::BTreeMap;
 
 use folo_api::{
-    Arch, BBox, BestEpoch, DatasetFormat, DatasetIssue, Epoch, ExportFormat, GpuInfo, IssueCounts,
-    IssueSeverity, LogLine, Loss, ModelMetrics, Run, RunStatus, Split, Splits, Step, TrainConfig, ValMetrics,
+    Arch, BBox, BestEpoch, Capabilities, DatasetFormat, DatasetIssue, Epoch, ExportFormat, GpuInfo,
+    IssueCounts, IssueSeverity, LogLine, Loss, ModelMetrics, Run, RunStatus, Split, Splits, Step,
+    TrainConfig, ValMetrics,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -526,6 +527,10 @@ pub struct FoloInfo {
     pub confine: bool,
     /// Devices of this machine (of the server's machine in proxy mode).
     pub devices: Devices,
+    /// What runs with `device: auto` can use: f16 inference, tensor cores, mixed-precision training (`amp`, with
+    /// the reason when it is not available). `/api/system`'s `capabilities` (`null` from a server too old to
+    /// report it).
+    pub capabilities: Option<Capabilities>,
     /// Model scales.
     pub scales: Vec<ScaleInfo>,
 }

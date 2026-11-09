@@ -150,10 +150,16 @@ pub fn amp_support(device: Device) -> Result<()> {
             Some(ctx) => format!("{device} has tensor cores {}", ctx.tensor_cores_status()),
         }
     };
-    Err(Error::NotSupported(format!(
+    Err(amp_not_supported(&why))
+}
+
+/// The `not_supported` error [`amp_support`] returns, naming `why` (for example `gpu:0 has tensor cores off
+/// (...)`); public so a stand-in for the trainer (folo-server's mock) words it the same.
+pub fn amp_not_supported(why: &str) -> Error {
+    Error::NotSupported(format!(
         "mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): {why}; train \
          without amp (f32), or on such a GPU (`folo train --amp` asks for them; start `folo serve --tensor-cores`)"
-    )))
+    ))
 }
 
 /// Early stopping (§8.7): record `fitness` of 0-based epoch `e` in `best`. Returns `(improved, stop)`: whether it

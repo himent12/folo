@@ -48,7 +48,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
-  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches"] }`
+  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches"], "capabilities"?: Capabilities }`
   (`util` in `0..1`; CPU utilisation is measured since the previous call. `data_dir` is the real server's
   `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
   the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
@@ -56,6 +56,28 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
   `memory_bytes` is `0` and `util` `null`.
+- `Capabilities` (`/api/system`'s `capabilities`, also in `folo doctor --json` and MCP's `folo_info`) says what a
+  run with `device: auto` can use on this server, so a client can disable a switch, showing the reason, before it
+  submits a run:
+  ```json
+  { "device": "gpu:0", "shader_f16": true,
+    "tensor_cores": { "available": true, "enabled": false,
+                      "reason": "off (not requested: FOLO_GPU_TENSOR_CORES=1 or --tensor-cores)" },
+    "amp": { "available": false,
+             "reason": "mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): gpu:0 has tensor cores off (not requested: ...); train without amp (f32), or ..." } }
+  ```
+  `device` is what `auto` resolves to (`gpu:0` or `cpu`; the real server creates its GPU context on the first
+  request, as a run would). `shader_f16`: the device computes in f16, so `precision: f16` inference runs in half
+  precision (else it falls back to f32). `tensor_cores.available`: the adapter reports the 16×16×16 f16 → f32
+  cooperative matrices the tensor-core kernels need (docs/GPU.md, Tensor cores); `enabled`: they are on for this
+  server (`folo serve --tensor-cores` / `FOLO_GPU_TENSOR_CORES=1`, and the start-up self-test passed); `reason`:
+  why not, exactly as `folo doctor` prints it (`off (not requested: ...)`, `off: <adapter> (<backend>) has no
+  cooperative matrices in wgpu`, `off: the tensor-core self-test failed (...)`, ...), `null` when enabled.
+  `amp.available`: a run with `"amp": true` can start, the trainer's own check (`folo_vision::train::amp_support`)
+  for that device; `amp.reason` is the `not_supported` message such a run would fail with, `null` when available.
+  Every field has a default, so clients parse objects from older and newer servers; servers older than this field
+  leave out `capabilities`. Studio and Desktop can disable the Mixed precision switch when `amp.available` is
+  false and show `amp.reason`.
 
 ## Datasets
 - `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
@@ -387,6 +409,10 @@ start, except live-run timestamps):
   metric histories; and one live run (`run_3c02`, r6-operators / folo-s) whose SSE stream advances in real time: a
   100-epoch run compressed into ~10 minutes (6 s per epoch, ~7 steps per second), starting around epoch 12, then it
   loops (`status` back to `queued`, metrics restart).
+- `/api/system`'s `capabilities` reports the RTX 4080 SUPER with tensor cores on and `amp` available. To test the
+  other states, start the mock with `FOLO_MOCK_TENSOR_CORES=off` (tensor cores available but not requested, no
+  `amp`) or `FOLO_MOCK_TENSOR_CORES=none` (also `0` / `false`: the adapter through DX12, `gpus[0].backend` `dx12`,
+  no tensor cores, no `amp`; `shader_f16` stays true). The reasons are worded as the real server's.
 - `POST /api/runs` starts a simulated run (6 s per epoch) that can be stopped; when it completes, its model appears
   in `/api/models`. `POST /api/datasets` scans real folders; `POST /api/datasets/synthetic` makes a procedural
   dataset. Predictions are deterministic in the image bytes (or dataset image) and the model. `POST /api/val` derives

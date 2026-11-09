@@ -709,8 +709,13 @@ impl Inner {
     async fn folo_info(&self, _: NoArgs) -> Result<Output, Error> {
         let info = self.info().await?;
         let gpus = info.devices.gpus.len();
+        let amp = match &info.capabilities {
+            Some(c) if c.amp.available => ", amp available",
+            Some(_) => ", no amp",
+            None => "",
+        };
         let summary = format!(
-            "FOLO {} ({} mode{}), {} GPU{}, {} CPU threads",
+            "FOLO {} ({} mode{}), {} GPU{}, {} CPU threads{amp}",
             info.version,
             info.mode,
             if info.read_only { ", read-only" } else { "" },
@@ -1311,18 +1316,18 @@ impl Inner {
 
     /// The `folo_info` record.
     pub async fn info(&self) -> Result<FoloInfo, Error> {
-        let (cpu, gpus, data_dir) = match &self.proxy {
+        let (cpu, gpus, data_dir, capabilities) = match &self.proxy {
             Some(p) => {
                 let p = p.clone();
                 let sys = tokio::task::spawn_blocking(move || p.system()).await.map_err(join)??;
-                let (data_dir, sys) = (sys.data_dir, sys.system);
+                let (data_dir, capabilities, sys) = (sys.data_dir, sys.capabilities, sys.system);
                 let cpu = CpuDevice {
                     name: sys.cpu.name,
                     threads: sys.cpu.threads,
                     memory_bytes: sys.memory.total_bytes,
                 };
                 // The server's data dir: runs, models and exports live there, not under this process's default.
-                (cpu, sys.gpus, data_dir)
+                (cpu, sys.gpus, data_dir, capabilities)
             }
             None => {
                 let store = self.store.clone();
@@ -1333,10 +1338,10 @@ impl Inner {
                         threads: host.cpu_threads,
                         memory_bytes: host.memory_total_bytes,
                     };
-                    (cpu, store.gpus())
+                    (cpu, store.gpus(), store.capabilities())
                 })
                 .await
-                .map(|(cpu, gpus)| (cpu, gpus, Some(folo_api::json::path(&self.paths.data_dir))))
+                .map(|(cpu, gpus, caps)| (cpu, gpus, Some(folo_api::json::path(&self.paths.data_dir)), caps))
                 .map_err(join)?
             }
         };
@@ -1355,6 +1360,7 @@ impl Inner {
             read_only: self.opts.read_only,
             confine: self.paths.confine,
             devices: Devices { cpu, gpus },
+            capabilities,
             scales: SCALES
                 .iter()
                 .map(|&(arch, params, gflops_640, gflops_320)| ScaleInfo {

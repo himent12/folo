@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use axum::http::StatusCode;
-use folo_api::{GpuBackend, GpuInfo};
+use folo_api::{AmpSupport, Capabilities, GpuBackend, GpuInfo, TensorCoreSupport};
 use folo_core::Device;
 use folo_nn::io::{ModelFile, Purpose};
 use folo_vision::predict::f16_unavailable;
@@ -163,6 +163,45 @@ pub fn gpus() -> Vec<GpuInfo> {
         out
     })
     .clone()
+}
+
+/// `/api/system`'s `capabilities`: what a run with `device: auto` gets on this server. The device comes from
+/// [`resolve`] (so this registers the GPU backend on first use, as a run would); `shader_f16` is
+/// [`f16_unavailable`] (what f16 inference falls back on), tensor cores come from the device's folo-gpu context
+/// (`reason` is its status, the line `folo doctor` prints), and `amp` is the trainer's own
+/// [`folo_vision::train::amp_support`] answer for that device.
+pub fn capabilities() -> Capabilities {
+    let device = resolve("auto").unwrap_or(Device::Cpu);
+    let ctx = (!device.is_cpu()).then(|| folo_gpu::context_for(device)).flatten();
+    let tensor_cores = match &ctx {
+        Some(ctx) => {
+            let enabled = ctx.tensor_cores();
+            TensorCoreSupport {
+                available: ctx.summary().tensor_cores,
+                enabled,
+                reason: (!enabled).then(|| ctx.tensor_cores_status()),
+            }
+        }
+        None => TensorCoreSupport {
+            available: false,
+            enabled: false,
+            reason: Some(match folo_gpu::init() {
+                Err(e) => format!("off: no usable GPU ({e})"),
+                Ok(_) => "off: device auto runs on the CPU".to_string(),
+            }),
+        },
+    };
+    // Only `amp_support` decides; its `not_supported` message is the reason.
+    let amp = match folo_vision::train::amp_support(device) {
+        Ok(()) => AmpSupport { available: true, reason: None },
+        Err(e) => AmpSupport { available: false, reason: Some(e.to_string()) },
+    };
+    Capabilities {
+        device: device.to_string(),
+        shader_f16: f16_unavailable(device).is_none(),
+        tensor_cores,
+        amp,
+    }
 }
 
 /// Reads a `.folo` file into memory (never memory-mapped: on Windows a mapped file cannot be replaced, and a run's

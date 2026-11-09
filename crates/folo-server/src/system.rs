@@ -22,6 +22,12 @@ pub struct HostInfo {
     pub memory_available_bytes: u64,
 }
 
+/// What runs with `device: auto` can use here (f16, tensor cores, `amp`): `/api/system`'s `capabilities`, which
+/// `folo doctor` reports too. Creates the GPU context on first use, as a run would.
+pub fn capabilities() -> folo_api::Capabilities {
+    crate::engine::capabilities()
+}
+
 /// The devices FOLO can run on, for error hints: `cpu, gpu:0 (NVIDIA GeForce RTX 4080 SUPER, vulkan)`. GPUs
 /// count once their backend is registered (folo-gpu's `init()`, which `auto` and `gpu:<n>` devices trigger).
 pub fn available_devices() -> String {

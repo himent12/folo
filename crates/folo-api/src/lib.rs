@@ -91,6 +91,60 @@ pub struct SystemResponse {
     /// can tell before it relies on one; empty from servers older than this field.
     #[serde(default)]
     pub features: Vec<String>,
+    /// What runs with `device: auto` can use on this server (f16 inference, tensor cores, mixed-precision
+    /// training), so a client can disable a switch, with the reason, before it submits a run; absent from servers
+    /// older than this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capabilities>,
+}
+
+/// [`SystemResponse::capabilities`]: what the device `device: auto` resolves to can do. Every field defaults, so a
+/// client parses an object from a newer server that adds fields, and one from an older server that lacks some.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Capabilities {
+    /// The device `device: auto` resolves to: `gpu:0` or `cpu`.
+    #[serde(default)]
+    pub device: String,
+    /// The device computes in f16, so `precision: f16` inference runs in half precision (else it falls back to
+    /// f32: the CPU, an adapter without `shader-f16`, or `FOLO_GPU_NO_F16`).
+    #[serde(default)]
+    pub shader_f16: bool,
+    /// The tensor-core (cooperative-matrix) f16 kernels.
+    #[serde(default)]
+    pub tensor_cores: TensorCoreSupport,
+    /// Mixed-precision training (`TrainConfig.amp`).
+    #[serde(default)]
+    pub amp: AmpSupport,
+}
+
+/// [`Capabilities::tensor_cores`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct TensorCoreSupport {
+    /// The adapter reports the 16×16×16 f16 → f32 cooperative matrices the tensor-core kernels need.
+    #[serde(default)]
+    pub available: bool,
+    /// The kernels are on for this server (`folo serve --tensor-cores` / `FOLO_GPU_TENSOR_CORES=1`, and the
+    /// start-up self-test passed).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Why they are off, as `folo doctor` phrases it (`off (not requested: ...)`, `off: ...`); `null` when
+    /// `enabled`.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// [`Capabilities::amp`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct AmpSupport {
+    /// A run with `"amp": true` and `device: auto` can start (it fails with `not_supported` otherwise).
+    #[serde(default)]
+    pub available: bool,
+    /// The trainer's `not_supported` message when not `available`; `null` when it is.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 /// [`SystemResponse::features`]: `POST /api/models/{id}/export` honours [`OnnxSwitches`] (older servers accept
@@ -1277,6 +1331,36 @@ pub struct ValTiming {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_capabilities_are_additive() {
+        // A server older than `capabilities` (and `features`, `data_dir`).
+        let old = r#"{"cpu":{"name":"c","threads":2,"util":0},"memory":{"used_bytes":1,"total_bytes":2},"gpus":[]}"#;
+        let s: SystemResponse = serde_json::from_str(old).unwrap();
+        assert_eq!((s.capabilities, s.features.len(), s.data_dir), (None, 0, None));
+        // A partial object (a field this version lacks, one a newer server adds) parses with defaults.
+        let v = serde_json::json!({
+            "cpu": {"name": "c", "threads": 2, "util": 0}, "memory": {"used_bytes": 1, "total_bytes": 2}, "gpus": [],
+            "capabilities": {"device": "gpu:0", "tensor_cores": {"available": true}, "future": 1},
+        });
+        let c = serde_json::from_value::<SystemResponse>(v).unwrap().capabilities.unwrap();
+        assert_eq!(c.device, "gpu:0");
+        assert!(c.tensor_cores.available && !c.tensor_cores.enabled && c.tensor_cores.reason.is_none());
+        assert_eq!(c.amp, AmpSupport::default());
+        // `reason` is sent as `null`, not left out.
+        let v = serde_json::to_value(Capabilities::default()).unwrap();
+        assert!(v["amp"]["reason"].is_null() && v["amp"].as_object().unwrap().contains_key("reason"), "{v}");
+        assert!(v["tensor_cores"].as_object().unwrap().contains_key("reason"), "{v}");
+        // Older clients (without the field) still parse the new response: SystemInfo ignores it.
+        let new = SystemResponse {
+            system: serde_json::from_str(old).unwrap(),
+            data_dir: None,
+            features: vec![],
+            capabilities: Some(Capabilities::default()),
+        };
+        let back: SystemInfo = serde_json::from_value(serde_json::to_value(&new).unwrap()).unwrap();
+        assert_eq!(back, new.system);
+    }
 
     #[test]
     fn train_config_defaults() {

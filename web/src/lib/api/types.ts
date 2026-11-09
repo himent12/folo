@@ -39,6 +39,19 @@ export interface SystemInfo {
   data_dir?: string;
   /** Optional API features the server implements, e.g. `export_onnx_switches`; empty or absent from older ones. */
   features?: string[];
+  /** What `device: auto` runs can use (f16, tensor cores, amp); absent from older servers. */
+  capabilities?: Capabilities;
+}
+
+/** `/api/system`'s `capabilities` (docs/API.md). A `reason` is null exactly when the feature is usable. */
+export interface Capabilities {
+  /** What `device: auto` resolves to: `gpu:0` or `cpu`. */
+  device: string;
+  /** f16 inference runs in half precision (else it falls back to f32). */
+  shader_f16: boolean;
+  tensor_cores: { available: boolean; enabled: boolean; reason: string | null };
+  /** Mixed-precision training (`TrainConfig.amp`). */
+  amp: { available: boolean; reason: string | null };
 }
 
 // ---------- Datasets ----------
