@@ -41,6 +41,13 @@
   let done = $state<ExportFormat | null>(null);
   let phase = $state<'idle' | 'running' | 'done' | 'error'>('idle');
   let result = $state<ExportResult | null>(null);
+  const announcement = $derived(
+    phase === 'running'
+      ? `Exporting ${model.name}…`
+      : phase === 'done' && result
+        ? `Export finished: ${result.path.split('/').pop()}, ${bytes(result.bytes, prefs.units)}.`
+        : '',
+  );
   let error = $state<unknown>(null);
   let copied = $state(false);
   let run = 0;
@@ -55,7 +62,8 @@
       result = r;
       done = format;
       phase = 'done';
-      toast.success(`Exported ${model.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
+      // The open dialog already says "Export finished" with the path: a toast would say it twice at once.
+      if (!open) toast.success(`Exported ${model.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
     } catch (e) {
       if (id !== run) return;
       error = e;
@@ -99,6 +107,9 @@
 </script>
 
 <Dialog bind:open title="Export model" description="Write {model.name} to a file you can deploy." onclose={reset}>
+  <!-- One live region that stays in the dialog, so the start and the end of an export are both announced (the toast is
+       held back while the dialog is open). Failures announce themselves through ErrorState's alert. -->
+  <p class="sr-only" role="status">{announcement}</p>
   {#if phase === 'done' && result}
     <div class="done">
       <div class="done-head">
@@ -146,7 +157,7 @@
       {/each}
     </fieldset>
     {#if phase === 'running'}
-      <div class="progress" role="status">
+      <div class="progress">
         <div class="bar" aria-hidden="true"><span></span></div>
         <span class="faint">Exporting {model.name}…</span>
       </div>

@@ -135,7 +135,7 @@ describe('LineChart layering and ticks', () => {
     { id: 'teal', label: 'teal', color: 'blue', pattern: 'dot' as const, points: [0, 1, 2, 3, 4, 5, 6].map((x) => ({ x, y: x / 10 })) },
   ];
 
-  it('paints the highlighted series last, with its knockout, and keeps its dot rhythm', () => {
+  it('paints the highlighted series last, with its halo, and keeps its dot rhythm', () => {
     const { target, c } = mountAt({ series, label: 'cmp', highlight: 'teal' });
     const lines = [...target.querySelectorAll('path.line')].map((p) => (p as SVGElement).style.stroke);
     expect(lines).toEqual(['red', 'blue']);
@@ -143,8 +143,52 @@ describe('LineChart layering and ticks', () => {
     const teal = target.querySelectorAll('path.line')[1] as SVGElement;
     expect(teal.classList.contains('emphasis')).toBe(true);
     expect(teal.style.strokeDasharray).toMatch(/^0\.014,?\s*6\.3/);
-    // The knockout sits directly under its line.
-    expect(teal.previousElementSibling?.classList.contains('knockout')).toBe(true);
+    // The halo sits directly under its line: the same dots, 1.5 px wider on each side.
+    const halo = teal.previousElementSibling as SVGElement;
+    expect(halo.classList.contains('halo')).toBe(true);
+    expect(halo.style.strokeWidth).toBe('6.25px');
+    expect(halo.style.strokeDasharray).toBe(teal.style.strokeDasharray);
+    // Nothing is faded: the other run keeps its colour and weight.
+    const sky = target.querySelectorAll('path.line')[0] as SVGElement;
+    expect(sky.classList.contains('emphasis')).toBe(false);
+    expect(target.querySelector('.faded')).toBeNull();
+    unmount(c);
+  });
+
+  it('paints a dotted series over a solid one even when it is the shorter of the two', () => {
+    const solid = { id: 'long', label: 'long', color: 'red', points: [0, 1, 2, 3, 4, 5, 6, 7].map((x) => ({ x, y: x / 10 })) };
+    const dotted = { id: 'dot', label: 'dot', color: 'blue', pattern: 'dot' as const, points: [0, 1, 2].map((x) => ({ x, y: x / 10 })) };
+    const { target, c } = mountAt({ series: [dotted, solid], label: 'z' });
+    const paths = [...target.querySelectorAll('path.line, path.halo')].map((p) => `${p.getAttribute('class')!.split(' ')[0]}:${(p as SVGElement).style.stroke || 'panel'}`);
+    expect(paths).toEqual(['line:red', 'halo:panel', 'line:blue']);
+    unmount(c);
+  });
+
+  it('pulses the best ring when its pulse count goes up, and not before', () => {
+    const marker = { x: 2, y: 0.2, label: 'best', quiet: true, color: 'lime' };
+    const props = $state({ series, label: 'best', markers: [marker] as (typeof marker & { pulse?: number })[] });
+    const { target, c } = mountAt(props);
+    expect(target.querySelector('.marker .ring')).toBeTruthy();
+    expect(target.querySelector('.marker .pulse')).toBeNull();
+    props.markers = [{ ...marker, pulse: 1 }];
+    flushSync();
+    expect(target.querySelector('.marker .pulse')).toBeTruthy();
+    unmount(c);
+  });
+
+  it('does not replay a pulse it was mounted with (a tab switch, a finished run)', () => {
+    const marker = { x: 2, y: 0.2, label: 'best', quiet: true, color: 'lime', pulse: 3 };
+    const { target, c } = mountAt({ series, label: 'best', markers: [marker] });
+    expect(target.querySelector('.marker .ring')).toBeTruthy();
+    expect(target.querySelector('.marker .pulse')).toBeNull();
+    unmount(c);
+  });
+
+  it('keeps the axes around an empty plot and states its one line', () => {
+    const { target, c } = mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: [] }], label: 'q', xDomain: [0, 120], empty: 'Starts when fasteners-s finishes' });
+    expect(target.querySelector('.axis')).toBeTruthy();
+    expect(target.querySelectorAll('.grid line').length).toBeGreaterThan(1);
+    expect(target.querySelector('.empty')!.textContent).toBe('Starts when fasteners-s finishes');
     unmount(c);
   });
 

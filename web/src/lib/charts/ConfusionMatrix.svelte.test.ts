@@ -26,3 +26,31 @@ describe('ConfusionMatrix reveal', () => {
     unmount(cm);
   });
 });
+
+describe('ConfusionMatrix labels', () => {
+  it('labels shares from 5% (8.3, not only 10% and up), marks true zeros, and names every cell with its value', () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    // bearing: 50 right, 5 taken for nut (8.3%), 2 for bolt (3.3%), 3 missed (5.0%); nothing taken for bearing by bolt.
+    const matrix = [
+      [40, 0, 0, 0],
+      [0, 30, 0, 0],
+      [2, 5, 50, 3],
+      [1, 0, 0, 0],
+    ];
+    const cm = mount(ConfusionMatrix, { target, props: { classes: ['bolt', 'nut', 'bearing'], matrix, sparseLabels: true, minCell: 32 } });
+    flushSync();
+    const cell = (r: number, c: number) => target.querySelector<HTMLElement>(`[data-r="${r}"][data-c="${c}"]`)!;
+    expect(cell(2, 1).textContent!.trim()).toBe('8.3');
+    expect(cell(2, 3).textContent!.trim()).toBe('5.0');
+    expect(cell(2, 2).textContent!.trim()).toBe('83');
+    // Under 5%: no label, but its value is in its name; a true zero is the empty surface.
+    expect(cell(2, 0).textContent!.trim()).toBe('');
+    expect(cell(2, 0).getAttribute('aria-label')).toBe('bearing predicted as bolt: 2 of 60, 3.3%');
+    expect(cell(2, 0).classList.contains('zero')).toBe(false);
+    expect(cell(0, 1).classList.contains('zero')).toBe(true);
+    expect(cell(0, 1).getAttribute('aria-label')).toBe('bolt predicted as nut: 0 of 40, 0.0%');
+    for (const el of target.querySelectorAll('.cell')) expect(el.getAttribute('aria-label')).toMatch(/: \d+ of \d+, \d+\.\d%$/);
+    unmount(cm);
+  });
+});

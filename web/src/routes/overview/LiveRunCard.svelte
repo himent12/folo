@@ -59,7 +59,8 @@
   const deviceText = $derived(run ? deviceLine(run, sys.data?.gpus ?? []) : '');
 </script>
 
-<section class="card" aria-labelledby={run ? 'live-title' : undefined} aria-label={run ? undefined : 'Loading training'} aria-busy={!run}>
+<!-- The lime hairline means "training now": only once a running run has loaded, never on the placeholder. -->
+<section class="card" class:live={run?.status === 'running'} aria-labelledby={run ? 'live-title' : undefined} aria-label={run ? undefined : 'Loading training'} aria-busy={!run}>
   <header>
     <div class="title-row">
       {#if run}
@@ -142,7 +143,7 @@
   :global([data-theme='light']) .card {
     border-color: var(--line-default);
   }
-  .card::before {
+  .card.live::before {
     content: '';
     position: absolute;
     inset: 0 0 auto 0;

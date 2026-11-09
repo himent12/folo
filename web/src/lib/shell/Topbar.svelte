@@ -9,8 +9,11 @@
   import Settings from '@lucide/svelte/icons/settings';
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
+  import { hub } from '$lib/api/index.svelte';
   import Button from '$lib/ui/Button.svelte';
+  import Gate from '$lib/ui/Gate.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
+  import { OFFLINE_REASON } from '$lib/ui/offline';
   import Logo from './Logo.svelte';
   import { page } from './crumbs.svelte';
 
@@ -58,7 +61,12 @@
     {#if router.route.name === 'run-new'}
       <span class="new-run here"><Button icon={Plus} aria-current="page" disabled>New run</Button></span>
     {:else}
-      <span class="new-run"><Button icon={Plus} href={href('/runs/new')}>New run</Button></span>
+      <!-- Nothing answers: disabled with the reason, as the pages' own create actions are. -->
+      <span class="new-run">
+        <Gate reason={hub.offline ? OFFLINE_REASON : null}>
+          {#snippet children(why)}<Button icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>{/snippet}
+        </Gate>
+      </span>
     {/if}
   </div>
 </header>

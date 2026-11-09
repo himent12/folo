@@ -8,6 +8,8 @@ export interface HealthItem {
   id: string;
   severity: Severity;
   title: string;
+  /** A few words for the folded severity line, with the unit named ("3 file issues", "35% tiny boxes"). */
+  short: string;
   detail: string;
   /** A concrete next step where the data allows one: a label and an app path (without the leading #). */
   action?: { label: string; path: string };
@@ -34,9 +36,24 @@ export function bySeverity(items: readonly HealthItem[]): SeverityGroup[] {
   return groups.filter((g) => g.items.length > 0);
 }
 
-/** Findings that need attention (errors and warnings): the "N to review" count, everywhere it is shown. */
+/** Findings that need attention (errors and warnings): the "N findings to review" count, everywhere it is shown. */
 export function reviewCount(items: readonly HealthItem[]): number {
   return items.filter((h) => h.severity === 'danger' || h.severity === 'warning').length;
+}
+
+/** "1 finding", "3 findings": a finding is one health line, whatever it counts inside (files, issues, boxes). */
+export function findings(n: number): string {
+  return `${n} ${n === 1 ? 'finding' : 'findings'}`;
+}
+
+/** "3 findings to review" (the tab and the Health panel say the same), or undefined when nothing needs review. */
+export function reviewLabel(n: number): string | undefined {
+  return n > 0 ? `${findings(n)} to review` : undefined;
+}
+
+/** The folded line of one severity: each finding's short form, so it reads whole ("3 file issues · 35% tiny boxes"). */
+export function groupSummary(g: SeverityGroup): string {
+  return g.items.map((h) => h.short).join(' · ');
 }
 
 /** Image size suggested for datasets with many tiny boxes (1.5× the 640 default). */
@@ -88,6 +105,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       id: 'broken',
       severity: 'danger',
       title: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
+      short: `${int(s.broken_labels)} broken label ${s.broken_labels === 1 ? 'file' : 'files'}`,
       detail: 'These labels could not be parsed, so their images are skipped in training. Fix or delete them, then re-register the dataset.',
       issues: 'error',
     });
@@ -95,7 +113,8 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
     out.push({
       id: 'check-errors',
       severity: 'danger',
-      title: `${int(counts.error)} dataset check ${counts.error === 1 ? 'error' : 'errors'}`,
+      title: `${int(counts.error)} file ${counts.error === 1 ? 'error' : 'errors'} from the dataset check`,
+      short: `${int(counts.error)} file ${counts.error === 1 ? 'error' : 'errors'}`,
       detail: 'Images that cannot be read and labels that cannot be parsed are left out of training. Fix or remove them.',
       issues: 'error',
     });
@@ -104,7 +123,8 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
     out.push({
       id: 'check-warnings',
       severity: 'warning',
-      title: `${int(counts.warning)} dataset check ${counts.warning === 1 ? 'warning' : 'warnings'}`,
+      title: `${int(counts.warning)} file ${counts.warning === 1 ? 'issue' : 'issues'} from the dataset check`,
+      short: `${int(counts.warning)} file ${counts.warning === 1 ? 'issue' : 'issues'}`,
       detail: 'Training still uses these files: boxes past the image edge, duplicate labels or images. Each says what a cleanup would do.',
       issues: 'warning',
     });
@@ -116,6 +136,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       id: 'missing',
       severity: 'danger',
       title: `${missing.length === 1 ? 'Class' : 'Classes'} without boxes: ${missing.join(', ')}`,
+      short: `${missing.length} ${missing.length === 1 ? 'class' : 'classes'} without boxes`,
       detail: 'The model can never learn a class it has not seen. Label some examples or remove the class.',
     });
   }
@@ -131,6 +152,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
         id: 'imbalance',
         severity: 'warning',
         title: `Class imbalance ${ratio.toFixed(1)}×`,
+        short: `${ratio.toFixed(1)}× class imbalance`,
         detail: `${d.classes[hi.i]} has ${int(hi.c)} boxes, ${d.classes[lo.i]} only ${int(lo.c)}. Rare classes usually score lower; add examples or oversample them.`,
         action: showClass(lo.i),
       });
@@ -143,6 +165,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       id: 'few',
       severity: 'warning',
       title: `${few.length === 1 ? 'A class has' : `${few.length} classes have`} fewer than ${FEW_BOXES} boxes`,
+      short: `${few.length} ${few.length === 1 ? 'class' : 'classes'} under ${FEW_BOXES} boxes`,
       detail: `${few.map((x) => `${d.classes[x.i]} (${int(x.c)})`).join(', ')}. Aim for a few hundred boxes per class or more.`,
       ...(few.length === 1 ? { action: showClass(few[0]!.i) } : {}),
     });
@@ -154,6 +177,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       id: 'tiny',
       severity: 'warning',
       title: `${share(tiny)} of boxes are tiny`,
+      short: `${share(tiny)} tiny boxes`,
       detail: 'They are under 5% of the image side (about 32 px at 640). Train at a larger image size or tile large images.',
       action: { label: `Train at ${TINY_IMGSZ} px`, path: `/runs/new?dataset=${id}&imgsz=${TINY_IMGSZ}` },
     });
@@ -164,6 +188,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       id: 'no-val',
       severity: 'warning',
       title: 'No validation split',
+      short: 'no validation split',
       detail: 'mAP cannot be measured during training. Move 10–20% of the images into a val split.',
     });
   }
@@ -174,6 +199,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       id: 'empty',
       severity: e > EMPTY_WARN ? 'warning' : 'info',
       title: `${int(s.empty_images)} empty ${s.empty_images === 1 ? 'image' : 'images'} (${share(e)})`,
+      short: `${int(s.empty_images)} empty ${s.empty_images === 1 ? 'image' : 'images'} (${share(e)})`,
       detail:
         e > EMPTY_WARN
           ? 'Background images reduce false positives, but above ~10% they slow learning. Check that labels were not lost.'
@@ -186,6 +212,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       id: 'small',
       severity: 'info',
       title: `Small dataset (${int(images)} images)`,
+      short: `only ${int(images)} images`,
       detail: 'Expect overfitting; keep augmentation on and start from pretrained weights.',
     });
   }
@@ -195,6 +222,7 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
       id: 'ok',
       severity: 'ok',
       title: 'No problems found',
+      short: 'no problems found',
       detail: 'Labels parse, every class is represented and the class balance is within 5×.',
     });
   }

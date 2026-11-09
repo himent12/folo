@@ -18,6 +18,8 @@
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import TableState from '$lib/ui/TableState.svelte';
+  import Gate from '$lib/ui/Gate.svelte';
+  import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
   import { rowNav } from '$lib/ui/rowNav';
   import AddDatasetDialog from './datasets/AddDatasetDialog.svelte';
   import { imageCount } from './dataset/health';
@@ -55,6 +57,9 @@
   /** Columns of the desktop table (for state rows that span it). */
   const COLS = 9;
 
+  // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
+  const offline = $derived(!datasets.data && isOffline(datasets.error));
+
   const classTip = (d: Dataset) => `${d.classes.length} classes: ${d.classes.join(', ')}`;
 </script>
 
@@ -62,7 +67,11 @@
   <!-- One fixed line: the counts live in the toolbar, so nothing here changes as the list loads. -->
   {#snippet sub()}<span>YOLO and COCO folders registered with the server.</span>{/snippet}
   {#snippet actions()}
-    <Button variant="primary" icon={Plus} onclick={() => add('folder')}>Add dataset</Button>
+    <Gate reason={offline ? OFFLINE_REASON : null}>
+      {#snippet children(why)}
+        <Button variant="primary" icon={Plus} disabled={!!why} aria-describedby={why} onclick={() => add('folder')}>Add dataset</Button>
+      {/snippet}
+    </Gate>
   {/snippet}
 
   {#if !datasets.error && (!datasets.data || datasets.data.length > 0)}
@@ -199,16 +208,6 @@
   }
   .rows {
     display: none;
-  }
-  @media (max-width: 1279px) {
-    .hide-lg {
-      display: none;
-    }
-  }
-  @media (max-width: 1023px) {
-    .hide-md {
-      display: none;
-    }
   }
   @media (max-width: 767px) {
     /* Phones show the rows below; the table frame stays only to hold an empty or error state. */

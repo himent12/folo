@@ -69,7 +69,7 @@
     font-size: var(--type-sm-size);
   }
   select:hover {
-    border-color: var(--text-tertiary);
+    border-color: var(--line-control-hover);
   }
   select:focus-visible {
     outline: none;

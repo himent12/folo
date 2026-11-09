@@ -35,6 +35,10 @@
       -webkit-backdrop-filter: blur(16px) saturate(1.4);
       border-top: 1px solid var(--line-subtle);
     }
+    /* A page showing a bottom dock (shell/dock.ts) takes the bottom edge: one fixed bar, not two. */
+    :global(:root[data-dock]) .tabbar {
+      display: none;
+    }
     a {
       display: flex;
       flex-direction: column;

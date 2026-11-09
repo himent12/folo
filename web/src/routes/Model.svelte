@@ -234,7 +234,7 @@
     {/snippet}
 
     <!-- One strip of numbers in ink: the headline metric, then the ones that support it, each with a short qualifier;
-         the ⓘ opens what they mean. Phones: one row of four values, qualifiers in the help. -->
+         the ⓘ opens what they mean. Phones: the headline on its own row at 32 px, the other three as a row under it. -->
     <section class="kpis" aria-label="Validation metrics">
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
@@ -321,18 +321,6 @@
               <dt>File size</dt>
               <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
             </div>
-            <div class="kv">
-              <dt>Benchmark</dt>
-              <dd class="latency">
-                <!-- The architecture's number (docs/BENCHMARKS.md), never this model's timing: say exactly what it is. -->
-                {#if latency(m) !== undefined}
-                  <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                  <span class="faint">{m.arch} benchmark (640 px), end to end on an RTX 4080 SUPER; not timed on this model</span>
-                {:else}
-                  <span class="faint">No {m.arch} benchmark yet</span>
-                {/if}
-              </dd>
-            </div>
             <div class="kv wide">
               <dt>Classes</dt>
               <dd class="classes">
@@ -375,6 +363,19 @@
               <dt>Created</dt>
               <dd>{date(m.created)}</dd>
             </div>
+            <!-- The architecture's number (docs/BENCHMARKS.md), never this model's timing: the label says whose it is,
+                 and the conditions sit beside the value. Last, apart from the facts about this model. -->
+            <div class="kv wide ref">
+              <dt>Architecture reference latency</dt>
+              <dd class="latency">
+                {#if latency(m) !== undefined}
+                  <span class="num">{latency(m)!.toFixed(2)} ms</span>
+                  <span class="faint"><span class="mono">{m.arch}</span> · 640 px · RTX 4080 SUPER · end to end</span>
+                {:else}
+                  <span class="faint">Not measured for <span class="mono">{m.arch}</span> yet</span>
+                {/if}
+              </dd>
+            </div>
           </dl>
         {/snippet}
         {#if phone.current}
@@ -400,9 +401,9 @@
     <div class="cm-part" class:off={!showing('confusion')}>
       <Panel title="Confusion matrix" meta={cm?.partial ? (phone.current ? `${CM_MAX} most common + Other` : `${CM_MAX} most common classes + Other + background`) : 'share of each true class'} id="cm">
         {#if cm}
-          <!-- 8 + 4, on the grid of the panels above: the matrix in the main column, what to read from it in the side
-               column (aligned with the Details rail). Up to 1199 px the two consequential cells lead (a phone's
-               matrix scrolls sideways, hiding the background column), and the reading notes follow the matrix. -->
+          <!-- The matrix at its own size (cells up to 72 px), what to read from it directly beside it, so the panel has
+               no dead middle. Up to 1199 px the two consequential cells lead (a phone's matrix scrolls sideways,
+               hiding the background column), and the reading notes follow the matrix. -->
           <div class="cm-layout">
             <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
             {#if confused || missed}
@@ -443,8 +444,8 @@
               <details class="how">
                 <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
                 <div class="how-body">
-                  <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5. Cells under 10% are not
-                    labelled; hover or tap one for its count.</p>
+                  <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5. Cells under 5% are not
+                    labelled; hover or tap one for its count. An empty cell had no objects at all.</p>
                   <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
                   {#if cm.partial}
                     <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
@@ -645,16 +646,17 @@
     grid-area: main;
     min-width: 0;
   }
-  /* The same 2 : 1 split as the panels above. Inside the panel's 16 px padding, an 80 px column gap puts the side
-     column's text on the Details rail's text edge (rail edge + 16). */
+  /* The matrix takes the width its cells want (up to 72 px each), the notes follow 32 px after it and take the rest
+     (at least 320 px): an 8-class matrix fills about two thirds of a full-width panel and the notes the remainder,
+     while a large one shrinks its cells before the notes drop under 320 px. */
   .cm-layout {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, max-content) minmax(320px, 1fr);
     grid-template-rows: auto 1fr;
     grid-template-areas:
       'main sum'
       'main notes';
-    gap: var(--space-4) calc(var(--space-16) + var(--space-4));
+    gap: var(--space-4) var(--space-8);
     align-items: start;
   }
   @media (max-width: 1199px) {
@@ -846,9 +848,21 @@
     text-align: right;
     overflow-wrap: anywhere;
   }
-  .latency {
+  /* Stacked in every layout: the label is long, and the value keeps its conditions on the same line. */
+  .kv.ref,
+  .two .kv.ref {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 2px;
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .latency {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 var(--space-2);
+    text-align: left;
   }
   .latency .faint {
     font-size: var(--type-sm-size);
@@ -898,27 +912,32 @@
     .two .kv {
       grid-template-columns: 96px minmax(0, 1fr);
     }
-    /* One row of four values: the headline a step larger; the qualifiers live in the help. */
+    /* The headline alone on the first row (32 / 600, with its qualifier); the three supporting values 3-up under it,
+       their qualifiers in the help. */
     .kpis {
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
     .kpi {
-      grid-template-rows: 16px 28px;
+      grid-template-rows: 16px 32px;
       gap: var(--space-1);
       padding: var(--space-3);
     }
-    .k-sub {
+    .kpi.hero {
+      grid-column: 1 / -1;
+      grid-template-rows: 16px 40px 16px;
+    }
+    .kpi:not(.hero) .k-sub {
       display: none;
     }
     .k-value {
-      font-size: var(--type-xl-size);
-      line-height: 28px;
-      letter-spacing: var(--type-xl-tracking);
+      font-size: var(--type-2xl-size);
+      line-height: 32px;
+      letter-spacing: var(--type-2xl-tracking);
     }
     .hero .k-value {
-      font-size: var(--type-2xl-size);
-      line-height: 28px;
-      letter-spacing: var(--type-2xl-tracking);
+      font-size: var(--type-3xl-size);
+      line-height: 40px;
+      letter-spacing: var(--type-3xl-tracking);
     }
     .k-body {
       grid-template-columns: minmax(0, 1fr);

@@ -94,6 +94,13 @@ describe('New run: a device the server cannot use', () => {
     expect(target.querySelector('#start-why')?.textContent).toBe('Device: GPU 1 is not available.');
     // Both Start buttons (summary and phone dock) carry the reason, and the select is tied to its error.
     expect(target.querySelector('#dock-why')?.textContent).toBe('Device: GPU 1 is not available.');
+    // In the dock the reason takes the estimate's place (one row of chrome), and it is an ink link behind a danger mark.
+    expect(target.querySelector('.dock .dock-est')).toBeNull();
+    for (const id of ['#start-why', '#dock-why']) {
+      const why = target.querySelector(id)!;
+      expect(why.firstElementChild?.tagName.toLowerCase()).toBe('svg');
+      expect(why.querySelector('button.why-go')).not.toBeNull();
+    }
     const starts = [...target.querySelectorAll<HTMLButtonElement>('.start button[type="submit"], .dock button[type="submit"]')];
     expect(starts.map((b) => b.getAttribute('aria-describedby'))).toEqual(['start-why', 'dock-why']);
     const sel = target.querySelector('select#device')!;
@@ -235,5 +242,48 @@ describe('New run: image size', () => {
     await new Promise((r) => setTimeout(r, 400));
     flushSync();
     expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
+  });
+});
+
+describe('New run: the form', () => {
+  it('ties an invalid field to its message with aria-invalid and aria-describedby', async () => {
+    await open();
+    const el = target.querySelector<HTMLInputElement>('input#epochs')!;
+    expect(el.hasAttribute('aria-invalid')).toBe(false);
+    el.value = '0';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(el.getAttribute('aria-invalid')).toBe('true');
+    expect(el.getAttribute('aria-describedby')).toBe('epochs-error');
+    expect(target.querySelector('#epochs-error')?.textContent).toBe('A whole number from 1 to 10,000.');
+    expect(target.querySelector('.dock .dock-est')).toBeNull();
+    expect(target.querySelector('#dock-why')?.textContent).toBe('Epochs: A whole number from 1 to 10,000.');
+  });
+
+  it('shows unmeasured latency as a dash and the size letters in uppercase', async () => {
+    await open();
+    const rows = [...target.querySelectorAll('.arch')];
+    expect(rows.map((r) => r.querySelector('.a-size')?.textContent)).toEqual(['N', 'S', 'M', 'L', 'X']);
+    expect(rows.slice(2).map((r) => r.querySelectorAll('.a-v')[2]?.textContent)).toEqual(['—', '—', '—']);
+    expect(target.querySelector('.arches')?.textContent).not.toContain('not measured');
+  });
+
+  it('folds augmentation behind its one-line summary until opened', async () => {
+    await open();
+    const toggle = target.querySelector<HTMLButtonElement>('.aug-toggle')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(target.querySelector('#aug-body')?.classList.contains('shut')).toBe(true);
+    toggle.click();
+    flushSync();
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(target.querySelector('#aug-body')?.classList.contains('shut')).toBe(false);
+  });
+
+  it('marks the page as having a bottom dock while the form is shown', async () => {
+    await open();
+    expect(document.documentElement.hasAttribute('data-dock')).toBe(true);
+    unmount(c!);
+    c = undefined;
+    expect(document.documentElement.hasAttribute('data-dock')).toBe(false);
   });
 });

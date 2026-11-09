@@ -143,13 +143,20 @@ export const scenes = [
     },
   },
   {
+    // A setting isolates itself in the preview on hover or focus: the augmentation section opened, Mosaic focused (focus
+    // survives the harness's scroll to the top, a hover would not) and the preview showing mosaic alone. The whole page,
+    // since the section sits below the first screen.
     name: 'run-new-focus-mosaic',
-    fullPage: false,
+    fullPage: true,
     path: '/runs/new',
-    themes: ['dark'],
-    viewports: ['desktop'],
+    themes: ['dark', 'light'],
+    viewports: ['desktop', 'laptop'],
     setup: async (page) => {
-      await page.getByText('Mosaic', { exact: true }).first().hover();
+      await until(page, '.aug-toggle');
+      await page.locator('.aug-toggle').click();
+      await page.locator('#sec-aug input[type="range"]').first().focus();
+      await until(page, '.aug-row.focused');
+      await page.clock.runFor(500);
     },
   },
   {
@@ -183,7 +190,8 @@ export const scenes = [
       await page.locator('.aug-toggle').click();
     },
   },
-  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'mobile'] },
+  // Run lengths 23 to 150 epochs: the x axis defaults to "% of run", and the control says so.
+  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
     // A run kept in front from the legend: its card selected, its line (here the dotted fourth run) painted over the rest.
     name: 'run-compare-pinned',
@@ -208,7 +216,22 @@ export const scenes = [
     },
   },
   { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
-  { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
+  // A queued run in the loaded frame: KPIs at "—", the chart's axes with what it waits for, the config in its rail.
+  { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // The loss chart's one control open: smoothing and y scale behind a single button.
+    name: 'run-loss-options',
+    path: '/runs/run_c19a',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      const tab = page.locator('[data-tab="loss"]');
+      if (await tab.isVisible()) await tab.click();
+      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      await page.locator('button.trigger').click();
+      await page.clock.runFor(500);
+    },
+  },
   { name: 'datasets-empty', path: '/datasets', search: 'scenario=empty' },
   {
     name: 'datasets-add',
@@ -282,6 +305,8 @@ export const scenes = [
       await page.locator('dialog[open] input[placeholder="D:/data/my-dataset"]').fill('D:/data/shapes');
       await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
       await until(page, 'text=Already registered as shapes');
+      // The thumbnails render in real time (the page clock, which would close the toast, stays put).
+      await page.locator('.cell img.loaded').nth(17).waitFor({ timeout: 15000 }).catch(() => {});
     },
   },
   {
@@ -291,6 +316,20 @@ export const scenes = [
     setup: async (page) => {
       await page.locator('.cell img.loaded').nth(6).waitFor();
       await page.waitForTimeout(400);
+    },
+  },
+  {
+    // Thumbnails mid-load and failed: a skeleton holds each tile until its image is ready (no boxes on an empty frame),
+    // and an image that could not be read says so, with Retry. Two images are made to fail after the first load.
+    name: 'dataset-images-unavailable',
+    path: '/datasets/ds_fasteners',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').nth(6).waitFor();
+      await page.locator('.cell img').evaluateAll((imgs) => [1, 4].forEach((i) => imgs[i]?.dispatchEvent(new Event('error'))));
+      await until(page, '.cell .failed');
+      await page.waitForTimeout(200);
     },
   },
   {
@@ -327,16 +366,32 @@ export const scenes = [
       await page.waitForTimeout(200);
     },
   },
+  {
+    // A label clicked (selected: bg.active + accent bar, aria-current, the image zoomed to its box) while another
+    // is hovered (a lighter neutral step), so the two states show side by side.
+    name: 'dataset-inspector-selected',
+    path: '/datasets/ds_fasteners',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.locator('.cell').nth(1).click();
+      await page.locator('dialog[open] .stage img.loaded').waitFor();
+      await page.locator('dialog[open] .labels button').nth(0).click();
+      await page.locator('dialog[open] .labels button').nth(2).hover();
+      await page.waitForTimeout(300);
+    },
+  },
   { name: 'runs', path: '/runs' },
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
-  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     // Phones open on the Curves section (the matrix is behind the section picker).
     name: 'model-detail',
     path: '/models/m_fast_n',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: (page, { vp }) => until(page, vp === 'mobile' ? '#pr svg' : '#cm .cell'),
   },
   {
@@ -594,8 +649,59 @@ export const scenes = [
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
   { name: 'runs-empty', path: '/runs', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   // Empty and error states sit in the table frame (header row, the message inside, a few rows tall).
-  { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
-  { name: 'datasets-error', path: '/datasets', search: 'scenario=error', viewports: ['desktop'] },
+  { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'datasets-error', path: '/datasets', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // Offline: the create action is disabled and says why on hover (and to assistive tech).
+    name: 'datasets-error-why',
+    path: '/datasets',
+    search: 'scenario=error',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'header .gate');
+      const box = await page.locator('main header .gate').first().boundingBox();
+      if (!box) throw new Error('datasets-error-why: no Add dataset');
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.clock.runFor(600);
+    },
+  },
+  {
+    // Row checkboxes appear on hover (the pointer is on the second row) and are hidden elsewhere.
+    name: 'runs-hover',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.locator('tr[data-row]').nth(1).hover();
+    },
+  },
+  {
+    // Once one run is selected every row shows its checkbox, so picking the rest is one click each.
+    name: 'runs-selected',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.locator('tr[data-row] .check label').first().click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Invalid fields: the danger edge, the danger focus ring on the focused one, and the message with its icon.
+    name: 'datasets-add-invalid',
+    path: '/datasets',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Add dataset' }).first().click();
+      await page.locator('dialog[open]').waitFor();
+      await page.locator('dialog[open] button[type="submit"]').click();
+      await page.locator('dialog[open] input[aria-invalid="true"]').first().focus();
+    },
+  },
   {
     name: 'datasets-nomatch',
     path: '/datasets',

@@ -5,6 +5,7 @@ import { HttpApi } from '$lib/api/client';
 import { hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import type { Model } from '$lib/api/types';
+import { toast } from '$lib/ui/toast.svelte';
 import ExportDialog from './ExportDialog.svelte';
 
 const model: Model = {
@@ -71,6 +72,22 @@ describe('ExportDialog', () => {
     });
     dl.click();
     expect(clicked).toHaveBeenCalledOnce();
+  });
+
+  it('says "Export finished" once: no toast on top of the open dialog', async () => {
+    hub.api = new MockApi('normal', 0);
+    vi.spyOn(hub.api, 'exportModel').mockResolvedValue({ path: 'D:/folo/exports/shapes-n-best-f16.folo', bytes: 5_300_000 });
+    const success = vi.spyOn(toast, 'success');
+    c = mount(ExportDialog, { target, props: { model, open: true } });
+    flushSync();
+    button('Export')!.click();
+    await until(() => button('Done'), 'the finished state');
+    expect(target.ownerDocument.querySelector('dialog')?.textContent).toContain('Export finished');
+    expect(success).not.toHaveBeenCalled();
+    // Without the toast, a live region in the dialog announces it.
+    const live = target.ownerDocument.querySelectorAll('dialog [role="status"]');
+    expect(live).toHaveLength(1);
+    expect(live[0]!.textContent).toBe('Export finished: shapes-n-best-f16.folo, 5.05 MiB.');
   });
 
   it('says plainly that ONNX cannot be downloaded, and shows where it is', async () => {

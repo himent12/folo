@@ -328,13 +328,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Matched characters: ink and weight only. Lime is not decoration (it means focus, live or the one action). */
   mark {
     background: none;
     color: var(--text-primary);
     font-weight: var(--weight-semibold);
-    text-decoration: underline;
-    text-decoration-color: var(--accent-line);
-    text-underline-offset: 3px;
   }
   .hint {
     flex: 1;

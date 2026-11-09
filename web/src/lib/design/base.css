@@ -309,7 +309,57 @@ table {
   text-decoration-color: var(--line-strong);
 }
 
-/* Shell metrics shared by fixed bars (mobile tab bar and docks that sit on it). */
+/*
+ * Responsive columns: one rule for every .table, so a header cell and the cells under it always hide together (a
+ * component-scoped rule cannot reach a header rendered by ui/SortHeader, and the values then slide under the wrong
+ * headings). Put the same class on the <th> and on every <td> of the column, the loading skeleton's too. Never define
+ * these in a component.
+ *   .hide-xl  below 1440     .hide-lg  below 1280     .hide-md  below 1024     .hide-sm  below 768 (phones)
+ */
+@media (max-width: 1439px) {
+  .table :is(th, td).hide-xl {
+    display: none;
+  }
+}
+@media (max-width: 1279px) {
+  .table :is(th, td).hide-lg {
+    display: none;
+  }
+}
+@media (max-width: 1023px) {
+  .table :is(th, td).hide-md {
+    display: none;
+  }
+}
+@media (max-width: 767px) {
+  .table :is(th, td).hide-sm {
+    display: none;
+  }
+}
+
+/*
+ * Invalid fields (aria-invalid='true' on an Input, a Select or a Segmented group): a danger.solid edge at rest and on
+ * hover, and a danger ring instead of the lime one when focused. The controls draw their edge, hover edge and ring
+ * from these properties, so overriding them here covers every state; Field adds the icon and the message.
+ */
+:root {
+  --line-control-hover: var(--text-tertiary);
+}
+.input:has(> input[aria-invalid='true']),
+select[aria-invalid='true'],
+[role='radiogroup'][aria-invalid='true'] {
+  --line-control: var(--danger-solid);
+  --line-control-hover: var(--danger-solid);
+  --seg-edge: var(--danger-solid);
+  --focus: var(--danger-solid);
+}
+
+/* Shell metrics shared by fixed bars (mobile tab bar and docks that sit on it). A page with a bottom dock (shell/dock.ts)
+   hides the tab bar: the bar's height drops to 0, so docks and toasts that sit on it move down to the screen's edge. */
 :root {
   --tabbar-h: 56px;
+  --dock-h: 0px;
+}
+:root[data-dock] {
+  --tabbar-h: 0px;
 }

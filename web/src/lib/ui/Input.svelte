@@ -24,7 +24,8 @@
   }: Props = $props();
 </script>
 
-<div class="input {size} {klass}" class:invalid class:has-icon={!!Icon}>
+<!-- aria-invalid on the input styles the frame (base.css): a danger edge, a danger focus ring. -->
+<div class="input {size} {klass}" class:has-icon={!!Icon}>
   {#if Icon}<span class="icon"><Icon size={14} strokeWidth={1.75} aria-hidden="true" /></span>{/if}
   <input bind:this={el} bind:value aria-invalid={invalid || undefined} {...rest} />
   {#if suffix}<span class="suffix">{suffix}</span>{/if}
@@ -53,15 +54,11 @@
     border-radius: var(--radius-sm);
   }
   .input:hover {
-    border-color: var(--text-tertiary);
+    border-color: var(--line-control-hover);
   }
   .input:focus-within {
     border-color: var(--focus);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
-  }
-  .invalid,
-  .invalid:hover {
-    border-color: var(--danger-solid);
   }
   input {
     flex: 1;
