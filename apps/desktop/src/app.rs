@@ -297,6 +297,9 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
     }
     c
 }
+/// The Playground's lowest default confidence: predictions are fetched down to it once, and the
+/// slider filters above it locally.
+pub const PLAY_CONF_FLOOR: f32 = 0.05;
 pub const IMGSZ: [u32; 5] = [320, 480, 640, 800, 1024];
 pub const DEVICES: [&str; 3] = ["auto", "gpu:0", "cpu"];
 pub const OPTIMIZERS: [Optimizer; 3] = [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw];
@@ -2071,13 +2074,20 @@ impl FoloApp {
         self.run_predict(cx);
     }
 
+    /// The confidence the Playground fetches predictions down to (the slider's low end).
+    pub fn play_fetch_floor(&self) -> f32 {
+        self.play_conf.min(PLAY_CONF_FLOOR)
+    }
+
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
         let (Some(model), Some(img)) = (self.play_model.clone(), self.play_image.as_ref()) else { return };
-        // Fetch everything above the lowest threshold once; the conf slider filters locally.
+        // Fetch everything above the lowest threshold once; the conf slider filters locally. The
+        // floor is 0.05, or lower when the threshold is (a model's best-F1 confidence can be), so
+        // local filtering never claims a threshold the fetch cut off.
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.input.clone(),
-            conf: 0.05,
+            conf: self.play_conf.min(PLAY_CONF_FLOOR),
             iou: self.play_iou,
             max_det: 300,
         };

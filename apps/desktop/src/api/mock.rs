@@ -600,6 +600,8 @@ impl MockBackend {
             },
         ];
         let now = Instant::now();
+        // Each run resolved against its own dataset's class count (Auto's AdamW rate depends on it).
+        let nc = |ds: &str| datasets.iter().find(|d| d.ds.id == ds).map_or(5, |d| d.ds.classes.len());
         let runs = specs
             .into_iter()
             .map(|s| {
@@ -608,7 +610,8 @@ impl MockBackend {
                     epochs: s.config.epochs,
                     spe: s.spe,
                     // The rate the run resolves to (Auto's pick), not the form's.
-                    lr0: resolve(&s.config, s.spe * s.config.batch as u64, 5).lr0 as f32,
+                    lr0: resolve(&s.config, s.spe * s.config.batch as u64, nc(&s.config.dataset_id)).lr0
+                        as f32,
                     batch: s.config.batch,
                     map_max: s.map_max,
                     ips: s.ips,
@@ -648,8 +651,9 @@ impl MockBackend {
                         model_id: s.model.map(Into::into),
                         error: s.error.map(Into::into),
                         error_code: s.error.map(|_| "training_failed".into()),
-                        resolved: (s.status != RunStatus::Queued)
-                            .then(|| resolve(&s.config, s.spe * s.config.batch as u64, 5)),
+                        resolved: (s.status != RunStatus::Queued).then(|| {
+                            resolve(&s.config, s.spe * s.config.batch as u64, nc(&s.config.dataset_id))
+                        }),
                         queue_position: (s.status == RunStatus::Queued).then_some(1),
                         config: s.config,
                     },
@@ -1409,7 +1413,7 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
     let batch = config.batch.max(1);
     let accumulate = ((nbs as f64 / batch as f64).round() as u32).max(1);
     let batches = train_images.div_ceil(batch as u64).max(1);
-    let steps = train_images as f64 / batch.max(nbs) as f64 * config.epochs as f64;
+    let steps = train_images.div_ceil(batch.max(nbs) as u64) as f64 * config.epochs as f64;
     let (optimizer, lr0) = match config.optimizer {
         Optimizer::Sgd => (ResolvedOptimizer::Sgd, config.lr0 as f64),
         Optimizer::Adamw => (ResolvedOptimizer::Adamw, config.lr0 as f64),
@@ -1419,10 +1423,13 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
             (ResolvedOptimizer::Adamw, (lr * 1e6).round() / 1e6)
         }
     };
-    let momentum = 0.937;
     let auto = config.optimizer == Optimizer::Auto;
-    let warmup_iters =
-        ((3.0 * batches as f64).round() as u64).max(100).min(batches * config.epochs as u64 * 3 / 10);
+    // Auto's momentum (AdamW β1) is 0.9; a chosen optimizer keeps the configured 0.937.
+    let momentum = if auto { 0.9 } else { 0.937 };
+    // Warmup in optimizer steps: three epochs' worth, at least 100, ending before the last epoch.
+    let spe = batches.div_ceil(accumulate as u64);
+    let total = spe * config.epochs as u64;
+    let warmup_iters = ((3.0 * spe as f64).round() as u64).max(100).min(total.saturating_sub(spe).max(1));
     ResolvedTrain {
         optimizer,
         lr0,
@@ -1434,7 +1441,7 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
         batch,
         accumulate,
         nbs,
-        optimizer_steps_per_epoch: batches.div_ceil(accumulate as u64),
+        optimizer_steps_per_epoch: spe,
         warmup_iters,
         warmup_epochs: 3.0,
         warmup_momentum: 0.8,
@@ -1493,6 +1500,34 @@ type BBoxT = super::types::BBox;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_as_the_trainer_does() {
+        let cfg = |batch, epochs, optimizer| TrainConfig {
+            name: "r".into(),
+            dataset_id: "ds".into(),
+            arch: Arch::N,
+            epochs,
+            batch,
+            imgsz: 640,
+            device: "auto".into(),
+            optimizer,
+            lr0: 0.01,
+            weights: None,
+            augment: Augment::default(),
+            seed: 0,
+            amp: false,
+            head: Default::default(),
+        };
+        // Warmup in optimizer steps: at least 100, ending before the last epoch.
+        assert_eq!(resolve(&cfg(16, 30, Optimizer::Auto), 800, 3).warmup_iters, 100);
+        assert_eq!(resolve(&cfg(16, 2, Optimizer::Auto), 16, 3).warmup_iters, 1);
+        // Auto: AdamW at 0.01 / (4 + nc) for short runs, with β1 0.9; SGD past 10,000 iterations
+        // (the iteration count rounds batches up).
+        let short = resolve(&cfg(16, 100, Optimizer::Auto), 3200, 3);
+        assert_eq!((short.optimizer, short.lr0, short.momentum), (ResolvedOptimizer::Adamw, 0.001429, 0.9));
+        assert_eq!(resolve(&cfg(32, 527, Optimizer::Auto), 1200, 3).optimizer, ResolvedOptimizer::Sgd);
+    }
 
     #[test]
     fn frozen_mock_is_deterministic() {

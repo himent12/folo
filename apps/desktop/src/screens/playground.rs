@@ -546,7 +546,16 @@ impl FoloApp {
                 }
             }),
         );
-        let conf = self.slider("play-conf", self.play_conf, 0.05, 0.95, 0.01, window, cx);
+        // The range widens to an applied threshold below the usual floor (a best-F1 confidence).
+        let conf = self.slider(
+            "play-conf",
+            self.play_conf,
+            crate::app::PLAY_CONF_FLOOR.min(self.play_conf),
+            0.95,
+            0.01,
+            window,
+            cx,
+        );
         let iou = self.slider("play-iou", self.play_iou, 0.3, 0.95, 0.01, window, cx);
         let conf_help = self.help_icon(
             "help-conf",
@@ -665,8 +674,15 @@ impl FoloApp {
                             radius::SM,
                             window,
                             cx,
-                            act(move |this, _, cx| {
+                            act(move |this, w, cx| {
+                                // Below what's been fetched: fetch down to it, so no box is missing.
+                                let refetch = c < this.play_fetch_floor();
                                 this.play_conf = c;
+                                if refetch {
+                                    this.run_predict(cx);
+                                }
+                                // The link goes once used: focus moves to the slider it set.
+                                this.focus_key("play-conf", w, cx);
                                 cx.notify();
                             }),
                         )))
