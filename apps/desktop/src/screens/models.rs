@@ -1467,8 +1467,6 @@ impl FoloApp {
         let rows: Vec<AnyElement> = per
             .into_iter()
             .map(|c| {
-                // The PR curve's shade (darkened in light mode), so table, legend and curve agree.
-                let color = t.class_stroke(c.class);
                 let class = c.class;
                 let key = format!("pc-row-{class}");
                 let hot = focus == Some(class);
@@ -1508,7 +1506,7 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(crate::ui::class_swatch(&t, color, 8.))
+                            .child(crate::ui::class_swatch(&t, c.class, 8.))
                             .child(
                                 text(ty::BASE, t.text_primary)
                                     .w(px(if pinned { 148. } else { 168. }))

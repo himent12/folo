@@ -1006,12 +1006,25 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex_1().child(typed(
-                        "Epochs",
-                        epochs_box,
-                        epochs_slider,
-                        epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
-                    )))
+                    // A help line on both halves, so the pair ends level (what an epoch is here, as
+                    // the right half says which epochs drop mosaic).
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(8.))
+                            .child(typed(
+                                "Epochs",
+                                epochs_box,
+                                epochs_slider,
+                                epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
+                            ))
+                            .child(text(ty::XS, t.text_tertiary).child(match ds.as_ref() {
+                                Some(d) => format!("Each one pass over {} training images", int(d.splits.train)),
+                                None => "Each one pass over the training images".to_string(),
+                            })),
+                    )
                     .child(
                         div().flex_1().child(
                             div()
@@ -2088,7 +2101,7 @@ impl FoloApp {
                             }
                         }
                     }))
-                    .child(crate::ui::class_swatch(&t, t.class(b.class), 8.))
+                    .child(crate::ui::class_swatch(&t, b.class, 8.))
                     .child(
                         text(ty::SM, t.text_primary)
                             .w(px(70.))

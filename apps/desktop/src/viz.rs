@@ -277,6 +277,13 @@ pub fn paint_image_with_boxes(
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
                     let cw = name_line.width + gap + score_line.width + px(10.);
                     let ch = px(if compact { 14. } else { 16. });
+                    // Thumbnails label sparingly: a chip as big as the object it names is noise, and
+                    // five chips on a 280 px tile outshout the image. Boxes at least two chips tall,
+                    // at most four chips a tile; the rest keep their outline (the inspector, and the
+                    // class key above the grid, name them).
+                    if compact && !b.highlight && (r.size.height < ch * 2. || placed.len() >= 4) {
+                        continue;
+                    }
                     // Preferred spots: above the top-left corner, inside it, below the bottom-left
                     // corner, inside the bottom-left. Take the first that is on the image and free.
                     // Inside the visible part of the box when the chip fits there, else inside the view.
@@ -289,15 +296,14 @@ pub fn paint_image_with_boxes(
                             x.min(bounds.right() - cw).max(bounds.left())
                         }
                     };
-                    // Each corner, outside then inside: top-left, top-right, bottom-left, bottom-right.
+                    // Above the box (left, then right), then inside its top corners, then inside its
+                    // bottom ones. Never below it: a chip under its box reads as the next one's.
                     let (lx, rx) = (r.left() - px(1.), r.right() - cw + px(1.));
                     let candidates = [
                         point(clamp_x(lx), r.top() - ch - px(1.)),
                         point(clamp_x(rx), r.top() - ch - px(1.)),
                         point(clamp_x(r.left() + px(1.)), r.top() + px(1.)),
                         point(clamp_x(rx - px(2.)), r.top() + px(1.)),
-                        point(clamp_x(lx), r.bottom() + px(1.)),
-                        point(clamp_x(rx), r.bottom() + px(1.)),
                         point(clamp_x(r.left() + px(1.)), r.bottom() - ch - px(1.)),
                         point(clamp_x(rx - px(2.)), r.bottom() - ch - px(1.)),
                     ];

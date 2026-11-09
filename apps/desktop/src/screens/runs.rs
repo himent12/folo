@@ -1290,7 +1290,7 @@ impl FoloApp {
                                 .flex()
                                 .items_center()
                                 .gap(px(6.))
-                                .child(crate::ui::class_swatch(&t, t.class(i as u32), 8.))
+                                .child(crate::ui::class_swatch(&t, i as u32, 8.))
                                 .child(text(ty::XS, t.text_secondary).child(name))
                         }),
                 ),

@@ -683,8 +683,6 @@ impl FoloApp {
                     .enumerate()
                     .map(|(i, b)| {
                         let hot = active == Some(i);
-                        // The bar's shade (darkened in light mode), so swatch and bar read as one class.
-                        let color = t.class_stroke(b.class);
                         let key = format!("det-{i}");
                         // A cut class name shows in full on hover and on keyboard focus.
                         let long = may_overflow(&b.name, ty::SM.size, 68.);
@@ -711,7 +709,7 @@ impl FoloApp {
                                     cx.notify();
                                 }
                             }))
-                            .child(crate::ui::class_swatch(&t, color, 8.))
+                            .child(crate::ui::class_swatch(&t, b.class, 8.))
                             .child(text(ty::SM, t.text_primary).w(px(68.)).truncate().child(b.name.clone()))
                             // Size tells apart two boxes of the same class.
                             .child(
@@ -729,7 +727,7 @@ impl FoloApp {
                                         .h_full()
                                         .w(relative(b.score))
                                         .rounded_full()
-                                        .bg(t.class_stroke(b.class)),
+                                        .bg(t.class_on(b.class, crate::theme::Surface::Panel)),
                                 ),
                             )
                             .child(
@@ -866,10 +864,15 @@ impl FoloApp {
                     .child(panel_header(&t, "Detections").h(px(32.)).child(
                         text(ty::XS, t.text_tertiary).tnum().child(if self.play_pred_pending {
                             "Updating…".to_string()
-                        } else if hidden > 0 {
-                            format!("{} shown · {hidden} below threshold", vis.len())
                         } else {
-                            vis.len().to_string()
+                            let n = if hidden > 0 {
+                                format!("{} shown · {hidden} below threshold", vis.len())
+                            } else {
+                                vis.len().to_string()
+                            };
+                            // Short windows: the latency breakdown may scroll away below, so its total
+                            // rides here too.
+                            if tight { format!("{n} · {:.1} ms", p.timing.total_ms) } else { n }
                         }),
                     ))
                     .child(
