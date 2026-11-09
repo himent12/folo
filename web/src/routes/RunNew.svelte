@@ -263,11 +263,11 @@
   const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu, ampOn));
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
-  /** The batches behind the steps, for the Summary's tooltip and its accessible description. */
+  /** The batches behind the steps, for the Summary's tooltip and its accessible description: one line in the rail. */
   const stepsWhy = $derived(
     sched.accumulate > 1
-      ? `${num(est.stepsPerEpoch)} batches of ${batchN} images; ${sched.accumulate} make one optimizer step.`
-      : `${num(est.stepsPerEpoch)} batches of ${batchN} images, one optimizer step each.`,
+      ? `${num(est.stepsPerEpoch)} batches of ${batchN}; ${sched.accumulate} per optimizer step.`
+      : `${num(est.stepsPerEpoch)} batches of ${batchN}, one step each.`,
   );
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
   const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);

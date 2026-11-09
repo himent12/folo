@@ -252,7 +252,7 @@ describe('New run: the schedule in the Summary', () => {
     const steps = est.querySelector<HTMLElement>('dd .steps')!;
     expect(steps.textContent).toBe('30 steps / epoch');
     expect(steps.tabIndex).toBe(0);
-    const why = '120 batches of 16 images; 4 make one optimizer step.';
+    const why = '120 batches of 16; 4 per optimizer step.';
     expect(est.querySelector('dd .sr-only')?.textContent).toBe(`. ${why}`);
     // Keyboard focus shows the tooltip and describes the value with it.
     // happy-dom has no :focus-visible; the tooltip shows on keyboard focus only.
@@ -265,7 +265,7 @@ describe('New run: the schedule in the Summary', () => {
     // Batch 64 is one batch a step.
     target.querySelector<HTMLButtonElement>('#batch button[role="radio"]:nth-child(4)')!.click();
     flushSync();
-    expect(est.querySelector('dd .sr-only')?.textContent).toBe('. 30 batches of 64 images, one optimizer step each.');
+    expect(est.querySelector('dd .sr-only')?.textContent).toBe('. 30 batches of 64, one step each.');
   });
 
   it("matches the short-run scenario's run: shapes at batch 32 for 5 epochs suggests its 16 epochs", async () => {
