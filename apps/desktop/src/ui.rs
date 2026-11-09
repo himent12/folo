@@ -802,11 +802,50 @@ impl ThumbGeo {
 /// Paint the thumb (GPUI draws none), so overflow is visible.
 pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut gpui::Window) {
     let Some(g) = ThumbGeo::of(handle) else { return };
+    // An overlay thumb: shown while dragged, while the pointer is over its area, and for a moment
+    // after the content scrolls; otherwise the content has the space to itself.
+    let over = handle.bounds().contains(&window.mouse_position());
+    if !(hot || over || recently_scrolled(handle)) {
+        return;
+    }
     let color = crate::theme::alpha(t.text_tertiary, if hot { 0.7 } else { 0.45 });
     window.paint_quad(
         fill(Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.))), color)
             .corner_radii(px(2.)),
     );
+}
+
+/// A scroll area's origin, its last vertical offset, and when that last changed.
+type ScrollSeen = ((f32, f32), f32, std::time::Instant);
+
+thread_local! {
+    static SCROLLED: std::cell::RefCell<Vec<ScrollSeen>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether `handle`'s content moved in the last 800 ms.
+fn recently_scrolled(handle: &ScrollHandle) -> bool {
+    let b = handle.bounds();
+    let key = (f32::from(b.origin.x), f32::from(b.origin.y));
+    let y = f32::from(handle.offset().y);
+    let now = std::time::Instant::now();
+    SCROLLED.with(|s| {
+        let mut s = s.borrow_mut();
+        match s.iter_mut().find(|(k, _, _)| *k == key) {
+            Some(e) if (e.1 - y).abs() > 0.5 => {
+                *e = (key, y, now);
+                true
+            }
+            Some(e) => now.duration_since(e.2) < std::time::Duration::from_millis(800),
+            None => {
+                // First sight: not a scroll.
+                s.push((key, y, now - std::time::Duration::from_secs(1)));
+                if s.len() > 64 {
+                    s.remove(0);
+                }
+                false
+            }
+        }
+    })
 }
 
 /// A run's device as shown: "RTX 4080 SUPER · Vulkan" from "NVIDIA GeForce RTX 4080 SUPER (vulkan)".
