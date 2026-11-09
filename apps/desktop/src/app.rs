@@ -2230,6 +2230,20 @@ impl FoloApp {
         format!("{} · {ds}", r.config.arch.as_str())
     }
 
+    /// The split a run's per-epoch scores come from: "val", or "train" when its dataset has no
+    /// validation images (the trainer then evaluates on the training images), so those scores are
+    /// never called validation.
+    pub fn eval_split(&self, r: &Run) -> &'static str {
+        self.store
+            .dataset_summary(&r.config.dataset_id)
+            .map_or("val", |d| if d.splits.val == 0 { "train" } else { "val" })
+    }
+
+    /// The mAP chart's title for that split.
+    pub fn map_title(&self, r: &Run) -> &'static str {
+        if self.eval_split(r) == "train" { "mAP on training images" } else { "Validation mAP" }
+    }
+
     /// A run's subtitle, the same in the Overview hero and on its page: identity, device, start.
     pub fn run_subtitle(
         &self,

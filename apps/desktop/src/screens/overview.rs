@@ -438,7 +438,7 @@ impl FoloApp {
             // The chart section is the run page's chart card without its frame: a header row on a
             // full-width rule, the legend row, then the plot, so the two screens' charts read alike.
             .child(div().w_full().min_w_0().border_t_1().border_color(t.line_subtle).child(
-                crate::ui::chart_section(&t, "Validation mAP", "per epoch", legend_el, chart, hero_h < 120.),
+                crate::ui::chart_section(&t, self.map_title(r), "per epoch", legend_el, chart, hero_h < 120.),
             ))
             .children(footer)
             .into_any_element()
