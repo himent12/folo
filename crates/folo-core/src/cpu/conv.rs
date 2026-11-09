@@ -1372,4 +1372,60 @@ mod kernel_tests {
         ];
         check(&cases);
     }
+
+    /// The fused paths (shifted rows or a 1x1's planes packed row by row, bias and SiLU applied in the
+    /// micro-kernel) are bit for bit an unfused GEMM over an im2col B (packed panel by panel from
+    /// `im2col_segment`, the elementwise formula) followed by the row epilogue: the same K blocks, the same FMAs,
+    /// the same epilogue lanes. Covers ragged M and N, K over one `KC` block, every phase split and zero biases.
+    #[test]
+    fn fused_conv_is_bitwise_im2col_gemm_plus_row_epilogue() {
+        let cases = [
+            (1, 20, [7, 9], 13, [1, 1], params([1, 1], [0, 0], [1, 1], 1)),
+            (2, 300, [5, 7], 7, [1, 1], params([1, 1], [0, 0], [1, 1], 1)),
+            (2, 8, [11, 13], 10, [3, 3], params([1, 1], [1, 1], [1, 1], 1)),
+            (1, 40, [6, 7], 8, [3, 3], params([1, 1], [1, 1], [1, 1], 1)),
+            (1, 8, [9, 9], 6, [3, 3], params([1, 1], [1, 1], [1, 1], 2)),
+            (1, 6, [13, 15], 9, [3, 3], params([2, 2], [1, 1], [1, 1], 1)),
+            (1, 5, [12, 9], 7, [3, 3], params([2, 2], [0, 0], [1, 1], 1)),
+            (1, 6, [10, 11], 5, [5, 5], params([2, 2], [2, 2], [1, 1], 1)),
+            (1, 5, [15, 14], 4, [3, 3], params([2, 2], [2, 2], [2, 2], 1)),
+            (1, 5, [16, 17], 6, [3, 3], params([3, 3], [1, 1], [1, 1], 1)),
+            (1, 6, [12, 13], 5, [3, 3], params([2, 1], [1, 1], [1, 1], 1)),
+            (1, 6, [9, 14], 5, [3, 3], params([1, 2], [1, 1], [1, 1], 1)),
+        ];
+        for (i, &(n, c, hw, o, k, prm)) in cases.iter().enumerate() {
+            let g = geom(n, c, hw, o, k, prm);
+            assert!(!g.is_depthwise() && !uses_small_c(&g));
+            let x = data(n * c * hw[0] * hw[1], 40 + i as u32);
+            let wt = data(o * g.kdim(), 500 + i as u32);
+            // Every third bias is exactly zero.
+            let bias: Vec<f32> =
+                (0..o).map(|c| if c % 3 == 0 { 0.0 } else { c as f32 * 0.3 - 1.0 }).collect();
+            let (cg, og, kdim, ohw, hwi) = (g.cg(), g.og(), g.kdim(), g.ohw(), g.h * g.w);
+            for act in [None, Some(UnaryOp::Silu), Some(UnaryOp::Relu)] {
+                for with_bias in [false, true] {
+                    let epi = BiasAct { bias: with_bias.then_some(&bias[..]), act };
+                    let mut got = vec![f32::NAN; n * o * ohw];
+                    conv2d_forward(&x, &wt, &mut got, &g, false, Some(epi));
+                    let mut want = vec![f32::NAN; n * o * ohw];
+                    let part = [ConvPart::contiguous(&x, c, hwi)];
+                    let input = ConvInput { parts: &part };
+                    for (img, out_img) in want.chunks_mut(o * ohw).enumerate() {
+                        let planes = input.planes(img, hwi);
+                        for grp in 0..g.p.groups {
+                            let a = Strided::lhs(&wt, grp * og * kdim, kdim, 1);
+                            let b = Im2Col { planes: &planes[grp * cg..(grp + 1) * cg], g };
+                            let cblk = &mut out_img[grp * og * ohw..(grp + 1) * og * ohw];
+                            gemm_ex(og, ohw, kdim, &a, &b, cblk, ohw, false, 1, None);
+                            for r in 0..og {
+                                epi.rows_from(grp * og).apply(r, &mut cblk[r * ohw..(r + 1) * ohw]);
+                            }
+                        }
+                    }
+                    let same = got.iter().zip(&want).all(|(p, q)| p.to_bits() == q.to_bits());
+                    assert!(same, "case {i} ({g:?}) act {act:?} bias {with_bias}: not bit-identical");
+                }
+            }
+        }
+    }
 }

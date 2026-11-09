@@ -1198,4 +1198,50 @@ mod tests {
             assert!((x - y).abs() < 1e-4);
         }
     }
+
+    /// The epilogue a micro-kernel applies to its registers is bit for bit the row pass over the stored block
+    /// ([`BiasAct::apply`]), on the portable and the dispatched kernel, for full and ragged blocks, overwriting and
+    /// accumulating, with zero, negative and positive biases.
+    #[test]
+    fn kernel_epilogue_is_bitwise_the_row_pass() {
+        let kc = 37;
+        let a = data(kc * MR, 5);
+        let b = data(kc * NR, 6);
+        let bias = [0.0f32, -0.75, 1.5, 0.0, -2.0, 0.25];
+        let kernels: [Kernel; 2] = [kernel_generic, kernel()];
+        for kern in kernels {
+            for (mr, nr) in [(MR, NR), (4, NR), (MR, 11), (1, 3)] {
+                for acc in [false, true] {
+                    for act in [None, Some(UnaryOp::Silu)] {
+                        for with_bias in [false, true] {
+                            let epi = BiasAct { bias: with_bias.then_some(&bias[..]), act };
+                            let prior = data(MR * NR, 7);
+                            let (mut fused, mut want) = (prior.clone(), prior.clone());
+                            let re = epi.kernel_rows(0, mr);
+                            // SAFETY: the panels and blocks are sized as the kernels require.
+                            unsafe {
+                                kern(
+                                    kc,
+                                    a.as_ptr(),
+                                    b.as_ptr(),
+                                    fused.as_mut_ptr(),
+                                    NR,
+                                    mr,
+                                    nr,
+                                    acc,
+                                    Some(&re),
+                                );
+                                kern(kc, a.as_ptr(), b.as_ptr(), want.as_mut_ptr(), NR, mr, nr, acc, None);
+                            }
+                            for i in 0..mr {
+                                epi.apply(i, &mut want[i * NR..i * NR + nr]);
+                            }
+                            let same = fused.iter().zip(&want).all(|(x, y)| x.to_bits() == y.to_bits());
+                            assert!(same, "mr {mr} nr {nr} acc {acc} act {act:?} bias {with_bias}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

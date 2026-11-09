@@ -51,8 +51,9 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   channel-swapped kernel (no col2im); strided convs use an unfolded gradient and col2im. `f32` buffers from 16 KiB
   are recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one
   to custom ops) so training and inference loops do not pay page faults every step. `cpu::in_pool` runs a closure on
-  a rayon worker with the caller's grad mode and autocast state; CPU forwards and predictions use it so their many
-  parallel kernels start inside the pool instead of each waking it from outside.
+  a worker of a dedicated rayon pool (so the per-thread state cannot reach other jobs of the global pool) with the
+  caller's grad mode and autocast state; CPU forwards and predictions use it so their many parallel kernels start
+  inside a pool instead of each waking one from outside.
 - Determinism: CPU results are bitwise identical from run to run and for every rayon thread count. Full and
   long-row reductions use fixed blocks (8192 elements) combined by a fixed-order pairwise tree; reductions over
   inner dims give each output element to one task; the GEMM's K split depends only on the shape; accumulating

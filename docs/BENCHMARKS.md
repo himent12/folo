@@ -650,9 +650,10 @@ with other jobs, the median call of a small conv runs 1.5–2x its fastest.
   because training shares it.
 - **Threading** (8 threads): every parallel call from outside the rayon pool is injected into the pool's queue and
   the caller sleeps until a worker wakes it. A 64×400×64 GEMM (a 1×1 conv at 20×20) took 28 µs that way, 17 µs
-  started from a worker. `FoloModel::forward` and `Predictor::predict` on the CPU now run inside the pool
+  started from a worker. `FoloModel::forward` and `Predictor::predict` on the CPU now run on a worker
   (`folo_core::cpu::in_pool`, which carries the caller's grad mode and autocast state), so the forward's hundred-odd
-  parallel calls start on a worker.
+  parallel calls start inside a pool. It is a dedicated pool of the same size: a worker waiting on its parallel work
+  runs other jobs of its pool, and in the global pool those would see the forward's per-thread state (tested).
 - **Fresh allocations**: buffers under 256 KB bypassed folo-core's buffer cache, and on Windows a fresh 100–250 KB
   block comes back zeroed through page faults. The 230 KB padded input of a 32-channel 40×40 conv took 80 µs to
   build fresh and 13 µs reused; a SiLU over a 64×20×20 activation 85–110 µs against 47 µs. The cache now takes
