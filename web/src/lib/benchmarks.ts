@@ -4,7 +4,7 @@
 
 import type { Arch } from '$lib/api/types';
 
-export const BENCH_SOURCE = 'docs/BENCHMARKS.md, 2026-11-08 · RTX 4080 SUPER · 640 px';
+export const BENCH_SOURCE = "FOLO's reference benchmarks, 2026-11-08 · RTX 4080 SUPER · 640 px";
 
 /** Per FOLO size: GPU end-to-end latency at batch 1 (decoded image in, boxes out, NMS included; row 5), f32. */
 export const e2eMs: Partial<Record<Arch, number>> = { 'folo-n': 5.18, 'folo-s': 7.87 };

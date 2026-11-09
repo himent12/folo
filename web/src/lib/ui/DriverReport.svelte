@@ -6,16 +6,18 @@
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
   import Button from './Button.svelte';
-  import { toast } from './toast.svelte';
+  import { feedback } from './feedback.svelte';
 
   let { report }: { report: string } = $props();
+  // The page's toaster, or the status region of the dialog this report sits in.
+  const notify = feedback();
 
   async function copy() {
     try {
       await navigator.clipboard.writeText(report);
-      toast.success('Driver report copied');
+      notify.success('Driver report copied');
     } catch (e) {
-      toast.error(e, 'Could not copy the driver report');
+      notify.error(e, 'Could not copy the driver report');
     }
   }
 </script>

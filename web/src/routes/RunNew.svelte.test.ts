@@ -160,6 +160,40 @@ describe('New run after running out of GPU memory', () => {
     expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
     expect(target.querySelector('#imgsz')!.closest('.field')!.querySelector('.was')).toBeNull();
   });
+  it('makes the change that fits the one primary while the settings are forecast not to fit, and Start a secondary', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    // "Retry with batch 16" as round 22 offered it: folo-m at 960 px, ~26.9 GiB on the mock's 16 GiB GPU.
+    await open('?from=run_a2f0&batch=16');
+    const fix = await until(() => [...target.querySelectorAll<HTMLElement>('.start .btn.primary')].find((b) => b.textContent?.includes('Use batch 8')), 'the fix');
+    expect(fix.textContent).toMatch(/Use batch 8 · ~13\.\d GiB/);
+    const startBtn = [...target.querySelectorAll<HTMLButtonElement>('.start button[type="submit"]')][0]!;
+    expect(startBtn.className).toContain('secondary');
+    expect(startBtn.getAttribute('aria-describedby')).toContain('rail-nofit');
+    // One condition, one severity: the meter and the line are danger; the figure, a metric, stays in ink.
+    expect(target.querySelector('#rail-nofit')?.className).toContain('danger');
+    expect(target.querySelector('.summary .vram i')?.className).toContain('danger');
+    const fig = [...target.querySelectorAll('.summary .est dd')].find((d) => /GiB/.test(d.textContent ?? ''))!;
+    expect(fig.textContent).toMatch(/~26\.\d GiB/);
+    expect(fig.className).not.toMatch(/danger|warn/);
+    // The dock (narrow screens) carries the figure against the GPU's, the verdict and the fix as its one button.
+    const dock = target.querySelector('.dock')!;
+    expect(dock.querySelector('.dock-est')?.textContent?.replace(/\s+/g, ' ')).toMatch(/~26\.\d GiB \/ 16\.0 GiB.*Likely won't fit/);
+    expect([...dock.querySelectorAll('.btn')].map((b) => b.textContent?.trim())).toEqual(['Use batch 8']);
+    // Taking it: batch 8, forecast to fit, and Start is the primary again.
+    fix.click();
+    flushSync();
+    expect(target.querySelector('#batch [aria-checked="true"]')?.textContent?.trim()).toBe('8');
+    await until(() => !target.querySelector('#rail-nofit'), 'the fit');
+    await until(() => target.querySelector('.start button[type="submit"]')?.className.includes('primary'), 'Start as the primary');
+    expect(target.querySelectorAll('.start .btn.primary')).toHaveLength(1);
+  });
+  it('keeps Start the primary when the settings fit', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    await until(() => target.querySelector('.summary .vram i'), 'the meter');
+    expect(target.querySelector('#rail-nofit')).toBeNull();
+    expect(target.querySelector('.start button[type="submit"]')?.className).toContain('primary');
+  });
   it("ignores an image size the trainer would reject and keeps the run's", async () => {
     await open('?from=run_a2f0&imgsz=333');
     await until(() => target.querySelector('.oom-note'));
@@ -200,7 +234,7 @@ describe('New run: short runs', () => {
     expect(more.getAttribute('aria-expanded')).toBe('true');
     const why = warn.querySelector(`#${more.getAttribute('aria-controls')}`)!;
     const text = why.textContent!.replace(/[ \t\n]+/g, ' ');
-    expect(text).toContain('150 optimizer steps: 5 epochs × 30 (120 batches of 16, 4 per step).');
+    expect(text).toContain('5 epochs × 30 steps. From scratch, a detector needs a few hundred');
     // "0" never ends up alone on a line, and the prose names no config keys.
     expect(text).toContain('expect an mAP near 0.');
     expect(text).toContain('Warmup takes 90 of the 150 steps');
@@ -245,28 +279,24 @@ describe('New run: short runs', () => {
 });
 
 describe('New run: the schedule in the Summary', () => {
-  it('counts optimizer steps in plain words, with the batches behind them in a tooltip and the description', async () => {
+  it('counts optimizer steps in plain words, with the batches behind them one tap away (ui/InfoButton)', async () => {
     await open();
     // fasteners: 1,920 images at batch 16 are 120 batches, 4 per optimizer step.
     const est = target.querySelector('.summary .est')!;
     expect(est.querySelector('dt')?.textContent).toBe('Schedule');
-    const steps = est.querySelector<HTMLElement>('dd .steps')!;
-    expect(steps.textContent).toBe('30 steps / epoch');
-    expect(steps.tabIndex).toBe(0);
-    const why = '120 batches of 16; 4 per optimizer step.';
-    expect(est.querySelector('dd .sr-only')?.textContent).toBe(`. ${why}`);
-    // Keyboard focus shows the tooltip and describes the value with it.
-    // happy-dom has no :focus-visible; the tooltip shows on keyboard focus only.
-    const matches = steps.matches.bind(steps);
-    vi.spyOn(steps, 'matches').mockImplementation(((sel: string) => sel === ':focus-visible' || matches(sel)) as typeof steps.matches);
-    steps.focus();
-    steps.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-    await until(() => document.getElementById('folo-tooltip')?.textContent === why, 'the tooltip');
-    expect(steps.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    // The value is the button: a tap, a click, Enter or Space opens the batches behind it (touch has no hover).
+    const steps = est.querySelector<HTMLButtonElement>('dd button.steps')!;
+    expect(steps.textContent).toBe('30 steps / epoch. How the steps are counted');
+    expect(steps.getAttribute('aria-expanded')).toBe('false');
+    const why = () => document.getElementById(steps.getAttribute('aria-controls')!)?.textContent?.trim();
+    expect(why()).toBe('120 batches of 16; 4 per optimizer step.');
+    steps.click();
+    flushSync();
+    expect(steps.getAttribute('aria-expanded')).toBe('true');
     // Batch 64 is one batch a step.
     target.querySelector<HTMLButtonElement>('#batch button[role="radio"]:nth-child(4)')!.click();
     flushSync();
-    expect(est.querySelector('dd .sr-only')?.textContent).toBe('. 30 batches of 64, one step each.');
+    expect(why()).toBe('30 batches of 64, one step each.');
   });
 
   it("matches the short-run scenario's run: shapes at batch 32 for 5 epochs suggests its 16 epochs", async () => {
@@ -441,7 +471,7 @@ describe('New run: the end-to-end head', () => {
     await open();
     sw()!.click();
     flushSync();
-    expect(row()?.querySelector('.rv-v')?.textContent).toBe('End-to-end, no NMS');
+    expect(row()?.querySelector('.rv-v')?.textContent).toBe('End-to-end (no NMS)');
     expect(cli()).toContain('--head o2o');
     const create = vi.spyOn(api, 'createRun');
     await start();
@@ -687,8 +717,8 @@ describe('New run: the estimate', () => {
     const radio = target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-x"]')!;
     radio.click();
     flushSync();
-    await until(() => basis().startsWith('Scaled'), 'the folo-x estimate');
-    expect(basis()).toBe('Scaled from folo-s at 640 px on this GPU');
+    await until(() => basis().includes('caled'), 'the folo-x estimate');
+    expect(basis()).toBe('Wide range: scaled from folo-s at 640 px');
     // folo-x is 9x folo-s's compute: low confidence, the value one step quieter.
     expect(rough()).toBe(true);
   });
@@ -698,7 +728,7 @@ describe('New run: the estimate', () => {
     const ask = vi.spyOn(api, 'estimateRun');
     await open();
     await until(() => basis(), 'the estimate');
-    expect(basis()).toBe('Reference figures, same GPU model');
+    expect(basis()).toBe('Reference benchmarks · not run here yet');
     expect(time()).toMatch(/^\d+–\d+ min$/);
     expect(rough()).toBe(true);
     expect(target.querySelector('.summary .how-note')?.textContent).toContain('does not estimate runs');
@@ -759,5 +789,83 @@ describe('New run: the estimate', () => {
     expect(here.textContent).toBe('5.90 ms');
     expect(here.closest('label')?.querySelector('input')?.value).toBe('folo-n');
     expect(target.querySelector('p.ref')?.textContent?.replace(/\s+/g, ' ')).toMatch(/measured on this GPU for folo-n; the others are the reference/);
+  });
+});
+
+describe('New run: DOGFOOD-3', () => {
+  const cli = () => target.querySelector('.cli code')!.textContent!;
+  async function fineTune() {
+    target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-n"]')!.click();
+    flushSync();
+    const sel = target.querySelector<HTMLSelectElement>('select#weights')!;
+    const opt = await until(() => sel.querySelector<HTMLOptionElement>('option[value="m_fast_n"]'), 'fasteners-n-best');
+    opt.selected = true;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+  }
+
+  it("fine-tunes from the weights file in the CLI command: no --model, and the file's path, not the model id (S1)", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    await fineTune();
+    expect(cli()).not.toContain('--model');
+    expect(cli()).not.toContain('m_fast_n');
+    // This server does not report the file's path: a placeholder, and one line that says what to put there.
+    expect(cli()).toContain('--weights <path to fasteners-n-best.folo>');
+    expect(target.querySelector('.summary .cli-note')?.textContent).toBe(
+      'Put the path of fasteners-n-best.folo on the server in its place: this server does not report it.',
+    );
+    expect(target.querySelector('.summary .cli code')?.getAttribute('aria-describedby')).toBe('cli-note');
+  });
+
+  it('names the file where the server reports its path (Model.path)', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const models = api.models.bind(api);
+    vi.spyOn(api, 'models').mockImplementation(async () => (await models()).map((m) => ({ ...m, path: `D:/folo data/models/${m.name}.folo` })));
+    await open();
+    await fineTune();
+    expect(cli()).toContain("--weights 'D:/folo data/models/fasteners-n-best.folo'");
+    expect(target.querySelector('.summary .cli-note')).toBeNull();
+  });
+
+  it("shows the server's own command where its estimate carries one", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const est = api.estimateRun.bind(api);
+    vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => ({ ...(await est(b)), cli: `folo train --data D:/x --weights D:/w.folo --name ${b.name}` }));
+    await open();
+    await fineTune();
+    await until(() => cli().includes('D:/w.folo'), "the server's command");
+    expect(cli()).toContain(`--name ${target.querySelector<HTMLInputElement>('input#name')!.value}`);
+    expect(target.querySelector('.summary .cli-note')).toBeNull();
+  });
+
+  it('says "Estimating…" until the server\'s devices load, never a CPU guess or 0 steps (S3)', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    vi.spyOn(api, 'system').mockReturnValue(new Promise(() => {}));
+    router.route = parse('#/runs/new');
+    c = mount(RunNew, { target });
+    // The dataset loaded, the server's devices still not.
+    await until(() => target.querySelector('.dock-est'), 'the dataset');
+    const summary = target.querySelector('.summary')!.textContent!;
+    expect(summary).toContain('Estimating…');
+    expect(summary).not.toContain('CPU is roughly');
+    expect(summary).not.toContain('steps / epoch');
+    expect(summary).not.toContain('img/s');
+    expect(target.querySelector('.dock-est')?.textContent).toContain('Estimating…');
+  });
+
+  it("states the GPU memory estimate alone where the adapter's size is not reported (memory_bytes 0)", async () => {
+    hub.api = api = new MockApi('normal', 0);
+    const sys = api.system.bind(api);
+    vi.spyOn(api, 'system').mockImplementation(async () => {
+      const r = await sys();
+      return { ...r, gpus: r.gpus.map((g) => ({ ...g, memory_bytes: 0 })) };
+    });
+    await open();
+    const dd = [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. GPU memory')!.nextElementSibling!;
+    expect(dd.textContent).toMatch(/^~[\d.]+ GiB$/);
+    const summary = target.querySelector('.summary')!.textContent!;
+    expect(summary).not.toContain('unknown');
+    expect(summary.split('This GPU’s memory size isn’t reported.')).toHaveLength(2);
   });
 });

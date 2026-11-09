@@ -179,9 +179,13 @@
     margin-bottom: -2px;
     transform: rotate(-135deg);
   }
-  .c-more:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  /* One disclosure style open and closed: the fill is the pointer's hover alone, so a tap (which leaves a sticky
+     :hover on touch) never turns the opened label into a filled pill. */
+  @media (hover: hover) {
+    .c-more:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
   }
   .c-detail {
     grid-column: 2 / -1;
@@ -193,6 +197,10 @@
   }
   .c-detail[hidden] {
     display: none;
+  }
+  /* The reasons behind Why? and More fixes read at the measure; buttons and the driver's report keep the width. */
+  .c-detail :global(p:not(.d-head)) {
+    max-inline-size: var(--measure);
   }
   @media (pointer: coarse) {
     .c-more {

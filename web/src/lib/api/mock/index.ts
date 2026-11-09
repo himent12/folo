@@ -84,7 +84,9 @@ export type Scenario =
   | 'tensor-cores-off'
   | 'no-tensor-cores'
   | 'finishing'
-  | 'no-throughput';
+  | 'no-throughput'
+  // A Studio build without folo-wasm: /api/system does not list `web_wasm`, so Playground's browser choices are off.
+  | 'no-wasm';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -208,6 +210,24 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
       startedAt: t0 - DAY - 2 * HOUR + 4_000,
       terminal: { status: 'completed', atEpoch: 150 },
       modelId: 'm_fast_n',
+      device: DEVICE,
+    },
+    {
+      // A short fine-tune (DOGFOOD-3 S2, S4): 15 epochs ask for the default close mosaic 10, which the trainer caps at
+      // 7 (half the run); in mixed precision with the end-to-end head, so the run's header says both.
+      id: 'run_f15c',
+      name: 'fasteners-n-ft',
+      config: config('fasteners-n-ft', 'ds_fasteners', 'folo-n', 15, { weights: 'm_fast_n', amp: true, head: 'o2o' }),
+      classes: 8,
+      classEase: FASTENER_EASE,
+      stepsPerEpoch: 120,
+      epochSeconds: 21.4,
+      mapMax: 0.6,
+      tau: 4,
+      imgsPerS: 90,
+      createdAt: t0 - DAY - 4 * HOUR,
+      startedAt: t0 - DAY - 4 * HOUR + 3_000,
+      terminal: { status: 'completed', atEpoch: 15 },
       device: DEVICE,
     },
     {
@@ -444,10 +464,13 @@ export class MockApi implements Api {
         cpu: { name: CPU_NAME, threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
         gpus: this.#gpus(),
-        features:
-          this.scenario === 'no-throughput'
+        features: [
+          ...(this.scenario === 'no-throughput'
             ? ['export_onnx_switches', 'queue_control', 'weights_onnx']
-            : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark'],
+            : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark']),
+          // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
+          ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
+        ],
         capabilities: capabilities(this.scenario),
       };
     }, 60);

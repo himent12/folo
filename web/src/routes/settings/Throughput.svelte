@@ -11,6 +11,7 @@
   import type { InferThroughput, TrainThroughput } from '$lib/api/types';
   import { deviceName, num } from '$lib/format';
   import { latencyMs, latencyRange, measuredHere, measuredRows, updatedWords } from '$lib/throughput';
+  import { referenceSource } from '$lib/reference';
   import Button from '$lib/ui/Button.svelte';
   import Ident from '$lib/ui/Ident.svelte';
   import { toast } from '$lib/ui/toast.svelte';
@@ -78,7 +79,7 @@
   <div class="tp-head">
     <div class="setting-text">
       <p>Throughput</p>
-      <p class="note">Speed measured on this server by its runs, predictions{benchmark ? ' and probes' : ''}. Estimates use it; where nothing is measured, the reference figures (docs/BENCHMARKS.md) stand in.</p>
+      <p class="note">Speed measured on this server by its runs, predictions{benchmark ? ' and probes' : ''}. Estimates use it; where nothing is measured, they come from {referenceSource(false)}, scaled to each setting.</p>
     </div>
     {#if benchmark}
       <Button size="sm" icon={Gauge} loading={measuring} onclick={measure}>{measuring ? 'Measuring' : 'Measure now'}</Button>
@@ -110,7 +111,7 @@
               <li class="tp-row">
                 <div class="tp-what">
                   <p><Ident value={r.arch} /> <span class="tp-set num">{setting(r)}</span></p>
-                  <p class="tp-meta num">{meta(r)}{#if other}{' '}· measured on {other}, not used{/if}</p>
+                  <p class="tp-meta num">{meta(r)}{#if other}{' '}· measured on another GPU ({other}), so not used for this one{/if}</p>
                 </div>
                 <div class="tp-val num">
                   {#if 'amp' in r}
@@ -149,7 +150,7 @@
     min-width: 0;
   }
   .note {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     margin-top: 2px;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);

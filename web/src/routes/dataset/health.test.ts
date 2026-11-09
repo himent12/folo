@@ -69,6 +69,19 @@ describe('healthChecks', () => {
     expect(healthChecks(ds(), st({ empty_images: 300 })).find((x) => x.id === 'empty')?.severity).toBe('warning');
   });
 
+  it('gives every finding a short form of its own for the folded line on tablets (at most 16 characters)', () => {
+    const many = [
+      healthChecks(ds({ splits: { train: 40, val: 0, test: 0 } }), st({ broken_labels: 3, empty_images: 300, class_counts: [1200, 0, 10], box_size_hist: { edges: [0, 0.05, 1], counts: [500, 2500] } })),
+      healthChecks(ds(), st({ class_counts: [1200, 600, 200] })),
+      healthChecks(ds(), st()),
+    ].flat();
+    expect(many.length).toBeGreaterThan(6);
+    for (const h of many) {
+      expect(h.tiny.length, h.id).toBeLessThanOrEqual(16);
+      expect(h.tiny, h.id).not.toBe(h.short);
+    }
+  });
+
   it('warns without a validation split', () => {
     expect(healthChecks(ds({ splits: { train: 1000, val: 0, test: 0 } }), st()).some((x) => x.id === 'no-val')).toBe(true);
   });

@@ -1,4 +1,5 @@
-// A tiny hash router. Hash URLs (`#/runs/run_7d1e`) work behind any static file server, including `folo serve`.
+// A tiny hash router. Hash URLs (`#/runs/run_7d1e`) work behind any static file server, including `folo serve`; a
+// path URL (`/runs/run_7d1e`) is moved to its hash route on load.
 
 export type RouteName =
   | 'overview'
@@ -63,6 +64,29 @@ export function section(name: RouteName): string {
   if (name === 'run' || name === 'run-new' || name === 'run-compare') return 'runs';
   if (name === 'model') return 'models';
   return name;
+}
+
+/**
+ * Where a path URL Studio was opened at belongs (`/datasets` → `/#/datasets`): the server answers any path with the
+ * app, which routes by hash only. A known route's path moves into the hash, the page's own query (`?mock=1`) stays,
+ * and a hash route already there wins (`/datasets#/runs` → `/#/runs`). Null when nothing needs to change: the app's
+ * root, or a path that is no route (a missing file). `base` is the app's base path. Exported for tests.
+ */
+export function hashUrl(loc: { pathname: string; search: string; hash: string }, base = '/'): string | null {
+  if (!loc.pathname.startsWith(base)) return null;
+  const rest = loc.pathname.slice(base.length).replace(/\/+$/, '');
+  if (!rest || rest === 'index.html') return null;
+  const path = `/${rest}`;
+  if (parse(`#${path}`).name === 'not-found') return null;
+  const hash = loc.hash && loc.hash !== '#' ? loc.hash : `#${path}`;
+  return `${base}${loc.search}${hash}`;
+}
+
+// Before the router reads the hash: a path URL becomes its hash route, in place (no history entry).
+if (typeof location !== 'undefined' && typeof history !== 'undefined') {
+  const base = import.meta.env?.BASE_URL?.startsWith('/') ? import.meta.env.BASE_URL : '/';
+  const to = hashUrl(location, base);
+  if (to) history.replaceState(history.state, '', to);
 }
 
 class Router {

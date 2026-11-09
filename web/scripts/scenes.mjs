@@ -80,6 +80,23 @@ export const scenes = [
     },
   },
   {
+    // The loss terms opened by a click (a tap on phones, Enter or Space from the keyboard): ui/InfoButton's popover.
+    name: 'run-loss-terms',
+    path: '/runs/run_c19a',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.locator('[data-tab="loss"]:visible, select[aria-label="Metric to chart"]:visible').first().waitFor();
+      const tab = page.locator('[data-tab="loss"]');
+      if (await tab.isVisible()) await tab.click();
+      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      await page.clock.runFor(500);
+      await page.getByRole('button', { name: 'What the loss terms mean' }).click();
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(300);
+    },
+  },
+  {
     // Phones, one section at a time (here: per-class results): the chart folds to its one-line readout above it.
     name: 'run-live-phone-classes',
     path: '/runs/run_7d1e',
@@ -102,15 +119,26 @@ export const scenes = [
       // "More fixes": the other smaller settings and the driver's report.
       await until(page, 'button.c-more');
       await page.locator('button.c-more').first().click();
+      // The pointer leaves the label it clicked: the shot shows the opened disclosure, not its hover fill.
+      await page.mouse.move(0, 0);
     },
   },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // "Retry with batch 16" on the out-of-memory run: the note says what failed and what changed, the field is marked.
+    // A retry of the out-of-memory run at batch 16, still forecast not to fit (~26.9 / 16 GiB): the note says what
+    // failed and what changed, the figure, meter and line are danger, "Use batch 8" is the one primary and Start a
+    // secondary; the phone dock says "~26.9 GiB / 16.0 GiB · Likely won't fit" beside "Use batch 8".
     name: 'run-new-oom-retry',
     path: '/runs/new?from=run_a2f0&batch=16',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: (page) => until(page, '.start .btn.primary:has-text("Use batch")'),
+  },
+  {
+    // The run page's retry ("Retry with batch 8 · ~13.6 GiB"): forecast to fit, so Start is the primary.
+    name: 'run-new-oom-fitted',
+    path: '/runs/new?from=run_a2f0&batch=8',
+    viewports: ['desktop', 'mobile'],
     setup: (page) => until(page, '.oom-note'),
   },
   {
@@ -190,6 +218,26 @@ export const scenes = [
     },
   },
   {
+    // DOGFOOD-3 S1: a fine-tune's CLI command: no --model (it conflicts with --weights) and the weights file by path;
+    // this server does not report it, so a placeholder and one line under the command say what to put there.
+    name: 'run-new-cli-finetune',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      // Phones pick the size from a segmented control; wider screens from the table's radios.
+      if (await page.locator('#arch-pick').isVisible()) await page.locator('#arch-pick button', { hasText: 'N' }).click();
+      else await page.locator('input[name="arch"][value="folo-n"]').check({ force: true });
+      for (let t = 0; t < 8000 && !(await page.locator('select#weights option[value="m_fast_n"]').count()); t += 250) await page.clock.runFor(250);
+      await page.selectOption('select#weights', 'm_fast_n');
+      await page.locator('.amp .switch').click();
+      await page.locator('.summary details.cli > summary').click();
+      await page.locator('.summary details.cli').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // The end-to-end head (TrainConfig.head "o2o"): Advanced opened and the switch on, with its one line; the Summary's
     // Head row and the CLI command (opened) carry it.
     name: 'run-new-e2e',
@@ -205,15 +253,16 @@ export const scenes = [
     },
   },
   {
-    // The Summary's schedule in plain words ("30 steps / epoch"); the batches behind it in a tooltip, here hovered.
+    // The Summary's schedule in plain words ("30 steps / epoch"); the batches behind it in a popover, here clicked.
     name: 'run-new-steps',
     path: '/runs/new',
     fullPage: false,
     viewports: ['desktop', 'laptop'],
     setup: async (page) => {
-      await until(page, '.summary .steps');
-      await page.locator('.summary .steps').hover();
-      await page.clock.runFor(600);
+      await until(page, '.summary button.steps');
+      await page.locator('.summary button.steps').click();
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(300);
     },
   },
   {
@@ -286,6 +335,20 @@ export const scenes = [
       await until(page, '.dock-est');
       await page.locator('.dock-est').click();
       await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    // The Summary sheet's "30 steps / epoch" opened by a tap: the batches behind it in a popover over the sheet (top
+    // layer), never behind the modal.
+    name: 'run-new-summary-steps',
+    fullPage: false,
+    path: '/runs/new',
+    viewports: ['tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.dock-est');
+      await page.locator('.dock-est').click();
+      await page.locator('dialog[open] button.steps').click();
+      await page.clock.runFor(300);
     },
   },
   {
@@ -392,6 +455,44 @@ export const scenes = [
     },
   },
   {
+    // DOGFOOD-3 S2: a 15-epoch fine-tune asked for close mosaic 10, which the trainer caps at 7: the bar hatches the last
+    // 7 epochs, the charts mark epoch 8, and Config says "last 7 epochs (requested 10)". Phones: the Config section.
+    name: 'run-short-mosaic',
+    path: '/runs/run_f15c',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
+      else await page.getByRole('tab', { name: 'Config' }).click();
+      // The rail's Config folds Augmentation, where Close mosaic is.
+      const fold = page.locator('#config details > summary');
+      if (await fold.isVisible()) await fold.click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // DOGFOOD-3 S4: the header's meta names what differs from the defaults: Mixed precision and the end-to-end head.
+    name: 'run-header-amp-head',
+    path: '/runs/run_f15c',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'text=Completed in');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // DOGFOOD-3 S2, S4: Compare's settings: the capped close mosaic with the request, the head that differs.
+    name: 'run-compare-short-mosaic',
+    path: '/runs/compare?ids=run_f15c,run_c19a',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'td.cfg');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // A 5-epoch run from scratch: the trainer's warnings that it is too short to learn, as one callout.
     name: 'run-short-warning',
     path: '/runs/run_s5q1',
@@ -467,6 +568,19 @@ export const scenes = [
     },
   },
   { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  {
+    // Box size's ⓘ opened by a click or tap: the definition in a popover under it (the whole page, so the panel shows).
+    name: 'dataset-stats-box-size',
+    path: '/datasets/ds_shapes_hard?tab=stats',
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button[aria-label="How box size is measured"]');
+      await page.locator('button[aria-label="How box size is measured"]').click();
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(300);
+    },
+  },
   {
     // The health line opened: every finding, its evidence and next step.
     name: 'dataset-health-open',
@@ -613,14 +727,30 @@ export const scenes = [
   {
     name: 'dataset-inspector',
     path: '/datasets/ds_fasteners',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     fullPage: false,
     setup: async (page) => {
       await page.locator('.cell img.loaded').first().waitFor();
       await page.locator('.cell').nth(1).click();
       await page.locator('dialog[open] .stage img.loaded').waitFor();
-      await page.locator('dialog[open] .labels button').nth(1).hover();
+      // Nothing selected and nothing hovered: the pointer that clicked the cell leaves the dialog, so no label row
+      // carries a highlight of a state the scene does not show (round 22's stray "rivet" row was this hover).
+      await page.mouse.move(0, 0);
       await page.waitForTimeout(200);
+    },
+  },
+  {
+    // A tooltip inside the inspector (a modal dialog): Zoom in hovered, its key hint drawn over the dialog.
+    name: 'dataset-inspector-tooltip',
+    path: '/datasets/ds_fasteners',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.locator('.cell').nth(1).click();
+      await page.locator('dialog[open] .stage img.loaded').waitFor();
+      await page.locator('dialog[open] button[aria-label="Zoom in"]:visible').first().hover();
+      await page.clock.runFor(600);
     },
   },
   {
@@ -644,7 +774,8 @@ export const scenes = [
   },
   { name: 'runs', path: '/runs' },
   {
-    // The waiting runs say their place ("1st in queue", "2nd in queue"); the second's ⋯ opened: Start next, Move up.
+    // The waiting runs say their place ("1st in queue", "2nd in queue"); the second's ⋯ opened: Start next, Move up,
+    // Remove from queue (the queue's one action set).
     name: 'runs-queue-menu',
     path: '/runs',
     fullPage: false,
@@ -746,9 +877,10 @@ export const scenes = [
     setup: async (page) => {
       await until(page, '#pr svg');
       await page.getByRole('tab', { name: 'Classes', exact: true }).click();
-      await page.locator('#per-class button.disc').nth(2).click();
-      await page.locator('#per-class tr.detail button', { hasText: 'View curve' }).click();
-      await until(page, '#pr .legend .back');
+      // Trace the third class, then the selection bar's View curve (the one place it lives).
+      await page.locator('#per-class button.cls').nth(2).click();
+      await page.locator('#per-class .to-curve').click();
+      await until(page, '#pr .tools .back');
       await page.clock.runFor(500);
     },
   },
@@ -791,9 +923,11 @@ export const scenes = [
     },
   },
   {
+    // Before an export, the demo says it creates no file ("Demo: no file is created"), under the formats.
     name: 'model-export',
     path: '/models/m_shapes_s',
     fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       // Phones keep Export in the header's ⋯ menu.
       if (vp === 'mobile') {
@@ -808,7 +942,8 @@ export const scenes = [
     },
   },
   {
-    // The f16 export finished: Download (the primary) for the file, by the name it has on the server.
+    // The demo's f16 export: a neutral preview (no success check, no saved file, no Download) whose one primary is
+    // "Connect to a server". A real server's finished export (Download, the path) is ExportDialog.svelte.test.ts's.
     name: 'model-export-done',
     path: '/models/m_shapes_s',
     fullPage: false,
@@ -824,7 +959,7 @@ export const scenes = [
       }
       await until(page, 'dialog[open] fieldset');
       await page.locator('dialog[open] footer button:has-text("Export")').click();
-      await until(page, 'dialog[open] .where');
+      await until(page, 'dialog[open] .done');
     },
   },
   {
@@ -850,9 +985,8 @@ export const scenes = [
     },
   },
   {
-    // ONNX on a server that serves it (weights_onnx): the primary names the file it downloads, the switches mapped to
-    // the query (half: "-f16.onnx").
-    name: 'model-export-onnx-download',
+    // ONNX in the demo: the same neutral preview as f16, by the file a server would write (fasteners-n-best.onnx).
+    name: 'model-export-onnx',
     path: '/models/m_fast_n',
     fullPage: false,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
@@ -868,31 +1002,7 @@ export const scenes = [
       await until(page, 'dialog[open] fieldset');
       await page.locator('dialog[open] label:has-text("ONNX")').first().click();
       await until(page, 'dialog[open] .switches');
-      await page.locator('dialog[open] .switches label').nth(2).click();
-      await until(page, 'dialog[open] footer button:has-text("Download")');
-      await page.mouse.move(0, 0);
-    },
-  },
-  {
-    // The download asked for: in the demo there is no graph to save, and the dialog says so by the file's name.
-    name: 'model-export-onnx',
-    path: '/models/m_fast_n',
-    fullPage: false,
-    viewports: ['desktop', 'mobile'],
-    setup: async (page, { vp }) => {
-      if (vp === 'mobile') {
-        await until(page, 'button[aria-label="More model actions"]');
-        await page.locator('button[aria-label="More model actions"]').click();
-        await page.getByRole('menuitem', { name: 'Export' }).click();
-      } else {
-        await until(page, 'button:has-text("Export")');
-        await page.locator('button:has-text("Export")').first().click();
-      }
-      await until(page, 'dialog[open] fieldset');
-      await page.locator('dialog[open] label:has-text("ONNX")').first().click();
-      // The server's features arrive on the mock's clock: Download replaces Export once they do.
-      await until(page, 'dialog[open] footer button:has-text("Download")');
-      await page.locator('dialog[open] footer button:has-text("Download")').click();
+      await page.locator('dialog[open] footer button:has-text("Export")').click();
       await until(page, 'dialog[open] .done');
     },
   },
@@ -969,6 +1079,21 @@ export const scenes = [
       await page.reload({ waitUntil: 'networkidle' });
       await page.clock.runFor(2000);
       await until(page, '.runon-note');
+    },
+  },
+  {
+    // DOGFOOD-3 S5: a Studio build without the in-browser runtime: WebGPU and CPU are off, the line under them says
+    // why, and the hovered CPU choice shows the reason as its tip.
+    name: 'playground-no-wasm',
+    path: '/playground?model=m_hard_s',
+    search: 'scenario=no-wasm',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      await until(page, '.runon-note');
+      if (vp === 'desktop' || vp === 'laptop') await page.locator('.runon .tip').last().hover();
+      else await page.mouse.move(0, 0);
+      await page.clock.runFor(800);
     },
   },
   {
@@ -1282,6 +1407,19 @@ export const scenes = [
       await page.getByRole('switch', { name: /Single-key shortcuts/ }).click({ force: true });
       await page.getByRole('button', { name: 'Show shortcuts' }).click();
       await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    // Phones: one run picked. Compare (disabled, "Select 2–4 runs") stays secondary and New run keeps the one primary.
+    name: 'runs-selected-phone',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, '.rows li');
+      await page.getByRole('button', { name: 'Select to compare' }).click();
+      await page.locator('.rows li .r-check').nth(1).click();
+      await page.mouse.move(0, 0);
     },
   },
   {

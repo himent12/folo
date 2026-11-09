@@ -26,7 +26,7 @@ afterEach(() => {
   target.remove();
 });
 
-async function render(view: 'all' | 'curves' | 'classes', more: { onviewcurve?: (cls: number) => void; onback?: () => void } = {}) {
+async function render(view: 'all' | 'curves' | 'classes', more: { onviewcurve?: (cls: number) => void; onback?: () => void; selected?: number[] } = {}) {
   const api = new MockApi('normal', 0);
   const model = await api.model('m_fast_n');
   const ev = fromModelEval(await api.modelEval('m_fast_n'));
@@ -50,7 +50,16 @@ describe('PrCurves on phones', () => {
   it('tells a phone how to trace a curve from the Curves section', async () => {
     phone = true;
     await render('curves');
-    expect(target.querySelector('.legend .hint')?.textContent).toBe('Tap a class in Classes to trace its curve.');
+    expect(target.querySelector('.tools.bar .hint')?.textContent).toBe('Tap a class in Classes to trace its curve');
+  });
+
+  it('keeps the legend a readout: navigation and Clear sit in the selection bar, never among the values', async () => {
+    phone = true;
+    await render('curves', { onback: () => {}, selected: [0] });
+    expect(target.querySelectorAll('.legend button, .legend .hint')).toHaveLength(0);
+    const bar = target.querySelector('.tools.bar')!;
+    expect([...bar.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual(['Back to Classes', 'Clear']);
+    expect(bar.textContent).toContain('1 class traced');
   });
 
   it('keeps the automatic layout (no colgroup) on wide screens', async () => {
@@ -87,15 +96,19 @@ describe('PrCurves on phones', () => {
     expect(trace.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it("traces a class from its details row's View curve, and offers the way back in the curves' legend", async () => {
+  it("shows a traced class's curve from the selection bar alone, and offers the way back in the curves' selection bar", async () => {
     phone = true;
     const viewed: number[] = [];
     await render('classes', { onviewcurve: (cls) => viewed.push(cls) });
     const disc = target.querySelector<HTMLButtonElement>('table.table tbody tr button.disc')!;
     const cls = Number(disc.dataset.cls);
+    target.querySelector<HTMLButtonElement>(`button.cls[data-cls="${cls}"]`)!.click();
     disc.click();
     flushSync();
-    const view = [...target.querySelectorAll<HTMLButtonElement>('tr.detail button')].find((b) => b.textContent?.trim() === 'View curve')!;
+    // One action in one place: the opened details row does not repeat the selection bar's View curve.
+    expect([...target.querySelectorAll('tr.detail button')].some((b) => b.textContent?.includes('View curve'))).toBe(false);
+    const view = target.querySelector<HTMLButtonElement>('.tools .to-curve')!;
+    expect(view.textContent?.trim()).toBe('View curve');
     view.click();
     flushSync();
     expect(viewed).toEqual([cls]);
@@ -103,7 +116,7 @@ describe('PrCurves on phones', () => {
     unmount(c!);
     let back = 0;
     await render('curves', { onback: () => back++ });
-    const b = target.querySelector<HTMLButtonElement>('.legend button.back')!;
+    const b = target.querySelector<HTMLButtonElement>('.tools.bar button.back')!;
     expect(b.textContent?.trim()).toBe('Back to Classes');
     b.click();
     expect(back).toBe(1);

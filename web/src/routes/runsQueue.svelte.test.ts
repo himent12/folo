@@ -51,9 +51,10 @@ describe('Runs: the training queue', () => {
     expect(place('run_q4n2')).toBe('1st in queue');
     expect(place('run_q7c5')).toBe('2nd in queue');
     expect(row('run_7d1e').querySelector('td.act button')).toBeNull();
-    // The front run cannot move up; the live run trains, so Start next (not "now"), and only for the one behind.
-    expect((await menu('run_q4n2')).map((b) => b.textContent?.trim())).toEqual(['Move down']);
-    expect((await menu('run_q7c5')).map((b) => b.textContent?.trim())).toEqual(['Start next', 'Move up']);
+    // The front run cannot move up; the live run trains, so Start next (not "now"), and only for the one behind. The
+    // queue's one action set ends with Remove from queue, as on the run's own page.
+    expect((await menu('run_q4n2')).map((b) => b.textContent?.trim())).toEqual(['Move down', 'Remove from queue']);
+    expect((await menu('run_q7c5')).map((b) => b.textContent?.trim())).toEqual(['Start next', 'Move up', 'Remove from queue']);
   });
 
   it('moves at once, and the server agrees', async () => {

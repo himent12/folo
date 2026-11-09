@@ -3,6 +3,7 @@
 // the state at "now" as time passes.
 
 import type { ClassMetrics, Epoch, LogLine, Loss, ResolvedTrain, Run, RunStatus, Step, TrainConfig } from '../types';
+import { closeMosaicEpochs } from '../progress';
 import { gauss, hash, rng, smoothNoise } from './rng';
 
 export interface RunProfile {
@@ -90,10 +91,13 @@ export function lrAt(p: RunProfile, epochF: number): number {
   return lr0 * (lrf + (1 - lrf) * decay);
 }
 
+/** The epochs the trainer closes mosaic for: the request, capped at half the run. */
+const closeEpochs = (p: RunProfile) => closeMosaicEpochs(p.config.augment.close_mosaic, p.config.epochs);
+
 /** Smooth training loss at fractional epoch, plus step noise. */
 export function lossAt(p: RunProfile, epochF: number, noisy: boolean): Loss {
   const s = seedOf(p);
-  const closing = Math.max(0, epochF - (p.config.epochs - p.config.augment.close_mosaic));
+  const closing = Math.max(0, epochF - (p.config.epochs - closeEpochs(p)));
   const close = closing > 0 ? 1 - 0.12 * Math.min(1, closing / 2) : 1;
   const n = (k: number, amp: number) => (noisy ? 1 + amp * smoothNoise(s + k, epochF * 9) + amp * 0.6 * (rng(s + k + Math.floor(epochF * 997))() - 0.5) : 1);
   // Harder runs (lower ceiling) plateau higher; slower runs (larger tau) decay slower.
@@ -107,21 +111,30 @@ export function lossAt(p: RunProfile, epochF: number, noisy: boolean): Loss {
 
 function mapCurve(p: RunProfile, e: number): number {
   const x = 1 - Math.exp(-(e + 1) / p.tau);
-  const closingBoost = Math.max(0, e - (p.config.epochs - p.config.augment.close_mosaic)) * 0.0022;
+  const closingBoost = Math.max(0, e - (p.config.epochs - closeEpochs(p))) * 0.0022;
   const wobble = 0.012 * smoothNoise(seedOf(p) + 11, e / 2.5) + 0.006 * (rng(seedOf(p) + e * 31)() - 0.5);
   return Math.max(0.001, Math.min(0.97, p.mapMax * Math.pow(x, 1.35) + closingBoost + wobble * x));
 }
 
+/**
+ * A run's validation after epoch `e + 1`. As folo-server's mock (and the engine, docs/METRICS.md) reports them, the
+ * overall numbers are class means: each class's mAP50-95 deviates from the epoch's by a zero-mean factor (its
+ * `classEase` re-centred on 1, plus a little noise), scaled down where a class would pass 0.98 or drop under 0.001 so
+ * no clamp moves the mean; mAP50, precision and recall are the means of the classes' own (`mock.test.ts` checks it).
+ */
 export function epochAt(p: RunProfile, e: number): Epoch {
   const m = mapCurve(p, e);
   const r = rng(seedOf(p) + e * 101);
-  const map50 = Math.min(0.995, m * 1.3 + 0.035 * (1 - m) + (r() - 0.5) * 0.008);
-  const precision = Math.min(0.995, 0.25 + m * 1.02 + (r() - 0.5) * 0.02);
-  const recall = Math.min(0.99, 0.18 + m * 1.0 + (r() - 0.5) * 0.02);
-  const per_class: ClassMetrics[] = Array.from({ length: p.classes }, (_, c) => {
-    const ease = p.classEase[c] ?? 1;
-    const cr = rng(seedOf(p) + e * 101 + c * 7);
-    const cm = Math.max(0.001, Math.min(0.98, m * ease + (cr() - 0.5) * 0.02));
+  const n = p.classes;
+  const easeMean = Array.from({ length: n }, (_, c) => p.classEase[c] ?? 1).reduce((a, b) => a + b, 0) / Math.max(1, n);
+  const noise = Array.from({ length: n }, (_, c) => rng(seedOf(p) + e * 101 + c * 7));
+  const raw = noise.map((cr, c) => (p.classEase[c] ?? 1) / easeMean - 1 + (cr() - 0.5) * 0.03);
+  const rawMean = raw.reduce((a, b) => a + b, 0) / Math.max(1, n);
+  const dev = raw.map((d) => d - rawMean);
+  const room = dev.reduce((k, d) => (d > 0 ? Math.min(k, (0.98 - m) / (m * d)) : d < 0 ? Math.min(k, (1 - 0.001 / m) / -d) : k), 1);
+  const per_class: ClassMetrics[] = dev.map((d, c) => {
+    const cr = noise[c]!;
+    const cm = m * (1 + room * d);
     return {
       class: c,
       map50: r4(Math.min(0.995, cm * 1.28 + 0.03)),
@@ -130,6 +143,12 @@ export function epochAt(p: RunProfile, e: number): Epoch {
       recall: r4(Math.min(0.99, 0.16 + cm * 1.0 + (cr() - 0.5) * 0.03)),
     };
   });
+  // Without classes, the old overall curves (their draws also keep the epoch durations where they were).
+  const flat = { map50: Math.min(0.995, m * 1.3 + 0.035 * (1 - m) + (r() - 0.5) * 0.008), precision: Math.min(0.995, 0.25 + m * 1.02 + (r() - 0.5) * 0.02), recall: Math.min(0.99, 0.18 + m * 1.0 + (r() - 0.5) * 0.02) };
+  const mean = (k: 'map50' | 'precision' | 'recall') => (n ? per_class.reduce((a, c) => a + c[k], 0) / n : flat[k]);
+  const map50 = mean('map50');
+  const precision = mean('precision');
+  const recall = mean('recall');
   // The best-F1 confidence on the 0.001 grid, as folo-server's mock derives it: low while the model is unsure,
   // settling near 0.3-0.45.
   const best_f1_conf = r3(Math.max(0.001, Math.min(0.999, 0.12 + 0.35 * map50 + 0.02 * smoothNoise(seedOf(p) + 22, e))));
@@ -228,8 +247,8 @@ export function epochLog(p: RunProfile, ep: Epoch, startedAt: number): LogLine[]
   ];
   const best = bestOf(p, ep.epoch);
   if (best && best.epoch === ep.epoch) lines.push({ t, level: 'info', message: `new best mAP50-95 ${best.map50_95.toFixed(4)}, saved best.folo` });
-  if (ep.epoch === p.config.epochs - p.config.augment.close_mosaic)
-    lines.push({ t, level: 'info', message: `closing mosaic: augmentation off for the last ${p.config.augment.close_mosaic} epochs` });
+  if (ep.epoch === p.config.epochs - closeEpochs(p))
+    lines.push({ t, level: 'info', message: `closing mosaic: augmentation off for the last ${closeEpochs(p)} epochs` });
   if ((ep.epoch - 1) % 17 === 9) lines.push({ t, level: 'warn', message: `data loader stalled 140 ms waiting for decode workers (8 threads); consider --workers 12` });
   return lines;
 }
@@ -326,6 +345,16 @@ export function startLogs(p: RunProfile, startedAt: number, datasetName: string,
     { t: t(0), level: 'info', message: `FOLO 0.1.0  ${c.arch}  device ${p.device}` },
     // Straight after the first line, as the trainer writes them.
     ...scheduleWarnings(p, images).map((message): LogLine => ({ t: t(0), level: 'warn', message })),
+    // folo_vision::train: a close_mosaic over half of the run is capped (folo-data `close_mosaic_epochs`).
+    ...(c.augment.mosaic > 0 && c.augment.close_mosaic > closeEpochs(p)
+      ? [
+          {
+            t: t(0),
+            level: 'info',
+            message: `close_mosaic ${c.augment.close_mosaic} is more than half of the ${c.epochs} epochs: mosaic closes for the last ${closeEpochs(p)} instead`,
+          } satisfies LogLine,
+        ]
+      : []),
     { t: t(40), level: 'info', message: `dataset ${datasetName}: ${images} train images, ${p.classes} classes, imgsz ${c.imgsz}` },
     { t: t(90), level: 'debug', message: `model ${c.arch}: params ${archInfo[c.arch].params.toLocaleString('en-US')}, ${archInfo[c.arch].flops} GFLOPs` },
     ...(p.resolved

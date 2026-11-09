@@ -44,8 +44,9 @@
     adding = true;
   }
 
+  // What the rows shown hold, said once at the list's end (base.css .list-foot).
   const totals = $derived.by(() => {
-    const list = datasets.data ?? [];
+    const list = shown;
     return {
       images: list.reduce((a, d) => a + imageCount(d), 0),
       boxes: list.reduce((a, d) => a + (d.stats?.boxes ?? 0), 0),
@@ -67,7 +68,7 @@
 </script>
 
 <Page title="Datasets">
-  <!-- One fixed line: the counts live in the toolbar, so nothing here changes as the list loads. -->
+  <!-- One fixed line: the counts live at the list's end, so nothing here changes as the list loads. -->
   {#snippet sub()}<span>YOLO and COCO folders registered with the server.</span>{/snippet}
   <!-- Phones: one header row, this line beside Add dataset. -->
   {#snippet subPhone()}<span>YOLO and COCO folders.</span>{/snippet}
@@ -81,11 +82,6 @@
 
   {#if !datasets.error && (!datasets.data || datasets.data.length > 0)}
     <div class="list-toolbar">
-      <span class="lt-count num">
-        {#if datasets.data}
-          {datasets.data.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'} · {num(totals.images)} images · {num(totals.boxes)} boxes
-        {:else}<Skeleton inline w="200px" h="10px" />{/if}
-      </span>
       <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" /></div>
     </div>
   {/if}
@@ -161,7 +157,8 @@
         </tbody>
       </table>
     </div>
-    <!-- Phones: two-line rows (name and one meta line, the image count and class balance on the right). -->
+    <!-- Phones: the name, then the image total and the class count, then the splits (each line wraps whole items, so no
+         count is cut); the class balance on the right. -->
     {#if shown.length}
       <ul class="rows" aria-label="Datasets">
         {#each shown as d (d.id)}
@@ -169,30 +166,37 @@
             <a href={href(`/datasets/${d.id}`)}>
               <span class="m-main">
                 <span class="name truncate">{d.name}</span>
-                <span class="m-meta num truncate"><Meta line><span>{num(d.splits.train)} train</span><span>{num(d.splits.val)} val</span><span>{num(d.splits.test)} test</span><span>{d.classes.length} classes</span></Meta></span>
+                <span class="m-meta m-total num"><Meta><span>{num(imageCount(d))} images</span><span>{d.classes.length} classes</span></Meta></span>
+                <span class="m-meta num"><Meta><span>{num(d.splits.train)} train</span><span>{num(d.splits.val)} val</span><span>{num(d.splits.test)} test</span></Meta></span>
               </span>
-              <span class="m-side">
-                <span class="num">{num(imageCount(d))}<span class="faint">&nbsp;img</span></span>
-                {#if d.stats}<span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
-              </span>
+              {#if d.stats}<span class="m-side"><span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span></span>{/if}
             </a>
           </li>
         {/each}
       </ul>
     {:else if !datasets.data && !datasets.error}
-      <!-- Phones, loading: the rows' shape (name over one meta line, the image count on the right). -->
+      <!-- Phones, loading: the rows' shape (the name over two meta lines, the class balance on the right). -->
       <ul class="rows" aria-hidden="true">
         {#each [0, 1, 2] as i (i)}
           <li>
             <span class="row-sk">
-              <span class="m-main"><Skeleton w="55%" h="14px" /><Skeleton w="75%" h="10px" /></span>
-              <span class="m-side"><Skeleton w="48px" h="14px" /></span>
+              <span class="m-main"><Skeleton w="55%" h="14px" /><Skeleton w="45%" h="10px" /><Skeleton w="65%" h="10px" /></span>
+              <span class="m-side"><Skeleton w="64px" h="4px" /></span>
             </span>
           </li>
         {/each}
       </ul>
     {/if}
   </Panel>
+  {#if datasets.data && shown.length}
+    <p class="list-foot num">
+      <Meta>
+        <span>{shown.length < datasets.data.length ? `${shown.length} of ${datasets.data.length}` : shown.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'}</span>
+        <span>{num(totals.images)} images</span>
+        <span>{num(totals.boxes)} boxes</span>
+      </Meta>
+    </p>
+  {/if}
 </Page>
 
 <AddDatasetDialog bind:open={adding} bind:mode={addMode} known={datasets.data} />
@@ -257,6 +261,10 @@
       font-size: var(--type-sm-size);
       line-height: var(--type-sm-line);
       color: var(--text-tertiary);
+    }
+    /* The dataset's size, read first: secondary ink over the tertiary splits. */
+    .m-total {
+      color: var(--text-secondary);
     }
     .m-side {
       display: grid;

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { resolveTrain } from '$lib/api/mock/runs';
-import { batchSetting, decaySetting, lrSetting, momentumSetting, optimizerSetting, settingText, warmupSetting } from './resolved';
+import { batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, headSetting, lrSetting, momentumSetting, optimizerSetting, precisionSetting, settingText, warmupSetting } from './resolved';
 
 const config = { optimizer: 'auto', lr0: 0.01, batch: 8, epochs: 30 } as TrainConfig;
 
@@ -44,5 +44,41 @@ describe('Run › Config wording', () => {
     expect(optimizerSetting(config, null)).toEqual({ value: 'auto', ident: false });
     expect(lrSetting(config, undefined)).toEqual({ value: '0.01' });
     expect(batchSetting(config, null)).toEqual({ value: '8' });
+  });
+});
+
+describe('close mosaic as the trainer runs it (DOGFOOD-3 S2)', () => {
+  const run = (epochs: number, close: number, resolved: Partial<ResolvedTrain> | null = null) => ({
+    config: { epochs, augment: { close_mosaic: close } } as TrainConfig,
+    resolved: resolved as ResolvedTrain | null,
+  });
+
+  it('caps the request at half the run: 15 epochs asked for 10 close for 7', () => {
+    expect(effectiveCloseMosaic(run(15, 10))).toBe(7);
+    expect(effectiveCloseMosaic(run(100, 10))).toBe(10);
+    expect(effectiveCloseMosaic(run(1, 10))).toBe(0);
+    expect(effectiveCloseMosaic(run(20, 0))).toBe(0);
+  });
+
+  it("prefers the server's figure where it sends one", () => {
+    expect(effectiveCloseMosaic(run(15, 10, { close_mosaic: 6 }))).toBe(6);
+    expect(effectiveCloseMosaic(run(15, 10, {}))).toBe(7);
+  });
+
+  it('says the request where the trainer capped it', () => {
+    expect(settingText(closeMosaicSetting(run(15, 10)))).toBe('last 7 epochs (requested 10)');
+    expect(settingText(closeMosaicSetting(run(100, 10)))).toBe('last 10 epochs');
+    expect(settingText(closeMosaicSetting(run(2, 1)))).toBe('last 1 epoch');
+    expect(settingText(closeMosaicSetting(run(1, 1)))).toBe('never (requested 1)');
+    expect(settingText(closeMosaicSetting(run(20, 0)))).toBe('never');
+  });
+});
+
+describe('precision and head (DOGFOOD-3 S4)', () => {
+  it("in Model › Details' words", () => {
+    expect(precisionSetting({ amp: true } as TrainConfig).value).toBe('Mixed precision (f16)');
+    expect(precisionSetting({} as TrainConfig).value).toBe('f32');
+    expect(headSetting({ head: 'o2o' } as TrainConfig).value).toBe('End-to-end (no NMS)');
+    expect(headSetting({} as TrainConfig).value).toBe('NMS (one-to-many)');
   });
 });

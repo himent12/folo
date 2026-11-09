@@ -258,13 +258,7 @@
     fill: var(--text-tertiary);
     font-size: var(--type-sm-size);
   }
-  svg:focus {
-    outline: none;
-  }
-  svg:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 4px;
-  }
+  /* Focus: the global :focus-visible ring (base.css), never a halo of its own (DESIGN_DIRECTION §2.9). */
   .grid {
     stroke: var(--chart-grid);
     shape-rendering: crispEdges;

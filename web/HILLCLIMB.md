@@ -47,6 +47,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r20 | Claude Opus 5.5 (128 sheets, 11 full-size) | 8 | 8 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8 |
 | r21 | GPT-6.1 Sol (134 sheets, 30 full-size) | 8 | 9 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 8 | 8.5 | 8 |
 | r21 | Claude Opus 5.5 (134 sheets, ~106 full-size) | 7.5 | 8 | 8 | 7.5 | 8 | 7.5 | 7.5 | 7.5 | 8 | 8.5 | 8 | 8 | 7.5 |
+| r22 | GPT-6.1 Sol (152 sheets, 42 full-size) | 8 | 8 | 9 | 9 | 8 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 8 | 8 |
+| r22 | Claude Opus 5.5 (152 sheets, 8 full-size) | 8 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -73,6 +75,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r19 | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 7.5 ↓ | 7 ↓ | 8 ↑ | 7.5 ↓ | 8 | 8 ↓ | 8 ↓ | 6.5 ↓ | 7.5 ↓ | 6.5 |
 | r20 | 8 ↑ | 8 ↑ | 8.5 ↑ | 8 ↑ | 8.5 ↑ | 8 | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8 |
 | r21 | 7.5 ↓ | 8 | 8 ↓ | 7.5 ↓ | 8 ↓ | 7.5 ↓ | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 8.5 | 8 ↓ | 8 ↓ | 7.5 |
+| r22 | 8 ↑ | 8 | 8.5 ↑ | 8.5 ↑ | 8 | 8 ↑ | 8 ↑ | 8.5 ↑ | 8.5 ↑ | 8 ↓ | 8 | 8 | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -154,3 +157,10 @@ empty; detection overlays too heavy in thumbnails and a selection that does not 
 disagree between places (Health's issues vs checks, a checkpoint's name vs its id); KPI values off their baseline;
 lime on the active nav icon. Round 22 takes them as rules, plus #129 (operating point, resolved config, queue
 control, ONNX).
+
+r22 (#135: the round-21 causes as rules, #129 and #130 in the UI, six branches merged by hand): the floor is back to
+8 on every line, with 3, 4, 8 and 9 at 8.5 (Sol 9 on 3 and 4). What holds 1, 2, 5, 6, 7, 10, 11 and 12 at 8 is now
+mostly truth and fit, not styling: an out-of-memory retry that the estimator says will fail again; demo exports that
+claim a saved file; per-class AP that does not average to the headline; phone rows that cut facts ("8 clas…",
+"shapes-hard…", Compare's first pair headers broken per letter); feedback and tooltips that sit behind an open
+dialog; help that needs hover; desktop canvases left half empty (lists, Settings, the empty Playground).

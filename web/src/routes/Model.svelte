@@ -5,7 +5,6 @@
   import Download from '@lucide/svelte/icons/download';
   import Copy from '@lucide/svelte/icons/copy';
   import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
-  import Info from '@lucide/svelte/icons/info';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { tick } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
@@ -24,6 +23,7 @@
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
+  import InfoButton from '$lib/ui/InfoButton.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Menu from '$lib/ui/Menu.svelte';
   import Panel from '$lib/ui/Panel.svelte';
@@ -38,6 +38,8 @@
   import Meta from '$lib/ui/Meta.svelte';
   import PrCurves from './model/PrCurves.svelte';
   import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
+  // The head and precision in the words Run's Config and Compare use.
+  import { HEAD_LABEL, PRECISION_LABEL } from './run/resolved';
   import { media } from '$lib/design/tokens';
 
   const id = $derived(router.route.params.id ?? '');
@@ -222,8 +224,6 @@
   // Phones: the four numbers as one compact 2 × 2 summary in every section (Curves too), so it never changes shape
   // between sections and each section starts on the first screen; what they mean is behind the ⓘ.
   const kpiGrid = $derived(phone.current);
-  /** The detection head, from the file (`Model.head`; missing, from older servers, means o2m). */
-  const HEAD_LABEL = { o2m: 'NMS (one-to-many)', o2o: 'End-to-end (no NMS)' } as const;
   /**
    * How the weights are stored (the file's folo.dtype and folo.fused, docs/API.md): "f16 · fused, inference only".
    * Null when the server does not say; a dtype this client has no name for reads as unknown, as the API asks.
@@ -244,7 +244,8 @@
 {#if model.error && !model.data}
   <Page title="Model">
     {#snippet actions()}<Button icon={ArrowLeft} href={href('/models')}>All models</Button>{/snippet}
-    <Panel><ErrorState error={model.error} retry={() => model.refresh()} title="Could not load this model" compact /></Panel>
+    <!-- Nothing to frame: the message frameless on the content edge (DESIGN_DIRECTION 8), as on Run and Not found. -->
+    <ErrorState error={model.error} retry={() => model.refresh()} title="Could not load this model" />
   </Page>
 {:else if !model.data}
   <Page title="Model">
@@ -267,9 +268,7 @@
   {#snippet kHelp()}
     <!-- What the four numbers mean: one place in every layout, after the strip's first label (the strip and the phone's
          2 × 2 grid alike), so it never lands on whichever cell happens to be last or top-right. -->
-    <button type="button" class="k-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
-      ><Info size={14} aria-hidden="true" /></button
-    >
+    <InfoButton label="What these metrics mean" controls="metric-help" bind:open={helpOpen} class="k-help" />
   {/snippet}
   {#snippet metricHelp()}
     <dl class="k-body" id="metric-help">
@@ -419,7 +418,7 @@
           {:else if evaluation.error}
             <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
           {:else}
-            <div class="sk"><Skeleton h="24px" w="200px" /><Skeleton h="300px" /></div>
+            <div class="sk"><Skeleton h="24px" w="200px" /><Skeleton h="360px" /></div>
           {/if}
         </Panel>
       </div>
@@ -477,7 +476,7 @@
             {#if m.trained_with}
               <div class="kv">
                 <dt>Trained in</dt>
-                <dd>{m.trained_with.amp ? 'Mixed precision (f16)' : 'f32'}</dd>
+                <dd>{m.trained_with.amp ? PRECISION_LABEL.amp : PRECISION_LABEL.f32}</dd>
               </div>
               <div class="kv">
                 <dt>Trained for</dt>
@@ -759,21 +758,10 @@
     min-width: 0;
     overflow: visible;
   }
-  .k-help {
-    position: relative;
-    flex-shrink: 0;
-    display: inline-grid;
-    place-items: center;
-    width: 20px;
-    height: 20px;
-    margin: -2px 0;
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-  }
-  .k-help:hover,
-  .k-help[aria-expanded='true'] {
-    background: var(--bg-hover);
-    color: var(--text-primary);
+  /* The 24 px ⓘ sits in a 16 px label line without deepening it. */
+  dt :global(.k-help),
+  .k-label :global(.k-help) {
+    margin: -4px 0;
   }
   .k-body {
     grid-column: 1 / -1;
@@ -789,7 +777,7 @@
     display: grid;
     grid-template-columns: 112px minmax(0, 1fr);
     gap: var(--space-3);
-    max-width: 72ch;
+    max-width: calc(112px + var(--space-3) + var(--measure)); /* the term column, then the definition at the measure */
   }
   .k-body dt {
     color: var(--text-primary);
@@ -855,7 +843,7 @@
   }
   .kg-cell {
     display: grid;
-    grid-template-rows: 16px 28px;
+    grid-template-rows: 16px 32px;
     gap: 2px;
     /* The phone panels' one 16 px inset, so labels line up with the sections' titles and bodies below. */
     padding: var(--space-2) var(--space-4);
@@ -871,12 +859,21 @@
   .kg .hero dt {
     color: var(--text-secondary);
   }
+  /* The desktop strip's hierarchy in two steps down: the headline at the KPI step (2xl), the others at lg, set 6 px
+     lower in the same 32 px row so the two values in a row share a baseline. */
   .kg dd {
     text-align: left;
-    font-size: var(--type-xl-size);
-    line-height: 28px;
-    letter-spacing: var(--type-xl-tracking);
+    padding-top: 6px;
+    font-size: var(--type-lg-size);
+    line-height: 26px;
+    letter-spacing: var(--type-lg-tracking);
     font-weight: var(--weight-semibold);
+  }
+  .kg .hero dd {
+    padding-top: 0;
+    font-size: var(--type-2xl-size);
+    line-height: var(--type-2xl-line);
+    letter-spacing: var(--type-2xl-tracking);
   }
   .kg dt {
     display: flex;
@@ -1143,7 +1140,7 @@
   .cm-notes {
     display: grid;
     gap: var(--space-2);
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
@@ -1326,13 +1323,6 @@
     .detail {
       grid-template-columns: minmax(0, 1fr);
       grid-template-areas: 'pr' 'cls' 'rail';
-    }
-  }
-  @media (pointer: coarse) {
-    .k-help::after {
-      content: '';
-      position: absolute;
-      inset: -12px;
     }
   }
   @media (max-width: 767px) {

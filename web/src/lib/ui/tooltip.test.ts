@@ -103,6 +103,37 @@ describe('tooltip', () => {
     b.remove();
   });
 
+  it('renders inside the open modal dialog that holds its anchor, and back in the body outside one', () => {
+    vi.useFakeTimers();
+    // The dataset inspector and New run's Summary sheet are modal dialogs in the top layer: a tooltip left in <body>
+    // would sit behind them (and be inert), so it moves into the dialog and keeps its description and Escape.
+    const dialog = document.createElement('dialog');
+    dialog.setAttribute('open', '');
+    const zoom = document.createElement('button');
+    dialog.appendChild(zoom);
+    const page = document.createElement('button');
+    document.body.append(dialog, page);
+    const a = tooltip(zoom, { text: 'Zoom in', keys: '+' });
+    const b = tooltip(page, 'Compare runs');
+    zoom.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    const tip = document.getElementById('folo-tooltip')!;
+    expect(tip.parentElement).toBe(dialog);
+    expect(tip.hasAttribute('data-show')).toBe(true);
+    expect(zoom.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    expect(tip.hasAttribute('data-show')).toBe(false);
+    expect(zoom.hasAttribute('aria-describedby')).toBe(false);
+    page.dispatchEvent(new PointerEvent('pointerenter'));
+    vi.advanceTimersByTime(500);
+    expect(tip.parentElement).toBe(document.body);
+    expect(page.getAttribute('aria-describedby')).toBe('folo-tooltip');
+    a.destroy();
+    b.destroy();
+    dialog.remove();
+    page.remove();
+  });
+
   describe('placeTip', () => {
     const view = { left: 4, top: 4, right: 1020, bottom: 764 };
     const size = { width: 240, height: 40 };

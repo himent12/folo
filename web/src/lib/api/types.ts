@@ -228,6 +228,11 @@ export interface Model {
   precision?: 'f32' | 'f16';
   /** Conv+BN fused (`folo.fused`: an inference-only export); missing = unknown. */
   fused?: boolean;
+  /**
+   * The model's file on the server (requested of the API: `folo train --weights` takes it); missing = unknown. Read
+   * only through `$lib/trainCli` `modelPath`.
+   */
+  path?: string;
 }
 
 /** `Model.trained_with`. */
@@ -360,6 +365,11 @@ export interface ResolvedTrain {
   warmup_epochs: number;
   warmup_momentum: number;
   warmup_bias_lr: number;
+  /**
+   * Epochs at the end of the run without mosaic, after the trainer's cap (requested of the API); missing = computed
+   * from the request. Read only through `effectiveCloseMosaic` (routes/run/resolved).
+   */
+  close_mosaic?: number;
 }
 
 /** POST /api/runs/{id}/queue: exactly one of `action` and `position` (1-based). Servers list `queue_control`. */
@@ -611,6 +621,8 @@ export interface RunEstimate {
   val_source: ThroughputSource;
   est_peak_vram_bytes: number | null;
   vram_source: ThroughputSource | null;
+  /** The `folo train` command for these settings, built by the server (requested of the API); missing = none. */
+  cli?: string | null;
 }
 
 /** POST /api/system/benchmark body; every field is optional. */

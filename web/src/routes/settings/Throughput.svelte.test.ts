@@ -50,7 +50,7 @@ describe('Settings › System › Throughput', () => {
     expect(list).toHaveLength(5);
     expect(list[0]).toMatch(/^folo-n 640 px · batch 16 · f32 99 samples · 40m ago 212 img\/s 205–220$/);
     expect(list.find((r) => r.includes('320 px'))).toContain('3 samples (probes)');
-    expect(list.find((r) => r.includes('RTX 3060'))).toContain('measured on RTX 3060, not used');
+    expect(list.find((r) => r.includes('RTX 3060'))).toContain('measured on another GPU (RTX 3060), so not used for this one');
     expect(target.querySelectorAll('.tp-h')).toHaveLength(2);
   });
 

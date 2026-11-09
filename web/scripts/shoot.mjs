@@ -6,7 +6,8 @@
 // Uses the installed Chrome (playwright-core, channel "chrome"); without one, the Chromium that
 // `npx playwright-core install --only-shell chromium` downloads. FOLO_SHOOT_BROWSER=chromium forces that one.
 // After each scene's setup, the QA lists every element whose content is wider than its box (and the page wider than the
-// viewport), skipping deliberate scrollers, and every blank section: a selected tab or section picker whose content
+// viewport), skipping deliberate scrollers, every fact an ellipsis cuts (a `ui/Meta` item or a `data-fact` span inside a
+// truncated box: DESIGN_DIRECTION §2.3, never ellipsize a fact), and every blank section: a selected tab or section picker whose content
 // renders nothing, a page with almost nothing under its header. The list prints at the end and goes to qa.txt.
 // --qa runs only those checks, where phone layouts break: every scene at the tablet and mobile sizes it lists, in dark
 // (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model).
@@ -96,12 +97,21 @@ async function overflowCheck(page) {
     };
     /** @type {{ el: Element, px: number }[]} */
     const hits = [];
+    // A fact: a meta line's item (counts, units, statuses, identifiers) or a span marked `data-fact`. An ellipsis may
+    // shorten a free-text name, never one of these (DESIGN_DIRECTION §2.3).
+    const FACT = '.ui-meta, [data-fact]';
     for (const el of document.querySelectorAll('body *')) {
       if (!(el instanceof HTMLElement) || el.clientWidth === 0) continue;
       const px = el.scrollWidth - el.clientWidth;
       if (px <= 1) continue;
       const cs = getComputedStyle(el);
-      if (cs.textOverflow === 'ellipsis') continue;
+      if (cs.textOverflow === 'ellipsis') {
+        if ((el.matches(FACT) || el.querySelector(FACT)) && el.checkVisibility({ checkVisibilityCSS: true })) {
+          const text = el.innerText.replace(/\s+/g, ' ').trim().slice(0, 40);
+          out.push({ selector: `cut fact: ${describe(el)}`, px, text });
+        }
+        continue;
+      }
       if (el.closest('[data-scrolls]')) continue;
       if (/auto|scroll/.test(cs.overflowX) && (masked(el) || masked(el.parentElement))) continue;
       let hidden = false;
