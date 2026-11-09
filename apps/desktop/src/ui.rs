@@ -138,10 +138,6 @@ pub fn panel_header(t: &Theme, title: &str) -> Div {
         .child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).child(title.to_string()))
 }
 
-pub fn hairline(t: &Theme) -> Div {
-    div().h(px(1.)).w_full().flex_none().bg(t.line_subtle)
-}
-
 pub fn vline(t: &Theme) -> Div {
     div().w(px(1.)).h_full().flex_none().bg(t.line_subtle)
 }
@@ -320,9 +316,17 @@ pub fn meta_row(
         .min_w_0()
         .child(text(size, color).flex_none().whitespace_nowrap().child(lead.into()))
         .children(tag)
+        // One separator rule: every dot is the font's " · " inside the group, the first included
+        // (a flex gap beside a lone "·" spaced it wider than the rest).
         .when(!rest.is_empty(), |d| {
-            d.child(text(size, color).flex_none().child("·"))
-                .child(text(size, color).flex_1().min_w_0().ellipsis().child(rest.join(" · ")))
+            d.child(
+                text(size, color)
+                    .flex_1()
+                    .min_w_0()
+                    .ml(px(-4.))
+                    .ellipsis()
+                    .child(format!(" · {}", rest.join(" · "))),
+            )
         })
 }
 
@@ -481,6 +485,12 @@ pub fn stat_at(
         .child(caption(t, label))
         .child(metric(t, value, unit, step, ty::SM))
         .children(detail)
+}
+
+/// A KPI tile's first detail line, at the caption line's height, for a graphic (a progress or
+/// split bar) that stands in for text, so its tile's later lines stay on the strip's grid.
+pub fn detail_line(content: impl IntoElement) -> Div {
+    div().h(px(ty::XS.line)).w_full().flex().items_center().child(content)
 }
 
 /// A duration as a metric: numbers at value size, units ("h", "m", "s") one step smaller.
@@ -667,6 +677,26 @@ pub fn int(n: u64) -> String {
 /// 5_400_000 → "5.1 MiB".
 /// Whether `s` set at `size` px in Geist may be wider than `width` px: a per-glyph estimate that
 /// errs wide (capitals and w / m count as wide), so a name that might be cut gets its full-name tip.
+/// A table's spare width, shared by weight: each column takes `weight` shares of `spare` on top
+/// of its base, up to its cap. What the caps leave stays where the table keeps its gap (before the
+/// numbers), so wide windows fill the columns first rather than open one dead band.
+pub fn share_spare<const N: usize>(spare: f32, cols: [(f32, f32, f32); N]) -> [f32; N] {
+    let weights: f32 = cols.iter().map(|c| c.1).sum();
+    let share = if weights > 0. { spare.max(0.) / weights } else { 0. };
+    // Whole pixels: a fractional column width can leave text measured at one width and laid out
+    // at another.
+    cols.map(|(base, weight, cap)| (base + share * weight).min(cap.max(base)).floor())
+}
+
+/// A flex table column on the same rule as `share_spare`, for rows whose cells need no known
+/// width: `basis` px, growing by `weight` up to `max`. Spare width past every cap goes to the
+/// first column given `.ml_auto()`.
+pub fn grow_col(d: Div, basis: f32, weight: f32, max: f32) -> Div {
+    let mut d = d.flex_basis(px(basis)).flex_shrink_0().min_w(px(basis)).max_w(px(max));
+    d.style().flex_grow = Some(weight);
+    d
+}
+
 pub fn may_overflow(s: &str, size: f32, width: f32) -> bool {
     let em: f32 = s
         .chars()
@@ -832,6 +862,34 @@ type ScrollSeen = ((f32, f32), f32, std::time::Instant);
 
 thread_local! {
     static SCROLLED: std::cell::RefCell<Vec<ScrollSeen>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A scroll area's edge fades: 24 px of its surface `bg` over an edge only while content lies
+/// past it, so a row cut by the edge reads as "more", and at either end the rows show undimmed.
+/// With the thumbs hidden at rest, these are the scroll cue. Absolute children sit inside a
+/// parent's border already, so `inset` is extra room, and `radius` is the parent's inner radius. Every scroll area but the page uses them, through
+/// `FoloApp::scroll_chrome`.
+pub fn scroll_edges(handle: &ScrollHandle, bg: Hsla, inset: f32, radius: f32) -> impl Iterator<Item = Div> {
+    let y = handle.offset().y;
+    let above = y < px(-1.);
+    let below = handle.max_offset().height + y > px(1.);
+    // 24 px: the gradient holds its full colour for the outer 6 px (its first stop at 25%), so a
+    // row cut at the edge leaves no sliver of glyphs, then ramps out. It paints its own rounded
+    // corners (`overflow_hidden` would clip square).
+    let fade = move |top: bool| {
+        let d = div().absolute().left(px(inset)).right(px(inset)).h(px(24.));
+        let d = if top {
+            d.top(px(inset)).rounded_t(px(radius))
+        } else {
+            d.bottom(px(inset)).rounded_b(px(radius))
+        };
+        d.bg(gpui::linear_gradient(
+            if top { 180. } else { 0. },
+            gpui::linear_color_stop(bg, 0.25),
+            gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
+        ))
+    };
+    above.then(|| fade(true)).into_iter().chain(below.then(|| fade(false)))
 }
 
 /// Whether `handle`'s content moved in the last 800 ms.

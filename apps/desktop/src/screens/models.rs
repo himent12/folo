@@ -1507,17 +1507,17 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            // Class takes the width; the metrics sit in fixed 120 px columns at the right, close
-            // enough to read across (spread over the whole row they stood ~190 px apart).
-            .child(th(&t, "Class").flex_1().min_w(px(200.)))
-            .child(th(&t, "AP50").w(px(120.)).flex_none().text_right())
-            .child(th(&t, "AP50-95").w(px(120.)).flex_none().text_right())
-            .child(th(&t, "Precision").w(px(120.)).flex_none().text_right())
-            .child(th(&t, "Recall").w(px(120.)).flex_none().text_right());
+            // Spare width is shared (Class 2 : each metric 1, to 360 / 160 px); past the caps it
+            // opens before the metrics, which stay close enough to read across.
+            .child(grow_col(th(&t, "Class"), 200., 2., 360.))
+            .child(grow_col(th(&t, "AP50"), 120., 1., 160.).ml_auto().text_right())
+            .child(grow_col(th(&t, "AP50-95"), 120., 1., 160.).text_right())
+            .child(grow_col(th(&t, "Precision"), 120., 1., 160.).text_right())
+            .child(grow_col(th(&t, "Recall"), 120., 1., 160.).text_right());
         let focus = self.pr_isolated(ev, window);
         let pin = self.pr_pin;
         let num =
-            |v: String| text(ty::SM, t.text_secondary).tnum().w(px(120.)).flex_none().text_right().child(v);
+            |v: String| grow_col(text(ty::SM, t.text_secondary).tnum(), 120., 1., 160.).text_right().child(v);
         let mut per: Vec<_> = ev.per_class.iter().collect();
         // Class order, as the PR legend and the confusion matrix run.
         per.sort_by_key(|c| c.class);
@@ -1558,9 +1558,7 @@ impl FoloApp {
                         }
                     }))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w(px(200.))
+                        grow_col(div(), 200., 2., 360.)
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -1577,8 +1575,8 @@ impl FoloApp {
                     )
                     // Only the headline metric carries a comparison bar; the others are plain
                     // numbers, so AP50-95 leads the row.
-                    .child(num(f3(c.map50)))
-                    .child(div().w(px(120.)).flex_none().flex().justify_end().child(bar_value(
+                    .child(num(f3(c.map50)).ml_auto())
+                    .child(grow_col(div(), 120., 1., 160.).flex().justify_end().child(bar_value(
                         &t,
                         c.map50_95,
                         f3(c.map50_95),
