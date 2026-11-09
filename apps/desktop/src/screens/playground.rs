@@ -234,8 +234,8 @@ impl FoloApp {
         let room = {
             let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
             // The other items, measured: the latency and count texts as they'll read, plus the
-            // fixed chrome (icon, help, zoom bar, rules, gaps and padding: ~240 px) and 20 px of
-            // margin.
+            // fixed chrome (icon 14, gaps 80, rules 3, spacer 8, padding 24, zoom group 134, borders
+            // 2: 265 px) and 10 px of margin.
             let sim = self.play_target.is_none() && !self.store.api.local_inference();
             let latency = self.play_pred.ready().map(|p| latency_text(p.timing.total_ms, sim));
             let shown =
@@ -246,7 +246,7 @@ impl FoloApp {
             let mut w = |s: Option<String>| {
                 s.map_or(0., |s| f32::from(crate::charts::text_width(window, &s, ty::SM.size)))
             };
-            let others = 240. + w(latency) + w(count) + 20.;
+            let others = 265. + w(latency) + w(count) + 10.;
             self.content_width(window) - rail - 16. - others
         };
         const SIZE_W: f32 = 68.;
