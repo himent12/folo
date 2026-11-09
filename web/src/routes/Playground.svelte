@@ -680,7 +680,7 @@
                   in the run's folder), or run it on the server.
                 </p>
               {/if}
-              <div class="nf-actions">
+              <div class="nf-actions cta-links">
                 <Button size="sm" variant="primary" icon={FileUp} onclick={() => weightsInput.click()}>Choose .folo file</Button>
                 <Button size="sm" onclick={() => (runOn = 'server')}>Run on the server</Button>
               </div>
@@ -1836,19 +1836,10 @@
     .pg-tools .runon {
       justify-content: space-between;
     }
-    /* The ways out: the primary full width, the others in one row of secondary buttons under it, 44 px each. */
+    /* The ways out (ui/Button's .cta-links): the primary full width, 44 px, the others one row of text links under it. */
     .notice :global(.acts),
     .nf-actions {
-      gap: var(--space-2);
-    }
-    /* The one phone button size (ui/Button's .cta-row on the notice). */
-    .notice :global(.acts .btn),
-    .nf-actions :global(.btn) {
-      flex: 1 1 auto;
-    }
-    .notice :global(.acts .btn:first-child),
-    .nf-actions :global(.btn:first-child) {
-      flex-basis: 100%;
+      gap: var(--space-1) var(--space-4);
     }
     /* The image goes edge to edge; its bars keep the 16 px gutter inside. */
     .viewer.loaded {

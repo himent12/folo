@@ -83,6 +83,10 @@
     ['Close mosaic', closeMosaicSetting({ config, resolved })],
   ]);
 
+  /** A value too long to sit beside its label in a narrow column ("Auto (AdamW for short runs, else SGD)"): in a
+   *  column under 360 px it takes the full width under the label instead of wrapping to a right-aligned second line. */
+  const isLong = (v: Setting) => v.value.length + (v.note ? v.note.length + 1 : 0) > 32;
+
   async function copy() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(config, null, 2));
@@ -97,7 +101,7 @@
   <dl>
     <!-- A heading only beside another group's; alone in the rail it would name the panel twice. -->
     {#if heading}<p class="group group-label">{heading}</p>{/if}
-    {#each items as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
+    {#each items as [k, v] (k)}{@const long = isLong(v)}<dt class:long>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num" class:long><span class:mono={v.ident}>{v.value}</span>{#if v.note}<Note text={v.note} />{/if}</dd>{/if}{/each}
   </dl>
 {/snippet}
 {#snippet fold(title: string, items: [string, Setting][])}
@@ -159,11 +163,14 @@
     gap: var(--space-4);
     align-content: start;
   }
+  /* A container: whether a long value fits beside its label depends on the column's width (half a panel, a rail, a
+     phone), not the viewport's (DESIGN_DIRECTION §18). */
   dl {
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 0;
     align-content: start;
+    container-type: inline-size;
   }
   /* Type and ink: the shared group label (base.css .group-label). */
   .group {
@@ -221,6 +228,21 @@
     padding-left: var(--space-4);
     text-align: right;
     overflow-wrap: anywhere;
+  }
+  /* A narrow column: a long value goes under its label at the column's full width, left-aligned, one row's rule under
+     both, never a value wrapping to a ragged right-aligned second line (round 26's "else SGD"). */
+  @container (max-width: 359px) {
+    dt.long {
+      grid-column: 1 / -1;
+      padding-bottom: 0;
+      border-bottom: 0;
+    }
+    dd.long {
+      grid-column: 1 / -1;
+      padding-top: 2px;
+      padding-left: 0;
+      text-align: left;
+    }
   }
   @media (max-width: 767px) {
     .cols {

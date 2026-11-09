@@ -469,6 +469,9 @@
             goTo(s.id, e.detail === 0);
           }}>{s.label}</a
         >{/each}
+      <!-- The rail ends on purpose (as a list ends on its .list-foot): the version of this Studio, so
+           six links never read as an orphaned list at the top of a tall column. -->
+      <p class="toc-foot num">FOLO Studio {pkg.version}</p>
     </nav>
   </div>
 </Page>
@@ -515,6 +518,16 @@
     transition:
       background-color var(--dur-fast) var(--ease-standard),
       color var(--dur-fast) var(--ease-standard);
+  }
+  .toc-foot {
+    display: grid;
+    gap: 2px;
+    margin-top: var(--space-3);
+    padding: var(--space-3) var(--space-2) 0;
+    border-top: 1px solid var(--line-subtle);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
   }
   .toc a.on {
     background: var(--bg-active);

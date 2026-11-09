@@ -546,7 +546,24 @@ export const scenes = [
       await page.mouse.move(0, 0);
     },
   },
-  { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'mobile'] },
+  {
+    // Scrolled into the pair's settings: the pager and the head row (both names, Baseline, Swap) hold under the top bar
+    // while the table is in view.
+    name: 'run-compare-pair-sticky',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    fullPage: false,
+    keepScroll: true,
+    setup: async (page) => {
+      await until(page, '#cmp-table .pair');
+      await page.evaluate(() => {
+        const rows = document.querySelectorAll('#cmp-table tbody tr');
+        rows[Math.min(6, rows.length - 1)]?.scrollIntoView({ block: 'center' });
+      });
+      await page.mouse.move(0, 0);
+    },
+  },
+  { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'laptop', 'mobile'] },
   // A queued run, first of two waiting: its place, what it waits for and when it should start lead; from 768 px up the
   // config beside the queue and one quiet list of what the run will have (no empty frames). Phones keep their sections.
   { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -1278,7 +1295,11 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
-      if (vp === 'mobile') await page.locator('button.meta-line').click();
+      if (vp === 'mobile') {
+        await page.locator('button.meta-line').click();
+        // Phones open every section on the folded headline: unfold the grid its ⓘ sits in.
+        await page.locator('.kpi-line').click();
+      }
       await page.getByRole('button', { name: 'What these metrics mean' }).click();
       await page.clock.runFor(1500);
     },
