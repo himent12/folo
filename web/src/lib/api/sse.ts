@@ -16,7 +16,7 @@ export type EventHandlers<M> = {
 /** The events of a run's stream (`GET /api/runs/{id}/events`); `queue` comes from servers with `queue_control`. */
 export const RUN_EVENTS: readonly (keyof RunEventMap)[] = ['status', 'step', 'epoch', 'log', 'queue'];
 /** The events of a labeling job's stream (`GET /api/label/jobs/{id}/events`). */
-export const LABEL_EVENTS: readonly (keyof LabelEventMap)[] = ['job', 'image', 'removed', 'log'];
+export const LABEL_EVENTS: readonly (keyof LabelEventMap)[] = ['job', 'image', 'removed', 'reload', 'log'];
 
 export interface Backoff {
   /** Delay before the given (0-based) retry attempt, in ms. */

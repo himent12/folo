@@ -62,6 +62,7 @@ describe('openEventStream', () => {
       job: (j) => got.push(`job ${j.id}`),
       image: (i) => got.push(`image ${i.id} ${i.status}`),
       removed: (r) => got.push(`removed ${r.id}`),
+      reload: () => got.push('reload'),
       log: (l) => got.push(`log ${l.message}`),
     });
     const es = FakeSource.all[0]!;
@@ -69,9 +70,10 @@ describe('openEventStream', () => {
     es.send('job', { id: 'lb_1' });
     es.send('image', { id: '7', status: 'labeling' });
     es.send('removed', { id: '7' });
+    es.send('reload', {});
     es.send('log', { t: '', level: 'info', message: 'call 1' });
     es.send('later', { id: 'x' });
-    expect(got).toEqual(['job lb_1', 'image 7 labeling', 'removed 7', 'log call 1']);
+    expect(got).toEqual(['job lb_1', 'image 7 labeling', 'removed 7', 'reload', 'log call 1']);
   });
 
   it('skips a payload that is not JSON and keeps listening', () => {

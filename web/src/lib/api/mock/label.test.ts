@@ -152,6 +152,12 @@ describe('MockApi agent labeling: edits and datasets', () => {
     expect(first.added).toHaveLength(24);
     expect((await api.importLabelImages(job.id, 'D:/data/fasteners-mini')).skipped).toHaveLength(24);
     await expect(api.importLabelImages(job.id, 'E:/nowhere')).rejects.toMatchObject({ status: 404, code: 'path_not_found' });
+    // More than 100 at once: the stream says reload instead of an image event each.
+    const said: string[] = [];
+    const close = api.labelEvents(job.id, { image: () => said.push('image'), reload: () => said.push('reload') });
+    expect((await api.importLabelImages(job.id, 'D:/data/shapes')).added).toHaveLength(1000);
+    expect(said).toEqual(['reload']);
+    close();
     await expect(api.createLabelJob({ name: 'x', classes: ['a', 'A'] })).rejects.toMatchObject({ status: 400 });
   });
 });

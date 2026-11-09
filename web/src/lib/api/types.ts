@@ -874,5 +874,7 @@ export interface LabelEventMap {
   job: LabelJob;
   image: LabelImage;
   removed: { id: string };
+  /** More changed than the stream carries (a bulk add, a client that fell behind): load the images again. */
+  reload: Record<string, never>;
   log: LogLine;
 }

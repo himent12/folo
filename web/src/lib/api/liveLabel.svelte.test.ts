@@ -104,6 +104,20 @@ describe('LiveLabelJob ordering', () => {
     stop();
   });
 
+  it('loads the images again on reload, replacing its list', async () => {
+    const { live, stop } = mount();
+    page.resolve({ total: 1, images: [img('1')] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loads).toHaveBeenCalledTimes(1);
+    page = deferred<LabelImagePage>();
+    handlers.reload?.({});
+    page.resolve({ total: 3, images: [img('1', 'labeled'), img('2'), img('3')] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(loads).toHaveBeenCalledTimes(2);
+    expect(live.images.map((i) => `${i.id} ${i.status}`)).toEqual(['1 labeled', '2 pending', '3 pending']);
+    stop();
+  });
+
   it('loads every page of a large job', async () => {
     const all = Array.from({ length: 2500 }, (_, i) => img(String(i + 1)));
     hub.api = {

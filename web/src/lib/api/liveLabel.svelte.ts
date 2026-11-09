@@ -2,7 +2,8 @@
 // log. As for a run (LiveRun), the stream replays nothing, so we subscribe *before* loading and merge the two: an
 // image event that arrived while the images were loading is applied over the answer, and a `job` event over the job
 // snapshot. An event may describe a state the answer already passed, but a newer event always follows it, so the view
-// settles on the server's. A reconnect loads again. The images (at most 10,000 a job) are all kept, in the order they
+// settles on the server's. A reconnect loads again, and so does `reload`, which the server sends instead of an event
+// per image when it has more to say than the stream carries (a bulk add, a client that fell behind). The images (at most 10,000 a job) are all kept, in the order they
 // were added: the page filters them and the grid draws only the ones in view.
 
 import { untrack } from 'svelte';
@@ -146,6 +147,9 @@ export class LiveLabelJob {
         },
         image: (img) => image(img.id, img),
         removed: ({ id }) => image(id, null),
+        reload: () => {
+          if (!closed) sync();
+        },
         log: (l) => {
           if (closed) return;
           heard = Date.now();
