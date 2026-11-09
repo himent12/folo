@@ -226,7 +226,12 @@ pub fn status_dot(t: &Theme, s: RunStatus, id: &str) -> Div {
         .flex()
         .items_center()
         .gap(px(6.))
-        .child(dot(dotc, 6., s == RunStatus::Running, format!("sd-{id}")))
+        .child(if s == RunStatus::Queued {
+            // Waiting, not halted: a ring where a stopped run has a filled dot.
+            div().size(px(6.)).flex_none().rounded_full().border_1().border_color(dotc).into_any_element()
+        } else {
+            dot(dotc, 6., s == RunStatus::Running, format!("sd-{id}")).into_any_element()
+        })
         .child(
             text(ty::XS, if s == RunStatus::Running { t.accent_text } else { fg })
                 .whitespace_nowrap()

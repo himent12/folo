@@ -669,11 +669,12 @@ impl FoloApp {
                             .child(text(ty::SM, t.text_primary).w(px(68.)).truncate().child(b.name.clone()))
                             // Size tells apart two boxes of the same class.
                             .child(
-                                text(ty::XS, t.text_tertiary).tnum().w(px(52.)).flex_none().child(format!(
-                                    "{:.0}×{:.0}",
-                                    b.x2 - b.x1,
-                                    b.y2 - b.y1
-                                )),
+                                // On the active row's fill, tertiary falls under AA: secondary there.
+                                text(ty::XS, if hot { t.text_secondary } else { t.text_tertiary })
+                                    .tnum()
+                                    .w(px(52.))
+                                    .flex_none()
+                                    .child(format!("{:.0}×{:.0}", b.x2 - b.x1, b.y2 - b.y1)),
                             )
                             .child(
                                 div().flex_1().h(px(4.)).rounded_full().bg(t.bg_inset).child(
