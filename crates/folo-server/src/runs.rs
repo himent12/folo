@@ -395,9 +395,21 @@ impl Runs {
         v.into_iter().map(|(_, _, e)| e).collect()
     }
 
-    /// Every run, newest first, with its place in the queue.
+    /// Every run, newest first, with its place in the queue. Every run's state is locked, then the queue once (the
+    /// order `stop` and `move_queued` take them in), so the places are those of one queue: unique and gapless.
     pub fn list(&self) -> Vec<Run> {
-        self.entries().iter().map(|e| self.record(e)).collect()
+        let entries = self.entries();
+        let states: Vec<_> = entries.iter().map(|e| e.state.lock().unwrap()).collect();
+        let q = self.queue.lock().unwrap();
+        entries
+            .iter()
+            .zip(&states)
+            .map(|(e, st)| {
+                let mut r = st.file.run.clone();
+                r.queue_position = q.runs.iter().position(|x| x.id == e.id).map(|i| i as u32 + 1);
+                r
+            })
+            .collect()
     }
 
     /// The API record of run `id` with its place in the queue ([`Run::queue_position`]).
@@ -1052,6 +1064,78 @@ mod tests {
         assert!(runs.queue.lock().unwrap().runs.is_empty());
         assert!(!*runs.worker.lock().unwrap(), "no worker for a refused run");
         assert!(runs.logs("run_late", 10).unwrap().iter().any(|l| l.message.contains("not queued")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `list` reads one queue: positions stay unique and gapless while another thread keeps moving runs.
+    #[test]
+    fn listed_queue_positions_are_one_snapshot() {
+        let dir = std::env::temp_dir().join(format!("folo-runs-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let runs = Runs::open(dir.clone());
+        let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"q"}"#).unwrap();
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: DatasetFormat::Yolo,
+        };
+        let ids: Vec<String> = (0..4).map(|i| format!("run_q{i}")).collect();
+        for id in &ids {
+            let run = Run {
+                id: id.clone(),
+                name: "q".into(),
+                status: RunStatus::Queued,
+                epochs: config.epochs,
+                config: config.clone(),
+                created: now(),
+                started: None,
+                finished: None,
+                epoch: 0,
+                step: 0,
+                steps_per_epoch: 0,
+                eta_s: None,
+                best: None,
+                device: "cpu".into(),
+                model_id: None,
+                error: None,
+                error_code: None,
+                resolved: None,
+                queue_position: None,
+            };
+            let file = RunFile {
+                run,
+                dataset: dataset.clone(),
+                weights: None,
+                val_offset: 0,
+                epochs_done: 0,
+                last_metrics: None,
+            };
+            std::fs::create_dir_all(dir.join(id)).unwrap();
+            let entry = Arc::new(RunEntry::new(id.clone(), dir.join(id), file));
+            runs.list.write().unwrap().push(entry.clone());
+            // Queued without a worker, so nothing leaves the queue.
+            runs.queue.lock().unwrap().runs.push_back(entry);
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let mover = {
+            let (runs, ids, stop) = (runs.clone(), ids.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut i = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let mv = if i % 2 == 0 { QueueMove::Top } else { QueueMove::Bottom };
+                    runs.move_queued(&ids[i % ids.len()], mv).unwrap();
+                    i += 1;
+                }
+            })
+        };
+        for _ in 0..300 {
+            let mut places: Vec<u32> = runs.list().iter().filter_map(|r| r.queue_position).collect();
+            places.sort_unstable();
+            assert_eq!(places, [1, 2, 3, 4]);
+        }
+        stop.store(true, Ordering::Relaxed);
+        mover.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 
