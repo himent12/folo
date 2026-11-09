@@ -150,7 +150,7 @@ class Router {
   #navigate(hash: string, replace = false) {
     if (replace) this.#show(hash);
     else if (location.hash !== hash) {
-      // Guards have been asked: the hashchange this causes goes through.
+      // Guards have been asked. `pushState` fires no `hashchange`, so the route is set here.
       history.pushState(null, '', hash);
       this.route = parse(hash);
     }
