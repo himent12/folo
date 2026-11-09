@@ -11,6 +11,7 @@ use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
 use folo_data::{AugmentConfig, Split};
 use folo_nn::Module;
 use folo_nn::io::ModelFile;
+use folo_test_support::TestDir;
 use folo_vision::train::{OptimizerChoice, ResumeOverrides};
 use folo_vision::{TrainConfig, TrainData, TrainOptions, Trainer};
 
@@ -61,8 +62,7 @@ fn epochs_of(log: &Mutex<Vec<RunEvent>>) -> Vec<folo_api::Epoch> {
 #[test]
 fn tiny_gpu_run_learns() {
     let Some(dev) = gpu() else { return };
-    let dir = std::env::temp_dir().join(format!("folo-gpu-train-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = TestDir::new("gpu-train");
     let cfg = TrainConfig {
         epochs: 10,
         batch: 4,
@@ -80,7 +80,7 @@ fn tiny_gpu_run_learns() {
     let log: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
     let sink = log.clone();
     let opts = TrainOptions {
-        run_dir: Some(dir.clone()),
+        run_dir: Some(dir.to_path_buf()),
         events: Some(Box::new(move |e| sink.lock().unwrap().push(e.clone()))),
         step_interval: std::time::Duration::ZERO,
         ..TrainOptions::default()
@@ -136,8 +136,7 @@ fn tensors(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
 #[test]
 fn stopped_gpu_run_resumes_bit_exactly() {
     let Some(dev) = gpu() else { return };
-    let root = std::env::temp_dir().join(format!("folo-gpu-resume-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = TestDir::new("gpu-resume");
     let cfg = TrainConfig {
         epochs: 4,
         batch: 4,

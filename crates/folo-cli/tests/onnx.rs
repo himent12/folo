@@ -14,6 +14,7 @@ use std::process::Command;
 use folo_core::rng::Rng;
 use folo_core::{Tensor, no_grad};
 use folo_nn::{Module, init};
+use folo_test_support::TestDir;
 use folo_vision::model::{FoloModel, HeadMode, ModelConfig};
 use folo_vision::nms::{NmsConfig, topk_detections};
 use serde_json::{Value, json};
@@ -161,9 +162,7 @@ fn onnx_matches_folo_in_onnxruntime() {
         eprintln!("skipped: {why}");
         return;
     };
-    let dir = std::env::temp_dir().join(format!("folo-cli-onnx-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TestDir::new("cli-onnx");
     let classes: Vec<String> = ["circle", "square", "triangle", "star", "ring"].map(String::from).into();
     let mut cases = vec![];
     for (k, scale) in ["n", "s"].into_iter().enumerate() {

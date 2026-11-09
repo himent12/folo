@@ -12,6 +12,7 @@ use folo_core::rng::Rng;
 use folo_core::{DType, Device, Tensor, no_grad};
 use folo_nn::Module;
 use folo_nn::io::ModelFile;
+use folo_test_support::TestFile;
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::nms::NmsConfig;
 use folo_vision::{Precision, PredictConfig, Predictor};
@@ -68,8 +69,8 @@ fn model(nc: usize) -> FoloModel {
     m
 }
 
-fn temp(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("folo-tc-{}-{name}.folo", std::process::id()))
+fn temp(name: &str) -> TestFile {
+    TestFile::new(&format!("tc-{name}"), "m.folo")
 }
 
 /// The worst `(score error, box error beyond 1%)` between the full decodes of `x` by `a` and by `b` (each in its

@@ -5,32 +5,23 @@
 //! context exists, which would change every other test in a shared process. Without a GPU, or on an adapter
 //! without tensor cores, it checks the refusal and its reason instead.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::Request;
 use folo_server::api::*;
 use folo_server::{Options, RealStore, Server};
+use folo_test_support::TestDir;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
-
-struct TempDir(PathBuf);
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn real_capabilities_match_the_trainer() {
     // Before anything creates the shared context.
     folo_gpu::context::request_tensor_cores();
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let home = TempDir(std::env::temp_dir().join(format!("folo-real-system-{}-{nanos}", std::process::id())));
-    let app = Server::new(Arc::new(RealStore::open(home.0.clone())), Options::default()).router();
+    let home = TestDir::new("real-system");
+    let app = Server::new(Arc::new(RealStore::open(home.to_path_buf())), Options::default()).router();
     let system = || async {
         let res =
             app.clone().oneshot(Request::get("/api/system").body(Body::empty()).unwrap()).await.unwrap();

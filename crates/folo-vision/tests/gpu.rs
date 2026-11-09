@@ -7,6 +7,7 @@
 use folo_core::rng::Rng;
 use folo_core::{Device, Tensor, no_grad};
 use folo_nn::Module;
+use folo_test_support::TestFile;
 use folo_vision::boxes::Xyxy;
 use folo_vision::loss::{ImageTargets, LossConfig, detection_loss};
 use folo_vision::model::{FoloModel, ModelConfig};
@@ -135,7 +136,7 @@ fn train_step_matches_cpu() {
 #[test]
 fn open_on_device_matches_cpu_predictions() {
     let dev = gpu!();
-    let path = std::env::temp_dir().join(format!("folo-gpu-open-{}.folo", std::process::id()));
+    let path = TestFile::new("gpu-open", "m.folo");
     model(2).save(&path).unwrap();
     let cpu = FoloModel::open(&path).unwrap();
     let gm = FoloModel::open_on(&path, dev).unwrap();

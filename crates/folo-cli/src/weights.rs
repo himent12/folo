@@ -198,6 +198,7 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use folo_test_support::TestDir;
 
     #[test]
     fn sums_lookup() {
@@ -209,8 +210,7 @@ mod tests {
 
     #[test]
     fn sha256_known_value() {
-        let dir = std::env::temp_dir().join(format!("folo-sha-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new("sha");
         let f = dir.join("abc.txt");
         std::fs::write(&f, b"abc").unwrap();
         assert_eq!(

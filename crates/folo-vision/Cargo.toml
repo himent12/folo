@@ -26,6 +26,9 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+folo-test-support.workspace = true
+
 # `std::time::Instant` panics in the browser; web-time reads `performance.now()` there.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time.workspace = true

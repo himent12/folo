@@ -40,6 +40,13 @@ easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes)
 ## Build hygiene on the dev machine
 - The C: drive is small. Put build output on D:: `export CARGO_TARGET_DIR=D:/folo-build/<branch-name-with-dashes>`
   (PowerShell: `$env:CARGO_TARGET_DIR="D:\folo-build\<name>"`). Delete that directory when your PR is merged.
+- Tests put their scratch folders (`folo-*`) under `FOLO_TEST_TMP` when it is set, else the system temp dir, and
+  remove them when they finish, also when they fail (`folo_test_support::TestDir`). On the dev machine, keep them off
+  C: too: `export FOLO_TEST_TMP=D:/folo-build/test-tmp` (PowerShell: `$env:FOLO_TEST_TMP="D:\folo-build\test-tmp"`).
+  A new test that needs a folder takes a `TestDir` (or `TestFile`), and a process it spawns goes in a `ChildGuard`
+  declared after that folder; `crates/folo-test-support/tests/hygiene.rs` fails on a direct `std::env::temp_dir()`.
+  `bash tools/test-tmp.sh cargo test --workspace` runs the tests the way CI does and fails if they leave anything
+  behind (docs/CI.md, Test temp dirs).
 - Many agents build at once: keep the default `jobs = 8` from `.cargo/config.toml`, and don't run more than one heavy
   build at a time from one agent.
 - The GPU (RTX 4080 SUPER) is shared. GPU test runs should be short (< 2 min) unless your task says otherwise.
@@ -58,6 +65,7 @@ crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves th
 crates/folo-mcp      `folo mcp`: the MCP server (rmcp, stdio) over the server's Store, embedded or proxying folo serve
 crates/folo-cli      the `folo` binary (train / val / predict / export / serve / mcp / doctor)
 crates/folo-wasm     FOLO detectors in the browser (wasm-bindgen; WebGPU or the wasm CPU), docs/WASM.md
+crates/folo-test-support  test-only helpers (a dev-dependency): TestDir / TestFile / ChildGuard, FOLO_TEST_TMP
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust + GPUI, its own cargo workspace; talks to folo-server over docs/API.md)
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md

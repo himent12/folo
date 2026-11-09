@@ -132,18 +132,16 @@ pub fn too_many_inputs(message: impl Into<String>) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use folo_test_support::TestDir;
 
-    fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("folo-mcp-paths-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn tmp(name: &str) -> TestDir {
+        TestDir::new(&format!("mcp-paths-{name}"))
     }
 
     #[test]
     fn relative_paths_resolve_against_the_data_dir() {
         let d = tmp("rel");
-        let p = PathPolicy { data_dir: d.clone(), confine: false };
+        let p = PathPolicy { data_dir: d.to_path_buf(), confine: false };
         assert_eq!(p.resolve("a/b.jpg").unwrap(), d.join("a/b.jpg"));
         assert!(p.resolve("  ").is_err());
     }
@@ -185,7 +183,7 @@ mod tests {
         for i in 0..=MAX_BATCH {
             std::fs::write(d.join(format!("{i:04}.jpg")), b"x").unwrap();
         }
-        let p = PathPolicy { data_dir: d, confine: false };
+        let p = PathPolicy { data_dir: d.to_path_buf(), confine: false };
         assert_eq!(p.expand_glob("*.jpg").unwrap_err().body.code, "too_many_inputs");
         assert_eq!(p.expand_glob("000*.jpg").unwrap().len(), 10);
     }

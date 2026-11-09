@@ -1,7 +1,7 @@
 //! Trainer tests (docs/MODEL.md §10.4) on tiny synthetic sets: a micro run that learns, checkpoint round trips,
 //! bit-exact resume, the schedule numbers, the non-finite guard, and the predictor on trained weights.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
@@ -11,6 +11,7 @@ use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
 use folo_data::{AugmentConfig, InMemoryDataset, Split};
 use folo_nn::io::{Metadata, ModelFile, Namespace};
 use folo_nn::{Module, RunningStats};
+use folo_test_support::{TestDir, TestFile};
 use folo_vision::train::{OptimizerChoice, ResumeOverrides};
 use folo_vision::{PredictConfig, Predictor, TrainConfig, TrainData, TrainOptions, Trainer};
 
@@ -63,10 +64,8 @@ fn resume_config() -> TrainConfig {
     }
 }
 
-fn temp_dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("folo-train-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    d
+fn run_dir(name: &str) -> TestDir {
+    TestDir::new(&format!("train-{name}"))
 }
 
 type Log = Arc<Mutex<Vec<RunEvent>>>;
@@ -117,8 +116,8 @@ fn tensors(path: &Path) -> Vec<(String, Vec<u8>)> {
 #[test]
 fn micro_run_learns_checkpoints_and_resumes_bit_exactly() {
     let ds = shapes(18, 4, 64);
-    let dir_a = temp_dir("a");
-    let dir_b = temp_dir("b");
+    let dir_a = run_dir("a");
+    let dir_b = run_dir("b");
 
     // A: two uninterrupted epochs.
     let (opts, log_a) = options(Some(&dir_a));
@@ -300,7 +299,7 @@ fn non_finite_batches_are_skipped_then_fail_the_run() {
     // A failed epoch is past its checkpoint: no retry, no checkpoint.
     assert_eq!(t.run().unwrap_err().code(), "invalid_config");
     assert_eq!(
-        t.save_checkpoint(std::env::temp_dir().join("folo-never.folo")).unwrap_err().code(),
+        t.save_checkpoint(TestFile::new("train-never", "never.folo")).unwrap_err().code(),
         "invalid_config"
     );
     assert_eq!(t.schedule().step(), 0);
@@ -369,7 +368,7 @@ fn micro_run_loss_decreases() {
 #[test]
 fn stop_inside_an_epoch() {
     let ds = shapes(8, 2, 64);
-    let dir = temp_dir("stop");
+    let dir = run_dir("stop");
     let (opts, log) = options(Some(&dir));
     let stop = opts.stop.clone();
     let sink = log.clone();
@@ -438,8 +437,8 @@ fn non_finite_batch_recovers_and_resumes() {
     let ds = shapes(8, 2, 64);
     // accumulate 1: the bad first batch is a window of its own.
     let cfg = || TrainConfig { nbs: 4, ..micro_config(2) };
-    let dir_a = temp_dir("nan-a");
-    let dir_b = temp_dir("nan-b");
+    let dir_a = run_dir("nan-a");
+    let dir_b = run_dir("nan-b");
 
     // The first `warn` (the skipped batch) puts the poisoned stem weights back.
     let run = |dir: &Path, stop_after_epoch: bool| {
@@ -521,7 +520,7 @@ fn non_finite_batch_recovers_and_resumes() {
 #[test]
 fn nonfinite_streak_crosses_a_checkpoint() {
     let ds = shapes(8, 2, 64);
-    let dir = temp_dir("streak");
+    let dir = run_dir("streak");
     let (opts, log) = options(Some(&dir));
     let w: Arc<Mutex<Option<Saved>>> = Arc::default();
     let (w2, sink) = (w.clone(), log.clone());
@@ -574,7 +573,7 @@ fn nonfinite_streak_crosses_a_checkpoint() {
 #[test]
 fn resuming_an_early_stopped_run_trains_no_further() {
     let ds = shapes(8, 2, 64);
-    let dir = temp_dir("patience");
+    let dir = run_dir("patience");
     let (opts, _) = options(Some(&dir));
     let s =
         Trainer::new(TrainConfig { patience: 0, ..micro_config(3) }, data(&ds), opts).unwrap().run().unwrap();
@@ -594,7 +593,7 @@ fn resuming_an_early_stopped_run_trains_no_further() {
 #[test]
 fn resume_preserves_unknown_metadata() {
     let ds = shapes(8, 2, 64);
-    let dir = temp_dir("meta");
+    let dir = run_dir("meta");
     let (opts, _) = options(Some(&dir));
     Trainer::new(micro_config(1), data(&ds), opts).unwrap().run().unwrap();
     // Add a provenance key to last.folo, as another tool might.
@@ -630,7 +629,7 @@ fn o2o_run_trains_checkpoints_and_resumes() {
     use folo_vision::model::{FoloModel, HeadMode};
     let ds = shapes(18, 4, 64);
     let cfg = TrainConfig { head: HeadMode::O2o, ..resume_config() };
-    let (dir_a, dir_b) = (temp_dir("o2o-a"), temp_dir("o2o-b"));
+    let (dir_a, dir_b) = (run_dir("o2o-a"), run_dir("o2o-b"));
     let (opts, log_a) = options(Some(&dir_a));
     let sum = Trainer::new(cfg.clone(), data(&ds), opts).unwrap().run().unwrap();
     assert_eq!((sum.status, sum.epochs_completed), (RunStatus::Completed, 2));

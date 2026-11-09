@@ -9,6 +9,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_server::api::*;
 use folo_server::{Cors, MockStore, Options, RealStore, Server, Store, WebSource};
+use folo_test_support::TestDir;
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -556,8 +557,7 @@ async fn sse_finished_run_and_errors() {
 #[tokio::test]
 async fn real_store_disk_dataset_and_engine_checks() {
     // More real-store dataset tests: tests/real_datasets.rs.
-    let root = std::env::temp_dir().join(format!("folo-real-store-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = TestDir::new("real-store");
     let ds_dir = root.join("ds");
     std::fs::create_dir_all(ds_dir.join("images/train")).unwrap();
     std::fs::create_dir_all(ds_dir.join("labels/train")).unwrap();
@@ -614,13 +614,13 @@ async fn real_store_disk_dataset_and_engine_checks() {
 
 #[tokio::test]
 async fn static_files_spa_fallback() {
-    let dir = std::env::temp_dir().join(format!("folo-web-{}", std::process::id()));
+    let dir = TestDir::new("web");
     std::fs::create_dir_all(dir.join("assets")).unwrap();
     std::fs::write(dir.join("index.html"), "<!doctype html><title>Studio</title>").unwrap();
     std::fs::write(dir.join("assets/app.js"), "console.log(1)").unwrap();
     let server = Server::new(
         Arc::new(MockStore::new()),
-        Options { web: WebSource::Dir(dir.clone()), cors: Cors::Loopback },
+        Options { web: WebSource::Dir(dir.to_path_buf()), cors: Cors::Loopback },
     );
     let app = server.router();
     let (s, _, b) = send(&app, get("/")).await;
@@ -647,7 +647,7 @@ async fn static_files_spa_fallback() {
     }
     let with = Server::new(
         Arc::new(MockStore::new()),
-        Options { web: WebSource::Dir(dir.clone()), cors: Cors::Loopback },
+        Options { web: WebSource::Dir(dir.to_path_buf()), cors: Cors::Loopback },
     );
     assert!(wasm(&with.router()).await);
     err(&app, get("/api/not-a-route"), StatusCode::NOT_FOUND, "route_not_found").await;
@@ -838,8 +838,7 @@ async fn sse_first_subscriber_sees_queued_to_running() {
 
 #[tokio::test]
 async fn datasets_without_classes_cannot_train() {
-    let dir = std::env::temp_dir().join(format!("folo-empty-ds-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = TestDir::new("empty-ds");
     std::fs::create_dir_all(dir.join("images")).unwrap();
     std::fs::create_dir_all(dir.join("labels")).unwrap();
     let (server, _) = mock();
@@ -859,12 +858,11 @@ async fn datasets_without_classes_cannot_train() {
 
 #[tokio::test]
 async fn malformed_registry_is_never_overwritten() {
-    let root = std::env::temp_dir().join(format!("folo-bad-registry-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = TestDir::new("bad-registry");
     std::fs::create_dir_all(root.join("ds/images")).unwrap();
     std::fs::create_dir_all(root.join("ds/labels")).unwrap();
     std::fs::write(root.join("datasets.json"), "{ not json").unwrap();
-    let app = Server::new(Arc::new(RealStore::open(root.clone())), Options::default()).router();
+    let app = Server::new(Arc::new(RealStore::open(root.to_path_buf())), Options::default()).router();
     let body = json!({ "path": root.join("ds").to_str().unwrap() });
     err(&app, post_json("/api/datasets", body), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
     assert_eq!(std::fs::read_to_string(root.join("datasets.json")).unwrap(), "{ not json");
@@ -1013,8 +1011,8 @@ async fn val_endpoint() {
     let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "conf": 2.0 });
     err(&app, post_json("/api/val", req), StatusCode::BAD_REQUEST, "invalid_body").await;
 
-    let dir = std::env::temp_dir().join(format!("folo-val-real-{}", std::process::id()));
-    let real = Server::new(Arc::new(RealStore::open(dir)), Options::default()).router();
+    let dir = TestDir::new("val-real");
+    let real = Server::new(Arc::new(RealStore::open(dir.to_path_buf())), Options::default()).router();
     let req = json!({ "model_id": "m_1", "dataset_id": "ds_1" });
     err(&real, post_json("/api/val", req), StatusCode::NOT_FOUND, "model_not_found").await;
 }

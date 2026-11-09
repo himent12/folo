@@ -3,28 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use folo_test_support::TestDir;
 use serde_json::Value;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("folo-cli-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
-    }
-
-    fn join(&self, p: &str) -> PathBuf {
-        self.0.join(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn folo(args: &[&str]) -> (i32, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_folo")).args(args).output().unwrap();
@@ -44,7 +24,7 @@ fn s(p: &Path) -> &str {
 }
 
 /// Writes a 40-image synthetic dataset and returns its path.
-fn synth(t: &TempDir, name: &str, extra: &[&str]) -> PathBuf {
+fn synth(t: &TestDir, name: &str, extra: &[&str]) -> PathBuf {
     let dir = t.join(name);
     let mut args =
         vec!["dataset", "synth", s(&dir), "--images", "40", "--imgsz", "96", "--seed", "4", "--json"];
@@ -64,7 +44,7 @@ fn synth(t: &TempDir, name: &str, extra: &[&str]) -> PathBuf {
 
 #[test]
 fn synth_then_stats_and_a_clean_check() {
-    let t = TempDir::new("synth");
+    let t = TestDir::new("cli-synth");
     let dir =
         synth(&t, "shapes", &["--classes", "circle,box,star", "--val-frac", "0.25", "--image-format", "png"]);
     assert!(dir.join("images/train/000000.png").is_file());
@@ -108,7 +88,7 @@ fn synth_then_stats_and_a_clean_check() {
 
 #[test]
 fn check_reports_each_issue_and_exits_1() {
-    let t = TempDir::new("check");
+    let t = TestDir::new("cli-check");
     let dir = synth(&t, "broken", &[]);
     std::fs::write(dir.join("labels/train/000001.txt"), "0 0.5 0.5 0.2 0.2\n9 0.5 0.5 0.1 0.1\n0 0.5\n")
         .unwrap();
@@ -182,7 +162,7 @@ fn check_reports_each_issue_and_exits_1() {
 
 #[test]
 fn convert_round_trips_through_coco() {
-    let t = TempDir::new("convert");
+    let t = TestDir::new("cli-convert");
     let dir = synth(&t, "yolo", &["--classes", "ring,hexagon"]);
     let coco = t.join("coco");
     let (code, stdout, stderr) = folo(&["dataset", "convert", s(&dir), s(&coco), "--to", "coco", "--json"]);
@@ -214,7 +194,7 @@ fn convert_round_trips_through_coco() {
 
 #[test]
 fn dataset_errors_use_stable_codes() {
-    let t = TempDir::new("errors");
+    let t = TestDir::new("cli-errors");
     let missing = t.join("nope");
     for cmd in ["stats", "check"] {
         let (code, stdout, _) = folo(&["dataset", cmd, s(&missing), "--json"]);

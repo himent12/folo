@@ -20,6 +20,7 @@ folo-vision = { path = "crates/folo-vision" }
 folo-server = { path = "crates/folo-server" }
 folo-mcp = { path = "crates/folo-mcp" }
 folo-wasm = { path = "crates/folo-wasm" }
+folo-test-support = { path = "crates/folo-test-support" }
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 crossbeam-channel = "0.5"
 half = { version = "2", features = ["bytemuck"] }

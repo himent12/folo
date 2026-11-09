@@ -5,6 +5,7 @@ use std::process::Command;
 
 use folo_data::ImageFormat;
 use folo_data::synthetic::{SyntheticConfig, write_yolo};
+use folo_test_support::{ChildGuard, TestDir};
 use serde_json::Value;
 
 /// Runs `folo` with `args`; engine commands get `--device cpu` (their `auto` would pick a GPU when there is one).
@@ -29,8 +30,7 @@ fn s(p: &Path) -> &str {
 
 #[test]
 fn train_val_predict_export_with_json() {
-    let root = std::env::temp_dir().join(format!("folo-cli-engine-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = TestDir::new("cli-engine");
     let data = root.join("shapes");
     let cfg = SyntheticConfig {
         images: 12,
@@ -363,8 +363,7 @@ fn assert_no_f32_noise(v: &Value) {
 #[test]
 fn stop_resume_and_epoch_only_records() {
     use std::io::BufRead;
-    let root = std::env::temp_dir().join(format!("folo-cli-stop-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = TestDir::new("cli-stop");
     let data = root.join("shapes");
     let cfg = SyntheticConfig {
         images: 16,
@@ -377,13 +376,14 @@ fn stop_resume_and_epoch_only_records() {
     write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
     let project = root.join("runs");
     let run = project.join("long");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
         .args(["train", "--json", "--device", "cpu", "--data", s(&data), "--imgsz", "64", "--batch", "4"])
         .args(["--epochs", "6", "--workers", "1", "--project", s(&project), "--name", "long"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .unwrap();
+        .unwrap()
+        .into();
     let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
     let mut records = Vec::new();
     let mut asked = false;
@@ -439,8 +439,7 @@ fn stop_resume_and_epoch_only_records() {
 #[test]
 fn format_picks_the_labels_and_resume_keeps_it() {
     use std::io::BufRead;
-    let root = std::env::temp_dir().join(format!("folo-cli-format-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = TestDir::new("cli-format");
     let data = root.join("both");
     let cfg = SyntheticConfig {
         images: 16,
@@ -464,13 +463,14 @@ fn format_picks_the_labels_and_resume_keeps_it() {
     let run = project.join("coco");
     // Runs `folo train` with `args` and stops it after its first epoch; returns the final record.
     let train_one_epoch = |args: &[&str]| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+        let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
             .args(["train", "--json", "--device", "cpu", "--workers", "1"])
             .args(args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .unwrap();
+            .unwrap()
+            .into();
         let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
         let mut last = Value::Null;
         for line in stdout.lines() {

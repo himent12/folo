@@ -37,5 +37,6 @@ image.workspace = true
 sysinfo.workspace = true
 
 [dev-dependencies]
+folo-test-support.workspace = true
 tower.workspace = true
 http-body-util.workspace = true

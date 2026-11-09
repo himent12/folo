@@ -15,6 +15,7 @@ use folo_data::{AugmentConfig, Split};
 use folo_nn::io::ModelFile;
 use folo_nn::optim::GradAccumulator;
 use folo_nn::{GradScaler, Module};
+use folo_test_support::TestDir;
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::train::{AMP_KEY, OptimizerChoice, ResumeOverrides};
 use folo_vision::{TrainConfig, TrainData, TrainOptions, Trainer};
@@ -355,8 +356,7 @@ fn tensors(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
 #[test]
 fn amp_run_resumes_bit_exactly_with_its_loss_scaler() {
     let (dev, _g) = gpu_tc!();
-    let root = std::env::temp_dir().join(format!("folo-amp-resume-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = TestDir::new("amp-resume");
     let (dir_a, dir_b) = (root.join("a"), root.join("b"));
     let log: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
     let sink = log.clone();
@@ -485,10 +485,9 @@ fn edit_amp(path: &std::path::Path, edit: impl FnOnce(&mut folo_nn::AmpContract)
 }
 
 /// A run stopped after its first epoch: `(root dir, its last.folo)`.
-fn one_epoch_checkpoint(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
-    let root = std::env::temp_dir().join(format!("folo-amp-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let mut o = TrainOptions { run_dir: Some(root.clone()), ..TrainOptions::default() };
+fn one_epoch_checkpoint(tag: &str) -> (TestDir, std::path::PathBuf) {
+    let root = TestDir::new(&format!("amp-{tag}"));
+    let mut o = TrainOptions { run_dir: Some(root.to_path_buf()), ..TrainOptions::default() };
     let stop = o.stop.clone();
     o.events = Some(Box::new(move |e| {
         if matches!(e, RunEvent::Epoch(_)) {
@@ -577,8 +576,7 @@ fn an_overflow_streak_continues_across_a_resume() {
 fn amp_trains_the_dual_head() {
     use folo_vision::model::{FoloModel, HeadMode};
     let (_, _g) = gpu_tc!();
-    let dir = std::env::temp_dir().join(format!("folo-amp-o2o-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = TestDir::new("amp-o2o");
     let cfg = TrainConfig {
         epochs: 6,
         nbs: 4,
@@ -596,7 +594,7 @@ fn amp_trains_the_dual_head() {
             .iter()
             .map(|e| e.train_loss.total)
             .collect();
-    let opts = TrainOptions { run_dir: Some(dir.clone()), ..TrainOptions::default() };
+    let opts = TrainOptions { run_dir: Some(dir.to_path_buf()), ..TrainOptions::default() };
     let mut t = Trainer::new(cfg, data(), opts).unwrap();
     assert!(t.model().has_o2o());
     let s = t.run().unwrap();

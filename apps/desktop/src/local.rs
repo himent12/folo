@@ -246,11 +246,9 @@ mod tests {
     fn weights() -> Vec<u8> {
         let mut m = FoloModel::new(folo_vision::ModelConfig::new("n", 2).unwrap()).unwrap();
         m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
-        let path = std::env::temp_dir().join(format!("folo-desktop-local-{}.folo", std::process::id()));
+        let path = folo_test_support::TestFile::new("desktop-local", "m.folo");
         m.export(&path, folo_nn::io::FloatDType::F16).unwrap();
-        let bytes = std::fs::read(&path).unwrap();
-        let _ = std::fs::remove_file(&path);
-        bytes
+        std::fs::read(&path).unwrap()
     }
 
     fn png(w: u32, h: u32) -> Vec<u8> {

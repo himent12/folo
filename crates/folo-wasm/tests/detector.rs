@@ -2,13 +2,12 @@
 //! GPU path (`download_async` readback) against the CPU path, the result's JSON shape and the options parsing.
 //! The GPU test skips without a hardware adapter, like folo-vision's.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use folo_core::no_grad;
 use folo_core::rng::Rng;
 use folo_data::Image;
 use folo_nn::Module;
 use folo_nn::io::{ModelFile, Purpose};
+use folo_test_support::TestDir;
 use folo_vision::{FoloModel, ModelConfig, Precision, PredictConfig, Predictor};
 use folo_wasm::detector::rgba_to_image;
 use folo_wasm::{Backend, BackendChoice, DetectOptions, Detector, LoadOptions};
@@ -16,7 +15,6 @@ use folo_wasm::{Backend, BackendChoice, DetectOptions, Detector, LoadOptions};
 /// A random folo-n with its class-output biases zeroed: the trained priors (MODEL.md §6.5) put every score near
 /// 1e-4, and the tests need detections.
 fn model_bytes() -> Vec<u8> {
-    static N: AtomicUsize = AtomicUsize::new(0);
     let mut m = FoloModel::with_rng(ModelConfig::new("n", 3).unwrap(), &mut Rng::seed(7)).unwrap();
     m.set_classes(vec!["circle".into(), "square".into(), "triangle".into()]).unwrap();
     {
@@ -27,14 +25,10 @@ fn model_bytes() -> Vec<u8> {
             }
         }
     }
-    let n = N.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("folo-wasm-test-{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TestDir::new("wasm-test");
     let path = dir.join("m.folo");
     m.save(&path).unwrap();
-    let bytes = std::fs::read(&path).unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
-    bytes
+    std::fs::read(&path).unwrap()
 }
 
 /// A smooth RGBA test pattern (alpha varies too: it must be ignored).

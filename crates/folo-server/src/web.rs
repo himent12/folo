@@ -122,6 +122,7 @@ pub(crate) fn respond(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use folo_test_support::TestDir;
 
     static FILES: &[EmbeddedFile] = &[
         EmbeddedFile { path: "assets/app-1a2b.js", bytes: b"console.log(1)", etag: "W/\"a1\"" },
@@ -207,7 +208,7 @@ mod tests {
         assert!(has_folo_wasm(with));
         assert!(!has_folo_wasm(&with[1..]), "the module needs its JS glue");
 
-        let dir = std::env::temp_dir().join(format!("folo-web-wasm-{}", std::process::id()));
+        let dir = TestDir::new("web-wasm");
         std::fs::create_dir_all(dir.join("folo-wasm")).unwrap();
         assert!(!dir_has_folo_wasm(&dir));
         std::fs::write(dir.join(FOLO_WASM_FILES[0]), b"").unwrap();
