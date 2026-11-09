@@ -675,12 +675,8 @@ impl FoloApp {
                             window,
                             cx,
                             act(move |this, w, cx| {
-                                // Below what's been fetched: fetch down to it, so no box is missing.
-                                let refetch = c < this.play_fetch_floor();
-                                this.play_conf = c;
-                                if refetch {
-                                    this.run_predict(cx);
-                                }
+                                // Below what's been fetched: set_play_conf fetches down to it.
+                                this.set_play_conf(c, cx);
                                 // The link goes once used: focus moves to the slider it set.
                                 this.focus_key("play-conf", w, cx);
                                 cx.notify();

@@ -1426,10 +1426,9 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
     let auto = config.optimizer == Optimizer::Auto;
     // Auto's momentum (AdamW β1) is 0.9; a chosen optimizer keeps the configured 0.937.
     let momentum = if auto { 0.9 } else { 0.937 };
-    // Warmup in optimizer steps: three epochs' worth, at least 100, ending before the last epoch.
+    // Warmup in optimizer steps: the trainer's own rule (docs/MODEL.md §8.4).
     let spe = batches.div_ceil(accumulate as u64);
-    let total = spe * config.epochs as u64;
-    let warmup_iters = ((3.0 * spe as f64).round() as u64).max(100).min(total.saturating_sub(spe).max(1));
+    let warmup_iters = folo_nn::warmup_iters(3.0, config.epochs as u64, spe);
     ResolvedTrain {
         optimizer,
         lr0,
@@ -1519,9 +1518,10 @@ mod tests {
             amp: false,
             head: Default::default(),
         };
-        // Warmup in optimizer steps: at least 100, ending before the last epoch.
+        // Warmup in optimizer steps, as folo_nn computes it.
         assert_eq!(resolve(&cfg(16, 30, Optimizer::Auto), 800, 3).warmup_iters, 100);
-        assert_eq!(resolve(&cfg(16, 2, Optimizer::Auto), 16, 3).warmup_iters, 1);
+        assert_eq!(resolve(&cfg(16, 10, Optimizer::Auto), 800, 3).warmup_iters, 39);
+        assert_eq!(resolve(&cfg(16, 1, Optimizer::Auto), 800, 3).warmup_iters, 0);
         // Auto: AdamW at 0.01 / (4 + nc) for short runs, with β1 0.9; SGD past 10,000 iterations
         // (the iteration count rounds batches up).
         let short = resolve(&cfg(16, 100, Optimizer::Auto), 3200, 3);

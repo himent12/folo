@@ -422,6 +422,8 @@ pub struct FoloApp {
     // Playground
     pub play_model: Option<String>,
     pub play_conf: f32,
+    /// The confidence the current predictions were fetched down to: a threshold below it refetches.
+    pub play_fetched_floor: f32,
     /// Short windows fold the validation-image picker to one line; this opens it.
     pub play_picker_open: bool,
     pub play_iou: f32,
@@ -590,6 +592,7 @@ impl FoloApp {
             cm_cell: None,
             play_model: None,
             play_conf: 0.25,
+            play_fetched_floor: PLAY_CONF_FLOOR,
             play_picker_open: false,
             play_iou: 0.7,
             play_target: None,
@@ -2074,9 +2077,13 @@ impl FoloApp {
         self.run_predict(cx);
     }
 
-    /// The confidence the Playground fetches predictions down to (the slider's low end).
-    pub fn play_fetch_floor(&self) -> f32 {
-        self.play_conf.min(PLAY_CONF_FLOOR)
+    /// Sets the Playground threshold, refetching when it drops below what was fetched (filtering
+    /// is local only above that floor).
+    pub fn set_play_conf(&mut self, conf: f32, cx: &mut Context<Self>) {
+        self.play_conf = conf;
+        if conf < self.play_fetched_floor - 1e-6 {
+            self.run_predict(cx);
+        }
     }
 
     pub fn run_predict(&mut self, cx: &mut Context<Self>) {
@@ -2084,13 +2091,15 @@ impl FoloApp {
         // Fetch everything above the lowest threshold once; the conf slider filters locally. The
         // floor is 0.05, or lower when the threshold is (a model's best-F1 confidence can be), so
         // local filtering never claims a threshold the fetch cut off.
+        let floor = self.play_conf.min(PLAY_CONF_FLOOR);
         let req = PredictRequest {
             model_id: model.clone(),
             input: img.input.clone(),
-            conf: self.play_conf.min(PLAY_CONF_FLOOR),
+            conf: floor,
             iou: self.play_iou,
             max_det: 300,
         };
+        self.play_fetched_floor = floor;
         let key = (self.play_image_gen, model);
         // Same image and model (an IoU change): keep showing the old boxes until the new ones land.
         if self.play_pred_for.as_ref() != Some(&key) {
