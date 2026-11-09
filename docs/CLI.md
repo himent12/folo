@@ -109,8 +109,9 @@ never writes a partial file. No FOLO v1 model has such a part.
 | `--head o2m\|o2o` | the model's | the head branch to export: an `o2o` model (trained with `--head o2o`) exports its one-to-one branch, or with `--head o2m` its one-to-many branch; the other branch's tensors are left out |
 
 **Input** `images: [B, 3, H, W]`, RGB in `[0, 1]` (`u8 / 255`, no mean/std), letterboxed as docs/MODEL.md §9.2
-says (gray 114 padding, and FOLO's resize: a box prefilter on 2× or larger reductions, then bilinear; another
-resize gives the same boxes with slightly different scores). **Outputs**, raw (default): `box_raw: [B, 64, A]` (DFL logits, channel `side · 16 + bin`,
+says (gray 114 padding, and FOLO's resize: a box prefilter on 2× or larger reductions, then bilinear). Parity with
+`folo predict` needs the same preprocessing: another resize changes the input pixels, so scores, and with them boxes
+and which detections pass `conf`, can differ (on R6 frames PIL's resize kept the boxes but moved scores by up to 0.15). **Outputs**, raw (default): `box_raw: [B, 64, A]` (DFL logits, channel `side · 16 + bin`,
 sides left, top, right, bottom) and `cls_raw: [B, nc, A]` (class logits), docs/MODEL.md §6.3. With `--decode`, one
 output `detections: [B, A, 4 + nc]`: per anchor `x1, y1, x2, y2` in input pixels, then the `nc` class scores after
 the sigmoid (docs/MODEL.md §6.4: the DFL softmax expectation and the anchor decode run in the graph). NMS is not in
