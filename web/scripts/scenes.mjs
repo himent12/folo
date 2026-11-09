@@ -440,6 +440,19 @@ export const scenes = [
   // in its run's status mark.
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
+    // Phones: the automatic axis's reason opened from the ⓘ beside the axis control, in place under the controls (the
+    // legend and the plot move down, never covered).
+    name: 'run-compare-axis-info',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, '.chip .key');
+      await page.getByRole('button', { name: 'About the progress axis' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // "By epoch", chosen by hand over the default "By progress": one epoch scale to the longest plan. On a tablet the
     // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row).
     name: 'run-compare-epoch',
@@ -1048,6 +1061,21 @@ export const scenes = [
     },
   },
   {
+    // Phones: tracing classes from Curves itself: the picker open under the bar, two classes traced (each a tap to
+    // remove), the graph and its legend still in view.
+    name: 'model-phone-trace',
+    path: '/models/m_fast_n',
+    viewports: ['mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.locator('#pr .trace').click();
+      await page.locator('#pr .t-chip').nth(1).click();
+      await page.locator('#pr .t-chip').nth(3).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // Phones: the Confusion section opens on the ranked confusions and misses, the matrix one step away.
     name: 'model-phone-confusion',
     path: '/models/m_fast_n',
@@ -1477,11 +1505,12 @@ export const scenes = [
     },
   },
   {
+    // Stop's confirm; on phones Stop is the icon button beside ⋯ (named "Stop <run>") and the confirm a bottom sheet.
     name: 'run-stop-dialog',
     fullPage: false,
     path: '/runs/run_7d1e',
     themes: ['light'],
-    viewports: ['desktop'],
+    viewports: ['desktop', 'mobile'],
     setup: async (page) => {
       await page.getByRole('button', { name: 'Stop' }).click();
     },
@@ -1544,7 +1573,8 @@ export const scenes = [
     ({ name, search }) =>
       /** @type {Scene} */ ({
         name,
-        path: '/settings',
+        // The System panel is the subject: the page opens on it, so the section strip marks System.
+        path: '/settings?section=system',
         search,
         // The whole page: the harness shoots from the top, and the panel sits near the bottom.
         fullPage: true,
@@ -1560,7 +1590,7 @@ export const scenes = [
     // Server PR #140 (`gpu_pool`): FOLO's GPU memory in Settings › System: in use, cached and the peak, in the one size
     // format, the device beside it (the whole page: the panel sits near the bottom).
     name: 'settings-gpu-pool',
-    path: '/settings',
+    path: '/settings?section=system',
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
@@ -1584,7 +1614,7 @@ export const scenes = [
   {
     // The server's own words opened under Driver report: wrapped prose in a well, copyable whole.
     name: 'settings-system-report',
-    path: '/settings',
+    path: '/settings?section=system',
     search: 'scenario=no-tensor-cores',
     fullPage: true,
     viewports: ['desktop', 'mobile'],
@@ -1598,7 +1628,7 @@ export const scenes = [
     // Settings › System › Throughput: the rows this server measured (training, predictions; one from another adapter),
     // their spread, samples and age, and Measure now.
     name: 'settings-throughput',
-    path: '/settings',
+    path: '/settings?section=system',
     // The whole page: the harness shoots from the top, and the block sits near the bottom.
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
@@ -1610,7 +1640,7 @@ export const scenes = [
   {
     // Measure now running: the button busy, the elapsed seconds counted against "up to 10 s".
     name: 'settings-measuring',
-    path: '/settings',
+    path: '/settings?section=system',
     // The whole page: the harness shoots from the top, and the block sits near the bottom.
     fullPage: true,
     viewports: ['desktop', 'mobile'],

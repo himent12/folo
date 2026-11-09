@@ -383,7 +383,10 @@
            (DESIGN_DIRECTION §13). Phones: Compare joins the ⋯. -->
       <span class="wide-only"><Button icon={GitCompare} href={href(`/runs/compare?ids=${run.id}`)}>Compare</Button></span>
       {#if run.status === 'running'}
-        <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
+        <!-- Phones: a quiet icon button the size of ⋯ beside it, so Stop is never the largest control above the progress
+             hero; its name says what it does, and the confirm stays. -->
+        <span class="wide-only"><Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button></span>
+        <span class="phone-only"><Button variant="danger" icon={Square} aria-label="Stop {run.name}" title="Stop run" onclick={() => (stopOpen = true)} /></span>
       {/if}
       {#if wideItems.length}<span class="wide-only"><Menu label="More run actions" items={wideItems} /></span>{/if}
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>

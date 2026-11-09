@@ -47,10 +47,30 @@ describe('PrCurves on phones', () => {
     expect(heads.slice(1).every((h) => h.classList.contains('r'))).toBe(true);
   });
 
-  it('tells a phone how to trace a curve from the Curves section', async () => {
+  it('traces classes from the Curves section itself: chips beside the graph, traced first, each a tap to remove', async () => {
     phone = true;
     await render('curves');
-    expect(target.querySelector('.tools.bar .hint')?.textContent).toBe('Tap a class in Classes to trace its curve');
+    const trace = target.querySelector<HTMLButtonElement>('.tools.bar .trace')!;
+    expect(trace.textContent).toBe('Trace a class');
+    const tracer = target.querySelector<HTMLElement>(`#${trace.getAttribute('aria-controls')}`)!;
+    expect(tracer.hidden).toBe(true);
+    trace.click();
+    flushSync();
+    expect(trace.getAttribute('aria-expanded')).toBe('true');
+    expect(tracer.hidden).toBe(false);
+    const chips = () => [...tracer.querySelectorAll<HTMLButtonElement>('.t-chip')];
+    const second = chips()[1]!.textContent;
+    chips()[1]!.click();
+    flushSync();
+    // Traced: first in the list, pressed, named for removal, and in the legend over the graph.
+    expect(chips()[0]!.textContent).toBe(second);
+    expect(chips()[0]!.getAttribute('aria-pressed')).toBe('true');
+    expect(chips()[0]!.getAttribute('aria-label')).toBe(`Stop tracing ${second}`);
+    expect([...target.querySelectorAll('.legend .item')].some((i) => i.textContent?.startsWith(`${second} `))).toBe(true);
+    chips()[0]!.click();
+    flushSync();
+    expect(chips().some((b) => b.getAttribute('aria-pressed') === 'true')).toBe(false);
+    expect(trace.textContent).toBe('Trace a class');
   });
 
   it('keeps the legend a readout: navigation and Clear sit in the selection bar, never among the values', async () => {
@@ -58,7 +78,7 @@ describe('PrCurves on phones', () => {
     await render('curves', { onback: () => {}, selected: [0] });
     expect(target.querySelectorAll('.legend button, .legend .hint')).toHaveLength(0);
     const bar = target.querySelector('.tools.bar')!;
-    expect([...bar.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual(['Back to Classes', 'Clear']);
+    expect([...bar.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual(['1 class traced', 'Back to Classes', 'Clear']);
     expect(bar.textContent).toContain('1 class traced');
   });
 

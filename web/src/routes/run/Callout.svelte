@@ -2,8 +2,8 @@
   /**
    * A run banner, one line (web/DESIGN_DIRECTION.md §4.4, the Vercel callout): status icon, title, cause, one action,
    * and a disclosure for the details. Only the icon and the title take the status hue; the cause stays in
-   * text.secondary. Below the laptop tier the actions go under the text (on a row of their own); on phones the cause
-   * also wraps under the title; a `stack` callout
+   * text.secondary. Below the laptop tier the actions go under the text (on a row of their own, every callout, never
+   * beside a title they would cut); on phones the cause also wraps under the title; a `stack` callout
    * gives its first action the full width (the one fix to take), the disclosure under it. An `also` line under the
    * first, with its own mark and hue, joins a second finding about the same run (a completed run's outcome, then the
    * trainer's warning that it was too short to learn), so one run never stacks two banners.
@@ -35,7 +35,8 @@
     label?: string;
     /** Phones: the first action across the callout. */
     stack?: boolean;
-    /** Phones: the cause is a summary the page repeats below; it hides, and the action stays on the title's line. */
+    /** Phones: the cause is a summary the page repeats below; it hides and the title stays (the actions, as on every
+     *  callout below 1024 px, take their own row under it). */
     brief?: boolean;
     /** Phones too: the cause runs on after the title ("Too short to learn: 125 optimizer steps") instead of under it. */
     runIn?: boolean;
@@ -221,12 +222,17 @@
       min-height: 44px;
     }
   }
-  /* Tablets and phones: the text takes the full width and the actions get a row of their own under it, so a cause
-     never wraps beside its buttons (a narrow column of text next to them). Laptops and up keep one line. */
+  /* Tablets and phones: the text takes the full width and the actions get a row of their own under it, 12 px below
+     the text and starting at its left edge after the icon column, so a cause never wraps beside its buttons (a narrow
+     column of text next to them) and a title is never cut by a button on its row. Every callout, brief, success and
+     facts ones included; the callout grows a row instead. Laptops and up keep one line. */
   @media (max-width: 1023px) {
     .callout {
       grid-template-columns: auto minmax(0, 1fr);
       align-items: start;
+    }
+    .c-acts {
+      margin-top: var(--space-1);
     }
     .callout > :global(svg),
     .c-also-mark {
@@ -292,21 +298,11 @@
     .stack .c-detail {
       grid-column: 1 / -1;
     }
-    /* A summary the page repeats below: one row, the action beside the title. */
-    .brief {
-      grid-template-columns: auto minmax(0, 1fr) auto;
-      align-items: center;
-      padding-block: var(--space-2);
-    }
-    .brief > :global(svg) {
-      margin-top: 0;
-    }
+    /* A summary the page repeats below: the title alone keeps its line ("Completed in 53m 30s", never cut), the facts
+       the page shows again hide, and the action stays on its own row under it like every callout's. */
     .brief .c-msg,
     .brief .facts :global(.ui-meta > :not(:first-child)) {
       display: none;
-    }
-    .brief .c-acts {
-      grid-column: 3;
     }
   }
 </style>

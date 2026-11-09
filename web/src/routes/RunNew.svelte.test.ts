@@ -625,23 +625,21 @@ describe('New run on a phone', () => {
   const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
   afterEach(() => setWidth(width));
 
-  it('picks the size from a segmented control and folds the full comparison behind "Compare sizes"', async () => {
+  it('picks the size from a segmented control with one recommendation; its figures fold behind "Compare sizes"', async () => {
     setWidth(390);
     await open();
     const pick = target.querySelector('#arch-pick')!;
     expect([...pick.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual(['N', 'S', 'M', 'L', 'X']);
     expect(target.querySelector('.a-sel')?.textContent).toBe('folo-s The default: fast and accurate.');
-    expect(target.querySelector('.a-specs')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('9.46M params · 21.6 GFLOPs');
-    // Latency is the architecture's reference, said so, with where it was measured under it.
-    expect(target.querySelector('.a-lat')?.textContent).toBe('Reference latency 7.87 ms');
-    expect(target.querySelectorAll('.a-pick .a-specs')[1]?.textContent).toBe('RTX 4080 SUPER · 640 px · f32 · end to end');
+    // Params, compute and latency with their provenance live in the comparison, not under the pick.
+    expect(target.querySelectorAll('.a-pick .a-specs, .a-pick .a-lat')).toHaveLength(0);
     const compare = target.querySelector<HTMLDetailsElement>('details.a-compare')!;
     expect(compare.open).toBe(false);
     expect(compare.querySelectorAll('.arch')).toHaveLength(5);
+    expect(compare.querySelector('.ref')?.textContent).toContain('reference: RTX 4080 SUPER, f32');
     pick.querySelectorAll('button')[2]!.click();
     flushSync();
     expect(target.querySelector('.a-sel')?.textContent).toBe('folo-m More accuracy on busy scenes.');
-    expect(target.querySelector('.a-lat')?.textContent).toBe('Reference latency not measured yet');
     expect(compare.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-m');
   });
 });

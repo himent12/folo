@@ -1,5 +1,9 @@
 <script lang="ts" generics="T extends string">
-  /** Underline tabs for switching views inside a page. Arrow keys move between tabs (WAI-ARIA tabs pattern). */
+  /**
+   * Underline tabs for switching views inside a page. Arrow keys move between tabs (WAI-ARIA tabs pattern). The 1 px
+   * track spans the whole column the tabs sit in, whatever holds them (a block, a grid cell or a flex row, as Run's
+   * sticky phone picker is), never ending at the last tab.
+   */
   interface Tab {
     value: T;
     label: string;
@@ -58,6 +62,8 @@
 <style>
   .tabs {
     display: flex;
+    width: 100%;
+    min-width: 0;
     gap: var(--space-4);
     border-bottom: 1px solid var(--line-subtle);
     overflow-x: auto;
