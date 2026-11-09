@@ -743,7 +743,9 @@ impl FoloApp {
                             .child(seg(p.timing.postprocess_ms, c_nms)),
                     )
                     .child(
-                        div().flex().gap(px(12.)).justify_between().children(
+                        // Whole entries wrap (the 280 px rail fits two of three stage names a line);
+                        // an entry never breaks inside.
+                        div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(4.)).justify_between().children(
                             [
                                 ("Preprocess", p.timing.preprocess_ms, c_pre),
                                 ("Inference", p.timing.inference_ms, c_model),
@@ -753,8 +755,10 @@ impl FoloApp {
                             .map(|(n, v, c)| {
                                 div()
                                     .flex()
+                                    .flex_none()
                                     .items_center()
                                     .gap(px(5.))
+                                    .whitespace_nowrap()
                                     .child(swatch(c, 6.))
                                     .child(text(ty::XS, t.text_tertiary).child(n))
                                     .child(text(ty::XS, t.text_secondary).tnum().child(format!("{v:.1} ms")))

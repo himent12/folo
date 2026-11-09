@@ -176,11 +176,6 @@ mod tests {
         }
     }
 
-    /// Status text (success, warning, danger, info, and accent text) is ≥ 4.5:1 (WCAG AA) on every
-    /// surface it sits on, in both themes: each plain surface (inset included), those under a
-    /// hover or selection, and its own tint (the muted fill of badges, banners and the Danger
-    /// button) over the surfaces tints are drawn on. Inset only carries the danger tint (error
-    /// rows of the run log). Every failing pair is reported, so a token change names what it broke.
     #[test]
     fn control_line_meets_3_to_1_on_every_surface() {
         // WCAG 1.4.11: a line that is the only mark of a control (switch track, slider rail,
@@ -199,6 +194,11 @@ mod tests {
         }
     }
 
+    /// Status text (success, warning, danger, info, and accent text) is ≥ 4.5:1 (WCAG AA) on every
+    /// surface it sits on, in both themes: each plain surface (inset included), those under a
+    /// hover or selection, and its own tint (the muted fill of badges, banners and the Danger
+    /// button) over the surfaces tints are drawn on. Inset only carries the danger tint (error
+    /// rows of the run log). Every failing pair is reported, so a token change names what it broke.
     #[test]
     fn status_text_meets_aa_on_every_surface_and_tint() {
         let mut failures = Vec::new();
