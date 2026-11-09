@@ -15,7 +15,10 @@
    * tertiary with dash patterns); hue is reserved for entities (runs in Compare, classes).
    */
   import { tooltip } from '$lib/ui/tooltip';
+  import type { Snippet } from 'svelte';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
+  import { BestPulse } from '$lib/charts/bestPulse';
+  import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
   import { holdDomain, logDomain, niceDomain, unitDomain, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
@@ -32,7 +35,16 @@
     epochs,
     version,
     loading,
-  }: { run: Run; steps: Step[]; epochs: Epoch[]; version: number; loading: boolean } = $props();
+    waiting,
+  }: {
+    run: Run;
+    steps: Step[];
+    epochs: Epoch[];
+    version: number;
+    loading: boolean;
+    /** A queued run: the one line its empty chart states (what it waits for), inside the axes it will fill. */
+    waiting?: Snippet;
+  } = $props();
 
   type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
   let tab = $state<Tab>('map');
@@ -67,8 +79,10 @@
   });
 
   // ---- chart data ----
-  let smoothing = $state<'0' | '0.6' | '0.9' | '0.97'>('0.9');
-  let scale = $state<'lin' | 'log'>('lin');
+  let smoothing = $state<Smoothing>('0.9');
+  // Log by default: the total starts near 8 while box / cls / dfl sit between 0.4 and 3, which a linear axis squashes
+  // into its bottom quarter.
+  let scale = $state<Scale>('log');
   let horizon = $state<'observed' | 'full'>('observed');
   const observed = $derived.by(() => {
     void version;
@@ -109,7 +123,8 @@
         const total = perStep((s) => s.loss.total);
         return [
           { id: 'raw', label: 'total (raw)', color: INK, ghost: true, points: a > 0 ? total : [] },
-          { id: 'total', label: 'Total', color: INK, emphasis: true, points: smooth(total, a) },
+          // Said in the legend, so the smoothed total never seems to contradict the KPI's raw last step.
+          { id: 'total', label: a > 0 ? `Total, EMA ${smoothing}` : 'Total, raw', color: INK, emphasis: true, points: smooth(total, a) },
           // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted.
           { id: 'box', label: 'box', color: 'var(--chart-2)', points: smooth(perStep((s) => s.loss.box), a) },
           { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
@@ -161,9 +176,24 @@
     return held.value;
   });
 
+  // A new best while the run trains pulses its ring once (LineChart, over the chart duration; nothing moves under reduced motion).
+  const pulser = new BestPulse();
+  let pulse = $state(0);
+  $effect.pre(() => {
+    pulse = pulser.see(run.best?.epoch ?? null, run.status === 'running');
+  });
   const best = $derived<Marker[]>(
     run.best && (tab === 'map' || tab === 'map50')
-      ? [{ x: run.best.epoch, y: tab === 'map' ? run.best.map50_95 : (epochs.find((e) => e.epoch === run.best!.epoch)?.val.map50 ?? 0), label: 'best', color: 'var(--accent-line)', quiet: true }]
+      ? [
+          {
+            x: run.best.epoch,
+            y: tab === 'map' ? run.best.map50_95 : (epochs.find((e) => e.epoch === run.best!.epoch)?.val.map50 ?? 0),
+            label: 'best',
+            color: 'var(--accent-line)',
+            quiet: true,
+            pulse,
+          },
+        ]
       : [],
   );
 
@@ -198,9 +228,9 @@
       id: 'loss',
       label: 'Loss',
       value: num(lastStep?.loss.total, 3),
-      caption: 'last step',
+      caption: 'last step, raw',
       title: 'Training loss',
-      qualifier: smoothing === '0' ? 'by epoch · raw per step' : `by epoch · EMA ${smoothing}`,
+      qualifier: 'by epoch',
     },
     {
       id: 'lr',
@@ -262,7 +292,7 @@
       </div>
       {#if closeFrom < 1 && live}<span class="sr-only">The hatched end of the bar marks the last {run.config.augment.close_mosaic} epochs, trained without mosaic.</span>{/if}
       <span class="cap num">
-        {#if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
+        {#if run.status === 'queued'}Not started{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
     <!-- svelte-ignore a11y_interactive_supports_focus -->
@@ -279,7 +309,7 @@
           onclick={() => (tab = t.id)}
         >
           <span class="label">{t.label}</span>
-          <span class="val num">{t.value}{#if t.unit}<span class="unit">{t.unit}</span>{/if}</span>
+          <span class="val num">{t.value}{#if t.unit && t.value !== '—'}<span class="unit">{t.unit}</span>{/if}</span>
           <span class="cap num">{t.caption}</span>
         </button>
       {/each}
@@ -292,21 +322,10 @@
       {#if picking}<div class="pick">{@render picker()}</div>{/if}
       <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}</span></h2>
       <div class="ctl">
-        {#if tab === 'loss'}
-          <Segmented
-            size="sm"
-            label="Smoothing"
-            bind:value={smoothing}
-            options={[
-              { value: '0', label: 'Raw' },
-              { value: '0.6', label: '0.6' },
-              { value: '0.9', label: '0.9' },
-              { value: '0.97', label: '0.97' },
-            ]}
-          />
-          <Segmented size="sm" label="Y scale" bind:value={scale} options={[{ value: 'lin', label: 'Lin' }, { value: 'log', label: 'Log' }]} />
-        {/if}
-        {#if live}
+        <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
+             segmented group. -->
+        {#if tab === 'loss'}<LossOptions bind:smoothing bind:scale />{/if}
+        {#if live && run.status !== 'queued'}
           <Segmented
             size="sm"
             label="Chart range"
@@ -338,7 +357,7 @@
           markers={best}
           legendNote={live ? 'Latest' : 'Last'}
           label="{current.title} by epoch"
-          empty={unit ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
+          empty={waiting ?? (unit ? 'Waiting for the first validation…' : 'Waiting for the first step…')}
         />
       {/key}
     {/if}
@@ -640,19 +659,27 @@
     }
   }
   @media (max-width: 767px) {
-    /* Phones: the tabs become one scrolling row; the chart follows directly. */
+    /* Phones: "23 / 100" and its meta on one baseline, the bar under the whole row 8 px below; the chart follows. */
     .epoch {
       grid-template-columns: auto minmax(0, 1fr);
-    }
-    .epoch .cap {
-      grid-column: 2;
-    }
-    .epoch .track {
-      grid-column: 2;
-      grid-row: 1;
+      align-items: baseline;
+      row-gap: var(--space-2);
     }
     .big {
-      grid-row: 1 / span 2;
+      grid-row: 1;
+      grid-column: 1;
+      align-self: baseline;
+    }
+    .epoch .cap {
+      grid-row: 1;
+      grid-column: 2;
+      align-self: baseline;
+      text-align: right;
+    }
+    .epoch .track {
+      grid-row: 2;
+      grid-column: 1 / -1;
+      align-self: center;
     }
     .val {
       font-size: var(--type-lg-size);

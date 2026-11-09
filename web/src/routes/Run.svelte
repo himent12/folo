@@ -1,7 +1,6 @@
 <script lang="ts">
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import Box from '@lucide/svelte/icons/box';
-  import Clock from '@lucide/svelte/icons/clock';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import Square from '@lucide/svelte/icons/square';
@@ -116,6 +115,16 @@
 
 </script>
 
+<!-- A queued run renders the page it will fill: KPIs at "—", the chart's axes with one line saying what it waits
+     for, and the config in its rail (states live in the loaded frame). -->
+{#snippet waiting()}
+  {#if ahead}
+    Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}
+  {:else}
+    Starts as soon as the device is free
+  {/if}
+{/snippet}
+
 {#if live.error && !run}
   <Page title="Run">
     <ErrorState error={live.error} title="Could not load this run" retry={() => live.retry()} />
@@ -199,7 +208,9 @@
       {#if run.status === 'running'}
         <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
       {:else if run.status === 'queued'}
-        <Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button>
+        <!-- Phones: the short label, so the status and its time keep one line beside it. -->
+        <span class="wide-only"><Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button></span>
+        <span class="phone-only"><Button variant="ghost" icon={X} aria-label="Remove from queue" onclick={() => (stopOpen = true)}>Remove</Button></span>
       {:else if !active}
         <span class="wide-only"><Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
       {/if}
@@ -209,28 +220,7 @@
 
     <Outcome {run} {elapsed} {resuming} onresume={resume} />
 
-    {#if queuedOnly}
-      <!-- Nothing has run yet: one clear waiting state instead of empty charts. -->
-      <section class="queued" aria-label="Queued">
-        <div class="q-mark" aria-hidden="true"><Clock size={20} strokeWidth={1.5} /></div>
-        <h2>Queued{#if ahead}<span class="faint">&nbsp;· next in line</span>{/if}</h2>
-        <p>
-          {#if ahead}
-            Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
-          {:else}
-            Waiting for the device. It starts as soon as it is free.
-          {/if}
-          Charts, samples and logs appear with the first training step.
-        </p>
-        <div class="q-facts num">
-          <span><b>{run.epochs}</b> epochs</span>
-          <span><b>{run.config.batch}</b> batch</span>
-          <span><b>{run.config.imgsz}</b> px</span>
-          <span class="mono">{run.config.arch}</span>
-        </div>
-      </section>
-    {:else}
-    <RunMetrics {run} steps={live.steps} epochs={live.epochs} version={live.version} loading={live.loading} />
+    <RunMetrics {run} steps={live.steps} epochs={live.epochs} version={live.version} loading={live.loading} waiting={queuedOnly ? waiting : undefined} />
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a sticky rail on the right. -->
     <!-- Below 960 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
@@ -256,8 +246,6 @@
         <div class="part" data-part="config"><ConfigPanel config={run.config} datasetName={dataset?.name} compact /></div>
       </aside>
     </div>
-    {/if}
-    {#if queuedOnly}<ConfigPanel config={run.config} datasetName={dataset?.name} />{/if}
   </Page>
 
   <Dialog
@@ -459,6 +447,7 @@
   .when-phone {
     display: none;
     font-size: var(--type-sm-size);
+    white-space: nowrap;
   }
   .wide-only {
     display: contents;
@@ -485,46 +474,6 @@
   }
   .dev {
     max-width: 320px;
-  }
-  .queued {
-    display: grid;
-    justify-items: center;
-    gap: var(--space-3);
-    padding: var(--space-12) var(--space-6);
-    text-align: center;
-    background: var(--bg-panel);
-    border: 1px solid var(--line-default);
-    border-radius: var(--radius-lg);
-  }
-  .q-mark {
-    display: grid;
-    place-items: center;
-    width: 44px;
-    height: 44px;
-    border-radius: 50%;
-    background: var(--bg-active);
-    color: var(--text-secondary);
-  }
-  .queued h2 {
-    font-size: var(--type-lg-size);
-    line-height: var(--type-lg-line);
-  }
-  .queued p {
-    max-width: 460px;
-    color: var(--text-secondary);
-    text-wrap: balance;
-  }
-  .q-facts {
-    display: flex;
-    gap: var(--space-4);
-    flex-wrap: wrap;
-    justify-content: center;
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-  }
-  .q-facts b {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
   }
   .detail {
     display: grid;

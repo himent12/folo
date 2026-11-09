@@ -183,7 +183,8 @@ export const scenes = [
       await page.locator('.aug-toggle').click();
     },
   },
-  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'mobile'] },
+  // Run lengths 23 to 150 epochs: the x axis defaults to "% of run", and the control says so.
+  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
     // A run kept in front from the legend: its card selected, its line (here the dotted fourth run) painted over the rest.
     name: 'run-compare-pinned',
@@ -208,7 +209,22 @@ export const scenes = [
     },
   },
   { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
-  { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
+  // A queued run in the loaded frame: KPIs at "—", the chart's axes with what it waits for, the config in its rail.
+  { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // The loss chart's one control open: smoothing and y scale behind a single button.
+    name: 'run-loss-options',
+    path: '/runs/run_c19a',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      const tab = page.locator('[data-tab="loss"]');
+      if (await tab.isVisible()) await tab.click();
+      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      await page.locator('button.trigger').click();
+      await page.clock.runFor(500);
+    },
+  },
   { name: 'datasets-empty', path: '/datasets', search: 'scenario=empty' },
   {
     name: 'datasets-add',

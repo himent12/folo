@@ -38,11 +38,16 @@
     color?: string;
     /** Ring only: the label is stated elsewhere (e.g. the panel header), not floated over the data. */
     quiet?: boolean;
+    /**
+     * Bump to pulse the ring once (e.g. a live run just set a new best): a ring grows out of it and fades over the
+     * chart duration. Nothing moves under reduced motion. 0 or unset: no pulse.
+     */
+    pulse?: number;
   }
 </script>
 
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, type Snippet } from 'svelte';
   import { scaleLinear, scaleLog } from 'd3-scale';
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
@@ -75,7 +80,8 @@
     /** Shared crosshair position in data x (bind it across charts to sync them). */
     cursor?: number | null;
     label: string;
-    empty?: string;
+    /** The one line in an empty plot: text, or a snippet (e.g. with a link). The axes stay drawn around it. */
+    empty?: string | Snippet;
     /** Label each line where it ends (direct labels), for comparisons where colour alone is not enough. */
     endLabels?: boolean;
     /** Short x-axis caption drawn under the x tick labels, e.g. "epoch". */
@@ -86,7 +92,10 @@
     legendNote?: string;
     /** A floating tooltip at the cursor. Off by default: the legend is the readout (cursor values on hover). */
     tooltip?: boolean;
-    /** Series id to bring forward; the others fade (e.g. while its legend entry is hovered). */
+    /**
+     * Series id to bring forward (e.g. while its legend entry is hovered or pinned): drawn heavier and painted over the
+     * rest. The others keep their own contrast-tested colour and weight; nothing is faded.
+     */
     highlight?: string | null;
     /** A small dot at each line's last point, so every series stays findable where lines overlap. */
     endDots?: boolean;
@@ -439,6 +448,13 @@
     const p = patternOf(s);
     return p ? SWATCH[p].join(' ') : undefined;
   };
+  /** Stroke width of a series' line in px, as the `.line` classes below draw it. */
+  function widthOf(s: Series): number {
+    if (s.ghost || s.context || s.thin) return 1;
+    const p = patternOf(s);
+    if (s.emphasis || (highlight !== null && s.id === highlight)) return p === 'dot' ? 3.25 : 2.75;
+    return p === 'dot' ? 2.25 : p ? 1.5 : 1.75;
+  }
   /** `items` with the highlighted series moved to the end, so it is painted over every other line. */
   function lifted<T>(items: T[], id: (t: T) => string): T[] {
     if (highlight === null) return items;
@@ -548,10 +564,11 @@
           {/each}
           {#each lifted(paintOrder(paths.filter((p) => !p.b), (p) => p.s), (p) => p.s.id) as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
-            {#if s.pattern === 'dot' && !s.ghost && !s.context}
-              <!-- A dotted line over a coincident solid one would lose its dots in the other line: a partial knockout in
-                   the panel colour underneath keeps the dots readable, and the other line still shows, recessed. -->
-              <path class="knockout" class:faded={highlight !== null && s.id !== highlight} {d} style:stroke-width={s.id === highlight ? 4.5 : undefined} />
+            {#if patternOf(s) && !s.ghost && !s.context}
+              <!-- Patterned lines are painted over solid ones (./layers). A 1.5 px halo in the panel colour around each
+                   dash or dot keeps the pattern readable where it runs along a solid line, which still shows between
+                   them. -->
+              <path class="halo" {d} style:stroke-width="{widthOf(s) + 3}px" style:stroke-dasharray={dashOf(s, s.id === highlight ? 1.4 : 1)} />
             {/if}
             <path
               class="line"
@@ -561,7 +578,6 @@
               class:ghost={s.ghost}
               class:context={s.context}
               class:emphasis={s.emphasis || (highlight !== null && s.id === highlight)}
-              class:faded={highlight !== null && s.id !== highlight && !s.ghost && !s.context}
               {d}
               style:stroke={s.context ? undefined : s.color}
               style:stroke-dasharray={dashOf(s, s.id === highlight ? 1.4 : 1)}
@@ -571,7 +587,7 @@
             {#each lifted(paintOrder(keyed, (s) => s), (s) => s.id) as s (s.id)}
               {@const p = s.points[s.points.length - 1]}
               {#if p && Number.isFinite(p.y)}
-                <circle class="end-dot" class:faded={highlight !== null && s.id !== highlight} cx={x(p.x)} cy={y(p.y)} r="3" style:fill={s.color} />
+                <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} r="3" style:fill={s.color} />
               {/if}
             {/each}
           {/if}
@@ -584,7 +600,10 @@
           {#each markers as m (m.label + m.x)}
             {#if m.x >= xExtent[0] && m.x <= xExtent[1]}
               <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
-                <circle r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />
+                {#if m.pulse}
+                  {#key m.pulse}<circle class="pulse" r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />{/key}
+                {/if}
+                <circle class="ring" r="4.5" style:stroke={m.color ?? 'var(--chart-1)'} />
                 {#if !m.quiet}
                   <text
                     y="-10"
@@ -615,7 +634,7 @@
       </svg>
 
       {#if !hasData}
-        <p class="empty">{empty}</p>
+        <p class="empty"><span>{#if typeof empty === 'string'}{empty}{:else}{@render empty()}{/if}</span></p>
       {/if}
 
       {#if hover && tooltip}
@@ -731,30 +750,21 @@
   .line.emphasis {
     stroke-width: 2.75;
   }
-  .line.faded,
-  .end-dot.faded {
-    opacity: 0.2;
+  .line.dotted.emphasis {
+    stroke-width: 3.25;
   }
-  .line,
-  .end-dot {
-    transition: opacity var(--dur-fast) var(--ease-standard);
+  .line {
+    transition: stroke-width var(--dur-fast) var(--ease-standard);
   }
   .end-dot {
     stroke: var(--bg-panel);
     stroke-width: 1.5;
   }
-  /* Partial, so a line the dots run along (box under dfl in the loss chart) still shows between them: the knockout
-     only softens it enough for the dots to read as dots. */
-  .knockout {
+  .halo {
     fill: none;
     stroke: var(--bg-panel);
-    stroke-width: 3;
-    opacity: 0.3;
     stroke-linejoin: round;
     stroke-linecap: round;
-  }
-  .knockout.faded {
-    opacity: 0;
   }
   .line.ghost {
     stroke-width: 1;
@@ -801,9 +811,33 @@
     stroke: var(--bg-panel);
     stroke-width: 3px;
   }
-  .marker circle {
+  .marker .ring {
     fill: var(--bg-panel);
     stroke-width: 2;
+  }
+  /* A new best: a ring grows out of the marker and fades, once, over the chart duration. */
+  .marker .pulse {
+    fill: none;
+    stroke-width: 2;
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: best-pulse var(--dur-chart) var(--ease-out);
+  }
+  @keyframes best-pulse {
+    from {
+      opacity: 0.9;
+      transform: scale(1);
+    }
+    to {
+      opacity: 0;
+      transform: scale(2.4);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .marker .pulse {
+      display: none;
+    }
   }
   .marker text {
     fill: var(--text-secondary);

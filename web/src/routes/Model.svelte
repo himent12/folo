@@ -400,9 +400,9 @@
     <div class="cm-part" class:off={!showing('confusion')}>
       <Panel title="Confusion matrix" meta={cm?.partial ? (phone.current ? `${CM_MAX} most common + Other` : `${CM_MAX} most common classes + Other + background`) : 'share of each true class'} id="cm">
         {#if cm}
-          <!-- 8 + 4, on the grid of the panels above: the matrix in the main column, what to read from it in the side
-               column (aligned with the Details rail). Up to 1199 px the two consequential cells lead (a phone's
-               matrix scrolls sideways, hiding the background column), and the reading notes follow the matrix. -->
+          <!-- The matrix at its own size (cells up to 72 px), what to read from it directly beside it, so the panel has
+               no dead middle. Up to 1199 px the two consequential cells lead (a phone's matrix scrolls sideways,
+               hiding the background column), and the reading notes follow the matrix. -->
           <div class="cm-layout">
             <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
             {#if confused || missed}
@@ -443,8 +443,8 @@
               <details class="how">
                 <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
                 <div class="how-body">
-                  <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5. Cells under 10% are not
-                    labelled; hover or tap one for its count.</p>
+                  <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5. Cells under 5% are not
+                    labelled; hover or tap one for its count. An empty cell had no objects at all.</p>
                   <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
                   {#if cm.partial}
                     <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
@@ -645,16 +645,17 @@
     grid-area: main;
     min-width: 0;
   }
-  /* The same 2 : 1 split as the panels above. Inside the panel's 16 px padding, an 80 px column gap puts the side
-     column's text on the Details rail's text edge (rail edge + 16). */
+  /* The matrix takes the width its cells want (up to 72 px each), the notes follow 32 px after it and take the rest
+     (at least 320 px): an 8-class matrix fills about two thirds of a full-width panel and the notes the remainder,
+     while a large one shrinks its cells before the notes drop under 320 px. */
   .cm-layout {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    grid-template-columns: minmax(0, max-content) minmax(320px, 1fr);
     grid-template-rows: auto 1fr;
     grid-template-areas:
       'main sum'
       'main notes';
-    gap: var(--space-4) calc(var(--space-16) + var(--space-4));
+    gap: var(--space-4) var(--space-8);
     align-items: start;
   }
   @media (max-width: 1199px) {

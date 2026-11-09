@@ -28,21 +28,31 @@ const lum = (c: number[]) => {
 };
 const contrast = (a: number[], b: number[]) => (Math.max(lum(a), lum(b)) + 0.05) / (Math.min(lum(a), lum(b)) + 0.05);
 
-describe('confusion-matrix label ink', () => {
+describe('confusion-matrix ramp', () => {
   for (const theme of ['dark', 'light'] as const) {
+    const ink = toOklab(rgb(tokens.color[theme].text.primary));
+    const panel = rgb(tokens.color[theme].bg.panel);
+    const base = toOklab(panel);
+    const cell = (v: number) => {
+      const t = rampShare(v, theme);
+      return fromOklab(ink.map((x, k) => x * t + base[k]! * (1 - t)));
+    };
+
     it(`keeps every label >= 4.5:1 over the whole ramp (${theme})`, () => {
-      const ink = toOklab(rgb(tokens.color[theme].text.primary));
-      const well = toOklab(rgb(tokens.color[theme].bg.inset));
       // Dark: low cells are dark (white labels); light: low cells are light (black labels).
       const [lo, hi] = theme === 'dark' ? [[1, 1, 1], [0, 0, 0]] : [[0, 0, 0], [1, 1, 1]];
       let worst = Infinity;
-      for (let i = 0; i <= 1000; i++) {
+      for (let i = 1; i <= 1000; i++) {
         const v = i / 1000;
-        const t = rampShare(v);
-        const cell = fromOklab(ink.map((x, k) => x * t + well[k]! * (1 - t)));
-        worst = Math.min(worst, contrast(v > CONFUSION_FLIP[theme] ? hi! : lo!, cell));
+        worst = Math.min(worst, contrast(v > CONFUSION_FLIP[theme] ? hi! : lo!, cell(v)));
       }
       expect(worst).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it(`tells the smallest share apart from an empty cell (${theme})`, () => {
+      expect(rampShare(0, theme)).toBe(0);
+      // 0.1 % of a row already sits on the first step, clearly off the panel an empty cell shows.
+      expect(contrast(cell(0.001), panel)).toBeGreaterThanOrEqual(theme === 'dark' ? 1.5 : 1.3);
     });
   }
 });

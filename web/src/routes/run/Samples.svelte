@@ -64,8 +64,9 @@
 
 <!-- The epoch picker names the epoch, so phones drop the meta that repeats it (title and picker then share a row). -->
 <Panel title="Validation samples" meta={samples.data && !phone.current ? `epoch ${samples.data.epoch}` : undefined} id="samples">
+  <!-- Before the first validation there is nothing to filter: the frame holds only its one line. -->
   {#snippet actions()}
-    <div class="ctl">
+    {#if epochsDone > 0}<div class="ctl">
       <Segmented
         size="sm"
         label="Show boxes"
@@ -77,11 +78,11 @@
         ]}
       />
       <Select size="sm" label="Epoch" bind:value={pick} {options} />
-    </div>
+    </div>{/if}
   {/snippet}
   <!-- One toolbar row under the header: the key on the left, the confidence slider (label, track, value) on the
        right. A narrow panel (the laptop column, phones) shortens the key instead of wrapping it. -->
-  <div class="bar-c">
+  {#if epochsDone > 0}<div class="bar-c">
     <div class="bar">
       <div class="legend" aria-hidden="true">
         <span><i class="solid"></i>prediction</span>
@@ -90,7 +91,7 @@
       </div>
       <div class="conf"><Slider label="Min confidence" bind:value={conf} min={0.05} max={0.95} step={0.05} inline /></div>
     </div>
-  </div>
+  </div>{/if}
   {#if epochsDone === 0}
     <p class="none">Samples appear after the first validation pass.</p>
   {:else if samples.error && !samples.data}
