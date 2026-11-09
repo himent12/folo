@@ -76,8 +76,9 @@ export const scenes = [
     fullPage: false,
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page) => {
-      await until(page, '.c-detail summary');
-      await page.locator('.c-detail summary').click();
+      // "More fixes": the other smaller settings and the driver's report.
+      await until(page, 'button.c-more');
+      await page.locator('button.c-more').first().click();
     },
   },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },

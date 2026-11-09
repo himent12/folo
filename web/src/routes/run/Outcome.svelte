@@ -1,10 +1,10 @@
 <script lang="ts">
   /**
-   * A finished run's outcome as one line under the header (status mark, what happened, the next action); it wraps
-   * rather than grows into a card. A failure keeps its cause in full, since it decides what to do next, except out of
-   * GPU memory: that is said plainly, with the smaller settings to retry with as actions and the driver's report one
-   * step away. A queued run leads with what it waits for and when it should start. The trainer's warning that a run is
-   * too short to learn from (./warnings) is one callout of its own, never a toast.
+   * A run's outcome under the header, every state in one pattern (./Callout): icon, title, cause, one action, and a
+   * disclosure for the rest. Out of GPU memory says so plainly, with the likeliest smaller setting as the action and
+   * the other fixes and the driver's report behind "More fixes". A queued run leads with what it waits for and when it
+   * should start. The trainer's warning that a run is too short to learn from (./warnings) is one line of its own,
+   * "Too short to learn: 125 optimizer steps", with the engine's sentences in plain words behind "Why?"; never a toast.
    */
   import type { Snippet } from 'svelte';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
@@ -15,11 +15,12 @@
   import Square from '@lucide/svelte/icons/square';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import type { Run } from '$lib/api/types';
-  import { deviceName, duration, metric } from '$lib/format';
+  import { duration, metric } from '$lib/format';
   import { isOom, oomDetail, oomFixes, retryPath } from '$lib/oom';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
-  import { sentences, suggestedEpochs } from './warnings';
+  import Callout from './Callout.svelte';
+  import { plain, shortCause, suggestedEpochs } from './warnings';
 
   let {
     run,
@@ -43,238 +44,106 @@
   const oom = $derived(run.status === 'failed' && isOom(run.error));
   const fixes = $derived(oom ? oomFixes(run.config) : []);
   const driver = $derived(oom ? oomDetail(run.error) : null);
-  /** "Train for at least N epochs" from the trainer: the warning's action opens New run with N filled in. */
+  /** The epochs that clear the warning (⌈200 / steps per epoch⌉): its action opens New run with them filled in. */
   const suggested = $derived(suggestedEpochs(warnings));
 </script>
 
 {#if run.status === 'failed' && oom}
-  <!-- What happened in plain words, the fixes as actions under it (the likeliest one primary), and the driver's
-       report one step away. -->
-  <div class="callout danger stack" role="alert">
-    <TriangleAlert size={16} aria-hidden="true" />
-    <p class="c-text">
-      <span class="c-title">Ran out of GPU memory</span>
-      <span class="c-msg">At epoch {run.epoch}, batch {run.config.batch} at {run.config.imgsz} px with <span class="mono">{run.config.arch}</span> needed more memory than {run.device ? `the ${deviceName(run.device)}` : 'the GPU'} has.</span>
-    </p>
-    <div class="c-acts">
-      {#each fixes as f, i (f.kind)}
-        <Button size="sm" variant={i === 0 ? 'primary' : 'secondary'} icon={i === 0 ? RotateCcw : undefined} href={href(retryPath(run.id, f))}>{f.label}</Button>
-      {/each}
-      {#if !fixes.length}<Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button>{/if}
-    </div>
-    {#if driver}
-      <details class="c-detail">
-        <summary>Driver report</summary>
+  <Callout tone="danger" icon={TriangleAlert} title="Ran out of GPU memory" role="alert" stack moreLabel="More fixes">
+    Batch {run.config.batch} at {run.config.imgsz} px with <span class="mono">{run.config.arch}</span> did not fit, at epoch {run.epoch}.
+    {#snippet actions()}
+      {#if fixes[0]}
+        <Button size="sm" variant="primary" icon={RotateCcw} href={href(retryPath(run.id, fixes[0]))}>{fixes[0].label}</Button>
+      {:else}
+        <Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button>
+      {/if}
+    {/snippet}
+    {#snippet more()}
+      {#if fixes.length > 1}
+        <div class="alts">
+          {#each fixes.slice(1) as f (f.kind)}<Button size="sm" href={href(retryPath(run.id, f))}>{f.label}</Button>{/each}
+        </div>
+      {/if}
+      {#if driver}
+        <p class="d-head">Driver report</p>
         <code class="mono">{driver}</code>
-      </details>
-    {/if}
-  </div>
+      {/if}
+    {/snippet}
+  </Callout>
 {:else if run.status === 'failed'}
-  <div class="callout danger" role="alert">
-    <TriangleAlert size={16} aria-hidden="true" />
-    <p class="c-text"><span class="c-title">Failed at epoch {run.epoch}</span> <span class="c-msg">{run.error}</span></p>
-    <div class="c-acts">
+  <Callout tone="danger" icon={TriangleAlert} title="Failed at epoch {run.epoch}" role="alert" moreLabel="More fixes">
+    {run.error}
+    {#snippet actions()}
       <!-- Anything but out of memory can continue from the last checkpoint. -->
       <Button size="sm" icon={Play} loading={resuming} onclick={onresume}>Resume</Button>
-      <Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button>
-    </div>
-  </div>
+    {/snippet}
+    {#snippet more()}
+      <div class="alts"><Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button></div>
+    {/snippet}
+  </Callout>
 {:else if run.status === 'completed'}
-  <div class="callout success" role="status">
-    <CircleCheck size={16} aria-hidden="true" />
-    <p class="c-text">
-      <span class="c-title">Completed in {duration(elapsed)}</span>
-      <span class="c-msg brief">Best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}, saved as a model.</span>
-    </p>
-    {#if run.model_id}<div class="c-acts"><Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button></div>{/if}
-  </div>
+  <Callout tone="success" icon={CircleCheck} title="Completed in {duration(elapsed)}" brief>
+    Best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}, saved as a model.
+    {#snippet actions()}
+      {#if run.model_id}<Button size="sm" icon={ScanSearch} href={href(`/playground?model=${run.model_id}`)}>Try in Playground</Button>{/if}
+    {/snippet}
+  </Callout>
 {:else if run.status === 'stopped'}
-  <div class="callout neutral" role="status">
-    <Square size={16} aria-hidden="true" />
-    <p class="c-text">
-      <span class="c-title">Stopped at epoch {run.epoch}</span>
-      <span class="c-msg">The last checkpoint was kept{run.model_id ? ' and saved as a model' : ''}; Resume continues from it.</span>
-    </p>
-    <div class="c-acts"><Button size="sm" icon={Play} loading={resuming} onclick={onresume}>Resume</Button></div>
-  </div>
+  <Callout tone="neutral" icon={Square} title="Stopped at epoch {run.epoch}">
+    The last checkpoint was kept{run.model_id ? ' and saved as a model' : ''}.
+    {#snippet actions()}<Button size="sm" icon={Play} loading={resuming} onclick={onresume}>Resume</Button>{/snippet}
+  </Callout>
 {:else if run.status === 'queued' && waiting}
-  <!-- The dependency and the start estimate lead; the empty frames below stay compact until there is data. -->
-  <div class="callout neutral" role="status">
-    <Clock size={16} aria-hidden="true" />
-    <p class="c-text"><span class="c-title">Waiting to start</span> <span class="c-msg">{@render waiting()}</span></p>
-  </div>
+  <!-- The dependency and the start estimate lead; the frames below stay compact until there is data. -->
+  <Callout tone="neutral" icon={Clock} title="Waiting to start">{@render waiting()}</Callout>
 {/if}
 
 {#if warnings.length}
-  <!-- The trainer's own sentences (cause, then what to do), under one plain title; New run like this opens the form
-       with this run's settings, where the epochs or the weights can change. -->
-  <div class="callout warning stack" role="note" aria-label="Schedule warning">
-    <TriangleAlert size={16} aria-hidden="true" />
-    <div class="c-text">
-      <p class="c-title">This run may be too short to learn</p>
-      {#each warnings as w (w)}<p class="c-msg w-msg">{sentences(w)}</p>{/each}
-    </div>
-    <div class="c-acts">
+  <!-- One line: the cause in numbers and the fix; the engine's sentences, in plain words, behind "Why?". -->
+  <Callout tone="warning" icon={TriangleAlert} title="Too short to learn:" role="note" label="Schedule warning" moreLabel="Why?" runIn>
+    {shortCause(warnings)}
+    {#snippet actions()}
       {#if suggested && suggested > run.config.epochs}
         <Button size="sm" icon={RotateCcw} href={href(`${retryPath(run.id)}&epochs=${suggested}`)}>Train {suggested} epochs</Button>
       {:else}
         <Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button>
       {/if}
-    </div>
-  </div>
+    {/snippet}
+    {#snippet more()}
+      {#each warnings as w (w)}<p class="why">{plain(w)}</p>{/each}
+    {/snippet}
+  </Callout>
 {/if}
 
 <style>
-  .callout {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-2) var(--space-3);
-    min-height: 44px;
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
-    background: var(--bg-panel);
-    border: 1px solid var(--line-default);
-    border-radius: var(--radius-lg);
-  }
-  /* The status mark carries the hue; the text stays in ink, so it reads at AA on the panel in both themes. */
-  .callout > :global(svg) {
-    flex-shrink: 0;
-  }
-  .danger > :global(svg) {
-    color: var(--danger-text);
-  }
-  .success > :global(svg) {
-    color: var(--success-text);
-  }
-  .neutral > :global(svg) {
-    color: var(--text-tertiary);
-  }
-  .warning > :global(svg) {
-    color: var(--warning-text);
-  }
-  /* The engine's sentences, one paragraph each, at a readable measure under the title. */
-  .w-msg {
-    display: block;
-    max-width: 80ch;
-    margin-top: var(--space-1);
-  }
-  .warning .c-title {
-    display: block;
-  }
-  .c-text {
-    min-width: 0;
-    color: var(--text-secondary);
-  }
-  .c-title {
-    margin-right: var(--space-2);
-    font-weight: var(--weight-medium);
-    color: var(--text-primary);
-  }
-  .c-msg .num {
-    color: var(--text-primary);
-  }
-  .c-acts {
+  .alts {
     display: flex;
     flex-wrap: wrap;
-    justify-content: flex-end;
     gap: var(--space-2);
+    padding-top: var(--space-1);
   }
-  /* Several actions: they go under the text instead of squeezing it, the driver's report under them. */
-  .callout.stack {
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: start;
-    padding-block: var(--space-3);
-  }
-  .callout.stack > :global(svg) {
-    margin-top: 2px;
-  }
-  .stack .c-acts,
-  .c-detail {
-    grid-column: 2;
-    justify-content: flex-start;
-  }
-  .c-detail {
-    min-width: 0;
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
+  .d-head {
+    margin-top: var(--space-2);
     color: var(--text-tertiary);
   }
-  .c-detail summary {
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    width: max-content;
-    cursor: pointer;
-    list-style: none;
-  }
-  .c-detail summary::-webkit-details-marker {
-    display: none;
-  }
-  /* The system disclosure chevron (as in ErrorState), not the native triangle. */
-  .c-detail summary::before {
-    content: '';
-    width: 5px;
-    height: 5px;
-    margin: 0 2px;
-    border-right: 1.5px solid currentColor;
-    border-bottom: 1.5px solid currentColor;
-    transform: rotate(-45deg);
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  .c-detail[open] summary::before {
-    transform: rotate(45deg);
-  }
-  .c-detail summary:hover {
-    color: var(--text-secondary);
-  }
-  .c-detail code {
+  code {
     display: block;
-    margin-top: var(--space-1);
     overflow-wrap: anywhere;
     color: var(--text-secondary);
   }
-  @media (pointer: coarse) {
-    .c-detail summary {
-      min-height: 44px;
-    }
+  /* The engine's sentences at a readable measure. */
+  .why {
+    max-width: 72ch;
+  }
+  .why + .why {
+    margin-top: var(--space-2);
   }
   @media (max-width: 767px) {
-    /* Phones: the mark and the title share the first line; a cause wraps below it, the actions under the text. */
-    .callout {
-      padding-left: var(--space-3);
-    }
-    .callout:has(.c-msg:not(.brief)) {
-      grid-template-columns: auto minmax(0, 1fr);
-      align-items: start;
-      padding-block: var(--space-3);
-    }
-    .callout:has(.c-msg:not(.brief)) > :global(svg) {
-      margin-top: 2px;
-    }
-    .callout:has(.c-msg:not(.brief)) .c-acts {
-      grid-column: 2;
-      justify-content: flex-start;
-    }
-    .c-msg {
-      display: block;
-      margin-top: 2px;
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-    }
-    /* Stacked actions (the out-of-memory fixes): one under the other across the callout, all at one size, the
-       primary first, so none wraps to an odd width. */
-    .callout.stack:has(.c-msg) .c-acts {
-      grid-column: 1 / -1;
-      flex-direction: column;
-      align-items: stretch;
-    }
-    .callout.stack .c-acts > :global(.btn) {
-      --h: var(--control-lg);
-      font-size: var(--type-base-size);
-    }
-    /* Success is a one-line summary with its action; the best epoch is in the tiles below. */
-    .c-msg.brief {
-      display: none;
+    /* Phones: the other fixes as one row of equal secondary buttons. */
+    .alts > :global(.btn.btn) {
+      --h: 44px;
+      flex: 1 1 0;
+      min-width: 0;
     }
   }
 </style>

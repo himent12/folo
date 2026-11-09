@@ -7,6 +7,7 @@
   import { classInk } from '$lib/design/classInk.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
+  import { tooltip } from '$lib/ui/tooltip';
 
   let {
     classes,
@@ -48,7 +49,8 @@
           <tr>
             <th>Class</th>
             <th class="r">AP50-95</th>
-            <th class="r delta-h" title="Change in AP50-95 since the previous epoch">Δ prev. epoch</th>
+            <!-- The symbol keeps the header on one line at every width; the full name is its tooltip and accessible name. -->
+            <th class="r delta-h" use:tooltip={'Change in AP50-95 since the previous epoch'}><span aria-hidden="true">Δ</span><span class="sr-only">Change in AP50-95 since the previous epoch</span></th>
             <th class="bar-col"><span class="sr-only">AP50-95 bar</span></th>
             {#if !compact}
               <th class="r">AP50</th>
@@ -130,11 +132,8 @@
     background: var(--bg-active);
     overflow: hidden;
   }
-  /* "Δ prev. epoch" takes two lines where the column is narrow (phones); it never runs into the AP50-95 header. */
   th.delta-h {
-    padding-block: var(--space-1);
-    white-space: normal;
-    line-height: var(--type-sm-line);
+    white-space: nowrap;
   }
   /* The table rule: one neutral inline bar. The class hue stays on the swatch; the bar is ink, primary on the
      hovered row (the rows select nothing). */

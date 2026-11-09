@@ -43,7 +43,10 @@
     epochs: Epoch[];
     version: number;
     loading: boolean;
-    /** A queued run with nothing yet: no KPI tabs (every one would read "—"), a short empty plot. */
+    /**
+     * A queued run with nothing yet: the same frame as a running run (KPI tabs reading "—", the empty plot); on phones a
+     * one-line "Metrics appear when training starts" that opens it.
+     */
     queued?: boolean;
     /** Phones: another section is picked, so the chart folds to its one-line readout (it opens on a tap). */
     folded?: boolean;
@@ -65,15 +68,17 @@
     tablet.addEventListener('change', on);
     return () => (phone.removeEventListener('change', on), tablet.removeEventListener('change', on));
   });
-  // A queued run's plot is the axes and one line: compact until there is data.
-  const height = $derived(queued ? (narrow ? 120 : 160) : narrow ? 168 : 320);
+  // Phones: a queued run's plot is the axes and one line, folded until asked for.
+  const height = $derived(queued && narrow ? 120 : narrow ? 168 : 320);
+  let queuedOpen = $state(false);
+  const queuedFold = $derived(queued && narrow && !queuedOpen);
   // Folded on phones while another section is picked; a tap on the readout opens it until the section changes.
   let peek = $state(false);
   $effect(() => {
     void folded;
     peek = false;
   });
-  const fold = $derived(folded && narrow && !peek);
+  const fold = $derived(folded && narrow && !peek && !queued);
 
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
   const progress = $derived(runProgress(run));
@@ -135,7 +140,7 @@
         return [
           { id: 'raw', label: 'total (raw)', color: INK, ghost: true, points: a > 0 ? total : [] },
           // Said in the legend, so the smoothed total never seems to contradict the KPI's raw last step.
-          { id: 'total', label: a > 0 ? `Total, EMA ${smoothing}` : 'Total, raw', endLabel: 'total', color: INK, emphasis: true, points: smooth(total, a) },
+          { id: 'total', label: a > 0 ? `Total, smoothed (EMA ${smoothing})` : 'Total, raw', endLabel: 'total', color: INK, emphasis: true, points: smooth(total, a) },
           // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted.
           // Box and dfl run together late in a run (0.85 vs 0.83): box is painted over dfl's dots, and each line is
           // labelled at its end, so both stay readable where they meet.
@@ -218,6 +223,8 @@
     caption: string;
     title: string;
     qualifier: string;
+    /** The value is the last step's raw reading (the chart may draw it smoothed): the phone picker says so. */
+    raw?: boolean;
   }
   const tabs = $derived.by((): TabDef[] => [
     {
@@ -242,6 +249,7 @@
       label: 'Loss',
       value: num(lastStep?.loss.total, 3),
       caption: 'last step, raw',
+      raw: true,
       title: 'Training loss',
       qualifier: 'by epoch',
     },
@@ -285,14 +293,22 @@
   <Select
     label="Metric to chart"
     bind:value={tab}
-    options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit ? ` ${t.unit}` : ''}` }))}
+    options={tabs.map((t) => ({ value: t.id, label: `${t.label} · ${t.value}${t.unit && t.value !== '—' ? ` ${t.unit}` : ''}${t.raw && t.value !== '—' ? ' raw' : ''}` }))}
   />
 {/snippet}
 
 <section class="metrics" aria-label="Run metrics">
+  {#if queued && narrow}
+    <!-- Phones, queued: one line until there is something to chart; the banner above says when it starts. -->
+    <button type="button" class="pending" aria-expanded={queuedOpen} aria-controls="run-metrics-body" onclick={() => (queuedOpen = !queuedOpen)}>
+      <span class="p-t">Metrics appear when training starts</span>
+      <span class="r-a">{queuedOpen ? 'Hide chart' : 'Show chart'}<ChevronDown size={14} aria-hidden="true" /></span>
+    </button>
+  {/if}
+  {#if !queuedFold}
+  <div class="metrics-body" id="run-metrics-body">
   <!-- Phones: a finished run's strip only repeats the completed banner above it (status, duration), so it goes. -->
-  <!-- Queued: the epoch row alone; the six tabs would all read "—" until the first step. -->
-  <div class="strip" class:finished={run.status === 'completed'} class:queued>
+  <div class="strip" class:finished={run.status === 'completed'}>
     <div class="epoch">
       <span class="label">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
@@ -309,9 +325,9 @@
         {#if run.status === 'queued'}Not started{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
-    {#if !queued}
-      <!-- svelte-ignore a11y_interactive_supports_focus -->
-      <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
+    <!-- Queued: the tabs read "—" until the first step, so the frame is the one a running run fills. -->
+    <!-- svelte-ignore a11y_interactive_supports_focus -->
+    <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
         {#each tabs as t (t.id)}
           <button
             role="tab"
@@ -329,11 +345,10 @@
           </button>
         {/each}
       </div>
-    {/if}
   </div>
 
   <div class="chart" class:folded={fold} id="run-chart" role="tabpanel" aria-label={current.title}>
-    {#if folded && narrow}
+    {#if folded && narrow && !queued}
       <!-- Phones, another section picked: the chart as its one-line readout, which opens it in place. -->
       <button type="button" class="readout" aria-expanded={!fold} aria-controls="run-chart-body" onclick={() => (peek = !peek)}>
         <span class="r-l">{current.label}</span>
@@ -392,6 +407,8 @@
       </div>
     {/if}
   </div>
+  </div>
+  {/if}
 </section>
 
 <style>
@@ -563,24 +580,35 @@
     gap: var(--space-2);
     min-width: 0;
   }
-  /* Queued: the epoch as one row (as on laptops), with no tabs under it. */
-  .strip.queued {
-    grid-template-columns: minmax(0, 1fr);
-  }
-  .strip.queued .epoch {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-rows: auto;
+  /* Phones, queued: the frame as one 48 px line that opens it. */
+  .pending {
+    display: flex;
     align-items: center;
-    column-gap: var(--space-4);
-    border-right: 0;
-    padding: var(--space-3) var(--space-4);
+    justify-content: space-between;
+    gap: var(--space-3);
+    width: 100%;
+    min-height: 48px;
+    padding: var(--space-1) var(--space-3);
+    text-align: left;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    border-radius: var(--radius-lg);
   }
-  .strip.queued .epoch .label {
-    display: none;
+  .pending[aria-expanded='true'] {
+    border-bottom: 1px solid var(--line-subtle);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   }
-  .strip.queued .big {
-    font-size: var(--type-2xl-size);
-    line-height: 32px;
+  .pending:focus-visible {
+    outline-offset: -2px;
+  }
+  .p-t {
+    color: var(--text-secondary);
+  }
+  .pending:hover .r-a {
+    color: var(--text-primary);
+  }
+  .pending[aria-expanded='true'] .r-a :global(svg) {
+    transform: rotate(180deg);
   }
   /* Phones, another section picked: the chart folded to one 44 px readout row that opens it. */
   .chart.folded {

@@ -63,13 +63,16 @@ function fitSteps(lo: number, hi: number, steps: readonly number[], gapOk: (gaps
   return { domain: [t[0]!, t[t.length - 1]!], ticks: t };
 }
 
+/** The lowest top a 0–1 metric's axis takes: a run stuck near 0 must read as low, not fill a 0–0.1 plot. */
+export const UNIT_MIN_TOP = 0.25;
+
 /**
- * A 0–1 metric (mAP, precision, recall): from 0 up to the first nice step at or above `max` plus `headroom`, capped
- * at 1. Steps of 0.01, 0.02, 0.05, 0.1, 0.2, 0.25 or 0.5, whichever gives the tightest top in 3–5 ticks at least MIN_GAP apart;
- * the top is always a tick.
+ * A 0–1 metric (mAP, precision, recall): from 0 up to the first nice step at or above `max` plus `headroom` (and at
+ * least UNIT_MIN_TOP), capped at 1. Steps of 0.01, 0.02, 0.05, 0.1, 0.2, 0.25 or 0.5, whichever gives the tightest top
+ * in 3–5 ticks at least MIN_GAP apart; the top is always a tick.
  */
 export function unitDomain(max: number, plotPx: number, headroom = 0.02): Fit {
-  const hi = Number.isFinite(max) && max > 0 ? Math.min(1, max + headroom) : 1;
+  const hi = Number.isFinite(max) && max > 0 ? Math.min(1, Math.max(UNIT_MIN_TOP, max + headroom)) : 1;
   return fitSteps(0, hi, [0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1], (gaps) => plotPx / gaps >= MIN_GAP);
 }
 
@@ -120,6 +123,22 @@ export function logTicks(lo: number, hi: number): number[] {
   let t = ends(decades);
   for (let k = 2; t.length > MAX_TICKS; k++) t = ends(decades.filter((_, i) => i % k === 0));
   return t;
+}
+
+/**
+ * The unlabelled gridlines of a log axis: the 1-2-5 values in the domain that `logTicks` leaves without a label, so a
+ * decade-labelled axis (0.2, 1, 10) still shows its 0.5, 2 and 5 and reads as a scale, not three uneven ticks.
+ */
+export function logMinors(lo: number, hi: number): number[] {
+  const labelled = new Set(logTicks(lo, hi));
+  if (!labelled.size) return [];
+  const out: number[] = [];
+  for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++)
+    for (const m of [1, 2, 5]) {
+      const v = +(m * 10 ** e).toPrecision(6);
+      if (v >= lo * (1 - 1e-9) && v <= hi * (1 + 1e-9) && !labelled.has(v)) out.push(v);
+    }
+  return out;
 }
 
 /** A log domain from the 1-2-5 values just outside the data, so it moves in steps, not with every value. */

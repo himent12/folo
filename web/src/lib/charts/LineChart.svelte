@@ -55,8 +55,8 @@
   import { scaleLinear, scaleLog } from 'd3-scale';
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
-  import { capTicks, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { placeEndLabels } from './endLabels';
+  import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
+  import { needsLeader, placeEndLabels } from './endLabels';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
@@ -104,6 +104,11 @@
      * rest. The others keep their own contrast-tested colour and weight; nothing is faded.
      */
     highlight?: string | null;
+    /**
+     * While a series is highlighted, draw it at 3 px over a panel-colour halo and the others at 1 px in their own
+     * colour (never faded, so each keeps >= 3:1): the comparison's "keep this line in front".
+     */
+    recede?: boolean;
     /** A small dot at each line's last point, so every series stays findable where lines overlap. */
     endDots?: boolean;
     /**
@@ -139,6 +144,7 @@
     legendNote,
     tooltip = false,
     highlight = null,
+    recede = false,
     endDots = false,
     hint = $bindable(null),
   }: Props = $props();
@@ -187,6 +193,9 @@
     if (yLog) return logTicks(yExtent[0], yExtent[1]);
     return capTicks(yExtent[0], yExtent[1], Math.min(yTicks, MAX_TICKS));
   });
+  // A log axis labels its decades and ends; the 2s and 5s between them stay as unlabelled minor gridlines, so the
+  // scale reads evenly (0.2 · 0.5 · 1 · 2 · 5 · 10) without crowding the labels.
+  const yMinor = $derived(yLog && !yTickProp ? logMinors(yExtent[0], yExtent[1]) : []);
 
   // Decimals follow the tick step, so a 0..6 axis reads "0 2 4 6", a 0..1 axis "0 0.5 1" and quarter steps
   // "0.25 0.50"; log ticks use 3 digits.
@@ -209,7 +218,8 @@
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
     // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px.
-    const labelW = showEnds ? Math.min(130, Math.max(0, ...series.map((s) => Math.min(18, endText(s)?.length ?? 0))) * 6.8 + 10) : 0;
+    // Plus room for a leader, when labels are moved apart (LEAD).
+    const labelW = showEnds ? Math.min(130, Math.max(0, ...series.map((s) => Math.min(18, endText(s)?.length ?? 0))) * 6.8 + 10) + LEAD - 6 : 0;
     const left = Math.ceil(longest * 7) + 14;
     // An x-axis title gets its own line under the tick labels.
     return { top: yLabel ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
@@ -273,6 +283,10 @@
     });
   });
 
+  /** End labels keep this much clear space between them (their glyphs end up >= 12 px apart). */
+  const LABEL_GAP = 10;
+  /** How far right of the plot the label column moves when it needs leaders. */
+  const LEAD = 20;
   const ends = $derived.by(() => {
     if (!showEnds) return [];
     const drawn = visible.filter((s) => endText(s) !== null);
@@ -290,7 +304,11 @@
       .sort((a, b) => Number(b.id === highlight) - Number(a.id === highlight) || a.x - b.x);
     const curves = visible.map((s) => s.points.filter((p) => Number.isFinite(p.y)).map((p) => ({ x: x(p.x), y: y(p.y) })));
     const bounds = { x0: margin.left, y0: margin.top, x1: width - 2, y1: height - margin.bottom };
-    return placeEndLabels(points, curves, bounds, 2, width - margin.right).map((e) => ({ ...e, color: color.get(e.id) ?? 'var(--text-secondary)' }));
+    return placeEndLabels(points, curves, bounds, 2, width - margin.right, { gap: LABEL_GAP, lead: LEAD }).map((e) => ({
+      ...e,
+      color: color.get(e.id) ?? 'var(--text-secondary)',
+      lead: needsLeader(e),
+    }));
   });
 
   // ---- hover / keyboard cursor ----
@@ -482,9 +500,14 @@
   function widthOf(s: Series): number {
     if (s.ghost || s.context || s.thin) return 1;
     const p = patternOf(s);
+    if (receding && s.id === highlight) return p === 'dot' ? 3.5 : 3;
+    // Receded: 1 px, dots a little heavier so a dotted run stays as findable as a solid one.
+    if (receding) return p === 'dot' ? 1.75 : 1;
     if (s.emphasis || (highlight !== null && s.id === highlight)) return p === 'dot' ? 3.25 : 2.75;
     return p === 'dot' ? 2.25 : p ? 1.5 : 1.75;
   }
+  /** A highlighted series with `recede`: it alone keeps weight. */
+  const receding = $derived(recede && highlight !== null && visible.some((s) => s.id === highlight));
   /** `items` with the highlighted series moved to the end, so it is painted over every other line. */
   function lifted<T>(items: T[], id: (t: T) => string): T[] {
     if (highlight === null) return items;
@@ -564,6 +587,9 @@
         onblur={() => ((cursor = null), (spoken = ''), (keyFocus = false))}
       >
         <g class="grid">
+          {#each yMinor as t (t)}
+            <line class="minor" x1={margin.left} x2={width - margin.right} y1={y(t)} y2={y(t)} />
+          {/each}
           {#each yTickValues as t (t)}
             <line x1={margin.left} x2={width - margin.right} y1={y(t)} y2={y(t)} />
           {/each}
@@ -596,7 +622,7 @@
           {/each}
           {#each lifted(paintOrder(paths.filter((p) => !p.b), (p) => p.s), (p) => p.s.id) as { s, d, a } (s.id)}
             {#if a}<path class="area" d={a} fill="url(#{uid}-{s.id})" />{/if}
-            {#if patternOf(s) && !s.ghost && !s.context}
+            {#if (patternOf(s) || (receding && s.id === highlight)) && !s.ghost && !s.context}
               <!-- Patterned lines are painted over solid ones (./layers). A 1.5 px halo in the panel colour around each
                    dash or dot keeps the pattern readable where it runs along a solid line, which still shows between
                    them. -->
@@ -612,6 +638,7 @@
               class:emphasis={s.emphasis || (highlight !== null && s.id === highlight)}
               {d}
               style:stroke={s.context ? undefined : s.color}
+              style:stroke-width={receding && !s.ghost && !s.context ? `${widthOf(s)}px` : undefined}
               style:stroke-dasharray={dashOf(s, s.id === highlight ? 1.4 : 1)}
             />
           {/each}
@@ -619,14 +646,18 @@
             {#each lifted(paintOrder(keyed, (s) => s), (s) => s.id) as s (s.id)}
               {@const p = s.points[s.points.length - 1]}
               {#if p && Number.isFinite(p.y)}
-                <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} r="3" style:fill={s.color} />
+                <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} r={receding && s.id === highlight ? 4 : 3} style:fill={s.color} />
               {/if}
             {/each}
           {/if}
 
           {#if showEnds}
             {#each ends as e (e.id)}
-              <text class="end-label" x={e.x} y={e.y} dy="0.32em" style:fill={e.color}>{e.label}</text>
+              <!-- A label moved off its line's end (to keep labels apart) is tied to it by a short leader. -->
+              {#if e.lead}<line class="leader" x1={e.ax + 4} y1={e.ay} x2={e.x - 4} y2={e.y} style:stroke={e.color} />{/if}
+            {/each}
+            {#each ends as e (e.id)}
+              <text class="end-label" class:hl={e.id === highlight} x={e.x} y={e.y} dy="0.32em" style:fill={e.color}>{e.label}</text>
             {/each}
           {/if}
           {#each markers as m (m.label + m.x)}
@@ -759,6 +790,10 @@
     stroke-width: 1;
     shape-rendering: crispEdges;
   }
+  /* Minor gridlines (a log axis's unlabelled 2s and 5s): the grid's ink, dashed, so they read as subdivisions. */
+  .grid line.minor {
+    stroke-dasharray: 2 3;
+  }
   .axis {
     stroke: var(--chart-axis);
     shape-rendering: crispEdges;
@@ -847,6 +882,13 @@
     paint-order: stroke;
     stroke: var(--bg-panel);
     stroke-width: 3px;
+  }
+  .end-label.hl {
+    font-weight: var(--weight-semibold);
+  }
+  .leader {
+    stroke-width: 1;
+    stroke-linecap: round;
   }
   .marker .ring {
     fill: var(--bg-panel);

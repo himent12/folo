@@ -107,10 +107,8 @@
   .line:hover {
     background: var(--bg-hover);
   }
-  /* Timestamps are the one incidental part of a line: they keep the 11 px step. */
   .t {
     color: var(--text-tertiary);
-    font-size: var(--type-xs-size);
     flex-shrink: 0;
   }
   .lv {
@@ -146,5 +144,37 @@
     position: absolute;
     right: var(--space-4);
     bottom: var(--space-3);
+  }
+  @media (max-width: 767px) {
+    /* Phones: time and level on one 12 px tertiary line above the message, which gets the full width. */
+    .line {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: start;
+      gap: 2px var(--space-2);
+      padding: 6px var(--space-3);
+    }
+    /* A hairline between entries, so each meta line reads as the head of the message under it. */
+    .line + .line {
+      border-top: 1px solid var(--line-subtle);
+    }
+    .t,
+    .lv {
+      font-family: var(--font-sans);
+      font-size: var(--type-sm-size);
+      line-height: 16px;
+      font-variant-numeric: tabular-nums;
+    }
+    .lv {
+      width: auto;
+    }
+    .lv::before {
+      content: '·';
+      margin-right: var(--space-2);
+      color: var(--text-tertiary);
+    }
+    .m {
+      grid-column: 1 / -1;
+    }
   }
 </style>

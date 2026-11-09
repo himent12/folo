@@ -11,6 +11,7 @@
   import { LiveRun } from '$lib/api/live.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import { ago, deviceName, eta } from '$lib/format';
+  import { origin } from '$lib/lineage';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -57,7 +58,18 @@
     return scheduleWarnings(live.logs);
   });
 
-  let section = $state<'samples' | 'classes' | 'logs' | 'config'>('samples');
+  type Section = 'samples' | 'classes' | 'logs' | 'config';
+  // Below 960 px one section shows at a time. A queued run has nothing to sample yet, so it opens on its Config (the
+  // dependency and start estimate are in the banner above); once picked, the choice holds.
+  let picked = $state<Section | null>(null);
+  const section = $derived<Section>(picked ?? (queuedOnly ? 'config' : 'samples'));
+  const models = new Resource((s) => hub.api.models(s));
+  /** Where the run started: "From scratch", or the model / file it was fine-tuned from (one reading, $lib/lineage). */
+  const lineage = $derived.by(() => {
+    if (!run) return '';
+    const o = origin(run.config.weights, models.data ?? []);
+    return o.kind === 'scratch' ? 'From scratch' : `Fine-tuned from ${o.label}`;
+  });
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
   let busy = $state(false);
@@ -113,7 +125,7 @@
     try {
       const id = run.id;
       const r = await live.resume(() => hub.api.resumeRun(id));
-      toast.success(`Resuming ${r.name}`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts from scratch.');
+      toast.success(`Resuming ${r.name}`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
     } catch (e) {
       toast.error(e, 'Could not resume the run');
     } finally {
@@ -202,6 +214,7 @@
       <span class="mono">{run.config.arch}</span>
       <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
       <span class="cfg">{run.config.imgsz} px · batch {run.config.batch}</span>
+      <span class="cfg lineage">{lineage}</span>
       <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
       <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
     {/snippet}
@@ -244,7 +257,7 @@
     <div class="phone-pick">
       <Segmented
         label="Show"
-        bind:value={section}
+        bind:value={() => section, (v) => (picked = v)}
         options={[
           { value: 'samples', label: 'Samples' },
           { value: 'classes', label: 'Classes' },
