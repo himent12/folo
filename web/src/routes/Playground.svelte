@@ -27,6 +27,8 @@
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import SheetHandle from '$lib/ui/SheetHandle.svelte';
+  import { sheetDrag } from '$lib/ui/sheetDrag';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -67,27 +69,9 @@
   });
   function closeSheet() {
     moreOpen = false;
-    sheetDy = 0;
     moreBtn?.querySelector('button')?.focus();
   }
-
-  // Dragging the sheet's header down by more than its height closes it; a shorter drag springs back.
-  let sheetDy = $state(0);
-  let dragFrom: number | null = null;
-  function ondragdown(e: PointerEvent) {
-    if ((e.target as Element).closest('button')) return;
-    dragFrom = e.clientY;
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  }
-  function ondragmove(e: PointerEvent) {
-    if (dragFrom !== null) sheetDy = Math.max(0, e.clientY - dragFrom);
-  }
-  function ondragup() {
-    if (dragFrom === null) return;
-    dragFrom = null;
-    if (sheetDy > 48) closeSheet();
-    else sheetDy = 0;
-  }
+  // Dragging the sheet's header down closes it; a shorter pull springs back (ui/sheetDrag, as every sheet).
 
   // ---------- model ----------
   const models = new Resource((s) => hub.api.models(s));
@@ -828,11 +812,9 @@
                   aria-labelledby="pg-more-title"
                   tabindex="-1"
                   bind:this={sheetEl}
-                  style:transform={sheetDy ? `translateY(${sheetDy}px)` : undefined}
                 >
-                  <!-- svelte-ignore a11y_no_static_element_interactions -->
-                  <div class="sheet-head" onpointerdown={ondragdown} onpointermove={ondragmove} onpointerup={ondragup} onpointercancel={ondragup}>
-                    <span class="handle" aria-hidden="true"></span>
+                  <div class="sheet-head" use:sheetDrag={{ sheet: () => sheetEl, close: closeSheet }}>
+                    <SheetHandle />
                     <h2 id="pg-more-title">Thresholds</h2>
                     {@render resetButton()}
                     <Button size="sm" variant="ghost" icon={X} aria-label="Close thresholds" onclick={closeSheet} />
@@ -1501,16 +1483,6 @@
     min-height: 48px;
     padding: var(--space-2) var(--space-2) 0 var(--space-4);
     touch-action: none;
-  }
-  .handle {
-    position: absolute;
-    top: 6px;
-    left: 50%;
-    width: 32px;
-    height: 4px;
-    margin-left: -16px;
-    border-radius: var(--radius-full);
-    background: var(--line-strong);
   }
   .sheet-head h2 {
     flex: 1;

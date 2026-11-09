@@ -11,6 +11,10 @@
      ~90). Every paragraph that explains (hints, notes, findings, a Why? fold, an empty state's sentence) caps its
      `max-inline-size` here, through `.measure` or its own rule; `copy.test.ts` rejects a measure of its own. */
   --measure: 40ch;
+  /* Inside a dialog the measure is the dialog's text column: ui/Dialog sets `--measure` to this on its <dialog>, so a
+     note, a hint or a body paragraph runs to the 480 px dialog's padding (440 px, ~52ch at 12–13 px) instead of
+     stopping at 40ch with the right third of the dialog empty. */
+  --measure-dialog: 52ch;
 }
 :root[data-theme='dark'] {
   --line-panel: var(--line-subtle);

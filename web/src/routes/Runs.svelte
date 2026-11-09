@@ -297,7 +297,7 @@
                     <span class="prog place">{queuePlace(placeOf(r) ?? 0)}</span>
                   {:else}
                     <div class="prog">
-                      <Progress value={r.status === 'running' ? runProgress(r) : r.epoch / r.epochs} size="xs" tone={tone(r)} label="{r.name} progress" />
+                      <Progress value={runProgress(r)} size="xs" tone={tone(r)} label="{r.name} progress" />
                       <span class="num faint">{r.epoch}/{r.epochs}</span>
                     </div>
                   {/if}

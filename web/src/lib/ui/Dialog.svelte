@@ -4,13 +4,19 @@
    * Clicking the backdrop closes it. Results of actions taken inside it (a copy, a failed confirm) show in its own status
    * region above the footer (`status`, ui/DialogStatus), never as a toast: the toaster sits outside the modal. What it
    * renders reports there through `feedback()` (ui/feedback.svelte.ts).
+   * On phones it is a bottom sheet: a grab handle on its header (`ui/SheetHandle`), which a drag down closes
+   * (`ui/sheetDrag`), and the labelled Close as ever.
    */
+  import { MediaQuery } from 'svelte/reactivity';
+  import { media } from '$lib/design/tokens';
   import X from '@lucide/svelte/icons/x';
   import type { Snippet } from 'svelte';
   import Button from './Button.svelte';
   import DialogStatusRegion from './DialogStatus.svelte';
   import { DialogStatus, provideStatus } from './feedback.svelte';
   import { rememberFocus } from './focus';
+  import SheetHandle from './SheetHandle.svelte';
+  import { sheetDrag } from './sheetDrag';
 
   let {
     open = $bindable(false),
@@ -38,6 +44,7 @@
 
   const uid = $props.id();
   let el: HTMLDialogElement;
+  const sheet = new MediaQuery(media.phone, false);
   // svelte-ignore state_referenced_locally: one region for the dialog's life; children find it through feedback().
   provideStatus(status);
 
@@ -85,7 +92,8 @@
   {onclick}
 >
   <div class="frame">
-    <header>
+    <header use:sheetDrag={{ sheet: () => el, close: () => el.close(), enabled: () => sheet.current }}>
+      {#if sheet.current}<SheetHandle />{/if}
       <div class="titles">
         <h2 id="{uid}-title">{title}</h2>
         {#if description}<p id="{uid}-desc">{description}</p>{/if}
@@ -99,7 +107,10 @@
 </dialog>
 
 <style>
+  /* The dialog is its own measure (base.css `--measure-dialog`): helper text, notes and body paragraphs inside it run
+     to its padding, never a 40ch column in a 440 px one. */
   dialog {
+    --measure: var(--measure-dialog);
     width: min(480px, calc(100vw - 32px));
     max-height: min(720px, calc(100dvh - 48px));
     margin: auto;
@@ -139,6 +150,7 @@
     max-height: inherit;
   }
   header {
+    position: relative;
     display: flex;
     align-items: flex-start;
     gap: var(--space-3);
@@ -208,11 +220,18 @@
       margin: auto 0 0;
       max-height: calc(100dvh - 24px);
       border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+      /* A short pull springs back (ui/sheetDrag clears the transform). */
+      transition: transform var(--dur-fast) var(--ease-standard);
     }
     dialog[open] {
       animation: sheet var(--dur-slow) var(--ease-out);
     }
+    /* The header is the sheet's grab area: a vertical drag moves the sheet, never the page. */
+    header {
+      touch-action: none;
+    }
     footer {
+      flex-wrap: wrap;
       padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
     }
     footer > :global(*),

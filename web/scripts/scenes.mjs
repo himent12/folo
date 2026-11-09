@@ -59,7 +59,8 @@ async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
 
 /** @type {Scene[]} */
 export const scenes = [
-  { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // The live run at the moment run-live shows it (the same `advance`), so the two screens' epoch and progress agree.
+  { name: 'overview', path: '/', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -124,22 +125,35 @@ export const scenes = [
     },
   },
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
+  // A run on fasteners-mini, which has no validation images: every epoch was scored on the training split, so the page
+  // says so once ("Evaluated on the training split") and its titles name that split, never "Validation".
+  { name: 'run-train-split', path: '/runs/run_m1n1', search: 'scenario=train-split', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // A retry of the out-of-memory run at batch 16, still forecast not to fit (~26.9 / 16 GiB): the note says what
-    // failed and what changed, the figure, meter and line are danger, "Use batch 8" is the one primary and Start a
-    // secondary; the phone dock says "~26.9 GiB / 16.0 GiB · Likely won't fit" beside "Use batch 8".
+    // The run page's retry, followed as a person would: shapes-hard-m ran out of GPU memory, its callout offers the
+    // largest batch the forecast fits ("Retry with batch 8 · ~13.6 GiB"), and that link opens New run with it. The
+    // note says what failed and what changed, with the figure ("Now batch 8 · ~13.6 GiB"), and Start is the primary.
     name: 'run-new-oom-retry',
-    path: '/runs/new?from=run_a2f0&batch=16',
+    path: '/runs/run_a2f0',
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
-    setup: (page) => until(page, '.start .btn.primary:has-text("Use batch")'),
+    setup: async (page) => {
+      const retry = page.locator('a.btn.primary', { hasText: 'Retry with' }).first();
+      await until(page, 'a.btn.primary:has-text("Retry with")');
+      await retry.click();
+      await until(page, '.oom-note');
+      await until(page, '.summary .est-how > summary');
+      await page.clock.runFor(500);
+      await page.mouse.move(0, 0);
+    },
   },
   {
-    // The run page's retry ("Retry with batch 8 · ~13.6 GiB"): forecast to fit, so Start is the primary.
-    name: 'run-new-oom-fitted',
-    path: '/runs/new?from=run_a2f0&batch=8',
+    // A preset that is still too big (batch 16, ~26.9 / 16 GiB): the note says the change is not enough rather than
+    // "Now batch 16", the figure, meter and line are danger, "Use batch 8" is the one primary and Start a secondary;
+    // the phone dock says "~26.9 GiB / 16.0 GiB · Likely won't fit" beside "Use batch 8".
+    name: 'run-new-oom-still-over',
+    path: '/runs/new?from=run_a2f0&batch=16',
     viewports: ['desktop', 'mobile'],
-    setup: (page) => until(page, '.oom-note'),
+    setup: (page) => until(page, '.start .btn.primary:has-text("Use batch")'),
   },
   {
     // Start on a GPU that went away (404 device_not_found): the cause and the adapters at the Device field.

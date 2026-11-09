@@ -94,6 +94,12 @@ describe('single-key shortcuts preference', () => {
     nav.destroy();
   });
 
+  it("lists the legends' Space toggles (Compare's chips, Model's per class)", () => {
+    const space = shortcutList.filter((s) => s.keys === 'Space').map((s) => s.label);
+    expect(space.some((l) => l.includes('Compare'))).toBe(true);
+    expect(space.some((l) => l.includes('per class'))).toBe(true);
+  });
+
   it('the dialog lists every group, Datasets included', () => {
     expect([...new Set(shortcutList.map((s) => s.group))]).toEqual(['General', 'Navigation', 'Lists', 'Charts', 'Datasets']);
   });

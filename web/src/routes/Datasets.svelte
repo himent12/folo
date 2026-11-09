@@ -16,6 +16,7 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
@@ -54,12 +55,17 @@
   });
 
   let query = $state('');
+  // The toolbar's filter, at its left as on Runs and Models (one shape for the three list toolbars): by format.
+  let format = $state<'all' | 'yolo' | 'coco'>('all');
+  const formatCount = (f: 'all' | 'yolo' | 'coco') => (datasets.data ?? []).filter((d) => f === 'all' || d.format === f).length;
   const shown = $derived.by(() => {
     const q = query.trim().toLowerCase();
-    return (datasets.data ?? []).filter((d) => !q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q));
+    return (datasets.data ?? []).filter(
+      (d) => (format === 'all' || d.format === format) && (!q || `${d.name} ${d.path} ${d.format} ${d.id}`.toLowerCase().includes(q)),
+    );
   });
-  /** Columns of the desktop table (for state rows that span it). */
-  const COLS = 9;
+  /** Columns of the desktop table (for state rows that span it), the empty last one included. */
+  const COLS = 10;
 
   // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
   const offline = $derived(!datasets.data && isOffline(datasets.error));
@@ -82,6 +88,15 @@
 
   {#if !datasets.error && (!datasets.data || datasets.data.length > 0)}
     <div class="list-toolbar">
+      <div class="lt-filter"><Segmented
+        label="Filter datasets by format"
+        bind:value={format}
+        options={[
+          { value: 'all', label: 'All', meta: datasets.data ? String(formatCount('all')) : undefined },
+          { value: 'yolo', label: 'YOLO', meta: datasets.data ? String(formatCount('yolo')) : undefined },
+          { value: 'coco', label: 'COCO', meta: datasets.data ? String(formatCount('coco')) : undefined },
+        ]}
+      /></div>
       <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" /></div>
     </div>
   {/if}
@@ -92,17 +107,20 @@
         <thead>
           <tr>
             <!-- One geometry in every state (DESIGN_DIRECTION 7): fixed widths on the header row that loading, empty,
-                 error and loaded share. The path takes what is left; where it hides (below 1280) the class balance
-                 does, at least 160 px (minmax(160px, 1fr)). -->
+                 error and loaded share. A few rows across a wide panel take bounded widths (the path 280 px, cut with
+                 its full path in the title) and leave the slack to an empty last column, as Model's per class does;
+                 below 1280, where the path and that column hide, the class balance takes what is left, at least
+                 160 px (minmax(160px, 1fr)). -->
             <th scope="col" style:width="160px">Dataset</th>
             <th scope="col" class="hide-md" style:width="80px">Format</th>
-            <th scope="col" class="hide-lg path-cell">Path</th>
+            <th scope="col" class="hide-lg" style:width="280px">Path</th>
             <th scope="col" class="r" style:width="80px">Train</th>
             <th scope="col" class="r" style:width="72px">Val</th>
             <th scope="col" class="r" style:width="72px">Test</th>
-            <th scope="col"><span class="bal-h">Class balance</span></th>
+            <th scope="col" class="bal"><span class="bal-h">Class balance</span></th>
             <th scope="col" class="r hide-md" style:width="88px">Boxes</th>
             <th scope="col" class="r hide-md" style:width="104px">Created</th>
+            <th class="hide-lg rest" aria-hidden="true"></th>
           </tr>
         </thead>
         <tbody>
@@ -117,8 +135,8 @@
             </TableState>
           {:else if datasets.data && shown.length === 0}
             <TableState cols={COLS}>
-              <EmptyState icon={Search} title="No datasets match" description="Try another name or path.">
-                {#snippet actions()}<Button size="sm" onclick={() => (query = '')}>Clear filter</Button>{/snippet}
+              <EmptyState icon={Search} title="No datasets match" description="Try another format or search term.">
+                {#snippet actions()}<Button size="sm" onclick={() => ((query = ''), (format = 'all'))}>Clear filters</Button>{/snippet}
               </EmptyState>
             </TableState>
           {:else if !datasets.data}
@@ -133,6 +151,7 @@
                 <td><Skeleton h="6px" r="999px" /></td>
                 <td class="r hide-md"><Skeleton w="36px" h="12px" /></td>
                 <td class="r hide-md"><Skeleton w="44px" h="12px" /></td>
+                <td class="hide-lg rest"></td>
               </tr>
             {/each}
           {:else}
@@ -151,6 +170,7 @@
                 <!-- Full numbers, like the split columns beside it: one format per column. -->
                 <td class="r num hide-md">{num(d.stats?.boxes)}</td>
                 <td class="r faint hide-md">{ago(d.created)}</td>
+                <td class="hide-lg rest" aria-hidden="true"></td>
               </tr>
             {/each}
           {/if}
@@ -205,10 +225,19 @@
   .scroll {
     overflow-x: auto;
   }
-  /* The path takes what the row has left, cut with an ellipsis (the full path is in the title). */
+  /* The path in its bounded column, cut with an ellipsis (the full path is in the title). */
   .path-cell {
-    width: 100%;
     max-width: 0;
+  }
+  /* From 1280 the class balance is bounded too (the empty last column takes the slack); below it, where that column
+     hides, it is the flexible one. */
+  @media (min-width: 1280px) {
+    .bal {
+      width: 224px;
+    }
+  }
+  .rest {
+    padding: 0;
   }
   .path {
     display: block;
