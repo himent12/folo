@@ -1153,7 +1153,9 @@ impl Backend for MockBackend {
             .iter()
             .find(|d| d.ds.id == config.dataset_id)
             .ok_or_else(|| ApiError::new("dataset_not_found", "No such dataset"))?;
-        let (train, val) = (ds.ds.splits.train, ds.ds.splits.val.max(1));
+        let train = ds.ds.splits.train;
+        // No validation split: validation runs on the training images (docs/API.md).
+        let val = if ds.ds.splits.val > 0 { ds.ds.splits.val } else { train };
         // The demo has never trained here: reference rates (the app's own reference model),
         // so the estimate says so and claims low confidence.
         let arch = match config.arch.as_str() {
@@ -1169,7 +1171,9 @@ impl Backend for MockBackend {
         let secs = if cpu { secs * 25. } else { secs };
         let vram_gib = if config.amp { vram_gib * 0.58 } else { vram_gib };
         let epochs = config.epochs.max(1);
-        let close = config.augment.close_mosaic.min(epochs / 2);
+        // Without mosaic every epoch is a close-mosaic one; else the last ones, capped at half.
+        let close =
+            if config.augment.mosaic <= 0. { epochs } else { config.augment.close_mosaic.min(epochs / 2) };
         let startup = 6.0;
         let epoch_s = secs / epochs as f64;
         let rate = train as f64 / (epoch_s * 0.92);

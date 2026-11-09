@@ -1754,6 +1754,14 @@ impl FoloApp {
         if !self.store.features.iter().any(|f| f == "run_estimate") {
             return;
         }
+        // A value being typed that doesn't parse yet: no estimate for the last good one.
+        if self
+            .new_run
+            .as_ref()
+            .is_some_and(|f| f.epochs_invalid || f.close_invalid || (f.lr_invalid && f.optimizer != 0))
+        {
+            return;
+        }
         let Some(mut config) = self.form_config(cx) else { return };
         // The name doesn't change the estimate (and an empty one mustn't fail it).
         config.name = "estimate".into();
@@ -1762,6 +1770,25 @@ impl FoloApp {
             return;
         }
         self.nr_estimate = Some((key.clone(), Load::Loading));
+        // Settled first (250 ms; at once for the frozen scenes), so a slider drag asks once for
+        // the value it stops on rather than for every step.
+        if self.frozen {
+            self.request_estimate(key, config, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            this.update(cx, |this, cx| {
+                if this.nr_estimate.as_ref().is_some_and(|(k, _)| *k == key) {
+                    this.request_estimate(key, config, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn request_estimate(&mut self, key: String, config: TrainConfig, cx: &mut Context<Self>) {
         self.fetch(
             cx,
             move |api| api.estimate_run(&config),
@@ -3226,6 +3253,9 @@ impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
         self.backend_gen += 1;
+        // Estimates are the old server's (and a pending one's answer will be dropped).
+        self.nr_estimate = None;
+        self.nr_estimate_last = None;
         // A draft's dataset belongs to the old server.
         self.new_run_draft = None;
         self.new_run_draft_ds = None;
