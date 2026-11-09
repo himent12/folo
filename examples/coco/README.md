@@ -5,10 +5,10 @@ epochs), evaluated on val2017 with FOLO's pycocotools-exact evaluator, published
 release for now, [Publish](#publish)), and used to fine-tune the R6 detector ([Fine-tuning](#fine-tuning-r6)).
 
 **Result: AP 0.314 / AP50 0.455 on val2017** (f32; f16 the same to three decimals), cross-checked number for number
-against pycocotools. Ultralytics' published nano models reach 0.395 (YOLO11n) and 0.409 (YOLO26n). Their schedule is
-about **12 times longer** (600+ epochs), with heavier augmentation and training tricks. This run is **50 epochs from
-random init**. The gap below is mostly that budget, and this is not a like-for-like comparison
-([Results](#results-val2017)).
+against pycocotools. Ultralytics' published nano models reach 0.395 (YOLO11n) and 0.409 (YOLO26n). YOLO26n was
+pretrained for 150 epochs on Objects365, then fine-tuned for 245 epochs on COCO with evolved hyperparameters. This run
+is **50 epochs on COCO alone, from random init**. Data, schedule, recipe and architecture all differ, so this is not a
+like-for-like comparison, and how much of the gap each accounts for is not known ([Results](#results-val2017)).
 
 ## Data
 
@@ -88,9 +88,10 @@ loader and the GPU are close to balanced.
 | 45 | 1.222 | 1.417 | 1.276 | 0.551 | 0.416 | 0.442 | 0.306 | 530 s |
 | **50** (best) | 1.212 | 1.392 | 1.267 | 0.535 | 0.429 | 0.449 | **0.310** | 574 s |
 
-Every epoch improved on the one before: best is the last epoch. The curve still climbs about 0.003 mAP50-95 per epoch
-at the end, and only the cosine decay to `lr0 · lrf` flattens it. A longer schedule would keep paying; the run is
-budget-bound, not converged.
+Every epoch improved on the one before, so the best epoch is the last. The gains shrink as the cosine LR decays:
+about 0.0023 mAP50-95 per epoch from epoch 30 to 40, 0.0009 per epoch from 45 to 50 (0.3055 → 0.3100), and 0.0005
+for the last epoch. The run ends at its schedule's floor, not at a measured plateau. A longer schedule would
+probably gain more, but how much has not been measured.
 
 ## Evaluate
 
@@ -122,15 +123,18 @@ plus 446 crowd regions:
 `coco` object to within 3.3e-16 (f32: AP 0.313810, AP50 0.455412, AP75 0.339179) and 5.6e-16 (f16: AP 0.313924).
 f16 differs from f32 by at most 0.0004 (AP_L), well inside the 0.002 bound in docs/BENCHMARKS.md. The internal
 val that picks `best.folo` (network-input boxes, crowd regions dropped) reads 0.310 / 0.449. The official numbers
-are slightly higher because crowd regions absorb some false positives.
+are slightly higher, partly because crowd regions absorb some false positives.
 
 **Against the incumbent.** Ultralytics publishes AP 0.395 for YOLO11n (2.6 M params) and 0.409 for YOLO26n (2.4 M;
-0.401 with its end-to-end head), with the same evaluation (val2017, 640, single scale). folo-n is 2.6 M params. Those
-models train for 600+ epochs, with stronger augmentation schedules and training tricks tuned over years. **This run
-is 50 epochs from scratch, about 1/12 of that schedule**, so 0.314 vs 0.395–0.409 measures the budget much more than
-the architecture or the trainer. It does not show that FOLO matches YOLO11n, and it does not show that it falls
-short at equal budget. Both need the same long schedule, or Ultralytics trained for 50 epochs from scratch on this
-machine, and neither run has been done.
+0.401 with its end-to-end head), with the same evaluation (val2017, 640, single scale). folo-n is 2.6 M params. The
+released YOLO26n was pretrained for 150 epochs on Objects365-v1, then fine-tuned for 245 epochs on COCO at batch 128
+with size-specific hyperparameters from evolutionary search ([the YOLO26 paper](https://arxiv.org/abs/2606.03748), §4.1 and supplementary S3).
+YOLO11n's recipe is not given on its model page. **This run is 50 epochs on COCO alone, from random init**, with the
+plain MODEL.md §8 recipe. The data, the schedule, the recipe and the architectures all differ, so 0.314 against
+0.395–0.409 cannot be split into those causes. The shorter schedule and the missing Objects365 pretraining are
+plausible large contributors, but neither has been isolated. The result does not show that FOLO matches YOLO11n, and
+it does not show that FOLO falls short at equal budget. That needs an equal-budget run (a much longer FOLO schedule,
+or Ultralytics for 50 epochs from scratch on COCO on this machine), and neither has been done.
 
 Per class (AP / AP50, f32): large, distinctive objects do well; small, thin or ambiguous ones do not.
 
@@ -175,8 +179,9 @@ folo train --data <your dataset> --weights folo-n-coco ...
 folo predict --model folo-n-coco-f16 --half <images>
 ```
 
-Pulled and passed by name, the files give the val2017 numbers above. `folo val --model folo-n-coco --coco` is
-identical to `best.folo` in f32 (all 12 stats). `folo val --model folo-n-coco-f16 --half --coco` matches the f16 row
+Pulled and passed by name, the files give the val2017 numbers above. `folo val --model folo-n-coco --data D:/folo-data/coco --coco`
+is identical to `best.folo` in f32 (all 12 stats). `folo val --model folo-n-coco-f16 --data D:/folo-data/coco --half
+--coco` matches the f16 row
 to four decimals.
 
 Once the release is published, everyone who can read the repository uses the same commands. Without `folo`:

@@ -36,8 +36,9 @@ the method, the raw JSON and how much noise to expect.
 | CPU end to end, batch 1 | 26.9 ms | **24.8 ms** | FOLO behind |
 
 Accuracy is a separate question: on COCO val2017, folo-n reaches AP 0.314 after a 50-epoch from-scratch run, against
-0.409 published for yolo26n after 600+ epochs ([examples/coco](examples/coco/README.md), docs/BENCHMARKS.md, Accuracy).
-The 12× shorter schedule is the obvious suspect for that gap, but no equal-budget comparison has been run yet.
+0.409 published for yolo26n, which was pretrained on Objects365 and then trained 245 epochs on COCO
+([examples/coco](examples/coco/README.md), docs/BENCHMARKS.md, Accuracy). No equal-budget comparison has been run
+yet, so how much of that gap is data and schedule rather than the model or the trainer is not known.
 
 FOLO is not ahead everywhere: the CPU end-to-end path (letterbox, decode and NMS around the forward) is still behind, and
 the CPU numbers were measured on a contended machine, so treat them as upper bounds. f16 inference and the full trainer loop (data loader included) have not been benchmarked against the incumbent yet.
@@ -208,7 +209,7 @@ What works today (v0.1):
 - `folo serve` (Studio and the HTTP API), `folo mcp`, in-browser inference, and release builds and install scripts.
 
 Not yet:
-- public pretrained weights (the release is a draft), or COCO accuracy at the incumbent's 600-epoch schedule;
+- public pretrained weights (the release is a draft), or a COCO comparison with the incumbent at equal budget;
 - f16 compute on the GPU;
 - `folo bench`;
 - a published release.

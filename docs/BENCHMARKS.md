@@ -187,11 +187,14 @@ the same detections with pycocotools itself, all 12 stats equal to 6e-16). folo-
 |---|---:|---|---:|---:|---:|---:|---:|---:|
 | folo-n, f32 | 2.6 M | **50 epochs from scratch**, FOLO trainer | **0.314** | 0.455 | 0.339 | 0.144 | 0.335 | 0.458 |
 | folo-n, f16 (`--half`) | 2.6 M | the same weights | 0.314 | 0.455 | 0.339 | 0.144 | 0.335 | 0.458 |
-| YOLO11n (Ultralytics, published) | 2.6 M | 600+ epochs, Ultralytics recipe | 0.395 | | | | | |
-| YOLO26n (Ultralytics, published) | 2.4 M | 600+ epochs, Ultralytics recipe | 0.409 (e2e 0.401) | | | | | |
+| YOLO11n (Ultralytics, published) | 2.6 M | Ultralytics recipe (not given on its model page) | 0.395 | | | | | |
+| YOLO26n (Ultralytics, published) | 2.4 M | 150 epochs Objects365-v1, then 245 epochs COCO, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.409 (e2e 0.401) | | | | | |
 
-**This is not like for like:** the incumbent numbers come from a schedule about 12 times longer, with augmentation
-and training tricks tuned for it. The FOLO run is budget-bound: mAP50-95 still rose every epoch, through the last one. The comparison FOLO still owes is the same long schedule. Until that run exists, FOLO's accuracy
+**This is not like for like:** YOLO26n's number comes from more data (Objects365 pretraining), a longer schedule and a
+tuned recipe (YOLO11n's is not documented on its model page), and the architectures differ. The gap cannot be split
+into those causes. The FOLO run ended
+at its schedule's floor, not at a plateau: mAP50-95 rose every epoch, by 0.0009 per epoch over the last five. The
+comparison FOLO still owes is an equal-budget one. Until that run exists, FOLO's accuracy
 on COCO is **behind the published nano models by 0.08–0.10 AP**, and the speed rows above should be read with that
 in mind.
 
