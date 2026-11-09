@@ -127,6 +127,22 @@ describe('MockApi agent labeling: edits and datasets', () => {
     await expect(api.updateLabelImage('lb_3f9a', busy.id, [])).rejects.toMatchObject({ status: 409, code: 'label_job_active' });
   });
 
+  it('takes an image that waits for its call out of the run when it is labeled by hand', async () => {
+    const api = new MockApi('normal', 0);
+    const before = (await api.labelJob('lb_3f9a')).run!;
+    const waiting = (await api.labelImages('lb_3f9a', { status: 'pending' })).images.at(-1)!;
+    const saved = await api.updateLabelImage('lb_3f9a', waiting.id, []);
+    expect(saved).toMatchObject({ status: 'labeled', source: 'manual' });
+    expect((await api.labelJob('lb_3f9a')).run!.total).toBe(before.total - 1);
+    // The run goes on without it: the agent never has it, and its labels stay the hand-drawn ones.
+    vi.advanceTimersByTime(10 * 60_000);
+    const job = await api.labelJob('lb_3f9a');
+    expect(job.run).toMatchObject({ outcome: 'completed', total: before.total - 1 });
+    expect(job.run!.done + job.run!.failed).toBe(before.total - 1);
+    const after = (await api.labelImages('lb_3f9a', { limit: 1000 })).images.find((i) => i.id === waiting.id)!;
+    expect(after).toMatchObject({ status: 'labeled', source: 'manual', boxes: [] });
+  });
+
   it('lets classes be renamed or added once there are boxes, never removed', async () => {
     const api = new MockApi('normal', 0);
     await expect(api.updateLabelJob('lb_51d0', { classes: ['bolt', 'nut'] })).rejects.toMatchObject({ status: 400 });

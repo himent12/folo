@@ -36,7 +36,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job (or an image in an agent call) while its agent run is active; stopping one without a run |
+| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict` and image uploads to a labeling job, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
@@ -673,10 +673,11 @@ exported more than once.
   They replace the image's boxes; the image becomes `labeled` with `source: "manual"` (an empty list labels it
   as a background image). Boxes are clipped to the image; one with a `class` outside the job's classes, a
   non-finite coordinate, or less than a pixel left after clipping is `400 invalid_body`, as are more than 1000
-  boxes. `409 label_job_active` while the image waits for, or is in, an agent call of the active run (other
-  images of a running job can be edited).
+  boxes. `409 label_job_active` while the image is in an agent call (`labeling`). Every other image of a running
+  job can be edited: one that still waited for the run leaves it (`run.total` drops by one), so labels drawn by
+  hand are never replaced by a call that had not started.
 - `DELETE /api/label/jobs/{id}/images/{image_id}` → `204` (an uploaded image's file is deleted too). `409
-  label_job_active` as for `PUT`.
+  label_job_active` while the image is in an agent call, as for `PUT`.
 
 **Asking an agent**
 - `POST /api/label/jobs/{id}/start` body `StartLabeling` → `LabelJob` (`status: "running"`, with the new `run`).

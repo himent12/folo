@@ -5,14 +5,15 @@
    * move or resize it by dragging, draw a new one on empty image. Save (the hand-drawn labels replace the image's; none
    * is a background image) or Discard; stepping away from unsaved changes asks first. J / K step through the images in
    * the current filter. "Ask the agent again" runs the agent on this image alone with a note; "Remove image" takes it
-   * out of the job. An image the agent has (or will have in its run) cannot be edited, and says so.
+   * out of the job. An image the agent has right now cannot be edited, and says so; one that waits for its turn in a run
+   * can, and then leaves the run.
    */
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import Trash from '@lucide/svelte/icons/trash-2';
   import X from '@lucide/svelte/icons/x';
-  import { ApiError, hub } from '$lib/api/index.svelte';
+  import { hub } from '$lib/api/index.svelte';
   import type { LiveLabelJob } from '$lib/api/liveLabel.svelte';
   import type { Box, LabelImage, LabelJob } from '$lib/api/types';
   import { classColor } from '$lib/design/tokens';
@@ -87,20 +88,7 @@
     }
   });
 
-  /** Images the server refused to change (`409`: in the agent's run), until that run ends. */
-  let refused = $state<ReadonlySet<string>>(new Set());
-  $effect(() => {
-    if (job.status === 'idle' && refused.size) refused = new Set();
-  });
-  const locked = $derived(
-    !img
-      ? null
-      : img.status === 'labeling'
-        ? 'The agent is labeling this image. You can edit it once it is done.'
-        : refused.has(img.id)
-          ? 'This image waits for the agent’s run. Edit it once the run is over, or stop the run.'
-          : null,
-  );
+  const locked = $derived(img?.status === 'labeling' ? 'The agent is labeling this image. You can edit it once it is done.' : null);
 
   // ---------- editing ----------
   function edit(next: Box[]) {
@@ -130,7 +118,6 @@
       status.success('Saved', imageState(saved));
       return true;
     } catch (e) {
-      if (e instanceof ApiError && e.code === 'label_job_active') refused = new Set([...refused, img.id]);
       status.error(e, 'Could not save the boxes');
       return false;
     } finally {
@@ -214,7 +201,6 @@
       removing = false;
       onnavigate(next && next.id !== img.id ? next.id : null);
     } catch (e) {
-      if (e instanceof ApiError && e.code === 'label_job_active') refused = new Set([...refused, img.id]);
       removeStatus.error(e, 'Could not remove the image');
     } finally {
       removeBusy = false;

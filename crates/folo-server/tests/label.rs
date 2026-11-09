@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,6 +30,8 @@ enum Step {
     Timeout,
     /// Works until the run is cancelled.
     Hold,
+    /// Waits for the switch, then labels as an unscripted call does.
+    Until(Arc<AtomicBool>),
 }
 
 /// What a scripted agent was asked.
@@ -117,7 +119,12 @@ impl Agent for Scripted {
                 }
                 return Err(AgentError::Cancelled);
             }
-            None => {
+            Some(Step::Until(_)) | None => {
+                if let Some(Step::Until(open)) = &step {
+                    while !open.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
                 let first_class = req.prompt.lines().next().unwrap().trim_start_matches("Classes: ");
                 boxes_reply(req.images.len(), first_class.split(", ").next().unwrap())
             }
@@ -691,8 +698,8 @@ async fn stopping_ends_the_calls_and_guards_images_in_the_run() {
     assert_eq!(page.iter().map(|i| i.status).collect::<Vec<_>>(), [Labeled, Labeling, Pending, Pending]);
     assert_eq!(images(app, &job.id, "?status=labeling").await.total, 1);
 
-    // While it runs: the job and the images the run holds are locked; a finished image and one outside the run
-    // can be edited, and images can be added.
+    // While it runs: the job and the image in the call are locked. A finished image and one outside the run can
+    // be edited; so can one that still waits, which then leaves the run. Images can be added.
     err(
         app,
         post(&format!("{uri}/start"), json!({ "agent": "claude" })),
@@ -704,18 +711,15 @@ async fn stopping_ends_the_calls_and_guards_images_in_the_run() {
     err(app, delete(&uri), StatusCode::CONFLICT, "label_job_active").await;
     err(app, post(&format!("{uri}/dataset"), json!({})), StatusCode::CONFLICT, "label_job_active").await;
     let boxes = json!({ "boxes": [] });
-    for held in [&page[1].id, &page[2].id] {
-        err(
-            app,
-            put(&format!("{uri}/images/{held}"), boxes.clone()),
-            StatusCode::CONFLICT,
-            "label_job_active",
-        )
-        .await;
-        err(app, delete(&format!("{uri}/images/{held}")), StatusCode::CONFLICT, "label_job_active").await;
-    }
+    let held = format!("{uri}/images/{}", page[1].id);
+    err(app, put(&held, boxes.clone()), StatusCode::CONFLICT, "label_job_active").await;
+    err(app, delete(&held), StatusCode::CONFLICT, "label_job_active").await;
     ok::<LabelImage>(app, put(&format!("{uri}/images/{}", page[0].id), boxes.clone())).await;
-    ok::<LabelImage>(app, put(&format!("{uri}/images/{}", page[3].id), boxes)).await;
+    ok::<LabelImage>(app, put(&format!("{uri}/images/{}", page[3].id), boxes.clone())).await;
+    let waiting: LabelImage = ok(app, put(&format!("{uri}/images/{}", page[2].id), boxes)).await;
+    assert_eq!((waiting.status, waiting.source), (Labeled, Some(LabelSource::Manual)));
+    let running: LabelJob = ok(app, get(&uri)).await;
+    assert_eq!(running.run.unwrap().total, 2, "the image labeled by hand left the run");
     let added: LabelImagesAdded =
         ok(app, upload(&format!("{uri}/images"), &[("late.png", png(77, 50, 50))])).await;
     assert_eq!(added.job.status, LabelJobStatus::Running);
@@ -724,15 +728,55 @@ async fn stopping_ends_the_calls_and_guards_images_in_the_run() {
     assert_eq!(stopping.status, LabelJobStatus::Stopping);
     let done = idle(app, &job.id).await;
     let run = done.run.unwrap();
-    assert_eq!((run.outcome, run.done, run.failed, run.total), (Some(LabelOutcome::Stopped), 1, 0, 3));
-    // The held call was ended, not waited for, and the third was never made.
+    assert_eq!((run.outcome, run.done, run.failed, run.total), (Some(LabelOutcome::Stopped), 1, 0, 2));
+    // The held call was ended, not waited for, and no third one was made.
     assert_eq!(f.agent.calls(), 2);
     let page = images(app, &job.id, "").await.images;
     assert_eq!(
         page.iter().map(|i| i.status).collect::<Vec<_>>(),
-        [Labeled, Pending, Pending, Labeled, Pending]
+        [Labeled, Pending, Labeled, Labeled, Pending]
     );
     assert!(!t.join("home/label").join(&job.id).join("tmp").exists(), "scratch folders are removed");
+}
+
+#[tokio::test]
+async fn images_changed_by_hand_while_they_wait_leave_the_run() {
+    let t = TestDir::new("label-withdraw");
+    let gate = Arc::new(AtomicBool::new(false));
+    let f = fixture(&t.join("home"), vec![Step::Until(gate.clone())]);
+    let app = &f.app;
+    let job = job_with_images(app, 4).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    let all = images(app, &job.id, "").await.images;
+
+    // One image a call, one call at a time: the first call waits at the gate, three images wait for theirs.
+    ok::<LabelJob>(
+        app,
+        post(&format!("{uri}/start"), json!({ "agent": "claude", "batch": 1, "parallel": 1 })),
+    )
+    .await;
+    for _ in 0..2000 {
+        if f.agent.calls() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The second is labeled by hand, the third removed: neither is the agent's any more.
+    let boxes = json!({ "boxes": [{ "class": 1, "x1": 10, "y1": 10, "x2": 60, "y2": 60 }] });
+    ok::<LabelImage>(app, put(&format!("{uri}/images/{}", all[1].id), boxes)).await;
+    let (status, _) = send(app, delete(&format!("{uri}/images/{}", all[2].id))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    gate.store(true, Ordering::SeqCst);
+
+    let done = idle(app, &job.id).await;
+    let run = done.run.unwrap();
+    assert_eq!((run.outcome, run.total, run.done, run.failed), (Some(LabelOutcome::Completed), 2, 2, 0));
+    // Two calls, for the first and the fourth image: the hand-drawn box was not sent anywhere, nor replaced.
+    assert_eq!(f.agent.calls(), 2);
+    let page = images(app, &job.id, "").await.images;
+    let sources: Vec<Option<LabelSource>> = page.iter().map(|i| i.source).collect();
+    assert_eq!(sources, [Some(LabelSource::Agent), Some(LabelSource::Manual), Some(LabelSource::Agent)]);
+    assert_eq!(page[1].boxes, [BBox { class: 1, x1: 10.0, y1: 10.0, x2: 60.0, y2: 60.0 }]);
 }
 
 #[tokio::test]

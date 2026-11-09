@@ -544,10 +544,10 @@ impl Labeler {
     pub fn update_image(&self, id: &str, image_id: &str, req: UpdateLabelImage) -> Result<LabelImage> {
         let job = self.job(id)?;
         let mut state = job.lock();
-        state.check_free(image_id)?;
         let classes = state.file.classes.len();
         let record = state.record(image_id)?;
         let boxes = check_boxes(&req.boxes, classes, (record.width, record.height))?;
+        state.claim(image_id)?;
         let record = state.record_mut(image_id).expect("the record was just read");
         record.boxes = boxes;
         record.status = LabelImageStatus::Labeled;
@@ -564,8 +564,8 @@ impl Labeler {
     pub fn delete_image(&self, id: &str, image_id: &str) -> Result<()> {
         let job = self.job(id)?;
         let mut state = job.lock();
-        state.check_free(image_id)?;
         let record = state.record(image_id)?.clone();
+        state.claim(image_id)?;
         state.file.images.retain(|r| r.id != image_id);
         job.save(&state)?;
         if record.external.is_none() {

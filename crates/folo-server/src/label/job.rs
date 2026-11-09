@@ -87,7 +87,7 @@ pub struct Active {
     pub stopping: bool,
     /// Ends the calls in flight and keeps new ones from starting.
     pub cancel: Arc<AtomicBool>,
-    /// Images of the run no call has taken yet.
+    /// Images of the run no call has taken yet (one changed by hand meanwhile leaves: [`State::claim`]).
     pub waiting: HashSet<String>,
     /// Images in a call right now.
     pub in_call: HashSet<String>,
@@ -171,16 +171,24 @@ impl State {
         }
     }
 
-    /// `409 label_job_active` while image `image_id` waits for, or is in, a call of the active run.
-    pub fn check_free(&self, image_id: &str) -> Result<()> {
-        match &self.active {
-            Some(a) if a.waiting.contains(image_id) || a.in_call.contains(image_id) => Err(Error::conflict(
+    /// Takes image `image_id` for a change by hand. `409 label_job_active` while it is in an agent call; an image
+    /// that only waits for one leaves the run instead (the run then has one image less to label), so work done by
+    /// hand is never overwritten by a call that had not started.
+    pub fn claim(&mut self, image_id: &str) -> Result<()> {
+        let Some(active) = self.active.as_mut() else { return Ok(()) };
+        if active.in_call.contains(image_id) {
+            return Err(Error::conflict(
                 "label_job_active",
-                format!("image '{image_id}' is with the agent; change it once the run is done with it"),
+                format!("image '{image_id}' is with the agent right now; change it once that call is done"),
             )
-            .hint("POST /api/label/jobs/{id}/stop ends the run")),
-            _ => Ok(()),
+            .hint("the image is `labeling`; POST /api/label/jobs/{id}/stop ends the run"));
         }
+        if active.waiting.remove(image_id)
+            && let Some(run) = self.file.run.as_mut()
+        {
+            run.total = run.total.saturating_sub(1);
+        }
+        Ok(())
     }
 
     /// The last `limit` log lines, oldest first.
@@ -380,7 +388,7 @@ mod tests {
         let job = state.job();
         assert_eq!(job.status, LabelJobStatus::Idle);
         assert_eq!(job.counts, LabelCounts { images: 4, pending: 1, labeled: 2, failed: 1, boxes: 3 });
-        assert!(state.check_idle("x").is_ok() && state.check_free("2").is_ok());
+        assert!(state.check_idle("x").is_ok() && state.claim("2").is_ok());
 
         state.active = Some(Active {
             stopping: false,
@@ -395,9 +403,10 @@ mod tests {
         assert_eq!((shown.status, shown.boxes.len()), (LabelImageStatus::Labeling, 2));
         assert_eq!(state.job().counts.labeled, 2);
         assert_eq!(state.check_idle("x").unwrap_err().body.code, "label_job_active");
-        assert_eq!(state.check_free("1").unwrap_err().body.code, "label_job_active");
-        assert_eq!(state.check_free("2").unwrap_err().body.code, "label_job_active");
-        assert!(state.check_free("4").is_ok());
+        // An image in a call cannot be taken; one that waits leaves the run; the others are free.
+        assert_eq!(state.claim("2").unwrap_err().body.code, "label_job_active");
+        assert!(state.claim("4").is_ok() && state.claim("1").is_ok());
+        assert!(state.active.as_ref().unwrap().waiting.is_empty());
         state.active.as_mut().unwrap().stopping = true;
         assert_eq!(state.job().status, LabelJobStatus::Stopping);
     }

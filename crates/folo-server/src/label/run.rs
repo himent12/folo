@@ -128,15 +128,20 @@ impl Run<'_> {
             let mut taken = Vec::new();
             for id in ids {
                 let Some(active) = state.active.as_mut() else { break };
-                active.waiting.remove(&id);
-                active.in_call.insert(id.clone());
-                if let Ok(r) = state.record(&id) {
-                    self.job.emit(LabelEvent::Image(state.image(r)));
-                    taken.push((id, self.job.image_path(r), (r.width, r.height)));
+                // An image that was labeled by hand or removed while it waited has left the run.
+                if !active.waiting.remove(&id) {
+                    continue;
                 }
+                active.in_call.insert(id.clone());
+                let r = state.record(&id).expect("an image of the run is not removed without leaving it");
+                self.job.emit(LabelEvent::Image(state.image(r)));
+                taken.push((id, self.job.image_path(r), (r.width, r.height)));
             }
             taken
         };
+        if taken.is_empty() {
+            return;
+        }
         let (mut batch, mut outcomes) = (Batch::default(), Vec::new());
         for (id, path, size) in taken {
             match agent_jpeg(&path) {

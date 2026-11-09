@@ -110,6 +110,8 @@ interface Run {
   startedAt: number;
   finishedAt: number | null;
   ids: string[];
+  /** Images changed by hand while they waited for their call: they left the run. */
+  left: Set<string>;
   batch: number;
   parallel: number;
   /** Calls answered so far. */
@@ -296,7 +298,7 @@ export class MockLabeling {
             effort: r.effort,
             started: iso(r.startedAt),
             finished: r.finishedAt === null ? null : iso(r.finishedAt),
-            total: r.ids.length,
+            total: r.ids.length - r.left.size,
             done: r.done,
             failed: r.failed,
             outcome: r.outcome,
@@ -483,18 +485,18 @@ export class MockLabeling {
     for (let k = 2; ; k++) if (!taken.has(`${stem}-${k}${ext}`.toLowerCase())) return `${stem}-${k}${ext}`;
   }
 
-  /** `409` while the image waits for, or is in, an agent call of the active run. */
-  #checkFree(j: Job, im: Img) {
+  /** Takes an image for a change by hand: `409` while it is in an agent call; one that only waits for its call leaves the run. */
+  #claim(j: Job, im: Img) {
+    if (im.status === 'labeling')
+      throw new ApiError(409, 'label_job_active', `${im.file} is with the agent right now.`, 'Change it once that call is done, or stop the run.');
     const r = j.run;
-    if (im.status === 'labeling' || (r && !r.outcome && r.ids.slice(r.applied * r.batch).includes(im.id)))
-      throw new ApiError(409, 'label_job_active', `${im.file} is in the agent's run.`, 'Edit it once the agent has labeled it, or stop the run.');
+    if (r && !r.outcome && r.ids.slice(r.applied * r.batch).includes(im.id)) r.left.add(im.id);
   }
 
   updateImage(id: string, imageId: string, boxes: Box[], now: number): LabelImage {
     const j = this.#job(id);
     this.advance(j, now);
     const im = this.#image(j, imageId);
-    this.#checkFree(j, im);
     if (boxes.length > 1000) throw new ApiError(400, 'invalid_body', 'field `boxes`: at most 1000');
     const clipped: Box[] = [];
     for (const b of boxes) {
@@ -511,6 +513,7 @@ export class MockLabeling {
       if (c.x2 - c.x1 < 1 || c.y2 - c.y1 < 1) throw new ApiError(400, 'invalid_body', 'field `boxes`: a box has less than a pixel left inside the image');
       clipped.push(c);
     }
+    this.#claim(j, im);
     Object.assign(im, { boxes: clipped, status: 'labeled', source: 'manual', error: null });
     this.#log(j, now, 'info', `${im.file}: ${clipped.length} ${clipped.length === 1 ? 'box' : 'boxes'} drawn by hand`);
     this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
@@ -523,7 +526,7 @@ export class MockLabeling {
     const j = this.#job(id);
     this.advance(j, now);
     const im = this.#image(j, imageId);
-    this.#checkFree(j, im);
+    this.#claim(j, im);
     j.images = j.images.filter((x) => x !== im);
     this.#emit(j.id, (h) => h.removed?.({ id: im.id }));
     const out = this.#toJob(j);
@@ -581,6 +584,7 @@ export class MockLabeling {
       note: body.note ?? '',
       startedAt: at,
       finishedAt: null,
+      left: new Set(),
       batch: body.batch ?? DEFAULT_BATCH[body.agent],
       parallel: body.parallel ?? 3,
       applied: 0,
@@ -632,7 +636,7 @@ export class MockLabeling {
     for (let k = r.applied; k < Math.min(calls, r.applied + r.parallel); k++)
       for (const id of this.#batch(r, k)) {
         const im = j.images.find((i) => i.id === id);
-        if (!im || im.status === 'labeling') continue;
+        if (!im || im.status === 'labeling' || r.left.has(id)) continue;
         im.before = { status: im.status, error: im.error };
         im.status = 'labeling';
         this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
@@ -679,7 +683,8 @@ export class MockLabeling {
   /** Call `k`'s answer at `at`: boxes for each of its images (an image the reply leaves out fails, once at most). */
   #answer(j: Job, k: number, at: number) {
     const r = j.run as Run;
-    const ids = this.#batch(r, k);
+    const ids = this.#batch(r, k).filter((id) => !r.left.has(id));
+    if (!ids.length) return;
     let boxes = 0;
     for (const id of ids) {
       const im = j.images.find((i) => i.id === id);
@@ -742,7 +747,7 @@ export class MockLabeling {
     r.outcome = outcome;
     r.finishedAt = at;
     r.stopAt = null;
-    const left = r.ids.length - r.done - r.failed;
+    const left = r.ids.length - r.left.size - r.done - r.failed;
     this.#log(
       j,
       at,
