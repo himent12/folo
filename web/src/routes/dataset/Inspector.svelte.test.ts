@@ -61,6 +61,42 @@ describe('Inspector labels', () => {
     pager.dispose();
   });
 
+  it('never leaves a hover behind a tap, keeps Shift + arrows for panning, and shortens the path in the middle', async () => {
+    const dataset = await hub.api.dataset('ds_fasteners');
+    const pager = new ImagePager(dataset.id, undefined, undefined);
+    const first = await pager.at(0);
+    const onnavigate = vi.fn();
+    c = mount(Inspector, {
+      target,
+      props: { pager, classes: dataset.classes, imageId: first!.id, only: null, onnavigate, onclose: () => {}, onmissing: () => {} },
+    });
+    const labels = () => [...target.querySelectorAll<HTMLButtonElement>('.labels button')];
+    await vi.waitFor(() => {
+      flushSync();
+      if (labels().length < 2) throw new Error('labels not rendered yet');
+    });
+    labels()[1]!.dispatchEvent(new PointerEvent('pointerenter', { pointerType: 'touch' }));
+    flushSync();
+    expect(labels()[1]!.classList.contains('hot')).toBe(false);
+
+    // The canvas is focusable and described by its keys; Shift + arrows pan it and never change the image.
+    const canvas = target.querySelector<HTMLElement>('.viewport')!;
+    expect(canvas.tabIndex).toBe(0);
+    expect(document.getElementById(canvas.getAttribute('aria-describedby')!)?.textContent).toMatch(/Shift and arrows: pan/);
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true }));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(onnavigate).not.toHaveBeenCalled();
+    canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+    await vi.waitFor(() => expect(onnavigate).toHaveBeenCalled());
+
+    // One line: the folders give way to an ellipsis, the file name stays whole; the full path is copyable.
+    const path = target.querySelector('dd.path')!;
+    expect(path.querySelector('.dir')?.textContent).toBe('images/train');
+    expect(path.querySelector('.base')?.textContent).toBe(first!.file.split('/').pop());
+    expect(path.querySelector('button.copy')?.getAttribute('aria-label')).toBe(`Copy the path ${first!.file}`);
+    pager.dispose();
+  });
+
   it('draws the selected label as the selected box (the others recede) and the hovered one apart from it', async () => {
     // The boxes are placed in screen pixels: give every element a size, since this DOM does no layout.
     const cw = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');

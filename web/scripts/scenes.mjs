@@ -303,9 +303,9 @@ export const scenes = [
       await page.locator('dialog[open]').waitFor();
     },
   },
-  { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // The health summary with every severity line opened: the findings, their evidence and next steps.
+    // The health line opened: every finding, its evidence and next step.
     name: 'dataset-health-open',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: false,
@@ -317,7 +317,7 @@ export const scenes = [
     },
   },
   {
-    // "Dataset check findings", its own section: the severity filter moved to warnings from the Warnings line's
+    // "Dataset check findings", its own section: the severity filter moved to warnings from the warning finding's
     // "Show the warnings", so the caption and rows are the warnings.
     name: 'dataset-issues',
     path: '/datasets/ds_shapes_hard?tab=stats',
@@ -325,7 +325,7 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page) => {
       await until(page, '#ds-health summary');
-      await page.locator('#ds-health li.warning summary').click();
+      await page.locator('#ds-health summary').click();
       await page.getByRole('button', { name: 'Show the warnings' }).click();
       await until(page, '#ds-check .issues .fix');
       await page.clock.runFor(500);

@@ -161,8 +161,8 @@ export function iou(a: Box, b: Box): number {
   return ua > 0 ? inter / ua : 0;
 }
 
-// Relative box size = sqrt(box area / image area), as in docs/API.md.
-const SIZE_EDGES = [0, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 1];
+// Relative box size = sqrt(box area / image area), in the server's bins (folo-data BOX_SIZE_EDGES, docs/API.md).
+const SIZE_EDGES = [0, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1];
 const PER_IMAGE_EDGES = [0, 1, 2, 4, 8, 16, 32, 64];
 
 function bin(edges: number[], v: number): number {

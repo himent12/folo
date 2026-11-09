@@ -44,8 +44,10 @@ describe('ConfusionMatrix labels', () => {
     expect(cell(2, 1).textContent!.trim()).toBe('8');
     expect(cell(2, 3).textContent!.trim()).toBe('5');
     expect(cell(2, 2).textContent!.trim()).toBe('83');
-    // Under 5%: no label, but its value is in its name; a true zero is the empty surface.
-    expect(cell(2, 0).textContent!.trim()).toBe('');
+    // 3–4%: labelled only in a full-size (72 px) cell, which a container query decides; under 3%: no label. Its value
+    // is always in its name; a true zero is the empty surface.
+    expect(cell(2, 0).querySelector('span.low')?.textContent).toBe('3');
+    expect(cell(2, 1).querySelector('span.low')).toBeNull();
     expect(cell(2, 0).getAttribute('aria-label')).toBe('bearing predicted as bolt: 2 of 60, 3%');
     expect(cell(2, 0).classList.contains('zero')).toBe(false);
     expect(cell(0, 1).classList.contains('zero')).toBe(true);
