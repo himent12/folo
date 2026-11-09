@@ -10,6 +10,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router.svelte';
+import { page as pageMeta } from '$lib/shell/crumbs.svelte';
 import Datasets from './Datasets.svelte';
 import Models from './Models.svelte';
 import Runs from './Runs.svelte';
@@ -159,6 +160,30 @@ describe('create actions while the server is offline', () => {
   });
 });
 
+describe('one create action per corner', () => {
+  for (const [name, page, path] of [
+    ['Runs', Runs, '/runs'],
+    ['Datasets', Datasets, '/datasets'],
+  ] as [string, Component, string][]) {
+    it(`${name} owns the create action while mounted, so the top bar's New run steps aside`, async () => {
+      expect(pageMeta.ownsCreate).toBe(false);
+      await open(page, path, new MockApi('error', 0));
+      flushSync();
+      expect(pageMeta.ownsCreate).toBe(true);
+      unmount(c!);
+      c = undefined;
+      flushSync();
+      expect(pageMeta.ownsCreate).toBe(false);
+    });
+  }
+
+  it('Models has no create action: the top bar keeps its New run', async () => {
+    await open(Models as Component, '/models', new MockApi('normal', 0));
+    flushSync();
+    expect(pageMeta.ownsCreate).toBe(false);
+  });
+});
+
 describe('Runs: row checkboxes', () => {
   async function loaded() {
     await open(Runs as Component, '/runs', new MockApi('normal', 0));
@@ -178,6 +203,23 @@ describe('Runs: row checkboxes', () => {
     flushSync();
     expect(table.classList.contains('picking')).toBe(true);
     expect(box.closest('tr')!.classList.contains('on')).toBe(true);
+  });
+
+  it('at 820 with a run selected: the same columns as before, the checkbox column reserved and Created hidden', async () => {
+    const table = await loaded();
+    resize(820);
+    const heads = () => [...table.querySelectorAll('thead th')].filter(shown).map((th) => th.textContent?.trim());
+    const before = heads();
+    table.querySelector<HTMLInputElement>('tbody tr[data-row] .check input')!.click();
+    flushSync();
+    resize(820);
+    expect(table.classList.contains('picking')).toBe(true);
+    // Selecting never adds a column (the checkbox column's width is always there), so nothing is pushed off the edge.
+    expect(heads()).toEqual(before);
+    expect(before[0]).toBe('Select for comparison');
+    expect(before).not.toContain('Created');
+    expect(before).toEqual(['Select for comparison', 'Run', 'Status', 'Progress', 'Best mAP50-95']);
+    for (const n of columns(table).rows) expect(n).toBe(before.length);
   });
 
   it('a click anywhere in the checkbox cell selects without opening the run', async () => {

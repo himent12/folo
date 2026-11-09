@@ -134,9 +134,17 @@
   header p {
     color: var(--text-secondary);
   }
+  /* A body taller than the dialog scrolls, with a shadow at each edge that has more behind it: the two covers in the
+     dialog's colour scroll with the content (local) and hide the edge shades (scroll) once the end is reached. */
   .body {
     padding: var(--space-2) var(--space-5) var(--space-5);
     overflow-y: auto;
+    background:
+      linear-gradient(var(--bg-overlay) 50%, transparent) top / 100% 32px no-repeat local,
+      linear-gradient(transparent, var(--bg-overlay) 50%) bottom / 100% 32px no-repeat local,
+      linear-gradient(var(--line-strong), transparent) top / 100% 16px no-repeat scroll,
+      linear-gradient(transparent, var(--line-strong)) bottom / 100% 16px no-repeat scroll,
+      var(--bg-overlay);
   }
   footer {
     display: flex;

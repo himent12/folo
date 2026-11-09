@@ -9,13 +9,52 @@
   import { motion } from './motion';
 
   const icons = { success: CircleCheck, error: CircleAlert, info: Info };
+
+  // Toasts never take focus: they announce through the live region, and a click on their buttons keeps focus where it
+  // was (mousedown is not allowed to move it). A keyboard user can still Tab in; while focus or the pointer is in the
+  // stack nothing auto-dismisses, and closing the toast that holds focus hands it back to where the user came from, so
+  // it never falls to <body> (round 17: the Playground lost focus after a toast closed).
+  let el: HTMLElement;
+  let hovered = false;
+  let focused = false;
+  let from: HTMLElement | null = null;
+  const hold = () => toast.hold(hovered || focused);
+
+  function onfocusin(e: FocusEvent) {
+    const prev = e.relatedTarget;
+    if (prev instanceof HTMLElement && !el.contains(prev)) from = prev;
+    focused = true;
+    hold();
+  }
+  function onfocusout(e: FocusEvent) {
+    if (e.relatedTarget instanceof Node && el.contains(e.relatedTarget)) return;
+    focused = false;
+    hold();
+  }
+
+  function close(id: number, run?: () => void) {
+    run?.();
+    // The action may have moved focus itself (e.g. opened a page): then it is not ours to place.
+    const inside = el.contains(document.activeElement);
+    toast.dismiss(id);
+    if (!inside) return;
+    focused = false;
+    hold();
+    if (from?.isConnected) from.focus({ preventScroll: true });
+    from = null;
+  }
+
+  const keepFocus = (e: MouseEvent) => e.preventDefault();
 </script>
 
 <section
   class="toaster"
   aria-label="Notifications"
-  onpointerenter={() => toast.hold(true)}
-  onpointerleave={() => toast.hold(false)}
+  bind:this={el}
+  onpointerenter={() => ((hovered = true), hold())}
+  onpointerleave={() => ((hovered = false), hold())}
+  {onfocusin}
+  {onfocusout}
 >
   <ol aria-live="polite">
     {#each toast.items as t (t.id)}
@@ -28,15 +67,9 @@
         </div>
         {#if t.action}
           {@const a = t.action}
-          <button
-            class="action"
-            onclick={() => {
-              a.run();
-              toast.dismiss(t.id);
-            }}>{a.label}</button
-          >
+          <button class="action" onmousedown={keepFocus} onclick={() => close(t.id, a.run)}>{a.label}</button>
         {/if}
-        <button class="close" aria-label="Dismiss" onclick={() => toast.dismiss(t.id)}><X size={14} /></button>
+        <button class="close" aria-label="Dismiss" onmousedown={keepFocus} onclick={() => close(t.id)}><X size={14} /></button>
       </li>
     {/each}
   </ol>

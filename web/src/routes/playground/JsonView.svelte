@@ -27,7 +27,7 @@
     <Button size="sm" icon={copied ? Check : Copy} onclick={copy}>{copied ? 'Copied' : 'Copy'}</Button>
   </div>
   <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-  <pre tabindex="0" aria-label={label}><code
+  <pre tabindex="0" aria-label={label} data-scrolls><code
       >{#each tokens as tk, i (i)}{#if tk.t === 'ws'}{tk.v}{:else}<span class={tk.t}>{tk.v}</span>{/if}{/each}</code
     ></pre>
 </div>

@@ -5,6 +5,7 @@
   import { router, section, href } from '$lib/router.svelte';
   import { sidebar } from './sidebarState.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
+  import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import Logo from './Logo.svelte';
   import { mainNav, settingsNav, type NavItem } from './nav';
 
@@ -26,7 +27,7 @@
     >
       <n.icon size={16} strokeWidth={1.75} aria-hidden="true" />
       <span class="label">{n.label}</span>
-      <span class="keys"><Kbd keys={n.keys} subtle /></span>
+      {#if keyPrefs.singleKeys}<span class="keys"><Kbd keys={n.keys} subtle /></span>{/if}
     </a>
   </li>
 {/snippet}

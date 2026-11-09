@@ -11,13 +11,13 @@
   import Box from '@lucide/svelte/icons/box';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import Keyboard from '@lucide/svelte/icons/keyboard';
-  import CornerDownLeft from '@lucide/svelte/icons/corner-down-left';
   import { hub } from '$lib/api/index.svelte';
   import { failureCause } from '$lib/oom';
   import type { Dataset, Model, Run } from '$lib/api/types';
   import { prefs } from '$lib/prefs.svelte';
   import { router } from '$lib/router.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
+  import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import type { IconType } from '$lib/ui/types';
   import { rememberFocus } from '$lib/ui/focus';
   import { fuzzy, highlight } from './commands';
@@ -228,7 +228,8 @@
               {#each highlight(query, item.label) as part, k (k)}{#if part.m}<mark>{part.s}</mark>{:else}{part.s}{/if}{/each}
             </span>
             {#if item.hint}<span class="hint">{item.hint}</span>{/if}
-            {#if item.keys}<Kbd keys={item.keys} subtle />{/if}
+            <!-- Every hint here is a single key: none while those are off (Settings). -->
+            {#if item.keys && keyPrefs.singleKeys}<Kbd keys={item.keys} subtle />{/if}
           </li>
         {/each}
       {:else}
@@ -237,8 +238,8 @@
     </ul>
     <footer>
       <span><Kbd keys="ArrowUp" subtle /><Kbd keys="ArrowDown" subtle /> move</span>
-      <span><CornerDownLeft size={12} /> open</span>
-      <span class="brand">FOLO</span>
+      <span><Kbd keys="Enter" subtle /> open</span>
+      <span><Kbd keys="Escape" subtle /> close</span>
     </footer>
   </div>
 </dialog>
@@ -366,11 +367,6 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-  }
-  .brand {
-    margin-left: auto;
-    font-weight: var(--weight-semibold);
-    letter-spacing: 0.04em;
   }
   @keyframes enter {
     from {

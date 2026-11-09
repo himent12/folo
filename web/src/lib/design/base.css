@@ -295,11 +295,15 @@ table {
 :where(.table) tbody tr:is(.on, [aria-selected='true']) > :first-child {
   box-shadow: inset 2px 0 0 var(--accent-line);
 }
-/* Arrow-key rows (rowNav): the ring sits inside the row, so the scroll box never clips it. */
+/* Arrow-key rows (rowNav): the ring sits inside the row, so the scroll box never clips it, and 4 px in from its edges,
+   so on a selected row the ring (a closed rectangle) and the selection (a 2 px bar on the very edge, and the fill) stay
+   two different shapes with a gap between them, not one lime edge. */
 :where(.table) tbody tr[tabindex]:focus-visible {
   outline: var(--size-focus-ring) solid var(--focus);
-  outline-offset: calc(-1 * var(--size-focus-ring));
+  outline-offset: calc(-1 * (var(--size-focus-ring) + var(--space-1)));
   border-radius: 0;
+}
+:where(.table) tbody tr[tabindex]:focus-visible:not(.on, [aria-selected='true']) {
   background: var(--bg-hover);
 }
 /* Links inside a row (the name, a source run) underline on hover; the row is the bigger target. */

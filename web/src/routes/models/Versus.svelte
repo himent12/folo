@@ -201,7 +201,8 @@
     }
     .vs tbody tr {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      /* The lead ("20% less memory") keeps its one line; the two values share the rest. */
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) max-content;
       gap: var(--space-1) var(--space-3);
       padding: var(--space-3) var(--space-4);
       border-bottom: 1px solid var(--line-subtle);

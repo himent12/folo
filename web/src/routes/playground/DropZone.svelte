@@ -54,7 +54,7 @@
       <p class="overline">Or try a sample</p>
       <ul>
         {#if samples === undefined}
-          {#each { length: 6 } as _, i (i)}<li><Skeleton h="100%" r="var(--radius-sm)" /></li>{/each}
+          {#each { length: 6 } as _, i (i)}<li><Skeleton h="100%" r="var(--radius-sm)" image /></li>{/each}
         {:else}
           {#each samples as s (s.ds.id + s.img.id)}
             <li>

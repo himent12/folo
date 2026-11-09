@@ -83,6 +83,12 @@
   .compact {
     padding: var(--space-3) 0;
   }
+  /* Inside a padded panel the panel's own padding is the edge (as for EmptyState), so a titled panel holding the error
+     is its header, the message and 16 px, not 28. */
+  :global(.pad-md > .body) > .err.compact,
+  :global(.pad-sm > .body) > .err.compact {
+    padding: var(--space-1) 0 0;
+  }
   .icon {
     color: var(--danger-text);
     padding-top: 2px;

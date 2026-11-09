@@ -59,3 +59,23 @@ describe('Page header actions', () => {
     r.done();
   });
 });
+
+describe('Page header on phones: one row', () => {
+  it('`subPhone` replaces the meta line on phones and makes the header one row', () => {
+    const r = render({ sub: text('Training runs, newest first. Select up to four to compare.'), subPhone: text('Newest first'), actions: text('<button>New run</button>') });
+    const header = r.target.querySelector('header')!;
+    expect(header.classList.contains('one-row')).toBe(true);
+    expect(header.querySelector('.sub.wide-only')?.textContent).toContain('Select up to four');
+    expect(header.querySelector('.sub.phone-only')?.textContent).toBe('Newest first');
+    r.done();
+  });
+
+  it('without `subPhone` the header keeps its single meta line and no phone copy', () => {
+    const r = render({ sub: text('folo-s · 3 classes'), actions: text('<button>Try</button>') });
+    const header = r.target.querySelector('header')!;
+    expect(header.classList.contains('one-row')).toBe(false);
+    expect(header.querySelectorAll('.sub')).toHaveLength(1);
+    expect(header.querySelector('.sub')!.classList.contains('wide-only')).toBe(false);
+    r.done();
+  });
+});

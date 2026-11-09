@@ -751,11 +751,11 @@ export const scenes = [
     },
   },
   {
+    // Every group, General to Datasets: two columns where wide, one with an edge shadow on phones.
     name: 'shortcuts-open',
     fullPage: false,
     path: '/runs',
-    themes: ['dark'],
-    viewports: ['desktop'],
+    viewports: ['desktop', 'mobile'],
     setup: async (page) => {
       await page.keyboard.press('Shift+?');
     },
@@ -788,4 +788,61 @@ export const scenes = [
     },
   },
   { name: 'not-found', path: '/nope', viewports: ['desktop', 'mobile'] },
+  {
+    // Thumbnails still loading: a raised fill with faint viewfinder corners, not a flat dark photo.
+    name: 'dataset-images-loading',
+    path: '/datasets/ds_fasteners',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      // Hold every image at "loading" (a src that never arrives), then ask the grid for a fresh set of thumbnails.
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.evaluate(() => {
+        Object.defineProperty(HTMLImageElement.prototype, 'src', { set() {}, get: () => '', configurable: true });
+        const set = Element.prototype.setAttribute;
+        Element.prototype.setAttribute = function (name, value) {
+          if (!(this instanceof HTMLImageElement && name === 'src')) set.call(this, name, value);
+        };
+      });
+      await page.goto(page.url().replace('ds_fasteners', 'ds_shapes_hard'));
+      await until(page, '.dsimg[aria-busy="true"] .cover');
+    },
+  },
+  {
+    // Connection says what it means ("Using demo data", "Leave blank to use this server"); the mechanics are folded.
+    name: 'settings-connection-details',
+    path: '/settings',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.locator('details.tech summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
+    name: 'shortcuts-off',
+    path: '/settings',
+    fullPage: false,
+    themes: ['light'],
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('switch', { name: /Single-key shortcuts/ }).click({ force: true });
+      await page.getByRole('button', { name: 'Show shortcuts' }).click();
+      await page.locator('dialog[open]').waitFor();
+    },
+  },
+  {
+    // Phones: two runs picked; Compare sits in the list's own header row, by the checkboxes.
+    name: 'runs-compare-phone',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, '.rows li');
+      await page.getByRole('button', { name: 'Select to compare' }).click();
+      await page.locator('.rows li .r-check').nth(1).click();
+      await page.locator('.rows li .r-check').nth(2).click();
+    },
+  },
 ];

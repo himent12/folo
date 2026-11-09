@@ -87,7 +87,7 @@
     {...rest}
   />
   {#if phase === 'loading'}
-    <span class="cover"><Skeleton w="100%" h="100%" r="0" /></span>
+    <span class="cover"><Skeleton w="100%" h="100%" r="0" image /></span>
   {:else if phase === 'error'}
     <span class="cover failed">
       <ImageOff size={16} strokeWidth={1.75} aria-hidden="true" />
