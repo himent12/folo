@@ -39,6 +39,7 @@
   import Select from '$lib/ui/Select.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
+  import Ident from '$lib/ui/Ident.svelte';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
 
@@ -178,14 +179,17 @@
   };
   const setX = (v: Axis) => (xChoice = v);
 
-  const rows = $derived<[string, (r: Run) => string][]>([
+  // The third field marks a row of identifiers (an architecture, a checkpoint, a named optimizer), set in mono like
+  // the chips and every other screen (ui/Ident); prose values ("From scratch", "auto") stay in sans.
+  const ID_PROSE = new Set(['From scratch', 'auto']);
+  const rows = $derived<[string, (r: Run) => string, boolean?][]>([
     ['Dataset', (r) => datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id],
-    ['Model', (r) => r.config.arch],
-    ['Start from', (r) => startOf(r) ?? 'From scratch'],
+    ['Model', (r) => r.config.arch, true],
+    ['Start from', (r) => startOf(r) ?? 'From scratch', true],
     ['Epochs', (r) => `${r.epoch}/${r.epochs}`],
     ['Batch', (r) => String(r.config.batch)],
     ['Image size', (r) => `${r.config.imgsz} px`],
-    ['Optimizer', (r) => r.config.optimizer],
+    ['Optimizer', (r) => r.config.optimizer, true],
     ['LR', (r) => String(r.config.lr0)],
     ['Mosaic / mixup', (r) => `${r.config.augment.mosaic} / ${r.config.augment.mixup}`],
     ['Close mosaic', (r) => (r.config.augment.close_mosaic > 0 ? `last ${r.config.augment.close_mosaic} epochs` : 'never')],
@@ -334,10 +338,10 @@
                   <td class="num" class:winner={sameData && i === bestIdx && chosen.length > 1}>{metric(r.best?.map50_95)}{#if sameData && i === bestIdx && chosen.length > 1}<span class="tag">best</span>{/if}</td>
                 {/each}
               </tr>
-              {#each diffRows as [k, f] (k)}
+              {#each diffRows as [k, f, id] (k)}
                 <tr>
                   <td class="k">{k}</td>
-                  {#each chosen as r (r.id)}<td class="num cfg diff">{f(r)}</td>{/each}
+                  {#each chosen as r (r.id)}<td class="num cfg diff">{@render cell(f(r), id)}</td>{/each}
                 </tr>
               {/each}
               {#if sameRows.length}
@@ -349,10 +353,10 @@
                   </td>
                 </tr>
                 {#if showSame}
-                  {#each sameRows as [k, f] (k)}
+                  {#each sameRows as [k, f, id] (k)}
                     <tr>
                       <td class="k">{k}</td>
-                      {#each chosen as r (r.id)}<td class="num cfg">{f(r)}</td>{/each}
+                      {#each chosen as r (r.id)}<td class="num cfg">{@render cell(f(r), id)}</td>{/each}
                     </tr>
                   {/each}
                 {/if}
@@ -364,6 +368,8 @@
     {/if}
   {/if}
 </Page>
+
+{#snippet cell(v: string, id: boolean | undefined)}{#if id && !ID_PROSE.has(v)}<Ident value={v} />{:else}{v}{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -400,7 +406,7 @@
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it only in Edit,
              on a full-width line of its own. -->
-        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}Fine-tuned from <span class="mono src">{from}</span>{:else}From scratch{/if}</span>
+        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}Fine-tuned from <Ident value={from} class="src" />{:else}From scratch{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
           <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -465,12 +471,9 @@
     gap: var(--space-3);
     padding: var(--space-4);
     background: var(--bg-panel);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     min-width: 0;
-  }
-  :global([data-theme='dark']) .compare {
-    border-color: var(--line-subtle);
   }
   /* The legend: one card per run (key, name, value under the cursor; how it started below), side by side. */
   .chips {
@@ -586,7 +589,7 @@
   .from.tuned {
     color: var(--text-secondary);
   }
-  .from .src {
+  .from :global(.ident) {
     font-size: var(--type-sm-size);
     white-space: nowrap;
   }

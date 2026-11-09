@@ -8,9 +8,11 @@
    * above the table says so and offers Clear. The legend row above the plot is the readout. Phones hide the precision
    * and recall columns: each row has two controls there, the class name traces its curve (`aria-pressed`) and the
    * chevron opens a details row with those two at their operating point (`aria-expanded`), with "View curve"
-   * (`onviewcurve`). `view` shows only the curves or only the table (the phone model page puts them in separate
-   * sections); both stay mounted, so a class picked in the table is still traced when the curves come back, and
-   * `onback` puts a way back to the table in the curves' legend row.
+   * (`onviewcurve`). `view` shows only the curves or only the table: the model page renders them as two panels (the
+   * curves beside the Details rail, the table in a row of its own; on a phone, two sections) that share `selected` and
+   * `hovered` (bindable), so a class picked or pointed at in the table is traced in the other panel's curves, and
+   * `onback` puts a way back to the table in the curves' legend row. `fill` lets the plot grow to the panel's height
+   * (a panel stretched to its row), from 300 px.
    */
   import type { Evaluation } from '$lib/api/evaluation';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
@@ -31,6 +33,9 @@
     view = 'all',
     onviewcurve,
     onback,
+    fill = false,
+    selected = $bindable([]),
+    hovered = $bindable(null),
   }: {
     classes: readonly string[];
     ev: Evaluation;
@@ -40,7 +45,15 @@
     onviewcurve?: (cls: number) => void;
     /** Back to the class table, offered in the curves' legend row (after "View curve"). */
     onback?: () => void;
+    /** The plot takes the height left in its panel (at least 300 px). */
+    fill?: boolean;
+    /** Classes traced in their hue (clicked rows), shared between a curves view and a table view. */
+    selected?: number[];
+    /** The class under the pointer or keyboard focus in the table. */
+    hovered?: number | null;
   } = $props();
+  /** The plot's box when it fills its panel: the chart is drawn at that height. */
+  let plotH = $state(0);
 
   // Phones get a shorter plot so the table (the legend) starts on the first screen.
   const phoneQuery = new MediaQuery(media.phone, false);
@@ -50,8 +63,6 @@
   const many = $derived(classes.length > 10);
   const order = $derived(ev.perClass.map((c) => c).sort((a, b) => (many ? b.instances - a.instances : b.ap50 - a.ap50)));
 
-  let hovered = $state<number | null>(null);
-  let selected = $state<number[]>([]);
   const toggle = (i: number) => (selected = selected.includes(i) ? selected.filter((x) => x !== i) : [...selected, i]);
   /** Phones: the classes whose details row is open (apart from tracing). */
   let opened = $state<number[]>([]);
@@ -130,7 +141,7 @@
       {#if view === 'curves'}
         {#if selected.length}
           <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
-        {:else if hovered === null}
+        {:else if hovered === null && narrow}
           <span class="hint">Tap a class in Classes to trace its curve.</span>
         {/if}
       {/if}
@@ -138,10 +149,10 @@
         <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show the band' : `All ${classes.length} curves`}</button>
       {/if}
     </div>
-    <div class="plot">
+    <div class="plot" class:fill bind:clientHeight={plotH}>
       <LineChart
         {series}
-        height={narrow ? 220 : 300}
+        height={narrow ? 220 : fill ? Math.max(300, plotH - 24) : 300}
         xDomain={[0, 1]}
         yDomain={[0, 1]}
         xFormat={(x) => x.toFixed(1)}
@@ -369,6 +380,17 @@
   /* Class curves are 1 px hairlines; the mean and the highlighted classes 2 px. */
   .plot {
     padding: var(--space-2) var(--space-4) var(--space-4);
+  }
+  /* Filling a stretched panel: the box takes the height left (its 8 + 16 px padding around the chart), and the chart,
+     drawn at that height, sits out of flow so it never feeds back into the box it measures. */
+  .plot.fill {
+    flex: 1;
+    position: relative;
+    min-height: 324px;
+  }
+  .plot.fill > :global(*) {
+    position: absolute;
+    inset: var(--space-2) var(--space-4) var(--space-4);
   }
   .plot :global(path.line) {
     stroke-width: 1;

@@ -55,11 +55,8 @@
   }
   .card {
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
-  }
-  :global([data-theme='light']) .card {
-    border-color: var(--line-default);
   }
   /* Muted and still: placeholder blocks with no shimmer; the labels keep their contrast (they are still text). */
   .card :global(.sk) {

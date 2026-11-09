@@ -441,12 +441,9 @@
 <style>
   .metrics {
     background: var(--bg-panel);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     min-width: 0;
-  }
-  :global([data-theme='dark']) .metrics {
-    border-color: var(--line-subtle);
   }
   .strip {
     display: grid;

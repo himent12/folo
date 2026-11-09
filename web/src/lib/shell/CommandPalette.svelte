@@ -32,6 +32,11 @@
     group: string;
     label: string;
     hint?: string;
+    /**
+     * The hint restates what the label already says (an action's description), where other hints are facts about the
+     * entity (status, model, size). Phones, short of width, leave it out instead of cutting it to a fragment.
+     */
+    describes?: boolean;
     keys?: string;
     icon: IconType;
     /** Other phrasings it answers to (commands.rank). */
@@ -130,6 +135,7 @@
         group: 'Actions',
         label: `New run on ${x.name}`,
         hint: 'Train a detector on this dataset',
+        describes: true,
         match: [x.name, `Train ${x.name}`],
         scoped: true,
         icon: Plus,
@@ -140,6 +146,7 @@
         group: 'Actions',
         label: `Open ${x.name} in Playground`,
         hint: 'Run it on an image',
+        describes: true,
         match: [x.name, `Playground ${x.name}`, `Try ${x.name}`],
         scoped: true,
         icon: ScanSearch,
@@ -252,7 +259,7 @@
             <span class="label">
               {#each highlight(query, item.label) as part, k (k)}{#if part.m}<mark>{part.s}</mark>{:else}{part.s}{/if}{/each}
             </span>
-            {#if item.hint}<span class="hint">{item.hint}</span>{/if}
+            {#if item.hint}<span class="hint" class:describes={item.describes}>{item.hint}</span>{/if}
             <!-- Every hint here is a single key: none while those are off (Settings). -->
             {#if item.keys && keyPrefs.singleKeys}<Kbd keys={item.keys} subtle />{/if}
           </li>
@@ -332,12 +339,13 @@
   .group:not(:first-child) {
     margin-top: var(--space-1);
   }
+  /* A long name wraps to a second line (the row grows) instead of losing its end; the hint gives way first. */
   .item {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    height: 36px;
-    padding: 0 12px;
+    min-height: 36px;
+    padding: var(--space-2) 12px;
     border-radius: var(--radius-md);
     color: var(--text-secondary);
     cursor: pointer;
@@ -349,10 +357,12 @@
   .item.on :global(svg) {
     color: var(--accent-text);
   }
+  .item > :global(svg) {
+    flex-shrink: 0;
+  }
   .label {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   /* Matched characters: ink and weight only. Lime is not decoration (it means focus, live or the one action). */
   mark {
@@ -404,7 +414,7 @@
   }
   @media (pointer: coarse) {
     .item {
-      height: 44px;
+      min-height: 44px;
     }
   }
   @media (max-width: 767px) {
@@ -424,6 +434,9 @@
       margin-top: var(--space-3);
     }
     footer {
+      display: none;
+    }
+    .hint.describes {
       display: none;
     }
   }

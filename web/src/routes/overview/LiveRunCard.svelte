@@ -17,6 +17,7 @@
   import Stat from '$lib/ui/Stat.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
+  import Ident from '$lib/ui/Ident.svelte';
 
   /** `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. */
   let { run: initial, dataset }: { run: Run | null; dataset?: Dataset } = $props();
@@ -72,7 +73,7 @@
     <p class="meta">
       {#if run}
         <span>{dataset?.name ?? run.config.dataset_id}</span><span class="sep">·</span>
-        <span class="mono">{run.config.arch}</span><span class="sep">·</span>
+        <Ident value={run.config.arch} /><span class="sep">·</span>
         <span>{run.config.imgsz} px · batch {run.config.batch}</span><span class="sep">·</span>
         <span class="truncate num">{deviceText}</span>
       {:else}
@@ -136,12 +137,9 @@
   .card {
     position: relative;
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
-  }
-  :global([data-theme='light']) .card {
-    border-color: var(--line-default);
   }
   header {
     display: grid;

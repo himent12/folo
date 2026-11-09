@@ -21,6 +21,7 @@
   import { isOom, oomDetail, oomFixes, retryPath } from '$lib/oom';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import Callout from './Callout.svelte';
   import { plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
 
@@ -59,7 +60,7 @@
   <!-- Out of memory blocks any run: its fix stays the action; a schedule warning joins as the second line, its fix and
        reasons behind More fixes. -->
   <Callout tone="danger" icon={TriangleAlert} title="Ran out of GPU memory" role="alert" stack moreLabel="More fixes" also={short}>
-    Batch {run.config.batch} at {run.config.imgsz} px with <span class="mono">{run.config.arch}</span> did not fit, at epoch {run.epoch}.
+    Batch {run.config.batch} at {run.config.imgsz} px with <Ident value={run.config.arch} /> did not fit, at epoch {run.epoch}.
     {#snippet actions()}
       {#if fixes[0]}
         <Button size="sm" variant="primary" icon={RotateCcw} href={href(retryPath(run.id, fixes[0]))}>{fixes[0].label}</Button>

@@ -1,5 +1,16 @@
 /* Reset, base typography and a few global utilities. Component styles live in their components. */
 
+/* The outer edge of every panel-like surface (ui/Panel, KPI strips, Health, cards, folds, their skeletons): line.default
+   in light, line.subtle in dark (design/README.md, Lines). One alias, so no panel draws a different edge. A strip that
+   paints its hairline dividers with a line-coloured background clips that background to its padding box, or the
+   translucent edge composites over it and reads darker than its neighbours. */
+:root {
+  --line-panel: var(--line-default);
+}
+:root[data-theme='dark'] {
+  --line-panel: var(--line-subtle);
+}
+
 *,
 *::before,
 *::after {
@@ -129,6 +140,14 @@ table {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 0.94em;
+}
+
+/* A model, checkpoint or run identifier (ui/Ident, always `.mono`); as a link it keeps the text colour it sits in and
+   underlines on hover, like every link (DESIGN_DIRECTION §2.6). */
+a.ident:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--line-strong);
 }
 
 /* Class swatches (any `.sw`): the palette hue plus a hairline edge so pale hues hold on light surfaces. */

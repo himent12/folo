@@ -82,6 +82,13 @@ describe('CommandPalette actions on entities', () => {
     expect(go).toHaveBeenCalledWith(expect.stringMatching(/^\/playground\?model=/));
   });
 
+  it("marks an action's description as dispensable (phones leave it out) and keeps entity facts", async () => {
+    await openWith('fasteners');
+    const hint = (id: string) => document.querySelector<HTMLElement>(`#${id} .hint`)!;
+    expect(hint('pi-act-train-ds_fasteners').classList.contains('describes')).toBe(true);
+    expect(hint('pi-ds-ds_fasteners').classList.contains('describes')).toBe(false);
+  });
+
   it('answers to "toggle theme"', async () => {
     await openWith('toggle theme', '#pi-theme');
     expect(options()[0]).toMatch(/^Switch theme/);

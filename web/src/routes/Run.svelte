@@ -24,6 +24,7 @@
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import ConfigPanel from './run/ConfigPanel.svelte';
   import Logs from './run/Logs.svelte';
@@ -65,11 +66,7 @@
   const section = $derived<Section>(picked ?? (queuedOnly ? 'config' : 'samples'));
   const models = new Resource((s) => hub.api.models(s));
   /** Where the run started: "From scratch", or the model / file it was fine-tuned from (one reading, $lib/lineage). */
-  const lineage = $derived.by(() => {
-    if (!run) return '';
-    const o = origin(run.config.weights, models.data ?? []);
-    return o.kind === 'scratch' ? 'From scratch' : `Fine-tuned from ${o.label}`;
-  });
+  const lineage = $derived(run ? origin(run.config.weights, models.data ?? []) : null);
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
   let busy = $state(false);
@@ -204,17 +201,17 @@
   <Page title={run.name} inlineActions>
     {#snippet lead()}
       <StatusBadge status={run.status} />
-      <span class="mono faint id">{run.id}</span>
+      <Ident value={run.id} class="faint id" />
       <!-- Phones: the time joins the status, so the meta line below fits one row. -->
       <span class="faint when-phone">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
       {#if live.connection === 'reconnecting'}<Badge tone="warning"><WifiOff size={12} /> Reconnecting</Badge>{/if}
     {/snippet}
     {#snippet sub()}
       <a class="link" href={href(`/datasets/${run.config.dataset_id}`)}>{dataset?.name ?? run.config.dataset_id}</a>
-      <span class="mono">{run.config.arch}</span>
+      <Ident value={run.config.arch} />
       <!-- Phones: size, batch and device are in the Config section; the id is in the URL. -->
       <span class="cfg">{run.config.imgsz} px · batch {run.config.batch}</span>
-      <span class="cfg lineage">{lineage}</span>
+      <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Ident value={lineage.label} title={lineage.kind === 'file' ? lineage.path : undefined} />{/if}</span>
       <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
       <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
     {/snippet}
@@ -315,7 +312,7 @@
   }
   .sk-metrics {
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -368,7 +365,7 @@
   }
   .sk-panel {
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
   }
@@ -464,7 +461,7 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
-  .id {
+  :global(.ident.id) {
     font-size: var(--type-sm-size);
   }
   .when-phone {
@@ -563,8 +560,8 @@
     }
     .dev,
     .cfg,
-    .id,
-    .when {
+    .when,
+    :global(.ident.id) {
       display: none;
     }
     .when-phone {

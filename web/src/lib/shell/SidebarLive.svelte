@@ -56,13 +56,10 @@
     padding: 12px;
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
-    border: 1px solid var(--line-subtle);
+    border: 1px solid var(--line-panel);
     transition:
       border-color var(--dur-fast) var(--ease-standard),
       background-color var(--dur-fast) var(--ease-standard);
-  }
-  :global([data-theme='light']) .card {
-    border-color: var(--line-default);
   }
   .card:hover {
     border-color: var(--line-strong);

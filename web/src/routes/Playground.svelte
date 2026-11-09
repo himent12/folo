@@ -1481,7 +1481,7 @@
     order: 3;
   }
   .disc {
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
   }

@@ -26,11 +26,12 @@
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
+  import Ident from '$lib/ui/Ident.svelte';
   import { cmIndex, rankConfusions, type ConfusionEntry } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
   import { origin } from '$lib/lineage';
   import PrCurves from './model/PrCurves.svelte';
-  import { MODEL_SECTIONS, prView, sectionShown, type ModelSection } from './model/sections';
+  import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/sections';
   import { media } from '$lib/design/tokens';
 
   const id = $derived(router.route.params.id ?? '');
@@ -162,6 +163,9 @@
 
   // Phones: a class's "View curve" (in Classes) shows its traced curve, with a way back to the class it came from.
   let backTo = $state<number | null>(null);
+  // The classes traced (clicked) and pointed at in the per-class table, drawn in the curves' panel.
+  let prSelected = $state<number[]>([]);
+  let prHovered = $state<number | null>(null);
   $effect(() => {
     if (section !== 'curves') backTo = null;
   });
@@ -176,7 +180,7 @@
     const cls = backTo;
     section = 'classes';
     await tick();
-    const row = document.querySelector<HTMLElement>(`#pr .disc[data-cls="${cls}"]`);
+    const row = document.querySelector<HTMLElement>(`#per-class .disc[data-cls="${cls}"]`);
     row?.focus({ preventScroll: true });
     row?.scrollIntoView({ block: 'center', behavior: smooth() });
   }
@@ -212,7 +216,7 @@
   <Page title="Model">
     {#snippet sub()}<Skeleton w="320px" h="14px" />{/snippet}
     <Skeleton h="106px" r="var(--radius-lg)" />
-    <div class="detail"><Skeleton h="560px" r="var(--radius-lg)" /><Skeleton h="380px" r="var(--radius-lg)" /></div>
+    <div class="detail"><Skeleton h="480px" r="var(--radius-lg)" /><Skeleton h="480px" r="var(--radius-lg)" /></div>
   </Page>
 {:else}
   {@const m = model.data}
@@ -222,12 +226,19 @@
     <!-- Where the weights started: the run's `weights`, a model (linked), an imported file, or nothing. -->
     {#if lineage?.kind === 'model'}
       {@const lid = lineage.id}
-      <span>fine-tuned from <a class="link" href={href(`/models/${encodeURIComponent(lid)}`)}>{context.data?.parent?.name ?? lid}</a></span>
+      <span>fine-tuned from <Ident value={context.data?.parent?.name ?? lid} class="link" href={href(`/models/${encodeURIComponent(lid)}`)} /></span>
     {:else if lineage?.kind === 'file'}
-      <span>fine-tuned from <span class="mono" title={lineage.path}>{lineage.label}</span></span>
+      <span>fine-tuned from <Ident value={lineage.label} title={lineage.path} /></span>
     {:else if lineage?.kind === 'scratch'}
       <span>from scratch</span>
     {/if}
+  {/snippet}
+  {#snippet kHelp()}
+    <!-- What the four numbers mean: one place in every layout, after the strip's first label (the strip and the phone's
+         2 × 2 grid alike), so it never lands on whichever cell happens to be last or top-right. -->
+    <button type="button" class="k-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
+      ><Info size={14} aria-hidden="true" /></button
+    >
   {/snippet}
   {#snippet metricHelp()}
     <dl class="k-body" id="metric-help">
@@ -266,7 +277,7 @@
     {#snippet sub()}
       {#if phone.current}
         <button type="button" class="meta-line num" aria-expanded={metaOpen} aria-controls="model-meta" onclick={() => (metaOpen = !metaOpen)}>
-          <span class="truncate"><span class="mono">{m.arch}</span> · {m.classes.length} classes · {m.imgsz} px</span>
+          <span class="truncate"><Ident value={m.arch} /> · {m.classes.length} classes · {m.imgsz} px</span>
           <ChevronDown size={14} aria-hidden="true" />
         </button>
         {#if metaOpen}
@@ -276,7 +287,7 @@
           </div>
         {/if}
       {:else}
-        <span class="mono">{m.arch}</span>
+        <Ident value={m.arch} />
         <span class="num">{m.classes.length} classes · {m.imgsz} px · {bytes(m.bytes, prefs.units)}</span>
         {@render provenance()}
       {/if}
@@ -298,28 +309,22 @@
         <dl class="kg">
           {#each kpis(m) as k, i (k.label)}
             <div class="kg-cell" class:hero={i === 0}>
-              <dt>{k.label}</dt>
+              <dt>{k.label}{#if i === 0}{@render kHelp()}{/if}</dt>
               <dd>{metric(k.value)}</dd>
             </div>
           {/each}
         </dl>
-        <button type="button" class="kg-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
-          ><Info size={14} aria-hidden="true" /></button
-        >
         {#if helpOpen}{@render metricHelp()}{/if}
       </section>
     {:else}
     <section class="kpis" aria-label="Validation metrics">
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
-          <span class="k-label">{k.label}</span>
+          <span class="k-label"><span class="truncate">{k.label}</span>{#if i === 0}{@render kHelp()}{/if}</span>
           <span class="k-value num">{metric(k.value)}</span>
           <span class="k-sub">{k.sub}</span>
         </div>
       {/each}
-      <button type="button" class="k-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
-        ><Info size={14} aria-hidden="true" /></button
-      >
       {#if helpOpen}{@render metricHelp()}{/if}
     </section>
     {/if}
@@ -331,22 +336,22 @@
       </div>
     {/if}
 
-    <!-- Evidence in the main column, reference in a sticky rail. -->
+    <!-- Evidence beside reference: the curves (8 columns) and the Details rail (4) stretch to one height, the plot
+         taking what the rail adds; the per-class table, the curves' legend, follows in a row of its own. Up to 1199 px
+         the table follows the curves and the details fold into one line under it. Both PR panels share the traced and
+         pointed-at classes. -->
     <div class="detail" class:off={!showing('curves') && !showing('classes') && !showing('details')}>
-      <div class="main-col" class:off={!showing('curves') && !showing('classes')}>
-        <Panel
-          title={phone.current && section === 'classes' ? 'Per class' : 'Precision–recall'}
-          meta={phone.current && section === 'classes' ? `${m.classes.length} classes · IoU 0.5` : 'precision by recall · IoU 0.5'}
-          pad="none"
-          id="pr"
-        >
+      <div class="main-col" class:off={!showing('curves')}>
+        <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
           {#if ev}
             <PrCurves
               classes={m.classes}
               {ev}
               map50={m.metrics?.map50 ?? null}
-              view={prView(phone.current, section)}
-              onviewcurve={phone.current ? viewCurve : undefined}
+              view="curves"
+              fill={!narrow.current}
+              bind:selected={prSelected}
+              bind:hovered={prHovered}
               onback={backTo !== null ? backToClasses : undefined}
             />
           {:else if evaluation.error}
@@ -356,13 +361,37 @@
           {/if}
         </Panel>
       </div>
+      <div class="cls-part" class:off={!showing('classes')}>
+        <Panel title="Per class" meta="{m.classes.length} classes · IoU 0.5" pad="none" id="per-class">
+          {#if ev}
+            <PrCurves
+              classes={m.classes}
+              {ev}
+              map50={m.metrics?.map50 ?? null}
+              view="classes"
+              bind:selected={prSelected}
+              bind:hovered={prHovered}
+              onviewcurve={phone.current ? viewCurve : undefined}
+            />
+          {:else if evaluation.error}
+            <!-- The failure is said once, in the curves' panel (or here on a phone, where that panel is another section). -->
+            {#if phone.current}
+              <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+            {:else}
+              <p class="quiet">The per-class figures show once the evaluation loads.</p>
+            {/if}
+          {:else}
+            <div class="sk">{#each [0, 1, 2, 3, 4, 5] as i (i)}<Skeleton h="16px" />{/each}</div>
+          {/if}
+        </Panel>
+      </div>
 
       <aside class="rail" class:off={!showing('details')} aria-label="Model details">
         {#snippet detailList(two: boolean)}
           <dl class="details" class:two id="model-details">
             <div class="kv">
               <dt>Architecture</dt>
-              <dd class="mono">{m.arch}</dd>
+              <dd><Ident value={m.arch} /></dd>
             </div>
             <div class="kv">
               <dt>Input size</dt>
@@ -421,9 +450,9 @@
                 <dt>Started from</dt>
                 <dd>
                   {#if lineage.kind === 'model'}
-                    <a class="link" href={href(`/models/${encodeURIComponent(lineage.id)}`)}>{context.data?.parent?.name ?? lineage.id}</a>
+                    <Ident value={context.data?.parent?.name ?? lineage.id} class="link" href={href(`/models/${encodeURIComponent(lineage.id)}`)} />
                   {:else if lineage.kind === 'file'}
-                    <span class="mono" title={lineage.path}>{lineage.label}</span>
+                    <Ident value={lineage.label} title={lineage.path} />
                   {:else}
                     <span class="muted">From scratch</span>
                   {/if}
@@ -432,7 +461,7 @@
             {/if}
             <div class="kv">
               <dt>Model id</dt>
-              <dd class="mono muted">{m.id}</dd>
+              <dd><Ident value={m.id} class="muted" /></dd>
             </div>
             <div class="kv">
               <dt>Created</dt>
@@ -445,9 +474,9 @@
               <dd class="latency">
                 {#if latency(m) !== undefined}
                   <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                  <span class="faint"><span class="mono">{m.arch}</span> · 640 px · RTX 4080 SUPER · end to end</span>
+                  <span class="faint"><Ident value={m.arch} /> · 640 px · RTX 4080 SUPER · end to end</span>
                 {:else}
-                  <span class="faint">Not measured for <span class="mono">{m.arch}</span> yet</span>
+                  <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
                 {/if}
               </dd>
             </div>
@@ -460,7 +489,7 @@
           <Panel pad="none" id="details">
             <button type="button" class="d-line" aria-expanded={detailsOpen} aria-controls="model-details" onclick={() => (detailsOpen = !detailsOpen)}>
               <span class="d-sum num truncate">
-                <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px<span class="sep" aria-hidden="true">·</span
+                <Ident value={m.arch} /><span class="sep" aria-hidden="true">·</span>{m.imgsz} px<span class="sep" aria-hidden="true">·</span
                 >{num(m.flops_g, 1)} GFLOPs<span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
               </span>
               <span class="d-verb">Details <ChevronRight size={14} aria-hidden="true" /></span>
@@ -522,57 +551,60 @@
           {#if phone.current}
             <button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Confusions and misses</button>
           {/if}
-          <!-- The matrix at its own size (cells up to 72 px) with a sticky 4-column rail beside it: what goes wrong most,
-               ranked (each line shows its cell), and how to read the matrix. Up to 1199 px the rail follows the matrix,
-               its two lists side by side. Phones lead with the matrix alone: the lists are the step back. -->
+          <!-- The matrix at its own size (cells up to 48 px) with a sticky rail beside it taking the rest of the width:
+               what goes wrong most, ranked (each line shows its cell), and how to read the matrix. With under 300 px
+               left beside the matrix the rail wraps under it; a rail 560 px or wider sets its two lists side by side.
+               Phones lead with the matrix alone: the lists are the step back. -->
           <div class="cm-layout">
-            <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" minCell={32} scale /></div>
+            <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" minCell={32} maxCell={48} scale /></div>
             <div class="cm-rail">
-              {#if !phone.current}
-                {#each ranked as g (g.kind)}
-                  <section class="rl" aria-labelledby="cm-rl-{g.kind}">
-                    <h3 class="rl-h" id="cm-rl-{g.kind}">{g.title}</h3>
-                    <ol>
-                      {#each g.rows as e (`${e.r}-${e.c}`)}
-                        {@const at = cellOf(e)}
-                        <li>
-                          <button
-                            type="button"
-                            class="rl-row"
-                            disabled={!at}
-                            title={at ? 'Show in the matrix' : undefined}
-                            aria-label="{e.kind === 'missed' ? `${m.classes[e.r]} missed` : `${m.classes[e.r]} taken for ${m.classes[e.c]}`}: {num(e.count)} of {num(e.total)}, {sharePct(e.v)}%{at ? '. Show in the matrix' : ''}"
-                            onclick={() => reveal(at)}
-                          >
-                            <span class="rl-what">
-                              <span class="sw" style:background={classInk(e.r)} aria-hidden="true"></span>
-                              {#if e.kind === 'missed'}<b class="truncate">{m.classes[e.r]}</b>{:else}<span class="truncate"><b>{m.classes[e.r]}</b> → <b>{m.classes[e.c]}</b></span>{/if}
-                            </span>
-                            <span class="rl-n num">{num(e.count)} of {num(e.total)}</span>
-                            <span class="rl-pct num">{sharePct(e.v)}%</span>
-                          </button>
-                        </li>
-                      {/each}
-                    </ol>
-                  </section>
-                {/each}
-              {/if}
-              <div class="cm-notes">
-                {#if missed && !phone.current}<p><span class="num strong">{sharePct(missed.v) || '0'}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
-                <p>Each row is one true class, split by what the model predicted for its objects. The diagonal is right;
-                  the background column is objects it missed.</p>
-                <details class="how">
-                  <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
-                  <div class="how-body">
-                    <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5, in whole percentages ("&lt;1"
-                      under half a percent). A cell too small for its number shows a dot instead; hover, tap or focus any cell
-                      for its count. An empty cell had no objects at all.</p>
-                    <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
-                    {#if cm.partial}
-                      <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
-                    {/if}
-                  </div>
-                </details>
+              <div class="rail-in">
+                {#if !phone.current}
+                  {#each ranked as g (g.kind)}
+                    <section class="rl" aria-labelledby="cm-rl-{g.kind}">
+                      <h3 class="rl-h" id="cm-rl-{g.kind}">{g.title}</h3>
+                      <ol>
+                        {#each g.rows as e (`${e.r}-${e.c}`)}
+                          {@const at = cellOf(e)}
+                          <li>
+                            <button
+                              type="button"
+                              class="rl-row"
+                              disabled={!at}
+                              title={at ? 'Show in the matrix' : undefined}
+                              aria-label="{e.kind === 'missed' ? `${m.classes[e.r]} missed` : `${m.classes[e.r]} taken for ${m.classes[e.c]}`}: {num(e.count)} of {num(e.total)}, {sharePct(e.v)}%{at ? '. Show in the matrix' : ''}"
+                              onclick={() => reveal(at)}
+                            >
+                              <span class="rl-what">
+                                <span class="sw" style:background={classInk(e.r)} aria-hidden="true"></span>
+                                {#if e.kind === 'missed'}<b class="truncate">{m.classes[e.r]}</b>{:else}<span class="truncate"><b>{m.classes[e.r]}</b> → <b>{m.classes[e.c]}</b></span>{/if}
+                              </span>
+                              <span class="rl-n num">{num(e.count)} of {num(e.total)}</span>
+                              <span class="rl-pct num">{sharePct(e.v)}%</span>
+                            </button>
+                          </li>
+                        {/each}
+                      </ol>
+                    </section>
+                  {/each}
+                {/if}
+                <div class="cm-notes">
+                  {#if missed && !phone.current}<p><span class="num strong">{sharePct(missed.v) || '0'}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
+                  <p>Each row is one true class, split by what the model predicted for its objects. The diagonal is right;
+                    the background column is objects it missed.</p>
+                  <details class="how">
+                    <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
+                    <div class="how-body">
+                      <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5, in whole percentages ("&lt;1"
+                        under half a percent). A cell too small for its number shows a dot instead; hover, tap or focus any cell
+                        for its count. An empty cell had no objects at all.</p>
+                      <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
+                      {#if cm.partial}
+                        <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+                      {/if}
+                    </div>
+                  </details>
+                </div>
               </div>
             </div>
           </div>
@@ -588,7 +620,8 @@
 {/if}
 
 <style>
-  .link {
+  .link,
+  :global(a.ident.link) {
     color: var(--text-primary);
   }
   .link:hover {
@@ -602,12 +635,10 @@
     grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 1px;
     background: var(--line-subtle);
-    border: 1px solid var(--line-default);
+    background-clip: padding-box;
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     overflow: hidden;
-  }
-  :global([data-theme='dark']) .kpis {
-    border-color: var(--line-subtle);
   }
   .kpi {
     display: grid;
@@ -640,15 +671,23 @@
   .hero .k-label {
     color: var(--text-secondary);
   }
-  /* The help toggle sits in the strip's top-right corner, over the last cell's empty label end. */
+  /* The help toggle follows the first label, on its line: a 20 px box (the row is 16 px tall), with a 44 px target on
+     touch screens. */
+  .k-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+    overflow: visible;
+  }
   .k-help {
-    position: absolute;
-    top: var(--space-3);
-    right: var(--space-3);
-    display: grid;
+    position: relative;
+    flex-shrink: 0;
+    display: inline-grid;
     place-items: center;
-    width: 24px;
-    height: 24px;
+    width: 20px;
+    height: 20px;
+    margin: -2px 0;
     border-radius: var(--radius-sm);
     color: var(--text-tertiary);
   }
@@ -724,13 +763,10 @@
   .kpi-grid {
     position: relative;
     display: grid;
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
     overflow: hidden;
-  }
-  :global([data-theme='dark']) .kpi-grid {
-    border-color: var(--line-subtle);
   }
   .kg {
     display: grid;
@@ -762,22 +798,10 @@
     letter-spacing: var(--type-xl-tracking);
     font-weight: var(--weight-semibold);
   }
-  .kg-help {
-    position: absolute;
-    top: 0;
-    right: 0;
-    display: grid;
-    place-items: center;
-    width: 44px;
-    height: 44px;
-    color: var(--text-tertiary);
-  }
-  .kg-help:hover,
-  .kg-help[aria-expanded='true'] {
-    color: var(--text-primary);
-  }
-  .kg-help:focus-visible {
-    outline-offset: -4px;
+  .kg dt {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
   }
   .kpi-grid .k-body {
     border-top: 1px solid var(--line-subtle);
@@ -864,22 +888,34 @@
   .to-list:hover {
     color: var(--text-primary);
   }
-  /* The rail is as tall as its content and sticks under the top bar while the long class table scrolls past. */
+  /* Curves (8) and Details (4) in one row, stretched to one height (DESIGN_DIRECTION §2.2); the per-class table under
+     both. Each column's single panel fills its grid cell. */
   .detail {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-    align-items: start;
+    grid-template-areas: 'pr rail' 'cls cls';
     gap: var(--space-4);
   }
-  .main-col,
+  .main-col {
+    grid-area: pr;
+  }
   .rail {
+    grid-area: rail;
+  }
+  .cls-part {
+    grid-area: cls;
+  }
+  .main-col,
+  .rail,
+  .cls-part {
     display: grid;
     gap: var(--space-4);
     min-width: 0;
   }
-  .rail {
-    position: sticky;
-    top: calc(var(--size-topbar) + var(--space-4));
+  .quiet {
+    padding: 0 var(--space-4) var(--space-4);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
   /* Phones: the sections the picker is not showing. */
   .cm-part {
@@ -910,45 +946,40 @@
     gap: var(--space-2);
     padding: 0 var(--space-4) var(--space-4);
   }
-  .cm-main {
-    grid-area: main;
-    min-width: 0;
-  }
-  /* The matrix takes the width its cells want (up to 72 px each); the rail follows 32 px after it and takes the rest
-     (about 4 of the 12 columns, at least 320 px), sticking under the top bar while a tall matrix scrolls past. A large
-     matrix shrinks its cells before the rail drops under 320 px. */
+  /* The matrix takes the width its cells want (up to 48 px each); the rail follows 32 px after it and takes the rest,
+     sticking under the top bar while a tall matrix scrolls past. Where under 300 px would be left beside the matrix
+     (many classes at the laptop tier, phones), the rail wraps under it at full width instead of squeezing the cells. */
   .cm-layout {
-    display: grid;
-    grid-template-columns: minmax(0, max-content) minmax(320px, 1fr);
-    grid-template-areas: 'main rail';
+    display: flex;
+    flex-wrap: wrap;
     gap: var(--space-4) var(--space-8);
-    align-items: start;
+    align-items: flex-start;
+  }
+  .cm-main {
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
   }
   .cm-rail {
-    grid-area: rail;
+    flex: 1 1 300px;
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
+    min-width: 0;
+    container: cm-rail / inline-size;
+  }
+  .rail-in {
     display: grid;
     gap: var(--space-5);
-    min-width: 0;
   }
-  @media (max-width: 1279px) {
-    .cm-layout {
-      grid-template-columns: minmax(0, 1fr);
-      grid-template-areas: 'main' 'rail';
-    }
-    .cm-rail {
-      position: static;
+  /* Room for two lists (a wide rail beside a small matrix, or the rail under the matrix): side by side, the notes
+     under both. */
+  @container cm-rail (min-width: 560px) {
+    .rail-in {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: var(--space-4) var(--space-8);
     }
-    .cm-rail .cm-notes {
+    .rail-in .cm-notes {
       grid-column: 1 / -1;
-    }
-  }
-  @media (max-width: 767px) {
-    .cm-rail {
-      grid-template-columns: minmax(0, 1fr);
     }
   }
   /* A ranked list: 32 px rows (the pair, its counts, its share); each line shows its cell in the matrix. */
@@ -1117,7 +1148,7 @@
     min-width: 0;
     color: var(--text-secondary);
   }
-  .d-sum .mono {
+  .d-sum :global(.ident) {
     color: var(--text-primary);
   }
   .sep {
@@ -1197,18 +1228,14 @@
   @media (max-width: 1023px) {
     .detail {
       grid-template-columns: minmax(0, 1fr);
-      align-items: start;
-    }
-    .rail {
-      position: static;
+      grid-template-areas: 'pr' 'cls' 'rail';
     }
   }
   @media (pointer: coarse) {
-    .k-help {
-      top: 0;
-      right: 0;
-      width: 44px;
-      height: 44px;
+    .k-help::after {
+      content: '';
+      position: absolute;
+      inset: -12px;
     }
   }
   @media (max-width: 767px) {
