@@ -73,7 +73,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   server (`folo serve --tensor-cores` / `FOLO_GPU_TENSOR_CORES=1`, and the start-up self-test passed); `reason`:
   why not, exactly as `folo doctor` prints it (`off (not requested: ...)`, `off: <adapter> (<backend>) has no
   cooperative matrices in wgpu`, `off: the tensor-core self-test failed (...)`, ...), `null` when enabled.
-  `amp.available`: a run with `"amp": true` can start, the trainer's own check (`folo_vision::train::amp_support`)
+  `amp.available`: a run with `"amp": true` can start, the trainer's own check (`folo_vision::train::amp_support`, without its side effect)
   for that device; `amp.reason` is the `not_supported` message such a run would fail with, `null` when available.
   Every field has a default, so clients parse objects from older and newer servers; servers older than this field
   leave out `capabilities`. Studio and Desktop can disable the Mixed precision switch when `amp.available` is

@@ -31,10 +31,16 @@ async fn real_capabilities_match_the_trainer() {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let home = TempDir(std::env::temp_dir().join(format!("folo-real-system-{}-{nanos}", std::process::id())));
     let app = Server::new(Arc::new(RealStore::open(home.0.clone())), Options::default()).router();
-    let res = app.oneshot(Request::get("/api/system").body(Body::empty()).unwrap()).await.unwrap();
-    assert!(res.status().is_success());
-    let raw: Value = serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
-    let c: Capabilities = serde_json::from_value(raw["capabilities"].clone()).expect("capabilities");
+    let system = || async {
+        let res =
+            app.clone().oneshot(Request::get("/api/system").body(Body::empty()).unwrap()).await.unwrap();
+        assert!(res.status().is_success());
+        let raw: Value =
+            serde_json::from_slice(&res.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let c: Capabilities = serde_json::from_value(raw["capabilities"].clone()).expect("capabilities");
+        (raw, c)
+    };
+    let (raw, c) = system().await;
     eprintln!("capabilities: {c:?}");
     for k in ["device", "shader_f16", "tensor_cores", "amp"] {
         assert!(raw["capabilities"].get(k).is_some(), "{k} missing: {raw}");
@@ -69,6 +75,18 @@ async fn real_capabilities_match_the_trainer() {
             let no_f16 = std::env::var("FOLO_GPU_NO_F16").is_ok_and(|v| v != "0" && !v.is_empty());
             if qualifies && !no_f16 {
                 assert!(c.tensor_cores.enabled && c.amp.available, "{c:?}");
+                // Reading capabilities changes nothing: tensor cores switched off at run time stay off (and
+                // `amp` stays available, since a run switches them back on).
+                ctx.set_tensor_cores(false);
+                let (_, off) = system().await;
+                assert!(!ctx.tensor_cores(), "a GET switched the tensor cores back on");
+                assert!(
+                    !off.tensor_cores.enabled && off.tensor_cores.available && off.amp.available,
+                    "{off:?}"
+                );
+                assert_eq!(off.tensor_cores.reason.as_deref(), Some("off (switched off at run time)"));
+                folo_vision::train::amp_support(device).unwrap();
+                assert!(ctx.tensor_cores(), "an amp run switches them on");
             } else {
                 assert!(
                     !c.amp.available && c.amp.reason.as_deref().unwrap().contains("tensor cores"),

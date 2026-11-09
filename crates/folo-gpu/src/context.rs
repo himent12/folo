@@ -617,6 +617,12 @@ impl GpuContext {
         on
     }
 
+    /// Whether [`GpuContext::set_tensor_cores`]`(true)` would turn the tensor-core kernels on (they are on, or
+    /// were only switched off at run time), without changing anything.
+    pub fn can_enable_tensor_cores(&self) -> bool {
+        self.inner.caps.coop_f16 && *self.inner.tensor_cores_status.lock().expect("status lock") == "on"
+    }
+
     /// `"on"`, or why the tensor-core kernels are off (not requested, unsupported adapter, failed self-test, a
     /// kernel that did not build, or switched off with [`GpuContext::set_tensor_cores`]).
     pub fn tensor_cores_status(&self) -> String {

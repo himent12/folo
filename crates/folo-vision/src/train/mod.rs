@@ -141,12 +141,24 @@ pub const MAX_AMP_SKIPS: usize = 50;
 /// else is `not_supported`, naming why: the f16 gradient kernels exist without tensor cores too, but they bring no
 /// speed (on Ada, non-tensor f16 arithmetic is no faster than f32), so AMP refuses to run there.
 pub fn amp_support(device: Device) -> Result<()> {
+    amp_check(device, true)
+}
+
+/// [`amp_support`]'s answer without switching anything on: what `/api/system` reports before a run (a context
+/// whose tensor cores were switched off at run time qualifies, since a run switches them back on).
+pub fn amp_available(device: Device) -> Result<()> {
+    amp_check(device, false)
+}
+
+fn amp_check(device: Device, activate: bool) -> Result<()> {
     let why = if device.is_cpu() {
         "the run is on the CPU".to_string()
     } else {
         match folo_gpu::context_for(device) {
             None => format!("{device} has no folo-gpu context"),
-            Some(ctx) if ctx.caps().coop_f16 && ctx.set_tensor_cores(true) => return Ok(()),
+            Some(ctx) if ctx.can_enable_tensor_cores() && (!activate || ctx.set_tensor_cores(true)) => {
+                return Ok(());
+            }
             Some(ctx) => format!("{device} has tensor cores {}", ctx.tensor_cores_status()),
         }
     };

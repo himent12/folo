@@ -1338,7 +1338,10 @@ impl Inner {
                         threads: host.cpu_threads,
                         memory_bytes: host.memory_total_bytes,
                     };
-                    (cpu, store.gpus(), store.capabilities())
+                    // Capabilities first, as `/api/system` does: they create the GPU context, and `gpus()` (cached
+                    // on first use) puts the context's adapter at ordinal 0 only once it exists.
+                    let caps = store.capabilities();
+                    (cpu, store.gpus(), caps)
                 })
                 .await
                 .map(|(cpu, gpus, caps)| (cpu, gpus, Some(folo_api::json::path(&self.paths.data_dir)), caps))

@@ -169,7 +169,8 @@ pub fn gpus() -> Vec<GpuInfo> {
 /// [`resolve`] (so this registers the GPU backend on first use, as a run would); `shader_f16` is
 /// [`f16_unavailable`] (what f16 inference falls back on), tensor cores come from the device's folo-gpu context
 /// (`reason` is its status, the line `folo doctor` prints), and `amp` is the trainer's own
-/// [`folo_vision::train::amp_support`] answer for that device.
+/// [`folo_vision::train::amp_support`] answer for that device ([`folo_vision::train::amp_available`]: the same check
+/// without switching tensor cores back on, so a read changes nothing).
 pub fn capabilities() -> Capabilities {
     let device = resolve("auto").unwrap_or(Device::Cpu);
     let ctx = (!device.is_cpu()).then(|| folo_gpu::context_for(device)).flatten();
@@ -191,8 +192,8 @@ pub fn capabilities() -> Capabilities {
             }),
         },
     };
-    // Only `amp_support` decides; its `not_supported` message is the reason.
-    let amp = match folo_vision::train::amp_support(device) {
+    // Only the trainer's check decides; its `not_supported` message is the reason.
+    let amp = match folo_vision::train::amp_available(device) {
         Ok(()) => AmpSupport { available: true, reason: None },
         Err(e) => AmpSupport { available: false, reason: Some(e.to_string()) },
     };
