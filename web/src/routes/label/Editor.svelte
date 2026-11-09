@@ -112,7 +112,7 @@
     status.clear();
     try {
       const saved = await hub.api.updateLabelImage(job.id, img.id, draft.map(tidy));
-      live.put(saved);
+      live.put([saved], live.mark());
       base = saved.boxes;
       draft = saved.boxes;
       status.success('Saved', imageState(saved));

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HttpApi } from './client';
+import { ApiError, HttpApi } from './client';
 import type { LabelImagesAdded, LabelJob } from './types';
-import { chunkFiles, mergeAdded } from './upload';
+import { chunkFiles, mergeAdded, UploadIncomplete } from './upload';
 
 const MiB = 2 ** 20;
 const sized = (...mib: number[]) => mib.map((m, i) => ({ name: `f${i}`, size: m * MiB }));
@@ -52,5 +52,29 @@ describe('HttpApi.addLabelImages', () => {
     expect(progress).toEqual([50, 60]);
     expect(r.added).toHaveLength(60);
     expect(r.job.counts.images).toBe(2);
+  });
+
+  it('keeps what the first requests added when a later one fails, with how many files were not sent and why', async () => {
+    let n = 0;
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      if (++n === 2) return new Response(JSON.stringify({ error: { code: 'payload_too_large', message: 'the request is too large' } }), { status: 413 });
+      const added = (init.body as FormData).getAll('image').map((f, i) => ({ id: `${i}`, file: (f as File).name }));
+      return new Response(JSON.stringify({ added, skipped: [{ file: 'x.txt', reason: 'not a readable image' }], job: { id: 'lb_1' } }), { status: 201 });
+    });
+    const files = Array.from({ length: 60 }, (_, i) => new File(['x'], `${i}.jpg`, { type: 'image/jpeg' }));
+    const e = await new HttpApi('').addLabelImages('lb_1', files).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(UploadIncomplete);
+    const inc = e as UploadIncomplete;
+    expect(inc.added.added).toHaveLength(50);
+    expect(inc.added.skipped).toEqual([{ file: 'x.txt', reason: 'not a readable image' }]);
+    expect(inc.unsent).toBe(10);
+    expect(inc.cause).toBeInstanceOf(ApiError);
+    expect(inc.message).toMatch(/too large/);
+  });
+
+  it("throws the first request's own failure as is: nothing was added", async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ error: { code: 'label_job_not_found', message: 'no job' } }), { status: 404 }));
+    const e = await new HttpApi('').addLabelImages('lb_1', [new File(['x'], 'a.jpg')]).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ApiError);
   });
 });

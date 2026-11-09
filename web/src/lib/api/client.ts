@@ -46,7 +46,7 @@ import type {
   UpdateLabelJob,
 } from './types';
 import { LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
-import { chunkFiles, mergeAdded, type UploadProgress } from './upload';
+import { uploadInChunks, type UploadProgress } from './upload';
 
 export class ApiError extends Error {
   constructor(
@@ -150,7 +150,7 @@ export interface Api {
   /**
    * Uploads images (multipart, one `image` part each) in requests of at most ~48 MiB / 50 files (the server takes
    * 64 MiB a request), calling `onprogress` after each. The answers are merged: every file added or skipped, and the
-   * job after the last.
+   * job after the last. A request that fails after others added images throws `UploadIncomplete` with those.
    */
   addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void): Promise<LabelImagesAdded>;
   /** Adds the images of a folder (or one image file) on the server's machine, read in place. */
@@ -357,16 +357,12 @@ export class HttpApi implements Api {
     );
   }
   async addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void) {
-    const parts: LabelImagesAdded[] = [];
-    let sent = 0;
-    for (const chunk of chunkFiles(files)) {
+    const send = (chunk: File[]) => {
       const fd = new FormData();
       for (const f of chunk) fd.append('image', f, f.name);
-      parts.push(await this.#req<LabelImagesAdded>('POST', `/label/jobs/${encodeURIComponent(jobId)}/images`, fd));
-      sent += chunk.length;
-      onprogress?.({ sent, total: files.length });
-    }
-    return mergeAdded(parts) ?? { added: [], skipped: [], job: await this.labelJob(jobId) };
+      return this.#req<LabelImagesAdded>('POST', `/label/jobs/${encodeURIComponent(jobId)}/images`, fd);
+    };
+    return (await uploadInChunks(files, send, onprogress)) ?? { added: [], skipped: [], job: await this.labelJob(jobId) };
   }
   importLabelImages(jobId: string, path: string) {
     return this.#req<LabelImagesAdded>('POST', `/label/jobs/${encodeURIComponent(jobId)}/images`, { path });

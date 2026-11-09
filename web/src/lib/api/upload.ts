@@ -36,6 +36,45 @@ export function mergeAdded(parts: readonly LabelImagesAdded[]): LabelImagesAdded
   return { added: parts.flatMap((p) => p.added), skipped: parts.flatMap((p) => p.skipped), job: last.job };
 }
 
+/**
+ * An upload that stopped part way: a request failed (`cause`) after earlier ones had added images. Those stay in the
+ * job, so the answer so far (`added`) is kept, with how many files were not sent.
+ */
+export class UploadIncomplete extends Error {
+  constructor(
+    readonly added: LabelImagesAdded,
+    readonly unsent: number,
+    override readonly cause: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = 'UploadIncomplete';
+  }
+}
+
+/**
+ * Sends `files` in chunks (`chunkFiles`) one request at a time and merges the answers; null when there were no files.
+ * A request that fails after one that succeeded throws `UploadIncomplete`; the first one's failure is thrown as is.
+ */
+export async function uploadInChunks<F extends { size: number }>(
+  files: readonly F[],
+  send: (chunk: F[]) => Promise<LabelImagesAdded>,
+  onprogress?: (p: UploadProgress) => void,
+): Promise<LabelImagesAdded | null> {
+  const parts: LabelImagesAdded[] = [];
+  let sent = 0;
+  for (const chunk of chunkFiles(files)) {
+    try {
+      parts.push(await send(chunk));
+    } catch (e) {
+      const done = mergeAdded(parts);
+      throw done ? new UploadIncomplete(done, files.length - sent, e) : e;
+    }
+    sent += chunk.length;
+    onprogress?.({ sent, total: files.length });
+  }
+  return mergeAdded(parts);
+}
+
 /** How far an upload has got: files sent so far of all of them. */
 export interface UploadProgress {
   sent: number;

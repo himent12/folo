@@ -1,9 +1,11 @@
 <script lang="ts">
   /**
    * An addition of images, said where the images are: its progress while files are sent ("Uploading 34 of 120…"), then
-   * how it went ("118 added · 2 skipped"), the files left out with their reasons one click away; or why it failed.
+   * how it went ("118 added · 2 skipped"), the files left out with their reasons one click away; or why it failed (when
+   * it failed part way, both: what was added, then how many files were not sent and why).
    */
   import X from '@lucide/svelte/icons/x';
+  import { UploadIncomplete } from '$lib/api/upload';
   import { num } from '$lib/format';
   import Button from '$lib/ui/Button.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -17,6 +19,8 @@
   const uid = $props.id();
   let open = $state(false);
   const result = $derived(uploads.result);
+  /** An upload that stopped part way: what it added shows, then why the rest was not sent. */
+  const incomplete = $derived(uploads.error instanceof UploadIncomplete ? uploads.error : null);
   $effect(() => {
     void result;
     open = false;
@@ -29,7 +33,7 @@
     <p class="line num"><Spinner size={12} /> Uploading {num(p.sent)} of {num(p.total)}…</p>
     <Progress value={p.total ? p.sent / p.total : 0} tone="accent" label="{p.sent} of {p.total} files uploaded" />
   </div>
-{:else if uploads.error}
+{:else if uploads.error && !incomplete}
   <ErrorState error={uploads.error} title="Could not upload the images" compact>
     {#snippet actions()}<Button size="sm" onclick={() => uploads.dismiss()}>Dismiss</Button>{/snippet}
   </ErrorState>
@@ -45,7 +49,7 @@
       {#if result.skipped.length}
         <button type="button" class="more" aria-expanded={open} aria-controls="{uid}-skipped" onclick={() => (open = !open)}>{open ? 'Hide skipped' : 'Show skipped'}</button>
       {/if}
-      <span class="close"><Button variant="ghost" size="sm" icon={X} aria-label="Dismiss" onclick={() => uploads.dismiss()} /></span>
+      {#if !incomplete}<span class="close"><Button variant="ghost" size="sm" icon={X} aria-label="Dismiss" onclick={() => uploads.dismiss()} /></span>{/if}
     </div>
     {#if result.skipped.length}
       <ul class="skipped scroll-shade" id="{uid}-skipped" hidden={!open}>
@@ -53,6 +57,11 @@
       </ul>
     {/if}
   </div>
+  {#if incomplete}
+    <ErrorState error={incomplete.cause} title="{num(incomplete.unsent)} {incomplete.unsent === 1 ? 'file was' : 'files were'} not sent" compact>
+      {#snippet actions()}<Button size="sm" onclick={() => uploads.dismiss()}>Dismiss</Button>{/snippet}
+    </ErrorState>
+  {/if}
 {/if}
 
 <style>

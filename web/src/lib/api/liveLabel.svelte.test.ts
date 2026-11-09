@@ -44,6 +44,25 @@ describe('upsertImage and applyChanges', () => {
     ]);
     expect(applyChanges([img('1'), img('2'), img('3')], changes).map((i) => `${i.id} ${i.status}`)).toEqual(['2 labeling', '3 pending', '4 pending']);
   });
+
+  it('keeps the order: changed images in place, new ones at the end in the order given', () => {
+    const out = applyChanges([img('1'), img('2')], [['5', img('5')], ['2', img('2', 'labeled')], ['4', img('4')], ['5', img('5', 'labeling')]]);
+    expect(out.map((i) => `${i.id} ${i.status}`)).toEqual(['1 pending', '2 labeled', '5 labeling', '4 pending']);
+  });
+
+  it('merges a bulk answer in one pass, not a search of the list per image', () => {
+    // Counts every read of an image's id: a search per image would read about 10,000 × 10,000 / 2 of them.
+    let reads = 0;
+    const counted = (i: LabelImage) => new Proxy(i, { get: (t, k) => (k === 'id' && reads++, Reflect.get(t, k)) });
+    const list = Array.from({ length: 10_000 }, (_, i) => counted(img(String(i))));
+    const answer = Array.from({ length: 10_000 }, (_, i) => counted(img(String(i + 5_000), 'labeled')));
+    const out = applyChanges(list, answer.map((i) => [i.id, i] as const));
+    expect(out).toHaveLength(15_000);
+    expect(out[4_999]?.status).toBe('pending');
+    expect(out[5_000]?.status).toBe('labeled');
+    expect(out.at(-1)?.id).toBe('14999');
+    expect(reads).toBeLessThan(100_000);
+  });
 });
 
 describe('LiveLabelJob ordering', () => {
@@ -129,6 +148,67 @@ describe('LiveLabelJob ordering', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(live.images).toHaveLength(2500);
     expect(live.images.at(-1)?.id).toBe('2500');
+    stop();
+  });
+
+  it('loads again when an image was removed while it loaded page after page, so no image is skipped', async () => {
+    // 1,001 images: after the first page one of them is removed, the last one moves to offset 999 and the second
+    // page (from 1,000) comes back empty. The removal cannot bring it back: the images load again.
+    let server = Array.from({ length: 1001 }, (_, i) => img(String(i + 1)));
+    let calls = 0;
+    hub.api = {
+      ...hub.api,
+      labelImages: async (_id: string, q: { offset?: number; limit?: number } = {}) => {
+        await Promise.resolve();
+        calls++;
+        const page = { total: server.length, images: server.slice(q.offset ?? 0, (q.offset ?? 0) + (q.limit ?? 100)) };
+        if (calls === 1) {
+          server = server.filter((i) => i.id !== '5');
+          handlers.removed?.({ id: '5' });
+        }
+        return page;
+      },
+    } as Api;
+    const { live, stop } = mount();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.images).toHaveLength(1000);
+    expect(live.images.some((i) => i.id === '5')).toBe(false);
+    expect(live.images.at(-1)?.id).toBe('1001');
+    stop();
+  });
+
+  it("shows an action's answer, except for an image the stream told of after the action began", async () => {
+    const { live, stop } = mount();
+    page.resolve({ total: 3, images: [img('1'), img('2'), img('3')] });
+    await vi.advanceTimersByTimeAsync(0);
+    // An upload in several requests: image 2 was removed while the later ones were sent.
+    let mark = live.mark();
+    handlers.removed?.({ id: '2' });
+    live.put([img('2'), img('4')], mark);
+    expect(live.images.map((i) => i.id)).toEqual(['1', '3', '4']);
+    // A slow save: the stream has a newer state of image 1 by the time its answer comes.
+    mark = live.mark();
+    handlers.image?.(img('1', 'labeling'));
+    live.put([img('1', 'labeled')], mark);
+    expect(live.images[0]?.status).toBe('labeling');
+    // Nothing heard since: the answer shows.
+    mark = live.mark();
+    live.put([img('3', 'labeled')], mark);
+    expect(live.images.map((i) => `${i.id} ${i.status}`)).toEqual(['1 labeling', '3 labeled', '4 pending']);
+    stop();
+  });
+
+  it('applies an answer and a removal over a load that was in flight, which may predate them', async () => {
+    const { live, stop } = mount();
+    page.resolve({ total: 2, images: [img('1'), img('2')] });
+    await vi.advanceTimersByTimeAsync(0);
+    page = deferred<LabelImagePage>();
+    handlers.reload?.({});
+    live.put([img('1', 'labeled')], live.mark());
+    live.drop('2');
+    page.resolve({ total: 2, images: [img('1'), img('2')] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.images.map((i) => `${i.id} ${i.status}`)).toEqual(['1 labeled']);
     stop();
   });
 

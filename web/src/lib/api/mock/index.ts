@@ -89,7 +89,7 @@ import {
 } from './runs';
 import { COCO80 } from './coco';
 import { applyQueueMove } from '../queue';
-import { chunkFiles, mergeAdded, type UploadProgress } from '../upload';
+import { uploadInChunks, type UploadProgress } from '../upload';
 import { onnxFileName } from '../client';
 import { CPU_NAME, MockThroughput } from './throughput';
 import { trainCommand } from '../../trainCli';
@@ -1324,15 +1324,12 @@ export class MockApi implements Api {
   addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void): Promise<LabelImagesAdded> {
     // One request per chunk, as the server takes them (lib/api/upload): progress moves as a real upload's does.
     return this.#labelCall(`POST /api/label/jobs/${jobId}/images`, async () => {
-      const parts: LabelImagesAdded[] = [];
-      let sent = 0;
-      for (const chunk of chunkFiles(files)) {
-        parts.push(await this.#label.upload(jobId, chunk, Date.now()));
-        sent += chunk.length;
-        onprogress?.({ sent, total: files.length });
+      const send = async (chunk: File[]) => {
+        const part = await this.#label.upload(jobId, chunk, Date.now());
         if (this.latency > 0) await sleep(this.latency * 2);
-      }
-      return mergeAdded(parts) ?? { added: [], skipped: [], job: this.#label.job(jobId, Date.now()) };
+        return part;
+      };
+      return (await uploadInChunks(files, send, onprogress)) ?? { added: [], skipped: [], job: this.#label.job(jobId, Date.now()) };
     });
   }
 
