@@ -333,13 +333,21 @@ impl FoloApp {
         );
 
         let mm = m.metrics;
-        // The dataset the headline numbers were measured on (the run's), named beside them.
-        // The split evaluation used: validation, or train when the dataset has no validation
-        // images (the server falls back to them).
-        let head_ds = run
-            .as_ref()
-            .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
-            .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }));
+        // The dataset and split the headline numbers were measured on, named beside them: as the
+        // evaluation reports them (`ModelEval`, so a fallback to train never reads as "val"), else,
+        // until it loads or from an older server, inferred from the run's dataset (train when it has
+        // no validation images, as the server falls back).
+        let head_ds = self
+            .store
+            .evals
+            .get(&m.id)
+            .and_then(|l| l.ready())
+            .and_then(|ev| ev.dataset_name.clone().zip(ev.split.map(|s| s.as_str())))
+            .or_else(|| {
+                run.as_ref()
+                    .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
+                    .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }))
+            });
         // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
         // The headline names the split; this tile's narrow caption says where on the curve.
         let op_point = pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), "", true);
