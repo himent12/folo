@@ -15,7 +15,7 @@ mod job;
 pub mod prompt;
 mod run;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -314,12 +314,24 @@ impl Labeler {
         {
             let mut state = job.lock();
             state.check_idle("delete the job")?;
+            // The job's file goes first: without it the folder is not a job, whatever else of it is still there.
+            let file = job.dir.join("job.json");
+            match std::fs::remove_file(&file) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(io_error("removing", &file, e));
+                }
+                _ => {}
+            }
             // Under the lock every writer takes: nothing in flight writes into the folder after this.
             state.deleted = true;
         }
         jobs.retain(|j| j.id != id);
         let _ = std::fs::remove_dir_all(self.thumbs.join(id));
-        std::fs::remove_dir_all(&job.dir).map_err(|e| io_error("removing", &job.dir, e))
+        if let Err(e) = std::fs::remove_dir_all(&job.dir) {
+            // A file of it is open somewhere (an image being served): what is left is not listed again.
+            tracing::warn!("removing {}: {e}", job.dir.display());
+        }
+        Ok(())
     }
 
     /// `POST /api/label/jobs/{id}/images` (multipart): stores the uploads in the job's folder.
@@ -338,16 +350,18 @@ impl Labeler {
             }
             let tmp =
                 dir.join(format!(".upload-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
-            std::fs::write(&tmp, &upload.bytes).map_err(|e| io_error("writing", &tmp, e))?;
-            match folo_data::probe_size(&tmp) {
+            let probed = std::fs::write(&tmp, &upload.bytes)
+                .map_err(|e| format!("could not be stored: {e}"))
+                .and_then(|()| folo_data::probe_size(&tmp).map_err(|_| "not a readable image".to_string()));
+            match probed {
                 Ok(size) => staged.push(Candidate {
                     name: upload.name,
                     source: Source::Upload { tmp, hash: fnv1a(&upload.bytes) },
                     size,
                 }),
-                Err(_) => {
+                Err(reason) => {
                     let _ = std::fs::remove_file(&tmp);
-                    skipped.push(skip("not a readable image"));
+                    skipped.push(skip(&reason));
                 }
             }
         }
@@ -365,9 +379,14 @@ impl Labeler {
     }
 
     fn add_folder_to(&self, job: &Job, folder: &Path) -> Result<LabelImagesAdded> {
-        let known: HashSet<PathBuf> =
-            job.lock().file.images.iter().filter_map(|r| r.external.clone()).collect();
-        let room = MAX_IMAGES.saturating_sub(job.lock().file.images.len());
+        // Known files and the room left are read up front so that neither is probed for nothing; `insert` has the
+        // last word on both.
+        let (known, room) = {
+            let state = job.lock();
+            let known: HashSet<PathBuf> =
+                state.file.images.iter().filter_map(|r| r.external.clone()).collect();
+            (known, MAX_IMAGES.saturating_sub(state.file.images.len()))
+        };
         let files = walkdir::WalkDir::new(folder)
             .sort_by_file_name()
             .into_iter()
@@ -407,18 +426,23 @@ impl Labeler {
         mut skipped: Vec<SkippedImage>,
     ) -> Result<LabelImagesAdded> {
         let mut state = job.lock();
-        let mut taken: HashSet<String> = state.file.images.iter().map(|r| stem_key(&r.file)).collect();
-        let first_new = state.file.images.len();
+        let images = &state.file.images;
+        let mut taken: HashSet<String> = images.iter().map(|r| stem_key(&r.file)).collect();
+        // What the job has, by what makes an image the same one: an upload's bytes, a folder image's path.
+        let mut uploads: HashMap<u64, String> =
+            images.iter().filter_map(|r| Some((r.hash?, r.file.clone()))).collect();
+        let mut folders: HashSet<PathBuf> = images.iter().filter_map(|r| r.external.clone()).collect();
+        let first_new = images.len();
         for candidate in staged {
             let Candidate { name, source, size: (width, height) } = candidate;
-            let duplicate = match &source {
-                Source::Upload { hash, .. } => state.file.images.iter().find(|r| r.hash == Some(*hash)),
-                Source::Folder(path) => state.file.images.iter().find(|r| r.external.as_ref() == Some(path)),
-            };
             let reason = if state.deleted {
                 Some("the job was deleted".to_string())
-            } else if let Some(same) = duplicate {
-                Some(format!("the job already has this image ({})", same.file))
+            } else if let Source::Upload { hash, .. } = &source
+                && let Some(same) = uploads.get(hash)
+            {
+                Some(format!("the job already has this image ({same})"))
+            } else if matches!(&source, Source::Folder(path) if folders.contains(path)) {
+                Some("the job already has this file".to_string())
             } else if state.file.images.len() >= MAX_IMAGES {
                 Some(format!("a job holds at most {MAX_IMAGES} images"))
             } else {
@@ -431,10 +455,19 @@ impl Labeler {
             }
             let file = unique_file_name(&name, &mut taken);
             let (external, hash) = match source {
-                Source::Folder(path) => (Some(path), None),
+                Source::Folder(path) => {
+                    folders.insert(path.clone());
+                    (Some(path), None)
+                }
                 Source::Upload { tmp, hash } => {
-                    let to = job.images_dir().join(&file);
-                    std::fs::rename(&tmp, &to).map_err(|e| io_error("storing", &to, e))?;
+                    if let Err(e) = std::fs::rename(&tmp, job.images_dir().join(&file)) {
+                        let _ = std::fs::remove_file(&tmp);
+                        taken.remove(&stem_key(&file));
+                        skipped
+                            .push(SkippedImage { file: name, reason: format!("could not be stored: {e}") });
+                        continue;
+                    }
+                    uploads.insert(hash, file.clone());
                     (None, Some(hash))
                 }
             };
