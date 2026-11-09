@@ -69,7 +69,9 @@ function highlight(text: string, terms: string[]): string {
 }
 
 function snippet(e: Entry, terms: string[]): string {
-  const at = Math.max(0, Math.min(...terms.map((t) => e.lText.indexOf(t)).filter((i) => i >= 0)));
+  // Where the first term occurs in the text; 0 when the terms only matched the titles.
+  const hits = terms.map((t) => e.lText.indexOf(t)).filter((i) => i >= 0);
+  const at = hits.length ? Math.min(...hits) : 0;
   const start = Math.max(0, at - 50);
   const head = start > 0 ? e.text.slice(start).replace(/^\S*\s/, '') : e.text;
   const body = head.slice(0, 200);

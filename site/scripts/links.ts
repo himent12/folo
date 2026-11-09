@@ -36,6 +36,11 @@ export function relUrl(from: string, to: string): string {
 
 const listings = new Map<string, Set<string>>();
 
+/** Forgets cached directory listings; each generation starts fresh, so the dev server sees added or removed files. */
+export function clearListings(): void {
+  listings.clear();
+}
+
 /** Whether a repository-relative path exists with exactly this spelling (Windows and macOS ignore case; Linux CI does not). */
 export function repoPathKind(path: string): 'file' | 'dir' | null {
   if (path === '' || path === '.') return 'dir';
@@ -53,16 +58,48 @@ export function repoPathKind(path: string): 'file' | 'dir' | null {
     if (!names.has(part)) return null;
     dir = resolve(dir, part);
   }
-  return statSync(dir).isDirectory() ? 'dir' : 'file';
+  try {
+    return statSync(dir).isDirectory() ? 'dir' : 'file';
+  } catch {
+    return null;
+  }
+}
+
+/** A repository path as a URL path: each segment percent-encoded (`plot#1.png` must not become a fragment). */
+export function encodePath(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/');
+}
+
+/** Splits a URL reference into path, query (with its "?") and fragment (without its "#"). */
+function splitRef(ref: string): { path: string; query: string; hash: string } {
+  const hashAt = ref.indexOf('#');
+  const hash = hashAt < 0 ? '' : ref.slice(hashAt + 1);
+  const beforeHash = hashAt < 0 ? ref : ref.slice(0, hashAt);
+  const queryAt = beforeHash.indexOf('?');
+  return {
+    path: queryAt < 0 ? beforeHash : beforeHash.slice(0, queryAt),
+    query: queryAt < 0 ? '' : beforeHash.slice(queryAt),
+    hash,
+  };
+}
+
+function decode(s: string): string | null {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return null;
+  }
 }
 
 function lineOf(tok: Token | undefined): string {
   return tok?.map ? `:${tok.map[0] + 1}` : '';
 }
 
-/** Repository path of a relative reference from `src`, or null if it leaves the repository. */
+/** Repository path of a relative (URL-encoded) reference from `src`; null if it leaves the repository or is malformed. */
 function resolveRepoPath(src: string, path: string): string | null {
-  const joined = posix.normalize(posix.join(posix.dirname(src), decodeURIComponent(path)));
+  const decoded = decode(path);
+  if (decoded === null) return null;
+  const joined = posix.normalize(posix.join(posix.dirname(src), decoded));
   if (joined.startsWith('..') || posix.isAbsolute(joined)) return null;
   return joined.replace(/\/$/, '');
 }
@@ -74,39 +111,54 @@ export function resolveHref(href: string, ctx: LinkContext, where: string): stri
     ctx.errors.push(`${ctx.src}${where}: broken link "${href}": ${why}`);
     return null;
   };
-  const hashAt = href.indexOf('#');
-  const path = hashAt < 0 ? href : href.slice(0, hashAt);
-  const hash = hashAt < 0 ? '' : href.slice(hashAt + 1);
+  const { path, query, hash } = splitRef(href);
+  const anchor = hash ? decode(hash) : '';
+  if (anchor === null) return fail('malformed #fragment');
+  const tail = `${query}${hash ? `#${hash}` : ''}`;
   if (path === '') {
     const self = ctx.pages.get(ctx.src);
-    if (hash && self && !self.anchors.has(decodeURIComponent(hash))) return fail(`no heading #${hash} on this page`);
+    if (anchor && self && !self.anchors.has(anchor)) return fail(`no heading #${hash} on this page`);
     return href;
   }
   if (path.startsWith('/')) return fail('absolute paths do not work on GitHub or on the site; use a relative path');
   const repoPath = resolveRepoPath(ctx.src, path);
-  if (repoPath === null) return fail('it points outside the repository');
+  if (repoPath === null) return fail('it points outside the repository or is not a valid URL path');
   const page = ctx.pages.get(repoPath);
   if (page) {
-    if (hash && !page.anchors.has(decodeURIComponent(hash))) return fail(`${repoPath} has no heading #${hash}`);
+    if (anchor && !page.anchors.has(anchor)) return fail(`${repoPath} has no heading #${hash}`);
     const url = page.src === ctx.src ? '' : relUrl(ctx.slug, page.slug);
-    return `${url || (hash ? '' : './')}${hash ? `#${hash}` : ''}`;
+    return `${url || (tail.startsWith('#') ? '' : './')}${tail}`;
   }
   const kind = repoPathKind(repoPath);
   if (!kind) return fail(`${repoPath} does not exist`);
-  return `${kind === 'dir' ? TREE_URL : BLOB_URL}/${repoPath}${hash ? `#${hash}` : ''}`;
+  return `${kind === 'dir' ? TREE_URL : BLOB_URL}/${encodePath(repoPath)}${tail}`;
 }
 
 /** Site URL and repository path of a local image; null for remote images and (with an error) for missing ones. */
 function resolveImage(src: string, ctx: LinkContext, where: string): { url: string; repoPath: string } | null {
-  if (/^[a-z][a-z0-9+.-]*:/i.test(src)) return null;
-  const repoPath = resolveRepoPath(ctx.src, src);
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('//')) return null;
+  const repoPath = resolveRepoPath(ctx.src, splitRef(src).path);
   if (repoPath === null || repoPathKind(repoPath) !== 'file') {
     ctx.errors.push(`${ctx.src}${where}: missing image "${src}"`);
     return null;
   }
-  const out = `media/${repoPath}`;
-  ctx.media.set(repoPath, out);
-  return { url: relUrl(ctx.slug, out), repoPath };
+  ctx.media.set(repoPath, `media/${repoPath}`);
+  return { url: relUrl(ctx.slug, `media/${encodePath(repoPath)}`), repoPath };
+}
+
+const HTML_REF = /(\s)(href|src)(\s*=\s*)(?:"([^"]*)"|'([^']*)')/gi;
+
+/**
+ * Links and images in raw HTML (`<a href>`, `<img src>`, ...) get the same checks and rewriting as Markdown ones, so
+ * HTML can't slip a broken or GitHub-only `.md` link past the build.
+ */
+function rewriteHtml(html: string, ctx: LinkContext, where: string): string {
+  return html.replace(HTML_REF, (whole, sp: string, name: string, eq: string, dq?: string, sq?: string) => {
+    const value = dq ?? sq ?? '';
+    const quote = dq !== undefined ? '"' : "'";
+    const url = name.toLowerCase() === 'href' ? resolveHref(value, ctx, where) : (resolveImage(value, ctx, where)?.url ?? null);
+    return url === null ? whole : `${sp}${name}${eq}${quote}${url}${quote}`;
+  });
 }
 
 const MENTION = /(?<![\w/.-])((?:docs\/[A-Z][A-Z0-9_-]*\.md)|(?:examples\/[a-z0-9_-]+\/README\.md))(#[a-z0-9_-]+)?(?![\w/-])/g;
@@ -121,6 +173,7 @@ function linkTokens(TokenCtor: new (type: string, tag: string, nesting: -1 | 0 |
 /** Rewrites links and images in place, and links plain mentions of other pages. */
 export function rewriteLinks(tokens: Token[], ctx: LinkContext): void {
   for (const block of tokens) {
+    if (block.type === 'html_block') block.content = rewriteHtml(block.content, ctx, lineOf(block));
     if (block.type !== 'inline' || !block.children) continue;
     const where = lineOf(block);
     const TokenCtor = block.constructor as new (type: string, tag: string, nesting: -1 | 0 | 1) => Token;
@@ -136,6 +189,8 @@ export function rewriteLinks(tokens: Token[], ctx: LinkContext): void {
         continue;
       }
       if (t.type === 'link_close') depth--;
+      // Raw HTML written in the Markdown; the heading anchors and status markers added by markdown.ts are already right.
+      if (t.type === 'html_inline' && !t.meta?.generated) t.content = rewriteHtml(t.content, ctx, where);
       if (t.type === 'image') {
         const src = attr(t, 'src');
         const img = resolveImage(src, ctx, where);

@@ -7,7 +7,7 @@ import type { MarkdownIt } from 'markdown-it';
 import { BLOB_URL, GEN_DIR, LANDING_SRC, LLMS_SRC, NAV, REPO_DIR, slugFor } from './config.ts';
 import { renderLanding } from './landing.ts';
 import { ICONS, shell, toc } from './layout.ts';
-import { relUrl, resolveHref, rewriteLinks, type LinkContext, type PageRef } from './links.ts';
+import { clearListings, relUrl, resolveHref, rewriteLinks, type LinkContext, type PageRef } from './links.ts';
 import { createMarkdown, escapeHtml, parsePage, sections, withoutTitle, type ParsedPage } from './markdown.ts';
 import { tokensCss } from './tokens.ts';
 
@@ -52,6 +52,7 @@ function writeFile(path: string, data: string | Buffer) {
 export async function generate({ write }: { write: boolean }): Promise<Generated> {
   const md = await createMarkdown();
   const problems: string[] = [];
+  clearListings();
 
   const navSources = NAV.flatMap((g) => g.pages.map((p) => p.src));
   for (const src of expectedSources()) {

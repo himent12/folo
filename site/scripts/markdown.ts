@@ -93,6 +93,7 @@ export async function createMarkdown(): Promise<MarkdownIt> {
       headings.push({ level, text, id });
       if (level >= 2 && inline.children) {
         const a = new state.Token('html_inline', '', 0);
+        a.meta = { generated: true };
         a.content = `<a class="h-anchor" href="#${id}" aria-label="Link to ${escapeHtml(text)}">#</a>`;
         inline.children.push(a);
       }
@@ -112,6 +113,7 @@ export async function createMarkdown(): Promise<MarkdownIt> {
       const [cls, label] = TASKS[m[1]];
       first.content = first.content.slice(m[0].length);
       const mark = new state.Token('html_inline', '', 0);
+      mark.meta = { generated: true };
       mark.content = `<span class="task task-${cls}" role="img" aria-label="${label}" title="${label}"></span>`;
       inline.children!.unshift(mark);
       tokens[i - 2].attrJoin('class', 'task-item');
