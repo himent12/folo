@@ -99,3 +99,36 @@ describe('Model: what was evaluated', () => {
     expect(text('#cm .how-body')).toContain('which this server does not report');
   });
 });
+
+describe('Model on a phone: the work before the summary', () => {
+  const width = window.innerWidth;
+  const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
+  afterEach(() => setWidth(width));
+
+  it('puts the section picker first, opens Curves on the 2 × 2 grid and the other sections on one folded line', async () => {
+    setWidth(390);
+    router.route = parse('#/models/m_fast_n');
+    c = mount(Model, { target });
+    await until(() => target.querySelector('.phone-pick [role="tab"]'), 'the section picker');
+    // Nothing between the header and the picker: the summary heads its section, inside the tab panel.
+    const panel = target.querySelector('#model-sec-panel')!;
+    const kpi = target.querySelector('section.kpi-grid')!;
+    expect(panel.contains(kpi)).toBe(true);
+    expect(panel.firstElementChild).toBe(kpi);
+    expect(target.querySelector('section.kpis')).toBeNull();
+    // Curves: the full grid, no folded line.
+    expect(kpi.querySelectorAll('.kg-cell')).toHaveLength(4);
+    expect(kpi.querySelector('.kpi-line')).toBeNull();
+    // Classes: the headline on one line that unfolds the same four cells.
+    target.querySelector<HTMLButtonElement>('#model-sec-classes')!.click();
+    flushSync();
+    const line = target.querySelector<HTMLButtonElement>('section.kpi-grid .kpi-line')!;
+    expect(line.textContent?.replace(/\s+/g, ' ').trim()).toBe('mAP50-95 0.604 All metrics');
+    expect(line.getAttribute('aria-expanded')).toBe('false');
+    expect(target.querySelectorAll('section.kpi-grid .kg-cell')).toHaveLength(0);
+    line.click();
+    flushSync();
+    expect(line.getAttribute('aria-expanded')).toBe('true');
+    expect(target.querySelectorAll('section.kpi-grid .kg-cell')).toHaveLength(4);
+  });
+});

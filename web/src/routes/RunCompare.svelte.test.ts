@@ -39,7 +39,7 @@ afterEach(() => {
 });
 
 describe('Compare runs on a phone: two at a time', () => {
-  it('keeps every row of the side-by-side table on the baseline and the run paged to, also after pinning another', async () => {
+  it('keeps every row on the baseline and the run paged to; the baseline is its own choice, never the line in front', async () => {
     const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 4);
     expect(runs).toHaveLength(4);
     // Each run's best epoch tells its precision · recall cell apart from the others'.
@@ -82,15 +82,23 @@ describe('Compare runs on a phone: two at a time', () => {
     target.querySelector<HTMLButtonElement>('button[aria-label="Next run"]')!.click();
     flushSync();
     check(names[0]!, names[2]!);
-    // Pin run D: it becomes the baseline, and the others page beside it.
+    // Keep run D's line in front: emphasis is not the baseline, so the table still reads against run A beside run C.
     const chip = [...target.querySelectorAll<HTMLButtonElement>('.chip button.key')].find((b) => b.textContent === names[3])!;
     chip.click();
     flushSync();
-    const other = target.querySelectorAll('#cmp-table thead th .th-name')[1]?.textContent ?? '';
-    expect(other).not.toBe(names[3]);
-    check(names[3]!, other);
-    target.querySelector<HTMLButtonElement>('button[aria-label="Previous run"]')!.click();
+    expect(chip.getAttribute('aria-pressed')).toBe('true');
+    check(names[0]!, names[2]!);
+    // The explicit control makes run C the baseline; run A, which it replaces, takes the other column.
+    target.querySelector<HTMLButtonElement>(`#cmp-table button[aria-label="Make ${names[2]} the baseline"]`)!.click();
     flushSync();
-    check(names[3]!, target.querySelectorAll('#cmp-table thead th .th-name')[1]?.textContent ?? '');
+    check(names[2]!, names[0]!);
+    // It holds while another line is brought forward and the pager steps through the rest.
+    [...target.querySelectorAll<HTMLButtonElement>('.chip button.key')].find((b) => b.textContent === names[1])!.click();
+    flushSync();
+    check(names[2]!, names[0]!);
+    target.querySelector<HTMLButtonElement>('button[aria-label="Next run"]')!.click();
+    flushSync();
+    check(names[2]!, target.querySelectorAll('#cmp-table thead th .th-name')[1]?.textContent ?? '');
+    expect(target.querySelectorAll('#cmp-table thead th .th-name')[1]?.textContent).not.toBe(names[0]);
   });
 });

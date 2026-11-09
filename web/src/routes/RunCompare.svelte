@@ -23,6 +23,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+  import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
@@ -45,6 +46,7 @@
   import { media } from '$lib/design/tokens';
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
+  import Dialog from '$lib/ui/Dialog.svelte';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
 
@@ -271,13 +273,22 @@
   const PAIR_SETTING_COL = 104;
   const RUN_COL_MIN = 136;
 
-  // Phones compare two runs at a time: a baseline (the pinned run, else the first) and one other, fully in view and
-  // paged with ‹ ›; values that differ from the baseline's are marked. "All runs" opens the whole table (it scrolls).
+  // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›; values that differ
+  // from the baseline's are marked. "All runs" opens the whole table (it scrolls). The baseline is its own choice (the
+  // first run until Swap in the table's header), never the legend's emphasis: keeping a line in front to
+  // read it must not change what the table measures against.
   let allRuns = $state(false);
   let otherAt = $state(0);
+  let baselineId = $state<string | null>(null);
   const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
-  const base = $derived(chosen.find((r) => r.id === pinned) ?? chosen[0]);
+  const base = $derived(chosen.find((r) => r.id === baselineId) ?? chosen[0]);
   const others = $derived(chosen.filter((r) => r !== base));
+  /** Makes `r` the baseline; the run it replaces takes the other column, so the pair on screen stays the same two. */
+  function setBaseline(r: Run) {
+    const prev = base;
+    baselineId = r.id;
+    otherAt = Math.max(0, chosen.filter((x) => x !== r).indexOf(prev!));
+  }
   const other = $derived(others[Math.min(otherAt, others.length - 1)]);
   const shown = $derived(pairMode && base && other ? [base, other] : chosen);
   const stepOther = (d: number) => (otherAt = (Math.min(otherAt, others.length - 1) + d + others.length) % others.length);
@@ -306,8 +317,9 @@
   {:else}
     <section class="compare" aria-label="Curves">
       {#if narrow}
-        <!-- Phones: one control row, the runs (a compact legend whose values follow a tap or scrub on the plot), the
-             one caveat that changes how to read it, then the plot. The longer explanation sits in the disclosure. -->
+        <!-- Phones: one control row, the runs (two columns of compact keys whose values follow a tap or scrub on the
+             plot), the one caveat that changes how to read it right above the plot, then the plot. Opening, removing and
+             adding runs sit in a sheet (Edit); the longer explanation sits in the disclosure. -->
         <header class="c-row">
           <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
@@ -327,10 +339,11 @@
             <p>Each line ends in its run's status: a ringed dot while it trains, a square where it was stopped, a cross
               where it failed.</p>
             <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
-              started (fine-tuned, or from scratch).</p>
+              started (fine-tuned, or from scratch). The table's baseline stays until you make another run the baseline.</p>
             <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>
           </div>
         </details>
+        {@render manageSheet()}
       {:else}
         {@render chips()}
         <!-- One line, and only when it changes how to read the plot; the axis names itself (and why it was chosen). -->
@@ -353,7 +366,7 @@
           <!-- Phones: the baseline and one run beside it; the pager steps through the others. -->
           <div class="pair num">
             <button type="button" class="pg" aria-label="Previous run" onclick={() => stepOther(-1)}><ChevronLeft size={16} aria-hidden="true" /></button>
-            <span class="pair-what" aria-live="polite">Run {others.indexOf(other) + 2} of {chosen.length}<span class="faint">{' '}vs baseline</span></span>
+            <span class="pair-what" aria-live="polite">Run {chosen.indexOf(other) + 1} of {chosen.length}<span class="faint">{' '}vs baseline</span></span>
             <button type="button" class="pg" aria-label="Next run" onclick={() => stepOther(1)}><ChevronRight size={16} aria-hidden="true" /></button>
             <button type="button" class="more" onclick={() => (allRuns = true)}>All {chosen.length} runs</button>
           </div>
@@ -388,7 +401,13 @@
                   <th>
                     <span class="th" style:--c={fill(r.id)}
                       ><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
-                      >{#if pairMode && r === base}<span class="base-tag">Baseline</span>{/if}</span
+                      >{#if pairMode && r === base}<span class="base-tag">Baseline</span>{:else if pairMode}<button
+                          type="button"
+                          class="set-base"
+                          aria-label="Make {r.name} the baseline"
+                          title="Make this run the baseline"
+                          onclick={() => setBaseline(r)}><ArrowLeftRight size={12} aria-hidden="true" />Swap</button
+                        >{/if}</span
                     >
                   </th>
                 {/each}
@@ -463,13 +482,13 @@
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
-  <div class="chips" class:managing role="group" aria-label="Runs being compared">
+  <div class="chips" role="group" aria-label="Runs being compared">
     <div class="chips-head">
       <!-- The readout row: where the values are read, or how to read them while the plot has keyboard focus or on a
            first touch. -->
       <span class="at num" class:hint={!!hint} aria-hidden="true">{hint ?? readoutAt}</span>
-      <!-- Phones: opening and removing runs sit behind one toggle, so the legend stays compact. -->
-      <button type="button" class="manage" aria-pressed={managing} onclick={() => (managing = !managing)}>{managing ? 'Done' : 'Edit'}</button>
+      <!-- Phones: opening, removing and adding runs sit in a sheet, so the legend stays two rows of keys. -->
+      <button type="button" class="manage" aria-haspopup="dialog" aria-expanded={managing} onclick={() => (managing = true)}>Edit</button>
     </div>
     {#each chosen as r (r.id)}
       {@const v = valueOf(r.id)}
@@ -493,11 +512,11 @@
           onclick={() => (pinned = pinned === r.id ? null : r.id)}
         ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
         <!-- How the line ended (live, stopped, failed) in words beside its value: the end label's fallback, and on phones,
-             which have no end labels, the only word for the end marker's shape. -->
+             which have no end labels, the only word for the end marker's shape (under the name, "0.494 · failed"). -->
         <span class="v num">{v === null ? '—' : metric(v)}{#if runEnd(r.status)}<span class="st"><span class="sep">{' · '}</span>{runEnd(r.status)}</span>{/if}</span>
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
-             toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it only in Edit,
-             on a full-width line of its own. -->
+             toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it in the Edit
+             sheet. -->
         <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}Fine-tuned from <Ident value={from} class="src" />{:else}From scratch{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
@@ -505,8 +524,31 @@
         </span>
       </span>
     {/each}
-    {#if ids.length < MAX && candidates.length}{@render adder()}{/if}
+    {#if !narrow && ids.length < MAX && candidates.length}{@render adder()}{/if}
   </div>
+{/snippet}
+
+{#snippet manageSheet()}
+  <!-- Phones: the legend's management in a bottom sheet: each run with how it started, open and remove, then Add. -->
+  <Dialog bind:open={managing} title="Runs in this comparison" description="Open a run, take it out, or add another (up to {MAX}).">
+    <ul class="m-list">
+      {#each chosen as r (r.id)}
+        {@const from = startOf(r)}
+        <li class="m-row" style:--c={fill(r.id)}>
+          <i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>
+          <span class="m-what">
+            <span class="m-name">{r.name}</span>
+            <span class="m-from" class:tuned={!!from}>{#if from}Fine-tuned from <Ident value={from} />{:else}From scratch{/if}</span>
+          </span>
+          <a class="m-act" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={16} aria-hidden="true" /></a>
+          <button type="button" class="m-act" aria-label="Remove {r.name}" title="Remove from the comparison" onclick={() => setIds(ids.filter((id) => id !== r.id))}
+            ><X size={16} aria-hidden="true" /></button
+          >
+        </li>
+      {/each}
+    </ul>
+    {#if ids.length < MAX && candidates.length}<div class="m-add">{@render adder()}</div>{/if}
+  </Dialog>
 {/snippet}
 
 {#snippet plot()}
@@ -853,12 +895,13 @@
     color: var(--text-secondary);
   }
   @media (max-width: 767px) {
-    /* Phones: a compact legend above the plot (44 px rows of key, name, value), so every run is named and the plot with
-       its axis still sits in the first screen. Edit adds open / remove and, on a full-width line of its own, how each
-       run started. */
+    /* Phones: the legend is two columns of compact keys above the plot, the run's whole name on the first line (wrapping
+       at its hyphens, never cut: "shapes-hard-s" beside "shapes-hard-m") and its value with how the line ended on the
+       second ("0.494 · failed"), so four runs take two rows and the plot with its axis sits in the first screen. The
+       whole key is the toggle that keeps a line in front. Opening, removing and adding runs live in the Edit sheet. */
     .chips {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 0;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-1) var(--space-2);
     }
     .chips-head {
       margin-top: calc(-1 * var(--space-2));
@@ -871,18 +914,14 @@
       font-size: var(--type-sm-size);
       color: var(--text-secondary);
     }
-    /* Rows bleed into the panel padding, so the selection bar sits at the panel's inner edge. The value is centred
-       on the row; the start line stays under the name. */
     .chips .chip {
-      margin-inline: calc(-1 * var(--space-2));
-      padding: 0 var(--space-2);
-      border-width: 0 0 1px;
-      border-color: var(--line-subtle);
-      border-radius: 0;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto;
+      align-content: start;
+      min-height: 44px;
+      padding: var(--space-1-5) var(--space-2);
+      border: 0;
       background: none;
-    }
-    .chips .chip:first-of-type {
-      border-top-width: 1px;
     }
     .chips .chip.pinned {
       background: var(--bg-active);
@@ -891,63 +930,57 @@
       top: 0;
       bottom: 0;
       left: 0;
-      border-radius: 0;
     }
+    /* The key (swatch and name) is the toggle; its hit area is the whole card (an ::after on the card), so a tap on
+       the value toggles too, and its focus ring is the card's. */
     .chips .chip .key {
       grid-row: 1;
-      align-items: center;
-      min-height: 44px;
-      margin-left: 0;
+      position: static;
+      align-items: flex-start;
+      gap: 6px;
+      margin: 0;
       padding: 0;
     }
     .chips .chip .key:hover {
       background: none;
     }
+    .chips .chip .key::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: var(--radius-md);
+    }
+    .chips .chip .key:focus-visible {
+      outline: none;
+    }
+    .chips .chip .key:focus-visible::after {
+      outline: 2px solid var(--focus);
+      outline-offset: -2px;
+    }
+    /* On the name's first line (16 px line). */
     .chips .chip .key i {
-      margin-top: 0;
-    }
-    .chips .chip .v {
-      grid-row: 1;
-      align-self: center;
-      padding-top: 0;
-    }
-    /* One run per 44 px row, its whole name on the left and the value on the right with how the line ended on the same
-       line ("0.494 · failed"), so every row keeps one height and no name is cut beside a visible sibling ("shapes-hard-s"
-       next to "shapes-hard-m"). Edit adds open, remove and how each run started. Legend text is 12 px; the value keeps
-       the body size. */
-    .chips:not(.managing) .chip .key {
-      gap: 6px;
-    }
-    .chips:not(.managing) .chip .key i {
       width: 12px;
+      margin-top: 6px;
     }
-    .chips:not(.managing) .nm {
+    .chips .nm {
       font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+      white-space: normal;
+      overflow: visible;
+      overflow-wrap: break-word;
     }
-    .chips:not(.managing) .chip .v {
-      padding-right: 0;
+    /* Under the name, past the key (12 px swatch + 6 px gap). */
+    .chips .chip .v {
+      grid-column: 1;
+      grid-row: 2;
+      min-width: 0;
+      padding: 0 0 0 18px; /* grid-ok: past the 12 px key and its 6 px gap */
+      text-align: left;
+      pointer-events: none;
     }
-    /* Edit: the start line under the whole row, past the key; the identifier keeps whole and ellipsizes (title has it). */
-    .chips .chip .from {
-      grid-column: 1 / -1;
-      margin-top: calc(-1 * var(--space-2));
-      padding: 0 0 var(--space-2) var(--space-6);
-    }
-    .chips:not(.managing) .chip .from,
-    .chips:not(.managing) .chip .acts {
+    .chips .chip .from,
+    .chips .chip .acts {
       display: none;
-    }
-    .chips.managing .chip .acts {
-      grid-row: 1;
-      grid-template-columns: 44px 44px;
-    }
-    .chips .chip .open,
-    .chips .chip .rm {
-      width: 44px;
-      height: 44px;
-    }
-    .chips .chip .rm::after {
-      content: none;
     }
     /* The side-by-side table scrolls sideways on phones: setting names stay pinned, and the right edge fades only
        while more runs lie beyond it. */
@@ -1010,12 +1043,14 @@
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
   }
+  /* From 768 px up one layout whatever the qualifier's length: the metric tabs left, the x-axis control right on the
+     tabs' row; a long qualifier ("by progress, % of planned epochs · plans differ in length") wraps under the tabs,
+     never pushing the control onto a row of its own. Phones have their own control row (.c-row). */
   .c-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
     gap: var(--space-3);
-    flex-wrap: wrap;
     padding-top: var(--space-3);
     border-top: 1px solid var(--line-subtle);
   }
@@ -1025,6 +1060,11 @@
     flex-wrap: wrap;
     gap: var(--space-1) var(--space-3);
     min-width: 0;
+  }
+  .c-what .qual {
+    min-height: var(--control-md);
+    display: inline-flex;
+    align-items: center;
   }
   /* The chart's header qualifier, as on every chart: tertiary, 12 px. */
   .qual {
@@ -1177,6 +1217,95 @@
     display: block;
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
+  }
+  /* The pair's other column: "Swap" makes it the baseline, the old baseline taking its place (the baseline never
+     follows the legend's emphasis). One short word, so it stays on one line in the narrow column. */
+  .set-base {
+    grid-column: 2;
+    justify-self: start;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    white-space: nowrap;
+    position: relative;
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-secondary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .set-base:hover {
+    color: var(--text-primary);
+  }
+  /* A 44 px target around the 16 px line. */
+  .set-base::after {
+    content: '';
+    position: absolute;
+    inset: -14px -8px; /* grid-ok: a 44 px target around the 16 px line */
+  }
+  /* The Edit sheet: one 56 px row per run (key, name over how it started, open, remove), then Add run. */
+  .m-list {
+    display: grid;
+    margin: 0 calc(-1 * var(--space-2));
+  }
+  .m-row {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr) 44px 44px;
+    align-items: center;
+    column-gap: var(--space-2);
+    min-height: 56px;
+    padding: var(--space-1) var(--space-2);
+  }
+  .m-row + .m-row {
+    border-top: 1px solid var(--line-subtle);
+  }
+  .m-row i {
+    align-self: start;
+    margin-top: 14px; /* grid-ok: on the name line, centred in the 56 px row */
+  }
+  .m-what {
+    display: grid;
+    min-width: 0;
+  }
+  .m-name {
+    font-weight: var(--weight-medium);
+    overflow-wrap: break-word;
+  }
+  .m-from {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+    overflow-wrap: anywhere;
+  }
+  .m-from.tuned {
+    color: var(--text-secondary);
+  }
+  .m-from :global(.ident) {
+    font-size: var(--type-sm-size);
+  }
+  .m-act {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+  }
+  .m-act:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .m-add {
+    padding-top: var(--space-3);
+  }
+  .m-row i {
+    flex-shrink: 0;
+    width: 16px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--c);
+    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
   }
   /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
   .swap {

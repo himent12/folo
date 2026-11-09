@@ -68,6 +68,14 @@ describe('Settings', () => {
     const report = target.querySelector<HTMLDetailsElement>('#system details.report')!;
     expect(report.open).toBe(false);
     expect(report.querySelector('summary')?.textContent).toBe('Driver report');
+    // Copy sits on the heading's row, outside the report, which takes the full width: one block per record, the
+    // newlines kept in its text for a copied selection.
+    expect(report.querySelector('.copy-at button[aria-label="Copy driver report"]')).not.toBeNull();
+    const pre = report.querySelector('pre')!;
+    expect(pre.querySelector('button')).toBeNull();
+    const recs = [...pre.querySelectorAll('.rec')];
+    expect(recs.length).toBeGreaterThan(1);
+    expect(pre.textContent).toBe(recs.map((r) => r.textContent).join('\n'));
   });
 });
 

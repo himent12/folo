@@ -57,6 +57,10 @@
   const phone = new MediaQuery(media.phone, false);
   // Below 1024 px the model and Run on leave the title row for a toolbar row of their own under it, full width.
   const narrow = new MediaQuery(media.upToLaptop, false);
+  // Tablets with an image: the canvas capped at half the viewport, Confidence and Overlap in a strip right under it,
+  // Max detections and the display toggles in the same sheet, so the image and the controls that redraw it share
+  // the first screen.
+  const tablet = $derived(narrow.current && !phone.current);
   let moreOpen = $state(false);
   let sheetEl = $state<HTMLElement>();
   let moreBtn = $state<HTMLElement>();
@@ -112,7 +116,9 @@
   // ---------- image source ----------
   type Source = { kind: 'file'; file: Blob; name: string; url: string; width: number; height: number } | { kind: 'dataset'; ds: Dataset; img: Img };
   let source = $state.raw<Source | null>(null);
-  const sheetShown = $derived(moreOpen && phone.current && !!source);
+  const sheetShown = $derived(moreOpen && narrow.current && !!source);
+  // Phones' sheet holds every threshold; a tablet's, what its strip leaves out.
+  const sheetTitle = $derived(tablet ? 'More settings' : 'Thresholds');
   let src = $state<string | null>(null);
   let seg = $state<'file' | 'dataset' | 'webcam'>('file');
   let pickerOpen = $state(false);
@@ -781,8 +787,16 @@
               {/if}
             </div>
             {#if source}
-              <!-- Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. -->
-              <div class="qconf" class:covered={sheetShown}><Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} /></div>
+              <!-- Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. Tablets:
+                   Confidence and Overlap side by side, the less-used settings one tap away. -->
+              <div class="qconf" class:covered={sheetShown && !tablet}>
+                <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
+                {#if tablet}
+                  <div class="qiou" title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
+                    <Slider inline label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} />
+                  </div>
+                {/if}
+              </div>
             {/if}
             {#if source && result}
               <!-- Phones: the picked detection in one line under the image, so its numbers are readable without the table. -->
@@ -815,7 +829,7 @@
                   <span class="grow"></span>
                 {/if}
                 <span class="more-btn" bind:this={moreBtn}>
-                  <Button size="sm" variant="ghost" iconRight={ChevronUp} aria-expanded={sheetShown} aria-controls="pg-more" onclick={() => (sheetShown ? closeSheet() : (moreOpen = true))}>Thresholds</Button>
+                  <Button size="sm" variant="ghost" iconRight={ChevronUp} aria-expanded={sheetShown} aria-controls="pg-more" onclick={() => (sheetShown ? closeSheet() : (moreOpen = true))}>{sheetTitle}</Button>
                 </span>
               </div>
               {#if sheetShown}
@@ -833,14 +847,18 @@
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <div class="sheet-head" onpointerdown={ondragdown} onpointermove={ondragmove} onpointerup={ondragup} onpointercancel={ondragup}>
                     <span class="handle" aria-hidden="true"></span>
-                    <h2 id="pg-more-title">Thresholds</h2>
+                    <h2 id="pg-more-title">{sheetTitle}</h2>
                     {@render resetButton()}
                     <Button size="sm" variant="ghost" icon={X} aria-label="Close thresholds" onclick={closeSheet} />
                   </div>
                   <div class="sheet-body">
                     <div class="more-sliders">
-                      <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
-                      {@render secondarySliders(true)}
+                      {#if tablet}
+                        <Slider inline label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} />
+                      {:else}
+                        <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
+                        {@render secondarySliders(true)}
+                      {/if}
                     </div>
                     <div class="more-toggles">{@render displayToggles()}</div>
                   </div>
@@ -1671,6 +1689,59 @@
        stretched to Thresholds' height. */
     .timing {
       align-self: start;
+    }
+    /* With an image: the canvas at most half the viewport (a square photo letterboxed on bg.inset), Confidence and
+       Overlap in one strip right under it, the rest in the sheet; the Thresholds panel steps out and Classes sits
+       beside Timing. */
+    .layout.fit {
+      --stage-h: 50dvh;
+    }
+    .aside.tucked .thresholds {
+      display: none;
+    }
+    .aside.tucked {
+      grid-template-rows: auto;
+    }
+    /* Side by side, the two panels end together (DESIGN_DIRECTION 2). */
+    .aside.tucked .classes,
+    .aside.tucked .timing {
+      display: grid;
+      align-self: stretch;
+    }
+    .qconf {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-6);
+      align-items: center;
+      min-height: 48px;
+      padding: 0 var(--space-4);
+      border-top: 1px solid var(--line-subtle);
+    }
+    .qconf :global(.slider.inline) {
+      grid-template-columns: auto minmax(0, 1fr) 40px;
+    }
+    .qconf :global(output.val) {
+      font-family: var(--font-sans);
+      font-variant-numeric: tabular-nums;
+    }
+    .more-btn {
+      display: inline-flex;
+    }
+    .vfoot .wide {
+      display: none;
+    }
+    /* A sheet from the content's bottom edge, as wide as a dialog, over the detections (never the image or strip). */
+    .sheet {
+      left: 0;
+      right: 0;
+      bottom: env(safe-area-inset-bottom);
+      width: min(560px, calc(100% - 2 * var(--space-4)));
+      margin-inline: auto;
+      border-inline: 1px solid var(--line-default);
+      max-height: 40dvh;
+    }
+    .layout:has(.sheet) {
+      padding-bottom: 40dvh;
     }
   }
   @media (max-width: 767px) {

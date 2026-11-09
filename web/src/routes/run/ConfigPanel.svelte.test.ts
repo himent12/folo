@@ -79,3 +79,35 @@ describe('ConfigPanel', () => {
     expect(d['Head']?.textContent).toBe('NMS (one-to-many)');
   });
 });
+
+describe('ConfigPanel: the work before the reference', () => {
+  function mountWith(props: Record<string, unknown>) {
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(ConfigPanel, { target, props: { config, resolved: resolveTrain(config, 1920, 8, 120), ...props } });
+    flushSync();
+    const lists = [...target.querySelectorAll('dl')];
+    /** The settings of each list, the folded ones marked by their disclosure's title. */
+    return lists.map((dl) => ({
+      fold: dl.closest('details')?.querySelector('summary')?.textContent ?? null,
+      group: dl.querySelector('.group')?.textContent ?? null,
+      keys: [...dl.querySelectorAll('dt')].map((dt) => dt.textContent?.trim()),
+    }));
+  }
+
+  it('shows a phone the six settings that say what will train, the rest folded', () => {
+    const lists = mountWith({ essential: true, resolved: null });
+    expect(lists[0]).toEqual({ fold: null, group: null, keys: ['Dataset', 'Model', 'Epochs', 'Batch', 'Image size', 'Device'] });
+    expect(lists.slice(1).map((l) => l.fold)).toEqual(['More training settings', 'Augmentation']);
+    expect(target.querySelectorAll('details[open]')).toHaveLength(0);
+  });
+
+  it('balances the two columns: setup on the left, the optimizer over augmentation on the right', () => {
+    const lists = mountWith({});
+    expect(lists.map((l) => l.group)).toEqual(['Training', 'Optimizer', 'Augmentation']);
+    const left = lists[0]!.keys.length;
+    const right = lists[1]!.keys.length + lists[2]!.keys.length;
+    // The right column carries one heading more: within a few rows of the left, never a hollow of six.
+    expect(Math.abs(left - right)).toBeLessThanOrEqual(3);
+  });
+});

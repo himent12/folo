@@ -373,11 +373,12 @@ export const scenes = [
   // Plans of 100 and 150 epochs: the x axis stays "By epoch"; each line ends in its run's status mark.
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // "By progress": every run over its planned epochs, so the failed and stopped runs end where they ended.
+    // "By progress": every run over its planned epochs, so the failed and stopped runs end where they ended. On a tablet
+    // the longer qualifier wraps under the metric tabs and the axis control stays on their row, as with "By epoch".
     name: 'run-compare-progress',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '.chip .key');
       await page.getByRole('radio', { name: 'By progress' }).click();
@@ -397,7 +398,8 @@ export const scenes = [
     },
   },
   {
-    // Phones: Edit turns the compact two-column legend into one run per row with open and remove.
+    // Phones: Edit opens a sheet, one run per row with how it started, open and remove, then Add run; the legend stays
+    // two columns of keys.
     name: 'run-compare-edit',
     path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
     fullPage: false,
@@ -405,6 +407,23 @@ export const scenes = [
     setup: async (page) => {
       await until(page, 'button.manage');
       await page.locator('button.manage').click();
+      await page.locator('dialog[open]').waitFor();
+      await page.clock.runFor(500);
+    },
+  },
+  {
+    // Phones: the fourth run's line kept in front while the third is the table's baseline: emphasis and baseline are
+    // separate choices, and the baseline holds while other lines are brought forward.
+    name: 'run-compare-baseline-phone',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#cmp-table .pair');
+      await page.getByRole('button', { name: 'Next run' }).click();
+      await page.locator('#cmp-table .set-base').click();
+      await page.locator('.chip .key').nth(3).click();
+      await page.mouse.move(0, 0);
     },
   },
   // Nothing picked: the inline empty state with the standard secondary "Add run…" button.
@@ -857,7 +876,7 @@ export const scenes = [
     setup: (page) => until(page, '#cm .cell'),
   },
   {
-    // Phones, whole page: the KPI hero row, the section picker, then the Curves section.
+    // Phones, whole page: the section picker under the header, then the Curves section headed by the 2 × 2 KPI grid.
     name: 'model-phone',
     path: '/models/m_fast_n',
     viewports: ['mobile'],
@@ -1127,6 +1146,20 @@ export const scenes = [
       await playgroundResult(page);
       await page.getByRole('button', { name: 'Thresholds' }).click();
       await page.locator('#pg-more').waitFor();
+    },
+  },
+  {
+    // Tablets: Confidence and Overlap stay in the strip under the half-height image; More settings opens Max detections
+    // and the display toggles in the same non-modal sheet, over the detections.
+    name: 'playground-more-tablet',
+    path: '/playground?model=m_hard_s',
+    viewports: ['tablet'],
+    fullPage: false,
+    setup: async (page) => {
+      await playgroundResult(page);
+      await page.getByRole('button', { name: 'More settings' }).click();
+      await page.locator('#pg-more').waitFor();
+      await page.clock.runFor(500);
     },
   },
   {

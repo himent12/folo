@@ -258,9 +258,11 @@
     { label: 'Precision', value: m.metrics?.precision, sub: atBestF1(m.metrics?.best_f1_conf) },
     { label: 'Recall', value: m.metrics?.recall, sub: atBestF1(m.metrics?.best_f1_conf) },
   ];
-  // Phones: the four numbers as one compact 2 × 2 summary in every section (Curves too), so it never changes shape
-  // between sections and each section starts on the first screen; what they mean is behind the ⓘ.
-  const kpiGrid = $derived(phone.current);
+  // Phones: the work before the summary (DESIGN_DIRECTION 12). The section picker sits right under the header, so it
+  // never moves between sections; Curves, the overview, opens on the 2 × 2 grid, and the other sections on one line,
+  // the headline and "All metrics", which unfolds the same grid. What the numbers mean is behind the grid's ⓘ.
+  let kpiOpen = $state(false);
+  const kpiFolded = $derived(phone.current && section !== 'curves');
   /**
    * How the weights are stored (the file's folo.dtype and folo.fused, docs/API.md): "f16 · fused, inference only".
    * Null when the server does not say; a dtype this client has no name for reads as unknown, as the API asks.
@@ -376,20 +378,9 @@
     {/snippet}
 
     <!-- One strip of numbers in ink: the headline metric, then the ones that support it, each with a short qualifier;
-         the ⓘ opens what they mean. Phones: a 2 × 2 summary of label over value, the headline first. -->
-    {#if kpiGrid}
-      <section class="kpi-grid num" aria-label={metricsLabel(source)}>
-        <dl class="kg">
-          {#each kpis(m) as k, i (k.label)}
-            <div class="kg-cell" class:hero={i === 0}>
-              <dt>{k.label}{#if i === 0}{@render kHelp()}{/if}</dt>
-              <dd>{metric(k.value)}</dd>
-            </div>
-          {/each}
-        </dl>
-        {#if helpOpen}{@render metricHelp()}{/if}
-      </section>
-    {:else}
+         the ⓘ opens what they mean. Phones: a 2 × 2 summary of label over value, the headline first, inside the
+         sections (below). -->
+    {#if !phone.current}
     <section class="kpis" aria-label={metricsLabel(source)}>
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
@@ -416,6 +407,29 @@
 
     <!-- The parts, in one frame: on phones it is the sections' tab panel; wider, a column with the page's own gap. -->
     <div class="parts" id="model-sec-panel" role={phone.current ? 'tabpanel' : undefined} aria-labelledby={phone.current ? `model-sec-${section}` : undefined}>
+    {#if phone.current}
+      <!-- Phones: the summary heads its section. Curves shows the grid; elsewhere one line that unfolds it. -->
+      <section class="kpi-grid num" class:folded={kpiFolded} aria-label={metricsLabel(source)}>
+        {#if kpiFolded}
+          <button type="button" class="kpi-line" aria-expanded={kpiOpen} aria-controls="kpi-cells" onclick={() => (kpiOpen = !kpiOpen)}>
+            <span class="kl-name">mAP50-95</span>
+            <span class="kl-value">{metric(m.metrics?.map50_95)}</span>
+            <span class="kl-verb">All metrics <ChevronDown size={14} aria-hidden="true" /></span>
+          </button>
+        {/if}
+        {#if !kpiFolded || kpiOpen}
+          <dl class="kg" id="kpi-cells">
+            {#each kpis(m) as k, i (k.label)}
+              <div class="kg-cell" class:hero={i === 0}>
+                <dt>{k.label}{#if i === 0}{@render kHelp()}{/if}</dt>
+                <dd>{metric(k.value)}</dd>
+              </div>
+            {/each}
+          </dl>
+          {#if helpOpen}{@render metricHelp()}{/if}
+        {/if}
+      </section>
+    {/if}
 
     <!-- Evidence beside reference: the curves (8 columns) and the Details rail (4) stretch to one height, the plot
          taking what the rail adds; the per-class table, the curves' legend, follows in a row of its own. Up to 1199 px
@@ -880,7 +894,8 @@
     line-height: 40px;
     letter-spacing: var(--type-3xl-tracking);
   }
-  /* Phones, every section: a compact 2 × 2 summary in the strip's frame, mAP50-95 first. Each cell is its label over
+  /* Phones, the head of the Curves section (folded to one line in the others): a compact 2 × 2 summary in the strip's
+     frame, mAP50-95 first. Each cell is its label over
      its value, the cells parted by hairlines (1 px gaps over the line colour); the ⓘ sits in the top-right corner, and
      what the numbers mean opens under the grid. */
   .kpi-grid {
@@ -937,6 +952,49 @@
     gap: var(--space-1);
   }
   .kpi-grid .k-body {
+    border-top: 1px solid var(--line-subtle);
+  }
+  /* Folded (every phone section but Curves): one 48 px line in the grid's frame, the headline's label and value on
+     the left and the verb that unfolds the four cells on the right. */
+  .kpi-line {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    width: 100%;
+    min-height: 48px;
+    padding: var(--space-3) var(--space-4);
+    text-align: left;
+  }
+  .kpi-line:focus-visible {
+    outline-offset: -2px;
+  }
+  .kl-name {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .kl-value {
+    font-size: var(--type-lg-size);
+    line-height: 24px;
+    letter-spacing: var(--type-lg-tracking);
+    font-weight: var(--weight-semibold);
+  }
+  .kl-verb {
+    display: inline-flex;
+    align-self: center;
+    align-items: center;
+    gap: var(--space-1);
+    margin-left: auto;
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .kl-verb :global(svg) {
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .kpi-line[aria-expanded='true'] .kl-verb :global(svg) {
+    transform: rotate(180deg);
+  }
+  .kpi-line + .kg {
     border-top: 1px solid var(--line-subtle);
   }
   /* Phones' confusion list: two-line 56 px rows (the pair and its share, then the counts behind it). */
@@ -1387,11 +1445,12 @@
       grid-template-columns: minmax(0, 1fr);
     }
   }
-  /* Tablets and phones: the rail stacks under the main column (as on Run and New run). */
+  /* Tablets: the rail is folded to one line of facts (Details ›), so it sits right under the KPI strip, the reference
+     before the evidence, never under a long per-class table. Phones show it as a section of its own. */
   @media (max-width: 1023px) {
     .detail {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-areas: 'pr' 'cls' 'rail';
+      grid-template-areas: 'rail' 'pr' 'cls';
     }
   }
   @media (max-width: 767px) {

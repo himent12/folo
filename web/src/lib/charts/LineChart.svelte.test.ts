@@ -275,7 +275,7 @@ describe('LineChart round 18', () => {
     unmount(out.c);
   });
 
-  it('labels short-named lines at their ends even on a phone, and paints a front line over a dotted one', () => {
+  it('labels no line end on a phone-width plot, short names included, and paints a front line over a dotted one', () => {
     const series = [
       { id: 'box', label: 'box', color: 'orange', front: true, points: pts((x) => 1 - x / 60) },
       { id: 'dfl', label: 'dfl', color: 'teal', pattern: 'dot' as const, points: pts((x) => 1 - x / 61) },
@@ -283,12 +283,15 @@ describe('LineChart round 18', () => {
       { id: 'raw', label: 'raw', color: 'white', ghost: true, points: pts((x) => 3 - x / 31) },
     ];
     const { target, c } = mountAt({ series, label: 'loss', endLabels: true }, 340);
-    const labels = [...target.querySelectorAll('.end-label')].map((t) => t.textContent).sort();
-    expect(labels).toEqual(['box', 'dfl', 'total']);
+    expect(target.querySelector('.end-label')).toBeNull();
     const strokes = [...target.querySelectorAll('path.line')].map((p) => (p as SVGElement).style.stroke);
     expect(strokes.indexOf('orange')).toBeGreaterThan(strokes.indexOf('teal'));
     expect(strokes.at(-1)).toBe('white');
     unmount(c);
+    const wide = mountAt({ series, label: 'loss', endLabels: true }, 600);
+    const labels = [...wide.target.querySelectorAll('.end-label')].map((t) => t.textContent).sort();
+    expect(labels).toEqual(['box', 'dfl', 'total']);
+    unmount(wide.c);
   });
 
   it('ends each line in its status mark and names the status after the label, which it never cuts', () => {

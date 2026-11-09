@@ -71,7 +71,7 @@
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { LABEL_GAP, labelWidth, leaderOf, placeEndLabels } from './endLabels';
+  import { END_LABELS_MIN, LABEL_GAP, labelWidth, leaderOf, placeEndLabels } from './endLabels';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
@@ -265,9 +265,9 @@
     return w ? Math.ceil(w) + 4 : labelWidth(t);
   }
   /** Direct labels at each line's last point, each in a spot that covers no curve and no other label (endLabels.ts). */
-  // Narrow plots keep their width for data (the legend names the lines), unless every label is a short name such as
-  // the loss components' "box", "cls", "dfl".
-  const showEnds = $derived(endLabels && (width >= 560 || series.every((s) => (endText(s)?.length ?? 0) <= 6)));
+  // One rule for every chart (DESIGN_DIRECTION §2.4): a plot under 560 px (every phone) has no direct labels, short
+  // names included, and keeps that width for data; its legend carries each line's name, value and how it ended.
+  const showEnds = $derived(endLabels && width >= END_LABELS_MIN);
 
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);

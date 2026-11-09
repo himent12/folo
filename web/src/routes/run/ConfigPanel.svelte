@@ -20,6 +20,7 @@
     resolved = null,
     datasetName,
     compact = false,
+    essential = false,
     weights,
   }: {
     config: TrainConfig;
@@ -28,6 +29,8 @@
     datasetName?: string;
     /** One column for a rail, augmentation folded away. */
     compact?: boolean;
+    /** Phones, a queued run: the six settings that say what will train, the rest of training and augmentation folded. */
+    essential?: boolean;
     /** Where the run started, read once ($lib/lineage): the checkpoint by name, its id in the tooltip, as the header says it. */
     weights?: Origin | null;
   } = $props();
@@ -37,16 +40,23 @@
   // scratch") are sans with tabular numerals (design/README.md, Type).
   const id = (value: string): Setting => ({ value, ident: true });
   const plain = (value: string): Setting => ({ value });
-  const rows = $derived<[string, Setting][]>([
+  // Three groups: what trains on what (the essentials), how the optimizer runs, and the rest of the setup. The rail
+  // lists them in that order as one Training list; the two-column layout puts the optimizer over Augmentation so the
+  // columns end together; a phone shows the essentials and folds the others.
+  const core = $derived<[string, Setting][]>([
     ['Dataset', plain(datasetName ?? config.dataset_id)],
     ['Model', id(config.arch)],
     ['Epochs', plain(String(config.epochs))],
     [resolved && resolved.accumulate > 1 ? 'Batch × accumulate' : 'Batch', batchSetting(config, resolved)],
     ['Image size', plain(`${config.imgsz} px`)],
     ['Device', config.device === 'auto' ? plain('auto') : id(config.device)],
+  ]);
+  const optim = $derived<[string, Setting][]>([
     ['Optimizer', optimizerSetting(config, resolved)],
     ['Initial LR', lrSetting(config, resolved)],
     ...(resolved ? resolvedRows(resolved) : []),
+  ]);
+  const setup = $derived<[string, Setting][]>([
     ['Precision', precisionSetting(config)],
     ['Head', headSetting(config)],
     ['Weights', config.weights ? id(config.weights) : plain('From scratch')],
@@ -72,32 +82,37 @@
   }
 </script>
 
-{#snippet training(heading: boolean)}
+{#snippet list(heading: string | null, items: [string, Setting][])}
   <dl>
-    <!-- A heading only beside Augmentation's; alone in the rail it would name the panel twice. -->
-    {#if heading}<p class="group">Training</p>{/if}
-    {#each rows as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/if}{/each}
+    <!-- A heading only beside another group's; alone in the rail it would name the panel twice. -->
+    {#if heading}<p class="group">{heading}</p>{/if}
+    {#each items as [k, v] (k)}<dt>{k}</dt>{#if k === 'Weights' && weights}<dd>{#if weights.kind === 'scratch'}From scratch{:else}<Lineage origin={weights} />{/if}</dd>{:else}<dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/if}{/each}
   </dl>
 {/snippet}
-{#snippet augmentation(heading: boolean)}
-  <dl>
-    {#if heading}<p class="group">Augmentation</p>{/if}
-    {#each aug as [k, v] (k)}<dt>{k}</dt><dd class="num">{v.value}{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/each}
-  </dl>
+{#snippet fold(title: string, items: [string, Setting][])}
+  <details>
+    <summary>{title}</summary>
+    {@render list(null, items)}
+  </details>
 {/snippet}
 
 <Panel title="Config" id="config">
   {#snippet actions()}<Button size="sm" variant="ghost" icon={Copy} onclick={copy}>Copy JSON</Button>{/snippet}
-  {#if compact}
-    {@render training(false)}
-    <details>
-      <summary>Augmentation</summary>
-      {@render augmentation(false)}
-    </details>
+  {#if essential}
+    {@render list(null, core)}
+    {@render fold('More training settings', [...optim, ...setup])}
+    {@render fold('Augmentation', aug)}
+  {:else if compact}
+    {@render list(null, [...core, ...optim, ...setup])}
+    {@render fold('Augmentation', aug)}
   {:else}
+    <!-- Two columns that end together: the run's setup on the left, the optimizer and augmentation on the right. -->
     <div class="cols">
-      {@render training(true)}
-      {@render augmentation(true)}
+      {@render list('Training', [...core, ...setup])}
+      <div class="col">
+        {@render list('Optimizer', optim)}
+        {@render list('Augmentation', aug)}
+      </div>
     </div>
   {/if}
 </Panel>
@@ -107,6 +122,12 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: var(--space-6);
+  }
+  /* 16 px between the right column's groups: with one heading more than the left, the columns end within a few px. */
+  .col {
+    display: grid;
+    gap: var(--space-4);
+    align-content: start;
   }
   dl {
     display: grid;
@@ -128,6 +149,9 @@
   details {
     margin-top: var(--space-3);
   }
+  details + details {
+    margin-top: var(--space-1);
+  }
   summary {
     display: flex;
     align-items: center;
@@ -137,6 +161,11 @@
     color: var(--text-secondary);
     cursor: pointer;
     list-style: none;
+  }
+  @media (pointer: coarse) {
+    summary {
+      height: 44px;
+    }
   }
   summary::-webkit-details-marker {
     display: none;

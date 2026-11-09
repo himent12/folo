@@ -139,6 +139,7 @@
   /** Where the run started: "From scratch", or the model / file it was fine-tuned from (one reading, $lib/lineage). */
   /** Below 1024 px the parts are one section at a time behind tabs: then the parts' frame is their tab panel. */
   const stacked = new MediaQuery(media.upToLaptop, false);
+  const phone = new MediaQuery(media.phone, false);
   const lineage = $derived(run ? origin(run.config.weights, models.data ?? []) : null);
   let stopOpen = $state(false);
   let deleteOpen = $state(false);
@@ -391,9 +392,10 @@
 
     {#if waitingLayout}
       <!-- Waiting: the config as asked for, beside the queue and what the run will have. Nothing here is an
-           empty frame, and no panel stretches to its neighbour's height. -->
+           empty frame, and no panel stretches to its neighbour's height. Below 1024 px the queue leads; phones show
+           the config's essentials, the rest folded (the work before the reference). -->
       <div class="waiting">
-        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} /></div>
+        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} essential={phone.current} /></div>
         <div class="w-side">
           {#if place !== null && queue.length}
             <Panel title="Queue" meta="{waitingCount} waiting" pad="none" id="queue">
@@ -740,9 +742,10 @@
       order: -1;
     }
   }
-  /* Phones: the callout above says the place and what it waits for; the config is the page. */
+  /* Phones: the callout (the place and what it waits for), the queue, then the config's essentials; what the run will
+     have once it trains waits for that (Run's sections show it then). */
   @media (max-width: 767px) {
-    .w-side {
+    .w-side :global(#later) {
       display: none;
     }
   }
@@ -763,6 +766,12 @@
   }
   .q-row:first-child {
     border-top: 0;
+  }
+  /* Each name is a link: a 44 px row on touch screens. */
+  @media (pointer: coarse) {
+    .q-row {
+      height: 44px;
+    }
   }
   .q-n {
     color: var(--text-tertiary);
