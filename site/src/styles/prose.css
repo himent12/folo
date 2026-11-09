@@ -1,0 +1,386 @@
+/* Rendered Markdown. Reading text is set at `type.lg` (16 px) with a looser 26 px line for long-form reading; tables,
+   code and captions use the dense UI steps. */
+
+.prose {
+  color: var(--text-secondary);
+  font-size: var(--type-lg-size);
+  line-height: 26px;
+  overflow-wrap: break-word;
+}
+
+.prose > * + * {
+  margin-top: var(--space-4);
+}
+
+.prose :is(h2, h3, h4, h5) {
+  position: relative;
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+  text-wrap: balance;
+}
+
+.prose h2 {
+  margin-top: var(--space-12);
+  padding-top: var(--space-6);
+  border-top: var(--size-hairline) solid var(--line-subtle);
+  font-size: var(--type-2xl-size);
+  line-height: var(--type-2xl-line);
+  letter-spacing: var(--type-2xl-tracking);
+}
+
+.prose > h2:first-child {
+  margin-top: 0;
+}
+
+.prose h3 {
+  margin-top: var(--space-10);
+  font-size: var(--type-xl-size);
+  line-height: var(--type-xl-line);
+  letter-spacing: var(--type-xl-tracking);
+}
+
+.prose h4,
+.prose h5 {
+  margin-top: var(--space-8);
+  font-size: var(--type-lg-size);
+  line-height: var(--type-lg-line);
+}
+
+.prose :is(h2, h3, h4) + * {
+  margin-top: var(--space-3);
+}
+
+.h-anchor {
+  margin-left: var(--space-2);
+  padding: 0 var(--space-1);
+  color: var(--text-tertiary);
+  font-weight: var(--weight-regular);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-standard);
+}
+
+:is(h2, h3, h4):hover .h-anchor,
+.h-anchor:focus-visible {
+  opacity: 1;
+}
+
+.h-anchor:hover {
+  color: var(--text-primary);
+}
+
+@media (hover: none) {
+  .h-anchor {
+    display: none;
+  }
+}
+
+.prose strong {
+  color: var(--text-primary);
+  font-weight: var(--weight-semibold);
+}
+
+.prose a {
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--line-control);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color var(--dur-fast) var(--ease-standard);
+}
+
+.prose a:hover {
+  text-decoration-color: currentColor;
+}
+
+.prose .h-anchor {
+  text-decoration: none;
+  color: var(--text-tertiary);
+}
+
+.prose :is(ul, ol) {
+  padding-left: var(--space-6);
+}
+
+.prose ul {
+  list-style: disc;
+}
+
+.prose li::marker {
+  color: var(--text-tertiary);
+}
+
+.prose li + li,
+.prose li > :is(ul, ol) {
+  margin-top: var(--space-1);
+}
+
+.prose li > p + p {
+  margin-top: var(--space-2);
+}
+
+/* Roadmap status markers */
+.prose li.task-item {
+  list-style: none;
+  position: relative;
+}
+
+.task {
+  position: absolute;
+  left: calc(-1 * var(--space-6));
+  top: 6px;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--radius-full);
+  border: 1.5px solid var(--line-control);
+}
+
+.task-done {
+  border-color: var(--success-solid);
+  background: var(--success-solid);
+}
+
+.task-done::after {
+  content: '';
+  position: absolute;
+  left: 3.5px;
+  top: 1px;
+  width: 4px;
+  height: 7px;
+  border-right: 1.5px solid var(--bg-panel);
+  border-bottom: 1.5px solid var(--bg-panel);
+  transform: rotate(45deg);
+}
+
+.task-doing {
+  border-color: var(--accent-line);
+  background: linear-gradient(90deg, var(--accent-line) 50%, transparent 50%);
+}
+
+.prose code {
+  padding: 1px var(--space-1);
+  border: var(--size-hairline) solid var(--line-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+  overflow-wrap: anywhere;
+}
+
+.prose a code {
+  color: inherit;
+}
+
+.prose blockquote {
+  padding: var(--space-3) var(--space-4);
+  border: var(--size-hairline) solid var(--line-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-raised);
+  font-size: var(--type-md-size);
+  line-height: 22px;
+}
+
+.prose blockquote > * + * {
+  margin-top: var(--space-2);
+}
+
+.prose hr {
+  border: 0;
+  border-top: var(--size-hairline) solid var(--line-default);
+  margin: var(--space-8) 0;
+}
+
+.prose img {
+  border: var(--size-hairline) solid var(--line-default);
+  border-radius: var(--radius-lg);
+  background: var(--bg-inset);
+}
+
+.prose p:has(> img) {
+  margin-top: var(--space-6);
+  margin-bottom: var(--space-6);
+}
+
+/* Code blocks */
+.code {
+  position: relative;
+}
+
+.prose .code,
+.prose .table-wrap {
+  margin-top: var(--space-5);
+}
+
+.prose .code + *,
+.prose .table-wrap + * {
+  margin-top: var(--space-5);
+}
+
+.shiki {
+  overflow-x: auto;
+  padding: var(--space-3) var(--space-4);
+  border: var(--size-hairline) solid var(--line-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-inset) !important;
+  color: var(--shiki-foreground) !important;
+  font-family: var(--font-mono);
+  font-size: var(--type-base-size);
+  line-height: var(--type-base-line);
+  tab-size: 4;
+}
+
+.shiki code {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+  overflow-wrap: normal;
+}
+
+.shiki:focus-visible {
+  outline-offset: -2px;
+}
+
+.code-tools {
+  position: absolute;
+  top: var(--space-1-5);
+  right: var(--space-1-5);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.copy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--control-md);
+  padding: 0 var(--space-2);
+  border: var(--size-hairline) solid var(--line-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: var(--type-sm-size);
+  opacity: 0;
+  transition:
+    opacity var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard);
+}
+
+.code:hover .copy,
+.copy:focus-visible,
+.copy[data-copied] {
+  opacity: 1;
+}
+
+.copy:hover {
+  border-color: var(--line-control);
+  color: var(--text-primary);
+}
+
+.copy .i-check,
+.copy[data-copied] .i-copy {
+  display: none;
+}
+
+.copy[data-copied] .i-check {
+  display: block;
+  color: var(--success-solid);
+}
+
+.copy-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.copy[data-copied] .copy-label {
+  position: static;
+  width: auto;
+  height: auto;
+  clip-path: none;
+}
+
+@media (hover: none) {
+  .copy {
+    opacity: 1;
+  }
+}
+
+/* Highlighting: shiki's CSS-variable theme, coloured from the tokens (status `text` colours, AA on every surface). */
+:root {
+  --shiki-foreground: var(--text-primary);
+  --shiki-background: var(--bg-inset);
+  --shiki-token-keyword: var(--info-text);
+  --shiki-token-string: var(--success-text);
+  --shiki-token-string-expression: var(--success-text);
+  --shiki-token-constant: var(--warning-text);
+  --shiki-token-function: var(--text-primary);
+  --shiki-token-parameter: var(--text-primary);
+  --shiki-token-punctuation: var(--text-secondary);
+  --shiki-token-comment: var(--text-tertiary);
+  --shiki-token-link: var(--info-text);
+}
+
+/* Tables */
+.table-wrap {
+  overflow-x: auto;
+  border: var(--size-hairline) solid var(--line-default);
+  border-radius: var(--radius-lg);
+}
+
+.table-wrap:focus-visible {
+  outline-offset: 2px;
+}
+
+.prose table {
+  width: 100%;
+  font-size: var(--type-base-size);
+  line-height: var(--type-base-line);
+  font-variant-numeric: tabular-nums;
+}
+
+.prose th,
+.prose td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: var(--size-hairline) solid var(--line-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+
+.prose th {
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  font-weight: var(--weight-medium);
+  white-space: nowrap;
+}
+
+.prose td {
+  min-width: 96px;
+}
+
+.prose td:first-child {
+  color: var(--text-primary);
+}
+
+.prose tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.prose tbody tr:hover td {
+  background: var(--bg-hover);
+}
+
+/* Wide tables: let long cells wrap at a readable width instead of one endless line. */
+.prose td {
+  max-width: 420px;
+}

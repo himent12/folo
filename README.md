@@ -230,6 +230,8 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 Examples: [shapes](examples/shapes/README.md) (the convergence gate, on CPU and GPU) and
 [r6](examples/r6/README.md) (a real dataset trained from scratch).
 
+To read these as a website with search: `cd site && npm ci && npm run dev` ([site/README.md](site/README.md)).
+
 ## License
 
 Licensed under either of MIT or Apache-2.0 at your option.

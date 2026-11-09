@@ -102,6 +102,21 @@ jobs:
       - if: steps.web.outputs.present == 'true'
         working-directory: web
         run: npm ci && npm run check && npm run build
+  site:
+    # The docs site (site/README.md), generated from docs/, README.md and examples/*/README.md: `npm run check`
+    # type-checks it and fails on a broken link, anchor or image; `npm run build` builds it (the same checks again).
+    # Node 24 runs the TypeScript build scripts directly (type stripping).
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - working-directory: site
+        run: npm ci && npm run check && npm run build
   wasm:
     # folo-wasm (FOLO in the browser, docs/WASM.md) for wasm32: clippy, then the release build and its JS bindings
     # through scripts/build-wasm.sh, exactly as Studio would build it.
