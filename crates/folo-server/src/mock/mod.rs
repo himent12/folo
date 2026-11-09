@@ -6,6 +6,7 @@
 
 mod runs;
 mod scene;
+mod throughput;
 mod val;
 mod weights;
 
@@ -14,11 +15,11 @@ use std::sync::{Arc, RwLock};
 
 use axum::http::StatusCode;
 use folo_api::{
-    AmpSupport, Arch, BBox, Capabilities, ClassMetrics, Dataset, DatasetFormat, DatasetIssue, ExportFormat,
-    ExportResult, ExportSpec, GpuBackend, GpuInfo, Head, ImageInfo, ImagePage, IssuePage, IssueSeverity,
-    LogLine, Model, ModelEval, ModelMetrics, ModelPrecision, PrCurve, PredictResponse, RegisterDataset, Run,
-    RunSamples, Sample, ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, TrainConfig,
-    TrainedWith,
+    AmpSupport, Arch, BBox, BenchmarkReport, BenchmarkRequest, Capabilities, ClassMetrics, Dataset,
+    DatasetFormat, DatasetIssue, ExportFormat, ExportResult, ExportSpec, GpuBackend, GpuInfo, Head,
+    ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval, ModelMetrics, ModelPrecision,
+    PhaseKind, PrCurve, PredictResponse, RegisterDataset, Run, RunEstimate, RunSamples, Sample, ScoredBox,
+    Split, Splits, SyntheticDataset, TensorCoreSupport, ThroughputTable, TrainConfig, TrainedWith,
 };
 
 use crate::error::{Error, Result};
@@ -491,6 +492,7 @@ pub struct MockStore {
     queue: std::sync::Mutex<Vec<Arc<SimRun>>>,
     weights: weights::MockWeights,
     tensor_cores: MockTensorCores,
+    throughput: crate::throughput::Throughput,
 }
 
 /// Environment variable that picks the mock GPU's tensor-core state ([`MockTensorCores`]), so front ends can test
@@ -561,6 +563,9 @@ impl MockTensorCores {
 
 /// The mock GPU.
 const MOCK_GPU: &str = "NVIDIA GeForce RTX 4080 SUPER";
+
+/// The scripted live run (it loops forever, so it does not block benchmark probes).
+const LIVE_RUN: &str = "run_3c02";
 
 impl Default for MockStore {
     fn default() -> Self {
@@ -851,6 +856,7 @@ impl MockStore {
             queue: std::sync::Mutex::default(),
             weights: weights::MockWeights::new(),
             tensor_cores: MockTensorCores::from_env(),
+            throughput: crate::throughput::Throughput::in_memory(throughput::table()),
         }
     }
 
@@ -972,6 +978,112 @@ impl Store for MockStore {
 
     fn capabilities(&self) -> Option<Capabilities> {
         Some(self.tensor_cores.capabilities())
+    }
+
+    fn throughput(&self) -> Result<ThroughputTable> {
+        Ok(self.throughput.table(&throughput::gpu(), &[throughput::gpu(), throughput::cpu()]))
+    }
+
+    fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
+        let ds = self.dataset(&config.dataset_id)?;
+        self.validate(&config)?;
+        let splits = ds.meta().splits;
+        if ds.meta().classes.is_empty() || splits.train == 0 {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_config",
+                format!("dataset_id: '{}' has no classes or no training images", ds.meta().id),
+            ));
+        }
+        let augment = folo_data::AugmentConfig {
+            close_mosaic: config.augment.close_mosaic,
+            ..folo_data::AugmentConfig::default()
+        };
+        let device = if config.device == "cpu" { throughput::cpu() } else { throughput::gpu() };
+        Ok(self.throughput.estimate(&crate::throughput::EstimateInput {
+            device,
+            arch: config.arch,
+            imgsz: config.imgsz,
+            amp: config.amp,
+            batch: config.batch,
+            epochs: config.epochs,
+            mosaic: config.augment.mosaic > 0.0,
+            close_mosaic_epochs: augment.close_mosaic_epochs(config.epochs),
+            train_images: splits.train,
+            val_images: if splits.val == 0 { splits.train } else { splits.val },
+        }))
+    }
+
+    /// Answers at once with numbers near the table's (or the reference's): no device is used. Refused while a run
+    /// created through the API is queued or training (the scripted live run does not count).
+    fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {
+        crate::probe::check(&req)?;
+        let busy =
+            self.runs.read().unwrap().iter().any(|r| r.0.id != LIVE_RUN && r.0.snap().status.is_active());
+        if busy {
+            return Err(Error::conflict(
+                "run_active",
+                "a training run is queued or running; a probe now would measure both slower",
+            )
+            .hint("wait until it finishes (or stop it), then probe again"));
+        }
+        let amp = req.amp && self.tensor_cores == MockTensorCores::On;
+        if req.amp && !amp {
+            return Err(Error::new(
+                StatusCode::NOT_IMPLEMENTED,
+                "not_supported",
+                self.tensor_cores.capabilities().amp.reason.unwrap_or_default(),
+            ));
+        }
+        let gpu = throughput::gpu();
+        let reference = crate::throughput::reference::train(true, req.arch, req.imgsz, amp);
+        let seed = fnv1a(format!("{:?}{}{}{}", req.arch, req.imgsz, req.batch, amp).as_bytes());
+        let ips = (reference.mosaic * (1.0 + 0.04 * noise(&[seed, 1]) as f64) * 10.0).round() / 10.0;
+        let trained = self.throughput.record_train(crate::throughput::TrainSample {
+            key: crate::throughput::TrainKey {
+                device: gpu.clone(),
+                arch: req.arch,
+                imgsz: req.imgsz,
+                batch: req.batch,
+                amp,
+            },
+            phase: PhaseKind::Mosaic,
+            train_imgs_per_s: Some(ips),
+            val_imgs_per_s: None,
+            startup_s: None,
+            peak_vram_bytes: Some(crate::throughput::reference::memory(req.arch, req.imgsz, req.batch, amp)),
+            probe: true,
+        });
+        let (latency, forward, _) =
+            crate::throughput::reference::infer(true, req.arch, req.imgsz, folo_api::InferPrecision::F32);
+        let calls = (req.budget_s * 0.4 * 1000.0 / latency).clamp(5.0, 500.0) as u64;
+        let mut inferred = None;
+        for i in 0..calls.min(crate::throughput::WINDOW as u64) {
+            let k = 1.0 + 0.08 * noise(&[seed, 100 + i]) as f64;
+            inferred = Some(self.throughput.record_infer(crate::throughput::InferSample {
+                key: crate::throughput::InferKey {
+                    device: gpu.clone(),
+                    arch: req.arch,
+                    imgsz: req.imgsz,
+                    precision: folo_api::InferPrecision::F32,
+                    tensor_cores: false,
+                },
+                total_ms: (latency + 0.9) * k,
+                inference_ms: forward * k,
+            }));
+        }
+        let inference = crate::throughput::infer_row(&inferred.expect("at least 5 predictions"));
+        Ok(BenchmarkReport {
+            device: gpu.device,
+            device_name: gpu.device_name,
+            train_imgs_per_s: ips,
+            train_batches: ((req.budget_s * 0.6 * 0.7 * ips) / req.batch as f64).max(1.0) as u64,
+            latency_ms: inference.latency_ms,
+            predictions: calls,
+            elapsed_s: ((req.budget_s + 1.8) * 10.0).round() / 10.0,
+            training: crate::throughput::train_row(&trained),
+            inference,
+        })
     }
 
     fn list_datasets(&self) -> Result<Vec<Dataset>> {

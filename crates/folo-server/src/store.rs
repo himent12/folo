@@ -7,9 +7,9 @@
 use std::path::Path;
 
 use folo_api::{
-    Capabilities, Dataset, ExportResult, ExportSpec, GpuInfo, LogLine, Model, ModelEval, PredictResponse,
-    RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset,
-    TrainConfig, ValReport, ValRequest,
+    BenchmarkReport, BenchmarkRequest, Capabilities, Dataset, ExportResult, ExportSpec, GpuInfo, LogLine,
+    Model, ModelEval, PredictResponse, RegisterDataset, Run, RunEstimate, RunEvent, RunMetrics, RunSamples,
+    Split, StatusEvent, SyntheticDataset, ThroughputTable, TrainConfig, ValReport, ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -290,6 +290,23 @@ pub trait Store: Send + Sync + 'static {
     /// The data dir to report in `/api/system` (`None`: the mock store).
     fn data_dir(&self) -> Option<&Path> {
         None
+    }
+    /// The throughput table (`GET /api/system/throughput`): measured rows, then the reference rows of this server's
+    /// devices. May block (the real store resolves `device: auto`). Stores without one answer `501
+    /// not_implemented` (the default).
+    fn throughput(&self) -> Result<ThroughputTable> {
+        Err(crate::error::Error::not_implemented("the throughput table"))
+    }
+    /// How long a run of `config` would take (`POST /api/runs/estimate`), checked like `POST /api/runs`.
+    fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate> {
+        let _ = config;
+        Err(crate::error::Error::not_implemented("run estimates"))
+    }
+    /// A few-second probe of training and inference speed (`POST /api/system/benchmark`); `409 run_active` while
+    /// a run is queued or training.
+    fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {
+        let _ = req;
+        Err(crate::error::Error::not_implemented("benchmark probes"))
     }
 
     /// All datasets (without stats), oldest first.

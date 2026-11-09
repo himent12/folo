@@ -81,7 +81,15 @@ pub enum FoloUri {
     Predictions(String),
     /// `folo://docs/{name}`
     Doc(String),
+    /// `folo://system/throughput`
+    Throughput,
+    /// `folo://estimate/{dataset_id}{?arch,epochs,batch,imgsz,device,amp}`: the dataset and the query's
+    /// `TrainConfig` fields, in URI order.
+    Estimate(String, Vec<(String, String)>),
 }
+
+/// The `TrainConfig` fields an estimate URI takes.
+pub const ESTIMATE_PARAMS: [&str; 6] = ["arch", "epochs", "batch", "imgsz", "device", "amp"];
 
 fn decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
@@ -122,6 +130,17 @@ impl FoloUri {
             }
         };
         let parts: Vec<&str> = path.split('/').collect();
+        if let ["estimate", id] = parts.as_slice() {
+            let mut fields = Vec::new();
+            for kv in query.unwrap_or("").split('&').filter(|kv| !kv.is_empty()) {
+                let (k, v) = kv.split_once('=')?;
+                if !ESTIMATE_PARAMS.contains(&k) || fields.iter().any(|(f, _)| f == k) {
+                    return None;
+                }
+                fields.push((k.to_string(), decode(v)?));
+            }
+            return Some(FoloUri::Estimate(decode(id)?, fields));
+        }
         Some(match parts.as_slice() {
             ["datasets", id, "images", image] => {
                 let size = match param("size")? {
@@ -147,6 +166,7 @@ impl FoloUri {
             ["runs", id, "epochs"] => FoloUri::Epochs(decode(id)?),
             ["predictions", id] => FoloUri::Predictions(decode(id)?),
             ["docs", name] => FoloUri::Doc(decode(name)?),
+            ["system", "throughput"] => FoloUri::Throughput,
             _ => return None,
         })
     }
@@ -178,6 +198,14 @@ impl fmt::Display for FoloUri {
             }
             FoloUri::Predictions(id) => write!(f, "folo://predictions/{}", encode(id)),
             FoloUri::Doc(name) => write!(f, "folo://docs/{}", encode(name)),
+            FoloUri::Throughput => write!(f, "folo://system/throughput"),
+            FoloUri::Estimate(id, fields) => {
+                write!(f, "folo://estimate/{}", encode(id))?;
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    write!(f, "{}{k}={}", if i == 0 { '?' } else { '&' }, encode(v))?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -216,6 +244,13 @@ pub fn list(store: &dyn Store, keep: &dyn Fn(&str) -> bool) -> Result<Vec<Resour
                 .with_mime_type("application/json"),
         );
     }
+    out.push(
+        Resource::new(FoloUri::Throughput.to_string(), "throughput")
+            .with_description(
+                "measured training and inference speed on this server, with docs/BENCHMARKS.md reference rows",
+            )
+            .with_mime_type("application/json"),
+    );
     for (name, text) in DOCS {
         out.push(
             Resource::new(FoloUri::Doc(name.to_string()).to_string(), format!("docs/{name}.md"))
@@ -273,12 +308,47 @@ pub fn templates() -> Vec<ResourceTemplate> {
             "application/json",
         ),
         t(
+            "folo://system/throughput",
+            "throughput",
+            "The GET /api/system/throughput table: training img/s per (device, arch, imgsz, batch, amp) and predict \
+             latency, each row `measured` on this server or a docs/BENCHMARKS.md `reference`.",
+            "application/json",
+        ),
+        t(
+            "folo://estimate/{dataset_id}{?arch,epochs,batch,imgsz,device,amp}",
+            "run estimate",
+            "How long a training run would take (POST /api/runs/estimate; TrainConfig defaults for what is left \
+             out): est_epoch_s, est_total_s with a range, est_peak_vram_bytes, source and confidence.",
+            "application/json",
+        ),
+        t(
             "folo://docs/{name}",
             "docs",
             "ARCHITECTURE, API, CLI, MODEL, FORMAT, METRICS or MCP.",
             "text/markdown",
         ),
     ]
+}
+
+/// The `TrainConfig` of `folo://estimate/{dataset_id}?...`: numbers and `amp` parsed, every other field at its
+/// default. `400 invalid_arguments`-style errors for values of the wrong type.
+pub fn estimate_config(
+    dataset_id: &str,
+    fields: &[(String, String)],
+) -> Result<folo_api::TrainConfig, Error> {
+    let mut o = serde_json::Map::new();
+    o.insert("dataset_id".into(), json!(dataset_id));
+    for (k, v) in fields {
+        let value = match k.as_str() {
+            "epochs" | "batch" | "imgsz" => v.parse::<u32>().map(|n| json!(n)).ok(),
+            "amp" => v.parse::<bool>().map(|b| json!(b)).ok(),
+            _ => Some(json!(v)),
+        }
+        .ok_or_else(|| crate::errors::invalid_arguments(format!("{k}: `{v}` is not a valid value")))?;
+        o.insert(k.clone(), value);
+    }
+    serde_json::from_value(Value::Object(o))
+        .map_err(|e| crate::errors::invalid_arguments(format!("invalid estimate query: {e}")))
 }
 
 /// `{ run, last_step, last_epoch }` of `folo://runs/{id}` (the caller adds `revision`).
@@ -306,6 +376,12 @@ mod tests {
             FoloUri::Samples("run_1".into(), 3, 256),
             FoloUri::Predictions("pb_1".into()),
             FoloUri::Doc("API".into()),
+            FoloUri::Throughput,
+            FoloUri::Estimate("ds_1".into(), vec![]),
+            FoloUri::Estimate(
+                "ds 1".into(),
+                vec![("arch".into(), "folo-s".into()), ("amp".into(), "true".into())],
+            ),
         ] {
             assert_eq!(FoloUri::parse(&u.to_string()), Some(u));
         }
@@ -325,5 +401,22 @@ mod tests {
         assert_eq!(FoloUri::parse("folo://nothing"), None);
         assert_eq!(FoloUri::parse("file:///etc/passwd"), None);
         assert!(doc("MCP").unwrap().contains("folo mcp"));
+        // Estimates: only TrainConfig's speed fields, each once.
+        let est = |q: &str| FoloUri::parse(&format!("folo://estimate/ds_1{q}"));
+        assert_eq!(
+            est("?epochs=50&device=gpu%3A0"),
+            Some(FoloUri::Estimate(
+                "ds_1".into(),
+                vec![("epochs".into(), "50".into()), ("device".into(), "gpu:0".into())]
+            ))
+        );
+        for bad in ["?lr0=0.1", "?epochs=1&epochs=2", "?epochs", "?arch="] {
+            assert_eq!(est(bad), None, "{bad}");
+        }
+        let c =
+            estimate_config("ds_1", &[("epochs".into(), "5".into()), ("amp".into(), "true".into())]).unwrap();
+        assert_eq!((c.dataset_id.as_str(), c.epochs, c.amp, c.batch), ("ds_1", 5, true, 16));
+        assert!(estimate_config("ds_1", &[("epochs".into(), "many".into())]).is_err());
+        assert!(estimate_config("ds_1", &[("arch".into(), "folo-q".into())]).is_err());
     }
 }

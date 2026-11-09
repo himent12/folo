@@ -10,18 +10,22 @@
 //! thread) updates the run, appends logs and forwards each event. On open, runs left `queued`, `running` or
 //! `stopping` by a previous process become `stopped`; [`Runs::resume`] continues one from `weights/last.folo`
 //! (same id, the full checkpoint state) or starts it over when it never finished an epoch.
+//!
+//! Every validated epoch after a session's first also feeds the throughput table ([`crate::throughput`]): its
+//! training rate (the epoch's last `step` event), its validation rate (the rest of the epoch's duration) and the
+//! GPU pool's peak memory.
 
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
-    BestEpoch, DatasetFormat, Epoch, LogLevel, LogLine, ModelMetrics, QueueEvent, Run, RunEvent, RunMetrics,
-    RunStatus, StatusEvent, Step, TrainConfig,
+    BestEpoch, DatasetFormat, Epoch, LogLevel, LogLine, ModelMetrics, PhaseKind, QueueEvent, Run, RunEvent,
+    RunMetrics, RunStatus, StatusEvent, Step, TrainConfig,
 };
 use folo_data::{Dataset as _, Split};
 use folo_vision::train::ResumeOverrides;
@@ -33,6 +37,7 @@ use crate::engine;
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
 use crate::store::{QueueMove, Subscription};
+use crate::throughput::{Throughput, TrainKey, TrainSample};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
 /// Events buffered per SSE subscriber before it counts as lagging.
@@ -93,6 +98,63 @@ pub struct RunEntry {
     state: Mutex<RunState>,
     tx: broadcast::Sender<RunEvent>,
     stop: Arc<AtomicBool>,
+    /// What the throughput table learns while the run trains (set by the worker).
+    measure: Mutex<Option<Measure>>,
+}
+
+/// A training session's contribution to the throughput table: each validated epoch after the session's first
+/// (which includes pipeline compilation) is one sample.
+struct Measure {
+    throughput: Arc<Throughput>,
+    key: TrainKey,
+    train_images: u64,
+    val_images: u64,
+    epochs: u32,
+    mosaic: bool,
+    close_mosaic_epochs: u32,
+    /// The training device (its folo-gpu context has the peak memory).
+    device: folo_core::Device,
+    /// The session's first epoch and its duration (the next epoch's shorter duration gives `startup_s`).
+    first: Option<(u32, f64)>,
+    /// The latest `step` event (the trainer always sends an epoch's last one).
+    last_step: Option<Step>,
+}
+
+impl Measure {
+    /// Epoch `e` (1-based) trains with mosaic.
+    fn mosaic_in(&self, e: u32) -> bool {
+        self.mosaic && e + self.close_mosaic_epochs <= self.epochs
+    }
+
+    fn epoch(&mut self, e: &Epoch) {
+        // Only the epoch's final step covers all of it (steps of non-finite batches are not sent).
+        let step = self.last_step.take().filter(|s| {
+            s.epoch == e.epoch && s.step == e.epoch as u64 * s.steps_per_epoch && s.imgs_per_s > 0.0
+        });
+        let Some((first, first_s)) = self.first else {
+            self.first = Some((e.epoch, e.duration_s));
+            return;
+        };
+        // `imgs_per_s` of the epoch's last step is its training rate: images over the time since the epoch began.
+        // Without it the epoch is not a sample at all.
+        let Some(s) = step else { return };
+        let ips = s.imgs_per_s as f64;
+        let val_s = e.duration_s - self.train_images as f64 / ips;
+        let val = (val_s > 0.01).then(|| self.val_images as f64 / val_s);
+        let mosaic = self.mosaic_in(e.epoch);
+        let startup =
+            (first + 1 == e.epoch && mosaic == self.mosaic_in(first)).then_some(first_s - e.duration_s);
+        let peak = folo_gpu::context_for(self.device).map(|c| c.pool_stats().peak_live_bytes);
+        self.throughput.record_train(TrainSample {
+            key: self.key.clone(),
+            phase: if mosaic { PhaseKind::Mosaic } else { PhaseKind::CloseMosaic },
+            train_imgs_per_s: Some(ips),
+            val_imgs_per_s: val,
+            startup_s: startup,
+            peak_vram_bytes: peak,
+            probe: false,
+        });
+    }
 }
 
 fn now() -> String {
@@ -125,6 +187,7 @@ impl RunEntry {
             }),
             tx,
             stop: Arc::new(AtomicBool::new(false)),
+            measure: Mutex::new(None),
         }
     }
 
@@ -204,6 +267,13 @@ impl RunEntry {
 
     /// The trainer's events: update the run, persist what matters, forward to subscribers.
     fn on_event(&self, ev: &RunEvent) {
+        if let Some(m) = self.measure.lock().unwrap().as_mut() {
+            match ev {
+                RunEvent::Step(s) => m.last_step = Some(*s),
+                RunEvent::Epoch(e) => m.epoch(e),
+                _ => {}
+            }
+        }
         let mut st = self.state.lock().unwrap();
         match ev {
             RunEvent::Status(s) => {
@@ -312,11 +382,18 @@ pub struct Runs {
     active: Mutex<Option<Arc<RunEntry>>>,
     idle: Condvar,
     worker: Mutex<bool>,
+    /// Counts the worker taking up and letting go of runs ([`Runs::activity`]).
+    activity: AtomicU64,
+    /// Held by the worker while it trains a run and by a benchmark probe while it measures ([`Runs::probe_gate`]),
+    /// so the two never share the device.
+    gate: Mutex<()>,
+    throughput: Arc<Throughput>,
 }
 
 impl Runs {
-    /// Loads the runs under `dir`. Runs a previous process left active become `stopped`.
-    pub fn open(dir: PathBuf) -> Arc<Runs> {
+    /// Loads the runs under `dir`. Runs a previous process left active become `stopped`. Trained epochs are
+    /// recorded in `throughput`.
+    pub fn open(dir: PathBuf, throughput: Arc<Throughput>) -> Arc<Runs> {
         let mut list = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for d in rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()) {
@@ -368,7 +445,49 @@ impl Runs {
             active: Mutex::new(None),
             idle: Condvar::new(),
             worker: Mutex::new(false),
+            gate: Mutex::new(()),
+            throughput,
+            activity: AtomicU64::new(0),
         })
+    }
+
+    /// Changes whenever the worker takes up or lets go of a run: equal values around a prediction (with
+    /// [`Runs::busy`] false at both ends) mean no run trained during it.
+    pub fn activity(&self) -> u64 {
+        self.activity.load(Ordering::SeqCst)
+    }
+
+    /// A run is queued, training or stopping.
+    pub fn busy(&self) -> bool {
+        !self.queue.lock().unwrap().runs.is_empty() || self.active.lock().unwrap().is_some()
+    }
+
+    /// The device to a benchmark probe: `409 run_active` while a run is queued or training (or another probe
+    /// holds it). Runs queued meanwhile wait for the guard to drop.
+    pub fn probe_gate(&self) -> Result<MutexGuard<'_, ()>> {
+        let busy = || {
+            Error::conflict(
+                "run_active",
+                "a training run is queued or running; a probe now would measure both slower",
+            )
+            .hint("wait until it finishes (or stop it), then probe again")
+        };
+        let guard = match self.gate.try_lock() {
+            Ok(g) => g,
+            Err(TryLockError::WouldBlock) => {
+                return Err(if self.busy() {
+                    busy()
+                } else {
+                    Error::conflict("run_active", "another benchmark probe is running")
+                        .hint("try again in a few seconds")
+                });
+            }
+            Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        };
+        if self.busy() {
+            return Err(busy());
+        }
+        Ok(guard)
     }
 
     /// One run.
@@ -601,8 +720,11 @@ impl Runs {
                 };
                 // Set before the queue lock is released, so `enqueue` counts the runs ahead exactly.
                 *self.active.lock().unwrap() = Some(entry.clone());
+                self.activity.fetch_add(1, Ordering::SeqCst);
                 entry
             };
+            // A benchmark probe finishes first; the device is the run's until it ends.
+            let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner());
             // Lock order: registry, then a run's state, then the queue (as `delete` and `stop` take them); the
             // queue lock is released first. A run stopped or deleted in between is skipped.
             {
@@ -610,12 +732,15 @@ impl Runs {
                 if st.file.run.status != RunStatus::Queued || st.deleted {
                     drop(st);
                     *self.active.lock().unwrap() = None;
+                    self.activity.fetch_add(1, Ordering::SeqCst);
                     self.idle.notify_all();
                     continue;
                 }
                 st.claimed = true;
             }
-            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&entry)));
+            let ran =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&entry, &self.throughput)));
+            *entry.measure.lock().unwrap() = None;
             let mut st = entry.state.lock().unwrap();
             let internal = || Some("internal".to_string());
             let (status, error, code) = match (ran, st.outcome.take()) {
@@ -635,6 +760,7 @@ impl Runs {
             entry.finish_with_code(&mut st, status, error, code);
             drop(st);
             *self.active.lock().unwrap() = None;
+            self.activity.fetch_add(1, Ordering::SeqCst);
             self.idle.notify_all();
         }
     }
@@ -914,7 +1040,7 @@ fn read_metrics(path: &Path) -> RunMetrics {
 }
 
 /// Trains one run on the worker thread.
-fn execute(e: &Arc<RunEntry>) {
+fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>) {
     let (config, dataset, weights) = {
         let st = e.state.lock().unwrap();
         (st.file.run.config.clone(), st.file.dataset.clone(), st.file.weights.clone())
@@ -935,6 +1061,32 @@ fn execute(e: &Arc<RunEntry>) {
         st.file.run.resolved = Some(trainer.resolved_train());
         e.persist(&st);
     }
+    let device = trainer.device();
+    if let Some(c) = folo_gpu::context_for(device) {
+        c.reset_peak_memory();
+    }
+    let rc = trainer.run_config();
+    let count = |k: &str| rc[k].as_u64().unwrap_or(0);
+    let (train_images, val_images) = (count("train_images"), count("val_images"));
+    *e.measure.lock().unwrap() = Some(Measure {
+        throughput: throughput.clone(),
+        key: TrainKey {
+            device: engine::device_id(device),
+            arch: config.arch,
+            imgsz: config.imgsz,
+            batch: config.batch,
+            amp: config.amp,
+        },
+        train_images,
+        // An empty val split validates the training split.
+        val_images: if val_images == 0 { train_images } else { val_images },
+        epochs: config.epochs,
+        mosaic: config.augment.mosaic > 0.0,
+        close_mosaic_epochs: count("close_mosaic_epochs") as u32,
+        device,
+        first: None,
+        last_step: None,
+    });
     // The trainer reports the outcome itself (the final `status` event, the error as a log line); the worker
     // publishes it after dropping the trainer (and with it the run's open files).
     if let Err(err) = trainer.run() {
@@ -1023,7 +1175,7 @@ mod tests {
     fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         let dir = std::env::temp_dir().join(format!("folo-runs-late-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let runs = Runs::open(dir.clone());
+        let runs = Runs::open(dir.clone(), Arc::new(Throughput::in_memory(Default::default())));
         let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
         let run = Run {
             id: "run_late".into(),
@@ -1072,7 +1224,7 @@ mod tests {
     fn listed_queue_positions_are_one_snapshot() {
         let dir = std::env::temp_dir().join(format!("folo-runs-list-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let runs = Runs::open(dir.clone());
+        let runs = Runs::open(dir.clone(), Arc::new(Throughput::in_memory(Default::default())));
         let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"q"}"#).unwrap();
         let dataset = DatasetRef {
             id: "ds_1".into(),
@@ -1137,6 +1289,58 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         mover.join().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The throughput samples of a run: the session's first epoch is warm-up, an epoch whose last step was not
+    /// sent (a non-finite final batch) is no sample, and the rest go to their phase with a validation rate from the
+    /// remainder of the epoch.
+    #[test]
+    fn only_complete_epochs_after_the_first_are_samples() {
+        let tp = Arc::new(Throughput::in_memory(Default::default()));
+        let device = crate::throughput::DeviceId { device: "cpu".into(), device_name: "a cpu".into() };
+        let key = TrainKey { device, arch: folo_api::Arch::N, imgsz: 64, batch: 4, amp: false };
+        let mut m = Measure {
+            throughput: tp.clone(),
+            key,
+            train_images: 10,
+            val_images: 2,
+            epochs: 4,
+            mosaic: true,
+            close_mosaic_epochs: 1,
+            device: folo_core::Device::Cpu,
+            first: None,
+            last_step: None,
+        };
+        let loss = r#""loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"eta_s":1"#;
+        let step = |e: u32, s: u64, ips: f32| -> Step {
+            serde_json::from_str(&format!(
+                r#"{{"epoch":{e},"step":{s},"imgs_per_s":{ips},"steps_per_epoch":3,"epochs":4,{loss}}}"#
+            ))
+            .unwrap()
+        };
+        let val = r#""val":{"map50":0.1,"map50_95":0.05,"precision":0.1,"recall":0.1,"per_class":[]}"#;
+        let epoch = |e: u32, d: f64| -> Epoch {
+            serde_json::from_str(&format!(
+                r#"{{"epoch":{e},"train_loss":{{"box":1,"cls":1,"dfl":1,"total":3}},{val},"duration_s":{d}}}"#
+            ))
+            .unwrap()
+        };
+        for (e, s, ips, d) in [(1, 3, 5.0, 4.0), (2, 5, 7.0, 1.5), (3, 9, 10.0, 1.2), (4, 12, 20.0, 0.7)] {
+            m.last_step = Some(step(e, s, ips));
+            m.epoch(&epoch(e, d));
+        }
+        let rows = tp.file().training;
+        assert_eq!(rows.len(), 1);
+        let r = &rows[0];
+        // Epoch 1: warm-up; epoch 2 ended on step 5 of 6: skipped; epoch 3 mosaic, epoch 4 close mosaic.
+        assert_eq!(
+            (r.mosaic.values.as_slice(), r.close_mosaic.values.as_slice()),
+            (&[10.0][..], &[20.0][..])
+        );
+        // Validation: 2 images in 1.2 - 10 / 10 = 0.2 s and 0.7 - 10 / 20 = 0.2 s.
+        assert_eq!(r.val.values.len(), 2);
+        assert!(r.val.values.iter().all(|v| (v - 10.0).abs() < 1e-6), "{:?}", r.val.values);
+        assert!(r.startup.is_empty(), "epoch 2 was no sample, so no startup");
     }
 
     #[test]

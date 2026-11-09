@@ -851,6 +851,12 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     assert!(!r.boxes.is_empty());
     let system: SystemInfo = ok(&app, get("/api/system")).await;
     assert_eq!(system.gpus.first().map(|g| g.name.as_str()), Some(gpu.as_str()));
+    // A one-second probe there measures the peak GPU memory too.
+    let probe = json!({ "imgsz": 64, "batch": 4, "budget_s": 1.0 });
+    let b: BenchmarkReport = ok(&app, post_json("/api/system/benchmark", probe)).await;
+    assert_eq!((b.device.as_str(), b.device_name.as_str()), ("gpu:0", gpu.as_str()));
+    assert!(b.training.batch == 4 && b.training.peak_vram_bytes.is_some_and(|v| v > 0), "{b:?}");
+    assert!(b.train_imgs_per_s > 0.0 && b.latency_ms > 0.0, "{b:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -915,4 +921,104 @@ fn with_metadata(bytes: &[u8], key: &str, value: Option<&str>) -> Vec<u8> {
     out.extend_from_slice(&header);
     out.extend_from_slice(&bytes[8 + n..]);
     out
+}
+
+/// The throughput table from real activity: a 3-epoch run's epochs 2 (mosaic) and 3 (close mosaic) are measured
+/// (the session's first is warm-up), a model's second prediction is (its first loads it), the table and the
+/// estimates say so, and everything survives a restart. A probe is refused while a run is queued and then
+/// measures on the CPU in about a second.
+#[tokio::test(flavor = "multi_thread")]
+async fn throughput_from_runs_predictions_and_a_probe() {
+    let t = TempDir::new("throughput");
+    let home = t.0.join("home");
+    let s = store(&home);
+    let app = app(&s);
+    let ds = dataset(&app, "speedy", 12).await;
+
+    // Before any run: the reference, labelled.
+    let e: RunEstimate = ok(&app, post_json("/api/runs/estimate", tiny(&ds, 3))).await;
+    assert_eq!(
+        (e.source, e.confidence, e.device.as_str()),
+        (ThroughputSource::Reference, Confidence::Low, "cpu")
+    );
+    assert_eq!((e.train_images, e.val_images, e.batches_per_epoch), (10, 2, 3));
+    assert_eq!(
+        e.phases.iter().map(|p| (p.phase, p.epochs)).collect::<Vec<_>>(),
+        [(PhaseKind::Mosaic, 2), (PhaseKind::CloseMosaic, 1)]
+    );
+    let bad = json!({ "dataset_id": ds.id, "imgsz": 48, "device": "cpu" });
+    err(&app, post_json("/api/runs/estimate", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
+    err(
+        &app,
+        post_json("/api/runs/estimate", json!({ "dataset_id": "ds_none" })),
+        StatusCode::NOT_FOUND,
+        "dataset_not_found",
+    )
+    .await;
+
+    let run: Run = ok(&app, post_json("/api/runs", tiny(&ds, 3))).await;
+    let probe = json!({ "imgsz": 64, "batch": 4, "budget_s": 1.0 });
+    err(&app, post_json("/api/system/benchmark", probe.clone()), StatusCode::CONFLICT, "run_active").await;
+    let mut sse = Events::open(&app, &run.id).await;
+    let events = sse.until_status(&["completed", "failed"]).await;
+    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    let done: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
+    let model = done.model_id.unwrap();
+    for _ in 0..2 {
+        let req = json!({ "model_id": model, "dataset_id": ds.id, "image_id": "0" });
+        ok::<PredictResponse>(&app, post_json("/api/predict", req)).await;
+    }
+
+    let table: ThroughputTable = ok(&app, get("/api/system/throughput")).await;
+    let row = table.training.iter().find(|r| r.source == ThroughputSource::Measured).expect("a measured row");
+    assert_eq!((row.device.as_str(), row.arch, row.imgsz, row.amp), ("cpu", Arch::N, 64, false));
+    assert_eq!(
+        (row.mosaic.unwrap().samples, row.close_mosaic.unwrap().samples, row.samples),
+        (1, 1, 2),
+        "{row:?}"
+    );
+    assert!(row.updated.is_some() && row.note.is_none() && row.peak_vram_bytes.is_none());
+    let infer =
+        table.inference.iter().find(|r| r.source == ThroughputSource::Measured).expect("a predict row");
+    assert_eq!(
+        (infer.arch, infer.imgsz, infer.samples),
+        (Arch::N, 64, 1),
+        "the first prediction loads the model"
+    );
+
+    let e: RunEstimate = ok(&app, post_json("/api/runs/estimate", tiny(&ds, 3))).await;
+    assert_eq!((e.source, e.confidence), (ThroughputSource::Measured, Confidence::Medium), "{e:?}");
+    assert!(e.basis.exact && e.basis.samples == 2);
+    let other = json!({ "dataset_id": ds.id, "imgsz": 96, "device": "cpu", "epochs": 3 });
+    let e: RunEstimate = ok(&app, post_json("/api/runs/estimate", other)).await;
+    assert_eq!(e.source, ThroughputSource::Measured);
+    assert!(!e.basis.exact && e.basis.imgsz == 64, "{:?}", e.basis);
+
+    // A probe on the idle server: a measured row of its own, marked as a probe.
+    let r: BenchmarkReport = ok(&app, post_json("/api/system/benchmark", probe)).await;
+    assert_eq!((r.device.as_str(), r.training.imgsz, r.training.probes), ("cpu", 64, 1));
+    assert_eq!(r.training.samples, 3, "the run's 2 epochs and the probe");
+    assert!(
+        r.train_imgs_per_s > 0.0 && r.train_batches >= 1 && r.predictions >= 5 && r.latency_ms > 0.0,
+        "{r:?}"
+    );
+    assert!(r.elapsed_s < 60.0, "{r:?}");
+
+    // Persisted: a new store on the same data dir reads it back.
+    s.shutdown();
+    assert!(home.join("throughput.json").is_file());
+    let app2 = crate::app(&store(&home));
+    let back: ThroughputTable = ok(&app2, get("/api/system/throughput")).await;
+    let measured = |t: &ThroughputTable| {
+        (
+            t.training.iter().filter(|r| r.source == ThroughputSource::Measured).cloned().collect::<Vec<_>>(),
+            t.inference
+                .iter()
+                .filter(|r| r.source == ThroughputSource::Measured)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    let now: ThroughputTable = ok(&app, get("/api/system/throughput")).await;
+    assert_eq!(measured(&back), measured(&now));
 }

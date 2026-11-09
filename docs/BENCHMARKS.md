@@ -409,6 +409,41 @@ vs 1454 img/s) while doing 19% more FLOPs. folo-s beats yolo26s end to end at ba
 training step (109 vs 105 img/s fp32; ties with AMP, 183 vs 188), ties batch-16 forward, and is behind on batch-1 forward (5.5 vs 4.9 ms) and
 batch-16 end to end against fp16 (394 vs 446 img/s; it beats the fp32 317).
 
+### Trainer throughput (the server's reference numbers)
+
+What a whole training run sustains, data loader and augmentation included, read from the `metrics.jsonl` of runs on
+this machine (2026-11-08): the median over epochs of each epoch's last `step` event (`imgs_per_s`: the epoch's images
+over its training time, validation excluded), epoch 1 left out. "val" is the rest of the epoch (validation pass and
+checkpoint writes) as images per second of the validation split. These are the `reference` rows of
+`GET /api/system/throughput` and the fallback of `POST /api/runs/estimate` (docs/API.md, *Throughput and
+estimates*) on a server that has not measured a size itself. Other jobs shared the machine during most of these runs,
+so treat them as typical, not best.
+
+| run | arch, imgsz, batch | images (train / val) | workers | mosaic epochs img/s | close-mosaic img/s | val img/s | epoch 1 img/s |
+|---|---|---|---|---|---|---|---|
+| COCO train2017, 50 epochs | folo-n, 640, 16, f32 | 118 287 / 5 000 | 16 | **208** | **215** | **266–284** | 168 |
+| R6, 300 epochs | folo-s, 640, 16, f32 | 2 030 / 203 | 16 | **105** | **110** | ~97 (overhead-bound) | 100 |
+| shapes, 30 epochs (two runs) | folo-n, 320, 16, f32 | 2 000 / 200 | 8 | **438–441** | **468–475** | 330–400 | 147–225 |
+| shapes gate, 30 epochs | folo-n, 320, 16, amp | 2 000 / 200 | 8 | **406** | **430** | 290–500 | 122 |
+| shapes, 30 epochs, CPU under load | folo-n, 320, 16, f32 | 2 000 / 200 | 8 | **14** | **20** | ~60 | 17 |
+
+- **amp at 640** has no whole-run measurement yet: the reference is the f32 trainer rate times the training-step
+  ratio of [Mixed-precision training](#mixed-precision-training-amp) (1.24 for folo-n: 258 / 267 img/s; 1.61 for
+  folo-s: 169 / 177 img/s). At 320 px amp is slower than f32 (406 vs 438), as the gate run above found.
+- **Other sizes** scale from the nearest row by compute (GFLOPs at the image size): rates go with the compute ratio
+  to the 0.55, which fits both folo-n 640 → 320 px (208 → 440 img/s for a quarter of the compute) and folo-n → folo-s
+  at 640 (208 → 105 for 3.3x); beyond 4x larger to the 0.8, beyond 4x smaller to the 0.25. Batch-1 latency grows
+  more slowly (GPU: to the 0.35, from rows 1 and 5: 5.18 → 7.87 ms for folo-n → folo-s).
+- **Loaders differ by dataset**: R6's 1920×1080 JPEGs keep folo-n at 640 near 100–150 img/s with mosaic (four
+  decodes per sample) and near 185 without, while COCO's smaller images give 208 / 215. The server's own
+  measurements are keyed by device, arch, imgsz and amp, not by dataset.
+- **First epoch**: 4–9 s slower than a steady one on the GPU in the shapes runs (pipeline compilation, buffer pool growth); the
+  reference adds 6 s.
+- **Peak memory**: the reference model is 16 bytes per parameter (weights, gradients, optimizer state, EMA) plus the
+  activations, measured per image from the training-step peaks above (folo-n 214.6 MiB, folo-s 399.8 MiB per 640 px
+  image in f32; amp × 0.58 / 0.56) and Studio's per-image ratios for folo-m / l / x. It reproduces the 3474 MiB step
+  peak of folo-n, and gave 898 MiB for a folo-n 320 px batch-16 probe that measured 891 MiB.
+
 ## NMS-free head (o2o)
 
 `folo train --head o2o` (docs/MODEL.md §6.6, as in YOLOv10 / YOLO26's end-to-end mode): a one-to-one copy of the
