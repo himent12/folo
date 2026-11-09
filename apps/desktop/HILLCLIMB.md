@@ -2033,3 +2033,50 @@ Round 49 changes:
 - **Playground:** a fixed best-F1 row ("Use 0.31 (best F1)", then "At best F1 (0.31)"), and `ui::fmt_conf` keeps a meaningful third decimal.
 - **Overview:** a taller hero in tall, wide windows.
 - **Brief:** settles New run's switch rows.
+
+## Round 49
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 9 | 9 |
+| Typography | 7 | 8 |
+| Colour | 9 | 9 |
+| Spacing | 8 | 8 |
+| Components | 8 | 9 |
+| Dataviz | 8 | 8 |
+| Info/copy | 8 | 8 |
+| Consistency | 7 | 8 |
+| Interaction | 8 | 9 |
+| Accessibility | 9 | 8 |
+| Responsiveness | 8 | 8 |
+| Polish | 8 | 8 |
+| **Average** | **8.1** | **8.4** |
+
+Round 49's largest root fix was `ui::Ellipsis`. GPUI 0.2.2's `truncate()` caches the first, unbounded measure of no-wrap text, so flex-sized text everywhere clipped without "…". Clamped one-line wrapping re-measures at each width. It now covers 33 sites, and a test keeps `.truncate()` out.
+
+Both reviewers then found where the ellipsis fired too early:
+- `cell2` didn't grow, so dataset cards cut "circl…" with room to spare and lost "+N".
+- `meta_row`'s middle parts couldn't shrink. The code review found this blocking twice; it was fixed before merge by grouping the rest, and by letting the hero's run name shrink while its meta clips.
+
+Opus also asked for:
+- The Overview tables stacked at 1280.
+- One metric pair and Precision / Recall caption.
+- One split label.
+- A nice-tick LR top.
+- One inline-link look.
+- Overlay scroll thumbs.
+
+Sol also asked for full disclosure for thumbnails and dataset cards.
+
+Round 50 changes:
+- **`cell2`** grows with basis 0.
+- **Dataset cards:**
+  - They say "4,400 images · 5 classes".
+  - Their name, size and every class are a hover and focus tip.
+- **Overview:** the tables stack below 1500, so Recent runs keeps its Arch · dataset column at 1280.
+- **Shared formatters:** `ui::metric_pair`, `ui::pr_caption` ("best F1 · conf 0.31 · IoU 0.50 · val") and `ui::split_label` ("shapes-hard · val · 800 images") on the run and model pages.
+- **Learning-rate chart:** its top is the next nice tick.
+- **`ui::inline_link`:** used for "Show them" and "Use 0.31 (best F1)".
+- **Dataset tiles:** list every class on hover and focus.
+- **Copy:** "6.4 ms simulated".
+- **Scroll thumbs:** shown while dragged, hovered or just scrolled.
