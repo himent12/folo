@@ -47,8 +47,8 @@ function themeVars(name) {
       const where = `color.${name}.${group}.${k}`;
       if (group === 'chart' && k === 'series') {
         v.forEach((s, i) => out.push([`--chart-${i + 1}`, css(s, `${where}[${i}]`)]));
-      } else if (group === 'chart' && k === 'fill') {
-        v.forEach((s, i) => out.push([`--chart-fill-${i + 1}`, css(s, `${where}[${i}]`)]));
+      } else if (group === 'chart' && (k === 'fill' || k === 'text')) {
+        v.forEach((s, i) => out.push([`--chart-${k}-${i + 1}`, css(s, `${where}[${i}]`)]));
       } else if (typeof v === 'number') {
         out.push([`--${kebab(group)}-${kebab(k)}`, String(v)]);
       } else {

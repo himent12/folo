@@ -72,6 +72,8 @@
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
   import { LABEL_GAP, labelWidth, leaderOf, placeEndLabels } from './endLabels';
+  import { seriesText } from './ink';
+  import { prefs } from '$lib/prefs.svelte';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
@@ -377,6 +379,8 @@
       ...e,
       // A receded run is a context curve: its label in ink, so the one hue left on the plot is the run in front.
       color: receding && e.id !== highlight ? 'var(--text-tertiary)' : (color.get(e.id) ?? 'var(--text-secondary)'),
+      // The label is text: the series' text ink (./ink), 4.5:1 where the line's own ink is only a 3:1 mark.
+      text: receding && e.id !== highlight ? 'var(--text-tertiary)' : seriesText(color.get(e.id) ?? 'var(--text-secondary)'),
       // Every label is anchored to its end marker: one not right beside it is tied to it by a leader.
       lead: leaderOf(e, endR(e.id)),
     }));
@@ -570,6 +574,13 @@
   // The legend swatch (12 px, 2 px stroke, round caps) shows the same rhythm as its line: two dashes, three dots.
   const SWATCH = { dash: [3, 4], dot: [0.01, 4.5], dashdot: [4, 3.5, 0.01, 3.5] } as const;
   const patternOf = (s: Series) => s.pattern ?? (s.dashed ? 'dash' : null);
+  const light = $derived(prefs.resolvedTheme === 'light');
+  /**
+   * A line's ink. A dash or a dot carries less ink than a line, so a patterned series takes its hue's text ink
+   * (./ink: 4.5:1 per dash, the same hue in dark, darker in light) and, in light, a 2 px dash (widthOf), so a dotted
+   * fourth run clears 3:1 in practice, not only per pixel (DESIGN_DIRECTION §2.5).
+   */
+  const inkOf = (s: Series) => (patternOf(s) ? seriesText(s.color) : s.color);
   /** stroke-dasharray for a series; `k` scales it with a heavier stroke (a highlighted line keeps its rhythm). */
   function dashOf(s: Series, k = 1): string | undefined {
     const p = patternOf(s);
@@ -587,7 +598,7 @@
     // Receded: a 1 px context curve, dots a little heavier so a dotted run keeps its rhythm.
     if (receding) return p === 'dot' ? 1.75 : 1;
     if (s.emphasis || (highlight !== null && s.id === highlight)) return p === 'dot' ? 3.25 : 2.75;
-    return p === 'dot' ? 2.25 : p ? 1.5 : 1.75;
+    return p === 'dot' ? 2.25 : p ? (light ? 2 : 1.5) : 1.75;
   }
   /** A highlighted series with `recede`: it alone keeps weight and hue. */
   const receding = $derived(recede && highlight !== null && visible.some((s) => s.id === highlight));
@@ -613,7 +624,7 @@
 
 {#snippet swatch(s: Series)}
   <svg class="swatch" width="14" height="6" viewBox="0 0 14 6" aria-hidden="true">
-    <line x1="1" x2="13" y1="3" y2="3" style:stroke={s.color} style:stroke-dasharray={swatchDash(s)} />
+    <line x1="1" x2="13" y1="3" y2="3" style:stroke={inkOf(s)} style:stroke-dasharray={swatchDash(s)} />
   </svg>
 {/snippet}
 
@@ -737,7 +748,7 @@
               class:context={contextual(s)}
               class:emphasis={s.emphasis || (highlight !== null && s.id === highlight)}
               {d}
-              style:stroke={contextual(s) ? undefined : s.color}
+              style:stroke={contextual(s) ? undefined : inkOf(s)}
               style:stroke-width={receding && !s.ghost && !s.context ? `${widthOf(s)}px` : undefined}
               style:stroke-dasharray={dashOf(s, s.id === highlight ? 1.4 : 1)}
             />
@@ -747,7 +758,7 @@
               {@const p = s.points[s.points.length - 1]}
               {#if p && Number.isFinite(p.y)}
                 {@const r = receding && s.id === highlight ? 4 : 3}
-                {@const ink = contextual(s) ? 'var(--chart-context)' : s.color}
+                {@const ink = contextual(s) ? 'var(--chart-context)' : inkOf(s)}
                 {#if s.end === 'failed'}
                   <path class="end-x" d="M{x(p.x) - r} {y(p.y) - r}l{2 * r} {2 * r}m0 {-2 * r}l{-2 * r} {2 * r}" style:stroke={ink} />
                 {:else if s.end === 'stopped'}
@@ -766,7 +777,7 @@
               {#if e.lead}<line class="leader" x1={e.lead.x1} y1={e.lead.y1} x2={e.lead.x2} y2={e.lead.y2} style:stroke={e.color} />{/if}
             {/each}
             {#each ends as e (e.id)}
-              <text class="end-label" class:hl={e.id === highlight} x={e.x} y={e.y} dy="0.32em" style:fill={e.color}>{e.label}</text>
+              <text class="end-label" class:hl={e.id === highlight} x={e.x} y={e.y} dy="0.32em" style:fill={e.text}>{e.label}</text>
             {/each}
           {/if}
           {#each markers as m (m.label + m.x)}
@@ -930,6 +941,10 @@
   }
   .line.dashed {
     stroke-width: 1.5;
+  }
+  /* In light a 1.5 px dash of a series hue reads fainter than its contrast says (the dotted teal fourth run): 2 px. */
+  :global([data-theme='light']) .line.dashed {
+    stroke-width: 2;
   }
   /* Dots carry less ink than a line: a heavier stroke keeps a dotted series as findable as a solid one. */
   .line.dotted {

@@ -41,9 +41,7 @@
     background: var(--bg-inset);
     /* The edge is what marks the field: line.control is >= 3:1 on every surface (WCAG 1.4.11). */
     border: 1px solid var(--line-control);
-    transition:
-      border-color var(--dur-fast) var(--ease-standard),
-      box-shadow var(--dur-fast) var(--ease-standard);
+    transition: border-color var(--dur-fast) var(--ease-standard);
     min-width: 0;
   }
   :global([data-theme='light']) .input {
@@ -56,9 +54,11 @@
   .input:hover {
     border-color: var(--line-control-hover);
   }
-  .input:focus-within {
-    border-color: var(--focus);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 18%, transparent);
+  /* Focus is the one global ring (base.css :focus-visible), drawn on the field's frame while its input has it: never
+     a halo or a lime edge of its own (DESIGN_DIRECTION §2.9). An invalid field's ring is danger (base.css). */
+  .input:has(> input:focus-visible) {
+    outline: var(--size-focus-ring) solid var(--focus);
+    outline-offset: var(--size-focus-offset);
   }
   input {
     flex: 1;

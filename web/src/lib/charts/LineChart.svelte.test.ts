@@ -291,6 +291,20 @@ describe('LineChart round 18', () => {
     unmount(c);
   });
 
+  it('draws a direct label in its series text ink, the line in its line ink (§2.5)', () => {
+    const series = [
+      { id: 'box', label: 'box', color: 'var(--chart-2)', points: pts((x) => 1 - x / 60) },
+      { id: 'tot', label: 'total', color: 'var(--text-primary)', emphasis: true, points: pts((x) => 3 - x / 30) },
+    ];
+    const { target, c } = mountAt({ series, label: 'loss', endLabels: true }, 340);
+    const fill = (t: string) => ([...target.querySelectorAll<SVGElement>('.end-label')].find((e) => e.textContent === t)!).style.fill;
+    expect(fill('box')).toBe('var(--chart-text-2)');
+    expect(fill('total')).toBe('var(--text-primary)');
+    const strokes = [...target.querySelectorAll<SVGElement>('path.line')].map((p) => p.style.stroke);
+    expect(strokes).toContain('var(--chart-2)');
+    unmount(c);
+  });
+
   it('ends each line in its status mark and names the status after the label, which it never cuts', () => {
     const series = [
       { id: 'a', label: 'fasteners-s', color: 'red', end: 'live' as const, points: pts((x) => x / 30).slice(0, 12) },

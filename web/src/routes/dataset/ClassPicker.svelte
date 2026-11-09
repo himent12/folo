@@ -182,10 +182,14 @@
     font-size: var(--type-sm-size);
     text-align: left;
   }
-  [role='option']:hover,
+  [role='option']:hover {
+    background: var(--bg-hover);
+  }
+  /* Keyboard focus is the focus ring, inset like ui/Menu's items, never the hover fill alone (§2.9). */
   [role='option']:focus-visible {
     background: var(--bg-hover);
-    outline: none;
+    outline: var(--size-focus-ring) solid var(--focus);
+    outline-offset: -2px;
   }
   .check {
     display: grid;
