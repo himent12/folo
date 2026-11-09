@@ -2283,10 +2283,7 @@ impl FoloApp {
                         .gap(px(6.))
                         .border_t_1()
                         .border_color(t.line_subtle)
-                        .child(row(
-                            shortcut(&t, &["←", "→"]).into_any_element(),
-                            "previous / next · pan when zoomed",
-                        ))
+                        .child(row(shortcut(&t, &["←", "→"]).into_any_element(), "previous / next"))
                         .child(row(shortcut(&t, &["PgUp", "PgDn"]).into_any_element(), "previous / next"))
                         .child(row(
                             div()
@@ -2298,7 +2295,7 @@ impl FoloApp {
                             "zoom",
                         ))
                         .child(row(kbd(&t, "0").into_any_element(), "fit"))
-                        .child(row(kbd(&t, "Drag").into_any_element(), "pan"))
+                        .child(row(kbd(&t, "Drag").into_any_element(), "pan (arrows too, when zoomed)"))
                 },
             );
         // Fitted by any path (the readout, 0, −, another image), focus left on the readout moves

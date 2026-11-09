@@ -725,9 +725,10 @@ impl FoloApp {
                         if e2e {
                             d.child(
                                 div()
+                                    .h(px(20.))
                                     .flex()
                                     .justify_between()
-                                    .items_baseline()
+                                    .items_center()
                                     .gap(px(10.))
                                     .child(
                                         text(ty::SM, t.text_secondary)
