@@ -1394,7 +1394,8 @@ impl FoloApp {
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
         // GiB, like the estimate and every size the app shows.
         let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / gib);
-        let fits = !matches!(est, Est::Server(..) | Est::Local)
+        // An answer being refreshed is never a warning: it's marked as updating instead.
+        let fits = !matches!(est, Est::Server(_, false) | Est::Local)
             || on_cpu
             || gpu_gb <= 0.0
             || vram.is_none_or(|v| v <= gpu_gb * 0.97);

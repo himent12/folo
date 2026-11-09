@@ -486,6 +486,8 @@ pub struct FoloApp {
     /// `run_estimate`); the last good answer stands while a changed config is out.
     pub nr_estimate: Option<(String, Load<crate::api::RunEstimate>)>,
     pub nr_estimate_last: Option<crate::api::RunEstimate>,
+    /// Bumped on every new estimate key (and on an invalid entry): only the latest settle timer asks.
+    pub nr_estimate_gen: u64,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
     pub toast_hover: Option<u64>,
@@ -635,6 +637,7 @@ impl FoloApp {
             confirm_stop: None,
             nr_estimate: None,
             nr_estimate_last: None,
+            nr_estimate_gen: 0,
             toasts: Vec::new(),
             toast_hover: None,
             toasts_expanded: false,
@@ -1760,6 +1763,11 @@ impl FoloApp {
             .as_ref()
             .is_some_and(|f| f.epochs_invalid || f.close_invalid || (f.lr_invalid && f.optimizer != 0))
         {
+            // Cancel a pending ask; an unanswered key would otherwise stay "loading" for good.
+            self.nr_estimate_gen += 1;
+            if matches!(self.nr_estimate, Some((_, Load::Loading))) {
+                self.nr_estimate = None;
+            }
             return;
         }
         let Some(mut config) = self.form_config(cx) else { return };
@@ -1770,6 +1778,8 @@ impl FoloApp {
             return;
         }
         self.nr_estimate = Some((key.clone(), Load::Loading));
+        self.nr_estimate_gen += 1;
+        let generation = self.nr_estimate_gen;
         // Settled first (250 ms; at once for the frozen scenes), so a slider drag asks once for
         // the value it stops on rather than for every step.
         if self.frozen {
@@ -1779,7 +1789,7 @@ impl FoloApp {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(Duration::from_millis(250)).await;
             this.update(cx, |this, cx| {
-                if this.nr_estimate.as_ref().is_some_and(|(k, _)| *k == key) {
+                if this.nr_estimate_gen == generation {
                     this.request_estimate(key, config, cx);
                 }
             })
