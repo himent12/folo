@@ -943,7 +943,7 @@
     stroke-width: 1.5;
   }
   /* In light a 1.5 px dash of a series hue reads fainter than its contrast says (the dotted teal fourth run): 2 px. */
-  :global([data-theme='light']) .line.dashed {
+  :global([data-theme='light']) .line.dashed:not(.thin) {
     stroke-width: 2;
   }
   /* Dots carry less ink than a line: a heavier stroke keeps a dotted series as findable as a solid one. */
