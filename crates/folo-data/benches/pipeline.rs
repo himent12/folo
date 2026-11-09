@@ -154,11 +154,8 @@ fn main() -> folo_data::Result<()> {
                 let p = [&resized[i], &resized[(i + 1) % m], &resized[(i + 2) % m], &resized[(i + 3) % m]];
                 black_box(mosaic4(p, s, &mut rng));
             });
-            let canvas = mosaic4(
-                [&resized[0], &resized[1 % m], &resized[2 % m], &resized[3 % m]],
-                s,
-                &mut rng,
-            );
+            let canvas =
+                mosaic4([&resized[0], &resized[1 % m], &resized[2 % m], &resized[3 % m]], s, &mut rng);
             let aug = AugmentConfig::default();
             per_image(&format!("random affine {} -> {s} (default)", 2 * s), m, |_| {
                 black_box(random_affine(&canvas, s, s, &aug, &mut rng));

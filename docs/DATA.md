@@ -46,6 +46,13 @@ produces plain buffers that the trainer wraps in tensors.
   path. `coco_annotation_files(path)` lists a COCO dataset's annotation files per split. Entries and the top level
   are read as structs only when they are JSON objects (a positional array would otherwise fill one). `folo val --coco` uses them for pycocotools-exact evaluation (docs/METRICS.md).
 
+`open_splits(path, &opts, &[Split::Val])` opens some splits only: those come out exactly as `open_with` builds
+them (same classes, entries and order) and the others empty, without reading or probing their images and labels.
+COCO files of the other splits are still read for their categories (every file counts for the class ids); a YOLO
+dataset without class names (counted from all labels then) is opened whole. `folo val` uses it, so COCO val2017
+opens without checking train2017's 118 287 images (the probe of a file not opened before costs about 6 ms on the dev
+machine, 0.35 ms each at 28 threads: 40-50 s for train2017).
+
 `LoadedDataset::sources` lists every file and folder a dataset was read from (description files, split folders and
 image lists, folders of every candidate image and label, split paths that do not exist yet), so callers such as
 the server can detect changes.
