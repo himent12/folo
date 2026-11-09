@@ -1,17 +1,21 @@
 //! Simulated training runs: deterministic metric curves, a timeline (fixed for finished runs, wall-clock driven for
 //! live ones) and an event ticker that feeds SSE subscribers.
+//!
+//! Runs created through the API share one training slot, like the real server's: [`reschedule`] gives each waiting
+//! run the moment it starts (when the run ahead of it ends), so its clock, its queue position and its `queue`
+//! events follow from the wall clock alone. The seeded looping run is outside the queue.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use folo_api::{
-    Arch, BestEpoch, ClassMetrics, Epoch, LogLevel, LogLine, Loss, Run, RunEvent, RunMetrics, RunStatus,
-    StatusEvent, Step, TrainConfig, ValMetrics,
+    Arch, BestEpoch, ClassMetrics, Epoch, LogLevel, LogLine, Loss, QueueEvent, ResolvedTrain, Run, RunEvent,
+    RunMetrics, RunStatus, StatusEvent, Step, TrainConfig, ValMetrics,
 };
 use tokio::sync::broadcast;
 
-use crate::store::Subscription;
+use crate::store::{QueueMove, Subscription};
 use crate::util::{noise, rfc3339, unix_now};
 
 /// Seconds a stop request spends in `stopping`.
@@ -28,6 +32,11 @@ pub fn arch_spec(arch: Arch) -> (u64, f64, f32, f64) {
         Arch::L => (25_310_000, 86.9, 88.0, 16.2),
         Arch::X => (56_870_000, 194.9, 46.0, 26.0),
     }
+}
+
+/// Rounds to 3 decimals (the confidence grid of docs/METRICS.md).
+pub(super) fn r3(v: f32) -> f32 {
+    (v * 1000.0).round() / 1000.0
 }
 
 /// Rounds to 4 decimals (keeps the JSON short; metrics are not more precise than that anyway).
@@ -156,16 +165,25 @@ impl Curve {
             (p, r)
         };
         let m = self.map50_95(e);
-        let m50 = to50(m);
-        let (precision, recall) = pr(m50, 21);
-        let per_class = (0..self.nc as u32)
-            .map(|c| {
-                let f = 1.0 + 0.16 * noise(&[self.seed, c as u64, 30]);
-                let cm = (m * f).clamp(0.0, 0.99);
+        // Per-class mAP50-95 deviates from the mean by zero-mean factors (scaled down so no class passes 0.99), so
+        // the overall numbers are the class means, as the engine reports them (docs/METRICS.md).
+        let raw: Vec<f32> = (0..self.nc as u64).map(|c| 0.16 * noise(&[self.seed, c, 30])).collect();
+        let mean_dev = raw.iter().sum::<f32>() / raw.len().max(1) as f32;
+        let dev: Vec<f32> = raw.iter().map(|d| d - mean_dev).collect();
+        let room = dev
+            .iter()
+            .filter(|&&d| d > 0.0)
+            .map(|d| (0.99 - m).max(0.0) / (m.max(1e-6) * d))
+            .fold(1.0, f32::min);
+        let per_class: Vec<ClassMetrics> = dev
+            .iter()
+            .enumerate()
+            .map(|(c, d)| {
+                let cm = (m * (1.0 + room * d)).clamp(0.0, 0.99);
                 let c50 = to50(cm);
                 let (precision, recall) = pr(c50, 40 + 2 * c as u64);
                 ClassMetrics {
-                    class: c,
+                    class: c as u32,
                     map50: r4(c50),
                     map50_95: r4(cm),
                     precision: r4(precision),
@@ -173,12 +191,21 @@ impl Curve {
                 }
             })
             .collect();
+        let mean = |f: fn(&ClassMetrics) -> f32| {
+            r4(per_class.iter().map(f).sum::<f32>() / per_class.len().max(1) as f32)
+        };
+        let m50 = if per_class.is_empty() { to50(m) } else { mean(|c| c.map50) };
+        let (precision, recall) =
+            if per_class.is_empty() { pr(m50, 21) } else { (mean(|c| c.precision), mean(|c| c.recall)) };
+        // The best-F1 confidence on the 0.001 grid: low while the model is unsure, settling near 0.3-0.45.
+        let conf = 0.12 + 0.35 * m50 + 0.02 * noise(&[self.seed, e as u64, 22]);
         ValMetrics {
             map50: r4(m50),
             map50_95: r4(m),
             precision: r4(precision),
             recall: r4(recall),
             per_class,
+            best_f1_conf: Some(r3(conf.clamp(0.001, 0.999))),
         }
     }
 
@@ -226,6 +253,8 @@ pub struct Snap {
     pub cycle: u64,
     /// Unix seconds of the stop request, if one was made in this cycle.
     pub stop_requested: Option<f64>,
+    /// `(position, waiting)` while the run waits in the training queue ([`QueueEvent`]).
+    pub queue: Option<(u32, u32)>,
 }
 
 /// Wall-clock driven timeline of a live run.
@@ -240,6 +269,11 @@ pub struct LiveClock {
     looping: bool,
     stop_at: Option<f64>,
     cycle: u64,
+    /// The earliest start (seconds after `origin`): `queue_s` as created, or the moment of a `start` request.
+    min_start: f64,
+    /// Set by [`reschedule`] for runs in the training queue: the scheduled starts of the waiting runs ahead of this
+    /// one, and of every waiting run.
+    queue: Option<(Vec<Instant>, Vec<Instant>)>,
 }
 
 impl LiveClock {
@@ -248,7 +282,27 @@ impl LiveClock {
         let now = Instant::now();
         let origin = now.checked_sub(Duration::from_secs_f64(offset_s)).unwrap_or(now);
         let origin_wall = unix_now() - now.duration_since(origin).as_secs_f64();
-        LiveClock { origin, origin_wall, epoch_s, queue_s, hold_s, looping, stop_at: None, cycle: 0 }
+        LiveClock {
+            origin,
+            origin_wall,
+            epoch_s,
+            queue_s,
+            hold_s,
+            looping,
+            stop_at: None,
+            cycle: 0,
+            min_start: queue_s,
+            queue: None,
+        }
+    }
+
+    /// When a started run frees the training slot.
+    fn ends_at(&self, curve: &Curve) -> Instant {
+        let end = match self.stop_at {
+            Some(sa) => sa + STOP_S,
+            None => self.queue_s + curve.epochs as f64 * self.epoch_s,
+        };
+        self.origin + Duration::from_secs_f64(end.max(0.0))
     }
 
     fn advance(&mut self, by: f64) {
@@ -275,6 +329,7 @@ impl LiveClock {
                 eta_s: None,
                 cycle: self.cycle,
                 stop_requested: self.stop_at.map(|sa| self.origin_wall + sa),
+                queue: None,
             };
             let started = (t >= self.queue_s).then_some(self.origin_wall + self.queue_s);
             if let Some(sa) = self.stop_at {
@@ -291,7 +346,11 @@ impl LiveClock {
                 return Snap { status: RunStatus::Stopped, step, started, finished, ..base };
             }
             if t < self.queue_s {
-                return base;
+                let queue = self.queue.as_ref().map(|(ahead, all)| {
+                    let later = |v: &[Instant]| v.iter().filter(|&&s| s > now).count() as u32;
+                    (1 + later(ahead), later(all).max(1))
+                });
+                return Snap { queue, ..base };
             }
             if t < run_end {
                 let step = steps_at(t);
@@ -349,9 +408,13 @@ pub struct SimRun {
     pub model_id: Option<String>,
     /// True for runs created via `POST /api/runs` (their model only exists once completed).
     pub user: bool,
+    /// What the trainer would resolve the config to ([`SimRun::resolved_for`]); shown once the run started.
+    resolved: Option<ResolvedTrain>,
     timeline: Timeline,
     hub: Mutex<Hub>,
     deleted: AtomicBool,
+    /// Log lines of actions outside the timeline (queue moves), in the order they happened.
+    notes: Mutex<Vec<LogLine>>,
 }
 
 impl SimRun {
@@ -377,10 +440,30 @@ impl SimRun {
             device,
             model_id,
             user,
+            resolved: None,
             timeline,
             hub: Mutex::default(),
             deleted: AtomicBool::new(false),
+            notes: Mutex::default(),
         }
+    }
+
+    /// Logs an action outside the timeline (a queue move): kept for `/logs` and sent to live subscribers.
+    pub fn note(&self, level: LogLevel, message: String) {
+        let line = LogLine { t: rfc3339(unix_now()), level, message };
+        self.notes.lock().unwrap().push(line.clone());
+        // Under the hub lock, as the ticker sends, so the line is ordered with the run's other events.
+        let hub = self.hub.lock().unwrap();
+        if let Some(tx) = &hub.tx {
+            let _ = tx.send(RunEvent::Log(line));
+        }
+    }
+
+    /// Sets `Run.resolved` to what the real trainer resolves this run's config to on `train_images` training images.
+    pub fn resolved_for(mut self, train_images: u64) -> SimRun {
+        let cfg = folo_vision::TrainConfig::from_api(&self.config);
+        self.resolved = Some(cfg.resolved_train(train_images as usize, self.classes.len()));
+        self
     }
 
     /// Current state.
@@ -399,6 +482,7 @@ impl SimRun {
                     eta_s: None,
                     cycle: 0,
                     stop_requested: None,
+                    queue: None,
                 }
             }
             Timeline::Live(clock) => clock.lock().unwrap().snap(&self.curve, Instant::now()),
@@ -475,6 +559,8 @@ impl SimRun {
             model_id: self.current_model(&snap),
             error: self.error(snap.status),
             error_code: self.error(snap.status).map(|_| "training_failed".to_string()),
+            resolved: snap.started.and(self.resolved.clone()),
+            queue_position: snap.queue.map(|q| q.0),
         }
     }
 
@@ -642,6 +728,9 @@ impl SimRun {
         if let (Some(m), Some(t)) = (self.msg_end(&snap), snap.finished) {
             out.push(line(t, m));
         }
+        // Queue moves, merged in by time (the sort is stable, so lines of the same second keep their order).
+        out.extend(self.notes.lock().unwrap().iter().cloned());
+        out.sort_by(|a, b| a.t.cmp(&b.t));
         out
     }
 
@@ -659,6 +748,11 @@ impl SimRun {
         }
         let entering =
             now.status != prev.status && !matches!(now.status, RunStatus::Completed | RunStatus::Stopped);
+        if now.queue != prev.queue
+            && let Some((position, waiting)) = now.queue
+        {
+            out.push(RunEvent::Queue(QueueEvent { position, waiting }));
+        }
         if entering {
             out.push(status(now));
             match now.status {
@@ -682,6 +776,71 @@ impl SimRun {
         }
         out
     }
+}
+
+/// Whether `run` waits in the training queue now (queued, not stopped).
+pub fn is_waiting(run: &SimRun) -> bool {
+    run.snap().queue.is_some()
+}
+
+/// Plans the training slot shared by the runs in `queue` (front first) as of `now`: runs that started keep their
+/// timeline; each waiting run starts when the slot frees (not before its `min_start`), in queue order. Every
+/// waiting run also learns the starts of the runs ahead of it, so its queue position follows from the clock.
+pub fn reschedule(queue: &[Arc<SimRun>], now: Instant) {
+    let mut free_at = now;
+    let mut starts: Vec<(Arc<SimRun>, Instant)> = Vec::new();
+    for run in queue {
+        let Timeline::Live(c) = &run.timeline else { continue };
+        let mut c = c.lock().unwrap();
+        let snap = c.snap(&run.curve, now);
+        match snap.status {
+            // A run stopped while it waited never held the slot.
+            RunStatus::Running | RunStatus::Stopping if snap.started.is_some() => {
+                free_at = free_at.max(c.ends_at(&run.curve));
+                c.queue = None;
+            }
+            RunStatus::Queued => {
+                let start = free_at.max(c.origin + Duration::from_secs_f64(c.min_start.max(0.0)));
+                c.queue_s = start.saturating_duration_since(c.origin).as_secs_f64();
+                free_at = start + Duration::from_secs_f64(run.curve.epochs as f64 * c.epoch_s);
+                starts.push((run.clone(), start));
+            }
+            _ => c.queue = None,
+        }
+    }
+    let all: Vec<Instant> = starts.iter().map(|s| s.1).collect();
+    for (i, (run, _)) in starts.iter().enumerate() {
+        if let Timeline::Live(c) = &run.timeline {
+            c.lock().unwrap().queue = Some((all[..i].to_vec(), all.clone()));
+        }
+    }
+}
+
+/// Moves run `id` among the waiting runs of `queue` (runs that are not waiting keep their order, ahead of the
+/// waiting ones) and plans the slot again. `start` also lets the run start at once when the slot is free. Returns
+/// `(from, to, waiting)` (0-based places), or `None` when the run does not wait in the queue.
+pub fn move_waiting(queue: &mut Vec<Arc<SimRun>>, id: &str, mv: QueueMove) -> Option<(usize, usize, usize)> {
+    let now = Instant::now();
+    reschedule(queue, now);
+    let (mut waiting, rest): (Vec<Arc<SimRun>>, Vec<Arc<SimRun>>) =
+        queue.drain(..).partition(|r| is_waiting(r));
+    let from = waiting.iter().position(|r| r.id == id);
+    let moved = from.map(|from| {
+        let to = mv.target(from, waiting.len());
+        let run = waiting.remove(from);
+        if mv == QueueMove::Start
+            && let Timeline::Live(c) = &run.timeline
+        {
+            let mut c = c.lock().unwrap();
+            c.min_start = now.saturating_duration_since(c.origin).as_secs_f64();
+        }
+        waiting.insert(to, run);
+        (from, to, waiting.len())
+    });
+    queue.extend(rest);
+    queue.extend(waiting);
+    reschedule(queue, now);
+    moved
 }
 
 /// Publishes a live run's events while it has subscribers; exits when the last one disconnects.

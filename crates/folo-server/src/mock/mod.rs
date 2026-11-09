@@ -25,7 +25,7 @@ use crate::error::{Error, Result};
 use crate::index::{Index, read_image};
 use crate::stats::StatsBuilder;
 use crate::store::{
-    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription, Weights,
+    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription, Weights,
     WeightsFormat,
 };
 use crate::util::{Rng, fnv1a, mix64, noise, parse_rfc3339, rfc3339, unique_id, unix_now};
@@ -354,6 +354,8 @@ struct StaticModel {
 #[derive(Clone)]
 struct EvalBasis {
     per_class: Vec<ClassMetrics>,
+    /// The confidence the per-class precision and recall are taken at.
+    best_f1_conf: Option<f32>,
     /// Validation instances per class.
     counts: Vec<u64>,
     images: u32,
@@ -373,8 +375,10 @@ impl EvalBasis {
                 *c += 1;
             }
         }
+        let val = run.curve.val(best);
         EvalBasis {
-            per_class: run.curve.val(best).per_class,
+            best_f1_conf: val.best_f1_conf,
+            per_class: val.per_class,
             counts,
             images: page.total as u32,
             seed: fnv1a(run.id.as_bytes()),
@@ -389,21 +393,29 @@ impl EvalBasis {
         let pr = per_class
             .iter_mut()
             .map(|m| {
-                // 1 - r^k has mean k / (k + 1) over [0, 1]: pick k so the curve's AP lands near the class mAP50.
-                let a = m.map50.clamp(0.02, 0.98);
-                let k = a / (1.0 - a);
-                let mut precision: Vec<f32> = recall
-                    .iter()
-                    .enumerate()
-                    .map(|(i, r)| {
-                        let wiggle = 1.0 + 0.04 * noise(&[self.seed, m.class as u64, i as u64]);
-                        ((1.0 - r.powf(k)) * wiggle).clamp(0.0, 1.0)
-                    })
-                    .collect();
-                for i in (0..precision.len() - 1).rev() {
-                    precision[i] = precision[i].max(precision[i + 1]);
+                // A wiggled `1 - r^k` envelope; its mean grows with k, so bisect k until the curve's AP is the class
+                // mAP50 the run reported for this epoch (the model page and the run page then agree).
+                let curve = |k: f32| {
+                    let mut p: Vec<f32> = recall
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| {
+                            let wiggle = 1.0 + 0.04 * noise(&[self.seed, m.class as u64, i as u64]);
+                            ((1.0 - r.powf(k)) * wiggle).clamp(0.0, 1.0)
+                        })
+                        .collect();
+                    for i in (0..p.len() - 1).rev() {
+                        p[i] = p[i].max(p[i + 1]);
+                    }
+                    p
+                };
+                let mean = |p: &[f32]| p.iter().sum::<f32>() / p.len() as f32;
+                let (mut lo, mut hi) = (1e-3f32, 1e3f32);
+                for _ in 0..60 {
+                    let mid = (lo * hi).sqrt();
+                    if mean(&curve(mid)) < m.map50 { lo = mid } else { hi = mid }
                 }
-                let precision: Vec<f32> = precision.into_iter().map(runs::r4).collect();
+                let precision: Vec<f32> = curve((lo * hi).sqrt()).into_iter().map(runs::r4).collect();
                 let ap50 = runs::r4(precision.iter().sum::<f32>() / precision.len() as f32);
                 m.map50 = ap50;
                 PrCurve { class: m.class, recall: recall.clone(), precision, ap50 }
@@ -466,7 +478,7 @@ impl EvalBasis {
                 m.precision = runs::r4(confusion[c][c] as f32 / col as f32);
             }
         }
-        ModelEval { pr, confusion, per_class, images: self.images }
+        ModelEval { pr, confusion, per_class, images: self.images, best_f1_conf: self.best_f1_conf }
     }
 }
 
@@ -475,6 +487,8 @@ pub struct MockStore {
     datasets: RwLock<Vec<Arc<DatasetEntry>>>,
     models: RwLock<Vec<StaticModel>>,
     runs: RwLock<Vec<(Arc<SimRun>, Arc<DatasetEntry>)>>,
+    /// The runs created through the API, in queue order: they share one training slot ([`runs::reschedule`]).
+    queue: std::sync::Mutex<Vec<Arc<SimRun>>>,
     weights: weights::MockWeights,
     tensor_cores: MockTensorCores,
 }
@@ -748,7 +762,8 @@ impl MockStore {
                 d.model.map(|m| m.0.to_string()),
                 false,
                 Timeline::Static { created, status, last_step, error },
-            );
+            )
+            .resolved_for(meta.splits.train);
             if let Some((mid, mname)) = d.model {
                 let snap = run.snap();
                 let best = run.curve.best(run.epochs_done(&snap)).map(|b| b.epoch).unwrap_or(1);
@@ -758,6 +773,7 @@ impl MockStore {
                     map50_95: val.map50_95,
                     precision: val.precision,
                     recall: val.recall,
+                    best_f1_conf: val.best_f1_conf,
                 };
                 let (params, flops_g, ..) = arch_spec(d.arch);
                 let finished = snap.finished.unwrap_or(created);
@@ -824,13 +840,15 @@ impl MockStore {
             None,
             false,
             Timeline::Live(std::sync::Mutex::new(clock)),
-        );
+        )
+        .resolved_for(r6.meta().splits.train);
         runs.push((Arc::new(live), Arc::clone(r6)));
 
         MockStore {
             datasets: RwLock::new(datasets),
             models: RwLock::new(models),
             runs: RwLock::new(runs),
+            queue: std::sync::Mutex::default(),
             weights: weights::MockWeights::new(),
             tensor_cores: MockTensorCores::from_env(),
         }
@@ -886,6 +904,7 @@ impl MockStore {
                     map50_95: val.map50_95,
                     precision: val.precision,
                     recall: val.recall,
+                    best_f1_conf: val.best_f1_conf,
                 }),
                 head: run.config.head,
                 trained_with: Some(TrainedWith {
@@ -1148,20 +1167,28 @@ impl Store for MockStore {
             _ => DEVICE.to_string(),
         };
         let clock = LiveClock::new(6.0, 2.0, 0.0, false, 0.0);
-        let run = Arc::new(SimRun::new(
-            id,
-            config,
-            meta.classes.clone(),
-            spe,
-            curve,
-            device,
-            Some(model_id),
-            true,
-            Timeline::Live(std::sync::Mutex::new(clock)),
-        ));
-        let api = run.to_api();
-        runs.push((run, Arc::clone(&ds)));
-        Ok(api)
+        let run = Arc::new(
+            SimRun::new(
+                id,
+                config,
+                meta.classes.clone(),
+                spe,
+                curve,
+                device,
+                Some(model_id),
+                true,
+                Timeline::Live(std::sync::Mutex::new(clock)),
+            )
+            .resolved_for(meta.splits.train),
+        );
+        runs.push((Arc::clone(&run), Arc::clone(&ds)));
+        drop(runs);
+        {
+            let mut queue = self.queue.lock().unwrap();
+            queue.push(Arc::clone(&run));
+            runs::reschedule(&queue, std::time::Instant::now());
+        }
+        Ok(run.to_api())
     }
 
     fn get_run(&self, id: &str) -> Result<Run> {
@@ -1176,7 +1203,38 @@ impl Store for MockStore {
                 serde_json::to_value(run.to_api().status).unwrap().as_str().unwrap_or(""),
             ));
         }
+        // The runs behind it start earlier now.
+        runs::reschedule(&self.queue.lock().unwrap(), std::time::Instant::now());
         Ok(run.to_api())
+    }
+
+    fn move_run(&self, id: &str, mv: QueueMove) -> Result<Run> {
+        let (run, _) = self.run(id)?;
+        let moved = runs::move_waiting(&mut self.queue.lock().unwrap(), id, mv);
+        if let Some((from, to, waiting)) = moved {
+            let after = run.to_api();
+            let place = format!("{} of {waiting}", to + 1);
+            let message = match mv {
+                QueueMove::Start if after.status == folo_api::RunStatus::Running => {
+                    "start requested: starting now".to_string()
+                }
+                QueueMove::Start => {
+                    format!(
+                        "start requested: moved to the front ({place}); it starts when the active run ends"
+                    )
+                }
+                _ if from == to => format!("queue position unchanged ({place})"),
+                _ => format!("moved in the queue to position {place}"),
+            };
+            run.note(folo_api::LogLevel::Info, message);
+            return Ok(after);
+        }
+        let what = match run.to_api().status {
+            folo_api::RunStatus::Queued => "is not in the training queue".to_string(),
+            s => format!("is {}", serde_json::to_value(s).unwrap().as_str().unwrap_or("finished")),
+        };
+        Err(Error::conflict("run_not_queued", format!("run '{id}' {what}, not waiting in the queue"))
+            .hint("only runs waiting in the queue (with a queue_position) can be moved"))
     }
 
     fn delete_run(&self, id: &str) -> Result<()> {
@@ -1187,6 +1245,7 @@ impl Store for MockStore {
         }
         run.delete();
         self.runs.write().unwrap().retain(|r| r.0.id != id);
+        self.queue.lock().unwrap().retain(|r| r.id != id);
         Ok(())
     }
 
@@ -1333,7 +1392,7 @@ mod eval_tests {
                 recall,
             })
             .collect();
-        EvalBasis { per_class, counts: counts.to_vec(), images: 10, seed: 1 }
+        EvalBasis { per_class, best_f1_conf: Some(0.3), counts: counts.to_vec(), images: 10, seed: 1 }
     }
 
     /// Row sums equal instance counts and `per_class` precision / recall match the matrix.

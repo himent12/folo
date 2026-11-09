@@ -435,6 +435,7 @@ impl Trainer {
             precision: m.precision as f32,
             recall: m.recall as f32,
             per_class: Vec::new(),
+            best_f1_conf: m.best_f1_conf.map(|c| c as f32),
         });
         t.pending_logs.push((
             LogLevel::Info,
@@ -613,6 +614,12 @@ impl Trainer {
         self.resolved
     }
 
+    /// docs/API.md's `Run.resolved`: the optimizer, effective LR and weight decay, accumulation and warmup this run
+    /// trains with (also `resolved` in its `config.json`).
+    pub fn resolved_train(&self) -> folo_api::ResolvedTrain {
+        self.resolved.to_api(&self.cfg, self.accumulate, self.sched.contract().steps_per_epoch)
+    }
+
     /// Training batches per epoch, `nb` (docs/API.md `steps_per_epoch`).
     pub fn batches_per_epoch(&self) -> usize {
         self.nb
@@ -687,6 +694,7 @@ impl Trainer {
             "warmup_iters": c.warmup_iters,
             "close_mosaic_epochs": self.cfg.augment.close_mosaic_epochs(self.cfg.epochs),
             "warnings": self.warnings,
+            "resolved": self.resolved_train(),
         })
     }
 
@@ -1180,6 +1188,7 @@ impl Trainer {
             map50_95: m.map50_95 as f64,
             precision: m.precision as f64,
             recall: m.recall as f64,
+            best_f1_conf: m.best_f1_conf.map(f32_decimal),
         });
         meta.created = Some(rfc3339_now());
         meta.extra = self.extra_meta.clone();

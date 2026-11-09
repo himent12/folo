@@ -92,6 +92,9 @@ pub struct ParamGroup {
     pub momentum: f64,
 }
 
+/// AdamW's β2 of every [`ParamGroup`] unless [`ParamGroup::adam`] sets another (FOLO's trainer never does).
+pub const DEFAULT_BETA2: f64 = 0.999;
+
 impl ParamGroup {
     /// A group with `lr = 0.01`, momentum 0.937, Nesterov on, no weight decay, `β2 = 0.999`, `ε = 1e-8`
     /// (docs/MODEL.md §8.1–8.2 defaults). Adjust with the builder methods.
@@ -103,7 +106,7 @@ impl ParamGroup {
             base_momentum: 0.937,
             weight_decay: 0.0,
             nesterov: true,
-            beta2: 0.999,
+            beta2: DEFAULT_BETA2,
             eps: 1e-8,
             lr: 0.01,
             momentum: 0.937,

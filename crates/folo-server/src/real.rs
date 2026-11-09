@@ -36,7 +36,7 @@ use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, data_error, read
 use crate::models::{ModelRef, Models, model_of};
 use crate::runs::{DatasetRef, Runs, run_model_id};
 use crate::store::{
-    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription, Weights,
+    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription, Weights,
     WeightsFormat, weights_file_name,
 };
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
@@ -801,8 +801,8 @@ impl Store for RealStore {
         let name = weights_file_name(&m.model.name, format);
         match format {
             WeightsFormat::Stored => Weights::open(&m.path, id, name),
-            WeightsFormat::F16 => {
-                let (path, file) = self.models.f16_weights(&m)?;
+            WeightsFormat::F16 | WeightsFormat::Onnx(_) => {
+                let (path, file) = self.models.derived_weights(&m, format)?;
                 Weights::from_file(file, &path, id, name)
             }
         }
@@ -844,7 +844,11 @@ impl Store for RealStore {
     }
 
     fn get_run(&self, id: &str) -> Result<Run> {
-        Ok(self.runs.get(id)?.run())
+        self.runs.snapshot(id)
+    }
+
+    fn move_run(&self, id: &str, mv: QueueMove) -> Result<Run> {
+        self.runs.move_queued(id, mv)
     }
 
     fn stop_run(&self, id: &str) -> Result<Run> {

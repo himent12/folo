@@ -4,7 +4,7 @@
 use axum::http::StatusCode;
 use folo_api::{ClassMetrics, Split, ValMetrics, ValReport, ValRequest, ValTiming};
 
-use super::runs::{arch_spec, r4};
+use super::runs::{arch_spec, r3, r4};
 use super::{MockStore, quality_of};
 use crate::error::{Error, Result};
 use crate::store::Store;
@@ -72,6 +72,9 @@ pub(super) fn val(store: &MockStore, req: ValRequest) -> Result<ValReport> {
         map50_95: mean(|c| c.map50_95),
         precision: mean(|c| c.precision),
         recall: mean(|c| c.recall),
+        // Detections below the NMS `conf` never count, so the operating point is at least that.
+        best_f1_conf: (!per_class.is_empty())
+            .then(|| r3(base.and_then(|m| m.best_f1_conf).unwrap_or(0.3).max(req.conf).min(1.0))),
         per_class,
     };
     let (.., inf_ms) = arch_spec(model.arch);

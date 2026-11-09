@@ -154,6 +154,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         "map50_95": m.map50_95,
         "precision": m.precision,
         "recall": m.recall,
+        "best_f1_conf": m.best_f1_conf,
         "per_class": m.per_class.iter().map(|c| json!({
             "class": c.class, "name": name(c.class), "map50": c.map50, "map50_95": c.map50_95,
             "precision": c.precision, "recall": c.recall,
@@ -172,7 +173,8 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
         r.report.num_truths,
         r.seconds
     ));
-    out.human(format!("  {:<16} {:>7} {:>9} {:>7} {:>7}", "class", "mAP50", "mAP50-95", "P", "R"));
+    let at = m.best_f1_conf.map_or(String::new(), |c| format!("  (P and R at conf {c:.3}, the best F1)"));
+    out.human(format!("  {:<16} {:>7} {:>9} {:>7} {:>7}{at}", "class", "mAP50", "mAP50-95", "P", "R"));
     out.human(format!(
         "  {:<16} {:>7.3} {:>9.3} {:>7.3} {:>7.3}",
         "all", m.map50, m.map50_95, m.precision, m.recall

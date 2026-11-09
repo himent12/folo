@@ -103,7 +103,8 @@ At IoU 0.5 only. For a confidence threshold `c`, class `k` counts the kept predi
 `P_k(c) = TP / (TP + FP)` (`0` when there are none), `R_k(c) = TP / npig`, `F1_k(c) = 2PR / (P + R)` (`0` when
 `P + R = 0`).
 
-`c` runs over a grid `0.000, 0.001, …, 1.000`. `best_conf` is the grid value that maximises `mean_k F1_k(c)`; on ties
+`c` runs over a grid `0.000, 0.001, …, 1.000`. `best_conf` (`best_f1_conf` in docs/API.md, `folo val --json` and
+`folo.metrics`) is the grid value that maximises `mean_k F1_k(c)`; on ties
 the highest such `c` is chosen. The report's `precision`, `recall` and `f1` (and each `per_class` entry's) are the
 values at `best_conf`. (Ultralytics does the same selection but interpolates P and R linearly between prediction
 scores and smooths the mean F1 curve before the argmax; FOLO uses the exact step functions and no smoothing.)

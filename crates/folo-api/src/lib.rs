@@ -151,6 +151,14 @@ pub struct AmpSupport {
 /// and ignore them).
 pub const FEATURE_EXPORT_ONNX_SWITCHES: &str = "export_onnx_switches";
 
+/// [`SystemResponse::features`]: `POST /api/runs/{id}/queue` exists ([`QueueRequest`]), runs carry
+/// `queue_position` and streams send `queue` events.
+pub const FEATURE_QUEUE_CONTROL: &str = "queue_control";
+
+/// [`SystemResponse::features`]: `GET /api/models/{id}/weights?format=onnx` exists (older servers answer `400
+/// invalid_query`).
+pub const FEATURE_WEIGHTS_ONNX: &str = "weights_onnx";
+
 /// CPU name, logical thread count and current utilisation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -653,10 +661,15 @@ pub struct ModelMetrics {
     pub map50: f32,
     /// mAP averaged over IoU 0.5:0.95.
     pub map50_95: f32,
-    /// Precision.
+    /// Precision at `best_f1_conf`.
     pub precision: f32,
-    /// Recall.
+    /// Recall at `best_f1_conf`.
     pub recall: f32,
+    /// The operating point of `precision` and `recall`: the confidence threshold (on a 0.001 grid) that maximises
+    /// the class-mean F1 at IoU 0.5 (docs/METRICS.md). `null` when unknown (runs, `metrics.jsonl` and `.folo`
+    /// files from before the field). Additive: missing reads as `null`.
+    #[serde(default)]
+    pub best_f1_conf: Option<f32>,
 }
 
 /// Detector architecture (scale).
@@ -716,6 +729,10 @@ pub struct ModelEval {
     pub per_class: Vec<ClassMetrics>,
     /// Validation images evaluated.
     pub images: u32,
+    /// The confidence at which the `per_class` precision and recall are taken ([`ModelMetrics::best_f1_conf`]).
+    /// Additive: missing (older servers) reads as `null`.
+    #[serde(default)]
+    pub best_f1_conf: Option<f32>,
 }
 
 /// A precision-recall curve at IoU 0.5, sampled at 101 recall points (`0.00, 0.01, ..., 1.00`). Precision is the
@@ -735,7 +752,7 @@ pub struct PrCurve {
 
 /// The ONNX switches of `POST /api/models/{id}/export` (docs/CLI.md, ONNX export), all off by default. Only
 /// valid with `format: onnx`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OnnxSwitches {
     /// Decode inside the graph: one `detections: [B, A, 4 + nc]` output instead of the raw head.
@@ -1019,6 +1036,100 @@ pub struct Run {
     /// otherwise and from servers that predate the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
+    /// What the trainer resolved `config` to (optimizer, effective LR, ...); `null` until the trainer is built.
+    #[serde(default)]
+    pub resolved: Option<ResolvedTrain>,
+    /// 1-based place in the training queue while the run waits there (`1` starts next), else `null`.
+    #[serde(default)]
+    pub queue_position: Option<u32>,
+}
+
+/// [`Run::resolved`]: the settings a run actually trains with, after `optimizer: auto` and the batch scaling of
+/// docs/MODEL.md §8.2 and §8.4. The run folder's `config.json` holds the same numbers.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ResolvedTrain {
+    /// The optimizer used, never `auto`.
+    pub optimizer: ResolvedOptimizer,
+    /// Base learning rate of every parameter group: what `auto` picked, else `TrainConfig.lr0`.
+    pub lr0: f64,
+    /// Final LR fraction: the last optimizer step runs at `lr0 · lrf`.
+    pub lrf: f64,
+    /// Cosine (`true`) or linear (`false`) LR decay.
+    pub cos_lr: bool,
+    /// SGD momentum, or AdamW β1, after warmup.
+    pub momentum: f64,
+    /// AdamW's `[β1, β2]`; `null` for SGD.
+    pub betas: Option<[f64; 2]>,
+    /// The weight decay of the decay group after the batch scaling `weight_decay · batch · accumulate / nbs`.
+    pub weight_decay: f64,
+    /// Images per forward / backward pass (`TrainConfig.batch`).
+    pub batch: u32,
+    /// Batches whose gradients are summed per optimizer step: `max(round(nbs / batch), 1)`.
+    pub accumulate: u32,
+    /// The nominal batch `accumulate` aims at.
+    pub nbs: u32,
+    /// Optimizer steps per epoch: `ceil(batches per epoch / accumulate)`.
+    pub optimizer_steps_per_epoch: u64,
+    /// Warmup length in optimizer steps (from `warmup_epochs`: at least 100, at most 30% of a short run).
+    pub warmup_iters: u64,
+    /// Warmup length as configured, in epochs.
+    pub warmup_epochs: f64,
+    /// Momentum / β1 at the start of warmup.
+    pub warmup_momentum: f64,
+    /// The bias group's LR at the start of warmup (`0` under `auto`).
+    pub warmup_bias_lr: f64,
+}
+
+/// [`ResolvedTrain::optimizer`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ResolvedOptimizer {
+    /// SGD with Nesterov momentum.
+    Sgd,
+    /// AdamW (decoupled weight decay).
+    Adamw,
+}
+
+/// `POST /api/runs/{id}/queue`: moves a waiting run in the training queue. Exactly one of `action` and `position`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct QueueRequest {
+    /// A relative move, or `start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<QueueAction>,
+    /// The 1-based place to move to (`1` starts next; larger than the queue means its end).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<u32>,
+}
+
+/// [`QueueRequest::action`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum QueueAction {
+    /// To the front of the queue: it starts next.
+    Top,
+    /// One place forward.
+    Up,
+    /// One place back.
+    Down,
+    /// To the back of the queue.
+    Bottom,
+    /// Start it at once when nothing is training, else move it to the front; never preempts the active run.
+    Start,
+}
+
+/// SSE `queue` payload: a waiting run's place in the training queue, sent to every waiting run after each change
+/// of the queue (a run queued, moved, taken by the worker, stopped or deleted).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct QueueEvent {
+    /// 1-based place in the queue (`Run.queue_position`).
+    pub position: u32,
+    /// Runs waiting in the queue, this one included.
+    pub waiting: u32,
 }
 
 /// The best epoch of a run.
@@ -1092,12 +1203,17 @@ pub struct ValMetrics {
     pub map50: f32,
     /// mAP averaged over IoU 0.5:0.95.
     pub map50_95: f32,
-    /// Precision.
+    /// Precision (class mean) at `best_f1_conf`.
     pub precision: f32,
-    /// Recall.
+    /// Recall (class mean) at `best_f1_conf`.
     pub recall: f32,
-    /// Per-class metrics.
+    /// Per-class metrics (their precision and recall are taken at `best_f1_conf` too).
     pub per_class: Vec<ClassMetrics>,
+    /// The operating point of `precision` and `recall`: the confidence (on a 0.001 grid) that maximises the
+    /// class-mean F1 at IoU 0.5, one threshold for every class (docs/METRICS.md). `null` when unknown (epochs
+    /// recorded before the field). Additive: missing reads as `null`.
+    #[serde(default)]
+    pub best_f1_conf: Option<f32>,
 }
 
 /// Validation metrics of one class.
@@ -1241,6 +1357,8 @@ pub enum RunEvent {
     Epoch(Epoch),
     /// `log`.
     Log(LogLine),
+    /// `queue`.
+    Queue(QueueEvent),
 }
 
 impl RunEvent {
@@ -1251,6 +1369,7 @@ impl RunEvent {
             RunEvent::Step(_) => "step",
             RunEvent::Epoch(_) => "epoch",
             RunEvent::Log(_) => "log",
+            RunEvent::Queue(_) => "queue",
         }
     }
 
@@ -1261,6 +1380,7 @@ impl RunEvent {
             RunEvent::Step(p) => serde_json::to_string(p),
             RunEvent::Epoch(p) => serde_json::to_string(p),
             RunEvent::Log(p) => serde_json::to_string(p),
+            RunEvent::Queue(p) => serde_json::to_string(p),
         };
         r.expect("event payloads always serialize")
     }
@@ -1273,6 +1393,7 @@ impl RunEvent {
             "step" => serde_json::from_str(data).map(RunEvent::Step),
             "epoch" => serde_json::from_str(data).map(RunEvent::Epoch),
             "log" => serde_json::from_str(data).map(RunEvent::Log),
+            "queue" => serde_json::from_str(data).map(RunEvent::Queue),
             _ => return None,
         })
     }

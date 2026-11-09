@@ -7,12 +7,12 @@ use std::time::Duration;
 
 use folo_api::{
     Dataset, DatasetList, ErrorBody, ExportResult, ExportSpec, FEATURE_EXPORT_ONNX_SWITCHES, GpuInfo, Health,
-    ImagePage, IssuePage, LogLine, Model, ModelEval, ModelList, PredictRequest, PredictResponse,
-    RegisterDataset, Run, RunList, RunLogs, RunMetrics, RunSamples, SyntheticDataset, SystemInfo,
-    SystemResponse, TrainConfig, ValReport, ValRequest,
+    ImagePage, IssuePage, LogLine, Model, ModelEval, ModelList, PredictRequest, PredictResponse, QueueAction,
+    QueueRequest, RegisterDataset, Run, RunList, RunLogs, RunMetrics, RunSamples, SyntheticDataset,
+    SystemInfo, SystemResponse, TrainConfig, ValReport, ValRequest,
 };
 use folo_server::store::{
-    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, Store, Subscription,
+    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription,
 };
 use http::StatusCode;
 use serde::Serialize;
@@ -28,6 +28,10 @@ pub struct HttpStore {
     base: String,
     agent: ureq::Agent,
     mock: std::sync::OnceLock<bool>,
+}
+
+fn action(a: QueueAction) -> QueueRequest {
+    QueueRequest { action: Some(a), position: None }
 }
 
 /// Percent-encodes one path segment or query value.
@@ -269,6 +273,18 @@ impl Store for HttpStore {
         let (_, b) =
             self.finish(self.agent.post(&self.url(&format!("/runs/{}/stop", encode(id)))).send_empty())?;
         self.parse(&b)
+    }
+
+    fn move_run(&self, id: &str, mv: QueueMove) -> Result<Run, Error> {
+        let body = match mv {
+            QueueMove::To(p) => QueueRequest { action: None, position: Some(p) },
+            QueueMove::Top => action(QueueAction::Top),
+            QueueMove::Up => action(QueueAction::Up),
+            QueueMove::Down => action(QueueAction::Down),
+            QueueMove::Bottom => action(QueueAction::Bottom),
+            QueueMove::Start => action(QueueAction::Start),
+        };
+        self.post(&format!("/runs/{}/queue", encode(id)), &body)
     }
 
     fn delete_run(&self, id: &str) -> Result<(), Error> {

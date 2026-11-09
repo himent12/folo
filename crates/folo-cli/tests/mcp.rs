@@ -212,7 +212,7 @@ fn tmp_dir(name: &str) -> std::path::PathBuf {
     d
 }
 
-const ALL_TOOLS: [&str; 17] = [
+const ALL_TOOLS: [&str; 18] = [
     "folo_info",
     "list_datasets",
     "get_dataset",
@@ -225,6 +225,7 @@ const ALL_TOOLS: [&str; 17] = [
     "run_status",
     "list_runs",
     "stop_run",
+    "reorder_run",
     "val",
     "predict",
     "predict_batch",
@@ -239,7 +240,7 @@ fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections::HashMap<S
     assert_eq!(names, expected);
     // Shared types are compacted (docs/MCP.md "Schemas"): the whole listing stays small.
     let bytes = serde_json::to_vec(&tools).unwrap().len();
-    assert!(bytes < 48 * 1024, "tools/list is {bytes} bytes");
+    assert!(bytes < 56 * 1024, "tools/list is {bytes} bytes");
     let mut out = std::collections::HashMap::new();
     for t in &tools {
         assert!(t["description"].as_str().unwrap().len() > 20);
@@ -593,6 +594,14 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     c.tool_error("list_datasets", json!({ "limit": 500 }), "invalid_arguments");
     c.tool_error("predict", json!({ "model_id": model_id }), "invalid_arguments");
     c.tool_error("compare_runs", json!({ "run_ids": [run_id] }), "invalid_arguments");
+    c.tool_error("reorder_run", json!({ "run_id": "run_2b02", "position": 1 }), "run_not_queued");
+    c.tool_error(
+        "reorder_run",
+        json!({ "run_id": run_id, "action": "up", "position": 1 }),
+        "invalid_arguments",
+    );
+    c.tool_error("reorder_run", json!({ "run_id": run_id, "position": 0 }), "invalid_arguments");
+    c.tool_error("reorder_run", json!({ "run_id": "run_none", "action": "top" }), "run_not_found");
     // The mock store does not resume runs (the real one does, see `real_store_end_to_end`).
     c.tool_error("train", json!({ "dataset_id": ds_id, "resume_run_id": run_id }), "not_implemented");
     c.tool_error("train", json!({ "resume_run_id": 7 }), "invalid_arguments");
@@ -707,6 +716,7 @@ fn read_only_hides_and_rejects_mutating_tools() {
         ("create_synthetic_dataset", json!({ "name": "x" })),
         ("register_dataset", json!({ "path": "." })),
         ("stop_run", json!({ "run_id": "run_3c02" })),
+        ("reorder_run", json!({ "run_id": "run_3c02", "action": "top" })),
         ("export", json!({ "model_id": "m_31aa", "format": "onnx" })),
     ] {
         c.tool_error(tool, args, "read_only");
@@ -1307,6 +1317,20 @@ fn proxy_mode_forwards_to_folo_serve() {
     let t = checked(&mut c, &schemas, "train", json!({ "dataset_id": "ds_5a1e", "epochs": 1 }));
     let stopped = checked(&mut c, &schemas, "stop_run", json!({ "run_id": t["run_id"] }));
     assert_eq!(stopped["status"], "stopping");
+    // reorder_run → POST /api/runs/{id}/queue: runs started through the API share one training slot.
+    let q1 = checked(&mut c, &schemas, "train", json!({ "dataset_id": "ds_5a1e", "epochs": 100 }));
+    let q2 = checked(&mut c, &schemas, "train", json!({ "dataset_id": "ds_5a1e", "epochs": 100 }));
+    let moved = checked(&mut c, &schemas, "reorder_run", json!({ "run_id": q2["run_id"], "action": "top" }));
+    assert_eq!(moved, json!({ "run_id": q2["run_id"], "status": "queued", "queue_position": 1 }));
+    let st = checked(&mut c, &schemas, "run_status", json!({ "run_id": q1["run_id"] }));
+    assert_eq!(st["queue_position"], 2);
+    let back = checked(&mut c, &schemas, "reorder_run", json!({ "run_id": q2["run_id"], "position": 2 }));
+    assert_eq!(back["queue_position"], 2);
+    c.tool_error("reorder_run", json!({ "run_id": "run_2b02", "action": "top" }), "run_not_queued");
+    c.tool_error("reorder_run", json!({ "run_id": q1["run_id"] }), "invalid_arguments");
+    for q in [&q1, &q2] {
+        checked(&mut c, &schemas, "stop_run", json!({ "run_id": q["run_id"] }));
+    }
     checked(&mut c, &schemas, "export", json!({ "model_id": "m_31aa", "format": "folo-f16" }));
     // The proxy forwards the ONNX switches to a server that announces them (`/api/system` features).
     let h =

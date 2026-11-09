@@ -195,8 +195,14 @@ export type Arch = 'folo-n' | 'folo-s' | 'folo-m' | 'folo-l' | 'folo-x';
 export interface ModelMetrics {
   map50: number;
   map50_95: number;
+  /** Precision and recall at `best_f1_conf`. */
   precision: number;
   recall: number;
+  /**
+   * The confidence threshold precision and recall are taken at (best class-mean F1 at IoU 0.5, 0.001 grid);
+   * `null` when unknown, missing from older servers.
+   */
+  best_f1_conf?: number | null;
 }
 
 export interface Model {
@@ -263,6 +269,8 @@ export interface ModelEval {
   /** As in Epoch.val.per_class; map50 equals pr[class].ap50. */
   per_class: ClassMetrics[];
   images: number;
+  /** The confidence `per_class` precision / recall are taken at; `null` when unknown, missing from older servers. */
+  best_f1_conf?: number | null;
 }
 
 export interface ExportResult {
@@ -326,6 +334,41 @@ export interface Run {
   error: string | null;
   /** Stable error code when failed (e.g. `not_supported`); missing otherwise and from older servers. */
   error_code?: string;
+  /** What the trainer resolved `config` to (auto optimizer, effective LR, ...); `null` until built, missing: older server. */
+  resolved?: ResolvedTrain | null;
+  /** 1-based place in the training queue while waiting there (1 starts next); `null` otherwise, missing: older server. */
+  queue_position?: number | null;
+}
+
+/** `Run.resolved` (docs/API.md): the settings a run actually trains with. */
+export interface ResolvedTrain {
+  optimizer: 'sgd' | 'adamw';
+  lr0: number;
+  lrf: number;
+  cos_lr: boolean;
+  /** SGD momentum or AdamW β1 after warmup. */
+  momentum: number;
+  /** AdamW `[β1, β2]`; `null` for SGD. */
+  betas: [number, number] | null;
+  /** After the batch scaling `weight_decay · batch · accumulate / nbs`. */
+  weight_decay: number;
+  batch: number;
+  accumulate: number;
+  nbs: number;
+  optimizer_steps_per_epoch: number;
+  warmup_iters: number;
+  warmup_epochs: number;
+  warmup_momentum: number;
+  warmup_bias_lr: number;
+}
+
+/** POST /api/runs/{id}/queue: exactly one of `action` and `position` (1-based). Servers list `queue_control`. */
+export type QueueRequest = { action: 'top' | 'up' | 'down' | 'bottom' | 'start' } | { position: number };
+
+/** SSE `queue`: a waiting run's place in the queue and how many runs wait, it included. */
+export interface QueueEvent {
+  position: number;
+  waiting: number;
 }
 
 export interface Loss {
@@ -401,6 +444,8 @@ export interface RunEventMap {
   step: Step;
   epoch: Epoch;
   log: LogLine;
+  /** Servers with `queue_control` only. */
+  queue: QueueEvent;
 }
 
 // ---------- Inference ----------

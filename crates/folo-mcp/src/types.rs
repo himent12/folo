@@ -127,6 +127,17 @@ pub struct TrainResult {
     pub status: RunStatus,
 }
 
+/// `reorder_run` result.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ReorderResult {
+    /// The moved run.
+    pub run_id: String,
+    /// Its status (`queued`, or `running` when `start` found the slot free).
+    pub status: RunStatus,
+    /// Its new 1-based place in the queue; `null` once it started.
+    pub queue_position: Option<u32>,
+}
+
 /// `run_status`.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunStatusArgs {
@@ -165,6 +176,21 @@ pub struct RunStatusResult {
 pub struct RunIdArgs {
     /// Run id.
     pub run_id: String,
+}
+
+/// `reorder_run`: exactly one of `action` and `position` (docs/API.md, `POST /api/runs/{id}/queue`).
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReorderRunArgs {
+    /// Run id of a run waiting in the queue (`queue_position` set).
+    pub run_id: String,
+    /// `top` / `up` / `down` / `bottom` move it; `start` starts it now when nothing trains, else moves it to the
+    /// front (the active run is never preempted).
+    #[serde(default)]
+    pub action: Option<folo_api::QueueAction>,
+    /// The 1-based place to move it to (1 starts next; past the end means the end).
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub position: Option<u32>,
 }
 
 /// `list_runs`.
@@ -547,5 +573,11 @@ pub struct FoloInfo {
 
 /// Rebuilds the summary of a val report (kept here so `compare_runs` and `val` describe metrics the same way).
 pub fn metrics_of(v: &ValMetrics) -> ModelMetrics {
-    ModelMetrics { map50: v.map50, map50_95: v.map50_95, precision: v.precision, recall: v.recall }
+    ModelMetrics {
+        map50: v.map50,
+        map50_95: v.map50_95,
+        precision: v.precision,
+        recall: v.recall,
+        best_f1_conf: v.best_f1_conf,
+    }
 }

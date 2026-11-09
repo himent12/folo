@@ -16,7 +16,7 @@ Claude Code and Codex are in the README ("Use FOLO from Claude Code / Codex"). T
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp.rs`.
 
 ## Status
-Implemented: both protocol revisions, all 17 tools with generated input and output schemas, every resource and
+Implemented: both protocol revisions, all 18 tools with generated input and output schemas, every resource and
 both subscription flows, both prompts, paging and size limits, `--read-only`, `--confine`, and proxy mode. Every
 tool goes through the [`Store`](../crates/folo-server/src/store.rs) behind the server, so what works depends on
 it:
@@ -26,7 +26,7 @@ it:
 | datasets (register, synthetic, stats, issues, images) | real files under `--data-dir` | 3 fixed mock datasets, plus real folders / synthetic ones | the `folo serve`'s |
 | `train` | trains on the FOLO engine, one run at a time (FIFO queue) | simulated, 6 s per epoch | `POST /api/runs` |
 | `train` with `resume_run_id` | resumes from `weights/last.folo` (same id) | `not_implemented` | `POST /api/runs` with `resume_run_id` |
-| `run_status`, `list_runs`, `stop_run`, `compare_runs` | persisted runs (`runs/<id>/`), also those of earlier sessions | mock runs | `/api/runs/...` |
+| `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` | persisted runs (`runs/<id>/`), also those of earlier sessions | mock runs (API-created ones share one training slot) | `/api/runs/...` |
 | `list_models` | `best` / `last` weights of finished runs, plus `.folo` files under `models/` | mock models | `/api/models` |
 | `val` | folo-vision's evaluator on the requested split, `conf` / `iou` as given | derived from the model's metrics | `POST /api/val` |
 | `predict`, `predict_batch` | the engine (on `--device`), predictors cached | deterministic mock boxes | `POST /api/predict` |
@@ -71,7 +71,7 @@ in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the
 ## Results and errors
 Every tool declares an `inputSchema` and an `outputSchema`. The schemas are generated from the same Rust types as the
 HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and docs/API.md is the source of field
-meanings. They are compacted for `tools/list` (about 45 KB for all 17 tools): no `$schema`, no numeric `format`
+meanings. They are compacted for `tools/list` (about 53 KB for all 18 tools): no `$schema`, no numeric `format`
 annotations, no `minimum: 0` of unsigned types, defaults without f32 noise (`0.01`, not `0.009999999776482582`);
 output schemas also leave out defaults and the field descriptions of the shared types in `$defs` (`Run`,
 `TrainConfig`, `Epoch`, ...; docs/API.md documents them) and write string enums as `enum`. Every input schema,
@@ -137,6 +137,7 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 | `run_status` | `{ run_id, log_lines?: 20 (max 200) }` | `Run`, plus `last_step`, `last_epoch` and `log` (the last `log_lines` log lines; older ones are dropped first if the result would exceed 32 KB) |
 | `list_runs` | `{ status?: string }` + paging | page of `Run` summaries |
 | `stop_run` | `{ run_id }` | `Run` |
+| `reorder_run` | `{ run_id, action?: "top"\|"up"\|"down"\|"bottom"\|"start", position?: integer (1-based) }`, exactly one of `action` and `position` | `{ run_id, status, queue_position }` (the new place; `null` once it started). Moves a run waiting in the training queue (`POST /api/runs/{id}/queue`, docs/API.md: `start` starts it now when nothing trains, else next; the active run is never preempted). A run that is not waiting (starting, running, finished) is `run_not_queued`; neither or both arguments `invalid_arguments` |
 | `val` | `{ model_id, dataset_id, split?: "val", imgsz?, conf?: 0.001, iou?: 0.7 }` | the `POST /api/val` report: `{ model_id, dataset_id, split, imgsz, images, val: Epoch.val, timing: { total_s, per_image_ms } }` |
 | `predict` | `{ model_id, image_path \| image_base64 \| (dataset_id + image_id), conf?: 0.25, iou?: 0.7, max_det?: 300 }` (flat fields; exactly one source) | the `/api/predict` response |
 | `predict_batch` | `{ model_id, paths: string[] \| glob: string, conf?, iou? }`, at most 256 images **after** glob expansion (more is a `too_many_inputs` error) | `{ batch_id, processed, failed: [{ path, code, message }] (first 50), failed_total, boxes_total, per_class_counts (by class name), timing: { total_ms, mean_ms }, details_uri }` plus a `resource_link` to `folo://predictions/{batch_id}` with the per-image boxes |
@@ -237,7 +238,7 @@ In read-only mode, `train_on_folder` is not listed.
 - **Proxy mode** (`folo mcp --server http://127.0.0.1:7878`): every tool maps to the HTTP API of a running
   `folo serve`, so Studio and the agent share runs that outlive the MCP process:
   `list_*`/`get_dataset` → `GET` list/detail endpoints (paging is applied by the MCP layer), `list_dataset_images` →
-  `GET /api/datasets/{id}/images`, `train` → `POST /api/runs` (with `resume_run_id` when given), `run_status` → `GET /api/runs/{id}`, `stop_run` → `POST /api/runs/{id}/stop`, `predict` → `POST /api/predict` (local `image_path` files are
+  `GET /api/datasets/{id}/images`, `train` → `POST /api/runs` (with `resume_run_id` when given), `run_status` → `GET /api/runs/{id}`, `stop_run` → `POST /api/runs/{id}/stop`, `reorder_run` → `POST /api/runs/{id}/queue`, `predict` → `POST /api/predict` (local `image_path` files are
   read by the MCP process and uploaded as multipart), `export` → `POST /api/models/{id}/export`. `run_status`
   takes its `log` from `GET /api/runs/{id}/logs` and its `last_step` / `last_epoch` from `/metrics`, `val` →
   `POST /api/val`, `predict_batch` → one `POST /api/predict` upload per image (until the planned

@@ -10,9 +10,9 @@ use base64::Engine as _;
 use folo_api::IssuePage;
 use folo_api::{
     Arch, Dataset, ExportResult, ExportSpec, IssueSeverity, LogLevel, LogLine, Model, OnnxSwitches,
-    PredictResponse, RegisterDataset, Run, RunMetrics, SyntheticDataset, ValReport, ValRequest,
+    PredictResponse, QueueRequest, RegisterDataset, Run, RunMetrics, SyntheticDataset, ValReport, ValRequest,
 };
-use folo_server::store::{ImageQuery, IssueQuery, PredictInput, PredictSource};
+use folo_server::store::{ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove};
 use rmcp::handler::server::common::{schema_for_input, schema_for_output};
 use rmcp::model::{
     ContentBlock, JsonObject, ProgressNotificationParam, ProgressToken, Resource, Tool, ToolAnnotations,
@@ -356,6 +356,15 @@ pub const TOOLS: &[ToolDef] = &[
         output: output::<Run>,
     },
     ToolDef {
+        name: "reorder_run",
+        description: "Moves a run waiting in the training queue: action top / up / down / bottom, or a 1-based \
+                      position; action start starts it now when nothing is training, else next (never preempting \
+                      the active run). Returns its status and new queue_position.",
+        mutating: true,
+        input: input::<ReorderRunArgs>,
+        output: output::<ReorderResult>,
+    },
+    ToolDef {
         name: "val",
         description: "Evaluates a model on a dataset split: mAP@0.5, mAP@0.5:0.95, precision, recall, per class. \
                       Reports progress.",
@@ -681,6 +690,7 @@ impl Inner {
             "run_status" => self.run_status(parse_args(args)?).await,
             "list_runs" => self.list_runs(parse_args(args)?).await,
             "stop_run" => self.stop_run(parse_args(args)?).await,
+            "reorder_run" => self.reorder_run(parse_args(args)?).await,
             "val" => self.val(parse_args(args)?, progress).await,
             "predict" => self.predict(parse_args(args)?).await,
             "predict_batch" => self.predict_batch(parse_args(args)?, progress).await,
@@ -1048,6 +1058,19 @@ impl Inner {
     async fn stop_run(&self, a: RunIdArgs) -> Result<Output, Error> {
         let run = self.blocking(move |s| s.stop_run(&a.run_id)).await?;
         out(&run, format!("{}: {}", run.id, run.status_str()))
+    }
+
+    async fn reorder_run(&self, a: ReorderRunArgs) -> Result<Output, Error> {
+        let mv = QueueMove::parse(QueueRequest { action: a.action, position: a.position })?;
+        let run = self.blocking(move |s| s.move_run(&a.run_id, mv)).await?;
+        let place = run
+            .queue_position
+            .map_or_else(|| run.status_str().to_string(), |p| format!("queue position {p}"));
+        let summary = format!("{}: {place}", run.id);
+        out(
+            &ReorderResult { run_id: run.id, status: run.status, queue_position: run.queue_position },
+            summary,
+        )
     }
 
     async fn val(&self, a: ValArgs, progress: &mut Progress) -> Result<Output, Error> {

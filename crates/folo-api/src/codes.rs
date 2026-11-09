@@ -77,6 +77,12 @@ pub const CODES: &[Code] = &[
     c("run_active", 409, 1, "the run is still queued, running or stopping"),
     c("run_not_active", 409, 1, "stopping a run that already finished"),
     c("run_not_resumable", 409, 1, "resuming a run that completed; start a new run from its weights instead"),
+    c(
+        "run_not_queued",
+        409,
+        1,
+        "moving a run that is not waiting in the queue (it is starting, running or finished)",
+    ),
     c("output_exists", 409, 1, "the output folder exists and is not empty (CLI)"),
     // Too large.
     c("payload_too_large", 413, 1, "an upload or image over the limit"),

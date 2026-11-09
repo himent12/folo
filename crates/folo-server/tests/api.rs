@@ -1000,3 +1000,206 @@ async fn val_endpoint() {
     let req = json!({ "model_id": "m_1", "dataset_id": "ds_1" });
     err(&real, post_json("/api/val", req), StatusCode::NOT_FOUND, "model_not_found").await;
 }
+
+/// Every precision / recall in mock mode says which confidence it is taken at (`best_f1_conf`).
+#[tokio::test]
+async fn mock_metrics_carry_the_operating_point() {
+    let (server, _) = mock();
+    let app = server.router();
+    let conf_ok =
+        |c: Option<f32>| c.is_some_and(|c| (0.001..1.0).contains(&c) && (c * 1000.0).fract() < 1e-3);
+    let models: ModelList = ok(&app, get("/api/models")).await;
+    for m in &models.models {
+        let metrics = m.metrics.unwrap();
+        assert!(conf_ok(metrics.best_f1_conf), "{}: {metrics:?}", m.id);
+        let ev: ModelEval = ok(&app, get(&format!("/api/models/{}/eval", m.id))).await;
+        assert_eq!(ev.best_f1_conf, metrics.best_f1_conf, "{}: /eval and the model agree", m.id);
+    }
+    let done = "run_1a01";
+    let hist: RunMetrics = ok(&app, get(&format!("/api/runs/{done}/metrics"))).await;
+    assert!(hist.epochs.iter().all(|e| conf_ok(e.val.best_f1_conf)));
+    let v = serde_json::to_value(&hist.epochs[0]).unwrap();
+    assert!(v["val"]["best_f1_conf"].is_number(), "{v}");
+    // POST /api/val: never below the request's NMS threshold.
+    let req = json!({ "model_id": "m_31aa", "dataset_id": "ds_5a1e", "conf": 0.6 });
+    let r: ValReport = ok(&app, post_json("/api/val", req)).await;
+    assert!(r.val.best_f1_conf.unwrap() >= 0.6, "{:?}", r.val.best_f1_conf);
+}
+
+/// docs/API.md `POST /api/runs/{id}/queue` in mock mode: runs created through the API share one training slot;
+/// moves, `start`, the `queue` events, `Run.resolved` once a run starts, and the errors.
+#[tokio::test]
+async fn mock_queue_control() {
+    let (server, _) = mock();
+    let app = server.router();
+    let ds: DatasetList = ok(&app, get("/api/datasets")).await;
+    let ds = ds.datasets[0].id.clone();
+    let mut ids = Vec::new();
+    for (i, name) in ["qa", "qb", "qc"].into_iter().enumerate() {
+        let r: Run =
+            ok(&app, post_json("/api/runs", json!({ "dataset_id": ds, "name": name, "epochs": 50 }))).await;
+        assert_eq!((r.status, r.queue_position), (RunStatus::Queued, Some(i as u32 + 1)), "{name}");
+        assert!(r.resolved.is_none(), "not started yet");
+        ids.push(r.id);
+    }
+    let (a, b, c) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+    let pos = |id: &str| {
+        let (app, id) = (app.clone(), id.to_string());
+        async move { ok::<Run>(&app, get(&format!("/api/runs/{id}"))).await.queue_position }
+    };
+    let mv = |id: &str, body: Value| post_json(&format!("/api/runs/{id}/queue"), body);
+    // The seeded live run is outside the queue; the list carries positions too.
+    let list: RunList = ok(&app, get("/api/runs")).await;
+    assert_eq!(list.runs.iter().find(|r| r.id == "run_3c02").unwrap().queue_position, None);
+    assert_eq!(list.runs.iter().find(|r| r.id == b).unwrap().queue_position, Some(2));
+
+    // Follow b's stream from here.
+    let res = app.clone().oneshot(get(&format!("/api/runs/{b}/events"))).await.unwrap();
+    let mut events = res.into_body();
+
+    let r: Run = ok(&app, mv(&c, json!({ "action": "top" }))).await;
+    assert_eq!(r.queue_position, Some(1));
+    assert_eq!((pos(&a).await, pos(&b).await), (Some(2), Some(3)));
+    let r: Run = ok(&app, mv(&c, json!({ "action": "up" }))).await;
+    assert_eq!(r.queue_position, Some(1), "up at the front is a no-op");
+    let r: Run = ok(&app, mv(&c, json!({ "action": "down" }))).await;
+    assert_eq!(r.queue_position, Some(2));
+    let r: Run = ok(&app, mv(&c, json!({ "position": 99 }))).await;
+    assert_eq!(r.queue_position, Some(3), "past the end is the end");
+    let r: Run = ok(&app, mv(&a, json!({ "action": "bottom" }))).await;
+    assert_eq!(r.queue_position, Some(3));
+    assert_eq!((pos(&b).await, pos(&c).await), (Some(1), Some(2)));
+
+    // Nothing trains (the first run waits 2 s), so `start` starts c at once; b and a wait behind it.
+    let r: Run = ok(&app, mv(&c, json!({ "action": "start" }))).await;
+    assert!(r.queue_position.is_none() && r.status == RunStatus::Running, "{r:?}");
+    let resolved = r.resolved.expect("resolved once it started");
+    assert_ne!(serde_json::to_value(resolved.optimizer).unwrap(), "auto");
+    assert!(resolved.lr0 > 0.0 && resolved.accumulate >= 1 && resolved.warmup_iters > 0);
+    assert_eq!((pos(&b).await, pos(&a).await), (Some(1), Some(2)));
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let r: Run = ok(&app, get(&format!("/api/runs/{b}"))).await;
+    assert_eq!((r.status, r.queue_position), (RunStatus::Queued, Some(1)), "the slot is taken");
+    // `start` with a run training only moves to the front.
+    let r: Run = ok(&app, mv(&a, json!({ "action": "start" }))).await;
+    assert_eq!((r.status, r.queue_position), (RunStatus::Queued, Some(1)));
+
+    // b's stream reported its moves: the last `queue` event says where it is now (2 of 2).
+    let mut last = None;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while last != Some(QueueEvent { position: 2, waiting: 2 }) {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let evs = read_events(&mut events, 1, left).await;
+        assert!(!evs.is_empty(), "no queue event; last {last:?}");
+        for (name, data) in evs {
+            if name == "queue" {
+                last = Some(serde_json::from_str(&data).unwrap());
+            }
+        }
+    }
+
+    // Moves are logged: in `/logs`, and live on the moved run's stream.
+    let logs: RunLogs = ok(&app, get(&format!("/api/runs/{c}/logs"))).await;
+    let msgs: Vec<&str> = logs.lines.iter().map(|l| l.message.as_str()).collect();
+    assert!(msgs.contains(&"moved in the queue to position 1 of 3"), "{msgs:?}");
+    assert!(msgs.contains(&"start requested: starting now"), "{msgs:?}");
+    let r: Run = ok(&app, mv(&b, json!({ "action": "down" }))).await;
+    assert_eq!(r.queue_position, Some(2));
+    let mut logged = false;
+    while !logged {
+        let evs = read_events(&mut events, 1, Duration::from_secs(3)).await;
+        assert!(!evs.is_empty(), "no log event for the move");
+        logged = evs.iter().any(|(n, d)| n == "log" && d.contains("queue position unchanged (2 of 2)"));
+    }
+
+    // Errors: a running or finished run, bad bodies, unknown runs.
+    let e = err(&app, mv(&c, json!({ "action": "top" })), StatusCode::CONFLICT, "run_not_queued").await;
+    assert!(e.message.contains("running"), "{}", e.message);
+    err(&app, mv("run_1a01", json!({ "action": "top" })), StatusCode::CONFLICT, "run_not_queued").await;
+    err(&app, mv("run_3c02", json!({ "position": 1 })), StatusCode::CONFLICT, "run_not_queued").await;
+    for body in [json!({}), json!({ "action": "top", "position": 1 }), json!({ "position": 0 })] {
+        err(&app, mv(&b, body), StatusCode::BAD_REQUEST, "invalid_body").await;
+    }
+    err(&app, mv(&b, json!({ "action": "sideways" })), StatusCode::UNPROCESSABLE_ENTITY, "invalid_body")
+        .await;
+    err(&app, mv("run_none", json!({ "action": "top" })), StatusCode::NOT_FOUND, "run_not_found").await;
+
+    // Stopping the running run lets the front run start.
+    let _: Run = ok(&app, Request::post(format!("/api/runs/{c}/stop")).body(Body::empty()).unwrap()).await;
+    tokio::time::sleep(Duration::from_millis(1800)).await;
+    let r: Run = ok(&app, get(&format!("/api/runs/{a}"))).await;
+    assert_eq!((r.status, r.queue_position), (RunStatus::Running, None));
+    assert_eq!(pos(&b).await, Some(1));
+    for id in [&a, &b] {
+        let _: Run =
+            ok(&app, Request::post(format!("/api/runs/{id}/stop")).body(Body::empty()).unwrap()).await;
+    }
+}
+
+/// A run model's stored metrics are the metrics of the epoch its weights were saved from (the run's best epoch),
+/// operating point included, and that epoch's overall precision / recall / mAP are its class means (as the engine
+/// reports them), so the run page and the model page show the same numbers. `/eval` re-evaluates the model: its
+/// per-class numbers stay within rounding of the epoch's (exactly equal operating point).
+#[tokio::test]
+async fn mock_model_metrics_match_their_run_epoch() {
+    let (server, _) = mock();
+    let app = server.router();
+    let models: ModelList = ok(&app, get("/api/models")).await;
+    let mut bad = Vec::new();
+    let mut checked = 0;
+    for m in models.models.iter().filter(|m| m.run_id.is_some()) {
+        let run_id = m.run_id.as_deref().unwrap();
+        let run: Run = ok(&app, get(&format!("/api/runs/{run_id}"))).await;
+        let hist: RunMetrics = ok(&app, get(&format!("/api/runs/{run_id}/metrics"))).await;
+        let best = run.best.unwrap().epoch;
+        let v = &hist.epochs.iter().find(|e| e.epoch == best).unwrap().val;
+        let from_run = ModelMetrics {
+            map50: v.map50,
+            map50_95: v.map50_95,
+            precision: v.precision,
+            recall: v.recall,
+            best_f1_conf: v.best_f1_conf,
+        };
+        if m.metrics != Some(from_run) {
+            bad.push(format!("{}: stored {:?} vs {run_id} epoch {best} {from_run:?}", m.id, m.metrics));
+        }
+        let mean = |pc: &[ClassMetrics], f: fn(&ClassMetrics) -> f32| {
+            pc.iter().map(f).sum::<f32>() / pc.len() as f32
+        };
+        type Field = (&'static str, fn(&ClassMetrics) -> f32, f32);
+        let fields: [Field; 4] = [
+            ("precision", |c| c.precision, v.precision),
+            ("recall", |c| c.recall, v.recall),
+            ("map50", |c| c.map50, v.map50),
+            ("map50_95", |c| c.map50_95, v.map50_95),
+        ];
+        for (name, f, overall) in fields {
+            if (mean(&v.per_class, f) - overall).abs() > 1e-3 {
+                bad.push(format!(
+                    "{run_id} epoch {best}: {name} {overall} vs class mean {}",
+                    mean(&v.per_class, f)
+                ));
+            }
+        }
+        let ev: ModelEval = ok(&app, get(&format!("/api/models/{}/eval", m.id))).await;
+        if ev.best_f1_conf != from_run.best_f1_conf {
+            bad.push(format!("{}: /eval conf {:?} vs {:?}", m.id, ev.best_f1_conf, from_run.best_f1_conf));
+        }
+        for (e, r) in ev.per_class.iter().zip(&v.per_class) {
+            let close = |a: f32, b: f32| (a - b).abs() <= 0.01;
+            if !(close(e.precision, r.precision) && close(e.recall, r.recall) && close(e.map50, r.map50)) {
+                bad.push(format!("{} class {}: /eval {e:?} vs epoch {r:?}", m.id, e.class));
+            }
+        }
+        checked += 1;
+    }
+    assert!(
+        bad.is_empty(),
+        "{}",
+        bad.join(
+            "
+"
+        )
+    );
+    assert!(checked >= 5, "{checked}");
+}

@@ -198,8 +198,45 @@ async fn mock_weights_are_a_real_folo_n_file() {
         error_code(&app, "/api/models/m_none/weights", StatusCode::NOT_FOUND).await,
         "model_not_found"
     );
-    let bad = error_code(&app, "/api/models/m_31aa/weights?format=onnx", StatusCode::BAD_REQUEST).await;
-    assert_eq!(bad, "invalid_query");
+    // ONNX: the real exporter's graph of the same generated file, named as `POST .../export` names it.
+    let urionnx = "/api/models/m_31aa/weights?format=onnx";
+    let (status, hx, bx, _) = send(&app, get(urionnx, &[])).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bx));
+    assert!(is_onnx(&bx));
+    assert_eq!(
+        header(&hx, header::CONTENT_DISPOSITION),
+        format!("attachment; filename=\"{}.onnx\"", model.name)
+    );
+    let etagx = check_validators(&app, urionnx, &hx, &bx).await;
+    let urihalf = "/api/models/m_31aa/weights?format=onnx&half=true&decode=true";
+    let (status, hh, bh, _) = send(&app, get(urihalf, &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(is_onnx(&bh) && bh.len() < bx.len());
+    assert!(header(&hh, header::CONTENT_DISPOSITION).ends_with("-f16.onnx\""));
+    assert_ne!(header(&hh, header::ETAG), etagx);
+    // An f16 model (its stored file is the f16 export) still downloads ONNX as ONNX.
+    let (status, h53, b53, _) = send(&app, get("/api/models/m_53d2/weights?format=onnx", &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(is_onnx(&b53), "not a .folo file under an .onnx name");
+    assert!(header(&h53, header::CONTENT_DISPOSITION).ends_with(".onnx\""));
+
+    assert_eq!(
+        error_code(&app, "/api/models/m_none/weights", StatusCode::NOT_FOUND).await,
+        "model_not_found"
+    );
+    for bad in [
+        "/api/models/m_31aa/weights?format=tflite",
+        "/api/models/m_31aa/weights?format=f16&half=true",
+        "/api/models/m_31aa/weights?decode=false",
+        "/api/models/m_31aa/weights?format=onnx&half=maybe",
+    ] {
+        assert_eq!(error_code(&app, bad, StatusCode::BAD_REQUEST).await, "invalid_query", "{bad}");
+    }
+}
+
+/// Bytes that look like a serialized ONNX `ModelProto` of a FOLO detector (its input is named `images`).
+fn is_onnx(b: &[u8]) -> bool {
+    b.len() > 1 << 20 && b.windows(6).any(|w| w == b"images")
 }
 
 /// Writes a folo-n weights file with two classes, initialised from `seed`.
@@ -257,6 +294,28 @@ async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
     assert_eq!(header(&again, header::ETAG), etag16, "served from the cache");
     assert_eq!(f16_cache(&home), cache);
 
+    // ONNX: exported on the first request (one cache file per switch combination), streamed with validators.
+    let urix = format!("{uri}?format=onnx");
+    let (status, hx, bx, _) = send(&app, get(&urix, &[])).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bx));
+    assert!(is_onnx(&bx));
+    assert_eq!(header(&hx, header::CONTENT_DISPOSITION), "attachment; filename=\"pets_n_v2.onnx\"");
+    let etagx = check_validators(&app, &urix, &hx, &bx).await;
+    let (status, hh, bh, _) = send(&app, get(&format!("{urix}&decode=true&half=true"), &[])).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(is_onnx(&bh) && bh.len() < bx.len() && bh != bx);
+    assert_eq!(header(&hh, header::CONTENT_DISPOSITION), "attachment; filename=\"pets_n_v2-f16.onnx\"");
+    let mut names = f16_cache(&home);
+    names.sort();
+    assert_eq!(names.len(), 3, "{names:?}");
+    // `<model id>.<16 hex digits of the file version>.` then the variant.
+    let version = &cache[0][..id.len() + 18];
+    for variant in ["f16.folo", "onnx", "decode-half.onnx"] {
+        assert!(names.contains(&format!("{version}{variant}")), "{variant}: {names:?}");
+    }
+    let (_, again, _, _) = send(&app, get(&urix, &[])).await;
+    assert_eq!(header(&again, header::ETAG), etagx, "served from the cache");
+
     // New weights under the same name: new validators, the old copy is no longer current, the f16 is redone.
     // A download in progress keeps its bytes when a newer export replaces (and removes) its cache file.
     let held = store.model_weights(&id, WeightsFormat::F16).unwrap();
@@ -270,7 +329,7 @@ async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
     assert_ne!(header(&h16b, header::ETAG), etag16);
     assert_ne!(b16b, b16);
     let cache2 = f16_cache(&home);
-    assert_eq!(cache2.len(), 1, "the stale export is removed: {cache2:?}");
+    assert_eq!(cache2.len(), 1, "the stale exports (f16 and ONNX) are removed: {cache2:?}");
     assert_ne!(cache2, cache);
     let WeightsBody::File(mut f) = held.body else { panic!("real weights are files") };
     let mut old = Vec::new();
@@ -282,6 +341,7 @@ async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
     std::fs::remove_file(&path).unwrap();
     assert_eq!(error_code(&app, &uri, StatusCode::NOT_FOUND).await, "model_not_found");
     assert_eq!(error_code(&app, &uri16, StatusCode::NOT_FOUND).await, "model_not_found");
+    assert_eq!(error_code(&app, &urix, StatusCode::NOT_FOUND).await, "model_not_found");
     let bad = error_code(&app, "/api/models/m_none/weights?format=f16", StatusCode::NOT_FOUND).await;
     assert_eq!(bad, "model_not_found");
 }
