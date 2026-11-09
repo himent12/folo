@@ -572,6 +572,7 @@ impl FoloApp {
             .children(options.iter().enumerate().map(|(i, label)| {
                 let on = i == selected;
                 let f = on_select.clone();
+                let group = key.to_string();
                 let why = off[i].clone();
                 let dead = why.is_some();
                 div()
@@ -587,7 +588,7 @@ impl FoloApp {
                     .when(!dead, |d| d.cursor_pointer())
                     .border_1()
                     .border_color(gpui::transparent_black())
-                    .when(on, |d| d.bg(t.bg_raised).border_color(t.line_strong))
+                    .when(on, |d| d.bg(t.bg_raised).border_color(t.line_control))
                     .when(!on && !dead, |d| d.hover(|s| s.bg(t.bg_hover)))
                     // The selected option answers the pointer too: hover tint over its raised fill.
                     .when(on, |d| {
@@ -597,6 +598,7 @@ impl FoloApp {
                     .when(!dead, |d| d.active(|s| s.bg(t.bg_active)))
                     .when(!dead, |d| {
                         d.on_click(cx.listener(move |this, _, window, cx| {
+                            window.focus(&this.fh(group.clone(), cx));
                             f(this, i, window, cx);
                             cx.notify();
                         }))
@@ -725,7 +727,7 @@ impl FoloApp {
             .cursor_pointer()
             .bg(if on { t.accent_fill() } else { t.line_control })
             // Hover and pressed are fills a step apart, like every other control.
-            .when(!on, |d| d.hover(|s| s.bg(t.text_disabled)).active(|s| s.bg(t.text_tertiary)))
+            .when(!on, |d| d.hover(|s| s.bg(t.text_tertiary)).active(|s| s.bg(t.text_secondary)))
             .when(on, |d| {
                 let hot = crate::theme::over(t.accent_fill(), t.bg_hover);
                 let down = crate::theme::over(t.accent_fill(), t.bg_active);
@@ -1004,7 +1006,9 @@ impl FoloApp {
                     .size_full(),
                 )
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // The clicked select takes focus, so the keys then work its menu.
+                window.focus(&this.fh(key, cx));
                 this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
                 this.menu_hl = selected;
                 this.menu_scroll.scroll_to_item(selected);

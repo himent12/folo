@@ -2045,7 +2045,28 @@ impl FoloApp {
         );
     }
 
+    /// Why Open image can't run now, if it can't: no server, the model list failed or is still
+    /// loading, or there's no model yet. The button, Ctrl+O and the palette share this.
+    pub fn open_image_blocked(&self) -> Option<&'static str> {
+        if self.store.runs.error().is_some() {
+            Some("Not connected")
+        } else if self.store.models.error().is_some() {
+            Some("Models didn't load: retry under Best models")
+        } else if self.store.models.ready().is_none() {
+            Some("Loading models…")
+        } else if self.store.models.ready().is_some_and(|m| m.is_empty()) {
+            Some("Train a model first")
+        } else {
+            None
+        }
+    }
+
     pub fn pick_image(&mut self, cx: &mut Context<Self>) {
+        // The shortcut and palette obey the button's rule, and say why.
+        if let Some(why) = self.open_image_blocked() {
+            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+            return;
+        }
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,

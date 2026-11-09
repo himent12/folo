@@ -58,6 +58,17 @@ pub fn fuzzy(q: &str, s: &str) -> Option<i32> {
     Some(score)
 }
 
+/// A reference estimate's duration, as precise as it is: whole minutes ("≈ 10 min", "≈ 1 h 25 min"),
+/// seconds only under a minute.
+fn rough_duration(secs: f64) -> String {
+    let m = (secs / 60.).round() as u64;
+    match m {
+        0 => format!("{:.0} s", secs.max(1.)),
+        1..60 => format!("{m} min"),
+        _ => format!("{} h {} min", m / 60, m % 60),
+    }
+}
+
 /// Rough training cost of a configuration on this machine: (seconds, VRAM GiB).
 pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -> (f64, f32) {
     const GFLOPS: [f32; 5] = [6.6, 21.5, 48.0, 104.0, 165.0];
@@ -236,7 +247,7 @@ impl FoloApp {
         let items = self.filtered_palette();
         let n = items.len();
         let p = self.palette.as_ref().unwrap();
-        // With no query the list is every command; with one it is matches.
+        // With no query the list is every item (commands, datasets, runs, models); with one, matches.
         let searching = !p.query.trim().is_empty();
         let selected = p.selected.min(n.saturating_sub(1));
         let input = p.input.clone();
@@ -433,7 +444,7 @@ impl FoloApp {
                             .child(text(ty::XS, t.text_tertiary).tnum().child(if searching {
                                 format!("{n} results")
                             } else {
-                                format!("{n} commands")
+                                format!("{n} items")
                             })),
                     ),
             );
@@ -896,7 +907,13 @@ impl FoloApp {
                     .child(div().flex_1().child(field(
                         "Architecture",
                         arch_seg,
-                        Some(format!("{} · {}", ARCHS[arch].as_str(), PARAMS[arch])),
+                        // The letter's size named, so the five choices read without knowing FOLO.
+                        Some(format!(
+                            "{}, {} · {}",
+                            ARCHS[arch].as_str(),
+                            ["nano", "small", "medium", "large", "extra large"][arch],
+                            PARAMS[arch]
+                        )),
                     )))
                     .child(div().flex_1().child(field(
                         "Image size",
@@ -1104,7 +1121,7 @@ impl FoloApp {
                             .child(if cpu {
                                 "CPU selected · no time estimate".to_string()
                             } else if fits {
-                                format!("≈ {} · ≈ {vram:.1} GiB GPU memory", crate::api::time::duration(secs))
+                                format!("≈ {} · ≈ {vram:.1} GiB GPU memory", rough_duration(secs))
                             } else {
                                 // No adapter name here: it can be long enough to reach the buttons.
                                 format!("≈ {vram:.0} GiB needed, {gpu_gb:.0} GiB on this GPU")
@@ -2143,6 +2160,13 @@ impl FoloApp {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rough_durations() {
+        assert_eq!(super::rough_duration(576.), "10 min");
+        assert_eq!(super::rough_duration(25.), "25 s");
+        assert_eq!(super::rough_duration(5100.), "1 h 25 min");
+    }
+
     use super::*;
 
     #[test]

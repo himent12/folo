@@ -86,17 +86,7 @@ impl FoloApp {
         };
         // One rule for Open image: it needs a model to run (not connected, still loading or none
         // yet, it says why, as New run beside it does).
-        let open_blocked = if self.store.runs.error().is_some() {
-            Some("Not connected")
-        } else if self.store.models.error().is_some() {
-            Some("Models didn't load: retry under Best models")
-        } else if self.store.models.ready().is_none() {
-            Some("Loading models…")
-        } else if self.store.models.ready().is_some_and(|m| m.is_empty()) {
-            Some("Train a model first")
-        } else {
-            None
-        };
+        let open_blocked = self.open_image_blocked();
         let open = if let Some(why) = open_blocked {
             self.button_disabled(
                 "ov-open",
