@@ -6,8 +6,13 @@
    * that list `weights_onnx` serve the ONNX graph itself (GET /api/models/{id}/weights?format=onnx, the switches as
    * query parameters): ONNX then downloads straight to this computer, the button naming the file
    * ("Download fasteners-n-best.onnx"). On older servers ONNX is written on the server and its path shown.
+   *
+   * The demo (the in-browser mock) creates no file and says so before and after: "Demo: no file is created" under the
+   * formats, then a neutral preview with no success check, no saved-file claim and no Download, whose one action is
+   * "Connect to a server" (Settings › Connection). FOLO and ONNX alike.
    */
   import Check from '@lucide/svelte/icons/check';
+  import Plug from '@lucide/svelte/icons/plug';
   import Copy from '@lucide/svelte/icons/copy';
   import Download from '@lucide/svelte/icons/download';
   import Info from '@lucide/svelte/icons/info';
@@ -16,6 +21,7 @@
   import type { ExportFormat, ExportResult, Model, OnnxSwitches } from '$lib/api/types';
   import { bytes } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
+  import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
@@ -47,6 +53,8 @@
     { key: 'half', label: 'Half precision (f16)', desc: 'f16 weights, input and outputs: about half the file size.' },
   ];
 
+  /** The demo's models are not real networks: an export there is a preview that creates no file. */
+  const demo = $derived(hub.api.mock);
   let format = $state<ExportFormat>('folo-f16');
   let switches = $state<Required<OnnxSwitches>>({ decode: false, dynamic: false, half: false });
   /** Whether the server takes the switches (older ones would ignore them): asked once the dialog opens. */
@@ -78,7 +86,9 @@
   const onnxSwitches = $derived(switchesOk || onnxDirect);
   /** Direct ONNX download: the file it will be, by the server's naming rule, and the file once it arrived. */
   const onnxName = $derived(onnxFileName(model.name, onnxSwitches && switches.half));
-  const direct = $derived(format === 'onnx' && onnxDirect);
+  const direct = $derived(format === 'onnx' && onnxDirect && !demo);
+  /** The format as listed, for the demo preview's size. */
+  const picked = $derived(formats.find((f) => f.value === format)!);
   let file = $state<File | null>(null);
   let phase = $state<'idle' | 'running' | 'done' | 'error'>('idle');
   let result = $state<ExportResult | null>(null);
@@ -87,16 +97,18 @@
       ? direct
         ? `Preparing ${onnxName}…`
         : `Exporting ${model.name}…`
-      : phase === 'done' && file
-        ? hub.api.mock
-          ? `${file.name}: nothing to download in the demo.`
-          : `Downloaded ${file.name}, ${bytes(file.size, prefs.units)}.`
-        : phase === 'done' && result
-          ? `Export finished: ${result.path.split('/').pop() ?? result.path}, ${bytes(result.bytes, prefs.units)}.`
-          : '',
+      : phase === 'done' && demo
+        ? 'Demo preview: no file was created.'
+        : phase === 'done' && file
+          ? `Downloaded ${file.name}, ${bytes(file.size, prefs.units)}.`
+          : phase === 'done' && result
+            ? `Export finished: ${result.path.split('/').pop() ?? result.path}, ${bytes(result.bytes, prefs.units)}.`
+            : '',
   );
   /** The file's name as the server wrote it, which is also the name it downloads under. */
   const fileName = $derived(result ? (result.path.split('/').pop() ?? result.path) : '');
+  /** The file a server would create, for the demo's preview (the server's naming rule for ONNX). */
+  const previewName = $derived(format === 'onnx' ? onnxName : fileName);
   let error = $state<unknown>(null);
   let copied = $state(false);
   let run = 0;
@@ -144,7 +156,10 @@
       done = format;
       phase = 'done';
       // The open dialog already says "Export finished" with the path: a toast would say it twice at once.
-      if (!open) toast.success(`Exported ${model.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
+      if (!open) {
+        if (demo) toast.info('Demo preview', `Exporting ${model.name} created no file.`);
+        else toast.success(`Exported ${model.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
+      }
     } catch (e) {
       if (id !== run) return;
       error = e;
@@ -193,20 +208,29 @@
   <!-- One live region that stays in the dialog, so the start and the end of an export are both announced (the toast is
        held back while the dialog is open). Failures announce themselves through ErrorState's alert. -->
   <p class="sr-only" role="status">{announcement}</p>
-  {#if phase === 'done' && file}
+  {#if phase === 'done' && demo}
+    <!-- The demo created nothing: a neutral mark (not the success check), what a server would write, no path and no
+         Download. The way to a real file is the footer's Connect to a server. -->
+    <div class="done">
+      <div class="done-head">
+        <span class="ok quiet" aria-hidden="true"><Info size={14} /></span>
+        <span>Demo preview: no file was created</span>
+      </div>
+      <p class="note">
+        On a server, this writes <span class="mono">{previewName}</span>, about {estimate(model.params * perParam(picked))}. The demo's models are not
+        real networks, so there is no file to save or download.
+      </p>
+    </div>
+  {:else if phase === 'done' && file}
     <!-- The ONNX graph, downloaded straight to this computer (servers with weights_onnx). -->
     <div class="done">
       <div class="done-head">
-        <!-- The demo saves nothing: a neutral mark, not the success check. -->
-        <span class="ok" class:quiet={hub.api.mock} aria-hidden="true">{#if hub.api.mock}<Info size={14} />{:else}<Check size={14} strokeWidth={2.25} />{/if}</span>
-        <span>{hub.api.mock ? 'Nothing to download in the demo' : 'Downloaded'}</span>
-        {#if !hub.api.mock}<span class="size num">{bytes(file.size, prefs.units)}</span>{/if}
+        <span class="ok" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>
+        <span>Downloaded</span>
+        <span class="size num">{bytes(file.size, prefs.units)}</span>
       </div>
       <div class="path"><code class="mono">{file.name}</code></div>
-      <p class="note">
-        {#if hub.api.mock}Demo models are not real networks, so they have no ONNX graph to save. Connect to <span class="mono">folo serve</span> to
-          download it.{:else}Your browser saved it to its downloads folder. Nothing was written on the server.{/if}
-      </p>
+      <p class="note">Your browser saved it to its downloads folder. Nothing was written on the server.</p>
     </div>
   {:else if phase === 'done' && result}
     <div class="done">
@@ -263,6 +287,10 @@
         {/if}
       {/each}
     </fieldset>
+    {#if demo && phase !== 'running'}
+      <!-- Said before the export, not only after it. -->
+      <p class="demo-note"><Info size={14} aria-hidden="true" /><span>Demo: no file is created. Connect to a server to export real weights.</span></p>
+    {/if}
     {#if phase === 'running'}
       <div class="progress">
         <div class="bar" aria-hidden="true"><span></span></div>
@@ -275,7 +303,12 @@
   {/if}
 
   {#snippet footer()}
-    {#if phase === 'done'}
+    {#if phase === 'done' && demo}
+      <!-- Nothing to download: the way to a real file is a server. -->
+      <Button variant="ghost" onclick={reset}>Export another</Button>
+      <Button variant="ghost" onclick={() => (open = false)}>Done</Button>
+      <Button variant="primary" icon={Plug} href={href('/settings')} onclick={() => (open = false)}>Connect to a server</Button>
+    {:else if phase === 'done'}
       <!-- The f16 file's next step is Download, the one primary; Done only closes. ONNX has nothing to download. -->
       <Button variant="ghost" onclick={reset}>Export another</Button>
       {#if done === 'folo-f16'}
@@ -525,6 +558,21 @@
     .box {
       margin-top: 0;
     }
+  }
+  /* The demo's word before an export: a neutral note with its mark, under the formats. */
+  .demo-note {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    margin-top: var(--space-4);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .demo-note > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 3px; /* grid-ok: the 14 px icon centred on the 20 px first line */
+    color: var(--text-tertiary);
   }
   .where {
     display: grid;
