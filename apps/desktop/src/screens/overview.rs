@@ -430,52 +430,17 @@ impl FoloApp {
                     .bg(t.bg_inset)
                     .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
             )
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(if hero_h < 120. { 8. } else { 16. }))
-                    .px(px(card_pad))
-                    .py(px(card_pad_y))
-                    .child(kpis)
-                    .child(
-                        // The chart section opens on a full-width rule, as the run page's chart
-                        // panels open under their header's.
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(4.))
-                            .mx(px(-card_pad))
-                            .px(px(card_pad))
-                            .pt(px(card_pad_y))
-                            .border_t_1()
-                            .border_color(t.line_subtle)
-                            .child(
-                                // Title, then the legend on its own left-aligned row, as on
-                                // the run dashboard's charts.
-                                div()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(6.))
-                                    .child(
-                                        div()
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .child(
-                                                text(ty::SM, t.text_primary)
-                                                    .font_weight(FontWeight::MEDIUM)
-                                                    .child("Validation mAP"),
-                                            )
-                                            .child(caption(&t, "per epoch")),
-                                    )
-                                    .child(legend_el),
-                            )
-                            .child(chart),
-                    ),
-            )
+            .child(div().px(px(card_pad)).py(px(card_pad_y)).child(kpis))
+            // The chart section is the run page's chart card without its frame: a header row on a
+            // full-width rule, the legend row, then the plot, so the two screens' charts read alike.
+            .child(div().border_t_1().border_color(t.line_subtle).child(crate::ui::chart_section(
+                &t,
+                "Validation mAP",
+                "per epoch",
+                legend_el,
+                chart,
+                hero_h < 120.,
+            )))
             .children(footer)
             .into_any_element()
     }

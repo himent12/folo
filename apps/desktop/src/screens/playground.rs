@@ -218,6 +218,24 @@ impl FoloApp {
         let dims = (img.width as f32, img.height as f32);
         let image = img.image.clone();
         let name = img.name.clone();
+        // The toolbar sheds by priority, not by flex order: the image's size goes first (it moves
+        // into the file's tip), then the dataset part of "dataset / file" gives way, never the
+        // file. The room is the stage less every other item (measured from the shots).
+        let mono_advance = window
+            .text_system()
+            .advance(window.text_system().resolve_font(&gpui::font(crate::theme::MONO)), px(ty::SM.size), 'M')
+            .map_or(8., |a| f32::from(a.width));
+        let stage_w = {
+            let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
+            self.content_width(window) - rail - 16.
+        };
+        // Below 1150 the toolbar shows the file alone, and its items sit tighter.
+        let compact_bar = window.viewport_size().width < px(1150.);
+        let shown =
+            if compact_bar { name.rsplit_once(" / ").map_or(name.as_str(), |(_, f)| f) } else { &name };
+        let others = if compact_bar { 460. } else { 510. };
+        let show_size = shown.chars().count() as f32 * mono_advance <= stage_w - others;
+        let size_text = format!("{} × {}", img.width, img.height);
         let (boxes, count, loading) = match &self.play_pred {
             Load::Ready(p) => {
                 let b = self.visible_boxes(p, active);
@@ -335,25 +353,24 @@ impl FoloApp {
                                     // less sidebar, gutters and rail) less its other items (~560 px:
                                     // crumb, size, latency, count, zoom). A long name ends in "…" at that
                                     // known width, as GPUI needs; the full name is on hover.
-                                    let vw = f32::from(window.viewport_size().width);
-                                    let rail = if vw < 1100. { 280. } else { 320. };
-                                    let stage = self.content_width(window) - rail - 16.;
-                                    let budget =
-                                        (stage - 584.).clamp(if compact { 120. } else { 160. }, 520.);
+                                    // A shed size leaves its ~68 px to the name.
+                                    let budget = (stage_w - 584. + if show_size { 0. } else { 68. })
+                                        .clamp(if compact { 120. } else { 160. }, 520.);
                                     // Monospace: the measured width is the glyph count times the advance.
-                                    let advance = window.text_system().advance(
-                                        window.text_system().resolve_font(&gpui::font(crate::theme::MONO)),
-                                        px(ty::SM.size),
-                                        'M',
-                                    );
-                                    let width = advance.map_or(8., |a| f32::from(a.width))
-                                        * file.chars().count() as f32;
+                                    let width = mono_advance * file.chars().count() as f32;
                                     let long = width > budget;
-                                    let full = file.clone();
+                                    // The tip carries what the toolbar shed: the full name, the size.
+                                    let tip_text = if show_size {
+                                        file.clone()
+                                    } else {
+                                        format!("{file} · {size_text}")
+                                    };
                                     div()
                                         .id("play-file-name")
                                         .flex_none()
-                                        .when(long, |d| d.tooltip(crate::controls::tip(full, None)))
+                                        .when(long || !show_size, |d| {
+                                            d.tooltip(crate::controls::tip(tip_text, None))
+                                        })
                                         .child(
                                             text(ty::SM, t.text_primary)
                                                 .w(px(width.min(budget).ceil()))
@@ -363,13 +380,8 @@ impl FoloApp {
                                 }),
                         )
                     })
-                    .when(true, |d| {
-                        d.child(
-                            text(ty::XS, t.text_tertiary)
-                                .flex_none()
-                                .tnum()
-                                .child(format!("{} × {}", img.width, img.height)),
-                        )
+                    .when(show_size, |d| {
+                        d.child(text(ty::XS, t.text_tertiary).flex_none().tnum().child(size_text.clone()))
                     })
                     .child(div().flex_1().min_w(px(8.)))
                     .when(loading, |d| d.child(text(ty::XS, t.text_tertiary).flex_none().child("Detecting…")))

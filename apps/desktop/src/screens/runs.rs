@@ -1056,24 +1056,7 @@ impl FoloApp {
         // Every card has the same anatomy: header, a 28 px legend row, then the plot. Plot tops line
         // up across a row however long a legend is.
         let card = |title: &str, sub: &str, extra: AnyElement, chart: AnyElement| {
-            panel(&t)
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(panel_header(&t, title).child(caption(&t, sub)).when(short, |d| d.h(px(32.))))
-                .child(
-                    div()
-                        .h(px(if short { 24. } else { 28. }))
-                        // Legends start under the panel title (16 px); the loss toggles pull their
-                        // 6 px hover pads back out so their swatches land there too.
-                        .px(px(16.))
-                        .pt(px(if short { 4. } else { 6. }))
-                        .flex()
-                        .items_center()
-                        .child(extra),
-                )
-                .child(div().px(px(12.)).pb(px(6.)).child(chart))
+            panel(&t).flex_1().min_w_0().child(crate::ui::chart_section(&t, title, sub, extra, chart, short))
         };
         // The smoothing explanation, on hover and on keyboard focus.
         let loss_help = self.help_icon(

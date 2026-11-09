@@ -125,6 +125,37 @@ pub fn panel(t: &Theme) -> Div {
 }
 
 /// Panel header row: overline title on the left, optional extras on the right.
+/// A chart's anatomy, everywhere one shows: a header (title, caption) on a rule, a 28 px legend
+/// row whose items start under the title, then the plot inset 12 px. The run page frames it as a
+/// card; the Overview hero sets it under its KPIs. `short` windows trade 8 px of header and 4 of
+/// legend for plot.
+pub fn chart_section(
+    t: &Theme,
+    title: &str,
+    sub: &str,
+    legend: impl IntoElement,
+    plot: impl IntoElement,
+    short: bool,
+) -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .min_w_0()
+        .child(panel_header(t, title).child(caption(t, sub)).when(short, |d| d.h(px(32.))))
+        .child(
+            div()
+                .h(px(if short { 24. } else { 28. }))
+                // Legends start under the title (16 px); the loss toggles pull their 6 px hover
+                // pads back out so their swatches land there too.
+                .px(px(16.))
+                .pt(px(if short { 4. } else { 6. }))
+                .flex()
+                .items_center()
+                .child(legend),
+        )
+        .child(div().px(px(12.)).pb(px(6.)).child(plot))
+}
+
 pub fn panel_header(t: &Theme, title: &str) -> Div {
     div()
         .flex()
