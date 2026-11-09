@@ -285,7 +285,9 @@ impl FoloApp {
                         .flex()
                         .items_center()
                         .gap(px(4.))
-                        .child(badge(&t, "end-to-end", Tone::Neutral))
+                        // The same compact tag as every list, right after the architecture badge;
+                        // its help on hover and keyboard focus.
+                        .child(e2e_tag(&t, "e2e-model-head"))
                         .child(self.help_icon("model-head-help", FoloApp::E2E_HELP, window, cx)),
                 )
             });
@@ -334,8 +336,8 @@ impl FoloApp {
         let mm = m.metrics;
         // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
         let op_point = match mm.as_ref().and_then(|x| x.best_f1_conf) {
-            Some(c) => format!("at conf {c:.2} (best F1) · IoU 0.50"),
-            None => "best-F1 · IoU 0.50".to_string(),
+            Some(c) => format!("at conf {} (best F1) · IoU 0.50", fmt_conf(c)),
+            None => "best F1 · IoU 0.50".to_string(),
         };
         // The dataset the headline numbers were measured on (the run's), named beside them.
         let head_ds = run
@@ -384,10 +386,12 @@ impl FoloApp {
                                 .tnum()
                                 .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
                         )
-                        .child(text(ty::XS, t.text_tertiary).truncate().child(match &head_ds {
-                            Some(d) => format!("IoU 0.50–0.95 · {d} validation"),
-                            None => "IoU 0.50–0.95 · validation split".to_string(),
-                        })),
+                        .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().truncate().child(
+                            match &head_ds {
+                                Some(d) => format!("IoU 0.50–0.95 · {d} validation"),
+                                None => "IoU 0.50–0.95 · validation split".to_string(),
+                            },
+                        )),
                 ),
             )
             .child(vline(&t))
@@ -398,18 +402,12 @@ impl FoloApp {
                 Some(text(ty::XS, t.text_tertiary).child("IoU 0.50")),
             )))
             .child(vline(&t))
+            // One tile for the pair, as on the run page; its caption stays on one line.
             .child(tile(small(
-                "Precision",
-                mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.precision)),
+                "Precision / Recall",
+                mm.as_ref().map_or("–".into(), |x| format!("{:.3} / {:.3}", x.precision, x.recall)),
                 "",
-                Some(text(ty::XS, t.text_tertiary).child(op_point.clone())),
-            )))
-            .child(vline(&t))
-            .child(tile(small(
-                "Recall",
-                mm.as_ref().map_or("–".into(), |x| format!("{:.3}", x.recall)),
-                "",
-                Some(text(ty::XS, t.text_tertiary).child(op_point.clone())),
+                Some(text(ty::XS, t.text_tertiary).whitespace_nowrap().truncate().child(op_point.clone())),
             )))
             .child(vline(&t))
             .child(tile(small(
@@ -426,7 +424,8 @@ impl FoloApp {
                 Some(
                     text(ty::XS, t.text_tertiary)
                         // The record's stored precision (as the header says), never a guess from size.
-                        .child(model_storage(&m).map_or(".folo".to_string(), |s| format!(".folo · {s}"))),
+                        // The format; the stored precision is the subtitle's to say (once).
+                        .child(".folo"),
                 ),
             )));
 
@@ -1062,7 +1061,7 @@ impl FoloApp {
                                     .child(
                                         text(ty::XS, t.text_tertiary)
                                             .whitespace_normal()
-                                            .child("Dots: P and R at the best-F1 threshold."),
+                                            .child("Dots: P and R at the best F1 threshold."),
                                     )
                                     .child(text(ty::XS, t.text_tertiary).whitespace_normal().child(pr_hint)),
                             ),

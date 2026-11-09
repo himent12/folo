@@ -409,9 +409,8 @@ impl FoloApp {
             .store
             .dataset_summary(&r.config.dataset_id)
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
-        // An end-to-end head is a badge by the title, as on the model page.
-        let e2e = r.config.head == crate::api::Head::O2o;
-        let subtitle = text(ty::BASE, t.text_secondary).child(self.run_subtitle(&r));
+        // The subtitle leads with the architecture and its e2e tag, as every list does.
+        let subtitle = self.run_subtitle(&t, &r, ty::BASE, t.text_secondary, "hdr");
 
         let mut actions = Vec::new();
         match r.status {
@@ -533,17 +532,7 @@ impl FoloApp {
             .items_center()
             .gap(px(12.))
             .child(text(ty::XL, t.text_primary).child(r.name.clone()))
-            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)))
-            .when(e2e, |d| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.))
-                        .child(badge(&t, "end-to-end", Tone::Neutral))
-                        .child(self.help_icon("run-head-help", FoloApp::E2E_HELP, window, cx)),
-                )
-            });
+            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)));
         let header = detail_header(&t, title, subtitle, actions);
 
         let mut body = div().flex().flex_col().gap(px(16.));
@@ -767,7 +756,7 @@ impl FoloApp {
                                 .child(last.map_or("–".into(), |e| format!("{:.3}", e.val.recall))),
                         ),
                 )
-                .child(text(ty::XS, t.text_tertiary).child("best-F1 · IoU 0.50 · val")),
+                .child(text(ty::XS, t.text_tertiary).child("best F1 · IoU 0.50 · val")),
             div()
                 .flex()
                 .flex_col()
@@ -1152,7 +1141,10 @@ impl FoloApp {
             };
             let auto = if r.config.optimizer == crate::api::Optimizer::Auto { " (auto)" } else { "" };
             let decay = if s.cos_lr { "cosine" } else { "linear" };
-            format!("{opt}{auto} · {decay} to {:.0}%", s.lrf * 100.)
+            // The end rate as a share of lr0, without rounding a 0.5% end to "0%" or "1%".
+            let pct = format!("{:.2}", s.lrf * 100.);
+            let pct = pct.trim_end_matches('0').trim_end_matches('.');
+            format!("{opt}{auto} · {decay} to {pct}%")
         });
         let lr_caption = match (resolved, lr_pow) {
             (Some(s), Some(p)) => format!("{s} · × 10{}", crate::charts::superscript(p)),
@@ -1189,7 +1181,7 @@ impl FoloApp {
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision / Recall", "best-F1 · IoU 0.50 · val", pr_legend, line_chart(&t, pr))
+                card("Precision / Recall", "best F1 · IoU 0.50 · val", pr_legend, line_chart(&t, pr))
                     .into_any_element(),
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,

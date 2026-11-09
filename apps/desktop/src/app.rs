@@ -2149,13 +2149,25 @@ impl FoloApp {
     }
 
     /// A run's subtitle, the same in the Overview hero and on its page: identity, device, start.
-    pub fn run_subtitle(&self, r: &Run) -> String {
-        let device = crate::ui::device_label(&r.device);
-        let now = self.store.api.now();
-        match r.started.as_deref().and_then(crate::api::time::parse) {
-            Some(s) => format!("{} · {device} · started {}", self.run_meta(r), crate::api::time::ago(s, now)),
-            None => format!("{} · {device}", self.run_meta(r)),
+    pub fn run_subtitle(
+        &self,
+        t: &crate::theme::Theme,
+        r: &Run,
+        size: crate::theme::TypeStep,
+        color: gpui::Hsla,
+        id: &str,
+    ) -> gpui::Div {
+        let ds = self
+            .store
+            .dataset_summary(&r.config.dataset_id)
+            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+        let mut rest = vec![ds, crate::ui::device_label(&r.device)];
+        if let Some(s) = r.started.as_deref().and_then(crate::api::time::parse) {
+            rest.push(format!("started {}", crate::api::time::ago(s, self.store.api.now())));
         }
+        // The architecture leads, its e2e tag right after it, as in every list.
+        let tag = (r.config.head == Head::O2o).then(|| crate::ui::e2e_tag(t, format!("e2e-{id}-{}", r.id)));
+        crate::ui::meta_row(size, color, r.config.arch.as_str(), tag, &rest)
     }
 
     /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own

@@ -221,6 +221,13 @@ pub fn queue_text(position: Option<u32>) -> String {
     }
 }
 
+/// A confidence threshold as every surface writes it: "0.31", or "0.314" when the third decimal
+/// carries information (the API's best-F1 grid is 0.001).
+pub fn fmt_conf(c: f32) -> String {
+    let three = format!("{c:.3}");
+    if three.ends_with('0') { format!("{c:.2}") } else { three }
+}
+
 /// One inference's total latency as every readout writes it: "6.4 ms", or "Sim. 6.4 ms" when the
 /// built-in demo simulated it.
 pub fn latency_text(ms: f64, simulated: bool) -> String {
@@ -232,6 +239,30 @@ pub fn latency_text(ms: f64, simulated: bool) -> String {
 pub fn model_storage(m: &crate::api::Model) -> Option<String> {
     let p = m.precision?.as_str();
     Some(if m.fused == Some(true) { format!("{p}, fused") } else { p.to_string() })
+}
+
+/// One metadata line: `lead` (an architecture, say), an optional tag right after it, then the rest
+/// as " · "-joined text. The line owns its separators (4 px either side of each dot) and only the
+/// rest gives way, with a real ellipsis, so every meta line spaces and truncates alike.
+pub fn meta_row(
+    size: TypeStep,
+    color: Hsla,
+    lead: impl Into<SharedString>,
+    tag: Option<gpui::Stateful<Div>>,
+    rest: &[String],
+) -> Div {
+    let rest: Vec<&str> = rest.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();
+    div()
+        .flex()
+        .items_center()
+        .gap(px(4.))
+        .min_w_0()
+        .child(text(size, color).flex_none().whitespace_nowrap().child(lead.into()))
+        .children(tag)
+        .when(!rest.is_empty(), |d| {
+            d.child(text(size, color).flex_none().child("·"))
+                .child(text(size, color).flex_1().min_w_0().truncate().child(rest.join(" · ")))
+        })
 }
 
 /// The compact end-to-end tag in tables (the title rows carry the full badge and its help).
@@ -626,6 +657,14 @@ pub fn f3(v: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confidences_keep_a_meaningful_third_decimal() {
+        assert_eq!(fmt_conf(0.31), "0.31");
+        assert_eq!(fmt_conf(0.314), "0.314");
+        assert_eq!(fmt_conf(0.024), "0.024");
+        assert_eq!(fmt_conf(0.35), "0.35");
+    }
 
     #[test]
     fn queue_places_read_as_ordinals() {

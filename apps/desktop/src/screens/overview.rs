@@ -404,13 +404,13 @@ impl FoloApp {
                     .gap(px(10.))
                     .child(text(ty::LG, t.text_primary).flex_none().child(r.name.clone()))
                     .child(status_badge(&t, r.status, &r.id))
-                    .child(
-                        text(ty::SM, t.text_tertiary)
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(self.run_subtitle(r)),
-                    )
+                    .child(div().flex_1().min_w_0().child(self.run_subtitle(
+                        &t,
+                        r,
+                        ty::SM,
+                        t.text_tertiary,
+                        "hero",
+                    )))
                     .child(open),
             )
             // Progress as a hairline rail across the panel.
@@ -809,22 +809,13 @@ impl FoloApp {
                             .dataset_summary(&r.config.dataset_id)
                             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                         let meta = |w: f32| {
-                            div()
-                                .w(px(w))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .child(
-                                    text(ty::XS, t.text_tertiary).flex_none().child(r.config.arch.as_str()),
-                                )
-                                .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-ovr-{}-{w}", r.id))))
-                                .child(
-                                    text(ty::XS, t.text_tertiary)
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(format!("· {ds_name}")),
-                                )
+                            div().w(px(w)).flex_none().child(meta_row(
+                                ty::XS,
+                                t.text_tertiary,
+                                r.config.arch.as_str(),
+                                e2e.then(|| e2e_tag(&t, format!("e2e-ovr-{}-{w}", r.id))),
+                                std::slice::from_ref(&ds_name),
+                            ))
                         };
                         let row = div()
                             .id(SharedString::from(key.clone()))
