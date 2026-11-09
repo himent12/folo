@@ -244,7 +244,8 @@
 {#if model.error && !model.data}
   <Page title="Model">
     {#snippet actions()}<Button icon={ArrowLeft} href={href('/models')}>All models</Button>{/snippet}
-    <Panel><ErrorState error={model.error} retry={() => model.refresh()} title="Could not load this model" compact /></Panel>
+    <!-- Nothing to frame: the message frameless on the content edge (DESIGN_DIRECTION 8), as on Run and Not found. -->
+    <ErrorState error={model.error} retry={() => model.refresh()} title="Could not load this model" />
   </Page>
 {:else if !model.data}
   <Page title="Model">
@@ -419,7 +420,7 @@
           {:else if evaluation.error}
             <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
           {:else}
-            <div class="sk"><Skeleton h="24px" w="200px" /><Skeleton h="300px" /></div>
+            <div class="sk"><Skeleton h="24px" w="200px" /><Skeleton h="360px" /></div>
           {/if}
         </Panel>
       </div>
@@ -855,7 +856,7 @@
   }
   .kg-cell {
     display: grid;
-    grid-template-rows: 16px 28px;
+    grid-template-rows: 16px 32px;
     gap: 2px;
     /* The phone panels' one 16 px inset, so labels line up with the sections' titles and bodies below. */
     padding: var(--space-2) var(--space-4);
@@ -871,12 +872,21 @@
   .kg .hero dt {
     color: var(--text-secondary);
   }
+  /* The desktop strip's hierarchy in two steps down: the headline at the KPI step (2xl), the others at lg, set 6 px
+     lower in the same 32 px row so the two values in a row share a baseline. */
   .kg dd {
     text-align: left;
-    font-size: var(--type-xl-size);
-    line-height: 28px;
-    letter-spacing: var(--type-xl-tracking);
+    padding-top: 6px;
+    font-size: var(--type-lg-size);
+    line-height: 26px;
+    letter-spacing: var(--type-lg-tracking);
     font-weight: var(--weight-semibold);
+  }
+  .kg .hero dd {
+    padding-top: 0;
+    font-size: var(--type-2xl-size);
+    line-height: var(--type-2xl-line);
+    letter-spacing: var(--type-2xl-tracking);
   }
   .kg dt {
     display: flex;

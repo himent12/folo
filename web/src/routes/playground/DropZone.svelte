@@ -83,16 +83,17 @@
     background: var(--bg-inset);
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  /* The drop target: beside the rail (from 1024 px) the canvas's height less the samples; in one column a content-sized
-     280–480 px (below), so the samples sit in the first screen. Its message is centred between the corners. */
+  /* The drop target: a sparse state's compact composition (DESIGN_DIRECTION 8) at every width, 280–480 px tall, so the
+     samples under it sit in the first screen. Beside the rail (from 1024 px) it is 480 px where the window has room
+     for it and the samples under the page header (about 420 px of chrome), and gives way in a shorter one. Its message
+     is centred between the corners. */
   .finder {
     position: relative;
     display: grid;
     place-items: center;
     width: 100%;
-    flex: 1 1 280px;
-    /* Gives way in a short window (down to 160 px) before the samples under it would be pushed out. */
-    min-height: 160px;
+    flex: none;
+    height: clamp(280px, calc(100dvh - 420px), 480px);
     padding: var(--space-8) var(--space-6);
   }
   .zone.dragging {
@@ -229,7 +230,6 @@
   }
   @media (max-width: 1023px) {
     .finder {
-      flex: none;
       height: clamp(280px, 40dvh, 480px);
     }
   }

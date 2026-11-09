@@ -365,15 +365,20 @@
 </Page>
 
 <style>
-  /* Form page (DESIGN_DIRECTION 15): the form column (720) on the shared content edge and the sticky rail of section
-     anchors 24 px after it, the two one block; what a wide canvas has left over stays to their right, never a hole
-     between the form and its rail. */
+  /* Form page (DESIGN_DIRECTION 15): the page grid's 12 columns (16 px gutters) of the content column, the form on
+     the first 8 from the shared content edge and the sticky rail of section anchors on the last 4, as every page's
+     8 + 4 rail. The two fill the content width: no gap between them and no empty margin after them. */
   .layout {
     display: grid;
-    grid-template-columns: minmax(0, 720px) 168px;
-    justify-content: start;
-    column-gap: var(--space-6);
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    column-gap: var(--space-4);
     align-items: start;
+  }
+  .layout > .col {
+    grid-column: span 8;
+  }
+  .layout > .toc {
+    grid-column: span 4;
   }
 
   .toc {
@@ -651,6 +656,12 @@
     gap: var(--space-4);
     flex-wrap: wrap;
   }
+  /* The text gives way (wrapping its note) before the control drops under it: the control keeps the row's right edge
+     until the text would be under 240 px (phones). */
+  .setting > .setting-text {
+    flex: 1 1 240px;
+    min-width: 0;
+  }
   .setting-text .note {
     margin-top: 2px;
   }
@@ -723,6 +734,9 @@
   @media (max-width: 1023px) {
     .layout {
       grid-template-columns: minmax(0, 1fr);
+    }
+    .layout > .col {
+      grid-column: auto;
     }
     .toc {
       display: none;

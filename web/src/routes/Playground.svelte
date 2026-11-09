@@ -1140,18 +1140,14 @@
     height: var(--stage-h);
     background: var(--bg-inset);
   }
-  /* Empty, the canvas height is a minimum: in a short window the drop target gives way first (DropZone), then the
-     stage grows, so the samples under it are never clipped. */
+  /* Empty, the canvas is as tall as its content (the drop target, 280–480 px, and the samples; DropZone), never held
+     at the viewport's height: a sparse state gets a compact composition (DESIGN_DIRECTION 8). */
   .stage.empty {
     height: auto;
-    min-height: var(--stage-h);
     display: flex;
     flex-direction: column;
     border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
     overflow: hidden;
-  }
-  .stage.empty > :global(.zone) {
-    flex: 1;
   }
   .scan {
     position: absolute;

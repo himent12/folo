@@ -400,49 +400,53 @@ a.ident:hover {
 }
 
 /*
- * List toolbars (Runs, Models, Datasets): one structure per tier, its slots always in this order, any of them optional:
+ * List toolbars (Runs, Models, Datasets): one structure per tier, its slots always in this order, either optional:
  *   .lt-filter  status or dataset chips (a picker on phones where chips cannot fit)
- *   .lt-count   what the list holds ("5 models · 65.5 MiB"), next to the filter field
  *   .lt-search  the filter field
- * Laptops and desktops: one row, the chips on the left, the count and a 280 px field on the right.
- * Tablets and phones: two rows, the chips and the count, then the field across the full width.
- * Without chips the count leads its row.
+ * Laptops and desktops: one row, the chips on the left, a 280 px field on the right.
+ * Tablets and phones: two rows, the chips, then the field across the full width.
+ * What the list holds is said once, at its end (.list-foot), not here.
  */
 .list-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, max-content) minmax(max-content, 1fr) auto;
-  grid-template-areas: 'filter count search';
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  column-gap: var(--space-4);
-  row-gap: var(--space-3);
+  gap: var(--space-3) var(--space-4);
 }
 .list-toolbar .lt-filter {
-  grid-area: filter;
   min-width: 0;
+  max-width: 100%;
 }
-.list-toolbar .lt-count {
-  grid-area: count;
-  justify-self: end;
+.list-toolbar .lt-search {
+  width: 280px;
+  margin-left: auto;
+}
+@media (max-width: 1023px) {
+  .list-toolbar .lt-filter {
+    flex: 1;
+  }
+  .list-toolbar .lt-search {
+    flex-basis: 100%;
+    width: auto;
+  }
+}
+
+/*
+ * A list page ends with one quiet line under its table (DESIGN_DIRECTION 8): what the list holds ("3 datasets ·
+ * 8,400 images · 64,086 boxes", "2 of 6 models · 10.3 MiB" while filtered), its text on the table's cell edge, 12 px
+ * under the panel. A short list then ends on purpose instead of trailing off into the canvas; with no rows (empty, no
+ * match, error) there is nothing to sum and the line is left out.
+ */
+.list-foot {
+  margin-top: calc(var(--space-3) - var(--space-5));
+  padding: 0 var(--space-4);
   font-size: var(--type-sm-size);
   line-height: var(--type-sm-line);
   color: var(--text-tertiary);
-  white-space: nowrap;
 }
-.list-toolbar:not(:has(.lt-filter)) .lt-count {
-  grid-column: 1 / 3;
-  justify-self: start;
-}
-.list-toolbar .lt-search {
-  grid-area: search;
-  width: 280px;
-}
-@media (max-width: 1023px) {
-  .list-toolbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas: 'filter count' 'search search';
-  }
-  .list-toolbar .lt-search {
-    width: auto;
+@media (max-width: 767px) {
+  .list-foot {
+    margin-top: calc(var(--space-3) - var(--space-4));
   }
 }
 

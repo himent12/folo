@@ -7,7 +7,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Model, Run, RunStatus } from '$lib/api/types';
   import RunSpark from '$lib/charts/RunSpark.svelte';
-  import { ago, metric } from '$lib/format';
+  import { ago, duration, metric } from '$lib/format';
   import { failureCause } from '$lib/oom';
   import { tooltip } from '$lib/ui/tooltip';
   import { href, router } from '$lib/router.svelte';
@@ -34,7 +34,10 @@
   import Menu from '$lib/ui/Menu.svelte';
   import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
   import type { QueueRequest } from '$lib/api/types';
-  import { moveQueued, queueItems } from './run/queueActions';
+  import { moveQueued, queueItems, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle } from './run/queueActions';
+  import Dialog from '$lib/ui/Dialog.svelte';
+  import X from '@lucide/svelte/icons/x';
+  import { toast } from '$lib/ui/toast.svelte';
 
   setCrumbs({ label: 'Runs' });
   // The header's create action is the one in the top-right corner (the top bar's New run steps aside).
@@ -83,8 +86,27 @@
   }
   const rowItems = (r: Run) => {
     const at = placeOf(r);
-    return at === null ? [] : queueItems(at, waiting, training, (req) => move(r, req));
+    return at === null ? [] : queueItems(at, waiting, training, (req) => move(r, req), { remove: () => (removing = r) });
   };
+
+  /** The waiting run Remove from queue asks about (the same confirm as on its own page). */
+  let removing = $state<Run | null>(null);
+  let removeBusy = $state(false);
+  async function removeQueued() {
+    const r = removing;
+    if (!r) return;
+    removeBusy = true;
+    try {
+      await hub.api.stopRun(r.id);
+      removing = null;
+      toast.success(`Removed ${r.name} from the queue`);
+      void runs.refresh();
+    } catch (e) {
+      toast.error(e, `Could not remove ${r.name}`);
+    } finally {
+      removeBusy = false;
+    }
+  }
 
   let filter = $state<Filter>((router.route.query.get('status') as Filter | null) ?? 'all');
   let query = $state('');
@@ -101,6 +123,15 @@
       if (!q) return true;
       return `${r.name} ${r.config.arch} ${dsName.get(r.config.dataset_id) ?? ''} ${r.id}`.toLowerCase().includes(q);
     }),
+  );
+
+  /** Compare needs two runs: until then New run stays the page's one primary (DESIGN_DIRECTION 6). */
+  const comparing = $derived(selected.length >= 2);
+  /** Phones: every row keeps the ⋯ slot while any row shown has a menu, so all rows share one right edge. */
+  const menuSlot = $derived(shown.some((r) => rowItems(r).length > 0));
+  // What the rows shown hold, said once at the list's end (base.css .list-foot): how many, and their training time.
+  const trained = $derived(
+    shown.reduce((a, r) => (r.started ? a + Math.max(0, (r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000 : a), 0),
   );
 
   function toggle(id: string) {
@@ -130,7 +161,7 @@
       <span class="compare">
         <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
           {#snippet children(why)}
-            <Button variant={selected.length ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+            <Button variant={comparing ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
               Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
             </Button>
           {/snippet}
@@ -138,8 +169,9 @@
       </span>
       <Gate reason={offline ? OFFLINE_REASON : null}>
         {#snippet children(why)}
-          <!-- While runs are selected, Compare is the page's one primary action and New run steps back. -->
-          <Button variant={selected.length ? 'secondary' : 'primary'} icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>
+          <!-- Once Compare can run (2+ selected) it is the page's one primary and New run steps back; one selected run
+               leaves Compare disabled, so New run stays primary. -->
+          <Button variant={comparing ? 'secondary' : 'primary'} icon={Plus} disabled={!!why} aria-describedby={why} href={href('/runs/new')}>New run</Button>
         {/snippet}
       </Gate>
     {/if}
@@ -284,14 +316,14 @@
     </div>
     {#if shown.length}
       <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
-      <!-- Select mode: Compare (with its count) the primary once a run is selected, Cancel a ghost one, both 44 px targets
+      <!-- Select mode: Compare (with its count) the primary once two runs are selected, Cancel a ghost one, both 44 px targets
            on touch. -->
-      <div class="rows-head">
+      <div class="rows-head" class:slot={menuSlot && !choosing}>
         {#if choosing}
           <Button variant="ghost" onclick={() => ((picking = false), (selected = []))}>Cancel</Button>
           <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
             {#snippet children(why)}
-              <Button variant={selected.length ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+              <Button variant={comparing ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
                 Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
               </Button>
             {/snippet}
@@ -322,7 +354,7 @@
               </span>
               <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
-            {#if !choosing && rowItems(r).length}<span class="r-menu"><Menu label="Queue actions for {r.name}" items={rowItems(r)} variant="ghost" fixed /></span>{/if}
+            {#if !choosing && menuSlot}<span class="r-menu">{#if rowItems(r).length}<Menu label="Queue actions for {r.name}" items={rowItems(r)} variant="ghost" fixed />{/if}</span>{/if}
             {#if r.status === 'running'}
               <span class="r-prog" aria-hidden="true" style:transform="scaleX({runProgress(r)})"></span>
             {/if}
@@ -343,7 +375,22 @@
       </ul>
     {/if}
   </Panel>
+  {#if runs.data && shown.length}
+    <p class="list-foot num">
+      <Meta>
+        <span>{shown.length < runs.data.length ? `${shown.length} of ${runs.data.length}` : shown.length} {runs.data.length === 1 ? 'run' : 'runs'}</span>
+        <span>{duration(trained)} of training</span>
+      </Meta>
+    </p>
+  {/if}
 </Page>
+
+<Dialog open={!!removing} onclose={() => (removing = null)} title={removing ? removeTitle(removing.name) : ''} description={REMOVE_DESCRIPTION} size="sm">
+  {#snippet footer()}
+    <Button onclick={() => (removing = null)}>Keep it queued</Button>
+    <Button variant="destructive" icon={X} loading={removeBusy} onclick={removeQueued}>{REMOVE_LABEL}</Button>
+  {/snippet}
+</Dialog>
 
 <style>
   /* Compare's count: part of the label, one weight lighter. */
@@ -525,9 +572,16 @@
       background: var(--bg-active);
       box-shadow: inset 2px 0 0 var(--accent-line);
     }
+    /* The ⋯ slot: on every row while any row has a menu (empty where it has none), so values share one right edge. */
     .r-menu {
       flex-shrink: 0;
+      display: flex;
+      justify-content: flex-end;
+      width: 32px;
       margin-left: var(--space-2);
+    }
+    .rows-head.slot {
+      padding-right: calc(var(--space-4) + 40px);
     }
     .r-check {
       display: grid;

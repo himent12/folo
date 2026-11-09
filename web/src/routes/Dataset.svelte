@@ -174,15 +174,15 @@
 </script>
 
 {#if ds.error && !d}
+  <!-- Nothing to frame: the message frameless on the content edge (DESIGN_DIRECTION 8), as on Run and Not found; the
+       way back is the header's action, as on Model. -->
   <Page title="Dataset">
-    <Panel>
-      {#if ds.error instanceof ApiError && ds.error.status === 404}
-        <ErrorState error={ds.error} title="Dataset not found" />
-      {:else}
-        <ErrorState error={ds.error} title="Could not load this dataset" retry={() => ds.refresh()} />
-      {/if}
-      <div class="back"><Button variant="ghost" icon={ArrowLeft} href={href('/datasets')}>All datasets</Button></div>
-    </Panel>
+    {#snippet actions()}<Button icon={ArrowLeft} href={href('/datasets')}>All datasets</Button>{/snippet}
+    {#if ds.error instanceof ApiError && ds.error.status === 404}
+      <ErrorState error={ds.error} title="Dataset not found" />
+    {:else}
+      <ErrorState error={ds.error} title="Could not load this dataset" retry={() => ds.refresh()} />
+    {/if}
   </Page>
 {:else if !d}
   <div class="sk-page" aria-busy="true" aria-label="Loading dataset">
@@ -365,9 +365,6 @@
     gap: var(--space-3);
     min-width: 0;
   }
-  .back {
-    padding: 0 var(--space-4) var(--space-4);
-  }
   .ds-toolbar {
     position: sticky;
     top: var(--size-topbar);
@@ -473,7 +470,7 @@
     overflow-wrap: anywhere;
   }
   .sk-page {
-    max-width: var(--size-content-max);
+    max-width: calc(var(--size-content-max) + 2 * var(--space-6));
     margin: 0 auto;
     padding: var(--space-6);
     display: grid;

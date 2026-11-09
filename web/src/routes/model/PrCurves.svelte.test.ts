@@ -87,15 +87,19 @@ describe('PrCurves on phones', () => {
     expect(trace.getAttribute('aria-pressed')).toBe('true');
   });
 
-  it("traces a class from its details row's View curve, and offers the way back in the curves' legend", async () => {
+  it("shows a traced class's curve from the selection bar alone, and offers the way back in the curves' legend", async () => {
     phone = true;
     const viewed: number[] = [];
     await render('classes', { onviewcurve: (cls) => viewed.push(cls) });
     const disc = target.querySelector<HTMLButtonElement>('table.table tbody tr button.disc')!;
     const cls = Number(disc.dataset.cls);
+    target.querySelector<HTMLButtonElement>(`button.cls[data-cls="${cls}"]`)!.click();
     disc.click();
     flushSync();
-    const view = [...target.querySelectorAll<HTMLButtonElement>('tr.detail button')].find((b) => b.textContent?.trim() === 'View curve')!;
+    // One action in one place: the opened details row does not repeat the selection bar's View curve.
+    expect([...target.querySelectorAll('tr.detail button')].some((b) => b.textContent?.includes('View curve'))).toBe(false);
+    const view = target.querySelector<HTMLButtonElement>('.tools .to-curve')!;
+    expect(view.textContent?.trim()).toBe('View curve');
     view.click();
     flushSync();
     expect(viewed).toEqual([cls]);

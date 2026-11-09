@@ -83,6 +83,11 @@
   .compact {
     padding: var(--space-3) 0;
   }
+  /* Frameless in a page's content slot (a detail page whose object could not be loaded or does not exist), as
+     EmptyState there: the page's content edge is its edge, never a card around the message. */
+  :global(.page) > .err {
+    padding: var(--space-1) 0;
+  }
   /* Inside a padded panel the panel's own padding is the edge (as for EmptyState), so a titled panel holding the error
      is its header, the message and 16 px, not 28. */
   :global(.pad-md > .body) > .err.compact,
