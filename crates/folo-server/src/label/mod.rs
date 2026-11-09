@@ -308,9 +308,7 @@ impl Labeler {
     /// `DELETE /api/label/jobs/{id}`: the job's folder (uploads, labels, log) and thumbnails; never images that
     /// were added from a folder.
     pub fn delete(&self, id: &str) -> Result<()> {
-        let mut jobs = self.jobs.write().unwrap();
-        let job =
-            jobs.iter().find(|j| j.id == id).cloned().ok_or_else(|| Error::not_found("label_job", id))?;
+        let job = self.job(id)?;
         {
             let mut state = job.lock();
             state.check_idle("delete the job")?;
@@ -325,7 +323,8 @@ impl Labeler {
             // Under the lock every writer takes: nothing in flight writes into the folder after this.
             state.deleted = true;
         }
-        jobs.retain(|j| j.id != id);
+        self.jobs.write().unwrap().retain(|j| j.id != id);
+        // The folders go last and outside every lock: a job with thousands of uploads takes a while to remove.
         let _ = std::fs::remove_dir_all(self.thumbs.join(id));
         if let Err(e) = std::fs::remove_dir_all(&job.dir) {
             // A file of it is open somewhere (an image being served): what is left is not listed again.
@@ -509,12 +508,11 @@ impl Labeler {
     ) -> Result<LabelImagePage> {
         let job = self.job(id)?;
         let state = job.lock();
-        let matching =
-            state.file.images.iter().map(|r| state.image(r)).filter(|i| status.is_none_or(|s| s == i.status));
+        let matching = state.file.images.iter().filter(|r| status.is_none_or(|s| s == state.status(r)));
         let (mut total, mut images) = (0u64, Vec::new());
-        for image in matching {
+        for record in matching {
             if total >= offset && (images.len() as u64) < limit {
-                images.push(image);
+                images.push(state.image(record));
             }
             total += 1;
         }

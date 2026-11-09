@@ -796,7 +796,9 @@ exported more than once.
 - `datasets/<name>/`: synthetic datasets and the datasets made from labeling jobs. `DELETE /api/datasets/{id}`
   removes the dataset's caches, never its files.
 - `label/<job id>/`: one folder per labeling job: `job.json` (the job, its images and their boxes, rewritten
-  atomically after every change), `images/` (uploaded files; folder imports stay where they are) and `log.jsonl`.
+  atomically after every change; during an agent run at most every 5 seconds and when it ends, so a crash can
+  lose the labels of the run's last few seconds), `images/` (uploaded files; folder imports stay where they are)
+  and `log.jsonl`.
   Its thumbnails are in `cache/thumbs/<job id>/`. On start every job is listed again, `idle`: a run a previous
   process left active is closed as `stopped` (its finished images keep their labels). On shutdown the active
   runs' agent calls are killed.

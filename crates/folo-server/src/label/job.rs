@@ -134,15 +134,22 @@ impl State {
         }
     }
 
-    /// An image as the API shows it: `labeling` while it is in a call.
+    /// An image's status as the API shows it: `labeling` while it is in a call.
+    pub fn status(&self, r: &Record) -> LabelImageStatus {
+        match &self.active {
+            Some(a) if a.in_call.contains(&r.id) => LabelImageStatus::Labeling,
+            _ => r.status,
+        }
+    }
+
+    /// An image as the API shows it.
     pub fn image(&self, r: &Record) -> LabelImage {
-        let in_call = self.active.as_ref().is_some_and(|a| a.in_call.contains(&r.id));
         LabelImage {
             id: r.id.clone(),
             file: r.file.clone(),
             width: r.width,
             height: r.height,
-            status: if in_call { LabelImageStatus::Labeling } else { r.status },
+            status: self.status(r),
             boxes: r.boxes.clone(),
             source: r.source,
             error: r.error.clone(),

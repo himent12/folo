@@ -11,6 +11,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use folo_api::{LabelEffort, LabelEvent, LabelImageStatus, LabelOutcome, LabelSource, LabelUsage, LogLevel};
 
@@ -26,6 +27,9 @@ pub const AGENT_IMAGE_SIDE: u32 = 1024;
 const JPEG_QUALITY: u8 = 85;
 /// Calls in a row that may time out or return garbage before the run gives up.
 const MAX_SOFT_FAILURES: u32 = 3;
+/// How often a run writes `job.json` at most. The file holds every image of the job, so a large job is not
+/// rewritten after each of its thousands of calls; what a crash can lose is the labels of the last few seconds.
+const SAVE_EVERY: Duration = Duration::from_secs(5);
 
 /// What a run does, decided when it starts.
 pub struct Plan {
@@ -70,6 +74,8 @@ struct Run<'a> {
     soft_failures: AtomicU32,
     /// Why the run gave up, once it has.
     fatal: Mutex<Option<String>>,
+    /// When `job.json` was last written by this run.
+    saved: Mutex<Instant>,
 }
 
 /// Runs `plan` on `job` to its end (the body of the run's thread). The job's `active` and `run` are set by the
@@ -89,6 +95,7 @@ pub fn run(job: &Job, plan: &Plan) {
         queue: Mutex::new(plan.batches.iter().cloned().enumerate().map(|(i, b)| (i + 1, b)).collect()),
         soft_failures: AtomicU32::new(0),
         fatal: Mutex::new(None),
+        saved: Mutex::new(Instant::now()),
     };
     let workers = plan.parallel.clamp(1, plan.batches.len().max(1));
     std::thread::scope(|scope| {
@@ -296,8 +303,12 @@ impl Run<'_> {
         for why in failures {
             self.job.log(&mut state, LogLevel::Warn, format!("call {n}: {why}"));
         }
-        if let Err(e) = self.job.save(&state) {
-            tracing::warn!(job = %self.job.id, "{e}");
+        let mut saved = self.saved.lock().unwrap();
+        if saved.elapsed() >= SAVE_EVERY {
+            *saved = Instant::now();
+            if let Err(e) = self.job.save(&state) {
+                tracing::warn!(job = %self.job.id, "{e}");
+            }
         }
         self.job.emit_job(&state);
     }
