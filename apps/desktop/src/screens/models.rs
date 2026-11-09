@@ -769,9 +769,10 @@ impl FoloApp {
             })
             .ok();
         });
-        // The legend is a list beside the plot, best AP50 first; hover or focus isolates a curve.
+        // The legend is a list beside the plot, in class order (as the confusion matrix and the
+        // class table beside it run); hover or focus isolates a curve.
         let mut order: Vec<&crate::api::PrCurve> = ev.pr.iter().collect();
-        order.sort_by(|a, b| b.ap50.total_cmp(&a.ap50));
+        order.sort_by_key(|c| c.class);
         let chips: Vec<AnyElement> = order
             .into_iter()
             .map(|c| {
@@ -1474,7 +1475,8 @@ impl FoloApp {
         let num =
             |v: String| text(ty::SM, t.text_secondary).tnum().w(px(120.)).flex_none().text_right().child(v);
         let mut per: Vec<_> = ev.per_class.iter().collect();
-        per.sort_by(|a, b| b.map50.total_cmp(&a.map50));
+        // Class order, as the PR legend and the confusion matrix run.
+        per.sort_by_key(|c| c.class);
         // Numbers right-aligned (bar to their left), like every other table's metric columns.
         let rows: Vec<AnyElement> = per
             .into_iter()

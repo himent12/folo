@@ -189,10 +189,6 @@ impl FoloApp {
         let card_pad_y = if hero_h < 120. { 12. } else { 16. };
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
-        let ds = self
-            .store
-            .dataset_summary(&r.config.dataset_id)
-            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         let now = self.store.api.now();
         let started = r
             .started
@@ -420,7 +416,7 @@ impl FoloApp {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(format!("{ds} · {} · {device} · {started}", r.config.arch.as_str())),
+                            .child(format!("{} · {device} · {started}", self.run_meta(r))),
                     )
                     .child(open),
             )
@@ -759,10 +755,6 @@ impl FoloApp {
                     .pb(px(4.))
                     .child(heads)
                     .children(runs.into_iter().map(|r| {
-                        let ds = self
-                            .store
-                            .dataset_summary(&r.config.dataset_id)
-                            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                         let created_at = time::parse(&r.created);
                         let when = created_at.map_or(String::new(), |c| time::ago(c, now));
                         // Progress (training runs only) right after Status; best mAP50-95 at the end.
@@ -809,7 +801,7 @@ impl FoloApp {
                         // The focus tip says in full what the row may cut: name, architecture,
                         // dataset, created time, and the head.
                         let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
-                            let who = format!("{} · {} · {ds}", r.name, r.config.arch.as_str());
+                            let who = format!("{} · {}", r.name, self.run_meta(&r));
                             let base = created_at.map_or(who.clone(), |c| {
                                 format!("{who} · created {}", time::local_datetime(c))
                             });
@@ -818,19 +810,9 @@ impl FoloApp {
                         // Architecture first (short, so it survives a narrow cell), then the
                         // dataset, then the e2e tag for an end-to-end run.
                         let meta = |w: f32| {
-                            div()
-                                .w(px(w))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .child(
-                                    text(ty::XS, t.text_tertiary)
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(format!("{} · {ds}", r.config.arch.as_str())),
-                                )
-                                .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-ovr-{}", r.id))))
+                            div().w(px(w)).flex_none().flex().items_center().gap(px(6.)).child(
+                                text(ty::XS, t.text_tertiary).min_w_0().truncate().child(self.run_meta(&r)),
+                            )
                         };
                         let row = div()
                             .id(SharedString::from(key.clone()))
@@ -860,12 +842,21 @@ impl FoloApp {
                                     .when(crate::ui::may_overflow(&r.name, ty::SM.size, name_w), |d| {
                                         d.tooltip(crate::controls::tip(r.name.clone(), None))
                                     })
+                                    // The name, then the e2e tag on its line (so the meta below keeps
+                                    // its full width for architecture and dataset).
                                     .child(
-                                        text(ty::SM, t.text_primary)
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .w_full()
-                                            .truncate()
-                                            .child(r.name.clone()),
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .child(
+                                                text(ty::SM, t.text_primary)
+                                                    .font_weight(FontWeight::MEDIUM)
+                                                    .min_w_0()
+                                                    .truncate()
+                                                    .child(r.name.clone()),
+                                            )
+                                            .when(e2e, |d| d.child(e2e_tag(&t, format!("e2e-ovr-{}", r.id)))),
                                     )
                                     .when(!wide, |d| d.child(meta(name_w))),
                             )
@@ -985,8 +976,9 @@ impl FoloApp {
                     .gap(px(12.))
                     .border_b_1()
                     .border_color(t.line_subtle)
-                    .child(th(&t, "Model").w(px(150.)).flex_none())
-                    .child(th(&t, "Dataset").flex_1())
+                    // The dataset leads: it's what the rows are, one each, in name order.
+                    .child(th(&t, "Dataset").w(px(120.)).flex_none())
+                    .child(th(&t, "Best model").flex_1())
                     .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")));
                 div()
                     .flex()
@@ -1010,15 +1002,13 @@ impl FoloApp {
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
                             .child(
-                                text(ty::SM, t.text_primary)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .w(px(150.))
+                                text(ty::SM, t.text_secondary)
+                                    .w(px(120.))
                                     .flex_none()
                                     .truncate()
-                                    .child(m.name.clone()),
+                                    .child(ds_name.clone()),
                             )
-                            // The dataset it was evaluated on (the e2e tag after; the name and its page
-                            // give the architecture).
+                            // Its best model, then the same compact e2e tag as the Models table.
                             .child(
                                 div()
                                     .flex_1()
@@ -1027,12 +1017,12 @@ impl FoloApp {
                                     .items_center()
                                     .gap(px(6.))
                                     .child(
-                                        text(ty::XS, t.text_tertiary)
+                                        text(ty::SM, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
                                             .min_w_0()
                                             .truncate()
-                                            .child(ds_name.clone()),
+                                            .child(m.name.clone()),
                                     )
-                                    // The same compact tag as the Models table.
                                     .when(self.model_e2e(&m), |d| {
                                         d.child(e2e_tag(&t, format!("e2e-ov-{}", m.id)))
                                     }),
