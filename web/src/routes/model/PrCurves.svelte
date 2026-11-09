@@ -23,7 +23,7 @@
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Search from '@lucide/svelte/icons/search';
-  import { classMetrics, matchesClass, PR_CONTEXT, prEnvelope, trimPrTail } from './pr';
+  import { classMetrics, matchesClass, prContext, prEnvelope, trimPrTail } from './pr';
   import { media } from '$lib/design/tokens';
 
   let {
@@ -266,7 +266,7 @@
                       <div><dt>{d.label}</dt><dd class="num">{d.value}</dd></div>
                     {/each}
                   </dl>
-                  <p class="ctx">{PR_CONTEXT}</p>
+                  <p class="ctx">{prContext(ev.bestF1Conf)}</p>
                   {#if onviewcurve}
                     <button type="button" class="view" onclick={() => viewCurve(c.class)}>View curve<ArrowRight size={14} aria-hidden="true" /></button>
                   {/if}
@@ -285,7 +285,7 @@
       </button>
     {/if}
     <p class="foot">
-      Evaluated on {num(ev.images)} validation images at IoU 0.50. Precision and recall {PR_CONTEXT.replace(', IoU 0.50', '')}; instances are
+      Evaluated on {num(ev.images)} validation images at IoU 0.50. Precision and recall {prContext(ev.bestF1Conf, false)}; instances are
       ground-truth boxes per class.
     </p>
   </div>

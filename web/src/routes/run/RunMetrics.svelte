@@ -32,7 +32,7 @@
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { runProgress, stepsPerEpoch } from '$lib/api/progress';
-  import { duration, eta, metric, num } from '$lib/format';
+  import { conf, duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import { media } from '$lib/design/tokens';
@@ -229,6 +229,9 @@
     /** A power of ten's exponent ("−4"): the tab draws the unit "× 10" with a real superscript instead. */
     exp?: string;
     caption: string;
+    /** Tablets (768–1023 px): a shorter label and caption, so all six tabs fit without clipping. */
+    short?: string;
+    capShort?: string;
     title: string;
     qualifier: string;
     /** The qualifier's power-of-ten exponent, drawn as a superscript after it. */
@@ -238,23 +241,36 @@
   // validation; per-step values from the epoch the last step is in.
   const latestEp = $derived(lastEpoch ? `Latest · ep ${lastEpoch.epoch}` : 'after the first epoch');
   const stepEp = $derived(lastStep ? `Latest · ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'after the first step');
+  // Tablets: the same readings in fewer words ("ep 37", "not yet").
+  const latestShort = $derived(lastEpoch ? `ep ${lastEpoch.epoch}` : 'not yet');
+  const stepShort = $derived(lastStep ? `ep ${Math.max(1, Math.ceil(observed - 1e-9))}` : 'not yet');
+  /** Precision and recall are read at each epoch's best-F1 confidence (docs/API.md, Operating point): the latest one. */
+  const prConf = $derived(lastEpoch?.val.best_f1_conf);
+  /** The LR schedule the trainer resolved (`Run.resolved`), else what the recipe defaults to. */
+  const schedule = $derived(
+    run.resolved ? `warmup ${run.resolved.warmup_iters} steps · ${run.resolved.cos_lr ? 'cosine' : 'linear'}` : 'warmup 3 epochs · linear',
+  );
   const tabs = $derived.by((): TabDef[] => [
     {
       id: 'map',
       label: 'mAP50-95',
       value: metric(lastEpoch?.val.map50_95),
       caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
+      capShort: run.best ? `best · ep ${run.best.epoch}` : 'not yet',
       title: 'Validation mAP50-95',
       qualifier: run.best ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
     },
-    { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: latestEp, title: 'Validation mAP50', qualifier: 'by epoch' },
+    { id: 'map50', label: 'mAP50', value: metric(lastEpoch?.val.map50), caption: latestEp, capShort: latestShort, title: 'Validation mAP50', qualifier: 'by epoch' },
     {
       id: 'pr',
       label: 'Precision · Recall',
+      short: 'P · R',
       value: lastEpoch ? `${metric(lastEpoch.val.precision)} · ${metric(lastEpoch.val.recall)}` : '—',
-      caption: latestEp,
+      // The latest epoch's threshold: "conf 0.31 · ep 37" (each epoch has its own, so the chart says "each at").
+      caption: lastEpoch ? (prConf != null ? `conf ${conf(prConf)} · ep ${lastEpoch.epoch}` : `best-F1 conf · ep ${lastEpoch.epoch}`) : 'after the first epoch',
+      capShort: lastEpoch && prConf != null ? `conf ${conf(prConf)}` : latestShort,
       title: 'Precision and recall',
-      qualifier: 'by epoch',
+      qualifier: prConf != null ? `by epoch · at each epoch's best-F1 conf (latest ${conf(prConf)})` : "by epoch · at each epoch's best-F1 confidence",
     },
     {
       id: 'loss',
@@ -263,15 +279,18 @@
       // The last step's raw reading, which the chart may draw smoothed: "raw" is its qualifier, set as a unit.
       unit: 'raw',
       caption: stepEp,
+      capShort: stepShort,
       title: 'Training loss',
       qualifier: 'by epoch',
     },
     {
       id: 'lr',
       label: 'Learning rate',
+      short: 'LR',
       // The power of ten is the value's unit, set smaller, so the tab never cuts the value off.
       ...lrParts(lastStep?.lr),
-      caption: 'warmup 3 · cosine',
+      caption: schedule,
+      capShort: run.resolved ? (run.resolved.cos_lr ? 'cosine' : 'linear') : 'linear',
       title: 'Learning rate',
       qualifier: 'by epoch · × 10',
       qExp: String(lrExp).replace('-', '−'),
@@ -282,6 +301,7 @@
       value: num(lastStep?.imgs_per_s, 0),
       unit: 'img/s',
       caption: stepEp,
+      capShort: stepShort,
       title: 'Throughput',
       qualifier: 'images/s by epoch',
     },
@@ -365,9 +385,9 @@
             data-tab={t.id}
             onclick={() => (tab = t.id)}
           >
-            <span class="label">{t.label}</span>
+            <span class="label"><span class="full">{t.label}</span><span class="short" aria-hidden="true">{t.short ?? t.label}</span></span>
             <span class="val num">{t.value}{#if t.unit && t.value !== '—'}{@render unitOf(t)}{/if}</span>
-            <span class="cap num">{t.caption}</span>
+            <span class="cap num"><span class="full">{t.caption}</span><span class="short" aria-hidden="true">{t.capShort ?? t.caption}</span></span>
           </button>
         {/each}
       </div>
@@ -748,6 +768,24 @@
       font-size: var(--type-xl-size);
       line-height: 32px;
       letter-spacing: var(--type-xl-tracking);
+    }
+  }
+  /* Tablets: six tabs share about 700 px, so each says it in fewer words ("P · R", "ep 37"), the full words their
+     accessible name; nothing clips. */
+  .short {
+    display: none;
+  }
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .tab .full {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+    .tab .short {
+      display: inline;
     }
   }
   @media (max-width: 767px) {

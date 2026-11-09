@@ -1,33 +1,48 @@
 <script lang="ts">
+  /**
+   * A run's config. With `resolved` (docs/API.md, `Run.resolved`) the settings it trains with are the values shown,
+   * the request a note where it differs ("AdamW (auto)", "0.001429 (requested 0.01)"), plus the batch it accumulates,
+   * the LR decay, the warmup and the optimizer's momentum and weight decay; without it, the request as asked for.
+   * Copy JSON copies the request: it is what `folo train --config` and New run take, and resolves the same way again.
+   */
   import Copy from '@lucide/svelte/icons/copy';
-  import type { TrainConfig } from '$lib/api/types';
+  import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
   import Button from '$lib/ui/Button.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
+  import { batchSetting, lrSetting, optimizerSetting, resolvedRows, type Setting } from './resolved';
 
   let {
     config,
+    resolved = null,
     datasetName,
     compact = false,
-  }: { config: TrainConfig; datasetName?: string; /** One column for a rail, augmentation folded away. */ compact?: boolean } = $props();
+  }: {
+    config: TrainConfig;
+    /** What the trainer resolved `config` to; null until it is built, missing from older servers. */
+    resolved?: ResolvedTrain | null;
+    datasetName?: string;
+    /** One column for a rail, augmentation folded away. */
+    compact?: boolean;
+  } = $props();
 
   const a = $derived(config.augment);
   // Identifiers (model names, weight paths, devices, a named optimizer) are mono; numbers and prose ("auto", "From
   // scratch") are sans with tabular numerals (design/README.md, Type).
-  const MONO = new Set(['Model', 'Weights', 'Device', 'Optimizer']);
-  const PROSE = new Set(['auto', 'From scratch']);
-  const mono = (k: string, v: string) => MONO.has(k) && !PROSE.has(v);
-  const rows = $derived<[string, string][]>([
-    ['Dataset', datasetName ?? config.dataset_id],
-    ['Model', config.arch],
-    ['Epochs', String(config.epochs)],
-    ['Batch', String(config.batch)],
-    ['Image size', `${config.imgsz} px`],
-    ['Device', config.device],
-    ['Optimizer', config.optimizer],
-    ['Initial LR', String(config.lr0)],
-    ['Weights', config.weights ?? 'From scratch'],
-    ['Seed', String(config.seed)],
+  const id = (value: string): Setting => ({ value, ident: true });
+  const plain = (value: string): Setting => ({ value });
+  const rows = $derived<[string, Setting][]>([
+    ['Dataset', plain(datasetName ?? config.dataset_id)],
+    ['Model', id(config.arch)],
+    ['Epochs', plain(String(config.epochs))],
+    [resolved && resolved.accumulate > 1 ? 'Batch × accumulate' : 'Batch', batchSetting(config, resolved)],
+    ['Image size', plain(`${config.imgsz} px`)],
+    ['Device', config.device === 'auto' ? plain('auto') : id(config.device)],
+    ['Optimizer', optimizerSetting(config, resolved)],
+    ['Initial LR', lrSetting(config, resolved)],
+    ...(resolved ? resolvedRows(resolved) : []),
+    ['Weights', config.weights ? id(config.weights) : plain('From scratch')],
+    ['Seed', plain(String(config.seed))],
   ]);
   const aug = $derived<[string, string][]>([
     ['Mosaic', String(a.mosaic)],
@@ -52,7 +67,7 @@
 {#snippet training()}
   <dl>
     <p class="group">Training</p>
-    {#each rows as [k, v] (k)}<dt>{k}</dt><dd class="num" class:mono={mono(k, v)}>{v}</dd>{/each}
+    {#each rows as [k, v] (k)}<dt>{k}</dt><dd class="num"><span class:mono={v.ident}>{v.value}</span>{#if v.note}<span class="note">{v.note}</span>{/if}</dd>{/each}
   </dl>
 {/snippet}
 {#snippet augmentation(heading: boolean)}
@@ -133,6 +148,14 @@
     color: var(--text-primary);
   }
   dt {
+    color: var(--text-tertiary);
+  }
+  /* The request beside the value it resolved to, in sans: "(auto)", "(requested 0.01)". */
+  .note {
+    margin-left: var(--space-1);
+    /* It wraps as a whole, never inside "(requested 0.01)". */
+    white-space: nowrap;
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   dd {

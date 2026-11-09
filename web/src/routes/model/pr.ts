@@ -1,7 +1,7 @@
 // Precision-recall curve helpers for the Model view.
 
 import type { ClassEvaluation } from '$lib/api/evaluation';
-import { metric } from '$lib/format';
+import { atBestF1, metric } from '$lib/format';
 
 /**
  * Drops the tail of a PR curve past its maximum recall: evaluators pad the curve with precision 0 up to recall 1,
@@ -62,3 +62,12 @@ export function classMetrics(c: ClassEvaluation): { label: string; value: string
 
 /** The operating point precision and recall are read at (folo-vision's metrics: one threshold for all classes). */
 export const PR_CONTEXT = 'at the confidence that maximises mean F1, IoU 0.50';
+
+/**
+ * The same, naming the threshold when the evaluation says which (`best_f1_conf`): "at conf 0.31 (best F1)"; else the
+ * sentence above. `iou` adds ", IoU 0.50".
+ */
+export function prContext(bestF1Conf: number | null | undefined, iou = true): string {
+  const at = bestF1Conf != null && Number.isFinite(bestF1Conf) ? atBestF1(bestF1Conf) : 'at the confidence that maximises mean F1';
+  return iou ? `${at}, IoU 0.50` : at;
+}

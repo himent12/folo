@@ -16,16 +16,35 @@
   import { tick } from 'svelte';
   import Button from './Button.svelte';
 
-  let { label, items }: { label: string; items: MenuItem[] } = $props();
+  let {
+    label,
+    items,
+    variant = 'secondary',
+    fixed = false,
+  }: {
+    label: string;
+    items: MenuItem[];
+    variant?: 'secondary' | 'ghost';
+    /** A row's menu inside a box that clips (a table that scrolls sideways): the list is placed on the viewport. */
+    fixed?: boolean;
+  } = $props();
 
   const uid = $props.id();
   let open = $state(false);
   let root = $state<HTMLElement>();
   let list = $state<HTMLElement>();
+  /** `fixed`: where the list sits, under the trigger's right edge. */
+  let at = $state<{ top: number; right: number } | null>(null);
+
+  function place() {
+    const r = root?.getBoundingClientRect();
+    if (r) at = { top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) };
+  }
 
   const entries = () => [...(list?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
 
   async function show() {
+    if (fixed) place();
     open = true;
     await tick();
     entries()[0]?.focus();
@@ -56,13 +75,26 @@
       if (root && !root.contains(e.target as Node)) hide(false);
     };
     document.addEventListener('pointerdown', away);
-    return () => document.removeEventListener('pointerdown', away);
+    // A list placed on the viewport would drift from its row: scrolling or resizing closes it.
+    const drift = (e: Event) => {
+      if (!list?.contains(e.target as Node)) hide(false);
+    };
+    if (fixed) {
+      window.addEventListener('scroll', drift, true);
+      window.addEventListener('resize', drift);
+    }
+    return () => {
+      document.removeEventListener('pointerdown', away);
+      window.removeEventListener('scroll', drift, true);
+      window.removeEventListener('resize', drift);
+    };
   });
 </script>
 
 <div class="menu" bind:this={root}>
   <Button
-    variant="secondary"
+    {variant}
+    size={variant === 'ghost' ? 'sm' : undefined}
     icon={Ellipsis}
     aria-label={label}
     title={label}
@@ -73,7 +105,17 @@
   />
   {#if open}
     <!-- svelte-ignore a11y_interactive_supports_focus -->
-    <div class="list" id="{uid}-list" role="menu" aria-label={label} bind:this={list} {onkeydown}>
+    <div
+      class="list"
+      class:fixed
+      id="{uid}-list"
+      role="menu"
+      aria-label={label}
+      bind:this={list}
+      style:top={fixed && at ? `${at.top}px` : undefined}
+      style:right={fixed && at ? `${at.right}px` : undefined}
+      {onkeydown}
+    >
       {#each items as it (it.label)}
         {#if it.href}
           <a role="menuitem" tabindex="-1" href={it.href} class:danger={it.danger} onclick={() => hide(false)}>
@@ -116,6 +158,9 @@
     box-shadow: var(--shadow-md);
     display: grid;
     animation: in var(--dur-fast) var(--ease-out);
+  }
+  .list.fixed {
+    position: fixed;
   }
   [role='menuitem'] {
     display: flex;

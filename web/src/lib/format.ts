@@ -159,3 +159,17 @@ export function sentence(s: string, plain = false): string {
   const cap = t[0]!.toUpperCase() + t.slice(1);
   return /[.!?]$/.test(cap) ? cap : `${cap}.`;
 }
+
+/** A confidence threshold on the 0.001 grid, as people set one: 0.312 → "0.31" (three decimals below 0.1: "0.045"). */
+export function conf(x: number | null | undefined): string {
+  return ok(x) ? num(x, x < 0.1 ? 3 : 2) : '—';
+}
+
+/**
+ * Where precision and recall were read (docs/API.md, Operating point): "at conf 0.31 (best F1)" when the server says
+ * which threshold (`best_f1_conf`), else the honest "at the best-F1 confidence" (older servers and files, or no class
+ * with ground truth).
+ */
+export function atBestF1(c: number | null | undefined): string {
+  return ok(c) ? `at conf ${conf(c)} (best F1)` : 'at the best-F1 confidence';
+}

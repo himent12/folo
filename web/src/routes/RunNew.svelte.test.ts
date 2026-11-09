@@ -444,8 +444,18 @@ describe('New run: the end-to-end head', () => {
     expect(create.mock.calls[0]![0].head).toBe('o2o');
     const run = await create.mock.results[0]!.value;
     expect(run.config.head).toBe('o2o');
-    const { lines } = await api.runLogs(run.id, 50);
-    expect(lines.some((l) => l.message.startsWith('head o2o: dual assignment'))).toBe(true);
+    // Runs train one at a time: free the slot (the live run and the two waiting ones), then let the worker take it.
+    for (const id of ['run_7d1e', 'run_q4n2', 'run_q7c5']) await api.stopRun(id);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + 5000);
+      await api.runs();
+      vi.setSystemTime(Date.now() + 5000);
+      const { lines } = await api.runLogs(run.id, 50);
+      expect(lines.some((l) => l.message.startsWith('head o2o: dual assignment'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("names o2m in the command when fine-tuning, since the CLI's default is the weights file's head", async () => {

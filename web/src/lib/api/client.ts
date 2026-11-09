@@ -18,6 +18,7 @@ import type {
   PredictInput,
   PredictOptions,
   Prediction,
+  QueueRequest,
   Run,
   RunEventMap,
   RunLogs,
@@ -71,6 +72,11 @@ export interface Api {
   modelEval(id: string, signal?: AbortSignal): Promise<ModelEval>;
   /** `switches` apply to `onnx` only (and only on servers whose `system().features` has `export_onnx_switches`). */
   exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches): Promise<ExportResult>;
+  /**
+   * The model's ONNX graph as a file (GET /api/models/{id}/weights?format=onnx with the switches as query parameters),
+   * under the name the server gives it (`<name>.onnx`, `<name>-f16.onnx` with `half`). Servers list `weights_onnx`.
+   */
+  onnxFile(id: string, switches: OnnxSwitches, signal?: AbortSignal): Promise<File>;
 
   runs(signal?: AbortSignal): Promise<Run[]>;
   run(id: string, signal?: AbortSignal): Promise<Run>;
@@ -82,6 +88,12 @@ export interface Api {
    */
   resumeRun(id: string, device?: string): Promise<Run>;
   deleteRun(id: string): Promise<void>;
+  /**
+   * `POST /api/runs/{id}/queue`: moves a run that waits in the training queue (servers list `queue_control`). `start`
+   * puts it at the front; FOLO never interrupts the active run, so it starts once the slot is free. A run the worker
+   * already took is `409 run_not_queued`.
+   */
+  moveRun(id: string, req: QueueRequest): Promise<Run>;
   /** Full history; `every` keeps every N-th step (plus the latest) to thin long runs. */
   runMetrics(id: string, signal?: AbortSignal, every?: number): Promise<RunMetrics>;
   /** The most recent `limit` log lines, oldest first. */
@@ -98,6 +110,20 @@ export interface Api {
   modelWeights(id: string, signal?: AbortSignal): Promise<ArrayBuffer>;
   /** The weights' current ETag (a HEAD request): it changes when the model's file does. Null when unknown. */
   modelWeightsTag(id: string, signal?: AbortSignal): Promise<string | null>;
+}
+
+/** The file name of a `Content-Disposition: attachment; filename="…"` header, or null. */
+export function attachmentName(header: string | null): string | null {
+  const m = header ? /filename="?([^";]+)"?/i.exec(header) : null;
+  return m?.[1]?.trim() || null;
+}
+
+/**
+ * The name a model's ONNX download gets on the server (docs/API.md): `<name>.onnx`, `<name>-f16.onnx` with `half`,
+ * characters outside `A-Z a-z 0-9 . _ -` as `_`. Studio names the file before it asks for it.
+ */
+export function onnxFileName(modelName: string, half: boolean): string {
+  return `${modelName.replace(/[^A-Za-z0-9._-]/g, '_')}${half ? '-f16' : ''}.onnx`;
 }
 
 /** Builds a query string from defined values only. */
@@ -218,6 +244,9 @@ export class HttpApi implements Api {
   deleteRun(id: string) {
     return this.#req<void>('DELETE', `/runs/${encodeURIComponent(id)}`);
   }
+  moveRun(id: string, req: QueueRequest) {
+    return this.#req<Run>('POST', `/runs/${encodeURIComponent(id)}/queue`, req);
+  }
   runMetrics(id: string, signal?: AbortSignal, every?: number) {
     return this.#req<RunMetrics>('GET', `/runs/${encodeURIComponent(id)}/metrics${qs({ every })}`, undefined, signal);
   }
@@ -242,6 +271,24 @@ export class HttpApi implements Api {
     if (res.ok) return res.arrayBuffer();
     const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
     throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the model (HTTP ${res.status}).`, err?.hint);
+  }
+
+  async onnxFile(id: string, switches: OnnxSwitches, signal?: AbortSignal) {
+    const on = (k: keyof OnnxSwitches) => (switches[k] ? 'true' : undefined);
+    const url = `${this.base}/api/models/${encodeURIComponent(id)}/weights${qs({ format: 'onnx', decode: on('decode'), dynamic: on('dynamic'), half: on('half') })}`;
+    let res: Response;
+    try {
+      res = await fetch(url, { signal });
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') throw e;
+      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+    }
+    if (!res.ok) {
+      const err = ((await res.json().catch(() => undefined)) as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
+      throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Could not download the ONNX file (HTTP ${res.status}).`, err?.hint);
+    }
+    const name = attachmentName(res.headers.get('content-disposition')) ?? `model${switches.half ? '-f16' : ''}.onnx`;
+    return new File([await res.blob()], name, { type: 'application/octet-stream' });
   }
 
   /** The f16 `.folo` file's URL (GET /api/models/{id}/weights?format=f16), for a browser download link. */

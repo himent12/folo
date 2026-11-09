@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import Box from '@lucide/svelte/icons/box';
+  import ChevronsUp from '@lucide/svelte/icons/chevrons-up';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import Square from '@lucide/svelte/icons/square';
@@ -10,6 +12,9 @@
   import { hub } from '$lib/api/index.svelte';
   import { LiveRun } from '$lib/api/live.svelte';
   import { Resource } from '$lib/api/resource.svelte';
+  import { hasFeature, ordinal, queuePlace, withQueueMove } from '$lib/api/queue';
+  import type { QueueRequest } from '$lib/api/types';
+  import { media } from '$lib/design/tokens';
   import { ago, deviceName, eta } from '$lib/format';
   import { origin } from '$lib/lineage';
   import { href, router } from '$lib/router.svelte';
@@ -25,13 +30,16 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import Ident from '$lib/ui/Ident.svelte';
+  import Panel from '$lib/ui/Panel.svelte';
   import { toast } from '$lib/ui/toast.svelte';
+  import { tooltip } from '$lib/ui/tooltip';
   import ConfigPanel from './run/ConfigPanel.svelte';
   import Logs from './run/Logs.svelte';
   import Outcome from './run/Outcome.svelte';
   import PerClass from './run/PerClass.svelte';
   import RunMetrics from './run/RunMetrics.svelte';
   import Samples from './run/Samples.svelte';
+  import { moveQueued, queueItems, startHint, startLabel } from './run/queueActions';
   import { scheduleWarnings } from './run/warnings';
 
   const id = $derived(router.route.params.id ?? '');
@@ -47,6 +55,61 @@
   const others = new Resource((s) => hub.api.runs(s), { poll: 5000 });
   const queuedOnly = $derived(run?.status === 'queued' && live.steps.length === 0);
   const ahead = $derived(others.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
+
+  // Queue control (servers that list `queue_control`, docs/API.md): the run's place, Start next, Move up / down.
+  const system = new Resource((s) => hub.api.system(s));
+  const queueCtl = $derived(hasFeature(system.data, 'queue_control'));
+  const place = $derived(run?.status === 'queued' && queueCtl ? (run.queue_position ?? null) : null);
+  /** The runs waiting, front first (this one among them). */
+  const queue = $derived(
+    (others.data ?? []).filter((r) => r.status === 'queued' && r.queue_position != null).sort((a, b) => (a.queue_position ?? 0) - (b.queue_position ?? 0)),
+  );
+  const waitingCount = $derived(Math.max(live.waiting ?? 0, queue.length, place ?? 0));
+  /** The waiting run just in front of this one. */
+  const before = $derived(place && place > 1 ? queue.find((r) => r.id !== run?.id && r.queue_position === place - 1) : undefined);
+  /** Start next is a move only when something is in front (or nothing trains, and it starts at once). */
+  const canStart = $derived(place !== null && (place > 1 || !ahead));
+
+  /** Moves this run in the queue: the new order at once (here and in the queue list), the old one back on a refusal. */
+  async function move(req: QueueRequest) {
+    const cur = run;
+    if (!cur) return;
+    const id = cur.id;
+    const refresh = () => {
+      void others.refresh();
+      hub.api.run(id).then(
+        (r) => {
+          if (live.run?.id === id) live.run = { ...live.run, status: r.status, started: r.started, queue_position: r.queue_position ?? null, resolved: r.resolved ?? live.run.resolved };
+        },
+        () => {},
+      );
+    };
+    const r = await moveQueued(
+      cur,
+      req,
+      () => {
+        const list = others.data;
+        const prev = live.run?.queue_position ?? null;
+        if (list) others.set(withQueueMove(list, id, req));
+        const next = others.data?.find((x) => x.id === id)?.queue_position;
+        if (live.run?.id === id && next != null) live.run = { ...live.run, queue_position: next };
+        return () => {
+          if (list) others.set(list);
+          if (live.run?.id === id) live.run = { ...live.run, queue_position: prev };
+        };
+      },
+      refresh,
+      ahead,
+    );
+    if (!r) return;
+    if (live.run?.id === id) live.run = { ...live.run, queue_position: r.queue_position ?? null };
+    void others.refresh();
+  }
+
+  // A queued run waits in a layout of its own from 768 px up: its place and the way to the front, what it waits for,
+  // then its config; the outputs it will have are one quiet list instead of empty frames. Phones keep their sections.
+  const phone = new MediaQuery(media.phone, false);
+  const waitingLayout = $derived(queuedOnly && !phone.current);
   const active = $derived(run ? ['queued', 'running', 'stopping'].includes(run.status) : false);
   const epochsDone = $derived.by(() => {
     void live.version;
@@ -108,11 +171,24 @@
       if (run.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${run.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${run.model_id}`) });
     }
-    // Phones: the queued run's one action keeps its one name, in the menu (the status and its time keep the row).
+    // Phones: the queued run's one action keeps its one name, in the menu (the status and its time keep the row); its
+    // moves come first (Start next is in the banner).
+    if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, { start: false }));
     if (run.status === 'queued') out.push({ label: 'Remove from queue', icon: X, danger: true, onclick: () => (stopOpen = true) });
     if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
     return out;
   });
+
+  /** Wider screens: the queued run's moves behind ⋯, next to Remove from queue (Start next is in the banner). */
+  const wideQueueItems = $derived(place !== null ? queueItems(place, waitingCount, ahead, move, { start: false }) : []);
+
+  /** What the run will have once it trains, in place of the empty frames (the waiting layout). */
+  const later = $derived([
+    { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
+    { name: 'Samples', what: 'Predictions on 16 validation images after every epoch' },
+    { name: 'Per class', what: `AP for each of ${dataset?.classes.length ?? 'its'} classes` },
+    { name: 'Logs', what: "The trainer's output, live" },
+  ]);
 
   // Resume: the same run continues from weights/last.folo (POST /api/runs with resume_run_id, docs/API.md).
   let resuming = $state(false);
@@ -135,10 +211,22 @@
 <!-- A queued run leads with what it waits for and when it should start (the callout under the header); the frames it
      will fill stay compact until there is data, and the config is in its rail. -->
 {#snippet waiting()}
-  {#if ahead}
+  {#if place !== null && place > 1}
+    <!-- Behind other waiting runs: the one in front of it, then what trains now. -->
+    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2} and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}.
+    {#if ahead}<a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> is training{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}.{/if}
+  {:else if ahead}
     Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
   {:else}
     Starts as soon as the device is free.
+  {/if}
+{/snippet}
+
+{#snippet startNext()}
+  {#if canStart}
+    <span class="start" use:tooltip={startHint(ahead)}>
+      <Button size="sm" icon={ChevronsUp} onclick={() => move({ action: 'start' })}>{startLabel(ahead)}</Button>
+    </span>
   {/if}
 {/snippet}
 
@@ -227,7 +315,10 @@
         <Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button>
       {:else if run.status === 'queued'}
         <!-- Phones: in the ⋯ menu under the same name, so the status and its time keep one line beside it. -->
-        <span class="wide-only"><Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button></span>
+        <span class="wide-only">
+          <Button variant="ghost" icon={X} onclick={() => (stopOpen = true)}>Remove from queue</Button>
+          {#if wideQueueItems.length}<Menu label="More run actions" items={wideQueueItems} />{/if}
+        </span>
       {:else if !active}
         <span class="wide-only"><Button variant="ghost" icon={Trash} aria-label="Delete run" title="Delete run" onclick={() => (deleteOpen = true)} /></span>
       {/if}
@@ -235,8 +326,51 @@
       <span class="phone-only"><Menu label="More run actions" items={moreItems} /></span>
     {/snippet}
 
-    <Outcome {run} {elapsed} {resuming} onresume={resume} waiting={queuedOnly ? waiting : undefined} {warnings} />
+    <Outcome
+      {run}
+      {elapsed}
+      {resuming}
+      onresume={resume}
+      waiting={queuedOnly ? waiting : undefined}
+      waitingTitle={place !== null ? queuePlace(place) : undefined}
+      waitingActions={canStart ? startNext : undefined}
+      {warnings}
+    />
 
+    {#if waitingLayout}
+      <!-- Waiting (768 px up): the config as asked for, beside the queue and what the run will have. Nothing here is an
+           empty frame, and no panel stretches to its neighbour's height. -->
+      <div class="waiting">
+        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} /></div>
+        <div class="w-side">
+          {#if place !== null && queue.length}
+            <Panel title="Queue" meta="{waitingCount} waiting" pad="none" id="queue">
+              <ol class="queue">
+                {#if ahead}
+                  <li class="q-row">
+                    <span class="q-n"><span class="live-dot" aria-hidden="true"></span><span class="sr-only">Training</span></span>
+                    <a class="q-name" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a>
+                    <span class="q-meta num">{ahead.eta_s !== null ? `${eta(ahead.eta_s)} left` : 'training'}</span>
+                  </li>
+                {/if}
+                {#each queue as q (q.id)}
+                  {@const self = q.id === run.id}
+                  <li class="q-row" class:self aria-current={self ? 'true' : undefined}>
+                    <span class="q-n num" aria-label={ordinal(q.queue_position ?? 0)}>{q.queue_position}</span>
+                    {#if self}<span class="q-name">{q.name}</span><span class="q-meta">this run</span>{:else}<a class="q-name" href={href(`/runs/${q.id}`)}>{q.name}</a><span class="q-meta"></span>{/if}
+                  </li>
+                {/each}
+              </ol>
+            </Panel>
+          {/if}
+          <Panel title="When training starts" pad="none" id="later">
+            <ul class="later">
+              {#each later as l (l.name)}<li><span class="l-name">{l.name}</span><span class="l-what">{l.what}</span></li>{/each}
+            </ul>
+          </Panel>
+        </div>
+      </div>
+    {:else}
     <!-- Phones: while another section is picked, the chart folds to its one-line readout so that section starts in
          the first screen. -->
     <RunMetrics
@@ -271,9 +405,10 @@
       </div>
       <aside class="rail" aria-label="Per-class results and config">
         <div class="part" data-part="classes"><PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact /></div>
-        <div class="part" data-part="config"><ConfigPanel config={run.config} datasetName={dataset?.name} compact /></div>
+        <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} compact /></div>
       </aside>
     </div>
+    {/if}
   </Page>
 
   <Dialog
@@ -494,6 +629,105 @@
   }
   .dev {
     max-width: 320px;
+  }
+  .start {
+    display: inline-flex;
+  }
+  /* The waiting layout: the config (8 columns) beside the queue and the outputs to come (4), each panel its own
+     height; stacked under 1024 px. */
+  .waiting {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    gap: var(--space-4);
+    align-items: start;
+  }
+  .w-side {
+    display: grid;
+    gap: var(--space-4);
+    min-width: 0;
+  }
+  .w-main {
+    min-width: 0;
+  }
+  @media (max-width: 1023px) {
+    .waiting {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    /* Tablets: the queue leads, then the config, then the outputs to come. */
+    .w-side {
+      display: contents;
+    }
+    .w-side :global(#queue) {
+      order: -1;
+    }
+  }
+  .queue,
+  .later {
+    list-style: none;
+    margin: 0;
+    padding: 0 0 var(--space-2);
+  }
+  .q-row {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-2);
+    height: 36px;
+    padding: 0 var(--space-4);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .q-row:first-child {
+    border-top: 0;
+  }
+  .q-n {
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+  }
+  .live-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-line);
+  }
+  .q-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+  }
+  a.q-name:hover {
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .q-row.self {
+    background: var(--bg-active);
+  }
+  .q-row.self .q-name {
+    font-weight: var(--weight-medium);
+  }
+  .q-meta {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .later li {
+    display: grid;
+    gap: 2px;
+    padding: var(--space-2) var(--space-4);
+    border-top: 1px solid var(--line-subtle);
+  }
+  .later li:first-child {
+    border-top: 0;
+  }
+  .l-name {
+    font-weight: var(--weight-medium);
+  }
+  .l-what {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
   }
   /* The two columns end together: each column's last panel takes what the other column adds. Usually the rail is the
      taller, and the log (at least 200 px) grows to its bottom; under a short rail (few classes) Config's frame runs

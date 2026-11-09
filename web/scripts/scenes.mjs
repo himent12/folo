@@ -307,9 +307,38 @@ export const scenes = [
   },
   // Nothing picked: the inline empty state with the standard secondary "Add run…" button.
   { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'mobile'] },
-  // A queued run in the loaded frame: KPIs at "—", the chart's axes with what it waits for, the config in its rail.
-  // A queued run: the dependency and start estimate lead, the empty frames stay compact until there is data.
+  // A queued run, first of two waiting: its place, what it waits for and when it should start lead; from 768 px up the
+  // config beside the queue and one quiet list of what the run will have (no empty frames). Phones keep their sections.
   { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // Second in the queue (queue control): "2nd in queue", the run in front of it, and Start next (it never interrupts the
+  // live run, so not "now").
+  { name: 'run-queued-second', path: '/runs/run_q7c5', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: (page) => until(page, '.callout button') },
+  {
+    // The queued run's ⋯: Move up (it is last, so no Move down); phones also keep Remove from queue there.
+    name: 'run-queued-menu',
+    path: '/runs/run_q7c5',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button[aria-label="More run actions"]:visible');
+      await page.locator('button[aria-label="More run actions"]:visible').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // What the run trains with (Run.resolved): "AdamW (auto)", "0.000833 (requested 0.01)", batch × accumulate, warmup.
+    // Phones: the Config section.
+    name: 'run-config-resolved',
+    path: '/runs/run_c19a',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
+      else await page.getByRole('radio', { name: 'Config' }).click();
+      await page.locator('#config').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
   {
     // A 5-epoch run from scratch: the trainer's warnings that it is too short to learn, as one callout.
     name: 'run-short-warning',
@@ -539,6 +568,19 @@ export const scenes = [
     },
   },
   { name: 'runs', path: '/runs' },
+  {
+    // The waiting runs say their place ("1st in queue", "2nd in queue"); the second's ⋯ opened: Start next, Move up.
+    name: 'runs-queue-menu',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      const menu = 'button[aria-label="Queue actions for fasteners-m"]:visible';
+      await until(page, menu);
+      await page.locator(menu).click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
   { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -733,18 +775,50 @@ export const scenes = [
     },
   },
   {
-    // ONNX has no download endpoint: the dialog says so next to the server path.
-    name: 'model-export-onnx',
-    path: '/models/m_shapes_s',
+    // ONNX on a server that serves it (weights_onnx): the primary names the file it downloads, the switches mapped to
+    // the query (half: "-f16.onnx").
+    name: 'model-export-onnx-download',
+    path: '/models/m_fast_n',
     fullPage: false,
-    viewports: ['desktop'],
-    setup: async (page) => {
-      await until(page, 'button:has-text("Export")');
-      await page.locator('button:has-text("Export")').first().click();
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
       await until(page, 'dialog[open] fieldset');
       await page.locator('dialog[open] label:has-text("ONNX")').first().click();
-      await page.locator('dialog[open] footer button:has-text("Export")').click();
-      await until(page, 'dialog[open] .where');
+      await until(page, 'dialog[open] .switches');
+      await page.locator('dialog[open] .switches label').nth(2).click();
+      await until(page, 'dialog[open] footer button:has-text("Download")');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The download asked for: in the demo there is no graph to save, and the dialog says so by the file's name.
+    name: 'model-export-onnx',
+    path: '/models/m_fast_n',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] label:has-text("ONNX")').first().click();
+      // The server's features arrive on the mock's clock: Download replaces Export once they do.
+      await until(page, 'dialog[open] footer button:has-text("Download")');
+      await page.locator('dialog[open] footer button:has-text("Download")').click();
+      await until(page, 'dialog[open] .done');
     },
   },
   {
