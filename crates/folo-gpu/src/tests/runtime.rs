@@ -42,8 +42,13 @@ fn pool_reuses_freed_buffers() {
 
 #[test]
 fn release_memory_empties_the_pool_and_lowers_its_cap() {
-    let ctx = gpu!();
-    // Sizes no other test uses, so concurrent tests neither take nor add these buffers.
+    // A context of its own: releasing the shared one would empty the pool under concurrent tests that count on
+    // reusing a buffer they just freed.
+    let _skip_without_adapter = gpu!();
+    let ctx = match crate::GpuContext::new() {
+        Ok(c) => c,
+        Err(e) => return eprintln!("note: skipping, no second context: {e}"),
+    };
     let bytes = 5 * 1024 * 1024 + 4 * 1013;
     let held: Vec<_> = (0..4).map(|_| ctx.alloc(bytes).unwrap()).collect();
     let size = held[0].size();

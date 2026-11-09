@@ -985,7 +985,8 @@ impl Inner {
                 .hint("leave `arch` out when `weights` is set (or set it to the weights' arch)"));
             }
         }
-        let run = self.blocking(move |s| s.create_run(a.config)).await.map_err(|e| self.amp_hint(e))?;
+        let run =
+            self.blocking(move |s| s.create_run(a.config)).await.map_err(|e| self.amp_hint(e, false))?;
         // Embedded runs end with this process, so they are stopped on disconnect; proxied runs belong to the
         // `folo serve` (and Studio) and outlive the session.
         if self.proxy.is_none() {
@@ -1004,8 +1005,9 @@ impl Inner {
     }
 
     /// A `not_supported` from `train` (an `amp` run this server cannot train: no tensor cores, or the CPU) gets a
-    /// hint an MCP client can act on: the switch, or how to restart this server with tensor cores.
-    fn amp_hint(&self, mut e: Error) -> Error {
+    /// hint an MCP client can act on: the switch, or how to restart this server with tensor cores. A resumed run
+    /// keeps its `amp`, so its hint is the restart, or a new f32 run from its model.
+    fn amp_hint(&self, mut e: Error, resume: bool) -> Error {
         if e.body.code != "not_supported" {
             return e;
         }
@@ -1018,10 +1020,17 @@ impl Inner {
                     .to_string()
             }
         };
-        e.body.hint = Some(format!(
-            "set `amp: false` to train in f32 (or `device: \"auto\"` if the run asked for the CPU), or {restart}; \
+        e.body.hint = Some(if resume {
+            format!(
+                "the run trained in mixed precision and resumes in it: {restart}; or train further in f32 with a new \
+                 `train` whose `weights` is the run's model"
+            )
+        } else {
+            format!(
+                "set `amp: false` to train in f32 (or `device: \"auto\"` if the run asked for the CPU), or {restart}; \
              folo_info's `capabilities.amp` says when amp is available"
-        ));
+            )
+        });
         e
     }
 
@@ -1030,7 +1039,8 @@ impl Inner {
         let dataset_id = self.blocking(move |s| Ok(s.get_run(&rid)?.config.dataset_id)).await?;
         self.ensure_dataset(&dataset_id).await?;
         let rid = id.clone();
-        let run = self.blocking(move |s| s.resume_run(&rid, &args)).await.map_err(|e| self.amp_hint(e))?;
+        let run =
+            self.blocking(move |s| s.resume_run(&rid, &args)).await.map_err(|e| self.amp_hint(e, true))?;
         if self.proxy.is_none() {
             let mut created = self.created_runs.lock().unwrap();
             if !created.contains(&run.id) {

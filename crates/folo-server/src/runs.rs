@@ -868,7 +868,21 @@ impl Runs {
             )
             .hint("omit the fields, or start a new run (with `weights` to start from this run's model)"));
         }
-        engine::resolve(&wanted.device)?;
+        let device = engine::resolve(&wanted.device)?;
+        // A mixed-precision run resumes in mixed precision (`amp` must match): refused before it is queued where this
+        // server cannot train it, as a new run is.
+        if wanted.amp
+            && let Err(err) = folo_vision::train::amp_available(device)
+        {
+            let mut err = engine::engine_error(err);
+            err.body.hint = Some(
+                "the run trained in mixed precision and resumes in it: resume it on a server with tensor cores \
+                 (`folo serve --tensor-cores` / `folo mcp --tensor-cores` on a GPU that has them), or start a new \
+                 f32 run with `weights` set to its model"
+                    .into(),
+            );
+            return Err(err);
+        }
         if !Path::new(&st.file.dataset.path).exists() {
             return Err(Error::not_found("dataset", &st.file.dataset.id)
                 .hint(format!("the run's dataset is gone from {}", st.file.dataset.path)));
@@ -1049,6 +1063,11 @@ fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>) {
     let mut trainer = match trainer {
         Ok(t) => t,
         Err((code, msg)) => {
+            // A trainer that failed after placing its model (weights that do not load, a dataset error after the
+            // model was built) left its buffers in the pool too.
+            if let Ok(device) = engine::resolve(&config.device) {
+                engine::release_gpu_memory(device);
+            }
             e.log(LogLevel::Error, msg.clone());
             e.state.lock().unwrap().outcome = Some((RunStatus::Failed, Some(msg), Some(code)));
             return;
@@ -1095,7 +1114,7 @@ fn execute(e: &Arc<RunEntry>, throughput: &Arc<Throughput>) {
     drop(trainer);
     // The run's model, optimizer state, EMA and activations are back in the pool now; hand them to the driver
     // before the run is reported finished, so the next job on this GPU (a CLI run, another process) has its memory.
-    crate::engine::release_gpu_memory(device);
+    engine::release_gpu_memory(device);
 }
 
 fn build(

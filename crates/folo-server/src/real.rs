@@ -93,7 +93,7 @@ impl GpuIdle {
     /// Marks an inference call in flight until the guard drops (its end is then the last use).
     fn using(self: &Arc<Self>) -> GpuUse {
         self.active.fetch_add(1, Ordering::SeqCst);
-        GpuUse(self.clone())
+        GpuUse { idle: self.clone(), gpu: AtomicBool::new(false) }
     }
 }
 
@@ -101,18 +101,28 @@ impl GpuUse {
     /// The call runs on `device`: a GPU's pool is released once inference is idle.
     fn on(&self, device: Device) {
         if !device.is_cpu() {
-            self.0.gpu_used.store(true, Ordering::SeqCst);
+            self.gpu.store(true, Ordering::SeqCst);
+            self.idle.gpu_used.store(true, Ordering::SeqCst);
         }
     }
 }
 
 /// An inference call in flight ([`GpuIdle::using`]).
-struct GpuUse(Arc<GpuIdle>);
+struct GpuUse {
+    idle: Arc<GpuIdle>,
+    gpu: AtomicBool,
+}
 
 impl Drop for GpuUse {
     fn drop(&mut self) {
-        self.0.last_ms.store(self.0.now_ms(), Ordering::SeqCst);
-        self.0.active.fetch_sub(1, Ordering::SeqCst);
+        // Marked again at the end (the guard is the call's first local, so it drops after the call's predictor and
+        // tensors): a call that overlapped a sweep, whose predictor the sweep evicted or whose buffers came back to
+        // the pool after the release, gets the next idle stretch's release.
+        if self.gpu.load(Ordering::SeqCst) {
+            self.idle.gpu_used.store(true, Ordering::SeqCst);
+        }
+        self.idle.last_ms.store(self.idle.now_ms(), Ordering::SeqCst);
+        self.idle.active.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -1074,12 +1084,6 @@ impl Store for RealStore {
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
-        // A mixed-precision run resumes in mixed precision: refused here when this server cannot (see create_run).
-        let config = self.runs.get(id)?.run().config;
-        if config.amp {
-            let device = fields.get("device").and_then(|v| v.as_str()).unwrap_or(&config.device);
-            folo_vision::train::amp_available(engine::resolve(device)?).map_err(engine_error)?;
-        }
         self.runs.resume(id, fields)
     }
 

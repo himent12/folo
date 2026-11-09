@@ -880,10 +880,30 @@ async fn auto_trains_and_predicts_on_the_gpu() {
     let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
     let gpu = folo_gpu::GpuContext::shared().unwrap().summary().name.clone();
     assert!(run.device.starts_with(&gpu), "{} on {gpu}", run.device);
+    // Queued behind it: a fine-tune whose weights file is gone by the time it starts, so its trainer fails after
+    // placing the model on the GPU. Its buffers are released too.
+    let zoo = home.join("models");
+    std::fs::create_dir_all(&zoo).unwrap();
+    let mut seed = folo_vision::FoloModel::with_rng(
+        folo_nn::io::ModelConfig::new("n", 2).unwrap(),
+        &mut folo_core::rng::Rng::seed(4),
+    )
+    .unwrap();
+    seed.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    seed.save(zoo.join("seed.folo")).unwrap();
+    let seed_id = ok::<ModelList>(&app, get("/api/models")).await.models[0].id.clone();
+    let mut doomed = tiny(&ds, 1);
+    doomed["device"] = json!("auto");
+    doomed["weights"] = json!(seed_id);
+    let doomed: Run = ok(&app, post_json("/api/runs", doomed)).await;
+    std::fs::remove_file(zoo.join("seed.folo")).unwrap();
     let mut sse = Events::open(&app, &run.id).await;
     let events = sse.until_status(&["completed", "failed"]).await;
     assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
-    // The finished run gave its pooled buffers back before it was reported finished (the other tests of this binary
+    let mut sse = Events::open(&app, &doomed.id).await;
+    let events = sse.until_status(&["completed", "failed"]).await;
+    assert_eq!(events.last().unwrap().1["status"], "failed", "{events:?}");
+    // Both runs gave their pooled buffers back before they were reported finished (the other tests of this binary
     // train on the CPU, so nothing else fills the pool meanwhile).
     let system: SystemResponse = ok(&app, get("/api/system")).await;
     let pool = system.gpu_pool.expect("the run used the GPU");
@@ -957,6 +977,36 @@ async fn amp_run_without_tensor_cores_is_refused_up_front() {
     assert!(!home.join("runs").exists() || std::fs::read_dir(home.join("runs")).unwrap().next().is_none());
     // The estimate is not refused (it answers what such a run would take where it can run).
     let _: RunEstimate = ok(&app, post_json("/api/runs/estimate", cfg)).await;
+
+    // Mixed-precision runs from a server that had tensor cores (their `amp` flag set in run.json): a stopped one is
+    // refused on resume with resume advice (`amp` must match), but only once it would otherwise resume; a completed
+    // one stays `run_not_resumable`.
+    let stopped: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    ok::<Run>(&app, post(&format!("/api/runs/{}/stop", stopped.id))).await;
+    let done: Run = ok(&app, post_json("/api/runs", tiny(&ds, 1))).await;
+    let mut sse = Events::open(&app, &done.id).await;
+    let events = sse.until_status(&["completed", "failed"]).await;
+    assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
+    drop(sse);
+    drop(app);
+    tokio::task::spawn_blocking(move || s.shutdown()).await.unwrap();
+    for id in [&stopped.id, &done.id] {
+        let p = home.join("runs").join(id).join("run.json");
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+        v["run"]["config"]["amp"] = json!(true);
+        std::fs::write(&p, v.to_string()).unwrap();
+    }
+    let s = store(&home);
+    let app = self::app(&s);
+    let resume = |id: &str| post_json("/api/runs", json!({ "resume_run_id": id }));
+    let e = err(&app, resume(&stopped.id), StatusCode::NOT_IMPLEMENTED, "not_supported").await;
+    let hint = e.hint.unwrap();
+    assert!(hint.contains("resumes in it") && !hint.contains("`amp: false`"), "{hint}");
+    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", stopped.id))).await.status, RunStatus::Stopped);
+    err(&app, resume(&done.id), StatusCode::CONFLICT, "run_not_resumable").await;
+    // A field that differs is still `invalid_config`, checked before amp.
+    let bad = json!({ "resume_run_id": stopped.id, "epochs": 7 });
+    err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
 }
 
 /// Published weights downloaded with `folo weights pull` list as models (id = the published name, `source:
