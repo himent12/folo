@@ -111,21 +111,46 @@ describe('Outcome', () => {
     r.done();
   });
 
-  it('says a too-short run in one line with the epochs that clear it, the reasons in plain words behind Why?', () => {
-    const SHORT =
-      'this run takes only 125 optimizer steps (5 epochs × 25: 800 training images, batch 32); a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. Train for at least 8 epochs, add images, or start from pretrained weights';
-    const WARMUP = "warmup takes 75 of the run's 125 optimizer steps, so the learning rate reaches lr0 only in the second half of the run; lower warmup_epochs (now 3) or train for more epochs";
-    const run = { ...failed(''), status: 'completed' as const, error: null, epochs: 5, config: { ...config, epochs: 5 } };
-    const r = render(run, vi.fn(), [SHORT, WARMUP]);
-    const note = r.target.querySelector<HTMLElement>('[aria-label="Schedule warning"]')!;
-    expect(note.querySelector('.c-title')?.textContent).toBe('Too short to learn:');
-    expect(note.querySelector('.c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
-    const acts = [...note.querySelectorAll<HTMLElement>('.c-acts a, .c-acts button')];
-    expect(acts.map((b) => b.textContent?.trim())).toEqual(['Train 8 epochs', 'Why?']);
-    expect(acts[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&epochs=8');
-    const why = note.querySelector('.c-detail')?.textContent ?? '';
+  const SHORT =
+    'this run takes only 125 optimizer steps (5 epochs × 25: 800 training images, batch 32); a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. Train for at least 8 epochs, add images, or start from pretrained weights';
+  const WARMUP = "warmup takes 75 of the run's 125 optimizer steps, so the learning rate reaches lr0 only in the second half of the run; lower warmup_epochs (now 3) or train for more epochs";
+  const short = (status: Run['status']) => ({ ...failed(''), status, error: status === 'failed' ? 'dataset folder is gone' : null, epochs: 5, config: { ...config, epochs: 5 }, model_id: 'm_1' });
+
+  it('joins a completed run that was too short to learn into one callout: outcome, then the warning, its fix and Why?', () => {
+    const r = render(short('completed'), vi.fn(), [SHORT, WARMUP]);
+    const callouts = r.target.querySelectorAll('.callout');
+    expect(callouts).toHaveLength(1);
+    const c = callouts[0]!;
+    const titles = [...c.querySelectorAll('.c-title')].map((t) => t.textContent);
+    expect(titles).toEqual(['Completed in 16m 00s', 'Too short to learn:']);
+    expect(c.querySelector('.c-msg')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('· best mAP50-95 0.410 at epoch 22');
+    expect(c.querySelector('.c-also .c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
+    // The fix is the one action (no Playground for a model that learned nothing); the reasons behind Why?.
+    expect(r.labels).toEqual(['Train 8 epochs', 'Why?']);
+    expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&epochs=8');
+    const why = c.querySelector('.c-detail')?.textContent ?? '';
     expect(why).toContain('reaches its initial value');
     expect(why).not.toMatch(/lr0|warmup_epochs/);
+    r.done();
+  });
+
+  it('keeps the same one-callout pattern for a stopped or failed short run, with Resume beside the fix', () => {
+    for (const status of ['stopped', 'failed'] as const) {
+      const r = render(short(status), vi.fn(), [SHORT]);
+      expect(r.target.querySelectorAll('.callout')).toHaveLength(1);
+      expect(r.target.querySelector('.c-also .c-title')?.textContent).toBe('Too short to learn:');
+      expect(r.labels).toEqual(['Train 8 epochs', 'Resume', 'Why?']);
+      r.done();
+    }
+  });
+
+  it('says the warning alone while the run has no outcome yet', () => {
+    const r = render(short('running'), vi.fn(), [SHORT, WARMUP]);
+    const note = r.target.querySelector<HTMLElement>('[aria-label="Schedule warning"]')!;
+    expect(r.target.querySelectorAll('.callout')).toHaveLength(1);
+    expect(note.querySelector('.c-title')?.textContent).toBe('Too short to learn:');
+    expect(note.querySelector('.c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
+    expect(r.labels).toEqual(['Train 8 epochs', 'Why?']);
     r.done();
   });
 });

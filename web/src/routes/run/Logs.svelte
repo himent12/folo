@@ -1,5 +1,11 @@
 <script lang="ts">
-  /** Streaming training log: level filter, follow mode (auto-scroll unless you scroll up). */
+  /**
+   * Streaming training log: level filter, follow mode (auto-scroll unless you scroll up). The view always starts on a
+   * whole entry: following, it pins the last entry to the bottom and, when that would cut the top entry (the wrapped
+   * tail of a message, without its time and level), pads the end by the cut so the top entry starts on the edge; read
+   * by hand, it snaps to entries. The box is at least `--log-h` tall (300 px) and grows with its panel when the page
+   * stretches it (Run's columns end together).
+   */
   import ArrowDownToLine from '@lucide/svelte/icons/arrow-down-to-line';
   import type { LogLevel, LogLine } from '$lib/api/types';
   import { clock } from '$lib/format';
@@ -30,9 +36,37 @@
     return { warn: logs.filter((l) => l.level === 'warn').length, error: logs.filter((l) => l.level === 'error').length };
   });
 
+  /** Space after the last entry, so that, pinned to the bottom, the top entry starts whole on the box's top edge. */
+  let pad = 0;
+  /** The box's top padding: an entry the view starts on sits this far under the edge, as the first one does. */
+  const INSET = 8;
+
+  /** Scrolls to the end, landing on a whole entry at the top (padding the end by what would otherwise be cut). */
+  function pin() {
+    if (!box) return;
+    const end = box.scrollHeight - pad - box.clientHeight;
+    let next = 0;
+    if (end > 0) {
+      const top = [...box.querySelectorAll<HTMLElement>('.line')].find((l) => l.offsetTop - INSET >= end - 0.5);
+      next = top ? top.offsetTop - INSET - end : 0;
+    }
+    // Set on the element, not through state: the scroll below must see the new padding in this frame.
+    pad = next;
+    box.style.setProperty('--tail', `${next}px`);
+    box.scrollTop = box.scrollHeight;
+  }
+
   $effect(() => {
     void shown;
-    if (follow && box) box.scrollTop = box.scrollHeight;
+    if (follow) pin();
+  });
+  // The box's height follows the page (Run stretches it to the rail): re-pin when it changes.
+  $effect(() => {
+    const el = box;
+    if (!el) return;
+    const ro = new ResizeObserver(() => follow && pin());
+    ro.observe(el);
+    return () => ro.disconnect();
   });
 
   function onscroll() {
@@ -73,7 +107,7 @@
       </div>
       {#if !follow}
         <div class="jump">
-          <Button size="sm" icon={ArrowDownToLine} onclick={() => ((follow = true), box && (box.scrollTop = box.scrollHeight))}>Follow</Button>
+          <Button size="sm" icon={ArrowDownToLine} onclick={() => ((follow = true), pin())}>Follow</Button>
         </div>
       {/if}
     </div>
@@ -83,11 +117,21 @@
 <style>
   .wrap {
     position: relative;
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
   }
   .log {
-    height: 300px;
+    position: relative;
+    flex: 1 1 auto;
+    height: var(--log-h, 300px);
     overflow: auto;
-    padding: var(--space-2) 0;
+    /* The end's padding grows by --tail when pinned, so the top entry is whole (pin()). */
+    padding: var(--space-2) 0 calc(var(--space-2) + var(--tail, 0px));
+    /* Read by hand, the view comes to rest on an entry's start. */
+    scroll-snap-type: y proximity;
+    scroll-padding-top: var(--space-2);
     background: var(--bg-inset);
     border-top: 1px solid var(--line-subtle);
     border-radius: 0 0 var(--radius-lg) var(--radius-lg);
@@ -103,6 +147,7 @@
     align-items: baseline;
     gap: var(--space-3);
     padding: 0 var(--space-4);
+    scroll-snap-align: start;
   }
   /* Wrap at spaces only: a piece (a word, a `key value` pair, a flag and its value) never breaks inside, except one
      too long for any line, as a last resort. */

@@ -262,8 +262,20 @@ export const scenes = [
       await page.locator('.aug-toggle').click();
     },
   },
-  // Run lengths 23 to 150 epochs: the x axis defaults to "% of run", and the control says so.
+  // Plans of 100 and 150 epochs: the x axis stays "By epoch"; each line ends in its run's status mark.
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  {
+    // "By progress": every run over its planned epochs, so the failed and stopped runs end where they ended.
+    name: 'run-compare-progress',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.chip .key');
+      await page.getByRole('radio', { name: 'By progress' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
   {
     // A run kept in front from the legend: its card selected, its line (here the dotted fourth run) painted over the rest.
     name: 'run-compare-pinned',

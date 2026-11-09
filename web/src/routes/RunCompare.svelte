@@ -25,7 +25,7 @@
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { niceDomain, unitDomain } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
-  import { defaultAxis, runX } from '$lib/charts/runAxis';
+  import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
   import { deviceName, duration, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -62,8 +62,9 @@
   let cursor = $state<number | null>(null);
 
   const chosen = $derived(ids.map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
-  // Runs of very different lengths (23 vs 150 epochs) would crush the short ones into the start of an epoch axis: then
-  // the axis defaults to "By progress" (each run over its own length, ../lib/charts/runAxis), and the axis says why.
+  // Runs planned for very different lengths (30 vs 150 epochs) would crush the short ones into the start of an epoch
+  // axis: then the axis defaults to "By progress" (each run over its planned epochs, ../lib/charts/runAxis), and the axis
+  // says why. Every run is divided by its plan, so a run that failed or stopped early ends where it ended.
   let xChoice = $state<Axis | null>(null);
   const x = $derived<Axis>(xChoice ?? defaultAxis(chosen));
   const xAuto = $derived(xChoice === null && x === 'progress');
@@ -72,7 +73,7 @@
     { value: 'progress', label: 'By progress' },
   ];
   // The normalised axis names itself; chosen for you, it also says why.
-  const xLabel = $derived(x === 'progress' ? (xAuto ? "% of each run's length · runs differ in length" : "% of each run's length") : undefined);
+  const xLabel = $derived(x === 'progress' ? (xAuto ? '% of planned epochs · plans differ in length' : '% of planned epochs') : undefined);
   let hint = $state<string | null>(null);
   // Colours follow the run, not its position: removing one run never repaints the others.
   let slots = $state<Record<string, number>>({});
@@ -110,6 +111,8 @@
         label: r.name,
         color: color(r.id),
         pattern: SLOT_PATTERN[slotOf(r.id)],
+        // Each line ends in its run's status mark (live, stopped, failed), so a line that stops short says why.
+        end: runEnd(r.status) ?? undefined,
         points: eps.map((e) => ({ x: runX(e.epoch, r, x), y: f(e) })),
       };
     });
@@ -276,7 +279,9 @@
           </summary>
           <div class="about-body">
             {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
-            {#if x === 'progress'}<p>By progress puts each run over its own length, so a short run and a long one compare by shape.</p>{/if}
+            {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
+            <p>Each line ends in its run's status: a ringed dot while it trains, a square where it was stopped, a cross
+              where it failed.</p>
             <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
               started (fine-tuned, or from scratch).</p>
             <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>

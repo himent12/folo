@@ -2,15 +2,17 @@
   /**
    * How fast the engine is, against the incumbent of the same size on the same machine: every row of
    * docs/BENCHMARKS.md's summary where both have a number, including the ones FOLO trails. Values in ink; the lead is a
-   * word ("1.66× faster", "17% less memory"), never a colour, and a row where FOLO is behind says so plainly. One sentence says what is
-   * compared and, next to it, that most rows are not like for like; each row keeps one short qualifier and names what
-   * differs (precision, workload), and the method and caveats sit in a "How this was measured" fold.
+   * word ("1.66× faster", "17% less memory"), never a colour, and a row where FOLO is behind says so plainly. Only rows
+   * measured under the same conditions state a winner: a row whose engines ran at different precision or did different
+   * work keeps both measurements, and its conclusion is "Different conditions" over the specific difference ("f32 vs
+   * TF32"). One sentence says what is compared and how many rows are not like for like; each row keeps one short
+   * qualifier, and the method and caveats sit in a "How this was measured" fold.
    * Phones stack each row (the metric, then its three values, each with its engine named in the markup); the header
    * row stays for assistive tech, every value names its metric and column through `headers`, and explicit cell roles
    * keep the table's semantics through the grid layout.
    */
   import { tick } from 'svelte';
-  import { advantage, BENCH_SOURCE, unlike, versusYolo26n, type Versus } from '$lib/benchmarks';
+  import { advantage, BENCH_SOURCE, comparable, unlike, versusYolo26n, type Versus } from '$lib/benchmarks';
   import { num } from '$lib/format';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Panel from '$lib/ui/Panel.svelte';
@@ -26,8 +28,7 @@
   const caveats = versusYolo26n.filter((v) => v.caveat);
 
   // What keeps a row from being like for like: one list, lib/benchmarks.ts `unlike` (Models' summary counts it too).
-  const differs = (v: Versus) => unlike[v.metric] ?? [];
-  const mixed = versusYolo26n.filter((v) => differs(v).length).length;
+  const mixed = versusYolo26n.filter((v) => !comparable(v)).length;
 
   let how = $state<HTMLDetailsElement>();
   /** "See how this was measured": opens the fold and takes the reader there. */
@@ -46,7 +47,7 @@
     folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px.
     {#if mixed}
       <span class="qual"
-        >{mixed} of {versusYolo26n.length} rows mix precision or workload conditions; <button type="button" class="see" onclick={showHow}>see how this was measured</button
+        >{mixed} of {versusYolo26n.length} rows ran under different conditions and name no winner; <button type="button" class="see" onclick={showHow}>see how this was measured</button
         >.</span
       >
     {/if}
@@ -63,17 +64,18 @@
     <tbody>
       {#each versusYolo26n as v, i (v.metric)}
         {@const ahead = advantage(v) >= 1}
-        <tr class:behind={!ahead}>
+        {@const diff = unlike[v.metric]}
+        <tr class:behind={!diff && !ahead} class:unlike={!!diff}>
           <th scope="row" role="rowheader" id="vs-r-{i}" headers="vs-h-m">
-            <span class="m"
-              >{v.metric}{#each differs(v) as d (d)}<span class="flag">{d} differs</span>{/each}</span
-            >
+            <span class="m">{v.metric}</span>
             {#if v.note}<span class="note">{v.note}</span>{/if}
           </th>
           <!-- The engine's name over each value is for the stacked phone rows; screen readers get it from `headers`. -->
           <td role="cell" class="r num v" headers="vs-r-{i} vs-h-folo"><span class="cl" aria-hidden="true">folo-n</span>{fmt(v, v.folo)}</td>
           <td role="cell" class="r num v yolo" headers="vs-r-{i} vs-h-yolo"><span class="cl" aria-hidden="true">YOLO26n</span>{fmt(v, v.yolo)}</td>
-          <td role="cell" class="r lead" headers="vs-r-{i} vs-h-lead"><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>{lead(v)}</td>
+          <td role="cell" class="r lead" headers="vs-r-{i} vs-h-lead"
+            ><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>{#if diff}<span class="dc">Different conditions</span><span class="why">{diff.differs}</span>{:else}{lead(v)}{/if}</td
+          >
         </tr>
       {/each}
     </tbody>
@@ -89,8 +91,9 @@
       </p>
       <p>Times and memory: lower is better. Images per second: higher is better.</p>
       <p>
-        <span class="cv-m">Precision differs:</span> the engines ran at different numeric precision (f32, TF32, fp16).
-        <span class="cv-m">Workload differs:</span> they did different work, or ran under different load.
+        <span class="cv-m">Different conditions:</span> the engines ran at different numeric precision (f32, TF32, fp16),
+        did different work, or ran under different load. Those rows keep both measurements and name the difference, but
+        no winner: the ratio would mix the engine with its conditions.
       </p>
       {#if caveats.length}
         <ul>
@@ -157,21 +160,6 @@
       margin-block: calc(var(--space-3) * -1);
     }
   }
-  /* What keeps a row from being like for like: a word, never only a colour. */
-  .flag {
-    display: inline-flex;
-    align-items: center;
-    height: 20px;
-    margin-left: var(--space-2);
-    padding: 0 6px;
-    border-radius: var(--radius-xs);
-    background: var(--bg-active);
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-secondary);
-    vertical-align: 1px;
-    white-space: nowrap;
-  }
   /* One 12 px tertiary line per row (qualifiers are ≤ 60 characters, tested). */
   .note {
     display: block;
@@ -204,6 +192,20 @@
   .behind .lead {
     font-weight: var(--weight-regular);
     color: var(--text-secondary);
+  }
+  /* No winner: the conclusion in secondary ink, over the specific difference on the qualifier's 12 px line. */
+  .unlike .lead {
+    font-weight: var(--weight-regular);
+  }
+  .dc {
+    display: block;
+    color: var(--text-secondary);
+  }
+  .why {
+    display: block;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
   }
   .how {
     border-top: 1px solid var(--line-subtle);
@@ -271,7 +273,8 @@
     }
     .vs tbody tr {
       display: grid;
-      /* The lead ("20% less memory") keeps its one line; the two values share the rest. */
+      /* The lead ("20% less memory", or "Different conditions" over its difference) keeps its width; the two values
+         share the rest. */
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) max-content;
       gap: var(--space-1) var(--space-3);
       padding: var(--space-3) var(--space-4);

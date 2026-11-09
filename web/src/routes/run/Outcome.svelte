@@ -3,8 +3,10 @@
    * A run's outcome under the header, every state in one pattern (./Callout): icon, title, cause, one action, and a
    * disclosure for the rest. Out of GPU memory says so plainly, with the likeliest smaller setting as the action and
    * the other fixes and the driver's report behind "More fixes". A queued run leads with what it waits for and when it
-   * should start. The trainer's warning that a run is too short to learn from (./warnings) is one line of its own,
-   * "Too short to learn: 125 optimizer steps", with the engine's sentences in plain words behind "Why?"; never a toast.
+   * should start. The trainer's warning that a run is too short to learn from (./warnings) is one line, "Too short to
+   * learn: 125 optimizer steps", with the engine's sentences in plain words behind "Why?"; never a toast. Once the run
+   * has an outcome, that line joins the outcome's callout as its second line ("Completed in 30s · best …", then "Too
+   * short to learn: …"), so one run never stacks two banners.
    */
   import type { Snippet } from 'svelte';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
@@ -46,10 +48,17 @@
   const driver = $derived(oom ? oomDetail(run.error) : null);
   /** The epochs that clear the warning (⌈200 / steps per epoch⌉): its action opens New run with them filled in. */
   const suggested = $derived(suggestedEpochs(warnings));
+  /**
+   * The trainer's schedule warning as a callout line, "Too short to learn: 125 optimizer steps": the second line of the
+   * run's outcome callout once there is one, else a callout of its own.
+   */
+  const short = $derived(warnings.length ? { icon: TriangleAlert, tone: 'warning' as const, title: scheduleTitle(warnings), msg: shortCause(warnings) } : undefined);
 </script>
 
 {#if run.status === 'failed' && oom}
-  <Callout tone="danger" icon={TriangleAlert} title="Ran out of GPU memory" role="alert" stack moreLabel="More fixes">
+  <!-- Out of memory blocks any run: its fix stays the action; a schedule warning joins as the second line, its fix and
+       reasons behind More fixes. -->
+  <Callout tone="danger" icon={TriangleAlert} title="Ran out of GPU memory" role="alert" stack moreLabel="More fixes" also={short}>
     Batch {run.config.batch} at {run.config.imgsz} px with <span class="mono">{run.config.arch}</span> did not fit, at epoch {run.epoch}.
     {#snippet actions()}
       {#if fixes[0]}
@@ -59,27 +68,40 @@
       {/if}
     {/snippet}
     {#snippet more()}
-      {#if fixes.length > 1}
+      {#if fixes.length > 1 || short}
         <div class="alts">
           {#each fixes.slice(1) as f (f.kind)}<Button size="sm" href={href(retryPath(run.id, f))}>{f.label}</Button>{/each}
+          {#if short}{@render scheduleFix()}{/if}
         </div>
       {/if}
       {#if driver}
         <p class="d-head">Driver report</p>
         <code class="mono">{driver}</code>
       {/if}
+      {#if short}{@render why()}{/if}
     {/snippet}
   </Callout>
 {:else if run.status === 'failed'}
-  <Callout tone="danger" icon={TriangleAlert} title="Failed at epoch {run.epoch}" role="alert" moreLabel="More fixes">
+  <Callout tone="danger" icon={TriangleAlert} title="Failed at epoch {run.epoch}" role="alert" moreLabel={short ? 'Why?' : 'More fixes'} also={short}>
     {run.error}
     {#snippet actions()}
+      {#if short}{@render scheduleFix()}{/if}
       <!-- Anything but out of memory can continue from the last checkpoint. -->
       <Button size="sm" icon={Play} loading={resuming} onclick={onresume}>Resume</Button>
     {/snippet}
     {#snippet more()}
-      <div class="alts"><Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button></div>
+      {#if short}{@render why()}{:else}
+        <div class="alts"><Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button></div>
+      {/if}
     {/snippet}
+  </Callout>
+{:else if run.status === 'completed' && short}
+  <!-- A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its action
+       (trying a model that learned nothing in the Playground is not the next step). -->
+  <Callout tone="success" icon={CircleCheck} title="Completed in {duration(elapsed)}" moreLabel="Why?" also={short} runIn>
+    · best mAP50-95 <span class="num">{metric(run.best?.map50_95)}</span> at epoch {run.best?.epoch ?? 0}
+    {#snippet actions()}{@render scheduleFix()}{/snippet}
+    {#snippet more()}{@render why()}{/snippet}
   </Callout>
 {:else if run.status === 'completed'}
   <Callout tone="success" icon={CircleCheck} title="Completed in {duration(elapsed)}" brief>
@@ -89,31 +111,36 @@
     {/snippet}
   </Callout>
 {:else if run.status === 'stopped'}
-  <Callout tone="neutral" icon={Square} title="Stopped at epoch {run.epoch}">
+  <Callout tone="neutral" icon={Square} title="Stopped at epoch {run.epoch}" moreLabel="Why?" also={short} more={short ? why : undefined}>
     The last checkpoint was kept{run.model_id ? ' and saved as a model' : ''}.
-    {#snippet actions()}<Button size="sm" icon={Play} loading={resuming} onclick={onresume}>Resume</Button>{/snippet}
+    {#snippet actions()}
+      {#if short}{@render scheduleFix()}{/if}
+      <Button size="sm" icon={Play} loading={resuming} onclick={onresume}>Resume</Button>
+    {/snippet}
   </Callout>
 {:else if run.status === 'queued' && waiting}
   <!-- The dependency and the start estimate lead; the frames below stay compact until there is data. -->
   <Callout tone="neutral" icon={Clock} title="Waiting to start">{@render waiting()}</Callout>
-{/if}
-
-{#if warnings.length}
-  <!-- One line: the cause in numbers and the fix; the engine's sentences, in plain words, behind "Why?". -->
-  <Callout tone="warning" icon={TriangleAlert} title={scheduleTitle(warnings)} role="note" label="Schedule warning" moreLabel="Why?" runIn>
-    {shortCause(warnings)}
-    {#snippet actions()}
-      {#if suggested && suggested > run.config.epochs}
-        <Button size="sm" icon={RotateCcw} href={href(`${retryPath(run.id)}&epochs=${suggested}`)}>Train {suggested} epochs</Button>
-      {:else}
-        <Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button>
-      {/if}
-    {/snippet}
-    {#snippet more()}
-      {#each warnings as w (w)}<p class="why">{plain(w)}</p>{/each}
-    {/snippet}
+{:else if short}
+  <!-- No outcome yet (a live run): the warning alone, one line: the cause in numbers and the fix; the engine's
+       sentences, in plain words, behind "Why?". -->
+  <Callout tone="warning" icon={TriangleAlert} title={short.title} role="note" label="Schedule warning" moreLabel="Why?" runIn more={why}>
+    {short.msg}
+    {#snippet actions()}{@render scheduleFix()}{/snippet}
   </Callout>
 {/if}
+
+{#snippet scheduleFix()}
+  {#if suggested && suggested > run.config.epochs}
+    <Button size="sm" icon={RotateCcw} href={href(`${retryPath(run.id)}&epochs=${suggested}`)}>Train {suggested} epochs</Button>
+  {:else}
+    <Button size="sm" icon={RotateCcw} href={href(retryPath(run.id))}>New run like this</Button>
+  {/if}
+{/snippet}
+
+{#snippet why()}
+  {#each warnings as w (w)}<p class="why">{plain(w)}</p>{/each}
+{/snippet}
 
 <style>
   .alts {

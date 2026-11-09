@@ -3,7 +3,9 @@
    * A run banner, one line (web/DESIGN_DIRECTION.md §4.4, the Vercel callout): status icon, title, cause, one action,
    * and a disclosure for the details. Only the icon and the title take the status hue; the cause stays in
    * text.secondary. On phones the cause wraps under the title and the actions go under the text; a `stack` callout
-   * gives its first action the full width (the one fix to take), the disclosure under it.
+   * gives its first action the full width (the one fix to take), the disclosure under it. An `also` line under the
+   * first, with its own mark and hue, joins a second finding about the same run (a completed run's outcome, then the
+   * trainer's warning that it was too short to learn), so one run never stacks two banners.
    */
   import type { Snippet } from 'svelte';
   import type { IconType } from '$lib/ui/types';
@@ -21,6 +23,7 @@
     actions,
     more,
     moreLabel = 'Details',
+    also,
   }: {
     tone: 'success' | 'warning' | 'danger' | 'neutral';
     icon: IconType;
@@ -39,17 +42,26 @@
     /** What the disclosure opens. */
     more?: Snippet;
     moreLabel?: string;
+    /** A second line under the first: its own mark and tone, a title and a short cause. The actions serve both. */
+    also?: { icon: IconType; tone: 'success' | 'warning' | 'danger' | 'neutral'; title: string; msg?: string };
   } = $props();
 
   const uid = $props.id();
   let open = $state(false);
 </script>
 
-<div class="callout {tone}" class:stack class:brief class:run-in={runIn} {role} aria-label={label}>
+<div class="callout {tone}" class:stack class:brief class:run-in={runIn} class:two={!!also} {role} aria-label={label}>
   <Icon size={16} aria-hidden="true" />
   <p class="c-text">
     <span class="c-title">{title}</span>{#if children}<span class="c-msg">{@render children()}</span>{/if}
   </p>
+  {#if also}
+    {@const AlsoIcon = also.icon}
+    <span class="c-also-mark {also.tone}" aria-hidden="true"><AlsoIcon size={16} /></span>
+    <p class="c-text c-also {also.tone}">
+      <span class="c-title">{also.title}</span>{#if also.msg}<span class="c-msg">{also.msg}</span>{/if}
+    </p>
+  {/if}
   {#if actions || more}
     <div class="c-acts">
       {#if actions}{@render actions()}{/if}
@@ -80,7 +92,7 @@
   }
   /* The status hue on the mark and the title only; the cause reads in text.secondary. */
   .danger > :global(svg),
-  .danger .c-title {
+  .danger > .c-text:not(.c-also) .c-title {
     color: var(--danger-text);
   }
   .success > :global(svg) {
@@ -90,8 +102,36 @@
     color: var(--text-tertiary);
   }
   .warning > :global(svg),
-  .warning .c-title {
+  .warning > .c-text:not(.c-also) .c-title {
     color: var(--warning-text);
+  }
+  /* The second line's mark and title take its own hue; its cause stays in text.secondary. */
+  .c-also-mark {
+    display: inline-flex;
+    color: var(--text-tertiary);
+  }
+  .c-also-mark.warning,
+  .c-also.warning .c-title {
+    color: var(--warning-text);
+  }
+  .c-also-mark.danger,
+  .c-also.danger .c-title {
+    color: var(--danger-text);
+  }
+  .c-also-mark.success {
+    color: var(--success-text);
+  }
+  .c-also.success .c-title,
+  .c-also.neutral .c-title {
+    color: var(--text-primary);
+  }
+  /* Two lines: the actions serve both, on the right across them. */
+  .two .c-acts {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+  .two .c-detail {
+    grid-row: 3;
   }
   .c-text {
     min-width: 0;
@@ -186,6 +226,14 @@
     }
     .c-detail {
       grid-column: 2;
+    }
+    .two .c-acts,
+    .two .c-detail {
+      grid-column: 2;
+      grid-row: auto;
+    }
+    .c-also-mark {
+      margin-top: 2px;
     }
     /* The one fix to take, across the callout; the disclosure under it. */
     .stack .c-acts {

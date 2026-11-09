@@ -252,7 +252,8 @@
       folded={section !== 'samples'}
     />
 
-    <!-- Evidence on the left (what the model sees, what the trainer says); reference in a sticky rail on the right. -->
+    <!-- Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right, the two
+         columns ending together. -->
     <!-- Below 960 px one of these shows at a time, chosen here; wider screens show them all beside a rail. -->
     <div class="phone-pick">
       <Segmented
@@ -497,21 +498,22 @@
   .dev {
     max-width: 320px;
   }
+  /* The two columns end together: each column's last panel takes what the other column adds. Usually the rail is the
+     taller, and the log (at least 200 px) grows to its bottom; under a short rail (few classes) Config's frame runs
+     down to the log's end, as a properties rail runs the page's height. No fixed heights. */
   .detail {
+    --log-h: 200px;
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: var(--space-4);
-    align-items: start;
+    align-items: stretch;
   }
   .main-col,
   .rail {
     display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
     gap: var(--space-4);
     min-width: 0;
-  }
-  .rail {
-    position: sticky;
-    top: calc(var(--size-topbar) + var(--space-4));
   }
   .part {
     display: grid;
@@ -545,8 +547,9 @@
     .detail {
       grid-template-columns: minmax(0, 1fr);
     }
-    .rail {
-      position: static;
+    /* One section at a time: the log keeps its own height. */
+    .detail {
+      --log-h: 300px;
     }
   }
   @media (max-width: 767px) {

@@ -60,8 +60,8 @@
   const deviceText = $derived(run ? deviceLine(run, sys.data?.gpus ?? []) : '');
 </script>
 
-<!-- The lime hairline means "training now": only once a running run has loaded, never on the placeholder. -->
-<section class="card" class:live={run?.status === 'running'} aria-labelledby={run ? 'live-title' : undefined} aria-label={run ? undefined : 'Loading training'} aria-busy={!run}>
+<!-- "Training now" is the status badge and the progress bar; the card's edge stays a plain hairline. -->
+<section class="card" aria-labelledby={run ? 'live-title' : undefined} aria-label={run ? undefined : 'Loading training'} aria-busy={!run}>
   <header>
     <div class="title-row">
       {#if run}
@@ -111,11 +111,11 @@
       </div>
     </div>
     <div class="chart">
-      <!-- Phones: the legend has no room for its "Latest · ep N" note, so the title carries it. -->
+      <!-- "Latest · ep N" is said once: in the legend's note where the legend has room for it; on phones in the title,
+           so the legend holds only the two series and their values, on one row. -->
       <p class="chart-title">Validation mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : 'by epoch, so far'}</span></p>
       {#if !run || live.loading}
-        <!-- Phones: the legend (note and two values) wraps to two rows. -->
-        <ChartSkeleton height={narrow ? 140 : 200} legendRows={narrow ? 2 : 1} />
+        <ChartSkeleton height={narrow ? 140 : 200} />
       {:else}
         <LineChart
           series={charts.map}
@@ -126,7 +126,7 @@
           valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
-          legendNote={lastEpoch ? `Latest · ep ${lastEpoch}` : 'Latest'}
+          legendNote={narrow ? undefined : lastEpoch ? `Latest · ep ${lastEpoch}` : 'Latest'}
           label="Validation mAP by epoch"
           empty="Waiting for the first validation…"
         />
@@ -145,14 +145,6 @@
   }
   :global([data-theme='light']) .card {
     border-color: var(--line-default);
-  }
-  .card.live::before {
-    content: '';
-    position: absolute;
-    inset: 0 0 auto 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--accent-line) 30%, var(--accent-line) 70%, transparent);
-    opacity: 0.55;
   }
   header {
     display: grid;

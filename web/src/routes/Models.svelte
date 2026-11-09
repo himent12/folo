@@ -145,7 +145,7 @@
   const strongScore = $derived<Key>(sortKey === 'map50' ? 'map50' : 'map50_95');
   /** One line for the collapsed engine benchmarks: what is measured and how many rows are not like for like (a win
    *  count would add up unlike conditions; each row's own qualifier says which way it goes). */
-  const benchUnlike = versusYolo26n.filter((v) => unlike[v.metric]?.length).length;
+  const benchUnlike = versusYolo26n.filter((v) => unlike[v.metric]).length;
 </script>
 
 <Page title="Models">
@@ -331,7 +331,7 @@
       <summary>
         <span class="chev" aria-hidden="true"></span>
         <span class="b-title">Engine benchmarks</span>
-        <span class="b-sum">{versusYolo26n.length} engine measurements · {benchUnlike} use different precision or workloads</span>
+        <span class="b-sum">{versusYolo26n.length} engine measurements · {benchUnlike} under different conditions</span>
       </summary>
       <div class="b-body"><Versus /></div>
     </details>

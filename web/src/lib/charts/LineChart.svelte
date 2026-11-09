@@ -29,6 +29,11 @@
     /** The direct label at the line's end (with `endLabels`): a short name instead of `label`, or false for none. */
     endLabel?: string | false;
     /**
+     * How the line ends, drawn at its last point with `endDots` in the status marks of StatusBadge: a ringed dot while
+     * live, a square when stopped, a cross when failed (a plain dot otherwise). The end label then names it too.
+     */
+    end?: 'live' | 'stopped' | 'failed';
+    /**
      * A band instead of a line: `points` is the upper edge, `lower` the lower edge at the same x positions (e.g. the
      * spread of many curves). Drawn as a soft fill under the lines; not in the legend or the readout.
      */
@@ -224,6 +229,13 @@
 
   /** A line's direct label: its short `endLabel`, else its legend label; null for none. */
   const endText = (s: Series) => (s.ghost || s.context || s.endLabel === false ? null : (s.endLabel ?? s.label));
+  /** The end label as drawn: the name cut at 18 characters, then how the line ends ("· failed"), never cut. */
+  const endShown = (s: Series) => {
+    const t = endText(s);
+    if (t === null) return null;
+    const name = t.length > 18 ? `${t.slice(0, 17)}…` : t;
+    return s.end ? `${name} · ${s.end}` : name;
+  };
   /** Direct labels at each line's last point, each in a spot that covers no curve and no other label (endLabels.ts). */
   // Narrow plots keep their width for data (the legend names the lines), unless every label is a short name such as
   // the loss components' "box", "cls", "dfl".
@@ -233,7 +245,7 @@
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
     // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px.
     // Plus room for a leader, when labels are moved apart (LEAD).
-    const labelW = showEnds ? Math.min(130, Math.max(0, ...series.map((s) => Math.min(18, endText(s)?.length ?? 0))) * 6.8 + 10) + LEAD - 6 : 0;
+    const labelW = showEnds ? Math.min(130, Math.max(0, ...series.map((s) => endShown(s)?.length ?? 0)) * 6.8 + 10) + LEAD - 6 : 0;
     const left = Math.ceil(longest * 7) + 14;
     // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot.
     return { top: yLabel || xMark ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
@@ -309,8 +321,7 @@
       .map((s) => {
         const p = s.points[s.points.length - 1];
         const curve = visible.indexOf(s);
-        const t = endText(s)!;
-        return p && Number.isFinite(p.y) ? { id: s.id, label: t.length > 18 ? `${t.slice(0, 17)}…` : t, x: x(p.x), y: y(p.y), curve } : null;
+        return p && Number.isFinite(p.y) ? { id: s.id, label: endShown(s)!, x: x(p.x), y: y(p.y), curve } : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
       // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
@@ -687,7 +698,16 @@
             {#each lifted(paintOrder(keyed, (s) => s), (s) => s.id) as s (s.id)}
               {@const p = s.points[s.points.length - 1]}
               {#if p && Number.isFinite(p.y)}
-                <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} r={receding && s.id === highlight ? 4 : 3} style:fill={contextual(s) ? 'var(--chart-context)' : s.color} />
+                {@const r = receding && s.id === highlight ? 4 : 3}
+                {@const ink = contextual(s) ? 'var(--chart-context)' : s.color}
+                {#if s.end === 'failed'}
+                  <path class="end-x" d="M{x(p.x) - r} {y(p.y) - r}l{2 * r} {2 * r}m0 {-2 * r}l{-2 * r} {2 * r}" style:stroke={ink} />
+                {:else if s.end === 'stopped'}
+                  <rect class="end-dot" x={x(p.x) - r} y={y(p.y) - r} width={2 * r} height={2 * r} style:fill={ink} />
+                {:else}
+                  {#if s.end === 'live'}<circle class="end-live" cx={x(p.x)} cy={y(p.y)} r={r + 3} />{/if}
+                  <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} {r} style:fill={ink} />
+                {/if}
               {/if}
             {/each}
           {/if}
@@ -885,6 +905,19 @@
   }
   .end-dot {
     stroke: var(--bg-panel);
+    stroke-width: 1.5;
+  }
+  /* A failed run's line ends in a cross, over a halo in the panel colour like the dots. */
+  .end-x {
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 1px var(--bg-panel));
+  }
+  /* Still training: the run's dot in a lime ring, the status bar's running mark. */
+  .end-live {
+    fill: none;
+    stroke: var(--accent-line);
     stroke-width: 1.5;
   }
   .halo {

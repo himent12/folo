@@ -25,7 +25,7 @@
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
-  import { holdDomain, logDomain, niceDomain, unitDomain, type Fit, type Held } from '$lib/charts/domain';
+  import { holdDomain, logDomain, niceDomain, unitDomain, UNIT_MIN_TOP, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
@@ -61,21 +61,21 @@
   type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
   let tab = $state<Tab>('map');
 
-  // Below 960 px the six tabs become one metric picker in the chart header, where it replaces the title; phones also
-  // get a shorter plot, so the samples start within the first screen.
-  const media = (q: string) => typeof matchMedia !== 'undefined' && matchMedia(q).matches;
-  let narrow = $state(media('(max-width: 767px)'));
-  let picking = $state(media('(max-width: 959px)'));
+  // Phones (< 768 px) turn the six tabs into one metric picker in the chart header, where it replaces the title, and
+  // get a shorter plot, so the samples start within the first screen. Tablets keep the tabs (scrolling sideways when
+  // a value needs it), as on laptops and desktops.
+  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
   $effect(() => {
     const phone = matchMedia('(max-width: 767px)');
-    const tablet = matchMedia('(max-width: 959px)');
-    const on = () => ((narrow = phone.matches), (picking = tablet.matches));
+    const on = () => (narrow = phone.matches);
     phone.addEventListener('change', on);
-    tablet.addEventListener('change', on);
-    return () => (phone.removeEventListener('change', on), tablet.removeEventListener('change', on));
+    return () => phone.removeEventListener('change', on);
   });
-  // Phones: a queued run's plot is the axes and one line, folded until asked for.
-  const height = $derived(queued && narrow ? 120 : narrow ? 168 : 320);
+  // Phones: a queued run's plot is the axes and one line, folded until asked for. An ended run that learned almost
+  // nothing (its best mAP50-95 sits under the 0–1 axis's lowest top, ../../lib/charts/domain UNIT_MIN_TOP) gets a
+  // shorter plot on every tab, so its few low samples are not a thin line along the floor of a 320 px frame.
+  const flat = $derived(!['queued', 'running', 'stopping'].includes(run.status) && (run.best?.map50_95 ?? 0) + 0.02 < UNIT_MIN_TOP);
+  const height = $derived(queued && narrow ? 120 : narrow ? 168 : flat ? 200 : 320);
   let queuedOpen = $state(false);
   const queuedFold = $derived(queued && narrow && !queuedOpen);
   // Folded on phones while another section is picked; a tap on the readout opens it until the section changes.
@@ -113,7 +113,7 @@
     const spe = Math.max(1, stepsPerEpoch(run, steps));
     return Math.max(lastStep ? lastStep.step / spe : 0, lastEpoch ? lastEpoch.epoch : 0);
   });
-  const xDomain = $derived(runHorizon(observed, run.epochs, live, horizon));
+  const xDomain = $derived(runHorizon(observed, run.epochs, horizon));
   const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
   const INK = 'var(--text-primary)';
@@ -356,7 +356,7 @@
     </div>
     <!-- Queued: the tabs read "—" until the first step, so the frame is the one a running run fills. -->
     <!-- svelte-ignore a11y_interactive_supports_focus -->
-    <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
+    <div class="tabs" role="tablist" aria-label="Metric to chart" data-scrolls {onkeydown}>
         {#each tabs as t (t.id)}
           <button
             role="tab"
@@ -389,8 +389,8 @@
     {#if !fold}
       <div class="chart-body" id="run-chart-body">
         <header>
-          <!-- Below 960 px the picker names the metric in place of the title (the tabs above are hidden). -->
-          {#if picking}<div class="pick">{@render picker()}</div>{/if}
+          <!-- Phones: the picker names the metric in place of the title (the tabs above are hidden). -->
+          {#if narrow}<div class="pick">{@render picker()}</div>{/if}
           <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}{#if current.qExp}<sup class="exp">{current.qExp}</sup>{/if}</span></h2>
           <div class="ctl">
             <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
@@ -781,9 +781,9 @@
       letter-spacing: var(--type-xl-tracking);
     }
   }
-  @media (max-width: 959px) {
-    /* Below 960 px six tiles would push the chart down: one compact metric picker in the chart header instead, in
-       place of the title (the qualifier stays beside it). */
+  @media (max-width: 767px) {
+    /* Phones: six tiles would push the chart down: one compact metric picker in the chart header instead, in place of
+       the title (the qualifier stays beside it). */
     .tabs {
       display: none;
     }
@@ -793,13 +793,6 @@
     .chart header {
       padding-top: var(--space-3);
       row-gap: var(--space-2);
-    }
-    .pick {
-      flex: 0 1 280px;
-      min-width: 0;
-    }
-    h2 {
-      flex: 1 1 200px;
     }
     h2 .t {
       position: absolute;
@@ -813,9 +806,7 @@
       font-size: var(--type-sm-size);
       font-weight: var(--weight-regular);
     }
-  }
-  @media (max-width: 767px) {
-    /* Phones: "23 / 100" and its meta on one baseline, the bar under the whole row 8 px below; the chart follows. */
+    /* "23 / 100" and its meta on one baseline, the bar under the whole row 8 px below; the chart follows. */
     .epoch {
       grid-template-columns: auto minmax(0, 1fr);
       align-items: baseline;
@@ -853,6 +844,7 @@
     }
     .pick {
       flex: 1 1 160px;
+      min-width: 0;
       max-width: 240px;
     }
     .ctl {

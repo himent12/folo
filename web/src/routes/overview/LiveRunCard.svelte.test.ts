@@ -25,20 +25,12 @@ afterEach(() => {
   target?.remove();
 });
 
-describe('LiveRunCard: the lime hairline means "training now"', () => {
-  it('is off on the loading placeholder', () => {
-    expect(render(null).classList.contains('live')).toBe(false);
-  });
-
-  it('is on once a running run has loaded', async () => {
+describe('LiveRunCard', () => {
+  it('says "training now" with the status badge alone: no decorative lime edge on the card', async () => {
     const runs = await new MockApi('normal', 0).runs();
     const running = runs.find((r) => r.status === 'running')!;
-    expect(render(running).classList.contains('live')).toBe(true);
-  });
-
-  it('is off for a run that is not running', async () => {
-    const runs = await new MockApi('normal', 0).runs();
-    const done = runs.find((r) => r.status === 'completed')!;
-    expect(render(done).classList.contains('live')).toBe(false);
+    const card = render(running);
+    expect(card.classList.contains('live')).toBe(false);
+    expect(card.querySelector('.badge.running')).not.toBeNull();
   });
 });
