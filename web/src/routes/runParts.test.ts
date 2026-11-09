@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { startFrom } from './RunCompare.svelte';
-import { lrParts } from './run/RunMetrics.svelte';
+import { lrParts, mosaicOffText } from './run/RunMetrics.svelte';
 
 describe('Compare: startFrom', () => {
   const models = [{ id: 'm_shapes_n', name: 'shapes-n' }];
@@ -23,5 +23,12 @@ describe('Run metrics: lrParts', () => {
     expect(lrParts(25)).toEqual({ value: '2.50', unit: '× 10¹', exp: '1' });
     expect(lrParts(null)).toEqual({ value: '—' });
     expect(lrParts(0)).toEqual({ value: '0' });
+  });
+});
+
+describe('Run metrics: mosaicOffText', () => {
+  it("names the hatched end of the bar with the trainer's capped count", () => {
+    expect(mosaicOffText(7)).toBe('Last 7 epochs: mosaic off');
+    expect(mosaicOffText(1)).toBe('Last 1 epoch: mosaic off');
   });
 });

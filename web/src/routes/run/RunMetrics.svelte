@@ -8,6 +8,11 @@
    * `exp` ("−4") is the exponent in plain digits, for a real superscript at a legible size (Unicode superscripts render
    * at about 8 px in a 12 px unit).
    */
+  /** What a progress bar's hatched end means (the last epochs train without mosaic), with the trainer's capped count. */
+  export function mosaicOffText(n: number): string {
+    return `Last ${n} ${n === 1 ? 'epoch' : 'epochs'}: mosaic off`;
+  }
+
   export function lrParts(v: number | null | undefined): { value: string; unit?: string; exp?: string } {
     const [m, e] = fmtLr(v).split(' × ');
     return e ? { value: m!, unit: `× ${e}`, exp: [...e.slice(2)].map((c) => PLAIN[c] ?? c).join('') } : { value: m! };
@@ -100,6 +105,10 @@
   const closeFrom = $derived(1 - closeN / run.epochs);
   /** The run's last epochs train without mosaic: the bar hatches them and every chart marks where they start. */
   const mosaicOff = $derived(closeFrom > 0 && closeFrom < 1);
+  /** What the hatch means, in one wording: its caption's tooltip and the bar's accessible description. */
+  const closeText = $derived(mosaicOffText(closeN));
+  const uid = $props.id();
+  const closeId = `${uid}-close`;
   const elapsed = $derived(run.started ? ((run.finished ? Date.parse(run.finished) : Date.now()) - Date.parse(run.started)) / 1000 : null);
 
   const lastStep = $derived.by(() => {
@@ -411,16 +420,28 @@
     <div class="epoch">
       <span class="sr-only">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
-      <div class="bar">
-        <div class="track" aria-hidden="true">
+      <div class="bar" class:has-close={mosaicOff}>
+        <div
+          class="track"
+          role="progressbar"
+          aria-label="Training progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={run.status === 'completed' ? 100 : Math.floor(progress * 100 + 1e-9)}
+          aria-describedby={mosaicOff ? closeId : undefined}
+        >
           <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
           <!-- Over the filled part of the bar (a finished run) the hatch is cut out of the fill in the panel colour. -->
           {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
         </div>
-        <!-- The hatched end explains itself on hover: a hit area over it, taller than the 4 px bar. -->
-        {#if mosaicOff}<span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={`Last ${closeN} ${closeN === 1 ? 'epoch trains' : 'epochs train'} without mosaic`}></span>{/if}
+        <!-- The hatched end says what it is: a caption under it, the same words on hover (a hit area taller than the
+             4 px bar) and as the bar's accessible description, with the trainer's capped count. -->
+        {#if mosaicOff}
+          <span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={closeText}></span>
+          <span class="close-cap" aria-hidden="true" use:tooltip={closeText}>mosaic off</span>
+          <span class="sr-only" id={closeId}>{closeText}</span>
+        {/if}
       </div>
-      {#if mosaicOff}<span class="sr-only">The hatched end of the bar marks the last {closeN} {closeN === 1 ? 'epoch' : 'epochs'}, trained without mosaic.</span>{/if}
       <span class="cap num">
         {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{progressText(run)}</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
@@ -693,6 +714,17 @@
     bottom: -12px;
     right: 0;
   }
+  /* "mosaic off" under the hatch, right-aligned to the bar's end: in the epoch row's spare height from the tablet up,
+     in a line the bar keeps for it on phones. */
+  .close-cap {
+    position: absolute;
+    top: calc(100% + var(--space-1));
+    right: 0;
+    font-size: var(--type-sm-size);
+    line-height: 16px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
   .close {
     position: absolute;
     top: 0;
@@ -913,6 +945,9 @@
       grid-row: 2;
       grid-column: 1 / -1;
       align-self: center;
+    }
+    .epoch .bar.has-close {
+      margin-bottom: var(--space-5);
     }
     .val {
       height: 28px;
