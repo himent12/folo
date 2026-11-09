@@ -246,6 +246,8 @@ pub struct NewRunForm {
     pub lr_invalid: bool,
     pub close_input: Entity<TextInput>,
     pub close_invalid: bool,
+    /// Mixed-precision training (f16 on tensor cores). Sent only for a GPU device.
+    pub amp: bool,
     _subs: Vec<Subscription>,
     pub submitting: bool,
     pub error: Option<ApiError>,
@@ -287,7 +289,7 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
         c.seed = b.seed;
         c.augment.hsv = b.augment.hsv;
         c.augment.translate = b.augment.translate;
-        c.amp = b.amp;
+        // Not `amp`: the form shows it (prefilled from the base) and the CPU guard decides it.
     }
     c
 }
@@ -1540,6 +1542,7 @@ impl FoloApp {
             f.fliplr = config.augment.fliplr;
             f.close_mosaic = config.augment.close_mosaic as f32;
             f.scale = config.augment.scale;
+            f.amp = config.amp;
             f.note = note;
             f.base = Some(config.clone());
             let input = f.name.clone();
@@ -1664,6 +1667,7 @@ impl FoloApp {
             lr_input,
             close_input,
             close_invalid: false,
+            amp: false,
             epochs_invalid: false,
             lr_invalid: false,
             _subs: subs,
@@ -1718,7 +1722,8 @@ impl FoloApp {
                     ..Augment::default()
                 },
                 seed: 0,
-                amp: false,
+                // The CPU has no tensor cores: the switch is inert there and never sent.
+                amp: form.amp && DEVICES[form.device] != "cpu",
             },
         );
         let _ = window;
@@ -3278,13 +3283,15 @@ mod retry_tests {
             weights: Some("runs/a/best.folo".into()),
             augment: Augment { hsv: [0.1, 0.2, 0.3], translate: 0.25, ..Augment::default() },
             seed: 42,
-            amp: false,
+            amp: true,
         };
         let edited = TrainConfig {
             name: "a-2".into(),
             weights: None,
             seed: 0,
             augment: Augment::default(),
+            // The form turned mixed precision off (the CPU, or the user): the base must not undo it.
+            amp: false,
             ..base.clone()
         };
         let out = carry_over(Some(&base), edited.clone());
@@ -3293,6 +3300,7 @@ mod retry_tests {
         assert_eq!(out.augment.hsv, [0.1, 0.2, 0.3]);
         assert_eq!(out.augment.translate, 0.25);
         assert_eq!(out.name, "a-2");
+        assert!(!out.amp);
         // A fresh form keeps its own values.
         assert_eq!(carry_over(None, edited.clone()), edited);
     }

@@ -1513,3 +1513,47 @@ Round 36 changes:
 - **Confusion matrix:** the error ramp is linear from a 0.1 floor, replacing the square root that lifted 1–4 % toward full red.
 - **Overview:** the chart section opens on a full-width rule.
 - **Palette:** the unfiltered count says "items".
+
+## Round 36
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 9 | 9 | 8 | 9 | 9 | 9 | 9 | 9 | 9 | 7 | 8 | 8.7 |
+| GPT-6.1 Sol | 9 | 9 | 9 | 8 | 9 | 9 | 8 | 9 | 9 | 9 | 7 | 8 | 8.6 |
+
+Both reviewers reached their best yet, with nine or ten lines at 9. Both held responsiveness at 7 and polish at 8 for one regression: on the first-run Overview, the third getting-started step overflowed the panel and the window. Making `ui::rich` one text run let each step size to its unwrapped text. The step columns now shrink (`min_w_0`, zero flex basis) and wrap; this was fixed on #105 before merge. The empty Overview is now captured at minimum and wide sizes too.
+
+Opus also flagged:
+- Latency's last lines below the rail's fold at 1280 × 800.
+- Image size's help dropped in the short New run.
+- Two near-identical grey latency swatches.
+- Dead space in the inspector's side column.
+
+Sol flagged:
+- The minimum Overview showing one Recent runs row.
+- Model rankings without their evaluation dataset.
+- No in-app list of broken labels.
+- "IoU" read as evaluation IoU.
+- A failure banner whose message column could overflow.
+- No copy action in the error state.
+
+The code reviews caught:
+- Open image's rule treating a failed runs list as "not connected", fixed to depend on models only.
+- Drag-and-drop skipping that rule.
+
+#101 (AMP) landed `amp` in TrainConfig. The server can't yet say whether it has tensor cores; a capability field is coming to `/api/system`.
+
+Round 37 changes:
+- **Mixed precision:**
+  - New run has a switch at the end of Schedule, stating its need for tensor cores (`folo serve --tensor-cores`). It is inert, and never sent, on the CPU.
+  - A run that fails with `not_supported` gets its own banner hint and isn't offered Resume. New run from this config turns mixed precision off with a note.
+- **Playground at 1280 × 800:**
+  - The Detections head is 32 px and the column row 20 px.
+  - Device and fps ride on the Latency row, so all detections, the latency bar and its first legend line fit.
+  - Postprocess is an outline in the bar and its key.
+  - The IoU slider reads "NMS IoU".
+- **New run:**
+  - The short layout keeps Image size's help as an (i).
+  - Rows with an (i) stay as tall as plain label rows, so neighbours line up.
+- **Run page:** the failure banner's text column shrinks, so long backend messages wrap.
+- **Capture set:** the empty Overview at 960 × 620 and 1680 × 1050.
