@@ -1342,18 +1342,24 @@ impl Backend for MockBackend {
             .filter(|t| t.device == device && t.measured_on == here)
             .cloned()
             .collect();
-        let compute =
-            |arch: Arch, imgsz: u32| (imgsz as f64).powi(2) / reference_train(arch, 640, false, false);
+        // Model compute: the architecture's GFLOPs at 640 px, scaled by image area.
+        let compute = |arch: Arch, imgsz: u32| gflops(arch) * (imgsz as f64 / 640.).powi(2);
         let want = compute(config.arch, config.imgsz);
         let exact = rows.iter().find(|t| {
             t.arch == config.arch && t.imgsz == config.imgsz && t.batch == config.batch && t.amp == config.amp
         });
+        // Nearest by compute, then by batch; the same precision before any other.
         let nearest = exact.or_else(|| {
             rows.iter().min_by(|a, b| {
-                let d = |t: &TrainThroughput| {
-                    (compute(t.arch, t.imgsz) / want).ln().abs() + if t.amp == config.amp { 0. } else { 10. }
+                let key = |t: &TrainThroughput| {
+                    (
+                        t.amp != config.amp,
+                        (compute(t.arch, t.imgsz) / want).ln().abs(),
+                        (t.batch.max(1) as f64 / config.batch.max(1) as f64).ln().abs(),
+                    )
                 };
-                d(a).total_cmp(&d(b))
+                let (ka, kb) = (key(a), key(b));
+                ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1)).then(ka.2.total_cmp(&kb.2))
             })
         });
         // (row, rate carried to this config, within 4x compute with the same precision)
@@ -1391,11 +1397,10 @@ impl Backend for MockBackend {
             .map(|(k, n)| phase(k, n))
             .collect();
         let device_name = here.to_string();
-        // An exact measured row: high confidence from 3 samples (±10 %), else medium (-20 / +30 %);
-        // the reference: low (-30 / +50 %).
         // Confidence and range as docs/API.md has them: an exact row, high from 3 samples (±10 %)
         // else medium (-20 / +30 %); a carried row within 4x the compute with the same precision,
-        // medium (-25 / +40 %); further, low (-40 / +80 %); the reference, low (-30 / +60 %).
+        // medium (-25 / +40 %); further, low (-40 / +80 %); the reference, low: -30 / +60 % on the
+        // reference machine, -60 / +200 % elsewhere (the demo's CPU isn't the reference CPU).
         let (source, confidence, lo, hi) = match &measured {
             Some((m, _, _)) if exact && m.samples >= 3 => {
                 (ThroughputSource::Measured, Confidence::High, 0.9, 1.1)
@@ -1403,7 +1408,10 @@ impl Backend for MockBackend {
             Some(_) if exact => (ThroughputSource::Measured, Confidence::Medium, 0.8, 1.3),
             Some((_, _, true)) => (ThroughputSource::Measured, Confidence::Medium, 0.75, 1.4),
             Some(_) => (ThroughputSource::Measured, Confidence::Low, 0.6, 1.8),
-            None => (ThroughputSource::Reference, Confidence::Low, 0.7, 1.6),
+            None if (if cpu { REF_CPU } else { REF_GPU }) == here => {
+                (ThroughputSource::Reference, Confidence::Low, 0.7, 1.6)
+            }
+            None => (ThroughputSource::Reference, Confidence::Low, 0.4, 3.0),
         };
         let basis = match &measured {
             Some((m, _, _)) => EstimateBasis {
@@ -1438,7 +1446,7 @@ impl Backend for MockBackend {
                 imgsz: 640,
                 batch: 16,
                 amp: false,
-                measured_on: REF_GPU.into(),
+                measured_on: if cpu { REF_CPU } else { REF_GPU }.into(),
                 samples: 0,
                 updated: None,
                 exact: false,
@@ -1925,6 +1933,17 @@ const REF_GPU: &str = "NVIDIA GeForce RTX 4080 SUPER";
 const REF_CPU: &str = "Intel Core i7-14700KF";
 const REF_NOTE: &str =
     "FOLO's measurement on its reference machine (docs/BENCHMARKS.md), scaled by compute to this size";
+
+/// An architecture's compute at 640 px, GFLOPs (as New run lists them).
+fn gflops(arch: Arch) -> f64 {
+    match arch.as_str() {
+        "folo-n" => 6.6,
+        "folo-s" => 21.5,
+        "folo-m" => 48.0,
+        "folo-l" => 104.0,
+        _ => 165.0,
+    }
+}
 
 /// Reference training rate, img/s at batch 16 (the demo's stand-in for docs/BENCHMARKS.md).
 fn reference_train(arch: Arch, imgsz: u32, amp: bool, cpu: bool) -> f64 {
