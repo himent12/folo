@@ -749,12 +749,13 @@ impl FoloApp {
                     last.map_or("–".into(), |e| format!("{:.3}", e.val.precision)),
                     last.map_or("–".into(), |e| format!("{:.3}", e.val.recall)),
                 ))
-                // The epoch's own operating point once the engine reports it (`best_f1_conf`).
-                .child(
-                    text(ty::XS, t.text_tertiary)
-                        .ellipsis()
-                        .child(pr_caption(last.and_then(|e| e.val.best_f1_conf), "val")),
-                ),
+                // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
+                // P/R chart below states the match rule, so the tile's line fits at 1280.
+                .child(text(ty::XS, t.text_tertiary).ellipsis().child(pr_caption(
+                    last.and_then(|e| e.val.best_f1_conf),
+                    "val",
+                    false,
+                ))),
             div()
                 .flex()
                 .flex_col()
@@ -846,6 +847,29 @@ impl FoloApp {
         let t = theme(cx);
         let live = r.status == RunStatus::Running;
         let hover = self.chart_hover;
+        // The P/R chart's operating point follows the cursor: each epoch's own best-F1 confidence.
+        let pr_conf = {
+            // Every validated epoch, its confidence optional: the cursor picks the epoch the P/R
+            // series picks (nearest x), then reads that epoch's own value, unknown included.
+            let epochs: Vec<(f32, Option<f32>)> = self
+                .store
+                .run_data
+                .get(&r.id)
+                .and_then(|x| x.ready())
+                .map(|x| x.metrics.epochs.iter().map(|e| (e.epoch as f32, e.val.best_f1_conf)).collect())
+                .unwrap_or_default();
+            let total = if r.status.is_active() || r.status == RunStatus::Completed {
+                r.epochs as f32
+            } else {
+                r.epoch.max(1) as f32
+            };
+            let xs: Vec<(f32, f32)> = epochs.iter().map(|e| (e.0, 0.)).collect();
+            let at = match hover {
+                Some(f) => crate::charts::nearest(&xs, total * f),
+                None => epochs.len().checked_sub(1),
+            };
+            at.and_then(|i| epochs[i].1)
+        };
         let view = cx.entity().downgrade();
         let on_hover: HoverFn = Rc::new(move |f, _, cx| {
             view.update(cx, |this, cx| {
@@ -1056,24 +1080,7 @@ impl FoloApp {
         // Every card has the same anatomy: header, a 28 px legend row, then the plot. Plot tops line
         // up across a row however long a legend is.
         let card = |title: &str, sub: &str, extra: AnyElement, chart: AnyElement| {
-            panel(&t)
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .child(panel_header(&t, title).child(caption(&t, sub)).when(short, |d| d.h(px(32.))))
-                .child(
-                    div()
-                        .h(px(if short { 24. } else { 28. }))
-                        // Legends start under the panel title (16 px); the loss toggles pull their
-                        // 6 px hover pads back out so their swatches land there too.
-                        .px(px(16.))
-                        .pt(px(if short { 4. } else { 6. }))
-                        .flex()
-                        .items_center()
-                        .child(extra),
-                )
-                .child(div().px(px(12.)).pb(px(6.)).child(chart))
+            panel(&t).flex_1().min_w_0().child(crate::ui::chart_section(&t, title, sub, extra, chart, short))
         };
         // The smoothing explanation, on hover and on keyboard focus.
         let loss_help = self.help_icon(
@@ -1182,7 +1189,7 @@ impl FoloApp {
                 if pair_a { 0.5 } else { 0.4 },
             ))
             .child(row(
-                card("Precision / Recall", &pr_caption(None, "val"), pr_legend, line_chart(&t, pr))
+                card("Precision / Recall", &pr_caption(pr_conf, "val", true), pr_legend, line_chart(&t, pr))
                     .into_any_element(),
                 card("Learning rate", &lr_caption, lr_legend, line_chart(&t, lr)).into_any_element(),
                 0.6,

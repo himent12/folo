@@ -2163,3 +2163,44 @@ Open:
   - one `kpi_strip` anatomy;
   - a priority drop order in the Playground toolbar;
   - a compact Run on below 700 px tall.
+
+## Round 52
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 8 | 9 |
+| Typography | 8 | 8 |
+| Colour | 9 | 9 |
+| Spacing | 8 | 9 |
+| Components | 8 | 9 |
+| Dataviz | 8 | 9 |
+| Info/copy | 8 | 9 |
+| Consistency | 8 | 9 |
+| Interaction | 8 | 9 |
+| Accessibility | 8 | 8.5 |
+| Responsiveness | 8 | 9 |
+| Polish | 8 | 8.5 |
+| **Average** | **8.1** | **8.8** |
+
+These are the scores after the mid-round fix. The first round 52 shots scored 7.8 / 8.5: the wide Overview had collapsed again.
+
+The cause came from outside Desktop. Studio #141 changed the shared `content_max` token from 1440 to 1200. Recent runs beside Best model then got 736 px, under its 778 px set. Once a row is wider than its slot, GPUI 0.2.2 lays the page out at min-content width.
+
+`tables_beside` now decides side-by-side from the measured room, so a token change can't squeeze the table again. At 1200 the tables always stack.
+
+Round 52 changes:
+- **One chart anatomy:** `ui::chart_section`, shared by the run cards and the Overview hero.
+- **Page scroll:** the page goes through `scroll_chrome`.
+- **Playground toolbar:** sheds by priority from shaped widths, disclosed on keyboard too.
+- **API provenance, now landed:**
+  - The P/R chart caption carries the cursor epoch's best-F1 confidence.
+  - The tile drops the IoU its chart states.
+  - The confusion matrix footer names dataset, split and its conf/IoU rule from `ModelEval`.
+
+Sol's remaining 8s, and Opus's typography and accessibility, come from 11 px supporting text. design/README already sets a 12 px floor (`xs` is for chart ticks only, since Studio #126), so Desktop breaks an existing rule. Round 53 remaps `ty::XS` to `ty::SM` with a guard test, as Studio's lint does.
+
+Opus's next items:
+- one danger-button style;
+- a chart annotation row;
+- single-line log rows with a duration column;
+- the stacked Best model table's dead zone.

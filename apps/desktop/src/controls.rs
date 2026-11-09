@@ -489,7 +489,7 @@ impl FoloApp {
     }
 
     /// A scroll area's chrome, for the `relative` parent of its scrolling element: the edge fades
-    /// (`ui::scroll_edges`) and the overlay thumb. Every scroll area but the page uses it.
+    /// (`ui::scroll_edges`) and the overlay thumb. Every scroll area, the page included, uses it.
     pub fn scroll_chrome(
         &self,
         handle: gpui::ScrollHandle,
