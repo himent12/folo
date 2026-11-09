@@ -499,6 +499,13 @@ impl FoloApp {
         let sel =
             self.play_model.as_ref().and_then(|id| models.iter().position(|m| &m.id == id)).unwrap_or(0);
         let model = models.get(sel).cloned();
+        // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
+        // so its IoU setting does nothing.
+        let e2e = model
+            .as_ref()
+            .and_then(|m| m.run_id.as_ref())
+            .and_then(|r| self.store.run(r))
+            .is_some_and(|r| r.config.head == crate::api::Head::O2o);
         let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
         let select = self.select(
             "play-model",
@@ -619,13 +626,32 @@ impl FoloApp {
                         conf.into_any_element(),
                         conf_help,
                     ))
-                    // "NMS IoU": the suppression overlap, not the evaluation's IoU 0.50.
-                    .child(field(
-                        "NMS IoU",
-                        format!("{:.2}", self.play_iou),
-                        iou.into_any_element(),
-                        iou_help,
-                    ))
+                    // "NMS IoU": the suppression overlap, not the evaluation's IoU 0.50. An end-to-end
+                    // model has no suppression step: the row says so instead of offering an inert slider.
+                    .map(|d| {
+                        if e2e {
+                            d.child(
+                                div()
+                                    .flex()
+                                    .justify_between()
+                                    .items_baseline()
+                                    .gap(px(10.))
+                                    .child(
+                                        text(ty::SM, t.text_secondary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child("NMS"),
+                                    )
+                                    .child(text(ty::XS, t.text_tertiary).child("None: an end-to-end model")),
+                            )
+                        } else {
+                            d.child(field(
+                                "NMS IoU",
+                                format!("{:.2}", self.play_iou),
+                                iou.into_any_element(),
+                                iou_help,
+                            ))
+                        }
+                    })
             });
 
         let active = self.play_active(window, cx);

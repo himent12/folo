@@ -239,14 +239,22 @@ impl FoloApp {
                             cx.stop_propagation();
                         }
                     }))
+                    // A name that may be cut shows in full on hover (and on focus, above).
                     .child(
-                        div().flex_1().min_w(px(180.)).child(
-                            text(ty::SM, t.text_primary)
-                                .font_weight(FontWeight::MEDIUM)
-                                .w(px(180.))
-                                .truncate()
-                                .child(r.name.clone()),
-                        ),
+                        div()
+                            .id(SharedString::from(format!("rn-{}", r.id)))
+                            .flex_1()
+                            .min_w(px(180.))
+                            .when(crate::ui::may_overflow(&r.name, ty::SM.size, 180.), |d| {
+                                d.tooltip(crate::controls::tip(r.name.clone(), None))
+                            })
+                            .child(
+                                text(ty::SM, t.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .w(px(180.))
+                                    .truncate()
+                                    .child(r.name.clone()),
+                            ),
                     )
                     .child(
                         text(ty::SM, t.text_secondary).w(px(64.)).flex_none().child(r.config.arch.as_str()),
@@ -390,9 +398,14 @@ impl FoloApp {
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         let started = r.started.as_deref().and_then(time::parse).map(|s| time::ago(s, now));
         let device = crate::ui::device_label(&r.device);
+        // The architecture, with an end-to-end head named beside it (as the model page shows it).
+        let arch = match r.config.head {
+            crate::api::Head::O2o => format!("{} end-to-end", r.config.arch.as_str()),
+            crate::api::Head::O2m => r.config.arch.as_str().to_string(),
+        };
         let subtitle = text(ty::BASE, t.text_secondary).child(match started {
-            Some(s) => format!("{} · {ds_name} · {device} · started {s}", r.config.arch.as_str()),
-            None => format!("{} · {ds_name} · {device}", r.config.arch.as_str()),
+            Some(s) => format!("{arch} · {ds_name} · {device} · started {s}"),
+            None => format!("{arch} · {ds_name} · {device}"),
         });
 
         let mut actions = Vec::new();
