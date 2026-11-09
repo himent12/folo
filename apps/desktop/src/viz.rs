@@ -123,6 +123,12 @@ pub fn paint_image_with_boxes(
         let mut chips: Vec<Option<Chip>> = order.iter().map(|_| None).collect();
         // The boxes that matter (not dimmed): a dimmed box's chip keeps off them, so their strokes
         // never cross its text; with nowhere clear, a dimmed box goes unlabelled.
+        // Every labelled box's outline, by index in `order`: a chip prefers a spot that crosses no
+        // other box's stroke (in a cluster, a chip on a neighbour's edge reads as the neighbour's).
+        let rects: Vec<Option<Bounds<Pixels>>> = order
+            .iter()
+            .map(|b| (!b.truth).then(|| Bounds::from_corners(to(b.x1, b.y1), to(b.x2, b.y2))))
+            .collect();
         let strong: Vec<Bounds<Pixels>> = order
             .iter()
             .filter(|b| !b.dim && !b.truth)
@@ -283,11 +289,17 @@ pub fn paint_image_with_boxes(
                             x.min(bounds.right() - cw).max(bounds.left())
                         }
                     };
+                    // Each corner, outside then inside: top-left, top-right, bottom-left, bottom-right.
+                    let (lx, rx) = (r.left() - px(1.), r.right() - cw + px(1.));
                     let candidates = [
-                        point(clamp_x(r.left() - px(1.)), r.top() - ch - px(1.)),
+                        point(clamp_x(lx), r.top() - ch - px(1.)),
+                        point(clamp_x(rx), r.top() - ch - px(1.)),
                         point(clamp_x(r.left() + px(1.)), r.top() + px(1.)),
-                        point(clamp_x(r.left() - px(1.)), r.bottom() + px(1.)),
+                        point(clamp_x(rx - px(2.)), r.top() + px(1.)),
+                        point(clamp_x(lx), r.bottom() + px(1.)),
+                        point(clamp_x(rx), r.bottom() + px(1.)),
                         point(clamp_x(r.left() + px(1.)), r.bottom() - ch - px(1.)),
+                        point(clamp_x(rx - px(2.)), r.bottom() - ch - px(1.)),
                     ];
                     let fits = |o: Point<Pixels>| {
                         o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
@@ -303,16 +315,32 @@ pub fn paint_image_with_boxes(
                             point(clamp_x(r.left() + px(1.)), r.top() + px(1.) + (ch + px(2.)) * k as f32)
                         })
                         .filter(|o| o.y + ch <= r.bottom() - px(1.));
-                    let free_spot = candidates
+                    // Whether a chip lies across another box's outline (touching its stroke band,
+                    // not sitting wholly inside or outside it).
+                    let crosses = |c: &Bounds<Pixels>| {
+                        rects.iter().enumerate().any(|(j, o)| {
+                            let Some(o) = o.filter(|_| j != i) else { return false };
+                            let inner = o.dilate(px(-2.));
+                            let within = c.left() >= inner.left()
+                                && c.right() <= inner.right()
+                                && c.top() >= inner.top()
+                                && c.bottom() <= inner.bottom();
+                            o.dilate(px(2.)).intersects(c) && !within
+                        })
+                    };
+                    let spots: Vec<Point<Pixels>> = candidates.iter().copied().chain(inside).collect();
+                    let open = |o: &Point<Pixels>| fits(*o) && free(&Bounds::new(*o, size(cw, ch)));
+                    // First a spot clear of every other outline; in a cluster with none, any free spot.
+                    let free_spot = spots
                         .iter()
                         .copied()
-                        .chain(inside)
-                        .find(|o| fits(*o) && free(&Bounds::new(*o, size(cw, ch))));
+                        .find(|o| open(o) && !crosses(&Bounds::new(*o, size(cw, ch))))
+                        .or_else(|| spots.iter().copied().find(open));
                     // Nowhere free: skip this chip (the selected box's chip always shows), so two
                     // chips never paint over each other.
                     let Some(origin) = free_spot.or_else(|| {
                         b.highlight
-                            .then(|| candidates.iter().copied().find(|o| fits(*o)).unwrap_or(candidates[1]))
+                            .then(|| candidates.iter().copied().find(|o| fits(*o)).unwrap_or(candidates[2]))
                     }) else {
                         continue;
                     };
