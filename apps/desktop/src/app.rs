@@ -3462,13 +3462,14 @@ impl FoloApp {
         if self.narrow { 16. } else { 24. }
     }
 
-    /// The page's content width: the window less the sidebar (an icon rail below 1120), capped
-    /// at `CONTENT_MAX` (border-box, so the cap includes the gutters), less the gutters. Layouts
-    /// that pick columns by the room they get measure it here, not by the window width.
+    /// The page's content width: the window less the sidebar (an icon rail below 1120), capped at
+    /// `layout.desktop_content_max` (Desktop's own cap, apart from Studio's `size.content_max`;
+    /// border-box, so it includes the gutters), less the gutters. Layouts that pick columns by the
+    /// room they get measure it here, not by the window width.
     pub fn content_width(&self, window: &Window) -> f32 {
         let vw = f32::from(window.viewport_size().width);
         let side = if vw < 1120. { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR };
-        (vw - side).min(tsize::CONTENT_MAX) - 2. * self.gutter()
+        (vw - side).min(crate::theme::layout::DESKTOP_CONTENT_MAX) - 2. * self.gutter()
     }
 
     pub fn page_frame(
@@ -3490,7 +3491,7 @@ impl FoloApp {
                     .child(
                         div()
                             .w_full()
-                            .max_w(px(tsize::CONTENT_MAX))
+                            .max_w(px(crate::theme::layout::DESKTOP_CONTENT_MAX))
                             .mx_auto()
                             .flex()
                             .flex_col()

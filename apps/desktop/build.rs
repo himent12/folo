@@ -206,6 +206,7 @@ fn generate(t: &Value) -> String {
     flat_group(&mut s, "space", &t["space"]);
     flat_group(&mut s, "radius", &t["radius"]);
     flat_group(&mut s, "size", &t["size"]);
+    flat_group(&mut s, "layout", &t["layout"]);
     flat_group(&mut s, "duration", &t["motion"]["duration"]);
 
     // Shadows: layers of (x, y, blur, spread, 0xRRGGBBAA).

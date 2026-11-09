@@ -13,7 +13,7 @@ pub mod tokens {
     include!(concat!(env!("OUT_DIR"), "/tokens.rs"));
 }
 
-pub use tokens::{Colors, TypeStep, radius, size, ty};
+pub use tokens::{Colors, TypeStep, layout, radius, size, ty};
 
 pub const SANS: &str = "Geist";
 pub const MONO: &str = "Geist Mono";
