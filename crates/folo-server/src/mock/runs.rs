@@ -561,18 +561,14 @@ impl SimRun {
             error_code: self.error(snap.status).map(|_| "training_failed".to_string()),
             resolved: snap.started.and(self.resolved.clone()),
             queue_position: snap.queue.map(|q| q.0),
+            cloud: None,
         }
     }
 
     /// Full history.
-    pub fn metrics(&self, every: u64) -> RunMetrics {
+    pub fn metrics(&self) -> RunMetrics {
         let snap = self.snap();
-        let every = every.max(1);
-        let mut steps: Vec<Step> = (1..=snap.step)
-            .filter(|s| s % every == 0 || *s == snap.step)
-            .map(|s| self.curve.step(s, self.eta_at(s)))
-            .collect();
-        steps.dedup_by_key(|s| s.step);
+        let steps: Vec<Step> = (1..=snap.step).map(|s| self.curve.step(s, self.eta_at(s))).collect();
         let epochs =
             (1..=self.epochs_done(&snap)).map(|e| self.curve.epoch(e, self.epoch_duration(e))).collect();
         RunMetrics { steps, epochs }

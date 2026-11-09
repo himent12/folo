@@ -1502,8 +1502,9 @@ pub enum RunEvent {
     Log(LogLine),
     /// `queue`.
     Queue(QueueEvent),
-    /// `cloud`: the run's [`RunCloud`] after it changed (a new phase, transfer progress, cost).
-    Cloud(RunCloud),
+    /// `cloud`: the run's [`RunCloud`] after it changed (a new phase, transfer progress, cost). Boxed: it is the
+    /// largest payload by far and the rarest event, and the others (a `step` ten times a second) stay small.
+    Cloud(Box<RunCloud>),
 }
 
 impl RunEvent {

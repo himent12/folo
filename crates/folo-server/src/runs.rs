@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use axum::http::StatusCode;
 use folo_api::{
     BestEpoch, DatasetFormat, Epoch, LogLevel, LogLine, ModelMetrics, PhaseKind, QueueEvent, Run, RunEvent,
-    RunMetrics, RunStatus, StatusEvent, Step, TrainConfig,
+    RunLogs, RunMetrics, RunStatus, StatusEvent, Step, TrainConfig,
 };
 use folo_data::{Dataset as _, Split};
 use folo_vision::train::ResumeOverrides;
@@ -36,7 +36,7 @@ use tokio::sync::broadcast;
 use crate::engine;
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
-use crate::store::{QueueMove, Subscription};
+use crate::store::{LogsQuery, MetricsQuery, QueueMove, Subscription};
 use crate::throughput::{Throughput, TrainKey, TrainSample};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
@@ -323,8 +323,9 @@ impl RunEntry {
                 self.persist(&st);
             }
             RunEvent::Log(l) => self.write_log(l),
-            // The trainer never sends these; the queue does (`Runs::notify_queue`).
-            RunEvent::Queue(_) => {}
+            // The trainer never sends these: the queue does (`Runs::notify_queue`), and only cloud runs have
+            // `cloud` events.
+            RunEvent::Queue(_) | RunEvent::Cloud(_) => {}
         }
         // Sent under the state lock, so subscribers see transitions in the order they happen.
         self.send(ev.clone());
@@ -645,12 +646,15 @@ impl Runs {
         Ok(run)
     }
 
-    /// Registers a new run (status `queued`) and queues it. `config` is already validated, its name filled in.
+    /// Registers a new run (status `queued`) and queues it. `config` is already validated, its name filled in. A
+    /// `checkpoint` (a full training checkpoint) is copied to the run's `weights/last.folo` first, so the worker
+    /// continues it as it resumes a run.
     pub fn create(
         self: &Arc<Self>,
         config: TrainConfig,
         dataset: DatasetRef,
         weights: Option<PathBuf>,
+        checkpoint: Option<&Path>,
         val_offset: u64,
         device: String,
     ) -> Result<Run> {
@@ -661,6 +665,15 @@ impl Runs {
         let dir = self.dir.join(&id);
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
+        if let Some(src) = checkpoint {
+            let last = dir.join("weights").join("last.folo");
+            let copied =
+                std::fs::create_dir_all(dir.join("weights")).and_then(|()| std::fs::copy(src, &last));
+            if let Err(e) = copied {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(Error::io(format!("copying {} to {}: {e}", src.display(), last.display())));
+            }
+        }
         let run = Run {
             id: id.clone(),
             name: config.name.clone(),
@@ -681,6 +694,7 @@ impl Runs {
             error_code: None,
             resolved: None,
             queue_position: None,
+            cloud: None,
         };
         let file =
             RunFile { run: run.clone(), dataset, weights, val_offset, epochs_done: 0, last_metrics: None };
@@ -688,6 +702,12 @@ impl Runs {
         entry.persist(&entry.state.lock().unwrap());
         list.push(entry.clone());
         drop(list);
+        if let Some(src) = checkpoint {
+            entry.log(
+                LogLevel::Info,
+                format!("continuing the training state of {}", folo_api::json::path(src)),
+            );
+        }
         self.enqueue(&entry)?;
         Ok(Run { queue_position: self.position(&run.id), ..run })
     }
@@ -965,28 +985,22 @@ impl Runs {
         Ok(Subscription { initial: status_event(&st.file.run), events })
     }
 
-    /// The run's metric history: `metrics.jsonl` (resumed epochs replace the steps and epochs they repeat) plus the
-    /// steps not flushed to it yet. `every > 1` keeps every `every`-th step and the latest.
-    pub fn metrics(&self, id: &str, every: u64) -> Result<RunMetrics> {
+    /// The run's metric history as `q` selects it: `metrics.jsonl` (resumed epochs replace the steps and epochs
+    /// they repeat) plus the steps not flushed to it yet.
+    pub fn metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics> {
         let e = self.get(id)?;
         let mut m = read_metrics(&e.dir.join("metrics.jsonl"));
         let tail = e.state.lock().unwrap().tail.clone();
         let last = m.steps.last().map_or(0, |s| s.step);
         m.steps.extend(tail.into_iter().filter(|s| s.step > last));
-        if every > 1 {
-            let latest = m.steps.last().map(|s| s.step);
-            m.steps.retain(|s| s.step % every == 0 || Some(s.step) == latest);
-        }
-        Ok(m)
+        Ok(q.select(m))
     }
 
-    /// The last `limit` log lines, oldest first.
-    pub fn logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>> {
+    /// The log lines `q` selects, oldest first, with the length of the whole log.
+    pub fn logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs> {
         let e = self.get(id)?;
         let text = std::fs::read_to_string(e.dir.join("log.jsonl")).unwrap_or_default();
-        let lines: Vec<LogLine> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        let skip = lines.len().saturating_sub(limit);
-        Ok(lines.into_iter().skip(skip).collect())
+        Ok(q.select(text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()))
     }
 
     /// Stops accepting work, stops the active run (it keeps its last checkpoint) and marks queued runs `stopped`.
@@ -1270,6 +1284,7 @@ mod tests {
             error_code: None,
             resolved: None,
             queue_position: None,
+            cloud: None,
         };
         let dataset = DatasetRef {
             id: "ds_1".into(),
@@ -1288,7 +1303,8 @@ mod tests {
         assert_eq!(entry.run().status, RunStatus::Stopped);
         assert!(runs.queue.lock().unwrap().runs.is_empty());
         assert!(!*runs.worker.lock().unwrap(), "no worker for a refused run");
-        assert!(runs.logs("run_late", 10).unwrap().iter().any(|l| l.message.contains("not queued")));
+        let logs = runs.logs("run_late", &LogsQuery::last(10)).unwrap();
+        assert!(logs.lines.iter().any(|l| l.message.contains("not queued")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1326,6 +1342,7 @@ mod tests {
                 error_code: None,
                 resolved: None,
                 queue_position: None,
+                cloud: None,
             };
             let file = RunFile {
                 run,

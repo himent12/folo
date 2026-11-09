@@ -6,7 +6,9 @@
 //! `{ "error": { code, message, hint } }`, and a server started with `--token` gets `Authorization: Bearer`.
 //! `http://` and `https://` (rustls, the bundled web PKI roots) both work.
 //!
-//! Calls block; async callers run them on a blocking pool.
+//! Calls block; async callers run them on a blocking pool. [`transfer`] moves files in parts on top of it.
+
+pub mod transfer;
 
 use std::ops::Range;
 use std::time::Duration;

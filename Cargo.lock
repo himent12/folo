@@ -611,6 +611,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filetime"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c287a33c7f0a620c38e641e7f60827713987b3c0f26e8ddc9462cc69cf75759"
+dependencies = [
+ "cfg-if",
+ "libc",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -724,6 +734,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tar",
  "thiserror",
  "walkdir",
 ]
@@ -747,6 +758,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "folo-api",
+ "folo-client",
  "folo-data",
  "folo-server",
  "folo-test-support",
@@ -759,7 +771,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
- "ureq",
 ]
 
 [[package]]
@@ -782,6 +793,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "folo-api",
+ "folo-client",
  "folo-core",
  "folo-data",
  "folo-gpu",
@@ -795,12 +807,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo",
+ "tar",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "tower",
  "tower-http",
  "tracing",
+ "tracing-subscriber",
  "walkdir",
 ]
 
@@ -2346,6 +2360,16 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-io-kit",
  "windows 0.61.3",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]

@@ -115,6 +115,58 @@ async fn check_validators(app: &Router, uri: &str, headers: &HeaderMap, body: &[
     etag
 }
 
+/// Checks `Range` and `If-Match` on a weights URI whose full answer is `body` with `etag`.
+async fn check_ranges(app: &Router, uri: &str, body: &[u8], etag: &str) {
+    let len = body.len();
+    let part = |range: &str| get(uri, &[(header::RANGE, range)]);
+    // First, middle, last and open-ended ranges; a last byte past the end is clamped.
+    for (spec, want) in [
+        ("bytes=0-9".to_string(), 0..10),
+        (format!("bytes=1000-{}", 1000 + 4095), 1000..5096),
+        (format!("bytes={}-{}", len - 7, len - 1), len - 7..len),
+        (format!("bytes={}-", len - 300), len - 300..len),
+        (format!("bytes={}-{}", len - 5, len + 100), len - 5..len),
+        ("bytes=0-".to_string(), 0..len),
+    ] {
+        let (s, h, b, _) = send(app, part(&spec)).await;
+        assert_eq!(s, StatusCode::PARTIAL_CONTENT, "{spec}");
+        assert!(b == body[want.clone()], "{spec}: the bytes of the range");
+        assert_eq!(header(&h, header::CONTENT_RANGE), format!("bytes {}-{}/{len}", want.start, want.end - 1));
+        assert_eq!(header(&h, header::CONTENT_LENGTH), want.len().to_string());
+        assert_eq!((header(&h, header::ETAG), header(&h, header::ACCEPT_RANGES)), (etag, "bytes"));
+    }
+    // Past the end: 416 with the length.
+    for spec in [format!("bytes={len}-"), format!("bytes={}-{}", len + 10, len + 20)] {
+        let (s, h, _, _) = send(app, part(&spec)).await;
+        assert_eq!(s, StatusCode::RANGE_NOT_SATISFIABLE, "{spec}");
+        assert_eq!(header(&h, header::CONTENT_RANGE), format!("bytes */{len}"));
+    }
+    // Forms this server does not take are ignored: the whole file.
+    for spec in ["bytes=0-1,5-9", "bytes=-500", "items=0-9", "bytes=9-0", "bytes=a-b", "bytes=+1-5"] {
+        let (s, _, b, _) = send(app, part(spec)).await;
+        assert_eq!((s, b.len()), (StatusCode::OK, len), "{spec}");
+    }
+    // If-Match: the file's ETag (or `*`) passes, alone or with a range; any other answers 412 without a body.
+    let (s, _, b, _) = send(app, get(uri, &[(header::IF_MATCH, etag)])).await;
+    assert_eq!((s, b.len()), (StatusCode::OK, len));
+    let (s, _, b, _) = send(app, get(uri, &[(header::IF_MATCH, etag), (header::RANGE, "bytes=10-19")])).await;
+    assert!(s == StatusCode::PARTIAL_CONTENT && b == body[10..20]);
+    assert_eq!(send(app, get(uri, &[(header::IF_MATCH, "*")])).await.0, StatusCode::OK);
+    let list = format!("\"x\", {etag}");
+    assert_eq!(send(app, get(uri, &[(header::IF_MATCH, &list)])).await.0, StatusCode::OK);
+    for other in ["\"other\"", &format!("W/{etag}")] {
+        let (s, h, b, _) =
+            send(app, get(uri, &[(header::IF_MATCH, other), (header::RANGE, "bytes=0-9")])).await;
+        assert_eq!((s, b.len()), (StatusCode::PRECONDITION_FAILED, 0), "{other}");
+        assert_eq!(header(&h, header::ETAG), etag, "the current version is named");
+    }
+    // HEAD: the range's headers, no body.
+    let head = Request::head(uri).header(header::RANGE, "bytes=5-14").body(Body::empty()).unwrap();
+    let (s, h, b, _) = send(app, head).await;
+    assert_eq!((s, b.len()), (StatusCode::PARTIAL_CONTENT, 0));
+    assert_eq!(header(&h, header::CONTENT_LENGTH), "10");
+}
+
 /// Parses a served file and builds the model it describes, as the browser detector does.
 fn load(bytes: &[u8]) -> ModelFile {
     let file = ModelFile::from_bytes(bytes.to_vec()).unwrap();
@@ -141,6 +193,7 @@ async fn mock_weights_are_a_real_folo_n_file() {
         format!("attachment; filename=\"{}.folo\"", model.name)
     );
     let etag = check_validators(&app, uri, &headers, &body).await;
+    check_ranges(&app, uri, &body, &etag).await;
 
     // Deterministic: another store serves the same bytes under the same ETag.
     let other = Server::new(Arc::new(MockStore::new()), Options::default()).router();
@@ -264,6 +317,7 @@ async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
     assert!(frames.iter().all(|&n| n <= 256 * 1024), "chunks of at most 256 KiB: {frames:?}");
     assert_eq!(header(&headers, header::CONTENT_DISPOSITION), "attachment; filename=\"pets_n_v2.folo\"");
     let etag = check_validators(&app, &uri, &headers, &body).await;
+    check_ranges(&app, &uri, &body, &etag).await;
 
     // f16: exported on the first request, then served from cache/weights/.
     let uri16 = format!("{uri}?format=f16");

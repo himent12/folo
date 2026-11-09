@@ -12,7 +12,9 @@ use folo_api::{
     Arch, Dataset, ExportResult, ExportSpec, IssueSeverity, LogLevel, LogLine, Model, OnnxSwitches,
     PredictResponse, QueueRequest, RegisterDataset, Run, RunMetrics, SyntheticDataset, ValReport, ValRequest,
 };
-use folo_server::store::{ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove};
+use folo_server::store::{
+    ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
+};
 use rmcp::handler::server::common::{schema_for_input, schema_for_output};
 use rmcp::model::{
     ContentBlock, JsonObject, ProgressNotificationParam, ProgressToken, Resource, Tool, ToolAnnotations,
@@ -1063,9 +1065,9 @@ impl Inner {
         let (run, metrics, mut log) = self
             .blocking(move |s| {
                 let run = s.get_run(&id)?;
-                let metrics = s.run_metrics(&id, u64::MAX)?;
+                let metrics = s.run_metrics(&id, &MetricsQuery::every(u64::MAX))?;
                 // The whole log (as far as /logs serves it), for the warnings; `log` keeps the last n lines.
-                let log = s.run_logs(&id, WARNING_SCAN_LINES)?;
+                let log = s.run_logs(&id, &LogsQuery::last(WARNING_SCAN_LINES))?.lines;
                 Ok((run, metrics, log))
             })
             .await?;
@@ -1351,7 +1353,9 @@ impl Inner {
         let ids = a.run_ids.clone();
         let runs: Vec<(Run, RunMetrics)> = self
             .blocking(move |s| {
-                ids.iter().map(|id| Ok((s.get_run(id)?, s.run_metrics(id, u64::MAX)?))).collect()
+                ids.iter()
+                    .map(|id| Ok((s.get_run(id)?, s.run_metrics(id, &MetricsQuery::every(u64::MAX))?)))
+                    .collect()
             })
             .await?;
         let entries: Vec<CompareEntry> = runs

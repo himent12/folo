@@ -23,6 +23,7 @@ mod stats;
 pub mod store;
 pub mod system;
 pub mod throughput;
+mod uploads;
 mod util;
 pub mod web;
 
@@ -73,6 +74,36 @@ pub enum WebSource {
     Embedded,
 }
 
+/// A secret every `/api` request must carry as `Authorization: Bearer <token>` (`folo serve --token`; docs/CLOUD.md,
+/// Securing a server). It never reaches a log: `Debug` hides it, and the server compares it in constant time.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Token(String);
+
+impl Token {
+    /// The token `secret`; `None` when it is empty (an empty token would protect nothing).
+    pub fn new(secret: impl Into<String>) -> Option<Token> {
+        let secret = secret.into();
+        (!secret.is_empty()).then_some(Token(secret))
+    }
+
+    /// Whether `presented` is the token. The time taken depends on the token's length only, not on where the two
+    /// differ.
+    fn matches(&self, presented: &[u8]) -> bool {
+        let token = self.0.as_bytes();
+        let mut diff = token.len() ^ presented.len();
+        for (i, &t) in token.iter().enumerate() {
+            diff |= usize::from(t ^ presented.get(i).copied().unwrap_or(0));
+        }
+        std::hint::black_box(diff) == 0
+    }
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Token(…)")
+    }
+}
+
 /// Server options.
 #[derive(Clone, Debug, Default)]
 pub struct Options {
@@ -80,6 +111,8 @@ pub struct Options {
     pub web: WebSource,
     /// CORS policy.
     pub cors: Cors,
+    /// The token `/api` requests must carry (`None`: no token needed, the default for a server on loopback).
+    pub token: Option<Token>,
 }
 
 /// Shared handler state.
@@ -97,6 +130,8 @@ pub struct Server {
     router: Router,
     shutdown: Arc<watch::Sender<bool>>,
     store: Arc<dyn Store>,
+    /// `/api` needs a token.
+    token: bool,
 }
 
 /// True when the web app folder exists and has an `index.html`.
@@ -140,6 +175,40 @@ async fn log_request(req: Request, next: Next) -> Response {
     } else {
         tracing::info!(%method, uri, status, ms, "request");
     }
+    res
+}
+
+/// With a [`Token`], every `/api` request needs `Authorization: Bearer <token>`, except `GET /api/health` (so a
+/// client can tell a server that is up from one it may not use) and CORS preflights; anything else is `401
+/// unauthorized` with `WWW-Authenticate: Bearer`. The header is never logged (the trace layer leaves headers out).
+async fn require_token(State(token): State<Token>, req: Request, next: Next) -> Response {
+    let open = match *req.method() {
+        Method::OPTIONS => true,
+        Method::GET | Method::HEAD => req.uri().path() == "/health",
+        _ => false,
+    };
+    let presented = req.headers().get(header::AUTHORIZATION).map(|v| {
+        let v = v.as_bytes();
+        // The scheme is case-insensitive (RFC 9110 §11.1).
+        match v.get(..7) {
+            Some(scheme) if scheme.eq_ignore_ascii_case(b"bearer ") => &v[7..],
+            _ => &[][..],
+        }
+    });
+    if open || presented.is_some_and(|p| token.matches(p)) {
+        return next.run(req).await;
+    }
+    let message = match presented {
+        None => "this server needs a token: send `Authorization: Bearer <token>`",
+        Some(_) => "the token is not this server's",
+    };
+    let mut res = error::Error::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
+        .hint(
+            "send the token the server was started with (`folo serve --token` or FOLO_TOKEN) as \
+             `Authorization: Bearer <token>`",
+        )
+        .into_response();
+    res.headers_mut().insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
     res
 }
 
@@ -199,7 +268,12 @@ impl Server {
             shutdown: shutdown.clone(),
             web_wasm,
         };
-        let mut router = Router::new().nest("/api", routes::api()).with_state(state);
+        let token = opts.token.is_some();
+        let api = match opts.token {
+            Some(t) => routes::api().layer(axum::middleware::from_fn_with_state(t, require_token)),
+            None => routes::api(),
+        };
+        let mut router = Router::new().nest("/api", api).with_state(state);
         router = match (opts.web, embedded) {
             (WebSource::Dir(dir), _) if web_dir_ready(&dir) => {
                 let spa = ServeDir::new(&dir).fallback(ServeFile::new(dir.join("index.html")));
@@ -232,10 +306,11 @@ impl Server {
             .layer(axum::middleware::from_fn(log_request))
             .layer(
                 TraceLayer::new_for_http()
-                    .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                    // Without headers (the default), so a token never reaches the log.
+                    .make_span_with(DefaultMakeSpan::new().level(Level::INFO).include_headers(false))
                     .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
             );
-        Server { router, shutdown, store }
+        Server { router, shutdown, store, token }
     }
 
     /// The router (cheap clone), e.g. for `tower::ServiceExt::oneshot` in tests.
@@ -256,6 +331,16 @@ impl Server {
         listener: TcpListener,
         signal: impl Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
+        if !self.token
+            && let Ok(addr) = listener.local_addr()
+            && !addr.ip().is_loopback()
+        {
+            tracing::warn!(
+                %addr,
+                "the API has no token and listens beyond loopback: anyone who can reach this port can use it \
+                 (start the server with --token)"
+            );
+        }
         let shutdown = self.shutdown.clone();
         let served = axum::serve(listener, self.router)
             .with_graceful_shutdown(async move {

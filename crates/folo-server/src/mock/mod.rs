@@ -17,17 +17,18 @@ use axum::http::StatusCode;
 use folo_api::{
     AmpSupport, Arch, BBox, BenchmarkReport, BenchmarkRequest, Capabilities, ClassMetrics, CliCommand,
     Dataset, DatasetFormat, DatasetIssue, ExportFormat, ExportResult, ExportSpec, GpuBackend, GpuInfo, Head,
-    ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval, ModelMetrics, ModelPrecision,
-    ModelSource, PhaseKind, PrCurve, PredictResponse, RegisterDataset, Run, RunEstimate, RunSamples, Sample,
-    ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, ThroughputTable, TrainConfig, TrainedWith,
+    ImageInfo, ImagePage, IssuePage, IssueSeverity, Model, ModelEval, ModelMetrics, ModelPrecision,
+    ModelSource, PhaseKind, PrCurve, PredictResponse, RegisterDataset, Run, RunEstimate, RunLogs, RunSamples,
+    Sample, ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, ThroughputTable, TrainConfig,
+    TrainedWith,
 };
 
 use crate::error::{Error, Result};
 use crate::index::{Index, read_image};
 use crate::stats::StatsBuilder;
 use crate::store::{
-    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription, Weights,
-    WeightsFormat,
+    ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
+    Store, Subscription, Weights, WeightsFormat,
 };
 use crate::util::{Rng, fnv1a, mix64, noise, parse_rfc3339, rfc3339, unique_id, unix_now};
 use runs::{Curve, LiveClock, SimRun, Timeline, arch_spec};
@@ -1018,6 +1019,11 @@ impl Store for MockStore {
         Some(self.tensor_cores.capabilities())
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        // Cursors and ranges, not uploads or checkpoints (docs/API.md, Mock mode).
+        &[folo_api::FEATURE_RUN_CURSORS]
+    }
+
     fn throughput(&self) -> Result<ThroughputTable> {
         Ok(self.throughput.table(&throughput::gpu(), &[throughput::gpu(), throughput::cpu()]))
     }
@@ -1429,8 +1435,8 @@ impl Store for MockStore {
         Ok(())
     }
 
-    fn run_metrics(&self, id: &str, every: u64) -> Result<folo_api::RunMetrics> {
-        Ok(self.run(id)?.0.metrics(every))
+    fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<folo_api::RunMetrics> {
+        Ok(q.select(self.run(id)?.0.metrics()))
     }
 
     fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples> {
@@ -1461,11 +1467,8 @@ impl Store for MockStore {
         Ok(RunSamples { epoch, samples })
     }
 
-    fn run_logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>> {
-        let mut lines = self.run(id)?.0.logs();
-        let skip = lines.len().saturating_sub(limit);
-        lines.drain(..skip);
-        Ok(lines)
+    fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs> {
+        Ok(q.select(self.run(id)?.0.logs()))
     }
 
     fn subscribe(&self, id: &str) -> Result<Subscription> {

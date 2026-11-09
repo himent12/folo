@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// FOLO: a from-scratch, very fast vision framework (YOLO-style detector, training, export, Studio).
@@ -84,6 +85,10 @@ pub struct ServeArgs {
     /// `"amp": true` need it (they fail with `not_supported` without tensor cores).
     #[arg(long, env = "FOLO_GPU_TENSOR_CORES", value_parser = clap::builder::BoolishValueParser::new())]
     pub tensor_cores: bool,
+    /// Require `Authorization: Bearer <token>` on every /api request but GET /api/health (use it whenever the
+    /// server listens beyond loopback; docs/CLOUD.md, Securing a server). Never logged or printed.
+    #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]
+    pub token: Option<String>,
 }
 
 /// `folo describe`.
@@ -624,6 +629,9 @@ pub struct McpArgs {
     /// the engine in this process.
     #[arg(long, value_name = "URL")]
     pub server: Option<String>,
+    /// With --server: the token that `folo serve` was started with (`--token`), sent as `Authorization: Bearer`.
+    #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]
+    pub token: Option<String>,
     /// Embedded mode: device of `predict`, `predict_batch` and `val`: auto (the GPU when one can hold the model,
     /// else the CPU), cpu or gpu:<n>. Training runs use their own `device` setting.
     #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]

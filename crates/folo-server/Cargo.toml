@@ -35,8 +35,11 @@ tower-http.workspace = true
 tracing.workspace = true
 image.workspace = true
 sysinfo.workspace = true
+tar.workspace = true
 
 [dev-dependencies]
 folo-test-support.workspace = true
+folo-client.workspace = true
+tracing-subscriber.workspace = true
 tower.workspace = true
 http-body-util.workspace = true

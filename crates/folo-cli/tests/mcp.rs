@@ -246,7 +246,7 @@ fn check_tools(c: &mut Client, expected: &[&str]) -> std::collections::HashMap<S
     assert_eq!(names, expected);
     // Shared types are compacted (docs/MCP.md "Schemas"): the whole listing stays small.
     let bytes = serde_json::to_vec(&tools).unwrap().len();
-    assert!(bytes < 56 * 1024, "tools/list is {bytes} bytes");
+    assert!(bytes < 64 * 1024, "tools/list is {bytes} bytes");
     let mut out = std::collections::HashMap::new();
     for t in &tools {
         assert!(t["description"].as_str().unwrap().len() > 20);
@@ -1420,6 +1420,58 @@ fn proxy_mode_forwards_to_folo_serve() {
     );
     c.tool_error("list_datasets", json!({}), "server_unreachable");
     c.finish();
+}
+
+/// `folo mcp --server <url> --token <secret>` against `folo serve` with `FOLO_TOKEN`: the tools work with the token
+/// and are `unauthorized` without it, and neither process prints it. An empty token is a usage error.
+#[test]
+fn proxy_mode_sends_the_token() {
+    const SECRET: &str = "mcp-s3cret";
+    let mut serve: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["serve", "--mock", "--port", "0", "--json"])
+        .env("FOLO_TOKEN", SECRET)
+        .env("RUST_LOG", "folo_server=debug,tower_http=trace")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+        .into();
+    // The server's log, read as it is written (a full pipe would block the server).
+    let mut stderr = serve.stderr.take().unwrap();
+    let log = std::thread::spawn(move || {
+        let mut log = String::new();
+        std::io::Read::read_to_string(&mut stderr, &mut log).unwrap();
+        log
+    });
+    let mut first = String::new();
+    BufReader::new(serve.stdout.take().unwrap()).read_line(&mut first).unwrap();
+    let listening: Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(listening["token"], true);
+    assert!(!first.contains(SECRET), "{first}");
+    let url = listening["url"].as_str().unwrap().to_string();
+
+    let mut c = spawn(&["--server", &url, "--token", SECRET], None);
+    init_old(&mut c);
+    assert_eq!(c.ok("list_datasets", json!({}))["total"], 3);
+    c.finish();
+    let mut c = spawn(&["--server", &url], None);
+    init_old(&mut c);
+    let e = c.tool_error("list_datasets", json!({}), "unauthorized");
+    assert!(e["hint"].as_str().unwrap().contains("--token"), "{e}");
+    c.finish();
+
+    let _ = serve.kill();
+    let _ = serve.wait();
+    let log = log.join().unwrap();
+    assert!(log.contains("/api/datasets") && !log.contains(SECRET), "{log}");
+
+    let empty = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["serve", "--mock", "--port", "0", "--token", ""])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert_eq!(empty.code(), Some(2));
 }
 
 /// Published weights in the `folo weights` cache (`FOLO_WEIGHTS_DIR`) are models in embedded mode: listed with

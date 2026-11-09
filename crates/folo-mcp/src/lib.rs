@@ -44,14 +44,32 @@ pub struct Options {
 }
 
 /// Where tool calls go.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum Backend {
     /// The real store on `data_dir` (embedded mode).
     Real,
     /// Deterministic mock data (`--mock`).
     Mock,
-    /// A running `folo serve` at this base URL (`--server`).
-    Proxy(String),
+    /// A running `folo serve` (`--server`).
+    Proxy {
+        /// Its base URL, `http://` or `https://`.
+        url: String,
+        /// The token it was started with (`--token`), if any.
+        token: Option<String>,
+    },
+}
+
+// Not derived: the token must not reach a log through `{:?}`.
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Backend::Real => f.write_str("Real"),
+            Backend::Mock => f.write_str("Mock"),
+            Backend::Proxy { url, token } => {
+                f.debug_struct("Proxy").field("url", url).field("token", &token.is_some()).finish()
+            }
+        }
+    }
 }
 
 /// The tools as `{ name, description, mutating, inputSchema, outputSchema }` (for `folo describe`).
@@ -63,7 +81,7 @@ pub fn describe_tools() -> serde_json::Value {
 pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
     // With --confine, the dataset reader refuses files outside the data dir (embedded mode; in proxy mode
     // `folo serve` reads the datasets).
-    if opts.confine && !matches!(backend, Backend::Proxy(_)) {
+    if opts.confine && !matches!(backend, Backend::Proxy { .. }) {
         let policy = paths::PathPolicy { data_dir: opts.data_dir.clone(), confine: true };
         confine::install_read_guard(&policy).map_err(|e| e.body.message)?;
     }
@@ -76,11 +94,13 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
             FoloMcp::new(Arc::new(store), None, opts)
         }
         Backend::Mock => FoloMcp::new(Arc::new(MockStore::new()), None, opts),
-        Backend::Proxy(url) => {
-            if !url.starts_with("http://") {
-                return Err(format!("--server must be an http:// URL of a `folo serve`, got `{url}`"));
+        Backend::Proxy { url, token } => {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                return Err(format!(
+                    "--server must be the http:// or https:// URL of a `folo serve`, got `{url}`"
+                ));
             }
-            let http = Arc::new(proxy::HttpStore::new(&url));
+            let http = Arc::new(proxy::HttpStore::new(&url, token.as_deref()));
             let store: Arc<dyn Store> = http.clone();
             FoloMcp::new(store, Some(http), opts)
         }

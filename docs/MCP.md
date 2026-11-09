@@ -9,8 +9,8 @@ scraping. It exposes the same operations as the CLI and `docs/API.md`, with the 
 { "mcpServers": { "folo": { "command": "folo", "args": ["mcp", "--data-dir", "D:/folo-data"] } } }
 ```
 
-`folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878] [--device auto]
-[--tensor-cores]`.
+`folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878 [--token SECRET]]
+[--device auto] [--tensor-cores]`.
 `--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where the embedded real store runs `predict`,
 `predict_batch` and `val`; each training run has its own `device`. `--tensor-cores` (env `FOLO_GPU_TENSOR_CORES=1`)
 asks for the GPU's tensor cores in embedded mode, as `folo serve --tensor-cores` does: `train { amp: true }` needs
@@ -76,7 +76,7 @@ in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the
 ## Results and errors
 Every tool declares an `inputSchema` and an `outputSchema`. The schemas are generated from the same Rust types as the
 HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and docs/API.md is the source of field
-meanings. They are compacted for `tools/list` (about 53 KB for all 18 tools): no `$schema`, no numeric `format`
+meanings. They are compacted for `tools/list` (about 60 KB for all 18 tools): no `$schema`, no numeric `format`
 annotations, no `minimum: 0` of unsigned types, defaults without f32 noise (`0.01`, not `0.009999999776482582`);
 output schemas also leave out defaults and the field descriptions of the shared types in `$defs` (`Run`,
 `TrainConfig`, `Epoch`, ...; docs/API.md documents them) and write string enums as `enum`. Every input schema,
@@ -261,7 +261,11 @@ In read-only mode, `train_on_folder` is not listed.
   `POST /api/predict/batch` exists), `compare_runs` → `GET /api/runs/{id}` + `/metrics` per run, dataset images
   and sample grids → `GET /api/datasets/{id}/images/{image_id}`. Run resources are polled the same way as in
   embedded mode, so subscriptions work through the proxy too. Every tool works in proxy mode; errors from the
-  server keep their codes. A server that does not answer is the `server_unreachable` tool error.
+  server keep their codes and statuses (an answer that is not FOLO's, such as a proxy's error page, is
+  `bad_gateway`). A server that does not answer is the `server_unreachable` tool error. The URL may be `http://` or
+  `https://` (a server behind a TLS proxy or tunnel). A server started with `--token` needs `--token` here too (env
+  `FOLO_TOKEN`), sent as `Authorization: Bearer` on every request and never logged; without it every tool is the
+  `unauthorized` tool error. The transport is the `folo-client` crate, the same one a cloud control plane uses.
 
 ## Example agent session
 ```
@@ -285,5 +289,5 @@ store (`--device cpu`, 64 px, about 15 s): a synthetic dataset, a 2-epoch run fo
 subscription until it completes, `list_models`, `val` on two splits, `predict` on a dataset image and the same
 file by path (boxes returned, identical), the sample grid resource, `export`, then a second run stopped after
 its first epoch, resumed (same id) and left training when the client disconnects; a new session finds it
-`stopped` by the graceful shutdown. Further tests cover `--confine`, proxy mode against `folo serve --mock` and an
-unreachable server.
+`stopped` by the graceful shutdown. Further tests cover `--confine`, proxy mode against `folo serve --mock` (also
+with a token) and an unreachable server.

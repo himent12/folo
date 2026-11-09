@@ -2,12 +2,13 @@
 
 use std::fmt;
 
+use folo_client::encode;
 use folo_server::Store;
+use folo_server::store::MetricsQuery;
 use rmcp::model::{Resource, ResourceTemplate};
 use serde_json::{Value, json};
 
 use crate::errors::Error;
-use crate::proxy::encode;
 
 /// `resources/list` page size.
 pub const PAGE: usize = 100;
@@ -354,7 +355,7 @@ pub fn estimate_config(
 /// `{ run, last_step, last_epoch }` of `folo://runs/{id}` (the caller adds `revision`).
 pub fn run_snapshot(store: &dyn Store, id: &str) -> Result<Value, Error> {
     let run = store.get_run(id)?;
-    let m = store.run_metrics(id, u64::MAX)?;
+    let m = store.run_metrics(id, &MetricsQuery::every(u64::MAX))?;
     Ok(json!({ "run": run, "last_step": m.steps.last(), "last_epoch": m.epochs.last() }))
 }
 

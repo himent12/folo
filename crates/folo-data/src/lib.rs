@@ -13,7 +13,8 @@
 //! - **Loading** ([`DataLoader`]): worker threads decode and augment ahead; batches are identical for a given seed
 //!   and epoch whatever the number of workers.
 //! - **Synthetic data** ([`synthetic`]): procedural shapes datasets for tests, demos and benchmarks.
-//! - **Tools** ([`check`], [`convert`]): line-level dataset validation and YOLO / COCO conversion.
+//! - **Tools** ([`check`], [`convert`], [`pack`]): line-level dataset validation, YOLO / COCO conversion, and a
+//!   dataset as one tar stream for another FOLO server.
 //!
 //! See `docs/DATA.md` for formats, augmentation parameters and the determinism rules.
 //!
@@ -59,6 +60,7 @@ pub mod guard;
 mod image;
 mod letterbox;
 mod loader;
+pub mod pack;
 pub mod par;
 pub mod paths;
 pub mod resize;

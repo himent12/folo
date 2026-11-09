@@ -620,7 +620,7 @@ async fn static_files_spa_fallback() {
     std::fs::write(dir.join("assets/app.js"), "console.log(1)").unwrap();
     let server = Server::new(
         Arc::new(MockStore::new()),
-        Options { web: WebSource::Dir(dir.to_path_buf()), cors: Cors::Loopback },
+        Options { web: WebSource::Dir(dir.to_path_buf()), cors: Cors::Loopback, token: None },
     );
     let app = server.router();
     let (s, _, b) = send(&app, get("/")).await;
@@ -647,7 +647,7 @@ async fn static_files_spa_fallback() {
     }
     let with = Server::new(
         Arc::new(MockStore::new()),
-        Options { web: WebSource::Dir(dir.to_path_buf()), cors: Cors::Loopback },
+        Options { web: WebSource::Dir(dir.to_path_buf()), cors: Cors::Loopback, token: None },
     );
     assert!(wasm(&with.router()).await);
     err(&app, get("/api/not-a-route"), StatusCode::NOT_FOUND, "route_not_found").await;
@@ -660,9 +660,11 @@ async fn static_files_spa_fallback() {
     std::fs::remove_dir_all(&dir).unwrap();
 
     // The embedded web app (only present in `embed-web` builds) serves the same way.
-    let embedded =
-        Server::new(Arc::new(MockStore::new()), Options { web: WebSource::Embedded, cors: Cors::Loopback })
-            .router();
+    let embedded = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::Embedded, cors: Cors::Loopback, token: None },
+    )
+    .router();
     let (s, h, b) = send(&embedded, get("/runs/run_1a01")).await;
     if folo_server::web::embedded().is_some() {
         assert_eq!(s, StatusCode::OK);
@@ -694,8 +696,11 @@ async fn cors_and_gzip() {
     let (_, h, _) = send(&app, preflight("https://evil.example")).await;
     assert!(h.get(header::ACCESS_CONTROL_ALLOW_ORIGIN).is_none());
 
-    let any =
-        Server::new(Arc::new(MockStore::new()), Options { web: WebSource::None, cors: Cors::Any }).router();
+    let any = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::None, cors: Cors::Any, token: None },
+    )
+    .router();
     let (_, h, _) = send(&any, preflight("https://elsewhere.example")).await;
     assert_eq!(h[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
 
@@ -756,8 +761,11 @@ async fn cross_origin_mutations_are_refused() {
     let (s, _, _) = send(&app, create("http://localhost:5173", "127.0.0.1:7878")).await;
     assert_eq!(s, StatusCode::CREATED);
     // --cors-any turns the guard off.
-    let any =
-        Server::new(Arc::new(MockStore::new()), Options { web: WebSource::None, cors: Cors::Any }).router();
+    let any = Server::new(
+        Arc::new(MockStore::new()),
+        Options { web: WebSource::None, cors: Cors::Any, token: None },
+    )
+    .router();
     let (s, _, _) = send(&any, create("https://elsewhere.example", "127.0.0.1:7878")).await;
     assert_eq!(s, StatusCode::CREATED);
 }

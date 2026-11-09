@@ -10,12 +10,12 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use folo_api::{
-    API_VERSION, BenchmarkReport, BenchmarkRequest, CliCommand, DatasetList, ExportSpec, Health, ImagePage,
-    IssuePage, LogLevel, LogLine, ModelList, OnnxSwitches, PredictRequest, QueueRequest, RegisterDataset,
-    RunEstimate, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo, SystemResponse,
-    ThroughputTable, TrainConfig, ValReport, ValRequest,
+    API_VERSION, BenchmarkReport, BenchmarkRequest, CliCommand, CreateUpload, DatasetList, ExportSpec,
+    Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList, OnnxSwitches, PredictRequest, QueueRequest,
+    RegisterDataset, RunEstimate, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo,
+    SystemResponse, ThroughputTable, TrainConfig, Upload, Uploaded, ValReport, ValRequest,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -23,10 +23,12 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use crate::AppState;
-use crate::error::{ApiJson, ApiPath, ApiQuery, Error, Result};
+use crate::error::{ApiBytes, ApiJson, ApiPath, ApiQuery, Error, Result};
 use crate::store::{
-    ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, WeightsBody, WeightsFormat,
+    ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove, Store,
+    WeightsBody, WeightsFormat,
 };
+use crate::uploads::MAX_PART_BYTES;
 use crate::util::{rfc3339, unix_now};
 
 /// Largest accepted request body for `POST /api/predict` uploads.
@@ -71,6 +73,10 @@ pub fn api() -> Router<AppState> {
         .route("/predict", post(predict).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)))
         .route("/predict/stream", get(predict_stream))
         .route("/val", post(val))
+        .route("/uploads", post(create_upload))
+        .route("/uploads/{id}", get(get_upload).delete(delete_upload))
+        .route("/uploads/{id}/parts/{n}", put(upload_part).layer(DefaultBodyLimit::max(MAX_PART_BYTES)))
+        .route("/uploads/{id}/complete", post(complete_upload))
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }
@@ -123,7 +129,7 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
             .await
             .map_err(|e| Error::internal(format!("task failed: {e}")))?;
     let data_dir = st.store.data_dir().map(folo_api::json::path);
-    let features = [
+    let features: Vec<String> = [
         folo_api::FEATURE_EXPORT_ONNX_SWITCHES,
         folo_api::FEATURE_QUEUE_CONTROL,
         folo_api::FEATURE_WEIGHTS_ONNX,
@@ -132,8 +138,10 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
         folo_api::FEATURE_BENCHMARK,
         folo_api::FEATURE_RUN_CLI,
     ]
-    .map(String::from)
-    .to_vec();
+    .iter()
+    .chain(st.store.features())
+    .map(|f| f.to_string())
+    .collect();
     let features = if st.web_wasm {
         features.into_iter().chain([folo_api::FEATURE_WEB_WASM.to_string()]).collect()
     } else {
@@ -323,9 +331,55 @@ fn not_modified(headers: &HeaderMap, etag: &str, modified: std::time::SystemTime
     secs(modified) <= secs(since)
 }
 
+/// False when the request has `If-Match` and it names neither `etag` nor `*` (the strong comparison, RFC 9110
+/// §13.1.1: a weak tag never matches).
+fn if_match(headers: &HeaderMap, etag: &str) -> bool {
+    let mut values = headers.get_all(header::IF_MATCH).iter().peekable();
+    if values.peek().is_none() {
+        return true;
+    }
+    values.filter_map(|v| v.to_str().ok()).any(|v| v.split(',').any(|t| t.trim() == "*" || t.trim() == etag))
+}
+
+/// What a request's `Range` header asks of a body of some length ([`byte_range`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ByteRange {
+    /// No header, or one this server does not understand (several ranges, a suffix range): the whole body.
+    Whole,
+    /// These bytes.
+    Part(std::ops::Range<u64>),
+    /// A range that starts at or past the end.
+    Unsatisfiable,
+}
+
+/// The one range `bytes=<first>-<last>` or `bytes=<first>-` of the request's `Range` header, against a body of
+/// `len` bytes (`<last>` clamped to it).
+fn byte_range(headers: &HeaderMap, len: u64) -> ByteRange {
+    let digits = |s: &str| {
+        let s = s.trim();
+        (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())).then(|| s.parse::<u64>().ok()).flatten()
+    };
+    let mut values = headers.get_all(header::RANGE).iter();
+    let (Some(v), None) = (values.next(), values.next()) else { return ByteRange::Whole };
+    let Some(spec) = v.to_str().ok().and_then(|v| v.trim().strip_prefix("bytes=")) else {
+        return ByteRange::Whole;
+    };
+    let Some((first, last)) = spec.split_once('-') else { return ByteRange::Whole };
+    let Some(first) = digits(first) else { return ByteRange::Whole };
+    let end = match last.trim() {
+        "" => len,
+        last => match digits(last) {
+            Some(last) if last >= first => last.saturating_add(1).min(len),
+            _ => return ByteRange::Whole,
+        },
+    };
+    if first >= len { ByteRange::Unsatisfiable } else { ByteRange::Part(first..end) }
+}
+
 /// `GET /api/models/{id}/weights[?format=f16]`: the `.folo` file, streamed, with `ETag`, `Last-Modified` and
-/// `304 Not Modified` for a current `If-None-Match` / `If-Modified-Since`. The compression layer leaves it alone
-/// (see [`crate::Server`]), so `Content-Length` and the strong ETag describe the bytes on the wire.
+/// `304 Not Modified` for a current `If-None-Match` / `If-Modified-Since`; `412` for an `If-Match` it fails; one
+/// `Range` as `206` (or `416`). The compression layer leaves it alone (see [`crate::Server`]), so `Content-Length`
+/// and the strong ETag describe the bytes on the wire.
 async fn model_weights(
     State(st): State<AppState>,
     ApiPath(id): ApiPath<String>,
@@ -360,33 +414,92 @@ async fn model_weights(
         (header::LAST_MODIFIED, HeaderValue::from_str(&httpdate::fmt_http_date(w.modified)).expect("ASCII")),
         // Models change (a run's last.folo every epoch): caches revalidate with the validators above.
         (header::CACHE_CONTROL, HeaderValue::from_static("no-cache")),
+        (header::ACCEPT_RANGES, HeaderValue::from_static("bytes")),
     ];
+    // A download in parts names the version it started with: another one is never mixed in.
+    if !if_match(&headers, &w.etag) {
+        return Ok((StatusCode::PRECONDITION_FAILED, validators).into_response());
+    }
     if not_modified(&headers, &w.etag, w.modified) {
         return Ok((StatusCode::NOT_MODIFIED, validators).into_response());
     }
-    let disposition = format!("attachment; filename=\"{}\"", w.file_name);
+    let (status, range) = match byte_range(&headers, w.len) {
+        ByteRange::Whole => (StatusCode::OK, 0..w.len),
+        ByteRange::Part(r) => (StatusCode::PARTIAL_CONTENT, r),
+        ByteRange::Unsatisfiable => {
+            let all = HeaderValue::from_str(&format!("bytes */{}", w.len)).expect("ASCII");
+            return Ok((StatusCode::RANGE_NOT_SATISFIABLE, validators, [(header::CONTENT_RANGE, all)])
+                .into_response());
+        }
+    };
+    let len = range.end - range.start;
     let body = match w.body {
-        WeightsBody::Bytes(b) => Body::from(b),
+        WeightsBody::Bytes(b) => Body::from(b.slice(range.start as usize..range.end as usize)),
         WeightsBody::File(f) => {
-            // At most `len` bytes, the length announced in Content-Length even if the file grew meanwhile.
-            let file = tokio::io::AsyncReadExt::take(tokio::fs::File::from_std(f), w.len);
+            let mut file = tokio::fs::File::from_std(f);
+            if range.start > 0 {
+                tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(range.start))
+                    .await
+                    .map_err(|e| Error::internal(format!("seeking in {}: {e}", w.file_name)))?;
+            }
+            // At most the range's bytes, the length announced in Content-Length even if the file grew meanwhile.
+            let file = tokio::io::AsyncReadExt::take(file, len);
             Body::from_stream(tokio_util::io::ReaderStream::with_capacity(file, WEIGHTS_CHUNK))
         }
     };
-    Ok((
+    let disposition = format!("attachment; filename=\"{}\"", w.file_name);
+    let mut res = (
+        status,
         validators,
         [
             (header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream")),
-            (header::CONTENT_LENGTH, HeaderValue::from(w.len)),
+            (header::CONTENT_LENGTH, HeaderValue::from(len)),
             (header::CONTENT_DISPOSITION, HeaderValue::from_str(&disposition).expect("sanitised name")),
         ],
         body,
     )
-        .into_response())
+        .into_response();
+    if status == StatusCode::PARTIAL_CONTENT {
+        let part = format!("bytes {}-{}/{}", range.start, range.end - 1, w.len);
+        res.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&part).expect("ASCII"));
+    }
+    Ok(res)
 }
 
 async fn val(State(st): State<AppState>, ApiJson(req): ApiJson<ValRequest>) -> Result<Json<ValReport>> {
     Ok(Json(blocking(&st, move |s| s.val(req)).await?))
+}
+
+// ---- uploads -----------------------------------------------------------------------------------------------------
+
+/// `POST /api/uploads`: `201` with a new session, or `200` with what an upload of the same fingerprint became.
+async fn create_upload(State(st): State<AppState>, ApiJson(req): ApiJson<CreateUpload>) -> Result<Response> {
+    let created = blocking(&st, move |s| s.create_upload(req)).await?;
+    let status = if created.upload.is_some() { StatusCode::CREATED } else { StatusCode::OK };
+    Ok((status, Json(created)).into_response())
+}
+
+async fn get_upload(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<Upload>> {
+    Ok(Json(blocking(&st, move |s| s.get_upload(&id)).await?))
+}
+
+/// `PUT /api/uploads/{id}/parts/{n}`: the body is the next bytes of the stream (at most [`MAX_PART_BYTES`]).
+async fn upload_part(
+    State(st): State<AppState>,
+    ApiPath((id, n)): ApiPath<(String, u32)>,
+    ApiBytes(bytes): ApiBytes,
+) -> Result<Json<Upload>> {
+    Ok(Json(blocking(&st, move |s| s.upload_part(&id, n, bytes)).await?))
+}
+
+async fn complete_upload(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Response> {
+    let done: Uploaded = blocking(&st, move |s| s.complete_upload(&id)).await?;
+    Ok((StatusCode::CREATED, Json(done)).into_response())
+}
+
+async fn delete_upload(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {
+    blocking(&st, move |s| s.delete_upload(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---- runs --------------------------------------------------------------------------------------------------------
@@ -403,23 +516,55 @@ fn body_error(e: impl std::fmt::Display) -> Error {
     )
 }
 
+/// A string field of a `POST /api/runs` body (`null` counts as missing).
+fn string_field(fields: &serde_json::Map<String, serde_json::Value>, key: &str) -> Result<Option<String>> {
+    match fields.get(key).filter(|v| !v.is_null()) {
+        None => Ok(None),
+        Some(v) => {
+            Ok(Some(v.as_str().ok_or_else(|| body_error(format!("{key}: expected a string")))?.into()))
+        }
+    }
+}
+
 /// `POST /api/runs`: a `TrainConfig` starts a new run (`201`); with `resume_run_id` it resumes that run instead
-/// (`200`, same id).
+/// (`200`, same id); with `checkpoint` the new run continues that model's training state.
 async fn create_run(
     State(st): State<AppState>,
     ApiJson(body): ApiJson<serde_json::Value>,
 ) -> Result<Response> {
-    let serde_json::Value::Object(fields) = body else {
+    let serde_json::Value::Object(mut fields) = body else {
         return Err(body_error("expected a JSON object"));
     };
-    if let Some(rid) = fields.get("resume_run_id").filter(|v| !v.is_null()) {
-        let rid = rid.as_str().ok_or_else(|| body_error("resume_run_id: expected a string"))?.to_string();
+    let checkpoint = string_field(&fields, "checkpoint")?;
+    let resume = string_field(&fields, "resume_run_id")?;
+    if checkpoint.is_some() {
+        let with = if resume.is_some() {
+            Some("resume_run_id")
+        } else {
+            string_field(&fields, "weights")?.map(|_| "weights")
+        };
+        if let Some(with) = with {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                format!("checkpoint cannot be combined with {with}"),
+            )
+            .hint(
+                "checkpoint starts a new run from a checkpoint's training state; leave the other field out",
+            ));
+        }
+    }
+    fields.remove("checkpoint");
+    if let Some(rid) = resume {
         let run = blocking(&st, move |s| s.resume_run(&rid, &fields)).await?;
         return Ok(Json(run).into_response());
     }
     let config: TrainConfig =
         serde_json::from_value(serde_json::Value::Object(fields)).map_err(body_error)?;
-    let run = blocking(&st, move |s| s.create_run(config)).await?;
+    let run = match checkpoint {
+        Some(model) => blocking(&st, move |s| s.continue_run(&model, config)).await?,
+        None => blocking(&st, move |s| s.create_run(config)).await?,
+    };
     Ok((StatusCode::CREATED, Json(run)).into_response())
 }
 
@@ -460,6 +605,8 @@ async fn delete_run(State(st): State<AppState>, ApiPath(id): ApiPath<String>) ->
 #[derive(Deserialize)]
 struct MetricsParams {
     every: Option<u64>,
+    after_step: Option<u64>,
+    after_epoch: Option<u32>,
 }
 
 async fn run_metrics(
@@ -467,8 +614,12 @@ async fn run_metrics(
     ApiPath(id): ApiPath<String>,
     ApiQuery(p): ApiQuery<MetricsParams>,
 ) -> Result<Response> {
-    let every = p.every.unwrap_or(1).max(1);
-    Ok(Json(blocking(&st, move |s| s.run_metrics(&id, every)).await?).into_response())
+    let q = MetricsQuery {
+        every: p.every.unwrap_or(1).max(1),
+        after_step: p.after_step,
+        after_epoch: p.after_epoch,
+    };
+    Ok(Json(blocking(&st, move |s| s.run_metrics(&id, &q)).await?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -492,6 +643,7 @@ pub const MAX_LOG_LINES: usize = 5000;
 #[derive(Deserialize)]
 struct LogsParams {
     limit: Option<usize>,
+    after: Option<u64>,
 }
 
 async fn run_logs(
@@ -499,8 +651,8 @@ async fn run_logs(
     ApiPath(id): ApiPath<String>,
     ApiQuery(p): ApiQuery<LogsParams>,
 ) -> Result<Json<RunLogs>> {
-    let limit = p.limit.unwrap_or(DEFAULT_LOG_LINES).clamp(1, MAX_LOG_LINES);
-    Ok(Json(RunLogs { lines: blocking(&st, move |s| s.run_logs(&id, limit)).await? }))
+    let q = LogsQuery { limit: p.limit.unwrap_or(DEFAULT_LOG_LINES).clamp(1, MAX_LOG_LINES), after: p.after };
+    Ok(Json(blocking(&st, move |s| s.run_logs(&id, &q)).await?))
 }
 
 fn sse_event(ev: &RunEvent) -> Event {

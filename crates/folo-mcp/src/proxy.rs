@@ -1,18 +1,18 @@
 //! Proxy mode (`folo mcp --server http://127.0.0.1:7878`): a [`Store`] that forwards to a running `folo serve`
 //! over docs/API.md, so Studio and the agent share datasets and runs. Every tool goes through the same `Store`
-//! methods as in embedded mode; only the transport differs. Calls are blocking (`ureq`); the MCP layer runs them
-//! on tokio's blocking pool.
-
-use std::time::Duration;
+//! methods as in embedded mode; only the transport differs: [`folo_client::Client`] (blocking, `http://` or
+//! `https://`, the server's `--token` when it has one). The MCP layer runs the calls on tokio's blocking pool.
 
 use folo_api::{
-    Dataset, DatasetList, ErrorBody, ExportResult, ExportSpec, FEATURE_EXPORT_ONNX_SWITCHES, GpuInfo, Health,
-    ImagePage, IssuePage, LogLine, Model, ModelEval, ModelList, PredictRequest, PredictResponse, QueueAction,
-    QueueRequest, RegisterDataset, Run, RunEstimate, RunList, RunLogs, RunMetrics, RunSamples,
-    SyntheticDataset, SystemInfo, SystemResponse, ThroughputTable, TrainConfig, ValReport, ValRequest,
+    Dataset, DatasetList, ExportResult, ExportSpec, FEATURE_EXPORT_ONNX_SWITCHES, GpuInfo, Health, ImagePage,
+    IssuePage, Model, ModelEval, ModelList, PredictRequest, PredictResponse, QueueAction, QueueRequest,
+    RegisterDataset, Run, RunEstimate, RunList, RunLogs, RunMetrics, RunSamples, SyntheticDataset,
+    SystemInfo, SystemResponse, ThroughputTable, TrainConfig, ValReport, ValRequest,
 };
+use folo_client::{Client, encode};
 use folo_server::store::{
-    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription,
+    ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
+    Store, Subscription,
 };
 use http::StatusCode;
 use serde::Serialize;
@@ -20,13 +20,9 @@ use serde::de::DeserializeOwned;
 
 use crate::errors::{Error, not_implemented};
 
-/// Largest response body read from the server (images, metric histories).
-const MAX_BODY: u64 = 256 * 1024 * 1024;
-
 /// A [`Store`] backed by a `folo serve` HTTP API.
 pub struct HttpStore {
-    base: String,
-    agent: ureq::Agent,
+    client: Client,
     mock: std::sync::OnceLock<bool>,
 }
 
@@ -34,34 +30,27 @@ fn action(a: QueueAction) -> QueueRequest {
     QueueRequest { action: Some(a), position: None }
 }
 
-/// Percent-encodes one path segment or query value.
-pub fn encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
+/// A transport error as a tool error: the server's code, status and hint; a server that does not answer is `502
+/// server_unreachable`.
+fn store_error(e: folo_client::Error) -> Error {
+    match e.status {
+        Some(status) => Error { status, body: e.error },
+        None => Error::new(StatusCode::BAD_GATEWAY, "server_unreachable", e.error.message)
+            .hint("is `folo serve` running there? start it, or run `folo mcp` without --server"),
     }
-    out
 }
 
 impl HttpStore {
-    /// A store forwarding to `base` (e.g. `http://127.0.0.1:7878`).
-    pub fn new(base: &str) -> HttpStore {
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_global(Some(Duration::from_secs(600)))
-            .build()
-            .into();
-        HttpStore { base: base.trim_end_matches('/').to_string(), agent, mock: std::sync::OnceLock::new() }
+    /// A store forwarding to `base` (e.g. `http://127.0.0.1:7878`), sending `token` to a server started with
+    /// `--token`.
+    pub fn new(base: &str, token: Option<&str>) -> HttpStore {
+        let client = Client::new(base).token(token.unwrap_or_default());
+        HttpStore { client, mock: std::sync::OnceLock::new() }
     }
 
     /// The server's base URL.
     pub fn base(&self) -> &str {
-        &self.base
+        self.client.base()
     }
 
     /// `GET /api/system` of the server.
@@ -69,54 +58,16 @@ impl HttpStore {
         self.get("/system")
     }
 
-    fn url(&self, path: &str) -> String {
-        format!("{}/api{path}", self.base)
-    }
-
-    fn unreachable(&self, e: ureq::Error) -> Error {
-        Error::new(StatusCode::BAD_GATEWAY, "server_unreachable", format!("{}: {e}", self.base))
-            .hint("is `folo serve` running there? start it, or run `folo mcp` without --server")
-    }
-
-    /// Reads a response: the body on 2xx, the API error envelope otherwise.
-    fn finish(
-        &self,
-        res: Result<http::Response<ureq::Body>, ureq::Error>,
-    ) -> Result<(http::HeaderMap, Vec<u8>), Error> {
-        let res = res.map_err(|e| self.unreachable(e))?;
-        let status = res.status();
-        let headers = res.headers().clone();
-        let bytes =
-            res.into_body().with_config().limit(MAX_BODY).read_to_vec().map_err(|e| self.unreachable(e))?;
-        if status.is_success() {
-            return Ok((headers, bytes));
-        }
-        let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        Err(match serde_json::from_slice::<ErrorBody>(&bytes) {
-            Ok(b) => Error { status, body: b.error },
-            Err(_) => Error::new(status, "internal", String::from_utf8_lossy(&bytes).into_owned()),
-        })
-    }
-
-    fn parse<T: DeserializeOwned>(&self, bytes: &[u8]) -> Result<T, Error> {
-        serde_json::from_slice(bytes)
-            .map_err(|e| Error::internal(format!("unexpected response from {}: {e}", self.base)))
-    }
-
     fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
-        let (_, b) = self.finish(self.agent.get(&self.url(path)).call())?;
-        self.parse(&b)
+        self.client.get(path).map_err(store_error)
     }
 
     fn post<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T, Error> {
-        let json = serde_json::to_vec(body).expect("request bodies serialize");
-        let req = self.agent.post(&self.url(path)).header("content-type", "application/json");
-        let (_, b) = self.finish(req.send(&json[..]))?;
-        self.parse(&b)
+        self.client.post(path, body).map_err(store_error)
     }
 
     fn delete(&self, path: &str) -> Result<(), Error> {
-        self.finish(self.agent.delete(&self.url(path)).call()).map(|_| ())
+        self.client.delete(path).map_err(store_error)
     }
 }
 
@@ -209,7 +160,7 @@ impl Store for HttpStore {
         if let Some(t) = thumb {
             path.push_str(&format!("?thumb={t}"));
         }
-        let (headers, bytes) = self.finish(self.agent.get(&self.url(&path)).call())?;
+        let (headers, bytes) = self.client.get_bytes(&path).map_err(store_error)?;
         let ct = headers.get(http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).unwrap_or("");
         Ok(ImageData { content_type: static_content_type(ct), bytes, immutable: false })
     }
@@ -239,7 +190,7 @@ impl Store for HttpStore {
                 "not_implemented",
                 format!(
                     "the folo serve at {} is too old for the ONNX switches (decode, dynamic, half)",
-                    self.base
+                    self.base()
                 ),
             )
             .hint("update folo serve, or export without the switches and use `folo export --format onnx`"));
@@ -270,9 +221,7 @@ impl Store for HttpStore {
     }
 
     fn stop_run(&self, id: &str) -> Result<Run, Error> {
-        let (_, b) =
-            self.finish(self.agent.post(&self.url(&format!("/runs/{}/stop", encode(id)))).send_empty())?;
-        self.parse(&b)
+        self.client.post_empty(&format!("/runs/{}/stop", encode(id))).map_err(store_error)
     }
 
     fn move_run(&self, id: &str, mv: QueueMove) -> Result<Run, Error> {
@@ -291,8 +240,15 @@ impl Store for HttpStore {
         self.delete(&format!("/runs/{}", encode(id)))
     }
 
-    fn run_metrics(&self, id: &str, every: u64) -> Result<RunMetrics, Error> {
-        self.get(&format!("/runs/{}/metrics?every={}", encode(id), every.max(1)))
+    fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics, Error> {
+        let mut path = format!("/runs/{}/metrics?every={}", encode(id), q.every.max(1));
+        if let Some(s) = q.after_step {
+            path.push_str(&format!("&after_step={s}"));
+        }
+        if let Some(e) = q.after_epoch {
+            path.push_str(&format!("&after_epoch={e}"));
+        }
+        self.get(&path)
     }
 
     fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples, Error> {
@@ -300,8 +256,12 @@ impl Store for HttpStore {
         self.get(&format!("/runs/{}/samples{q}", encode(id)))
     }
 
-    fn run_logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>, Error> {
-        Ok(self.get::<RunLogs>(&format!("/runs/{}/logs?limit={}", encode(id), limit.clamp(1, 5000)))?.lines)
+    fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs, Error> {
+        let mut path = format!("/runs/{}/logs?limit={}", encode(id), q.limit.clamp(1, 5000));
+        if let Some(a) = q.after {
+            path.push_str(&format!("&after={a}"));
+        }
+        self.get(&path)
     }
 
     fn subscribe(&self, _id: &str) -> Result<Subscription, Error> {
@@ -333,9 +293,7 @@ impl Store for HttpStore {
                     ("max_det", input.max_det.to_string()),
                 ];
                 let (ct, body) = multipart(&fields, &bytes);
-                let req = self.agent.post(&self.url("/predict")).header("content-type", &ct);
-                let (_, b) = self.finish(req.send(&body[..]))?;
-                self.parse(&b)
+                self.client.send("/predict", &ct, &body).map_err(store_error)
             }
         }
     }
@@ -358,16 +316,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encodes_segments() {
-        assert_eq!(encode("ds_1"), "ds_1");
-        assert_eq!(encode("a/b c"), "a%2Fb%20c");
-    }
-
-    #[test]
     fn unreachable_server_is_a_tool_error() {
         // Port 9 (discard) is essentially never served on loopback.
-        let s = HttpStore::new("http://127.0.0.1:9");
+        let s = HttpStore::new("http://127.0.0.1:9", Some("s3cret"));
         let e = s.list_datasets().unwrap_err();
-        assert_eq!(e.body.code, "server_unreachable");
+        assert_eq!((e.status, e.body.code.as_str()), (StatusCode::BAD_GATEWAY, "server_unreachable"));
+        assert!(e.body.hint.unwrap().contains("folo serve"));
+        assert!(!e.body.message.contains("s3cret"));
     }
 }

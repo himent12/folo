@@ -17,18 +17,22 @@
 //! - `cache/eval/<model id>.json`: cached `/eval` results (`POST /api/val` is computed on every request).
 //! - `cache/weights/<model id>.<hash>.f16.folo`: f16 exports served by `GET /api/models/{id}/weights?format=f16`.
 //! - `throughput.json`: the measured throughput table ([`crate::throughput`]).
+//! - `uploads/<id>/`, `uploads.json`: upload sessions in progress and the fingerprints of finished uploads
+//!   ([`crate::uploads`]); a finished dataset upload moves to `datasets/<name>/`, a model to `models/`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use axum::http::StatusCode;
 use folo_api::{
-    BBox, BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, Dataset, DatasetFormat, ExportResult,
-    ExportSpec, GpuInfo, GpuPool, ImagePage, ImageSize, InferPrecision, LogLine, Model, ModelEval,
-    PredictResponse, RegisterDataset, Run, RunEstimate, RunMetrics, RunSamples, Sample, ScoredBox, Splits,
-    SyntheticDataset, ThroughputTable, TrainConfig, ValReport, ValRequest,
+    BBox, BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, CreateUpload, Dataset, DatasetFormat,
+    ExportResult, ExportSpec, GpuInfo, GpuPool, ImagePage, ImageSize, InferPrecision, Model, ModelEval,
+    PredictResponse, RegisterDataset, Run, RunEstimate, RunLogs, RunMetrics, RunSamples, Sample, ScoredBox,
+    Splits, SyntheticDataset, ThroughputTable, TrainConfig, Upload, UploadCreated, UploadKind, Uploaded,
+    ValReport, ValRequest,
 };
 use folo_core::Device;
 use folo_vision::PredictConfig;
@@ -37,13 +41,14 @@ use serde::{Deserialize, Serialize};
 use crate::engine::{self, Predictors, engine_error};
 use crate::error::{Error, Result};
 use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, data_error, read_image_with, write_atomic};
-use crate::models::{ModelRef, Models, model_of};
+use crate::models::{ModelRef, Models, file_model_id, model_of};
 use crate::runs::{DatasetRef, Runs, run_model_id};
 use crate::store::{
-    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription, Weights,
-    WeightsFormat, weights_file_name,
+    ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
+    Store, Subscription, Weights, WeightsFormat, weights_file_name,
 };
 use crate::throughput::{EstimateInput, InferKey, InferSample, Throughput};
+use crate::uploads::{Finished, Uploads};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
 /// How often a dataset's files are re-checked for changes (on `GET /api/datasets/{id}` and image listings).
@@ -271,6 +276,7 @@ pub struct RealStore {
     device: String,
     precision: folo_vision::Precision,
     throughput: Arc<Throughput>,
+    uploads: Arc<Uploads>,
 }
 
 impl RealStore {
@@ -311,6 +317,7 @@ impl RealStore {
         let predictors = Arc::new(Predictors::default());
         let idle = Arc::new(GpuIdle::new());
         spawn_idle_sweeper(Arc::downgrade(&idle), Arc::downgrade(&predictors), Arc::downgrade(&runs));
+        let uploads = Uploads::open(&data_dir);
         RealStore {
             data_dir,
             entries: RwLock::new(entries),
@@ -322,6 +329,7 @@ impl RealStore {
             device: "auto".into(),
             precision: folo_vision::Precision::F32,
             throughput,
+            uploads,
         }
     }
 
@@ -353,6 +361,13 @@ impl RealStore {
     pub fn gpu_idle_release(self, pool: Duration, predictors: Duration) -> RealStore {
         self.idle.release_after_ms.store(pool.as_millis() as u64, Ordering::Relaxed);
         self.idle.predictors_after_ms.store(predictors.as_millis() as u64, Ordering::Relaxed);
+        self
+    }
+
+    /// Changes how long an upload session may go without a part before it expires (default
+    /// [`crate::uploads::UPLOAD_IDLE`]).
+    pub fn upload_idle(self, idle: Duration) -> RealStore {
+        self.uploads.set_idle(idle);
         self
     }
 
@@ -625,6 +640,127 @@ impl RealStore {
         )))
     }
 
+    /// A new, empty folder `datasets/<base>` (`-2`, `-3`, ... when taken) for a dataset this server writes.
+    fn claim_dataset_dir(&self, base: &str) -> Result<PathBuf> {
+        let parent = self.data_dir.join("datasets");
+        std::fs::create_dir_all(&parent)
+            .map_err(|e| Error::internal(format!("creating {}: {e}", parent.display())))?;
+        // create_dir claims the folder atomically, so concurrent requests with the same name never share one.
+        let mut dir = parent.join(base);
+        let mut n = 1;
+        loop {
+            match std::fs::create_dir(&dir) {
+                Ok(()) => return Ok(dir),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    n += 1;
+                    dir = parent.join(format!("{base}-{n}"));
+                }
+                Err(e) => return Err(Error::internal(format!("creating {}: {e}", dir.display()))),
+            }
+        }
+    }
+
+    /// What the finished upload of `kind` with `fingerprint` became, while it still exists (the dataset registered,
+    /// the model listed).
+    fn uploaded(&self, kind: UploadKind, fingerprint: &str) -> Option<Uploaded> {
+        let id = self.uploads.known(kind, fingerprint)?;
+        match kind {
+            UploadKind::Dataset => {
+                self.get_dataset(&id).ok().map(|d| Uploaded { dataset: Some(d), model: None })
+            }
+            UploadKind::Model => {
+                self.model(&id).ok().map(|m| Uploaded { dataset: None, model: Some(m.model) })
+            }
+        }
+    }
+
+    /// Moves an unpacked dataset upload into its own folder under `datasets/` and registers it, as `POST
+    /// /api/datasets` would. Nothing stays behind when that fails.
+    fn adopt_dataset(&self, done: &Finished) -> Result<Dataset> {
+        let dir = self.claim_dataset_dir(&slug(done.name(), "dataset"))?;
+        let path = dir.to_string_lossy().into_owned();
+        let registered = move_children(done.root(), &dir)
+            .and_then(|()| self.register(Some(done.name().to_string()), path, done.format()));
+        if registered.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        registered
+    }
+
+    /// Moves an uploaded weights file to `models/<name>.folo` (the name reduced as for downloads, `-2`, ... when
+    /// taken) once its header parses (`422 invalid_weights` otherwise), and returns its model.
+    fn adopt_model(&self, done: &Finished) -> Result<Model> {
+        let file = done.file();
+        crate::models::read_meta(&file).map_err(|e| {
+            Error::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_weights",
+                format!("the upload is not a readable .folo file: {}", e.body.message),
+            )
+            .hint("upload a FOLO weights file or checkpoint (docs/FORMAT.md)")
+        })?;
+        let dir = self.models.models_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| Error::io(format!("creating {}: {e}", dir.display())))?;
+        let name = weights_file_name(done.name(), WeightsFormat::Stored);
+        let stem = name.trim_end_matches(".folo");
+        // create_new claims the name, so two uploads never share a file; the upload then replaces it atomically.
+        let mut n = 1;
+        let path = loop {
+            let tag = if n == 1 { String::new() } else { format!("-{n}") };
+            let p = dir.join(format!("{stem}{tag}.folo"));
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+                Ok(_) => break p,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(Error::io(format!("creating {}: {e}", p.display()))),
+            }
+        };
+        if let Err(e) = std::fs::rename(&file, &path) {
+            let _ = std::fs::remove_file(&path);
+            return Err(Error::io(format!("moving {} to {}: {e}", file.display(), path.display())));
+        }
+        self.model(&file_model_id(&path)).map(|m| m.model)
+    }
+
+    /// `POST /api/runs`: checks `config` and queues a new run, which continues the training state in the
+    /// `checkpoint` file when there is one (it becomes the run's `weights/last.folo`).
+    fn start_run(&self, mut config: TrainConfig, checkpoint: Option<&Path>) -> Result<Run> {
+        let e = self.entry(&config.dataset_id)?;
+        let idx = self.fresh_index(&e)?;
+        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
+        if idx.classes.is_empty() {
+            return Err(bad("the dataset has no classes".into()));
+        }
+        if idx.splits.train == 0 {
+            return Err(bad("the dataset has no training images".into()));
+        }
+        // Fine-tuning takes the weights' architecture, as `folo train --weights` does (`arch` would otherwise build
+        // another model and transfer almost nothing into it).
+        let weights = match &config.weights {
+            Some(w) => {
+                let m = self.model(w)?;
+                config.arch = m.model.arch;
+                Some(m.path)
+            }
+            None => None,
+        };
+        // The settings first (on the CPU), so a rejected config never initialises a GPU.
+        let mut check = folo_vision::TrainConfig::from_api(&config);
+        check.device = "cpu".into();
+        check.validate().map_err(engine_error)?;
+        let device = engine::resolve(&config.device)?;
+        // `amp` is checked here, as `folo train --amp` checks it, rather than failing the queued run: the same
+        // answer `/api/system`'s `capabilities.amp` gives (the trainer's own check, without switching anything on).
+        if config.amp {
+            folo_vision::train::amp_available(device).map_err(engine_error)?;
+        }
+        let ds = self.dataset_ref(&e);
+        if config.name.trim().is_empty() {
+            config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
+        }
+        let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
+        self.runs.create(config, ds, weights, checkpoint, val_offset, engine::describe(device))
+    }
+
     /// The validation samples of epoch `epoch` of a run, with image ids of its dataset.
     fn samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples> {
         let e = self.runs.get(id)?;
@@ -815,8 +951,8 @@ fn load_or_build(dir: &Path, e: &Entry) {
     }
 }
 
-/// A folder name for a dataset name: lowercase ASCII letters, digits and `-`.
-fn slug(name: &str) -> String {
+/// A folder name for a dataset name: lowercase ASCII letters, digits and `-` (`fallback` when none are left).
+fn slug(name: &str, fallback: &str) -> String {
     let mut s = String::new();
     for c in name.trim().chars() {
         if c.is_ascii_alphanumeric() {
@@ -826,7 +962,21 @@ fn slug(name: &str) -> String {
         }
     }
     let s = s.trim_end_matches('-').chars().take(48).collect::<String>();
-    if s.is_empty() { "synthetic".into() } else { s }
+    if s.is_empty() { fallback.into() } else { s }
+}
+
+/// Moves every entry of `from` into the folder `to` (renames: both are in the data dir).
+fn move_children(from: &Path, to: &Path) -> Result<()> {
+    let entries =
+        std::fs::read_dir(from).map_err(|e| Error::io(format!("reading {}: {e}", from.display())))?;
+    for e in entries {
+        let e = e.map_err(|e| Error::io(format!("reading {}: {e}", from.display())))?;
+        let dest = to.join(e.file_name());
+        std::fs::rename(e.path(), &dest).map_err(|err| {
+            Error::io(format!("moving {} to {}: {err}", e.path().display(), dest.display()))
+        })?;
+    }
+    Ok(())
 }
 
 impl Store for RealStore {
@@ -848,6 +998,10 @@ impl Store for RealStore {
 
     fn data_dir(&self) -> Option<&Path> {
         Some(&self.data_dir)
+    }
+
+    fn features(&self) -> &'static [&'static str] {
+        &[folo_api::FEATURE_UPLOADS, folo_api::FEATURE_RUN_CURSORS, folo_api::FEATURE_RUN_CHECKPOINT]
     }
 
     fn throughput(&self) -> Result<ThroughputTable> {
@@ -969,23 +1123,7 @@ impl Store for RealStore {
             val_fraction: 0.2,
             ..Default::default()
         };
-        let parent = self.data_dir.join("datasets");
-        let base = slug(&req.name);
-        std::fs::create_dir_all(&parent)
-            .map_err(|e| Error::internal(format!("creating {}: {e}", parent.display())))?;
-        // create_dir claims the folder atomically, so concurrent requests with the same name never share one.
-        let mut dir = parent.join(&base);
-        let mut n = 1;
-        loop {
-            match std::fs::create_dir(&dir) {
-                Ok(()) => break,
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    n += 1;
-                    dir = parent.join(format!("{base}-{n}"));
-                }
-                Err(e) => return Err(Error::internal(format!("creating {}: {e}", dir.display()))),
-            }
-        }
+        let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
         let t0 = Instant::now();
         if let Err(e) = folo_data::synthetic::write_yolo(&cfg, &dir, folo_data::ImageFormat::Jpeg(90)) {
             let _ = std::fs::remove_dir_all(&dir);
@@ -1087,42 +1225,28 @@ impl Store for RealStore {
         Ok(self.runs.list())
     }
 
-    fn create_run(&self, mut config: TrainConfig) -> Result<Run> {
-        let e = self.entry(&config.dataset_id)?;
-        let idx = self.fresh_index(&e)?;
-        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
-        if idx.classes.is_empty() {
-            return Err(bad("the dataset has no classes".into()));
+    fn create_run(&self, config: TrainConfig) -> Result<Run> {
+        self.start_run(config, None)
+    }
+
+    fn continue_run(&self, checkpoint: &str, config: TrainConfig) -> Result<Run> {
+        if config.weights.is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                "checkpoint and weights cannot be combined: the checkpoint holds the weights",
+            ));
         }
-        if idx.splits.train == 0 {
-            return Err(bad("the dataset has no training images".into()));
+        let m = self.model(checkpoint)?;
+        if engine::read_model_file(&m.path)?.checkpoint().is_none() {
+            return Err(Error::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_weights",
+                format!("model '{checkpoint}' ({}) has no training state to continue", m.model.name),
+            )
+            .hint("name a full checkpoint (a run's last.folo), or start a new run with `weights` set to the model"));
         }
-        // Fine-tuning takes the weights' architecture, as `folo train --weights` does (`arch` would otherwise build
-        // another model and transfer almost nothing into it).
-        let weights = match &config.weights {
-            Some(w) => {
-                let m = self.model(w)?;
-                config.arch = m.model.arch;
-                Some(m.path)
-            }
-            None => None,
-        };
-        // The settings first (on the CPU), so a rejected config never initialises a GPU.
-        let mut check = folo_vision::TrainConfig::from_api(&config);
-        check.device = "cpu".into();
-        check.validate().map_err(engine_error)?;
-        let device = engine::resolve(&config.device)?;
-        // `amp` is checked here, as `folo train --amp` checks it, rather than failing the queued run: the same
-        // answer `/api/system`'s `capabilities.amp` gives (the trainer's own check, without switching anything on).
-        if config.amp {
-            folo_vision::train::amp_available(device).map_err(engine_error)?;
-        }
-        let ds = self.dataset_ref(&e);
-        if config.name.trim().is_empty() {
-            config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
-        }
-        let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
-        self.runs.create(config, ds, weights, val_offset, engine::describe(device))
+        self.start_run(config, Some(&m.path))
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
@@ -1153,16 +1277,16 @@ impl Store for RealStore {
         Ok(())
     }
 
-    fn run_metrics(&self, id: &str, every: u64) -> Result<RunMetrics> {
-        self.runs.metrics(id, every)
+    fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics> {
+        self.runs.metrics(id, q)
     }
 
     fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples> {
         self.samples(id, epoch)
     }
 
-    fn run_logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>> {
-        self.runs.logs(id, limit)
+    fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs> {
+        self.runs.logs(id, q)
     }
 
     fn subscribe(&self, id: &str) -> Result<Subscription> {
@@ -1261,7 +1385,47 @@ impl Store for RealStore {
         crate::models::val(&m, &ds, req.split, req.imgsz, req.conf, req.iou, device, p)
     }
 
+    fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
+        Uploads::check(&req)?;
+        if let Some(existing) = req.fingerprint.as_deref().and_then(|f| self.uploaded(req.kind, f)) {
+            return Ok(UploadCreated { upload: None, existing: Some(existing) });
+        }
+        Ok(UploadCreated { upload: Some(self.uploads.create(&req)?), existing: None })
+    }
+
+    fn get_upload(&self, id: &str) -> Result<Upload> {
+        self.uploads.get(id)
+    }
+
+    fn upload_part(&self, id: &str, part: u32, bytes: Bytes) -> Result<Upload> {
+        self.uploads.put(id, part, bytes)
+    }
+
+    fn complete_upload(&self, id: &str) -> Result<Uploaded> {
+        let done = self.uploads.finish(id)?;
+        let (made, uploaded) = match done.kind() {
+            UploadKind::Dataset => {
+                let d = self.adopt_dataset(&done)?;
+                (d.id.clone(), Uploaded { dataset: Some(d), model: None })
+            }
+            UploadKind::Model => {
+                let m = self.adopt_model(&done)?;
+                (m.id.clone(), Uploaded { dataset: None, model: Some(m) })
+            }
+        };
+        if let Some(fingerprint) = done.fingerprint() {
+            self.uploads.remember(done.kind(), fingerprint, &made);
+        }
+        tracing::info!(upload = %id, made = %made, "upload completed");
+        Ok(uploaded)
+    }
+
+    fn delete_upload(&self, id: &str) -> Result<()> {
+        self.uploads.delete(id)
+    }
+
     fn shutdown(&self) {
+        self.uploads.shutdown();
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();
     }
@@ -1273,8 +1437,8 @@ mod tests {
 
     #[test]
     fn slugs() {
-        assert_eq!(slug("Shapes 1k!"), "shapes-1k");
-        assert_eq!(slug("  --  "), "synthetic");
-        assert_eq!(slug("a__b"), "a-b");
+        assert_eq!(slug("Shapes 1k!", "synthetic"), "shapes-1k");
+        assert_eq!(slug("  --  ", "synthetic"), "synthetic");
+        assert_eq!(slug("a__b", "dataset"), "a-b");
     }
 }

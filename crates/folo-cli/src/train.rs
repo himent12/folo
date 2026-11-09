@@ -580,7 +580,8 @@ impl Progress {
                 };
                 println!("{tag}{}", l.message);
             }
-            RunEvent::Status(_) | RunEvent::Queue(_) => {}
+            // Queue and cloud events come from a server's runs, never from this trainer.
+            RunEvent::Status(_) | RunEvent::Queue(_) | RunEvent::Cloud(_) => {}
         }
     }
 

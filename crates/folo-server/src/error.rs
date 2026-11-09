@@ -2,7 +2,7 @@
 
 use axum::Json;
 use axum::extract::multipart::{MultipartError, MultipartRejection};
-use axum::extract::rejection::{JsonRejection, PathRejection, QueryRejection};
+use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection, QueryRejection};
 use axum::extract::{FromRequest, FromRequestParts};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -71,6 +71,11 @@ impl Error {
     pub fn internal(message: impl Into<String>) -> Error {
         Error::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
     }
+
+    /// `500 io_error`: a file could not be read or written (a full disk, permissions).
+    pub fn io(message: impl Into<String>) -> Error {
+        Error::new(StatusCode::INTERNAL_SERVER_ERROR, "io_error", message)
+    }
 }
 
 impl std::fmt::Display for Error {
@@ -113,6 +118,18 @@ impl From<PathRejection> for Error {
     }
 }
 
+impl From<BytesRejection> for Error {
+    fn from(r: BytesRejection) -> Error {
+        let status = r.status();
+        if status == StatusCode::PAYLOAD_TOO_LARGE {
+            Error::new(status, "payload_too_large", r.body_text())
+                .hint("send the stream in smaller parts: Upload.max_part_bytes is the largest part this server takes")
+        } else {
+            Error::new(StatusCode::BAD_REQUEST, "invalid_body", r.body_text())
+        }
+    }
+}
+
 /// Maps a multipart failure, keeping its status (`413 payload_too_large` when the body is over the limit).
 fn multipart_error(status: StatusCode, what: &str, text: String) -> Error {
     if status == StatusCode::PAYLOAD_TOO_LARGE {
@@ -141,6 +158,17 @@ impl Error {
 #[derive(FromRequest)]
 #[from_request(via(axum::Json), rejection(Error))]
 pub struct ApiJson<T>(pub T);
+
+/// A raw request body (an upload part) whose rejection is our error envelope.
+pub struct ApiBytes(pub axum::body::Bytes);
+
+impl<S: Send + Sync> FromRequest<S> for ApiBytes {
+    type Rejection = Error;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<ApiBytes> {
+        Ok(ApiBytes(axum::body::Bytes::from_request(req, state).await?))
+    }
+}
 
 /// `Path<T>` whose rejection is our error envelope.
 #[derive(FromRequestParts)]

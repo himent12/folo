@@ -186,8 +186,9 @@ pub enum CloudAvailability {
     Low,
     /// None right now: launching would be refused.
     None,
-    /// The provider does not say.
+    /// The provider does not say (also a level this version does not know).
     #[default]
+    #[serde(other)]
     Unknown,
 }
 
@@ -248,6 +249,9 @@ pub enum CloudInstanceStatus {
     Terminated,
     /// The provider no longer has it although FOLO did not terminate it (it failed, or was removed elsewhere).
     Lost,
+    /// A status this version does not know (a newer server's). Counted as alive: it may cost money.
+    #[serde(other)]
+    Unknown,
 }
 
 impl CloudInstanceStatus {
@@ -339,6 +343,10 @@ pub enum CloudPhase {
     Releasing,
     /// Done: nothing of the run is left at the provider.
     Released,
+    /// A phase this version does not know (a newer server's), so a client still reads the run. Never sent by this
+    /// version.
+    #[serde(other)]
+    Unknown,
 }
 
 impl CloudPhase {
@@ -363,6 +371,7 @@ impl CloudPhase {
             CloudPhase::Collecting => "collecting",
             CloudPhase::Releasing => "releasing",
             CloudPhase::Released => "released",
+            CloudPhase::Unknown => "unknown",
         }
     }
 }
@@ -528,5 +537,10 @@ mod tests {
         }
         assert!(CloudPhase::Syncing < CloudPhase::Training);
         assert!(CloudInstanceStatus::Terminating.is_alive() && !CloudInstanceStatus::Lost.is_alive());
+        // A newer server's words still parse, so one unknown value does not hide a whole run or instance list.
+        assert_eq!(serde_json::from_str::<CloudPhase>(r#""migrating""#).unwrap(), CloudPhase::Unknown);
+        let status: CloudInstanceStatus = serde_json::from_str(r#""paused""#).unwrap();
+        assert!(status == CloudInstanceStatus::Unknown && status.is_alive());
+        assert_eq!(serde_json::from_str::<CloudAvailability>(r#""plenty""#).unwrap(), CloudAvailability::Unknown);
     }
 }
