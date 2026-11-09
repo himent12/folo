@@ -234,7 +234,9 @@ wins); a name that is not downloaded fails with `weights_not_found` (exit 3) and
 | `folo-n-coco` | `weights-v1` | folo-n trained from scratch on COCO train2017 at 640 px (EMA, f32, unfused): fine-tune or predict. Budget and val2017 results: examples/coco/README.md |
 | `folo-n-coco-f16` | `weights-v1` | the same, fused and cast to f16 (`folo export`): inference only |
 
-Without `folo`, `gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`
+`weights-v1` is a draft release for now. `gh release download` finds draft releases by tag for accounts with write
+access to the repository, so `folo weights pull` already works for them. Everyone else needs the release published
+first. Without `folo`, `gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`
 then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
 
 ## Adding a command
