@@ -140,9 +140,9 @@
       {:else if !agents}
         <div class="sk" aria-hidden="true"><Skeleton w="64px" h="12px" /><Skeleton h="32px" r="var(--radius-md)" /><Skeleton w="64px" h="12px" /><Skeleton h="32px" r="var(--radius-md)" /></div>
       {:else}
-        <Field label="Agent" hint={notReady.map((a) => `${a.name}: ${a.hint}`).join(' ') || undefined}>
+        <Field label="CLI" hint={notReady.map((a) => `${a.name}: ${a.hint}`).join(' ') || undefined}>
           <Segmented
-            label="Agent"
+            label="Agent CLI"
             value={agent?.id ?? 'claude'}
             options={agents.map((a) => ({ value: a.id, label: a.name, disabled: !a.available, tip: a.hint ?? undefined }))}
             onchange={(id) => choice.pick(id)}
