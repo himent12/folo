@@ -56,7 +56,11 @@ Their names differ on purpose. The first-run Overview is capped at 1040 px and l
 cards stretched three short steps across 1,600 px, the next asked them to fill a wide window. The Playground rail's sliders
 are inline rows ("label · slider · value") for every model, so the rail never reflows when the model changes (asked for
 in round 44; round 47 asked for stacked rows again). New run's End-to-end and Mixed precision rows keep to the left column, their
-switch beside the label (round 42 asked for that; round 48 asked for them to span the dialog again).
+switch beside the label (round 42 asked for that; round 48 asked for them to span the dialog again). A dialog's destructive commit
+(`Btn::DangerCommit`) is the danger tint with a danger edge, not a solid red fill: white on the danger red fails AA in
+both themes and the tokens have no on-danger ink (round 52 asked for a solid fill). Run log lines wrap rather than
+truncate: every line stays readable without a tooltip. Pages cap at `content_max` (design/tokens.json, now 1200) and
+centre; a wider desktop cap is the orchestrator's call, not a per-round fix.
 
 ## Scoring
 Use `REVIEW_RUBRIC.md` (path in your task): 12 lines, 1–10, where **9 means "would ship as-is at Linear / Raycast / Zed

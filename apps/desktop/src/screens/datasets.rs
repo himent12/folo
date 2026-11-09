@@ -349,7 +349,7 @@ impl FoloApp {
                     .items_center()
                     .gap(px(5.))
                     .child(swatch(col, 6.))
-                    .child(text(ty::XS, t.text_tertiary).tnum().child(format!("{n} {}", int(c))))
+                    .child(text(ty::SM, t.text_tertiary).tnum().child(format!("{n} {}", int(c))))
             }),
         );
         let tile = |content: gpui::Div| div().flex_1().min_w_0().px(px(16.)).py(px(pad)).child(content);
@@ -378,7 +378,7 @@ impl FoloApp {
                 "Boxes",
                 int(boxes),
                 "",
-                Some(text(ty::XS, t.text_tertiary).tnum().child(format!("{per:.1} per image"))),
+                Some(text(ty::SM, t.text_tertiary).tnum().child(format!("{per:.1} per image"))),
             )))
             .child(vline(&t))
             .child(tile(stat(
@@ -386,7 +386,7 @@ impl FoloApp {
                 "Classes",
                 ds.classes.len().to_string(),
                 "",
-                Some(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(names_summary(&ds.classes, 24))),
+                Some(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(names_summary(&ds.classes, 24))),
             )))
             .child(vline(&t))
             .child({
@@ -408,12 +408,12 @@ impl FoloApp {
                         "",
                         Some(if empty > 0 {
                             if on {
-                                text(ty::XS, t.accent_text).child("Showing them · clear")
+                                text(ty::SM, t.accent_text).child("Showing them · clear")
                             } else {
                                 inline_link(&t, "Show them")
                             }
                         } else {
-                            text(ty::XS, t.text_tertiary).child("every image has labels")
+                            text(ty::SM, t.text_tertiary).child("every image has labels")
                         }),
                     ));
                 if empty > 0 {
@@ -468,7 +468,7 @@ impl FoloApp {
                                     .gap(px(4.))
                                     .child(icon("icons/triangle-alert.svg", 12., t.warning_solid))
                                     .child(
-                                        text(ty::XS, t.warning_text)
+                                        text(ty::SM, t.warning_text)
                                             .font_weight(FontWeight::MEDIUM)
                                             .child("Broken labels"),
                                     ),
@@ -487,7 +487,7 @@ impl FoloApp {
                             "Broken labels",
                             broken.to_string(),
                             "",
-                            Some(div().child(text(ty::XS, t.success_text).child("all labels valid"))),
+                            Some(div().child(text(ty::SM, t.success_text).child("all labels valid"))),
                         )
                     });
                 if broken > 0 {
@@ -624,7 +624,7 @@ impl FoloApp {
             .flex()
             .items_center()
             .gap(px(6.))
-            .child(text(ty::XS, t.text_tertiary).mr(px(2.)).child("Classes · box counts"))
+            .child(text(ty::SM, t.text_tertiary).mr(px(2.)).child("Classes · box counts"))
             .children(chips)
             .when(self.ds_empty_only, |d| {
                 d.child(self.chip(
@@ -835,12 +835,12 @@ impl FoloApp {
                                             .when(!focused, |d| d.invisible())
                                             .group_hover(SharedString::from(key.clone()), |s| s.visible())
                                             .child(
-                                                text(ty::XS, gpui::white())
+                                                text(ty::SM, gpui::white())
                                                     .font_family(crate::theme::MONO)
                                                     .child(meta.id.clone()),
                                             )
                                             .child(
-                                                text(ty::XS, gpui::hsla(0., 0., 1., 0.75))
+                                                text(ty::SM, gpui::hsla(0., 0., 1., 0.75))
                                                     .tnum()
                                                     .ellipsis()
                                                     .child(what),
@@ -965,7 +965,7 @@ impl FoloApp {
                     )
                     .child(text(ty::SM, t.text_primary).tnum().w(px(56.)).text_right().child(int(c)))
                     .child(
-                        text(ty::XS, t.text_tertiary)
+                        text(ty::SM, t.text_tertiary)
                             .tnum()
                             .w(px(40.))
                             .text_right()
@@ -1035,7 +1035,7 @@ impl FoloApp {
                     .child(
                         panel(&t)
                             .child(panel_header(&t, "Class balance").child(
-                                text(ty::XS, t.text_tertiary).tnum().child(format!("{} boxes", int(total))),
+                                text(ty::SM, t.text_tertiary).tnum().child(format!("{} boxes", int(total))),
                             ))
                             .child(class_rows),
                     )
@@ -1048,7 +1048,7 @@ impl FoloApp {
                                     .flex_1()
                                     .min_w_0()
                                     .child(panel_header(&t, "Box size").child(
-                                        text(ty::XS, t.text_tertiary).child("√(box area ÷ image area)"),
+                                        text(ty::SM, t.text_tertiary).child("√(box area ÷ image area)"),
                                     ))
                                     .child(self.hist_group(
                                         "hist-size-kb",
@@ -1065,7 +1065,7 @@ impl FoloApp {
                                     .min_w_0()
                                     .child(
                                         panel_header(&t, "Boxes per image")
-                                            .child(text(ty::XS, t.text_tertiary).child("images")),
+                                            .child(text(ty::SM, t.text_tertiary).child("images")),
                                     )
                                     .child(self.hist_group(
                                         "hist-per-kb",
@@ -1170,13 +1170,13 @@ fn severity_detail(t: &crate::theme::Theme, c: &crate::api::IssueCounts) -> gpui
         .min_w_0()
         .when(c.error > 0, |d| {
             d.child(
-                text(ty::XS, t.danger_text).tnum().whitespace_nowrap().child(n(c.error, "error", "errors")),
+                text(ty::SM, t.danger_text).tnum().whitespace_nowrap().child(n(c.error, "error", "errors")),
             )
         })
-        .when(c.error > 0 && c.warning > 0, |d| d.child(text(ty::XS, t.text_tertiary).child("·")))
+        .when(c.error > 0 && c.warning > 0, |d| d.child(text(ty::SM, t.text_tertiary).child("·")))
         .when(c.warning > 0, |d| {
             d.child(
-                text(ty::XS, t.warning_text)
+                text(ty::SM, t.warning_text)
                     .tnum()
                     .whitespace_nowrap()
                     .child(n(c.warning, "warning", "warnings")),
@@ -1190,7 +1190,7 @@ fn copy_cmd(t: &crate::theme::Theme, label: &'static str) -> gpui::Div {
         .items_center()
         .gap(px(4.))
         .min_w_0()
-        .child(text(ty::XS, t.text_secondary).whitespace_nowrap().child(label))
+        .child(text(ty::SM, t.text_secondary).whitespace_nowrap().child(label))
         .child(div().flex_none().child(icon("icons/copy.svg", 12., t.text_secondary)))
 }
 

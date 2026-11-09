@@ -237,6 +237,7 @@ pub fn paint_image_with_boxes(
                     // Small views label sparingly at rest; hovered or focused (`reveal`), they label
                     // like full views, so no box is known by its colour alone.
                     let strict = compact && !reveal;
+                    // small: label chips drawn on images (design/README: `xs`, `micro` on thumbnails).
                     let fs = if compact { 10. } else { ty::XS.size };
                     // Narrow views (thumbnails under 140 px) show the score only; the key names the hue.
                     let name = if bounds.size.width < px(140.) {

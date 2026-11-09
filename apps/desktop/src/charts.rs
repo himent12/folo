@@ -702,6 +702,19 @@ pub fn paint_text(
     w
 }
 
+/// The width of `text` in Geist Mono at `size_px` (file names and paths), fallbacks included.
+pub fn mono_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
+    let run = TextRun {
+        len: text.len(),
+        font: gpui::font(crate::theme::MONO),
+        color: gpui::black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window.text_system().shape_line(SharedString::from(text.to_string()), px(size_px), &[run], None).width
+}
+
 pub fn text_width(window: &mut Window, text: &str, size_px: f32) -> Pixels {
     let run = TextRun {
         len: text.len(),
@@ -799,7 +812,10 @@ fn paint_line_chart(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let label_size = ty::XS.size - 0.5;
+    // small: chart tick labels (and the axis's shared power), the one place design/README allows `xs`.
+    let label_size = ty::XS.size;
+    // Annotations (markers, the projected span, the cursor's value chip) are labels: 12 px.
+    let annot_size = ty::SM.size;
     // Data extents.
     let mut x0 = f32::INFINITY;
     let mut x1 = f32::NEG_INFINITY;
@@ -896,7 +912,7 @@ fn paint_line_chart(
     // Placed in the order given: the first marker takes the top lane.
     for m in ms {
         let x = sx0(m.x);
-        let w = text_width(window, &m.label, label_size) + px(8.);
+        let w = text_width(window, &m.label, annot_size) + px(8.);
         // Right of the line, or left of it near the right edge; on a collision try the other side
         // before opening a second lane.
         let right = x + px(2.);
@@ -928,15 +944,15 @@ fn paint_line_chart(
         size(plot_w, bounds.size.height - px(top_pad) - px(bottom_pad)),
     );
     if let Some((xt, yt)) = spec.axis_titles {
-        paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::XS.size, false);
-        let w = text_width(window, xt, ty::XS.size);
+        paint_text(window, cx, yt, point(bounds.left(), bounds.top()), t.text_tertiary, ty::SM.size, false);
+        let w = text_width(window, xt, ty::SM.size);
         paint_text(
             window,
             cx,
             xt,
             point(plot.left() + (plot.size.width - w) / 2., plot.bottom() + px(22.)),
             t.text_tertiary,
-            ty::XS.size,
+            ty::SM.size,
             false,
         );
     }
@@ -1005,7 +1021,7 @@ fn paint_line_chart(
             t.line_default,
         ));
         if !label.is_empty() {
-            let w = text_width(window, label, label_size);
+            let w = text_width(window, label, annot_size);
             // At the start of the span (where "now" is): in the marker band, like the other
             // annotations, when the chart has one and lane 0 is free there; else inside the plot.
             let lx = (fx + px(6.)).min(plot.right() - w - px(6.));
@@ -1014,7 +1030,7 @@ fn paint_line_chart(
                     .iter()
                     .any(|(ox, ow, lane, _)| *lane == 0 && *ox < lx + w + px(6.) && lx < *ox + *ow + px(6.));
             let y = if in_band { plot.top() - px(band) } else { plot.top() + px(4.) };
-            paint_text(window, cx, label, point(lx, y), t.text_tertiary, label_size, false);
+            paint_text(window, cx, label, point(lx, y), t.text_tertiary, annot_size, false);
         }
     }
     // Linked charts pass one tick count, so every chart in a group shows the same x ticks.
@@ -1184,7 +1200,7 @@ fn paint_line_chart(
             &m.label,
             point(r.left() + px(4.), r.top() + px(1.)),
             m.color,
-            label_size,
+            annot_size,
             false,
         );
     }
@@ -1229,7 +1245,7 @@ fn paint_line_chart(
     if !spec.readout {
         // The values are in the header legend; the axis says where the cursor is.
         let l = chip_label(spec, snap);
-        let w = text_width(window, &l, label_size) + px(10.);
+        let w = text_width(window, &l, annot_size) + px(10.);
         let chip = Bounds::new(
             point(clamp_in(cx_px - w / 2., plot.left() - px(4.), plot.right() - w), plot.bottom() + px(3.)),
             size(w, px(16.)),
@@ -1241,7 +1257,7 @@ fn paint_line_chart(
             &l,
             point(chip.left() + px(5.), chip.top() + px(1.)),
             t.bg_panel,
-            label_size,
+            annot_size,
             false,
         );
         return;
@@ -1252,7 +1268,7 @@ fn paint_line_chart(
         format!("{} {}{}", spec.x_name, (spec.x_fmt)(snap), if smoothed_any { " · smoothed" } else { "" })
             .trim()
             .to_string();
-    let fs = ty::XS.size;
+    let fs = ty::SM.size;
     let title_w = text_width(window, &title, fs);
     let name_w = rows.iter().map(|r| text_width(window, &r.1, fs)).fold(title_w, |a, b| a.max(b));
     let val_w = rows.iter().map(|r| text_width(window, &r.2, fs)).fold(px(0.), |a, b| a.max(b));
@@ -1462,7 +1478,8 @@ pub fn histogram(
                             ),
                         );
                         if let Some(l) = labels.get(i) {
-                            let fs = ty::XS.size - 0.5;
+                            // small: category tick labels under the bars.
+                            let fs = ty::XS.size;
                             let w = text_width(window, l, fs);
                             if w < bw + gap * 2. || i % 2 == 0 {
                                 paint_text(
@@ -1478,14 +1495,14 @@ pub fn histogram(
                         }
                         if hot {
                             let s = crate::ui::int(c);
-                            let w = text_width(window, &s, ty::XS.size);
+                            let w = text_width(window, &s, ty::SM.size);
                             paint_text(
                                 window,
                                 cx,
                                 &s,
                                 point(x + bw / 2. - w / 2., plot.bottom() - h - px(15.)),
                                 t.text_primary,
-                                ty::XS.size,
+                                ty::SM.size,
                                 false,
                             );
                         }

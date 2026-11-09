@@ -283,8 +283,8 @@ impl FoloApp {
                             .items_center()
                             .gap(px(5.))
                             .child(div().size(px(6.)).rounded_full().bg(t.accent_fill()))
-                            .child(text(ty::XS, t.text_secondary).child("best"))
-                            .child(text(ty::XS, t.text_primary).tnum().child(format!(
+                            .child(text(ty::SM, t.text_secondary).child("best"))
+                            .child(text(ty::SM, t.text_primary).tnum().child(format!(
                                 "{} @ {}",
                                 f3(b.map50_95),
                                 b.epoch
@@ -322,7 +322,7 @@ impl FoloApp {
                 .min_w_0()
                 .child(caption(&t, label))
                 .child(value)
-                .when_some(detail, |d, s| d.child(text(ty::XS, t.text_tertiary).tnum().child(s)))
+                .when_some(detail, |d, s| d.child(text(ty::SM, t.text_tertiary).tnum().child(s)))
         };
         // One row of four KPIs above a full-width chart: no column beside the chart to leave a
         // gap in, whatever the chart's height.
@@ -449,9 +449,9 @@ impl FoloApp {
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(label))
+                .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(label))
                 .child(div().w(px(48.)).child(progress(&t, frac, color, 3.)))
-                .child(text(ty::XS, t.text_secondary).tnum().whitespace_nowrap().child(value))
+                .child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(value))
         };
         let mut row = div()
             .h(px(36.))
@@ -738,7 +738,7 @@ impl FoloApp {
                                 if r.status == crate::api::RunStatus::Queued {
                                     // The Runs table's phrase, so a queued run reads the same everywhere.
                                     return d.child(
-                                        text(ty::XS, t.text_tertiary)
+                                        text(ty::SM, t.text_tertiary)
                                             .whitespace_nowrap()
                                             .child(queue_text(r.queue_position)),
                                     );
@@ -754,7 +754,7 @@ impl FoloApp {
                                     d.child(div().flex_1().child(progress(&t, r.progress(), fill, 4.)))
                                 })
                                 .child(
-                                    text(ty::XS, t.text_secondary)
+                                    text(ty::SM, t.text_secondary)
                                         .tnum()
                                         .w(px(56.))
                                         .flex_none()
@@ -791,7 +791,7 @@ impl FoloApp {
                             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
                         let meta = |w: f32| {
                             div().w(px(w)).flex_none().child(meta_row(
-                                ty::XS,
+                                ty::SM,
                                 t.text_tertiary,
                                 r.config.arch.as_str(),
                                 e2e.then(|| e2e_tag(&t, format!("e2e-ovr-{}-{w}", r.id))),
@@ -843,7 +843,7 @@ impl FoloApp {
                             .when(created, |d| {
                                 d.child(
                                     div().w(px(when_w)).flex_none().flex().justify_end().child(
-                                        text(ty::XS, t.text_tertiary)
+                                        text(ty::SM, t.text_tertiary)
                                             .id(SharedString::from(format!("ov-rc-{}", r.id)))
                                             .when_some(created_at, |d, c| {
                                                 d.tooltip(crate::controls::tip(time::local_datetime(c), None))
@@ -936,6 +936,10 @@ impl FoloApp {
                         ))
                         .into_any_element();
                 }
+                // Stacked under Recent runs (full width), the table carries the Models list's
+                // architecture, mAP50 and age too, rather than three columns across 1,100 px.
+                let wide = !self.tables_beside(window);
+                let now = self.store.api.now();
                 // Column heads like Recent runs beside it, so the two lists share row lines.
                 let heads = div()
                     .h(px(28.))
@@ -949,7 +953,12 @@ impl FoloApp {
                     // The dataset leads: it's what the rows are, one each, in name order.
                     .child(th(&t, "Dataset").w(px(120.)).flex_none())
                     .child(th(&t, "Best model").flex_1())
-                    .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")));
+                    .when(wide, |d| d.child(th(&t, "Architecture").w(px(120.)).flex_none()))
+                    .child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50-95")))
+                    .when(wide, |d| {
+                        d.child(div().w(px(64.)).flex_none().flex().justify_end().child(th(&t, "mAP50")))
+                            .child(div().w(px(80.)).flex_none().flex().justify_end().child(th(&t, "Created")))
+                    });
                 div()
                     .flex()
                     .flex_col()
@@ -959,6 +968,9 @@ impl FoloApp {
                         let id = m.id.clone();
                         let key = format!("ov-model-{}", m.id);
                         let map = m.metrics.as_ref().map_or(0., |m| m.map50_95);
+                        let map50 = m.metrics.as_ref().map(|m| m.map50);
+                        let arch = format!("{} · {} px", m.arch.as_str(), m.imgsz);
+                        let created = time::parse(&m.created).map_or(String::new(), |c| time::ago(c, now));
                         let row = div()
                             .id(SharedString::from(key.clone()))
                             .h(px(36.))
@@ -997,6 +1009,16 @@ impl FoloApp {
                                         d.child(e2e_tag(&t, format!("e2e-ov-{}", m.id)))
                                     }),
                             )
+                            .when(wide, |d| {
+                                d.child(
+                                    text(ty::SM, t.text_secondary)
+                                        .tnum()
+                                        .w(px(120.))
+                                        .flex_none()
+                                        .ellipsis()
+                                        .child(arch),
+                                )
+                            })
                             // The number alone: a bar would set rows from different datasets against
                             // each other, which their mAPs can't support.
                             .child(
@@ -1006,7 +1028,17 @@ impl FoloApp {
                                     .flex()
                                     .justify_end()
                                     .child(text(ty::SM, t.text_secondary).tnum().child(f3(map))),
-                            );
+                            )
+                            .when(wide, |d| {
+                                d.child(div().w(px(64.)).flex_none().flex().justify_end().child(
+                                    text(ty::SM, t.text_tertiary).tnum().child(map50.map_or("–".into(), f3)),
+                                ))
+                                .child(
+                                    div().w(px(80.)).flex_none().flex().justify_end().child(
+                                        text(ty::SM, t.text_tertiary).whitespace_nowrap().child(created),
+                                    ),
+                                )
+                            });
                         self.bind(
                             row,
                             &key,
@@ -1158,7 +1190,7 @@ impl FoloApp {
                         .justify_center()
                         .bg(if active { t.accent_fill() } else { t.bg_active })
                         .child(
-                            text(ty::XS, if active { t.accent_on } else { t.text_tertiary })
+                            text(ty::SM, if active { t.accent_on } else { t.text_tertiary })
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(n.to_string()),
                         ),
@@ -1404,7 +1436,7 @@ impl FoloApp {
             .cursor_pointer()
             .hover(|s| s.bg(t.bg_hover))
             .active(|s| s.bg(t.bg_active))
-            .child(text(ty::XS, t.text_secondary).child("View all"))
+            .child(text(ty::SM, t.text_secondary).child("View all"))
             .child(icon("icons/chevron-right.svg", 12., t.text_tertiary));
         self.bind(
             el,
