@@ -14,6 +14,7 @@ mod dataset;
 mod job;
 pub mod prompt;
 mod run;
+mod tree;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -203,8 +204,7 @@ impl Labeler {
             .filter(|e| e.path().join("job.json").is_file())
             .filter_map(|e| match Job::load(e.path()) {
                 Ok(job) => {
-                    // Scratch folders of calls a previous process did not get to clean up.
-                    let _ = std::fs::remove_dir_all(job.dir.join("tmp"));
+                    job.sweep();
                     Some(Arc::new(job))
                 }
                 Err(err) => {
@@ -430,7 +430,8 @@ impl Labeler {
         staged: Vec<Candidate>,
         mut skipped: Vec<SkippedImage>,
     ) -> Result<LabelImagesAdded> {
-        let mut state = job.lock();
+        // The job may have been deleted while the files were probed: its staged uploads go with it.
+        let mut state = job.live().inspect_err(|_| staged.iter().for_each(|c| c.source.discard()))?;
         let images = &state.file.images;
         let mut taken: HashSet<String> = images.iter().map(|r| stem_key(&r.file)).collect();
         // What the job has, by what makes an image the same one: an upload's bytes, a folder image's path.
@@ -440,9 +441,7 @@ impl Labeler {
         let first_new = images.len();
         for candidate in staged {
             let Candidate { name, source, size: (width, height) } = candidate;
-            let reason = if state.deleted {
-                Some("the job was deleted".to_string())
-            } else if let Source::Upload { hash, .. } = &source
+            let reason = if let Source::Upload { hash, .. } = &source
                 && let Some(same) = uploads.get(hash)
             {
                 Some(format!("the job already has this image ({same})"))

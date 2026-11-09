@@ -30,6 +30,8 @@ const MAX_SOFT_FAILURES: u32 = 3;
 /// How often a run writes `job.json` at most. The file holds every image of the job, so a large job is not
 /// rewritten after each of its thousands of calls; what a crash can lose is the labels of the last few seconds.
 const SAVE_EVERY: Duration = Duration::from_secs(5);
+/// How often the run's thread looks whether its workers are done or a save is due.
+const WATCH: Duration = Duration::from_millis(50);
 
 /// What a run does, decided when it starts.
 pub struct Plan {
@@ -74,8 +76,8 @@ struct Run<'a> {
     soft_failures: AtomicU32,
     /// Why the run gave up, once it has.
     fatal: Mutex<Option<String>>,
-    /// When `job.json` was last written by this run.
-    saved: Mutex<Instant>,
+    /// Results are in memory that `job.json` does not have yet.
+    unsaved: AtomicBool,
 }
 
 /// Runs `plan` on `job` to its end (the body of the run's thread). The job's `active` and `run` are set by the
@@ -95,12 +97,20 @@ pub fn run(job: &Job, plan: &Plan) {
         queue: Mutex::new(plan.batches.iter().cloned().enumerate().map(|(i, b)| (i + 1, b)).collect()),
         soft_failures: AtomicU32::new(0),
         fatal: Mutex::new(None),
-        saved: Mutex::new(Instant::now()),
+        unsaved: AtomicBool::new(false),
     };
     let workers = plan.parallel.clamp(1, plan.batches.len().max(1));
     std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(|| run.work());
+        let workers: Vec<_> = (0..workers).map(|_| scope.spawn(|| run.work())).collect();
+        // Meanwhile this thread keeps `job.json` no more than `SAVE_EVERY` behind, also while every worker waits
+        // on a long call.
+        let mut saved = Instant::now();
+        while workers.iter().any(|w| !w.is_finished()) {
+            std::thread::sleep(WATCH);
+            if saved.elapsed() >= SAVE_EVERY && run.unsaved.swap(false, Ordering::AcqRel) {
+                saved = Instant::now();
+                run.save(&job.lock());
+            }
         }
     });
     run.finish();
@@ -309,14 +319,15 @@ impl Run<'_> {
         for why in failures {
             self.job.log(&mut state, LogLevel::Warn, format!("call {n}: {why}"));
         }
-        let mut saved = self.saved.lock().unwrap();
-        if saved.elapsed() >= SAVE_EVERY {
-            *saved = Instant::now();
-            if let Err(e) = self.job.save(&state) {
-                tracing::warn!(job = %self.job.id, "{e}");
-            }
-        }
+        self.unsaved.store(true, Ordering::Release);
         self.job.emit_job(&state);
+    }
+
+    /// Writes `job.json`; a failure is logged (the labels stay in memory, and the next save tries again).
+    fn save(&self, state: &super::job::State) {
+        if let Err(e) = self.job.save(state) {
+            tracing::warn!(job = %self.job.id, "{e}");
+        }
     }
 
     /// Closes the run: its outcome, the job idle again.
@@ -355,9 +366,7 @@ impl Run<'_> {
             _ => (LogLevel::Info, format!("{name} is done: {summary}")),
         };
         self.job.log(&mut state, level, message);
-        if let Err(e) = self.job.save(&state) {
-            tracing::warn!(job = %self.job.id, "{e}");
-        }
+        self.save(&state);
         self.job.emit_job(&state);
     }
 }

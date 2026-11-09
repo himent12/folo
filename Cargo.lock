@@ -779,6 +779,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "walkdir",
+ "windows-sys",
 ]
 
 [[package]]

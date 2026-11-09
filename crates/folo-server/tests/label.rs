@@ -720,6 +720,64 @@ async fn a_job_deleted_while_its_start_waits_for_the_agent_does_not_run() {
 }
 
 #[tokio::test]
+async fn a_run_saves_its_labels_while_later_calls_are_still_out() {
+    let t = TestDir::new("label-save-during-run");
+    let home = t.join("home");
+    let gate = Arc::new(AtomicBool::new(false));
+    let f = fixture(&home, vec![Step::Reply(boxes_reply(1, "car")), Step::Until(gate.clone())]);
+    let job = job_with_images(&f.app, 2).await;
+    let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
+    ok::<LabelJob>(&f.app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
+
+    // The first image is labeled; the second call does not come back. Within a few seconds the job's file has
+    // the first image's labels, so a crash during the long call would not lose them.
+    let file = home.join("label").join(&job.id).join("job.json");
+    let saved = || {
+        let on_disk: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        on_disk["images"][0]["status"] == "labeled" && on_disk["run"]["usage"]["calls"] == 1
+    };
+    let mut waited = Duration::ZERO;
+    while !saved() && waited < Duration::from_secs(20) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        waited += Duration::from_millis(100);
+    }
+    assert!(saved(), "job.json was not written while the run waited on a call");
+    assert_eq!(f.agent.calls(), 2);
+    gate.store(true, Ordering::SeqCst);
+    assert_eq!(idle(&f.app, &job.id).await.counts.labeled, 2);
+}
+
+#[tokio::test]
+async fn what_a_crash_left_in_a_job_folder_is_swept_on_start() {
+    let t = TestDir::new("label-sweep");
+    let home = t.join("home");
+    let f = fixture(&home, vec![]);
+    let job = job_with_images(&f.app, 2).await;
+    drop(f);
+    // An upload that was being staged, one that was stored but never recorded, and a call's scratch folder.
+    let dir = home.join("label").join(&job.id);
+    std::fs::write(dir.join("images").join(".upload-1-7"), b"half an image").unwrap();
+    std::fs::write(dir.join("images").join("never-recorded.png"), png(9, 8, 8)).unwrap();
+    std::fs::create_dir_all(dir.join("tmp").join("call-3")).unwrap();
+    std::fs::write(dir.join("tmp").join("call-3").join("1.jpg"), b"x").unwrap();
+
+    let f = fixture(&home, vec![]);
+    let mut left: Vec<String> = std::fs::read_dir(dir.join("images"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["img0.png", "img1.png"]);
+    assert!(!dir.join("tmp").exists());
+    // The job's own images are as they were.
+    let page = images(&f.app, &job.id, "").await;
+    assert_eq!(page.total, 2);
+    let (status, bytes) =
+        send(&f.app, get(&format!("/api/label/jobs/{}/images/{}", job.id, page.images[1].id))).await;
+    assert_eq!((status, bytes), (StatusCode::OK, png(1, 200, 100)));
+}
+
+#[tokio::test]
 async fn calls_that_time_out_in_a_row_end_the_run() {
     let t = TestDir::new("label-timeouts");
     let f = fixture(&t.join("home"), vec![Step::Timeout, Step::Timeout, Step::Timeout]);

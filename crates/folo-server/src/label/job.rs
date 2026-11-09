@@ -196,6 +196,17 @@ impl State {
     /// that only waits for one leaves the run instead (the run then has one image less to label), so work done by
     /// hand is never overwritten by a call that had not started.
     pub fn claim(&mut self, image_id: &str) -> Result<()> {
+        // A dataset being written has the images as they were when it began: changing one now would either be
+        // missing from it without a word, or take a file away under the copy.
+        if self.exporting {
+            return Err(Error::conflict(
+                "label_job_active",
+                format!(
+                    "a dataset is being made from labeling job '{}'; change its images once it is written",
+                    self.file.id
+                ),
+            ));
+        }
         let Some(active) = self.active.as_mut() else { return Ok(()) };
         if active.in_call.contains(image_id) {
             return Err(Error::conflict(
@@ -283,6 +294,21 @@ impl Job {
             return Err(Error::not_found("label_job", &self.id));
         }
         Ok(state)
+    }
+
+    /// Removes what a previous process left in the job's folder and no longer belongs to the job: the scratch
+    /// folders of agent calls, and files in `images/` that no image refers to (an upload that was being staged,
+    /// or was stored after `job.json` was last written). Images added from other folders are never touched.
+    pub fn sweep(&self) {
+        let _ = std::fs::remove_dir_all(self.dir.join("tmp"));
+        let state = self.lock();
+        let uploads: HashSet<&str> =
+            state.file.images.iter().filter(|r| r.external.is_none()).map(|r| r.file.as_str()).collect();
+        for entry in std::fs::read_dir(self.images_dir()).into_iter().flatten().flatten() {
+            if !uploads.contains(entry.file_name().to_string_lossy().as_ref()) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
     }
 
     /// Where an image's file is.
@@ -466,6 +492,8 @@ mod tests {
             ..state_of(JobFile::new("lb_2".into(), "j".into(), vec![], String::new()))
         };
         assert_eq!(exporting.check_idle("x").unwrap_err().body.code, "label_job_active");
+        let mut exporting = exporting;
+        assert_eq!(exporting.claim("1").unwrap_err().body.code, "label_job_active");
         // An image in a call cannot be taken; one that waits leaves the run; the others are free.
         assert_eq!(state.claim("2").unwrap_err().body.code, "label_job_active");
         assert!(state.claim("4").is_ok() && state.claim("1").is_ok());

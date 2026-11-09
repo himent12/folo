@@ -745,8 +745,9 @@ exported more than once.
   image (an empty label file). The images are shuffled with `seed` and `round(n · val_fraction)` of them go to
   `val` (`val_fraction` in `0..=0.5`, else `400 invalid_body`; at least one image always stays in `train`).
   `name` defaults to the job's. `400 invalid_dataset` when no image is labeled, `409 label_job_active` while a
-  run is active. While the dataset is written the job cannot be changed, deleted or given to an agent (`409
-  label_job_active`). The job keeps existing and remembers the dataset as `dataset_id`; exporting again makes
+  run is active. While the dataset is written the job cannot be changed, deleted or given to an agent, and its
+  images cannot be edited or removed (`409 label_job_active`); images can still be added (they are not part of
+  that dataset). The job keeps existing and remembers the dataset as `dataset_id`; exporting again makes
   another dataset.
 
 ```jsonc
@@ -804,8 +805,9 @@ exported more than once.
   lose the labels of the run's last few seconds), `images/` (uploaded files; folder imports stay where they are)
   and `log.jsonl`.
   Its thumbnails are in `cache/thumbs/<job id>/`. On start every job is listed again, `idle`: a run a previous
-  process left active is closed as `stopped` (its finished images keep their labels). On shutdown the active
-  runs' agent calls are killed.
+  process left active is closed as `stopped` (its finished images keep their labels), and files in `images/`
+  that no image of the job refers to (an upload a crash interrupted) are removed. On shutdown the active runs'
+  agent calls are killed.
 
 - `runs/<id>/`: one folder per training run: `run.json` (the `Run` plus the dataset reference, rewritten atomically
   on every status change and after every epoch), `log.jsonl` (every log line, as `/logs` returns them),

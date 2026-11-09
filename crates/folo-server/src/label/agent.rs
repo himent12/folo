@@ -10,6 +10,8 @@ use std::time::{Duration, Instant};
 
 use folo_api::{LabelAgent, LabelAgentId, LabelEffort, LabelUsage};
 
+use super::tree::Tree;
+
 /// How long one agent call may take.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long a CLI may take to answer a question about itself (`--version`, its model list).
@@ -225,10 +227,10 @@ impl Piped {
 }
 
 /// Runs `cmd` to its end, feeding it `stdin` (then closing it), and returns what it printed. Nothing is started
-/// once `cancel` is set, and the child and the processes it started are killed when `timeout` passes or `cancel`
-/// is set. Input and output move on threads of their own, so neither side can block the other on a full pipe, and
-/// none of them is waited for without a limit: a process the child left behind may hold its pipes open, but not
-/// this call (after [`PIPE_GRACE`], what was read is the output).
+/// once `cancel` is set, and the child and the processes it started ([`Tree`]) are killed when `timeout` passes
+/// or `cancel` is set. Input and output move on threads of their own, so neither side can block the other on a
+/// full pipe, and none of them is waited for without a limit: a process the child left behind may hold its pipes
+/// open, but not this call (after [`PIPE_GRACE`], what was read is the output, and that process is killed too).
 pub fn run(
     mut cmd: Command,
     stdin: Option<Vec<u8>>,
@@ -238,18 +240,13 @@ pub fn run(
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    no_window(&mut cmd);
-    #[cfg(unix)]
-    {
-        // A group of its own, so the whole tree can be killed (see `kill_tree`).
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
+    Tree::prepare(&mut cmd);
     if cancel.load(Ordering::Relaxed) {
         return Err(AgentError::Cancelled);
     }
     let program = cmd.get_program().to_string_lossy().into_owned();
     let mut child = cmd.spawn().map_err(|e| AgentError::Unavailable(format!("starting `{program}`: {e}")))?;
+    let tree = Tree::of(&child);
     if let Some(bytes) = stdin {
         let mut pipe = child.stdin.take().expect("stdin is piped");
         // A child that exits early closes the pipe; its exit status tells the story, not the write error.
@@ -279,41 +276,9 @@ pub fn run(
     };
     if ended.is_err() || !(stdout.ended() && stderr.ended()) {
         // Whatever still runs (the child, or what it started and left holding a pipe) goes.
-        kill_tree(&mut child);
+        tree.kill(&mut child);
     }
     Ok(Output { success: ended?, stdout: stdout.text(), stderr: stderr.text() })
-}
-
-/// Keeps a console child from opening a window of its own when the server has none (started by a desktop app).
-fn no_window(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    let _ = cmd;
-}
-
-/// Kills `child` and everything it started: a CLI installed through npm is a shim (a batch file, a node script)
-/// around the process that does the work, and killing only the shim would leave that one running.
-fn kill_tree(child: &mut std::process::Child) {
-    let pid = child.id().to_string();
-    let mut killer = if cfg!(windows) {
-        let mut c = Command::new("taskkill");
-        c.args(["/T", "/F", "/PID", &pid]);
-        c
-    } else {
-        // The child leads a process group of its own (see `run`); a negative pid names the group.
-        let mut c = Command::new("kill");
-        c.args(["-KILL", "--", &format!("-{pid}")]);
-        c
-    };
-    no_window(&mut killer);
-    let _ = killer.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
-    let _ = child.kill();
-    let _ = child.wait();
 }
 
 /// The last non-empty line of `text`, shortened: what a CLI's error output boils down to.
@@ -385,18 +350,33 @@ mod tests {
     }
 
     #[test]
-    fn a_process_left_holding_the_pipes_does_not_hold_the_call() {
-        // The shell starts a long-lived process that inherits its output pipes, prints and exits.
-        let script = if cfg!(windows) {
-            "start /B ping -n 20 127.0.0.1 > NUL & echo done"
+    fn a_process_left_holding_the_pipes_neither_holds_the_call_nor_outlives_it() {
+        // A script that starts a second one in the background (it inherits the output pipes), prints and exits.
+        // The second one would write a marker file five seconds later.
+        let dir = folo_test_support::TestDir::new("label-agent-orphan");
+        let marker = dir.join("marker");
+        let cmd = if cfg!(windows) {
+            let late = "@echo off\r\nping -n 6 127.0.0.1 > NUL\r\necho late > \"%~dp0marker\"\r\n";
+            std::fs::write(dir.join("late.cmd"), late).unwrap();
+            let main = "@echo off\r\nstart /B \"\" cmd /C \"%~dp0late.cmd\"\r\necho done\r\n";
+            std::fs::write(dir.join("main.cmd"), main).unwrap();
+            Command::new(dir.join("main.cmd"))
         } else {
-            "sleep 20 & echo done"
+            let main = "(sleep 5; echo late > \"$(dirname \"$0\")/marker\") &\necho done\n";
+            std::fs::write(dir.join("main.sh"), main).unwrap();
+            let mut cmd = Command::new("sh");
+            cmd.arg(dir.join("main.sh"));
+            cmd
         };
         let t0 = Instant::now();
-        let out = run(shell(script), None, Duration::from_secs(60), &AtomicBool::new(false)).unwrap();
-        assert!(out.success);
+        let out = run(cmd, None, Duration::from_secs(60), &AtomicBool::new(false)).unwrap();
+        assert!(out.success, "{}", out.stderr);
         assert_eq!(out.stdout.trim(), "done");
-        assert!(t0.elapsed() < Duration::from_secs(15), "waited {:?} for the pipes", t0.elapsed());
+        // The call came back once the grace for the pipes was over, not when the second script would have ended...
+        assert!(t0.elapsed() < Duration::from_millis(4500), "waited {:?} for the pipes", t0.elapsed());
+        // ... and the second script was killed with it: its marker never appears.
+        std::thread::sleep(Duration::from_millis(6500).saturating_sub(t0.elapsed()));
+        assert!(!marker.exists(), "the process left behind was not killed");
     }
 
     #[test]
