@@ -60,12 +60,16 @@
     void shown;
     if (follow) pin();
   });
-  // The box's height follows the page (Run stretches it to the rail): re-pin when it changes.
+  // Re-pin when the box's height follows the page (Run stretches it to the rail) or the entries re-wrap (the mono
+  // font arriving, a narrower column).
+  let inner: HTMLDivElement | undefined = $state();
   $effect(() => {
     const el = box;
-    if (!el) return;
+    const content = inner;
+    if (!el || !content) return;
     const ro = new ResizeObserver(() => follow && pin());
     ro.observe(el);
+    ro.observe(content);
     return () => ro.disconnect();
   });
 
@@ -96,6 +100,7 @@
     <div class="wrap">
       <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable region must be keyboard reachable) -->
       <div class="log" bind:this={box} {onscroll} role="log" aria-live={live ? 'polite' : 'off'} aria-label="Training log" tabindex="0">
+        <div bind:this={inner}>
         {#each shown as l, i (i)}
           <!-- The message wraps only at spaces, each `key value` pair and flag whole (./logTokens). -->
           <p class="line {l.level}"><span class="t">{clock(l.t)}</span><span class="lv">{l.level}</span><span class="m"
@@ -104,6 +109,7 @@
         {:else}
           <p class="empty">No log lines{level !== 'all' ? ` at ${level} level` : ''} yet.</p>
         {/each}
+        </div>
       </div>
       {#if !follow}
         <div class="jump">
@@ -138,6 +144,18 @@
     font-family: var(--font-mono);
     font-size: var(--type-sm-size);
     line-height: 18px;
+  }
+  /* The top padding stays clear while scrolled: a band in the log's own fill over the end of the entry above the
+     one the view starts on (pin()), so the first line shown is always a whole entry. */
+  .log::before {
+    content: '';
+    position: sticky;
+    top: calc(-1 * var(--space-2));
+    z-index: 1;
+    display: block;
+    height: var(--space-2);
+    margin: calc(-1 * var(--space-2)) 0 0;
+    background: var(--bg-inset);
   }
   .log:focus-visible {
     outline-offset: -2px;
