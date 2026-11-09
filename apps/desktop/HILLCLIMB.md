@@ -2300,3 +2300,44 @@ Round 55 changes:
 - **Shot set:** `model` at 1680.
 
 Follow-up from Opus's last pass: the strongest error cell in the matrix measured 4.36:1. The error ramp now tops out at 0.72, and a test holds every step at 4.5:1 or better in both themes.
+
+## Final state (hill-climb stopped after round 56)
+
+- **Round 55 (in-round):** Opus 5.5 and GPT-6.1 Sol scored 9 on all 12 lines (#150).
+- **Independent check at `7b94806`:** fresh reviewers on the orchestrator's own shots of main scored Opus **8.75** and Sol **8.8**, so the all-9 result didn't hold. That opened round 56.
+- **Round 56 fixes:**
+  - **GPUI:** 0.2.2 is vendored with the truncation fix and a multi-byte regression test (#159). The P/R and op-point captions ellipsize again.
+  - **Page width:** Desktop has its own page-width token, `layout.desktop_content_max` 1440 (#157). The type scale is unchanged.
+  - **Keyboard:**
+    - Page Up / Down page the page while the chart group keeps its single Tab stop.
+    - The Playground canvas takes focus and arrows pan.
+    - Every keyed control names its keys in one strip over the page's bottom edge. It doesn't move the page, and focus reveals clear of it and of the edge fades.
+  - **Run samples:**
+    - Sample tiles are Tab stops with hover and pressed edges.
+    - A tile opens the inspector on that sample with its epoch's predictions over dashed labels.
+    - The inspector lists labels and predictions apart, as keyboard rows, and steps through the run's samples.
+  - **Layout:**
+    - Overview KPIs sit on equal grid tracks with even label steps.
+    - In the per-class table, the class column fits the longest name and all four metrics have bars.
+    - The stacked PR chart is a compact 240 px.
+    - Dialog and palette footers no longer paint past the rounded corners.
+    - Scroll fades are decided at paint time, so a capture's first frames show them too.
+  - **Values:**
+    - One formatter per value: learning rates as ×10⁻ⁿ below 0.01, drawn as a raised 11 px exponent everywhere (config, New run, chart captions and legends), mosaic "1.00", scale "±0.50", "9.42 M".
+    - One header per concept: "Architecture", "File size".
+    - Configuration shows one setting per row.
+    - Thumbnail chips show full class names.
+    - The FP share row sits on the error ramp; errors under 2 % of their row aren't filled.
+    - The dataset grid opens in Fit.
+    - The run log has Copy log.
+  - **Demo data:** each class's PR curve has its AP50 as its area. Its P and R are the curve's best-F1 point, so the dots sit on the curves, and the classes average to the model's figures.
+  - **Settings:** a device throughput table, `GET /api/system/throughput`, with Measure now, `POST /api/system/benchmark` (#162).
+  - **Shot set:** the log below the fold, keyboard-focus states, light-theme overlays, and the inspector opened from a sample.
+- **Round 56 reviews (before the last fixes):**
+  - Sol scored 8.4 both times.
+  - Opus scored 8.2, then 7.8.
+  - The last fixes addressed both reviewers' top issues: the key-strip reflow, sample-scoped inspector stepping and a prediction list, the PR chart, the confusion floor, and Configuration rows.
+  - The hill-climb was stopped there at the user's request. No later design review was run, so no final scores exist for that state.
+- **Left as is:**
+  - The Playground "triangle 0.73" chip is placed inside-bottom, because its higher-scoring neighbours hold the top corners.
+  - Two items stay open: a per-image issue list for broken labels, and hatched segments on the dataset split bar.

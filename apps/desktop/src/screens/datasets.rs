@@ -294,7 +294,9 @@ impl FoloApp {
             .gap(px(if short { 12. } else { 16. }))
             .px(px(self.gutter()))
             .pt(px(if short { 16. } else { 20. }))
-            .pb(px(16.))
+            // In keyboard mode the key-hint strip (32 px) lies over the page's bottom: the grid
+            // ends above it, so a focused bottom row is never under it.
+            .pb(px(if self.kb { 48. } else { 16. }))
             .child(header)
             .child(strip)
             .child(
@@ -717,6 +719,12 @@ impl FoloApp {
         let class_names: Vec<String> =
             self.store.dataset_summary(&id).map(|d| d.classes.clone()).unwrap_or_default();
         let fit = if self.ds_fill { crate::viz::Fit::Cover } else { crate::viz::Fit::Contain };
+        // A focused image tile names its keys (decided here: the list's rows render after the
+        // page has handed its hint to the strip).
+        if self.kb && self.focus.borrow().iter().any(|(k, f)| k.starts_with("tile-") && f.is_focused(window))
+        {
+            self.hint_keys("Arrows move between images · Enter opens one in the inspector");
+        }
         let grid = uniform_list(
             "ds-grid",
             rows,

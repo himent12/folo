@@ -1007,26 +1007,54 @@ impl Backend for MockBackend {
         });
         let n = m.classes.len();
         let mut rng = Rng::new(hash(id));
+        // Each class's PR curve has its AP50 as its area: precision 1 - (r / r1)^k up to the
+        // recall r1 it reaches (k = 6, flat then falling, as detector curves run; a class too
+        // good for that reaches recall 1 with a steeper k). Its precision and recall are the
+        // curve's best-F1 point, so the dots sit on their curves.
+        let curve = |ap: f32| {
+            let (r1, k) =
+                if ap * 7. / 6. <= 1. { (ap * 7. / 6., 6.) } else { (1., ap / (1. - ap).max(1e-3)) };
+            move |r: f32| if r > r1 { 0. } else { 1. - (r / r1).powf(k) }
+        };
+        // Per-class spread around the model's figures, scaled so the classes average to them
+        // (the legend's "All classes" row is their mean).
+        let spread: Vec<f32> = (0..n).map(|c| 1.0 + 0.07 * rng.normal() - 0.025 * c as f32).collect();
+        let mean = (spread.iter().sum::<f32>() / n.max(1) as f32).max(1e-3);
         let per_class: Vec<ClassMetrics> = (0..n as u32)
             .map(|c| {
-                let d = 1.0 + 0.07 * rng.normal() - 0.025 * c as f32;
+                let d = spread[c as usize] / mean;
+                let ap = (metrics.map50 * d).min(0.995);
+                let p_at = curve(ap);
+                let (recall, precision) = (1..=200)
+                    .map(|i| {
+                        let r = i as f32 / 200.;
+                        (r, p_at(r))
+                    })
+                    .max_by(|a, b| {
+                        let f1 = |(r, p): &(f32, f32)| 2. * r * p / (r + p).max(1e-6);
+                        f1(a).total_cmp(&f1(b))
+                    })
+                    .unwrap_or((metrics.recall, metrics.precision));
                 ClassMetrics {
                     class: c,
-                    map50: (metrics.map50 * d).min(0.995),
+                    map50: ap,
                     map50_95: (metrics.map50_95 * d).min(0.99),
-                    precision: (metrics.precision * (1.0 + 0.04 * rng.normal())).min(0.995),
-                    recall: (metrics.recall * (1.0 + 0.05 * rng.normal())).min(0.995),
+                    precision,
+                    recall,
                 }
             })
             .collect();
         let pr = per_class
             .iter()
             .map(|cm| {
-                // A smooth monotone PR curve whose area matches the class's AP50.
-                let k = (cm.map50 / (1.0 - cm.map50).max(0.02)).powf(0.9) * 1.6;
-                let recall: Vec<f32> = (0..=50).map(|i| i as f32 / 50.0).collect();
+                let p_at = curve(cm.map50);
+                // Sampled up to where the curve ends, its end point (precision 0 at r1) included.
+                let r1 = if cm.map50 * 7. / 6. <= 1. { cm.map50 * 7. / 6. } else { 1. };
+                let mut recall: Vec<f32> =
+                    (0..=100).map(|i| i as f32 / 100.).take_while(|&r| r == 0. || r < r1).collect();
+                recall.push(r1);
                 let precision: Vec<f32> =
-                    recall.iter().map(|&r| (1.0 - r.powf(k.max(0.3))).max(0.0).powf(0.35)).collect();
+                    recall.iter().map(|&r| if r >= r1 { 0. } else { p_at(r) }).collect();
                 PrCurve { class: cm.class, recall, precision, ap50: cm.map50 }
             })
             .collect();

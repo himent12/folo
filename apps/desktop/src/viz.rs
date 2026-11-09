@@ -257,12 +257,11 @@ pub fn paint_image_with_boxes(
                     let strict = compact && !reveal;
                     // small: label chips drawn on images (design/README: `xs`, `micro` on thumbnails).
                     let fs = if compact { 10. } else { ty::XS.size };
-                    // Narrow views (thumbnails under 140 px) show the score only; the key names the hue.
-                    let name = if bounds.size.width < px(140.) {
-                        Default::default()
-                    } else {
-                        b.label.clone().unwrap_or_default()
-                    };
+                    // Narrow views (thumbnails under 140 px) name the class in full and leave the
+                    // score out: a word reads where a prefix ("tri") or a bare score can't (the
+                    // inspector shows the scores).
+                    let narrow = bounds.size.width < px(140.);
+                    let name = b.label.clone().unwrap_or_default();
                     // The selected box's chip takes the selection colour, like its outline.
                     let (chip_bg, ink) = if b.highlight {
                         (t.accent_solid, t.accent_on)
@@ -279,7 +278,7 @@ pub fn paint_image_with_boxes(
                     } else {
                         (color, chip_text)
                     };
-                    let score = b.score.map(|s| format!("{s:.2}")).unwrap_or_default();
+                    let score = b.score.filter(|_| !narrow).map(|s| format!("{s:.2}")).unwrap_or_default();
                     // Nothing left to say (a name-only chip in a narrow view): no empty chip.
                     if name.is_empty() && score.is_empty() {
                         continue;

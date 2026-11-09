@@ -296,7 +296,7 @@ impl FoloApp {
     }
 
     /// Make a group of charts one Tab stop: ←/→ step the shared cursor by `step` (a fraction of the
-    /// x range), Shift steps ×10, Home/End jump, Esc clears. The readouts follow the cursor. `end` is
+    /// x range), Shift steps ×10, Home/End jump, Esc clears; Page Up/Down pass on and page the page. The readouts follow the cursor. `end` is
     /// where recorded data stops (a live run's latest epoch): the cursor starts there and never
     /// steps past it into the epochs still to come.
     #[allow(clippy::too_many_arguments)]
@@ -348,23 +348,11 @@ impl FoloApp {
                 cx.notify();
             }))
             .when(ring, |d| {
-                d.child(focus_ring(&t, radius::LG)).child(
-                    div()
-                        .absolute()
-                        .top(gpui::relative(1.))
-                        .right_0()
-                        .mt(px(6.))
-                        .px(px(8.))
-                        .py(px(3.))
-                        .rounded(px(radius::SM))
-                        .bg(t.bg_overlay)
-                        .border_1()
-                        .border_color(t.line_default)
-                        .child(
-                            text(ty::SM, t.text_secondary)
-                                .child("← → inspect · Shift ×10 · Home / End · Esc clears"),
-                        ),
-                )
+                // The keys go in the strip under the page: in view at any size, over no chart.
+                self.hint_keys(
+                    "← → inspect · Shift ×10 · Home / End · PgUp / PgDn scroll the page · Esc clears",
+                );
+                d.child(focus_ring(&t, radius::LG))
             })
             .into_any_element()
     }

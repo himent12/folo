@@ -246,13 +246,3 @@ pub fn cell2(t: &Theme, primary: impl Into<SharedString>, secondary: impl Into<S
 pub fn th(t: &Theme, label: &str) -> Div {
     text(ty::SM, t.text_tertiary).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.to_string())
 }
-
-/// A small inline bar (0..1) with its value, for metric columns.
-pub fn bar_value(t: &Theme, v: f32, label: impl Into<SharedString>, color: gpui::Hsla) -> Div {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .child(div().w(px(48.)).child(progress(t, v, color, 4.)))
-        .child(text(ty::SM, t.text_primary).tnum().child(label.into()))
-}

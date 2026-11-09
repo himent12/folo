@@ -171,6 +171,11 @@ pub struct Inspector {
     pub pan: (f32, f32),
     pub drag_from: Option<(gpui::Point<Pixels>, (f32, f32))>,
     pub hover_box: Option<usize>,
+    /// An image to land on once the dataset's image list is in (opened from a run's sample).
+    pub want: Option<String>,
+    /// Opened from a run's samples: that run and the view it was in. Images that are among its
+    /// samples show the epoch's predictions over the (dashed) labels, as the run page draws them.
+    pub sample: Option<(String, SampleView)>,
 }
 
 /// Close mosaic: a whole number of epochs, at most the run's length.
@@ -491,6 +496,12 @@ pub struct FoloApp {
     /// Frames left to keep the page scrolled to its end (a review scene of a page's bottom): the
     /// page grows as its data lays out, so the end is pinned for a while, not once.
     pub scroll_end_pending: u8,
+    /// Frames left in which the focused control scrolls into the page's view once laid out (a
+    /// scenario that opens on keyboard focus below the fold).
+    pub reveal_pending: u8,
+    /// The keys of the control that has keyboard focus, set while the page renders and shown in a
+    /// strip under the page (never over its content, and in view at any window size).
+    pub key_hint: RefCell<Option<SharedString>>,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
     pub toast_hover: Option<u64>,
@@ -568,7 +579,8 @@ impl FoloApp {
             ds_class: None,
             ds_empty_only: false,
             ds_boxes: true,
-            ds_fill: true,
+            // Whole images by default: a crop can hide the very boxes a dataset review is for.
+            ds_fill: false,
             ds_split_counts: RefCell::new(None),
             ds_tile: 168.,
             ds_hover_tile: None,
@@ -642,6 +654,8 @@ impl FoloApp {
             nr_estimate_last: None,
             nr_estimate_gen: 0,
             scroll_end_pending: 0,
+            reveal_pending: 0,
+            key_hint: RefCell::new(None),
             toasts: Vec::new(),
             toast_hover: None,
             toasts_expanded: false,
@@ -685,6 +699,11 @@ impl FoloApp {
     pub fn fh(&self, key: impl Into<SharedString>, cx: &mut Context<Self>) -> FocusHandle {
         let key = key.into();
         self.focus.borrow_mut().entry(key).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone()
+    }
+
+    /// Names the keys of the focused control in the strip under the page (see `key_hint`).
+    pub fn hint_keys(&self, keys: impl Into<SharedString>) {
+        *self.key_hint.borrow_mut() = Some(keys.into());
     }
 
     /// Keyboard focus is on this handle and should show a ring.
@@ -2894,11 +2913,13 @@ thread_local! {
     static REVEAL: RefCell<Option<Vec<ScrollHandle>>> = const { RefCell::new(None) };
 }
 
-/// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible
-/// with an 8 px margin. Runs once per request.
+/// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible,
+/// clear of the edge fades (24 px, so 32 at the top) and of the key-hint strip over the page's
+/// bottom (32 px, so 40 there). Runs once per request.
 fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
     let Some(handles) = REVEAL.with(|r| r.borrow_mut().take()) else { return };
     let margin = px(8.);
+    let (top_m, bottom_m) = (px(32.), px(40.));
     // The innermost clip around the control: only a container that contains it owns the control
     // (a dialog's fixed header and footer sit outside the scrolling body).
     let mask = window.content_mask().bounds;
@@ -2912,15 +2933,19 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
         if vp.size.width <= px(0.) || !inside {
             continue;
         }
-        let tall = b.size.height + margin * 2. > vp.size.height;
-        let dy = if b.top() - margin < vp.top() {
-            b.top() - margin - vp.top()
+        let tall = b.size.height + top_m + bottom_m > vp.size.height;
+        let dy = if b.top() - top_m < vp.top() && !tall {
+            b.top() - top_m - vp.top()
         } else if tall {
             // Taller than the view (the run page's linked chart group at minimum size): its top
-            // leads. Already in view, it stays; below, it comes up to the top edge, never past.
-            if b.top() + margin > vp.bottom() - margin * 4. { b.top() - margin - vp.top() } else { px(0.) }
-        } else if b.bottom() + margin > vp.bottom() {
-            b.bottom() + margin - vp.bottom()
+            // leads. Already in view, it stays; elsewhere, it comes to the top edge, never past.
+            if b.top() < vp.top() || b.top() + margin > vp.bottom() - margin * 4. {
+                b.top() - top_m - vp.top()
+            } else {
+                px(0.)
+            }
+        } else if b.bottom() + bottom_m > vp.bottom() {
+            b.bottom() + bottom_m - vp.bottom()
         } else {
             px(0.)
         };
@@ -2932,6 +2957,25 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
         }
         return;
     }
+}
+
+/// The strip over the page's bottom edge that names the focused control's keys: 32 px, a
+/// hairline above, a keyboard glyph and the keys. An overlay, so focusing a control never moves
+/// the page (its last 32 px are the page's own bottom padding).
+fn key_hint_strip(t: &Theme, keys: SharedString) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id("key-hint")
+        .flex_none()
+        .h(px(32.))
+        .px(px(16.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .border_t_1()
+        .border_color(t.line_subtle)
+        .bg(t.bg_panel)
+        .child(crate::ui::icon("icons/keyboard.svg", 14., t.text_tertiary))
+        .child(crate::ui::text(ty::SM, t.text_secondary).whitespace_nowrap().child(keys))
 }
 
 /// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
@@ -2961,6 +3005,11 @@ impl Render for FoloApp {
             self.page_scroll.set_offset(gpui::point(px(0.), -max));
             window.request_animation_frame();
         }
+        if self.reveal_pending > 0 {
+            self.reveal_pending -= 1;
+            REVEAL.with(|r| *r.borrow_mut() = Some(vec![self.page_scroll.clone()]));
+            window.request_animation_frame();
+        }
         if self.open_new_run_pending && self.store.datasets.ready().is_some_and(|d| !d.is_empty()) {
             self.open_new_run_pending = false;
             self.open_new_run(None, window, cx);
@@ -2970,7 +3019,10 @@ impl Render for FoloApp {
         self.ensure_core(cx);
         let titlebar = self.titlebar(window, cx).into_any_element();
         let sidebar = self.sidebar(window, cx).into_any_element();
+        *self.key_hint.borrow_mut() = None;
         let page = self.page(window, cx);
+        // A dialog or the inspector owns the keys: the page's hint stands down.
+        let key_hint = self.key_hint.borrow_mut().take().filter(|_| self.kb && !self.modal_open());
         let overlays = self.overlays(window, cx);
         div()
             .id("root")
@@ -3052,6 +3104,23 @@ impl Render for FoloApp {
                     cx.notify();
                 }
                 let m = &ev.keystroke.modifiers;
+                // Page Up / Down scroll the page about a screen (less 32 px, so a line of context
+                // stays) whenever the focused control didn't use them: a chart group keeps its one
+                // Tab stop and the page still pages.
+                if matches!(ev.keystroke.key.as_str(), "pageup" | "pagedown")
+                    && !this.modal_open()
+                    && this.palette.is_none()
+                    && !(m.control || m.alt || m.platform || m.shift)
+                {
+                    let s = &this.page_scroll;
+                    let (y, max) = (-s.offset().y, s.max_offset().height);
+                    let page = (s.bounds().size.height - px(32.)).max(px(32.));
+                    let to = if ev.keystroke.key == "pageup" { y - page } else { y + page };
+                    s.set_offset(gpui::point(s.offset().x, -to.clamp(px(0.), max)));
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if this.route == Route::Playground
                     && this.play_image.is_some()
                     && !this.modal_open()
@@ -3125,7 +3194,10 @@ impl Render for FoloApp {
                             .flex_1()
                             .min_h_0()
                             .relative()
-                            .child(page),
+                            .child(page)
+                            .when_some(key_hint, |d, h| {
+                                d.child(key_hint_strip(&t, h).absolute().left_0().right_0().bottom_0())
+                            }),
                     ),
             )
             .children(overlays)
@@ -3272,11 +3344,38 @@ impl FoloApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.inspector =
-            Some(Inspector { dataset, index, zoom: 1.0, pan: (0., 0.), drag_from: None, hover_box: None });
+        self.inspector = Some(Inspector {
+            dataset,
+            index,
+            zoom: 1.0,
+            pan: (0., 0.),
+            drag_from: None,
+            hover_box: None,
+            want: None,
+            sample: None,
+        });
         self.inspector_return = window.focused(cx);
         window.focus(&self.inspector_focus);
         cx.notify();
+    }
+
+    /// Opens the inspector on one image of a dataset by id (a run's sample tile): it lands there
+    /// once the image list is in, and ←/→ then walk the dataset from it.
+    pub fn open_sample(
+        &mut self,
+        dataset: String,
+        image: String,
+        run: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_dataset(&dataset, cx);
+        let view = self.sample_view;
+        self.open_inspector(dataset, 0, window, cx);
+        if let Some(i) = self.inspector.as_mut() {
+            i.want = Some(image);
+            i.sample = Some((run, view));
+        }
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {

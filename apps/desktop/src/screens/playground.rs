@@ -229,8 +229,13 @@ impl FoloApp {
             None => (None, name.to_string()),
         };
         let file_w = f32::from(crate::charts::mono_width(window, &file, ty::SM.size));
-        // The crumb's "/" sits between 6 px gaps, a little wider than the shaped " / ".
-        let full_w = f32::from(crate::charts::mono_width(window, &name, ty::SM.size)) + 6.;
+        // The dataset in the UI sans (a name, as everywhere else), the file in mono; the crumb's
+        // "/" sits between 6 px gaps, a little wider than the shaped " / ".
+        let full_w = file_w
+            + prefix_all.as_ref().map_or(0., |p| {
+                f32::from(crate::charts::text_width(window, &format!("{p} / "), ty::SM.size))
+            })
+            + 6.;
         let room = {
             let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
             // The other items, measured: the latency and count texts as they'll read, plus the
@@ -295,6 +300,11 @@ impl FoloApp {
             window,
             cx,
         );
+        // The image is its own Tab stop, and a press on it focuses it: the arrows then pan the
+        // image (zoomed) rather than stepping whichever slider had focus last.
+        let canvas_fh = self.fh("stage-canvas", cx);
+        let canvas_focused = canvas_fh.is_focused(window);
+        let canvas_ring = self.ring(&canvas_fh, window);
         let zoom_bar = div()
             .flex()
             .items_center()
@@ -361,22 +371,17 @@ impl FoloApp {
                                 .gap(px(6.))
                                 .min_w_0()
                                 .flex_shrink()
-                                // `text` sets the UI sans: each part names Geist Mono itself.
+                                // The dataset is a name (UI sans, as everywhere); the file is a path
+                                // (Geist Mono).
                                 .when_some(prefix, |d, p| {
                                     d.child(
                                         text(ty::SM, t.text_tertiary)
-                                            .font_family(crate::theme::MONO)
                                             .min_w_0()
                                             .flex_shrink()
                                             .ellipsis()
                                             .child(p),
                                     )
-                                    .child(
-                                        text(ty::SM, t.text_tertiary)
-                                            .font_family(crate::theme::MONO)
-                                            .flex_none()
-                                            .child("/"),
-                                    )
+                                    .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
                                 })
                                 .child(
                                     // A long file name ends in "…" at its known budget, as GPUI needs.
@@ -438,6 +443,7 @@ impl FoloApp {
             .child(
                 div()
                     .id("stage-canvas")
+                    .track_focus(&canvas_fh)
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -461,7 +467,8 @@ impl FoloApp {
                     }))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|this, ev: &gpui::MouseDownEvent, _, _| {
+                        cx.listener(move |this, ev: &gpui::MouseDownEvent, w, _| {
+                            w.focus(&canvas_fh);
                             this.play_drag = Some((ev.position, this.play_pan));
                         }),
                     )
@@ -522,7 +529,27 @@ impl FoloApp {
                             },
                         )
                         .size_full(),
-                    ),
+                    )
+                    // Focused, the stage says so: a focus-coloured inset edge (2 px from the
+                    // keyboard, like every ring; 1 px after a click), and from the keyboard, its keys.
+                    .when(canvas_focused, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .when(canvas_ring, |d| d.border_2())
+                                .when(!canvas_ring, |d| d.border_1())
+                                .border_color(t.focus),
+                        )
+                    })
+                    .when(canvas_ring, |d| {
+                        self.hint_keys(if zoom > 1.0 {
+                            "Arrows pan · Shift ×4 · + − zoom · 0 fits"
+                        } else {
+                            "+ − zoom · arrows pan when zoomed · 0 fits"
+                        });
+                        d
+                    }),
             )
             .into_any_element()
     }

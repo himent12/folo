@@ -443,6 +443,8 @@ impl FoloApp {
                             .border_t_1()
                             .border_color(t.line_subtle)
                             .bg(t.bg_raised)
+                            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+                            .rounded_b(px(radius::XL - 1.))
                             .child(
                                 div()
                                     .flex()
@@ -618,7 +620,7 @@ impl FoloApp {
                 changed.push("end-to-end".into());
             }
             if opt != 0 {
-                changed.push(format!("{} at {lr0}", OPT_LABELS[opt]));
+                changed.push(format!("{} at {}", OPT_LABELS[opt], crate::ui::fmt_lr(lr0 as f64)));
             }
             if f.amp {
                 changed.push("mixed precision".into());
@@ -781,11 +783,11 @@ impl FoloApp {
             let steps = (d.splits.train as usize).div_ceil(BATCHES[batch].max(64) as usize)
                 * epochs.round().max(1.) as usize;
             if steps > 10_000 {
-                ("SGD", "0.01".to_string())
+                ("SGD", crate::ui::fmt_lr(0.01))
             } else {
                 let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
-                // Its six decimals, written as the run dashboard writes rates (1.11×10⁻³).
-                ("AdamW", crate::charts::in_pow(lr, lr.log10().floor() as i32))
+                // Written as every rate is (1.11×10⁻³).
+                ("AdamW", crate::ui::fmt_lr(lr))
             }
         });
         // The adapter behind "GPU 0", named as the other screens name it.
@@ -1210,7 +1212,9 @@ impl FoloApp {
                                                 // A value, not an input: an outline, no well.
                                                 .border_1()
                                                 .border_color(t.line_subtle)
-                                                .child(text(ty::SM, t.text_tertiary).tnum().child(
+                                                .child(crate::ui::sci(
+                                                    ty::SM,
+                                                    t.text_tertiary,
                                                     match &auto_pick {
                                                         Some((_, lr)) => format!("Auto · {lr}"),
                                                         None => "Auto".to_string(),
@@ -1318,8 +1322,8 @@ impl FoloApp {
                     div()
                         .flex()
                         .gap(px(16.))
-                        .child(div().flex_1().child(valued("Mosaic", format!("{mosaic:.2}"), mosaic_slider)))
-                        .child(div().flex_1().child(valued("Mixup", format!("{mixup:.2}"), mixup_slider))),
+                        .child(div().flex_1().child(valued("Mosaic", crate::ui::fmt_aug(mosaic), mosaic_slider)))
+                        .child(div().flex_1().child(valued("Mixup", crate::ui::fmt_aug(mixup), mixup_slider))),
                 )
                 .child(
                     div()
@@ -1327,12 +1331,12 @@ impl FoloApp {
                         .gap(px(16.))
                         .child(div().flex_1().child(valued(
                             "Horizontal flip",
-                            format!("{fliplr:.2}"),
+                            crate::ui::fmt_aug(fliplr),
                             flip_slider,
                         )))
                         .child(div().flex_1().child(valued(
                             "Scale jitter",
-                            format!("±{scale:.2}"),
+                            crate::ui::fmt_scale(scale),
                             scale_slider,
                         ))),
                 )
@@ -1552,6 +1556,8 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle)
             .bg(t.bg_raised)
+            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+            .rounded_b(px(radius::XL - 1.))
             .child(estimate_line.flex_1())
             .child(
                 div()
@@ -1730,6 +1736,8 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle)
             .bg(t.bg_raised)
+            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+            .rounded_b(px(radius::XL - 1.))
             .child(cancel)
             .child(go);
         self.dialog_frame(
@@ -1808,6 +1816,8 @@ impl FoloApp {
             .border_t_1()
             .border_color(t.line_subtle)
             .bg(t.bg_raised)
+            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+            .rounded_b(px(radius::XL - 1.))
             .child(cancel)
             .child(stop);
         self.dialog_frame(
@@ -2034,8 +2044,38 @@ impl FoloApp {
             .into_any_element()
     }
 
+    /// The inspector was asked for an image by id (`Inspector::want`): once the list is in, its
+    /// place in the filtered list. An image the dataset page's filters hide clears them (the
+    /// inspector walks that list); one the dataset doesn't have opens the first image.
+    fn land_inspector(&mut self) {
+        let Some((ds, want)) =
+            self.inspector.as_ref().and_then(|i| Some((i.dataset.clone(), i.want.clone()?)))
+        else {
+            return;
+        };
+        let Some(all) = self.store.images.get(&ds).and_then(|l| l.ready()) else { return };
+        let in_all = all.iter().position(|m| m.id == want);
+        let shown = self.filtered_indices(&ds).iter().position(|&i| all[i].id == want);
+        let index = match (shown, in_all) {
+            (Some(i), _) => i,
+            (None, Some(i)) => {
+                self.ds_split = None;
+                self.ds_class = None;
+                self.ds_empty_only = false;
+                // Unfiltered, the list is every image in order.
+                i
+            }
+            (None, None) => 0,
+        };
+        if let Some(i) = self.inspector.as_mut() {
+            i.index = index;
+            i.want = None;
+        }
+    }
+
     fn inspector_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        self.land_inspector();
         let insp = self.inspector.as_ref().unwrap();
         let ds_id = insp.dataset.clone();
         let n = self.filtered_indices(&ds_id).len();
@@ -2051,14 +2091,35 @@ impl FoloApp {
         let Some(meta) = self.filtered_image(&ds_id, index).cloned() else { return div().into_any_element() };
         // A keyboard-focused label row highlights its box like the pointer does; while the keyboard
         // is in use it wins over a pointer hover left behind on the image.
-        let focused = (0..meta.boxes.len()).find(|i| self.fh(format!("insp-box-{i}"), cx).is_focused(window));
+        // Opened from a run's samples: this image's predictions at that epoch, if it is one of them.
+        let sample_ctx = self.inspector.as_ref().and_then(|i| i.sample.clone());
+        let sample_set =
+            sample_ctx.as_ref().and_then(|(run, _)| self.store.samples.get(run)?.ready().cloned());
+        let sample_preds = sample_set.as_ref().and_then(|s| {
+            let smp = s.samples.iter().find(|x| x.image_id == meta.id)?;
+            Some((s.epoch, smp.pred.clone()))
+        });
+        let show_preds = sample_ctx.as_ref().is_some_and(|(_, v)| *v != crate::app::SampleView::Truth);
+        // Shown predictions (score ≥ 0.30, as the run page draws them). Box indices: the labels
+        // first (0..n), then these (n..), for hover, focus and the list rows alike.
+        let preds: Option<Vec<crate::api::ScoredBox>> = sample_preds
+            .as_ref()
+            .filter(|_| show_preds)
+            .map(|(_, ps)| ps.iter().filter(|p| p.score >= 0.3).cloned().collect());
+        let n_labels = meta.boxes.len();
+        let focused =
+            (0..n_labels).find(|i| self.fh(format!("insp-box-{i}"), cx).is_focused(window)).or_else(|| {
+                (0..preds.as_ref().map_or(0, Vec::len))
+                    .find(|j| self.fh(format!("insp-pred-{j}"), cx).is_focused(window))
+                    .map(|j| n_labels + j)
+            });
         let hover = if self.kb { focused.or(hover) } else { hover.or(focused) };
         let classes = self.store.dataset_summary(&ds_id).map(|d| d.classes.clone()).unwrap_or_default();
         let img = self
             .image(&ds_id, &meta.id, ImgKind::Full, cx)
             .or_else(|| self.image(&ds_id, &meta.id, ImgKind::Thumb, cx));
         let dims = (meta.width as f32, meta.height as f32);
-        let boxes: Vec<DrawBox> = meta
+        let mut boxes: Vec<DrawBox> = meta
             .boxes
             .iter()
             .enumerate()
@@ -2066,9 +2127,36 @@ impl FoloApp {
                 label: classes.get(b.class as usize).cloned().map(Into::into),
                 highlight: hover == Some(i),
                 dim: hover.is_some_and(|h| h != i),
+                // With predictions over them, the labels are drawn as the run page draws ground
+                // truth: dashed, no chip (the list beside names them).
+                truth: preds.is_some() && hover != Some(i),
                 ..DrawBox::new(b.class, b.x1, b.y1, b.x2, b.y2)
             })
             .collect();
+        if let Some(ps) = &preds {
+            // After the labels, so a label row's index is still its box's.
+            boxes.extend(ps.iter().enumerate().map(|(j, p)| DrawBox {
+                label: classes.get(p.class as usize).cloned().map(Into::into),
+                score: Some(p.score),
+                highlight: hover == Some(n_labels + j),
+                dim: hover.is_some_and(|h| h != n_labels + j),
+                ..DrawBox::new(p.class, p.x1, p.y1, p.x2, p.y2)
+            }));
+        }
+        // What the image shows, said beside it: the run, the epoch, and how each kind is drawn.
+        let sample_line: Option<(String, String)> = sample_ctx.as_ref().map(|(run, _)| {
+            let name = self.store.run(run).map_or(run.clone(), |r| r.name.clone());
+            match (&sample_preds, show_preds) {
+                (Some((epoch, _)), true) => (
+                    format!("{name} · epoch {epoch}"),
+                    "Predictions ≥ 0.30 solid · labels dashed".to_string(),
+                ),
+                (Some((epoch, _)), false) => {
+                    (format!("{name} · epoch {epoch}"), "Labels (the run page's view)".to_string())
+                }
+                (None, _) => (name, "Not one of this run's samples: labels only".to_string()),
+            }
+        });
         let bounds_cell = self.insp_view.clone();
         // A pan pushed past the edge is stored clamped, so reversing it responds at once.
         if let (Some(b), Some(i)) = (bounds_cell.get(), self.inspector.as_mut()) {
@@ -2193,7 +2281,7 @@ impl FoloApp {
             a.class.cmp(&b.class).then(area(b).total_cmp(&area(a)))
         });
         let insp_chrome = self.scroll_chrome(self.insp_list_scroll.clone(), t.bg_overlay, 0., 0., cx);
-        let box_rows: Vec<AnyElement> = box_order
+        let mut box_rows: Vec<AnyElement> = box_order
             .into_iter()
             .map(|(i, b)| {
                 let hot = hover == Some(i);
@@ -2268,6 +2356,83 @@ impl FoloApp {
                 .into_any_element()
             })
             .collect();
+        // The epoch's predictions, after the labels: score and box, each a Tab stop that
+        // highlights its box (as a label row does).
+        if let Some(ps) = &preds {
+            box_rows.push(
+                div()
+                    .px(px(8.))
+                    .pt(px(12.))
+                    .pb(px(4.))
+                    .flex()
+                    .justify_between()
+                    .child(overline(&t, "Predictions"))
+                    .child(text(ty::SM, t.text_tertiary).child("score · x, y · w×h"))
+                    .into_any_element(),
+            );
+            for (j, p) in ps.iter().enumerate() {
+                let idx = n_labels + j;
+                let hot = hover == Some(idx);
+                let key = format!("insp-pred-{j}");
+                let row = div()
+                    .id(SharedString::from(key.clone()))
+                    .h(px(30.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(radius::SM))
+                    .when(hot, |d| d.bg(t.bg_active).child(crate::ui::select_bar(&t)))
+                    .hover(|s| s.bg(t.bg_hover))
+                    .active(|s| s.bg(t.bg_active))
+                    .on_hover(cx.listener(move |this, h: &bool, _, cx| {
+                        if let Some(insp) = this.inspector.as_mut() {
+                            let next = if *h { Some(idx) } else { None };
+                            if insp.hover_box != next {
+                                insp.hover_box = next;
+                                cx.notify();
+                            }
+                        }
+                    }))
+                    .child(crate::ui::class_swatch(&t, p.class, 8.))
+                    .child(
+                        text(ty::SM, t.text_primary)
+                            .w(px(70.))
+                            .ellipsis()
+                            .child(classes.get(p.class as usize).cloned().unwrap_or_default()),
+                    )
+                    .child(text(ty::SM, t.text_primary).tnum().w(px(32.)).child(format!("{:.2}", p.score)))
+                    .child(
+                        text(ty::SM, if hot { t.text_secondary } else { t.text_tertiary })
+                            .tnum()
+                            .flex_1()
+                            .text_right()
+                            .child(format!(
+                                "{:.0}, {:.0} · {:.0}×{:.0}",
+                                p.x1,
+                                p.y1,
+                                p.x2 - p.x1,
+                                p.y2 - p.y1
+                            )),
+                    );
+                box_rows.push(
+                    self.bind(
+                        row,
+                        &key,
+                        radius::SM,
+                        window,
+                        cx,
+                        act(move |this, _, cx| {
+                            if let Some(insp) = this.inspector.as_mut() {
+                                insp.hover_box = if insp.hover_box == Some(idx) { None } else { Some(idx) };
+                            }
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                );
+            }
+        }
         let prev = self.icon_button(
             "insp-prev",
             "icons/chevron-left.svg",
@@ -2326,8 +2491,32 @@ impl FoloApp {
                             .gap(px(6.))
                             .child(badge(&t, meta.split.label(), Tone::Neutral))
                             .child(badge(&t, format!("{} × {}", meta.width, meta.height), Tone::Neutral))
-                            .child(badge(&t, format!("{} boxes", meta.boxes.len()), Tone::Neutral)),
-                    ),
+                            .child(badge(
+                                &t,
+                                match &preds {
+                                    Some(_) => format!("{} labels", meta.boxes.len()),
+                                    None => format!("{} boxes", meta.boxes.len()),
+                                },
+                                Tone::Neutral,
+                            ))
+                            .when_some(preds.as_ref().map(Vec::len), |d, m| {
+                                d.child(badge(
+                                    &t,
+                                    format!("{m} {}", if m == 1 { "prediction" } else { "predictions" }),
+                                    Tone::Neutral,
+                                ))
+                            }),
+                    )
+                    .when_some(sample_line, |d, (run, how)| {
+                        d.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(text(ty::SM, t.text_secondary).ellipsis().child(run))
+                                .child(text(ty::SM, t.text_tertiary).child(how)),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -2372,7 +2561,16 @@ impl FoloApp {
                         div()
                             .flex()
                             .items_center()
-                            .child(div().w(px(96.)).flex_none().flex().items_center().gap(px(4.)).child(keys))
+                            .child(
+                                div()
+                                    .w(px(96.))
+                                    .flex_none()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(keys),
+                            )
                             // At 12 px the longest hint needs two lines in the 300 px panel: it
                             // wraps inside its column rather than running past the edge.
                             .child(
@@ -2390,8 +2588,17 @@ impl FoloApp {
                         .gap(px(6.))
                         .border_t_1()
                         .border_color(t.line_subtle)
-                        .child(row(shortcut(&t, &["←", "→"]).into_any_element(), "previous / next"))
-                        .child(row(shortcut(&t, &["PgUp", "PgDn"]).into_any_element(), "previous / next"))
+                        // Both pairs step the same way: one row, the pairs stacked in the key column.
+                        .child(row(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(4.))
+                                .child(shortcut(&t, &["←", "→"]))
+                                .child(shortcut(&t, &["PgUp", "PgDn"]))
+                                .into_any_element(),
+                            "previous / next",
+                        ))
                         .child(row(
                             div()
                                 .flex()
@@ -2456,11 +2663,16 @@ impl FoloApp {
             .border_color(t.line_subtle)
             .child(prev)
             .child(next)
-            .child(text(ty::SM, t.text_secondary).tnum().child(format!(
-                "{} of {}",
-                int(index as u64 + 1),
-                int(n as u64)
-            )))
+            .child(text(ty::SM, t.text_secondary).tnum().child(
+                match sample_set.as_ref().and_then(|s| {
+                    let at = s.samples.iter().position(|x| x.image_id == meta.id)?;
+                    Some((at, s.samples.len(), s.epoch))
+                }) {
+                    // Opened from a run's samples: ← / → walk those.
+                    Some((at, len, epoch)) => format!("Sample {} of {len} · epoch {epoch}", at + 1),
+                    None => format!("{} of {}", int(index as u64 + 1), int(n as u64)),
+                },
+            ))
             .child(div().flex_1())
             .child(zoom_ctrls)
             .child(div().w(px(1.)).h(px(16.)).bg(t.line_subtle))
@@ -2528,6 +2740,23 @@ impl FoloApp {
     }
 
     pub fn step_inspector(&mut self, d: i32, cx: &mut Context<Self>) {
+        // Opened from a run's samples: the previous / next sample (the inspector lands on it by id).
+        let next_sample = self.inspector.as_ref().and_then(|i| {
+            let (run, _) = i.sample.as_ref()?;
+            let set = self.store.samples.get(run)?.ready()?;
+            let cur = self.filtered_image(&i.dataset, i.index).map(|m| m.id.clone());
+            let at = cur.and_then(|c| set.samples.iter().position(|x| x.image_id == c))?;
+            let len = set.samples.len() as i32;
+            Some(set.samples[(at as i32 + d).rem_euclid(len) as usize].image_id.clone())
+        });
+        if let (Some(id), Some(i)) = (next_sample, self.inspector.as_mut()) {
+            i.want = Some(id);
+            i.zoom = 1.0;
+            i.pan = (0., 0.);
+            i.hover_box = None;
+            cx.notify();
+            return;
+        }
         let n = self.inspector.as_ref().map_or(0, |i| self.filtered_indices(&i.dataset).len());
         if let Some(i) = self.inspector.as_mut()
             && n > 0
