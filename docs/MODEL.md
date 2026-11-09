@@ -700,6 +700,10 @@ If the loss is not finite, or any running statistic became non-finite, it restor
 update never sees poisoned buffers. Ten consecutive non-finite batches, or an epoch without a single finite batch,
 abort the run with an error (`status: failed`).
 
+**Epoch boundaries.** The loader of epoch `e + 1` starts as soon as epoch `e` has taken its last batch, so it works
+while validation and the checkpoints run and the next epoch's first step does not wait for it. Its batches are the
+same whenever it starts (everything is seeded by the epoch and the sample position).
+
 **On a GPU** (`--device gpu:0`, or `auto` with an adapter) the same loop runs with everything on the device: the model,
 the EMA, the optimizer state and the accumulation buffers live there; the loader delivers `u8` pixels and a feeder
 thread stages the next batch in a mapped buffer while the current step runs, so a step starts with one buffer copy
@@ -809,7 +813,7 @@ augmentation: resize as above and pad to a square `s × s` (§9.2) only.
   confidence that maximises the class-mean F1), computed in the network input space: ground-truth boxes go through
   the same resize and pad as the image, so predictions need no inverse map. Fitness is mAP@0.5:0.95.
 - Best and early stopping: `best_fitness` starts at −∞ and `best_epoch` at −1. After validating epoch `e`, if
-  `fitness > best_fitness`, set both and write `best`. Write `last` every epoch. Stop after epoch `e` when
+  `fitness > best_fitness`, set both and write `best`. Write `last` every epoch (on a GPU its tensors come back in one download per dtype, concatenated on the device, not one wait per tensor). Stop after epoch `e` when
   `e − best_epoch >= patience`. Checkpoints persist `{ "epoch": best_epoch, "fitness": best_fitness }` as
   `folo.best` (FORMAT.md; `fitness` is `null` while it is −∞), so a resume continues the same patience count.
 - v1 reports training losses only (API `Epoch.train_loss`). Validation loss is not computed.
