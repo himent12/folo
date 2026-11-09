@@ -14,8 +14,9 @@ plus training, evaluation and export. You drive it from one `folo` binary, an HT
   at 640 in Chrome).
 
 > **Status: early (v0.1).** The detector trains and infers on CPU and GPU, and it passes its convergence gate.
-> COCO-pretrained folo-n weights now exist (`folo-n-coco`, val2017 AP 0.314 after 50 epochs from scratch) as a
-> **draft** release, not public yet. See [Project status](#project-status).
+> COCO-pretrained folo-n weights now exist (`folo-n-coco`, val2017 AP 0.314 after 50 epochs from scratch; the interim
+> `folo-n-coco-v2`, AP 0.317 at epoch 62 of a paused 300-epoch run) as **draft** releases, not public yet.
+> See [Project status](#project-status).
 
 ## Why FOLO: the numbers
 
@@ -35,7 +36,8 @@ the method, the raw JSON and how much noise to expect.
 | CPU forward, batch 1, f32 | **21.4 ms** (28 threads, contended machine) | 22.8 ms (8 threads) | FOLO slightly faster |
 | CPU end to end, batch 1 | **21.7 ms** (contended machine) | 24.8 ms | FOLO slightly faster |
 
-Accuracy is a separate question: on COCO val2017, folo-n reaches AP 0.314 after a 50-epoch from-scratch run, against
+Accuracy is a separate question: on COCO val2017, folo-n reaches AP 0.317 after 62 epochs from scratch (a 300-epoch
+run, paused there; 0.314 for the finished 50-epoch run), against
 0.409 published for yolo26n, which was pretrained on Objects365 and then trained 245 epochs on COCO
 ([examples/coco](examples/coco/README.md), docs/BENCHMARKS.md, Accuracy). No equal-budget comparison has been run
 yet, so how much of that gap is data and schedule rather than the model or the trainer is not known.
@@ -220,7 +222,8 @@ What works today (v0.1):
 - COCO-pretrained weights: `folo-n-coco`, folo-n trained from scratch on COCO for 50 epochs, val2017 AP 0.314 /
   AP50 0.455 (pycocotools-exact, [examples/coco](examples/coco/README.md)). It is uploaded as a **draft** GitHub
   release (`weights-v1`), so for now only repository writers can `folo weights pull` it. Fine-tuned from it, R6
-  reaches 0.441 test / 0.201 held-out mAP50-95 in 100 epochs (0.350 / 0.118 from scratch).
+  reaches 0.441 test / 0.201 held-out mAP50-95 in 100 epochs (0.350 / 0.118 from scratch). `folo-n-coco-v2`
+  (draft release `weights-v2`) is the interim result of a 300-epoch run paused at epoch 62: AP 0.317 / AP50 0.458.
 - YOLO and COCO datasets: reading, stats, checks and conversion. mAP that matches pycocotools.
 - `val`, `predict` and export to `.folo` (f32 or f16, a safetensors-compatible format) and ONNX (opset 17, f32 or
   f16, optional in-graph decode and dynamic shapes; parity-tested in onnxruntime).

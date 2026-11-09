@@ -147,7 +147,9 @@ are re-initialised, and everything else is kept. As a check: fine-tuning the sha
 `star, ring, heart` dataset reached mAP50 0.32 after 2 epochs, while a from-scratch model is near 0 at that point.
 
 **Pretrained weights.** `folo-n-coco` is folo-n trained on COCO ([examples/coco](../examples/coco/README.md)). It is
-in a **draft** GitHub release for now, so only people with write access to the repository can download it:
+in a **draft** GitHub release for now, so only people with write access to the repository can download it.
+`folo-n-coco-v2` (draft release `weights-v2`) is an interim, slightly better checkpoint (val2017 AP 0.317 against
+0.314) from a longer run that is paused at epoch 62 of 300; its R6 fine-tune has not been measured yet.
 
 ```sh
 folo weights pull folo-n-coco                                    # into ~/.folo/weights/, checksum verified

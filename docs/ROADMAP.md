@@ -40,6 +40,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] dogfooding: reports 1 (#59 → #69) and 2 (#93 → #99)
 - [x] ONNX export with onnxruntime parity in CI (#87)
 - [x] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50 epochs from scratch, val2017 AP 0.314 / AP50 0.455 (pycocotools parity); R6 fine-tune from COCO beats the 410-epoch scratch run in 100 epochs; `weights-v1` draft release (#128)
+- [~] COCO 300-epoch folo-n (#144): **paused at epoch 62 of 300** (8.0 h, AMP), val2017 AP 0.317 / AP50 0.458; interim `folo-n-coco-v2` in the `weights-v2` draft release. Resume: `folo train --resume D:\folo-data\runs-coco\coco-folo-n-long\weights\last.folo --data D:\folo-data\coco` (about 29 h left; examples/coco/README.md, Resume (v2)); then re-evaluate, export and redo the R6 fine-tune comparison
 - [x] `Model.head` / `trained_with` (#117); [x] `Model.precision` / `fused` (#123); [x] operating-point conf, resolved optimizer/LR, queue control, ONNX download (#129); [x] measured throughput, run estimates, benchmark probe (#130)
 
 ## M5 — polish

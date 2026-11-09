@@ -68,7 +68,7 @@ fn list(out: Out) {
             "cached": cached, "about": p.about,
         }));
         out.human(format!(
-            "{:<18} {:<11} {}\n{:<18} {}",
+            "{:<20} {:<11} {}\n{:<20} {}",
             p.name,
             if cached { "downloaded" } else { "-" },
             p.about,

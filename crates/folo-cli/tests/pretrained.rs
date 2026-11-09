@@ -81,7 +81,9 @@ fn weights_names_export_and_coco_val() {
     let (code, lines, stderr) = folo(&cache, &["weights", "list", "--json"]);
     assert_eq!(code, 0, "{stderr}");
     let names: Vec<&str> = lines.iter().map(|l| l["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"folo-n-coco") && names.contains(&"folo-n-coco-f16"), "{names:?}");
+    for name in ["folo-n-coco", "folo-n-coco-f16", "folo-n-coco-v2", "folo-n-coco-v2-f16"] {
+        assert!(names.contains(&name), "{name} missing from {names:?}");
+    }
     assert!(lines.iter().all(|l| l["cached"] == false));
     // JSON paths use `/` on every OS (the cache dir from the environment has `\` on Windows).
     for l in &lines {

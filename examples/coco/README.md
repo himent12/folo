@@ -10,6 +10,10 @@ pretrained for 150 epochs on Objects365, then fine-tuned for 245 epochs on COCO 
 is **50 epochs on COCO alone, from random init**. Data, schedule, recipe and architecture all differ, so this is not a
 like-for-like comparison, and how much of the gap each accounts for is not known ([Results](#results-val2017)).
 
+**v2 (interim): AP 0.317 / AP50 0.458** after 62 epochs of a 300-epoch schedule that was paused there, published as
+`folo-n-coco-v2` (draft release `weights-v2`). It can be resumed from its checkpoint
+([v2](#v2-a-300-epoch-schedule-paused-at-epoch-62)).
+
 ## Data
 
 COCO 2017 from the official servers, into `D:/folo-data/coco` (about 20 GB of zips, 26 GB unpacked):
@@ -203,11 +207,14 @@ seed and epoch budget, both evaluated on r6-clean test and the held-out r6-fresh
 Pretraining is worth more than four times the epochs. In 100 epochs the fine-tune beats the 410-epoch from-scratch
 run on both splits, and it generalises much better to unseen footage (+70% on r6-fresh over the same budget).
 
-## v2: a 300-epoch schedule (in progress)
+## v2: a 300-epoch schedule, paused at epoch 62
 
 The 50-epoch run above ended at its schedule's floor, still gaining every epoch. v2 trains the same folo-n from
-scratch, with the same recipe, for **300 epochs** to measure how much of the gap to the published nano models the
-schedule alone closes.
+scratch, with the same recipe, on a **300-epoch** schedule, to measure how much of the gap to the published nano
+models the schedule alone closes. **The run was paused after epoch 62 of 300** (stopped cleanly at the epoch
+boundary, 2026-11-09, when the work had to wrap up). Its checkpoint can be resumed ([Resume](#resume-v2)). The
+weights at the pause are published as the interim `folo-n-coco-v2`: **val2017 AP 0.317**, 0.003 above v1, with
+the learning rate still at 90% of `lr0` and mosaic still on.
 
 ```sh
 folo train --data D:/folo-data/coco --model folo-n --imgsz 640 --batch 16 --epochs 300 --cos-lr --amp \
@@ -243,3 +250,89 @@ whose learning rate is at most 2.5% lower over these epochs):
 The two f32 runs differ by 0.0035 mAP50-95 at epoch 5, the AMP run lies between them, and the losses agree to 1%
 after the first epoch. The scaler skipped 4 optimizer steps for overflow, all in the first 24 batches, while the
 scale backed off from 2^16 to 2^12; it grew back to 2^16 by epoch 5 without another overflow. AMP keeps f32 accuracy here, as it did on the shapes gate (docs/BENCHMARKS.md).
+
+### Run (epochs 1–62)
+
+2026-11-09, 03:21 to 11:23 local time, one process, no crash or resume: **8.0 h of epochs**, median 442 s per epoch
+(400–614 s; one epoch of 1241 s while a game shared the GPU), 250–310 img/s with mosaic. The trainer was then stopped
+with `folo stop` right after epoch 62's checkpoint, so `last.folo` and `best.folo` both hold epoch 62. The loss
+scaler skipped 48 of 114,638 optimizer steps for gradient overflow over the run (the scale doubles every 2000 finite
+steps and backs off on each overflow), and no batch was non-finite.
+
+| epoch | box | cls | dfl | val P | val R | val mAP50 | val mAP50-95 | v1 at the same epoch | epoch time |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 3.135 | 5.080 | 3.565 | 0.011 | 0.017 | 0.006 | 0.002 | 0.002 | 482 s |
+| 5 | 1.592 | 2.526 | 1.671 | 0.307 | 0.246 | 0.214 | 0.134 | 0.134 | 462 s |
+| 10 | 1.459 | 2.122 | 1.513 | 0.415 | 0.307 | 0.305 | 0.200 | 0.203 | 434 s |
+| 20 | 1.383 | 1.898 | 1.415 | 0.447 | 0.355 | 0.354 | 0.239 | 0.242 | 435 s |
+| 30 | 1.350 | 1.810 | 1.376 | 0.511 | 0.374 | 0.398 | 0.272 | 0.276 | 448 s |
+| 40 | 1.334 | 1.760 | 1.350 | 0.550 | 0.393 | 0.424 | 0.292 | 0.298 | 412 s |
+| 50 | 1.321 | 1.722 | 1.333 | 0.555 | 0.408 | 0.442 | 0.304 | 0.310 (v1's last) | 442 s |
+| 60 | 1.310 | 1.697 | 1.322 | 0.554 | 0.424 | 0.451 | 0.312 | | 478 s |
+| **62** (paused, best) | 1.310 | 1.692 | 1.321 | 0.536 | 0.435 | 0.453 | **0.313** | | 504 s |
+
+Every epoch improved on the one before. Up to epoch 50, v1 is slightly ahead at the same epoch: its cosine schedule
+decays six times faster, and it closed mosaic for its last 10 epochs, which lowers the training loss and lifts
+validation (v1's cls loss falls from 1.58 to 1.39 between epochs 40 and 50; v2's from 1.76 to 1.72). v2 passes v1's
+final number at epoch 58 with the learning rate still at `0.90 · lr0` (cosine at 62 of 300 epochs) and mosaic on.
+It was gaining about 0.0008 mAP50-95 per epoch at the pause (epochs 52 to 62), and the decay and close-mosaic phases
+are still ahead; how much they will add has not been measured.
+
+### Evaluate (v2)
+
+```sh
+folo val --model D:/folo-data/runs-coco/coco-folo-n-long/weights/best.folo --data D:/folo-data/coco \
+  --coco --save-json D:/folo-data/runs-coco/eval-long/val2017-dets-f32.json --device gpu:0 --workers 16
+folo val --model D:/folo-data/runs-coco/coco-folo-n-long/weights/best.folo --data D:/folo-data/coco \
+  --coco --half --save-json D:/folo-data/runs-coco/eval-long/val2017-dets-f16.json --device gpu:0 --workers 16
+# pycocotools on the same detections, as for v1 (D:/folo-venvs/parity)
+```
+
+`best.folo` (EMA, epoch 62), 640 px, the MODEL.md §9.3 validation settings, 5000 images:
+
+| | AP | AP50 | AP75 | AP_S | AP_M | AP_L | AR1 | AR10 | AR100 | AR_S | AR_M | AR_L |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **v2 f32** (epoch 62 of 300) | **0.317** | **0.458** | 0.343 | 0.153 | 0.344 | 0.453 | 0.287 | 0.492 | 0.550 | 0.317 | 0.604 | 0.742 |
+| v2 f16 (`--half`) | 0.317 | 0.458 | 0.343 | 0.153 | 0.344 | 0.453 | 0.287 | 0.492 | 0.550 | 0.317 | 0.604 | 0.741 |
+| v1 f32 (50 of 50 epochs) | 0.314 | 0.455 | 0.339 | 0.144 | 0.335 | 0.458 | 0.284 | 0.486 | 0.544 | 0.311 | 0.598 | 0.745 |
+
+**pycocotools agrees on all 12 numbers** (f32: AP 0.316821, AP50 0.457804, AP75 0.342836; largest difference
+2.2e-16 for f32 and 2.8e-16 for f16). f16 is within 0.0015 of f32 on every stat (AR_L), inside the 0.002 bound.
+Against v1: +0.003 AP, +0.009 on small and medium objects, −0.005 on large ones. The gain is small and comes from
+12 more epochs at a higher learning rate; it is not yet a measure of what the 300-epoch schedule can reach. The gap
+to YOLO11n (0.395) and YOLO26n (0.409) is still 0.08–0.09 AP.
+
+### Publish (v2)
+
+```sh
+folo export --model D:/folo-data/runs-coco/coco-folo-n-long/weights/best.folo --format weights \
+  --output D:/folo-weights/folo-n-coco-v2.folo
+folo export --model D:/folo-weights/folo-n-coco-v2.folo --format folo-f16 --output D:/folo-weights/folo-n-coco-v2-f16.folo
+cd D:/folo-weights/weights-v2 && sha256sum folo-n-coco-v2.folo folo-n-coco-v2-f16.folo > SHA256SUMS
+gh release create weights-v2 --draft --repo himent12/folo --title "FOLO pretrained weights v2 (interim)" \
+  --notes-file notes.md folo-n-coco-v2.folo folo-n-coco-v2-f16.folo SHA256SUMS
+```
+
+| asset | what | bytes | SHA-256 |
+|---|---|---:|---|
+| `folo-n-coco-v2.folo` | folo-n, 80 classes, EMA weights of epoch 62, unfused f32: fine-tune or predict | 10,601,456 | `98d27ef83cc9f24e7007aead94018ceb4a38b99bad8a16dc924c74c90f4ae760` |
+| `folo-n-coco-v2-f16.folo` | the same, BatchNorm fused, f16: inference only | 5,251,088 | `95412714ab27afe129a4ef393f852f77209d15e28fa697a9633a697a6cc92af2` |
+
+`weights-v2` is a **draft** release, as `weights-v1` is, and its notes say "interim: 62 of 300 epochs, run paused".
+`folo weights pull folo-n-coco-v2` (and `-f16`) already works for repository writers (checked: both pull and verify).
+The exported files reproduce the `best.folo` numbers above exactly (all 12 stats, f32 and f16). The R6 fine-tune
+comparison from v2 has not been run: for v1 it took two 100-epoch runs of about 44 min each.
+
+### Resume (v2)
+
+The checkpoint holds the optimizer, the schedule, the EMA and the loss scaler, so the run continues bit-exactly at
+epoch 63:
+
+```sh
+folo train --resume D:\folo-data\runs-coco\coco-folo-n-long\weights\last.folo --data D:\folo-data\coco --workers 16 --device gpu:0
+```
+
+Checked on a copy of the run folder: it resumes "after epoch 62 (optimizer step 114590)" with mixed precision and the
+stored loss scale (16384). At the measured 442 s per epoch, the remaining 238 epochs take about 29 h. Run it hidden,
+in its own process group, and never next to a `folo serve` that holds GPU memory. When it finishes, re-run the
+evaluation, export a final `folo-n-coco-v2` (or v3) and repeat the R6 fine-tune comparison.
