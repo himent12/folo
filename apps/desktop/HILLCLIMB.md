@@ -1678,3 +1678,30 @@ Round 40 changes:
   - Pre is tertiary at half strength.
   - The rail's tail is 8 px.
 - **Hover details:** Overview's Recent runs show the exact time, and the inspector's class rows show the full name.
+
+## Round 40
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.2 |
+| GPT-6.1 Sol | 8.9 |
+
+Sol gave a 9 on every line except accessibility. Its remaining issue is that hover-only details have no keyboard route: the exact created time, the inspector's full class names, select values, and model and dataset names.
+
+Opus scored dataviz and responsiveness 9. It asked for:
+- One header-actions rule across empty, error and loading states. First run hid them, while Playground-empty and Overview-error still showed inert buttons.
+- A first-run way to generate a sample without a terminal.
+- The demo reporting capabilities, so Mixed precision's help matches its working switch.
+- A disabled switch visible in light theme.
+- Latency Pre at 3:1.
+- One "Add dataset" label.
+
+The code review of #112 found one blocking bug, fixed before merge. A focused Mixed precision switch that became blocked left focus on a detached handle, so Tab, Escape and Ctrl Enter stopped. Focus now moves to the slider before it, and the handoff runs before that slider draws.
+
+Round 41 changes:
+- **Keyboard route:** focused rows in Recent runs, Runs and Models show the full name and exact created time, and a focused inspector label shows its full class name. Hover tips now appear only for names that may not fit.
+- **Header actions:** they show once the page has loaded and has a body to act on. None on first run, not connected, loading, or a Playground with no models.
+- **Demo:** the built-in demo reports simulated tensor cores.
+- **Disabled switch:** an edged inset track and a tertiary knob.
+- **Latency:** Pre at 70 % tertiary.
+- **First run:** "Add dataset" plus "Generate synthetic". Step 1 says "or generate a sample", and the terminal hint reads "start it, then Connect in Settings".
