@@ -174,7 +174,8 @@
   .tip > button {
     pointer-events: none;
   }
-  button:disabled {
+  button:disabled,
+  [aria-disabled='true'] button.on {
     color: var(--text-disabled);
   }
   button.on {
