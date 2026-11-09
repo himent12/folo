@@ -630,3 +630,31 @@ fn letterbox_helpers_reject_mismatched_geometry() {
     assert!(letterbox_on_host(&imgs, &[ok[1], ok[0]]).is_err(), "geometry of another image size");
     assert!(letterbox_on_host(&imgs, &[ok[0], lb(&imgs[1], 32)]).is_err(), "different canvases");
 }
+
+/// On the CPU a batch runs as chunks of images side by side; every image's predictions are exactly what
+/// predicting it alone on the square canvas gives.
+#[test]
+fn cpu_predict_batch_matches_single_images() {
+    use folo_vision::predict::{PredictConfig, Predictor};
+    let model = FoloModel::new(ModelConfig::new("n", 4).unwrap()).unwrap();
+    let cfg = PredictConfig { imgsz: 96, conf: 0.001, rect: false, ..PredictConfig::default() };
+    let p = Predictor::new(model, cfg).unwrap();
+    let mut rng = Rng::seed(21);
+    let imgs: Vec<folo_data::Image> = (0..5)
+        .map(|i| {
+            let (w, h) = (80 + 8 * i, 96 - 4 * i);
+            let data = (0..w * h * 3).map(|_| (rng.uniform(0.0, 256.0) as u32).min(255) as u8).collect();
+            folo_data::Image::from_raw(w, h, data).unwrap()
+        })
+        .collect();
+    let batch = p.predict_batch(&imgs).unwrap();
+    assert_eq!(batch.len(), imgs.len());
+    let mut any = false;
+    for (img, b) in imgs.iter().zip(&batch) {
+        let one = p.predict_batch(std::slice::from_ref(img)).unwrap().pop().unwrap();
+        assert_eq!(b.detections, one.detections);
+        assert_eq!((b.width, b.height), (one.width, one.height));
+        any |= !one.detections.is_empty();
+    }
+    assert!(any, "no detections to compare");
+}

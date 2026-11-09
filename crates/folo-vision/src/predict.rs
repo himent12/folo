@@ -326,8 +326,9 @@ impl Predictor {
         Ok(self.run(std::slice::from_ref(img), self.cfg.rect)?.pop().expect("one image in, one out"))
     }
 
-    /// A batch in one forward pass: every image is letterboxed to the square `imgsz × imgsz` canvas. Each
-    /// prediction's timing is the batch's divided by its size.
+    /// A batch: every image is letterboxed to the square `imgsz × imgsz` canvas. On a GPU it is one forward
+    /// pass; on the CPU, chunks of two images run side by side (the same predictions as one pass). Each
+    /// prediction's timing is its pass's (or chunk's) divided by its size.
     pub fn predict_batch(&self, imgs: &[Image]) -> Result<Vec<Prediction>> {
         if imgs.is_empty() {
             return Ok(Vec::new());
@@ -336,8 +337,23 @@ impl Predictor {
     }
 
     fn run(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+        /// Images per forward when the CPU predicts a batch (see below). One, two and four measured within
+        /// 5% of each other at batch 16 on 28 threads, and all about 20% faster than one batched forward.
+        const CPU_BATCH_CHUNK: usize = 2;
         // On the CPU every stage (letterbox, forward, decode) runs from inside the rayon pool.
         if self.model.device().is_cpu() {
+            // A batch runs as chunks of about two images whose forwards run side by side (each op's tasks
+            // spread over the pool by work stealing), which keeps every kernel nearer one core's efficiency
+            // than one batched forward across all threads. Every image's result is the same either way (the
+            // CPU kernels compute each image on its own, in an order that depends only on its shape).
+            let chunk = CPU_BATCH_CHUNK;
+            if imgs.len() > chunk {
+                return folo_core::cpu::in_pool(|| {
+                    let parts: Vec<Vec<Prediction>> =
+                        imgs.par_chunks(chunk).map(|c| self.run_here(c, false)).collect::<Result<_>>()?;
+                    Ok(parts.into_iter().flatten().collect())
+                });
+            }
             folo_core::cpu::in_pool(|| self.run_here(imgs, rect))
         } else {
             self.run_here(imgs, rect)

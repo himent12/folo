@@ -527,30 +527,21 @@ fn wgrad_split(m: usize, n: usize, k: usize) -> (usize, usize) {
     (parts, tiles)
 }
 
-/// Above this many flops per image, one image's GEMM is parallelised; below it, images run in parallel.
-const IMAGE_PAR_FLOPS: usize = 1 << 25;
-
 /// Bias (one per output channel) and activation applied to every output element once, as it is finished
 /// (conv2d fuses bias + activation here).
 pub(crate) type ChannelEpilogue<'a> = BiasAct<'a>;
 
-/// Run `f(img, out_img, threads)` for every image: one after another with the whole pool for large images, side
-/// by side otherwise, splitting the pool between the images when there are fewer images than threads.
-fn for_each_image(
-    out: &mut [f32],
-    per_image: usize,
-    n: usize,
-    flops: usize,
-    f: impl Fn(usize, &mut [f32], usize) + Sync,
-) {
+/// Run `f(img, out_img, threads)` for every image: one image with the whole pool, several side by side with
+/// the pool split between them (`threads / n` each, at least one; work stealing spreads the GEMM tiles of a
+/// batch smaller than the pool). Images side by side keep each GEMM nearer one core's efficiency than one
+/// image at a time across every thread; results do not depend on the split.
+fn for_each_image(out: &mut [f32], per_image: usize, n: usize, f: impl Fn(usize, &mut [f32], usize) + Sync) {
     let threads = rayon::current_num_threads();
     if per_image == 0 {
         return;
     }
-    if flops >= IMAGE_PAR_FLOPS || n == 1 {
-        for (img, o) in out.chunks_mut(per_image).enumerate() {
-            f(img, o, threads);
-        }
+    if n == 1 {
+        f(0, out, threads);
     } else {
         let share = threads.div_ceil(n).max(1);
         out.par_chunks_mut(per_image).enumerate().for_each(|(img, o)| f(img, o, share));
@@ -589,8 +580,7 @@ pub(crate) fn conv2d_forward_parts(
         return small_c_forward(x, wt, out, g, epi);
     }
     let (cg, og, kdim, ohw, hw) = (g.cg(), g.og(), g.kdim(), g.ohw(), g.h * g.w);
-    let per_image_flops = 2 * g.o * ohw * kdim;
-    for_each_image(out, g.o * ohw, g.n, per_image_flops, |img, out_img, threads| {
+    for_each_image(out, g.o * ohw, g.n, |img, out_img, threads| {
         let planes = x.planes(img, hw);
         for grp in 0..g.p.groups {
             let a = Strided::lhs(wt, grp * og * kdim, kdim, 1);
@@ -807,7 +797,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
     let hw = g.h * g.w;
     if g.is_pointwise() {
         // gx[img, grp] = W_g^T [cg x og] * gy[img, grp] [og x hw], reading W transposed in place.
-        for_each_image(gx, g.c * hw, g.n, 2 * g.c * hw * og, |img, gx_img, threads| {
+        for_each_image(gx, g.c * hw, g.n, |img, gx_img, threads| {
             for grp in 0..groups {
                 let a = Strided::lhs(wt, grp * og * cg, 1, cg);
                 let b = Strided::rhs(gy, (img * g.o + grp * og) * hw, hw, 1);
@@ -868,8 +858,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
 /// [`conv2d_backward_input`] through an unfolded gradient (`W^T gy`) and col2im.
 fn backward_input_col2im(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
     let (cg, og, kdim, ohw, hw) = (g.cg(), g.og(), g.kdim(), g.ohw(), g.h * g.w);
-    let flops = 2 * g.c * ohw * og * g.kh * g.kw;
-    for_each_image(gx, g.c * hw, g.n, flops, |img, gx_img, threads| {
+    for_each_image(gx, g.c * hw, g.n, |img, gx_img, threads| {
         // Every element of `col` is overwritten, so a recycled buffer needs no clearing.
         let mut col = super::alloc_uninit(kdim * ohw);
         for grp in 0..g.p.groups {
