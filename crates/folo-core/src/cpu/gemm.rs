@@ -16,9 +16,8 @@
 use std::cell::RefCell;
 use std::sync::OnceLock;
 
-use rayon::prelude::*;
-
 use super::elementwise::SendPtr;
+use super::par;
 use crate::backend::UnaryOp;
 
 /// Rows of a micro-tile.
@@ -500,12 +499,12 @@ fn plan_tiles(m: usize, n: usize, k: usize, threads: usize) -> Geometry {
 const PACK_A_PAR_MIN: usize = 1 << 17;
 const PACK_A_TASK: usize = 1 << 15;
 
-/// Pack the A panels (`panel` floats each) of `pa` with `pack(index, panel)`: in parallel, several panels a
-/// task, when there is enough of it.
-fn pack_lhs_panels(pa: &mut [f32], panel: usize, parallel: bool, pack: impl Fn((usize, &mut [f32])) + Sync) {
-    if parallel && pa.len() >= PACK_A_PAR_MIN {
+/// Pack the A panels (`panel` floats each) of `pa` with `pack(index, panel)`: on up to `threads` threads,
+/// several panels a task, when there is enough of it.
+fn pack_lhs_panels(pa: &mut [f32], panel: usize, threads: usize, pack: impl Fn((usize, &mut [f32])) + Sync) {
+    if threads > 1 && pa.len() >= PACK_A_PAR_MIN {
         let per_task = PACK_A_TASK.div_ceil(panel);
-        pa.par_chunks_mut(per_task * panel).enumerate().for_each(|(t, chunk)| {
+        par::for_each_chunk_mut(pa, per_task * panel, threads, |t, chunk| {
             chunk.chunks_mut(panel).enumerate().for_each(|(p, dst)| pack((t * per_task + p, dst)))
         });
     } else {
@@ -532,7 +531,7 @@ pub fn gemm<A: Operand, B: Operand>(
     accumulate: bool,
     parallel: bool,
 ) {
-    let threads = if parallel { rayon::current_num_threads() } else { 1 };
+    let threads = if parallel { par::threads() } else { 1 };
     gemm_ex(m, n, k, a, b, c, ldc, accumulate, threads, None);
 }
 
@@ -632,11 +631,11 @@ pub(crate) fn gemm_ex<A: Operand, B: Operand>(
             buf
         };
         let parts = k.div_ceil(step);
-        let partials: Vec<Vec<f32>> = if threads > 1 {
-            (0..parts).into_par_iter().map(part).collect()
-        } else {
-            (0..parts).map(part).collect()
-        };
+        let slots: Vec<std::sync::OnceLock<Vec<f32>>> = (0..parts).map(|_| Default::default()).collect();
+        par::for_each(parts, threads, |p| {
+            let _ = slots[p].set(part(p));
+        });
+        let partials: Vec<Vec<f32>> = slots.into_iter().map(|s| s.into_inner().expect("every part ran")).collect();
         for i in 0..m {
             let row = &mut c[i * ldc..i * ldc + n];
             if !accumulate {
@@ -719,7 +718,7 @@ fn gemm_blocked<A: Operand, B: Operand>(
             let pack_a = |(p, dst): (usize, &mut [f32])| {
                 a.pack(p * MR, MR.min(m - p * MR), s0, ksz, MR, dst);
             };
-            pack_lhs_panels(pa, MR * ksz, parallel, pack_a);
+            pack_lhs_panels(pa, MR * ksz, if parallel { threads } else { 1 }, pack_a);
             let pa = &*pa;
             let tile = |t: usize| {
                 let (ti, tj) = (t / tn, t % tn);
@@ -777,11 +776,7 @@ fn gemm_blocked<A: Operand, B: Operand>(
                     }
                 }
             };
-            if parallel {
-                (0..tm * tn).into_par_iter().for_each(tile);
-            } else {
-                (0..tm * tn).for_each(tile);
-            }
+            par::for_each(tm * tn, if parallel { threads } else { 1 }, tile);
             s0 += ksz;
         }
     });
@@ -1000,7 +995,7 @@ pub(crate) fn gemm_rows<A: Operand>(
             let pack_a = |(p, dst): (usize, &mut [f32])| {
                 a.pack(p * MR, MR.min(m - p * MR), s0, ksz, MR, dst);
             };
-            pack_lhs_panels(pa, MR * ksz, parallel, pack_a);
+            pack_lhs_panels(pa, MR * ksz, if parallel { threads } else { 1 }, pack_a);
             let pa = &*pa;
             let tile = |t: usize| {
                 let (ti, tj) = (t / tn, t % tn);
@@ -1094,11 +1089,7 @@ pub(crate) fn gemm_rows<A: Operand>(
                     });
                 }
             };
-            if parallel {
-                (0..tm * tn).into_par_iter().for_each(tile);
-            } else {
-                (0..tm * tn).for_each(tile);
-            }
+            par::for_each(tm * tn, if parallel { threads } else { 1 }, tile);
             s0 += ksz;
         }
     });

@@ -16,6 +16,7 @@ mod conv;
 pub(crate) mod elementwise;
 pub mod gemm;
 mod index;
+mod par;
 mod pool;
 mod pool_alloc;
 pub(crate) mod reduce;
