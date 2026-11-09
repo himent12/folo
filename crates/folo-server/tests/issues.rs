@@ -1,6 +1,6 @@
 //! `GET /api/datasets/{id}/issues` in mock and real mode.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,31 +9,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_server::api::*;
 use folo_server::{MockStore, Options, RealStore, Server};
+use folo_test_support::TestDir;
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("folo-issues-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
-    }
-
-    fn join(&self, p: &str) -> PathBuf {
-        self.0.join(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
     let res = app.clone().oneshot(req).await.unwrap();
@@ -129,7 +109,7 @@ fn write_shapes(dir: &Path) {
 
 #[tokio::test]
 async fn real_issues_are_cached_and_refreshed() {
-    let t = TempDir::new("real");
+    let t = TestDir::new("issues-real");
     let (home, data) = (t.join("home"), t.join("shapes"));
     write_shapes(&data);
     std::fs::write(data.join("labels/train/000001.txt"), "0 0.5 0.5 0.2 0.2\n42 0.5 0.5 0.1 0.1\n").unwrap();

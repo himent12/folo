@@ -7,6 +7,7 @@ use folo_core::testing::{GradCheck, grad_check_with};
 use folo_core::{Tensor, no_grad};
 use folo_nn::Module;
 use folo_nn::io::{FloatDType, ModelFile};
+use folo_test_support::TestFile;
 use folo_vision::Xyxy;
 use folo_vision::assign::{Assignment, TalConfig, assign};
 use folo_vision::boxes::ciou_eps;
@@ -28,10 +29,8 @@ fn positives(a: &Assignment) -> Vec<usize> {
     a.fg_mask.iter().enumerate().filter(|(_, f)| **f).map(|(i, _)| i).collect()
 }
 
-fn temp(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("folo-o2o-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d.join(name)
+fn temp(name: &str) -> TestFile {
+    TestFile::new("o2o", name)
 }
 
 /// Moves every output bias away from the prior and perturbs every weight, so outputs depend on the tensors that

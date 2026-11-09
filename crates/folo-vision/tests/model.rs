@@ -7,6 +7,7 @@ use folo_core::testing::grad_check;
 use folo_core::{DType, Tensor, no_grad};
 use folo_nn::io::{FloatDType, LoadOptions, ModelFile, Purpose, SkipReason};
 use folo_nn::{Forward, Layer, Module, init};
+use folo_test_support::TestFile;
 use folo_vision::model::blocks::{Attention, Bottleneck, C2Psa, C3k, C3k2, Init, PsaBlock, Sppf};
 use folo_vision::model::{FoloModel, LAYER_NAMES, ModelConfig};
 use folo_vision::nms::NmsConfig;
@@ -96,8 +97,8 @@ fn per_layer_params(m: &FoloModel) -> [usize; 24] {
     out
 }
 
-fn scratch(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("folo-vision-model-{}-{tag}.folo", std::process::id()))
+fn scratch(tag: &str) -> TestFile {
+    TestFile::new(&format!("vision-model-{tag}"), "m.folo")
 }
 
 fn input(b: usize, h: usize, w: usize, seed: u64) -> Tensor {

@@ -13,6 +13,7 @@ use folo_core::rng::Rng;
 use folo_core::{DType, Device, Tensor, no_grad};
 use folo_nn::Module;
 use folo_nn::io::{FloatDType, ModelFile};
+use folo_test_support::TestFile;
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::nms::NmsConfig;
 use folo_vision::predict::f16_unavailable;
@@ -67,8 +68,8 @@ fn model(nc: usize) -> FoloModel {
     m
 }
 
-fn temp(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("folo-f16-{}-{name}.folo", std::process::id()))
+fn temp(name: &str) -> TestFile {
+    TestFile::new(&format!("f16-{name}"), "m.folo")
 }
 
 /// The worst `(score error, box error beyond 1%)` between two full decodes of `x` (in each model's dtype).

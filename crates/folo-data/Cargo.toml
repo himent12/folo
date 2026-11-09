@@ -21,6 +21,9 @@ serde_yaml.workspace = true
 thiserror.workspace = true
 walkdir.workspace = true
 
+[dev-dependencies]
+folo-test-support.workspace = true
+
 [[bench]]
 name = "pipeline"
 harness = false

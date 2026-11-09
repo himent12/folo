@@ -6,6 +6,7 @@ use std::process::Command;
 
 use folo_data::ImageFormat;
 use folo_data::synthetic::{SyntheticConfig, write_yolo};
+use folo_test_support::TestDir;
 use serde_json::Value;
 
 /// Runs `folo` with `args` and `FOLO_WEIGHTS_DIR = cache`; engine commands get `--device cpu`.
@@ -61,8 +62,7 @@ fn tiny_train(
 
 #[test]
 fn weights_names_export_and_coco_val() {
-    let root = std::env::temp_dir().join(format!("folo-cli-pretrained-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = TestDir::new("cli-pretrained");
     let cache = root.join("cache");
     let data = root.join("shapes");
     let cfg = SyntheticConfig {

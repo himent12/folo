@@ -50,11 +50,13 @@ jobs:
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && runner.os == 'Windows' && '2' || '1' }}
         run: bash tools/ci-retry.sh cargo clippy --workspace --all-targets -- -D warnings
+      # tools/test-tmp.sh points FOLO_TEST_TMP and the temp dir (TMPDIR / TMP / TEMP) at a fresh folder under
+      # $RUNNER_TEMP and fails the step if the tests left a `folo-*` entry there (docs/CI.md, Test temp dirs).
       - name: test
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && runner.os == 'Windows' && '2' || '1' }}
-        run: bash tools/ci-retry.sh cargo test --workspace
+        run: bash tools/ci-retry.sh bash tools/test-tmp.sh cargo test --workspace
   onnx:
     # ONNX export parity (docs/CLI.md, ONNX export): crates/folo-cli/tests/onnx.rs runs the exported graphs in
     # onnxruntime through bench/parity/onnx_check.py. The test skips without a Python; FOLO_ONNX_REQUIRED makes a
@@ -81,7 +83,8 @@ jobs:
           "$RUNNER_TEMP/onnx-venv/bin/python" -m pip install --disable-pip-version-check \
             onnx==1.23.2 onnxruntime==1.31.1 numpy==2.5.4
           echo "FOLO_ONNX_PYTHON=$RUNNER_TEMP/onnx-venv/bin/python" >> "$GITHUB_ENV"
-      - run: cargo test -p folo-cli --test onnx -- --nocapture
+      - run: bash tools/test-tmp.sh cargo test -p folo-cli --test onnx -- --nocapture
+        shell: bash
         env:
           FOLO_ONNX_REQUIRED: "1"
   web:

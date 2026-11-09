@@ -1024,6 +1024,7 @@ fn peak_vram(records: &[TrainRecord], input: &EstimateInput) -> (Option<u64>, Op
 #[cfg(test)]
 mod tests {
     use super::*;
+    use folo_test_support::TestDir;
 
     fn gpu() -> DeviceId {
         DeviceId { device: "gpu:0".into(), device_name: "NVIDIA GeForce RTX 4080 SUPER".into() }
@@ -1255,8 +1256,7 @@ mod tests {
 
     #[test]
     fn the_table_round_trips_through_its_file() {
-        let dir = std::env::temp_dir().join(format!("folo-throughput-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = TestDir::new("throughput");
         let path = dir.join(FILE);
         let t = Throughput::open(path.clone());
         let key = TrainKey { device: gpu(), arch: Arch::S, imgsz: 640, batch: 8, amp: true };

@@ -1,21 +1,19 @@
 //! `.folo` files: compatibility both ways with safetensors, loading rules, export, and checkpoint resume.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use folo_core::rng::Rng;
 use folo_core::{Tensor, f16, no_grad};
 use folo_nn::io::*;
 use folo_nn::optim::*;
 use folo_nn::*;
+use folo_test_support::{TestDir, TestFile};
 use serde_json::Value;
 
 // ----- helpers -----
 
-fn tmp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("folo-nn-tests-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(name)
+fn tmp(name: &str) -> TestFile {
+    TestFile::new("nn-tests", name)
 }
 
 /// A tiny model with detector-style names: `backbone.stem.*`, `head.cls.p3.pw0.*`, `head.cls.p3.out.*`.
@@ -288,11 +286,12 @@ fn export_fuses_and_matches_unfused_eval() {
     let x = Tensor::randn([2, 3, 8, 8], 0.0, 1.0, &mut rng);
     let want = m_forward(&model, &x).to_vec::<f32>().unwrap();
 
-    let ck = tmp("export-src.folo");
+    let dir = TestDir::new("nn-tests-export");
+    let ck = dir.join("export-src.folo");
     save_weights(&ck, &meta(FileKind::Weights, 3), &model).unwrap();
     let src = ModelFile::open(&ck).unwrap();
     for (dtype, tol) in [(FloatDType::F32, 1e-5f32), (FloatDType::F16, 2e-2)] {
-        let out = tmp(&format!("export-{}.folo", dtype.as_str()));
+        let out = dir.join(format!("export-{}.folo", dtype.as_str()));
         src.export(&out, dtype).unwrap();
         let f = ModelFile::open(&out).unwrap();
         assert!(f.metadata().fused && f.metadata().dtype == dtype && f.metadata().kind == FileKind::Weights);
@@ -311,7 +310,7 @@ fn export_fuses_and_matches_unfused_eval() {
     let fused_t =
         fuse_bn_tensors(model.named_tensors().into_iter().map(|t| (t.name, t.tensor)).collect(), BN_EPS)
             .unwrap();
-    let f = ModelFile::open(tmp("export-F32.folo")).unwrap();
+    let f = ModelFile::open(dir.join("export-F32.folo")).unwrap();
     for (n, t) in fused_t {
         assert_eq!(bits(&t), bits(&f.tensor(&n).unwrap()), "{n}");
     }

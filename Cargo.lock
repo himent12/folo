@@ -666,6 +666,7 @@ dependencies = [
  "folo-mcp",
  "folo-nn",
  "folo-server",
+ "folo-test-support",
  "folo-vision",
  "image",
  "jsonschema",
@@ -693,6 +694,7 @@ name = "folo-data"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "folo-test-support",
  "image",
  "rayon",
  "serde",
@@ -723,6 +725,7 @@ dependencies = [
  "folo-api",
  "folo-data",
  "folo-server",
+ "folo-test-support",
  "glob",
  "http",
  "image",
@@ -741,6 +744,7 @@ version = "0.1.0"
 dependencies = [
  "folo-core",
  "folo-gpu",
+ "folo-test-support",
  "memmap2",
  "rayon",
  "serde",
@@ -758,6 +762,7 @@ dependencies = [
  "folo-data",
  "folo-gpu",
  "folo-nn",
+ "folo-test-support",
  "folo-vision",
  "futures-util",
  "http-body-util",
@@ -776,6 +781,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "folo-test-support"
+version = "0.1.0"
+
+[[package]]
 name = "folo-vision"
 version = "0.1.0"
 dependencies = [
@@ -784,6 +793,7 @@ dependencies = [
  "folo-data",
  "folo-gpu",
  "folo-nn",
+ "folo-test-support",
  "rayon",
  "serde",
  "serde_json",
@@ -800,6 +810,7 @@ dependencies = [
  "folo-data",
  "folo-gpu",
  "folo-nn",
+ "folo-test-support",
  "folo-vision",
  "js-sys",
  "pollster",

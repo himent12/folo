@@ -10,31 +10,11 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_server::api::*;
 use folo_server::{Options, RealStore, Server};
+use folo_test_support::TestDir;
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("folo-real-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
-    }
-
-    fn join(&self, p: &str) -> PathBuf {
-        self.0.join(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// A new server on the same data dir (a restart), for tests whose `app` variable shadows [`app`].
 fn restart(home: &Path) -> Router {
@@ -91,7 +71,7 @@ fn write_shapes(dir: &Path, images: usize) {
 
 #[tokio::test]
 async fn synthetic_datasets_images_and_thumbnails() {
-    let t = TempDir::new("synth");
+    let t = TestDir::new("real-synth");
     let home = t.join("home");
     let app = app(&home);
     let body = json!({ "name": "Shapes Mini", "images": 12, "imgsz": 64, "classes": ["apple", "square"], "seed": 1 });
@@ -174,7 +154,7 @@ async fn synthetic_datasets_images_and_thumbnails() {
 
 #[tokio::test]
 async fn registry_and_index_cache_survive_restarts_and_track_changes() {
-    let t = TempDir::new("registry");
+    let t = TestDir::new("real-registry");
     let (home, data) = (t.join("home"), t.join("shapes"));
     write_shapes(&data, 10);
     let app1 = app(&home);
@@ -234,7 +214,7 @@ async fn registry_and_index_cache_survive_restarts_and_track_changes() {
 
 #[tokio::test]
 async fn coco_folders_and_registration_errors() {
-    let t = TempDir::new("coco");
+    let t = TestDir::new("real-coco");
     let home = t.join("home");
     let yolo = t.join("yolo");
     write_shapes(&yolo, 8);
@@ -266,7 +246,7 @@ async fn coco_folders_and_registration_errors() {
 
 #[tokio::test]
 async fn external_split_sources_are_watched() {
-    let t = TempDir::new("external");
+    let t = TestDir::new("real-external");
     let (home, shared, ds_dir) = (t.join("home"), t.join("shared"), t.join("ds"));
     write_shapes(&shared, 10);
     std::fs::create_dir_all(&ds_dir).unwrap();
@@ -303,13 +283,12 @@ async fn external_split_sources_are_watched() {
 async fn relative_paths_are_registered_absolute() {
     // Under the working directory (the package folder), so a relative path to it exists.
     let name = format!(".folo-rel-test-{}", std::process::id());
-    let local = TempDir(std::env::current_dir().unwrap().join(&name));
-    let _ = std::fs::remove_dir_all(&local.0);
+    let local = TestDir::at(std::env::current_dir().unwrap().join(&name));
     let yolo = local.join("yolo");
     write_shapes(&yolo, 6);
     let loaded = folo_data::open(&yolo).unwrap();
     folo_data::convert::convert(&loaded, &local.join("coco"), folo_data::Format::Coco).unwrap();
-    let t = TempDir::new("relative");
+    let t = TestDir::new("real-relative");
     let app = app(&t.join("home"));
     let rel = format!("./{name}/coco/annotations/instances_train.json");
     let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": rel }))).await;
@@ -325,7 +304,7 @@ async fn relative_paths_are_registered_absolute() {
 
 #[tokio::test]
 async fn lists_recursive_roots_and_rejected_images_are_watched() {
-    let t = TempDir::new("sources");
+    let t = TestDir::new("real-sources");
     let (home, shared, ds_dir) = (t.join("home"), t.join("shared"), t.join("ds"));
     write_shapes(&shared, 10);
     std::fs::create_dir_all(&ds_dir).unwrap();
@@ -373,7 +352,7 @@ async fn lists_recursive_roots_and_rejected_images_are_watched() {
 
 #[tokio::test]
 async fn a_yaml_root_created_later_is_picked_up() {
-    let t = TempDir::new("later");
+    let t = TestDir::new("real-later");
     let (home, ds_dir, later) = (t.join("home"), t.join("ds"), t.join("later"));
     write_shapes(&ds_dir, 5);
     let names = "names: [circle, square, triangle, star, ring, cross]";
@@ -395,7 +374,7 @@ async fn a_yaml_root_created_later_is_picked_up() {
 
 #[tokio::test]
 async fn files_are_relative_to_the_dataset_root() {
-    let t = TempDir::new("root");
+    let t = TestDir::new("real-root");
     let yolo = t.join("yolo");
     write_shapes(&yolo, 6);
     let loaded = folo_data::open(&yolo).unwrap();
@@ -419,7 +398,7 @@ async fn files_are_relative_to_the_dataset_root() {
 
 #[tokio::test]
 async fn a_data_dir_inside_the_dataset_keeps_its_cache() {
-    let t = TempDir::new("inside");
+    let t = TestDir::new("real-inside");
     let data = t.join("ds");
     write_shapes(&data, 6);
     let home = data.join(".folo");
@@ -438,7 +417,7 @@ async fn a_data_dir_inside_the_dataset_keeps_its_cache() {
 
 #[tokio::test]
 async fn an_empty_root_folder_created_later_counts_as_a_change() {
-    let t = TempDir::new("empty-root");
+    let t = TestDir::new("real-empty-root");
     let (home, ds_dir) = (t.join("home"), t.join("ds"));
     write_shapes(&ds_dir, 5);
     let yaml = "path: later\ntrain: images/train\nval: images/val\nnames: [circle, square, triangle, star, ring, cross]\n";
@@ -464,7 +443,7 @@ async fn an_empty_root_folder_created_later_counts_as_a_change() {
 /// returns the one dataset it is; its path is reported with `/` separators.
 #[tokio::test]
 async fn registering_a_folder_again_returns_the_same_dataset() {
-    let t = TempDir::new("idem");
+    let t = TestDir::new("real-idem");
     let (home, data) = (t.join("home"), t.join("shapes"));
     write_shapes(&data, 6);
     let store = Arc::new(RealStore::open(home.clone()).recheck_every(Duration::ZERO));

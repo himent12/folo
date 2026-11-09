@@ -1,15 +1,13 @@
 //! The process-wide read guard (`folo_data::guard`). A separate test binary, because a guard stays installed for the
 //! whole process: here it refuses any path with a `forbidden` component and any `classes.txt`.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use folo_data::{Image, ImageFormat, open};
+use folo_test_support::TestDir;
 
-fn tmp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("folo-guard-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmp(name: &str) -> TestDir {
+    TestDir::new(&format!("guard-{name}"))
 }
 
 fn image(path: &Path) {

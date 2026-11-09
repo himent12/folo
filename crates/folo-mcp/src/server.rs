@@ -646,6 +646,7 @@ impl ServerHandler for FoloMcp {
 mod tests {
     use super::*;
     use folo_server::MockStore;
+    use folo_test_support::TestDir;
 
     /// Cancelled while it waits for its second subscription, `follow` still ends the first forwarder.
     #[tokio::test]
@@ -689,8 +690,9 @@ mod tests {
         for (tc, amp) in [(MockTensorCores::On, true), (MockTensorCores::None, false)] {
             let store = Arc::new(MockStore::new().with_tensor_cores(tc));
             let want = store.capabilities();
+            let home = TestDir::new("mcp-info");
             let opts = Options {
-                data_dir: std::env::temp_dir(),
+                data_dir: home.to_path_buf(),
                 read_only: false,
                 confine: false,
                 device: "cpu".into(),
@@ -708,8 +710,9 @@ mod tests {
     #[tokio::test]
     async fn dropped_watchers_release_their_event_streams() {
         let store = Arc::new(MockStore::new());
+        let home = TestDir::new("mcp-watch");
         let opts = Options {
-            data_dir: std::env::temp_dir(),
+            data_dir: home.to_path_buf(),
             read_only: false,
             confine: false,
             device: "cpu".into(),

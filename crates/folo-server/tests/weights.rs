@@ -1,7 +1,7 @@
 //! `GET /api/models/{id}/weights`: the mock store's generated folo-n files and the real store's `.folo` files
 //! (streamed), their validators (ETag, Last-Modified, 304s), the cached f16 export, errors, compression and CORS.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
@@ -11,26 +11,10 @@ use folo_nn::io::{FloatDType, ModelConfig, ModelFile, Purpose};
 use folo_server::api::*;
 use folo_server::store::{WeightsBody, WeightsFormat};
 use folo_server::{MockStore, Options, RealStore, Server, Store};
+use folo_test_support::TestDir;
 use folo_vision::FoloModel;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("folo-weights-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 /// A response's status, headers, body and the sizes of its body frames.
 async fn send(app: &Router, req: Request<Body>) -> (StatusCode, HeaderMap, Vec<u8>, Vec<usize>) {
@@ -255,8 +239,8 @@ fn f16_cache(home: &Path) -> Vec<String> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
-    let t = TempDir::new("real");
-    let home = t.0.join("home");
+    let t = TestDir::new("weights-real");
+    let home = t.join("home");
     let path = home.join("models").join("zoo").join("pets n+v2.folo");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     write_model(&path, 1);

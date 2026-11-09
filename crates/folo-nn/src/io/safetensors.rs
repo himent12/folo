@@ -488,6 +488,7 @@ impl<'de> Deserialize<'de> for StringMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use folo_test_support::TestDir;
 
     fn file(header: &str, data: &[u8]) -> Vec<u8> {
         let mut v = (header.len() as u64).to_le_bytes().to_vec();
@@ -540,8 +541,7 @@ mod tests {
 
     #[test]
     fn read_header_applies_the_same_rules_from_disk() {
-        let dir = std::env::temp_dir().join(format!("folo-nn-header-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new("nn-header");
         let path = dir.join("f.safetensors");
         let read = |bytes: &[u8]| {
             std::fs::write(&path, bytes).unwrap();

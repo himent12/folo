@@ -2,19 +2,20 @@
 //! supported revision. Every line the server writes to stdout must be a JSON-RPC 2.0 message.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use folo_test_support::{ChildGuard, TestDir};
 use serde_json::{Value, json};
 
 const NEW: &str = "2026-07-28";
 const OLD: &str = "2025-11-25";
 
 struct Client {
-    child: Child,
+    child: ChildGuard,
     stdin: ChildStdin,
     rx: Receiver<Value>,
     lines: Arc<Mutex<Vec<String>>>,
@@ -27,12 +28,12 @@ struct Client {
 
 fn spawn(args: &[&str], inline: Option<&'static str>) -> Client {
     // No published weights unless a test puts some there (the machine's own ~/.folo/weights would list as models).
-    spawn_with_weights(args, inline, &std::env::temp_dir().join("folo-mcp-test-no-weights"))
+    spawn_with_weights(args, inline, &folo_test_support::root().join("folo-mcp-test-no-weights"))
 }
 
 /// [`spawn`] with `FOLO_WEIGHTS_DIR` (the `folo weights` cache, listed as published models) set to `weights`.
 fn spawn_with_weights(args: &[&str], inline: Option<&'static str>, weights: &std::path::Path) -> Client {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
         .arg("mcp")
         .args(args)
         .env("RUST_LOG", "warn")
@@ -41,7 +42,8 @@ fn spawn_with_weights(args: &[&str], inline: Option<&'static str>, weights: &std
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap();
+        .unwrap()
+        .into();
     let stdout = child.stdout.take().unwrap();
     let stdin = child.stdin.take().unwrap();
     let lines = Arc::new(Mutex::new(Vec::new()));
@@ -212,11 +214,8 @@ fn validate(schema: &Value, instance: &Value, what: &str) {
     }
 }
 
-fn tmp_dir(name: &str) -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!("folo-mcp-test-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn tmp_dir(name: &str) -> TestDir {
+    TestDir::new(&format!("mcp-test-{name}"))
 }
 
 const ALL_TOOLS: [&str; 18] = [
@@ -789,7 +788,7 @@ fn confine_rejects_paths_outside_the_data_dir() {
         json!({ "model_id": "m_31aa", "glob": "../*.jpg" }),
         "path_outside_data_dir",
     );
-    c.tool_error("register_dataset", json!({ "path": root }), "path_outside_data_dir");
+    c.tool_error("register_dataset", json!({ "path": root.path() }), "path_outside_data_dir");
     c.finish();
 }
 
@@ -1049,10 +1048,12 @@ fn confine_keeps_yolo_labels_inside() {
 fn make_dir_link(target: &std::path::Path, link: &std::path::Path) -> bool {
     #[cfg(windows)]
     {
+        // mklink reads a `/` as the start of a switch: pass `\` separators (FOLO_TEST_TMP may use `/`).
+        let native = |p: &std::path::Path| p.to_string_lossy().replace('/', "\\");
         Command::new("cmd")
             .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
+            .arg(native(link))
+            .arg(native(target))
             .stdout(Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
@@ -1312,13 +1313,14 @@ fn real_store_end_to_end() {
 
 #[test]
 fn proxy_mode_forwards_to_folo_serve() {
-    let mut serve = Command::new(env!("CARGO_BIN_EXE_folo"))
+    let mut serve: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
         .args(["serve", "--mock", "--port", "0", "--json"])
         .env("RUST_LOG", "warn")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap();
+        .unwrap()
+        .into();
     let mut first = String::new();
     BufReader::new(serve.stdout.take().unwrap()).read_line(&mut first).unwrap();
     let listening: Value = serde_json::from_str(&first).unwrap();

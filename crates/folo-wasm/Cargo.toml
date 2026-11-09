@@ -33,4 +33,5 @@ js-sys.workspace = true
 web-time.workspace = true
 
 [dev-dependencies]
+folo-test-support.workspace = true
 pollster.workspace = true

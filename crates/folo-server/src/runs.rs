@@ -1220,11 +1220,11 @@ pub fn data_format(f: DatasetFormat) -> folo_data::Format {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use folo_test_support::TestDir;
 
     #[test]
     fn resumed_metrics_replace_repeated_steps() {
-        let dir = std::env::temp_dir().join(format!("folo-runs-metrics-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = TestDir::new("runs-metrics");
         let p = dir.join("metrics.jsonl");
         let loss = r#""loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1"#;
         let val = r#""val":{"map50":0.1,"map50_95":0.05,"precision":0.1,"recall":0.1,"per_class":[]}"#;
@@ -1247,9 +1247,8 @@ mod tests {
     /// marked stopped instead of queued, and no worker starts.
     #[test]
     fn enqueue_after_shutdown_refuses_and_stops_the_run() {
-        let dir = std::env::temp_dir().join(format!("folo-runs-late-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let runs = Runs::open(dir.clone(), Arc::new(Throughput::in_memory(Default::default())));
+        let dir = TestDir::new("runs-late");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
         let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"late"}"#).unwrap();
         let run = Run {
             id: "run_late".into(),
@@ -1296,9 +1295,8 @@ mod tests {
     /// `list` reads one queue: positions stay unique and gapless while another thread keeps moving runs.
     #[test]
     fn listed_queue_positions_are_one_snapshot() {
-        let dir = std::env::temp_dir().join(format!("folo-runs-list-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let runs = Runs::open(dir.clone(), Arc::new(Throughput::in_memory(Default::default())));
+        let dir = TestDir::new("runs-list");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
         let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"q"}"#).unwrap();
         let dataset = DatasetRef {
             id: "ds_1".into(),

@@ -658,6 +658,7 @@ fn read_classes(run_dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::same;
+    use folo_test_support::TestDir;
     use serde_json::json;
 
     #[test]
@@ -680,11 +681,10 @@ mod tests {
 
     #[test]
     fn concurrent_runs_reserve_distinct_folders() {
-        let project = std::env::temp_dir().join(format!("folo-reserve-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&project);
+        let project = TestDir::new("reserve");
         let threads: Vec<_> = (0..8)
             .map(|_| {
-                let project = project.clone();
+                let project = project.to_path_buf();
                 std::thread::spawn(move || super::reserve_dir(&project, "shapes-n").unwrap())
             })
             .collect();

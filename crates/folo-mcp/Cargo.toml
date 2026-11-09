@@ -26,3 +26,6 @@ base64.workspace = true
 glob.workspace = true
 http.workspace = true
 ureq.workspace = true
+
+[dev-dependencies]
+folo-test-support.workspace = true

@@ -3,6 +3,7 @@
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
+use folo_test_support::TestDir;
 use serde_json::Value;
 
 fn folo(args: &[&str]) -> (i32, String, String) {
@@ -59,7 +60,7 @@ fn doctor_json() {
 
 #[test]
 fn doctor_reports_folo_wasm_in_the_web_dir() {
-    let dir = std::env::temp_dir().join(format!("folo-doctor-wasm-{}", std::process::id()));
+    let dir = TestDir::new("doctor-wasm");
     std::fs::create_dir_all(dir.join("folo-wasm")).unwrap();
     let report = || {
         let (code, stdout, stderr) = folo(&["doctor", "--json", "--web-dir", dir.to_str().unwrap()]);

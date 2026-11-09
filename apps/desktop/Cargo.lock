@@ -1850,6 +1850,7 @@ dependencies = [
  "folo-data",
  "folo-gpu",
  "folo-nn",
+ "folo-test-support",
  "folo-vision",
  "gpui",
  "image",
@@ -1882,6 +1883,10 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
 ]
+
+[[package]]
+name = "folo-test-support"
+version = "0.1.0"
 
 [[package]]
 name = "folo-vision"

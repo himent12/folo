@@ -2,37 +2,23 @@
 #![allow(dead_code)]
 
 use folo_data::{BBox, Image, ImageFormat, Sample, encode};
+use folo_test_support::TestDir;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A unique directory under the system temp dir, removed on drop.
-pub struct TempDir(PathBuf);
+/// A unique `folo-data-<tag>-...` directory under `FOLO_TEST_TMP` (else the system temp dir), removed on drop.
+pub struct TempDir(TestDir);
 
 impl TempDir {
     pub fn new(tag: &str) -> Self {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!(
-            "folo-data-{tag}-{}-{}-{nanos}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
+        TempDir(TestDir::new(&format!("data-{tag}")))
     }
 
     pub fn path(&self) -> &Path {
-        &self.0
+        self.0.path()
     }
 
     pub fn join(&self, p: impl AsRef<Path>) -> PathBuf {
         self.0.join(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

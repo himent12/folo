@@ -2,7 +2,7 @@
 //! dataset, train over HTTP while reading the SSE stream, find the run's model, evaluate, export and predict with
 //! it, stop / resume / delete runs, and reload everything after a store restart.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,6 +11,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use folo_server::api::*;
 use folo_server::{Options, RealStore, Server, Store};
+use folo_test_support::TestDir;
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -18,23 +19,6 @@ use tower::ServiceExt;
 
 /// Longest wait for a run to reach a state (a 2-epoch run here takes a few seconds).
 const TIMEOUT: Duration = Duration::from_secs(300);
-
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-        let p = std::env::temp_dir().join(format!("folo-runs-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&p).unwrap();
-        TempDir(p)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 fn store(home: &Path) -> Arc<RealStore> {
     Arc::new(RealStore::open(home.to_path_buf()).recheck_every(Duration::ZERO).device("cpu"))
@@ -165,8 +149,8 @@ fn count(events: &[(String, Value)], name: &str) -> usize {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn train_evaluate_predict_and_reload() {
-    let t = TempDir::new("train");
-    let home = t.0.join("home");
+    let t = TestDir::new("runs-train");
+    let home = t.join("home");
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "tiny", 12).await;
@@ -609,8 +593,8 @@ fn multipart(model_id: &str, file: Option<(&str, Vec<u8>)>, fields: &[(&str, &st
 
 #[tokio::test(flavor = "multi_thread")]
 async fn queue_stop_resume_and_restart() {
-    let t = TempDir::new("stop");
-    let home = t.0.join("home");
+    let t = TestDir::new("runs-stop");
+    let home = t.join("home");
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "stoppy", 12).await;
@@ -741,8 +725,8 @@ async fn queue_stop_resume_and_restart() {
 /// the trainer, from `run.json` after a restart and from `config.json` for runs recorded before the field.
 #[tokio::test(flavor = "multi_thread")]
 async fn queue_moves_and_resolved_config() {
-    let t = TempDir::new("queue");
-    let home = t.0.join("home");
+    let t = TestDir::new("runs-queue");
+    let home = t.join("home");
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "queued", 12).await;
@@ -872,8 +856,8 @@ async fn auto_trains_and_predicts_on_the_gpu() {
         Ok(ctx) => return eprintln!("note: skipping, software adapter {}", ctx.summary().name),
         Err(e) => return eprintln!("note: skipping, no GPU adapter: {e}"),
     }
-    let t = TempDir::new("gpu");
-    let home = t.0.join("home");
+    let t = TestDir::new("runs-gpu");
+    let home = t.join("home");
     // Inference memory is released after 300 ms idle, the predictors after 600 ms (30 s and 5 min by default).
     let s = Arc::new(
         RealStore::open(home.clone())
@@ -953,8 +937,8 @@ async fn auto_trains_and_predicts_on_the_gpu() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn no_runs_start_after_shutdown() {
-    let t = TempDir::new("shutdown");
-    let s = store(&t.0.join("home"));
+    let t = TestDir::new("runs-shutdown");
+    let s = store(&t.join("home"));
     let app = app(&s);
     let ds = dataset(&app, "tiny", 4).await;
     // Held after its first epoch of two, so the stop always wins (it cannot complete first).
@@ -976,8 +960,8 @@ async fn no_runs_start_after_shutdown() {
 /// resuming a mixed-precision run is refused the same way.
 #[tokio::test(flavor = "multi_thread")]
 async fn amp_run_without_tensor_cores_is_refused_up_front() {
-    let t = TempDir::new("amp");
-    let home = t.0.join("home");
+    let t = TestDir::new("runs-amp");
+    let home = t.join("home");
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "amp", 4).await;
@@ -1034,9 +1018,9 @@ async fn amp_run_without_tensor_cores_is_refused_up_front() {
 /// command as the hint.
 #[tokio::test(flavor = "multi_thread")]
 async fn published_weights_list_as_models_and_fine_tune_by_name() {
-    let t = TempDir::new("published");
-    let home = t.0.join("home");
-    let cache = t.0.join("weights");
+    let t = TestDir::new("runs-published");
+    let home = t.join("home");
+    let cache = t.join("weights");
     std::fs::create_dir_all(&cache).unwrap();
     let mut m = folo_vision::FoloModel::with_rng(
         folo_nn::io::ModelConfig::new("n", 3).unwrap(),
@@ -1121,8 +1105,8 @@ fn with_metadata(bytes: &[u8], key: &str, value: Option<&str>) -> Vec<u8> {
 /// measures on the CPU in about a second.
 #[tokio::test(flavor = "multi_thread")]
 async fn throughput_from_runs_predictions_and_a_probe() {
-    let t = TempDir::new("throughput");
-    let home = t.0.join("home");
+    let t = TestDir::new("runs-throughput");
+    let home = t.join("home");
     let s = store(&home);
     let app = app(&s);
     let ds = dataset(&app, "speedy", 12).await;
