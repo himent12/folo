@@ -53,12 +53,13 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
 | `releasing` | terminate the instance | unchanged |
 | `released` | done; the final status is published | `completed` / `stopped` / `failed` |
 
-- **Worker check (booting).** The worker must answer `/api/health` with the token, list the features `uploads`,
-  `run_cursors` and `run_checkpoint` in `/api/system`, and resolve `device: auto` to a GPU; a run with `amp` also
-  needs `capabilities.amp.available`. Otherwise the run fails with `cloud_boot_failed` before anything is uploaded,
-  and the message says which check failed (a worker that is too old, an instance without a usable GPU adapter
-  with the adapters it reported, mixed precision without tensor cores). A provisioned instance gets 15 minutes to
-  pass the check.
+- **Worker check (booting).** The worker must answer `/api/system` with the token and list the features
+  `uploads`, `run_cursors` and `run_checkpoint` there; a provisioned instance must also resolve `device: auto` to
+  a GPU (a rented GPU that FOLO cannot use would train on the CPU at GPU prices; a `remote` server is used as it
+  is), and a run with `amp` needs `capabilities.amp.available`. Otherwise the run fails with `cloud_boot_failed`
+  before anything is uploaded, and the message says which check failed (a worker that is too old, an instance
+  without a usable GPU adapter with the adapters it reported, mixed precision without tensor cores). A
+  provisioned instance gets 15 minutes to pass the check; a `remote` server one minute to answer.
 - **Dataset.** The dataset is sent as FOLO reads it, not as it lies on disk: a tar stream in the canonical YOLO
   layout (`data.yaml`, `images/<split>/<n>.<ext>`, `labels/<split>/<n>.txt`, files numbered in dataset order;
   images byte for byte, labels written from the parsed boxes), produced on the fly by `folo_data::pack` and cut
@@ -139,7 +140,8 @@ A FOLO server you run yourself: `folo serve --host 0.0.0.0 --token <secret>` on 
 - **Credentials**: its `url` and `token`. Use `https://` across networks you do not control (put the server
   behind a TLS proxy or a tunnel); `http://` is accepted, with a warning in the connection's `note` unless the
   host is loopback or a private address.
-- **Offers**: one, the server's GPU (`/api/system`), with no price.
+- **Offers**: one, the device the server trains on (`/api/system`: its GPU, or its CPU when it has none), with no
+  price.
 - No instance is launched or terminated; runs wait in that server's own queue; uploaded datasets stay there and
   are reused by later runs.
 

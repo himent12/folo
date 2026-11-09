@@ -210,7 +210,10 @@ pub enum InstanceState {
         /// Base URL of the worker's API.
         url: String,
     },
-    /// The provider no longer has it (terminated, failed, never existed).
+    /// The provider still has it, but it no longer runs and will not come back by itself (its container exited or
+    /// failed). It may still be billed for its disk: terminate it.
+    Stopped,
+    /// The provider no longer has it (terminated, or it never existed).
     Gone,
 }
 
@@ -237,7 +240,8 @@ pub trait Provider: Send + Sync {
 
     /// Launches an instance that runs the worker ([`bootstrap::script`]) and returns the provider's id of it.
     /// [`ErrorKind::NoOffer`] for an unknown offer, [`ErrorKind::Refused`] when the provider has no capacity or
-    /// the account no balance.
+    /// the account no balance. After [`ErrorKind::Unavailable`] the instance may exist all the same (the request
+    /// was sent and its answer lost): the caller looks for it with [`Provider::find`].
     fn launch(&self, values: &Values, spec: &LaunchSpec) -> Result<String> {
         let _ = (values, spec);
         Err(self.does_not_provision())
