@@ -24,8 +24,12 @@ command below works as `cargo folo` from the checkout. You can also put the buil
 (Vulkan)`). To choose a different one, set `FOLO_GPU_ADAPTER=<index or name substring>`, or limit the backends with
 `FOLO_GPU_BACKEND=vulkan,dx12,metal` ([GPU.md](GPU.md)).
 
-Prebuilt binaries with Studio embedded are planned for tagged releases (`scripts/install.sh`, `scripts/install.ps1`,
-[RELEASE.md](RELEASE.md)). No release has been published yet.
+Or skip the build: releases ship `folo` for x86_64 Windows and Linux with Studio embedded (and FOLO Desktop for
+Windows). With a logged-in [`gh`](https://cli.github.com) (the repository is private):
+`gh release download --repo himent12/folo --pattern install.sh && sh install.sh` on Linux, or
+`gh release download --repo himent12/folo --pattern install.ps1` then
+`powershell -ExecutionPolicy Bypass -File install.ps1` on Windows (add `-Desktop` for FOLO Desktop). The commands
+below then work as plain `folo`. See the README's [Install](../README.md#install) and [RELEASE.md](RELEASE.md).
 
 ## 2. A first model on synthetic data
 
