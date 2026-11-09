@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   /**
    * A fresh install's Overview, under the three steps: the live card's frame (epoch bar, the four stats, the validation
    * chart's axes) in placeholder geometry, muted and still, so the page shows what it becomes once a run trains instead
@@ -8,14 +9,10 @@
   import Progress from '$lib/ui/Progress.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Stat from '$lib/ui/Stat.svelte';
+  import { media } from '$lib/design/tokens';
 
-  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
-  $effect(() => {
-    const mq = matchMedia('(max-width: 767px)');
-    const on = () => (narrow = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
+  const phoneQuery = new MediaQuery(media.phone, false);
+  const narrow = $derived(phoneQuery.current);
 </script>
 
 <section class="preview" aria-labelledby="preview-note">

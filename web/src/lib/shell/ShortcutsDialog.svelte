@@ -87,7 +87,7 @@
   .off li {
     color: var(--text-tertiary);
   }
-  @media (max-width: 640px) {
+  @media (max-width: 767px) {
     :global(dialog.shortcuts.lg) {
       width: 100%;
     }

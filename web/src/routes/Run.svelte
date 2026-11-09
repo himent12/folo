@@ -425,17 +425,17 @@
     grid-template-columns: auto auto;
     justify-content: space-between;
   }
-  @media (max-width: 1199px) {
+  @media (max-width: 1279px) {
     .sk-tabs .sk-cell {
       grid-template-rows: 16px 32px 16px;
       gap: var(--space-1);
-      padding: var(--space-3) var(--space-4);
+      padding: var(--space-3);
     }
     .sk-tiles :global(.sk-tile:nth-child(9)) {
       display: block;
     }
   }
-  @media (max-width: 959px) {
+  @media (max-width: 1023px) {
     .sk-tabs {
       display: none;
     }
@@ -520,8 +520,8 @@
   .phone-pick {
     display: none;
   }
-  @media (max-width: 959px) {
-    /* Below 960 px the rail no longer fits beside the samples: one section at a time, picked above. */
+  @media (max-width: 1023px) {
+    /* Tablets and phones: the rail no longer fits beside the samples, so one section at a time, picked above. */
     /* The section picker stays reachable while the section scrolls (just under the top bar). */
     .phone-pick {
       display: block;

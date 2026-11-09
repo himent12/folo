@@ -16,6 +16,7 @@
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Slider from '$lib/ui/Slider.svelte';
   import { MediaQuery } from 'svelte/reactivity';
+  import { media } from '$lib/design/tokens';
 
   let { runId, classes, epochsDone }: { runId: string; classes: string[]; epochsDone: number } = $props();
 
@@ -40,7 +41,7 @@
   });
   let showAll = $state(false);
   // Phones drop the header's epoch meta (the picker names it).
-  const phone = new MediaQuery('max-width: 767px', false);
+  const phone = new MediaQuery(media.phone, false);
 
   // Memoise the props the fetcher reads: the parent passes values derived from a run object that changes every
   // step, and an unmemoised prop read would refetch on each one.
@@ -255,7 +256,7 @@
     border-radius: var(--radius-xs);
     background: #000000b3;
     color: #fff;
-    font-size: var(--type-micro-size);
+    font-size: var(--type-micro-size); /* small: image chip (the thumbnail's box count) */
     line-height: 14px;
   }
   .count .faint {

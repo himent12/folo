@@ -274,7 +274,7 @@
   }
   .tick {
     fill: var(--chart-label);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-xs-size); /* small: chart tick */
     font-variant-numeric: tabular-nums;
   }
   .marker {
@@ -284,7 +284,7 @@
   }
   .marker-label {
     fill: var(--text-secondary);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
   }
   .bar {

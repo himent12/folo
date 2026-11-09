@@ -147,6 +147,21 @@ function buildTs() {
     easing: t.motion.easing,
     size: Object.fromEntries(Object.entries(t.size).filter(([k]) => !isMeta(k))),
   };
+  const bp = t.breakpoint;
+  const tiers = Object.entries(bp).filter(([k]) => !isMeta(k));
+  if (tiers.map(([k]) => k).join() !== 'tablet,laptop,desktop' || !tiers.every(([, v], i) => i === 0 || v > tiers[i - 1][1]))
+    throw new Error('breakpoint: expected ascending tablet, laptop, desktop');
+  data.breakpoint = Object.fromEntries(tiers);
+  // The tier queries, written exactly as CSS writes them (custom media cannot use variables; lint-spacing.mjs accepts
+  // only these widths). `upTo*` is everything below that tier, `*Up` that tier and wider.
+  data.media = {
+    phone: `(max-width: ${bp.tablet - 1}px)`,
+    tabletUp: `(min-width: ${bp.tablet}px)`,
+    upToLaptop: `(max-width: ${bp.laptop - 1}px)`,
+    laptopUp: `(min-width: ${bp.laptop}px)`,
+    upToDesktop: `(max-width: ${bp.desktop - 1}px)`,
+    desktop: `(min-width: ${bp.desktop}px)`,
+  };
   const body = Object.entries(data)
     .map(([k, v]) => `export const ${k} = ${JSON.stringify(v, null, 2)} as const;\n`)
     .join('\n');

@@ -488,7 +488,7 @@
   /* Wide screens: Recent runs and Best model share a row as equal-height panels (they end together in every state:
      loaded, loading, empty, error), and Datasets runs across the full width under both, its datasets side by side,
      instead of hanging below the side column alone. */
-  @media (min-width: 1200px) {
+  @media (min-width: 1280px) {
     .cols {
       align-items: stretch;
     }
@@ -505,14 +505,14 @@
       column-gap: var(--space-4);
     }
   }
-  @media (max-width: 1199px) {
+  @media (max-width: 1279px) {
     .cols {
       grid-template-columns: minmax(0, 1fr);
     }
   }
   /* Laptop and tablet: the rail's two panels stack full width under Recent runs (as Datasets is on desktop), each
      laying its entries out side by side, so neither panel stops halfway beside a taller one. */
-  @media (min-width: 768px) and (max-width: 1199px) {
+  @media (min-width: 768px) and (max-width: 1279px) {
     .models,
     .dslist {
       display: grid;

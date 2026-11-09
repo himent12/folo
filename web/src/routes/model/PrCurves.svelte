@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { MediaQuery } from 'svelte/reactivity';
   /**
    * Precision-recall curves with the per-class table as their legend. Every class is a 1 px context line
    * (`--chart-context`, >= 3:1 on the panel) and the mean over all classes a heavier line in ink; many classes are a
@@ -21,6 +22,7 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Search from '@lucide/svelte/icons/search';
   import { classMetrics, matchesClass, PR_CONTEXT, prEnvelope, trimPrTail } from './pr';
+  import { media } from '$lib/design/tokens';
 
   let {
     classes,
@@ -41,13 +43,8 @@
   } = $props();
 
   // Phones get a shorter plot so the table (the legend) starts on the first screen.
-  let narrow = $state(typeof matchMedia !== 'undefined' && matchMedia('(max-width: 767px)').matches);
-  $effect(() => {
-    const mq = matchMedia('(max-width: 767px)');
-    const on = () => (narrow = mq.matches);
-    mq.addEventListener('change', on);
-    return () => mq.removeEventListener('change', on);
-  });
+  const phoneQuery = new MediaQuery(media.phone, false);
+  const narrow = $derived(phoneQuery.current);
 
   // Few classes: a leaderboard by AP. Many: by frequency.
   const many = $derived(classes.length > 10);

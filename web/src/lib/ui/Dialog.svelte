@@ -174,7 +174,7 @@
     }
   }
   /* Phones: a bottom sheet with full-width actions, clear of the home indicator. */
-  @media (max-width: 640px) {
+  @media (max-width: 767px) {
     dialog,
     dialog.sm,
     dialog.lg {

@@ -270,7 +270,7 @@
     border-radius: var(--radius-xs);
     background: var(--bg-scrim);
     color: var(--text-primary);
-    font-size: var(--type-micro-size);
+    font-size: var(--type-micro-size); /* small: image chip (the thumbnail's box count) */
     backdrop-filter: blur(4px);
   }
   :global([data-theme='light']) .meta > span {

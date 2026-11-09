@@ -40,13 +40,14 @@
   import { tooltip } from '$lib/ui/tooltip';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
   import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun, warmup } from './runnew/estimate';
+  import { media } from '$lib/design/tokens';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
   // This page is the create action: the top bar's New run steps aside instead of showing a pressed, disabled copy.
   ownCreateAction();
 
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
-  const phone = new MediaQuery('max-width: 767px', false);
+  const phone = new MediaQuery(media.phone, false);
 
   const q = router.route.query;
   const defaults: Augment = { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 };
@@ -1747,8 +1748,8 @@
   .dock {
     display: none;
   }
-  @media (max-width: 1199px) {
-    /* Laptops keep the sticky rail beside the form. */
+  @media (max-width: 1279px) {
+    /* Laptops keep the sticky rail beside the form, 40 px slimmer. */
     .layout {
       grid-template-columns: minmax(0, 1fr) 300px;
     }
@@ -1758,7 +1759,7 @@
       gap: var(--space-4);
     }
   }
-  @media (max-width: 959px) {
+  @media (max-width: 1023px) {
     .layout {
       padding-bottom: 64px;
     }
