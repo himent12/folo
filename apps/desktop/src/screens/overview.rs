@@ -752,7 +752,7 @@ impl FoloApp {
                                     return d.child(
                                         text(ty::XS, t.text_tertiary)
                                             .whitespace_nowrap()
-                                            .child("Waiting for GPU"),
+                                            .child("Waiting to start"),
                                     );
                                 }
                                 let fill = match r.status {

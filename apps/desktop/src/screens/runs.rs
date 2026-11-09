@@ -174,7 +174,7 @@ impl FoloApp {
                 let dur = duration_of(r, now).map_or("–".into(), time::duration);
                 let created = time::parse(&r.created).map_or(String::new(), |c| time::ago(c, now));
                 let progress_cell = match r.status {
-                    RunStatus::Queued => text(ty::SM, t.text_tertiary).child("Waiting for GPU"),
+                    RunStatus::Queued => text(ty::SM, t.text_tertiary).child("Waiting to start"),
                     _ => div()
                         .flex()
                         .items_center()
