@@ -16,7 +16,7 @@ use crate::app::{FoloApp, Route, act};
 use crate::charts::{HoverFn, LineChart, Series, line_chart};
 use crate::controls::Btn;
 use crate::store::Load;
-use crate::theme::{alpha, radius, size as tsize, theme, ty};
+use crate::theme::{alpha, radius, theme, ty};
 use crate::ui::*;
 
 /// Row-label column of the confusion matrix (fits "Share of all FP").
@@ -59,9 +59,7 @@ impl FoloApp {
         // The name takes what the other columns leave (GPUI truncates against a known width, so
         // it's computed: content width less the fixed columns, their 16 px gaps, row padding).
         let name_w = {
-            let side = if vw < px(1120.) { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR };
-            let pad = if self.narrow { 16. } else { 24. };
-            let content = (f32::from(vw) - side - 2. * pad).min(tsize::CONTENT_MAX);
+            let content = self.content_width(window);
             // Architecture is 150 px (its "folo-s · 640 px" plus the e2e tag).
             let fixed = [150., 130., 72., 72., 84.].iter().sum::<f32>()
                 + if wide { 150. } else { 0. }

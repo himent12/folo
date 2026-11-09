@@ -336,17 +336,8 @@ impl FoloApp {
                                     // crumb, size, latency, count, zoom). A long name ends in "…" at that
                                     // known width, as GPUI needs; the full name is on hover.
                                     let vw = f32::from(window.viewport_size().width);
-                                    let side = if vw < 1120. {
-                                        crate::theme::size::SIDEBAR_COLLAPSED
-                                    } else {
-                                        crate::theme::size::SIDEBAR
-                                    };
                                     let rail = if vw < 1100. { 280. } else { 320. };
-                                    let stage = vw.min(crate::theme::size::CONTENT_MAX + side)
-                                        - side
-                                        - 2. * self.gutter()
-                                        - rail
-                                        - 16.;
+                                    let stage = self.content_width(window) - rail - 16.;
                                     let budget =
                                         (stage - 584.).clamp(if compact { 120. } else { 160. }, 520.);
                                     // Monospace: the measured width is the glyph count times the advance.
