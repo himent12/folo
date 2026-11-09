@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import type { TrainConfig } from '$lib/api/types';
-import { failureCause, isOom, oomDetail, oomFixes, retryPath } from './oom';
+import { referenceVram } from '$lib/reference';
+import { failureCause, fitFix, fitFixes, fitsGpu, isOom, oomCalibration, oomDetail, oomFixes, retryPath, smallerBatches, useLabel, vramForecaster, type VramOf } from './oom';
 
 const cfg = (c: Partial<TrainConfig>) => ({ batch: 16, imgsz: 640, arch: 'folo-s' as const, device: 'auto' as const, ...c });
 
@@ -59,6 +60,92 @@ describe('oomFixes', () => {
     const [fix] = oomFixes(cfg({ batch: 64 }));
     expect(retryPath('run_a2f0', fix)).toBe('/runs/new?from=run_a2f0&batch=32');
     expect(retryPath('run_a2f0')).toBe('/runs/new?from=run_a2f0');
+  });
+});
+
+const GiB = 2 ** 30;
+const full = (c: Partial<TrainConfig>): TrainConfig => ({
+  name: 'r',
+  dataset_id: 'ds',
+  arch: 'folo-m',
+  epochs: 100,
+  batch: 32,
+  imgsz: 960,
+  device: 'auto',
+  optimizer: 'auto',
+  lr0: 0.01,
+  weights: null,
+  augment: { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 },
+  seed: 0,
+  ...c,
+});
+/** The reference model, as New run's local estimate. */
+const reference: VramOf = async (c) => ({ bytes: referenceVram(c.arch, c.imgsz, c.batch, c.amp ?? false), measured: false });
+
+describe('fitFixes: a suggested fix must fix it', () => {
+  it('halves down to the largest batch the forecast fits with 10% to spare, and says what it costs', async () => {
+    // folo-m at 960 px: batch 16 is forecast at ~26.9 GiB, batch 8 at ~13.6 GiB, on a 16 GiB GPU.
+    const [first] = await fitFixes(full({}), 16 * GiB, reference);
+    expect(first).toMatchObject({ kind: 'batch', label: 'Retry with batch 8', query: { batch: '8' }, fits: true });
+    expect(first!.vram! / GiB).toBeCloseTo(13.6, 1);
+    expect(referenceVram('folo-m', 960, 16, false) / GiB).toBeCloseTo(26.9, 1);
+    expect(fitsGpu(first!.vram!, 16 * GiB)).toBe(true);
+  });
+  it('gives a smaller image or model the batch that fits it, and drops a fix that fits at no batch', async () => {
+    const fixes = await fitFixes(full({}), 16 * GiB, reference);
+    expect(fixes.map((f) => f.label)).toEqual(['Retry with batch 8', 'Retry at 640 px, batch 16', 'Retry with folo-s, batch 16']);
+    expect(fixes.every((f) => f.fits && fitsGpu(f.vram!, 16 * GiB))).toBe(true);
+    expect(fixes[1]!.query).toEqual({ imgsz: '640', batch: '16' });
+  });
+  it('keeps the headroom: a forecast between 90% and 100% of the memory does not fit', async () => {
+    const tight: VramOf = async (c) => ({ bytes: c.batch >= 16 ? 15 * GiB : 7 * GiB, measured: false });
+    expect((await fitFixes(full({ batch: 32, imgsz: 320, arch: 'folo-n' }), 16 * GiB, tight))[0]).toMatchObject({ label: 'Retry with batch 8', fits: true });
+  });
+  it("scales the reference by the failed run's correction, but never a measured peak", async () => {
+    const low = full({ arch: 'folo-n', batch: 32, imgsz: 640 });
+    const k = oomCalibration(low, 16 * GiB);
+    expect(k).toBeGreaterThan(1);
+    const [ref] = await fitFixes(low, 16 * GiB, reference, k);
+    expect(ref!.vram).toBeCloseTo(referenceVram('folo-n', 640, Number(ref!.query.batch), false) * k, 0);
+    const measured: VramOf = async (c) => ({ bytes: c.batch * 0.5 * GiB, measured: true });
+    expect((await fitFixes(low, 16 * GiB, measured, k))[0]).toMatchObject({ query: { batch: '16' }, vram: 8 * GiB });
+  });
+  it('leads with the CPU when nothing on the GPU fits', async () => {
+    const huge: VramOf = async () => ({ bytes: 99 * GiB, measured: false });
+    const fixes = await fitFixes(full({}), 16 * GiB, huge);
+    expect(fixes[0]).toMatchObject({ kind: 'cpu', fits: true });
+    expect(fixes.slice(1).every((f) => f.fits === false)).toBe(true);
+  });
+  it('without the GPU memory, offers the fixes unforecast', async () => {
+    expect(await fitFixes(full({}), null, reference)).toEqual(oomFixes(full({})));
+  });
+  it('halves to 1', () => {
+    expect(smallerBatches(32)).toEqual([16, 8, 4, 2, 1]);
+    expect(smallerBatches(1)).toEqual([]);
+  });
+});
+
+describe("fitFix: New run's one change", () => {
+  it('is the first fix that fits, named as an action', async () => {
+    const f = await fitFix(full({ batch: 16 }), 16 * GiB, reference);
+    expect(f && useLabel(f)).toBe('Use batch 8');
+    expect(useLabel({ kind: 'imgsz', label: 'Retry at 640 px, batch 16', query: {} })).toBe('Use 640 px, batch 16');
+    expect(useLabel({ kind: 'cpu', label: 'Retry on the CPU', query: {} })).toBe('Use the CPU');
+  });
+  it('is never the CPU', async () => {
+    expect(await fitFix(full({}), 16 * GiB, async () => ({ bytes: 99 * GiB, measured: false }))).toBeNull();
+  });
+});
+
+describe('vramForecaster', () => {
+  const sys = (features: string[]) => ({ features }) as unknown as Parameters<typeof vramForecaster>[1];
+  it("asks the server where it estimates runs, and falls back to the reference when it cannot", async () => {
+    const api = { estimateRun: async () => ({ est_peak_vram_bytes: 5 * GiB, vram_source: 'measured' }) } as unknown as Parameters<typeof vramForecaster>[0];
+    expect(await vramForecaster(api, sys(['run_estimate']))(full({}))).toEqual({ bytes: 5 * GiB, measured: true });
+    expect(await vramForecaster(api, sys([]))(full({}))).toEqual({ bytes: referenceVram('folo-m', 960, 32, false), measured: false });
+    const broken = { estimateRun: async () => Promise.reject(new Error('down')) } as unknown as Parameters<typeof vramForecaster>[0];
+    expect((await vramForecaster(broken, sys(['run_estimate']))(full({})))?.measured).toBe(false);
+    expect(await vramForecaster(api, sys(['run_estimate']))(full({ device: 'cpu' }))).toBeNull();
   });
 });
 

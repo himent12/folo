@@ -373,6 +373,7 @@
       waitingTitle={place !== null ? queuePlace(place) : undefined}
       waitingActions={canStart ? startNext : undefined}
       {warnings}
+      system={system.data ?? (system.error ? null : undefined)}
     />
 
     {#if waitingLayout}

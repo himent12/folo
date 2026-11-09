@@ -160,6 +160,38 @@ describe('New run after running out of GPU memory', () => {
     expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
     expect(target.querySelector('#imgsz')!.closest('.field')!.querySelector('.was')).toBeNull();
   });
+  it('makes the change that fits the one primary while the settings are forecast not to fit, and Start a secondary', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    // "Retry with batch 16" as round 22 offered it: folo-m at 960 px, ~26.9 GiB on the mock's 16 GiB GPU.
+    await open('?from=run_a2f0&batch=16');
+    const fix = await until(() => [...target.querySelectorAll<HTMLElement>('.start .btn.primary')].find((b) => b.textContent?.includes('Use batch 8')), 'the fix');
+    expect(fix.textContent).toMatch(/Use batch 8 · ~13\.\d GiB/);
+    const startBtn = [...target.querySelectorAll<HTMLButtonElement>('.start button[type="submit"]')][0]!;
+    expect(startBtn.className).toContain('secondary');
+    expect(startBtn.getAttribute('aria-describedby')).toContain('rail-nofit');
+    // One condition, one severity: the figure, the meter and the line are all danger.
+    expect(target.querySelector('#rail-nofit')?.className).toContain('danger');
+    expect(target.querySelector('.summary .vram i')?.className).toContain('danger');
+    expect(target.querySelector('.summary .est dd.danger')?.textContent).toMatch(/~26\.\d GiB/);
+    // The dock (narrow screens) carries the figure against the GPU's, the verdict and the fix as its one button.
+    const dock = target.querySelector('.dock')!;
+    expect(dock.querySelector('.dock-est')?.textContent?.replace(/\s+/g, ' ')).toMatch(/~26\.\d GiB \/ 16\.0 GiB.*Likely won't fit/);
+    expect([...dock.querySelectorAll('.btn')].map((b) => b.textContent?.trim())).toEqual(['Use batch 8']);
+    // Taking it: batch 8, forecast to fit, and Start is the primary again.
+    fix.click();
+    flushSync();
+    expect(target.querySelector('#batch [aria-checked="true"]')?.textContent?.trim()).toBe('8');
+    await until(() => !target.querySelector('#rail-nofit'), 'the fit');
+    await until(() => target.querySelector('.start button[type="submit"]')?.className.includes('primary'), 'Start as the primary');
+    expect(target.querySelectorAll('.start .btn.primary')).toHaveLength(1);
+  });
+  it('keeps Start the primary when the settings fit', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    await until(() => target.querySelector('.summary .vram i'), 'the meter');
+    expect(target.querySelector('#rail-nofit')).toBeNull();
+    expect(target.querySelector('.start button[type="submit"]')?.className).toContain('primary');
+  });
   it("ignores an image size the trainer would reject and keeps the run's", async () => {
     await open('?from=run_a2f0&imgsz=333');
     await until(() => target.querySelector('.oom-note'));

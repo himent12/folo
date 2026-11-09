@@ -107,10 +107,19 @@ export const scenes = [
   { name: 'run-completed', path: '/runs/run_c19a', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-new', path: '/runs/new', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
-    // "Retry with batch 16" on the out-of-memory run: the note says what failed and what changed, the field is marked.
+    // A retry of the out-of-memory run at batch 16, still forecast not to fit (~26.9 / 16 GiB): the note says what
+    // failed and what changed, the figure, meter and line are danger, "Use batch 8" is the one primary and Start a
+    // secondary; the phone dock says "~26.9 GiB / 16.0 GiB · Likely won't fit" beside "Use batch 8".
     name: 'run-new-oom-retry',
     path: '/runs/new?from=run_a2f0&batch=16',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: (page) => until(page, '.start .btn.primary:has-text("Use batch")'),
+  },
+  {
+    // The run page's retry ("Retry with batch 8 · ~13.6 GiB"): forecast to fit, so Start is the primary.
+    name: 'run-new-oom-fitted',
+    path: '/runs/new?from=run_a2f0&batch=8',
+    viewports: ['desktop', 'mobile'],
     setup: (page) => until(page, '.oom-note'),
   },
   {
