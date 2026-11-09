@@ -1831,4 +1831,70 @@ export const scenes = [
       await page.locator('.rows li .r-check').nth(2).click();
     },
   },
+  // ---------- Agent labeling (Datasets › Label images) ----------
+  { name: 'label-jobs', path: '/datasets/label', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  { name: 'label-jobs-empty', path: '/datasets/label', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
+  {
+    // The New labeling job dialog, filled in: two classes as chips, instructions for the agent.
+    name: 'label-new-dialog',
+    path: '/datasets/label?new=1',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'dialog[open] input[id$="-name"]');
+      await page.locator('dialog[open] input[id$="-name"]').fill('street-scenes');
+      await page.locator('dialog[open] input[id$="-classes"]').fill('car, person, bicycle');
+      await page.keyboard.press('Enter');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A job just made: no images yet, the drop target in the grid's place.
+    name: 'label-job-fresh',
+    path: '/datasets/label?new=1',
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'dialog[open] input[id$="-name"]');
+      await page.locator('dialog[open] input[id$="-name"]').fill('street-scenes');
+      await page.locator('dialog[open] input[id$="-classes"]').fill('car, person');
+      await page.keyboard.press('Enter');
+      await page.locator('dialog[open] button[type="submit"]').click();
+      await until(page, '.zone');
+      await page.clock.runFor(500);
+      await page.mouse.move(0, 0);
+    },
+  },
+  { name: 'label-job-pending', path: '/datasets/label/lb_7c21', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  { name: 'label-job-running', path: '/datasets/label/lb_3f9a', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  { name: 'label-job-review', path: '/datasets/label/lb_51d0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  { name: 'label-job-failed', path: '/datasets/label/lb_9e44', viewports: ['desktop', 'tablet', 'mobile'] },
+  {
+    // The editor on an image corrected by hand, one box selected: its handles, its class, Delete box.
+    name: 'label-editor',
+    path: '/datasets/label/lb_51d0?image=5',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'dialog[open] .boxes button');
+      await page.clock.runFor(800);
+      await page.locator('dialog[open] .boxes button').first().click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Create dataset: the name, the validation share and what goes in.
+    name: 'label-dataset-dialog',
+    path: '/datasets/label/lb_51d0',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.agent');
+      const header = page.locator('header').getByRole('button', { name: 'Create dataset' });
+      if (await header.isVisible()) await header.click();
+      await until(page, 'dialog[open] input[id$="-name"]');
+      await page.mouse.move(0, 0);
+    },
+  },
+  // `folo serve --mock` (or an older server): one calm state in the page frame.
+  { name: 'label-unavailable', path: '/datasets/label', search: 'scenario=no-labeling', viewports: ['desktop', 'mobile'] },
 ];

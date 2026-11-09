@@ -4,7 +4,7 @@
    * cells take the dataset's dominant image shape.
    */
   import DatasetImage from '$lib/detect/DatasetImage.svelte';
-  import TileGrid, { type Density } from '$lib/ui/TileGrid.svelte';
+  import TileGrid, { dominantAspect, type Density } from '$lib/ui/TileGrid.svelte';
   import type { ImagePager } from './pager.svelte';
 
   let {
@@ -23,25 +23,8 @@
     onopen: (index: number, id: string) => void;
   } = $props();
 
-  /**
-   * The cells take the dataset's dominant shape (the commonest width / height among the first 64 images, within 3:4 to
-   * 16:9; 4:3 until they load), so a set of square photos fills square cells instead of sitting in letterboxed 4:3
-   * ones, whose bands read as uneven gaps (wide beside each image, narrow between rows). An image of another shape is
-   * still shown whole on the cell's bg.inset well.
-   */
-  const aspect = $derived.by(() => {
-    const seen = new Map<number, number>();
-    for (let i = 0; i < Math.min(pager.total ?? 0, 64); i++) {
-      const im = pager.get(i);
-      if (!im?.width || !im.height) continue;
-      const a = Math.round((im.width / im.height) * 100) / 100;
-      seen.set(a, (seen.get(a) ?? 0) + 1);
-    }
-    let best = 4 / 3;
-    let n = 0;
-    for (const [a, c] of seen) if (c > n) [best, n] = [a, c];
-    return Math.min(16 / 9, Math.max(3 / 4, best));
-  });
+  /** The cells take the shape of the dataset's first 64 images (4:3 until they load). */
+  const aspect = $derived(dominantAspect(Array.from({ length: Math.min(pager.total ?? 0, 64) }, (_, i) => pager.get(i))));
 
   const stem = (file: string) => file.split('/').pop() ?? file;
 

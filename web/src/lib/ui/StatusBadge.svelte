@@ -25,6 +25,7 @@
     plain = false,
     dotOnly = false,
     lastKnown,
+    label,
   }: {
     status: RunStatus;
     size?: 'sm' | 'md';
@@ -37,6 +38,8 @@
      * 2m ago" (`lib/api/freshness`). The pill turns neutral and the heartbeat stops: nothing here says "now" any more.
      */
     lastKnown?: string;
+    /** The word to show instead of the run status's, for a job with the same states (a labeling job: "Labeling", "Idle"). */
+    label?: string;
   } = $props();
 
   const labels = STATUS_LABEL;
@@ -51,7 +54,7 @@
     <svg class="mark" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.8 1.8 6.2 6.2M6.2 1.8 1.8 6.2" /></svg>
   {:else}
     <span class="dot" aria-hidden="true"></span>
-  {/if}{#if dotOnly}<span class="sr-only">{lastKnown ?? labels[status]}</span>{:else}{lastKnown ?? labels[status]}{/if}
+  {/if}{#if dotOnly}<span class="sr-only">{lastKnown ?? label ?? labels[status]}</span>{:else}{lastKnown ?? label ?? labels[status]}{/if}
 </span>
 
 <style>

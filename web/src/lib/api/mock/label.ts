@@ -48,8 +48,8 @@ const PRICE: Record<string, [number, number]> = { sonnet: [3, 15], haiku: [1, 5]
 const QUALITY: Record<string, number> = { sonnet: 0.86, haiku: 0.74, opus: 0.92 };
 
 /**
- * The agents a server finds: Claude Code installed; Codex not installed (its hint says how), except in `all-agents`,
- * where both are.
+ * The agents a server finds, with the real server's models and defaults: Claude Code installed; Codex not installed
+ * (its hint says how), except in `all-agents`, where both are.
  */
 export function mockAgents(codex: boolean): LabelAgent[] {
   return [
@@ -59,11 +59,12 @@ export function mockAgents(codex: boolean): LabelAgent[] {
       available: true,
       version: '2.1.302',
       models: [
-        { id: 'sonnet', label: 'Sonnet' },
         { id: 'haiku', label: 'Haiku' },
+        { id: 'sonnet', label: 'Sonnet' },
         { id: 'opus', label: 'Opus' },
       ],
-      default_model: 'sonnet',
+      default_model: 'haiku',
+      default_effort: 'medium',
       hint: null,
     },
     {
@@ -72,10 +73,13 @@ export function mockAgents(codex: boolean): LabelAgent[] {
       available: codex,
       version: codex ? '0.58.0' : null,
       models: [
-        { id: 'gpt-5-codex', label: 'GPT-5 Codex' },
-        { id: 'gpt-5', label: 'GPT-5' },
+        { id: 'gpt-6.1-sol', label: 'GPT-6.1-Sol' },
+        { id: 'gpt-6-astra', label: 'GPT-6-Astra' },
+        { id: 'gpt-6.1-terra', label: 'GPT-6.1 Terra' },
+        { id: 'gpt-6-luna', label: 'GPT-6-Luna' },
       ],
       default_model: null,
+      default_effort: 'low',
       hint: codex ? null : 'Install Codex (npm install -g @openai/codex) and sign in with `codex login`, or set FOLO_CODEX_BIN to its path.',
     },
   ];
@@ -566,10 +570,11 @@ export class MockLabeling {
   }
 
   #blankRun(body: StartLabeling, at: number): Omit<Run, 'ids'> {
+    const agent = mockAgents(true).find((a) => a.id === body.agent);
     return {
       agent: body.agent,
-      model: body.model ?? (body.agent === 'claude' ? 'sonnet' : null),
-      effort: body.effort ?? 'low',
+      model: body.model ?? agent?.default_model ?? null,
+      effort: body.effort ?? agent?.default_effort ?? 'low',
       note: body.note ?? '',
       startedAt: at,
       finishedAt: null,
@@ -724,7 +729,7 @@ export class MockLabeling {
     const cached = k === 0 ? 0 : Math.round(fixed * 0.86);
     const reasoning = { low: 0, medium: 260, high: 820 }[r.effort] * images;
     const output = 48 + boxes * 23 + reasoning;
-    const price = r.agent === 'claude' ? PRICE[r.model ?? 'sonnet'] : undefined;
+    const price = r.agent === 'claude' ? PRICE[r.model ?? 'haiku'] : undefined;
     const cost = price ? round(((input - cached) * price[0] + cached * price[0] * 0.1 + output * price[1]) / 1e6, 6) : null;
     return { calls: 1, input_tokens: input, cached_input_tokens: cached, output_tokens: output, cost_usd: cost };
   }

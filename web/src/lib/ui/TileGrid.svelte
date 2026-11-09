@@ -1,5 +1,24 @@
 <script lang="ts" module>
   export type Density = 's' | 'm' | 'l';
+
+  /**
+   * The cells' shape for a set of images: the commonest width / height among them, within 3:4 to 16:9 (4:3 for none),
+   * so a set of square photos fills square cells instead of sitting in letterboxed 4:3 ones, whose bands read as uneven
+   * gaps (wide beside each image, narrow between rows). An image of another shape is still shown whole on the cell's
+   * bg.inset well.
+   */
+  export function dominantAspect(images: Iterable<{ width: number; height: number } | undefined>): number {
+    const seen = new Map<number, number>();
+    for (const im of images) {
+      if (!im?.width || !im.height) continue;
+      const a = Math.round((im.width / im.height) * 100) / 100;
+      seen.set(a, (seen.get(a) ?? 0) + 1);
+    }
+    let best = 4 / 3;
+    let n = 0;
+    for (const [a, c] of seen) if (c > n) [best, n] = [a, c];
+    return Math.min(16 / 9, Math.max(3 / 4, best));
+  }
 </script>
 
 <script lang="ts">

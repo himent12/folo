@@ -1,5 +1,7 @@
 // User preferences, persisted to localStorage.
 
+import type { LabelAgentId } from './api/types';
+
 export type ThemePref = 'dark' | 'light' | 'system';
 export type Units = 'metric' | 'binary';
 
@@ -8,10 +10,12 @@ interface Prefs {
   serverUrl: string;
   units: Units;
   sidebarCollapsed: boolean;
+  /** The agent the labeling screens asked last. */
+  labelAgent: LabelAgentId | null;
 }
 
 const KEY = 'folo.prefs';
-const defaults: Prefs = { theme: 'dark', serverUrl: '', units: 'binary', sidebarCollapsed: false };
+const defaults: Prefs = { theme: 'dark', serverUrl: '', units: 'binary', sidebarCollapsed: false, labelAgent: null };
 
 function load(): Prefs {
   try {
@@ -65,6 +69,14 @@ class PrefsStore {
   }
   set sidebarCollapsed(v: boolean) {
     this.#p.sidebarCollapsed = v;
+    this.#save();
+  }
+
+  get labelAgent() {
+    return this.#p.labelAgent;
+  }
+  set labelAgent(v: LabelAgentId | null) {
+    this.#p.labelAgent = v;
     this.#save();
   }
 

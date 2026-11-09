@@ -713,6 +713,8 @@ export interface LabelAgent {
   models: LabelModel[];
   /** The model a run uses when it names none; null: the CLI's own default. */
   default_model: string | null;
+  /** The effort a run uses when it names none: what labels best for its cost with this agent. */
+  default_effort: LabelEffort;
   /** How to make the agent available (install, sign in); null when it is. */
   hint: string | null;
 }
@@ -850,7 +852,8 @@ export type LabelScope = 'unlabeled' | 'all';
 export interface StartLabeling {
   agent: LabelAgentId;
   model?: string | null;
-  effort?: LabelEffort;
+  /** Absent or null: the agent's `default_effort`. */
+  effort?: LabelEffort | null;
   scope?: LabelScope;
   /** Exactly these images, whatever their status, instead of `scope`. */
   image_ids?: string[] | null;

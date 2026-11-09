@@ -5,6 +5,8 @@ export type RouteName =
   | 'overview'
   | 'datasets'
   | 'dataset'
+  | 'label-jobs'
+  | 'label-job'
   | 'runs'
   | 'run-new'
   | 'run-compare'
@@ -25,6 +27,9 @@ export interface Route {
 const table: [RouteName, RegExp, string[]][] = [
   ['overview', /^\/$/, []],
   ['datasets', /^\/datasets$/, []],
+  // Labeling jobs live under Datasets, ahead of a dataset's page (whose id would otherwise take `label`).
+  ['label-jobs', /^\/datasets\/label$/, []],
+  ['label-job', /^\/datasets\/label\/([^/]+)$/, ['id']],
   ['dataset', /^\/datasets\/([^/]+)$/, ['id']],
   ['runs', /^\/runs$/, []],
   ['run-new', /^\/runs\/new$/, []],
@@ -60,7 +65,7 @@ export function parse(hash: string): Route {
 
 /** The top-level section a route belongs to (for nav highlighting). */
 export function section(name: RouteName): string {
-  if (name === 'dataset') return 'datasets';
+  if (name === 'dataset' || name === 'label-jobs' || name === 'label-job') return 'datasets';
   if (name === 'run' || name === 'run-new' || name === 'run-compare') return 'runs';
   if (name === 'model') return 'models';
   return name;

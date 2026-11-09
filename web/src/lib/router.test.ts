@@ -25,6 +25,17 @@ describe('router.parse', () => {
     expect(r.query.get('class')).toBe('2');
   });
 
+  it('routes labeling jobs under Datasets, ahead of a dataset id', () => {
+    expect(parse('#/datasets/label').name).toBe('label-jobs');
+    expect(parse('#/datasets/label?new=1').query.get('new')).toBe('1');
+    const job = parse('#/datasets/label/lb_3f9a?image=17&show=failed');
+    expect(job.name).toBe('label-job');
+    expect(job.params.id).toBe('lb_3f9a');
+    expect(job.query.get('image')).toBe('17');
+    expect(parse('#/datasets/labels').name).toBe('dataset');
+    expect(parse('#/datasets/label/lb_1/x').name).toBe('not-found');
+  });
+
   it('treats malformed percent-encoding as not found', () => {
     expect(parse('#/datasets/%ZZ').name).toBe('not-found');
   });
@@ -38,6 +49,8 @@ describe('router.parse', () => {
     expect(section('run-new')).toBe('runs');
     expect(section('dataset')).toBe('datasets');
     expect(section('model')).toBe('models');
+    expect(section('label-jobs')).toBe('datasets');
+    expect(section('label-job')).toBe('datasets');
   });
 });
 
@@ -51,6 +64,7 @@ describe('hashUrl (a path URL opened directly, DOGFOOD-3 S5)', () => {
     expect(at('/models/m_31aa/')).toBe('/#/models/m_31aa');
     expect(at('/playground', '?mock=1')).toBe('/?mock=1#/playground');
     expect(at('/settings')).toBe('/#/settings');
+    expect(at('/datasets/label/lb_1')).toBe('/#/datasets/label/lb_1');
   });
 
   it("moves the route's query into the hash with it, and keeps the page's own keys in the page's query", () => {

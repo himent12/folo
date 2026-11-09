@@ -59,11 +59,23 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
   { keys: 'J K', label: 'Next / previous image (inspector)', group: 'Datasets' },
   { keys: '+ -', label: 'Zoom in / out (inspector)', group: 'Datasets' },
   { keys: '0', label: 'Fit image (inspector)', group: 'Datasets' },
+  // The labeling editor's own keys: they work while it is open, whatever the setting.
+  { keys: 'J K', label: 'Next / previous image (labeling editor)', group: 'Datasets' },
+  { keys: '1–9', label: "Set the selected box's class (labeling editor)", group: 'Datasets' },
+  { keys: 'Delete', also: 'Backspace', label: 'Delete the selected box (labeling editor)', group: 'Datasets' },
 ];
 
 /** Where Escape goes back to from a detail page (its list), or null where it does nothing. */
 export function backPath(route: { name: string }): string | null {
-  return ({ run: '/runs', 'run-compare': '/runs', model: '/models', dataset: '/datasets' } as Record<string, string>)[route.name] ?? null;
+  const back: Record<string, string> = {
+    run: '/runs',
+    'run-compare': '/runs',
+    model: '/models',
+    dataset: '/datasets',
+    'label-jobs': '/datasets',
+    'label-job': '/datasets/label',
+  };
+  return back[route.name] ?? null;
 }
 
 /**

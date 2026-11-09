@@ -3,6 +3,7 @@
   import Plus from '@lucide/svelte/icons/plus';
   import Search from '@lucide/svelte/icons/search';
   import Sparkles from '@lucide/svelte/icons/sparkles';
+  import Tags from '@lucide/svelte/icons/tags';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset } from '$lib/api/types';
@@ -76,7 +77,8 @@
 
 </script>
 
-<Page title="Datasets">
+<!-- Labeling images (agent labeling) lives under Datasets: a secondary action beside Add dataset (the ⋯ on phones). -->
+<Page title="Datasets" more={[{ label: 'Label images', icon: Tags, href: href('/datasets/label') }]} moreLabel="More dataset actions">
   <!-- One fixed line: the counts live at the list's end, so nothing here changes as the list loads. -->
   {#snippet sub()}<span>YOLO and COCO folders registered with the server.</span>{/snippet}
   <!-- Phones: one header row, this line beside Add dataset. -->
@@ -134,8 +136,8 @@
           {:else if datasets.data?.length === 0}
             <!-- The header already holds the primary action (and the subtitle says what a dataset is): offer the quick start. -->
             <TableState cols={COLS}>
-              <EmptyState icon={Images} title="No datasets yet" description="Try FOLO in a minute with a generated set of shapes.">
-                {#snippet actions()}<Button icon={Sparkles} onclick={() => add('synthetic')}>Generate sample set</Button>{/snippet}
+              <EmptyState icon={Images} title="No datasets yet" description="Try FOLO in a minute with a generated set of shapes, or have an agent label your own images.">
+                {#snippet actions()}<Button icon={Sparkles} onclick={() => add('synthetic')}>Generate sample set</Button><Button icon={Tags} href={href('/datasets/label')}>Label images</Button>{/snippet}
               </EmptyState>
             </TableState>
           {:else if datasets.data && shown.length === 0}

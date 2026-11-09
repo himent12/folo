@@ -16,7 +16,7 @@
     title: string;
     /** One sentence under the title. */
     description: Snippet;
-    actions: Snippet;
+    actions?: Snippet;
   } = $props();
 </script>
 
@@ -28,7 +28,7 @@
   <div class="center">
     <p class="title">{title}</p>
     <p class="desc">{@render description()}</p>
-    <div class="actions">{@render actions()}</div>
+    {#if actions}<div class="actions">{@render actions()}</div>{/if}
   </div>
 </div>
 

@@ -2,8 +2,10 @@
   /**
    * An empty state in place of the content it stands for: the small viewfinder mark inline, a one-line title, one
    * useful sentence and one action, starting at the content's left edge. Every empty state uses it, Not found too.
+   * A command in the sentence is in backticks (`folo serve`) and set as code.
    */
   import type { Snippet } from 'svelte';
+  import CodeText from './CodeText.svelte';
   import type { IconType } from './types';
 
   let {
@@ -24,7 +26,7 @@
     </div>
   {/if}
   <p class="title">{title}</p>
-  {#if description}<p class="desc">{description}</p>{/if}
+  {#if description}<p class="desc"><CodeText text={description} /></p>{/if}
   {#if actions}<div class="actions">{@render actions()}</div>{/if}
 </div>
 
