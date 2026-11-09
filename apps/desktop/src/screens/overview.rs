@@ -56,6 +56,9 @@ impl FoloApp {
             Some("Connect to folo serve first")
         } else if no_ds {
             Some("Add a dataset first")
+        } else if self.store.datasets.error().is_some() {
+            // Settled, not loading: say so, and where to retry.
+            Some("Datasets didn't load · retry on the Datasets page")
         } else if self.store.datasets.ready().is_none() {
             Some("Loading datasets…")
         } else {
@@ -568,11 +571,18 @@ impl FoloApp {
                                 .child(skeleton(&t, format!("hero-kpi-{c}")))
                         })))
                         .child(
+                            // The chart section opens on the same full-width rule and inset as the
+                            // live card's, so the loaded card is exactly this tall.
                             div()
                                 .flex_1()
                                 .flex()
                                 .flex_col()
                                 .gap(px(4.))
+                                .mx(px(-16.))
+                                .px(px(16.))
+                                .pt(px(if hero_h < 120. { 12. } else { 16. }))
+                                .border_t_1()
+                                .border_color(t.line_subtle)
                                 .child(div().h(px(20.)).w(px(120.)).child(sk("hero-chart-title")))
                                 .child(div().mt(px(2.)).h(px(18.)).w(px(220.)).child(sk("hero-chart-legend")))
                                 .child(div().h(px(hero_h + 16.)).child(sk("hero-chart"))),
