@@ -320,9 +320,17 @@ pub fn meta_row(
         .min_w_0()
         .child(text(size, color).flex_none().whitespace_nowrap().child(lead.into()))
         .children(tag)
+        // One separator rule: every dot is the font's " · " inside the group, the first included
+        // (a flex gap beside a lone "·" spaced it wider than the rest).
         .when(!rest.is_empty(), |d| {
-            d.child(text(size, color).flex_none().child("·"))
-                .child(text(size, color).flex_1().min_w_0().ellipsis().child(rest.join(" · ")))
+            d.child(
+                text(size, color)
+                    .flex_1()
+                    .min_w_0()
+                    .ml(px(-4.))
+                    .ellipsis()
+                    .child(format!(" · {}", rest.join(" · "))),
+            )
         })
 }
 
@@ -481,6 +489,12 @@ pub fn stat_at(
         .child(caption(t, label))
         .child(metric(t, value, unit, step, ty::SM))
         .children(detail)
+}
+
+/// A KPI tile's first detail line, at the caption line's height, for a graphic (a progress or
+/// split bar) that stands in for text, so its tile's later lines stay on the strip's grid.
+pub fn detail_line(content: impl IntoElement) -> Div {
+    div().h(px(ty::XS.line)).w_full().flex().items_center().child(content)
 }
 
 /// A duration as a metric: numbers at value size, units ("h", "m", "s") one step smaller.
@@ -832,6 +846,31 @@ type ScrollSeen = ((f32, f32), f32, std::time::Instant);
 
 thread_local! {
     static SCROLLED: std::cell::RefCell<Vec<ScrollSeen>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A scroll area's edge fades: 16 px of its surface `bg` over an edge only while content lies
+/// past it, so a row cut by the edge reads as "more", and at either end the rows show undimmed.
+/// With the thumbs hidden at rest, these are the scroll cue. `inset` keeps them inside a panel's
+/// border, `radius` follows its corners. Every scroll area but the page uses them, through
+/// `FoloApp::scroll_chrome`.
+pub fn scroll_edges(handle: &ScrollHandle, bg: Hsla, inset: f32, radius: f32) -> impl Iterator<Item = Div> {
+    let y = handle.offset().y;
+    let above = y < px(-1.);
+    let below = handle.max_offset().height + y > px(1.);
+    let fade = move |top: bool| {
+        let d = div().absolute().left(px(inset)).right(px(inset)).h(px(16.));
+        let d = if top {
+            d.top(px(inset)).rounded_t(px(radius))
+        } else {
+            d.bottom(px(inset)).rounded_b(px(radius))
+        };
+        d.bg(gpui::linear_gradient(
+            if top { 180. } else { 0. },
+            gpui::linear_color_stop(bg, 0.),
+            gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
+        ))
+    };
+    above.then(|| fade(true)).into_iter().chain(below.then(|| fade(false)))
 }
 
 /// Whether `handle`'s content moved in the last 800 ms.

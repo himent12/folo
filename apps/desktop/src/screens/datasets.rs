@@ -361,14 +361,15 @@ impl FoloApp {
             .flex()
             .child(
                 div().flex_none().w(px(if narrow_strip { 220. } else { 300. })).px(px(16.)).py(px(pad)).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .child(caption(&t, "Images"))
-                        .child(metric(&t, int(ds.splits.total()), "", step, ty::SM))
-                        .child(split_bar)
-                        .child(legend),
+                    // The split bar on the strip's first detail line (where the others' captions
+                    // sit), its legend on the second: the same grid as every tile beside it.
+                    stat(
+                        &t,
+                        "Images",
+                        int(ds.splits.total()),
+                        "",
+                        Some(div().flex().flex_col().gap(px(6.)).child(detail_line(split_bar)).child(legend)),
+                    ),
                 ),
             )
             .child(vline(&t))

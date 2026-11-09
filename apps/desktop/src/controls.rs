@@ -458,6 +458,22 @@ impl FoloApp {
             .into_any_element()
     }
 
+    /// A scroll area's chrome, for the `relative` parent of its scrolling element: the edge fades
+    /// (`ui::scroll_edges`) and the overlay thumb. Every scroll area but the page uses it.
+    pub fn scroll_chrome(
+        &self,
+        handle: gpui::ScrollHandle,
+        bg: Hsla,
+        inset: f32,
+        radius: f32,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut v: Vec<AnyElement> =
+            crate::ui::scroll_edges(&handle, bg, inset, radius).map(IntoElement::into_any_element).collect();
+        v.push(self.scrollbar(handle, cx));
+        v
+    }
+
     /// A segmented control. Arrow keys move the selection while it has focus.
     pub fn segmented(
         &self,
@@ -1141,6 +1157,11 @@ impl FoloApp {
             }
             _ => (false, 288.),
         };
+        let menu_chrome = if open && !empty {
+            self.scroll_chrome(menu_scroll.clone(), t.bg_overlay, 1., radius::LG, cx)
+        } else {
+            Vec::new()
+        };
         let menu = (open && !empty).then(|| {
             gpui::deferred(
                 div()
@@ -1206,7 +1227,8 @@ impl FoloApp {
                                         }),
                                     )
                             })),
-                    ),
+                    )
+                    .children(menu_chrome),
             )
             .with_priority(2)
         });

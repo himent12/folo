@@ -413,13 +413,13 @@ impl FoloApp {
                             .child(input)
                             .child(kbd(&t, "Esc")),
                     )
-                    .child(div().relative().child(list).child(self.scrollbar(scroll_bar, cx)).child(
-                        div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(gpui::linear_gradient(
-                            0.,
-                            gpui::linear_color_stop(t.bg_overlay, 0.),
-                            gpui::linear_color_stop(crate::theme::alpha(t.bg_overlay, 0.), 1.),
-                        )),
-                    ))
+                    .child(div().relative().child(list).children(self.scroll_chrome(
+                        scroll_bar,
+                        t.bg_overlay,
+                        0.,
+                        0.,
+                        cx,
+                    )))
                     .child(
                         div()
                             .h(px(36.))
@@ -480,10 +480,6 @@ impl FoloApp {
         let close_btn =
             self.icon_button("dialog-close", "icons/x.svg", "Close (Esc)", window, cx, on_close.clone());
         // From the last layout, as the run log's follow state is.
-        let more_below = {
-            let s = &self.dialog_scroll;
-            s.max_offset().height + s.offset().y > px(1.)
-        };
         // Scrolled: a hairline under the fixed header, so rows passing beneath it read as scrolled
         // away, not cut.
         let scrolled = self.dialog_scroll.offset().y < px(-1.);
@@ -563,23 +559,15 @@ impl FoloApp {
                                                 .track_scroll(&self.dialog_scroll)
                                                 .child(body),
                                         )
-                                        .child(self.scrollbar(self.dialog_scroll.clone(), cx))
-                                        // Only while more of the form lies below: at the end, the last
-                                        // row's controls show undimmed.
-                                        .when(more_below, |d| {
-                                            d.child(
-                                                div().absolute().bottom_0().left_0().right_0().h(px(16.)).bg(
-                                                    gpui::linear_gradient(
-                                                        0.,
-                                                        gpui::linear_color_stop(t.bg_overlay, 0.),
-                                                        gpui::linear_color_stop(
-                                                            crate::theme::alpha(t.bg_overlay, 0.),
-                                                            1.,
-                                                        ),
-                                                    ),
-                                                ),
-                                            )
-                                        }),
+                                        // Fades only where more of the form lies (a row half under
+                                        // the header reads as scrolled away; the ends show undimmed).
+                                        .children(self.scroll_chrome(
+                                            self.dialog_scroll.clone(),
+                                            t.bg_overlay,
+                                            0.,
+                                            0.,
+                                            cx,
+                                        )),
                                 )
                                 .child(footer),
                         ),
@@ -781,8 +769,7 @@ impl FoloApp {
             } else {
                 let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
                 // Its six decimals, written as the run dashboard writes rates (1.11×10⁻³).
-                let p = lr.log10().floor() as i32;
-                ("AdamW", format!("{:.2}×10{}", lr * 10f64.powi(-p), crate::charts::superscript(p)))
+                ("AdamW", crate::charts::in_pow(lr, lr.log10().floor() as i32))
             }
         });
         // The adapter behind "GPU 0", named as the other screens name it.
@@ -2094,6 +2081,7 @@ impl FoloApp {
             let area = |x: &crate::api::BBox| (x.x2 - x.x1) * (x.y2 - x.y1);
             a.class.cmp(&b.class).then(area(b).total_cmp(&area(a)))
         });
+        let insp_chrome = self.scroll_chrome(self.insp_list_scroll.clone(), t.bg_overlay, 0., 0., cx);
         let box_rows: Vec<AnyElement> = box_order
             .into_iter()
             .map(|(i, b)| {
@@ -2230,21 +2218,29 @@ impl FoloApp {
             )
             .child(
                 div()
-                    .id("insp-boxes")
-                    // As tall as its rows (up to the room left), so the key hints sit right under it.
+                    .relative()
                     .flex_shrink()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.insp_list_scroll)
-                    .px(px(8.))
-                    .children(box_rows)
-                    .when(meta.boxes.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .p(px(8.))
-                                .child(text(ty::SM, t.text_tertiary).child("No labels: a background image.")),
-                        )
-                    }),
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .id("insp-boxes")
+                            // As tall as its rows (up to the room left), so the key hints sit right
+                            // under it.
+                            .flex_shrink()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.insp_list_scroll)
+                            .px(px(8.))
+                            .children(box_rows)
+                            .when(meta.boxes.is_empty(), |d| {
+                                d.child(div().p(px(8.)).child(
+                                    text(ty::SM, t.text_tertiary).child("No labels: a background image."),
+                                ))
+                            }),
+                    )
+                    .children(insp_chrome),
             )
             .child(
                 // One action per row on a fixed key column, so the keys line up and nothing wraps.

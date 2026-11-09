@@ -320,7 +320,20 @@ pub fn pow2_ticks_every(y0: f32, y1: f32, k: i32) -> Vec<f32> {
 /// (tick step under 0.01). Legends of that chart format their values in the same power.
 pub fn axis_pow(y0: f32, y1: f32, ticks: usize) -> Option<i32> {
     let step = nice_step(y1 - y0, ticks);
-    (step > 0. && step < 0.01).then(|| step.log10().floor() as i32)
+    // The top tick's power, not the step's: a 1.5×10⁻³ top reads "0 0.5 1.0 1.5 × 10⁻³", in the
+    // power its values are written in elsewhere (New run's "1.11×10⁻³"), not "0 5 10 15 × 10⁻⁴".
+    let top = y0.abs().max(y1.abs());
+    (step > 0. && step < 0.01 && top > 0.).then(|| top.log10().floor() as i32)
+}
+
+/// A value in a given power of ten, as legends write it: two decimals ("6.71×10⁻⁴" reads
+/// "0.67×10⁻³"), or two significant figures once it's below 0.1 ("0.011×10⁻³"), so a small
+/// value never rounds to "0.00".
+pub fn in_pow(x: f64, p: i32) -> String {
+    let v = x * 10f64.powi(-p);
+    let a = v.abs();
+    let digits = if a == 0. || a >= 0.1 { 2 } else { (1 - a.log10().floor() as i32).max(2) as usize };
+    format!("{v:.digits$}×10{}", superscript(p))
 }
 
 /// An exponent in superscript digits ("-3" → "⁻³").
@@ -1616,8 +1629,13 @@ mod tests {
     #[test]
     fn small_values_share_a_power_of_ten() {
         assert_eq!(superscript(-3), "⁻³");
-        assert_eq!(axis_pow(0., 0.012, 3), Some(-3));
+        assert_eq!(axis_pow(0., 0.012, 3), Some(-2));
+        assert_eq!(axis_pow(0., 0.0015, 3), Some(-3));
         assert_eq!(axis_pow(0., 1., 4), None);
+        assert_eq!(in_pow(6.71e-4, -3), "0.67×10⁻³");
+        assert_eq!(in_pow(1.11e-3, -3), "1.11×10⁻³");
+        assert_eq!(in_pow(1.1e-5, -3), "0.011×10⁻³");
+        assert_eq!(in_pow(6.7e-6, -3), "0.0067×10⁻³");
     }
 
     #[test]
