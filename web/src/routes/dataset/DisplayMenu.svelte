@@ -7,7 +7,7 @@
   import { tick } from 'svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Switch from '$lib/ui/Switch.svelte';
-  import type { Density } from './ImageGrid.svelte';
+  import type { Density } from '$lib/ui/TileGrid.svelte';
 
   let {
     boxes,

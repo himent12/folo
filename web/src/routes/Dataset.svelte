@@ -26,10 +26,13 @@
   import Tabs from '$lib/ui/Tabs.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import Select from '$lib/ui/Select.svelte';
+  import ToggleButton from '$lib/ui/ToggleButton.svelte';
+  import { gridView } from '$lib/ui/gridView.svelte';
   import ClassPicker from './dataset/ClassPicker.svelte';
   import DisplayMenu from './dataset/DisplayMenu.svelte';
   import { findingCount, findingLabel, healthChecks, imageCount } from './dataset/health';
-  import ImageGrid, { type Density } from './dataset/ImageGrid.svelte';
+  import ImageGrid from './dataset/ImageGrid.svelte';
+  import type { Density } from '$lib/ui/TileGrid.svelte';
   import Inspector from './dataset/Inspector.svelte';
   import { ImagePager } from './dataset/pager.svelte';
   import StatsTab from './dataset/StatsTab.svelte';
@@ -90,32 +93,11 @@
     return () => p?.dispose();
   });
 
-  // ---------- per-viewer view preferences ----------
-  function readPref<T extends string>(key: string, ok: readonly T[], fallback: T): T {
-    try {
-      const v = localStorage.getItem(key);
-      return v !== null && (ok as readonly string[]).includes(v) ? (v as T) : fallback;
-    } catch {
-      return fallback;
-    }
-  }
-  function writePref(key: string, v: string) {
-    try {
-      localStorage.setItem(key, v);
-    } catch {
-      /* private mode: not remembered */
-    }
-  }
-  let density = $state<Density>(readPref('folo.datasets.density', ['s', 'm', 'l'] as const, 'm'));
-  let boxes = $state(readPref('folo.datasets.boxes', ['on', 'off'] as const, 'on') === 'on');
-  function setBoxes(on: boolean) {
-    boxes = on;
-    writePref('folo.datasets.boxes', on ? 'on' : 'off');
-  }
-  function setDensity(v: Density) {
-    density = v;
-    writePref('folo.datasets.density', v);
-  }
+  // ---------- per-viewer view preferences (every image grid's, ui/gridView) ----------
+  const density = $derived(gridView.density);
+  const boxes = $derived(gridView.boxes);
+  const setBoxes = (on: boolean) => (gridView.boxes = on);
+  const setDensity = (v: Density) => (gridView.density = v);
 
   // Phones get their own header and toolbar: one meta line, an icon Train button, and a one-row image toolbar.
   const phoneQuery = new MediaQuery(media.phone, false);
@@ -291,9 +273,7 @@
           {#if phone}
             <DisplayMenu {boxes} {density} onboxes={setBoxes} ondensity={setDensity} />
           {:else}
-            <button type="button" class="toggle" aria-pressed={boxes} onclick={() => setBoxes(!boxes)}>
-              <Scan size={14} strokeWidth={1.75} aria-hidden="true" />Boxes
-            </button>
+            <ToggleButton pressed={boxes} label="Boxes" icon={Scan} onchange={setBoxes} />
             <Segmented
               label="Thumbnail size"
               size="sm"
@@ -445,33 +425,7 @@
     overflow: hidden;
     clip-path: inset(50%);
   }
-  .toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: var(--control-sm);
-    padding: 0 var(--space-2);
-    border-radius: var(--radius-sm);
-    border: 1px solid var(--line-default);
-    color: var(--text-secondary);
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-medium);
-    white-space: nowrap;
-    transition:
-      border-color var(--dur-fast) var(--ease-standard),
-      color var(--dur-fast) var(--ease-standard);
-  }
-  .toggle:hover {
-    color: var(--text-primary);
-    border-color: var(--line-strong);
-  }
-  /* Pressed is neutral (lime is for the primary action, focus and live state): a stronger edge and primary text. */
-  .toggle[aria-pressed='true'] {
-    border-color: var(--text-tertiary);
-    color: var(--text-primary);
-  }
   @media (pointer: coarse) {
-    .toggle,
     .clear {
       height: 44px;
     }

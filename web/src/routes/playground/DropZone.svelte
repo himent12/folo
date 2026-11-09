@@ -8,6 +8,7 @@
   import Button from '$lib/ui/Button.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
+  import Viewfinder from '$lib/ui/Viewfinder.svelte';
   import { TOUCH_ONLY } from '$lib/shell/shortcuts';
   import { media } from '$lib/design/tokens';
 
@@ -38,24 +39,15 @@
 <!-- The viewfinder is the drop target and fills the canvas; the samples sit right under it, at the panel's foot. -->
 <div class="zone" class:dragging>
   <div class="finder">
-    <span class="corner tl" aria-hidden="true"></span>
-    <span class="corner tr" aria-hidden="true"></span>
-    <span class="corner bl" aria-hidden="true"></span>
-    <span class="corner br" aria-hidden="true"></span>
-
-    <div class="center">
-      {#if touch}
-        <p class="title">Choose an image to detect objects</p>
-        <p class="desc">JPEG, PNG or WebP, from your photos, camera or files.</p>
-      {:else}
-        <p class="title">{dragging ? 'Release to detect' : 'Drop an image to detect objects'}</p>
-        <p class="desc">JPEG, PNG or WebP. You can also paste from the clipboard with <span class="nowrap"><Kbd keys="Mod+V" />.</span></p>
-      {/if}
-      <div class="actions">
+    <Viewfinder {dragging} title={touch ? 'Choose an image to detect objects' : dragging ? 'Release to detect' : 'Drop an image to detect objects'}>
+      {#snippet description()}
+        {#if touch}JPEG, PNG or WebP, from your photos, camera or files.{:else}JPEG, PNG or WebP. You can also paste from the clipboard with <span class="nowrap"><Kbd keys="Mod+V" />.</span>{/if}
+      {/snippet}
+      {#snippet actions()}
         <Button variant="primary" icon={Upload} onclick={onbrowse}>{touch ? 'Choose an image' : 'Browse files'}</Button>
         <Button icon={Images} onclick={onpick}>Pick from a dataset</Button>
-      </div>
-    </div>
+      {/snippet}
+    </Viewfinder>
   </div>
 
   {#if samples === undefined || samples.length > 0}
@@ -93,103 +85,16 @@
   /* The drop target: a sparse state's compact composition (DESIGN_DIRECTION 8) at every width, so the samples under it
      sit in the first screen. Beside the rail (from 1024 px) it is 480 px where the window has room
      for it and the samples under the page header (about 420 px of chrome), and gives way in a shorter one. Its message
-     is centred between the corners. */
+     is centred between the corners (ui/Viewfinder). */
   .finder {
-    position: relative;
     display: grid;
-    place-items: center;
     width: 100%;
     flex: none;
     height: clamp(280px, calc(100dvh - 420px), 480px);
-    padding: var(--space-8) var(--space-6);
+    --vf-pad: var(--space-8) var(--space-6);
   }
   .zone.dragging {
     background: color-mix(in srgb, var(--bg-inset), var(--accent-solid) 6%);
-  }
-  .corner {
-    position: absolute;
-    width: 28px;
-    height: 28px;
-    border: 0 solid var(--line-strong);
-    transition:
-      border-color var(--dur-fast) var(--ease-standard),
-      inset var(--dur-base) var(--ease-out);
-  }
-  .tl {
-    top: 0;
-    left: 0;
-    border-top-width: 2px;
-    border-left-width: 2px;
-  }
-  .tr {
-    top: 0;
-    right: 0;
-    border-top-width: 2px;
-    border-right-width: 2px;
-  }
-  .bl {
-    bottom: 0;
-    left: 0;
-    border-bottom-width: 2px;
-    border-left-width: 2px;
-  }
-  .br {
-    bottom: 0;
-    right: 0;
-    border-bottom-width: 2px;
-    border-right-width: 2px;
-  }
-  .dragging .corner {
-    border-color: var(--accent-line);
-  }
-  .dragging .tl {
-    top: var(--space-3);
-    left: var(--space-3);
-  }
-  .dragging .tr {
-    top: var(--space-3);
-    right: var(--space-3);
-  }
-  .dragging .bl {
-    bottom: var(--space-3);
-    left: var(--space-3);
-  }
-  .dragging .br {
-    bottom: var(--space-3);
-    right: var(--space-3);
-  }
-  .center {
-    position: relative;
-    display: grid;
-    justify-items: center;
-    gap: var(--space-2);
-    text-align: center;
-    max-width: 420px;
-  }
-  .center::before {
-    content: '';
-    width: 10px;
-    height: 10px;
-    margin-bottom: var(--space-3);
-    border-radius: 50%;
-    background: var(--accent-line);
-    box-shadow: 0 0 0 6px var(--accent-muted);
-  }
-  .title {
-    font-size: var(--type-lg-size);
-    line-height: var(--type-lg-line);
-    letter-spacing: var(--type-lg-tracking);
-    font-weight: var(--weight-medium);
-  }
-  .desc {
-    color: var(--text-secondary);
-  }
-  .actions {
-    display: flex;
-    gap: var(--space-2);
-    margin-top: var(--space-3);
-    flex-wrap: wrap;
-    justify-content: center;
   }
   .samples {
     display: grid;
@@ -244,7 +149,7 @@
     }
     .finder {
       height: auto;
-      padding: var(--space-6);
+      --vf-pad: var(--space-6);
     }
   }
   @media (max-width: 767px) {
@@ -255,14 +160,10 @@
     /* Phones: as tall as the message and buttons need. */
     .finder {
       height: auto;
-      padding: var(--space-8) var(--space-4);
+      --vf-pad: var(--space-8) var(--space-4);
     }
     .samples ul {
       grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .corner {
-      width: 20px;
-      height: 20px;
     }
   }
 </style>
