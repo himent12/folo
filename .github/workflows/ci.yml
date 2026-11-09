@@ -101,7 +101,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - if: steps.web.outputs.present == 'true'
         working-directory: web
-        run: npm ci && npm run check && npm run build
+        run: npm ci && npm run check && npm test && npm run build
       # npm run qa (web/DESIGN_DIRECTION.md §6): every scene at tablet and phone sizes, failing on a blank section or
       # horizontal overflow. It uses the runner's Chrome (ubuntu-latest and the boat.dev runners have one); without one,
       # Playwright's headless Chromium, downloaded once per playwright-core version (cached on GitHub-hosted runners,

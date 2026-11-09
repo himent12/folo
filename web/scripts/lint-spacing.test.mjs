@@ -27,6 +27,9 @@ describe('lintCss', () => {
     expect(lintCss('a { font-size: var(--type-sm-size); }')).toEqual([]);
     expect(lintCss('a { font-size: 0.7em; }')).toEqual([]);
     expect(lintCss('a { font-size: 9px; /* grid-ok */ }')).toEqual([]);
+    // The shorthand sets a size too.
+    expect(lintCss('a { font: 10px Geist; }')[0]).toContain('--type-*-size');
+    expect(lintCss('a { font: inherit; }')).toEqual([]);
   });
 });
 
@@ -87,5 +90,8 @@ describe('lintSmallText: the 12 px text floor', () => {
     expect(lintSmallText('<text font-size="10px">1</text>')[0]).toContain('outside a stylesheet');
     // A commented-out use is not a use.
     expect(lintSmallText('// font-size: var(--type-xs-size)')).toEqual([]);
+    // A token in another declaration on the line exempts nothing.
+    expect(lintSmallText('<span style="font-size:10px; line-height:var(--type-sm-line)">x</span>')[0]).toContain('font-size:10px');
+    expect(lintSmallText('<text style="font-size: var(--type-sm-size)" x="10px">1</text>')).toEqual([]);
   });
 });

@@ -90,7 +90,8 @@ export function lintCss(css, file, startLine = 1) {
   const lineAt = (i) => code.slice(0, i).split('\n').length - 1;
   for (const m of code.matchAll(/(?:^|[;{\s])([a-z-]+)\s*:\s*([^;{}]+)/g)) {
     const [, prop, value] = m;
-    const size = prop === 'font-size';
+    // The `font` shorthand sets a size too (`font: 10px Geist`).
+    const size = prop === 'font-size' || prop === 'font';
     if (!PROP.test(prop) && !size) continue;
     const first = lineAt(m.index + m[0].indexOf(prop));
     const last = lineAt(m.index + m[0].length);
@@ -99,7 +100,7 @@ export function lintCss(css, file, startLine = 1) {
     if (skip) continue;
     const where = locate(file, startLine + first);
     if (size) {
-      if (/\d*\.?\d+px\b/.test(dropVarMath(value))) problems.push(`${where}  font-size: ${value.trim()}  (use a --type-*-size token)`);
+      if (/\d*\.?\d+px\b/.test(dropVarMath(value))) problems.push(`${where}  ${prop}: ${value.trim()}  (use a --type-*-size token)`);
       continue;
     }
     for (const px of dropVarMath(value).matchAll(/(-?\d*\.?\d+)px\b/g)) {
@@ -174,8 +175,11 @@ export function lintSmallText(text, file, { css = false } = {}) {
       problems.push(`${locate(file, k + 1)}  ${m[0]}  (${why})`);
     }
     const outside = style ? blankComments(style[k], true) : '';
-    if (/font(?:-size)?\s*[=:]\s*[^;\n]*?\b\d+(?:\.\d+)?px/.test(outside) && !/var\(--type-/.test(outside))
-      problems.push(`${locate(file, k + 1)}  ${outside.trim()}  (a font size in px outside a stylesheet; use a --type-*-size token)`);
+    // Each font declaration on its own (a token elsewhere on the line exempts nothing): its value runs to the next
+    // `;`, quote or line end.
+    for (const d of outside.matchAll(/font(?:-size)?\s*[=:]\s*["'`]?([^;\n"'`]*)/g))
+      if (/\b\d+(?:\.\d+)?px/.test(d[1]))
+        problems.push(`${locate(file, k + 1)}  ${d[0].trim()}  (a font size in px outside a stylesheet; use a --type-*-size token)`);
   });
   return problems;
 }

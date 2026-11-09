@@ -20,4 +20,9 @@ describe('runHorizon', () => {
     expect(runHorizon(38, 100, 'full')).toEqual([0, 100]);
     expect(runHorizon(0, 100, 'observed')).toEqual([0, 100]);
   });
+  it('ends at the history when no plan is recorded', () => {
+    expect(runHorizon(23, 0, 'observed')).toEqual([0, 23]);
+    expect(runHorizon(22.4, 0, 'full')).toEqual([0, 23]);
+    expect(runHorizon(0, 0, 'observed')).toEqual([0, 1]);
+  });
 });
