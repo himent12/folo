@@ -47,7 +47,7 @@ impl FoloApp {
                 "Some data didn't load · retry in its panel".to_string()
             }
             // The sidebar says "Connecting…" until the server answers; the page says the same.
-            _ if self.store.health.ready().is_none() => "Connecting…".to_string(),
+            _ if self.store.health.is_loading() => "Connecting…".to_string(),
             _ => "Loading…".to_string(),
         };
         // Training needs a server and a dataset; until then the action explains itself instead.
@@ -195,8 +195,10 @@ impl FoloApp {
         // Short windows trade chart height for the sections below.
         // Short windows (620 px minimum): a lower plot, so two Recent runs rows show under the hero.
         let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
-        // The card's padding (tighter with the short chart); the chart section's rule spans it.
-        let card_pad = if hero_h < 120. { 12. } else { 16. };
+        // The card's inset: 16 px at the sides always, tighter above and below with the short chart.
+        // The chart section's rule spans it.
+        let card_pad = 16.;
+        let card_pad_y = if hero_h < 120. { 12. } else { 16. };
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
         let ds = self
@@ -446,7 +448,8 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(if hero_h < 120. { 8. } else { 16. }))
-                    .p(px(card_pad))
+                    .px(px(card_pad))
+                    .py(px(card_pad_y))
                     .child(kpis)
                     .child(
                         // The chart section opens on a full-width rule, as the run page's chart
@@ -459,7 +462,7 @@ impl FoloApp {
                             .gap(px(4.))
                             .mx(px(-card_pad))
                             .px(px(card_pad))
-                            .pt(px(card_pad))
+                            .pt(px(card_pad_y))
                             .border_t_1()
                             .border_color(t.line_subtle)
                             .child(
@@ -567,7 +570,9 @@ impl FoloApp {
                         .flex()
                         .flex_col()
                         .gap(px(if hero_h < 120. { 8. } else { 16. }))
-                        .p(px(if hero_h < 120. { 12. } else { 16. }))
+                        // 16 px at the sides always, as the live card's.
+                        .px(px(16.))
+                        .py(px(if hero_h < 120. { 12. } else { 16. }))
                         // One strip with 1 px dividers, as the loaded tiles sit.
                         .child(div().flex().children((0..4).map(|c| {
                             div()
@@ -1158,14 +1163,14 @@ impl FoloApp {
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "2",
                         "Train a model",
-                        "Start a run; loss, mAP and throughput stream in live.",
+                        "Start a run and watch loss and mAP live.",
                         None,
                         false,
                     )))
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "3",
                         "Try it",
-                        "Open any image in the Playground and tune the thresholds.",
+                        "Open any image in the Playground.",
                         None,
                         false,
                     ))),

@@ -84,7 +84,8 @@ pub trait Backend: Send + Sync + 'static {
     fn now(&self) -> i64;
 
     fn health(&self) -> ApiResult<Health>;
-    fn system(&self) -> ApiResult<SystemInfo>;
+    /// The machine, plus what runs can use on it (`capabilities`; absent from older servers).
+    fn system(&self) -> ApiResult<SystemResponse>;
 
     fn datasets(&self) -> ApiResult<Vec<Dataset>>;
     fn dataset(&self, id: &str) -> ApiResult<Dataset>;

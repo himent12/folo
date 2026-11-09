@@ -66,6 +66,14 @@ pub fn local_clock(t: i64) -> String {
     clock(t + local_offset_at(t))
 }
 
+/// `YYYY-MM-DD HH:MM` in the machine's local time: the exact moment behind an "ago".
+pub fn local_datetime(t: i64) -> String {
+    let lt = t + local_offset_at(t);
+    let (y, m, d) = civil_from_days(lt.div_euclid(86_400));
+    let s = lt.rem_euclid(86_400);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", s / 3600, s / 60 % 60)
+}
+
 /// Seconds east of UTC at `t` (Windows: the zone's rules for that date, daylight saving included;
 /// UTC elsewhere).
 #[cfg(windows)]

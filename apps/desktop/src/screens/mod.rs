@@ -142,6 +142,7 @@ impl FoloApp {
         let s = &mut self.store;
         s.health = Load::Idle;
         s.system = Load::Idle;
+        s.capabilities = None;
         s.datasets = Load::Idle;
         s.models = Load::Idle;
         s.runs = Load::Idle;

@@ -10,6 +10,7 @@ pub use folo_api::{
     PredictResponse, RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, RunStatus, Sample, ScoredBox,
     Split, Splits, StatusEvent, Step, SyntheticDataset, SystemInfo, Timing, TrainConfig, ValMetrics,
 };
+pub use folo_api::{Capabilities, SystemResponse};
 
 /// Display helpers for wire enums.
 pub trait Label {

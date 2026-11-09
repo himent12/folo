@@ -200,7 +200,7 @@ impl FoloApp {
             for m in models {
                 let id = m.id.clone();
                 let detail = m.metrics.as_ref().map_or(m.arch.as_str().to_string(), |x| {
-                    format!("{} · mAP {:.3}", m.arch.as_str(), x.map50_95)
+                    format!("{} · mAP50-95 {:.3}", m.arch.as_str(), x.map50_95)
                 });
                 items.push(PaletteItem {
                     group: "Models",
@@ -1072,11 +1072,13 @@ impl FoloApp {
                         ),
                     ),
             )
-            // Mixed precision: f16 on tensor cores. Whether the server's GPU has them shows only when
-            // the run starts (it fails with not_supported), so the requirement is stated here.
+            // Mixed precision: f16 on tensor cores. The server says whether its GPU can
+            // (`capabilities.amp`); when it can't, the switch is off and inert with its reason. An older
+            // server can't say, so the requirement is stated and a run's failure tells.
             .child({
-                let on_cpu = DEVICES[device] == "cpu";
-                let amp_on = amp && !on_cpu;
+                let blocked = self.amp_blocked(DEVICES[device]);
+                let off = blocked.is_some();
+                let amp_on = amp && !off;
                 let switch = self
                     .switch(
                         "nr-amp",
@@ -1085,7 +1087,7 @@ impl FoloApp {
                         cx,
                         act(move |this, _, cx| {
                             if let Some(f) = this.new_run.as_mut()
-                                && !on_cpu
+                                && !off
                             {
                                 f.amp = !f.amp;
                                 cx.notify();
@@ -1106,11 +1108,25 @@ impl FoloApp {
                             .flex_col()
                             .gap(px(2.))
                             .child(label("Mixed precision"))
-                            .child(text(ty::XS, t.text_tertiary).child(if on_cpu {
-                                "Off on the CPU: it needs a GPU with tensor cores"
-                            } else {
-                                "Trains in f16 on tensor cores; needs folo serve --tensor-cores"
-                            })),
+                            .child(
+                                // The server's reason is plain text (a backtick in it is literal); only
+                                // the stated need carries a code chip.
+                                match blocked {
+                                    Some(why) => text(ty::XS, t.text_tertiary).whitespace_normal().child(why),
+                                    // The server confirmed it can; an older one can't say, so the need is stated.
+                                    None if self.store.capabilities.is_some() => {
+                                        text(ty::XS, t.text_tertiary)
+                                            .child("Trains in f16 on this server's tensor cores")
+                                    }
+                                    None => rich(
+                                        &t,
+                                        ty::XS,
+                                        t.text_tertiary,
+                                        "Trains in f16 on tensor cores; needs `folo serve --tensor-cores`",
+                                    )
+                                    .text_left(),
+                                },
+                            ),
                     )
                     .child(switch)
             })

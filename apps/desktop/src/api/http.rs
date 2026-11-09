@@ -186,7 +186,7 @@ impl Backend for HttpBackend {
         self.get("/health")
     }
 
-    fn system(&self) -> ApiResult<SystemInfo> {
+    fn system(&self) -> ApiResult<SystemResponse> {
         self.get("/system")
     }
 

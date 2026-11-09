@@ -461,6 +461,8 @@ pub struct FoloApp {
     /// The draft's dataset by id (the list can gain datasets at the front while the draft waits,
     /// so its index alone could point at another one).
     pub new_run_draft_ds: Option<String>,
+    /// `--open new-run`: open the dialog once the dataset list is in (it needs one to start from).
+    pub open_new_run_pending: bool,
     /// The Generate synthetic dataset dialog.
     pub synth: Option<SynthForm>,
     pub synth_seq: u64,
@@ -608,6 +610,7 @@ impl FoloApp {
             new_run: None,
             new_run_draft: None,
             new_run_draft_ds: None,
+            open_new_run_pending: false,
             synth: None,
             synth_seq: 0,
             restore_pending: false,
@@ -802,10 +805,14 @@ impl FoloApp {
                 |api| api.system(),
                 |this, r, _| {
                     if let Ok(s) = &r
-                        && let Some(g) = s.gpus.first().and_then(|g| g.util)
+                        && let Some(g) = s.system.gpus.first().and_then(|g| g.util)
                     {
                         this.store.gpu_util.push_back(g);
                     }
+                    let r = r.map(|s| {
+                        this.store.capabilities = s.capabilities;
+                        s.system
+                    });
                     this.store.system = r.into();
                 },
             );
@@ -1679,6 +1686,8 @@ impl FoloApp {
     }
 
     pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(device) = self.new_run.as_ref().map(|f| f.device) else { return };
+        let amp_ok = self.amp_blocked(DEVICES[device]).is_none();
         let Some(form) = self.new_run.as_mut() else { return };
         // Auto sets its own rate, so an unparsed rate entry doesn't block it.
         let lr_invalid = form.lr_invalid && form.optimizer != 0;
@@ -1722,8 +1731,8 @@ impl FoloApp {
                     ..Augment::default()
                 },
                 seed: 0,
-                // The CPU has no tensor cores: the switch is inert there and never sent.
-                amp: form.amp && DEVICES[form.device] != "cpu",
+                // Only where it can run: not the CPU, nor a server that says it can't.
+                amp: form.amp && amp_ok,
             },
         );
         let _ = window;
@@ -2053,6 +2062,23 @@ impl FoloApp {
                 }
             },
         );
+    }
+
+    /// Why Mixed precision can't be used for a run on `device` (an entry of `DEVICES`), if it can't:
+    /// the CPU, or the server's own answer (`capabilities.amp`, the message such a run would fail
+    /// with). An older server without capabilities says nothing; the run's failure tells then.
+    pub fn amp_blocked(&self, device: &str) -> Option<String> {
+        if device == "cpu" {
+            return Some("Off on the CPU: it needs a GPU with tensor cores".into());
+        }
+        let caps = self.store.capabilities.as_ref()?;
+        // The tensor cores' own short reason when there is one ("off: <GPU> has no cooperative
+        // matrices", "off (not requested: …)"); else the trainer's full message.
+        (!caps.amp.available).then(|| match (&caps.tensor_cores.reason, &caps.amp.reason) {
+            (Some(tc), _) => format!("Not available: tensor cores {tc}"),
+            (None, Some(amp)) => amp.clone(),
+            (None, None) => "Mixed precision isn't available on this server".into(),
+        })
     }
 
     /// Why Open image can't run now, if it can't: the model list failed (with the runs list too:
@@ -2708,6 +2734,10 @@ impl Render for FoloApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if std::mem::take(&mut self.restore_pending) {
             self.restore_focus(window);
+        }
+        if self.open_new_run_pending && self.store.datasets.ready().is_some_and(|d| !d.is_empty()) {
+            self.open_new_run_pending = false;
+            self.open_new_run(None, window, cx);
         }
         self.narrow = window.viewport_size().width < px(1120.);
         let t = theme(cx);

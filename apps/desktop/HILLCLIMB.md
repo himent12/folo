@@ -1605,3 +1605,38 @@ Round 38 changes:
   - The PR legend says "Hover a legend or table row".
   - The stop dialog says "Progress after epoch N is lost".
 - **Runs:** an active status event clears a run's old error and code.
+
+## Round 38
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.6 |
+| GPT-6.1 Sol | 8.5 |
+
+Getting started now holds together at every size. The command chip stays whole on its own line, and the step cards end at one height.
+
+Opus flagged:
+- The Latency key still wrapping into the fade.
+- The hero card's side inset shrinking to 12 px on short windows.
+- Step copy long enough to orphan words.
+- The Mixed precision help naming a command as plain text.
+
+Sol flagged:
+- Focus and scroll restore after navigation.
+- Select type-ahead and scrollbars.
+- The palette's bare "mAP".
+- No exact time behind "3 h ago".
+
+The code review of #110 found nothing blocking. Its two notes are fixed in round 39:
+- The "Connecting…" guard now uses `health.is_loading()`.
+- The `rich()` comment is corrected.
+
+Round 39 changes:
+- **Mixed precision** reads `GET /api/system` `capabilities` (#108). When the server can't run it, the switch is off and inert and shows the server's reason. When it can, the help says "Trains in f16 on this server's tensor cores". An older server shows the requirement as a code chip.
+- **`--open new-run`** opens the dialog once datasets load, for shots.
+- **Latency key:** "Pre / Infer / Post" on one line, full names on hover.
+- **Overview cards:** a 16 px side inset at every size; only vertical padding tightens.
+- **Copy:**
+  - Shorter step copy.
+  - The palette says "mAP50-95".
+- **Created columns** (Runs and Models) show the exact local time on hover.
