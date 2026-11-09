@@ -832,12 +832,16 @@
   .cap:last-child {
     padding-bottom: 0;
   }
+  /* The word sets the baseline the row aligns to (the icon is centred on it), so "Available" sits on the name's line. */
   .cap-state {
     flex-shrink: 0;
     display: inline-flex;
-    align-items: center;
+    align-items: baseline;
     gap: var(--space-1-5);
     color: var(--text-secondary);
+  }
+  .cap-state > :global(svg) {
+    align-self: center;
   }
   .cap-state[data-state='on'] {
     color: var(--text-primary);

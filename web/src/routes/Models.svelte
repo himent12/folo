@@ -46,7 +46,7 @@
   const throughput = new Resource((s) => loadThroughput(hub.api, s));
   const benchHere = $derived([measuredLatency(throughput.data, 'folo-n'), measuredTraining(throughput.data, 'folo-n')].filter(Boolean).length);
 
-  type Key = 'name' | 'arch' | 'classes' | 'imgsz' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'parent' | 'created';
+  type Key = 'name' | 'arch' | 'classes' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'parent' | 'created';
   interface Col {
     key: Key;
     label: string;
@@ -89,22 +89,23 @@
     splitRank(a.ctx.split) - splitRank(b.ctx.split);
 
   // Source run: a run's name ends in what tells it from its siblings ("shapes-hard-s" beside "shapes-hard-m"), so it is
-  // never cut (DESIGN_DIRECTION §2.3). From 1280 px every column is in use and 112 px (88 of text) holds the usual
-  // names, a longer one wrapping at its hyphens; between 1024 and 1279 Classes, GFLOPs and Started from step out and the
-  // name column has room to spare, so Source run takes 136.
+  // never cut (DESIGN_DIRECTION §2.3). The widths add up to the 1,160 px panel with the longest model name whole: the
+  // input size (the same 640 on almost every model, and on each model's page) is not a column, which pays for
+  // mAP50-95's "joint best" (120 px, its real width) and a 128 px Source run (104 px of text) from 1280 px; between
+  // 1024 and 1279 Classes, GFLOPs and Started from step out and Source run takes 144. A longer name wraps at its
+  // hyphens, never cut.
   const laptopOnly = new MediaQuery(`${media.laptopUp} and ${media.upToDesktop}`, false);
   // Sizes in one unit for the column, named in its header (prefs.units: MiB or MB).
   const cols: Col[] = $derived([
     { key: 'name', label: 'Model', get: (m) => m.name.toLowerCase() },
     { key: 'arch', label: 'Arch', get: (m) => m.arch, w: '72px' },
     { key: 'classes', label: 'Classes', num: true, get: (m) => m.classes.length, hide: 'lg', w: '84px' },
-    { key: 'imgsz', label: 'Input px', num: true, get: (m) => m.imgsz, hide: 'md', w: '88px' },
     { key: 'params', label: 'Params', num: true, get: (m) => m.params, w: '80px' },
     { key: 'flops', label: 'GFLOPs', num: true, get: (m) => m.flops_g, hide: 'lg', w: '84px' },
     { key: 'bytes', label: `Size, ${sizeUnit(prefs.units)}`, num: true, get: (m) => m.bytes, hide: 'md', w: '80px' },
-    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '96px' },
+    { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1, w: '120px' },
     { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1, w: '80px' },
-    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: laptopOnly.current ? '136px' : '112px' },
+    { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md', w: laptopOnly.current ? '144px' : '128px' },
     { key: 'parent', label: 'Started from', get: (m) => parentOf(m)?.label ?? '~', hide: 'lg', w: '120px' },
     { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created), w: '112px' },
   ]);
@@ -312,7 +313,6 @@
                   <td><a class="name" href={href(`/models/${m.id}`)} title={m.about ?? m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
                   <td><Ident value={m.arch} class="faint" /></td>
                   <td class="r spec hide-lg" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
-                  <td class="r spec hide-md">{m.imgsz}</td>
                   <td class="r spec">{compact(m.params)}</td>
                   <td class="r spec hide-lg">{num(m.flops_g, 1)}</td>
                   <td class="r spec hide-md">{sizeIn(m.bytes, prefs.units)}</td>

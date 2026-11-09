@@ -483,7 +483,9 @@
       </div>
       <aside class="rail" aria-label="Per-class results and config">
         <div class="part" data-part="classes"><PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact /></div>
-        <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} compact cli={runCli} /></div>
+        <!-- One column in the rail (laptops up) and on phones; on a tablet the section is the panel's full width, so it
+             takes the two columns it has on a queued run's page (a panel at 768–1279 px uses its width). -->
+        <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} compact={!stacked.current || phone.current} cli={runCli} /></div>
       </aside>
     </div>
     {/if}

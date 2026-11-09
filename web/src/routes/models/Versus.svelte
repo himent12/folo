@@ -39,10 +39,11 @@
   /** folo-n at 640 px as this server measured it: end to end (any precision; the line says which) and training. */
   const hereLat = $derived(measuredLatency(table, 'folo-n'));
   const hereTrain = $derived(measuredTraining(table, 'folo-n'));
-  /** Those figures as rows of the table: the value in the folo-n column, its spread and count on the qualifier line. */
+  /** Those figures as rows of the table: the value in the folo-n column, its spread and count on the qualifier line (the
+   *  precision only where it is not the table's f32). */
   const hereRows = $derived([
     ...(hereLat
-      ? [{ id: 'lat', metric: 'GPU end to end, batch 1', value: latencyMs(hereLat.latency_ms), note: `${latencyRange(hereLat.latency_ms_low, hereLat.latency_ms_high)} · ${num(hereLat.samples)} predictions · ${hereLat.precision}` }]
+      ? [{ id: 'lat', metric: 'GPU end to end, batch 1', value: latencyMs(hereLat.latency_ms), note: `${latencyRange(hereLat.latency_ms_low, hereLat.latency_ms_high)} · ${num(hereLat.samples)} predictions${hereLat.precision === 'f32' ? '' : ` · ${hereLat.precision}`}` }]
       : []),
     ...(hereTrain
       ? [
@@ -50,7 +51,7 @@
             id: 'train',
             metric: `Training, batch ${hereTrain.batch}`,
             value: `${num(hereTrain.imgs_per_s)} img/s`,
-            note: `${hereTrain.mosaic ? `${num(hereTrain.mosaic.low)}–${num(hereTrain.mosaic.high)} img/s · ` : ''}${num(hereTrain.samples)} samples · whole trainer, f32`,
+            note: `${hereTrain.mosaic ? `${num(hereTrain.mosaic.low)}–${num(hereTrain.mosaic.high)} img/s · ` : ''}${num(hereTrain.samples)} samples · whole trainer`,
           },
         ]
       : []),

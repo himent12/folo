@@ -935,12 +935,19 @@
       min-width: 56px;
       height: 44px;
     }
+    .labels-scroll {
+      overflow: visible;
+      background: none;
+    }
     .touch-hint {
       font-size: var(--type-sm-size);
       line-height: var(--type-sm-line);
       color: var(--text-tertiary);
     }
+    /* Phones: the rail under the image is short, so it scrolls as one list (labels, classes, facts) rather than
+       pinning Classes under a two-row label list. */
     aside {
+      display: block;
       flex: 1;
       min-height: 0;
       border-left: 0;

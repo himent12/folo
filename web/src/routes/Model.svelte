@@ -876,6 +876,7 @@
   .k-body > div {
     display: grid;
     grid-template-columns: 112px minmax(0, 1fr);
+    align-content: start; /* a short definition beside a long one keeps its term on its first line */
     gap: var(--space-3);
     max-width: calc(112px + var(--space-3) + var(--measure)); /* the term column, then the definition at the measure */
   }
