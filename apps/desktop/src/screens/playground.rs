@@ -220,17 +220,17 @@ impl FoloApp {
         let name = img.name.clone();
         // The toolbar sheds by priority, not by flex order: the whole "dataset / file" with the
         // image's size if both fit; else the whole name without the size; else the file alone.
-        // Whatever is shed moves into the file's tip. Widths are shaped in the toolbar's own font
-        // (fallbacks included, so CJK names measure true); `room` is the stage less every other
+        // Whatever is shed moves into the file's tip. Widths are shaped in the crumb's own font,
+        // Geist Mono as file names are everywhere (fallbacks included, so CJK names measure true); `room` is the stage less every other
         // item (icon, latency, count, zoom, rules and gaps: ~450 px measured, plus 20 of margin).
         let size_text = format!("{} × {}", img.width, img.height);
         let (prefix_all, file) = match name.rsplit_once(" / ") {
             Some((p, f)) => (Some(p.to_string()), f.to_string()),
             None => (None, name.to_string()),
         };
-        let file_w = f32::from(crate::charts::text_width(window, &file, ty::SM.size));
+        let file_w = f32::from(crate::charts::mono_width(window, &file, ty::SM.size));
         // The crumb's "/" sits between 6 px gaps, a little wider than the shaped " / ".
-        let full_w = f32::from(crate::charts::text_width(window, &name, ty::SM.size)) + 6.;
+        let full_w = f32::from(crate::charts::mono_width(window, &name, ty::SM.size)) + 6.;
         let room = {
             let rail = if window.viewport_size().width < px(1100.) { 280. } else { 320. };
             self.content_width(window) - rail - 16. - 470.
@@ -347,16 +347,22 @@ impl FoloApp {
                                 .gap(px(6.))
                                 .min_w_0()
                                 .flex_shrink()
-                                .font_family(crate::theme::MONO)
+                                // `text` sets the UI sans: each part names Geist Mono itself.
                                 .when_some(prefix, |d, p| {
                                     d.child(
                                         text(ty::SM, t.text_tertiary)
+                                            .font_family(crate::theme::MONO)
                                             .min_w_0()
                                             .flex_shrink()
                                             .ellipsis()
                                             .child(p),
                                     )
-                                    .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
+                                    .child(
+                                        text(ty::SM, t.text_tertiary)
+                                            .font_family(crate::theme::MONO)
+                                            .flex_none()
+                                            .child("/"),
+                                    )
                                 })
                                 .child(
                                     // A long file name ends in "…" at its known budget, as GPUI needs.
@@ -374,6 +380,7 @@ impl FoloApp {
                                     .flex_none()
                                     .child(
                                         text(ty::SM, t.text_primary)
+                                            .font_family(crate::theme::MONO)
                                             .w(px(file_w.min(file_budget).ceil()))
                                             .ellipsis()
                                             .child(file.clone()),
@@ -777,7 +784,7 @@ impl FoloApp {
                                 // On the active row's fill, tertiary falls under AA: secondary there.
                                 text(ty::SM, if hot { t.text_secondary } else { t.text_tertiary })
                                     .tnum()
-                                    .w(px(52.))
+                                    .w(px(60.))
                                     .flex_none()
                                     .child(format!("{:.0}×{:.0}", b.x2 - b.x1, b.y2 - b.y1)),
                             )
@@ -954,7 +961,7 @@ impl FoloApp {
                                         .items_center()
                                         .gap(px(8.))
                                         .child(th(&t, "Class").w(px(84.)).flex_none())
-                                        .child(th(&t, "Size (px)").w(px(52.)).flex_none())
+                                        .child(th(&t, "Size (px)").w(px(60.)).flex_none())
                                         .child(th(&t, "Confidence").flex_1().text_right()),
                                 )
                             })

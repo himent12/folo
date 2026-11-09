@@ -1276,7 +1276,7 @@ impl FoloApp {
                                         // The server confirmed it can; an older one can't say, so the need is stated.
                                         None if self.store.capabilities.is_some() => {
                                             text(ty::SM, t.text_tertiary).whitespace_normal().child(
-                                                "Trains in f16 on this server's tensor cores: about 40% less GPU memory (at 640 px, not faster)",
+                                                "f16 on this server's tensor cores: about 40% less GPU memory at 640 px. Not faster.",
                                             )
                                         }
                                         None => rich(

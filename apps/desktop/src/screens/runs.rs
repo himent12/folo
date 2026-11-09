@@ -1404,7 +1404,7 @@ impl FoloApp {
                                             })
                                             // Windows paths read with `/`, as everywhere else in
                                             // the app; other text is left as it is.
-                                            .child(slash_paths(&l.message)),
+                                            .child(log_text(&l.message)),
                                     )
                             })),
                     )
@@ -1577,6 +1577,29 @@ fn pr_floor(low: f32) -> f32 {
 
 /// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive
 /// (a letter, `:`, a separator) change, so a Unix path or escaped text with `\` keeps it.
+/// A log message as shown: Windows paths with `/`, and every space before a number (or a unit
+/// after one) no-break, so a wrapped line breaks between fields, never inside "mAP50 0.745".
+fn log_text(s: &str) -> String {
+    let s = slash_paths(s);
+    let c: Vec<char> = s.chars().collect();
+    // A unit: one or two letters, then the end or a non-letter ("14.3 s", "6 ms").
+    let unit_at = |i: usize| {
+        let n = c[i..].iter().take_while(|x| x.is_alphabetic()).count();
+        (1..=2).contains(&n)
+    };
+    c.iter()
+        .enumerate()
+        .map(|(i, &ch)| {
+            let joins = ch == ' '
+                && i > 0
+                && i + 1 < c.len()
+                && ((c[i + 1].is_ascii_digit() && c[i - 1] != '·')
+                    || (c[i - 1].is_ascii_digit() && unit_at(i + 1)));
+            if joins { '\u{a0}' } else { ch }
+        })
+        .collect()
+}
+
 fn slash_paths(s: &str) -> String {
     let drive = |w: &str| {
         let b = w.trim_start_matches(['"', '\'', '(']).as_bytes();
@@ -1593,6 +1616,13 @@ const LOG_LINE: f32 = 21.;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn log_lines_break_between_fields() {
+        let t = super::log_text("epoch 32/100 · mAP50-95 0.594 · mAP50 0.745 · 14.3 s");
+        assert_eq!(t, "epoch\u{a0}32/100 · mAP50-95\u{a0}0.594 · mAP50\u{a0}0.745 · 14.3\u{a0}s");
+        assert_eq!(super::log_text("loaded 3 classes"), "loaded\u{a0}3 classes");
+    }
+
     #[test]
     fn windows_paths_only() {
         use super::slash_paths;

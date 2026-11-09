@@ -978,7 +978,7 @@ impl FoloApp {
         } else if self.pr_pin.is_some() {
             "Pinned: click the class again to unpin."
         } else {
-            "Hover a legend or table row to isolate it; click to pin."
+            "Hover a class to isolate it · click to pin"
         };
 
         panel(&t)

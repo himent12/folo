@@ -189,7 +189,8 @@ mod tests {
                 let lines: Vec<&str> = text.lines().collect();
                 for (i, l) in lines.iter().enumerate() {
                     let noted = l.contains("small:") || i > 0 && lines[i - 1].contains("small:");
-                    if (l.contains("ty::XS") || l.contains("ty::MICRO")) && !noted {
+                    let sized = l.replace("ty::XS.line", "").replace("ty::MICRO.line", "");
+                    if (sized.contains("ty::XS") || sized.contains("ty::MICRO")) && !noted {
                         bad.push(format!("{}:{}", p.file_name().unwrap().to_string_lossy(), i + 1));
                     }
                 }
