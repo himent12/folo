@@ -3,8 +3,8 @@
 //! Three paths:
 //! - **1×1, stride 1, no padding**: a plain batched GEMM per (image, group): `Y[n,g] = W[g] · X[n,g]`, with
 //!   `vec4` loads when `H·W` is a multiple of 4.
-//! - **Depthwise** (`groups == C_in`, `C_out` a multiple of `C_in`): a direct kernel, one output per thread
-//!   (the GEMM view would have a single row per group).
+//! - **Depthwise** (`groups == C_in`, `C_out` a multiple of `C_in`): a direct kernel, four adjacent outputs of a
+//!   row per thread (the GEMM view would have a single row per group).
 //! - **Everything else**: implicit GEMM. `M = C_out/groups`, `N = OH·OW`, `K = C_in/groups·KH·KW`; the GEMM
 //!   generator's `CONV` mode gathers the `B` tile straight from the image (each thread keeps one output pixel
 //!   for the whole K loop, so the index math is a few constant divisions per element), so no im2col buffer is
@@ -25,6 +25,8 @@
 //! on, the f16 input and weight gradients run on [`coop`]'s `CONV_MODE` 2 / 3 kernels (1×1 input gradients as a
 //! GEMM over the transposed weight), and the weight gradient can be written as f32 directly
 //! ([`conv2d_backward_weight_as`]).
+
+use std::fmt::Write as _;
 
 use super::{check_buf, prod};
 use crate::DType;
@@ -147,8 +149,76 @@ impl Conv2dDesc {
     }
 }
 
-fn gen_depthwise(_: &Spec) -> String {
-    format!("{UNARY_FN}{}", include_str!("../shaders/depthwise.wgsl"))
+/// Outputs per invocation of the depthwise kernel (adjacent along a row).
+const DW_VX: u32 = 4;
+
+fn gen_depthwise(spec: &Spec) -> String {
+    let g = |name: &str| spec.get_u32(name, 1);
+    let (kh, kw, sw, dh, dw) = (g("KH"), g("KW"), g("SW"), g("DH"), g("DW"));
+    // Input columns the DW_VX outputs of a row read: (DW_VX - 1) · SW + (KW - 1) · DW + 1.
+    let span = (DW_VX - 1) * sw + (kw - 1) * dw + 1;
+    let mut taps = String::from(
+        "fn taps(acc: ptr<function, array<f32, DW_VX>>, base: u32, wbase: u32, iy0: i32, ix0: i32, h: i32,          w: i32) {
+",
+    );
+    for t in 0..kh * kw {
+        let _ = writeln!(taps, "    let w{t} = f32(Wt[wbase + {t}u]);");
+    }
+    for ky in 0..kh {
+        let _ = writeln!(
+            taps,
+            "    {{
+        let iy = iy0 + {};",
+            ky * dh
+        );
+        taps.push_str(
+            "        if (iy >= 0 && iy < h) {
+            let row = base + u32(iy) * u32(w);
+",
+        );
+        for j in 0..span {
+            let _ = writeln!(taps, "            let x{j} = ld(row, ix0 + {j}, w);");
+        }
+        for v in 0..DW_VX {
+            for kx in 0..kw {
+                let _ = writeln!(
+                    taps,
+                    "            (*acc)[{v}] = fma(x{}, w{}, (*acc)[{v}]);",
+                    v * sw + kx * dw,
+                    ky * kw + kx
+                );
+            }
+        }
+        taps.push_str(
+            "        }
+    }
+",
+        );
+    }
+    taps.push_str(
+        "}
+",
+    );
+    // Constant indices only, so `acc` stays in registers.
+    taps.push_str(
+        "fn store(acc: ptr<function, array<f32, DW_VX>>, out: u32, ox0: u32, ow: u32, b: f32) {
+",
+    );
+    for v in 0..DW_VX {
+        let _ = writeln!(
+            taps,
+            "    if (ox0 + {v}u < ow) {{ Y[out + {v}u] = T(unary1(ACT, (*acc)[{v}] + b, pf(6u))); }}"
+        );
+    }
+    taps.push_str(
+        "}
+",
+    );
+    format!(
+        "const DW_VX: u32 = {DW_VX}u;
+{UNARY_FN}{taps}{}",
+        include_str!("../shaders/depthwise.wgsl")
+    )
 }
 
 static DEPTHWISE: KernelDef = KernelDef {
@@ -196,8 +266,17 @@ pub fn conv2d_with_config(
             .u32("ACT", d.act.code())
             .f16(d.dtype == DType::F16);
         let k = ctx.kernel(&DEPTHWISE, spec)?;
-        let total = d.n * d.c_out * oh * ow;
-        let p = Params::new().uz(total)?.uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?.uz(d.c_out)?.f(d.act.alpha());
+        let qw = ow.div_ceil(DW_VX as usize);
+        let total = d.n * d.c_out * oh * qw;
+        let p = Params::new()
+            .uz(total)?
+            .uz(d.h)?
+            .uz(d.w)?
+            .uz(oh)?
+            .uz(ow)?
+            .uz(d.c_out)?
+            .f(d.act.alpha())
+            .uz(qw)?;
         ctx.dispatch(&k, &[x, weight, bias.unwrap_or(ctx.dummy()), y], &p, ctx.grid_1d(total as u64, 256)?)?;
         return Ok((oh, ow));
     }

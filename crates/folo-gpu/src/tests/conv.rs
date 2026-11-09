@@ -135,6 +135,9 @@ fn conv_f16() {
         (desc(1, 5, 9, 9, 7, 1, Window2d::square(3, 2, 1)), false),
         (desc(2, 16, 8, 8, 24, 1, Window2d::square(1, 1, 0)), true),
         (desc(2, 8, 9, 9, 8, 8, Window2d::square(3, 1, 1)), true),
+        // Depthwise: stride 2, a width that is no multiple of the 4 outputs per invocation, channel multiplier 2.
+        (desc(2, 8, 13, 11, 8, 8, Window2d::square(3, 2, 1)), false),
+        (desc(1, 6, 7, 18, 12, 6, Window2d::square(5, 1, 2)), true),
     ] {
         let mut d = d;
         d.dtype = DType::F16;
