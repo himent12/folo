@@ -9,9 +9,13 @@ scraping. It exposes the same operations as the CLI and `docs/API.md`, with the 
 { "mcpServers": { "folo": { "command": "folo", "args": ["mcp", "--data-dir", "D:/folo-data"] } } }
 ```
 
-`folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878] [--device auto]`.
+`folo mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server http://127.0.0.1:7878] [--device auto]
+[--tensor-cores]`.
 `--device` (env `FOLO_DEVICE`: `auto`, `cpu`, `gpu:<n>`) is where the embedded real store runs `predict`,
-`predict_batch` and `val`; each training run has its own `device`. Setup snippets for
+`predict_batch` and `val`; each training run has its own `device`. `--tensor-cores` (env `FOLO_GPU_TENSOR_CORES=1`)
+asks for the GPU's tensor cores in embedded mode, as `folo serve --tensor-cores` does: `train { amp: true }` needs
+them (`folo_info`'s `capabilities.amp` says whether they are on). They have to be asked for before the GPU is
+first used, so it is a start-up flag, not a runtime switch; with `--server`, the `folo serve` decides. Setup snippets for
 Claude Code and Codex are in the README ([Use FOLO from an agent](../README.md#use-folo-from-an-agent)). The implementation is the
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp.rs`.
 
@@ -28,7 +32,7 @@ it:
 | `train` with `resume_run_id` | resumes from `weights/last.folo` (same id) | `not_implemented` | `POST /api/runs` with `resume_run_id` |
 | `folo://system/throughput`, `folo://estimate/...` | the throughput measured by this data dir's runs and predictions, else docs/BENCHMARKS.md's reference | the mock's table (measured and reference rows) | `GET /api/system/throughput`, `POST /api/runs/estimate` |
 | `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` | persisted runs (`runs/<id>/`), also those of earlier sessions | mock runs (API-created ones share one training slot) | `/api/runs/...` |
-| `list_models` | `best` / `last` weights of finished runs, plus `.folo` files under `models/` | mock models | `/api/models` |
+| `list_models` | `best` / `last` weights of finished runs, `.folo` files under `models/`, and published weights pulled into the `folo weights` cache (id = the name, e.g. `folo-n-coco`) | mock models | `/api/models` |
 | `val` | folo-vision's evaluator on the requested split, `conf` / `iou` as given | derived from the model's metrics | `POST /api/val` |
 | `predict`, `predict_batch` | the engine (on `--device`), predictors cached | deterministic mock boxes | `POST /api/predict` |
 | `export` | `folo-f16` or `onnx` (f32, batch 1, the model's imgsz, raw head outputs; `decode`, `dynamic` and `half` switch those) to `exports/` | a `mock://` path (nothing is written) | `POST /api/models/{id}/export` |
@@ -133,8 +137,8 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 | `list_dataset_images` | `{ dataset_id, split?: "train"\|"val"\|"test", class?: integer, include_boxes?: boolean (default false) }` + paging | page of `{ image_id, file, split, width, height, boxes? }` (`boxes` only with `include_boxes: true`) |
 | `register_dataset` | `{ name, path, format?: "auto"\|"yolo"\|"coco" }` | `Dataset`; a folder registered before (same canonical path) returns that dataset (the summary says "already registered") |
 | `create_synthetic_dataset` | `{ name, images?: 1000 (max 100000), classes?: string[], imgsz?: 640, seed?: 0 }` | `Dataset` |
-| `list_models` | paging | page of `{ id, name, arch, imgsz, num_classes, classes, metrics, head, trained_with, precision?, fused? }` (`head`, `trained_with`, `precision` and `fused` as on the API's Model; `precision` / `fused` are left out when unknown) |
-| `train` | `TrainConfig` (docs/API.md; `dataset_id` required), or `{ resume_run_id }` (other fields optional and must match the run). `amp: true` (mixed precision) needs GPU tensor cores: `FOLO_GPU_TENSOR_CORES=1` for `folo mcp`, `--tensor-cores` for the `folo serve` it proxies; the run fails with `not_supported` otherwise. `head: "o2o"` trains the NMS-free one-to-one head too (docs/MODEL.md §6.6); `val`, `predict` and `export` then use it (no NMS) because the model says so, no extra argument | `{ run_id, status }` |
+| `list_models` | paging | page of `{ id, name, arch, imgsz, num_classes, classes, metrics, head, trained_with, precision?, fused?, source?, about? }` (`head`, `trained_with`, `precision`, `fused`, `source` and `about` as on the API's Model; `precision` / `fused` are left out when unknown; `source: "published"` marks weights from `folo weights pull`, whose id is the published name) |
+| `train` | `TrainConfig` (docs/API.md; `dataset_id` required), or `{ resume_run_id }` (other fields optional and must match the run). `weights` takes any model id, including a published name (`"folo-n-coco"`, once `folo weights pull folo-n-coco` has run on that machine); the run trains the weights' architecture, and an explicit `arch` naming another one is `invalid_config`. `amp: true` (mixed precision) needs GPU tensor cores: `folo mcp --tensor-cores` (or `FOLO_GPU_TENSOR_CORES=1` in the MCP client's `env`), `--tensor-cores` for the `folo serve` it proxies. Without them `train` answers `not_supported` at once (nothing is started), with a hint for the client: `amp: false`, or how to restart this server with tensor cores. `head: "o2o"` trains the NMS-free one-to-one head too (docs/MODEL.md §6.6); `val`, `predict` and `export` then use it (no NMS) because the model says so, no extra argument | `{ run_id, status }` |
 | `run_status` | `{ run_id, log_lines?: 20 (max 200) }` | `Run`, plus `last_step`, `last_epoch` and `log` (the last `log_lines` log lines; older ones are dropped first if the result would exceed 32 KB) |
 | `list_runs` | `{ status?: string }` + paging | page of `Run` summaries |
 | `stop_run` | `{ run_id }` | `Run` |

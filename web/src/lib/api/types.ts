@@ -41,6 +41,16 @@ export interface SystemInfo {
   features?: string[];
   /** What `device: auto` runs can use (f16, tensor cores, amp); absent from older servers. */
   capabilities?: Capabilities;
+  /** FOLO's GPU buffer pool, once the server has used the GPU; absent otherwise and from older servers. */
+  gpu_pool?: GpuPool;
+}
+
+/** GPU memory held by FOLO's buffer pool (released after a run and when inference is idle). */
+export interface GpuPool {
+  device: string;
+  live_bytes: number;
+  cached_bytes: number;
+  peak_live_bytes: number;
 }
 
 /** `/api/system`'s `capabilities` (docs/API.md). A `reason` is null exactly when the feature is usable. */
@@ -233,6 +243,10 @@ export interface Model {
    * only through `$lib/trainCli` `modelPath`.
    */
   path?: string;
+  /** `run`, a `file` under the models folder, or `published` weights from `folo weights pull` (id = the name). */
+  source?: 'run' | 'file' | 'published';
+  /** What published weights are; absent for other models. */
+  about?: string;
 }
 
 /** `Model.trained_with`. */
@@ -389,6 +403,12 @@ export interface ResolvedTrain {
    * from the request. Read only through `effectiveCloseMosaic` (routes/run/resolved).
    */
   close_mosaic?: number;
+}
+
+/** GET /api/runs/{id}/cli (servers list `run_cli`): the run's `folo train` command on the server's machine. */
+export interface CliCommand {
+  cli: string;
+  argv: string[];
 }
 
 /** POST /api/runs/{id}/queue: exactly one of `action` and `position` (1-based). Servers list `queue_control`. */
@@ -643,6 +663,8 @@ export interface RunEstimate {
   val_source: ThroughputSource;
   est_peak_vram_bytes: number | null;
   vram_source: ThroughputSource | null;
+  /** Close-mosaic epochs after the cap at half the run (0 from older servers). */
+  close_mosaic?: number;
   /** The `folo train` command for these settings, built by the server (requested of the API); missing = none. */
   cli?: string | null;
 }

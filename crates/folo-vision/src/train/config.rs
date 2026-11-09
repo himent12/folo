@@ -33,6 +33,9 @@ pub struct TrainConfig {
     /// The dataset: a path or a registered id (informational: the caller opens it and passes [`super::TrainData`];
     /// `folo train --resume` reopens it from here).
     pub dataset: String,
+    /// How `dataset` is read (informational, like `dataset`: `folo train --resume` reopens it so, and a folder that
+    /// holds both YOLO and COCO labels reads the same). Missing in configs from before it: `auto`.
+    pub data_format: folo_data::Format,
     /// Architecture, `folo-n` … `folo-x`.
     pub arch: String,
     /// Epochs, `1..=10000`.
@@ -92,6 +95,7 @@ impl Default for TrainConfig {
         TrainConfig {
             name: String::new(),
             dataset: String::new(),
+            data_format: folo_data::Format::Auto,
             arch: "folo-n".into(),
             epochs: 100,
             batch: 16,
@@ -316,6 +320,7 @@ impl ResolvedOptim {
             warmup_epochs: cfg.warmup_epochs,
             warmup_momentum: cfg.warmup_momentum,
             warmup_bias_lr: self.warmup_bias_lr,
+            close_mosaic: Some(cfg.augment.close_mosaic_epochs(cfg.epochs)),
         }
     }
 
@@ -323,7 +328,12 @@ impl ResolvedOptim {
     /// or, in files written before it, the same numbers rebuilt from `optimizer`, `accumulate`, `steps_per_epoch`,
     /// `warmup_iters` and `train`. `None` when the file has neither.
     pub fn from_run_config(v: &serde_json::Value) -> Option<folo_api::ResolvedTrain> {
-        if let Some(r) = v.get("resolved").and_then(|r| serde_json::from_value(r.clone()).ok()) {
+        // `close_mosaic_epochs` is the capped value the trainer used (files from before `resolved.close_mosaic`).
+        let close_mosaic = v.get("close_mosaic_epochs").and_then(|x| x.as_u64()).map(|n| n as u32);
+        if let Some(mut r) =
+            v.get("resolved").and_then(|r| serde_json::from_value::<folo_api::ResolvedTrain>(r.clone()).ok())
+        {
+            r.close_mosaic = r.close_mosaic.or(close_mosaic);
             return Some(r);
         }
         let o = v.get("optimizer")?;
@@ -346,6 +356,7 @@ impl ResolvedOptim {
         // The numbers the run trained with, where the file has them.
         r.weight_decay = f(o, "weight_decay").unwrap_or(r.weight_decay);
         r.warmup_iters = n("warmup_iters").unwrap_or(r.warmup_iters);
+        r.close_mosaic = close_mosaic.or(r.close_mosaic);
         Some(r)
     }
 }

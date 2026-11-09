@@ -54,6 +54,16 @@ buffer being returned, batch-16 training thrashed the driver allocator (171 GB a
 batch-1 inference after it 3.5x slower). `PoolStats::peak_live_bytes` is the largest `live_bytes` seen, PyTorch's
 `max_memory_allocated` counterpart (in size-class bytes); `ctx.reset_peak_memory()` restarts it.
 
+The high-water mark is what lets a training loop keep its working set, and it is also why a long-lived process must
+give the pool back between jobs: after a run the free lists hold up to the run's peak (about 7 GB for a folo-n
+fine-tune at 640 px, batch 16, report 3's X1), which other processes on the GPU then page around (a CLI run beside
+an idle `folo serve` took 2.5–4× longer per epoch). `ctx.release_memory()` drops every cached buffer, lowers the
+cap back to the live bytes (`trim_pool()`), submits the open batch and waits for the GPU, so wgpu frees the memory
+now rather than at its next submission; it returns the bytes released. `folo serve` and `folo mcp` call it when a
+training run ends (before the run is reported finished) and after 30 s without inference, and drop their cached
+predictors after 5 minutes idle (docs/API.md, `gpu_pool`). Buffers in use are untouched, and a dropped buffer that
+encoded work still reads is freed only once that work is done.
+
 Reusing a buffer while earlier, unsubmitted work still reads it is safe. All work runs on one queue in encoding
 order, and wgpu puts barriers between dispatches that touch the same buffer. The one exception is
 `Queue::write_buffer`, which runs before the next submission's commands. That is why every upload first submits

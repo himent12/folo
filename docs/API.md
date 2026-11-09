@@ -41,7 +41,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
 | 500 | `internal` | a bug or an IO failure |
-| 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (a training run with `"amp": true` without GPU tensor cores fails with it in `Run.error`) |
+| 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (`POST /api/runs` with `"amp": true` where `capabilities.amp.available` is false: refused before anything is queued, with the same reason and a hint) |
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
@@ -49,12 +49,15 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
   "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches", "queue_control", "weights_onnx"],
-  "capabilities"?: Capabilities }`
+  "capabilities"?: Capabilities, "gpu_pool"?: { "device", "live_bytes", "cached_bytes", "peak_live_bytes" } }`
   (`util` in `0..1`; CPU utilisation is measured since the previous call. `data_dir` is the real server's
   `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
   the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
   below; older servers accept and ignore them), `queue_control` (`POST /api/runs/{id}/queue`, `Run.queue_position`
-  and `queue` events), `weights_onnx` (`/weights?format=onnx`; older servers answer `400 invalid_query`). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
+  and `queue` events), `weights_onnx` (`/weights?format=onnx`; older servers answer `400 invalid_query`), `run_cli` (`GET /api/runs/{id}/cli`
+  and `RunEstimate.cli`), `web_wasm` (the Studio this server serves includes the in-browser runtime, folo-wasm,
+  so its Playground can run models with WebGPU or the wasm CPU; left out for a build without it, or without a
+  web app). `folo mcp --server` refuses the switches without it.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
   `memory_bytes` is `0` and `util` `null`.
@@ -79,7 +82,16 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   for that device; `amp.reason` is the `not_supported` message such a run would fail with, `null` when available.
   Every field has a default, so clients parse objects from older and newer servers; servers older than this field
   leave out `capabilities`. Studio and Desktop can disable the Mixed precision switch when `amp.available` is
-  false and show `amp.reason`.
+  false and show `amp.reason`. `POST /api/runs` (and MCP `train`) refuse such a run with `501 not_supported`
+  (`amp.reason` as the message) before anything is queued.
+- `gpu_pool` (real mode, once the server has used the GPU): FOLO's GPU buffer pool. `live_bytes` are buffers in
+  use (loaded predictors, a run's tensors), `cached_bytes` free buffers kept for reuse, `peak_live_bytes` the most
+  in use since the last run or benchmark probe started. A finished run gives its cached buffers back to the driver
+  before its final `status` event, and inference (`/api/predict`, `/api/val`, `/eval`, probes) does after 30 s
+  without a request while no run is queued or training; the cached predictors (loaded models) are dropped after
+  5 minutes of that. So an idle server holds no pooled GPU memory (`cached_bytes` 0, `live_bytes` 0 once the
+  predictors are gone), and other processes on the GPU get it back. Absent in mock mode, on a CPU-only server and
+  from servers older than the field.
 
 ## Datasets
 - `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
@@ -172,6 +184,16 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   wrong). Clients read a `precision` value they do not know as unknown too, so a later dtype is additive. Metadata
   comes from the file's header alone (the first `8 + N` bytes, docs/FORMAT.md), never the tensor data, read once
   per file version; a file whose header is invalid is skipped with a warning in the server log.
+  **Published weights:** `folo serve` and `folo mcp` also list the published weights downloaded with `folo weights
+  pull` (the `folo weights` cache: `$FOLO_WEIGHTS_DIR`, else `<FOLO_HOME or ~/.folo>/weights`, whatever the
+  `--data-dir`; docs/CLI.md, Weights). Their id and name are the published name (`folo-n-coco`), `source` is
+  `published` and `about` is the line `folo weights list` prints, so `TrainConfig.weights: "folo-n-coco"`, predict,
+  val, eval and export take the name everywhere a model id goes (Studio's "Start from", MCP `train { weights }`).
+  A file pulled while the server runs lists at once. A published name that is not downloaded is `404
+  model_not_found` with `folo weights pull <name>` as the hint.
+  `source` (additive, left out by older servers): `run` (a run's `best` / `last`), `file` (`<data dir>/models`) or
+  `published`; `about` only for published weights. `path` (additive): the weights file on the server's machine, `/`
+  separators, what `folo train --weights`, `val --model` and `export --model` take there (left out by the mock).
 - `GET /api/models/{id}` → `Model`
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none, see Split fallback below), for the PR curves and confusion matrix of the Models view:
@@ -241,8 +263,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   the fused EMA weights to `<data dir>/exports/`: `folo-f16` as f16 `.folo` (as `folo export` does, docs/FORMAT.md)
   to `<model name>-f16.folo`; `onnx` as an ONNX graph (opset 17) to `<model name>.onnx`, with the defaults of
   `folo export --format onnx` (docs/CLI.md, ONNX export): f32, a fixed batch of 1, the model's training imgsz
-  (square), and the raw head outputs `box_raw` / `cls_raw`, unless a switch says otherwise (`half` writes
-  `<model name>-f16.onnx`). Names get `-2`, `-3`, ... when taken (exports never
+  (square), and the raw head outputs `box_raw` / `cls_raw`, unless a switch says otherwise (`decode` writes
+  `<model name>-decoded.onnx`, `half` `<model name>-f16.onnx`, both `-decoded-f16.onnx`, as `folo export` names
+  them). Names get `-2`, `-3`, ... when taken (exports never
   overwrite). `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
   part (no FOLO v1 model hits this).
 - `GET /api/models/{id}/weights` (optional `?format=f16|onnx`) → the model's `.folo` file (docs/FORMAT.md), for loading
@@ -370,13 +393,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 { "name": "", "dataset_id": "ds_8f2c", "arch": "folo-n", "epochs": 100, "batch": 16, "imgsz": 640,
   "device": "auto",            // auto | cpu | gpu:<n>
   "optimizer": "auto",         // auto | sgd | adamw
-  "lr0": 0.01, "weights": null, // or a model id to fine-tune from
+  "lr0": 0.01, "weights": null, // or a model id to fine-tune from (a published name such as "folo-n-coco" too);
+                               // the run then trains the weights' architecture, whatever `arch` says
   "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5, "scale": 0.5, "translate": 0.1,
                "close_mosaic": 10 },
   "seed": 0,
   "amp": false,                // mixed-precision training (docs/MODEL.md §8.8): f16 on GPU tensor cores, f32 master
-                               // weights; needs `folo serve --tensor-cores` on a GPU with them, else the run fails
-                               // with `not_supported`
+                               // weights; needs `folo serve --tensor-cores` on a GPU with them, else POST /api/runs
+                               // answers `501 not_supported` (nothing is queued)
   "head": "o2m" }              // o2m | o2o: o2o adds the NMS-free one-to-one head (docs/MODEL.md §6.6), trained with
                                // dual assignment; the run's models then predict and validate without NMS (predict
                                // and val pick the head from the model, no request field needed). Additive: missing
@@ -411,7 +435,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "weight_decay": 0.0005,       // of the decay group, after the batch scaling weight_decay · batch · accumulate / nbs
   "batch": 16, "accumulate": 4, "nbs": 64,  // gradients of `accumulate` batches per optimizer step (≈ nbs images)
   "optimizer_steps_per_epoch": 13,
-  "warmup_iters": 100, "warmup_epochs": 3.0, "warmup_momentum": 0.8, "warmup_bias_lr": 0.0 }
+  "warmup_iters": 100, "warmup_epochs": 3.0, "warmup_momentum": 0.8, "warmup_bias_lr": 0.0,
+  "close_mosaic": 7 }           // close-mosaic epochs after the cap at half the run (docs/MODEL.md §8.4): mosaic is
+                               // off for the last `close_mosaic` epochs; left out for runs older than the field
+                               // whose config.json lacks `close_mosaic_epochs`
 // Run.resolved is set when the trainer is built (by the time the `running` status is sent: fetch the run then),
 // recomputed on resume, and read from the run folder's config.json for runs recorded before the field; it stays
 // null for runs whose trainer never started (stopped while queued, failed to build). Mock runs fill it once they
@@ -501,6 +528,22 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   - `est_peak_vram_bytes` (GPU only, `null` on the CPU): the measured peak of a row with the run's device, arch,
     imgsz and amp at the nearest batch, scaled to the run's batch by the reference model; else the reference model (16
     bytes per parameter plus the activations per image, docs/BENCHMARKS.md). `vram_source` says which.
+  - `close_mosaic`: the close-mosaic epochs after the cap (the `close_mosaic` phase's epochs; `Run.resolved` has the
+    same number once the run is built).
+  - `cli`: the `folo train` command that trains this config on the server's machine (see `GET /api/runs/{id}/cli`).
+- `GET /api/runs/{id}/cli` → `{ "cli": "folo train --data D:/data/r6 --weights folo-n-coco --head o2m --epochs 15
+  --amp", "argv": ["folo", "train", ...] }`: the CLI command of a run's config, built from the same `TrainConfig`
+  mapping the server trains with (a test parses it with the real `folo` arguments and compares the configs).
+  `--data` is the dataset's folder on the server's machine, with `--format yolo|coco` when it was registered with
+  one (so a folder holding both reads the same); `--weights` is the published name for published weights,
+  else the `.folo` file the run started from (so no `--model`: the CLI takes the architecture from the weights,
+  and `--head` is always given, since the CLI's default is the weights file's head); settings equal to the
+  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). `cli` is quoted for PowerShell,
+  as Studio shows commands: arguments with spaces or shell characters are single-quoted, a quote inside doubled
+  (`'O''Brien'`, also for the typographic quotes PowerShell reads as quotes); POSIX shells read the same words
+  unless an argument holds a quote. `argv` is the same command unquoted, for spawning without a shell (the
+  folo-cli tests split `cli` by PowerShell's rules, compare it with `argv` and parse it with the real arguments). `run_not_found` for an unknown run;
+  the mock server answers too, with made-up weights paths.
 - `POST /api/system/benchmark` body `BenchmarkRequest` (all optional: `{ "arch": "folo-n", "imgsz": 320, "batch":
   16, "amp": false, "budget_s": 4 }`) → `BenchmarkReport`. An explicit quick probe on the server's inference device
   (`--device`): the trainer on a synthetic shapes split for 60% of `budget_s` (the first 30% of that is warm-up and

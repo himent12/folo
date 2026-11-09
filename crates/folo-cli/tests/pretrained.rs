@@ -116,7 +116,7 @@ fn weights_names_export_and_coco_val() {
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(
         (lines[0]["format"].as_str(), lines[0]["fused"].as_bool(), lines[0]["dtype"].as_str()),
-        (Some("weights"), Some(false), Some("F32"))
+        (Some("weights"), Some(false), Some("f32"))
     );
     assert!(std::fs::metadata(&exported).unwrap().len() < std::fs::metadata(&best).unwrap().len());
 

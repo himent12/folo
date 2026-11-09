@@ -38,6 +38,9 @@ pub struct Options {
     pub confine: bool,
     /// Embedded mode: the real store's inference and validation device (`auto`, `cpu`, `gpu:<n>`).
     pub device: String,
+    /// Embedded mode: the `folo weights` cache whose downloaded published weights list as models
+    /// ([`RealStore::published_weights`]; `folo mcp` passes `folo_api::weights::cache_dir()`).
+    pub published_weights: Option<PathBuf>,
 }
 
 /// Where tool calls go.
@@ -66,7 +69,10 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
     }
     Ok(match backend {
         Backend::Real => {
-            let store = RealStore::open(opts.data_dir.clone()).device(opts.device.clone());
+            let mut store = RealStore::open(opts.data_dir.clone()).device(opts.device.clone());
+            if let Some(dir) = &opts.published_weights {
+                store = store.published_weights(dir);
+            }
             FoloMcp::new(Arc::new(store), None, opts)
         }
         Backend::Mock => FoloMcp::new(Arc::new(MockStore::new()), None, opts),

@@ -1,5 +1,5 @@
-//! Models of the real store: the weights of finished runs and the `.folo` files under `<data dir>/models`, their
-//! metadata (read once per file version), validation results (`/eval`, computed with folo-vision's [`validate`]
+//! Models of the real store: the weights of finished runs, the `.folo` files under `<data dir>/models` and the
+//! published weights downloaded with `folo weights pull` ([`folo_api::weights`]), their metadata (read once per file version), validation results (`/eval`, computed with folo-vision's [`validate`]
 //! and cached in memory and under `cache/eval/`) and exports.
 
 use std::collections::HashMap;
@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use axum::http::StatusCode;
 use folo_api::{
     Arch, ExportFormat, ExportResult, ExportSpec, Head, Model, ModelEval, ModelMetrics, ModelPrecision,
-    PrCurve, SplitFallback, TrainedWith, ValReport, ValTiming,
+    ModelSource, PrCurve, SplitFallback, TrainedWith, ValReport, ValTiming,
 };
 use folo_core::Device;
 use folo_data::{Dataset as _, Split};
@@ -183,7 +183,16 @@ pub struct ModelRef {
     pub dataset: Option<DatasetRef>,
 }
 
-/// Builds the API record of a weights file. `metrics` are used as given (`None` = unknown).
+impl ModelRef {
+    /// A model and its file; `Model.path` is the file (`/` separators).
+    pub fn new(mut model: Model, path: PathBuf, dataset: Option<DatasetRef>) -> ModelRef {
+        model.path = Some(folo_api::json::path(&path));
+        ModelRef { model, path, dataset }
+    }
+}
+
+/// Builds the API record of a weights file. `metrics` are used as given (`None` = unknown). The source is `run`
+/// with a `run_id`, else `file` (published weights set theirs after).
 pub fn model_of(
     id: String,
     name: String,
@@ -192,6 +201,10 @@ pub fn model_of(
     metrics: Option<ModelMetrics>,
 ) -> Model {
     Model {
+        source: Some(if run_id.is_some() { ModelSource::Run } else { ModelSource::File }),
+        about: None,
+        // Set by `ModelRef::new`.
+        path: None,
         id,
         name,
         arch: meta.arch,
@@ -229,6 +242,8 @@ struct CachedEval {
 /// Metadata, eval and f16 weights caches.
 pub struct Models {
     data_dir: PathBuf,
+    /// The `folo weights` cache whose downloaded files list as published models (`None`: none are listed).
+    published_dir: Option<PathBuf>,
     meta: Mutex<HashMap<PathBuf, (FileKey, Arc<FileMeta>)>>,
     evals: Mutex<HashMap<String, (String, ModelEval)>>,
     /// Held while a derived weights file (f16, ONNX) is written, so concurrent first requests export once.
@@ -238,7 +253,54 @@ pub struct Models {
 impl Models {
     /// Caches rooted at `data_dir`.
     pub fn new(data_dir: PathBuf) -> Models {
-        Models { data_dir, meta: Mutex::default(), evals: Mutex::default(), derived: Mutex::default() }
+        Models {
+            data_dir,
+            published_dir: None,
+            meta: Mutex::default(),
+            evals: Mutex::default(),
+            derived: Mutex::default(),
+        }
+    }
+
+    /// Lists the published weights downloaded into `dir` (the `folo weights` cache, [`folo_api::weights::cache_dir`])
+    /// as models.
+    pub fn set_published(&mut self, dir: Option<PathBuf>) {
+        self.published_dir = dir;
+    }
+
+    /// The `folo weights` cache this store lists published models from.
+    pub fn published_dir(&self) -> Option<&Path> {
+        self.published_dir.as_deref()
+    }
+
+    /// The published weights downloaded into the cache, as models: id and name are the published name (what
+    /// `folo weights pull` and `train --weights` take), `source: published`, `about` from the registry.
+    pub fn published(&self) -> Vec<ModelRef> {
+        let Some(dir) = &self.published_dir else { return Vec::new() };
+        let mut out = Vec::new();
+        for p in folo_api::weights::PUBLISHED {
+            let path = dir.join(p.asset);
+            if !path.is_file() {
+                continue;
+            }
+            match self.meta(&path) {
+                Ok(meta) => {
+                    let mut model =
+                        model_of(p.name.to_string(), p.name.to_string(), &meta, None, meta.metrics);
+                    model.source = Some(ModelSource::Published);
+                    model.about = Some(p.about.to_string());
+                    out.push(ModelRef::new(model, path, None));
+                }
+                Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
+            }
+        }
+        out
+    }
+
+    /// The published model `name`, when it is downloaded.
+    pub fn published_model(&self, name: &str) -> Option<ModelRef> {
+        folo_api::weights::find(name)?;
+        self.published().into_iter().find(|m| m.model.id == name)
     }
 
     fn weights_cache(&self) -> PathBuf {
@@ -353,7 +415,7 @@ impl Models {
                     let name =
                         path.file_stem().map_or_else(|| "model".into(), |s| s.to_string_lossy().into_owned());
                     let model = model_of(file_model_id(&path), name, &meta, None, meta.metrics);
-                    out.push(ModelRef { model, path, dataset: None });
+                    out.push(ModelRef::new(model, path, None));
                 }
                 Err(e) => tracing::warn!("skipping {}: {e}", path.display()),
             }
@@ -423,8 +485,9 @@ impl Models {
     }
 
     /// Exports `m` to `<data dir>/exports/`: `folo-f16` as `<name>-f16.folo`, `onnx` as `<name>.onnx` (the
-    /// defaults of `folo export --format onnx`: f32, batch 1, the model's imgsz, raw head outputs). `-2`, `-3`,
-    /// ... when the name is taken; never overwriting.
+    /// defaults of `folo export --format onnx`: f32, batch 1, the model's imgsz, raw head outputs; `-decoded` with
+    /// `decode`, `-f16` with `half`, as the CLI names them). `-2`, `-3`, ... when the name is taken; never
+    /// overwriting.
     pub fn export(&self, m: &ModelRef, spec: ExportSpec) -> Result<ExportResult> {
         let format = spec.format;
         let file = engine::read_model_file(&m.path)?;
@@ -434,8 +497,12 @@ impl Models {
         let base = m.model.name.replace(['/', '\\', ':'], "-");
         let (suffix, ext) = match format {
             ExportFormat::FoloF16 => ("-f16", "folo"),
-            ExportFormat::Onnx if spec.onnx.half => ("-f16", "onnx"),
-            ExportFormat::Onnx => ("", "onnx"),
+            ExportFormat::Onnx => match (spec.onnx.decode, spec.onnx.half) {
+                (true, true) => ("-decoded-f16", "onnx"),
+                (false, true) => ("-f16", "onnx"),
+                (true, false) => ("-decoded", "onnx"),
+                (false, false) => ("", "onnx"),
+            },
         };
         // create_new claims the name, so two exports never share a file; the export then replaces it atomically.
         let mut n = 1;

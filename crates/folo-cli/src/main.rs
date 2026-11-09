@@ -123,11 +123,7 @@ fn not_implemented(cmd: &str, waits_on: &str) -> CliError {
 
 /// `$FOLO_HOME`, else `~/.folo`, else `./.folo`.
 pub(crate) fn default_data_dir() -> PathBuf {
-    if let Some(h) = std::env::var_os("FOLO_HOME") {
-        return PathBuf::from(h);
-    }
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
-    home.map_or_else(|| PathBuf::from(".folo"), |h| PathBuf::from(h).join(".folo"))
+    folo_api::weights::home_dir()
 }
 
 fn init_tracing() {
@@ -172,7 +168,12 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         let store: Arc<dyn Store> = if args.mock {
             Arc::new(MockStore::new())
         } else {
-            Arc::new(RealStore::open(data_dir.clone()).device(args.device.clone()).precision(precision))
+            Arc::new(
+                RealStore::open(data_dir.clone())
+                    .device(args.device.clone())
+                    .precision(precision)
+                    .published_weights(folo_api::weights::cache_dir()),
+            )
         };
         let web = resolve_web(args.web_dir.clone());
         let (web_dir, web_ready) = match &web {
@@ -225,6 +226,10 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
 /// `--json`); logs go to stderr.
 fn mcp(args: McpArgs) -> Result<(), CliError> {
     init_tracing();
+    if args.tensor_cores && args.server.is_none() {
+        // As `folo serve --tensor-cores`: before anything creates the GPU context.
+        folo_gpu::context::request_tensor_cores();
+    }
     let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
     let backend = match (&args.server, args.mock) {
         (Some(url), _) => folo_mcp::Backend::Proxy(url.clone()),
@@ -236,6 +241,7 @@ fn mcp(args: McpArgs) -> Result<(), CliError> {
         read_only: args.read_only,
         confine: args.confine,
         device: args.device.clone(),
+        published_weights: Some(folo_api::weights::cache_dir()),
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -359,8 +365,20 @@ fn doctor(args: DoctorArgs, out: Out) -> Result<(), CliError> {
         }
         Err(e) => out.human(format!("gpu       no usable adapter: {e}")),
     }
+    let tc = &capabilities.tensor_cores;
     let amp = match &capabilities.amp.reason {
         None => format!("mixed-precision training (amp) available on {}", capabilities.device),
+        // The adapter has them, only this process did not ask: `folo train --amp` does.
+        Some(_)
+            if tc.available
+                && tc.reason.as_deref() == Some(folo_gpu::context::TENSOR_CORES_NOT_REQUESTED) =>
+        {
+            format!(
+                "available on {}: `folo train --amp` asks for tensor cores itself; `folo serve` and `folo mcp` need \
+                 `--tensor-cores` for amp runs",
+                capabilities.device
+            )
+        }
         Some(why) => format!("not available: {why}"),
     };
     out.human(format!("amp       {amp}"));

@@ -11,49 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::cli::{WeightsCommand, WeightsPullArgs};
 use crate::output::{CliError, ExitCode, Out};
 
-/// The release asset listing `<sha256>  <file>` for every weights file of a release.
-pub const SUMS: &str = "SHA256SUMS";
-
-/// A published weights file.
-pub struct Published {
-    /// What users type: `folo weights pull <name>`, `--weights <name>`.
-    pub name: &'static str,
-    /// Release tag.
-    pub release: &'static str,
-    /// Release asset (also the cached file name).
-    pub asset: &'static str,
-    /// One line for `folo weights list`.
-    pub about: &'static str,
-}
-
-/// Every published weights file.
-pub const PUBLISHED: &[Published] = &[
-    Published {
-        name: "folo-n-coco",
-        release: "weights-v1",
-        asset: "folo-n-coco.folo",
-        about: "folo-n trained from scratch on COCO train2017 at 640 px (EMA weights, f32, unfused: fine-tune or \
-                predict); examples/coco",
-    },
-    Published {
-        name: "folo-n-coco-f16",
-        release: "weights-v1",
-        asset: "folo-n-coco-f16.folo",
-        about: "folo-n-coco fused and cast to f16 (folo export): inference only",
-    },
-];
-
-/// The cache folder: `$FOLO_WEIGHTS_DIR`, else `<FOLO_HOME or ~/.folo>/weights`.
-pub fn cache_dir() -> PathBuf {
-    match std::env::var_os("FOLO_WEIGHTS_DIR") {
-        Some(d) if !d.is_empty() => PathBuf::from(d),
-        _ => crate::default_data_dir().join("weights"),
-    }
-}
-
-fn find(name: &str) -> Option<&'static Published> {
-    PUBLISHED.iter().find(|p| p.name == name)
-}
+pub use folo_api::weights::{PUBLISHED, Published, SUMS, cache_dir, find};
 
 /// Whether `name` is a published weights name.
 pub fn is_published(name: &str) -> bool {
@@ -83,7 +41,7 @@ pub fn resolve(arg: &Path) -> Result<PathBuf, CliError> {
         )
         .hint(format!(
             "pass a .folo file, e.g. runs/<name>/weights/best.folo from `folo train`, or a published name ({})",
-            PUBLISHED.iter().map(|p| p.name).collect::<Vec<_>>().join(", ")
+            folo_api::weights::names()
         )));
     };
     let path = cache_dir().join(p.asset);
@@ -260,13 +218,5 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn names_are_unique_and_cached_by_asset() {
-        for (i, a) in PUBLISHED.iter().enumerate() {
-            assert!(a.asset.ends_with(".folo"));
-            assert!(PUBLISHED[i + 1..].iter().all(|b| b.name != a.name && b.asset != a.asset));
-        }
     }
 }

@@ -8,6 +8,7 @@
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
+pub mod cli;
 mod engine;
 pub mod error;
 mod index;
@@ -87,6 +88,8 @@ pub struct AppState {
     store: Arc<dyn Store>,
     probe: Arc<system::SystemProbe>,
     shutdown: Arc<watch::Sender<bool>>,
+    /// The served Studio includes the in-browser runtime (`/api/system`'s `web_wasm` feature).
+    web_wasm: bool,
 }
 
 /// A configured server: the router plus the shutdown switch that ends open SSE streams.
@@ -184,10 +187,17 @@ impl Server {
     ) -> Server {
         let (tx, _) = watch::channel(false);
         let shutdown = Arc::new(tx);
+        // What the fallback below serves: the folder when it is a built app, else the embedded files.
+        let web_wasm = match (&opts.web, embedded) {
+            (WebSource::Dir(dir), _) if web_dir_ready(dir) => web::dir_has_folo_wasm(dir),
+            (_, Some(files)) => web::has_folo_wasm(files),
+            _ => false,
+        };
         let state = AppState {
             store: store.clone(),
             probe: Arc::new(system::SystemProbe::default()),
             shutdown: shutdown.clone(),
+            web_wasm,
         };
         let mut router = Router::new().nest("/api", routes::api()).with_state(state);
         router = match (opts.web, embedded) {

@@ -367,6 +367,9 @@ impl MockBackend {
             trained_with: None,
             precision: Some(folo_api::ModelPrecision::F32),
             fused: Some(false),
+            source: Some(folo_api::ModelSource::Run),
+            about: None,
+            path: None,
         };
         let mut models = vec![
             model(
@@ -872,6 +875,7 @@ impl Backend for MockBackend {
             data_dir: None,
             features: vec!["queue_control".into(), "weights_onnx".into()],
             capabilities: Some(capabilities),
+            gpu_pool: None,
         })
     }
 
@@ -1495,6 +1499,8 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
         warmup_epochs: 3.0,
         warmup_momentum: 0.8,
         warmup_bias_lr: if auto { 0.0 } else { 0.1 },
+        // The trainer's cap: at most half the run.
+        close_mosaic: Some(config.augment.close_mosaic.min(config.epochs / 2)),
     }
 }
 

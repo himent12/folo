@@ -171,7 +171,8 @@ fn amp_check(device: Device, activate: bool) -> Result<()> {
 pub fn amp_not_supported(why: &str) -> Error {
     Error::NotSupported(format!(
         "mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): {why}; train \
-         without amp (f32), or on such a GPU (`folo train --amp` asks for them; start `folo serve --tensor-cores`)"
+         without amp (f32), or on such a GPU (`folo train --amp` asks for them; start `folo serve` or `folo mcp` with \
+         `--tensor-cores`)"
     ))
 }
 
@@ -231,6 +232,8 @@ pub struct ResumeOverrides {
     pub workers: Option<usize>,
     /// Device.
     pub device: Option<String>,
+    /// How the dataset is read ([`TrainConfig::data_format`]), kept in the resumed run's checkpoints.
+    pub data_format: Option<folo_data::Format>,
 }
 
 /// How a run ended.
@@ -337,17 +340,26 @@ impl Trainer {
             if let Some(ema) = &mut t.ema {
                 ema.reset(&t.model)?;
             }
-            t.pending_logs.push((
-                LogLevel::Info,
-                format!(
-                    "transferred {} of {} tensors from {} ({} skipped, {} missing)",
-                    report.loaded.len(),
-                    t.model.named_tensors().len(),
-                    folo_api::json::path(&w),
-                    report.skipped.len(),
-                    report.missing.len()
-                ),
-            ));
+            // What did not transfer keeps its fresh initialisation; usually the class outputs of another class
+            // list (`skipped`: in the file with another shape), which is expected rather than a failure.
+            let total = t.model.named_tensors().len();
+            let kept = total.saturating_sub(report.loaded.len());
+            let mut line = format!(
+                "transferred {} of {total} tensors from {}",
+                report.loaded.len(),
+                folo_api::json::path(&w)
+            );
+            if kept > 0 {
+                line.push_str(&format!("; the other {kept} keep their fresh initialisation"));
+                if !report.skipped.is_empty() {
+                    line.push_str(&format!(
+                        " ({} of the file's tensors were not used: another shape, such as the class outputs of \
+                         another class list, or not part of this model)",
+                        report.skipped.len()
+                    ));
+                }
+            }
+            t.pending_logs.push((LogLevel::Info, line));
         }
         Ok(t)
     }
@@ -376,6 +388,9 @@ impl Trainer {
         }
         if let Some(d) = overrides.device {
             cfg.device = d;
+        }
+        if let Some(f) = overrides.data_format {
+            cfg.data_format = f;
         }
         cfg.augment.close_mosaic_fixed = Some(resumed_close_mosaic(&c.train, &cfg));
         if let Some(n) = c.train.get(TRAIN_IMAGES_KEY).and_then(|v| v.as_u64())
