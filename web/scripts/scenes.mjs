@@ -190,6 +190,26 @@ export const scenes = [
     },
   },
   {
+    // DOGFOOD-3 S1: a fine-tune's CLI command: no --model (it conflicts with --weights) and the weights file by path;
+    // this server does not report it, so a placeholder and one line under the command say what to put there.
+    name: 'run-new-cli-finetune',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      // Phones pick the size from a segmented control; wider screens from the table's radios.
+      if (await page.locator('#arch-pick').isVisible()) await page.locator('#arch-pick button', { hasText: 'N' }).click();
+      else await page.locator('input[name="arch"][value="folo-n"]').check({ force: true });
+      for (let t = 0; t < 8000 && !(await page.locator('select#weights option[value="m_fast_n"]').count()); t += 250) await page.clock.runFor(250);
+      await page.selectOption('select#weights', 'm_fast_n');
+      await page.locator('.amp .switch').click();
+      await page.locator('.summary details.cli > summary').click();
+      await page.locator('.summary details.cli').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // The end-to-end head (TrainConfig.head "o2o"): Advanced opened and the switch on, with its one line; the Summary's
     // Head row and the CLI command (opened) carry it.
     name: 'run-new-e2e',
@@ -388,6 +408,44 @@ export const scenes = [
       if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
       else await page.getByRole('tab', { name: 'Config' }).click();
       await page.locator('#config').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // DOGFOOD-3 S2: a 15-epoch fine-tune asked for close mosaic 10, which the trainer caps at 7: the bar hatches the last
+    // 7 epochs, the charts mark epoch 8, and Config says "last 7 epochs (requested 10)". Phones: the Config section.
+    name: 'run-short-mosaic',
+    path: '/runs/run_f15c',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
+      else await page.getByRole('tab', { name: 'Config' }).click();
+      // The rail's Config folds Augmentation, where Close mosaic is.
+      const fold = page.locator('#config details > summary');
+      if (await fold.isVisible()) await fold.click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // DOGFOOD-3 S4: the header's meta names what differs from the defaults: Mixed precision and the end-to-end head.
+    name: 'run-header-amp-head',
+    path: '/runs/run_f15c',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'text=Completed in');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // DOGFOOD-3 S2, S4: Compare's settings: the capped close mosaic with the request, the head that differs.
+    name: 'run-compare-short-mosaic',
+    path: '/runs/compare?ids=run_f15c,run_c19a',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'td.cfg');
       await page.mouse.move(0, 0);
     },
   },
@@ -969,6 +1027,21 @@ export const scenes = [
       await page.reload({ waitUntil: 'networkidle' });
       await page.clock.runFor(2000);
       await until(page, '.runon-note');
+    },
+  },
+  {
+    // DOGFOOD-3 S5: a Studio build without the in-browser runtime: WebGPU and CPU are off, the line under them says
+    // why, and the hovered CPU choice shows the reason as its tip.
+    name: 'playground-no-wasm',
+    path: '/playground?model=m_hard_s',
+    search: 'scenario=no-wasm',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      await until(page, '.runon-note');
+      if (vp === 'desktop' || vp === 'laptop') await page.locator('.runon .tip').last().hover();
+      else await page.mouse.move(0, 0);
+      await page.clock.runFor(800);
     },
   },
   {

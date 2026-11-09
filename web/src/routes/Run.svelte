@@ -34,6 +34,7 @@
   import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import ConfigPanel from './run/ConfigPanel.svelte';
+  import { HEAD_LABEL } from './run/resolved';
   import Logs from './run/Logs.svelte';
   import Outcome from './run/Outcome.svelte';
   import PerClass from './run/PerClass.svelte';
@@ -337,6 +338,9 @@
         <span class="cfg num">{run.config.imgsz} px</span>
         <span class="cfg num">batch {run.config.batch}</span>
         <span class="cfg lineage">{#if !lineage || lineage.kind === 'scratch'}From scratch{:else}Fine-tuned from <Lineage origin={lineage} />{/if}</span>
+        <!-- Only where they differ from the defaults (f32, the NMS head); Config always says both. -->
+        {#if run.config.amp}<span class="cfg">Mixed precision</span>{/if}
+        {#if run.config.head === 'o2o'}<span class="cfg">{HEAD_LABEL.o2o}</span>{/if}
         <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
         <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
       </Meta>
@@ -379,7 +383,7 @@
       <!-- Waiting (768 px up): the config as asked for, beside the queue and what the run will have. Nothing here is an
            empty frame, and no panel stretches to its neighbour's height. -->
       <div class="waiting">
-        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} /></div>
+        <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} /></div>
         <div class="w-side">
           {#if place !== null && queue.length}
             <Panel title="Queue" meta="{waitingCount} waiting" pad="none" id="queue">

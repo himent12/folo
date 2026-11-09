@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Prediction } from '$lib/api/types';
-import { BrowserEngine, type Backend, type Detector, type WasmModule } from './browser.svelte';
+import type { SystemInfo } from '$lib/api/types';
+import { BrowserEngine, probeWasm, resetWasmProbe, wasmFromSystem, type Backend, type Detector, type WasmModule } from './browser.svelte';
 
 /** A fake folo-wasm: counts loads, records frees, and lets a test hold a detect call open. */
 function fakeWasm() {
@@ -154,5 +155,41 @@ describe('BrowserEngine', () => {
     expect(w.loads).toEqual(['m1:1:cpu', 'm1:1:cpu']);
     await new Promise((res) => setTimeout(res, 0));
     expect(w.freed).toEqual(['m1:1:cpu', 'm1:1:cpu']);
+  });
+});
+
+describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {
+  const answer = (types: Record<string, string | null>) => {
+    const calls: string[] = [];
+    const fetcher = (async (url: string) => {
+      calls.push(url);
+      const type = Object.entries(types).find(([k]) => url.endsWith(k))?.[1];
+      return type === null || type === undefined ? new Response(null, { status: 404 }) : new Response(null, { status: 200, headers: { 'content-type': type } });
+    }) as typeof fetch;
+    return { fetcher, calls };
+  };
+
+  it('is, when both files answer with their own types; asked once', async () => {
+    resetWasmProbe();
+    const { fetcher, calls } = answer({ '.js': 'text/javascript; charset=utf-8', '.wasm': 'application/wasm' });
+    expect(await probeWasm(fetcher)).toBe(true);
+    expect(await probeWasm(fetcher)).toBe(true);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("is not, when the server answers with the app's index.html (the SPA fallback) or a 404", async () => {
+    resetWasmProbe();
+    expect(await probeWasm(answer({ '.js': 'text/html; charset=utf-8', '.wasm': 'text/html; charset=utf-8' }).fetcher)).toBe(false);
+    resetWasmProbe();
+    expect(await probeWasm(answer({ '.js': 'text/javascript', '.wasm': null }).fetcher)).toBe(false);
+    resetWasmProbe();
+    expect(await probeWasm((async () => Promise.reject(new TypeError('offline'))) as typeof fetch)).toBe(false);
+    resetWasmProbe();
+  });
+
+  it("takes the server's word where it gives one", () => {
+    expect(wasmFromSystem({ features: ['web_wasm'] } as SystemInfo)).toBe(true);
+    expect(wasmFromSystem({ features: ['queue_control'] } as SystemInfo)).toBeNull();
+    expect(wasmFromSystem(undefined)).toBeNull();
   });
 });

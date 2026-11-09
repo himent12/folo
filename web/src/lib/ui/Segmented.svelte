@@ -1,5 +1,6 @@
 <script lang="ts" generics="T extends string">
   /** A segmented control (radio group). Arrow keys move the selection, as in native radio groups. */
+  import { tooltip } from './tooltip';
   import type { IconType } from './types';
 
   interface Option {
@@ -10,6 +11,8 @@
     meta?: string;
     /** Shown but not selectable (e.g. "coming soon"). */
     disabled?: boolean;
+    /** Why a disabled option is off: its tooltip (pair it with a visible line the group is described by). */
+    tip?: string;
   }
 
   let {
@@ -80,24 +83,33 @@
 >
   {#each options as o (o.value)}
     {@const on = o.value === value}
-    <button
-      type="button"
-      role="radio"
-      aria-checked={on}
-      tabindex={on ? 0 : -1}
-      class:on
-      class:icon-only={iconOnly && o.icon}
-      disabled={o.disabled}
-      onclick={() => select(o.value)}
-      aria-label={iconOnly ? o.label : undefined}
-      title={iconOnly ? o.label : undefined}
-    >
-      {#if o.icon}<o.icon size={14} strokeWidth={1.75} aria-hidden="true" />{/if}
-      {#if !iconOnly || !o.icon}<span>{o.label}</span>{/if}
-      {#if o.meta}<span class="meta">{o.meta}</span>{/if}
-    </button>
+    {#if o.disabled && o.tip}
+      <!-- A disabled button takes no pointer events in some browsers: the wrapper takes the hover, as ui/Gate does. -->
+      <span class="tip" use:tooltip={o.tip}>{@render option(o, on)}</span>
+    {:else}
+      {@render option(o, on)}
+    {/if}
   {/each}
 </div>
+
+{#snippet option(o: Option, on: boolean)}
+  <button
+    type="button"
+    role="radio"
+    aria-checked={on}
+    tabindex={on ? 0 : -1}
+    class:on
+    class:icon-only={iconOnly && o.icon}
+    disabled={o.disabled}
+    onclick={() => select(o.value)}
+    aria-label={iconOnly ? o.label : undefined}
+    title={iconOnly ? o.label : undefined}
+  >
+    {#if o.icon}<o.icon size={14} strokeWidth={1.75} aria-hidden="true" />{/if}
+    {#if !iconOnly || !o.icon}<span>{o.label}</span>{/if}
+    {#if o.meta}<span class="meta">{o.meta}</span>{/if}
+  </button>
+{/snippet}
 
 <style>
   .seg {
@@ -150,6 +162,13 @@
   }
   button:hover:not(:disabled) {
     color: var(--text-primary);
+  }
+  .tip {
+    display: inline-flex;
+    cursor: not-allowed;
+  }
+  .tip > button {
+    pointer-events: none;
   }
   button:disabled {
     color: var(--text-disabled);

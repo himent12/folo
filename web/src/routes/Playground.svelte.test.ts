@@ -153,3 +153,34 @@ describe('Playground: detections', () => {
     expect(rows()[1]!.classList.contains('on')).toBe(true);
   });
 });
+
+describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
+  async function open(scenario: Scenario) {
+    hub.api = new MockApi(scenario, 0);
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_shapes_s');
+    c = mount(Playground, { target });
+    return until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+  }
+  const option = (g: Element, name: string) => [...g.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === name)!;
+
+  it('offers WebGPU and CPU off, with the reason, where the build has none', async () => {
+    const g = await open('no-wasm');
+    await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
+    expect(option(g, 'Server').disabled).toBe(false);
+    expect(option(g, 'WebGPU').disabled).toBe(true);
+    expect(target.querySelector('#runon-note')?.textContent).toBe('No in-browser runtime');
+    expect(target.querySelector('.runon')?.getAttribute('aria-describedby')).toBe('runon-note');
+  });
+
+  it('offers the CPU where the build has it', async () => {
+    const g = await open('normal');
+    await until(() => target.querySelector('select, .model-pick'), 'the pickers');
+    await new Promise((r) => setTimeout(r, 50));
+    flushSync();
+    expect(option(g, 'CPU').disabled).toBe(false);
+    expect(target.querySelector('#runon-note')?.textContent ?? '').not.toContain('runtime');
+  });
+});
