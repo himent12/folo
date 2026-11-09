@@ -568,3 +568,46 @@ fn an_overflow_streak_continues_across_a_resume() {
     assert!(e.to_string().contains(&format!("{max} consecutive optimizer steps")), "{e}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Dual-head training (`head: o2o`, docs/MODEL.md §6.6) under mixed precision: both branches run under autocast and
+/// their losses in f32. The losses stay finite and track the same run in f32 (the reported total is a weighted sum
+/// whose weights move to the one-to-one loss, so it need not fall every epoch), the loss scaler keeps working, and
+/// the checkpoint holds an `o2o` model that predicts with its one-to-one head.
+#[test]
+fn amp_trains_the_dual_head() {
+    use folo_vision::model::{FoloModel, HeadMode};
+    let (_, _g) = gpu_tc!();
+    let dir = std::env::temp_dir().join(format!("folo-amp-o2o-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let cfg = TrainConfig {
+        epochs: 6,
+        nbs: 4,
+        warmup_epochs: 0.0,
+        augment: AugmentConfig::none(),
+        head: HeadMode::O2o,
+        ..amp_config()
+    };
+    let f32_losses: Vec<f32> =
+        Trainer::new(TrainConfig { amp: false, ..cfg.clone() }, data(), TrainOptions::default())
+            .unwrap()
+            .run()
+            .unwrap()
+            .epochs
+            .iter()
+            .map(|e| e.train_loss.total)
+            .collect();
+    let opts = TrainOptions { run_dir: Some(dir.clone()), ..TrainOptions::default() };
+    let mut t = Trainer::new(cfg, data(), opts).unwrap();
+    assert!(t.model().has_o2o());
+    let s = t.run().unwrap();
+    let losses: Vec<f32> = s.epochs.iter().map(|e| e.train_loss.total).collect();
+    eprintln!("o2o losses: amp {losses:?}, f32 {f32_losses:?}");
+    assert!(losses.iter().all(|l| l.is_finite()), "{losses:?}");
+    let tail = |l: &[f32]| l[l.len() - 2..].iter().sum::<f32>() / 2.0;
+    assert!(tail(&losses) <= 1.15 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
+    let scaler = t.loss_scaler().unwrap();
+    assert!(scaler.skipped_steps() < 20 && scaler.scale() >= 1.0, "{scaler:?}");
+    let m = FoloModel::open(dir.join("weights/last.folo")).unwrap();
+    assert!(m.has_o2o() && m.head_mode() == HeadMode::O2o);
+    let _ = std::fs::remove_dir_all(&dir);
+}

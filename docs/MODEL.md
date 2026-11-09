@@ -493,7 +493,8 @@ both branches and are trained with dual assignment; `head = "o2m"` files (every 
   it drops become background, and its soft target (§7.3 step 5, over that single positive) is about its IoU.
   Weights after `e` completed epochs: `w_m = max(1 − e / max(E − 1, 1), 0) · (0.8 − 0.1) + 0.1`, `w_o = 1 − w_m`
   (starting at `w_m = 0.8`, ending at 0.1). The reported loss items (§7.4) are the same weighted sums of the two
-  branches' items.
+  branches' items. With `amp` (§8.8) both branches run under autocast and both losses in f32 on f32 copies of their
+  outputs, like the o2m loss (`tests/gpu_amp.rs` trains a dual head under amp against the f32 run).
 - Inference uses o2o only, with no NMS, and computes only that branch: take the `k = min(max_det, A)` anchors with
   the highest max-class score (ties: smaller anchor), then the top `k` (anchor, class) pairs among them (ties: the
   anchor's rank, then the class), then apply `conf` (validation: `conf = 0.001`, §9.3). Single-label prediction
