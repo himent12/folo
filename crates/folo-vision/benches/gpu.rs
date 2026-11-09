@@ -262,7 +262,11 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     let profile: std::cell::RefCell<[Profile; 4]> = Default::default();
     let mut step = |split: bool, host: bool| {
         let mut phase = 0;
+        // Host time spent encoding each phase (until its synchronisation starts).
+        let mut enc = [Duration::ZERO; 4];
+        let mut mark = Instant::now();
         let mut sync = |on: bool| {
+            enc[phase] = mark.elapsed();
             if on {
                 synchronize(dev).expect("sync");
             }
@@ -273,6 +277,7 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
                 e.1 += r.ms;
             }
             phase += 1;
+            mark = Instant::now();
         };
         let t0 = Instant::now();
         let out = {
@@ -314,7 +319,7 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
             drop(grads);
         }
         sync(true);
-        (t0.elapsed(), [t1 - t0, t2 - t1, t3 - t2, t3.elapsed()])
+        (t0.elapsed(), [t1 - t0, t2 - t1, t3 - t2, t3.elapsed()], enc)
     };
     let w0 = ctx.work_stats();
     for _ in 0..3 {
@@ -327,11 +332,13 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     row(&format!("train step b16 ({label}, SGD)"), &s, 16);
     let mut split = |host: bool| {
         step(true, host);
-        let runs: Vec<[Duration; 4]> = (0..10).map(|_| step(true, host).1).collect();
-        let m = |i: usize| stats(runs.iter().map(|r| r[i]).collect()).median;
-        (m(0), m(1), m(2), m(3))
+        let runs: Vec<([Duration; 4], [Duration; 4])> =
+            (0..10).map(|_| step(true, host)).map(|r| (r.1, r.2)).collect();
+        let m = |i: usize| stats(runs.iter().map(|r| r.0[i]).collect()).median;
+        let e = |i: usize| stats(runs.iter().map(|r| r.1[i]).collect()).median;
+        ((m(0), m(1), m(2), m(3)), [e(0), e(1), e(2), e(3)])
     };
-    let (f, l, b, o) = split(false);
+    let ((f, l, b, o), enc) = split(false);
     println!(
         "    split (medians, each phase synchronised): forward {f:.1} ms, loss {l:.1} ms, backward {b:.1} ms, \
          {} {o:.1} ms; {} dispatches and {} submissions per step; peak {:.0} MiB",
@@ -340,8 +347,12 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
         (w1.submissions - w0.submissions) / 3,
         mib(peak)
     );
+    println!(
+        "    host encode time of each phase (medians): forward {:.1} ms, loss {:.1} ms, backward {:.1} ms, step {:.1} ms",
+        enc[0], enc[1], enc[2], enc[3]
+    );
     if !amp && !ctx.profiling() {
-        let (_, l, b, _) = split(true);
+        let ((_, l, b, _), _) = split(true);
         println!("    host assigner instead (detection_loss_host): loss {l:.1} ms, backward {b:.1} ms");
     }
     if ctx.profiling() {

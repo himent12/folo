@@ -106,16 +106,14 @@ impl Profiler {
                 "folo-gpu profile resolve",
                 wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
             ),
-            read: buffer("folo-gpu profile read", wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST),
+            read: buffer(
+                "folo-gpu profile read",
+                wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            ),
             period: queue.get_timestamp_period() as f64,
             labels: Vec::new(),
             totals: HashMap::new(),
         }
-    }
-
-    /// Whether the open batch has room for another timed command.
-    pub fn full(&self) -> bool {
-        self.labels.len() as u32 >= MAX_TIMED
     }
 
     /// Registers the next timed command and returns its first query index (the second is the next one).
@@ -146,7 +144,8 @@ impl Profiler {
         slice.map_async(wgpu::MapMode::Read, |_| {});
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
         if let Ok(view) = slice.get_mapped_range() {
-            let ticks: Vec<u64> = view.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+            let ticks: Vec<u64> =
+                view.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
             for (label, t) in self.labels.drain(..).zip(ticks.chunks_exact(2)) {
                 let ms = t[1].saturating_sub(t[0]) as f64 * self.period * 1e-6;
                 let e = self.totals.entry(label).or_default();

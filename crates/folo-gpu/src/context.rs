@@ -47,8 +47,15 @@ pub fn request_tensor_cores() -> bool {
     }
 }
 
-/// Dispatches encoded before the open batch is submitted on its own (the default of
-/// [`GpuContext::set_flush_interval`]).
+/// Environment variable that overrides the flush interval ([`GpuContext::set_flush_interval`]) of contexts created
+/// afterwards, for experiments (`FOLO_GPU_FLUSH_EVERY=1024`).
+pub const ENV_FLUSH_EVERY: &str = "FOLO_GPU_FLUSH_EVERY";
+/// Dispatches encoded before the open batch is submitted on its own, by default. Small batches keep the GPU busy:
+/// it starts on a batch while the host encodes the next, instead of waiting for one long submission. 64 made the
+/// folo-n training step about 20% faster than 1024 (docs/GPU.md, Command batching); 16 is slower again, because
+/// every submission costs host time.
+pub const DEFAULT_FLUSH_INTERVAL: u32 = 64;
+/// Largest flush interval.
 pub const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
 /// Size of one uniform arena chunk (256 parameter slots).
 const UNIFORM_CHUNK: u64 = 64 * 1024;
@@ -585,10 +592,10 @@ impl GpuContext {
                 tensor_cores_status: Mutex::new(status),
                 experimental: coop,
                 flush_every: AtomicU32::new(
-                    std::env::var("FOLO_GPU_FLUSH_EVERY")
+                    std::env::var(ENV_FLUSH_EVERY)
                         .ok()
                         .and_then(|v| v.parse().ok())
-                        .unwrap_or(MAX_DISPATCHES_PER_BATCH)
+                        .unwrap_or(DEFAULT_FLUSH_INTERVAL)
                         .clamp(1, MAX_DISPATCHES_PER_BATCH),
                 ),
                 profiler,
@@ -720,6 +727,17 @@ impl GpuContext {
     /// A small storage buffer bound where a kernel's optional input is absent (never written).
     pub(crate) fn dummy(&self) -> &wgpu::Buffer {
         &self.inner.dummy
+    }
+
+    /// Submit the open batch on its own once it holds `dispatches` dispatches (clamped to
+    /// `1..=`[`MAX_DISPATCHES_PER_BATCH`]; the default is [`DEFAULT_FLUSH_INTERVAL`], or [`ENV_FLUSH_EVERY`]).
+    pub fn set_flush_interval(&self, dispatches: u32) {
+        self.inner.flush_every.store(dispatches.clamp(1, MAX_DISPATCHES_PER_BATCH), Ordering::Relaxed);
+    }
+
+    /// The current flush interval ([`GpuContext::set_flush_interval`]).
+    pub fn flush_interval(&self) -> u32 {
+        self.inner.flush_every.load(Ordering::Relaxed)
     }
 
     /// Dispatch and submission counters (benchmarks use the difference across a pass).

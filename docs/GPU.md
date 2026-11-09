@@ -74,13 +74,31 @@ the open batch.
 Kernels never submit. Each call encodes a dispatch into one long-lived compute pass of an open command encoder.
 The batch is submitted when:
 
-- 1024 dispatches have been encoded;
+- 64 dispatches have been encoded (`ctx.set_flush_interval(n)`, 1 to 1024, or `FOLO_GPU_FLUSH_EVERY=n` for
+  contexts created afterwards);
 - an upload or readback needs ordering;
 - you call `ctx.flush()` (submit without waiting) or `ctx.sync()` (submit, wait, report errors).
 
 A forward pass is therefore a handful of submissions. Each dispatch's parameters take a 256-byte slot in a
 64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches and submissions
 (the backend benchmark prints them per pass).
+
+The interval was 1024 until the training-step profile showed the GPU idle for most of the host's encoding and
+submission time: a step's 1300 dispatches went out in 3 submissions, so the GPU waited for each one to be built
+whole. Submitting every 64 lets the GPU run one batch while the host encodes the next: the folo-n training step
+went from 295 to 366 img/s with AMP (median of 3 alternated rounds) and from 231 / 245 to 259 / 277 img/s in f32
+(the undisturbed rounds; docs/hill/gpu-train.md). 32 to 128 perform alike; 16 is slower again (every submission
+costs host time) and 256 gives back half the gain.
+
+### Profiling
+
+`FOLO_GPU_PROFILE=1` (on an adapter with timestamp queries inside passes) makes a context write a timestamp
+before and after every dispatch, copy and clear and add the differences up per label: the caller's
+`profile::scope` tag (folo-gpu's backend tags each op with its kind and shape, e.g. `conv_bwd_in 16->32 k3 s2 g1
+16x320x320 F16`) plus the kernel name. `ctx.profile_take()` returns and resets the totals. Resolving the queries
+waits at every submission, so a profiled run is slower end to end and the per-kernel times are upper bounds (the
+timestamps serialise kernels that would otherwise overlap). The folo-vision `gpu` benchmark prints a per-phase
+table of a profiled training step when the variable is set.
 
 ### Pipeline cache and specialisation constants
 
