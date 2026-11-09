@@ -110,7 +110,7 @@ describe('New run › Run on', () => {
     await open('cloud-trouble');
     const opt = await until(() => target.querySelector<HTMLOptionElement>('select#runon option[value="cc_4d2a"]'), 'the connection');
     expect(opt.disabled).toBe(true);
-    expect(text(opt)).toContain('RunPod rejected the API key');
+    expect(text(opt)).toContain('RunPod rejected this API key');
   });
 
   it('reveals the GPU and Stop after for a connection, the device a fact, and sends compute', async () => {

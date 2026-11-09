@@ -1,9 +1,10 @@
 // The mock's cloud compute (docs/API.md, Mock mode → Cloud): the connection, its offers, the documented errors, and a
 // cloud run through every phase on the clock, with its instance and its cost.
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { RunCloud, TrainConfig } from '../types';
 import { MockApi } from './index';
-import { RTX_4090, RUNPOD_OFFERS } from './cloud';
+import { PROVIDERS, RTX_4090, RUNPOD_OFFERS } from './cloud';
 
 const NOW = Date.parse('2026-11-08T14:30:00Z');
 
@@ -24,7 +25,7 @@ describe('mock cloud: connections and offers', () => {
     expect((await api.system()).features).toContain('cloud');
     expect((await api.cloudProviders()).map((p) => [p.id, p.fields.map((f) => `${f.key}${f.secret ? '*' : ''}${f.required ? '!' : ''}`)])).toEqual([
       ['runpod', ['api_key*!', 'worker_base_url']],
-      ['remote', ['url!', 'token*!']],
+      ['remote', ['url!', 'token*']],
     ]);
     const [conn] = await api.cloudConnections();
     expect(conn).toMatchObject({ id: 'cc_4d2a', status: 'ok', account: 'you@example.com', balance_usd: 42.17, values: { api_key: '••••a1b2' } });
@@ -34,6 +35,23 @@ describe('mock cloud: connections and offers', () => {
     expect(offers.map((o) => o.availability)).toContain('low');
     const prices = offers.map((o) => o.price_per_hour ?? 0);
     expect(prices).toEqual([...prices].sort((a, b) => a - b));
+  });
+
+  it("says what the real providers say: folo-cloud's `info()`, word for word", () => {
+    // The string literals of each provider's `info()`, a `\` line continuation joined as Rust joins it.
+    const literals = (file: string) => {
+      const src = readFileSync(new URL(`../../../../../crates/folo-cloud/src/${file}`, import.meta.url), 'utf8');
+      const body = src.slice(src.indexOf('fn info(&self) -> CloudProvider {'), src.indexOf('\n    }\n', src.indexOf('fn info(&self)')));
+      return [...body.replace(/\\\r?\n\s*/g, '').matchAll(/"([^"\\]*)"/g)].map((m) => m[1]);
+    };
+    for (const [file, id] of [
+      ['runpod.rs', 'runpod'],
+      ['remote.rs', 'remote'],
+    ]) {
+      const p = PROVIDERS.find((x) => x.id === id)!;
+      const texts = [p.id, p.name, p.about, p.docs_url, ...p.fields.flatMap((f) => [f.label, f.placeholder, f.help])].filter((t) => t !== null);
+      expect(texts, file).toEqual(literals(file!));
+    }
   });
 
   it('has no connection in cloud-none, no cloud at all in cloud-off', async () => {
@@ -67,7 +85,7 @@ describe('mock cloud: connections and offers', () => {
     const api = new MockApi('cloud-trouble', 0);
     vi.setSystemTime(NOW + 60_000);
     const c = await api.checkCloudConnection('cc_4d2a');
-    expect(c).toMatchObject({ status: 'error', error: expect.stringContaining('401'), checked: new Date(NOW + 60_000).toISOString() });
+    expect(c).toMatchObject({ status: 'error', error: expect.stringContaining('rejected this API key'), checked: new Date(NOW + 60_000).toISOString() });
     await expect(api.cloudOffers('cc_4d2a')).rejects.toMatchObject({ status: 422, code: 'cloud_auth_failed' });
   });
 
@@ -95,7 +113,7 @@ describe('mock cloud: runs and instances', () => {
 
   it('lists a termination that is not confirmed as terminating, with its error', async () => {
     const [inst] = await new MockApi('cloud-trouble', 0).cloudInstances();
-    expect(inst).toMatchObject({ status: 'terminating', error: expect.stringContaining('401'), ended: null });
+    expect(inst).toMatchObject({ status: 'terminating', error: expect.stringContaining('rejected this API key'), ended: null });
   });
 
   it('simulates a cloud run through every phase, out of the training queue, its cost growing', async () => {

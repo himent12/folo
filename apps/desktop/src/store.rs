@@ -775,7 +775,7 @@ mod tests {
 
     #[test]
     fn a_cloud_event_replaces_the_runs_cloud_state() {
-        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        let mut store = Store::new(Arc::new(MockBackend::with_cloud_runs(4200, true)));
         store.runs = store.api.runs().into();
         let id = "run_c1d0";
         let mut cloud = store.run(id).and_then(|r| r.cloud.clone()).expect("a cloud run");

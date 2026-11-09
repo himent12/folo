@@ -9,12 +9,12 @@ const GiB = 2 ** 30;
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 
-/** The providers as folo-cloud lists them (docs/CLOUD.md, Providers). */
+/** The providers as folo-cloud lists them (`info()` of crates/folo-cloud's runpod.rs and remote.rs, word for word). */
 export const PROVIDERS: CloudProvider[] = [
   {
     id: 'runpod',
     name: 'RunPod',
-    about: 'GPU pods rented by the hour, one per run.',
+    about: 'Rents an on-demand GPU pod on RunPod for each run and terminates it when the run ends.',
     docs_url: 'https://www.runpod.io/console/user/settings',
     fields: [
       {
@@ -23,15 +23,15 @@ export const PROVIDERS: CloudProvider[] = [
         secret: true,
         required: true,
         placeholder: 'rpa_…',
-        help: 'RunPod console › Settings › API Keys, with write access to pods.',
+        help: 'RunPod console → Settings → API Keys; the key needs read and write access to pods.',
       },
       {
         key: 'worker_base_url',
         label: 'Worker download URL',
         secret: false,
         required: false,
-        placeholder: 'https://…',
-        help: 'Where instances download FOLO from. Leave blank for this server’s release.',
+        placeholder: 'https://example.com/folo',
+        help: 'Where instances download FOLO from (install.sh and the release archive) when not the public release of this version: a mirror, or your own build.',
       },
     ],
     provisions: true,
@@ -40,11 +40,18 @@ export const PROVIDERS: CloudProvider[] = [
   {
     id: 'remote',
     name: 'Remote FOLO server',
-    about: 'A FOLO server you run yourself, on a machine with a GPU.',
+    about: 'A FOLO server you run yourself (`folo serve --host 0.0.0.0 --token …`), on a workstation or a VM at any cloud.',
     docs_url: null,
     fields: [
-      { key: 'url', label: 'Server URL', secret: false, required: true, placeholder: 'https://gpu-box.example.com:7878', help: 'Use https:// across networks you do not control.' },
-      { key: 'token', label: 'Token', secret: true, required: true, placeholder: null, help: 'The `--token` the server was started with.' },
+      {
+        key: 'url',
+        label: 'Server URL',
+        secret: false,
+        required: true,
+        placeholder: 'https://gpu-box.example.com:7878',
+        help: 'The address of its `folo serve`; use https:// (a TLS proxy or a tunnel) across networks you do not control.',
+      },
+      { key: 'token', label: 'Token', secret: true, required: false, placeholder: null, help: 'Its `--token` (or FOLO_TOKEN); empty when it runs without one.' },
     ],
     provisions: false,
     self_terminates: false,
@@ -98,7 +105,7 @@ export function seedConnection(t0: number, error: boolean): CloudConnection {
     status: error ? 'error' : 'ok',
     account: 'you@example.com',
     balance_usd: error ? null : 42.17,
-    error: error ? 'RunPod rejected the API key (401 Unauthorized): it was revoked or has expired.' : null,
+    error: error ? 'RunPod rejected this API key' : null,
     note: null,
     checked: new Date(t0 - 3 * MIN).toISOString(),
     values: { api_key: '••••a1b2' },

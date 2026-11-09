@@ -1,5 +1,6 @@
 // The status pill is the title form (DESIGN_DIRECTION 6): only beside the name of the one run a screen is about. Every
-// other status (tables, lists, Compare) is dot + word (`plain`), so one job never has two looks.
+// other status (tables, lists, Compare) is dot + word (`plain`), so one job never has two looks. Either form, and every
+// status word written as text, is read from the run itself, so a cloud run in its hand-over says its phase everywhere.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { parse } from 'svelte/compiler';
@@ -8,11 +9,11 @@ import { describe, expect, it } from 'vitest';
 const SRC = resolve(process.cwd(), 'src');
 const TITLE_FORM = new Set(['routes/Run.svelte', 'routes/overview/LiveRunCard.svelte']);
 
-function files(dir: string, out: string[] = []): string[] {
+function files(dir: string, ext = /\.svelte$/, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     const p = join(dir, name);
-    if (statSync(p).isDirectory()) files(p, out);
-    else if (name.endsWith('.svelte')) out.push(p);
+    if (statSync(p).isDirectory()) files(p, ext, out);
+    else if (ext.test(name)) out.push(p);
   }
   return out;
 }
@@ -42,21 +43,42 @@ function isPlain(badge: Node): boolean {
   return tag?.type === 'ExpressionTag' && tag.expression?.type === 'Literal' && tag.expression.value === true;
 }
 
-/** Every `<StatusBadge>` in a component's markup that renders as a pill, as its source text. */
-function pills(source: string): string[] {
-  const out: string[] = [];
+/** Every `<StatusBadge>` in a component's markup. */
+function badges(source: string): Node[] {
+  const out: Node[] = [];
   const seen = new WeakSet<object>();
   const walk = (n: unknown) => {
     if (!n || typeof n !== 'object' || seen.has(n)) return;
     seen.add(n);
     if (Array.isArray(n)) return n.forEach(walk);
     const node = n as Node;
-    if (node.type === 'Component' && node.name === 'StatusBadge' && !isPlain(node)) out.push(source.slice(node.start, node.end));
+    if (node.type === 'Component' && node.name === 'StatusBadge') out.push(node);
     for (const v of Object.values(node)) walk(v);
   };
   walk(parse(source, { modern: true }).fragment);
   return out;
 }
+
+/** Every `<StatusBadge>` in a component's markup that renders as a pill, as its source text. */
+const pills = (source: string): string[] => badges(source).filter((b) => !isPlain(b)).map((b) => source.slice(b.start, b.end));
+
+/**
+ * Every `<StatusBadge>` not certainly given a run as it came from the API: no `run`, or one rebuilt in place
+ * (`run={{ status: r.status }}`), which drops the cloud hand-over and says "Queued" where it should say the phase.
+ */
+function rebuilt(source: string): string[] {
+  return badges(source)
+    .filter((b) => {
+      const run = (b.attributes ?? []).find((a) => a.type === 'Attribute' && a.name === 'run');
+      const v = run?.value as Node | Node[] | true | undefined;
+      const tag = Array.isArray(v) ? (v.length === 1 ? v[0] : undefined) : v === true ? undefined : v;
+      return tag?.type !== 'ExpressionTag' || tag.expression?.type === 'ObjectExpression';
+    })
+    .map((b) => source.slice(b.start, b.end));
+}
+
+/** `statusWord` called on an object built in place rather than the run, as source text. */
+const rebuiltWords = (source: string): string[] => [...source.matchAll(/\bstatusWord\(\s*\{[^)]*\)/g)].map((m) => m[0]);
 
 describe('status pills', () => {
   it('appear only as the title form; every other status is dot + word', () => {
@@ -70,19 +92,38 @@ describe('status pills', () => {
   });
 
   it('reads the value of `plain`, not just the word', () => {
-    for (const ok of ['<StatusBadge status={s} plain />', '<StatusBadge status={s} plain dotOnly />', '<StatusBadge status={s} plain={true} />'])
+    for (const ok of ['<StatusBadge run={r} plain />', '<StatusBadge run={r} plain dotOnly />', '<StatusBadge run={r} plain={true} />'])
       expect(pills(ok), ok).toEqual([]);
     for (const bad of [
-      '<StatusBadge status={s} />',
-      '<StatusBadge status={s} plain={false} />',
-      '<StatusBadge status={s} plain={flag} />',
-      '<StatusBadge status={s} {plain} />',
-      '<StatusBadge status={s} plain="false" />',
-      '<StatusBadge status={s} plain {...rest} />',
-      '<StatusBadge status={s} title="plain" />',
-      '<StatusBadge status={s}></StatusBadge>',
-      '<td>{#if x}<StatusBadge status={s} plain={false} />{/if}</td>',
+      '<StatusBadge run={r} />',
+      '<StatusBadge run={r} plain={false} />',
+      '<StatusBadge run={r} plain={flag} />',
+      '<StatusBadge run={r} {plain} />',
+      '<StatusBadge run={r} plain="false" />',
+      '<StatusBadge run={r} plain {...rest} />',
+      '<StatusBadge run={r} title="plain" />',
+      '<StatusBadge run={r}></StatusBadge>',
+      '<td>{#if x}<StatusBadge run={r} plain={false} />{/if}</td>',
     ])
       expect(pills(bad), bad).toHaveLength(1);
+  });
+
+  it('reads every status from the run itself, so a cloud run in its hand-over says its phase', () => {
+    const hits: string[] = [];
+    for (const f of files(SRC, /\.(?:svelte|ts)$/)) {
+      if (/\.test\.ts$/.test(f)) continue;
+      const rel = relative(SRC, f).split(sep).join('/');
+      const source = readFileSync(f, 'utf8');
+      if (f.endsWith('.svelte')) for (const b of rebuilt(source)) hits.push(`${rel}: ${b}`);
+      for (const w of rebuiltWords(source)) hits.push(`${rel}: ${w}`);
+    }
+    expect(hits).toEqual([]);
+  });
+
+  it('tells a run passed whole from one rebuilt without its cloud state', () => {
+    for (const ok of ['<StatusBadge {run} />', '<StatusBadge run={r} plain />', '<StatusBadge run={live.run ?? r} plain />']) expect(rebuilt(ok), ok).toEqual([]);
+    for (const bad of ['<StatusBadge run={{ status: r.status }} plain />', '<StatusBadge plain />', '<StatusBadge run="queued" plain />', '<StatusBadge {...r} plain />'])
+      expect(rebuilt(bad), bad).toHaveLength(1);
+    expect(rebuiltWords('statusWord(x); statusWord({ status: x.status })')).toEqual(['statusWord({ status: x.status })']);
   });
 });

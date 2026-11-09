@@ -293,11 +293,7 @@ impl FoloApp {
                                 .child(format!("{} px · {}", r.config.imgsz, r.config.batch)),
                         )
                     })
-                    .child(div().w(px(96.)).flex_none().child(status_dot(
-                        &t,
-                        r.status,
-                        &format!("row-{}", r.id),
-                    )))
+                    .child(div().w(px(96.)).flex_none().child(status_dot(&t, r, &format!("row-{}", r.id))))
                     .child(div().w(px(140.)).flex_none().child(progress_cell))
                     .child(div().w(px(96.)).flex_none().flex().justify_end().child(best))
                     .child(
@@ -534,7 +530,7 @@ impl FoloApp {
             .items_center()
             .gap(px(12.))
             .child(text(ty::XL, t.text_primary).child(r.name.clone()))
-            .child(status_badge(&t, r.status, &format!("hdr-{}", r.id)))
+            .child(status_badge(&t, &r, &format!("hdr-{}", r.id)))
             // The subtitle's e2e tag explains itself on hover; this help gives it a keyboard route.
             .when(r.config.head == crate::api::Head::O2o, |d| {
                 d.child(self.help_icon("run-head-help", FoloApp::E2E_HELP, window, cx))
@@ -597,10 +593,14 @@ impl FoloApp {
         let provider = self.provider_name(&c.provider);
         let released = c.phase == CloudPhase::Released;
         let live = r.status.is_active();
-        let steps = CloudPhase::ALL.iter().enumerate().map(|(i, &p)| {
+        // A newer server's phase has no known place among these: it is the one step, current.
+        let phases =
+            if c.phase == CloudPhase::Unknown { vec![CloudPhase::Unknown] } else { CloudPhase::ALL.to_vec() };
+        let count = phases.len();
+        let steps = phases.into_iter().enumerate().map(|(i, p)| {
             let done = p < c.phase || released;
             let current = p == c.phase && !released;
-            let last = i + 1 == CloudPhase::ALL.len();
+            let last = i + 1 == count;
             let dot = if current {
                 dot(t.accent_fill(), 8., live, format!("cloud-{}", r.id)).into_any_element()
             } else if done {

@@ -142,7 +142,11 @@ fn main() {
 
         let frozen = spec.is_some();
         let live_step = spec.as_ref().map_or(4180, |s| s.live_step);
-        let mut mock = MockBackend::new(live_step, frozen);
+        let mut mock = if spec.as_ref().is_some_and(|s| s.cloud_runs) {
+            MockBackend::with_cloud_runs(live_step, frozen)
+        } else {
+            MockBackend::new(live_step, frozen)
+        };
         if spec.as_ref().is_some_and(|s| s.fail) {
             mock = mock.failing();
         }

@@ -16,6 +16,10 @@ use crate::store::Load;
 use crate::theme::{Mode, radius, theme, ty};
 use crate::ui::*;
 
+/// The settings column's widest: wide enough not to read as a narrow form, close enough that a
+/// label and its control (right edge) stay one glance apart on big windows.
+const COLUMN_MAX: f32 = 880.;
+
 impl FoloApp {
     pub fn settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
@@ -291,10 +295,8 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(16.))
-            // Capped at 880 px: wide enough not to read as a narrow form, close enough that a label
-            // and its control (right edge) stay one glance apart on big windows.
             .w_full()
-            .max_w(px(880.))
+            .max_w(px(COLUMN_MAX))
             .child(connection)
             // Where work runs, both: this server, then the compute it can rent or reach.
             .when(self.cloud_on(), |d| {
@@ -899,18 +901,44 @@ impl FoloApp {
         let running = instances
             .as_ref()
             .map_or(0, |l| l.iter().filter(|i| i.status == crate::api::CloudInstanceStatus::Running).count());
+        // An alive instance's deadline, "—" for the others.
+        let deadline = |i: &crate::api::CloudInstance| {
+            i.deadline
+                .as_deref()
+                .and_then(crate::api::time::parse)
+                .filter(|_| i.status.is_alive())
+                .map_or("—".to_string(), |d| crate::api::time::local_deadline(d, now))
+        };
+        // Column widths, measured: Stops by holds its longest reading ("2026-11-08 23:24" when a
+        // deadline falls on another day). The GPU line takes what the others leave; when that is
+        // less than its longest line, Started (the least needed) goes, as a whole column.
+        let list = instances.as_deref().unwrap_or_default();
+        let measure = |window: &mut Window, s: &str, size: f32| {
+            f32::from(crate::charts::text_width(window, s, size)).ceil()
+        };
+        // Headings are medium weight: ~4 % wider than the regular face `text_width` measures.
+        let heading_w = (measure(window, "Stops by", ty::SM.size) * 1.04).ceil();
+        let stops_w =
+            list.iter().map(|i| measure(window, &deadline(i), ty::SM.size)).fold(heading_w, f32::max);
+        let gpu_need =
+            list.iter().map(|i| measure(window, &offer_line(&i.offer), ty::SM.size)).fold(0., f32::max);
+        const GAP: f32 = 12.;
+        // The panel's border and its rows' padding; Run, Status, Cost and the action, each with a gap.
+        let fixed = 2. + 32. + (128. + 100. + 64. + 88. + 4. * GAP) + stops_w + GAP;
+        let table_w = self.content_width(window).min(COLUMN_MAX);
+        let show_started = table_w - fixed - (72. + GAP) >= gpu_need;
         let cell =
             |w: f32, right: bool, el: gpui::Div| el.w(px(w)).flex_none().when(right, |d| d.text_right());
-        let cols = |d: gpui::Div| d.flex().items_center().gap(px(12.)).px(px(16.)).h(px(36.));
+        let cols = |d: gpui::Div| d.flex().items_center().gap(px(GAP)).px(px(16.)).h(px(36.));
         let head = cols(div())
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "GPU").flex_1().min_w_0())
             .child(cell(128., false, th(&t, "Run")))
             .child(cell(100., false, th(&t, "Status")))
-            .child(cell(72., true, th(&t, "Started")))
+            .when(show_started, |d| d.child(cell(72., true, th(&t, "Started"))))
             .child(cell(64., true, th(&t, "Cost")))
-            .child(cell(112., true, th(&t, "Stops by")))
+            .child(cell(stops_w, true, th(&t, "Stops by")))
             .child(cell(88., false, div()));
         let body = match &self.cloud.instances {
             Load::Failed(e) => div()
@@ -953,6 +981,8 @@ impl FoloApp {
                             crate::api::CloudInstanceStatus::Running => (t.accent_fill(), t.accent_text),
                             crate::api::CloudInstanceStatus::Terminating => (t.warning_solid, t.warning_text),
                             crate::api::CloudInstanceStatus::Lost => (t.danger_solid, t.danger_text),
+                            // Launching, starting, terminated, and a newer server's status (counted
+                            // alive: it keeps its Terminate): no status hue.
                             _ => (t.text_tertiary, quiet),
                         };
                         let line = offer_line(&i.offer);
@@ -985,12 +1015,6 @@ impl FoloApp {
                         };
                         let started = crate::api::time::parse(&i.created)
                             .map_or(String::new(), |c| crate::api::time::ago(c, now));
-                        let deadline = i
-                            .deadline
-                            .as_deref()
-                            .and_then(crate::api::time::parse)
-                            .filter(|_| live)
-                            .map_or("—".to_string(), |d| crate::api::time::local_deadline(d, now));
                         // Every instance that may still cost money can be terminated (again, for
                         // one whose termination isn't confirmed: it is idempotent).
                         let action = if !live {
@@ -1025,20 +1049,22 @@ impl FoloApp {
                                     .child(div().size(px(6.)).flex_none().rounded_full().bg(dot_c))
                                     .child(text(ty::SM, label_c).whitespace_nowrap().child(i.status.label())),
                             ))
-                            .child(cell(
-                                72.,
-                                true,
-                                text(ty::SM, quiet).tnum().whitespace_nowrap().child(started),
-                            ))
+                            .when(show_started, |d| {
+                                d.child(cell(
+                                    72.,
+                                    true,
+                                    text(ty::SM, quiet).tnum().whitespace_nowrap().child(started),
+                                ))
+                            })
                             .child(cell(
                                 64.,
                                 true,
                                 text(ty::SM, ink).tnum().child(i.cost_usd.map_or("—".to_string(), fmt_cost)),
                             ))
                             .child(cell(
-                                112.,
+                                stops_w,
                                 true,
-                                text(ty::SM, quiet).tnum().whitespace_nowrap().child(deadline),
+                                text(ty::SM, quiet).tnum().whitespace_nowrap().child(deadline(i)),
                             ))
                             .child(cell(88., false, div().flex().justify_end().child(action)))
                             .into_any_element()

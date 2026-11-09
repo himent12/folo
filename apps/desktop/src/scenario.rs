@@ -16,6 +16,10 @@ pub struct Spec {
     pub live_step: u32,
     pub fail: bool,
     pub empty: bool,
+    /// The demo with cloud runs under way ([`crate::api::mock::MockBackend::with_cloud_runs`]):
+    /// `+cloud` on any screen, Settings › Cloud's dialogs and the cloud run pages. Every other
+    /// scenario keeps the default demo, whose one cloud run is long finished.
+    pub cloud_runs: bool,
 }
 
 /// Every scenario `tools/shoot-all.ps1` captures, in review order.
@@ -59,14 +63,22 @@ pub const ALL: &[&str] = &[
     "playground+canvas-focus",
     "settings",
     "settings+reference",
+    "overview+cloud",
+    "runs+cloud",
     "settings+cloud",
     "settings+cloud+light",
     "settings+cloud+empty",
     "settings+cloud+trouble",
+    "settings+cloud+trouble+light",
     "cloud-connect",
+    "cloud-connect+light",
     "cloud-connect+rejected",
+    "cloud-connect+remote",
+    "cloud-connect+remote+light",
     "cloud-disconnect",
+    "cloud-disconnect+light",
     "cloud-terminate",
+    "cloud-terminate+light",
     "new-run+cloud",
     "new-run+cloud+light",
     "run-cloud+syncing",
@@ -81,7 +93,9 @@ impl Spec {
     pub fn parse(name: &str) -> Spec {
         let parts: Vec<String> = name.split('+').map(|s| s.trim().to_string()).collect();
         let has = |p: &str| parts.iter().any(|x| x == p);
+        let screen = parts.first().map_or("", String::as_str);
         Spec {
+            cloud_runs: has("cloud") || screen == "run-cloud" || screen.starts_with("cloud-"),
             mode: if has("light") {
                 Some(Mode::Light)
             } else if has("dark") {
@@ -219,6 +233,10 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     match screen {
         "cloud-connect" => {
             app.open_connect(window, cx);
+            if s.has("remote") {
+                // The second provider: a FOLO server of yours (a URL and an optional token).
+                app.set_connect_provider(1, cx);
+            }
             if s.has("rejected") {
                 // A key RunPod turns down, sent as Connect sends it: the answer lands on its field.
                 if let Some(f) = app.cloud.connect.as_ref() {

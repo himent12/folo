@@ -464,7 +464,7 @@ function cloudRuns(t0: number, scenario: Scenario): Omit<RunProfile, 'classNames
   const MiB = 2 ** 20;
   const finishedAt = scenario === 'cloud-trouble' ? t0 - 2 * HOUR : t0 - 2 * DAY - 5 * HOUR;
   const done = rented('run_c3d5', '4c1a', 'k2x9wq7m3fz1', finishedAt, { provision: 40_000, boot: 3 * MIN, sync: 70_000 }, 64 * MiB, 330 * MiB, 2);
-  if (scenario === 'cloud-trouble') done.stuck = 'RunPod rejected the API key (401 Unauthorized)';
+  if (scenario === 'cloud-trouble') done.stuck = 'RunPod rejected this API key';
   const finished: Omit<RunProfile, 'classNames'> = {
     id: 'run_c3d5',
     name: 'shapes-m',
@@ -1574,17 +1574,17 @@ export class MockApi implements Api {
       for (const f of provider.fields) if (f.required && !value(f.key)) throw new ApiError(400, 'invalid_body', `\`${f.key}\` is required to connect ${provider.name}`);
       const url = provider.id === 'remote' ? value('url') : '';
       if (provider.id === 'remote' && !/^https?:\/\/[^\s/]+/i.test(url)) throw new ApiError(400, 'invalid_body', '`url` must be an http:// or https:// URL');
+      const host = url.replace(/^https?:\/\//i, '').replace(/[/?#].*$/, '');
       if (provider.fields.some((f) => f.secret && value(f.key).includes('bad')))
         throw new ApiError(
           422,
           'cloud_auth_failed',
-          provider.id === 'remote' ? `the server at ${url} refused the token (401 unauthorized)` : `${provider.name} rejected the API key (401 Unauthorized)`,
-          provider.id === 'remote' ? 'Use the token the server was started with (`folo serve --token`).' : 'Create a key with write access to pods: RunPod console › Settings › API Keys.',
+          provider.id === 'remote' ? `the server at ${host} rejected the token` : `${provider.name} rejected this API key`,
+          provider.id === 'remote' ? 'Use the token the server was started with (`folo serve --token`).' : 'Create a key with read and write access to pods: RunPod console → Settings → API Keys.',
         );
       const taken = new Set(this.#connections.map((c) => c.name));
       let name = body.name?.trim() || provider.name;
       for (let k = 2; !body.name?.trim() && taken.has(name); k++) name = `${provider.name} ${k}`;
-      const host = url.replace(/^https?:\/\//i, '').replace(/[/?#].*$/, '');
       const local = /^(localhost|127\.|\[::1\]|10\.|192\.168\.)/i.test(host);
       const now = Date.now();
       const conn: CloudConnection = {

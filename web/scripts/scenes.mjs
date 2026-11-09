@@ -1875,10 +1875,26 @@ export const scenes = [
     name: 'settings-cloud-connect',
     path: '/settings?section=cloud',
     fullPage: false,
-    viewports: ['desktop', 'mobile'],
+    viewports: ['desktop', 'tablet', 'mobile', 'small'],
     setup: async (page) => {
       await until(page, '#cloud header .btn');
       await page.locator('#cloud header .btn').click();
+      await page.locator('dialog[open] input[type="password"]').waitFor();
+      await page.clock.runFor(300);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Connect to a remote FOLO server: its sentence names the command to run there, in mono and never broken inside a
+    // flag; the token is optional.
+    name: 'settings-cloud-connect-remote',
+    path: '/settings?section=cloud',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile', 'small'],
+    setup: async (page) => {
+      await until(page, '#cloud header .btn');
+      await page.locator('#cloud header .btn').click();
+      await page.locator('dialog[open]').getByRole('radio', { name: 'Remote FOLO server' }).click();
       await page.locator('dialog[open] input[type="password"]').waitFor();
       await page.clock.runFor(300);
       await page.mouse.move(0, 0);
@@ -1927,6 +1943,28 @@ export const scenes = [
       await until(page, '#cloud .xfer:visible');
       await page.mouse.move(0, 0);
     },
+  },
+  {
+    // The Runs list with that run: its status is the phase ("Uploading data", the waiting run's neutral mark), never
+    // "Queued", and it has no place in the queue.
+    name: 'runs-cloud-upload',
+    path: '/runs',
+    search: 'scenario=cloud-upload',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'a[href$="/runs/run_c9e4"]:visible');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Overview's recent runs with that run: the phase in the Status column, as in Runs.
+    name: 'overview-cloud-upload',
+    path: '/',
+    search: 'scenario=cloud-upload',
+    fullPage: false,
+    advance: 4000,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
   },
   {
     // A cloud run training: where it runs in the header ("RunPod · RTX 4090") and the Cloud panel in the rail (phones:

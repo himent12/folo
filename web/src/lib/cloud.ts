@@ -2,7 +2,7 @@
 // line, the offer New run preselects, the default time limit, the states of an instance. One module, so Settings, New
 // run and the run page say the same thing with the same numbers.
 
-import type { CloudAvailability, CloudInstanceStatus, CloudOffer, CloudPhase, CloudProvider, RunCloud, SystemInfo, TransferProgress } from './api/types';
+import type { CloudAvailability, CloudInstanceStatus, CloudOffer, CloudPhase, CloudProvider, Run, RunCloud, SystemInfo, TransferProgress } from './api/types';
 import { bytes, hoursText, pct, pricePerHour, usd } from './format';
 
 /**
@@ -38,6 +38,13 @@ export const beforeTraining = (phase: string): boolean => {
   const i = phaseIndex(phase);
   return i >= 0 && i < PHASES.indexOf('training');
 };
+
+/**
+ * A queued cloud run whose hand-over is still before `training` (provisioning, booting, uploading its data): it waits in
+ * no queue, so it is shown by its phase, not as "Queued", and has no place in the queue.
+ */
+export const inHandover = <R extends Pick<Run, 'status' | 'cloud'>>(run: R): run is R & { cloud: RunCloud } =>
+  run.status === 'queued' && !!run.cloud && beforeTraining(run.cloud.phase);
 
 /** The share of a transfer done (0..1), or null when its size is not known. */
 export function transferShare(p: TransferProgress | null | undefined): number | null {
@@ -109,7 +116,12 @@ export function availabilityNote(a: CloudAvailability): string | null {
 
 /** An offer in one line, without its price: "RTX 4090 · 24.0 GiB · Secure Cloud" (memory in the app's one size format). */
 export function offerLine(o: CloudOffer, units: 'binary' | 'metric' = 'binary'): string {
-  return [o.gpu_count > 1 ? `${o.gpu_count} × ${o.gpu}` : o.gpu, o.vram_bytes > 0 ? bytes(o.vram_bytes, units) : null, o.detail].filter(Boolean).join(' · ');
+  return offerParts(o, units).join(' · ');
+}
+
+/** `offerLine`'s items, for markup that sets them as a meta line (`ui/Meta`), so a wrapped line never ends on a "·". */
+export function offerParts(o: CloudOffer, units: 'binary' | 'metric' = 'binary'): string[] {
+  return [o.gpu_count > 1 ? `${o.gpu_count} × ${o.gpu}` : o.gpu, o.vram_bytes > 0 ? bytes(o.vram_bytes, units) : null, o.detail].filter((p): p is string => !!p);
 }
 
 /**

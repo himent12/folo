@@ -211,6 +211,12 @@
       flex-wrap: nowrap;
       flex-shrink: 0;
     }
+    /* A lead longer than the room beside the actions (a cloud run's "Uploading data" and its time at 320 px) wraps
+       whole items onto a second line rather than spill past them. */
+    .lead {
+      flex-wrap: wrap;
+      row-gap: var(--space-1);
+    }
     /* One row: the short meta line on the left (one line), the primary and the ⋯ menu on the right, centred on it. */
     header.one-row {
       flex-wrap: nowrap;

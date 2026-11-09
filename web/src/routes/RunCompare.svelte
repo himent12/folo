@@ -48,7 +48,7 @@
   import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
-  import StatusBadge, { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
+  import StatusBadge, { statusWord } from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -532,7 +532,7 @@
             <tbody>
               <tr>
                 <td class="k">Status</td>
-                {#each shown as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
+                {#each shown as r (r.id)}<td><StatusBadge run={r} plain /></td>{/each}
               </tr>
               <tr>
                 <!-- The best epoch's score, which the chips' latest value need not be (a stopped run's 0.595 · stopped
@@ -720,7 +720,7 @@
       }}
     >
       <option value="">Add run…</option>
-      {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {STATUS_LABEL[c.status]}</option>{/each}
+      {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {statusWord(c)}</option>{/each}
     </select>
   </label>
 {/snippet}

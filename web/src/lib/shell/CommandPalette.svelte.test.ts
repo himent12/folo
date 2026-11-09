@@ -96,6 +96,12 @@ describe('CommandPalette actions on entities', () => {
     for (const h of hints) expect(h).toMatch(/^(Queued|Running|Stopping|Stopped|Completed|Failed)/);
   });
 
+  it('writes a cloud run in its hand-over by its phase, not as Queued', async () => {
+    hub.api = new MockApi('cloud-upload', 0);
+    await openWith('shapes-hard-x', '#pi-run-run_c9e4');
+    expect(document.querySelector('#pi-run-run_c9e4 .hint')?.textContent?.trim()).toMatch(/^Uploading data/);
+  });
+
   it('answers to "toggle theme"', async () => {
     await openWith('toggle theme', '#pi-theme');
     expect(options()[0]).toMatch(/^Switch theme/);

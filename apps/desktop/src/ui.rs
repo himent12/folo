@@ -267,11 +267,12 @@ pub fn latency_text(ms: f64, simulated: bool) -> String {
     if simulated { format!("{ms:.1} ms simulated") } else { format!("{ms:.1} ms") }
 }
 
-/// What a run that hasn't started training waits on, as every list writes it: a cloud run's phase
-/// ("Uploading data · 25%"), else its place in the training queue.
+/// What a run that hasn't started training waits on, as every list writes it beside its status: a
+/// cloud run's transfer ("1.2 of 4.8 GiB"; "–" before there is one, the status names the phase),
+/// else its place in the training queue.
 pub fn waiting_text(r: &Run) -> String {
     match r.cloud_pending() {
-        Some(c) => phase_text(c),
+        Some(c) => c.progress.as_ref().map_or("–".to_string(), fmt_transfer),
         None => queue_text(r.queue_position),
     }
 }
@@ -506,9 +507,16 @@ pub fn badge(t: &Theme, label: impl Into<SharedString>, tone: Tone) -> Div {
         .child(label.into())
 }
 
-/// Status chip for a run: a dot (pulsing while running) and the status word.
+/// A run's status in one word, wherever a status is drawn (badges, rows, the palette): the status,
+/// or for a cloud run handing over to its instance its phase ("Provisioning", "Booting", "Uploading
+/// data"), since it waits in no queue. Such a run keeps a waiting run's look (`status_tone`).
+pub fn status_label(r: &Run) -> &'static str {
+    r.cloud_pending().map_or(r.status.label(), |c| c.phase.label())
+}
+
 /// Status for dense rows: a dot and a word, no tinted pill.
-pub fn status_dot(t: &Theme, s: RunStatus, id: &str) -> Div {
+pub fn status_dot(t: &Theme, r: &Run, id: &str) -> Div {
+    let s = r.status;
     let (_, fg, dotc) = status_tone(s).colors(t);
     div()
         .flex()
@@ -523,11 +531,13 @@ pub fn status_dot(t: &Theme, s: RunStatus, id: &str) -> Div {
         .child(
             text(ty::SM, if s == RunStatus::Running { t.accent_text } else { fg })
                 .whitespace_nowrap()
-                .child(s.label()),
+                .child(status_label(r)),
         )
 }
 
-pub fn status_badge(t: &Theme, s: RunStatus, id: &str) -> Div {
+/// Status chip for a run: a dot (pulsing while running) and the status word.
+pub fn status_badge(t: &Theme, r: &Run, id: &str) -> Div {
+    let s = r.status;
     let tone = status_tone(s);
     let (_, _, dotc) = tone.colors(t);
     let (bg, fg, _) = tone.colors(t);
@@ -544,7 +554,7 @@ pub fn status_badge(t: &Theme, s: RunStatus, id: &str) -> Div {
         .bg(bg)
         .whitespace_nowrap()
         .child(dot(dotc, 6., s == RunStatus::Running, format!("badge-{id}")))
-        .child(s.label())
+        .child(status_label(r))
 }
 
 /// Keycap for shortcut hints.
@@ -1276,6 +1286,40 @@ mod cloud_format_tests {
         assert_eq!(cloud_wait_title(&c, "RunPod"), "Uploading data · 25%");
         c.progress = Some(TransferProgress { done_bytes: 1, total_bytes: 0 });
         assert_eq!(phase_text(&c), "Uploading data");
+    }
+
+    #[test]
+    fn a_cloud_run_handing_over_reads_its_phase_not_queued() {
+        use crate::api::{Backend, RunStatus};
+        let api = crate::api::mock::MockBackend::with_cloud_runs(0, true);
+        let mut r = api.run("run_c1d0").unwrap();
+        assert_eq!(r.status, RunStatus::Queued);
+        assert_eq!((status_label(&r), waiting_text(&r).as_str()), ("Uploading data", "1.2 of 4.8 GiB"));
+        let phase = |r: &mut Run, p: CloudPhase| {
+            if let Some(c) = r.cloud.as_mut() {
+                c.phase = p;
+                c.progress = None;
+            }
+        };
+        phase(&mut r, CloudPhase::Provisioning);
+        assert_eq!((status_label(&r), waiting_text(&r).as_str()), ("Provisioning", "–"));
+        phase(&mut r, CloudPhase::Booting);
+        assert_eq!(status_label(&r), "Booting");
+        // It still looks like a waiting run.
+        assert_eq!(status_tone(r.status), Tone::Neutral);
+        // Training (even before the status catches up), a newer server's phase, or not queued any
+        // more: the status says it.
+        for p in [CloudPhase::Training, CloudPhase::Unknown] {
+            phase(&mut r, p);
+            assert_eq!((status_label(&r), waiting_text(&r).as_str()), ("Queued", "Waiting to start"));
+        }
+        phase(&mut r, CloudPhase::Syncing);
+        r.status = RunStatus::Stopping;
+        assert_eq!(status_label(&r), "Stopping");
+        // A run on this machine reads its status and its place in the queue.
+        let local = api.run("run_b7e2").unwrap();
+        assert_eq!((status_label(&local), waiting_text(&local).as_str()), ("Queued", "Next to start"));
+        assert_eq!(status_label(&api.run("run_c9f1").unwrap()), "Completed");
     }
 }
 

@@ -1816,6 +1816,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "folo-client"
+version = "0.1.0"
+dependencies = [
+ "folo-api",
+ "http",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "folo-cloud"
+version = "0.1.0"
+dependencies = [
+ "folo-api",
+ "folo-client",
+ "http",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "folo-core"
 version = "0.1.0"
 dependencies = [
@@ -1847,6 +1870,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "folo-api",
+ "folo-cloud",
  "folo-core",
  "folo-data",
  "folo-gpu",

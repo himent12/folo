@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import type { CloudOffer, RunCloud } from './api/types';
+import type { CloudOffer, RunCloud, RunStatus } from './api/types';
 import {
   article,
   availabilityNote,
   beforeTraining,
   defaultMaxHours,
+  inHandover,
   isAlive,
   limitText,
   offerLine,
+  offerParts,
   phaseIndex,
   phaseLabel,
   phaseTitle,
@@ -46,6 +48,17 @@ describe('cloud phases', () => {
     expect(beforeTraining('syncing')).toBe(true);
     expect(beforeTraining('training')).toBe(false);
     expect(beforeTraining('migrating')).toBe(false);
+  });
+
+  it('counts a queued cloud run as in its hand-over only until it trains', () => {
+    const run = (status: RunStatus, phase: string | null) => ({ status, cloud: phase === null ? undefined : ({ phase } as RunCloud) });
+    expect(inHandover(run('queued', 'provisioning'))).toBe(true);
+    expect(inHandover(run('queued', 'syncing'))).toBe(true);
+    // The worker has it and waits for its GPU, a newer server's phase, a run of this machine, one already running.
+    expect(inHandover(run('queued', 'training'))).toBe(false);
+    expect(inHandover(run('queued', 'migrating'))).toBe(false);
+    expect(inHandover(run('queued', null))).toBe(false);
+    expect(inHandover(run('stopped', 'booting'))).toBe(false);
   });
 
   it('titles the hand-over by its phase, never as a wait in the queue', () => {
@@ -103,6 +116,7 @@ describe('offers', () => {
   it('writes an offer in one line and says what its stock means', () => {
     expect(offerLine(offers[2]!)).toBe('RTX 4090 · 24.0 GiB · Secure Cloud');
     expect(offerLine({ ...offers[2]!, gpu_count: 2, vram_bytes: 0, detail: null })).toBe('2 × RTX 4090');
+    expect(offerParts(offers[2]!, 'metric')).toEqual(['RTX 4090', '25.8 GB', 'Secure Cloud']);
     expect(availabilityNote('low')).toBe('low stock');
     expect(availabilityNote('none')).toBe('none available now');
     expect(availabilityNote('high')).toBeNull();

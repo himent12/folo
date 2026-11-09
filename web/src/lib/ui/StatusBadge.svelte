@@ -1,8 +1,9 @@
 <script lang="ts" module>
-  import type { RunStatus } from '$lib/api/types';
+  import type { Run, RunStatus } from '$lib/api/types';
+  import { inHandover, phaseLabel } from '$lib/cloud';
 
-  /** A status's one word, in sentence case, wherever it is written (lists, meta lines, the palette): never "queued". */
-  export const STATUS_LABEL: Record<RunStatus, string> = {
+  /** A status's one word, in sentence case: never "queued". */
+  const STATUS_LABEL: Record<RunStatus, string> = {
     queued: 'Queued',
     running: 'Running',
     stopping: 'Stopping',
@@ -10,6 +11,15 @@
     completed: 'Completed',
     failed: 'Failed',
   };
+
+  /** What a run's status is read from: the status and, for a cloud run, its hand-over (`Run.cloud`). */
+  export type RunState = Pick<Run, 'status' | 'cloud'>;
+
+  /**
+   * A run's status in one word, wherever it is written (the badge, lists, meta lines, the palette): a cloud run in its
+   * hand-over is its phase ("Provisioning", "Uploading data"), since it waits in no queue.
+   */
+  export const statusWord = (run: RunState): string => (inHandover(run) ? phaseLabel(run.cloud.phase) : STATUS_LABEL[run.status]);
 </script>
 
 <script lang="ts">
@@ -17,16 +27,17 @@
    * A run's status as its mark and word. Two forms, one rule (DESIGN_DIRECTION 6): the tinted pill is the title form,
    * beside the name of the one run a screen is about (the run page's header, Overview's live card), at most one per
    * screen; everywhere else (tables, lists, Compare, meta lines) it is `plain`, dot + word. `statusPill.test.ts` holds
-   * the pill to those two places.
+   * the pill to those two places. It takes the run itself, not its bare status, so a cloud run in its hand-over says
+   * its phase in the neutral look of a waiting run wherever a status is shown.
    */
   let {
-    status,
+    run,
     size = 'md',
     plain = false,
     dotOnly = false,
     lastKnown,
   }: {
-    status: RunStatus;
+    run: RunState;
     size?: 'sm' | 'md';
     /** Dot and word without the pill, for table cells. */
     plain?: boolean;
@@ -39,10 +50,11 @@
     lastKnown?: string;
   } = $props();
 
-  const labels = STATUS_LABEL;
+  const status = $derived(run.status);
+  const word = $derived(lastKnown ?? statusWord(run));
 </script>
 
-<span class="badge {status} {size}" class:plain class:held={!!lastKnown}>
+<span class="badge {status} {size}" class:plain class:alone={dotOnly} class:held={!!lastKnown}>
   <!-- Each status has its own mark as well as its hue (running and completed are both green-ish): a ringed dot
        while running, a check when completed, a cross when failed, hollow while queued, a square when stopped. -->
   {#if status === 'completed'}
@@ -51,7 +63,7 @@
     <svg class="mark" viewBox="0 0 8 8" aria-hidden="true"><path d="M1.8 1.8 6.2 6.2M6.2 1.8 1.8 6.2" /></svg>
   {:else}
     <span class="dot" aria-hidden="true"></span>
-  {/if}{#if dotOnly}<span class="sr-only">{lastKnown ?? labels[status]}</span>{:else}{lastKnown ?? labels[status]}{/if}
+  {/if}{#if dotOnly}<span class="sr-only">{word}</span>{:else}{word}{/if}
 </span>
 
 <style>
@@ -137,8 +149,12 @@
     border-radius: 1.5px;
   }
   /* In tables: the hue is on the dot only, the word stays in ink. The badge takes the cell's own line box (and sits at
-     its top), so the word shares the row's baseline instead of a flex box's synthesized one a couple of px lower. */
+     its top), so the word shares the row's baseline instead of a flex box's synthesized one a couple of px lower. A word
+     of two (a cloud run's "Uploading data") may take two lines where its column is tight (Runs on a tablet), as the
+     row's name does, rather than widen the table past its panel. */
   .plain {
+    align-items: flex-start;
+    white-space: normal;
     height: auto;
     padding: 0;
     line-height: inherit;
@@ -150,6 +166,16 @@
   }
   .plain .dot {
     background: var(--c);
+  }
+  /* Beside its word, the mark sits on the first line's centre, also when a word of two wraps; alone, its row centres it. */
+  .plain:not(.alone) .dot {
+    margin-top: calc((1lh - 6px) / 2);
+  }
+  .plain:not(.alone) .mark {
+    margin-top: calc((1lh - 8px) / 2);
+  }
+  .plain.running:not(.alone) .dot {
+    margin-top: calc((1lh - 4px) / 2);
   }
   .plain.queued .dot {
     background: none;

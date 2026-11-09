@@ -21,7 +21,7 @@
   import Ident from '$lib/ui/Ident.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import Meta from '$lib/ui/Meta.svelte';
-  import { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
+  import { statusWord } from '$lib/ui/StatusBadge.svelte';
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import type { IconType } from '$lib/ui/types';
   import { rememberFocus } from '$lib/ui/focus';
@@ -135,7 +135,7 @@
       id: `run-${x.id}`,
       group: 'Runs',
       label: x.name,
-      hint: [failureCause(x) ? 'Failed, out of GPU memory' : STATUS_LABEL[x.status], { ident: x.config.arch }, `epoch ${x.epoch}/${x.epochs}`],
+      hint: [failureCause(x) ? 'Failed, out of GPU memory' : statusWord(x), { ident: x.config.arch }, `epoch ${x.epoch}/${x.epochs}`],
       icon: Activity,
       status: x.status,
       run: go(`/runs/${x.id}`),

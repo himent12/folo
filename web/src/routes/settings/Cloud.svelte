@@ -16,7 +16,7 @@
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { CloudConnection, CloudInstance } from '$lib/api/types';
-  import { INSTANCE_LABEL, isAlive, offerLine, providerName } from '$lib/cloud';
+  import { INSTANCE_LABEL, isAlive, offerParts, providerName } from '$lib/cloud';
   import { ago, timeOfDay, usd } from '$lib/format';
   import { prefs } from '$lib/prefs.svelte';
   import { href } from '$lib/router.svelte';
@@ -246,7 +246,7 @@
               {@const run = runName(i.run_id)}
               <tr class:ended={!alive}>
                 <td>
-                  <span class="gpu">{offerLine(i.offer, prefs.units)}</span>
+                  <span class="gpu"><Meta>{#each offerParts(i.offer, prefs.units) as p (p)}<span>{p}</span>{/each}</Meta></span>
                   <span class="sub num"><Meta><span><Ident value={i.name} /></span><span>started {ago(i.created)}</span></Meta></span>
                 </td>
                 <td class="run">{#if i.run_id}<a href={href(`/runs/${i.run_id}`)}>{run ?? i.run_id}</a>{:else}<NoValue label="no run" />{/if}</td>
@@ -270,7 +270,7 @@
             {@const alive = isAlive(i.status)}
             <li class="m-row" class:ended={!alive}>
               <div class="m-main">
-                <span class="gpu">{offerLine(i.offer, prefs.units)}</span>
+                <span class="gpu"><Meta>{#each offerParts(i.offer, prefs.units) as p (p)}<span>{p}</span>{/each}</Meta></span>
                 <span class="sub num">
                   <Meta>
                     <span class="st" data-status={i.status}><span class="dot" aria-hidden="true"></span>{INSTANCE_LABEL[i.status]}</span>

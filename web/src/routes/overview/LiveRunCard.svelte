@@ -12,7 +12,7 @@
   import { progressText, runProgress } from '$lib/api/progress';
   import { lr, metric, num } from '$lib/format';
   import { etaText, lastKnown, Now } from '$lib/api/freshness.svelte';
-  import { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
+  import { statusWord } from '$lib/ui/StatusBadge.svelte';
   import { deviceParts } from './device';
   import { runEvalSource, scoresTitle } from '$lib/evaluated';
   import { href } from '$lib/router.svelte';
@@ -108,7 +108,7 @@
   <header>
     <div class="title-row">
       {#if run}
-        <StatusBadge status={run.status} lastKnown={live.lost !== null ? lastKnown(STATUS_LABEL[run.status], live.lost, now.current) : undefined} />
+        <StatusBadge {run} lastKnown={live.lost !== null ? lastKnown(statusWord(run), live.lost, now.current) : undefined} />
         <h2 id="live-title"><a href={href(`/runs/${run.id}`)}>{run.name}</a></h2>
       {:else}
         <Skeleton w="80px" h="20px" r="var(--radius-full)" />

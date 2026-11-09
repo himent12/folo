@@ -408,7 +408,7 @@
 {:else}
   <Page title={run.name} inlineActions>
     {#snippet lead()}
-      <StatusBadge status={run.status} />
+      <StatusBadge {run} />
       <Ident value={run.id} class="faint id" />
       <!-- Phones: the time joins the status, so the meta line below fits one row. -->
       <span class="faint when-phone">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>

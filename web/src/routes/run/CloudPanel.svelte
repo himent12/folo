@@ -24,36 +24,57 @@
 </script>
 
 <Panel title="Cloud" meta={provider} id="cloud">
-  <ol class="phases" aria-label="Hand-over">
-    {#each PHASES as p, i (p)}
-      {@const s = state(i)}
-      <li data-state={s} aria-current={s === 'now' ? 'step' : undefined}>
-        <span class="mark" aria-hidden="true">{#if s === 'done'}<Check size={12} strokeWidth={2.25} />{/if}</span>
-        <span class="name">{PHASE_LABEL[p]}</span>
-        {#if s === 'now' && cloud.progress}
-          <span class="xfer num">{transferText(cloud.progress, prefs.units)}</span>
-          {#if share !== null}<span class="bar"><Progress value={share} size="xs" label="{PHASE_LABEL[p]}: {transferText(cloud.progress, prefs.units)}" /></span>{/if}
-        {/if}
-      </li>
-    {/each}
-    {#if at < 0}
-      <!-- A phase from a newer server: its own word, as the current one. -->
-      <li data-state="now" aria-current="step"><span class="mark" aria-hidden="true"></span><span class="name">{phaseLabel(cloud.phase)}</span></li>
-    {/if}
-  </ol>
-  <!-- One row per fact, each its own line: a long label never narrows another row's value. -->
-  <dl class="facts">
-    <div>
-      <dt>Instance</dt>
-      <dd>{#if cloud.instance_id}<a class="link" href={href('/settings?section=cloud')}>{offerLine(cloud.offer, prefs.units)}</a>{:else}{offerLine(cloud.offer, prefs.units)}{/if}</dd>
-    </div>
-    <div><dt>Cost</dt><dd class="num">{cost}</dd></div>
-    <div><dt>Limit</dt><dd class="num">{limit}</dd></div>
-    <div><dt>Last checkpoint copy</dt><dd class="num">{cloud.synced ? ago(cloud.synced) : 'none yet'}</dd></div>
-  </dl>
+  <div class="body"><div class="wrap">
+    <ol class="phases" aria-label="Hand-over">
+      {#each PHASES as p, i (p)}
+        {@const s = state(i)}
+        <li data-state={s} aria-current={s === 'now' ? 'step' : undefined}>
+          <span class="mark" aria-hidden="true">{#if s === 'done'}<Check size={12} strokeWidth={2.25} />{/if}</span>
+          <span class="name">{PHASE_LABEL[p]}</span>
+          {#if s === 'now' && cloud.progress}
+            <span class="xfer num">{transferText(cloud.progress, prefs.units)}</span>
+            {#if share !== null}<span class="bar"><Progress value={share} size="xs" label="{PHASE_LABEL[p]}: {transferText(cloud.progress, prefs.units)}" /></span>{/if}
+          {/if}
+        </li>
+      {/each}
+      {#if at < 0}
+        <!-- A phase from a newer server: its own word, as the current one. -->
+        <li data-state="now" aria-current="step"><span class="mark" aria-hidden="true"></span><span class="name">{phaseLabel(cloud.phase)}</span></li>
+      {/if}
+    </ol>
+    <!-- One row per fact, each its own line: a long label never narrows another row's value. -->
+    <dl class="facts">
+      <div>
+        <dt>Instance</dt>
+        <dd>{#if cloud.instance_id}<a class="link" href={href('/settings?section=cloud')}>{offerLine(cloud.offer, prefs.units)}</a>{:else}{offerLine(cloud.offer, prefs.units)}{/if}</dd>
+      </div>
+      <div><dt>Cost</dt><dd class="num">{cost}</dd></div>
+      <div><dt>Limit</dt><dd class="num">{limit}</dd></div>
+      <div><dt>Last checkpoint copy</dt><dd class="num">{cloud.synced ? ago(cloud.synced) : 'none yet'}</dd></div>
+    </dl>
+  </div></div>
 </Panel>
 
 <style>
+  /* Where the panel is wide (a tablet's section, the full width), the phases and the facts sit side by side, so the
+     panel uses its width instead of a narrow list with its right half empty. */
+  .body {
+    container-type: inline-size;
+  }
+  @container (min-width: 560px) {
+    .wrap {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      column-gap: var(--space-8);
+      align-items: start;
+    }
+    .wrap .phases {
+      margin-bottom: 0;
+    }
+    .wrap .facts {
+      border-top: 0;
+    }
+  }
   /* The phases, top to bottom: done ones with an ink check, the current one marked live (lime: it is happening now)
      with its transfer under it, those to come hollow. */
   .phases {
@@ -63,9 +84,10 @@
   .phases li {
     display: grid;
     grid-template-columns: 16px minmax(0, 1fr) auto;
+    /* Every phase's own line is 24 px, also the current one's above its transfer bar, so the steps keep one rhythm. */
+    grid-template-rows: 24px;
     align-items: center;
     column-gap: var(--space-2);
-    min-height: 24px;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);

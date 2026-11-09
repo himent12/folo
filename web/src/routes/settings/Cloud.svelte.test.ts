@@ -68,7 +68,8 @@ describe('Settings › Cloud', () => {
     expect(target.querySelector('#cloud header .btn.secondary')?.textContent?.trim()).toBe('Connect');
     const inst = await until(() => target.querySelector('table.inst tbody tr'), 'the instances');
     expect(inst.classList.contains('ended')).toBe(true);
-    expect(text(inst.querySelector('.gpu'))).toBe('RTX 4090 · 24.0 GiB · Secure Cloud');
+    // The offer as a meta line: one item each, so a wrapped line never ends on a "·".
+    expect([...inst.querySelectorAll('.gpu .ui-meta > span')].map(text)).toEqual(['RTX 4090', '24.0 GiB', 'Secure Cloud']);
     expect(text(inst.querySelector('.run a'))).toBe('shapes-m');
     expect(text(inst.querySelector('.st'))).toBe('Terminated');
     expect(button(inst, 'Terminate')).toBeUndefined();
@@ -86,13 +87,13 @@ describe('Settings › Cloud', () => {
   it('shows a failed check in words, and a termination that is not confirmed as a problem', async () => {
     open(new MockApi('cloud-trouble', 0));
     const err = await until(() => target.querySelector('.cx-error'), 'the error');
-    expect(text(err)).toContain('RunPod rejected the API key (401 Unauthorized)');
+    expect(text(err)).toContain('RunPod rejected this API key');
     expect(button(err.closest('li')!, 'Check again')).toBeDefined();
     const callout = await until(() => target.querySelector('#cloud-instances .callout'), 'the callout');
     expect(callout.getAttribute('role')).toBe('alert');
     expect(text(callout.querySelector('.c-title'))).toBe('Termination not confirmed');
     expect(text(callout.querySelector('.c-msg'))).toBe(
-      'FOLO could not confirm that folo-run_c3d5-4c1a is terminated: RunPod rejected the API key (401 Unauthorized). It keeps trying. Check the provider’s console for k2x9wq7m3fz1; the instance may still be billed.',
+      'FOLO could not confirm that folo-run_c3d5-4c1a is terminated: RunPod rejected this API key. It keeps trying. Check the provider’s console for k2x9wq7m3fz1; the instance may still be billed.',
     );
     expect(callout.querySelectorAll('.ident')).toHaveLength(2);
     const row = target.querySelector('table.inst tbody tr')!;

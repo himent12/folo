@@ -242,7 +242,7 @@ impl FoloApp {
                 let id = r.id.clone();
                 let detail = match r.status {
                     RunStatus::Running => format!("running · epoch {} / {}", r.epoch, r.epochs),
-                    s => format!("{} · {}", s.label().to_lowercase(), r.config.arch.as_str()),
+                    _ => format!("{} · {}", status_label(r).to_lowercase(), r.config.arch.as_str()),
                 };
                 items.push(PaletteItem {
                     group: "Runs",
@@ -2402,12 +2402,17 @@ impl FoloApp {
                                 .items_start()
                                 .justify_between()
                                 .gap(px(12.))
+                                // Providers write commands and flags as `code`.
                                 .child(
-                                    text(ty::SM, t.text_tertiary)
-                                        .flex_1()
-                                        .min_w_0()
-                                        .whitespace_normal()
-                                        .child(field.help.clone().unwrap_or_default()),
+                                    rich(
+                                        &t,
+                                        ty::SM,
+                                        t.text_tertiary,
+                                        field.help.as_deref().unwrap_or_default(),
+                                    )
+                                    .text_left()
+                                    .flex_1()
+                                    .min_w_0(),
                                 )
                                 .children(docs),
                         )
@@ -2437,7 +2442,7 @@ impl FoloApp {
                     .child(label("Provider"))
                     .child(provider_seg)
                     .when(!p.about.is_empty(), |d| {
-                        d.child(text(ty::SM, t.text_tertiary).whitespace_normal().child(p.about.clone()))
+                        d.child(rich(&t, ty::SM, t.text_tertiary, &p.about).text_left())
                     }),
             )
             .children(rows)

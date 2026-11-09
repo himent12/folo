@@ -23,7 +23,7 @@
   import { runProgress } from '$lib/api/progress';
   import { rowNav } from '$lib/ui/rowNav';
   import Skeleton from '$lib/ui/Skeleton.svelte';
-  import StatusBadge, { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
+  import StatusBadge, { statusWord } from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
   import { compareHint, compareReason } from './runs/compareHint';
@@ -69,7 +69,8 @@
   const queueCtl = $derived(hasFeature(system.data, 'queue_control'));
   const waiting = $derived((runs.data ?? []).filter((r) => r.status === 'queued' && r.queue_position != null).length);
   const training = $derived(runs.data?.find((r) => r.status === 'running' || r.status === 'stopping') ?? null);
-  const placeOf = (r: Run) => (queueCtl && r.status === 'queued' ? (r.queue_position ?? null) : null);
+  // A cloud run waits in no queue here (its hand-over is said by its status word), so it never has a place.
+  const placeOf = (r: Run) => (queueCtl && r.status === 'queued' && !r.cloud ? (r.queue_position ?? null) : null);
   function move(r: Run, req: QueueRequest) {
     void moveQueued(
       r,
@@ -219,7 +220,7 @@
                  that loading and loaded share; the run's name takes what is left. -->
             <th class="check"><span class="sr-only">Select for comparison</span></th>
             <th>Run</th>
-            <th style:width="112px">Status</th>
+            <th style:width="128px">Status</th>
             <th class="hide-lg" style:width="112px">Dataset</th>
             <th class="hide-lg" style:width="80px">Model</th>
             <th class="hide-lg" style:width="128px">Started from</th>
@@ -283,7 +284,7 @@
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
                   <span class="sub ctx"><Meta line><span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span><Ident value={r.config.arch} /><span>from <Lineage origin={from} link={false} scratch="scratch" /></span></Meta></span>
                 </td>
-                <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
+                <td use:tooltip={failureCause(r)}><StatusBadge run={r} plain /></td>
                 <td class="hide-lg muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
                 <td class="hide-lg"><Ident value={r.config.arch} class="muted" /></td>
                 <td class="hide-lg from">
@@ -359,12 +360,12 @@
             </label>
             <a class="r-main" href={href(`/runs/${r.id}`)}>
               <span class="r-text">
-                <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate" title={r.name}>{r.name}</span></span>
+                <span class="r-name"><StatusBadge run={r} plain dotOnly /><span class="name truncate" title={r.name}>{r.name}</span></span>
                 <!-- A failure's cause is a line of its own (it is the news), with the epoch and the whole dataset under it;
                      otherwise the status leads that line. Lines wrap whole items, so no fact is cut (DESIGN_DIRECTION
                      §2.3). With the checkboxes in, the dataset steps out. -->
                 {#if cause}<span class="r-cause" data-fact>{cause}</span>{/if}
-                <span class="r-meta num"><Meta>{#if !cause}<span>{placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : STATUS_LABEL[r.status]}</span>{/if}<span>{r.epoch}/{r.epochs}</span>{#if !choosing}<span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>{/if}</Meta></span>
+                <span class="r-meta num"><Meta>{#if !cause}<span>{placeOf(r) !== null ? queuePlace(placeOf(r) ?? 0) : statusWord(r)}</span>{/if}<span>{r.epoch}/{r.epochs}</span>{#if !choosing}<span>{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>{/if}</Meta></span>
               </span>
               <span class="r-end"><span class="r-val num">{#if r.best}{metric(r.best.map50_95)}{:else}<NoValue />{/if}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>

@@ -55,10 +55,12 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
   reloads; an unreachable server still runs the loaded copy). The demo data has no weights, so there it is Server only.
   `FOLO_SERVER=… cargo test real_server -- --ignored` checks local results against the server's.
 - **`MockBackend`** is built-in demo data (procedural shapes datasets, models and runs with a live simulator) used
-  for screenshots, tests and when no server is available. It also has cloud compute (docs/CLOUD.md): one RunPod
-  connection with a fixed offer list, a cloud run uploading its data, one training and one released, and runs
-  created with a GPU under Run on going through every phase; `+empty` scenarios have no connection and `+trouble`
-  ones a revoked key and a termination the provider hasn't confirmed.
+  for screenshots, tests and when no server is available. It also has cloud compute (docs/CLOUD.md), as
+  `folo serve --mock` does: the real providers' fields, one RunPod connection with a fixed offer list, one cloud
+  run released long ago (with its final cost and terminated instance), and runs created with a GPU under Run on
+  going through every phase. `MockBackend::with_cloud_runs` adds one uploading its data and one training (the
+  cloud scenarios: `+cloud`, `cloud-…`, `run-cloud+…`); `+empty` scenarios have no connection and `+trouble` ones
+  a revoked key and a termination the provider hasn't confirmed.
 
 ## Cloud compute
 

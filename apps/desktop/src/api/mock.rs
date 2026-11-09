@@ -531,7 +531,8 @@ const RTX4090_OFFER: &str = "NVIDIA GeForce RTX 4090@secure";
 const L40S_OFFER: &str = "NVIDIA L40S@secure";
 const A100_OFFER: &str = "NVIDIA A100 80GB PCIe@secure";
 
-/// The providers as `folo serve` lists them (docs/CLOUD.md, *Providers*).
+/// The providers as `folo serve` lists them: `info()` of `folo-cloud`'s RunPod and remote server,
+/// word for word (the Connect dialog is laid out for these texts).
 fn cloud_providers() -> Vec<CloudProvider> {
     let field =
         |key: &str, label: &str, secret: bool, required: bool, placeholder: Option<&str>, help: &str| {
@@ -548,7 +549,7 @@ fn cloud_providers() -> Vec<CloudProvider> {
         CloudProvider {
             id: "runpod".into(),
             name: "RunPod".into(),
-            about: "Rents a GPU pod by the hour for each run and terminates it when the run ends.".into(),
+            about: "Rents an on-demand GPU pod on RunPod for each run and terminates it when the run ends.".into(),
             docs_url: Some("https://www.runpod.io/console/user/settings".into()),
             fields: vec![
                 field(
@@ -557,15 +558,16 @@ fn cloud_providers() -> Vec<CloudProvider> {
                     true,
                     true,
                     Some("rpa_…"),
-                    "RunPod console › Settings › API Keys, with write access to pods.",
+                    "RunPod console → Settings → API Keys; the key needs read and write access to pods.",
                 ),
                 field(
                     "worker_base_url",
                     "Worker download URL",
                     false,
                     false,
-                    Some("https://github.com/himent12/folo/releases"),
-                    "Where pods download FOLO from; leave empty for this version's release.",
+                    Some("https://example.com/folo"),
+                    "Where instances download FOLO from (install.sh and the release archive) when not the \
+                     public release of this version: a mirror, or your own build.",
                 ),
             ],
             provisions: true,
@@ -573,8 +575,9 @@ fn cloud_providers() -> Vec<CloudProvider> {
         },
         CloudProvider {
             id: "remote".into(),
-            name: "FOLO server".into(),
-            about: "Another machine of yours that runs folo serve with a token; runs wait in its own queue."
+            name: "Remote FOLO server".into(),
+            about: "A FOLO server you run yourself (`folo serve --host 0.0.0.0 --token …`), on a workstation or a \
+                    VM at any cloud."
                 .into(),
             docs_url: None,
             fields: vec![
@@ -584,9 +587,17 @@ fn cloud_providers() -> Vec<CloudProvider> {
                     false,
                     true,
                     Some("https://gpu-box.example.com:7878"),
-                    "Use https:// across networks you don't control.",
+                    "The address of its `folo serve`; use https:// (a TLS proxy or a tunnel) across networks you \
+                     do not control.",
                 ),
-                field("token", "Token", true, true, None, "The --token that server was started with."),
+                field(
+                    "token",
+                    "Token",
+                    true,
+                    false,
+                    None,
+                    "Its `--token` (or FOLO_TOKEN); empty when it runs without one.",
+                ),
             ],
             provisions: false,
             self_terminates: false,
@@ -712,10 +723,23 @@ pub struct MockBackend {
 }
 
 const LIVE_ID: &str = "run_a19f";
+/// [`MockBackend::with_cloud_runs`]'s runs: uploading its dataset, and training on its instance.
+const CLOUD_SYNCING_ID: &str = "run_c1d0";
+const CLOUD_TRAINING_ID: &str = "run_c2e1";
 
 impl MockBackend {
     /// `live_step`: where the live run starts. `frozen`: keep the clock still (screenshots).
     pub fn new(live_step: u32, frozen: bool) -> Self {
+        Self::build(live_step, frozen, false)
+    }
+
+    /// The demo with two cloud runs under way besides: one uploading its dataset, one training on
+    /// its instance (the cloud screenshots).
+    pub fn with_cloud_runs(live_step: u32, frozen: bool) -> Self {
+        Self::build(live_step, frozen, true)
+    }
+
+    fn build(live_step: u32, frozen: bool, cloud_runs: bool) -> Self {
         let h = |hours: f64| MOCK_NOW - (hours * 3600.0) as i64;
         let datasets = vec![
             DatasetFixture::new(
@@ -949,7 +973,7 @@ impl MockBackend {
             model: Option<&'static str>,
             error: Option<&'static str>,
         }
-        let specs = vec![
+        let mut specs = vec![
             Spec {
                 id: LIVE_ID,
                 config: cfg("shapes-hard-m", "ds_3b91", "folo-m", 100, 32, 640, "gpu:0", 0.01),
@@ -1029,40 +1053,7 @@ impl MockBackend {
                 model: Some("m_31aa"),
                 error: None,
             },
-            // Cloud runs (docs/CLOUD.md): one uploading its dataset, one training, one released.
-            Spec {
-                id: "run_c1d0",
-                config: on(
-                    L40S_OFFER,
-                    24.,
-                    cfg("shapes-crowded-l", "ds_5e21", "folo-l", 120, 32, 800, "auto", 0.01),
-                ),
-                status: RunStatus::Queued,
-                step: 0,
-                spe: 50,
-                created_h: 0.1,
-                map_max: 0.62,
-                ips: 120.0,
-                model: None,
-                error: None,
-            },
-            Spec {
-                id: "run_c2e1",
-                // The out-of-memory run above, again on a 24 GB GPU.
-                config: on(
-                    RTX4090_OFFER,
-                    12.,
-                    cfg("shapes-hard-l-2", "ds_3b91", "folo-l", 100, 32, 1024, "auto", 0.01),
-                ),
-                status: RunStatus::Running,
-                step: 4400,
-                spe: 100,
-                created_h: 2.4,
-                map_max: 0.7,
-                ips: 96.0,
-                model: None,
-                error: None,
-            },
+            // The demo's one cloud run (docs/CLOUD.md), released long ago with its final cost.
             Spec {
                 id: "run_c9f1",
                 config: on(
@@ -1104,6 +1095,47 @@ impl MockBackend {
                 error: None,
             },
         ];
+        if cloud_runs {
+            // Among the newest, after the live and the queued run.
+            specs.splice(
+                2..2,
+                [
+                    Spec {
+                        id: CLOUD_SYNCING_ID,
+                        config: on(
+                            L40S_OFFER,
+                            24.,
+                            cfg("shapes-crowded-l", "ds_5e21", "folo-l", 120, 32, 800, "auto", 0.01),
+                        ),
+                        status: RunStatus::Queued,
+                        step: 0,
+                        spe: 50,
+                        created_h: 0.1,
+                        map_max: 0.62,
+                        ips: 120.0,
+                        model: None,
+                        error: None,
+                    },
+                    Spec {
+                        id: CLOUD_TRAINING_ID,
+                        // The out-of-memory run above, again on a 24 GB GPU.
+                        config: on(
+                            RTX4090_OFFER,
+                            12.,
+                            cfg("shapes-hard-l-2", "ds_3b91", "folo-l", 100, 32, 1024, "auto", 0.01),
+                        ),
+                        status: RunStatus::Running,
+                        step: 4400,
+                        spe: 100,
+                        created_h: 2.4,
+                        map_max: 0.7,
+                        ips: 96.0,
+                        model: None,
+                        error: None,
+                    },
+                ],
+            );
+        }
         let now = Instant::now();
         // Each run resolved against its own dataset's class count (Auto's AdamW rate depends on it).
         let nc = |ds: &str| datasets.iter().find(|d| d.ds.id == ds).map_or(5, |d| d.ds.classes.len());
@@ -1169,8 +1201,9 @@ impl MockBackend {
                 fixture
             })
             .collect::<Vec<RunFixture>>();
-        // The cloud fixtures live on their instances: 6 minutes into uploading 4.8 GiB, 2.4 hours
-        // into training (at step 4,400), and released 5 days ago after about an hour on an A100.
+        // The cloud fixtures live on their instances: released 5 days ago after training as long as
+        // it would have here (its Duration reads the same), 6 minutes into uploading 4.8 GiB, and 2.4
+        // hours into training (at step 4,400).
         let clock = Clock { frozen, started: now };
         let gib = 1u64 << 30;
         for f in &mut runs {
@@ -1186,12 +1219,17 @@ impl MockBackend {
                 total,
             );
             match f.run.id.as_str() {
-                "run_c1d0" => (sim.pre, sim.upload_bytes) = ([40., 150., 680.], gib * 24 / 5),
-                "run_c2e1" => {
+                CLOUD_SYNCING_ID => (sim.pre, sim.upload_bytes) = ([40., 150., 680.], gib * 24 / 5),
+                CLOUD_TRAINING_ID => {
                     (sim.pre, sim.upload_bytes) = ([45., 230., 290.], gib * 21 / 10);
                     sim.anchor = ((MOCK_NOW - t0) as f64, f.step);
                 }
-                _ => (sim.pre, sim.upload_bytes, sim.step_dt) = ([45., 240., 360.], gib * 13 / 10, 0.85),
+                _ => {
+                    let at = |t: &Option<String>| t.as_deref().and_then(time::parse).unwrap_or(t0);
+                    let trained = (at(&f.run.finished) - at(&f.run.started)) as f64 - COLLECT_S - RELEASE_S;
+                    (sim.pre, sim.upload_bytes) = ([45., 240., 360.], gib * 13 / 10);
+                    sim.step_dt = trained / total as f64;
+                }
             }
             // Unless anchored mid-run, training starts from step 0 when the upload ends.
             if sim.anchor.1 == 0 {
@@ -1255,8 +1293,8 @@ impl MockBackend {
         self
     }
 
-    /// The RunPod key revoked, and the training cloud run stopped ten minutes ago with a termination
-    /// RunPod hasn't confirmed: Settings › Cloud's problem states.
+    /// The RunPod key revoked, and a training cloud run ([`MockBackend::with_cloud_runs`]) stopped ten
+    /// minutes ago with a termination RunPod hasn't confirmed: Settings › Cloud's problem states.
     pub fn cloud_trouble(self) -> Self {
         if let Some(c) = self.connections.lock().unwrap().first_mut() {
             c.status = CloudConnectionStatus::Error;
@@ -3271,8 +3309,53 @@ mod tests {
     }
 
     #[test]
-    fn cloud_fixtures_upload_train_and_release() {
+    fn the_demo_lists_the_real_providers() {
+        let real: Vec<CloudProvider> = folo_cloud::providers().iter().map(|p| p.info()).collect();
+        assert_eq!(cloud_providers(), real);
+    }
+
+    #[test]
+    fn the_default_demo_has_one_released_cloud_run() {
         let m = MockBackend::new(0, true);
+        // The demo's runs as they were before cloud compute, one live; the oldest finished one
+        // trained on RunPod.
+        let runs = m.runs().unwrap();
+        let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "run_a19f", "run_b7e2", "run_52e8", "run_e4f0", "run_1a2b", "run_7d1e", "run_c9f1",
+                "run_d204", "run_0b5e"
+            ]
+        );
+        assert_eq!(
+            runs.iter().filter(|r| r.status.is_active()).count(),
+            2,
+            "the live run and the queued one"
+        );
+        assert_eq!(runs.iter().filter(|r| r.cloud.is_some()).count(), 1);
+        let released = m.run("run_c9f1").unwrap();
+        let c = released.cloud.as_ref().unwrap();
+        assert_eq!((released.status, c.phase), (RunStatus::Completed, CloudPhase::Released));
+        assert!(released.model_id.is_some() && released.device.contains("A100"));
+        // It trained as long as it did on this machine (the Runs table's Duration, 9m 21s).
+        let at = |t: &Option<String>| t.as_deref().and_then(time::parse).unwrap();
+        assert_eq!(at(&released.finished) - at(&released.started), 561);
+        // About 20 minutes of an A100 at $1.64/h, final.
+        assert!((0.5..0.6).contains(&c.cost_usd.unwrap()), "final cost {:?}", c.cost_usd);
+        let instances = m.cloud_instances().unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(
+            (instances[0].status, instances[0].run_id.as_deref()),
+            (CloudInstanceStatus::Terminated, Some("run_c9f1"))
+        );
+        assert_eq!(m.cloud_connections().unwrap().len(), 1);
+        assert!(m.system().unwrap().features.iter().any(|f| f == folo_api::FEATURE_CLOUD));
+    }
+
+    #[test]
+    fn cloud_runs_upload_and_train() {
+        let m = MockBackend::with_cloud_runs(0, true);
         let syncing = m.run("run_c1d0").unwrap();
         let c = syncing.cloud.as_ref().expect("a cloud run");
         assert_eq!(
@@ -3291,12 +3374,7 @@ mod tests {
         // 2.4 hours at $0.69/h so far.
         assert!((c.cost_usd.unwrap() - 0.69 * 2.4).abs() < 0.01, "{:?}", c.cost_usd);
         assert!(training.device.contains("RTX 4090") && c.deadline.is_some() && c.synced.is_some());
-        let released = m.run("run_c9f1").unwrap();
-        let c = released.cloud.as_ref().unwrap();
-        assert_eq!((released.status, c.phase), (RunStatus::Completed, CloudPhase::Released));
-        assert!(released.model_id.is_some() && released.finished.is_some());
-        assert!((1.5..2.5).contains(&c.cost_usd.unwrap()), "final cost {:?}", c.cost_usd);
-        // Instances: the two alive first, then the released one's, terminated.
+        // Instances: the two alive first, then the released run's, terminated.
         let instances = m.cloud_instances().unwrap();
         let alive: Vec<bool> = instances.iter().map(|i| i.status.is_alive()).collect();
         assert_eq!(alive, [true, true, false]);
@@ -3350,7 +3428,7 @@ mod tests {
 
     #[test]
     fn terminating_an_instance_fails_its_run() {
-        let m = MockBackend::new(0, true);
+        let m = MockBackend::with_cloud_runs(0, true);
         let training = m.run("run_c2e1").unwrap();
         let id = training.cloud.unwrap().instance_id.unwrap();
         let gone = m.terminate_instance(&id).unwrap();
@@ -3362,10 +3440,16 @@ mod tests {
 
     #[test]
     fn cloud_variants() {
-        let none = MockBackend::new(0, true).without_cloud();
+        let none = MockBackend::with_cloud_runs(0, true).without_cloud();
         assert!(none.cloud_connections().unwrap().is_empty() && none.cloud_instances().unwrap().is_empty());
-        assert!(none.runs().unwrap().iter().all(|r| r.cloud.is_none() && r.config.compute.is_none()));
-        let trouble = MockBackend::new(0, true).cloud_trouble();
+        let runs = none.runs().unwrap();
+        assert!(runs.iter().all(|r| r.cloud.is_none() && r.config.compute.is_none()));
+        assert_eq!(
+            runs.len(),
+            MockBackend::new(0, true).runs().unwrap().len(),
+            "the cloud runs under way go"
+        );
+        let trouble = MockBackend::with_cloud_runs(0, true).cloud_trouble();
         let conn = &trouble.cloud_connections().unwrap()[0];
         assert!(conn.status == CloudConnectionStatus::Error && conn.error.is_some());
         assert_eq!(trouble.cloud_offers(&conn.id, false).unwrap_err().code, "cloud_auth_failed");

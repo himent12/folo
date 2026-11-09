@@ -142,7 +142,10 @@ impl RunExt for Run {
     }
 
     fn cloud_pending(&self) -> Option<&RunCloud> {
-        self.cloud.as_ref().filter(|c| self.status == RunStatus::Queued && c.phase < CloudPhase::Training)
+        // Named, not compared: a newer server's phase (`Unknown`) has no known place in the order.
+        let handing_over =
+            |p: CloudPhase| matches!(p, CloudPhase::Provisioning | CloudPhase::Booting | CloudPhase::Syncing);
+        self.cloud.as_ref().filter(|c| self.status == RunStatus::Queued && handing_over(c.phase))
     }
 }
 

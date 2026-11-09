@@ -11,6 +11,7 @@
   import type { CloudConnection, CloudField, CloudProvider } from '$lib/api/types';
   import { sentence } from '$lib/format';
   import Button from '$lib/ui/Button.svelte';
+  import CodeText from '$lib/ui/CodeText.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Field from '$lib/ui/Field.svelte';
@@ -101,7 +102,7 @@
           <Segmented label="Provider" bind:value={providerId} onchange={reset} options={providers.map((p) => ({ value: p.id, label: p.name }))} />
         </Field>
       {:else}
-        <p class="about">{provider.about}</p>
+        <p class="about"><CodeText text={provider.about} /></p>
       {/if}
       {#each provider.fields as f (`${provider.id}/${f.key}`)}
         <Field label={f.label} for="{uid}-{f.key}" hint={f.help ?? undefined} error={fieldErrors[f.key] ?? null}>
