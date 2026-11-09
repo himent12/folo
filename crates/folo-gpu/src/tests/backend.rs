@@ -604,6 +604,53 @@ fn conv2d_forward_and_backward() {
             groups: 1,
             bias: true,
         },
+        // Stride phases (the input gradient's decomposition): groups, no padding on odd sizes, a kernel smaller
+        // than the stride (phases without taps), a kernel of 4 at stride 2, stride 2 with dilation 2 (not phased).
+        ConvCase {
+            x: [2, 8, 11, 9],
+            w: [12, 4, 3, 3],
+            stride: 2,
+            padding: 1,
+            dilation: 1,
+            groups: 2,
+            bias: false,
+        },
+        ConvCase {
+            x: [2, 5, 13, 12],
+            w: [7, 5, 3, 3],
+            stride: 2,
+            padding: 0,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
+        ConvCase {
+            x: [1, 6, 14, 13],
+            w: [9, 6, 2, 2],
+            stride: 3,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
+        ConvCase {
+            x: [2, 4, 12, 15],
+            w: [8, 4, 4, 4],
+            stride: 2,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
+        ConvCase {
+            x: [1, 4, 15, 15],
+            w: [6, 4, 3, 3],
+            stride: 2,
+            padding: 2,
+            dilation: 2,
+            groups: 1,
+            bias: false,
+        },
     ];
     for (i, c) in cases.iter().enumerate() {
         let x = randn(&c.x, 30 + i as u64);

@@ -248,6 +248,8 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
     // 0 = plain GEMM, 1 = conv forward, 2 = conv input gradient, 3 = conv weight gradient.
     let mode = spec.get_u32("CONV_MODE", 0);
     let conv = mode != 0;
+    // Input gradient of one stride phase (`super::conv`'s stride-phase decomposition).
+    let phase = mode == 2 && spec.get_bool("PHASE");
     let split = spec.get_bool("SPLIT");
     let bias = spec.get_u32("BIAS_KIND", 0);
     let f16 = spec.is_f16();
@@ -274,6 +276,9 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
 
     let mut s = String::new();
     s.push_str(UNARY_FN);
+    if phase {
+        s.push_str(super::conv::PHASE_PIXEL);
+    }
     let _ = writeln!(s, "@group(0) @binding(1) var<storage, read> A: array<{}>;", wgsl_ty(f16, va));
     let _ = writeln!(s, "@group(0) @binding(2) var<storage, read> B: array<{}>;", wgsl_ty(f16, vb && !conv));
     s.push_str("@group(0) @binding(3) var<storage, read> BIAS: array<T>;\n");
@@ -315,7 +320,12 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
         1 => s.push_str("  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n"),
         // Input gradient: B[k = (co, kh, kw)][j = (ih, iw)] = G[co][(ih + PH - kh*DH) / SH][(iw + PW - kw*DW) / SW]
         // where the divisions are exact and in range, else 0.
-        2 => s.push_str("  let IH = pu(24u); let IW = pu(25u); let OH = pu(26u); let OW = pu(27u);\n"),
+        2 => {
+            s.push_str("  let IH = pu(24u); let IW = pu(25u); let OH = pu(26u); let OW = pu(27u);\n");
+            if phase {
+                s.push_str("  let WR = pu(33u);\n");
+            }
+        }
         // Weight gradient: k = (n, oh, ow) runs over the whole batch; A[m][k] = G[n][m][oh, ow] and
         // B[k][j = (ci, kh, kw)] = X[n][ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
         3 => {
@@ -333,6 +343,10 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
             "  let cj = n0 + bi;\n  let coh = cj / OW; let cow = cj % OW;\n\
              let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;\n\
              let cjok = cj < N;\n",
+        ),
+        2 if phase => s.push_str(
+            "  let cj = n0 + bi; let cjok = cj < N;\n\
+             let ca = pi(30u) + i32(cj / WR); let cb = pi(31u) + i32(cj % WR);\n",
         ),
         2 => s.push_str(
             "  let cj = n0 + bi; let cjok = cj < N;\n\
@@ -418,6 +432,20 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                      \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
                      \x20       {reg}{comp} = f32(B[offB + (ci * IH + u32(ih)) * IW + u32(iw)]);\n\
                      \x20     }} else {{ {reg}{comp} = 0.0; }} }}"
+                );
+                continue;
+            }
+            2 if phase => {
+                // Unit (k = (co, th, tw), j = phase pixel (a, b)): output pixel (BH + a - th, BW + b - tw).
+                let _ = writeln!(
+                    load,
+                    "    {{ let k = k0 + {o}; let co = k / (PTH * PTW); let r = k % (PTH * PTW);\n\
+                     \x20     let oh = ca - i32(r / PTW); let ow = cb - i32(r % PTW);\n\
+                     \x20     var v = 0.0;\n\
+                     \x20     if (cjok && k < K && oh >= 0 && ow >= 0 && oh < i32(OH) && ow < i32(OW)) {{\n\
+                     \x20       v = f32(B[offB + (co * OH + u32(oh)) * OW + u32(ow)]);\n\
+                     \x20     }}\n\
+                     \x20     {reg}{comp} = v; }}"
                 );
                 continue;
             }
@@ -606,12 +634,19 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
                     let _ =
                         writeln!(s, "      if (col < N) {{ C[(offC + row * ldc + col) / 4u] = {cast}; }}");
                 } else {
+                    if phase {
+                        s.push_str("      var pp = ppix_at(col);\n");
+                    }
                     for c in 0..4 {
                         let cast = if c_f16 { format!("f16(v[{c}])") } else { format!("v[{c}]") };
+                        let at = if phase { "ppix_off(pp)".to_string() } else { format!("col + {c}u") };
                         let _ = writeln!(
                             s,
-                            "      if (col + {c}u < N) {{ C[offC + row * ldc + col + {c}u] = {cast}; }}"
+                            "      if (col + {c}u < N) {{ C[offC + row * ldc + {at}] = {cast}; }}"
                         );
+                        if phase && c < 3 {
+                            s.push_str("      ppix_next(&pp);\n");
+                        }
                     }
                 }
                 s.push_str("    }\n");

@@ -269,6 +269,8 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     // 0 = plain GEMM, 1 = conv forward, 2 = conv input gradient, 3 = conv weight gradient (as `super::gemm`).
     let mode = spec.get_u32("CONV_MODE", 0);
     let conv = mode != 0;
+    // Input gradient of one stride phase (`super::conv`'s stride-phase decomposition).
+    let phase = mode == 2 && spec.get_bool("PHASE");
     let split = spec.get_bool("SPLIT");
     let bias = spec.get_u32("BIAS_KIND", 0);
     let ct = if spec.get_bool("OUT_F16") { "f16" } else { "f32" };
@@ -285,6 +287,9 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let vty = |v: bool, scalar: &str| if v { format!("vec4<{scalar}>") } else { scalar.to_string() };
     let mut s = String::new();
     s.push_str(UNARY_FN);
+    if phase {
+        s.push_str(super::conv::PHASE_PIXEL);
+    }
     let _ = writeln!(s, "alias CT = {ct};");
     let _ = writeln!(s, "@group(0) @binding(1) var<storage, read> MA: array<{}>;", vty(va, "f16"));
     let _ = writeln!(s, "@group(0) @binding(2) var<storage, read> MB: array<{}>;", vty(vb && !conv, "f16"));
@@ -360,6 +365,15 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         }
         // Input gradient: column = input pixel; B[k = (co, kh, kw)][j] =
         // G[co][(ih + PH − kh·DH) / SH][(iw + PW − kw·DW) / SW] where both divisions are exact and in range, else 0.
+        2 if phase => {
+            let _ = writeln!(
+                s,
+                "  let OH = pu(26u); let OW = pu(27u); let WR = pu(33u);\n\
+                 \x20 let cj = n0 + {}; let cjok = cj < N;\n\
+                 \x20 let ca = pi(30u) + i32(cj / WR); let cb = pi(31u) + i32(cj % WR);",
+                pb.inner_expr()
+            );
+        }
         2 => {
             let _ = writeln!(
                 s,
@@ -448,6 +462,17 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
                  \x20       rb{u} = MB[offB + (ci * IH + u32(ih)) * IW + u32(iw)];\n\
                  \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            )
+        } else if phase {
+            // k = (co, th, tw), column = phase pixel (a, b): output pixel (BH + a - th, BW + b - tw).
+            format!(
+                "    {{ let k = k0 + {o}; let co = k / (PTH * PTW); let r = k % (PTH * PTW);\n\
+                 \x20     let oh = ca - i32(r / PTW); let ow = cb - i32(r % PTW);\n\
+                 \x20     var v = f16(0.0);\n\
+                 \x20     if (cjok && k < K && oh >= 0 && ow >= 0 && oh < i32(OH) && ow < i32(OW)) {{\n\
+                 \x20       v = MB[offB + (co * OH + u32(oh)) * OW + u32(ow)];\n\
+                 \x20     }}\n\
+                 \x20     rb{u} = v; }}\n"
             )
         } else if mode == 2 {
             format!(
@@ -652,13 +677,23 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                     let _ = writeln!(s, "      MC[({at}) / 4u + 1u] = vec4<CT>(v1);");
                 }
             } else {
+                if phase {
+                    s.push_str("      var pp = ppix_at(col);\n");
+                }
                 for c in 0..8 {
                     let (v, x) = if c < 4 { ("v0", c) } else { ("v1", c - 4) };
-                    if check {
-                        let _ =
-                            writeln!(s, "      if (col + {c}u < N) {{ MC[{at} + {c}u] = CT({v}[{x}]); }}");
+                    let at = if phase {
+                        "offC + row * ldc + ppix_off(pp)".to_string()
                     } else {
-                        let _ = writeln!(s, "      MC[{at} + {c}u] = CT({v}[{x}]);");
+                        format!("{at} + {c}u")
+                    };
+                    if check {
+                        let _ = writeln!(s, "      if (col + {c}u < N) {{ MC[{at}] = CT({v}[{x}]); }}");
+                    } else {
+                        let _ = writeln!(s, "      MC[{at}] = CT({v}[{x}]);");
+                    }
+                    if phase && c < 7 {
+                        s.push_str("      ppix_next(&pp);\n");
                     }
                 }
             }
@@ -964,6 +999,41 @@ pub(crate) fn encode_conv_backward_input(
     let Some(kernel) = build(ctx, with_window(spec, d)) else { return Ok(false) };
     let p = gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
     ctx.dispatch(&kernel, &[wt, grad, ctx.dummy(), gx], &p, grid(g, cfg, d.n * d.groups)?)?;
+    Ok(true)
+}
+
+/// One stride phase of the f16 conv `d`'s input gradient on tensor cores (`CONV_MODE` 2 with `PHASE`, see
+/// [`super::conv`]'s stride-phase decomposition): `g` is the phase's GEMM view (`M = C_in/groups`, `N` its
+/// pixels, `K = C_out/groups · th · tw`), `packed` the phase-packed weight. Returns `false` (nothing encoded) when
+/// the kernel failed to build.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_conv_backward_input_phase(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    g: &GemmDesc,
+    phase: &super::conv::Phase,
+    vec_a: bool,
+    packed: &wgpu::Buffer,
+    grad: &wgpu::Buffer,
+    gx: &wgpu::Buffer,
+) -> Result<bool> {
+    let (oh, ow) = d.output()?;
+    let Some(cfg) = resolve(ctx, None, || pick_config(g.m, g.n, d.n * d.groups))? else { return Ok(false) };
+    let check = !g.m.is_multiple_of(cfg.bm as usize)
+        || !g.n.is_multiple_of(cfg.bn as usize)
+        || !g.k.is_multiple_of(cfg.bk as usize)
+        || g.k == 0;
+    let spec = base_spec(g, DType::F16, cfg)
+        .bool("VEC_A", vec_a)
+        .bool("VEC_B", false)
+        .bool("VEC_C", false)
+        .bool("TRANS_A", false)
+        .bool("TRANS_B", false)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 2);
+    let Some(kernel) = build(ctx, phase.spec(with_window(spec, d))) else { return Ok(false) };
+    let p = phase.params(gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?)?;
+    ctx.dispatch(&kernel, &[packed, grad, ctx.dummy(), gx], &p, grid(g, cfg, d.n * d.groups)?)?;
     Ok(true)
 }
 

@@ -218,6 +218,16 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   `k = (c_out, kh, kw)`, reads the output-gradient pixel `((ih + PH - kh·DH) / SH, (iw + PW - kw·DW) / SW)` when
   the divisions are exact and in range (a strided conv leaves the rest zero). `A` is the weight permuted once to
   `[groups, C_in/g, C_out/g, KH·KW]`.
+- **Stride phases** (`CONV_MODE = 2` with `PHASE`): for a strided conv with dilation 1 (not depthwise), only the
+  taps `kh ≡ (ih + PH) mod SH` (and likewise for `kw`) reach input row `ih`, so the plain transposed conv
+  multiplies by zero for 3/4 of its `K` at 3×3 stride 2. The input pixels split into `SH·SW` phases by
+  `((ih + PH) mod SH, (iw + PW) mod SW)`; each phase is a dense implicit GEMM with `K = C_out/g · th · tw` (1, 2, 2
+  or 4 taps of the 9 at 3×3 s2, constants `PTH` / `PTW`), its `B` gathered at output pixel `(bh + a − t, bw + b −
+  u)` for phase pixel `(a, b)` and tap `(t, u)` with no divisibility test, and its epilogue writing column `j` to
+  plane offset `(IH0 + SH·(j / WR))·W + IW0 + SW·(j mod WR)` (`ppix`). `conv2d_phase_pack` packs the weight per
+  phase once (`[phase][g][C_in/g][C_out/g][th·tw]`, the `A` of each phase), replacing the permute. One dispatch
+  per phase; a phase without taps (kernel smaller than the stride) runs with `K = 0` and writes its zeros. Both
+  the regular and the tensor-core generator have it.
 - `CONV_MODE = 3` is the weight gradient: `K = N·OH·OW` folds the batch into the reduction, `A` rows are output-
   gradient planes read across images, and `B` is the image gathered as a transposed im2col (each thread owns one
   `(c_in, kh, kw)` column). `SPLIT = true` splits `K` into chunks, one per extra workgroup layer, each writing a
@@ -539,9 +549,8 @@ update kernel.
 - Backend: no general elementwise fusion. The fused paths are Conv + bias + activation (inference), BatchNorm +
   activation (training), the optimizer updates and the detection loss (`folo_gpu::detect`); other chains (residual
   adds, attention, gradient accumulation and clipping) are separate memory passes.
-- Backend: strided convolution input gradients run the transposed-conv GEMM over every `(kh, kw)` tap and skip
-  the positions the stride never touched (3/4 of the B tile is zero at stride 2); a stride-phase decomposition
-  would remove that waste.
+- Backend: strided convolution input gradients with dilation > 1 still run the transposed-conv GEMM over every
+  tap (dilated strided convs keep the old path; the detector has none).
 - Backend: index ops do not report out-of-range indices (see [folo-core backend](#folo-core-backend)), and top-k
   is one thread per row (`O(k · d)`), sized for assigner-style `k`.
 - Backend: `Device::Gpu(0)` only; registering further adapters as `Gpu(1..)` is a few lines with
