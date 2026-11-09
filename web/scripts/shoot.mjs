@@ -7,7 +7,7 @@
 // `npx playwright-core install --only-shell chromium` downloads. FOLO_SHOOT_BROWSER=chromium forces that one.
 // After each scene's setup, the QA lists every element whose content is wider than its box (and the page wider than the
 // viewport), skipping deliberate scrollers, every fact an ellipsis cuts (a `ui/Meta` item or a `data-fact` span inside a
-// truncated box: DESIGN_DIRECTION §2.3, never ellipsize a fact), and every blank section: a selected tab or section picker whose content
+// truncated box, or clipped past its box without one: DESIGN_DIRECTION §2.3, never cut a fact), and every blank section: a selected tab or section picker whose content
 // renders nothing, a page with almost nothing under its header. The list prints at the end and goes to qa.txt.
 // --qa runs only those checks, where phone layouts break: every scene at the tablet and mobile sizes it lists, in dark
 // (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model).
@@ -75,11 +75,17 @@ async function overflowCheck(page) {
     const doc = document.documentElement;
     const pageOver = doc.scrollWidth - doc.clientWidth;
     if (pageOver > 1) out.push({ selector: '(page)', px: pageOver, text: '' });
+    /** A clip that hides the box (visually hidden text), not one that trims an edge (ui/Meta's leading dot). */
+    const clipsAway = (/** @type {Element} */ el, /** @type {CSSStyleDeclaration} */ cs) => {
+      const clipped = (cs.clipPath !== 'none' && cs.clipPath !== '') || (cs.clip !== 'auto' && cs.clip !== '');
+      if (!clipped) return false;
+      const r = el.getBoundingClientRect();
+      return r.width <= 1 || r.height <= 1 || /inset\(\s*50%|rect\(\s*0(px)?[ ,]+0(px)?[ ,]+0(px)?[ ,]+0/.test(`${cs.clipPath} ${cs.clip}`);
+    };
     const hiddenBySelf = (/** @type {Element} */ el, /** @type {CSSStyleDeclaration} */ cs) =>
       cs.display === 'none' ||
       cs.visibility === 'hidden' ||
-      (cs.clipPath !== 'none' && cs.clipPath !== '') ||
-      (cs.clip !== 'auto' && cs.clip !== '') ||
+      clipsAway(el, cs) ||
       (el.getAttribute('aria-hidden') === 'true' && cs.position === 'absolute');
     const masked = (/** @type {Element | null} */ el) => {
       if (!el) return false;
@@ -97,6 +103,8 @@ async function overflowCheck(page) {
     };
     /** @type {{ el: Element, px: number }[]} */
     const hits = [];
+    /** @type {{ el: Element, px: number }[]} */
+    const clippedFacts = [];
     // A fact: a meta line's item (counts, units, statuses, identifiers) or a span marked `data-fact`. An ellipsis may
     // shorten a free-text name, never one of these (DESIGN_DIRECTION §2.3).
     const FACT = '.ui-meta, [data-fact]';
@@ -121,7 +129,14 @@ async function overflowCheck(page) {
           break;
         }
       }
-      if (!hidden) hits.push({ el, px });
+      if (hidden) continue;
+      // A fact cut without an ellipsis: its text runs past its box and is clipped or covered (round 25's "Completed in
+      // 53m 3" under the callout's button: a ui/Meta item that may shrink below its nowrap text).
+      if (el.closest(FACT) && el.checkVisibility({ checkVisibilityCSS: true })) {
+        clippedFacts.push({ el, px });
+        continue;
+      }
+      hits.push({ el, px });
     }
     /** The descendant that sticks out furthest past the box's left or right edge (null: its own text is too wide). */
     const culprit = (/** @type {Element} */ el) => {
@@ -149,6 +164,11 @@ async function overflowCheck(page) {
       }
       return false;
     };
+    for (const h of clippedFacts) {
+      if (clippedFacts.some((o) => o !== h && h.el.contains(o.el) && o.px >= h.px - 1)) continue;
+      const text = /** @type {HTMLElement} */ (h.el).innerText.replace(/\s+/g, ' ').trim().slice(0, 40);
+      out.push({ selector: `cut fact: ${describe(h.el)}`, px: h.px, text });
+    }
     // Overflow propagates up through every overflow-visible ancestor: keep the innermost box (an ancestor whose overflow
     // is no larger than a descendant's is the same spill seen again).
     for (const h of hits) {

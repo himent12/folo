@@ -55,6 +55,24 @@ describe('Settings', () => {
     expect(jump.querySelector('a.on')?.getAttribute('aria-current')).toBe('location');
   });
 
+  it('keeps a chosen section current until the person scrolls, and opens on ?section=', async () => {
+    hub.api = new MockApi('normal', 0);
+    router.route = parse('#/settings?section=system');
+    c = mount(Settings, { target });
+    const jump = target.querySelector<HTMLElement>('nav.jump')!;
+    // The URL's section, once the server's capabilities add it.
+    await until(() => jump.querySelector('a.on')?.textContent === 'System', 'System chosen by the URL');
+    expect(jump.querySelector('a.on')?.getAttribute('href')).toBe('#/settings?section=system');
+    // A scroll the page makes itself (a resize, a full-page capture) keeps it.
+    window.dispatchEvent(new Event('scroll'));
+    await new Promise((r) => requestAnimationFrame(r));
+    flushSync();
+    expect(jump.querySelector('a.on')?.textContent).toBe('System');
+    // The person's own scroll releases it to the geometry (no layout here: every top is 0, so the last section).
+    window.dispatchEvent(new Event('wheel'));
+    await until(() => jump.querySelector('a.on')?.textContent !== 'System', 'the scroll-spy again');
+  });
+
   it('says which theme is current in its own card and in its radio’s name', () => {
     hub.api = new MockApi('normal', 0);
     prefs.theme = 'light';

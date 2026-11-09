@@ -1,5 +1,6 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import CircleMinus from '@lucide/svelte/icons/circle-minus';
   import CircleSlash from '@lucide/svelte/icons/circle-slash';
@@ -35,6 +36,8 @@
   import ThemePreview from './settings/ThemePreview.svelte';
   import Throughput from './settings/Throughput.svelte';
   import { hasFeature } from '$lib/throughput';
+  import { href, router } from '$lib/router.svelte';
+  import { SCROLL_KEYS, sectionAt } from './settings/spy';
 
   setCrumbs({ label: 'Settings' });
 
@@ -62,57 +65,96 @@
   /** The server's own reasons as plain text, for an issue or a terminal. */
   const report = $derived(caps && sys.data ? driverReport(capRows, caps.device, deviceSummary(caps, sys.data.gpus, sys.data.cpu.name)) : '');
 
-  // Scroll-spy from geometry: the current section is the last one whose top has passed just below the top bar
-  // (the first while nothing has; the last once the page is scrolled to the bottom).
+  // Scroll-spy from geometry (./settings/spy): the current section is the one under the sticky chrome (the top bar,
+  // and below 1024 px the strip under it), never the last one because the page has bottomed out. A section chosen by a
+  // click or by the URL (`#/settings?section=system`) stays current until the person scrolls the page themselves, so a
+  // short last section that cannot reach the chrome still reads as the one they asked for.
   let current = $state<string>('connection');
+  /** The section a click or the URL chose; released by the person's own scroll (wheel, touch, keys, scrollbar). */
+  let chosen: string | null = null;
   /** Below 1024 px: the sticky jump strip under the top bar (the rail's place on wider screens). */
   let jumpEl = $state<HTMLElement>();
+  let spy = () => {};
   $effect(() => {
     let raf = 0;
     const update = () => {
       raf = 0;
-      // Just under the sticky chrome: the top bar, and below 1024 px the jump strip under it.
+      if (chosen) {
+        current = chosen;
+        return;
+      }
       const strip = jumpEl && jumpEl.offsetParent ? jumpEl.getBoundingClientRect().bottom : 48;
-      const line = strip + 24;
-      const els = sections.map((x) => document.getElementById(x.id)).filter((e): e is HTMLElement => !!e);
-      let id = els[0]?.id ?? 'connection';
-      for (const e of els) if (e.getBoundingClientRect().top <= line) id = e.id;
-      if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2) id = els[els.length - 1]?.id ?? id;
-      current = id;
+      const tops = sections.flatMap((x) => {
+        const el = document.getElementById(x.id);
+        return el ? [{ id: x.id, top: el.getBoundingClientRect().top }] : [];
+      });
+      current = sectionAt(tops, strip + 24) ?? 'connection';
     };
+    spy = update;
     const onscroll = () => {
       if (!raf) raf = requestAnimationFrame(update);
     };
+    const release = () => {
+      if (chosen === null) return;
+      chosen = null;
+      onscroll();
+    };
+    const onkey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (SCROLL_KEYS.has(e.key) && !t?.closest('input, textarea, select, [role=slider], [role=radiogroup]')) release();
+    };
+    // The page's own scrollbar: a press on the root element, not on content.
+    const onpointer = (e: PointerEvent) => e.target === document.documentElement && release();
     update();
     window.addEventListener('scroll', onscroll, { passive: true });
     window.addEventListener('resize', onscroll);
+    window.addEventListener('wheel', release, { passive: true });
+    window.addEventListener('touchmove', release, { passive: true });
+    window.addEventListener('keydown', onkey);
+    window.addEventListener('pointerdown', onpointer);
     return () => {
       cancelAnimationFrame(raf);
       window.removeEventListener('scroll', onscroll);
       window.removeEventListener('resize', onscroll);
+      window.removeEventListener('wheel', release);
+      window.removeEventListener('touchmove', release);
+      window.removeEventListener('keydown', onkey);
+      window.removeEventListener('pointerdown', onpointer);
     };
   });
 
-  // The jump strip keeps the current section's link in view as the page scrolls.
+  // The jump strip keeps the current section's chip in view, whole and clear of the faded edges, as the page scrolls.
   $effect(() => {
     void current;
     const on = jumpEl?.querySelector<HTMLElement>('a.on');
     if (!jumpEl || !on || !jumpEl.offsetParent) return;
     const left = on.offsetLeft - jumpEl.offsetLeft;
-    if (left < jumpEl.scrollLeft || left + on.offsetWidth > jumpEl.scrollLeft + jumpEl.clientWidth)
-      jumpEl.scrollTo({ left: Math.max(0, left - 16), behavior: 'instant' });
+    const fade = 48;
+    if (left - fade < jumpEl.scrollLeft || left + on.offsetWidth + fade > jumpEl.scrollLeft + jumpEl.clientWidth)
+      jumpEl.scrollTo({ left: Math.max(0, left - (jumpEl.clientWidth - on.offsetWidth) / 2), behavior: 'instant' });
   });
 
   /** Goes to a section: its heading clear of the sticky chrome (scroll-margin-top), and focus on the section, so the
-   *  keyboard and a screen reader continue from there. */
+   *  keyboard and a screen reader continue from there. It stays the current one until the person scrolls. */
   function goTo(id: string) {
+    chosen = id;
     current = id;
     const el = document.getElementById(id);
     if (!el) return;
     el.scrollIntoView({ block: 'start' });
     if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
     el.focus({ preventScroll: true });
+    spy();
   }
+
+  // `#/settings?section=system`: the page opens on that section (once it exists: System waits for the server).
+  const asked = $derived(router.route.name === 'settings' ? router.route.query.get('section') : null);
+  let opened: string | null = null;
+  $effect(() => {
+    if (!asked || asked === opened || !sections.some((s) => s.id === asked)) return;
+    opened = asked;
+    requestAnimationFrame(() => goTo(asked));
+  });
 
   // ---- connection ----
   const origin = typeof location === 'undefined' ? '' : location.origin;
@@ -166,18 +208,22 @@
   {#snippet sub()}<span>Preferences are stored in this browser.</span>{/snippet}
 
   <!-- Below 1024 px the rail goes: its sections as one sticky strip under the top bar, so System and About are a tap
-       away from the top of a long page. It scrolls sideways where the links do not fit (a phone). -->
-  <nav class="jump" aria-label="Settings sections" data-scrolls use:fadeScroll bind:this={jumpEl}>
-    {#each sections as s (s.id)}<a
-        href="#/settings"
-        class:on={current === s.id}
-        aria-current={current === s.id ? 'location' : undefined}
-        onclick={(e) => {
-          e.preventDefault();
-          goTo(s.id);
-        }}>{s.label}</a
-      >{/each}
-  </nav>
+       away from the top of a long page. It scrolls sideways where the links do not fit (a phone): the clipped edge fades
+       and carries a chevron, so the sections past it read as more to scroll to, never as a cut label. -->
+  <div class="jump-bar">
+    <nav class="jump" aria-label="Settings sections" data-scrolls use:fadeScroll bind:this={jumpEl}>
+      {#each sections as s (s.id)}<a
+          href={href(`/settings?section=${s.id}`)}
+          class:on={current === s.id}
+          aria-current={current === s.id ? 'location' : undefined}
+          onclick={(e) => {
+            e.preventDefault();
+            goTo(s.id);
+          }}>{s.label}</a
+        >{/each}
+    </nav>
+    <span class="jump-more" aria-hidden="true"><ChevronRight size={16} strokeWidth={1.75} /></span>
+  </div>
 
   <div class="layout">
     <div class="col">
@@ -408,7 +454,7 @@
     <nav class="toc" aria-label="Settings sections">
       <p class="toc-title">On this page</p>
       {#each sections as s (s.id)}<a
-          href="#/settings"
+          href={href(`/settings?section=${s.id}`)}
           class:on={current === s.id}
           aria-current={current === s.id ? 'location' : undefined}
           onclick={(e) => {
@@ -798,7 +844,7 @@
     text-align: right;
     color: var(--text-secondary);
   }
-  .jump {
+  .jump-bar {
     display: none;
   }
   @media (max-width: 1023px) {
@@ -813,33 +859,52 @@
     }
     /* A full-bleed strip on the page's background, just under the top bar: the sections as links, the current one
        neutral (bg.active, as the rail's), a hairline under it once content scrolls beneath. */
-    .jump {
+    .jump-bar {
       position: sticky;
       top: var(--size-topbar);
       z-index: var(--z-sticky);
+      display: block;
+      /* Full bleed: out over the page's side gutters (24 px; 16 on phones). */
+      margin: 0 calc(-1 * var(--space-6));
+      background: var(--bg-app);
+      border-bottom: 1px solid var(--line-subtle);
+    }
+    .jump {
       display: flex;
       align-items: center;
       gap: var(--space-1);
       height: 44px;
-      /* Full bleed: out over the page's side gutters (24 px; 16 on phones). */
-      margin: 0 calc(-1 * var(--space-6));
       padding: 0 var(--space-5);
       overflow-x: auto;
       scrollbar-width: none;
-      background: var(--bg-app);
-      border-bottom: 1px solid var(--line-subtle);
     }
     .jump::-webkit-scrollbar {
       display: none;
     }
+    /* A scroller says so (DESIGN_DIRECTION §2.12): the edge with more behind it fades over 48 px, wide enough that the
+       cut chip reads as passing under the edge, and the end carries a chevron. */
     .jump:global([data-fade='end']) {
-      mask-image: linear-gradient(to right, #000 calc(100% - 32px), transparent);
+      mask-image: linear-gradient(to right, #000 calc(100% - 64px), transparent calc(100% - 16px));
     }
     .jump:global([data-fade='start']) {
-      mask-image: linear-gradient(to left, #000 calc(100% - 32px), transparent);
+      mask-image: linear-gradient(to left, #000 calc(100% - 48px), transparent);
     }
     .jump:global([data-fade='both']) {
-      mask-image: linear-gradient(to right, transparent, #000 32px, #000 calc(100% - 32px), transparent);
+      mask-image: linear-gradient(to right, transparent, #000 48px, #000 calc(100% - 64px), transparent calc(100% - 16px));
+    }
+    .jump-more {
+      position: absolute;
+      top: 0;
+      right: var(--space-2);
+      bottom: 0;
+      display: none;
+      align-items: center;
+      color: var(--text-tertiary);
+      pointer-events: none;
+    }
+    .jump:global([data-fade='end']) + .jump-more,
+    .jump:global([data-fade='both']) + .jump-more {
+      display: flex;
     }
     .jump a {
       flex-shrink: 0;
@@ -867,8 +932,10 @@
     }
   }
   @media (max-width: 767px) {
-    .jump {
+    .jump-bar {
       margin: 0 calc(-1 * var(--space-4));
+    }
+    .jump {
       padding: 0 var(--space-3);
     }
   }

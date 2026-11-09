@@ -1530,7 +1530,8 @@ export const scenes = [
     ({ name, search }) =>
       /** @type {Scene} */ ({
         name,
-        path: '/settings',
+        // The System panel is the subject: the page opens on it, so the section strip marks System.
+        path: '/settings?section=system',
         search,
         // The whole page: the harness shoots from the top, and the panel sits near the bottom.
         fullPage: true,
@@ -1546,7 +1547,7 @@ export const scenes = [
     // Server PR #140 (`gpu_pool`): FOLO's GPU memory in Settings › System: in use, cached and the peak, in the one size
     // format, the device beside it (the whole page: the panel sits near the bottom).
     name: 'settings-gpu-pool',
-    path: '/settings',
+    path: '/settings?section=system',
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
@@ -1570,7 +1571,7 @@ export const scenes = [
   {
     // The server's own words opened under Driver report: wrapped prose in a well, copyable whole.
     name: 'settings-system-report',
-    path: '/settings',
+    path: '/settings?section=system',
     search: 'scenario=no-tensor-cores',
     fullPage: true,
     viewports: ['desktop', 'mobile'],
@@ -1584,7 +1585,7 @@ export const scenes = [
     // Settings › System › Throughput: the rows this server measured (training, predictions; one from another adapter),
     // their spread, samples and age, and Measure now.
     name: 'settings-throughput',
-    path: '/settings',
+    path: '/settings?section=system',
     // The whole page: the harness shoots from the top, and the block sits near the bottom.
     fullPage: true,
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
@@ -1596,7 +1597,7 @@ export const scenes = [
   {
     // Measure now running: the button busy, the elapsed seconds counted against "up to 10 s".
     name: 'settings-measuring',
-    path: '/settings',
+    path: '/settings?section=system',
     // The whole page: the harness shoots from the top, and the block sits near the bottom.
     fullPage: true,
     viewports: ['desktop', 'mobile'],
