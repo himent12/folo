@@ -10,10 +10,11 @@
 // no `throughput`, `run_estimate`, `benchmark` or `run_cli` feature, and those endpoints answer 404), `stale` (the server
 // stops answering, its live stream too, 3 s after load), `stale-lists` (the requests stop, the live stream keeps streaming) and `amp-refused`
 // (the server restarted without tensor cores after the page loaded: `/api/system` said mixed precision was available,
-// `POST /api/runs` refuses it with `501 not_supported`, and `/api/system` says so from then on), for screenshots of
-// those states.
+// `POST /api/runs` refuses it with `501 not_supported`, and `/api/system` says so from then on), `no-labeling` (`folo serve
+// --mock`: no `agent_labeling` feature, and the labeling endpoints answer `501 not_implemented`) and `all-agents` (both
+// labeling agents installed; elsewhere Codex is not), for screenshots of those states.
 
-import { ApiError, type Api, type RunEventHandlers } from '../client';
+import { ApiError, type Api, type LabelEventHandlers, type RunEventHandlers } from '../client';
 import type {
   Arch,
   BenchmarkReport,
@@ -23,6 +24,7 @@ import type {
   ClassMetrics,
   CliCommand,
   CreateDataset,
+  CreateLabelJob,
   CreateSyntheticDataset,
   Dataset,
   DatasetImages,
@@ -34,6 +36,13 @@ import type {
   GpuPool,
   Health,
   IssueCounts,
+  LabelAgent,
+  LabelDatasetRequest,
+  LabelImage,
+  LabelImagePage,
+  LabelImagesAdded,
+  LabelImagesQuery,
+  LabelJob,
   LogLine,
   Model,
   ModelEval,
@@ -50,12 +59,16 @@ import type {
   RunSamples,
   Sample,
   Split,
+  StartLabeling,
   SystemInfo,
   ThroughputTable,
   TrainConfig,
+  UpdateLabelJob,
 } from '../types';
+import { imageSize, inventBoxes, predictBoxes, round, withDuplicates, type Scored } from './boxes';
 import { image, imageIndex, indices, issues, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
 import { synthEvaluation, toModelEval } from './evaluation';
+import { MockLabeling, mockAgents } from './label';
 import { renderImage } from './render';
 import { hash, rng, smoothNoise, range } from './rng';
 import {
@@ -76,9 +89,11 @@ import {
 } from './runs';
 import { COCO80 } from './coco';
 import { applyQueueMove } from '../queue';
+import { chunkFiles, mergeAdded, type UploadProgress } from '../upload';
 import { onnxFileName } from '../client';
 import { CPU_NAME, MockThroughput } from './throughput';
 import { trainCommand } from '../../trainCli';
+import { LABEL_FEATURE } from '../../label';
 
 export type Scenario =
   | 'normal'
@@ -102,7 +117,11 @@ export type Scenario =
   // and the page says the lists alone are not refreshing.
   | 'stale-lists'
   // A Studio build without folo-wasm: /api/system does not list `web_wasm`, so Playground's browser choices are off.
-  | 'no-wasm';
+  | 'no-wasm'
+  // `folo serve --mock`: no agent labeling (the feature is not listed; its endpoints answer 501 not_implemented).
+  | 'no-labeling'
+  // Both labeling agents installed (Codex is not, elsewhere).
+  | 'all-agents';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -403,9 +422,6 @@ function withResolved(p: RunProfile, train?: number): RunProfile {
   return { ...p, resolved: resolveTrain(p.config, images, p.classes, p.stepsPerEpoch) };
 }
 
-/** A prediction before it gets its class name. */
-type Scored = Box & { score: number };
-
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 export class MockApi implements Api {
@@ -429,6 +445,8 @@ export class MockApi implements Api {
   /** Runs created through the API: while one is queued or running, a benchmark probe answers `409 run_active`. */
   #created = new Set<string>();
   #probing = false;
+  /** Agent labeling: its jobs, runs and streams (./label). */
+  #label: MockLabeling;
 
   constructor(
     readonly scenario: Scenario = 'normal',
@@ -438,6 +456,7 @@ export class MockApi implements Api {
     this.#runs = scenario === 'empty' ? [] : profiles(this.#t0, scenario);
     this.#datasets = scenario === 'empty' ? [] : [...specs];
     this.#throughput = new MockThroughput(this.#t0);
+    this.#label = new MockLabeling(this.#t0, scenario !== 'empty', scenario === 'all-agents');
     this.#queue = this.#runs
       .filter((p) => p.startedAt === null && !p.terminal)
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -555,6 +574,7 @@ export class MockApi implements Api {
             : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli']),
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
+          ...(this.#labeling() ? [LABEL_FEATURE] : []),
         ],
         capabilities: this.#capabilities(),
         ...(pool ? { gpu_pool: pool } : {}),
@@ -1257,6 +1277,136 @@ export class MockApi implements Api {
     return [...lines, ...notes].sort((a, b) => a.t.localeCompare(b.t));
   }
 
+  // ---------- agent labeling ----------
+
+  /** Whether this server labels: not `folo serve --mock` (`no-labeling`), nor a server from before it (`no-throughput`). */
+  #labeling() {
+    return this.scenario !== 'no-labeling' && this.scenario !== 'no-throughput';
+  }
+
+  /** A labeling call: `folo serve --mock` answers 501, an older server has no such route. */
+  async #labelCall<T>(path: string, fn: () => T | Promise<T>, latency?: number): Promise<T> {
+    return this.#call(() => {
+      if (this.scenario === 'no-throughput') throw this.#noRoute(path);
+      if (!this.#labeling()) throw new ApiError(501, 'not_implemented', 'Agent labeling needs a real server.', 'Start folo serve without --mock to label images.');
+      return fn();
+    }, latency);
+  }
+
+  labelAgents(): Promise<LabelAgent[]> {
+    return this.#labelCall('GET /api/label/agents', () => mockAgents(this.scenario === 'all-agents'), 80);
+  }
+
+  labelJobs(): Promise<LabelJob[]> {
+    return this.#labelCall('GET /api/label/jobs', () => this.#label.jobs(Date.now()));
+  }
+
+  labelJob(id: string): Promise<LabelJob> {
+    return this.#labelCall(`GET /api/label/jobs/${id}`, () => this.#label.job(id, Date.now()));
+  }
+
+  createLabelJob(body: CreateLabelJob): Promise<LabelJob> {
+    return this.#labelCall('POST /api/label/jobs', () => this.#label.create(body, Date.now()), 300);
+  }
+
+  updateLabelJob(id: string, body: UpdateLabelJob): Promise<LabelJob> {
+    return this.#labelCall(`PUT /api/label/jobs/${id}`, () => this.#label.update(id, body, Date.now()));
+  }
+
+  deleteLabelJob(id: string): Promise<void> {
+    return this.#labelCall(`DELETE /api/label/jobs/${id}`, () => this.#label.delete(id, Date.now()));
+  }
+
+  labelImages(jobId: string, q: LabelImagesQuery = {}): Promise<LabelImagePage> {
+    return this.#labelCall(`GET /api/label/jobs/${jobId}/images`, () => this.#label.images(jobId, q, Date.now()), 90);
+  }
+
+  addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void): Promise<LabelImagesAdded> {
+    // One request per chunk, as the server takes them (lib/api/upload): progress moves as a real upload's does.
+    return this.#labelCall(`POST /api/label/jobs/${jobId}/images`, async () => {
+      const parts: LabelImagesAdded[] = [];
+      let sent = 0;
+      for (const chunk of chunkFiles(files)) {
+        parts.push(await this.#label.upload(jobId, chunk, Date.now()));
+        sent += chunk.length;
+        onprogress?.({ sent, total: files.length });
+        if (this.latency > 0) await sleep(this.latency * 2);
+      }
+      return mergeAdded(parts) ?? { added: [], skipped: [], job: this.#label.job(jobId, Date.now()) };
+    });
+  }
+
+  importLabelImages(jobId: string, path: string): Promise<LabelImagesAdded> {
+    return this.#labelCall(`POST /api/label/jobs/${jobId}/images`, () => this.#label.importPath(jobId, path, Date.now()), 500);
+  }
+
+  updateLabelImage(jobId: string, imageId: string, boxes: Box[]): Promise<LabelImage> {
+    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.#label.updateImage(jobId, imageId, boxes, Date.now()));
+  }
+
+  deleteLabelImage(jobId: string, imageId: string): Promise<void> {
+    return this.#labelCall(`DELETE /api/label/jobs/${jobId}/images/${imageId}`, () => this.#label.deleteImage(jobId, imageId, Date.now()));
+  }
+
+  startLabeling(jobId: string, body: StartLabeling): Promise<LabelJob> {
+    return this.#labelCall(`POST /api/label/jobs/${jobId}/start`, () => this.#label.start(jobId, body, Date.now()), 200);
+  }
+
+  stopLabeling(jobId: string): Promise<LabelJob> {
+    return this.#labelCall(`POST /api/label/jobs/${jobId}/stop`, () => this.#label.stop(jobId, Date.now()));
+  }
+
+  labelLogs(jobId: string, limit = 500): Promise<{ lines: LogLine[] }> {
+    return this.#labelCall(`GET /api/label/jobs/${jobId}/logs`, () => this.#label.logs(jobId, limit, Date.now()), 120);
+  }
+
+  createLabelDataset(jobId: string, body: LabelDatasetRequest): Promise<Dataset> {
+    return this.#labelCall(
+      `POST /api/label/jobs/${jobId}/dataset`,
+      () => {
+        const spec = this.#label.dataset(jobId, body, this.#datasets.map((d) => d.name), Date.now());
+        this.#datasets.unshift(spec);
+        return toDataset(spec, this.#t0, true);
+      },
+      700,
+    );
+  }
+
+  async labelImageUrl(jobId: string, imageId: string, thumb?: number): Promise<string> {
+    return this.#label.imageUrl(jobId, imageId, thumb);
+  }
+
+  labelEvents(jobId: string, h: LabelEventHandlers): () => void {
+    if (this.scenario === 'loading' || this.scenario === 'error' || !this.#labeling()) {
+      if (this.scenario === 'error') setTimeout(() => h.connection?.('reconnecting'), 500);
+      return () => {};
+    }
+    const unsub = this.#label.subscribe(jobId, h);
+    const t0 = setTimeout(() => {
+      h.connection?.('open');
+      try {
+        h.job?.(this.#label.job(jobId, Date.now()));
+      } catch {
+        // A job deleted meanwhile: its stream has nothing to say.
+      }
+    }, 30);
+    let dropped = false;
+    const timer = setInterval(() => {
+      // `stale`: the server stops, its stream with it.
+      if (this.scenario === 'stale' && Date.now() - this.#t0 > STALE_AFTER) {
+        if (!dropped) h.connection?.('reconnecting');
+        dropped = true;
+        return;
+      }
+      this.#label.tick(jobId, Date.now());
+    }, 250);
+    return () => {
+      clearTimeout(t0);
+      clearInterval(timer);
+      unsub();
+    };
+  }
+
   // ---------- inference ----------
 
   modelWeightsTag(): Promise<string | null> {
@@ -1333,85 +1483,4 @@ export class MockApi implements Api {
       };
     })();
   }
-}
-
-function round(x: number, d: number) {
-  const k = 10 ** d;
-  return Math.round(x * k) / k;
-}
-
-async function imageSize(file: Blob): Promise<{ width: number; height: number }> {
-  try {
-    const bmp = await createImageBitmap(file);
-    const out = { width: bmp.width, height: bmp.height };
-    bmp.close();
-    return out;
-  } catch {
-    throw new ApiError(400, 'bad_image', 'That file is not an image FOLO can decode.', 'Use a JPEG, PNG or WebP.');
-  }
-}
-
-/** Predictions for an image with known ground truth: misses, jitter, confusions and low-score false positives. */
-export function predictBoxes(truth: Box[], W: number, H: number, quality: number, seed: number, classes: number): Scored[] {
-  const r = rng(seed);
-  const q = Math.max(0, Math.min(1, quality));
-  const out: Scored[] = [];
-  for (const t of truth) {
-    if (r() > 0.25 + 0.75 * Math.min(1, q * 1.25)) continue;
-    const w = t.x2 - t.x1;
-    const h = t.y2 - t.y1;
-    const j = (1 - q) * 0.22;
-    const nx1 = t.x1 + w * j * (r() - 0.5) * 2;
-    const ny1 = t.y1 + h * j * (r() - 0.5) * 2;
-    const nx2 = t.x2 + w * j * (r() - 0.5) * 2;
-    const ny2 = t.y2 + h * j * (r() - 0.5) * 2;
-    const cls = r() < (1 - q) * 0.25 ? Math.floor(r() * classes) : t.class;
-    out.push(clampBox({ class: cls, x1: nx1, y1: ny1, x2: nx2, y2: ny2, score: Math.min(0.99, 0.3 + 0.62 * q + (r() - 0.5) * 0.3) }, W, H));
-  }
-  const fps = Math.round((1 - q) * 4 * r() + r() * 1.5);
-  for (let i = 0; i < fps; i++) {
-    const w = range(r, W * 0.04, W * 0.2);
-    const h = w * range(r, 0.6, 1.5);
-    const x1 = range(r, 0, W - w);
-    const y1 = range(r, 0, H - h);
-    out.push(clampBox({ class: Math.floor(r() * classes), x1, y1, x2: x1 + w, y2: y1 + h, score: range(r, 0.04, 0.42) }, W, H));
-  }
-  return out.sort((a, b) => b.score - a.score);
-}
-
-/** Adds lower-scored, slightly shifted copies of some boxes (IoU ≈ 0.75–0.9 with the original). */
-function withDuplicates(boxes: Scored[], W: number, H: number, seed: number): Scored[] {
-  const r = rng(seed);
-  const out = [...boxes];
-  for (const b of boxes) {
-    if (b.score < 0.3 || r() > 0.55) continue;
-    const w = b.x2 - b.x1;
-    const h = b.y2 - b.y1;
-    const j = () => (r() - 0.5) * 0.08;
-    out.push(clampBox({ ...b, x1: b.x1 + w * j(), y1: b.y1 + h * j(), x2: b.x2 + w * j(), y2: b.y2 + h * j(), score: b.score * range(r, 0.45, 0.8) }, W, H));
-  }
-  return out.sort((a, b) => b.score - a.score);
-}
-
-/** Plausible boxes for an uploaded image the mock knows nothing about. */
-function inventBoxes(W: number, H: number, seed: number, classes: number): Scored[] {
-  const r = rng(seed);
-  const n = 3 + Math.floor(r() * 6);
-  const out: Scored[] = [];
-  for (let i = 0; i < n; i++) {
-    const w = range(r, W * 0.08, W * 0.35);
-    const h = range(r, H * 0.1, H * 0.45);
-    const x1 = range(r, 0, W - w);
-    const y1 = range(r, 0, H - h);
-    out.push(clampBox({ class: Math.floor(r() * Math.min(classes, 12)), x1, y1, x2: x1 + w, y2: y1 + h, score: i < 3 ? range(r, 0.55, 0.96) : range(r, 0.05, 0.5) }, W, H));
-  }
-  return out.sort((a, b) => b.score - a.score);
-}
-
-function clampBox<T extends Scored>(b: T, W: number, H: number): T {
-  const x1 = Math.max(0, Math.min(W, b.x1));
-  const x2 = Math.max(0, Math.min(W, b.x2));
-  const y1 = Math.max(0, Math.min(H, b.y1));
-  const y2 = Math.max(0, Math.min(H, b.y2));
-  return { ...b, x1: round(Math.min(x1, x2), 1), y1: round(Math.min(y1, y2), 1), x2: round(Math.max(x1, x2), 1), y2: round(Math.max(y1, y2), 1), score: round(b.score, 4) };
 }

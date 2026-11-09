@@ -4,8 +4,10 @@
 import type {
   BenchmarkReport,
   BenchmarkRequest,
+  Box,
   CliCommand,
   CreateDataset,
+  CreateLabelJob,
   CreateSyntheticDataset,
   Dataset,
   DatasetImages,
@@ -15,6 +17,15 @@ import type {
   ExportFormat,
   ExportResult,
   Health,
+  LabelAgent,
+  LabelDatasetRequest,
+  LabelEventMap,
+  LabelImage,
+  LabelImagePage,
+  LabelImagesAdded,
+  LabelImagesQuery,
+  LabelJob,
+  LogLine,
   Model,
   ModelEval,
   OnnxSwitches,
@@ -28,11 +39,14 @@ import type {
   RunMetrics,
   RunEstimate,
   RunSamples,
+  StartLabeling,
   SystemInfo,
   ThroughputTable,
   TrainConfig,
+  UpdateLabelJob,
 } from './types';
-import { openEventStream } from './sse';
+import { LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
+import { chunkFiles, mergeAdded, type UploadProgress } from './upload';
 
 export class ApiError extends Error {
   constructor(
@@ -46,14 +60,8 @@ export class ApiError extends Error {
   }
 }
 
-export type RunEventHandlers = {
-  [K in keyof RunEventMap]?: (data: RunEventMap[K]) => void;
-} & {
-  /** Called after the stream reconnects; callers should refetch history to fill the gap. */
-  reconnect?: () => void;
-  /** Connection state changes, for "reconnecting…" indicators. */
-  connection?: (state: 'open' | 'reconnecting') => void;
-};
+export type RunEventHandlers = EventHandlers<RunEventMap>;
+export type LabelEventHandlers = EventHandlers<LabelEventMap>;
 
 export interface Api {
   readonly mock: boolean;
@@ -126,6 +134,40 @@ export interface Api {
   modelWeights(id: string, signal?: AbortSignal): Promise<ArrayBuffer>;
   /** The weights' current ETag (a HEAD request): it changes when the model's file does. Null when unknown. */
   modelWeightsTag(id: string, signal?: AbortSignal): Promise<string | null>;
+
+  // Agent labeling (docs/API.md; servers list `agent_labeling`).
+  /** Claude Code, then Codex, each with whether its CLI is installed on the server's machine. */
+  labelAgents(signal?: AbortSignal): Promise<LabelAgent[]>;
+  /** Newest first. */
+  labelJobs(signal?: AbortSignal): Promise<LabelJob[]>;
+  labelJob(id: string, signal?: AbortSignal): Promise<LabelJob>;
+  createLabelJob(body: CreateLabelJob): Promise<LabelJob>;
+  /** `409 label_job_active` while a run is active; once the job has boxes, classes may only be renamed or appended. */
+  updateLabelJob(id: string, body: UpdateLabelJob): Promise<LabelJob>;
+  /** Removes the job, its uploaded images and labels; never folder images or datasets made from it. */
+  deleteLabelJob(id: string): Promise<void>;
+  labelImages(jobId: string, q?: LabelImagesQuery, signal?: AbortSignal): Promise<LabelImagePage>;
+  /**
+   * Uploads images (multipart, one `image` part each) in requests of at most ~48 MiB / 50 files (the server takes
+   * 64 MiB a request), calling `onprogress` after each. The answers are merged: every file added or skipped, and the
+   * job after the last.
+   */
+  addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void): Promise<LabelImagesAdded>;
+  /** Adds the images of a folder (or one image file) on the server's machine, read in place. */
+  importLabelImages(jobId: string, path: string): Promise<LabelImagesAdded>;
+  /** Labels drawn by hand: they replace the image's boxes and it becomes `labeled` by `manual` (none: a background image). */
+  updateLabelImage(jobId: string, imageId: string, boxes: Box[]): Promise<LabelImage>;
+  deleteLabelImage(jobId: string, imageId: string): Promise<void>;
+  startLabeling(jobId: string, body: StartLabeling): Promise<LabelJob>;
+  stopLabeling(jobId: string): Promise<LabelJob>;
+  /** Subscribes to a job's SSE stream (it replays nothing: load the images, then apply events). */
+  labelEvents(jobId: string, handlers: LabelEventHandlers): () => void;
+  /** The job's log history (its `log` events), oldest first. */
+  labelLogs(jobId: string, limit?: number, signal?: AbortSignal): Promise<{ lines: LogLine[] }>;
+  /** Writes the job's labeled images as a YOLO dataset and registers it. */
+  createLabelDataset(jobId: string, body: LabelDatasetRequest): Promise<Dataset>;
+  /** URL of a job's image (thumbnail when `thumb` is set), as `imageUrl`. */
+  labelImageUrl(jobId: string, imageId: string, thumb?: number): Promise<string>;
 }
 
 /** The file name of a `Content-Disposition: attachment; filename="…"` header, or null. */
@@ -285,7 +327,73 @@ export class HttpApi implements Api {
     return this.#req<RunSamples>('GET', `/runs/${encodeURIComponent(id)}/samples${qs({ epoch })}`, undefined, signal);
   }
   runEvents(id: string, handlers: RunEventHandlers) {
-    return openEventStream(`${this.base}/api/runs/${encodeURIComponent(id)}/events`, handlers);
+    return openEventStream(`${this.base}/api/runs/${encodeURIComponent(id)}/events`, RUN_EVENTS, handlers);
+  }
+
+  async labelAgents(signal?: AbortSignal) {
+    return (await this.#req<{ agents: LabelAgent[] }>('GET', '/label/agents', undefined, signal)).agents;
+  }
+  async labelJobs(signal?: AbortSignal) {
+    return (await this.#req<{ jobs: LabelJob[] }>('GET', '/label/jobs', undefined, signal)).jobs;
+  }
+  labelJob(id: string, signal?: AbortSignal) {
+    return this.#req<LabelJob>('GET', `/label/jobs/${encodeURIComponent(id)}`, undefined, signal);
+  }
+  createLabelJob(body: CreateLabelJob) {
+    return this.#req<LabelJob>('POST', '/label/jobs', body);
+  }
+  updateLabelJob(id: string, body: UpdateLabelJob) {
+    return this.#req<LabelJob>('PUT', `/label/jobs/${encodeURIComponent(id)}`, body);
+  }
+  deleteLabelJob(id: string) {
+    return this.#req<void>('DELETE', `/label/jobs/${encodeURIComponent(id)}`);
+  }
+  labelImages(jobId: string, q: LabelImagesQuery = {}, signal?: AbortSignal) {
+    return this.#req<LabelImagePage>(
+      'GET',
+      `/label/jobs/${encodeURIComponent(jobId)}/images${qs({ status: q.status, offset: q.offset, limit: q.limit })}`,
+      undefined,
+      signal,
+    );
+  }
+  async addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void) {
+    const parts: LabelImagesAdded[] = [];
+    let sent = 0;
+    for (const chunk of chunkFiles(files)) {
+      const fd = new FormData();
+      for (const f of chunk) fd.append('image', f, f.name);
+      parts.push(await this.#req<LabelImagesAdded>('POST', `/label/jobs/${encodeURIComponent(jobId)}/images`, fd));
+      sent += chunk.length;
+      onprogress?.({ sent, total: files.length });
+    }
+    return mergeAdded(parts) ?? { added: [], skipped: [], job: await this.labelJob(jobId) };
+  }
+  importLabelImages(jobId: string, path: string) {
+    return this.#req<LabelImagesAdded>('POST', `/label/jobs/${encodeURIComponent(jobId)}/images`, { path });
+  }
+  updateLabelImage(jobId: string, imageId: string, boxes: Box[]) {
+    return this.#req<LabelImage>('PUT', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`, { boxes });
+  }
+  deleteLabelImage(jobId: string, imageId: string) {
+    return this.#req<void>('DELETE', `/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}`);
+  }
+  startLabeling(jobId: string, body: StartLabeling) {
+    return this.#req<LabelJob>('POST', `/label/jobs/${encodeURIComponent(jobId)}/start`, body);
+  }
+  stopLabeling(jobId: string) {
+    return this.#req<LabelJob>('POST', `/label/jobs/${encodeURIComponent(jobId)}/stop`);
+  }
+  labelEvents(jobId: string, handlers: LabelEventHandlers) {
+    return openEventStream(`${this.base}/api/label/jobs/${encodeURIComponent(jobId)}/events`, LABEL_EVENTS, handlers);
+  }
+  labelLogs(jobId: string, limit?: number, signal?: AbortSignal) {
+    return this.#req<{ lines: LogLine[] }>('GET', `/label/jobs/${encodeURIComponent(jobId)}/logs${qs({ limit })}`, undefined, signal);
+  }
+  createLabelDataset(jobId: string, body: LabelDatasetRequest) {
+    return this.#req<Dataset>('POST', `/label/jobs/${encodeURIComponent(jobId)}/dataset`, body);
+  }
+  async labelImageUrl(jobId: string, imageId: string, thumb?: number) {
+    return `${this.base}/api/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}${qs({ thumb })}`;
   }
 
   async modelWeights(id: string, signal?: AbortSignal) {
