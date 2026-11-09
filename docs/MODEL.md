@@ -706,7 +706,7 @@ thread stages the next batch in a mapped buffer while the current step runs, so 
 and a `u8 → f32 / 255` conversion on the device; the loss is folo-gpu's (§7.4); global-norm clipping computes the norm
 and the factor on the device. A step waits for the GPU twice, both after the loss: the reported items and the
 finiteness check of the running statistics (one readback for all of them). Validation uploads `u8` batches too and
-runs the predictor's forward + decode on the device (NMS on the host). The numbers are the same as on the CPU up to
+runs the predictor's forward + decode on the device (NMS on the host); the download, NMS and scoring of a batch run on a second thread while the next batches' forward passes run, with the same result as one after the other. The numbers are the same as on the CPU up to
 float rounding (sums in other orders), so a run is reproducible on one device (a GPU resume is bit-exact) but not
 bit-identical across devices. If the GPU is lost mid-run (a driver reset / TDR), the run fails with `status: failed`
 and a message naming the lost device and the `--resume` command: checkpoints are written only at epoch boundaries, so
