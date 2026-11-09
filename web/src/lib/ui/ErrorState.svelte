@@ -38,7 +38,7 @@
     offline ? `Nothing answered at ${hub.serverUrl}.` : oom ? 'The GPU ran out of memory.' : error instanceof ApiError ? sentence(raw) : raw,
   );
   const serverHint = $derived(error instanceof ApiError && error.hint ? sentence(error.hint) : undefined);
-  const hint = $derived(offline ? 'Start folo serve, or check the server URL.' : (ownHint ?? serverHint));
+  const hint = $derived(offline ? 'Start `folo serve`, or check the server URL.' : (ownHint ?? serverHint));
   /** The hint in parts, identifiers (in backticks, as the server writes them) set in mono. */
   const hintParts = $derived((hint ?? '').split('`').map((text, i) => ({ text, code: i % 2 === 1 })));
   const code = $derived(error instanceof ApiError ? `${error.code}${error.status ? ` · HTTP ${error.status}` : ''}` : undefined);

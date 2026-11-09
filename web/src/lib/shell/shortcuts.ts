@@ -19,18 +19,23 @@ export function showShortcuts() {
   window.dispatchEvent(new Event(SHOW_SHORTCUTS));
 }
 
-export const shortcutList: { keys: string; label: string; group: string }[] = [
+/**
+ * Every shortcut the reference lists. `single`: a single-character key that Settings can turn off (ui/keyPrefs); the
+ * rest (Mod+K, the arrow keys and Enter of a focused list or chart, the image inspector's own keys) always work.
+ */
+export const shortcutList: { keys: string; label: string; group: string; single?: boolean }[] = [
   { keys: 'Mod+K', label: 'Command palette', group: 'General' },
-  { keys: '?', label: 'Keyboard shortcuts', group: 'General' },
-  { keys: '[', label: 'Collapse or expand the sidebar', group: 'General' },
-  { keys: 'N', label: 'New training run', group: 'General' },
-  ...[...mainNav, settingsNav].map((n) => ({ keys: n.keys, label: `Go to ${n.label}`, group: 'Navigation' })),
+  { keys: '?', label: 'Keyboard shortcuts', group: 'General', single: true },
+  { keys: '[', label: 'Collapse or expand the sidebar', group: 'General', single: true },
+  { keys: 'N', label: 'New training run', group: 'General', single: true },
+  ...[...mainNav, settingsNav].map((n) => ({ keys: n.keys, label: `Go to ${n.label}`, group: 'Navigation', single: true })),
   // Rows of the Runs, Models and Datasets tables (ui/rowNav.ts). J / K enter the list when nothing has focus.
-  { keys: 'J K', label: 'Next / previous row', group: 'Lists' },
+  { keys: 'J K', label: 'Next / previous row', group: 'Lists', single: true },
   { keys: 'ArrowDown ArrowUp', label: 'Next / previous row (focused list)', group: 'Lists' },
   { keys: 'Enter', label: 'Open the row', group: 'Lists' },
-  { keys: 'X', label: 'Select the run to compare (Runs)', group: 'Lists' },
+  { keys: 'X', label: 'Select the run to compare (Runs)', group: 'Lists', single: true },
   { keys: 'ArrowLeft ArrowRight', label: 'Move the chart cursor (focused chart)', group: 'Charts' },
+  // The dataset image inspector's own keys: they work while it is open, whatever the setting.
   { keys: 'J K', label: 'Next / previous image (inspector)', group: 'Datasets' },
   { keys: '+ -', label: 'Zoom in / out (inspector)', group: 'Datasets' },
   { keys: '0', label: 'Fit image (inspector)', group: 'Datasets' },

@@ -78,28 +78,6 @@
   });
 
   /**
-   * The largest off-diagonal confusion between two real classes (background excluded), row-normalised over the full
-   * matrix. Rows with very few instances are skipped so one stray box can't top the list.
-   */
-  const confused = $derived.by(() => {
-    if (!ev) return null;
-    const conf = ev.confusion;
-    const k = conf.length - 1;
-    let best: { r: number; c: number; v: number } | null = null;
-    for (let r = 0; r < k; r++) {
-      const row = conf[r] ?? [];
-      const sum = row.reduce((a, b) => a + b, 0);
-      if (sum < 20) continue;
-      for (let c = 0; c < k; c++) {
-        if (c === r) continue;
-        const v = (row[c] ?? 0) / sum;
-        if (v > 0 && (!best || v > best.v)) best = { r, c, v };
-      }
-    }
-    return best;
-  });
-
-  /**
    * Missed objects: the share of real instances whose only match was background (the matrix's last column), overall
    * and for the class that misses most (rows with very few instances skipped, as above).
    */
@@ -121,21 +99,9 @@
     return total ? { v: miss / total, worst } : null;
   });
 
-  // The summary points into the matrix: each figure is a button that reveals its cell (on a phone the matrix scrolls
+  // The ranked lists point into the matrix: each line is a button that reveals its cell (on a phone the matrix scrolls
   // sideways, so the background column starts out of view).
   let matrixView = $state<ConfusionMatrix>();
-  const confusedCell = $derived.by(() => {
-    if (!cm || !confused) return null;
-    const r = cmIndex(confused.r, cm.ids);
-    const c = cmIndex(confused.c, cm.ids);
-    return r === null || c === null ? null : { r, c };
-  });
-  const missedCell = $derived.by(() => {
-    if (!cm || !missed?.worst) return null;
-    const r = cmIndex(missed.worst.r, cm.ids);
-    return r === null ? null : { r, c: cm.classes.length };
-  });
-
   let exportOpen = $state(false);
   // Up to 1199 px the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
   const narrow = new MediaQuery('max-width: 1199px', false);
@@ -145,15 +111,16 @@
   let section = $state<ModelSection>('curves');
   const showing = (part: ModelSection) => sectionShown(phone.current, section, part);
 
-  // Phones: the Confusion section opens on a ranked list of what goes wrong; the full matrix is one step further.
+  // What goes wrong most, ranked: beside the matrix in a rail on wider screens; on phones the Confusion section opens on
+  // these lists and the full matrix is one step further.
   let cmExplore = $state(false);
   // Two short groups, so misses (usually the larger shares) never crowd out the confusions between classes.
   const RANK_MAX = 5;
   const ranked = $derived.by(() => {
     const all = ev ? rankConfusions(ev.confusion, Infinity) : [];
     return [
-      { kind: 'confused', title: 'Taken for another class', rows: all.filter((e) => e.kind === 'confused').slice(0, RANK_MAX) },
-      { kind: 'missed', title: 'Missed', rows: all.filter((e) => e.kind === 'missed').slice(0, RANK_MAX) },
+      { kind: 'confused', title: 'Most confused', rows: all.filter((e) => e.kind === 'confused').slice(0, RANK_MAX) },
+      { kind: 'missed', title: 'Most missed', rows: all.filter((e) => e.kind === 'missed').slice(0, RANK_MAX) },
     ].filter((g) => g.rows.length);
   });
   /** Any confusion or miss at all, counting the classes too small to rank (fewer than 20 objects). */
@@ -224,8 +191,9 @@
     { label: 'Precision', short: 'P', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
     { label: 'Recall', short: 'R', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
   ];
-  // Phones past the first section: the four numbers fold into one line, so the section starts on the first screen.
-  const kpiLine = $derived(phone.current && section !== 'curves');
+  // Phones: the four numbers on one line in every section (Curves too), so the strip never changes shape between
+  // sections and each section starts on the first screen; what they mean is behind the ⓘ.
+  const kpiLine = $derived(phone.current);
   // What the four numbers mean, one tap away (the strip itself keeps to values and a short qualifier).
   let helpOpen = $state(false);
   // Phones: one summary line under the top bar; the rest of the provenance behind it.
@@ -254,8 +222,32 @@
     {:else if lineage?.kind === 'file'}
       <span>fine-tuned from <span class="mono" title={lineage.path}>{lineage.label}</span></span>
     {:else if lineage?.kind === 'scratch'}
-      <span>trained from scratch</span>
+      <span>from scratch</span>
     {/if}
+  {/snippet}
+  {#snippet metricHelp()}
+    <dl class="k-body" id="metric-help">
+      <div>
+        <dt>AP and mAP</dt>
+        <dd>AP is the area under one class's precision–recall curve. mAP is the mean of AP over all {m.classes.length} classes; per-class tables show AP.</dd>
+      </div>
+      <div>
+        <dt>50 and 50-95</dt>
+        <dd>The overlap (IoU) a box needs with a true box to count as found: 0.50, or AP averaged over IoU 0.50 to 0.95 in 0.05 steps.</dd>
+      </div>
+      <div>
+        <dt>Precision, recall</dt>
+        <dd>Measured at the confidence that gives the best F1 (precision and recall balanced, averaged over classes, at IoU 0.50): the model's best trade-off between missed objects and false boxes.</dd>
+      </div>
+      <div>
+        <dt>Evaluated on</dt>
+        <dd>
+          {#if context.data?.dataset}The validation split of {context.data.dataset.name}{:else}The validation split of the model's dataset{/if}{ev
+            ? ` (${num(ev.images)} images)`
+            : ''}, at {m.imgsz} px with NMS IoU 0.7.
+        </dd>
+      </div>
+    </dl>
   {/snippet}
   {#snippet provenance()}
     {#if m.run_id}
@@ -299,15 +291,22 @@
          the ⓘ opens what they mean. Phones: the headline on its own row at 32 px, the other three as a row under it. -->
     {#if kpiLine}
       <section class="kpi-line num" aria-label="Validation metrics">
-        {#each kpis(m) as k, i (k.label)}
-          {#if i}<span class="sep" aria-hidden="true">·</span>{/if}
-          <span class="kl-item"
-            >{#if k.short !== k.label}<span class="kl" aria-hidden="true">{k.short}</span><span class="sr-only">{k.label}</span>{:else}<span class="kl"
-                >{k.label}</span
-              >{/if}
-            <b>{metric(k.value)}</b></span
+        <div class="kl-row">
+          <span class="kl-vals">
+            {#each kpis(m) as k, i (k.label)}
+              <span class="kl-item"
+                >{#if k.short !== k.label}<span class="kl" aria-hidden="true">{k.short}</span><span class="sr-only">{k.label}</span>{:else}<span class="kl"
+                    >{k.label}</span
+                  >{/if}
+                <b>{metric(k.value)}</b></span
+              >
+            {/each}
+          </span>
+          <button type="button" class="kl-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
+            ><Info size={14} aria-hidden="true" /></button
           >
-        {/each}
+        </div>
+        {#if helpOpen}{@render metricHelp()}{/if}
       </section>
     {:else}
     <section class="kpis" aria-label="Validation metrics">
@@ -321,30 +320,7 @@
       <button type="button" class="k-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
         ><Info size={14} aria-hidden="true" /></button
       >
-      {#if helpOpen}
-        <dl class="k-body" id="metric-help">
-          <div>
-            <dt>AP and mAP</dt>
-            <dd>AP is the area under one class's precision–recall curve. mAP is the mean of AP over all {m.classes.length} classes; per-class tables show AP.</dd>
-          </div>
-          <div>
-            <dt>50 and 50-95</dt>
-            <dd>The overlap (IoU) a box needs with a true box to count as found: 0.50, or AP averaged over IoU 0.50 to 0.95 in 0.05 steps.</dd>
-          </div>
-          <div>
-            <dt>Precision, recall</dt>
-            <dd>At the one confidence threshold that maximises the class-mean F1 at IoU 0.50. The server does not report which threshold that was.</dd>
-          </div>
-          <div>
-            <dt>Evaluated on</dt>
-            <dd>
-              {#if context.data?.dataset}The validation split of {context.data.dataset.name}{:else}The validation split of the model's dataset{/if}{ev
-                ? ` (${num(ev.images)} images)`
-                : ''}, at {m.imgsz} px with NMS IoU 0.7.
-            </dd>
-          </div>
-        </dl>
-      {/if}
+      {#if helpOpen}{@render metricHelp()}{/if}
     </section>
     {/if}
 
@@ -359,7 +335,7 @@
     <div class="detail" class:off={!showing('curves') && !showing('classes') && !showing('details')}>
       <div class="main-col" class:off={!showing('curves') && !showing('classes')}>
         <Panel
-          title={phone.current && section === 'classes' ? 'Per-class AP' : 'Precision–recall'}
+          title={phone.current && section === 'classes' ? 'Per class' : 'Precision–recall'}
           meta={phone.current && section === 'classes' ? `${m.classes.length} classes · IoU 0.5` : 'precision by recall · IoU 0.5'}
           pad="none"
           id="pr"
@@ -433,7 +409,7 @@
                   {:else if lineage.kind === 'file'}
                     <span class="mono" title={lineage.path}>{lineage.label}</span>
                   {:else}
-                    <span class="muted">Random weights (from scratch)</span>
+                    <span class="muted">From scratch</span>
                   {/if}
                 </dd>
               </div>
@@ -530,58 +506,58 @@
           {#if phone.current}
             <button type="button" class="to-list" onclick={closeMatrix}><ArrowLeft size={14} aria-hidden="true" />Confusions and misses</button>
           {/if}
-          <!-- The matrix at its own size (cells up to 72 px), what to read from it directly beside it, so the panel has
-               no dead middle. Up to 1199 px the two consequential cells lead (a phone's matrix scrolls sideways,
-               hiding the background column), and the reading notes follow the matrix. -->
+          <!-- The matrix at its own size (cells up to 72 px) with a sticky 4-column rail beside it: what goes wrong most,
+               ranked (each line shows its cell), and how to read the matrix. Up to 1199 px the rail follows the matrix,
+               its two lists side by side. Phones lead with the matrix alone: the lists are the step back. -->
           <div class="cm-layout">
             <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
-            {#if confused || missed}
-              <dl class="cm-sum">
-                {#if confused}
-                  <div>
-                    <dt>Most confused</dt>
-                    <dd>
-                      {#snippet pair()}<b>{m.classes[confused.r]}</b> → <b>{m.classes[confused.c]}</b> <span class="num">{sharePct(confused.v)}%</span>{/snippet}
-                      {#if confusedCell}
-                        {@const at = confusedCell}
-                        <button type="button" class="go" title="Show in the matrix" onclick={() => reveal(at)}>{@render pair()}</button>
-                      {:else}{@render pair()}{/if}
-                    </dd>
+            <div class="cm-rail">
+              {#if !phone.current}
+                {#each ranked as g (g.kind)}
+                  <section class="rl" aria-labelledby="cm-rl-{g.kind}">
+                    <h3 class="rl-h" id="cm-rl-{g.kind}">{g.title}</h3>
+                    <ol>
+                      {#each g.rows as e (`${e.r}-${e.c}`)}
+                        {@const at = cellOf(e)}
+                        <li>
+                          <button
+                            type="button"
+                            class="rl-row"
+                            disabled={!at}
+                            title={at ? 'Show in the matrix' : undefined}
+                            aria-label="{e.kind === 'missed' ? `${m.classes[e.r]} missed` : `${m.classes[e.r]} taken for ${m.classes[e.c]}`}: {num(e.count)} of {num(e.total)}, {sharePct(e.v)}%{at ? '. Show in the matrix' : ''}"
+                            onclick={() => reveal(at)}
+                          >
+                            <span class="rl-what">
+                              <span class="sw" style:background={classInk(e.r)} aria-hidden="true"></span>
+                              {#if e.kind === 'missed'}<b class="truncate">{m.classes[e.r]}</b>{:else}<span class="truncate"><b>{m.classes[e.r]}</b> → <b>{m.classes[e.c]}</b></span>{/if}
+                            </span>
+                            <span class="rl-n num">{num(e.count)} of {num(e.total)}</span>
+                            <span class="rl-pct num">{sharePct(e.v)}%</span>
+                          </button>
+                        </li>
+                      {/each}
+                    </ol>
+                  </section>
+                {/each}
+              {/if}
+              <div class="cm-notes">
+                {#if missed && !phone.current}<p><span class="num strong">{sharePct(missed.v) || '0'}%</span> of all objects missed overall, at IoU 0.5.</p>{/if}
+                <p>Each row is one true class, split by what the model predicted for its objects. The diagonal is right;
+                  the background column is objects it missed.</p>
+                <details class="how">
+                  <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
+                  <div class="how-body">
+                    <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5, in whole percentages ("&lt;1"
+                      under half a percent). Cells under 5% are labelled only when they are full size (from 3%); hover or
+                      tap any cell for its count. An empty cell had no objects at all.</p>
+                    <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
+                    {#if cm.partial}
+                      <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+                    {/if}
                   </div>
-                {/if}
-                {#if missed}
-                  <div>
-                    <dt>Most missed</dt>
-                    <dd>
-                      {#if missed.worst}
-                        {@const w = missed.worst}
-                        {#snippet worst()}<b>{m.classes[w.r]}</b> <span class="num">{sharePct(w.v)}%</span>{/snippet}
-                        {#if missedCell}
-                          {@const at = missedCell}
-                          <button type="button" class="go" title="Show in the matrix" onclick={() => reveal(at)}>{@render worst()}</button>
-                        {:else}{@render worst()}{/if}<span class="sep" aria-hidden="true">·</span>
-                      {/if}<span
-                        class="num">{sharePct(missed.v) || '0'}%</span> overall
-                    </dd>
-                  </div>
-                {/if}
-              </dl>
-            {/if}
-            <div class="cm-notes">
-              <p>Each row is one true class, split by what the model predicted for its objects. The diagonal is right;
-                the background column is objects it missed.</p>
-              <details class="how">
-                <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
-                <div class="how-body">
-                  <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5, in whole percentages ("&lt;1"
-                    under half a percent). Cells under 5% are not labelled; hover or tap one for its count. An empty cell
-                    had no objects at all.</p>
-                  <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
-                  {#if cm.partial}
-                    <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
-                  {/if}
-                </div>
-              </details>
+                </details>
+              </div>
             </div>
           </div>
         {:else if evaluation.error}
@@ -726,17 +702,45 @@
     line-height: 40px;
     letter-spacing: var(--type-3xl-tracking);
   }
-  /* Phones past the first section: the four numbers on one 40 px line, the same frame as the strip. */
+  /* Phones, every section: the four numbers on one 44 px line in the strip's frame, the ⓘ at its end; what they mean
+     opens under it. */
   .kpi-line {
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+    overflow: hidden;
+  }
+  /* No gap before the ⓘ: its 44 px target already sets it off. */
+  .kl-row {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 0 0 0 var(--space-3);
+  }
+  /* Label-value pairs set apart by space alone (no dots; grey label, value in ink), so even an 80-class model's four fit one line at 390 px. */
+  .kl-vals {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
     gap: 0 var(--space-2);
-    min-height: 40px;
-    padding: var(--space-2) var(--space-3);
-    border: 1px solid var(--line-default);
-    border-radius: var(--radius-lg);
-    background: var(--bg-panel);
+    flex: 1;
+    min-width: 0;
+    padding-block: var(--space-2);
+  }
+  .kl-help {
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    width: 44px;
+    height: 44px;
+    color: var(--text-tertiary);
+  }
+  .kl-help:hover,
+  .kl-help[aria-expanded='true'] {
+    color: var(--text-primary);
+  }
+  .kpi-line .k-body {
+    border-top: 1px solid var(--line-subtle);
   }
   :global([data-theme='dark']) .kpi-line {
     border-color: var(--line-subtle);
@@ -750,9 +754,6 @@
   }
   .kpi-line b {
     font-weight: var(--weight-semibold);
-  }
-  .kpi-line .sep {
-    margin: 0;
   }
   /* Phones' confusion list: two-line 56 px rows (the pair and its share, then the counts behind it). */
   .rank-h {
@@ -907,79 +908,114 @@
     grid-area: main;
     min-width: 0;
   }
-  /* The matrix takes the width its cells want (up to 72 px each), the notes follow 32 px after it and take the rest
-     (at least 320 px): an 8-class matrix fills about two thirds of a full-width panel and the notes the remainder,
-     while a large one shrinks its cells before the notes drop under 320 px. */
+  /* The matrix takes the width its cells want (up to 72 px each); the rail follows 32 px after it and takes the rest
+     (about 4 of the 12 columns, at least 320 px), sticking under the top bar while a tall matrix scrolls past. A large
+     matrix shrinks its cells before the rail drops under 320 px. */
   .cm-layout {
     display: grid;
     grid-template-columns: minmax(0, max-content) minmax(320px, 1fr);
-    grid-template-rows: auto 1fr;
-    grid-template-areas:
-      'main sum'
-      'main notes';
+    grid-template-areas: 'main rail';
     gap: var(--space-4) var(--space-8);
     align-items: start;
+  }
+  .cm-rail {
+    grid-area: rail;
+    position: sticky;
+    top: calc(var(--size-topbar) + var(--space-4));
+    display: grid;
+    gap: var(--space-5);
+    min-width: 0;
   }
   @media (max-width: 1199px) {
     .cm-layout {
       grid-template-columns: minmax(0, 1fr);
-      grid-template-rows: none;
-      grid-template-areas: 'sum' 'main' 'notes';
+      grid-template-areas: 'main' 'rail';
+    }
+    .cm-rail {
+      position: static;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--space-4) var(--space-8);
+    }
+    .cm-rail .cm-notes {
+      grid-column: 1 / -1;
     }
   }
-  .cm-sum {
-    grid-area: sum;
-    display: grid;
-    gap: var(--space-2);
+  @media (max-width: 767px) {
+    .cm-rail {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  /* A ranked list: 32 px rows (the pair, its counts, its share); each line shows its cell in the matrix. */
+  .rl-h {
+    display: flex;
+    align-items: center;
+    height: 28px;
     font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
+    font-weight: var(--weight-medium);
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--line-subtle);
   }
-  .cm-sum > div {
+  .rl li + li {
+    border-top: 1px solid var(--line-subtle);
+  }
+  .rl-row {
     display: grid;
-    grid-template-columns: 128px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto 40px;
+    align-items: center;
     gap: var(--space-3);
-    /* The label sits on the figure's baseline, also when the figure is a taller touch target. */
-    align-items: baseline;
-  }
-  .cm-sum dt {
-    color: var(--text-tertiary);
-  }
-  .cm-sum dd {
+    width: calc(100% + var(--space-4));
+    height: 32px;
+    margin: 0 calc(var(--space-2) * -1);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    font-size: var(--type-sm-size);
     text-align: left;
     color: var(--text-secondary);
   }
-  .cm-sum b,
-  .cm-sum .num {
+  .rl-row:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .rl-row:focus-visible {
+    outline-offset: -2px;
+  }
+  .rl-row:disabled {
+    cursor: default;
+  }
+  .rl-what {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+  .rl-what b {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  /* A figure that points at its cell: reads as a link (ink, underline), the cell takes the selection stroke. */
-  .go {
-    display: inline;
-    color: inherit;
-    text-decoration: underline;
-    text-decoration-color: var(--line-strong);
-    text-underline-offset: 3px;
-    text-align: left;
+  .rl-n {
+    color: var(--text-tertiary);
   }
-  .go:hover {
-    text-decoration-color: currentColor;
+  .rl-pct {
+    text-align: right;
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
   @media (pointer: coarse) {
-    /* 20 px of text + 12 px above and below: a 44 px target. */
-    .go {
-      display: inline-block;
-      padding-block: var(--space-3);
+    .rl-row {
+      height: 44px;
     }
   }
   .cm-notes {
-    grid-area: notes;
     display: grid;
     gap: var(--space-2);
     max-width: 60ch;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
+  }
+  .cm-notes .strong {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
   /* Secondary explanation: how the figures are made, folded until asked for. */
   .how summary {

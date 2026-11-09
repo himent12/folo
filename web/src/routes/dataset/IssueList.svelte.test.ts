@@ -49,9 +49,10 @@ describe('IssueList', () => {
     expect(counts[0]).toBe('Errors3');
     expect(counts[1]).toBe('Warnings3');
     expect(counts[2]).toMatch(/^Notes\d+$/);
-    // Three kinds of error: the kind filter lists them with their counts.
+    // Three kinds of error: a sub-filter by check type (not a second severity filter) lists them with their counts.
     const kinds = [...target.querySelectorAll('select option')].map((o) => o.textContent);
-    expect(kinds).toEqual(['All errors', 'Broken label · 1', 'Class out of range · 1', 'Box out of range · 1']);
+    expect(target.querySelector('select')?.getAttribute('aria-label')).toBe('Check type');
+    expect(kinds).toEqual(['All error types', 'Broken label · 1', 'Class out of range · 1', 'Box out of range · 1']);
   });
 
   it('asks the server for one severity when the filter moves', async () => {

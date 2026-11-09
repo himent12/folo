@@ -1,19 +1,33 @@
 // Histogram geometry shared by Histogram.svelte, pure so it can be tested.
 
 /**
- * Bar heights for a histogram drawn with true bin widths: each bar's height is its count per `per` units of the
- * *displayed* span, so its area is its count. A last bin that reaches past `xMax` is drawn only up to `xMax`, and its
- * density uses that clipped span (otherwise a clipped tail would show a fraction of its count).
- * `per` defaults to the narrowest displayed bin.
+ * `n` evenly spaced category bars from px `x0` to `x1`, as `{ x, w }` (each bin one category, whatever its value span:
+ * the bar's height carries the count, its label the range).
  */
-export function binDensities(edges: number[], counts: number[], xMax = Infinity, per?: number): number[] {
-  const spans = counts.map((_, i) => {
+export function categoryBars(n: number, x0: number, x1: number): { x: number; w: number }[] {
+  const w = n > 0 ? Math.max(0, x1 - x0) / n : 0;
+  return Array.from({ length: n }, (_, i) => ({ x: x0 + i * w, w }));
+}
+
+/**
+ * Pixel x of value `v` on a category axis: a bin edge sits on the boundary between its two bars; a value inside a bin
+ * lies proportionally inside that bin's bar. Clamped to the first and last bar.
+ */
+export function edgeX(edges: readonly number[], bars: readonly { x: number; w: number }[], v: number): number {
+  const n = bars.length;
+  if (!n) return 0;
+  const first = bars[0]!;
+  const last = bars[n - 1]!;
+  if (v <= (edges[0] ?? 0)) return first.x;
+  for (let i = 0; i < n; i++) {
     const lo = edges[i] ?? 0;
-    const hi = Math.min(edges[i + 1] ?? lo, xMax);
-    return Math.max(1e-12, hi - lo);
-  });
-  const unit = per ?? Math.min(...spans);
-  return counts.map((c, i) => c / (spans[i]! / unit));
+    const hi = edges[i + 1] ?? lo;
+    if (v < hi) {
+      const b = bars[i]!;
+      return b.x + ((v - lo) / Math.max(1e-12, hi - lo)) * b.w;
+    }
+  }
+  return last.x + last.w;
 }
 
 /**
@@ -31,32 +45,4 @@ export function binAt(bars: readonly { x: number; w: number }[], px: number): nu
     }
   });
   return best;
-}
-
-/**
- * Bars on a linear value axis from px `x0` to `x1` covering `[edges[0], xMax]`, each at its true width. When the last
- * bin is open-ended (its upper edge past `xMax`), it is set apart: the axis breaks for `gap` px before it, and it is
- * drawn `xMax − its lower edge` wide at the same scale (so its area is still its count). `mainEnd` is where the
- * continuous axis stops; `tail` says whether the last bar is set apart.
- */
-export function proportionalBars(
-  edges: readonly number[],
-  xMax: number,
-  x0: number,
-  x1: number,
-  gap: number,
-): { bars: { x: number; w: number }[]; mainEnd: number; tail: boolean } {
-  const n = Math.max(0, edges.length - 1);
-  const lo0 = edges[0] ?? 0;
-  const hi = Math.min(edges[n] ?? 1, xMax);
-  const lastLo = edges[n - 1] ?? lo0;
-  const tail = n > 0 && (edges[n] ?? 0) > hi && lastLo < hi;
-  const k = (x1 - x0 - (tail ? gap : 0)) / Math.max(1e-12, hi - lo0);
-  const at = (v: number) => x0 + (Math.min(Math.max(v, lo0), hi) - lo0) * k;
-  const bars = Array.from({ length: n }, (_, i) => {
-    const a = at(edges[i] ?? 0);
-    const w = Math.max(1, at(edges[i + 1] ?? 0) - a);
-    return tail && i === n - 1 ? { x: a + gap, w } : { x: a, w };
-  });
-  return { bars, mainEnd: tail ? at(lastLo) : x1, tail };
 }

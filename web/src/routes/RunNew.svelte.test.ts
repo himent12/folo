@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router.svelte';
+import { page } from '$lib/shell/crumbs.svelte';
 import RunNew from './RunNew.svelte';
 
 let api: MockApi;
@@ -186,12 +187,23 @@ describe('New run: short runs', () => {
     // fasteners: 1,920 train images at batch 16 are 30 optimizer steps an epoch; 5 epochs are 150, W = 90 of them.
     type('epochs', 5);
     const warn = await until(() => target.querySelector('.summary .short'));
-    const text = warn.textContent!.replace(/\s+/g, ' ');
-    expect(text).toContain('Only 150 optimizer steps (5 epochs × 30, batch 16 × accumulate 4).');
-    expect(text).toContain('expect an mAP near 0');
-    expect(text).toContain("Warmup takes 90 of the 150 steps");
-    expect(target.querySelector('.dock-warn')?.textContent).toBe('Too few steps');
-    // One fix for both: 200 steps need 7 epochs.
+    // One line and the fix; the reasons behind "Why?".
+    expect(warn.querySelector('p')?.textContent?.trim()).toBe('Too short to learn: 150 optimizer steps.');
+    expect(warn.querySelector('.short-why')).toBeNull();
+    const more = warn.querySelector<HTMLButtonElement>('button.more')!;
+    expect(more.textContent).toBe('Why?');
+    more.click();
+    flushSync();
+    expect(more.getAttribute('aria-expanded')).toBe('true');
+    const why = warn.querySelector(`#${more.getAttribute('aria-controls')}`)!;
+    const text = why.textContent!.replace(/[ \t\n]+/g, ' ');
+    expect(text).toContain('150 optimizer steps: 5 epochs × 30 (120 batches of 16, 4 per step).');
+    // "0" never ends up alone on a line, and the prose names no config keys.
+    expect(text).toContain('expect an mAP near 0.');
+    expect(text).toContain('Warmup takes 90 of the 150 steps');
+    expect(text).not.toMatch(/lr0|warmup_epochs/);
+    expect(target.querySelector('.dock-warn')?.textContent).toBe('Too short to learn');
+    // The trainer's own count, ceil(200 / 30) = 7, which also clears the warmup warning.
     warn.querySelector<HTMLButtonElement>('button.fix')!.click();
     flushSync();
     expect(target.querySelector<HTMLInputElement>('input#epochs')!.value).toBe('7');
@@ -204,8 +216,11 @@ describe('New run: short runs', () => {
     choose('weights', target.querySelectorAll<HTMLOptionElement>('select#weights option')[1]!.value);
     type('epochs', 5);
     const warn = await until(() => target.querySelector('.summary .short'));
-    expect(warn.textContent).not.toContain('optimizer steps (');
-    expect(warn.textContent).toContain("Warmup takes 90 of the 150 steps");
+    expect(warn.querySelector('p')?.textContent?.trim()).toBe('Mostly warmup: 90 of 150 optimizer steps.');
+    warn.querySelector<HTMLButtonElement>('button.more')!.click();
+    flushSync();
+    expect(warn.textContent).not.toContain('Too short');
+    expect(warn.textContent).toContain('Warmup takes 90 of the 150 steps');
     expect(target.querySelector('.dock-warn')?.textContent).toBe('Mostly warmup');
     warn.querySelector<HTMLButtonElement>('button.fix')!.click();
     flushSync();
@@ -223,6 +238,128 @@ describe('New run: short runs', () => {
     expect(target.querySelector('#close-hint')?.textContent).toBe('At most half the run: mosaic closes for the last 4 epochs.');
     type('epochs', 100);
     expect(target.querySelector('#close-hint')?.textContent).toBe('Train the last N epochs without mosaic to settle the boxes.');
+  });
+});
+
+describe('New run: the schedule in the Summary', () => {
+  it('counts optimizer steps, with the batches behind them when several make one step', async () => {
+    await open();
+    // fasteners: 1,920 images at batch 16 are 120 batches, 4 per optimizer step.
+    const est = target.querySelector('.summary .est')!;
+    expect(est.querySelector('dt')?.textContent).toBe('Optimizer steps / epoch');
+    expect(est.querySelector('dd')?.textContent).toBe('30');
+    expect(est.querySelector('.est-sub')?.textContent).toBe('120 batches, accumulate 4');
+  });
+
+  it("matches the short-run scenario's run: shapes at batch 32 for 5 epochs suggests its 16 epochs", async () => {
+    await open('?dataset=ds_shapes');
+    target.querySelector<HTMLButtonElement>('#batch button[role="radio"]:nth-child(3)')!.click();
+    const el = target.querySelector<HTMLInputElement>('input#epochs')!;
+    el.value = '5';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    const warn = await until(() => target.querySelector('.summary .short'));
+    expect(warn.querySelector('p')?.textContent?.trim()).toBe('Too short to learn: 65 optimizer steps.');
+    expect(warn.querySelector('button.fix')?.textContent).toBe('Train 16 epochs');
+  });
+});
+
+describe('New run: mixed precision', () => {
+  const sw = () => target.querySelector<HTMLInputElement>('input#amp');
+  const cli = () => target.querySelector('.cli code')!.textContent!;
+  const row = () => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === 'Mixed precision');
+  const time = () => [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. time')!.nextElementSibling!.textContent;
+
+  it('is off by default; on, the run, the Summary and the command say so, and the estimate is faster', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    const s = await until(sw, 'the switch');
+    expect(s.checked).toBe(false);
+    expect(s.disabled).toBe(false);
+    expect(s.getAttribute('role')).toBe('switch');
+    // folo-s, measured: about 1.6× faster.
+    expect(s.closest('.switch')?.textContent).toContain('Mixed precision');
+    expect(s.closest('.switch')?.textContent).toContain('about 1.6× faster, 40% less memory');
+    expect(row()?.querySelector('.rv-v')?.textContent).toBe('Off');
+    expect(cli()).not.toContain('--amp');
+    const f32 = time();
+    s.click();
+    flushSync();
+    expect(row()?.querySelector('.rv-v')?.textContent).toBe('On');
+    expect(cli()).toContain('--amp');
+    expect(time()).not.toBe(f32);
+    const create = vi.spyOn(api, 'createRun');
+    await start();
+    expect(create.mock.calls[0]![0].amp).toBe(true);
+  });
+
+  it("is off with the server's reason where it has no tensor cores, and the run is sent without it", async () => {
+    hub.api = api = new MockApi('no-tensor-cores', 0);
+    await open();
+    const s = await until(sw, 'the switch');
+    expect(s.disabled).toBe(true);
+    expect(s.checked).toBe(false);
+    expect(s.getAttribute('aria-describedby')).toBe('amp-why');
+    expect(target.querySelector('#amp-why')?.textContent).toBe("This server's GPU has no tensor cores FOLO can use, so runs train in f32.");
+    const detail = target.querySelector('.amp .dev-detail')!;
+    expect(detail.textContent).toContain('NVIDIA GeForce RTX 4080 SUPER (Dx12) has no cooperative matrices in wgpu');
+    expect(detail.textContent).not.toContain('`');
+    const create = vi.spyOn(api, 'createRun');
+    await start();
+    expect(create.mock.calls[0]![0].amp).toBe(false);
+  });
+
+  it('says how to turn tensor cores on when the server has them off', async () => {
+    hub.api = api = new MockApi('tensor-cores-off', 0);
+    await open();
+    await until(sw, 'the switch');
+    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server. Start it with folo serve --tensor-cores.');
+    expect(target.querySelector('#amp-why .mono')?.textContent).toBe('folo serve --tensor-cores');
+  });
+
+  it('is off on the CPU, and comes back on with the GPU', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    await open();
+    const s = await until(sw, 'the switch');
+    s.click();
+    flushSync();
+    pick('cpu');
+    expect(sw()!.disabled).toBe(true);
+    expect(sw()!.checked).toBe(false);
+    expect(cli()).not.toContain('--amp');
+    pick('auto');
+    expect(sw()!.checked).toBe(true);
+  });
+
+  it('is hidden for servers that do not report capabilities, and the run leaves amp out', async () => {
+    const sys = api.system.bind(api);
+    api.system = async () => ({ ...(await sys()), capabilities: undefined });
+    await open();
+    expect(sw()).toBeNull();
+    expect(row()).toBeUndefined();
+    const create = vi.spyOn(api, 'createRun');
+    await start();
+    expect('amp' in create.mock.calls[0]![0]).toBe(false);
+  });
+});
+
+describe('New run: the top bar', () => {
+  it('owns the create action while mounted, so the top bar steps aside', async () => {
+    const before = page.creators;
+    await open();
+    expect(page.ownsCreate).toBe(true);
+    unmount(c!);
+    c = undefined;
+    expect(page.creators).toBe(before);
+  });
+});
+
+describe('New run: start weights', () => {
+  it('names a run without weights "From scratch", in the select and in the Summary', async () => {
+    await open();
+    expect(target.querySelector('select#weights option[value="none"]')?.textContent).toBe('From scratch');
+    const rv = [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === 'Start from');
+    expect(rv?.querySelector('.rv-v')?.textContent).toBe('From scratch');
   });
 });
 

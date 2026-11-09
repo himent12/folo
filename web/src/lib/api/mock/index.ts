@@ -4,12 +4,14 @@
 // Scenarios (`?scenario=`): `normal` (default), `empty` (nothing registered yet), `error` (every call fails),
 // `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
 // `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
-// finished 5-epoch run the trainer warns is too short to learn from), for screenshots of those states.
+// finished 5-epoch run the trainer warns is too short to learn from), `tensor-cores-off` and `no-tensor-cores` (no
+// mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), for screenshots of those states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
   Arch,
   Box,
+  Capabilities,
   ClassMetrics,
   CreateDataset,
   CreateSyntheticDataset,
@@ -50,6 +52,7 @@ import {
   epochLog,
   history,
   loopStart,
+  optimizerSteps,
   progressAt,
   startLogs,
   stepAt,
@@ -58,7 +61,7 @@ import {
 } from './runs';
 import { COCO80 } from './coco';
 
-export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged' | 'short-run';
+export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged' | 'short-run' | 'tensor-cores-off' | 'no-tensor-cores';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -85,6 +88,33 @@ function config(name: string, dataset_id: string, arch: Arch, epochs: number, ex
 }
 
 const DEVICE = `${GPU_NAME} (vulkan)`;
+
+/** folo_gpu::context::TENSOR_CORES_NOT_REQUESTED. */
+const TC_NOT_REQUESTED = 'off (not requested: FOLO_GPU_TENSOR_CORES=1 or --tensor-cores)';
+
+/**
+ * `/api/system`'s `capabilities` as folo-server's mock reports them (`MockTensorCores`), worded as the real server's:
+ * tensor cores on and `amp` available; `tensor-cores-off`, available but not requested; `no-tensor-cores`, the adapter
+ * through DX12, where wgpu has no cooperative matrices.
+ */
+export function capabilities(scenario: Scenario): Capabilities {
+  const status = scenario === 'tensor-cores-off' ? TC_NOT_REQUESTED : scenario === 'no-tensor-cores' ? `off: ${GPU_NAME} (Dx12) has no cooperative matrices in wgpu` : null;
+  return {
+    device: 'gpu:0',
+    shader_f16: true,
+    tensor_cores: { available: scenario !== 'no-tensor-cores', enabled: status === null, reason: status },
+    amp:
+      status === null
+        ? { available: true, reason: null }
+        : {
+            available: false,
+            // folo_vision::train::amp_not_supported
+            reason:
+              `mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): gpu:0 has tensor cores ${status}; ` +
+              'train without amp (f32), or on such a GPU (`folo train --amp` asks for them; start `folo serve --tensor-cores`)',
+          },
+  };
+}
 const FASTENER_EASE = [1.05, 1.1, 1.12, 0.92, 0.78, 1.0, 0.85, 0.7];
 
 function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
@@ -214,7 +244,9 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
       modelId: 'm_shapes_n',
       device: 'cpu (AMD Ryzen 9 7950X)',
     },
-    // `short-run`: 125 optimizer steps from scratch, so the trainer warns it is too short (and its warmup too long).
+    // `short-run`: 800 images at batch 32 are 25 batches an epoch, 2 accumulated per optimizer step (docs/MODEL.md
+    // §8.3), so 13 steps an epoch and 65 in 5 epochs: from scratch, the trainer warns it is too short (and its warmup
+    // too long). New run's `run-new-short` scene asks for the same run and suggests the same 16 epochs.
     ...(scenario === 'short-run'
       ? [
           {
@@ -223,7 +255,7 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
             config: config('shapes-quick', 'ds_shapes', 'folo-n', 5, { batch: 32 }),
             classes: 3,
             classEase: [1.04, 1.0, 0.95],
-            stepsPerEpoch: 25,
+            stepsPerEpoch: optimizerSteps(800, 32),
             epochSeconds: 6,
             mapMax: 0.3,
             tau: 40,
@@ -299,7 +331,7 @@ export class MockApi implements Api {
       {
         ordinal: 0,
         name: GPU_NAME,
-        backend: 'vulkan' as const,
+        backend: this.scenario === 'no-tensor-cores' ? ('dx12' as const) : ('vulkan' as const),
         memory_bytes: 16 * 2 ** 30,
         util: training ? round(0.91 + 0.04 * smoothNoise(5, t / 2), 3) : 0.02,
       },
@@ -317,6 +349,7 @@ export class MockApi implements Api {
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
         gpus: this.#gpus(),
         features: ['export_onnx_switches'],
+        capabilities: capabilities(this.scenario),
       };
     }, 60);
   }
@@ -546,7 +579,7 @@ export class MockApi implements Api {
         classes: ds.classes.length,
         classNames: [...ds.classes],
         classEase: ds.classes.map((_, i) => 0.85 + 0.3 * rng(hash(id) + i)()),
-        stepsPerEpoch: Math.max(1, Math.ceil(ds.splits.train / c.batch)),
+        stepsPerEpoch: optimizerSteps(ds.splits.train, c.batch),
         epochSeconds: 600 / Math.max(1, c.epochs),
         mapMax: 0.55 + sizeIdx * 0.04,
         tau: Math.max(4, c.epochs / 7),

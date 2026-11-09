@@ -28,24 +28,27 @@
   const touch = new MediaQuery('pointer: coarse', false);
 </script>
 
+<!-- The viewfinder is the drop target, capped in height; the samples sit right under it, not at the panel's foot. -->
 <div class="zone" class:dragging>
-  <span class="corner tl" aria-hidden="true"></span>
-  <span class="corner tr" aria-hidden="true"></span>
-  <span class="corner bl" aria-hidden="true"></span>
-  <span class="corner br" aria-hidden="true"></span>
-  <span class="cross" aria-hidden="true"></span>
+  <div class="finder">
+    <span class="corner tl" aria-hidden="true"></span>
+    <span class="corner tr" aria-hidden="true"></span>
+    <span class="corner bl" aria-hidden="true"></span>
+    <span class="corner br" aria-hidden="true"></span>
+    <span class="cross" aria-hidden="true"></span>
 
-  <div class="center">
-    {#if touch.current}
-      <p class="title">Choose an image to detect objects</p>
-      <p class="desc">JPEG, PNG or WebP, from your photos, camera or files.</p>
-    {:else}
-      <p class="title">{dragging ? 'Release to detect' : 'Drop an image to detect objects'}</p>
-      <p class="desc">JPEG, PNG or WebP. You can also paste from the clipboard with <span class="nowrap"><Kbd keys="Mod+V" />.</span></p>
-    {/if}
-    <div class="actions">
-      <Button variant="primary" icon={Upload} onclick={onbrowse}>{touch.current ? 'Choose an image' : 'Browse files'}</Button>
-      <Button icon={Images} onclick={onpick}>Pick from a dataset</Button>
+    <div class="center">
+      {#if touch.current}
+        <p class="title">Choose an image to detect objects</p>
+        <p class="desc">JPEG, PNG or WebP, from your photos, camera or files.</p>
+      {:else}
+        <p class="title">{dragging ? 'Release to detect' : 'Drop an image to detect objects'}</p>
+        <p class="desc">JPEG, PNG or WebP. You can also paste from the clipboard with <span class="nowrap"><Kbd keys="Mod+V" />.</span></p>
+      {/if}
+      <div class="actions">
+        <Button variant="primary" icon={Upload} onclick={onbrowse}>{touch.current ? 'Choose an image' : 'Browse files'}</Button>
+        <Button icon={Images} onclick={onpick}>Pick from a dataset</Button>
+      </div>
     </div>
   </div>
 
@@ -72,16 +75,22 @@
 
 <style>
   .zone {
-    position: relative;
-    height: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
-    justify-content: center;
-    gap: var(--space-8);
-    padding: var(--space-10) var(--space-6);
+    gap: var(--space-4);
+    padding: var(--space-4) var(--space-4) var(--space-8);
     background: var(--bg-inset);
     transition: background-color var(--dur-fast) var(--ease-standard);
+  }
+  /* The drop target: about 280 px tall at most, its message centred between the corners. */
+  .finder {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 280px;
+    padding: var(--space-8) var(--space-6);
   }
   .zone.dragging {
     background: color-mix(in srgb, var(--bg-inset), var(--accent-solid) 6%);
@@ -96,26 +105,26 @@
       inset var(--dur-base) var(--ease-out);
   }
   .tl {
-    top: var(--space-5);
-    left: var(--space-5);
+    top: 0;
+    left: 0;
     border-top-width: 2px;
     border-left-width: 2px;
   }
   .tr {
-    top: var(--space-5);
-    right: var(--space-5);
+    top: 0;
+    right: 0;
     border-top-width: 2px;
     border-right-width: 2px;
   }
   .bl {
-    bottom: var(--space-5);
-    left: var(--space-5);
+    bottom: 0;
+    left: 0;
     border-bottom-width: 2px;
     border-left-width: 2px;
   }
   .br {
-    bottom: var(--space-5);
-    right: var(--space-5);
+    bottom: 0;
+    right: 0;
     border-bottom-width: 2px;
     border-right-width: 2px;
   }
@@ -123,25 +132,25 @@
     border-color: var(--accent-line);
   }
   .dragging .tl {
-    top: var(--space-8);
-    left: var(--space-8);
+    top: var(--space-3);
+    left: var(--space-3);
   }
   .dragging .tr {
-    top: var(--space-8);
-    right: var(--space-8);
+    top: var(--space-3);
+    right: var(--space-3);
   }
   .dragging .bl {
-    bottom: var(--space-8);
-    left: var(--space-8);
+    bottom: var(--space-3);
+    left: var(--space-3);
   }
   .dragging .br {
-    bottom: var(--space-8);
-    right: var(--space-8);
+    bottom: var(--space-3);
+    right: var(--space-3);
   }
   /* The focus dot at the centre of the viewfinder. */
   .cross {
     position: absolute;
-    top: var(--space-5);
+    top: 0;
     left: 50%;
     width: 1px;
     height: 10px;
@@ -221,12 +230,17 @@
     border-radius: var(--radius-xs);
     background: var(--bg-overlay);
     color: var(--text-secondary);
-    font-size: var(--type-micro-size);
-    line-height: 14px;
+    font-size: var(--type-sm-size);
+    line-height: 16px;
   }
   @media (max-width: 767px) {
     .zone {
       gap: var(--space-6);
+      padding: var(--space-3) var(--space-3) var(--space-6);
+    }
+    /* Phones: as tall as the message and buttons need. */
+    .finder {
+      height: auto;
       padding: var(--space-8) var(--space-4);
     }
     .samples ul {
@@ -235,22 +249,6 @@
     .corner {
       width: 20px;
       height: 20px;
-    }
-    .tl,
-    .tr {
-      top: var(--space-3);
-    }
-    .bl,
-    .br {
-      bottom: var(--space-3);
-    }
-    .tl,
-    .bl {
-      left: var(--space-3);
-    }
-    .tr,
-    .br {
-      right: var(--space-3);
     }
   }
   .nowrap {

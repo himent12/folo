@@ -3,7 +3,7 @@
 
   /**
    * The weights a run started from, by name: a model id resolves through the models list, a path shows its file name,
-   * none is null ("from scratch"). Fine-tuned vs from scratch often explains most of a gap between two runs.
+   * none is null ("From scratch"). Fine-tuned vs from scratch often explains most of a gap between two runs.
    */
   export function startFrom(weights: string | null, models: readonly { id: string; name: string }[] | undefined): string | null {
     const o = origin(weights, models ?? []);
@@ -151,7 +151,8 @@
     if (cursor < first.x - 0.5 || cursor > last.x + 0.5) return null;
     return pts[nearest(pts, cursor)]?.y ?? null;
   }
-  // Hover, focus or tap a run chip to bring its line forward (the others fade).
+  // Hover, focus or tap a run chip to bring its line forward: 3 px over a halo, painted last with a bold end label; the
+  // others drop to 1 px in their own colour (never faded, so each keeps >= 3:1).
   let hovered = $state<string | null>(null);
   let pinned = $state<string | null>(null);
   // Only runs still in the comparison count (a removed run must not leave every line faded).
@@ -166,14 +167,14 @@
   const startOf = (r: Run) => startFrom(r.config.weights, models.data);
   const startLine = (r: Run) => {
     const from = startOf(r);
-    return from ? `fine-tuned from ${from}` : 'from scratch';
+    return from ? `Fine-tuned from ${from}` : 'From scratch';
   };
   const setX = (v: Axis) => (xChoice = v);
 
   const rows = $derived<[string, (r: Run) => string][]>([
     ['Dataset', (r) => datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id],
     ['Model', (r) => r.config.arch],
-    ['Start from', (r) => startOf(r) ?? 'from scratch'],
+    ['Start from', (r) => startOf(r) ?? 'From scratch'],
     ['Epochs', (r) => `${r.epoch}/${r.epochs}`],
     ['Batch', (r) => String(r.config.batch)],
     ['Image size', (r) => `${r.config.imgsz} px`],
@@ -227,6 +228,10 @@
     return () => ro.disconnect();
   });
 
+  /** The side-by-side table's setting column, and the narrowest a run column gets before the table scrolls. */
+  const SETTING_COL = 152;
+  const RUN_COL_MIN = 136;
+
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
 
@@ -266,7 +271,7 @@
             {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
             {#if x === 'progress'}<p>By progress puts each run over its own length, so a short run and a long one compare by shape.</p>{/if}
             <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
-              started (fine-tuned or from scratch).</p>
+              started (fine-tuned, or from scratch).</p>
             <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>
           </div>
         </details>
@@ -295,7 +300,12 @@
           </p>
         {/if}
         <div class="scroll" class:more={tableMore} bind:this={tableEl} onscroll={measureTable}>
-          <table class="table">
+          <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. -->
+          <table class="table fixed" style:min-width="{SETTING_COL + chosen.length * RUN_COL_MIN}px">
+            <colgroup>
+              <col style:width="{SETTING_COL}px" />
+              {#each chosen as r (r.id)}<col />{/each}
+            </colgroup>
             <thead>
               <tr>
                 <th></th>
@@ -381,7 +391,7 @@
         <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it only in Edit,
              on a full-width line of its own. -->
-        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}fine-tuned from <span class="mono src">{from}</span>{:else}from scratch{/if}</span>
+        <span class="from" class:tuned={!!from} title={startLine(r)}>{#if from}Fine-tuned from <span class="mono src">{from}</span>{:else}From scratch{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
           <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -414,6 +424,7 @@
       bind:hint
       legend={false}
       {highlight}
+      recede
       endDots
       endLabels
       label="{metricDef.label} for the compared runs"
@@ -458,6 +469,12 @@
     grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
     gap: var(--space-2);
     align-items: stretch;
+  }
+  /* Laptops and tablets: a 2 × 2 grid, so four runs never leave one card orphaned on a row of its own. */
+  @media (min-width: 768px) and (max-width: 1279px) {
+    .chips {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
   }
   .chips-head {
     grid-column: 1 / -1;
@@ -866,6 +883,15 @@
   }
   .scroll {
     overflow-x: auto;
+  }
+  table.fixed {
+    table-layout: fixed;
+    width: 100%;
+  }
+  .fixed th,
+  .fixed td {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .th {
     display: inline-flex;

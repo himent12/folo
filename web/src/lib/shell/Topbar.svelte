@@ -8,7 +8,7 @@
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Settings from '@lucide/svelte/icons/settings';
   import { prefs } from '$lib/prefs.svelte';
-  import { href, router } from '$lib/router.svelte';
+  import { href } from '$lib/router.svelte';
   import { hub } from '$lib/api/index.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Gate from '$lib/ui/Gate.svelte';
@@ -56,12 +56,9 @@
     <Button variant="ghost" icon={themeIcon} aria-label={themeLabel} title={themeLabel} onclick={() => prefs.cycleTheme()} />
     <span class="mobile-only"><Button variant="ghost" icon={Settings} href={href('/settings')} aria-label="Settings" /></span>
     <!-- A global shortcut, so not lime: each page keeps a single lime primary of its own. -->
-    <!-- On New run itself the button stays, marked as the current page (pressed look, not a link to itself), so the
-         bar never changes shape. -->
-    <!-- A page with a create action of its own (Runs, Datasets: crumbs.ownCreateAction) has the one in this corner. -->
-    {#if router.route.name === 'run-new'}
-      <span class="new-run here"><Button icon={Plus} aria-current="page" disabled>New run</Button></span>
-    {:else if !page.ownsCreate}
+    <!-- A page with a create action of its own (Runs, Datasets, and New run itself: crumbs.ownCreateAction) has the one
+         in this corner, so the button steps aside there. -->
+    {#if !page.ownsCreate}
       <!-- Nothing answers: disabled with the reason, as the pages' own create actions are. -->
       <span class="new-run">
         <Gate reason={hub.offline ? OFFLINE_REASON : null}>
@@ -132,13 +129,6 @@
   }
   .crumbs li:not(.last):not(.sep) {
     flex-shrink: 0;
-  }
-  /* The current page: a pressed control, not a disabled-looking one. */
-  .new-run.here :global(button:disabled) {
-    opacity: 1;
-    cursor: default;
-    background: var(--bg-active);
-    color: var(--text-secondary);
   }
   .actions {
     display: flex;

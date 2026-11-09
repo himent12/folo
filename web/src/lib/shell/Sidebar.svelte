@@ -32,7 +32,10 @@
   </li>
 {/snippet}
 
-<nav class="sidebar" class:collapsed aria-label="Main">
+<!-- The rail is the shell's column: it runs the page's full height (its fill and edge reach the bottom of a long page,
+     full-page captures included), and the navigation sticks to the viewport inside it. -->
+<div class="shell-rail" class:collapsed>
+<nav class="sidebar" aria-label="Main">
   <div class="head">
     <a href={href('/')} class="brand" aria-label="FOLO Studio home"><Logo wordmark={!collapsed} /></a>
   </div>
@@ -63,24 +66,27 @@
     </button>
   </div>
 </nav>
+</div>
 
 <style>
+  .shell-rail {
+    width: var(--size-sidebar);
+    flex-shrink: 0;
+    background: var(--bg-app);
+    border-right: 1px solid var(--line-subtle);
+    z-index: var(--z-sidebar);
+    transition: width var(--dur-slow) var(--ease-standard);
+  }
+  .shell-rail.collapsed {
+    width: var(--size-sidebar-collapsed);
+  }
   .sidebar {
     position: sticky;
     top: 0;
     height: 100dvh;
-    width: var(--size-sidebar);
-    flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    background: var(--bg-app);
-    border-right: 1px solid var(--line-subtle);
     padding: 0 var(--space-2) var(--space-2);
-    z-index: var(--z-sidebar);
-    transition: width var(--dur-slow) var(--ease-standard);
-  }
-  .collapsed {
-    width: var(--size-sidebar-collapsed);
   }
   .head {
     height: var(--size-topbar);

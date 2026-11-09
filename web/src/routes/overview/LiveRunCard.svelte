@@ -4,10 +4,9 @@
   import { LiveRun } from '$lib/api/live.svelte';
   import type { Dataset, Run } from '$lib/api/types';
   import LineChart from '$lib/charts/LineChart.svelte';
-  import { runHorizon } from '$lib/charts/horizon';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import { runProgress, stepsPerEpoch } from '$lib/api/progress';
+  import { runProgress } from '$lib/api/progress';
   import { eta, lr, metric, num } from '$lib/format';
   import { deviceLine } from './device';
   import { href } from '$lib/router.svelte';
@@ -47,11 +46,13 @@
     };
   });
 
-  const horizon = $derived.by(() => {
+  // "So far": the axis ends at the last validated epoch, so the curve always reaches the right edge (no unexplained
+  // empty stretch for a run that is a third done; the epoch bar beside it shows how far the whole run is).
+  const lastEpoch = $derived.by(() => {
     void live.version;
-    if (!run) return [0, 1] as [number, number];
-    return runHorizon(Math.max(live.epochs.length, run.step / Math.max(1, stepsPerEpoch(run, live.steps))), run.epochs, true, 'observed');
+    return live.epochs[live.epochs.length - 1]?.epoch ?? 0;
   });
+  const horizon = $derived<[number, number]>(run ? [0, Math.max(1, lastEpoch)] : [0, 1]);
   const progress = $derived(run ? runProgress(run) : 0);
 
   // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
@@ -102,14 +103,15 @@
         </p>
       </div>
       <div class="grid">
-        <Stat label="Best mAP50-95" value={metric(run?.best?.map50_95)} sub={run?.best ? `epoch ${run.best.epoch}` : 'after first epoch'} loading={!run} />
+        <!-- The best epoch's score; the chart's legend reads the latest one, and each says which it is. -->
+        <Stat label="mAP50-95" value={metric(run?.best?.map50_95)} sub={run?.best ? `best · ep ${run.best.epoch}` : 'best, after the first epoch'} loading={!run} />
         <Stat label="Throughput" value={num(charts.lastStep?.imgs_per_s, 0)} unit="img/s" loading={!run} />
         <Stat label="Learning rate" value={lr(charts.lastStep?.lr)} loading={!run} />
         <Stat label="Loss" value={num(charts.lastStep?.loss.total, 3)} sub="last step, unsmoothed" loading={!run} />
       </div>
     </div>
     <div class="chart">
-      <p class="chart-title">Validation mAP <span class="faint">by epoch</span></p>
+      <p class="chart-title">Validation mAP <span class="faint">by epoch, so far</span></p>
       {#if !run || live.loading}
         <!-- Phones: the legend (note and two values) wraps to two rows. -->
         <ChartSkeleton height={narrow ? 140 : 200} legendRows={narrow ? 2 : 1} />
@@ -123,7 +125,7 @@
           valueFormat={(v) => metric(v)}
           xTitle={(x) => `Epoch ${Math.round(x)}`}
           curve="monotone"
-          legendNote="Latest"
+          legendNote={lastEpoch ? `Latest · ep ${lastEpoch}` : 'Latest'}
           label="Validation mAP by epoch"
           empty="Waiting for the first validation…"
         />

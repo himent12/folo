@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { capTicks, holdDomain, logDomain, logTicks, MAX_TICKS, niceDomain, stepDecimals, unitDomain } from './domain';
+import { capTicks, holdDomain, logDomain, logMinors, logTicks, MAX_TICKS, niceDomain, stepDecimals, unitDomain } from './domain';
 
 describe('unitDomain', () => {
   it('fits a 0–1 metric to the tightest nice top above its maximum, with a little headroom', () => {
@@ -16,8 +16,10 @@ describe('unitDomain', () => {
     expect(unitDomain(0.606, 290).ticks).toEqual([0, 0.25, 0.5, 0.75]);
     expect(unitDomain(0.86, 290).ticks).toEqual([0, 0.25, 0.5, 0.75, 1]);
     expect(unitDomain(0.33, 290).ticks).toEqual([0, 0.1, 0.2, 0.3, 0.4]);
-    // A low score keeps a fitted axis instead of a flat line at the bottom of 0–1.
-    expect(unitDomain(0.08, 290).ticks).toEqual([0, 0.05, 0.1]);
+    // A low score keeps a fitted axis, but never one so tight that a run stuck near 0 fills the plot: the top is at
+    // least 0.25 of the metric's 1.
+    expect(unitDomain(0.08, 290).ticks).toEqual([0, 0.1, 0.2, 0.3]);
+    expect(unitDomain(0.2, 290).domain[1]).toBeGreaterThanOrEqual(0.25);
     for (const max of [0.01, 0.12, 0.27, 0.45, 0.5, 0.63, 0.71, 0.88, 0.97, 1])
       for (const px of [138, 290]) {
         const t = unitDomain(max, px).ticks;
@@ -79,6 +81,13 @@ describe('logTicks', () => {
     expect(logTicks(0.001, 1000)).toEqual([0.001, 0.1, 10, 1000]);
     // A domain that is not on a 1-2-5 value is labelled at the outermost ones inside it.
     expect(logTicks(0.15, 12)).toEqual([0.2, 1, 10]);
+  });
+
+  it('keeps the unlabelled 1-2-5 values as minor gridlines', () => {
+    expect(logMinors(0.2, 10)).toEqual([0.5, 2, 5]);
+    expect(logMinors(1, 10)).toEqual([]);
+    expect(logMinors(0.1, 100)).toEqual([0.2, 0.5, 2, 5, 20, 50]);
+    expect(logMinors(0, 1)).toEqual([]);
   });
 });
 

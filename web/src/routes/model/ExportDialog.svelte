@@ -63,6 +63,17 @@
   });
   /** The estimate follows the switches: an f16 ONNX file is about half the size. */
   const perParam = (f: (typeof formats)[number]) => (f.value === 'onnx' && switchesOk && switches.half ? 2.05 : f.bytesPerParam);
+  /** The size estimates share one precision, one decimal ("≈ 18.3 MiB", "≈ 37.0 MiB"), so the column reads evenly. */
+  function estimate(b: number): string {
+    const [k, names] = prefs.units === 'binary' ? [1024, ['B', 'KiB', 'MiB', 'GiB']] : [1000, ['B', 'kB', 'MB', 'GB']];
+    let i = 0;
+    let v = b;
+    while (v >= k && i < names.length - 1) {
+      v /= k;
+      i++;
+    }
+    return `${i === 0 ? Math.round(v) : v.toFixed(1)} ${names[i]}`;
+  }
   /** The format of the finished export (the radio may not be shown any more). */
   let done = $state<ExportFormat | null>(null);
   let phase = $state<'idle' | 'running' | 'done' | 'error'>('idle');
@@ -173,7 +184,7 @@
             <span class="opt-top">
               <span class="opt-name">{f.label}</span>
               <span class="ext mono">{f.ext}</span>
-              <span class="est num">≈ {bytes(model.params * perParam(f), prefs.units)}</span>
+              <span class="est num">≈ {estimate(model.params * perParam(f))}</span>
             </span>
             <span class="opt-desc">{f.desc}</span>
           </span>

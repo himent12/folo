@@ -42,12 +42,13 @@ afterEach(() => {
 });
 
 describe('Playground: a failed prediction', () => {
-  it('shows the error once, under the image, and moves focus to it', async () => {
+  it('shows the error once, above the image, and moves focus to it', async () => {
     await run('oom', 'm_shapes_s');
     const notice = await until(() => target.querySelector('.notice'), 'the notice');
-    // Under the image, not over it: the stage holds only the image.
+    // Above the image, where the result would be, not over it: the stage holds only the image. The same at every width.
     expect(target.querySelector('.stage .notice, .stage [role="alert"]')).toBeNull();
-    expect(notice.previousElementSibling?.classList.contains('stage')).toBe(true);
+    expect(notice.nextElementSibling?.classList.contains('stage')).toBe(true);
+    expect(notice.previousElementSibling?.classList.contains('vbar')).toBe(true);
     const title = notice.querySelector<HTMLElement>('.title')!;
     expect(title.textContent).toBe('Prediction failed');
     expect(document.activeElement).toBe(title);
@@ -133,10 +134,22 @@ describe('Playground: detections', () => {
     expect(row.querySelector<HTMLElement>('.sw')!.style.background).not.toBe('');
   });
 
-  it('describes IoU as suppression', async () => {
+  it('describes IoU as suppression, under the one name the phone sheet uses too', async () => {
     await run('normal', 'm_hard_s');
     await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
     expect(target.querySelector('.thresholds')?.textContent).toContain('Suppress same-class overlaps above this.');
     expect(target.querySelector('.thresholds')?.textContent).not.toContain('Merge');
+    expect([...target.querySelectorAll('.thresholds .slider label')].map((l) => l.textContent)).toEqual(['Confidence', 'Overlap (IoU)', 'Max detections']);
+  });
+
+  it('marks the selected row with aria-selected', async () => {
+    await run('normal', 'm_hard_s');
+    await until(() => target.querySelectorAll('#pg-panel tbody tr').length > 1, 'the detections');
+    const rows = () => [...target.querySelectorAll<HTMLTableRowElement>('#pg-panel tbody tr')];
+    expect(rows().some((r) => r.hasAttribute('aria-selected'))).toBe(false);
+    rows()[1]!.click();
+    flushSync();
+    expect(rows().map((r) => r.getAttribute('aria-selected'))).toEqual(rows().map((_, i) => (i === 1 ? 'true' : null)));
+    expect(rows()[1]!.classList.contains('on')).toBe(true);
   });
 });

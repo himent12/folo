@@ -2,7 +2,7 @@
   /**
    * How fast the engine is, against the incumbent of the same size on the same machine: every row of
    * docs/BENCHMARKS.md's summary where both have a number, including the ones FOLO trails. Values in ink; the lead is a
-   * word ("1.66× faster"), never a colour, and a row where FOLO is behind says so plainly. One sentence says what is
+   * word ("1.66× faster", "17% less memory"), never a colour, and a row where FOLO is behind says so plainly. One sentence says what is
    * compared and, next to it, that most rows are not like for like; each row keeps one short qualifier and names what
    * differs (precision, workload), and the method and caveats sit in a "How this was measured" fold.
    * Phones stack each row (the metric, then its three values, each with its engine named in the markup); the header
@@ -16,13 +16,12 @@
   import Panel from '$lib/ui/Panel.svelte';
 
   const fmt = (v: Versus, x: number) => `${num(x, v.unit === 'ms' ? (x < 10 ? 2 : 1) : 0)} ${v.unit}`;
-  /** "1.66× faster", "17% less memory", "8% slower": the lead in the metric's own terms. */
+  /** One format per kind: speed as a ratio ("1.66× faster", "1.09× slower"), memory as a share ("17% less memory"). */
   function lead(v: Versus): string {
     const a = advantage(v);
     const ahead = a >= 1;
     if (v.unit === 'MiB') return `${Math.round(Math.abs(1 - v.folo / v.yolo) * 100)}% ${ahead ? 'less' : 'more'} memory`;
-    if (!ahead) return `${Math.round((1 / a - 1) * 100)}% slower`;
-    return a >= 1.2 ? `${a.toFixed(2)}× faster` : `${Math.round((a - 1) * 100)}% faster`;
+    return ahead ? `${a.toFixed(2)}× faster` : `${(1 / a).toFixed(2)}× slower`;
   }
   const caveats = versusYolo26n.filter((v) => v.caveat);
 
@@ -70,7 +69,7 @@
         <th scope="col" role="columnheader" id="vs-h-m">Measured</th>
         <th scope="col" role="columnheader" class="r" id="vs-h-folo">folo-n</th>
         <th scope="col" role="columnheader" class="r" id="vs-h-yolo">YOLO26n</th>
-        <th scope="col" role="columnheader" class="r lead-h" id="vs-h-lead">FOLO</th>
+        <th scope="col" role="columnheader" class="r lead-h" id="vs-h-lead">folo-n vs YOLO26n</th>
       </tr>
     </thead>
     <tbody>
@@ -86,7 +85,7 @@
           <!-- The engine's name over each value is for the stacked phone rows; screen readers get it from `headers`. -->
           <td role="cell" class="r num v" headers="vs-r-{i} vs-h-folo"><span class="cl" aria-hidden="true">folo-n</span>{fmt(v, v.folo)}</td>
           <td role="cell" class="r num v yolo" headers="vs-r-{i} vs-h-yolo"><span class="cl" aria-hidden="true">YOLO26n</span>{fmt(v, v.yolo)}</td>
-          <td role="cell" class="r lead" headers="vs-r-{i} vs-h-lead"><span class="cl" aria-hidden="true">FOLO</span>{lead(v)}</td>
+          <td role="cell" class="r lead" headers="vs-r-{i} vs-h-lead"><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>{lead(v)}</td>
         </tr>
       {/each}
     </tbody>

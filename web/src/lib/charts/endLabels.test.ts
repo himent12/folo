@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { labelWidth, placeEndLabels } from './endLabels';
+import { labelWidth, needsLeader, placeEndLabels } from './endLabels';
 
 const bounds = { x0: 0, y0: 0, x1: 600, y1: 300 };
 const line = (pts: [number, number][]) => pts.map(([x, y]) => ({ x, y }));
@@ -8,7 +8,7 @@ describe('placeEndLabels', () => {
   it('puts a label right of its line when that spot is clear', () => {
     const c = line([[0, 200], [300, 100]]);
     const [p] = placeEndLabels([{ id: 'a', label: 'run-a', x: 300, y: 100 }], [c], bounds);
-    expect(p).toEqual({ id: 'a', label: 'run-a', x: 306, y: 100 });
+    expect(p).toEqual({ id: 'a', label: 'run-a', x: 306, y: 100, ax: 300, ay: 100 });
   });
 
   it('moves off another line that runs through the right-hand spot', () => {
@@ -102,5 +102,32 @@ describe('placeEndLabels: the gutter column', () => {
     const placed = placeEndLabels(ends, ends.map((e) => line([[0, e.y], [500, e.y]])), bounds, 2, 500);
     expect(placed).toHaveLength(4);
     for (const p of placed) expect(p.y + 7).toBeLessThanOrEqual(300);
+  });
+
+  it('keeps labels a clear gap apart, with leaders for those moved off their line', () => {
+    // The loss chart's box and dfl ending 1 px apart at the plot's edge, and the comparison's two runs ending at 100 %.
+    const flat = (y: number) => line([[0, y], [500, y]]);
+    const ends = [
+      { id: 'box', label: 'box', x: 500, y: 170, curve: 0 },
+      { id: 'dfl', label: 'dfl', x: 500, y: 171, curve: 1 },
+      { id: 'cls', label: 'cls', x: 500, y: 210, curve: 2 },
+    ];
+    const placed = placeEndLabels(ends, [flat(170), flat(171), flat(210)], bounds, 2, 500, { gap: 10, lead: 14 });
+    expect(placed).toHaveLength(3);
+    const ys = placed.map((p) => p.y).sort((a, b) => a - b);
+    for (let i = 1; i < ys.length; i++) expect(ys[i]! - ys[i - 1]!).toBeGreaterThanOrEqual(24);
+    // Moved apart, the column steps out for the leaders; the labels stay inside the bounds.
+    for (const p of placed) {
+      expect(p.x).toBe(514);
+      expect(p.x + labelWidth(p.label)).toBeLessThanOrEqual(600);
+    }
+    expect(placed.some(needsLeader)).toBe(true);
+  });
+
+  it('labels a line ending at the plot edge in the column, beside its end when nothing crowds it', () => {
+    const ends = [{ id: 'total', label: 'total', x: 500, y: 100, curve: 0 }];
+    const [p] = placeEndLabels(ends, [line([[0, 100], [500, 100]])], bounds, 2, 500, { gap: 10, lead: 14 });
+    expect(p).toMatchObject({ x: 506, y: 100 });
+    expect(needsLeader(p!)).toBe(false);
   });
 });

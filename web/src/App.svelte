@@ -131,7 +131,8 @@
     transform: none;
   }
   @media (max-width: 767px) {
-    .app :global(.sidebar) {
+    /* The sidebar's own column only (pages have rails of their own, which phones show as sections). */
+    .app :global(.shell-rail) {
       display: none;
     }
     /* Clear of the tab bar (56 px + 8), or of nothing but 8 px while a page's dock replaces it (shell/dock.ts). */
