@@ -3,7 +3,7 @@ import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { resolveTrain } from '$lib/api/mock/runs';
 import { batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, headSetting, lrSetting, momentumSetting, optimizerSetting, precisionSetting, settingText, warmupSetting } from './resolved';
 
-const config = { optimizer: 'auto', lr0: 0.01, batch: 8, epochs: 30 } as TrainConfig;
+const config = { optimizer: 'auto', lr0: 0.01, batch: 8, epochs: 30, augment: { close_mosaic: 10 } } as TrainConfig;
 
 describe('the trainer resolution the mock reports (folo-vision resolved_train)', () => {
   it('matches the trainer test: auto on a short run is AdamW at 0.002 · 5 / (4 + 3)', () => {
@@ -12,6 +12,13 @@ describe('the trainer resolution the mock reports (folo-vision resolved_train)',
     expect(r).toMatchObject({ optimizer: 'adamw', lr0: 0.001429, momentum: 0.9, betas: [0.9, 0.999], warmup_bias_lr: 0 });
     expect(r).toMatchObject({ batch: 8, accumulate: 8, nbs: 64, optimizer_steps_per_epoch: 16, warmup_iters: 100, lrf: 0.01, cos_lr: false });
     expect(r.weight_decay).toBeCloseTo(0.0005, 12);
+  });
+
+  it('reports close mosaic after the cap at half the run, as the server does', () => {
+    expect(resolveTrain(config, 1000, 3, 16).close_mosaic).toBe(10);
+    const short = { ...config, epochs: 15 } as TrainConfig;
+    expect(resolveTrain(short, 1000, 3, 16).close_mosaic).toBe(7);
+    expect(effectiveCloseMosaic({ config: short, resolved: resolveTrain(short, 1000, 3, 16) })).toBe(7);
   });
 
   it('keeps a named optimizer at the requested LR with the recipe momentum, SGD without betas', () => {

@@ -6,6 +6,10 @@
     value: T;
     label: string;
     disabled?: boolean;
+    /** Consecutive options with the same group are listed under it (`<optgroup>`); none, at the top level. */
+    group?: string;
+    /** What the option is, as its tooltip (a native option holds no markup). */
+    title?: string;
   }
 
   let {
@@ -31,12 +35,28 @@
     invalid?: boolean;
     describedby?: string;
   } = $props();
+
+  /** Runs of options: the ungrouped ones as they are, each group's under its label. */
+  const runs = $derived(
+    options.reduce<{ group?: string; options: Option[] }[]>((out, o) => {
+      const last = out.at(-1);
+      if (last && last.group === o.group) last.options.push(o);
+      else out.push({ group: o.group, options: [o] });
+      return out;
+    }, []),
+  );
 </script>
+
+{#snippet option(o: Option)}<option value={o.value} disabled={o.disabled} title={o.title}>{o.label}</option>{/snippet}
 
 <div class="select {size}">
   <select {id} bind:value aria-label={label} {disabled} aria-invalid={invalid || undefined} aria-describedby={describedby} onchange={() => onchange?.(value)}>
-    {#each options as o (o.value)}
-      <option value={o.value} disabled={o.disabled}>{o.label}</option>
+    {#each runs as r, i (i)}
+      {#if r.group}
+        <optgroup label={r.group}>{#each r.options as o (o.value)}{@render option(o)}{/each}</optgroup>
+      {:else}
+        {#each r.options as o (o.value)}{@render option(o)}{/each}
+      {/if}
     {/each}
   </select>
   <span class="chev" aria-hidden="true"><ChevronDown size={14} strokeWidth={1.75} /></span>

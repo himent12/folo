@@ -266,6 +266,43 @@ export const scenes = [
     },
   },
   {
+    // Server PR #140: published weights (folo-n-coco, `folo weights pull`) in Start from, a group of their own. Picked,
+    // they set the size ("folo-n, from folo-n-coco" above the picker), their `about` is the field's hint, and the
+    // command names them by their published name.
+    name: 'run-new-published',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      for (let t = 0; t < 8000 && !(await page.locator('select#weights option[value="folo-n-coco"]').count()); t += 250) await page.clock.runFor(250);
+      await page.selectOption('select#weights', 'folo-n-coco');
+      await until(page, '.a-from');
+      if (await page.locator('.summary details.cli > summary').isVisible()) await page.locator('.summary details.cli > summary').click();
+      await page.clock.runFor(1000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Server PR #140: a POST refused with `501 not_supported` (the server restarted without tensor cores after the page
+    // loaded): the server's words at the Mixed precision field, never a toast, and, from the capabilities read again,
+    // the switch off with the way to turn tensor cores back on.
+    name: 'run-new-amp-refused',
+    path: '/runs/new',
+    search: 'scenario=amp-refused',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#amp');
+      await page.locator('.amp .switch').click();
+      await page.locator('form.layout').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
+      await until(page, '#amp-error');
+      await until(page, '#amp-why');
+      await page.clock.runFor(1000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // The end-to-end head (TrainConfig.head "o2o"): Advanced opened and the switch on, with its one line; the Summary's
     // Head row and the CLI command (opened) carry it.
     name: 'run-new-e2e',
@@ -498,6 +535,20 @@ export const scenes = [
       if (vp === 'desktop' || vp === 'laptop') await until(page, '#config dd');
       else await page.getByRole('tab', { name: 'Config' }).click();
       await page.locator('#config').scrollIntoViewIfNeeded();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Server PR #140 (`run_cli`): the run's `folo train` command (GET /api/runs/{id}/cli) closes its Config, under
+    // "In PowerShell:" on one copyable line. Phones and tablets: the Config section. The whole page: the harness shoots
+    // from the top, and Config sits below the charts.
+    name: 'run-cli',
+    path: '/runs/run_c19a',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp !== 'desktop' && vp !== 'laptop') await page.getByRole('tab', { name: 'Config' }).click();
+      await until(page, '#config .cli pre.line');
       await page.mouse.move(0, 0);
     },
   },
@@ -1466,6 +1517,31 @@ export const scenes = [
         },
       }),
   ),
+  {
+    // Server PR #140 (`gpu_pool`): FOLO's GPU memory in Settings › System: in use, cached and the peak, in the one size
+    // format, the device beside it (the whole page: the panel sits near the bottom).
+    name: 'settings-gpu-pool',
+    path: '/settings',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#system .pool');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Server PR #140: published weights listed as models, their own group ("Published weights") after the datasets.
+    name: 'models-published',
+    path: '/models',
+    viewports: ['desktop', 'laptop', 'mobile'],
+  },
+  {
+    // The published weights' page: "published weights" in its meta line, its Source what they are.
+    name: 'model-published',
+    path: '/models/folo-n-coco',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+  },
   {
     // The server's own words opened under Driver report: wrapped prose in a well, copyable whole.
     name: 'settings-system-report',

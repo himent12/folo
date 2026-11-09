@@ -63,11 +63,16 @@
   };
 
   // mAP is only comparable on the same validation data: a model is evaluated on its run's dataset, so the list is
-  // grouped by it and each group is ranked on its own. Imported weights carry no dataset and are never ranked.
+  // grouped by it and each group is ranked on its own. Published weights (`folo weights pull`, scored on COCO) and
+  // imported files carry no dataset of this server's and are never ranked; each is a group of its own.
+  const PUBLISHED = '~published';
   const IMPORTED = '~imported';
   const UNKNOWN = '~unknown';
+  /** Groups that are not an evaluation dataset of this server's: no link, no "best", after the datasets. */
+  const OTHER = [PUBLISHED, IMPORTED, UNKNOWN];
   const dsName = $derived(new Map((datasets.data ?? []).map((d) => [d.id, d.name])));
   const evalSet = (m: Model): { key: string; label: string } => {
+    if (m.source === 'published') return { key: PUBLISHED, label: 'Published weights' };
     if (!m.run_id) return { key: IMPORTED, label: 'Imported' };
     const dsId = runById.get(m.run_id)?.config.dataset_id;
     if (!dsId) return { key: UNKNOWN, label: 'Unknown dataset' };
@@ -107,7 +112,7 @@
   const matches = (m: Model, q: string) =>
     !q || `${m.name} ${m.arch} ${m.id} ${sourceName(m)} ${evalSet(m).label}`.toLowerCase().includes(q);
 
-  /** Groups in display order (named datasets A–Z, then imported, then unknown), each with its rows sorted. */
+  /** Groups in display order (named datasets A–Z, then published, imported, unknown), each with its rows sorted. */
   const groups = $derived.by(() => {
     const q = query.trim().toLowerCase();
     const col = cols.find((c) => c.key === sortKey) ?? cols[0]!;
@@ -119,7 +124,7 @@
       if (!by.has(e.key)) by.set(e.key, { ...e, rows: [] });
       by.get(e.key)!.rows.push(m);
     }
-    const rank = (k: string) => (k === IMPORTED ? 1 : k === UNKNOWN ? 2 : 0);
+    const rank = (k: string) => OTHER.indexOf(k) + 1;
     const out = [...by.values()].sort((a, b) => rank(a.key) - rank(b.key) || a.label.localeCompare(b.label));
     for (const g of out)
       g.rows.sort((a, b) => {
@@ -142,7 +147,7 @@
   const best = $derived.by(() => {
     const ids = new Set<string>();
     for (const g of groups) {
-      if (g.key === IMPORTED || g.key === UNKNOWN || g.rows.length < 2) continue;
+      if (OTHER.includes(g.key) || g.rows.length < 2) continue;
       const top = g.rows.reduce<Model | null>((b, m) => ((m.metrics?.map50_95 ?? -1) > (b?.metrics?.map50_95 ?? -1) ? m : b), null);
       if (top?.metrics) ids.add(top.id);
     }
@@ -158,8 +163,8 @@
       k.n++;
       keys.set(e.key, k);
     }
-    const named = [...keys].filter(([k]) => k !== IMPORTED && k !== UNKNOWN).sort((a, b) => a[1].label.localeCompare(b[1].label));
-    const rest = [...keys].filter(([k]) => k === IMPORTED || k === UNKNOWN);
+    const named = [...keys].filter(([k]) => !OTHER.includes(k)).sort((a, b) => a[1].label.localeCompare(b[1].label));
+    const rest = [...keys].filter(([k]) => OTHER.includes(k)).sort((a, b) => OTHER.indexOf(a[0]) - OTHER.indexOf(b[0]));
     return [
       { value: 'all', label: 'All', meta: String(models.data?.length ?? 0) },
       ...[...named, ...rest].map(([value, { label, n }]) => ({ value, label, meta: String(n) })),
@@ -177,7 +182,7 @@
 
 <Page title="Models">
   <!-- One fixed line: the counts live at the list's end, so nothing here changes as the list loads. -->
-  {#snippet sub()}<span>Trained weights and imported <span class="mono">.folo</span> files, ranked per evaluation dataset.</span>{/snippet}
+  {#snippet sub()}<span>Trained, published and imported weights, ranked per evaluation dataset.</span>{/snippet}
   <!-- Phones: one line, so the list starts 16 px under it. -->
   {#snippet subPhone()}<span>Ranked per evaluation dataset.</span>{/snippet}
 
@@ -263,7 +268,7 @@
             <tbody>
               <tr class="group">
                 <th colspan={cols.length} scope="colgroup">
-                  {#if g.key === IMPORTED || g.key === UNKNOWN}
+                  {#if OTHER.includes(g.key)}
                     <span>{g.label}</span>
                   {:else}
                     <a class="g-name" href={href(`/datasets/${g.key}`)}>{g.label}</a>
@@ -274,7 +279,7 @@
               {#each g.rows as m (m.id)}
                 {@const parent = parentOf(m)}
                 <tr class="link" data-row aria-label={m.name} onclick={() => router.go(`/models/${m.id}`)}>
-                  <td><a class="name" href={href(`/models/${m.id}`)} title={m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
+                  <td><a class="name" href={href(`/models/${m.id}`)} title={m.about ?? m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
                   <td><Ident value={m.arch} class="faint" /></td>
                   <td class="r spec hide-lg" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
                   <td class="r spec hide-md">{m.imgsz}</td>
@@ -337,7 +342,7 @@
           <ul>
             {#each g.rows as m (m.id)}
               <li>
-                <a href={href(`/models/${m.id}`)}>
+                <a href={href(`/models/${m.id}`)} title={m.about}>
                   <span class="m-main">
                     <span class="name truncate">{m.name}</span>
                     <span class="m-meta num"><Meta line><Ident value={m.arch} /><span>{m.imgsz} px</span><span>{compact(m.params)}</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>

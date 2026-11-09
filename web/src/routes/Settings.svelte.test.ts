@@ -79,6 +79,30 @@ describe('Settings', () => {
   });
 });
 
+describe("Settings › System: FOLO's GPU memory (gpu_pool)", () => {
+  it('shows what FOLO holds on the GPU, in use, cached and the peak, in the one size format', async () => {
+    hub.api = new MockApi('normal', 0);
+    prefs.units = 'binary';
+    c = mount(Settings, { target });
+    const row = await until(() => [...target.querySelectorAll('#system .setting')].find((r) => r.querySelector('p')?.textContent === "FOLO's GPU memory"), 'the GPU memory row');
+    // One meta item each (ui/Meta draws the separators); under 1 GiB the format steps down to MiB, as everywhere.
+    expect([...row.querySelectorAll('.pool .ui-meta > span')].map((x) => x.textContent)).toEqual([
+      '4.6 GiB in use',
+      '901.1 MiB cached',
+      'peak 5.3 GiB',
+    ]);
+    expect(row.querySelector('.device')?.textContent).toBe('gpu:0');
+    expect(row.textContent).not.toMatch(/VRAM/);
+  });
+
+  it('shows nothing where the server reports no pool', async () => {
+    hub.api = new MockApi('empty', 0);
+    c = mount(Settings, { target });
+    await until(() => target.querySelector('#system'), 'the System panel');
+    expect(target.textContent).not.toContain("FOLO's GPU memory");
+  });
+});
+
 describe('Settings › Throughput', () => {
   it('lists f16 with and without tensor cores as two rows, each saying which', async () => {
     const api = new MockApi('normal', 0);

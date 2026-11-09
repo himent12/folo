@@ -4,12 +4,15 @@
    * the request a note where it differs ("AdamW (auto)", "0.001429 (requested 0.01)"), plus the batch it accumulates,
    * the LR decay, the warmup and the optimizer's momentum and weight decay; without it, the request as asked for.
    * Close mosaic is the trainer's capped count ("last 7 epochs (requested 10)"). Copy JSON copies the request: the
-   * TrainConfig `POST /api/runs` and MCP `train` take, which resolves the same way again.
+   * TrainConfig `POST /api/runs` and MCP `train` take, which resolves the same way again. With `cli` (servers that list
+   * `run_cli`), the same run from a terminal on the server's machine closes the panel: "In PowerShell:" and the
+   * command on one copyable line (ui/CommandLine).
    */
   import Copy from '@lucide/svelte/icons/copy';
   import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
   import type { Origin } from '$lib/lineage';
   import Button from '$lib/ui/Button.svelte';
+  import CommandLine from '$lib/ui/CommandLine.svelte';
   import Lineage from '$lib/ui/Lineage.svelte';
   import Note from '$lib/ui/Note.svelte';
   import Panel from '$lib/ui/Panel.svelte';
@@ -23,6 +26,7 @@
     compact = false,
     essential = false,
     weights,
+    cli = null,
   }: {
     config: TrainConfig;
     /** What the trainer resolved `config` to; null until it is built, missing from older servers. */
@@ -34,6 +38,8 @@
     essential?: boolean;
     /** Where the run started, read once ($lib/lineage): the checkpoint by name, its id in the tooltip, as the header says it. */
     weights?: Origin | null;
+    /** The run's `folo train` command, quoted for PowerShell (`GET /api/runs/{id}/cli`); null where the server has none. */
+    cli?: string | null;
   } = $props();
 
   const a = $derived(config.augment);
@@ -116,9 +122,28 @@
       </div>
     </div>
   {/if}
+  {#if cli}
+    <div class="cli">
+      <p class="shell">In PowerShell:</p>
+      <CommandLine command={cli} label="PowerShell command" copied="The run's folo train command, for the server's machine." />
+    </div>
+  {/if}
 </Panel>
 
 <style>
+  /* The run from a terminal: under the settings, across the panel's width, the command one line that never wraps. */
+  .cli {
+    display: grid;
+    gap: var(--space-1);
+    margin-top: var(--space-4);
+    min-width: 0;
+  }
+  /* As ui/Remedy labels its shell. */
+  .shell {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
   .cols {
     display: grid;
     grid-template-columns: 1fr 1fr;

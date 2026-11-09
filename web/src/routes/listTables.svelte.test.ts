@@ -273,3 +273,21 @@ describe('Runs: row checkboxes', () => {
     go.mockRestore();
   });
 });
+
+describe('Models: published weights (server PR #140)', () => {
+  it('are a group of their own after the datasets, never ranked, what they are in the name tooltip', async () => {
+    await open(Models as Component, '/models', new MockApi('normal', 0));
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('table.models tbody tr[data-row]')) throw new Error('rows not loaded');
+    });
+    const groups = [...target.querySelectorAll('table.models tr.group th')].map((th) => th.firstElementChild?.textContent);
+    expect(groups.slice(-2)).toEqual(['Published weights', 'Imported']);
+    const body = [...target.querySelectorAll('table.models tbody')].find((b) => b.querySelector('tr.group')?.textContent?.includes('Published weights'))!;
+    expect(body.querySelector('tr.group a')).toBeNull();
+    const name = body.querySelector<HTMLAnchorElement>('a.name')!;
+    expect(name.textContent).toBe('folo-n-coco');
+    expect(name.title).toMatch(/^folo-n trained from scratch on COCO/);
+    expect(body.querySelector('.best')).toBeNull();
+  });
+});

@@ -22,6 +22,7 @@
   import DriverReport from '$lib/ui/DriverReport.svelte';
   import Field from '$lib/ui/Field.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
+  import Meta from '$lib/ui/Meta.svelte';
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
@@ -40,6 +41,8 @@
   // sits low on the page: a real server answers once its GPU is up, and the panel must not push the forms down.
   const sys = new Resource((s) => hub.api.system(s));
   const caps = $derived(sys.data?.capabilities);
+  /** FOLO's own GPU buffer pool (`gpu_pool`): absent until the server has used the GPU, and from older servers. */
+  const pool = $derived(sys.data?.gpu_pool);
   const capRows = $derived(caps ? capabilityRows(caps, sys.data?.gpus ?? []) : []);
   const capMarks: Record<CapState, typeof CircleCheck> = { on: CircleCheck, off: CircleMinus, none: CircleSlash };
 
@@ -307,6 +310,22 @@
               </div>
               <span class="mono device">{caps.device}</span>
             </div>
+            {#if pool}
+              <!-- What FOLO itself holds on the GPU (in the one size format): in use, kept for reuse, and the peak. -->
+              <div class="setting">
+                <div class="setting-text">
+                  <p>FOLO's GPU memory</p>
+                  <p class="pool num">
+                    <Meta><span>{bytes(pool.live_bytes, prefs.units)} in use</span><span>{bytes(pool.cached_bytes, prefs.units)} cached</span><span
+                        >peak {bytes(pool.peak_live_bytes, prefs.units)}</span
+                      ></Meta
+                    >
+                  </p>
+                  <p class="note">The peak is since the last run started. Cached memory goes back to the driver when a run ends, and after 30 s without predictions.</p>
+                </div>
+                <span class="mono device">{pool.device}</span>
+              </div>
+            {/if}
             <ul class="caps" aria-label="Capabilities">
               {#each capRows as c (c.id)}
                 {@const Mark = capMarks[c.state]}
@@ -669,6 +688,13 @@
   }
   .device {
     font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  /* Figures people read: secondary ink (§2.3, tertiary is for skimming). */
+  .pool {
+    margin-top: 2px;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
   .caps {

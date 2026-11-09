@@ -337,6 +337,8 @@
     {#if m.run_id}
       <span>trained by <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a></span>
       {@render lineageNote()}
+    {:else if m.source === 'published'}
+      <span title={m.about}>published weights</span>
     {:else}
       <span>imported</span>
     {/if}
@@ -556,12 +558,16 @@
                 {#if m.classes.length > 10}<span class="faint">+{m.classes.length - 10} more</span>{/if}
               </dd>
             </div>
-            <div class="kv">
+            <div class="kv" class:stack={!m.run_id && m.source === 'published' && !!m.about}>
               <dt>Source</dt>
               <dd>
                 {#if m.run_id}
                   <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a>
                   {#if context.data?.dataset}<span class="faint">{' on '}</span><a class="link" href={href(`/datasets/${context.data.dataset.id}`)}>{context.data.dataset.name}</a>{/if}
+                {:else if m.source === 'published'}
+                  <!-- `folo weights pull` weights: what they are, in the words `folo weights list` prints. -->
+                  <span>Published weights</span>
+                  {#if m.about}<span class="about">{m.about}</span>{/if}
                 {:else}
                   <span class="muted">Imported .folo file</span>
                 {/if}
@@ -1320,6 +1326,25 @@
     justify-content: space-between;
     align-items: baseline;
     gap: var(--space-4);
+  }
+  /* A value with a sentence under it (published weights and what they are): the label over it, the sentence at the
+     measure, in the rail; the folded rail keeps its label column (`.two .kv` below). */
+  .kv.stack {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .kv.stack dd {
+    display: grid;
+    gap: 2px;
+    text-align: left;
+  }
+  .about {
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    text-wrap: pretty;
   }
   /* Folded rail (up to 1199 px): labels beside their values, in two columns. */
   .details.two {

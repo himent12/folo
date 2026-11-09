@@ -361,6 +361,8 @@ export class MockThroughput {
       val_source: valRow && valRow.samples > 0 ? 'measured' : 'reference',
       est_peak_vram_bytes: vram === null ? null : Math.round(vram),
       vram_source: vramSource,
+      // The trainer's cap at half the run, whatever the mosaic probability (as `Run.resolved.close_mosaic`).
+      close_mosaic: Math.max(0, Math.min(c.augment.close_mosaic, Math.floor(c.epochs / 2))),
     };
   }
 

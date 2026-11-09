@@ -395,3 +395,88 @@ describe('mock metrics reconcile', () => {
     }
   });
 });
+
+describe('mock: the final fields of server PR #140', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('lists published weights as a model named by its published name, with what they are', async () => {
+    const models = await new MockApi('normal', 0).models();
+    const coco = models.find((m) => m.id === 'folo-n-coco');
+    expect(coco).toMatchObject({ name: 'folo-n-coco', arch: 'folo-n', source: 'published', run_id: null, fused: false });
+    expect(coco?.about).toMatch(/^folo-n trained from scratch on COCO/);
+    expect(coco?.metrics).toMatchObject({ map50: 0.455, map50_95: 0.314 });
+    // Every model says where it comes from; only published weights say what they are; the mock reports no paths.
+    expect(models.every((m) => m.source === 'run' || m.source === 'file' || m.source === 'published')).toBe(true);
+    expect(models.filter((m) => m.about).map((m) => m.id)).toEqual(['folo-n-coco']);
+    expect(models.every((m) => m.path === undefined)).toBe(true);
+    expect(models.filter((m) => m.source === 'run').every((m) => m.run_id)).toBe(true);
+    expect((await new MockApi('empty', 0).models()).length).toBe(0);
+  });
+
+  it('fine-tunes from published weights in their architecture, whatever `arch` says', async () => {
+    const api = new MockApi('normal', 0);
+    const c = { ...(await api.run('run_31aa')).config, name: 'coco-ft', arch: 'folo-s' as const, weights: 'folo-n-coco' };
+    const est = await api.estimateRun(c);
+    expect(est.basis.arch).toBe('folo-n');
+    expect(est.cli).toBe('folo train --data D:/data/shapes --weights folo-n-coco --epochs 100 --batch 16 --imgsz 640 --device gpu:0 --head o2m --name coco-ft');
+    const run = await api.createRun(c);
+    expect(run.config.arch).toBe('folo-n');
+    await expect(api.createRun({ ...c, weights: 'folo-x-nope' })).rejects.toMatchObject({ status: 404, code: 'model_not_found' });
+  });
+
+  it("serves a run's CLI command (run_cli): quoted for PowerShell, its argv exact", async () => {
+    const api = new MockApi('normal', 0);
+    expect((await api.system()).features).toContain('run_cli');
+    const { cli, argv } = await api.runCli('run_c19a');
+    expect(cli).toBe('folo train --data D:/data/fasteners --weights D:/folo/models/shapes-n-best.folo --epochs 150 --batch 16 --imgsz 640 --device gpu:0 --amp --head o2m --name fasteners-n');
+    expect(argv.slice(0, 2)).toEqual(['folo', 'train']);
+    expect(argv.join(' ')).toBe(cli);
+    await expect(api.runCli('run_nope')).rejects.toMatchObject({ status: 404, code: 'run_not_found' });
+    // A server from before the field has no such route.
+    const old = new MockApi('no-throughput', 0);
+    expect((await old.system()).features).not.toContain('run_cli');
+    await expect(old.runCli('run_c19a')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('estimates close mosaic after the cap, as the run will report it', async () => {
+    const api = new MockApi('normal', 0);
+    const c = (await api.run('run_f15c')).config;
+    expect((await api.estimateRun(c)).close_mosaic).toBe(7);
+    expect((await api.run('run_f15c')).resolved?.close_mosaic).toBe(7);
+    expect((await api.estimateRun({ ...c, epochs: 100 })).close_mosaic).toBe(10);
+  });
+
+  it("reports FOLO's GPU pool once the GPU was used, never for an unused or older server", async () => {
+    const pool = (await new MockApi('normal', 0).system()).gpu_pool;
+    expect(pool?.device).toBe('gpu:0');
+    expect(pool!.live_bytes).toBeGreaterThan(0);
+    expect(pool!.peak_live_bytes).toBeGreaterThanOrEqual(pool!.live_bytes);
+    expect((await new MockApi('empty', 0).system()).gpu_pool).toBeUndefined();
+    expect((await new MockApi('no-throughput', 0).system()).gpu_pool).toBeUndefined();
+  });
+
+  it('refuses an amp run the server cannot train with 501 not_supported, before anything is queued', async () => {
+    const api = new MockApi('tensor-cores-off', 0);
+    const c = { ...(await api.run('run_31aa')).config, name: 'amp', device: 'auto' as const, amp: true };
+    const before = (await api.runs()).length;
+    await expect(api.createRun(c)).rejects.toMatchObject({ status: 501, code: 'not_supported', message: (await api.system()).capabilities?.amp.reason });
+    expect((await api.runs()).length).toBe(before);
+    await expect(new MockApi('normal', 0).createRun({ ...c, device: 'cpu' })).rejects.toMatchObject({ status: 501, code: 'not_supported' });
+    await expect(new MockApi('normal', 0).createRun(c)).resolves.toMatchObject({ config: { amp: true } });
+  });
+
+  it('amp-refused: says amp is available, refuses it at POST, then says it is not', async () => {
+    const api = new MockApi('amp-refused', 0);
+    expect((await api.system()).capabilities?.amp.available).toBe(true);
+    const c = { ...(await api.run('run_31aa')).config, name: 'amp', device: 'auto' as const, amp: true };
+    await expect(api.createRun(c)).rejects.toMatchObject({ status: 501, code: 'not_supported' });
+    const caps = (await api.system()).capabilities!;
+    expect(caps.amp.available).toBe(false);
+    expect(caps.tensor_cores).toMatchObject({ available: true, enabled: false });
+    await expect(api.createRun({ ...c, amp: false })).resolves.toMatchObject({ config: { amp: false } });
+  });
+});
