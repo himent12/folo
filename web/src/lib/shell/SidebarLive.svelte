@@ -74,7 +74,7 @@
   }
   /* The pulsing dot carries "live"; the word stays in ink. */
   .label {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     font-weight: var(--weight-medium);
     color: var(--text-secondary);
   }
@@ -90,7 +90,7 @@
   }
   .eta {
     margin-left: auto;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .name {
@@ -99,11 +99,11 @@
   .meta {
     display: flex;
     justify-content: space-between;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .queued {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .mini {

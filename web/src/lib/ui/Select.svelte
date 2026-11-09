@@ -56,7 +56,7 @@
     padding: 0 28px 0 12px;
     border-radius: var(--radius-md);
     background: var(--bg-raised);
-    border: 1px solid var(--line-default);
+    border: 1px solid var(--line-control);
     color: var(--text-primary);
     cursor: pointer;
     transition: border-color var(--dur-fast) var(--ease-standard);
@@ -69,7 +69,7 @@
     font-size: var(--type-sm-size);
   }
   select:hover {
-    border-color: var(--line-strong);
+    border-color: var(--text-tertiary);
   }
   select:focus-visible {
     outline: none;

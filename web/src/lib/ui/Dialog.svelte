@@ -6,6 +6,7 @@
   import X from '@lucide/svelte/icons/x';
   import type { Snippet } from 'svelte';
   import Button from './Button.svelte';
+  import { rememberFocus } from './focus';
 
   let {
     open = $bindable(false),
@@ -28,14 +29,20 @@
   const uid = $props.id();
   let el: HTMLDialogElement;
 
+  // Focus returns to the opener on close (browsers that restore it themselves are left alone).
+  let restore: (() => void) | null = null;
   $effect(() => {
-    if (open && !el.open) el.showModal();
-    else if (!open && el.open) el.close();
+    if (open && !el.open) {
+      restore = rememberFocus();
+      el.showModal();
+    } else if (!open && el.open) el.close();
   });
 
   function onDialogClose() {
     open = false;
     onclose?.();
+    restore?.();
+    restore = null;
   }
 
   // A click whose target is the <dialog> itself landed on the backdrop. It must also have started there: a text

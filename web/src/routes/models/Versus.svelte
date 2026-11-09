@@ -2,10 +2,12 @@
   /**
    * How fast the engine is, against the incumbent of the same size on the same machine: every row of
    * docs/BENCHMARKS.md's summary where both have a number, including the ones FOLO trails. Values in ink; the lead is a
-   * word ("1.66× faster"), never a colour, and a row where FOLO is behind says so plainly.
+   * word ("1.66× faster"), never a colour, and a row where FOLO is behind says so plainly. One sentence says what is
+   * compared; each row keeps one short qualifier, and the method and caveats sit in a "How this was measured" fold.
    */
   import { advantage, BENCH_SOURCE, versusYolo26n, type Versus } from '$lib/benchmarks';
   import { num } from '$lib/format';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Panel from '$lib/ui/Panel.svelte';
 
   const fmt = (v: Versus, x: number) => `${num(x, v.unit === 'ms' ? (x < 10 ? 2 : 1) : 0)} ${v.unit}`;
@@ -17,9 +19,11 @@
     if (!ahead) return `${Math.round((1 / a - 1) * 100)}% slower`;
     return a >= 1.2 ? `${a.toFixed(2)}× faster` : `${Math.round((a - 1) * 100)}% faster`;
   }
+  const caveats = versusYolo26n.filter((v) => v.caveat);
 </script>
 
-<Panel title="Engine speed" meta="folo-n vs YOLO26n" pad="none" id="engine-speed">
+<Panel title="Engine speed" pad="none" id="engine-speed">
+  <p class="lede">folo-n vs YOLO26n on the same RTX 4080 SUPER, 640 px.</p>
   <table class="table vs">
     <thead>
       <tr>
@@ -44,27 +48,54 @@
       {/each}
     </tbody>
   </table>
-  <!-- The conditions every row shares, said once. -->
-  <p class="src">
-    Both on the same RTX 4080 SUPER (and i7-14700KF for the CPU rows), 640 × 640 input. folo-n has untrained
-    weights and YOLO26n its COCO-pretrained ones, so almost no FOLO candidates pass the confidence threshold and its
-    end-to-end times include less NMS work than a trained model's (about 0.1–0.3 ms per image). Times and memory:
-    lower is better; images per second: higher. Source: {BENCH_SOURCE.split(' · ')[0]}.
-  </p>
+  <!-- How the rows were made and what qualifies them, one step away. -->
+  <details class="how">
+    <summary><ChevronDown size={14} aria-hidden="true" />How this was measured</summary>
+    <div class="how-body">
+      <p>
+        One RTX 4080 SUPER (and an i7-14700KF for the CPU rows), 640 × 640 input. folo-n has untrained weights and YOLO26n
+        its COCO-pretrained ones, so almost no FOLO candidates pass the confidence threshold and its end-to-end times
+        include less NMS work than a trained model's (about 0.1–0.3 ms per image).
+      </p>
+      <p>Times and memory: lower is better. Images per second: higher is better.</p>
+      {#if caveats.length}
+        <ul>
+          {#each caveats as v (v.metric)}<li><span class="cv-m">{v.metric}:</span> {v.caveat}</li>{/each}
+        </ul>
+      {/if}
+      <p>Source: {BENCH_SOURCE.split(' · ')[0]}.</p>
+    </div>
+  </details>
 </Panel>
 
 <style>
+  /* Two-line rows (metric + qualifier): 8 px above and below, values on the metric's line. */
   .vs td {
     vertical-align: top;
+    padding-block: var(--space-2);
   }
   .m {
     display: block;
     font-weight: var(--weight-medium);
   }
+  .lede {
+    padding: 0 var(--space-4) var(--space-3);
+    color: var(--text-secondary);
+  }
+  /* One 12 px tertiary line per row (qualifiers are ≤ 60 characters, tested). */
   .note {
     display: block;
+    font-weight: var(--weight-regular);
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-tertiary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .vs td:first-child {
+    max-width: 0;
+    width: 50%;
   }
   .r {
     text-align: right;
@@ -84,11 +115,58 @@
     font-weight: var(--weight-regular);
     color: var(--text-secondary);
   }
-  .src {
-    padding: var(--space-3) var(--space-4);
+  .how {
     border-top: 1px solid var(--line-subtle);
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
+  .how summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: 40px;
+    padding: 0 var(--space-4);
+    list-style: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
+  }
+  .how summary::-webkit-details-marker {
+    display: none;
+  }
+  .how summary:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+  .how summary:focus-visible {
+    outline-offset: -2px;
+  }
+  .how summary :global(svg) {
     color: var(--text-tertiary);
+    transform: rotate(-90deg);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .how[open] summary :global(svg) {
+    transform: none;
+  }
+  .how-body {
+    display: grid;
+    gap: var(--space-2);
+    max-width: 72ch;
+    padding: 0 var(--space-4) var(--space-4) calc(var(--space-4) + 18px);
+    color: var(--text-secondary);
+  }
+  .how-body ul {
+    display: grid;
+    gap: var(--space-1);
+  }
+  .cv-m {
+    color: var(--text-primary);
+  }
+  @media (pointer: coarse) {
+    .how summary {
+      min-height: 44px;
+    }
   }
   /* Phones: the metric on its own line, then the three values in a row. */
   @media (max-width: 767px) {
@@ -108,13 +186,15 @@
     }
     .vs td:first-child {
       grid-column: 1 / -1;
+      max-width: none;
+      width: auto;
     }
     .vs .r {
       text-align: left;
     }
     .vs td.v::before {
       display: block;
-      font-size: var(--type-xs-size);
+      font-size: var(--type-sm-size);
       color: var(--text-tertiary);
       font-weight: var(--weight-regular);
     }
@@ -127,7 +207,7 @@
     .vs td.lead::before {
       content: 'FOLO';
       display: block;
-      font-size: var(--type-xs-size);
+      font-size: var(--type-sm-size);
       color: var(--text-tertiary);
       font-weight: var(--weight-regular);
     }

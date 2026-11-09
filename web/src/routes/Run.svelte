@@ -454,7 +454,7 @@
     }
   }
   .id {
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
   }
   .when-phone {
     display: none;

@@ -1,6 +1,4 @@
 <script lang="ts">
-  import ArrowDown from '@lucide/svelte/icons/arrow-down';
-  import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import Box from '@lucide/svelte/icons/box';
   import Plus from '@lucide/svelte/icons/plus';
   import Search from '@lucide/svelte/icons/search';
@@ -21,6 +19,11 @@
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
+  import SortHeader from '$lib/ui/SortHeader.svelte';
+  import TableState from '$lib/ui/TableState.svelte';
+  import { rowNav } from '$lib/ui/rowNav';
+  import { advantage, versusYolo26n } from '$lib/benchmarks';
+  import { origin } from '$lib/lineage';
 
   setCrumbs({ label: 'Models' });
 
@@ -31,7 +34,7 @@
   const runs = new Resource((s) => hub.api.runs(s));
   const datasets = new Resource((s) => hub.api.datasets(s));
 
-  type Key = 'name' | 'arch' | 'classes' | 'imgsz' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'created';
+  type Key = 'name' | 'arch' | 'classes' | 'imgsz' | 'params' | 'flops' | 'bytes' | 'map50_95' | 'map50' | 'source' | 'parent' | 'created';
   interface Col {
     key: Key;
     label: string;
@@ -42,6 +45,12 @@
 
   const runById = $derived(new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
   const sourceName = (m: Model) => (m.run_id ? (runById.get(m.run_id)?.name ?? m.run_id) : '');
+  const modelById = $derived(new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
+  /** The model a trained model was fine-tuned from (its run's starting weights); null for imported weights. */
+  const parentOf = (m: Model) => {
+    const run = m.run_id ? runById.get(m.run_id) : undefined;
+    return run ? origin(run.config.weights, modelById) : null;
+  };
 
   // mAP is only comparable on the same validation data: a model is evaluated on its run's dataset, so the list is
   // grouped by it and each group is ranked on its own. Imported weights carry no dataset and are never ranked.
@@ -66,6 +75,7 @@
     { key: 'map50_95', label: 'mAP50-95', num: true, get: (m) => m.metrics?.map50_95 ?? -1 },
     { key: 'map50', label: 'mAP50', num: true, get: (m) => m.metrics?.map50 ?? -1 },
     { key: 'source', label: 'Source run', get: (m) => sourceName(m) || '~', hide: 'md' },
+    { key: 'parent', label: 'Started from', get: (m) => parentOf(m)?.label ?? '~', hide: 'lg' },
     { key: 'created', label: 'Created', num: true, get: (m) => Date.parse(m.created) },
   ];
 
@@ -128,18 +138,16 @@
     ];
   });
   const totalBytes = $derived((models.data ?? []).reduce((a, m) => a + m.bytes, 0));
-  const ariaSort = (k: Key) => (sortKey === k ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined);
   const hideCls = (c: Col) => (c.hide ? `hide-${c.hide}` : '');
+  /** Medium weight goes to the name and the score the list is ranked by; specs stay regular. */
+  const strongScore = $derived<Key>(sortKey === 'map50' ? 'map50' : 'map50_95');
+  /** One line for the collapsed engine benchmarks: how many of the measurements folo-n leads. */
+  const benchLead = versusYolo26n.filter((v) => advantage(v) >= 1).length;
 </script>
 
 <Page title="Models">
-  {#snippet sub()}
-    {#if models.data && models.data.length}
-      <span class="num">{models.data.length} {models.data.length === 1 ? 'model' : 'models'} · {bytes(totalBytes, prefs.units)} · ranked per evaluation dataset</span>
-    {:else}
-      <span>Trained weights and imported <span class="mono">.folo</span> files</span>
-    {/if}
-  {/snippet}
+  <!-- One fixed line: the counts live in the toolbar, so nothing here changes as the list loads. -->
+  {#snippet sub()}<span>Trained weights and imported <span class="mono">.folo</span> files, ranked per evaluation dataset.</span>{/snippet}
 
   {#if !models.error && (!models.data || models.data.length > 0)}
     <div class="toolbar">
@@ -158,144 +166,168 @@
           <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
         </div>
       {/if}
-      <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
+      <div class="end">
+        <span class="count num">
+          {#if models.data}{models.data.length} {models.data.length === 1 ? 'model' : 'models'} · {bytes(totalBytes, prefs.units)}{:else}<Skeleton inline w="104px" h="10px" />{/if}
+        </span>
+        <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
+      </div>
     </div>
   {/if}
 
   <Panel pad="none">
-    {#if models.error && !models.data}
-      <ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" />
-    {:else if models.data?.length === 0}
-      <EmptyState
-        icon={Box}
-        title="No models yet"
-        description="A training run saves its best weights here when it finishes."
-      >
-        {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
-      </EmptyState>
-    {:else if models.data && shownCount === 0}
-      <EmptyState icon={Search} title="No models match" description="Try another dataset or search term.">
-        {#snippet actions()}<Button size="sm" onclick={() => ((dsFilter = 'all'), (query = ''))}>Clear filters</Button>{/snippet}
-      </EmptyState>
-    {:else}
-      <div class="scroll">
-        <table class="table models" aria-busy={!models.data} aria-label="Models by evaluation dataset">
-          <thead>
-            <tr>
-              {#each cols as c (c.key)}
-                <th class={hideCls(c)} class:r={c.num} aria-sort={ariaSort(c.key)} scope="col">
-                  <button type="button" class="sort" class:on={sortKey === c.key} disabled={!models.data} onclick={() => sortBy(c)}>
-                    <span>{c.label}</span>
-                    {#if sortKey === c.key}
-                      {#if sortDir === 'asc'}<ArrowUp size={12} strokeWidth={2} aria-hidden="true" />{:else}<ArrowDown size={12} strokeWidth={2} aria-hidden="true" />{/if}
-                    {/if}
-                  </button>
-                </th>
-              {/each}
-            </tr>
-          </thead>
-          {#if !models.data}
-            <!-- The loaded rhythm: dataset groups (a header row, then their models), with placeholder content. -->
-            {#each SK_GROUPS as n, gi (gi)}
-              <tbody aria-hidden="true">
-                <tr class="group"><th colspan={cols.length}><Skeleton h="10px" w="96px" /></th></tr>
-                {#each Array(n) as _, i (i)}
-                  <tr>
-                    {#each cols as c (c.key)}
-                      <td class={hideCls(c)} class:r={c.num}><Skeleton h="12px" w={c.key === 'name' ? '112px' : '40px'} /></td>
-                    {/each}
-                  </tr>
-                {/each}
-              </tbody>
+    <div class="scroll" class:state={(!!models.data && shownCount === 0) || (!!models.error && !models.data)}>
+      <table class="table models" aria-busy={!models.data} aria-label="Models by evaluation dataset" use:rowNav>
+        <thead>
+          <tr>
+            {#each cols as c (c.key)}
+              <SortHeader
+                label={c.label}
+                class={hideCls(c)}
+                align={c.num ? 'right' : 'left'}
+                dir={sortKey === c.key ? sortDir : null}
+                disabled={!models.data}
+                onsort={() => sortBy(c)}
+              />
             {/each}
-          {:else}
-            {#each groups as g (g.key)}
-              <tbody>
-                <tr class="group">
-                  <th colspan={cols.length} scope="colgroup">
-                    {#if g.key === IMPORTED || g.key === UNKNOWN}
-                      <span>{g.label}</span>
-                    {:else}
-                      <a class="g-name" href={href(`/datasets/${g.key}`)}>{g.label}</a>
-                    {/if}
-                    <span class="faint num">{g.rows.length}</span>
-                  </th>
-                </tr>
-                {#each g.rows as m (m.id)}
-                  <tr class="link" onclick={() => router.go(`/models/${m.id}`)}>
-                    <td><a class="name" href={href(`/models/${m.id}`)} title={m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
-                    <td class="mono faint">{m.arch}</td>
-                    <td class="r hide-lg" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
-                    <td class="r hide-md">{m.imgsz}</td>
-                    <td class="r">{compact(m.params)}</td>
-                    <td class="r hide-lg">{num(m.flops_g, 1)}</td>
-                    <td class="r hide-md">{bytes(m.bytes, prefs.units)}</td>
-                    <td class="r map">
-                      {metric(m.metrics?.map50_95)}
-                    </td>
-                    <td class="r muted">{metric(m.metrics?.map50)}</td>
-                    <td class="hide-md">
-                      {#if m.run_id}
-                        <a class="src" href={href(`/runs/${m.run_id}`)} onclick={(e) => e.stopPropagation()}>{sourceName(m)}</a>
-                      {:else}
-                        <span class="faint">—</span>
-                      {/if}
-                    </td>
-                    <td class="r faint" title={date(m.created)}>{ago(m.created)}</td>
-                  </tr>
-                {/each}
-              </tbody>
-            {/each}
-          {/if}
-        </table>
-      </div>
-
-      <!-- Phones: the same groups as two-line rows (name and one meta line, mAP on the right). -->
-      <div class="rows">
-        {#if !models.data}
+          </tr>
+        </thead>
+        {#if models.error && !models.data}
+          <tbody><TableState cols={cols.length} rows={10}><ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" /></TableState></tbody>
+        {:else if models.data?.length === 0}
+          <tbody>
+            <TableState cols={cols.length} rows={10}>
+              <EmptyState icon={Box} title="No models yet" description="A training run saves its best weights here when it finishes.">
+                {#snippet actions()}<Button icon={Plus} href={href('/runs/new')}>New run</Button>{/snippet}
+              </EmptyState>
+            </TableState>
+          </tbody>
+        {:else if models.data && shownCount === 0}
+          <tbody>
+            <TableState cols={cols.length} rows={10}>
+              <EmptyState icon={Search} title="No models match" description="Try another dataset or search term.">
+                {#snippet actions()}<Button size="sm" onclick={() => ((dsFilter = 'all'), (query = ''))}>Clear filters</Button>{/snippet}
+              </EmptyState>
+            </TableState>
+          </tbody>
+        {:else if !models.data}
+          <!-- The loaded rhythm: dataset groups (a header row, then their models), with placeholder content. -->
           {#each SK_GROUPS as n, gi (gi)}
-            <section aria-hidden="true">
-              <h2 class="m-group"><Skeleton h="10px" w="96px" /></h2>
-              <ul>
-                {#each Array(n) as _, i (i)}
-                  <li>
-                    <span class="row-sk">
-                      <span class="m-main"><span class="l-name"><Skeleton w="55%" h="14px" /></span><span class="l-meta"><Skeleton w="75%" h="10px" /></span></span>
-                      <span class="m-side"><span class="l-name"><Skeleton w="40px" h="14px" /></span><span class="l-meta"><Skeleton w="56px" h="10px" /></span></span>
-                    </span>
-                  </li>
-                {/each}
-              </ul>
-            </section>
+            <tbody aria-hidden="true">
+              <tr class="group"><th colspan={cols.length}><Skeleton h="10px" w="96px" /></th></tr>
+              {#each Array(n) as _, i (i)}
+                <tr>
+                  {#each cols as c (c.key)}
+                    <td class={hideCls(c)} class:r={c.num}><Skeleton h="12px" w={c.key === 'name' ? '112px' : '40px'} /></td>
+                  {/each}
+                </tr>
+              {/each}
+            </tbody>
+          {/each}
+        {:else}
+          {#each groups as g (g.key)}
+            <tbody>
+              <tr class="group">
+                <th colspan={cols.length} scope="colgroup">
+                  {#if g.key === IMPORTED || g.key === UNKNOWN}
+                    <span>{g.label}</span>
+                  {:else}
+                    <a class="g-name" href={href(`/datasets/${g.key}`)}>{g.label}</a>
+                  {/if}
+                  <span class="faint num">{g.rows.length}</span>
+                </th>
+              </tr>
+              {#each g.rows as m (m.id)}
+                {@const parent = parentOf(m)}
+                <tr class="link" data-row aria-label={m.name} onclick={() => router.go(`/models/${m.id}`)}>
+                  <td><a class="name" href={href(`/models/${m.id}`)} title={m.id} onclick={(e) => e.stopPropagation()}>{m.name}</a></td>
+                  <td class="mono faint">{m.arch}</td>
+                  <td class="r spec hide-lg" title={m.classes.slice(0, 12).join(', ') + (m.classes.length > 12 ? ', …' : '')}>{m.classes.length}</td>
+                  <td class="r spec hide-md">{m.imgsz}</td>
+                  <td class="r spec">{compact(m.params)}</td>
+                  <td class="r spec hide-lg">{num(m.flops_g, 1)}</td>
+                  <td class="r spec hide-md">{bytes(m.bytes, prefs.units)}</td>
+                  <td class="r score" class:strong={strongScore === 'map50_95'}>{metric(m.metrics?.map50_95)}</td>
+                  <td class="r score" class:strong={strongScore === 'map50'}>{metric(m.metrics?.map50)}</td>
+                  <td class="hide-md">
+                    {#if m.run_id}
+                      <a class="src" href={href(`/runs/${m.run_id}`)} onclick={(e) => e.stopPropagation()}>{sourceName(m)}</a>
+                    {:else}
+                      <span class="faint">—</span>
+                    {/if}
+                  </td>
+                  <td class="hide-lg">
+                    {#if parent?.kind === 'model' && modelById.has(parent.id)}
+                      <a class="src" href={href(`/models/${parent.id}`)} onclick={(e) => e.stopPropagation()}>{parent.label}</a>
+                    {:else if parent?.kind === 'file'}
+                      <span class="mono src" title={parent.path}>{parent.label}</span>
+                    {:else}
+                      <span class="faint">{parent?.label ?? '—'}</span>
+                    {/if}
+                  </td>
+                  <td class="r faint" title={date(m.created)}>{ago(m.created)}</td>
+                </tr>
+              {/each}
+            </tbody>
           {/each}
         {/if}
-        {#each groups as g (g.key)}
-          <section aria-label={g.label}>
-            <h2 class="m-group">{g.label} <span class="faint num">{g.rows.length}</span></h2>
+      </table>
+    </div>
+
+    <!-- Phones: the same groups as two-line rows (name and one meta line, mAP on the right). -->
+    <div class="rows">
+      {#if !models.data && !models.error}
+        {#each SK_GROUPS as n, gi (gi)}
+          <section aria-hidden="true">
+            <h2 class="m-group"><Skeleton h="10px" w="96px" /></h2>
             <ul>
-              {#each g.rows as m (m.id)}
+              {#each Array(n) as _, i (i)}
                 <li>
-                  <a href={href(`/models/${m.id}`)}>
-                    <span class="m-main">
-                      <span class="name truncate">{m.name}</span>
-                      <span class="m-meta truncate"><span class="mono">{m.arch}</span> · <span class="num">{m.imgsz} px · {compact(m.params)} · {bytes(m.bytes, prefs.units)}</span></span>
-                    </span>
-                    <span class="m-side">
-                      <span class="num map">{metric(m.metrics?.map50_95)}</span>
-                      <span class="m-cap">mAP50-95</span>
-                    </span>
-                  </a>
+                  <span class="row-sk">
+                    <span class="m-main"><span class="l-name"><Skeleton w="55%" h="14px" /></span><span class="l-meta"><Skeleton w="75%" h="10px" /></span></span>
+                    <span class="m-side"><span class="l-name"><Skeleton w="40px" h="14px" /></span><span class="l-meta"><Skeleton w="56px" h="10px" /></span></span>
+                  </span>
                 </li>
               {/each}
             </ul>
           </section>
         {/each}
-      </div>
-    {/if}
+      {/if}
+      {#each groups as g (g.key)}
+        <section aria-label={g.label}>
+          <h2 class="m-group">{g.label} <span class="faint num">{g.rows.length}</span></h2>
+          <ul>
+            {#each g.rows as m (m.id)}
+              <li>
+                <a href={href(`/models/${m.id}`)}>
+                  <span class="m-main">
+                    <span class="name truncate">{m.name}</span>
+                    <span class="m-meta truncate"><span class="mono">{m.arch}</span> · <span class="num">{m.imgsz} px · {compact(m.params)} · {bytes(m.bytes, prefs.units)}</span></span>
+                  </span>
+                  <span class="m-side">
+                    <span class="num map">{metric(m.metrics?.map50_95)}</span>
+                    <span class="m-cap">mAP50-95</span>
+                  </span>
+                </a>
+              </li>
+            {/each}
+          </ul>
+        </section>
+      {/each}
+    </div>
   </Panel>
 
-  <!-- Only with models to look at: the empty / error states stay about getting a model. -->
-  {#if models.data?.length}<Versus />{/if}
+  <!-- Only with models to look at. The engine comparison is reference: one line until it is asked for. -->
+  {#if models.data?.length}
+    <details class="bench">
+      <summary>
+        <span class="chev" aria-hidden="true"></span>
+        <span class="b-title">Engine benchmarks</span>
+        <span class="b-sum">folo-n leads YOLO26n on {benchLead} of {versusYolo26n.length} measurements, same GPU</span>
+      </summary>
+      <div class="b-body"><Versus /></div>
+    </details>
+  {/if}
 </Page>
 
 <style>
@@ -343,43 +375,6 @@
   .scroll {
     overflow-x: auto;
   }
-  .models td {
-    height: 40px;
-  }
-  thead th {
-    padding: 0 !important;
-  }
-  th .sort {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    width: 100%;
-    height: 32px;
-    padding: 0 var(--space-3);
-    color: inherit;
-    font-weight: inherit;
-    white-space: nowrap;
-    transition: color var(--dur-fast) var(--ease-standard);
-  }
-  th.r .sort {
-    justify-content: flex-end;
-  }
-  th:first-child .sort {
-    padding-left: var(--space-4);
-  }
-  th:last-child .sort {
-    padding-right: var(--space-4);
-  }
-  th .sort:not(:disabled):hover,
-  th .sort.on {
-    color: var(--text-primary);
-  }
-  th .sort:disabled {
-    cursor: default;
-  }
-  th .sort:focus-visible {
-    outline-offset: -2px;
-  }
   /* A 32 px section header per evaluation dataset: the groups are ranked separately. */
   /* Placeholders in number columns sit where the numbers will: at the right. */
   td.r :global(.sk) {
@@ -399,9 +394,7 @@
     margin-left: var(--space-2);
     font-weight: var(--weight-regular);
   }
-  .g-name:hover,
-  .name:hover,
-  .src:hover {
+  .g-name:hover {
     text-decoration: underline;
     text-underline-offset: 3px;
     text-decoration-color: var(--line-strong);
@@ -410,11 +403,100 @@
   .models tbody:not(:last-child) tr:last-child td {
     border-bottom: 1px solid var(--line-subtle);
   }
-  .name {
+  /* Specs (and the score the list is not ranked by) are reference: regular and secondary, so the name and the ranked
+     score lead the row. */
+  .spec,
+  .score {
+    color: var(--text-secondary);
+  }
+  .score.strong {
+    color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
   .src {
     color: var(--text-secondary);
+  }
+  .end {
+    display: flex;
+    align-items: center;
+    gap: var(--space-4);
+  }
+  .count {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  /* The engine benchmarks: a collapsed row with a one-line summary; the comparison opens beneath it. */
+  .bench {
+    min-width: 0;
+  }
+  .bench summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 40px;
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--line-default);
+    border-radius: var(--radius-lg);
+    background: var(--bg-panel);
+    cursor: pointer;
+    list-style: none;
+    transition: border-color var(--dur-fast) var(--ease-standard);
+  }
+  :global([data-theme='dark']) .bench summary {
+    border-color: var(--line-subtle);
+  }
+  .bench summary:hover {
+    border-color: var(--line-strong);
+  }
+  .bench summary::-webkit-details-marker {
+    display: none;
+  }
+  .bench summary:focus-visible {
+    border-radius: var(--radius-lg);
+  }
+  .chev {
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    margin: 0 var(--space-1) 0 2px;
+    border-right: 1.5px solid var(--text-tertiary);
+    border-bottom: 1.5px solid var(--text-tertiary);
+    transform: rotate(-45deg);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .bench[open] .chev {
+    transform: rotate(45deg);
+  }
+  .b-title {
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+  .b-sum {
+    min-width: 0;
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  /* Open: the summary row becomes the head of one frame, the comparison panel its body. */
+  .bench[open] summary {
+    border-bottom-left-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  /* Measurement names and their notes are sentences: they wrap (table cells default to one line). */
+  .b-body :global(td:first-child) {
+    white-space: normal;
+  }
+  .b-body > :global(.panel) {
+    border-top: 0;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+  @media (pointer: coarse) {
+    .bench summary {
+      min-height: 44px;
+    }
   }
   .map {
     font-weight: var(--weight-medium);
@@ -433,8 +515,25 @@
     }
   }
   @media (max-width: 767px) {
-    .scroll {
+    /* Phones show the grouped rows below; the table frame stays only to hold an empty or error state. */
+    .scroll:not(.state),
+    .scroll.state thead {
       display: none;
+    }
+    .end {
+      width: 100%;
+      flex-direction: column-reverse;
+      align-items: stretch;
+      gap: var(--space-2);
+    }
+    /* The summary wraps under the title, on the title's edge (past the chevron). */
+    .b-sum {
+      flex-basis: 100%;
+      padding-left: 20px;
+    }
+    .bench summary {
+      flex-wrap: wrap;
+      row-gap: 0;
     }
     .rows {
       display: block;

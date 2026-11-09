@@ -108,7 +108,7 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_7d1e',
       name: 'fasteners-s',
-      config: config('fasteners-s', 'ds_fasteners', 'folo-s', 100),
+      config: config('fasteners-s', 'ds_fasteners', 'folo-s', 100, { weights: 'm_coco_s' }),
       classes: 8,
       classEase: FASTENER_EASE,
       stepsPerEpoch: 120,
@@ -125,7 +125,8 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_c19a',
       name: 'fasteners-n',
-      config: config('fasteners-n', 'ds_fasteners', 'folo-n', 150),
+      // Fine-tuned from shapes-n (the Model page's lineage line).
+      config: config('fasteners-n', 'ds_fasteners', 'folo-n', 150, { weights: 'm_shapes_n' }),
       classes: 8,
       classEase: FASTENER_EASE,
       stepsPerEpoch: 120,
@@ -142,7 +143,7 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_a2f0',
       name: 'shapes-hard-m',
-      config: config('shapes-hard-m', 'ds_shapes_hard', 'folo-m', 100, { batch: 32, imgsz: 960 }),
+      config: config('shapes-hard-m', 'ds_shapes_hard', 'folo-m', 100, { batch: 32, imgsz: 960, augment: { ...defaultAugment, close_mosaic: 15 } }),
       classes: 6,
       classEase: [1.1, 1.05, 1, 0.82, 0.95, 0.75],
       stepsPerEpoch: 125,
@@ -163,7 +164,8 @@ function profiles(t0: number): RunProfile[] {
     {
       id: 'run_5be3',
       name: 'shapes-hard-s',
-      config: config('shapes-hard-s', 'ds_shapes_hard', 'folo-s', 100),
+      // Fine-tuned from shapes-s: Compare's Start from row and legend show it next to the runs from scratch.
+      config: config('shapes-hard-s', 'ds_shapes_hard', 'folo-s', 100, { weights: 'm_shapes_s' }),
       classes: 6,
       classEase: [1.1, 1.05, 1, 0.82, 0.95, 0.75],
       stepsPerEpoch: 250,

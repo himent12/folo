@@ -3,8 +3,9 @@
    * Precision-recall curves with the per-class table as their legend. Every class is a 1 px context line
    * (`--chart-context`, >= 3:1 on the panel) and the mean over all classes a heavier line in ink; many classes are a
    * percentile band instead, so 80 classes read as one shape instead of spaghetti. Hovering a table row gives its curve
-   * the class hue, clicking keeps it highlighted. The legend row above the plot is the readout. Phones hide the
-   * precision and recall columns; tapping a row opens a details row with every metric of that class. `view` shows
+   * the class hue, clicking keeps it highlighted (the selection rule: bg.active and a 2 px accent bar), and a line
+   * above the table says so and offers Clear. The legend row above the plot is the readout. Phones hide the precision
+   * and recall columns; tapping a row opens a details row with those two, at their operating point. `view` shows
    * only the curves or only the table (the phone model page puts them in separate sections); both stay mounted, so a
    * class picked in the table is still traced when the curves come back.
    */
@@ -15,7 +16,7 @@
   import Input from '$lib/ui/Input.svelte';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Search from '@lucide/svelte/icons/search';
-  import { classMetrics, matchesClass, prEnvelope, trimPrTail } from './pr';
+  import { classMetrics, matchesClass, PR_CONTEXT, prEnvelope, trimPrTail } from './pr';
 
   let {
     classes,
@@ -103,10 +104,13 @@
         <span class="item"><span class="line" style:background={classStroke(i)} aria-hidden="true"></span>{name(i)} <span class="num">{cursor === null ? metric(apOf.get(i)) : at(ev.curves[i] ?? [])}</span></span>
       {/each}
       {#if banded}<span class="item band-key"><span class="swatch-band" aria-hidden="true"></span>10th–90th percentile of classes</span>{/if}
-      {#if selected.length}
-        <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
-      {:else if hovered === null}
-        <span class="hint">{view === 'curves' ? 'Pick a class under Classes to trace its curve' : 'Pick a class below to trace its curve'}</span>
+      <!-- Phones' Curves section has no table beside it: the hint and Clear come along. Elsewhere they head the table. -->
+      {#if view === 'curves'}
+        {#if selected.length}
+          <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
+        {:else if hovered === null}
+          <span class="hint">Select classes under Classes to trace their curves</span>
+        {/if}
       {/if}
       {#if many}
         <button type="button" class="clear mode" aria-pressed={allCurves} onclick={() => (allCurves = !allCurves)}>{allCurves ? 'Show the band' : `All ${classes.length} curves`}</button>
@@ -134,11 +138,22 @@
   </div>
 
   <div class="part" class:off={view === 'curves'}>
-    {#if many}
-      <div class="filter">
-        <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
-      </div>
-    {/if}
+    <!-- The rows are the curves' controls: say so, and how many are traced, with a way back. -->
+    <div class="tools">
+      {#if many}
+        <div class="filter">
+          <Input bind:value={query} icon={Search} size="sm" type="search" placeholder="Find a class" aria-label="Find a class" />
+        </div>
+      {/if}
+      <p class="pick num" aria-live="polite">
+        {#if selected.length}
+          <span>{selected.length} {selected.length === 1 ? 'class' : 'classes'} traced</span>
+          <button type="button" class="clear" onclick={() => (selected = [])}>Clear</button>
+        {:else}
+          <span class="hint">Select classes to trace their curves</span>
+        {/if}
+      </p>
+    </div>
     <div class="scroll">
       <table class="table dense">
         <thead>
@@ -194,6 +209,7 @@
                       <div><dt>{d.label}</dt><dd class="num">{d.value}</dd></div>
                     {/each}
                   </dl>
+                  <p class="ctx">{PR_CONTEXT}</p>
                 </td>
               </tr>
             {/if}
@@ -208,7 +224,10 @@
         {all ? `Show the first ${ROWS_MAX}` : `Show all ${listed.length}`}
       </button>
     {/if}
-    <p class="foot">Evaluated on {num(ev.images)} validation images at IoU 0.5; instances are ground-truth boxes per class.</p>
+    <p class="foot">
+      Evaluated on {num(ev.images)} validation images at IoU 0.50. Precision and recall {PR_CONTEXT.replace(', IoU 0.50', '')}; instances are
+      ground-truth boxes per class.
+    </p>
   </div>
 </div>
 
@@ -292,7 +311,7 @@
     height: 20px;
     padding: 0 var(--space-2);
     border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
   }
   .clear:hover {
     color: var(--text-primary);
@@ -308,10 +327,24 @@
   .plot :global(path.line.emphasis) {
     stroke-width: 2;
   }
+  .tools {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+    padding: 0 var(--space-4) var(--space-2);
+  }
   .filter {
     width: 240px;
-    max-width: calc(100% - 2 * var(--space-4));
-    margin: 0 var(--space-4) var(--space-2);
+    max-width: 100%;
+  }
+  .pick {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 28px;
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
   }
   .scroll {
     overflow-x: auto;
@@ -360,9 +393,14 @@
   }
   .detail dl {
     display: grid;
-    /* Five on one row at 390 px (326 px inside the cell padding). */
-    grid-template-columns: repeat(auto-fit, minmax(56px, 1fr));
-    gap: var(--space-2);
+    grid-template-columns: repeat(2, max-content);
+    gap: var(--space-2) var(--space-8);
+  }
+  .ctx {
+    margin-top: var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
   }
   .detail dt {
     font-size: var(--type-sm-size);
@@ -414,6 +452,9 @@
     .more {
       height: 44px;
     }
+    .clear {
+      height: 44px;
+    }
     /* Touch: every class row is a 44 px target (fine pointers keep the dense 28 px rows). */
     tbody td {
       height: 44px;
@@ -431,7 +472,8 @@
       width: 100%;
     }
     .legend,
-    .plot {
+    .plot,
+    .tools {
       padding-inline: var(--space-3);
     }
   }

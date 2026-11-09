@@ -43,6 +43,7 @@ describe('IssueList', () => {
   it('lists each issue with its fix, and counts every severity from the server', async () => {
     c = mount(IssueList, { target, props: { datasetId: 'ds_shapes_hard', path: 'D:/data/shapes-hard', severity: 'error' } });
     await until(() => rows().length === 3, 'the three errors');
+    expect(target.querySelector('.caption')?.textContent).toBe('3 errors: these files are left out of training until fixed.');
     for (const li of rows()) expect(li.querySelector('.fix')?.textContent).toMatch(/^Fix: delete line \d+$/);
     const counts = await until(() => (radios()[0]?.querySelector('.meta') ? radios().map((b) => b.textContent?.replace(/\s+/g, '')) : null), 'the counts');
     expect(counts[0]).toBe('Errors3');
@@ -60,6 +61,8 @@ describe('IssueList', () => {
     radios()[1]!.click();
     await until(() => (rows().length === 3 && rows().every((li) => li.querySelector('.fix')?.textContent?.includes('clip') || li.querySelector('.fix')?.textContent?.includes('remove this copy')) ? true : null), 'the warnings');
     expect(read.mock.calls[0]?.[1]).toEqual({ severity: 'warning', offset: 0, limit: 1000 });
+    // The caption names exactly the rows shown.
+    expect(target.querySelector('.caption')?.textContent).toBe('3 warnings: training still uses these files.');
     // Notes (infos) have no fix.
     radios()[2]!.click();
     await until(() => (rows().length > 0 && rows()[0]?.querySelector('.msg')?.textContent === 'no boxes (a background image)' ? true : null), 'the notes');

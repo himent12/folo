@@ -80,26 +80,29 @@
 <div class="grid" aria-label="Augmentation preview: four random training samples" role="img">
   {#each draws as d, i (i)}
     <div class="frame">
-      <div
-        class="canvas"
-        style:transform="translate({d.tx * 100}%, {d.ty * 100}%) scale({d.scale}) scaleX({d.flip ? -1 : 1})"
-        style:filter="hue-rotate({d.hue}deg) saturate({d.sat}) brightness({d.val})"
-      >
-        {#if d.mosaic}
-          <div class="mosaic">
-            {#each d.tiles as t, k (k)}<div class="cell">{@render tile(t)}</div>{/each}
-          </div>
-        {:else}
-          {@render tile(d.tiles[0] as Img)}
-        {/if}
-        {#if d.mix}<div class="mix" style:opacity={d.mixAlpha}>{@render tile(d.mix)}</div>{/if}
+      <div class="view">
+        <div
+          class="canvas"
+          style:transform="translate({d.tx * 100}%, {d.ty * 100}%) scale({d.scale}) scaleX({d.flip ? -1 : 1})"
+          style:filter="hue-rotate({d.hue}deg) saturate({d.sat}) brightness({d.val})"
+        >
+          {#if d.mosaic}
+            <div class="mosaic">
+              {#each d.tiles as t, k (k)}<div class="cell">{@render tile(t)}</div>{/each}
+            </div>
+          {:else}
+            {@render tile(d.tiles[0] as Img)}
+          {/if}
+          {#if d.mix}<div class="mix" style:opacity={d.mixAlpha}>{@render tile(d.mix)}</div>{/if}
+        </div>
       </div>
+      <!-- What this draw applied, in its own strip under the image so it never covers a box. -->
       <span class="tag" aria-hidden="true">
         {#each [d.mosaic && 'mosaic', d.flip && 'flip', Math.abs(d.scale - 1) > 0.02 && `×${d.scale.toFixed(2)}`, d.mix && 'mixup'].filter(Boolean) as part, i (i)}{#if i > 0}<span class="sep">·</span>{/if}{part}{:else}original{/each}
       </span>
     </div>
   {:else}
-    {#each [0, 1, 2, 3] as i (i)}<div class="frame empty"></div>{/each}
+    {#each [0, 1, 2, 3] as i (i)}<div class="frame empty"><div class="view"></div><span class="tag">&nbsp;</span></div>{/each}
   {/each}
 </div>
 
@@ -110,14 +113,20 @@
     gap: var(--space-2);
   }
   .frame {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: var(--radius-md);
+    border: 1px solid var(--line-subtle);
+    background: var(--bg-raised);
+  }
+  .view {
     position: relative;
     aspect-ratio: 1;
     overflow: hidden;
-    border-radius: var(--radius-md);
     background:
       repeating-linear-gradient(45deg, var(--bg-inset) 0 6px, transparent 6px 12px),
       var(--bg-raised);
-    box-shadow: inset 0 0 0 1px var(--line-subtle);
   }
   .canvas {
     position: absolute;
@@ -142,25 +151,16 @@
     inset: 0;
   }
   .tag {
-    position: absolute;
-    left: 6px;
-    bottom: 6px;
-    padding: 1px 6px;
-    border-radius: var(--radius-xs);
-    background: #000000b3;
-    color: #fff;
-    font-family: var(--font-mono);
-    font-size: var(--type-micro-size);
-    line-height: 16px;
-    /* One line on small frames (the laptop column): it truncates rather than wraps over the image. */
-    max-width: calc(100% - 12px);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    flex: 1;
+    padding: var(--space-1) var(--space-2);
+    border-top: 1px solid var(--line-subtle);
+    color: var(--text-secondary);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    font-variant-numeric: tabular-nums;
   }
-  /* Narrower than a space either side, so "mosaic · flip · ×1.11" fits a 140 px frame. */
   .sep {
-    margin: 0 var(--space-0-5);
-    color: #ffffffa6;
+    margin: 0 var(--space-1);
+    color: var(--text-tertiary);
   }
 </style>

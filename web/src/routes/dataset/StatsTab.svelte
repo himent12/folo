@@ -1,19 +1,18 @@
 <script lang="ts">
   /**
-   * Dataset statistics. Findings to review come first, and only when there are any; then four numbers, the class
-   * balance as the focal chart, and the two histograms in ink. On phones the findings start collapsed under a one-line
-   * summary, so the class balance stays on the first screen.
+   * Dataset statistics. A compact health summary comes first: one line per severity (errors, warnings, notes) naming
+   * its findings, each opening to the evidence. Then four numbers, the class balance as the focal chart, the two
+   * histograms in ink, and last the `folo dataset check` issues in their own section with severity and kind filters.
    */
+  import { tick } from 'svelte';
   import IssueList from './IssueList.svelte';
-  import { MediaQuery } from 'svelte/reactivity';
+  import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
-  import ArrowUp from '@lucide/svelte/icons/arrow-up';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import Info from '@lucide/svelte/icons/info';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
-  import { tick } from 'svelte';
   import type { Dataset, DatasetStats, IssueCounts, IssueSeverity } from '$lib/api/types';
   import Histogram from '$lib/charts/Histogram.svelte';
   import { classInk } from '$lib/design/classInk.svelte';
@@ -21,7 +20,8 @@
   import { href } from '$lib/router.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { tooltip } from '$lib/ui/tooltip';
-  import { countBinLabel, healthChecks, imageCount, reviewCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
+  import { swatchStyle } from './swatch';
+  import { bySeverity, countBinLabel, healthChecks, imageCount, reviewCount, sizeBinLabel, TINY_SIZE, type Severity } from './health';
 
   let {
     dataset,
@@ -33,22 +33,31 @@
   const images = $derived(imageCount(dataset));
   const health = $derived(healthChecks(dataset, stats, counts));
   const issues = $derived(reviewCount(health));
-  const findings = $derived(health.filter((h) => h.severity !== 'ok'));
-  const notes = $derived(findings.length - issues);
-  // One list of the check's issues, under the first finding they back; the others move its filter to their severity.
-  const host = $derived(findings.find((h) => h.issues));
+  const groups = $derived(bySeverity(health));
+  const notes = $derived(groups.find((g) => g.severity === 'info')?.items.length ?? 0);
+  const ok = $derived(health.find((h) => h.severity === 'ok'));
+  const summary = $derived(
+    [issues ? `${issues} to review` : 'nothing to fix', notes ? `${notes} ${notes === 1 ? 'note' : 'notes'}` : ''].filter(Boolean).join(' · '),
+  );
+  // Each severity line starts folded: the summary is the point, the evidence one tap away.
+  let open = $state<Partial<Record<Severity, boolean>>>({});
+
+  // The check's issues get a section of their own (where the server ran the check, or labels are broken); its filter
+  // starts on the most severe level that has issues, and a finding backed by them moves it there.
+  const checkShown = $derived(stats.broken_labels > 0 || (!!counts && counts.error + counts.warning + counts.info > 0));
   let listed = $state<IssueSeverity | null>(null);
-  const listSeverity = $derived(listed ?? host?.issues ?? 'error');
+  const listSeverity = $derived<IssueSeverity>(
+    listed ?? (stats.broken_labels > 0 || (counts?.error ?? 0) > 0 ? 'error' : (counts?.warning ?? 0) > 0 ? 'warning' : 'info'),
+  );
+  /** Moves the list to `sev`, then takes the reader there: the section scrolls in and its heading takes focus. */
   async function showIssues(sev: IssueSeverity) {
-    if (!host) return;
     listed = sev;
-    toggled[host.id] = true;
     await tick();
-    document.getElementById('ds-issues')?.scrollIntoView({ block: 'nearest', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    const heading = document.getElementById('ds-check-title');
+    heading?.setAttribute('tabindex', '-1');
+    heading?.focus({ preventScroll: true });
+    document.getElementById('ds-check')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
   }
-  // Findings start open on wide screens and collapsed on phones; once toggled, a finding keeps its own state.
-  const phone = new MediaQuery('max-width: 767px', false);
-  let toggled = $state<Record<string, boolean>>({});
   const sizeEdges = $derived(stats.box_size_hist.edges);
   // Unequal size bins keep their true widths up to 60% of the side; the open last bin (≥ 50%) is drawn up to there.
   const sizeMax = $derived(Math.min(0.6, sizeEdges[sizeEdges.length - 1] ?? 1));
@@ -69,46 +78,59 @@
   const splitLine = $derived(`${num(dataset.splits.train)} train · ${num(dataset.splits.val)} val · ${num(dataset.splits.test)} test`);
   const classCount = $derived(`${dataset.classes.length} ${dataset.classes.length === 1 ? 'class' : 'classes'}`);
   const pct = (x: number) => (images ? `${((x / images) * 100).toFixed(1)}% of images` : '');
+  const showLabel = (sev: IssueSeverity) => (sev === 'error' ? 'Show the files' : sev === 'warning' ? 'Show the warnings' : 'Show the notes');
 </script>
 
 <div class="stats">
-  {#if issues > 0}
-    <Panel pad="none" id="ds-health">
-      <h2 class="hsum num">
-        {issues} to review{#if notes > 0}<span class="hnotes"><span aria-hidden="true">·</span> {notes} {notes === 1 ? 'note' : 'notes'}</span>{/if}
-      </h2>
-      <ul class="health">
-        {#each findings as h (h.id)}
-          {@const Icon = icons[h.severity]}
-          <li class={h.severity}>
-            <details open={toggled[h.id] ?? !phone.current} ontoggle={(e) => (toggled[h.id] = e.currentTarget.open)}>
-              <summary>
-                <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-label={h.severity} /></span>
-                <span class="htitle">{h.title}</span>
-                <span class="hchev" aria-hidden="true"><ChevronDown size={14} strokeWidth={1.75} /></span>
-              </summary>
-              <div class="hbody">
-                <p class="hdetail">{h.detail}</p>
-                {#if h.issues && h.id === host?.id}
-                  <!-- The evidence: each file and line with the checker's message and its fix. -->
-                  <div class="hlist" id="ds-issues">
-                    <IssueList datasetId={dataset.id} path={dataset.path} bind:severity={() => listSeverity, (v) => (listed = v)} {counts} />
-                  </div>
-                {:else if h.issues}
-                  <button type="button" class="haction" onclick={() => h.issues && showIssues(h.issues)}
-                    >List the {h.issues === 'error' ? 'errors' : 'warnings'}<ArrowUp size={12} strokeWidth={2} aria-hidden="true" /></button
-                  >
-                {/if}
-                {#if h.action}
-                  <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
-                {/if}
-              </div>
-            </details>
+  <Panel title="Health" meta={summary} pad="none" id="ds-health">
+    <ul class="health">
+      {#each groups as g (g.severity)}
+        {@const Icon = icons[g.severity]}
+        <li class={g.severity}>
+          <details open={open[g.severity] ?? false} ontoggle={(e) => (open[g.severity] = e.currentTarget.open)}>
+            <summary>
+              <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="hlabel">{g.label}</span>
+              <!-- Folded: the findings' titles. Open: the titles head the evidence below, so the line just counts them. -->
+              <span class="htitles truncate">{open[g.severity] ? `${g.items.length} ${g.items.length === 1 ? 'finding' : 'findings'}` : g.items.map((h) => h.title).join(' · ')}</span>
+              <span class="hchev" aria-hidden="true"><ChevronDown size={14} strokeWidth={1.75} /></span>
+            </summary>
+            <ul class="hitems">
+              {#each g.items as h (h.id)}
+                <li>
+                  <p class="htitle">{h.title}</p>
+                  <p class="hdetail">{h.detail}</p>
+                  {#if h.issues || h.action}
+                    <p class="hacts">
+                      {#if h.issues}
+                        {@const sev = h.issues}
+                        <button type="button" class="haction" onclick={() => showIssues(sev)}
+                          >{showLabel(sev)}<ArrowDown size={12} strokeWidth={2} aria-hidden="true" /></button
+                        >
+                      {/if}
+                      {#if h.action}
+                        <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
+                      {/if}
+                    </p>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+          </details>
+        </li>
+      {:else}
+        {#if ok}
+          <li class="ok">
+            <div class="okrow">
+              <span class="hicon"><CircleCheck size={16} strokeWidth={1.75} aria-hidden="true" /></span>
+              <span class="hlabel">{ok.title}</span>
+              <span class="htitles truncate">{ok.detail}</span>
+            </div>
           </li>
-        {/each}
-      </ul>
-    </Panel>
-  {/if}
+        {/if}
+      {/each}
+    </ul>
+  </Panel>
 
   <!-- 1 px gaps over a hairline-coloured background draw the dividers in any column count. -->
   <section class="kpis" aria-label="Summary">
@@ -133,14 +155,13 @@
       <span class="k-sub">{stats.broken_labels > 0 ? 'not trained on' : 'all labels parse'}</span>
     </div>
   </section>
-  <!-- Phones: the split counts get a full line of their own instead of truncating inside the Images cell. -->
 
   <Panel title="Class balance" meta="boxes per class · {ratio.toFixed(1)}× largest / smallest" pad="none" id="ds-balance">
     <ul class="bars">
       {#each balance as b (b.cls)}
         <li>
           <button type="button" class:absent={b.count === 0} onclick={() => onclass(b.cls)} aria-label="{b.name}: {num(b.count)} boxes, {share(b.count).toFixed(1)}%. Show images">
-            <span class="sw" style:background={classInk(b.cls)}></span>
+            <span class="sw" style={swatchStyle(b.cls, b.count === 0)}></span>
             <span class="cname truncate">{b.name}</span>
             <span class="track"><span class="fill sw" style:width="{(b.count / maxCount) * 100}%" style:background={classInk(b.cls)}></span></span>
             <span class="count num">{num(b.count)}</span>
@@ -160,7 +181,7 @@
           type="button"
           class="how"
           aria-label="How box size is measured"
-          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. Bars span their real size range, so a bar's area is its count.", side: 'bottom' }}
+          use:tooltip={{ text: "Size = √(box area ÷ image area): 10% is a box about a tenth of the image's side. Bars span their real size range and their height is boxes per 1 percentage point of size, so a bar's area is its count.", side: 'bottom' }}
           ><Info size={14} aria-hidden="true" /></button
         >
       {/snippet}
@@ -177,6 +198,8 @@
         edgeLabel={pctEdge}
         densityPer={0.01}
         marker={{ x: TINY_SIZE, label: 'tiny' }}
+        yLabel="Boxes per 1 percentage point of size"
+        note="bar area is the count"
       />
     </Panel>
     <Panel title="Boxes per image" meta="how many images have each count" id="ds-per">
@@ -189,15 +212,28 @@
         hoverColor="var(--text-primary)"
         unit="images"
         height={180}
+        yLabel="Images"
       />
     </Panel>
   </div>
+
+  {#if checkShown}
+    <!-- The evidence: every file and line the check flagged, with the checker's message and its fix. -->
+    <Panel title="Dataset check findings" meta="from folo dataset check" id="ds-check">
+      <IssueList datasetId={dataset.id} path={dataset.path} bind:severity={() => listSeverity, (v) => (listed = v)} {counts} />
+    </Panel>
+  {/if}
 </div>
+
 
 <style>
   .stats {
     display: grid;
     gap: var(--space-4);
+  }
+  /* "Show the files" scrolls the check's section to just under the top bar. */
+  .stats :global(#ds-check) {
+    scroll-margin-top: calc(var(--size-topbar) + var(--space-4));
   }
   .kpis {
     display: grid;
@@ -286,9 +322,6 @@
     height: 10px;
     border-radius: 2px;
   }
-  .absent .sw {
-    opacity: 0.4;
-  }
   .cname {
     font-weight: var(--weight-medium);
   }
@@ -324,34 +357,23 @@
   .bars button:focus-visible .go {
     opacity: 1;
   }
-  /* The panel header is the severity summary: a 40 px row like every panel title. */
-  .hsum {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-height: 40px;
-    padding: 0 var(--space-4);
-    font-size: var(--type-md-size);
-    line-height: var(--type-md-line);
-    letter-spacing: var(--type-md-tracking);
-    font-weight: var(--weight-medium);
-  }
-  .hnotes {
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-  }
-  .health {
-    display: grid;
-  }
-  .health li {
+  /* One 40 px line per severity: icon, the level as a word, its findings' titles; it opens to the evidence. */
+  .health > li {
     border-top: 1px solid var(--line-subtle);
   }
-  summary {
-    display: flex;
+  summary,
+  .okrow {
+    display: grid;
+    grid-template-columns: 16px 72px minmax(0, 1fr) 14px;
     align-items: center;
     gap: var(--space-3);
     min-height: 40px;
     padding: 0 var(--space-4);
+  }
+  .okrow {
+    grid-template-columns: 16px auto minmax(0, 1fr);
+  }
+  summary {
     cursor: pointer;
     list-style: none;
     transition: background-color var(--dur-fast) var(--ease-standard);
@@ -365,30 +387,12 @@
   summary:focus-visible {
     outline-offset: -2px;
   }
-  .health li:last-child details:not([open]) summary {
+  .health > li:last-child details:not([open]) summary {
     border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
   }
-  .hchev {
-    display: flex;
-    margin-left: auto;
-    color: var(--text-tertiary);
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  details[open] .hchev {
-    transform: rotate(180deg);
-  }
-  /* The detail lines up under the title: 16 px padding + 16 px icon + 12 px gap. */
-  .hbody {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-3);
-    padding: 0 var(--space-4) var(--space-3) 44px;
-  }
   .hicon {
-    flex-shrink: 0;
     display: grid;
     place-items: center;
-    height: 20px;
   }
   .danger .hicon {
     color: var(--danger-text);
@@ -399,29 +403,64 @@
   .info .hicon {
     color: var(--text-tertiary);
   }
+  .ok .hicon {
+    color: var(--success-text);
+  }
+  .hlabel {
+    font-weight: var(--weight-medium);
+    white-space: nowrap;
+  }
+  .htitles {
+    color: var(--text-secondary);
+  }
+  /* Errors keep their weight in the summary: the titles in ink, not grey. */
+  .danger .htitles {
+    color: var(--text-primary);
+  }
+  .info .hlabel,
+  .ok .htitles {
+    color: var(--text-secondary);
+  }
+  details[open] .htitles {
+    color: var(--text-tertiary);
+  }
+  .hchev {
+    display: flex;
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  details[open] .hchev {
+    transform: rotate(180deg);
+  }
+  /* The evidence lines up under the titles column: 16 px padding + 16 px icon + 72 px label + two 12 px gaps. */
+  .hitems {
+    display: grid;
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-4) var(--space-4) calc(var(--space-16) * 2);
+  }
+  .hitems li {
+    display: grid;
+    gap: 2px;
+    max-width: 72ch;
+  }
   .htitle {
-    min-width: 0;
-    padding: var(--space-2) 0;
     font-weight: var(--weight-medium);
   }
   .hdetail {
-    flex: 1;
-    min-width: 0;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
-  /* The issue list takes two thirds of the row beside the detail. */
-  .hlist {
-    flex: 2 1 0;
-    min-width: 0;
+  .hacts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-4);
   }
   .haction {
-    flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    height: 20px;
+    min-height: 24px;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-medium);
     color: var(--text-primary);
@@ -445,6 +484,9 @@
     .haction {
       min-height: 44px;
     }
+    .hacts {
+      margin-top: calc(var(--space-2) * -1);
+    }
   }
   @media (max-width: 1023px) {
     .kpis {
@@ -459,12 +501,24 @@
     .two {
       grid-template-columns: minmax(0, 1fr);
     }
-    .hbody {
-      flex-wrap: wrap;
+    /* Phones: the level's word shrinks to fit, and the evidence starts under the icon's right edge. */
+    summary {
+      grid-template-columns: 16px auto minmax(0, 1fr) 14px;
+      gap: var(--space-2);
     }
-    .haction,
-    .hlist {
-      flex-basis: 100%;
+    .okrow {
+      gap: var(--space-2);
+    }
+    .hitems {
+      padding-left: 40px;
+    }
+    .kpi {
+      grid-template-rows: 16px 28px 16px;
+    }
+    .k-value {
+      font-size: var(--type-xl-size);
+      line-height: 28px;
+      letter-spacing: var(--type-xl-tracking);
     }
     /* Phones: Images spans the grid so the split counts stay inside their tile; the other three share one row. */
     .kpis {
@@ -474,9 +528,6 @@
       grid-column: 1 / -1;
     }
     .kpi:not(:first-child) .wide {
-      display: none;
-    }
-    .hide-sm {
       display: none;
     }
     .bars button {

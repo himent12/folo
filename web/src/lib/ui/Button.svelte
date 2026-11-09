@@ -133,13 +133,17 @@
     background: var(--bg-active);
   }
 
+  /* The quiet destructive control on a page (Stop): a secondary button whose label and icon carry the danger hue,
+     no tinted fill, so it never outshouts the page's focal object. The dialog it opens holds the solid confirm. */
   .danger {
-    background: var(--danger-muted);
+    background: var(--bg-raised);
+    border-color: var(--line-default);
     color: var(--danger-text);
-    border-color: color-mix(in srgb, var(--danger-solid) 30%, transparent);
+    box-shadow: var(--shadow-sm);
   }
   .danger:hover:not(:disabled) {
-    background: color-mix(in srgb, var(--danger-solid) 22%, transparent);
+    border-color: color-mix(in srgb, var(--danger-solid) 45%, var(--line-default));
+    background: color-mix(in srgb, var(--bg-raised), var(--danger-solid) 6%);
   }
 
   .destructive {
@@ -151,14 +155,24 @@
     background: color-mix(in srgb, var(--danger-solid), var(--text-inverse) 10%);
   }
 
-  .btn:disabled {
-    opacity: 0.55;
-  }
-  /* Light theme: lime on white needs an edge to read as a control; a neutral one, so lime stays a single accent. */
+  /* Light theme: lime on white needs an edge to read as a control. A neutral 1 px line.default edge (design/README.md),
+     drawn outside the fill (background-clip), so the translucent line reads grey on the page, never olive on lime. */
   :global([data-theme='light']) .primary {
-    box-shadow:
-      inset 0 0 0 1px #0b0e031a,
-      0 1px 2px #0a0e1414;
+    border-color: var(--line-default);
+    background-clip: padding-box;
+    box-shadow: 0 1px 2px #0a0e1414;
+  }
+  /* Disabled, one treatment in both themes for every filled button: the raised surface, a disabled label, the
+     default edge, no shadow. It reads as off, not as a faded primary (no pale lime that still looks pressable). A
+     loading button is busy, not unavailable: it keeps its look and the spinner says it is working. */
+  .btn:disabled:not(.ghost, [aria-busy='true']) {
+    background: var(--bg-raised);
+    border-color: var(--line-default);
+    color: var(--text-disabled);
+    box-shadow: none;
+  }
+  .ghost:disabled:not([aria-busy='true']) {
+    color: var(--text-disabled);
   }
   /* Touch: grow the hit area to at least 44 px without changing the visual size. */
   @media (pointer: coarse) {

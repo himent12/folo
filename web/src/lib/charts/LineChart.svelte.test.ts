@@ -119,3 +119,47 @@ describe('LineChart touch readout', () => {
     unmount(c);
   });
 });
+
+describe('LineChart layering and ticks', () => {
+  const mountAt = (props: Record<string, unknown>, w = 640) => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(LineChart, { target, props: props as never });
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: w });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flushSync();
+    return { target, c };
+  };
+  const series = [
+    { id: 'sky', label: 'sky', color: 'red', points: [0, 1, 2, 3, 4].map((x) => ({ x, y: x / 10 })) },
+    { id: 'teal', label: 'teal', color: 'blue', pattern: 'dot' as const, points: [0, 1, 2, 3, 4, 5, 6].map((x) => ({ x, y: x / 10 })) },
+  ];
+
+  it('paints the highlighted series last, with its knockout, and keeps its dot rhythm', () => {
+    const { target, c } = mountAt({ series, label: 'cmp', highlight: 'teal' });
+    const lines = [...target.querySelectorAll('path.line')].map((p) => (p as SVGElement).style.stroke);
+    expect(lines).toEqual(['red', 'blue']);
+    // Drawn once (no duplicate copy on top), emphasised, the dots spaced for the heavier stroke.
+    const teal = target.querySelectorAll('path.line')[1] as SVGElement;
+    expect(teal.classList.contains('emphasis')).toBe(true);
+    expect(teal.style.strokeDasharray).toMatch(/^0\.014,?\s*6\.3/);
+    // The knockout sits directly under its line.
+    expect(teal.previousElementSibling?.classList.contains('knockout')).toBe(true);
+    unmount(c);
+  });
+
+  it('draws legend swatches in the pattern of their lines', () => {
+    const { target, c } = mountAt({ series, label: 'cmp' });
+    const sw = [...target.querySelectorAll('.legend .swatch line')].map((l) => (l as SVGElement).style.strokeDasharray);
+    expect(sw[0]).toBe('');
+    expect(sw[1]).toMatch(/^0\.01,?\s*4\.5/);
+    unmount(c);
+  });
+
+  it('uses the y ticks the caller fitted', () => {
+    const { target, c } = mountAt({ series, label: 'fit', yDomain: [0, 0.7], yTickValues: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7] });
+    const ys = [...target.querySelectorAll('.ticks text[text-anchor="end"]')].map((t) => t.textContent);
+    expect(ys).toEqual(['0.0', '0.1', '0.2', '0.3', '0.4', '0.5', '0.6', '0.7']);
+    unmount(c);
+  });
+});

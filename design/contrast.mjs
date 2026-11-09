@@ -1,4 +1,5 @@
-// WCAG 2 contrast check for tokens.json: every pairing design/README.md documents, in both themes.
+// Colour checks for tokens.json, in both themes: WCAG 2 contrast for every pairing design/README.md documents, and
+// colour-vision separation for colours it documents as told apart.
 //   node design/contrast.mjs            exit 1 if any pairing is below its minimum
 //   node design/contrast.mjs --all      also print every measured pair
 // Text needs 4.5:1; non-text marks (focus rings, dots, chart lines, bars) and large text need 3:1. Translucent
@@ -25,6 +26,8 @@ function rules(theme) {
     // Non-text marks that must be seen against the surface: accent.line and focus rings.
     { fg: 'accent.line', on: SURFACES, min: MARK },
     { fg: 'focus', on: SURFACES, min: MARK },
+    // Control boundaries (WCAG 1.4.11): switch tracks, slider rails, checkbox / radio and input edges.
+    { fg: 'line.control', on: SURFACES, min: MARK },
     // Status: text on every surface and on its own tint (badges, banners); solid dots and icons are marks.
     ...STATUS.map((s) => ({ fg: `${s}.text`, on: [...SURFACES, ...tinted(`${s}.muted`)], min: TEXT })),
     ...STATUS.map((s) => ({ fg: `${s}.solid`, on: SURFACES, min: MARK })),
@@ -86,9 +89,55 @@ for (const theme of ['dark', 'light']) {
   }
 }
 
+// Colours documented as told apart stay apart under colour-vision deficiency: OKLab distance (×100) under normal
+// vision and Machado et al. (2009) full-severity protan / deutan / tritan simulation, in linear RGB.
+const SEPARATION = 7;
+const CVD = {
+  normal: null,
+  protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+  deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.01182, 0.04294, 0.968881]],
+  tritan: [[1.255528, -0.076749, -0.178779], [-0.078411, 0.930809, 0.147602], [0.004733, 0.691367, 0.3039]],
+};
+const toLinear = (h) => {
+  const { r, g, b } = hex(h);
+  return [r, g, b].map((v) => ((v /= 255) <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+};
+const oklab = ([r, g, b]) => {
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s, 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s];
+};
+const seen = (h, mat) => {
+  const c = toLinear(h);
+  return mat ? mat.map((row) => Math.min(1, Math.max(0, row[0] * c[0] + row[1] * c[1] + row[2] * c[2]))) : c;
+};
+const distance = (a, b, mat) => 100 * Math.hypot(...oklab(seen(a, mat)).map((v, i) => v - oklab(seen(b, mat))[i]));
+
+/** Sets whose members must be told apart: neighbouring chart series, and the loss components (box, cls, dfl). */
+const SETS = [
+  ...[0, 1, 2, 3, 4].map((i) => ({ what: `chart.series ${i} / ${i + 1}`, paths: [`chart.series.${i}`, `chart.series.${i + 1}`] })),
+  { what: 'loss box / cls / dfl', paths: ['chart.series.1', 'chart.series.4', 'chart.series.3'] },
+];
+for (const theme of ['dark', 'light']) {
+  for (const { what, paths } of SETS) {
+    for (let i = 0; i < paths.length; i++) {
+      for (let j = i + 1; j < paths.length; j++) {
+        for (const [vision, mat] of Object.entries(CVD)) {
+          const d = distance(get(theme, paths[i]), get(theme, paths[j]), mat);
+          const line = `${theme.padEnd(5)} ${what}: ${paths[i]} vs ${paths[j]} (${vision})`.padEnd(78) + `ΔE ${d.toFixed(1).padStart(5)} (min ${SEPARATION})`;
+          checked++;
+          if (d < SEPARATION) failures.push(line);
+          else if (all) console.log(line);
+        }
+      }
+    }
+  }
+}
+
 if (failures.length) {
-  console.error(`contrast: ${failures.length} of ${checked} pairings below the minimum (design/README.md, Colour):`);
+  console.error(`contrast: ${failures.length} of ${checked} checks below the minimum (design/README.md, Colour):`);
   for (const f of failures) console.error(`  ${f}`);
   process.exit(1);
 }
-console.log(`contrast: all ${checked} documented colour pairings meet WCAG (text 4.5:1, marks 3:1) in both themes`);
+console.log(`contrast: all ${checked} documented colour checks pass in both themes (text 4.5:1, marks 3:1, CVD ΔE ${SEPARATION})`);

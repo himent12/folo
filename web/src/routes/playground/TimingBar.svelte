@@ -1,7 +1,8 @@
 <script lang="ts">
   /**
    * Where the time of one prediction went: preprocess / inference / postprocess as a stacked bar in neutral shades
-   * (the phases are not entities, so they get no hue; inference, the part that matters, is the darkest ink).
+   * (the phases are not entities, so they get no hue; inference, the part that matters, is the darkest ink). Each
+   * phase says what it covers (docs/API.md, docs/WASM.md): inference includes waiting for the device to finish.
    */
   import type { Timing } from '$lib/api/types';
   import { ms, num } from '$lib/format';
@@ -9,9 +10,9 @@
   let { timing, device }: { timing: Timing; device: string } = $props();
 
   const parts = $derived([
-    { key: 'pre', label: 'Preprocess', v: timing.preprocess_ms, color: 'var(--text-tertiary)' },
-    { key: 'inf', label: 'Inference', v: timing.inference_ms, color: 'var(--text-primary)' },
-    { key: 'post', label: 'Postprocess', v: timing.postprocess_ms, color: 'var(--line-strong)' },
+    { key: 'pre', label: 'Preprocess', what: 'decode, resize', v: timing.preprocess_ms, color: 'var(--text-tertiary)' },
+    { key: 'inf', label: 'Inference', what: 'the model', v: timing.inference_ms, color: 'var(--text-primary)' },
+    { key: 'post', label: 'Postprocess', what: 'boxes, NMS', v: timing.postprocess_ms, color: 'var(--line-strong)' },
   ]);
   const sum = $derived(parts.reduce((a, p) => a + p.v, 0) || 1);
   const total = $derived(timing.total_ms || sum);
@@ -36,7 +37,7 @@
     {#each parts as p (p.key)}
       <li>
         <span class="sw" style:background={p.color} aria-hidden="true"></span>
-        <span class="name">{p.label}</span>
+        <span class="name">{p.label} <span class="what">{p.what}</span></span>
         <span class="v num">{ms(p.v)}</span>
         <span class="pct num">{Math.round((p.v / sum) * 100)}%</span>
       </li>
@@ -102,7 +103,15 @@
     border-radius: 2px;
   }
   .name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     color: var(--text-secondary);
+  }
+  .what {
+    margin-left: var(--space-1);
+    color: var(--text-tertiary);
   }
   .v {
     font-size: var(--type-sm-size);

@@ -1,6 +1,7 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import ChevronUp from '@lucide/svelte/icons/chevron-up';
   import Copy from '@lucide/svelte/icons/copy';
   import Images from '@lucide/svelte/icons/images';
@@ -32,7 +33,7 @@
   import Slider from '$lib/ui/Slider.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
-  import { arches, estimate, oomScale } from './runnew/estimate';
+  import { arches, autoCloseMosaic, defaultImgsz, estimate, oomScale, shortRun } from './runnew/estimate';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'New run' });
 
@@ -55,8 +56,11 @@
   let batch = $state('16');
   const IMGSZ = IMGSZ_STEPS.map(String);
   const BATCHES = ['8', '16', '32', '64'];
-  // ?imgsz= (e.g. from a dataset's "Train at 960 px" health finding) preselects a supported size.
-  let imgsz = $state(IMGSZ.includes(q.get('imgsz') ?? '') ? q.get('imgsz')! : '640');
+  // ?imgsz= (e.g. from a dataset's "Train at 960 px" health finding) preselects a supported size. Until one is chosen
+  // (there, by hand or by a retry) the size follows the dataset (see `defaultImgsz`).
+  const queryImgsz = IMGSZ.includes(q.get('imgsz') ?? '');
+  let imgsz = $state(queryImgsz ? q.get('imgsz')! : '640');
+  let imgszChosen = $state(queryImgsz);
   let device = $state<string>('auto');
   let optimizer = $state<Optimizer>('auto');
   let lr0 = $state(0.01);
@@ -65,13 +69,13 @@
   let name = $state('');
   let nameEdited = $state(false);
   let augment = $state<Augment>(structuredClone(defaults));
-  // Close mosaic follows the epoch count (default 10, never more than the run's epochs) until it is set by hand, so a
-  // short run never starts out invalid.
+  // Close mosaic follows the epoch count (default 10, never more than half the run) until it is set by hand, so a
+  // short run still trains with mosaic.
   let closeEdited = $state(false);
   $effect(() => {
     const e = epochs;
     if (closeEdited || !Number.isFinite(e) || e < 1) return;
-    const want = Math.min(defaults.close_mosaic, Math.floor(e));
+    const want = autoCloseMosaic(e);
     if (untrack(() => augment.close_mosaic) !== want) augment.close_mosaic = want;
   });
   let focus = $state<AugKey | null>(null);
@@ -111,6 +115,7 @@
     epochs = c.epochs;
     batch = whole('batch', 1, 1024) ?? String(c.batch);
     imgsz = whole('imgsz', 64, 4096, 32) ?? String(c.imgsz); // the trainer's limits (docs/API.md, runs)
+    imgszChosen = true;
     device = q.get('device') === 'cpu' ? 'cpu' : c.device;
     optimizer = c.optimizer;
     lr0 = c.lr0;
@@ -161,6 +166,30 @@
     return (await hub.api.datasetImages(id, { split: 'train', offset: 0, limit: 12 }, s)).images.filter((i) => i.boxes.length > 0);
   });
 
+  // The training images' sizes, to train a dataset of small images at its own size. Read only for a dataset small
+  // enough to list in a few pages (the stats do not carry image sizes); otherwise null, and the size stays 640.
+  const trainSizes = new Resource(async (s) => {
+    const id = datasetId;
+    if (!id) return null;
+    const MAX = 2000;
+    const sizes: (readonly [number, number])[] = [];
+    let total = Infinity;
+    for (let page = 0; page < 8 && sizes.length < Math.min(total, MAX); page++) {
+      const r = await hub.api.datasetImages(id, { split: 'train', offset: sizes.length, limit: 1000 }, s);
+      total = r.total;
+      if (total > MAX || !r.images.length) break;
+      sizes.push(...r.images.map((i) => [i.width, i.height] as const));
+    }
+    return { id, sizes: sizes.length === total ? sizes : null };
+  });
+  const datasetImgsz = $derived(trainSizes.data && trainSizes.data.id === datasetId ? defaultImgsz(trainSizes.data.sizes) : null);
+  // Until the current dataset's sizes are known (or when they cannot be read), an unchosen size is the 640 default:
+  // never the size fitted to the dataset picked before.
+  $effect(() => {
+    const d = datasetImgsz;
+    if (!untrack(() => imgszChosen)) imgsz = String(d ?? 640);
+  });
+
   // Estimates are rough (architecture constants, a reference GPU): show them with matching precision.
   const roughDuration = (s: number) =>
     s < 3600 ? `~${Math.max(1, Math.round(s / 60))} min` : `~${(s / 3600).toFixed(s < 36000 ? 1 : 0)} h`;
@@ -200,10 +229,20 @@
   const vram = $derived(est.vramBytes * scale);
   const vramPct = $derived(gpuMem ? vram / gpuMem : 0);
 
-  // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field,
-  // with the server's list of adapters, until another device is picked.
-  let deviceError = $state<{ device: string; text: string } | null>(null);
-  const deviceMsg = $derived(deviceError && deviceError.device === device ? deviceError.text : null);
+  // Start answered `404 device_not_found` (`501 not_implemented` from servers before it): said at the Device field in
+  // one line built from the devices this machine lists now, until another device is picked. The server's own words
+  // (they name its backends) fold into the field's technical details.
+  let deviceError = $state<{ device: string; gone: boolean; detail: string } | null>(null);
+  const deviceErr = $derived(deviceError && deviceError.device === device ? deviceError : null);
+  /** A device in words: "Auto", "GPU 1", "CPU". */
+  const devWord = (d: string) => (d === 'auto' ? 'Auto' : d === 'cpu' ? 'CPU' : d.replace(/^gpu:/, 'GPU '));
+  const deviceMsg = $derived.by(() => {
+    const e = deviceErr;
+    if (!e) return null;
+    if (!e.gone) return `This server cannot train on ${devWord(e.device)}. Pick Auto or CPU.`;
+    const others = [...(system.data?.gpus ?? []).map((g) => `gpu:${g.ordinal}`).filter((d) => d !== e.device), 'cpu'].map(devWord);
+    return `${devWord(e.device)} is no longer available. Pick Auto, ${others.length > 1 ? `${others.slice(0, -1).join(', ')} or ${others.at(-1)}` : others[0]}.`;
+  });
 
   const errors = $derived({
     name: !name.trim() ? 'Give the run a name.' : /[^\w.-]/.test(name.trim()) ? 'Letters, digits, dot, dash and underscore only.' : null,
@@ -213,11 +252,10 @@
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
     dataset: !dataset ? 'Pick a dataset.' : null,
     weights: weights !== 'none' && !weightOptions.some((m) => m.id === weights) ? 'Pick weights of the same model size.' : null,
-    // The field has the server's words and the adapters; the line beside Start only needs the gist.
-    device: deviceMsg ? `${device} is not on this machine; pick another.` : null,
+    // The field says what to pick; the line beside Start only names the problem and leads there.
+    device: deviceErr ? `${devWord(device)} is not available.` : null,
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
-  const firstError = $derived(Object.values(errors).find((e) => e !== null) ?? null);
   const FIELD: Record<keyof typeof errors, string> = {
     name: 'Run name',
     epochs: 'Epochs',
@@ -228,12 +266,24 @@
     weights: 'Start from',
     device: 'Device',
   };
-  /** The first problem, named by its field (shown beside a disabled Start). */
+  const JUMP: Record<keyof typeof errors, Jump> = {
+    name: 'name',
+    epochs: 'epochs',
+    lr0: 'lr0',
+    seed: 'seed',
+    close: 'close',
+    dataset: 'data',
+    weights: 'weights',
+    device: 'device',
+  };
+  /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = $derived.by(() => {
-    for (const [k, v] of Object.entries(errors)) if (v) return `${FIELD[k as keyof typeof errors]}: ${v}`;
+    for (const [k, v] of Object.entries(errors)) if (v) return { text: `${FIELD[k as keyof typeof errors]}: ${v}`, key: JUMP[k as keyof typeof errors] };
     return null;
   });
   const showWhy = $derived(!valid && !!why && prefilled);
+  // A short run that would mostly warm up, or never see mosaic: not an error, a warning with what to change.
+  const short = $derived(errors.epochs || errors.close ? null : shortRun(dataset?.splits.train ?? 0, epochs, batchN, augment.close_mosaic, augment.mosaic));
   // A folded section must not hide its own error: while one is shown the section stays open whatever was toggled.
   const augShown = $derived(augOpen || errors.close !== null);
 
@@ -292,7 +342,11 @@
       router.go(`/runs/${run.id}`);
     } catch (err) {
       if (err instanceof ApiError && (err.code === 'device_not_found' || (err.code === 'not_implemented' && device.startsWith('gpu:')))) {
-        deviceError = { device, text: [err.message, err.hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' ') };
+        deviceError = {
+          device,
+          gone: err.code === 'device_not_found',
+          detail: [err.message, err.hint].filter((x): x is string => !!x).map((x) => sentence(x, true)).join(' '),
+        };
         // The adapters may have changed (an eGPU unplugged): list them again, and show the field with its message.
         void system.refresh();
         void jump('device');
@@ -300,6 +354,12 @@
     } finally {
       submitting = false;
     }
+  }
+
+  /** The way out of a device the server cannot use: Auto, then back to the field. */
+  function useAuto() {
+    device = 'auto';
+    document.getElementById('device')?.focus();
   }
 
   async function copyCli() {
@@ -323,7 +383,7 @@
     const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === device);
     return g ? `${device} · ${shortGpu(g.name)}` : device;
   });
-  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'weights' | 'opt';
+  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'weights' | 'opt' | 'lr0' | 'seed' | 'close';
   /** The settings that shape the run, each a way back to its control. Optimizer only once it is not the default. */
   const review = $derived<{ key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[]>([
     { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—', warn: !!errors.dataset },
@@ -360,7 +420,8 @@
 
   async function jump(key: Jump) {
     sumOpen = false;
-    if (key === 'opt') advancedOpen = true;
+    if (key === 'opt' || key === 'lr0' || key === 'seed') advancedOpen = true;
+    if (key === 'close') augOpen = true;
     await tick();
     // A closing dialog hands focus back to its opener; move on after that.
     requestAnimationFrame(() => {
@@ -412,6 +473,29 @@
     </p>
   {:else if onCpu}
     <p class="warning soft"><TriangleAlert size={14} /> Training on the CPU is roughly 14× slower than on a GPU.</p>
+  {/if}
+  {#if short}
+    <div class="warning soft short">
+      <TriangleAlert size={14} />
+      <div>
+        {#if short.kind === 'warmup'}
+          <p>Warmup takes {num(short.warmup)} of the run's {num(short.steps)} optimizer steps, so the learning rate barely settles.</p>
+          <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
+        {:else}
+          <p>Close mosaic covers all {num(short.epochs)} epochs, so mosaic never runs.</p>
+          <button type="button" class="fix" onclick={() => (closeEdited = false)}>Close mosaic for {short.suggest} {short.suggest === 1 ? 'epoch' : 'epochs'}</button>
+        {/if}
+      </div>
+    </div>
+  {/if}
+{/snippet}
+
+<!-- Why Start is off, as a way to the field that needs changing (the field may be far away). -->
+{#snippet whyLine(id: string, cls = '')}
+  {#if showWhy && why}
+    <p class="why {cls}" {id} role={id === 'start-why' ? 'status' : undefined}>
+      <button type="button" class="why-go" onclick={() => why && jump(why.key)}>{why.text}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></button>
+    </p>
   {/if}
 {/snippet}
 
@@ -474,27 +558,30 @@
         </Panel>
 
         <Panel title="2 · Model" id="sec-model" meta={was('model') ? `was ${oomRun?.config.arch}` : undefined}>
+          <!-- One specification row per size, the column header on the same grid (subgrid), so every value sits
+               under its heading at every width. -->
           <div class="arches" role="radiogroup" aria-label="Model size">
-            <!-- Below 960 px the cards become single-line rows; this is their column header. -->
-            <div class="a-head" aria-hidden="true"><span class="a-head-lead"></span><span>Params</span><span>GFLOPs</span><span>Latency</span></div>
+            <div class="a-head" aria-hidden="true"><span class="a-head-lead">Size</span><span>Params</span><span>GFLOPs</span><span>Latency</span><span></span></div>
             {#each arches as a (a.arch)}
               {@const on = a.arch === arch}
               <label class="arch" class:on>
                 <input type="radio" name="arch" value={a.arch} bind:group={arch} class="sr-only" />
-                <span class="a-top"><span class="a-size">{a.size}</span><span class="a-name mono">{a.arch}</span></span>
-                {#if on}<span class="tick" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>{/if}
+                <span class="a-size">{a.size}</span>
+                <span class="a-name mono">{a.arch}</span>
                 <span class="a-note">{a.note}</span>
-                <span class="a-bars">
-                  <span class="a-row"><span class="a-k faint">Params</span><span class="num">{compact(a.params)}</span></span>
-                  <span class="a-row"><span class="a-k faint">GFLOPs</span><span class="num">{num(a.flops, 1)}</span></span>
-                  <span class="a-row"><span class="a-k faint">Latency</span>{#if a.ms !== undefined}<span class="num">{num(a.ms, 2)} ms</span>{:else}<span class="faint" title="Not measured"><span class="nm-long">not measured</span><span class="nm-short">—</span></span>{/if}</span>
-                </span>
+                <span class="a-v num">{compact(a.params)}</span>
+                <span class="a-v num">{num(a.flops, 1)}</span>
+                {#if a.ms !== undefined}<span class="a-v num">{num(a.ms, 2)} ms</span>{:else}<span class="a-v faint" title="Not measured"><span class="nm-long">not measured</span><span class="nm-short">—</span></span>{/if}
+                <span class="tick" aria-hidden="true">{#if on}<Check size={14} strokeWidth={2.25} />{/if}</span>
               </label>
             {/each}
           </div>
           <!-- Phones: the rows have no room for the notes, so the chosen size's purpose sits under them. -->
           <p class="a-sel"><span class="mono">{arch}</span> {archNote}</p>
-          <p class="ref">Latency is measured end to end on an RTX 4080 SUPER: one decoded 640 px image in, boxes out, NMS included (fp32).</p>
+          <p class="ref">
+            Latency is measured end to end on an RTX 4080 SUPER: one decoded 640 px image in, boxes out, NMS included (fp32).
+            <span class="nm-note">Sizes with a dash are not measured yet.</span>
+          </p>
           <div class="row2">
             <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster.">
               <Select
@@ -515,12 +602,22 @@
               {#snippet aside()}{#if was('batch')}<span class="was">was {oomRun?.config.batch}</span>{/if}{/snippet}
               <Segmented id="batch" label="Batch size" bind:value={batch} options={withValue(BATCHES, batch).map((v) => ({ value: v, label: v }))} />
             </Field>
-            <Field label="Image size" for="imgsz" hint="Longer side in pixels, letterboxed.">
+            <Field
+              label="Image size"
+              for="imgsz"
+              hint={!imgszChosen && datasetImgsz !== null && datasetImgsz < 640
+                ? `Longer side in pixels. ${dataset?.name}'s images are all ${datasetImgsz} px.`
+                : 'Longer side in pixels, letterboxed.'}
+            >
               {#snippet aside()}{#if was('imgsz')}<span class="was">was {oomRun?.config.imgsz}</span>{/if}{/snippet}
-              <Segmented id="imgsz" label="Image size" bind:value={imgsz} options={withValue(IMGSZ, imgsz).map((v) => ({ value: v, label: v }))} />
+              <Segmented id="imgsz" label="Image size" bind:value={imgsz} onchange={() => (imgszChosen = true)} options={withValue(IMGSZ, imgsz).map((v) => ({ value: v, label: v }))} />
             </Field>
-            <Field label="Device" for="device" error={deviceMsg}>
-              {#snippet aside()}{#if was('device')}<span class="was">was {oomRun?.config.device}</span>{/if}{/snippet}
+            <!-- Not a Field: a device the server cannot use gets a line with a way out and folded details. -->
+            <div class="field dev" class:invalid={!!deviceMsg}>
+              <div class="dev-top">
+                <label for="device">Device</label>
+                {#if was('device')}<span class="was">was {oomRun?.config.device}</span>{/if}
+              </div>
               <Select
                 id="device"
                 bind:value={device}
@@ -534,7 +631,23 @@
                   { value: 'cpu', label: `CPU${system.data ? ` · ${system.data.cpu.threads} threads` : ''}` },
                 ]}
               />
-            </Field>
+              {#if deviceMsg && deviceErr}
+                <div class="dev-err">
+                  <div class="dev-line">
+                    <p id="device-error" role="alert">{deviceMsg}</p>
+                    <Button size="sm" onclick={useAuto}>Use Auto</Button>
+                  </div>
+                  {#if deviceErr.detail}
+                    <details class="dev-detail">
+                      <summary><ChevronRight size={12} aria-hidden="true" />Technical details</summary>
+                      <p>{deviceErr.detail}</p>
+                    </details>
+                  {/if}
+                </div>
+              {:else}
+                <p class="dev-hint">Auto uses the GPU when there is one, else the CPU.</p>
+              {/if}
+            </div>
           </div>
           <details class="advanced" open={advancedOpen} ontoggle={(e) => (advancedOpen = (e.currentTarget as HTMLDetailsElement).open)}>
             <summary><ChevronRight size={14} /> Advanced <span class="faint">optimizer, learning rate, seed</span></summary>
@@ -634,8 +747,7 @@
                 disabled={!valid}
                 aria-describedby={showWhy ? 'start-why' : undefined}>Start training</Button
               >
-              <!-- A disabled Start always says why, next to it (the field may be far away). -->
-              {#if showWhy}<p class="why" id="start-why" role="status">{why}</p>{/if}
+              {@render whyLine('start-why')}
             </div>
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
@@ -652,10 +764,11 @@
       <!-- Narrow screens: the summary sits below the form, so keep the essentials and the action in reach. -->
       <div class="dock" class:away={startVisible} role="region" aria-label="Start training" inert={startVisible}>
         <!-- The reason Start is off travels with it (the Summary's line is out of view here). -->
-        {#if showWhy}<p class="why dock-why" id="dock-why">{why}</p>{/if}
+        {@render whyLine('dock-why', 'dock-why')}
         <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
           <span>{roughDuration(est.totalSeconds)}</span>
           {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
+          {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.kind === 'warmup' ? 'Mostly warmup' : 'No mosaic'}</span>{/if}
           {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
           <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
         </button>
@@ -668,11 +781,11 @@
       <Dialog bind:open={sumOpen} title="Summary" size="sm">
         <div class="sum">
           {@render estimates(true)}
-          {#if firstError && prefilled}<p class="warning" role="alert"><TriangleAlert size={14} /> {firstError}</p>{/if}
+          {@render whyLine('sheet-why')}
         </div>
         {#snippet footer()}
           <Button variant="ghost" onclick={() => (sumOpen = false)}>Keep editing</Button>
-          <Button type="submit" variant="primary" icon={Play} loading={submitting} disabled={!valid}>Start training</Button>
+          <Button type="submit" variant="primary" icon={Play} loading={submitting} disabled={!valid} aria-describedby={showWhy ? 'sheet-why' : undefined}>Start training</Button>
         {/snippet}
       </Dialog>
     </form>
@@ -702,10 +815,7 @@
   }
   .card,
   .arch {
-    display: grid;
-    gap: 6px;
-    align-content: start;
-    padding: var(--space-3);
+    position: relative;
     border-radius: var(--radius-md);
     border: 1px solid var(--line-default);
     background: var(--bg-raised);
@@ -715,30 +825,37 @@
       background-color var(--dur-fast) var(--ease-standard),
       box-shadow var(--dur-fast) var(--ease-standard);
   }
+  .card {
+    display: grid;
+    gap: 6px;
+    align-content: start;
+    padding: var(--space-3);
+  }
   .card:hover,
   .arch:hover {
     border-color: var(--line-strong);
   }
   /* Selection: a strong edge on a neutral fill and a small ink check; lime stays for the Start button and focus.
      (bg.selected is lime-tinted, for selected rows; a chosen card is a static choice, so it stays neutral.) */
-  .card,
-  .arch {
-    position: relative;
-  }
-  .card.on,
-  .arch.on {
+  .card.on {
     border-color: var(--line-strong);
     background: var(--bg-active);
   }
+  /* A model size is a row in a list: the one selection rule, bg.active and a 2 px accent bar, plus the check. */
+  .arch.on {
+    background: var(--bg-active);
+    box-shadow: inset 2px 0 0 var(--accent-line);
+  }
   .tick {
-    position: absolute;
-    top: 12px;
-    right: 12px;
     display: grid;
     color: var(--text-primary);
   }
-  .card.on .c-fmt,
-  .arch.on .a-name {
+  .card .tick {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+  }
+  .card.on .c-fmt {
     visibility: hidden;
   }
   .card:has(:focus-visible),
@@ -746,8 +863,7 @@
     outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
-  .c-top,
-  .a-top {
+  .c-top {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
@@ -756,9 +872,8 @@
   .c-name {
     font-weight: var(--weight-medium);
   }
-  .c-fmt,
-  .a-name {
-    font-size: var(--type-xs-size);
+  .c-fmt {
+    font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
   .c-meta {
@@ -768,45 +883,68 @@
   .c-meta > span {
     white-space: nowrap;
   }
-  .nm-short {
+  .nm-short,
+  .nm-note {
     display: none;
   }
+  /* Model sizes: single-line rows (letter, name, note, the three specs, the check) on one grid with their header.
+     A subgrid's edge tracks hold its border and padding, so the first and last are 12 + 1 px wider than their content. */
   .arches {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: var(--space-2);
+    grid-template-columns: 28px auto minmax(0, 1fr) repeat(2, 64px) 88px 28px;
+    column-gap: var(--space-3);
+    row-gap: var(--space-1);
+  }
+  .a-head,
+  .arch {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: subgrid;
+    align-items: center;
+  }
+  .a-head {
+    padding: 0 calc(var(--space-3) + 1px) var(--space-1);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    text-align: right;
+  }
+  .a-head-lead {
+    grid-column: 1 / 4;
+    text-align: left;
+  }
+  .arch {
+    min-height: 36px;
+    padding: 0 var(--space-3);
   }
   .a-size {
-    font-size: var(--type-2xl-size);
-    line-height: var(--type-2xl-line);
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
     font-weight: var(--weight-semibold);
-    letter-spacing: var(--type-2xl-tracking);
   }
-  .arch.on .a-size {
-    color: var(--text-primary);
+  .a-name {
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  .arch.on .a-name {
+    color: var(--text-secondary);
   }
   .a-note {
+    min-width: 0;
     font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-secondary);
-    min-height: 32px;
+    color: var(--text-tertiary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .a-bars {
-    display: grid;
-    gap: 4px;
-    margin-top: 2px;
-  }
-  .a-row {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--space-2);
+  .a-v {
     font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
+    text-align: right;
+    white-space: nowrap;
   }
-  .a-row .num {
+  .a-v.num {
     color: var(--text-secondary);
   }
-  .arch.on .a-row .num {
+  .arch.on .a-v.num {
     color: var(--text-primary);
   }
   .ref {
@@ -818,10 +956,100 @@
     margin-top: var(--space-4);
     max-width: 420px;
   }
+  /* Two fields a row on one grid: a label row, a control row of one height, then help. Each field spans the three rows
+     (subgrid), so labels, controls and help line up across the pair whatever each one holds. */
   .fields {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-4) var(--space-5);
+    grid-auto-rows: auto minmax(var(--control-md), auto) auto;
+    gap: 0 var(--space-5);
+  }
+  .fields > :global(div.field) {
+    grid-row: span 3;
+    display: grid;
+    grid-template-rows: subgrid;
+    row-gap: 6px;
+    align-items: center;
+    padding-bottom: var(--space-4);
+  }
+  .fields > :global(div.field > :first-child) {
+    align-self: end;
+  }
+  .fields > :global(div.field > p),
+  .fields > :global(div.field > .dev-err) {
+    align-self: start;
+  }
+  /* The Device field: a Field's shape, with room for its error's way out. */
+  .dev-top {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+  .dev-top label {
+    color: var(--text-secondary);
+    font-weight: var(--weight-medium);
+  }
+  .dev-top .was {
+    font-size: var(--type-sm-size);
+  }
+  .dev-hint {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .dev-err {
+    display: grid;
+    gap: var(--space-1);
+  }
+  .dev-line {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-3);
+  }
+  .dev-line p {
+    padding-top: var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--danger-text);
+  }
+  .dev-line :global(.btn) {
+    flex-shrink: 0;
+  }
+  .dev-detail summary {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    cursor: pointer;
+    list-style: none;
+    border-radius: var(--radius-sm);
+  }
+  .dev-detail summary::-webkit-details-marker {
+    display: none;
+  }
+  .dev-detail summary:hover {
+    color: var(--text-primary);
+  }
+  .dev-detail summary :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .dev-detail[open] summary :global(svg) {
+    transform: rotate(90deg);
+  }
+  .dev-detail p {
+    margin-top: var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+    overflow-wrap: anywhere;
+  }
+  @media (pointer: coarse) {
+    .dev-detail summary {
+      min-height: 44px;
+    }
   }
   .aug {
     display: grid;
@@ -874,7 +1102,33 @@
   .why {
     margin-top: var(--space-2);
     font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--danger-text);
+  }
+  /* The reason Start is off leads to the field: a link in the danger ink, underlined on hover. */
+  .why-go {
+    display: inline;
+    color: inherit;
+    text-align: inherit;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+    text-underline-offset: 3px;
+    border-radius: var(--radius-xs);
+  }
+  .why-go:hover {
+    text-decoration-color: currentColor;
+  }
+  .why-go :global(svg) {
+    display: inline;
+    margin-left: var(--space-1);
+    vertical-align: -1px;
+  }
+  @media (pointer: coarse) {
+    .why-go {
+      display: inline-block;
+      min-height: 44px;
+      padding-block: var(--space-3);
+    }
   }
   .rv {
     display: flex;
@@ -952,7 +1206,6 @@
     background: var(--warning-solid);
   }
   .ds-pick,
-  .a-head,
   .a-sel,
   .aug-toggle {
     display: none;
@@ -1024,6 +1277,29 @@
   .warning.soft {
     background: var(--warning-muted);
     color: var(--warning-text);
+  }
+  .short > div {
+    display: grid;
+    justify-items: start;
+    gap: var(--space-1);
+  }
+  /* The fix a short-run warning suggests, one click away. */
+  .fix {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+    text-align: left;
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+    border-radius: var(--radius-xs);
+  }
+  .fix:hover {
+    text-decoration-color: currentColor;
+  }
+  @media (pointer: coarse) {
+    .fix {
+      min-height: 44px;
+    }
   }
   .calib {
     margin-top: calc(-1 * var(--space-1));
@@ -1158,14 +1434,22 @@
     display: none;
   }
   @media (max-width: 1199px) {
-    /* Laptops keep the sticky rail beside the form; the model cards go two by two so their notes stay readable. */
+    /* Laptops keep the sticky rail beside the form. */
     .layout {
       grid-template-columns: minmax(0, 1fr) 300px;
     }
+    /* The notes keep their room: an unmeasured latency is a dash, explained under the rows. */
     .arches {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: 28px auto minmax(0, 1fr) repeat(3, 64px) 28px;
     }
-    /* The preview takes a little more of the narrower form, so its frames keep their one-line tags. */
+    .nm-long {
+      display: none;
+    }
+    .nm-short,
+    .nm-note {
+      display: inline;
+    }
+    /* The preview takes a little more of the narrower form, so its frames stay large enough to read. */
     .aug {
       grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
       gap: var(--space-4);
@@ -1236,8 +1520,14 @@
       display: grid;
       color: var(--text-tertiary);
     }
-    .dock-est .warn {
+    .dock-est .warn,
+    .dock-warn {
       color: var(--warning-text);
+    }
+    .dock-warn {
+      display: inline-flex;
+      align-items: center;
+      gap: var(--space-1);
     }
     .layout {
       grid-template-columns: minmax(0, 1fr);
@@ -1253,73 +1543,6 @@
     .summary .est {
       padding-top: 0;
       border-top: 0;
-    }
-    /* Model sizes as single-line rows: letter, name, note, then the three specs in columns. */
-    .arches {
-      --a-cols: 16px auto minmax(0, 1fr) repeat(3, 72px) 14px;
-      grid-template-columns: minmax(0, 1fr);
-      gap: var(--space-1);
-    }
-    .a-head,
-    .arch {
-      grid-template-columns: var(--a-cols);
-      align-items: center;
-      column-gap: var(--space-3);
-    }
-    .a-head {
-      display: grid;
-      padding: 0 calc(var(--space-3) + 1px) var(--space-1);
-      font-size: var(--type-sm-size);
-      color: var(--text-tertiary);
-      text-align: right;
-    }
-    .a-head-lead {
-      grid-column: 1 / -5;
-    }
-    .arch {
-      gap: 0 var(--space-3);
-      align-content: center;
-      min-height: 36px;
-      padding: 0 var(--space-3);
-    }
-    .a-top,
-    .a-bars {
-      display: contents;
-    }
-    .a-size {
-      font-size: var(--type-md-size);
-      line-height: var(--type-md-line);
-      letter-spacing: 0;
-    }
-    .arch.on .a-name {
-      visibility: visible;
-      color: var(--text-secondary);
-    }
-    .a-note {
-      grid-column: 3;
-      grid-row: 1;
-      min-height: 0;
-      color: var(--text-tertiary);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-    .a-row {
-      display: block;
-      text-align: right;
-      white-space: nowrap;
-    }
-    .a-row .a-k,
-    .nm-long {
-      display: none;
-    }
-    .nm-short {
-      display: inline;
-    }
-    .arch .tick {
-      position: static;
-      grid-column: -2;
-      grid-row: 1;
     }
   }
   .dock-est .faint {
@@ -1373,16 +1596,13 @@
     .cards {
       display: none;
     }
-    /* Model rows: the note gives way so the three specs keep their columns; 44 px touch rows. */
+    /* Model rows: the note gives way (it sits under the rows) so the three specs keep their columns; 44 px rows. */
     .arches {
-      --a-cols: 16px minmax(0, 1fr) repeat(3, 52px) 14px;
-    }
-    .a-head,
-    .arch {
+      grid-template-columns: 28px minmax(0, 1fr) repeat(3, 52px) 28px;
       column-gap: var(--space-2);
     }
-    .a-head {
-      padding-inline: calc(var(--space-3) + 1px);
+    .a-head-lead {
+      grid-column: 1 / 3;
     }
     .arch {
       min-height: 44px;

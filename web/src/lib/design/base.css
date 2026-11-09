@@ -219,50 +219,94 @@ table {
   background: color-mix(in srgb, var(--bg-app) 14%, transparent);
 }
 
-/* Data tables */
+/*
+ * Data tables: the one table system (DESIGN_DIRECTION §2.7). Every <table class="table"> gets the same header, row
+ * heights, first column, hover, selection bar and keyboard focus from here; a sortable header is ui/SortHeader.svelte,
+ * arrow-key rows are ui/rowNav.ts, and an empty / error / loading state sits in the frame with ui/TableState.svelte.
+ * The defaults are wrapped in :where() so they weigh nothing: a table's own classes (.faint, a column style) win.
+ *   rows   36 px single-line (.dense 28, .tall 48 for a name over one meta line); header 32 px
+ *   header 12/500 tertiary, sentence case; numbers right-aligned (.r) and tabular, the unit in the header
+ *   lead   the first cell of a row is 13/500 primary (the row's name); its second line is .sub (12/400 tertiary)
+ *   rows that open something carry .link (hover fill, pointer); selected rows .on (bg.active + 2 px accent bar)
+ */
 .table {
   width: 100%;
   font-variant-numeric: tabular-nums;
 }
-.table th {
+:where(.table) th {
   height: 32px;
   padding: 0 var(--space-3);
   text-align: left;
   font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
   font-weight: var(--weight-medium);
   color: var(--text-tertiary);
   white-space: nowrap;
   border-bottom: 1px solid var(--line-subtle);
 }
-.table td {
+:where(.table) td {
   height: var(--size-row);
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--line-subtle);
   white-space: nowrap;
 }
-.table th:first-child,
-.table td:first-child {
+:where(.table) :is(th, td):first-child {
   padding-left: var(--space-4);
 }
-.table th:last-child,
-.table td:last-child {
+:where(.table) :is(th, td):last-child {
   padding-right: var(--space-4);
 }
-.table tr:last-child td {
+:where(.table) tr:last-child td {
   border-bottom: 0;
+}
+:where(.table.dense) td {
+  height: var(--size-row-dense);
+}
+:where(.table.tall) td {
+  height: 48px;
+}
+/* The row's name: the first cell, or the cell marked .lead when a checkbox or index comes first. A cell spanning the
+   whole row (a state, a fold, a details row) is not a name. */
+:where(.table tbody tr > :first-child:not([colspan]), .table .lead) {
+  color: var(--text-primary);
+  font-weight: var(--weight-medium);
+}
+:where(.table) .sub {
+  display: block;
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  font-weight: var(--weight-regular);
+  color: var(--text-tertiary);
 }
 .table .r {
   text-align: right;
 }
-.table.dense td {
-  height: var(--size-row-dense);
-}
-.table tbody tr.link {
+:where(.table) tbody tr.link {
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard);
 }
-.table tbody tr.link:hover {
+:where(.table) tbody tr.link:hover {
   background: var(--bg-hover);
+}
+/* The selection rule: bg.active and a 2 px accent bar on the row's leading edge. */
+:where(.table) tbody tr:is(.on, [aria-selected='true']) {
+  background: var(--bg-active);
+}
+:where(.table) tbody tr:is(.on, [aria-selected='true']) > :first-child {
+  box-shadow: inset 2px 0 0 var(--accent-line);
+}
+/* Arrow-key rows (rowNav): the ring sits inside the row, so the scroll box never clips it. */
+:where(.table) tbody tr[tabindex]:focus-visible {
+  outline: var(--size-focus-ring) solid var(--focus);
+  outline-offset: calc(-1 * var(--size-focus-ring));
+  border-radius: 0;
+  background: var(--bg-hover);
+}
+/* Links inside a row (the name, a source run) underline on hover; the row is the bigger target. */
+:where(.table) td a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--line-strong);
 }
 
 /* Shell metrics shared by fixed bars (mobile tab bar and docks that sit on it). */

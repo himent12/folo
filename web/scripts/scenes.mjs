@@ -44,6 +44,19 @@ export const scenes = [
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
+    // The loss chart: total in ink, box / cls / dfl in their design/README.md hues (amber, violet dashed, teal dotted).
+    name: 'run-loss',
+    path: '/runs/run_c19a',
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      const tab = page.locator('[data-tab="loss"]');
+      if (await tab.isVisible()) await tab.click();
+      else await page.locator('select[aria-label="Metric to chart"]:visible').selectOption('loss');
+      await page.mouse.move(0, 0);
+      await page.clock.runFor(500);
+    },
+  },
+  {
     // The phone layout below the fold: the metrics instrument, then one section at a time (here: per-class results).
     name: 'run-live-phone-classes',
     path: '/runs/run_7d1e',
@@ -84,6 +97,37 @@ export const scenes = [
     fullPage: true,
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: unplugGpu,
+  },
+  {
+    // The server's own words fold under "Technical details" at the Device field; here opened.
+    name: 'run-new-device-details',
+    path: '/runs/new',
+    search: 'scenario=gpu-unplugged',
+    fullPage: false,
+    viewports: ['laptop'],
+    setup: async (page) => {
+      await unplugGpu(page);
+      await page.locator('.dev-detail summary').click();
+      await page.locator('#device').scrollIntoViewIfNeeded();
+    },
+  },
+  {
+    // A short run on fasteners (5 epochs, 1,920 images): warmup would take 100 of its 150 optimizer steps. The Summary
+    // warns with the fix; below 960 px the dock says so too.
+    name: 'run-new-short',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      await until(page, 'input#epochs');
+      await page.locator('input#epochs').fill('5');
+      await page.mouse.move(0, 0);
+      if (vp === 'mobile') {
+        await page.locator('.dock-est').click();
+        await page.locator('dialog[open]').waitFor();
+      } else if (vp === 'desktop') await until(page, '.summary .short');
+      else await until(page, '.dock-warn');
+    },
   },
   {
     // The same on tablet and phone, in the viewport: the dock's Start says why it is off.
@@ -140,6 +184,29 @@ export const scenes = [
     },
   },
   { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'mobile'] },
+  {
+    // A run kept in front from the legend: its card selected, its line (here the dotted fourth run) painted over the rest.
+    name: 'run-compare-pinned',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.chip .key');
+      await page.locator('.chip .key').nth(3).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Phones: Edit turns the compact two-column legend into one run per row with open and remove.
+    name: 'run-compare-edit',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, 'button.manage');
+      await page.locator('button.manage').click();
+    },
+  },
   { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
   { name: 'run-queued', path: '/runs/run_q4n2', themes: ['dark'], viewports: ['desktop'] },
   { name: 'datasets-empty', path: '/datasets', search: 'scenario=empty' },
@@ -154,21 +221,53 @@ export const scenes = [
   },
   { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'mobile'] },
   {
-    // The check's findings with their fixes; the severity filter moved to warnings in the first list.
-    name: 'dataset-issues',
+    // The health summary with every severity line opened: the findings, their evidence and next steps.
+    name: 'dataset-health-open',
     path: '/datasets/ds_shapes_hard?tab=stats',
     fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#ds-health summary');
+      for (const s of await page.locator('#ds-health summary').all()) await s.click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // "Dataset check findings", its own section: the severity filter moved to warnings from the Warnings line's
+    // "Show the warnings", so the caption and rows are the warnings.
+    name: 'dataset-issues',
+    path: '/datasets/ds_shapes_hard?tab=stats',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#ds-health summary');
+      await page.locator('#ds-health li.warning summary').click();
+      await page.getByRole('button', { name: 'Show the warnings' }).click();
+      await until(page, '#ds-check .issues .fix');
+      await page.clock.runFor(500);
+    },
+  },
+  {
+    // The box-size histogram with a bin pinned by a tap (phones) or under the mouse: the readout row states its count.
+    name: 'dataset-histogram',
+    path: '/datasets/ds_shapes_hard?tab=stats',
+    fullPage: true,
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page, { vp }) => {
-      // Phones start the findings folded: open the first one.
-      if (vp === 'mobile') {
-        await until(page, '#ds-health summary');
-        await page.locator('#ds-health summary').first().click();
-      }
-      await until(page, '#ds-health .issues li');
-      await page.locator('#ds-health details[open] .issues').first().getByRole('radio', { name: /Warnings/ }).click();
-      await until(page, '#ds-health .issues .fix');
-      await page.clock.runFor(500);
+      await until(page, '#ds-size svg');
+      const svg = page.locator('#ds-size svg[role=img]');
+      await svg.scrollIntoViewIfNeeded();
+      const box = await svg.boundingBox();
+      if (!box) return;
+      const at = { x: box.x + box.width * 0.22, y: box.y + box.height * 0.6 };
+      // The shot's context has no touch screen: a phone's tap is sent as touch pointer events.
+      if (vp === 'mobile')
+        await svg.evaluate((el, p) => {
+          for (const type of ['pointerdown', 'pointerup'])
+            el.dispatchEvent(new PointerEvent(type, { clientX: p.x, clientY: p.y, pointerType: 'touch', bubbles: true }));
+        }, at);
+      else await page.mouse.move(at.x, at.y);
+      await page.clock.runFor(300);
     },
   },
   {
@@ -231,7 +330,7 @@ export const scenes = [
   { name: 'runs', path: '/runs' },
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
-  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop'] },
+  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
   { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     // Phones open on the Curves section (the matrix is behind the section picker).
@@ -311,15 +410,99 @@ export const scenes = [
     name: 'model-export',
     path: '/models/m_shapes_s',
     fullPage: false,
+    setup: async (page, { vp }) => {
+      // Phones keep Export in the header's ⋯ menu.
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+    },
+  },
+  {
+    // The f16 export finished: a Download button for the file, and where it sits on the server.
+    name: 'model-export-done',
+    path: '/models/m_shapes_s',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, 'button[aria-label="More model actions"]');
+        await page.locator('button[aria-label="More model actions"]').click();
+        await page.getByRole('menuitem', { name: 'Export' }).click();
+      } else {
+        await until(page, 'button:has-text("Export")');
+        await page.locator('button:has-text("Export")').first().click();
+      }
+      await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] footer button:has-text("Export")').click();
+      await until(page, 'dialog[open] .where');
+    },
+  },
+  {
+    // ONNX has no download endpoint: the dialog says so next to the server path.
+    name: 'model-export-onnx',
+    path: '/models/m_shapes_s',
+    fullPage: false,
+    viewports: ['desktop'],
     setup: async (page) => {
       await until(page, 'button:has-text("Export")');
       await page.locator('button:has-text("Export")').first().click();
       await until(page, 'dialog[open] fieldset');
+      await page.locator('dialog[open] label:has-text("ONNX")').click();
+      await page.locator('dialog[open] footer button:has-text("Export")').click();
+      await until(page, 'dialog[open] .where');
+    },
+  },
+  {
+    // The metric help under the KPI strip (AP vs mAP, IoU, the precision / recall operating point), and the header's
+    // lineage: fasteners-n was fine-tuned from shapes-n. Phones: the summary line opened too.
+    name: 'model-metric-help',
+    path: '/models/m_fast_n',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      await until(page, '#pr svg');
+      if (vp === 'mobile') await page.locator('button.meta-line').click();
+      await page.getByRole('button', { name: 'What these metrics mean' }).click();
+      await page.clock.runFor(1500);
+    },
+  },
+  {
+    // Per-class rows trace curves: the hint above the table, two classes selected (bg.active + accent bar) and Clear.
+    name: 'model-classes-selected',
+    path: '/models/m_fast_n',
+    fullPage: true,
+    viewports: ['desktop', 'laptop'],
+    setup: async (page) => {
+      await until(page, '#cm .cell');
+      await page.locator('#pr button.cls').nth(1).click();
+      await page.locator('#pr button.cls').nth(4).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The engine benchmark with its "How this was measured" fold open.
+    name: 'models-engine-how',
+    path: '/models',
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      // The panel lives in the collapsed Engine benchmarks fold: open that, then its own "How this was measured".
+      await until(page, 'details.bench > summary');
+      await page.locator('details.bench > summary').first().click();
+      await until(page, '#engine-speed');
+      await page.locator('#engine-speed summary', { hasText: 'How this was measured' }).click();
     },
   },
   { name: 'playground-empty', path: '/playground', setup: (page) => until(page, 'button.sample') },
   {
-    // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model).
+    // Server inference ran out of GPU memory (507): the cause, the hint, and the ways out (this browser, a smaller model),
+    // in a strip under the image, which stays whole.
     name: 'playground-oom',
     path: '/playground?model=m_shapes_s',
     search: 'scenario=oom',
@@ -328,12 +511,27 @@ export const scenes = [
       await until(page, 'button.sample');
       await page.locator('button.sample').first().click();
       await page.mouse.move(0, 0);
-      await until(page, '.stage-err .err');
+      await until(page, '.notice .err');
       // The toast repeats the cause; let it go so the shot shows the state in place.
       await page.clock.runFor(6000);
     },
   },
   { name: 'playground-result', path: '/playground?model=m_hard_s', viewports: ['desktop', 'laptop', 'mobile'], setup: playgroundResult },
+  {
+    // A browser without WebGPU: the option is off and the header says why, and what is left.
+    name: 'playground-no-webgpu',
+    path: '/playground?model=m_hard_s',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.addInitScript(() => {
+        delete (/** @type {any} */ (Navigator.prototype)).gpu;
+      });
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.clock.runFor(2000);
+      await until(page, '.runon-note');
+    },
+  },
   {
     name: 'playground-selected',
     path: '/playground?model=m_hard_s',
@@ -393,8 +591,48 @@ export const scenes = [
   { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
-  { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop'] },
-  { name: 'runs-empty', path: '/runs', search: 'scenario=empty', themes: ['dark'], viewports: ['desktop'] },
+  { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  { name: 'runs-empty', path: '/runs', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
+  // Empty and error states sit in the table frame (header row, the message inside, a few rows tall).
+  { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  { name: 'datasets-error', path: '/datasets', search: 'scenario=error', viewports: ['desktop'] },
+  {
+    name: 'datasets-nomatch',
+    path: '/datasets',
+    themes: ['light'],
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'input[aria-label="Filter datasets"]');
+      await page.fill('input[aria-label="Filter datasets"]', 'zebra');
+    },
+  },
+  {
+    // Keyboard rows: J moves a roving focus over the rows, X selects the focused run for Compare.
+    name: 'runs-keyboard',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.keyboard.press('j');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+    },
+  },
+  {
+    // The engine benchmarks, opened from their one-line summary under the inventory.
+    name: 'models-bench',
+    path: '/models',
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      // The outer Engine benchmarks fold (the panel inside has a "How this was measured" fold of its own).
+      await until(page, 'details.bench > summary');
+      await page.locator('details.bench > summary').first().click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'run-loading', path: '/runs/run_7d1e', search: 'scenario=loading', themes: ['dark'], viewports: ['desktop', 'laptop'] },
   {
     name: 'palette-open',
@@ -443,5 +681,5 @@ export const scenes = [
       await page.locator('#run-chart .legend .note.at').waitFor({ state: 'visible', timeout: 3000 });
     },
   },
-  { name: 'not-found', path: '/nope', themes: ['dark'], viewports: ['desktop'] },
+  { name: 'not-found', path: '/nope', viewports: ['desktop', 'mobile'] },
 ];

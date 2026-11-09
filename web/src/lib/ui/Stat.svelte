@@ -37,8 +37,11 @@
 </div>
 
 <style>
+  /* Rows pack to the top: a stat without a sub line, stretched beside one with it, keeps its value on the shared
+     baseline instead of spreading its rows over the extra height. */
   .stat {
     display: grid;
+    align-content: start;
     gap: 2px;
     min-width: 0;
   }

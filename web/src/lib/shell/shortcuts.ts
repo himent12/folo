@@ -16,6 +16,11 @@ export const shortcutList: { keys: string; label: string; group: string }[] = [
   { keys: '[', label: 'Collapse or expand the sidebar', group: 'General' },
   { keys: 'N', label: 'New training run', group: 'General' },
   ...[...mainNav, settingsNav].map((n) => ({ keys: n.keys, label: `Go to ${n.label}`, group: 'Navigation' })),
+  // Rows of the Runs, Models and Datasets tables (ui/rowNav.ts). J / K enter the list when nothing has focus.
+  { keys: 'J K', label: 'Next / previous row', group: 'Lists' },
+  { keys: 'ArrowDown ArrowUp', label: 'Next / previous row (focused list)', group: 'Lists' },
+  { keys: 'Enter', label: 'Open the row', group: 'Lists' },
+  { keys: 'X', label: 'Select the run to compare (Runs)', group: 'Lists' },
   { keys: 'ArrowLeft ArrowRight', label: 'Move the chart cursor (focused chart)', group: 'Charts' },
   { keys: 'J K', label: 'Next / previous image (inspector)', group: 'Datasets' },
   { keys: '+ -', label: 'Zoom in / out (inspector)', group: 'Datasets' },

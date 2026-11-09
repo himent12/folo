@@ -2,7 +2,8 @@
   /**
    * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
    * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart
-   * by position, not hue), counts on hover. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
+   * by position, not hue), counts on hover. In light, the ramp starts at the first non-zero share: an empty cell is the
+   * panel with a hairline grid, so most of a large matrix is not a grey chequerboard. `reveal(r, c)` lets a summary elsewhere point at one cell: it scrolls the
    * cell into view and makes it the active cell, whose counts the readout states. A matrix that scrolls sideways
    * (phones) also gets a whole-matrix overview: every cell as a small square and a band over the columns in view. A tap
    * on it brings those columns into view; cells are picked in the full matrix, whose cells are large enough to hit.
@@ -168,7 +169,7 @@
     <svg class="ov-map" width={geo.size} height={geo.size} viewBox="0 0 {geo.size} {geo.size}" aria-hidden="true" onclick={onmap}>
       {#each names as _, r (r)}
         {#each names as _, c (c)}
-          <rect class="ov-cell" x={c * (geo.cell + geo.gap)} y={r * (geo.cell + geo.gap)} width={geo.cell} height={geo.cell} rx="1" style:--v={norm(r, c)} />
+          <rect class="ov-cell" class:zero={!matrix[r]?.[c]} x={c * (geo.cell + geo.gap)} y={r * (geo.cell + geo.gap)} width={geo.cell} height={geo.cell} rx="1" style:--v={norm(r, c)} />
         {/each}
       {/each}
       <rect class="ov-band" x={band.x - 1.5} y="-1.5" width={band.w + 3} height={geo.size + 3} rx="2" />
@@ -208,6 +209,7 @@
         {@const v = norm(r, c)}
         <div
           class="cell"
+          class:zero={!matrix[r]?.[c]}
           class:hl={hovered && (hovered.r === r || hovered.c === c)}
           class:pin={pinned !== null && pinned.r === r && pinned.c === c}
           role="gridcell"
@@ -232,8 +234,13 @@
 {#if scale}
   <div class="scale" aria-hidden="true">
     <span class="scale-name">Share of the true class</span>
-    <span class="ramp"></span>
-    <span class="ticks"><span>0%</span><span>50%</span><span>100%</span></span>
+    <span class="keys">
+      <span class="none-key"><i></i>None</span>
+      <span class="ramp-key">
+        <span class="ramp"></span>
+        <span class="ticks"><span>&gt;0%</span><span>50%</span><span>100%</span></span>
+      </span>
+    </span>
   </div>
 {/if}
 {#if !range}{@render readout()}{/if}
@@ -246,7 +253,8 @@
     display: grid;
     grid-template-columns: minmax(64px, 96px) repeat(var(--n), minmax(22px, 1fr));
     gap: 2px;
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     overflow-x: auto;
   }
   /* Fixed minimum cells: the matrix scrolls sideways under pinned row labels. */
@@ -337,7 +345,7 @@
     border-radius: 3px;
     /* One ramp from the plot well to full ink, perceptually even (oklab). */
     background: color-mix(in oklab, var(--text-primary) calc(var(--v) * 90% + 4%), var(--bg-inset));
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
     color: var(--text-secondary);
     transition: box-shadow var(--dur-fast) var(--ease-standard);
@@ -352,7 +360,13 @@
       display: none;
     }
   }
-  .cell.hl {
+  /* Light: no objects at all is the panel itself, edged by the hairline grid; the ramp begins at the first object. */
+  :global([data-theme='light']) .cell.zero {
+    background: var(--bg-panel);
+    box-shadow: inset 0 0 0 1px var(--line-subtle);
+  }
+  .cell.hl,
+  :global([data-theme='light']) .cell.zero.hl {
     box-shadow: inset 0 0 0 1px var(--line-strong);
   }
   /* The active cell (tapped, or pointed at from a summary): a selection stroke; keyboard focus has its own ring. */
@@ -422,6 +436,11 @@
   .ov-cell {
     fill: color-mix(in oklab, var(--text-primary) calc(var(--v) * 90% + 4%), var(--bg-inset));
   }
+  :global([data-theme='light']) .ov-cell.zero {
+    fill: var(--bg-panel);
+    stroke: var(--line-subtle);
+    stroke-width: 1;
+  }
   .ov-band {
     fill: none;
     stroke: var(--text-secondary);
@@ -440,19 +459,44 @@
     font-variant-numeric: tabular-nums;
   }
   .scale {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
-    align-items: center;
-    gap: 4px var(--space-2);
-    max-width: 320px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: var(--space-1) var(--space-3);
+    max-width: 400px;
     margin-top: var(--space-3);
-    font-size: var(--type-xs-size);
-    line-height: var(--type-xs-line);
-    color: var(--text-tertiary);
-  }
-  .scale-name {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .keys {
+    flex: 1 1 200px;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-3);
+  }
+  /* The empty-cell key exists only where empty cells differ from the ramp's start (light). */
+  .none-key {
+    display: none;
+    align-items: center;
+    gap: var(--space-1);
+    white-space: nowrap;
+  }
+  :global([data-theme='light']) .none-key {
+    display: inline-flex;
+  }
+  .none-key i {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    background: var(--bg-panel);
+    box-shadow: inset 0 0 0 1px var(--line-default);
+  }
+  .ramp-key {
+    flex: 1;
+    display: grid;
+    gap: var(--space-1);
+    padding-top: 4px;
   }
   .ramp {
     height: 8px;
@@ -464,7 +508,6 @@
     );
   }
   .ticks {
-    grid-column: 2;
     display: flex;
     justify-content: space-between;
     font-variant-numeric: tabular-nums;

@@ -6,6 +6,7 @@
   import { fly } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import { toast } from './toast.svelte';
+  import { motion } from './motion';
 
   const icons = { success: CircleCheck, error: CircleAlert, info: Info };
 </script>
@@ -19,7 +20,7 @@
   <ol aria-live="polite">
     {#each toast.items as t (t.id)}
       {@const Icon = icons[t.tone]}
-      <li class="toast {t.tone}" role={t.tone === 'error' ? 'alert' : 'status'} transition:fly={{ y: 8, duration: 160, easing: cubicOut }}>
+      <li class="toast {t.tone}" role={t.tone === 'error' ? 'alert' : 'status'} transition:fly={{ y: 8, duration: motion(160), easing: cubicOut }}>
         <span class="icon"><Icon size={16} strokeWidth={1.75} /></span>
         <div class="text">
           <p class="title">{t.title}</p>

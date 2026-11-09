@@ -3,6 +3,7 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Download from '@lucide/svelte/icons/download';
+  import Info from '@lucide/svelte/icons/info';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { tick } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
@@ -20,11 +21,13 @@
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
+  import Menu from '$lib/ui/Menu.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { cmIndex } from './model/confusion';
   import ExportDialog from './model/ExportDialog.svelte';
+  import { origin } from '$lib/lineage';
   import PrCurves from './model/PrCurves.svelte';
   import { MODEL_SECTIONS, prView, sectionShown, type ModelSection } from './model/sections';
 
@@ -35,15 +38,18 @@
     setCrumbs({ label: 'Models', path: '/models' }, { label: model.data?.name ?? id });
   });
 
-  // The source run and its dataset, for the provenance links.
+  // The source run, its dataset and the model it was fine-tuned from (its `weights`), for the provenance links.
   const runId = $derived(model.data?.run_id ?? null);
-  const context = new Resource<{ run: Run | null; dataset: Dataset | null }>(async (s) => {
+  const context = new Resource<{ run: Run | null; dataset: Dataset | null; parent: Model | null }>(async (s) => {
     const rid = runId;
-    if (!rid) return { run: null, dataset: null };
+    if (!rid) return { run: null, dataset: null, parent: null };
     const run = await hub.api.run(rid, s).catch(() => null);
     const dataset = run ? await hub.api.dataset(run.config.dataset_id, s).catch(() => null) : null;
-    return { run, dataset };
+    const from = origin(run?.config.weights);
+    const parent = from.kind === 'model' ? await hub.api.model(from.id, s).catch(() => null) : null;
+    return { run, dataset, parent };
   });
+  const lineage = $derived(context.data?.run ? origin(context.data.run.config.weights, context.data.parent ? [context.data.parent] : []) : null);
 
   // PR curves, confusion matrix and per-class metrics from GET /api/models/{id}/eval.
   const evaluation = new Resource((s) => hub.api.modelEval(id, s));
@@ -147,14 +153,21 @@
     matrixView?.reveal(at.r, at.c);
   }
 
-  /** The architecture's measured end-to-end time at 640 px (docs/BENCHMARKS.md), or undefined when not measured. */
+  /**
+   * The architecture's end-to-end time from docs/BENCHMARKS.md (640 px, one RTX 4080 SUPER), or undefined when not
+   * measured. It is a benchmark of the architecture, never this model's own timing, and is labelled as such.
+   */
   const latency = (m: Model): number | undefined => e2eMs[m.arch];
   const kpis = (m: Model) => [
-    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95', rest: ', all classes' },
-    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50', rest: '' },
-    { label: 'Precision', value: m.metrics?.precision, sub: 'boxes', rest: ', all classes' },
-    { label: 'Recall', value: m.metrics?.recall, sub: 'boxes', rest: ', all classes' },
+    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
+    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
+    { label: 'Precision', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
+    { label: 'Recall', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
   ];
+  // What the four numbers mean, one tap away (the strip itself keeps to values and a short qualifier).
+  let helpOpen = $state(false);
+  // Phones: one summary line under the top bar; the rest of the provenance behind it.
+  let metaOpen = $state(false);
 </script>
 
 {#if model.error && !model.data}
@@ -171,33 +184,92 @@
 {:else}
   {@const m = model.data}
   {@const run = context.data?.run}
-  <Page title={m.name}>
+  {#snippet lineageNote()}
+    <!-- Where the weights started: the run's `weights`, a model (linked), an imported file, or nothing. -->
+    {#if lineage?.kind === 'model'}
+      {@const lid = lineage.id}
+      <span>fine-tuned from <a class="link" href={href(`/models/${encodeURIComponent(lid)}`)}>{context.data?.parent?.name ?? lid}</a></span>
+    {:else if lineage?.kind === 'file'}
+      <span>fine-tuned from <span class="mono" title={lineage.path}>{lineage.label}</span></span>
+    {:else if lineage?.kind === 'scratch'}
+      <span>trained from scratch</span>
+    {/if}
+  {/snippet}
+  {#snippet provenance()}
+    {#if m.run_id}
+      <span>trained by <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a></span>
+      {@render lineageNote()}
+    {:else}
+      <span>imported</span>
+    {/if}
+    <span class="faint" title={date(m.created)}>created {ago(m.created)}</span>
+  {/snippet}
+  <Page title={m.name} inlineActions={phone.current}>
     {#snippet sub()}
-      <span class="mono">{m.arch}</span>
-      <span class="num">{m.classes.length} classes · {m.imgsz} px · {bytes(m.bytes, prefs.units)}</span>
-      {#if m.run_id}
-        <span>trained by <a class="link" href={href(`/runs/${m.run_id}`)}>{run?.name ?? m.run_id}</a></span>
+      {#if phone.current}
+        <button type="button" class="meta-line num" aria-expanded={metaOpen} aria-controls="model-meta" onclick={() => (metaOpen = !metaOpen)}>
+          <span class="truncate"><span class="mono">{m.arch}</span> · {m.classes.length} classes · {m.imgsz} px</span>
+          <ChevronDown size={14} aria-hidden="true" />
+        </button>
+        {#if metaOpen}
+          <div class="meta-more" id="model-meta">
+            <span class="num">{bytes(m.bytes, prefs.units)}</span>
+            {@render provenance()}
+          </div>
+        {/if}
       {:else}
-        <span>imported</span>
+        <span class="mono">{m.arch}</span>
+        <span class="num">{m.classes.length} classes · {m.imgsz} px · {bytes(m.bytes, prefs.units)}</span>
+        {@render provenance()}
       {/if}
-      <span class="faint" title={date(m.created)}>created {ago(m.created)}</span>
     {/snippet}
     {#snippet actions()}
-      <Button icon={Download} onclick={() => (exportOpen = true)}>Export</Button>
-      <Button variant="primary" icon={ScanSearch} href={href(`/playground?model=${encodeURIComponent(m.id)}`)}>Try in Playground</Button>
+      {#if phone.current}
+        <Button variant="primary" icon={ScanSearch} aria-label="Try in Playground" href={href(`/playground?model=${encodeURIComponent(m.id)}`)}>Try</Button>
+        <Menu label="More model actions" items={[{ label: 'Export', icon: Download, onclick: () => (exportOpen = true) }]} />
+      {:else}
+        <Button icon={Download} onclick={() => (exportOpen = true)}>Export</Button>
+        <Button variant="primary" icon={ScanSearch} href={href(`/playground?model=${encodeURIComponent(m.id)}`)}>Try in Playground</Button>
+      {/if}
     {/snippet}
 
-    <!-- One strip of numbers in ink: the headline metric, then the ones that support it. Phones: the headline gets
-         its own row, the other three a subordinate row sharing one qualifier line. -->
+    <!-- One strip of numbers in ink: the headline metric, then the ones that support it, each with a short qualifier;
+         the ⓘ opens what they mean. Phones: one row of four values, qualifiers in the help. -->
     <section class="kpis" aria-label="Validation metrics">
       {#each kpis(m) as k, i (k.label)}
         <div class="kpi" class:hero={i === 0}>
           <span class="k-label">{k.label}</span>
           <span class="k-value num">{metric(k.value)}</span>
-          <span class="k-sub">{k.sub}<span class="k-rest">{k.rest}</span></span>
+          <span class="k-sub">{k.sub}</span>
         </div>
       {/each}
-      <p class="k-note">All four over all classes · mAP50 at IoU 0.50</p>
+      <button type="button" class="k-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
+        ><Info size={14} aria-hidden="true" /></button
+      >
+      {#if helpOpen}
+        <dl class="k-body" id="metric-help">
+          <div>
+            <dt>AP and mAP</dt>
+            <dd>AP is the area under one class's precision–recall curve. mAP is the mean of AP over all {m.classes.length} classes; per-class tables show AP.</dd>
+          </div>
+          <div>
+            <dt>50 and 50-95</dt>
+            <dd>The overlap (IoU) a box needs with a true box to count as found: 0.50, or AP averaged over IoU 0.50 to 0.95 in 0.05 steps.</dd>
+          </div>
+          <div>
+            <dt>Precision, recall</dt>
+            <dd>At the one confidence threshold that maximises the class-mean F1 at IoU 0.50. The server does not report which threshold that was.</dd>
+          </div>
+          <div>
+            <dt>Evaluated on</dt>
+            <dd>
+              {#if context.data?.dataset}The validation split of {context.data.dataset.name}{:else}The validation split of the model's dataset{/if}{ev
+                ? ` (${num(ev.images)} images)`
+                : ''}, at {m.imgsz} px with NMS IoU 0.7.
+            </dd>
+          </div>
+        </dl>
+      {/if}
     </section>
 
     {#if phone.current}
@@ -250,14 +322,14 @@
               <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
             </div>
             <div class="kv">
-              <dt>Latency</dt>
+              <dt>Benchmark</dt>
               <dd class="latency">
-                <!-- Measured for the architecture (docs/BENCHMARKS.md), never scaled or estimated: say exactly what it is. -->
+                <!-- The architecture's number (docs/BENCHMARKS.md), never this model's timing: say exactly what it is. -->
                 {#if latency(m) !== undefined}
-                  <span class="num">{latency(m)!.toFixed(2)} ms{m.imgsz !== 640 ? ' at 640 px' : ''}</span>
-                  <span class="faint">End to end, one image · RTX 4080 SUPER · fp32</span>
+                  <span class="num">{latency(m)!.toFixed(2)} ms</span>
+                  <span class="faint">{m.arch} benchmark (640 px), end to end on an RTX 4080 SUPER; not timed on this model</span>
                 {:else}
-                  <span class="faint">Not measured for {m.arch} yet</span>
+                  <span class="faint">No {m.arch} benchmark yet</span>
                 {/if}
               </dd>
             </div>
@@ -281,6 +353,20 @@
                 {/if}
               </dd>
             </div>
+            {#if lineage}
+              <div class="kv">
+                <dt>Started from</dt>
+                <dd>
+                  {#if lineage.kind === 'model'}
+                    <a class="link" href={href(`/models/${encodeURIComponent(lineage.id)}`)}>{context.data?.parent?.name ?? lineage.id}</a>
+                  {:else if lineage.kind === 'file'}
+                    <span class="mono" title={lineage.path}>{lineage.label}</span>
+                  {:else}
+                    <span class="muted">Random weights (from scratch)</span>
+                  {/if}
+                </dd>
+              </div>
+            {/if}
             <div class="kv">
               <dt>Model id</dt>
               <dd class="mono muted">{m.id}</dd>
@@ -298,11 +384,8 @@
           <Panel pad="none" id="details">
             <button type="button" class="d-line" aria-expanded={detailsOpen} aria-controls="model-details" onclick={() => (detailsOpen = !detailsOpen)}>
               <span class="d-sum num truncate">
-                <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px{#if latency(m) !== undefined}<span class="d-lat"
-                    ><span class="sep" aria-hidden="true">·</span><span title="Measured end to end at 640 px: RTX 4080 SUPER, fp32, one image"
-                      >{latency(m)!.toFixed(2)} ms{m.imgsz !== 640 ? ' at 640 px' : ''}</span
-                    ></span
-                  >{/if}<span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
+                <span class="mono">{m.arch}</span><span class="sep" aria-hidden="true">·</span>{m.imgsz} px<span class="sep" aria-hidden="true">·</span
+                >{num(m.flops_g, 1)} GFLOPs<span class="sep" aria-hidden="true">·</span>{bytes(m.bytes, prefs.units)}
               </span>
               <span class="d-verb">Details <ChevronRight size={14} aria-hidden="true" /></span>
             </button>
@@ -315,7 +398,7 @@
     </div>
     <!-- Full width: the matrix grows with the class count, and the rail beside it would sit empty. -->
     <div class="cm-part" class:off={!showing('confusion')}>
-      <Panel title="Confusion matrix" meta={cm?.partial ? `top ${CM_MAX} of ${m.classes.length} classes` : 'share of each true class'} id="cm">
+      <Panel title="Confusion matrix" meta={cm?.partial ? (phone.current ? `${CM_MAX} most common + Other` : `${CM_MAX} most common classes + Other + background`) : 'share of each true class'} id="cm">
         {#if cm}
           <!-- 8 + 4, on the grid of the panels above: the matrix in the main column, what to read from it in the side
                column (aligned with the Details rail). Up to 1199 px the two consequential cells lead (a phone's
@@ -364,7 +447,7 @@
                     labelled; hover or tap one for its count.</p>
                   <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
                   {#if cm.partial}
-                    <p>The {CM_MAX} most frequent classes are shown; the other {m.classes.length - CM_MAX} are folded into Other.</p>
+                    <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
                   {/if}
                 </div>
               </details>
@@ -421,6 +504,9 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  .kpis {
+    position: relative;
+  }
   .k-value {
     align-self: end;
     font-size: var(--type-2xl-size);
@@ -431,18 +517,89 @@
   .hero .k-label {
     color: var(--text-secondary);
   }
-  .k-note {
-    display: none;
+  /* The help toggle sits in the strip's top-right corner, over the last cell's empty label end. */
+  .k-help {
+    position: absolute;
+    top: var(--space-3);
+    right: var(--space-3);
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: var(--radius-sm);
+    color: var(--text-tertiary);
+  }
+  .k-help:hover,
+  .k-help[aria-expanded='true'] {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+  .k-body {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3) var(--space-8);
+    padding: var(--space-4);
+    background: var(--bg-panel);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
+  .k-body > div {
+    display: grid;
+    grid-template-columns: 112px minmax(0, 1fr);
+    gap: var(--space-3);
+    max-width: 72ch;
+  }
+  .k-body dt {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+  }
+  .k-body dd {
+    text-align: left;
+    color: var(--text-secondary);
+  }
+  .meta-line {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
+    max-width: 100%;
+    min-height: var(--control-md);
+    color: var(--text-secondary);
+    text-align: left;
+  }
+  @media (pointer: coarse) {
+    .meta-line {
+      min-height: 44px;
+    }
+  }
+  .meta-line :global(svg) {
+    flex-shrink: 0;
+    color: var(--text-tertiary);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .meta-line[aria-expanded='true'] :global(svg) {
+    transform: rotate(180deg);
+  }
+  .meta-more {
+    flex-basis: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1) var(--space-3);
+    margin-top: calc(var(--space-2) * -1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
   }
   .hero .k-value {
     font-size: var(--type-3xl-size);
     line-height: 40px;
     letter-spacing: var(--type-3xl-tracking);
   }
-  /* Panels in a row end together: the rail stretches to the PR panel's height. */
+  /* The rail is as tall as its content and sticks under the top bar while the long class table scrolls past. */
   .detail {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    align-items: start;
     gap: var(--space-4);
   }
   .main-col,
@@ -715,6 +872,9 @@
     color: var(--text-secondary);
   }
   @media (max-width: 1199px) {
+    .k-body {
+      grid-template-columns: minmax(0, 1fr);
+    }
     .detail {
       grid-template-columns: minmax(0, 1fr);
       align-items: start;
@@ -723,63 +883,50 @@
       position: static;
     }
   }
-  @media (max-width: 767px) {
-    /* The reference latency stays in the opened list; the line keeps what fits. */
-    .d-lat {
-      display: none;
+  @media (pointer: coarse) {
+    .k-help {
+      top: 0;
+      right: 0;
+      width: 44px;
+      height: 44px;
     }
+  }
+  @media (max-width: 767px) {
     .details.two {
       grid-template-columns: minmax(0, 1fr);
     }
     .two .kv {
       grid-template-columns: 96px minmax(0, 1fr);
     }
-    /* Headline row: label, then the value with its qualifier on the same baseline. */
+    /* One row of four values: the headline a step larger; the qualifiers live in the help. */
     .kpis {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: repeat(4, minmax(0, 1fr));
     }
     .kpi {
-      grid-template-rows: 16px 24px;
+      grid-template-rows: 16px 28px;
       gap: var(--space-1);
       padding: var(--space-3);
     }
-    .kpi.hero {
-      grid-column: 1 / -1;
-      grid-template-columns: auto minmax(0, 1fr);
-      grid-template-rows: 16px 40px;
-      column-gap: var(--space-3);
-      align-items: baseline;
-    }
-    .hero .k-label {
-      grid-column: 1 / -1;
-    }
-    .hero .k-value {
-      line-height: 40px;
-    }
-    /* On the value's baseline: 40 px line, 32 px figures; 16 px line, 12 px text. */
-    .hero .k-sub {
-      align-self: end;
-      padding-bottom: 6px;
-    }
-    .k-rest {
+    .k-sub {
       display: none;
     }
     .k-value {
       font-size: var(--type-xl-size);
-      line-height: 24px;
+      line-height: 28px;
       letter-spacing: var(--type-xl-tracking);
     }
-    .kpi:not(.hero) .k-sub {
-      display: none;
+    .hero .k-value {
+      font-size: var(--type-2xl-size);
+      line-height: 28px;
+      letter-spacing: var(--type-2xl-tracking);
     }
-    .k-note {
-      display: block;
-      grid-column: 1 / -1;
-      padding: var(--space-2) var(--space-3);
-      background: var(--bg-panel);
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-      color: var(--text-tertiary);
+    .k-body {
+      grid-template-columns: minmax(0, 1fr);
+      padding: var(--space-3);
+    }
+    .k-body > div {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 2px;
     }
   }
 </style>

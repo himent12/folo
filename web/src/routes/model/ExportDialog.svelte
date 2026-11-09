@@ -1,8 +1,13 @@
 <script lang="ts">
-  /** Export a model to a deployable file: pick a format, run it on the server, then copy the resulting path. */
+  /**
+   * Export a model to a deployable file: pick a format and run it on the server. The f16 file can then be downloaded
+   * to this computer (GET /api/models/{id}/weights?format=f16); ONNX has no download endpoint, so its path on the
+   * server is shown, and the dialog says so.
+   */
   import Check from '@lucide/svelte/icons/check';
   import Copy from '@lucide/svelte/icons/copy';
   import Download from '@lucide/svelte/icons/download';
+  import { HttpApi } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import type { ExportFormat, ExportResult, Model } from '$lib/api/types';
   import { bytes } from '$lib/format';
@@ -32,6 +37,8 @@
   ];
 
   let format = $state<ExportFormat>('folo-f16');
+  /** The format of the finished export (the radio may not be shown any more). */
+  let done = $state<ExportFormat | null>(null);
   let phase = $state<'idle' | 'running' | 'done' | 'error'>('idle');
   let result = $state<ExportResult | null>(null);
   let error = $state<unknown>(null);
@@ -46,6 +53,7 @@
       const r = await hub.api.exportModel(model.id, format);
       if (id !== run) return;
       result = r;
+      done = format;
       phase = 'done';
       toast.success(`Exported ${model.name}`, `${r.path} · ${bytes(r.bytes, prefs.units)}`);
     } catch (e) {
@@ -66,8 +74,23 @@
     }
   }
 
+  /** Saves the f16 file through the browser (the server names it). The demo's models have no file to save. */
+  function download() {
+    const api = hub.api;
+    if (!(api instanceof HttpApi)) {
+      toast.info('Nothing to download in the demo', 'Demo models are not real networks, so they have no weights file.');
+      return;
+    }
+    const a = document.createElement('a');
+    a.href = api.weightsUrl(model.id);
+    a.download = `${model.name}-f16.folo`;
+    a.rel = 'noopener';
+    a.click();
+  }
+
   function reset() {
     run++;
+    done = null;
     phase = 'idle';
     result = null;
     error = null;
@@ -83,11 +106,26 @@
         <span>Export finished</span>
         <span class="size num">{bytes(result.bytes, prefs.units)}</span>
       </div>
-      <div class="path">
-        <code class="mono">{result.path}</code>
-        <Button size="sm" variant="ghost" icon={copied ? Check : Copy} aria-label="Copy path" onclick={copy} />
+      {#if done === 'folo-f16'}
+        <div class="get">
+          <Button icon={Download} onclick={download}>Download {model.name}-f16.folo</Button>
+        </div>
+      {/if}
+      <div class="where">
+        <span class="where-label">On the server</span>
+        <div class="path">
+          <code class="mono">{result.path}</code>
+          <Button size="sm" variant="ghost" icon={copied ? Check : Copy} aria-label="Copy path" onclick={copy} />
+        </div>
       </div>
-      <p class="note">The file is on the machine running folo serve.</p>
+      {#if done === 'onnx'}
+        <p class="note">
+          Studio cannot download ONNX files yet: the file stays on the machine running folo serve. Copy it from there, or
+          run <span class="mono">folo export --format onnx</span> where you need it.
+        </p>
+      {:else}
+        <p class="note">Also saved on the machine running folo serve.</p>
+      {/if}
     </div>
   {:else}
     <fieldset disabled={phase === 'running'}>
@@ -183,8 +221,8 @@
     height: 14px;
     margin-top: 4px;
     border-radius: 50%;
-    /* text.tertiary keeps the empty ring at ≥ 3:1 on both themes' panels. */
-    border: 1px solid var(--text-tertiary);
+    /* The empty ring marks the option: line.control (>= 3:1 on every surface). */
+    border: 1px solid var(--line-control);
     background: var(--bg-inset);
     transition: border-color var(--dur-fast) var(--ease-standard);
   }
@@ -302,6 +340,21 @@
     color: var(--text-primary);
   }
   .note {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+  }
+  .note .mono {
+    color: var(--text-secondary);
+  }
+  .get {
+    display: flex;
+  }
+  .where {
+    display: grid;
+    gap: var(--space-1);
+  }
+  .where-label {
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
