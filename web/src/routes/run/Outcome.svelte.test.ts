@@ -88,7 +88,8 @@ describe('Outcome', () => {
     expect(acts[0]?.textContent?.trim()).toMatch(/^Retry with batch 8 · ~13\.6 GiB$/);
     expect(acts[0]?.className).toContain('primary');
     expect(acts[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&batch=8');
-    expect(r.more()).toEqual([expect.stringMatching(/^Retry at 640 px, batch 16 · ~\d+\.\d GiB$/), expect.stringMatching(/^Retry with folo-s, batch 16 · ~\d+\.\d GiB$/)]);
+    // The others take the largest batch that fits them, not the next halving: 19 at 640 px.
+    expect(r.more()).toEqual([expect.stringMatching(/^Retry at 640 px, batch 19 · ~\d+\.\d GiB$/), expect.stringMatching(/^Retry with folo-s, batch 16 · ~\d+\.\d GiB$/)]);
     r.done();
   });
 

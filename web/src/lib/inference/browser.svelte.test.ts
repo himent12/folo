@@ -183,7 +183,21 @@ describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {
     resetWasmProbe();
     expect(await probeWasm(answer({ '.js': 'text/javascript', '.wasm': null }).fetcher)).toBe(false);
     resetWasmProbe();
-    expect(await probeWasm((async () => Promise.reject(new TypeError('offline'))) as typeof fetch)).toBe(false);
+  });
+
+  it('does not know while offline or while the server errs, and asks again next time instead of keeping that', async () => {
+    resetWasmProbe();
+    const offline = (async () => Promise.reject(new TypeError('Failed to fetch'))) as typeof fetch;
+    expect(await probeWasm(offline)).toBeNull();
+    // Back online: the next visit asks again and gets the answer, which is then kept.
+    const { fetcher, calls } = answer({ '.js': 'text/javascript', '.wasm': 'application/wasm' });
+    expect(await probeWasm(fetcher)).toBe(true);
+    expect(await probeWasm(offline)).toBe(true);
+    expect(calls).toHaveLength(2);
+    resetWasmProbe();
+    const down = (async () => new Response(null, { status: 503 })) as typeof fetch;
+    expect(await probeWasm(down)).toBeNull();
+    expect(await probeWasm(answer({ '.js': 'text/javascript', '.wasm': null }).fetcher)).toBe(false);
     resetWasmProbe();
   });
 

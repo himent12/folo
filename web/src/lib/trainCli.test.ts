@@ -20,11 +20,14 @@ const base: TrainConfig = {
 const model = (extra: Partial<Model> = {}) => ({ id: 'm_d849e303', name: 'fasteners-n-best', arch: 'folo-n', ...extra }) as Model;
 const ft = (extra: Partial<TrainConfig> = {}): TrainConfig => ({ ...base, name: 'r6-n-2', arch: 'folo-n', epochs: 15, weights: 'm_d849e303', ...extra });
 
-/** POSIX word splitting for the commands this module writes (bare words and single quotes). */
+/**
+ * PowerShell's word splitting for the commands this module writes: bare words and single-quoted ones, where a doubled
+ * quote is one (`'O''Brien'`), the typographic single quotes counting as `'` (as crates/folo-cli/tests/studio_cli.rs).
+ */
 function split(line: string): string[] {
   const out: string[] = [];
-  const re = /'((?:[^']|'\\'')*)'|(\S+)/g;
-  for (let m = re.exec(line); m; m = re.exec(line)) out.push(m[1] !== undefined ? m[1].replace(/'\\''/g, "'") : m[2]!);
+  const re = /['‘’‚‛]((?:[^'‘’‚‛]|['‘’‚‛]{2})*)['‘’‚‛]|(\S+)/g;
+  for (let m = re.exec(line); m; m = re.exec(line)) out.push(m[1] !== undefined ? m[1].replace(/(['‘’‚‛])['‘’‚‛]/g, '$1') : m[2]!);
   return out;
 }
 
@@ -71,13 +74,24 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
     ]);
   });
 
-  it('quotes paths a shell would split or unescape', () => {
+  it('quotes words as PowerShell reads them: an apostrophe is doubled inside single quotes', () => {
     expect(quote('D:/data/r6')).toBe('D:/data/r6');
+    expect(quote('D:\\data\\r6')).toBe('D:\\data\\r6');
     expect(quote('D:/my data/r6')).toBe("'D:/my data/r6'");
-    expect(quote('D:\\data\\r6')).toBe("'D:\\data\\r6'");
-    expect(quote("it's")).toBe("'it'\\''s'");
+    expect(quote("D:/O'Brien/data")).toBe("'D:/O''Brien/data'");
+    // PowerShell ends a single-quoted string at a typographic quote too: doubled the same way.
+    expect(quote('D:/O’Brien’s/data')).toBe("'D:/O’’Brien’’s/data'");
+    // An array, splatting, a variable, a comment, an escape, a subexpression, a separator, the stop-parsing token.
+    for (const w of ['a,b', '@x', '$x', '#x', 'a`b', '(x)', 'a;b', '--%']) expect(quote(w)).toBe(`'${w}'`);
     const c = trainCommand(base, 'C:/Users/me/My Datasets/r6');
     expect(split(c.line).slice(1)).toEqual(c.argv);
+  });
+
+  it("quotes apostrophes in the dataset and weights paths, and in the run's name", () => {
+    const c = trainCommand(ft({ name: "Bob's r6" }), "D:/O'Brien/data", model({ path: "D:/models/O'Brien's best.folo" }));
+    expect(c.line).toBe("folo train --data 'D:/O''Brien/data' --weights 'D:/models/O''Brien''s best.folo' --epochs 15 --batch 16 --imgsz 640 --head o2m --name 'Bob''s r6'");
+    expect(split(c.line).slice(1)).toEqual(c.argv);
+    expect(c.argv).toContain("D:/O'Brien/data");
   });
 
   it("prefers the server's own command where it sends one", () => {
@@ -110,6 +124,8 @@ const cases: { name: string; config: TrainConfig; data: string; model?: Model }[
   },
   { name: 'a dataset path with spaces', config: { ...base, arch: 'folo-n' }, data: 'C:/Users/me/My Datasets/r6' },
   { name: 'a Windows path', config: { ...base, arch: 'folo-l' }, data: 'D:\\data\\shapes' },
+  { name: 'an apostrophe in the dataset path and the name', config: { ...base, name: "Bob's r6" }, data: "D:/O'Brien/data" },
+  { name: 'an apostrophe in the weights path', config: ft(), data: 'D:/r6', model: model({ path: "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo" }) },
 ];
 
 describe('the CLI fixture (crates/folo-cli/tests/studio_cli.rs)', () => {

@@ -66,11 +66,15 @@ export function section(name: RouteName): string {
   return name;
 }
 
+/** The query keys the page itself reads from `location.search` (lib/api: the demo and its scenario), not a route. */
+const PAGE_KEYS = new Set(['mock', 'scenario']);
+
 /**
  * Where a path URL Studio was opened at belongs (`/datasets` → `/#/datasets`): the server answers any path with the
- * app, which routes by hash only. A known route's path moves into the hash, the page's own query (`?mock=1`) stays,
- * and a hash route already there wins (`/datasets#/runs` → `/#/runs`). Null when nothing needs to change: the app's
- * root, or a path that is no route (a missing file). `base` is the app's base path. Exported for tests.
+ * app, which routes by hash only. A known route's path moves into the hash with its query (`/runs/new?from=run_a` →
+ * `/#/runs/new?from=run_a`), the page's own keys (`?mock=1`) stay in the page's query, and a hash route already there
+ * wins (`/datasets#/runs` → `/#/runs`). Null when nothing needs to change: the app's root, or a path that is no route
+ * (a missing file). `base` is the app's base path. Exported for tests.
  */
 export function hashUrl(loc: { pathname: string; search: string; hash: string }, base = '/'): string | null {
   if (!loc.pathname.startsWith(base)) return null;
@@ -78,8 +82,12 @@ export function hashUrl(loc: { pathname: string; search: string; hash: string },
   if (!rest || rest === 'index.html') return null;
   const path = `/${rest}`;
   if (parse(`#${path}`).name === 'not-found') return null;
-  const hash = loc.hash && loc.hash !== '#' ? loc.hash : `#${path}`;
-  return `${base}${loc.search}${hash}`;
+  if (loc.hash && loc.hash !== '#') return `${base}${loc.search}${loc.hash}`;
+  const page = new URLSearchParams();
+  const route = new URLSearchParams();
+  for (const [k, v] of new URLSearchParams(loc.search)) (PAGE_KEYS.has(k) ? page : route).append(k, v);
+  const q = (p: URLSearchParams) => (String(p) ? `?${p}` : '');
+  return `${base}${q(page)}#${path}${q(route)}`;
 }
 
 // Before the router reads the hash: a path URL becomes its hash route, in place (no history entry).

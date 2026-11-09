@@ -470,7 +470,7 @@ pub struct WeightsPullArgs {
     #[arg(long)]
     pub force: bool,
     /// GitHub repository (owner/name) whose release holds the weights.
-    #[arg(long, default_value = crate::weights::REPO)]
+    #[arg(long, default_value = crate::WEIGHTS_REPO)]
     pub repo: String,
 }
 

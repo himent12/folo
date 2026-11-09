@@ -1,45 +1,39 @@
 //! FOLO Studio's "CLI command" (New run) parses with the real `folo` command tree: every command in
 //! `web/src/lib/trainCli.fixtures.json` (written by the web tests from representative run settings) goes through
 //! clap's `Cli::try_parse_from`, and the parsed `train` arguments hold the run's values (DOGFOOD-3 S1: a fine-tune
-//! must not pass `--model` with `--weights`).
-
-// The CLI is a binary crate: its command tree is compiled in here from the same source.
-#[allow(dead_code)]
-#[path = "../src/cli.rs"]
-mod cli;
-
-/// What `cli.rs` reads from its crate root.
-const VERSION: &str = "test";
-mod weights {
-    pub const REPO: &str = "himent12/folo";
-}
+//! must not pass `--model` with `--weights`). Studio shows the command for PowerShell, so it is split by PowerShell's
+//! rules.
 
 use clap::Parser;
 use serde_json::Value;
 
-use cli::{Cli, Command, HeadArg, OptimizerArg};
+use folo_cli::cli::{Cli, Command, HeadArg, OptimizerArg};
 
-/// A command line as a POSIX shell splits it: bare words and single-quoted ones (`'\''` is a quote), as Studio
-/// quotes them.
+/// Whether PowerShell reads `c` as a single quote: `'` and the typographic ones (U+2018 to U+201B).
+fn is_quote(c: char) -> bool {
+    matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}')
+}
+
+/// A command line as PowerShell splits it, for the words Studio writes: bare words and single-quoted ones, where a
+/// doubled quote stands for one (`'O''Brien'`).
 fn split(line: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut word = String::new();
     let mut in_word = false;
-    let mut chars = line.chars();
+    let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
-            '\'' => {
+            c if is_quote(c) => {
                 in_word = true;
-                for q in chars.by_ref() {
-                    if q == '\'' {
+                while let Some(q) = chars.next() {
+                    if !is_quote(q) {
+                        word.push(q);
+                    } else if let Some(n) = chars.next_if(|&n| is_quote(n)) {
+                        word.push(n);
+                    } else {
                         break;
                     }
-                    word.push(q);
                 }
-            }
-            '\\' => {
-                in_word = true;
-                word.extend(chars.next());
             }
             c if c.is_whitespace() => {
                 if in_word {

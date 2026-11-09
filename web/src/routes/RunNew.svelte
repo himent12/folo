@@ -22,7 +22,7 @@
   import { REF_CPU, REF_GPU, referenceSource } from '$lib/reference';
   import { basisLine, confidenceLine, hasFeature, referenceBasis, latencyMs, latencyRange, measuredLatency, timeRange, updatedWords } from '$lib/throughput';
   import { href, router } from '$lib/router.svelte';
-  import { serverCommand, trainCommand } from '$lib/trainCli';
+  import { SHELL, serverCommand, trainCommand } from '$lib/trainCli';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import { dock } from '$lib/shell/dock';
   import { sidebar } from '$lib/shell/sidebarState.svelte';
@@ -406,19 +406,29 @@
   // weights of another size), already said at their fields: the reference figures stand in.
   const canEstimate = $derived(hasFeature(system.data, 'run_estimate'));
   let served = $state.raw<{ key: string; est: RunEstimate } | null>(null);
+  /** Whether the latest request is still out: set by the run of the effect that owns it, cleared by every other. */
   let estimating = $state(false);
   /** Whether an estimate has been asked for yet (not state: it only sets the next one's delay). */
   let asked = false;
+  /** The latest request's number: an answer to an older (cancelled) one never touches the state. */
+  let estSeq = 0;
   // The name is part of the request: the server's command (`cli`) names the run.
   const estKey = $derived(JSON.stringify(config));
   $effect(() => {
     const key = estKey;
     const body = { ...config, name: config.name || 'estimate' };
+    const seq = ++estSeq;
+    // No request for these settings (none possible, or the answer is already in): none is pending either, even where
+    // the one this replaced (since cancelled) was.
     if (!canEstimate || !dataset || !isInt(epochs, 1, 10000) || errors.close) {
       served = null;
+      estimating = false;
       return;
     }
-    if (untrack(() => served?.key) === key) return;
+    if (untrack(() => served?.key) === key) {
+      estimating = false;
+      return;
+    }
     const ctrl = new AbortController();
     estimating = true;
     const t = setTimeout(
@@ -426,12 +436,12 @@
         asked = true;
         hub.api.estimateRun(body, ctrl.signal).then(
           (e) => {
-            if (ctrl.signal.aborted) return;
+            if (ctrl.signal.aborted || seq !== estSeq) return;
             served = { key, est: e };
             estimating = false;
           },
           () => {
-            if (ctrl.signal.aborted) return;
+            if (ctrl.signal.aborted || seq !== estSeq) return;
             served = null;
             estimating = false;
           },
@@ -1095,12 +1105,13 @@
             </div>
             <details class="cli">
               <summary><ChevronRight size={14} aria-hidden="true" />CLI command <span class="faint">the same run from a terminal</span></summary>
+              <p class="cli-shell">In {SHELL}:</p>
               <div class="cli-body">
-                <!-- One flag a line; a line too long for the rail wraps at a space and hangs deeper than the flags. -->
+                <!-- One flag a line, ended by PowerShell's line continuation (a backtick); a line too long for the rail wraps at a space and hangs deeper than the flags. -->
                 <code aria-describedby={cliPlaceholder ? 'cli-note' : undefined}
                   >{#each cliParts as p, i (i)}<span class="ln" class:cont={i > 0}
                       >{#if cliPlaceholder && p === `--weights <path to ${cliPlaceholder}>`}--weights <span class="ph">&lt;path to <span class="ph-file">{cliPlaceholder}</span>&gt;</span
-                        >{:else}{p}{/if}{i < cliParts.length - 1 ? ' \\' : ''}</span
+                        >{:else}{p}{/if}{i < cliParts.length - 1 ? ' `' : ''}</span
                     >{/each}</code
                 >
                 <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy command" title="Copy command" onclick={() => copy(cli, 'Command copied')} /></span>
@@ -1974,9 +1985,16 @@
   .cli summary .faint {
     font-weight: var(--weight-regular);
   }
+  /* The shell the command is written for, as ui/Remedy names it. */
+  .cli-shell {
+    margin-top: var(--space-2);
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
   .cli-body {
     position: relative;
-    margin-top: var(--space-2);
+    margin-top: var(--space-1);
   }
   .ln {
     display: block;

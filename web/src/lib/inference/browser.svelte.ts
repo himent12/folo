@@ -75,22 +75,29 @@ const WASM_FILES = [
   ['folo-wasm/folo_wasm_bg.wasm', /wasm/],
 ] as const;
 
-let probe: Promise<boolean> | null = null;
+let probe: Promise<boolean | null> | null = null;
 
 /**
- * Whether this build serves the in-browser runtime, asked once: both files answer with their own type (a build
- * without them gets the SPA's index.html, or a 404). `fetcher` is for tests.
+ * Whether this build serves the in-browser runtime: `true` when both files answer with their own type, `false` when
+ * one is confirmed missing (a 404 or 410, or another type: a build without them gets the SPA's index.html), `null`
+ * when that is not known (offline, a server error). Only a confirmed answer is kept for the session; an unknown one
+ * is asked again on the next call (the next visit to Playground, or on reconnecting). `fetcher` is for tests.
  */
-export function probeWasm(fetcher: typeof fetch = fetch): Promise<boolean> {
-  probe ??= Promise.all(
-    WASM_FILES.map(([path, type]) =>
+export function probeWasm(fetcher: typeof fetch = fetch): Promise<boolean | null> {
+  if (probe) return probe;
+  const p = Promise.all(
+    WASM_FILES.map(([path, type]): Promise<boolean | null> =>
       fetcher(`${import.meta.env.BASE_URL}${path}`, { method: 'HEAD' }).then(
-        (r) => r.ok && type.test(r.headers.get('content-type') ?? ''),
-        () => false,
+        (r) => (r.ok ? type.test(r.headers.get('content-type') ?? '') : r.status === 404 || r.status === 410 ? false : null),
+        () => null,
       ),
     ),
-  ).then((ok) => ok.every(Boolean));
-  return probe;
+  ).then((ok) => (ok.includes(false) ? false : ok.includes(null) ? null : true));
+  probe = p;
+  void p.then((v) => {
+    if (v === null && probe === p) probe = null;
+  });
+  return p;
 }
 
 /** Forgets the probe's answer (tests). */

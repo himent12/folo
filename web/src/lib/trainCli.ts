@@ -67,15 +67,26 @@ export const FLAGS: readonly Flag[] = [
   { flag: '--name', get: (c) => c.name.trim() || null },
 ];
 
-/** A word as a shell reads it: bare when it is plain, else in single quotes (POSIX shells and PowerShell alike). */
+/**
+ * The shell the command is written for, as New run labels it ("In PowerShell:", like ui/Remedy's commands): FOLO's
+ * servers are Windows machines first, and paths are written as they are (`D:\data`, `D:/data`).
+ */
+export const SHELL = 'PowerShell';
+
+/**
+ * A word as PowerShell reads it: bare when it is plain, else in single quotes, where a quote is doubled (`'O''Brien'`).
+ * PowerShell takes the typographic single quotes (‘ ’ ‚ ‛) for `'` too, so they are doubled as well. Not bare: a comma
+ * (an array to PowerShell, passed as separate words), `@` (splatting), `$`, `#`, backticks, brackets and the rest,
+ * and `--%`, which would stop PowerShell parsing the line.
+ */
 export function quote(word: string): string {
-  return /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replace(/'/g, `'\\''`)}'`;
+  return /^[\w%+=:./\\-]+$/.test(word) && word !== '--%' ? word :`'${word.replace(/['‘’‚‛]/g, '$&$&')}'`;
 }
 
 export interface TrainCommand {
   /** The arguments after `folo`, as the CLI receives them. */
   argv: string[];
-  /** One line per flag, quoted: `folo train`, `--data D:/x`, … (joined with spaces, or with line continuations). */
+  /** One line per flag, quoted: `folo train`, `--data D:/x`, … (joined with spaces, or with PowerShell's backtick continuations). */
   parts: string[];
   /** The command line. */
   line: string;

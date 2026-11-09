@@ -187,6 +187,37 @@ describe('New run after running out of GPU memory', () => {
     await until(() => target.querySelector('.start button[type="submit"]')?.className.includes('primary'), 'Start as the primary');
     expect(target.querySelectorAll('.start .btn.primary')).toHaveLength(1);
   });
+  it('finds the fit after a change is taken back before its estimate came in (settings A, then B, then A again)', async () => {
+    hub.api = api = new MockApi('normal', 0);
+    // A's own estimate (folo-m, 960 px, batch 16) is answered at once; every other ask (A's fit, B's estimate) waits
+    // until `release`.
+    const real = api.estimateRun.bind(api);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const isA = (b: { arch: string; imgsz: number; batch: number }) => b.arch === 'folo-m' && b.imgsz === 960 && b.batch === 16;
+    let answeredA = false;
+    let fitAsks = 0;
+    vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => {
+      if (isA(b)) return real(b).finally(() => (answeredA = true));
+      if (answeredA) fitAsks++;
+      await held;
+      return real(b);
+    });
+    const batchTo = (v: string) => {
+      [...target.querySelectorAll<HTMLElement>('#batch [role="radio"]')].find((o) => o.textContent?.trim() === v)!.click();
+      flushSync();
+    };
+    // A: folo-m at 960 px, batch 16, answered and forecast not to fit; its fit is being looked for.
+    await open('?from=run_a2f0&batch=16');
+    await until(() => fitAsks > 0, "A's fit, after A's estimate");
+    expect(target.querySelector('.start .btn.primary')?.textContent?.trim()).toBe('Finding settings that fit');
+    // B, then A again before B's estimate is in: A's estimate is still the one shown, so it is not asked again.
+    batchTo('32');
+    batchTo('16');
+    release();
+    const fix = await until(() => [...target.querySelectorAll<HTMLElement>('.start .btn.primary')].find((b) => b.textContent?.includes('Use batch 8')), 'the fit');
+    expect(fix.textContent).toMatch(/Use batch 8 · ~13\.\d GiB/);
+  });
   it('keeps Start the primary when the settings fit', async () => {
     hub.api = api = new MockApi('normal', 0);
     await open();

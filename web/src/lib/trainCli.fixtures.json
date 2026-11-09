@@ -628,7 +628,7 @@
   },
   {
     "name": "a Windows path",
-    "command": "folo train --data 'D:\\data\\shapes' --model folo-l --epochs 100 --batch 16 --imgsz 640 --name r6-s",
+    "command": "folo train --data D:\\data\\shapes --model folo-l --epochs 100 --batch 16 --imgsz 640 --name r6-s",
     "argv": [
       "train",
       "--data",
@@ -669,6 +669,98 @@
       "close_mosaic": 10,
       "seed": 0,
       "name": "r6-s"
+    }
+  },
+  {
+    "name": "an apostrophe in the dataset path and the name",
+    "command": "folo train --data 'D:/O''Brien/data' --model folo-s --epochs 100 --batch 16 --imgsz 640 --name 'Bob''s r6'",
+    "argv": [
+      "train",
+      "--data",
+      "D:/O'Brien/data",
+      "--model",
+      "folo-s",
+      "--epochs",
+      "100",
+      "--batch",
+      "16",
+      "--imgsz",
+      "640",
+      "--name",
+      "Bob's r6"
+    ],
+    "expect": {
+      "data": "D:/O'Brien/data",
+      "model": "folo-s",
+      "weights": null,
+      "epochs": 100,
+      "batch": 16,
+      "imgsz": 640,
+      "device": "auto",
+      "optimizer": "auto",
+      "lr0": 0.01,
+      "amp": false,
+      "head": null,
+      "mosaic": 1,
+      "mixup": 0,
+      "hsv": [
+        0.015,
+        0.7,
+        0.4
+      ],
+      "fliplr": 0.5,
+      "scale": 0.5,
+      "translate": 0.1,
+      "close_mosaic": 10,
+      "seed": 0,
+      "name": "Bob's r6"
+    }
+  },
+  {
+    "name": "an apostrophe in the weights path",
+    "command": "folo train --data D:/r6 --weights 'C:/Users/O''Brien/FOLO models/fasteners-n-best.folo' --epochs 15 --batch 16 --imgsz 640 --head o2m --name r6-n-2",
+    "argv": [
+      "train",
+      "--data",
+      "D:/r6",
+      "--weights",
+      "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo",
+      "--epochs",
+      "15",
+      "--batch",
+      "16",
+      "--imgsz",
+      "640",
+      "--head",
+      "o2m",
+      "--name",
+      "r6-n-2"
+    ],
+    "expect": {
+      "data": "D:/r6",
+      "model": null,
+      "weights": "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo",
+      "epochs": 15,
+      "batch": 16,
+      "imgsz": 640,
+      "device": "auto",
+      "optimizer": "auto",
+      "lr0": 0.01,
+      "amp": false,
+      "head": "o2m",
+      "mosaic": 1,
+      "mixup": 0,
+      "hsv": [
+        0.015,
+        0.7,
+        0.4
+      ],
+      "fliplr": 0.5,
+      "scale": 0.5,
+      "translate": 0.1,
+      "close_mosaic": 10,
+      "seed": 0,
+      "name": "r6-n-2"
     }
   }
 ]

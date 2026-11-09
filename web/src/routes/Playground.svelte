@@ -260,9 +260,19 @@
   // Whether this build has the in-browser runtime (folo-wasm): what /api/system says, else one probe of its files.
   // The demo simulates the browser path, so there only its server's answer counts. Unknown (null) leaves both on.
   const system = new Resource((s) => hub.api.system(s));
+  // The probe is asked on each visit, again when the server reconnects (`system` is read again) and when the browser
+  // comes back online: an unknown answer (offline) is never kept (lib/inference `probeWasm`).
   let probed = $state<boolean | null>(null);
   $effect(() => {
-    if (!hub.api.mock && wasmFromSystem(system.data) === null) void probeWasm().then((v) => (probed = v));
+    if (hub.api.mock || wasmFromSystem(system.data) !== null) return;
+    let live = true;
+    const ask = () => void probeWasm().then((v) => live && (probed = v));
+    ask();
+    window.addEventListener('online', ask);
+    return () => {
+      live = false;
+      window.removeEventListener('online', ask);
+    };
   });
   const wasm = $derived(wasmFromSystem(system.data) ?? (hub.api.mock ? (system.data ? false : null) : probed));
   /** Why the browser backends are off, or null when they are offered. */

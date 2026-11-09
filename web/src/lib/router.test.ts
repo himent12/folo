@@ -53,6 +53,21 @@ describe('hashUrl (a path URL opened directly, DOGFOOD-3 S5)', () => {
     expect(at('/settings')).toBe('/#/settings');
   });
 
+  it("moves the route's query into the hash with it, and keeps the page's own keys in the page's query", () => {
+    const route = (url: string | null) => parse(url!.slice(url!.indexOf('#')));
+    const retry = at('/runs/new', '?from=run_a&batch=8');
+    expect(retry).toBe('/#/runs/new?from=run_a&batch=8');
+    expect(Object.fromEntries(route(retry).query)).toEqual({ from: 'run_a', batch: '8' });
+    const compare = at('/runs/compare', '?ids=a,b');
+    expect(route(compare).name).toBe('run-compare');
+    expect(route(compare).query.get('ids')).toBe('a,b');
+    // Both kinds at once, encoded values kept as they were meant.
+    const both = at('/runs/new', '?mock=1&from=run%20a%26b&scenario=gpu-unplugged&name=caf%C3%A9+r6');
+    expect(both).toMatch(/^\/\?mock=1&scenario=gpu-unplugged#\/runs\/new\?/);
+    expect(new URLSearchParams(both!.slice(0, both!.indexOf('#')).replace(/^\/\?/, '')).get('mock')).toBe('1');
+    expect(Object.fromEntries(route(both).query)).toEqual({ from: 'run a&b', name: 'café r6' });
+  });
+
   it('keeps a hash route that is already there', () => {
     expect(at('/datasets', '', '#/datasets')).toBe('/#/datasets');
     expect(at('/datasets', '', '#/runs?ids=a')).toBe('/#/runs?ids=a');

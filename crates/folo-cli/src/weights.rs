@@ -11,8 +11,6 @@ use sha2::{Digest, Sha256};
 use crate::cli::{WeightsCommand, WeightsPullArgs};
 use crate::output::{CliError, ExitCode, Out};
 
-/// The GitHub repository whose releases carry the weights.
-pub const REPO: &str = "himent12/folo";
 /// The release asset listing `<sha256>  <file>` for every weights file of a release.
 pub const SUMS: &str = "SHA256SUMS";
 

@@ -1,6 +1,5 @@
 //! The `folo` command-line tool. See `docs/CLI.md`.
 
-mod cli;
 mod coco;
 mod dataset;
 mod describe;
@@ -18,12 +17,11 @@ use clap::CommandFactory;
 use folo_server::{Cors, MockStore, Options, RealStore, Server, Store, WebSource};
 use serde_json::json;
 
+// The command tree is the library's (src/lib.rs), so tests parse commands with it.
+use folo_cli::{VERSION, cli};
+
 use cli::{Cli, Command, DoctorArgs, McpArgs, ServeArgs};
 use output::{CliError, ExitCode, Out};
-
-/// `folo --version`: the workspace version, the commit and the build date (see build.rs).
-pub const VERSION: &str =
-    concat!(env!("CARGO_PKG_VERSION"), " (", env!("FOLO_GIT_SHA"), " ", env!("FOLO_BUILD_DATE"), ")");
 
 /// The web app folder used when `--web-dir` is not given and nothing is embedded.
 const DEFAULT_WEB_DIR: &str = "web/dist";

@@ -127,40 +127,75 @@ export function vramForecaster(api: Pick<Api, 'estimateRun'>, system: SystemInfo
   };
 }
 
-/** The batches below `b` worth trying, largest first: halving down to 1. */
-export function smallerBatches(b: number): number[] {
-  const out: number[] = [];
-  for (let x = b; x > 1; ) out.push((x = halfBatch(x)));
-  return out;
+/** A batch and its forecast, and whether that fits. */
+export interface BatchFit {
+  batch: number;
+  bytes: number;
+  fits: boolean;
+}
+
+/**
+ * The largest batch in 1..`max` whose forecast fits, by binary search (a forecast grows with the batch): one forecast
+ * at a time, at most ⌈log2(max + 1)⌉ of them. When none fits, batch 1 with its forecast and `fits: false`; null where a
+ * forecast is unknown, or `max` is below 1.
+ */
+export async function largestFittingBatch(max: number, bytesAt: (batch: number) => Promise<number | null>, fits: (bytes: number) => boolean): Promise<BatchFit | null> {
+  if (max < 1) return null;
+  // Every batch up to `lo` fits (none known: 0), every one above `hi` does not.
+  let lo = 0;
+  let hi = max;
+  let fitBytes = 0;
+  let missBytes = 0;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    const v = await bytesAt(mid);
+    if (v === null) return null;
+    if (fits(v)) {
+      lo = mid;
+      fitBytes = v;
+    } else {
+      hi = mid - 1;
+      missBytes = v;
+    }
+  }
+  // Nothing fits: the last forecast was batch 1's.
+  return lo > 0 ? { batch: lo, bytes: fitBytes, fits: true } : { batch: 1, bytes: missBytes, fits: false };
 }
 
 /**
  * `oomFixes`, each forecast and made to fit: the batch fix takes the largest smaller batch whose forecast fits the GPU
- * with `OOM_HEADROOM` to spare; a smaller image or model keeps the batch when it fits that way, else takes the largest
- * batch that does ("Retry at 640 px, batch 16"). A fix that fits at no batch is dropped; when none fits, the CPU (which
- * has no GPU memory to run out of) leads and the others follow marked `fits: false`. Without the GPU's size the fixes
- * come back as `oomFixes` gives them.
+ * with `OOM_HEADROOM` to spare (any whole batch: the trainer takes them all); a smaller image or model keeps the batch
+ * when it fits that way, else takes the largest batch that does ("Retry at 640 px, batch 19"). A fix that fits at no
+ * batch is dropped; when none fits, the CPU (which has no GPU memory to run out of) leads and the others follow marked
+ * `fits: false`. Without the GPU's size the fixes come back as `oomFixes` gives them. Each fix asks for one forecast at
+ * a time (`largestFittingBatch`), so at most one per fix is out at once; an abort stops the search (the forecaster
+ * throws).
  */
 export async function fitFixes(c: TrainConfig, gpuBytes: number | null, vramOf: VramOf, scale = 1): Promise<OomFix[]> {
   const base = oomFixes(c);
   if (!gpuBytes || c.device === 'cpu') return base;
-  const forecast = async (cfg: TrainConfig) => {
-    const f = await vramOf(cfg);
-    return f ? forecastBytes(f, scale) : null;
-  };
+  const fits = (v: number) => fitsGpu(v, gpuBytes);
   const out = await Promise.all(
     base.map(async (fix): Promise<OomFix> => {
       if (fix.kind === 'cpu') return { ...fix, fits: true };
       const change: Partial<TrainConfig> = fix.kind === 'imgsz' ? { imgsz: Number(fix.query.imgsz) } : fix.kind === 'arch' ? { arch: fix.query.arch as Arch } : {};
-      const tries = fix.kind === 'batch' ? smallerBatches(c.batch) : [c.batch, ...smallerBatches(c.batch)];
-      const bytes = await Promise.all(tries.map((b) => forecast({ ...c, ...change, batch: b })));
-      if (bytes.every((v) => v === null)) return fix;
-      const i = bytes.findIndex((v) => v !== null && fitsGpu(v, gpuBytes));
-      if (i < 0) return { ...fix, vram: bytes[bytes.length - 1] ?? undefined, fits: false };
-      const b = tries[i]!;
-      const v = bytes[i]!;
+      const bytesAt = async (b: number) => {
+        const f = await vramOf({ ...c, ...change, batch: b });
+        return f ? forecastBytes(f, scale) : null;
+      };
+      // A smaller image or model tries the run's own batch first: it usually fits as it is.
+      if (fix.kind !== 'batch') {
+        const v = await bytesAt(c.batch);
+        if (v === null) return fix;
+        if (fits(v)) return { ...fix, vram: v, fits: true };
+        if (c.batch === 1) return { ...fix, vram: v, fits: false };
+      }
+      const found = await largestFittingBatch(c.batch - 1, bytesAt, fits);
+      if (!found) return fix;
+      const { batch: b, bytes: v } = found;
+      if (!found.fits) return { ...fix, vram: v, fits: false };
       if (fix.kind === 'batch') return { ...fix, label: `Retry with batch ${b}`, query: { batch: String(b) }, vram: v, fits: true };
-      return b === c.batch ? { ...fix, vram: v, fits: true } : { ...fix, label: `${fix.label}, batch ${b}`, query: { ...fix.query, batch: String(b) }, vram: v, fits: true };
+      return { ...fix, label: `${fix.label}, batch ${b}`, query: { ...fix.query, batch: String(b) }, vram: v, fits: true };
     }),
   );
   const fit = out.filter((f) => f.fits !== false);
