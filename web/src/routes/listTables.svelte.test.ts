@@ -274,15 +274,40 @@ describe('Runs: row checkboxes', () => {
   });
 });
 
+describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', () => {
+  async function groupHeads(scenario: 'normal' | 'train-split') {
+    await open(Models as Component, '/models', new MockApi(scenario, 0));
+    await vi.waitFor(() => {
+      flushSync();
+      if (!target.querySelector('table.models tr.group th')?.textContent?.includes('split of')) throw new Error('groups not loaded');
+    });
+    return [...target.querySelectorAll('table.models tr.group th')].map((th) => th.firstElementChild?.textContent);
+  }
+  it('heads each ranked group with what its scores are on, then the unranked groups, saying so', async () => {
+    expect(await groupHeads('normal')).toEqual([
+      'Validation split of fasteners',
+      'Validation split of shapes',
+      'Validation split of shapes-hard',
+      'Published weights · split unknown',
+      'Imported · split unknown',
+    ]);
+    const tails = [...target.querySelectorAll('table.models tr.group th')].map((th) => th.textContent!.includes('not ranked'));
+    expect(tails).toEqual([false, false, false, true, true]);
+  });
+  it('ranks a training-split model apart from the validation ones, under its own heading', async () => {
+    expect(await groupHeads('train-split')).toContain('Training split of fasteners-mini');
+  });
+});
+
 describe('Models: published weights (server PR #140)', () => {
   it('are a group of their own after the datasets, never ranked, what they are in the name tooltip', async () => {
     await open(Models as Component, '/models', new MockApi('normal', 0));
     await vi.waitFor(() => {
       flushSync();
-      if (!target.querySelector('table.models tbody tr[data-row]')) throw new Error('rows not loaded');
+      if (!target.querySelector('table.models tr.group th')?.textContent?.includes('split of')) throw new Error('rows not loaded');
     });
     const groups = [...target.querySelectorAll('table.models tr.group th')].map((th) => th.firstElementChild?.textContent);
-    expect(groups.slice(-2)).toEqual(['Published weights', 'Imported']);
+    expect(groups.slice(-2)).toEqual(['Published weights · split unknown', 'Imported · split unknown']);
     const body = [...target.querySelectorAll('table.models tbody')].find((b) => b.querySelector('tr.group')?.textContent?.includes('Published weights'))!;
     expect(body.querySelector('tr.group a')).toBeNull();
     const name = body.querySelector<HTMLAnchorElement>('a.name')!;

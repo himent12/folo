@@ -14,7 +14,8 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { ApiError, hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Arch, Augment, DatasetImage, Device, Model, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
+  import type { Arch, Augment, Dataset, DatasetImage, Device, Model, Optimizer, Run, RunEstimate, TrainConfig } from '$lib/api/types';
+  import { modelChoices, scoreContext, scoreText } from '$lib/scoreSummary';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
@@ -45,7 +46,8 @@
   import { toast } from '$lib/ui/toast.svelte';
   import InfoButton from '$lib/ui/InfoButton.svelte';
   import { VULKAN } from './settings/capabilities';
-  import { HEAD_LABEL } from './run/resolved';
+  import { HEAD_LABEL, optimizerLabel } from './run/resolved';
+  import { balanced } from '$lib/ui/balancedGrid';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
   import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
   import { media } from '$lib/design/tokens';
@@ -184,6 +186,13 @@
   const startable = $derived((models.data ?? []).filter((m) => m.fused !== true));
   const weightOptions = $derived(startable.filter((m) => !isPublished(m) && m.arch === arch));
   const publishedOptions = $derived(startable.filter(isPublished));
+  // Each starting point's score with what it is on (lib/scoreSummary): grouped by dataset and split, best first.
+  const scoreCtx = $derived.by(() => {
+    const runById = new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r]));
+    const dsById = new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d]));
+    return (m: Model) => scoreContext(m, runById, dsById);
+  });
+  const weightChoices = $derived(modelChoices(weightOptions, scoreCtx));
   const picked = $derived(weights === 'none' ? undefined : startable.find((m) => m.id === weights));
   /** Published weights picked: the run's size is theirs, said under the size picker. */
   const pickedPublished = $derived(picked && isPublished(picked) ? picked : null);
@@ -655,7 +664,7 @@
       mono: weights !== 'none',
       warn: !!errors.weights,
     },
-    ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizer === 'sgd' ? 'SGD + momentum' : 'AdamW' }] : []),
+    ...(optimizer !== 'auto' ? [{ key: 'opt' as const, label: 'Optimizer', value: optimizerLabel(optimizer) }] : []),
     ...(e2e ? [{ key: 'head' as const, label: 'Head', value: HEAD_LABEL.o2o }] : []),
   ]);
 
@@ -888,7 +897,7 @@
       <div class="form">
         <Panel title="1 · Dataset" id="sec-data">
           {#if !datasets.data}
-            <div class="cards">{#each [0, 1, 2] as i (i)}<Skeleton h="88px" r="var(--radius-md)" />{/each}</div>
+            <div class="cards" use:balanced={{ n: 3, min: 184, gap: 8 }}>{#each [0, 1, 2] as i (i)}<Skeleton h="88px" r="var(--radius-md)" />{/each}</div>
           {:else}
             <!-- Phones: a compact picker and a one-line summary; the cards are for wider screens. -->
             <div class="ds-pick">
@@ -899,7 +908,7 @@
                 </p>
               {/if}
             </div>
-            <div class="cards" role="radiogroup" aria-label="Dataset" aria-invalid={errors.dataset ? 'true' : undefined}>
+            <div class="cards" role="radiogroup" aria-label="Dataset" aria-invalid={errors.dataset ? 'true' : undefined} use:balanced={{ n: datasets.data.length, min: 184, gap: 8 }}>
               {#each datasets.data as d (d.id)}
                 {@const on = d.id === datasetId}
                 <label class="card" class:on>
@@ -968,10 +977,10 @@
                 describedby={errors.weights ? 'weights-error' : 'weights-hint'}
                 options={[
                   { value: 'none', label: 'From scratch' },
-                  ...weightOptions.map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` })),
+                  ...weightChoices.map((c) => ({ value: c.model.id, label: c.label, group: c.group })),
                   ...publishedOptions.map((m) => ({
                     value: m.id,
-                    label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}`,
+                    label: m.metrics ? `${m.name} · ${scoreText(m.metrics.map50_95, scoreCtx(m))}` : m.name,
                     group: 'Published weights',
                     title: m.about,
                   })),
@@ -1075,7 +1084,7 @@
             <summary><ChevronRight size={14} /> Advanced <span class="faint">optimizer, learning rate, seed, head</span></summary>
             <div class="fields">
             <Field label="Optimizer" for="opt">
-              <Select id="opt" bind:value={optimizer} options={[{ value: 'auto', label: 'Auto (AdamW for short runs, else SGD)' }, { value: 'sgd', label: 'SGD + momentum' }, { value: 'adamw', label: 'AdamW' }]} />
+              <Select id="opt" bind:value={optimizer} options={(['auto', 'sgd', 'adamw'] as const).map((value) => ({ value, label: optimizerLabel(value) }))} />
             </Field>
             <Field label="Initial learning rate" for="lr0" error={errors.lr0} hint="Warmup 3 epochs, then cosine to 1%.">
               <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!errors.lr0} aria-describedby={errors.lr0 ? 'lr0-error' : 'lr0-hint'} />
@@ -1305,9 +1314,11 @@
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
   }
+  /* As many cards across as fit at 184 px, never one alone on a row (ui/balancedGrid sets --cols): four datasets are
+     one row on a desktop and 2 × 2 on a laptop or tablet, never 3 + 1. */
   .cards {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
     gap: var(--space-2);
   }
   .card,

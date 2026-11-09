@@ -9,6 +9,7 @@
   import Activity from '@lucide/svelte/icons/activity';
   import Images from '@lucide/svelte/icons/images';
   import Box from '@lucide/svelte/icons/box';
+  import { scoreContext, scoreText } from '$lib/scoreSummary';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import Keyboard from '@lucide/svelte/icons/keyboard';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
@@ -140,11 +141,14 @@
       icon: Images,
       run: go(`/datasets/${x.id}`),
     }));
+    // A model's score with what it is on (lib/scoreSummary): "mAP 0.604 on fasteners", "mAP 0.701 · split unknown".
+    const runById = new Map(runs.map((x) => [x.id, x]));
+    const dsById = new Map(datasets.map((x) => [x.id, x]));
     const m: Item[] = models.map((x) => ({
       id: `model-${x.id}`,
       group: 'Models',
       label: x.name,
-      hint: [{ ident: x.arch }, `mAP ${x.metrics?.map50_95.toFixed(3) ?? '—'}`],
+      hint: [{ ident: x.arch }, x.metrics ? scoreText(x.metrics.map50_95, scoreContext(x, runById, dsById)) : 'not scored'],
       icon: Box,
       run: go(`/models/${x.id}`),
     }));

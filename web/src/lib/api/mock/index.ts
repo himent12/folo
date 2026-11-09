@@ -94,12 +94,16 @@ export type Scenario =
   | 'train-split'
   | 'no-throughput'
   | 'amp-refused'
+  // The server answers the first loads, then stops (STALE_AFTER): pages keep what they have and say it is stale.
+  | 'stale'
   // A Studio build without folo-wasm: /api/system does not list `web_wasm`, so Playground's browser choices are off.
   | 'no-wasm';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
+/** The `stale` scenario: how long the server answers before it stops. */
+const STALE_AFTER = 3000;
 
 const defaultAugment = { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4] as [number, number, number], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 };
 
@@ -380,6 +384,8 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
     startedAt: t0 - 3 * HOUR + 2_000,
     terminal: { status: 'completed', atEpoch: 60 },
     device: DEVICE,
+    // Its best weights, scored on the training split: Overview and Models tag the score and rank it apart.
+    modelId: 'm_mini_run',
   };
   const all =
     scenario === 'finishing' ? [...list.filter((p) => p.id !== 'run_7d1e'), finishing] : scenario === 'train-split' ? [...list, trainSplit] : list;
@@ -465,7 +471,7 @@ export class MockApi implements Api {
   async #call<T>(fn: () => T, latency?: number): Promise<T> {
     if (this.scenario === 'loading') return new Promise<T>(() => {});
     if (this.latency > 0 && (latency ?? this.latency) > 0) await sleep((latency ?? this.latency) * (0.7 + 0.6 * Math.random()));
-    if (this.scenario === 'error')
+    if (this.scenario === 'error' || (this.scenario === 'stale' && Date.now() - this.#t0 > STALE_AFTER))
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     this.#schedule(Date.now());
     return fn();

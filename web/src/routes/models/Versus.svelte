@@ -15,7 +15,7 @@
    * it: YOLO26n was not run here, so they compare with nothing.
    */
   import { tick } from 'svelte';
-  import { advantage, BENCH_SOURCE, comparable, unlike, versusYolo26n, type Versus } from '$lib/benchmarks';
+  import { advantage, BENCH_SOURCE, comparable, unlike, unlikeSentence, versusYolo26n, type Versus } from '$lib/benchmarks';
   import type { ThroughputTable } from '$lib/api/types';
   import { deviceName, num } from '$lib/format';
   import { latencyMs, latencyRange, measuredLatency, measuredTraining } from '$lib/throughput';
@@ -94,7 +94,9 @@
           <td role="cell" class="r num v" headers="vs-r-{i} vs-h-folo"><span class="cl" aria-hidden="true">folo-n</span>{fmt(v, v.folo)}</td>
           <td role="cell" class="r num v yolo" headers="vs-r-{i} vs-h-yolo"><span class="cl" aria-hidden="true">YOLO26n</span>{fmt(v, v.yolo)}</td>
           <td role="cell" class="r lead" headers="vs-r-{i} vs-h-lead"
-            ><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>{#if diff}<span class="dc" aria-label="No winner: different conditions">—</span><span class="why">{diff.differs}</span>{:else}{lead(v)}{/if}</td
+            ><span class="cl" aria-hidden="true">folo-n vs YOLO26n</span>{#if diff}<span class="dc" aria-label="No winner: different conditions">—</span><span class="why">{diff.differs}</span><span class="cond" data-fact
+                >{unlikeSentence(diff)}</span
+              >{:else}{lead(v)}{/if}</td
           >
         </tr>
       {/each}
@@ -268,6 +270,10 @@
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
+  /* The phone form of a no-winner row's conclusion (a line of its own there). */
+  .cond {
+    display: none;
+  }
   /* The server's own rows: a group heading over them, the values in the folo-n column. */
   .vs tbody.here tr.here-h th {
     max-width: none;
@@ -412,6 +418,20 @@
     }
     .vs .lead {
       white-space: normal;
+    }
+    /* No winner: the conditions are a full-width line under the two values ("Different precision: f32 vs
+       TensorFloat-32, no winner"), never a three-line "—" in the ratio column, which keeps real ratios only. */
+    .vs tbody tr.unlike .lead {
+      grid-column: 1 / -1;
+    }
+    .unlike .lead :is(.cl, .dc, .why) {
+      display: none;
+    }
+    .cond {
+      display: block;
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+      color: var(--text-secondary);
     }
     .cl {
       display: block;

@@ -26,6 +26,7 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
   import Gate from '$lib/ui/Gate.svelte';
+  import { compareHint, compareReason } from './runs/compareHint';
   import Ident from '$lib/ui/Ident.svelte';
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -157,13 +158,15 @@
 </script>
 
 <Page title="Runs">
-  {#snippet sub()}<span>Training runs, newest first. Select up to four to compare their curves.</span>{/snippet}
+  {#snippet sub()}<span>Training runs, newest first.</span>{/snippet}
   <!-- Phones: one header row (this line and New run); Compare lives in the list's own header row, by the checkboxes. -->
   {#snippet subPhone()}<span>Training runs, newest first.</span>{/snippet}
   {#snippet actions()}
     {#if runs.data?.length !== 0}
       <span class="compare">
-        <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
+        <!-- What Compare needs, in words beside it (a disabled button's tooltip never shows to touch or the keyboard). -->
+        {#if runs.data && !offline}<span class="cmp-hint" role="status" data-gate-why>{compareHint(selected.length)}</span>{/if}
+        <Gate reason={offline ? OFFLINE_REASON : compareReason(selected.length)}>
           {#snippet children(why)}
             <Button variant={comparing ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
               Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
@@ -325,7 +328,7 @@
       <div class="rows-head" class:slot={menuSlot && !choosing}>
         {#if choosing}
           <Button variant="ghost" onclick={() => ((picking = false), (selected = []))}>Cancel</Button>
-          <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
+          <Gate reason={offline ? OFFLINE_REASON : compareReason(selected.length)}>
             {#snippet children(why)}
               <Button variant={comparing ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
                 Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
@@ -337,6 +340,7 @@
         {/if}
         <span class="col" aria-hidden="true">Best mAP50-95</span>
       </div>
+      {#if choosing && !offline}<p class="rows-hint" role="status" data-gate-why>{compareHint(selected.length)}</p>{/if}
       <ul class="rows" class:choosing>
         {#each shown as r (r.id)}
           {@const on = selected.includes(r.id)}
@@ -407,6 +411,20 @@
   }
   .compare {
     display: contents;
+  }
+  /* The prerequisite, beside the action it gates: 12 px secondary, one line. */
+  .cmp-hint,
+  .rows-hint {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .cmp-hint {
+    align-self: center;
+    white-space: nowrap;
+  }
+  .rows-hint {
+    display: none;
   }
   .scroll {
     overflow-x: auto;
@@ -569,6 +587,15 @@
     }
     .compare {
       display: none;
+    }
+    /* Phones: under Cancel and Compare, on the rows' edge, before the first row (one rule under both). */
+    .rows-head:has(+ .rows-hint) {
+      border-bottom: 0;
+    }
+    .rows-hint {
+      display: block;
+      padding: 0 var(--space-4) var(--space-3);
+      border-bottom: 1px solid var(--line-subtle);
     }
     .col {
       margin-left: auto;

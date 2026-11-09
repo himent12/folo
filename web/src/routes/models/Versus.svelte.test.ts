@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
-import { comparable, unlike, versusYolo26n } from '$lib/benchmarks';
+import { comparable, unlike, unlikeSentence, versusYolo26n } from '$lib/benchmarks';
 import { MockApi } from '$lib/api/mock';
 import Versus from './Versus.svelte';
 
@@ -44,7 +44,8 @@ describe('Engine speed table', () => {
     flushSync();
     const leads = [...target.querySelectorAll('tbody td.lead')].map((td) => [...td.childNodes].slice(1).map((n) => n.textContent?.trim()).filter(Boolean).join(' | '));
     versusYolo26n.forEach((v, i) => {
-      if (!comparable(v)) expect(leads[i]).toBe(`— | ${unlike[v.metric]!.differs}`);
+      // The desktop's "—" and difference, then the phone's one-line form of the same conditions.
+      if (!comparable(v)) expect(leads[i]).toBe(`— | ${unlike[v.metric]!.differs} | ${unlikeSentence(unlike[v.metric]!)}`);
       else if (v.unit === 'MiB') expect(leads[i]).toMatch(/^\d+% (less|more) memory$/);
       else expect(leads[i]).toMatch(/^\d+\.\d\d× (faster|slower)$/);
     });

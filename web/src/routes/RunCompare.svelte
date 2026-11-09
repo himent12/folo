@@ -203,8 +203,8 @@
   };
   const setX = (v: Axis) => (xChoice = v);
 
-  // A cell is a Setting (./run/resolved): identifiers (an architecture, a checkpoint, a named optimizer) in mono like
-  // the chips and every other screen (ui/Ident), prose ("From scratch", "auto") in sans. Where the server resolved a
+  // A cell is a Setting (./run/resolved): identifiers (an architecture, a checkpoint) in mono like the chips and every
+  // other screen (ui/Ident), prose ("From scratch") and named optimizers ("AdamW") in sans. Where the server resolved a
   // run's config (`Run.resolved`), the optimizer, LR and batch are what it trains with, the request a note beside them.
   const plain = (value: string): Setting => ({ value });
   const ident = (value: string): Setting => ({ value, ident: true });

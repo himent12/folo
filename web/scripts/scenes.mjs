@@ -1316,7 +1316,15 @@ export const scenes = [
   { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
-  { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  // Nothing loads: one recovery block on the page (Retry, Connection settings), not four panels each saying so.
+  { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
+  // The server stops answering after the first loads: the page keeps what it has under one stale-data notice (the runs
+  // poll every 5 s, so the first failed poll is past 5 s).
+  { name: 'overview-stale', path: '/', search: 'scenario=stale', advance: 7000, viewports: ['desktop', 'mobile'] },
+  // A model scored on its training split (fasteners-mini has no validation images): Best models tags its score
+  // ("Training split"), ranks it only within its own dataset and split, and counts imported and published weights apart.
+  { name: 'overview-train-split', path: '/', search: 'scenario=train-split', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  { name: 'models-train-split', path: '/models', search: 'scenario=train-split', viewports: ['desktop', 'mobile'] },
   { name: 'runs-empty', path: '/runs', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   // Empty and error states sit in the table frame (header row, the message inside, a few rows tall).
   { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -1605,6 +1613,24 @@ export const scenes = [
       await until(page, '.rows li');
       await page.getByRole('button', { name: 'Select to compare' }).click();
       await page.locator('.rows li .r-check').nth(1).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Four runs picked, the most Compare takes: the line under the selection says so, and the other boxes are off.
+    name: 'runs-selected-four',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'mobile') {
+        await until(page, '.rows li');
+        await page.getByRole('button', { name: 'Select to compare' }).click();
+        for (let i = 0; i < 4; i++) await page.locator('.rows li .r-check').nth(i).click();
+      } else {
+        await until(page, 'tr[data-row]');
+        for (let i = 0; i < 4; i++) await page.locator('tr[data-row] .check label').nth(i).click();
+      }
       await page.mouse.move(0, 0);
     },
   },

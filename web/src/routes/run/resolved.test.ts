@@ -31,7 +31,7 @@ describe('Run › Config wording', () => {
   const r: ResolvedTrain = resolveTrain({ ...config } as TrainConfig, 1000, 3, 16);
 
   it('shows what the run trains with, the request beside it', () => {
-    expect(optimizerSetting(config, r)).toEqual({ value: 'AdamW', ident: true, note: '(auto)' });
+    expect(optimizerSetting(config, r)).toEqual({ value: 'AdamW', note: '(auto)' });
     expect(settingText(lrSetting(config, r))).toBe('0.001429 (requested 0.01)');
     expect(batchSetting(config, r).value).toBe('8 × 8 = 64');
     expect(settingText(warmupSetting(r))).toBe('100 steps (6.3 epochs)');
@@ -42,13 +42,13 @@ describe('Run › Config wording', () => {
   it('names a requested optimizer without "(auto)", and an LR that did not change once', () => {
     const sgd = { ...config, optimizer: 'sgd' } as TrainConfig;
     const rs = resolveTrain(sgd, 1000, 3, 16);
-    expect(optimizerSetting(sgd, rs)).toEqual({ value: 'SGD', ident: true, note: undefined });
+    expect(optimizerSetting(sgd, rs)).toEqual({ value: 'SGD', note: undefined });
     expect(lrSetting(sgd, rs)).toEqual({ value: '0.01' });
     expect(momentumSetting(rs)).toEqual(['Momentum', { value: '0.937' }]);
   });
 
   it('keeps the request as it is without a resolution (queued runs, older servers)', () => {
-    expect(optimizerSetting(config, null)).toEqual({ value: 'auto', ident: false });
+    expect(optimizerSetting(config, null)).toEqual({ value: 'Auto (AdamW for short runs, else SGD)' });
     expect(lrSetting(config, undefined)).toEqual({ value: '0.01' });
     expect(batchSetting(config, null)).toEqual({ value: '8' });
   });

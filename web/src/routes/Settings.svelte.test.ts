@@ -38,6 +38,23 @@ afterEach(() => {
 });
 
 describe('Settings', () => {
+  it('jumps to a section from the strip below 1024 px: every section listed, focus moved onto the one chosen', async () => {
+    hub.api = new MockApi('normal', 0);
+    c = mount(Settings, { target });
+    const jump = target.querySelector<HTMLElement>('nav.jump')!;
+    await until(() => jump.textContent?.includes('System'), 'the System section');
+    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Connection', 'Appearance', 'Units', 'Shortcuts', 'System', 'About']);
+    const scroll = vi.fn();
+    const system = target.querySelector<HTMLElement>('#system')!;
+    system.scrollIntoView = scroll;
+    [...jump.querySelectorAll('a')].find((a) => a.textContent === 'System')!.click();
+    flushSync();
+    expect(scroll).toHaveBeenCalledWith({ block: 'start' });
+    expect(document.activeElement).toBe(system);
+    expect(jump.querySelector('a.on')?.textContent).toBe('System');
+    expect(jump.querySelector('a.on')?.getAttribute('aria-current')).toBe('location');
+  });
+
   it('says which theme is current in its own card and in its radio’s name', () => {
     hub.api = new MockApi('normal', 0);
     prefs.theme = 'light';

@@ -43,8 +43,8 @@
   } = $props();
 
   const a = $derived(config.augment);
-  // Identifiers (model names, weight paths, devices, a named optimizer) are mono; numbers and prose ("auto", "From
-  // scratch") are sans with tabular numerals (design/README.md, Type).
+  // Identifiers (model names, weight paths, devices) are mono; numbers, prose ("From scratch") and named optimizers
+  // ("AdamW", a name) are sans with tabular numerals (design/README.md, Type).
   const id = (value: string): Setting => ({ value, ident: true });
   const plain = (value: string): Setting => ({ value });
   // Three groups: what trains on what (the essentials), how the optimizer runs, and the rest of the setup. The rail

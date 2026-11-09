@@ -944,13 +944,15 @@ describe('New run: published weights (server PR #140)', () => {
     hub.api = api = new MockApi('normal', 0);
     await open();
     expect(arch()).toBe('folo-s');
-    const group = await until(() => sel().querySelector('optgroup'), 'the published group');
-    expect(group.getAttribute('label')).toBe('Published weights');
+    const group = await until(() => sel().querySelector('optgroup[label="Published weights"]'), 'the published group');
     const opt = group.querySelector<HTMLOptionElement>('option[value="folo-n-coco"]')!;
-    expect(opt.textContent).toBe('folo-n-coco · mAP 0.314');
+    // A score never without what it is on: published weights' split is not known here.
+    expect(opt.textContent).toBe('folo-n-coco · mAP 0.314 · split unknown');
     expect(opt.title).toMatch(/^folo-n trained from scratch on COCO/);
-    // The run models of the chosen size stay outside the group.
-    expect(sel().querySelector('option[value="m_shapes_s"]')?.parentElement).toBe(sel());
+    // The run models of the chosen size are grouped by what their scores are on, outside the published group.
+    const own = await until(() => sel().querySelector('option[value="m_shapes_s"]'), 'the run models');
+    expect(own.parentElement?.getAttribute('label')).toBe('Validation split of shapes');
+    expect(own.textContent).toBe('shapes-s-best · mAP 0.854 on shapes');
   });
 
   it('take their size when picked, say so, and drop out when another size is picked', async () => {

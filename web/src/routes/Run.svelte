@@ -261,9 +261,12 @@
      will fill stay compact until there is data, and the config is in its rail. -->
 {#snippet waiting()}
   {#if place !== null && place > 1}
-    <!-- Behind other waiting runs: the one in front of it, then what trains now. -->
-    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2}{' '}and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}.
-    {#if ahead}<a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> is training{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}.{/if}
+    <!-- Behind other waiting runs: the one in front of it, and in brackets what trains now, so two run names never
+         run together as two sentences ("…shapes-hard-l. fasteners-s is training"). -->
+    Starts after {#if before}<a class="link" href={href(`/runs/${before.id}`)}>{before.name}</a>{#if place > 2}{' '}and {place - 2} more{/if}{:else}{place - 1} queued {place === 2 ? 'run' : 'runs'}{/if}{#if ahead}{' '}(<a
+        class="link"
+        href={href(`/runs/${ahead.id}`)}>{ahead.name}</a
+      >{' '}is training now{#if ahead.eta_s !== null}, about {eta(ahead.eta_s)} left{/if}){/if}.
   {:else if ahead}
     Starts when <a class="link" href={href(`/runs/${ahead.id}`)}>{ahead.name}</a> finishes{#if ahead.eta_s !== null}, in about {eta(ahead.eta_s)}{/if}.
   {:else}

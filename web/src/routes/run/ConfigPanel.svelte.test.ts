@@ -47,7 +47,8 @@ describe('ConfigPanel', () => {
     // fasteners: 1920 images at batch 16 over 100 epochs is 3000 iterations: AdamW at 0.002 · 5 / (4 + 8).
     const r = rows(resolveTrain(config, 1920, 8, 120));
     expect(r['Optimizer']?.textContent).toBe('AdamW (auto)');
-    expect(r['Optimizer']?.querySelector('.mono')?.textContent).toBe('AdamW');
+    // A named optimizer is a name, in sans (Geist Mono's struck W reads as "₩").
+    expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
     expect(r['Initial LR']?.textContent).toBe('0.000833 (requested 0.01)');
     expect(r['Batch × accumulate']?.textContent).toBe('16 × 4 = 64');
     expect(r['Warmup']?.textContent).toBe('360 steps (3 epochs)');
@@ -58,7 +59,7 @@ describe('ConfigPanel', () => {
 
   it('keeps the request as today without a resolution', () => {
     const r = rows(null);
-    expect(r['Optimizer']?.textContent).toBe('auto');
+    expect(r['Optimizer']?.textContent).toBe('Auto (AdamW for short runs, else SGD)');
     expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
     expect(r['Initial LR']?.textContent).toBe('0.01');
     expect(r['Batch']?.textContent).toBe('16');

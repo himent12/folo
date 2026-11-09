@@ -17,12 +17,13 @@
   import { hub } from '$lib/api/index.svelte';
   import { MockApi } from '$lib/api/mock';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction } from '$lib/api/types';
+  import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction, Run } from '$lib/api/types';
+  import { modelChoices, scoreContext } from '$lib/scoreSummary';
   import { classColor, media } from '$lib/design/tokens';
   import DetectionView from '$lib/detect/DetectionView.svelte';
   import { filterDetections } from '$lib/detect/nms';
   import { BrowserEngine, hasWebGpu, NO_WASM, PHASE_TEXT, probeWasm, servedBy, wasmFromSystem, type Backend } from '$lib/inference/browser.svelte';
-  import { metric, ms, num, sentence } from '$lib/format';
+  import { ms, num, sentence } from '$lib/format';
   import { isOom } from '$lib/oom';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -79,10 +80,18 @@
 
   // ---------- model ----------
   const models = new Resource((s) => hub.api.models(s));
-  // Best first; on a tie the earlier checkpoint (a run's best weights are saved before its last).
-  const ranked = $derived(
-    [...(models.data ?? [])].sort((a, b) => (b.metrics?.map50_95 ?? -1) - (a.metrics?.map50_95 ?? -1) || a.created.localeCompare(b.created)),
-  );
+  // What each model's score is on (lib/scoreSummary): the picker groups models by dataset and split, best first within
+  // a group (on a tie the earlier checkpoint), and never ranks one group against another.
+  const runs = new Resource((s) => hub.api.runs(s));
+  const datasets = new Resource((s) => hub.api.datasets(s));
+  const choices = $derived.by(() => {
+    // Until the runs and datasets answer (or fail) the splits are unknown: wait, so the default never switches.
+    if (!models.data || (!runs.data && !runs.error) || (!datasets.data && !datasets.error)) return [];
+    const runById = new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r]));
+    const dsById = new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d]));
+    return modelChoices(models.data, (m) => scoreContext(m, runById, dsById));
+  });
+  const ranked = $derived(choices.map((c) => c.model));
   const queryModel = $derived(router.route.query.get('model'));
   let pickedModel = $state<string | null>(null);
   const model = $derived.by((): Model | null => {
@@ -674,7 +683,7 @@
       <Select
         label="Model"
         value={modelId ?? ''}
-        options={ranked.map((m) => ({ value: m.id, label: `${m.name}${m.metrics ? ` · mAP ${metric(m.metrics.map50_95)}` : ''}` }))}
+        options={choices.map((c) => ({ value: c.model.id, label: c.label, group: c.group }))}
         onchange={chooseModel}
       />
       {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}

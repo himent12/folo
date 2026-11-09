@@ -7,10 +7,12 @@
   import Plus from '@lucide/svelte/icons/plus';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { Dataset, Model } from '$lib/api/types';
+  import type { Dataset, Run } from '$lib/api/types';
   import RunSpark from '$lib/charts/RunSpark.svelte';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { ago, bytes, compact, metric } from '$lib/format';
+  import { rankByContext, scoreContext, scoreTag } from '$lib/scoreSummary';
+  import { balanced } from '$lib/ui/balancedGrid';
   import { failureCause } from '$lib/oom';
   import { tooltip } from '$lib/ui/tooltip';
   import { prefs } from '$lib/prefs.svelte';
@@ -28,6 +30,8 @@
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import LiveRunCard from './overview/LiveRunCard.svelte';
+  import Callout from './run/Callout.svelte';
+  import WifiOff from '@lucide/svelte/icons/wifi-off';
 
   setCrumbs({ label: 'Overview' });
 
@@ -41,8 +45,13 @@
 
   const live = $derived(runs.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
   const recent = $derived((runs.data ?? []).filter((r) => r.id !== live?.id).slice(0, 6));
-  // One failure behind every request is a connection problem: say it once instead of in every panel.
-  const offline = $derived(!!runs.error && !runs.data && !!models.error && !models.data && !!datasets.error && !datasets.data);
+  const all = [runs, models, datasets];
+  // Nothing loaded and every request failed: one page-level block says why and how to recover, instead of four panels
+  // each saying the same thing (DESIGN_DIRECTION §2.8).
+  const down = $derived(all.every((r) => !!r.error && !r.data));
+  // Something loaded, then the server stopped answering: keep it, and say once that it is stale.
+  const stale = $derived(!down && all.some((r) => r.stale !== undefined));
+  const staleSince = $derived(Math.min(...all.map((r) => r.updated ?? Infinity)));
   const fresh = $derived(datasets.data?.length === 0 && runs.data?.length === 0 && models.data?.length === 0);
   function retryAll() {
     void runs.refresh();
@@ -50,21 +59,17 @@
     void datasets.refresh();
   }
   const dsById = $derived(new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
-  // mAP is only comparable on the same data, so rank within each dataset and show the best of each.
-  const topModels = $derived.by(() => {
-    const runDs = new Map((runs.data ?? []).map((r) => [r.id, r.config.dataset_id]));
-    const best = new Map<string, { m: Model; ds: string }>();
-    for (const m of models.data ?? []) {
-      const dsId = m.run_id ? runDs.get(m.run_id) : undefined;
-      const key = dsId ?? 'imported';
-      const ds = dsId ? (dsById.get(dsId)?.name ?? dsId) : 'Imported';
-      const cur = best.get(key);
-      // On a tie the earlier checkpoint wins (a run's best weights are saved before its last).
-      const d = (m.metrics?.map50_95 ?? -1) - (cur?.m.metrics?.map50_95 ?? -1);
-      if (!cur || d > 0 || (d === 0 && m.created < cur.m.created)) best.set(key, { m, ds });
-    }
-    return [...best.values()].sort((a, b) => (b.m.created > a.m.created ? 1 : -1)).slice(0, 5);
-  });
+  const runById = $derived(new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
+  // A score ranks only against scores on the same dataset and split (lib/scoreSummary): the best of each comparable
+  // group, its dataset named above it and any split but validation tagged beside the score. Imported and published
+  // weights have no known split here, so they are counted under the list, not ranked in it.
+  const ranking = $derived(
+    rankByContext(models.data ?? [], (m) => scoreContext(m, runById, dsById), (m) => m.metrics?.map50_95, (m) => m.created),
+  );
+  const topModels = $derived(ranking.groups.slice(0, 6).map((g) => ({ m: g.items[0]!, ctx: g.ctx })));
+  const unranked = $derived(ranking.unranked.length + Math.max(0, ranking.groups.length - 6));
+  // The ranking needs each model's run and dataset: wait for both (a failed one leaves the splits unknown).
+  const rankReady = $derived(!!models.data && (!!runs.data || !!runs.error) && (!!datasets.data || !!datasets.error));
   const total = (d: Dataset) => d.splits.train + d.splits.val + d.splits.test;
 </script>
 
@@ -95,12 +100,21 @@
         </li>
       </ol>
     </section>
+  {:else if down}
+    <!-- Nothing loaded and every request failed: one recovery block on the page's content edge (Retry, Connection
+         settings), never four panels each saying the server has not answered. -->
+    <ErrorState error={runs.error} retry={retryAll} title="Could not load the overview" />
   {:else}
+    {#if stale}
+      <div class="stale">
+        <Callout tone="warning" icon={WifiOff} title="Server not answering">
+          Showing what loaded {ago(new Date(staleSince).toISOString())}.
+          {#snippet actions()}<Button size="sm" onclick={retryAll}>Retry</Button>{/snippet}
+        </Callout>
+      </div>
+    {/if}
     <div class="live">
-      {#if offline}
-        <!-- One failure behind every request: said once, where the live run would be; the panels below keep their frames. -->
-        <Panel title="Training"><ErrorState error={runs.error} retry={retryAll} compact /></Panel>
-      {:else if runs.error && !runs.data}
+      {#if runs.error && !runs.data}
         <Panel title="Training"><ErrorState error={runs.error} retry={() => runs.refresh()} compact /></Panel>
       {:else if !runs.data}
         <!-- The live card itself with placeholder values, so nothing jumps when it arrives. -->
@@ -139,9 +153,7 @@
 
               </thead>
               <tbody>
-                {#if offline}
-                  <TableState cols={6}><p class="quiet">Recent runs show here once the server answers.</p></TableState>
-                {:else if runs.error && !runs.data}
+                {#if runs.error && !runs.data}
                   <TableState cols={6}><ErrorState error={runs.error} retry={() => runs.refresh()} /></TableState>
                 {:else if !runs.data}
                   {#each [0, 1, 2, 3, 4, 5] as i (i)}
@@ -184,16 +196,15 @@
         </Panel>
       </div>
       <div class="col-side">
-        <!-- The top model of each dataset (named above each row); the metric is named once, here, not under every value. -->
+        <!-- The top model of each comparable group (its dataset named above it, any split but validation tagged beside
+             the score); the metric is named once, here, not under every value. -->
         <Panel title="Best models" meta="mAP50-95" pad="none" id="best-models">
           {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/models')}>All models</Button>{/snippet}
-          {#if offline}
-            <p class="quiet pad">The best model of each dataset shows here once the server answers.</p>
-          {:else if models.error && !models.data}
+          {#if models.error && !models.data}
             <ErrorState error={models.error} retry={() => models.refresh()} />
-          {:else if !models.data}
+          {:else if !rankReady}
             <!-- The loaded list's rows (dataset, name, meta; mAP on the right) at their height. -->
-            <ul class="models" aria-busy="true" aria-label="Loading models">
+            <ul class="models" aria-busy="true" aria-label="Loading models" use:balanced={{ n: 4, min: 280 }}>
               {#each [0, 1, 2, 3] as i (i)}
                 <li aria-hidden="true">
                   <span class="m-row">
@@ -207,33 +218,43 @@
                 </li>
               {/each}
             </ul>
-          {:else if topModels.length === 0}
+          {:else if models.data?.length === 0}
             <EmptyState icon={Box} title="No models yet" description="Finished runs save their best weights here." />
           {:else}
-            <ul class="models">
-              {#each topModels as { m, ds } (m.id)}
-                <li>
-                  <a href={href(`/models/${m.id}`)}>
-                    <span class="m-text">
-                      <span class="m-ds truncate">{ds}</span>
-                      <span class="m-name truncate">{m.name}</span>
-                      <span class="m-sub num"><Meta line><Ident value={m.arch} /><span>{m.classes.length} classes</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
-                    </span>
-                    <span class="m-map"><span class="num"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span></span>
-                  </a>
-                </li>
-              {/each}
-            </ul>
+            {#if topModels.length}
+              <ul class="models" use:balanced={{ n: topModels.length, min: 280 }}>
+                {#each topModels as { m, ctx } (m.id)}
+                  {@const tag = scoreTag(ctx)}
+                  <li>
+                    <a href={href(`/models/${m.id}`)}>
+                      <span class="m-text">
+                        <span class="m-ds truncate">{ctx.datasetName}</span>
+                        <span class="m-name truncate">{m.name}</span>
+                        <span class="m-sub num"><Meta line><Ident value={m.arch} /><span>{m.classes.length} classes</span><span>{bytes(m.bytes, prefs.units)}</span></Meta></span>
+                      </span>
+                      <span class="m-map">
+                        <span class="num"><span class="sr-only">mAP50-95 </span>{metric(m.metrics?.map50_95)}</span>
+                        {#if tag}<span class="m-tag" data-fact>{tag}</span>{/if}
+                      </span>
+                    </a>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if unranked}
+              <!-- Imported and published weights (and any model whose split is unknown) are not ranked against these. -->
+              <p class="unranked" class:alone={!topModels.length}>
+                {unranked} {unranked === 1 ? 'model' : 'models'} not ranked: evaluation split unknown.
+              </p>
+            {/if}
           {/if}
         </Panel>
         <Panel title="Datasets" meta={datasets.data ? String(datasets.data.length) : undefined} pad="none" id="datasets">
           {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/datasets')}>All datasets</Button>{/snippet}
-          {#if offline}
-            <p class="quiet pad">Registered datasets show here once the server answers.</p>
-          {:else if datasets.error && !datasets.data}
+          {#if datasets.error && !datasets.data}
             <ErrorState error={datasets.error} retry={() => datasets.refresh()} compact />
           {:else if !datasets.data}
-            <ul class="dslist" aria-busy="true" aria-label="Loading datasets">
+            <ul class="dslist" aria-busy="true" aria-label="Loading datasets" use:balanced={{ n: 3, min: 280 }}>
               {#each [0, 1, 2] as i (i)}
                 <li aria-hidden="true">
                   <span class="d-sk">
@@ -246,7 +267,7 @@
           {:else if datasets.data.length === 0}
             <EmptyState icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a sample set of shapes." />
           {:else}
-            <ul class="dslist">
+            <ul class="dslist" use:balanced={{ n: Math.min(6, datasets.data.length), min: 280 }}>
               {#each datasets.data.slice(0, 6) as d (d.id)}
                 <li>
                   <a href={href(`/datasets/${d.id}`)}>
@@ -389,13 +410,9 @@
   .run-name {
     display: block;
   }
-  /* In place of a panel's content while the server is unreachable (the error is said once, in Training). */
-  .quiet {
-    padding: var(--space-5) var(--space-4);
-    color: var(--text-tertiary);
-  }
-  .quiet.pad {
-    padding: 0 var(--space-4) var(--space-4);
+  /* Stale data: one notice over the page, the panels keep what they have. */
+  .stale {
+    min-width: 0;
   }
   .prog {
     display: flex;
@@ -409,6 +426,14 @@
     font-size: var(--type-sm-size);
     min-width: 46px;
     text-align: right;
+  }
+  /* Entries side by side wherever two or more fit, in balanced columns (ui/balancedGrid sets --cols): four datasets
+     are 2 × 2, never 3 + 1 with one alone on a row. */
+  .models,
+  .dslist {
+    display: grid;
+    grid-template-columns: repeat(var(--cols, 1), minmax(0, 1fr));
+    column-gap: var(--space-4);
   }
   .models {
     padding: 0 var(--space-2) var(--space-2);
@@ -450,6 +475,21 @@
   }
   .m-map .num {
     font-weight: var(--weight-medium);
+  }
+  /* "Training split", "Split unknown": a label beside a score that is not on a validation split. */
+  .m-tag {
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .unranked {
+    padding: 0 var(--space-4) var(--space-4);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .unranked.alone {
+    padding-top: var(--space-1);
   }
   .dslist {
     padding: 0 var(--space-2) var(--space-2);
@@ -494,29 +534,10 @@
     .cols > .col-side > :global(#datasets) {
       grid-column: 1 / -1;
     }
-    .dslist {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-      column-gap: var(--space-4);
-    }
   }
   @media (max-width: 1279px) {
     .cols {
       grid-template-columns: minmax(0, 1fr);
-    }
-  }
-  /* Laptop and tablet: the rail's two panels stack full width under Recent runs (as Datasets is on desktop), each
-     laying its entries out side by side, so neither panel stops halfway beside a taller one. */
-  @media (min-width: 768px) and (max-width: 1279px) {
-    .models,
-    .dslist {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-      column-gap: var(--space-4);
-    }
-    /* Model entries carry three lines and a score: two columns keep them readable (and pairs even). */
-    .models {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
   }
   /* Phones: every Recent runs row is one height, a name over one meta line. The dataset goes (the run's own page has

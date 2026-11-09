@@ -58,6 +58,15 @@ export interface Unlike {
   differs: string;
 }
 
+/**
+ * A row's conditions as one sentence, for phones, where it takes a line of its own under the two values instead of the
+ * conclusion column: "Different precision: f32 vs TensorFloat-32, no winner".
+ */
+export function unlikeSentence(u: Unlike): string {
+  const what = u.kinds.includes('precision') && u.kinds.includes('workload') ? 'precision and work' : u.kinds.includes('precision') ? 'precision' : 'work';
+  return `Different ${what}: ${u.differs}, no winner`;
+}
+
 export const unlike: Record<string, Unlike> = {
   'GPU forward throughput, batch 16': { kinds: ['precision'], differs: 'f32 vs TensorFloat-32' },
   'GPU end to end, batch 1': { kinds: ['workload'], differs: 'less NMS work for FOLO' },
