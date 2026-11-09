@@ -93,7 +93,9 @@ pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
             continue;
         }
         let code = i % 2 == 1;
-        let seg = if code { format!("\u{a0}{part}\u{a0}") } else { part.to_string() };
+        // A code span never breaks inside (its chip would split into two boxes across the line).
+        let seg =
+            if code { format!("\u{a0}{}\u{a0}", part.replace(' ', "\u{a0}")) } else { part.to_string() };
         runs.push(gpui::TextRun {
             len: seg.len(),
             font: if code { mono.clone() } else { sans.clone() },
@@ -224,7 +226,12 @@ pub fn status_dot(t: &Theme, s: RunStatus, id: &str) -> Div {
         .flex()
         .items_center()
         .gap(px(6.))
-        .child(dot(dotc, 6., s == RunStatus::Running, format!("sd-{id}")))
+        .child(if s == RunStatus::Queued {
+            // Waiting, not halted: a ring where a stopped run has a filled dot.
+            div().size(px(6.)).flex_none().rounded_full().border_1().border_color(dotc).into_any_element()
+        } else {
+            dot(dotc, 6., s == RunStatus::Running, format!("sd-{id}")).into_any_element()
+        })
         .child(
             text(ty::XS, if s == RunStatus::Running { t.accent_text } else { fg })
                 .whitespace_nowrap()

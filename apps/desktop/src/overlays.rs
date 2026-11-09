@@ -333,7 +333,13 @@ impl FoloApp {
                         .truncate()
                         .child(it.title),
                     )
-                    .child(text(ty::SM, t.text_tertiary).flex_1().min_w_0().truncate().child(it.detail))
+                    .child(
+                        text(ty::SM, if on { t.text_secondary } else { t.text_tertiary })
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(it.detail),
+                    )
                     .when(!it.keys.is_empty(), |d| d.child(shortcut(&t, it.keys)))
                     .when(on && it.keys.is_empty(), |d| {
                         d.child(icon("icons/arrow-right.svg", 14., t.text_tertiary))
@@ -1492,9 +1498,9 @@ impl FoloApp {
                     .whitespace_normal()
                     // The epoch in progress is discarded; last.folo is the last finished epoch's.
                     .child(match finished {
-                        Some(Some(e)) => format!("Stops after the current batch. The epoch {e} checkpoint is kept for export or resume; progress since is lost."),
+                        Some(Some(e)) => format!("Stops after the current batch and keeps the epoch {e} checkpoint for export or resume. Progress after epoch {e} is lost."),
                         Some(None) => "Stops after the current batch. No epoch has finished yet, so there is no checkpoint to keep.".to_string(),
-                        None => "Stops after the current batch. The last finished epoch's checkpoint is kept for export or resume; progress since is lost.".to_string(),
+                        None => "Stops after the current batch and keeps the last finished epoch's checkpoint for export or resume. Progress after it is lost.".to_string(),
                     }),
             );
         let footer = div()

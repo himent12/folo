@@ -889,7 +889,7 @@ impl FoloApp {
         } else if self.pr_pin.is_some() {
             "Pinned: click the class again to unpin."
         } else {
-            "Hover a class to isolate it; click to pin."
+            "Hover a legend or table row to isolate it; click to pin."
         };
 
         panel(&t)
@@ -1015,6 +1015,13 @@ impl FoloApp {
     ) -> AnyElement {
         let t = theme(cx);
         let norm = self.confusion_norm;
+        // The evaluated dataset, named (by the model's run), so the numbers say what they measure.
+        let eval_ds = m
+            .run_id
+            .as_ref()
+            .and_then(|r| self.store.run(r))
+            .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
+            .map(|d| d.name.clone());
         let seg = self.segmented(
             "cm-norm",
             &["Row %", "Counts"],
@@ -1383,7 +1390,10 @@ impl FoloApp {
                         div().pt(px(4.)).child(
                             text(ty::XS, t.text_tertiary)
                                 .tnum()
-                                .child(format!("Validation split · {} images", int(ev.images as u64))),
+                                .child(match &eval_ds {
+                                    Some(d) => format!("Validation · {d} · {} images", int(ev.images as u64)),
+                                    None => format!("Validation split · {} images", int(ev.images as u64)),
+                                }),
                         ),
                     ),
             )

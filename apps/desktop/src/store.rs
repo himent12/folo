@@ -501,6 +501,12 @@ impl Store {
                     if st.error_code.is_some() {
                         r.error_code = st.error_code;
                     }
+                    // Active again (resumed, requeued): an earlier failure's message and code no
+                    // longer describe it.
+                    if st.status.is_active() {
+                        r.error = None;
+                        r.error_code = None;
+                    }
                     if !st.status.is_active() {
                         r.eta_s = None;
                     }
