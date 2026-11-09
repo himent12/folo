@@ -768,8 +768,9 @@ impl FoloApp {
                             ),
                     )
                     .child(
-                        // One line in the 280 px rail: short stage names, the full name on hover.
-                        div().flex().gap(px(12.)).children(
+                        // One line in the 280 px rail: short stage names, the full name on hover. Whole
+                        // entries still wrap if the numbers get wide (100 ms inference on a narrow rail).
+                        div().flex().flex_wrap().gap_x(px(12.)).gap_y(px(4.)).children(
                             [
                                 ("Pre", "Preprocess", p.timing.preprocess_ms, c_pre),
                                 ("Infer", "Inference", p.timing.inference_ms, c_model),
