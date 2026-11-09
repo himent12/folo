@@ -534,7 +534,9 @@ export const scenes = [
       await page.locator('.cell').nth(1).click();
       await page.locator('dialog[open] .stage img.loaded').waitFor();
       await page.locator('dialog[open] .labels button').nth(0).click();
-      await page.locator('dialog[open] .labels button').nth(1).hover();
+      // The selection alone, as the Playground's selected scene: the pointer leaves the list, so no row keeps a hover
+      // (and on touch there is none to keep).
+      await page.mouse.move(0, 0);
       await page.waitForTimeout(300);
     },
   },

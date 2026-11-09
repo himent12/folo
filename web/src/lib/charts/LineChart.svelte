@@ -71,7 +71,7 @@
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { labelWidth, needsLeader, placeEndLabels } from './endLabels';
+  import { labelWidth, leaderOf, placeEndLabels } from './endLabels';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
@@ -236,6 +236,25 @@
     const name = t.length > 18 ? `${t.slice(0, 17)}…` : t;
     return s.end ? `${name} · ${s.end}` : name;
   };
+  /**
+   * An end label's width as drawn (12 px medium Geist, from the type tokens), so a label beside its marker really sits
+   * beside it; `labelWidth`'s estimate where there is no canvas (tests).
+   */
+  let measurer: CanvasRenderingContext2D | null | undefined;
+  function textWidth(t: string): number {
+    if (measurer === undefined) {
+      try {
+        const cs = getComputedStyle(document.documentElement);
+        measurer = document.createElement('canvas').getContext('2d');
+        if (measurer) measurer.font = `${cs.getPropertyValue('--weight-semibold').trim() || 600} ${cs.getPropertyValue('--type-sm-size').trim()} ${cs.getPropertyValue('--font-sans')}`;
+      } catch {
+        measurer = null;
+      }
+    }
+    const w = measurer?.measureText(t).width;
+    // Measured at the highlighted (semibold) weight, the widest a label is drawn, plus the halo.
+    return w ? Math.ceil(w) + 4 : labelWidth(t);
+  }
   /** Direct labels at each line's last point, each in a spot that covers no curve and no other label (endLabels.ts). */
   // Narrow plots keep their width for data (the legend names the lines), unless every label is a short name such as
   // the loss components' "box", "cls", "dfl".
@@ -243,9 +262,10 @@
 
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
-    // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px.
+    // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px, measured (textWidth).
     // Plus room for a leader, when labels are moved apart (LEAD).
-    const labelW = showEnds ? Math.min(130, Math.max(0, ...series.map((s) => endShown(s)?.length ?? 0)) * 6.8 + 10) + LEAD - 6 : 0;
+    const widest = Math.max(0, ...series.map((s) => endShown(s)).map((t) => (t === null ? 0 : textWidth(t))));
+    const labelW = showEnds ? Math.min(130, widest + 6) + LEAD - 6 : 0;
     const left = Math.ceil(longest * 7) + 14;
     // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot.
     return { top: yLabel || xMark ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
@@ -313,6 +333,12 @@
   const LABEL_GAP = 12;
   /** How far right of the plot the label column moves when it needs leaders: short ones, fanning from each line's end. */
   const LEAD = 14;
+  /** Where a leader starts: just outside the line's end marker (the live ring is wider), px from its centre. */
+  const endR = (id: string) => {
+    if (!endDots) return 3;
+    const r = receding && id === highlight ? 4 : 3;
+    return (visible.find((s) => s.id === id)?.end === 'live' ? r + 3 : r) + 2;
+  };
   const ends = $derived.by(() => {
     if (!showEnds) return [];
     const drawn = visible.filter((s) => endText(s) !== null);
@@ -321,7 +347,8 @@
       .map((s) => {
         const p = s.points[s.points.length - 1];
         const curve = visible.indexOf(s);
-        return p && Number.isFinite(p.y) ? { id: s.id, label: endShown(s)!, x: x(p.x), y: y(p.y), curve } : null;
+        const label = endShown(s)!;
+        return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: y(p.y), curve, w: textWidth(label) } : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
       // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
@@ -333,7 +360,8 @@
       ...e,
       // A receded run is a context curve: its label in ink, so the one hue left on the plot is the run in front.
       color: receding && e.id !== highlight ? 'var(--text-tertiary)' : (color.get(e.id) ?? 'var(--text-secondary)'),
-      lead: needsLeader(e),
+      // Every label is anchored to its end marker: one not right beside it is tied to it by a leader.
+      lead: leaderOf(e, endR(e.id)),
     }));
   });
 
@@ -714,8 +742,8 @@
 
           {#if showEnds}
             {#each ends as e (e.id)}
-              <!-- A label moved off its line's end (to keep labels apart) is tied to it by a short leader. -->
-              {#if e.lead}<line class="leader" x1={e.ax + 4} y1={e.ay} x2={e.x - 4} y2={e.y} style:stroke={e.color} />{/if}
+              <!-- A label moved off its line's end (to keep clear of lines and labels) is tied to its marker by a leader. -->
+              {#if e.lead}<line class="leader" x1={e.lead.x1} y1={e.lead.y1} x2={e.lead.x2} y2={e.lead.y2} style:stroke={e.color} />{/if}
             {/each}
             {#each ends as e (e.id)}
               <text class="end-label" class:hl={e.id === highlight} x={e.x} y={e.y} dy="0.32em" style:fill={e.color}>{e.label}</text>

@@ -186,7 +186,7 @@
               {classes}
               {only}
               compact
-              fit="cover"
+              fit="contain"
               alt=""
             />
             <span class="meta">

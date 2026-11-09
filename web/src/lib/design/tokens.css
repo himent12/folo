@@ -212,6 +212,12 @@
   --chart-4: #2dd4bf;
   --chart-5: #a78bfa;
   --chart-6: #fb923c;
+  --chart-fill-1: #5cc8ff;
+  --chart-fill-2: #f2c14e;
+  --chart-fill-3: #e879f9;
+  --chart-fill-4: #2dd4bf;
+  --chart-fill-5: #a78bfa;
+  --chart-fill-6: #fb923c;
   --chart-grid: #ffffff0f;
   --chart-axis: #ffffff24;
   --chart-label: #80868f;
@@ -269,6 +275,12 @@
   --chart-4: #0b8a7b;
   --chart-5: #7c5ce6;
   --chart-6: #d9620b;
+  --chart-fill-1: #5cc8ff;
+  --chart-fill-2: #f2c14e;
+  --chart-fill-3: #e879f9;
+  --chart-fill-4: #2dd4bf;
+  --chart-fill-5: #a78bfa;
+  --chart-fill-6: #fb923c;
   --chart-grid: #0a0e140f;
   --chart-axis: #0a0e1429;
   --chart-label: #646b75;

@@ -2,9 +2,11 @@
 // that covers no curve and no other label, stepping further up or down when the near spots are taken; then the same
 // spots allowing the label over its own line (never another's); finally the clear gutter right of the plot: as one
 // column in the order of the lines' ends when the caller says where the plot ends (so two lines ending together get
-// neighbouring labels), else at the nearest free height. A line that ends at the plot's right edge goes straight to that
-// column. Labels keep `gap` px between them; a label moved off its line's end gets a short leader (`Placed.ax/ay`).
-// Only a label with no free spot anywhere is left out (the legend still names the line).
+// neighbouring labels), else at the free height nearest its end, at most MAX_REACH px away. A line that ends at the
+// plot's right edge goes straight to that column. Labels keep `gap` px between them. Every label is anchored to its
+// line's end marker: one that does not sit right beside it gets a leader from the marker to the label's nearest edge
+// (`leaderOf`), so a label never floats free over another line. A label with no free spot within reach is left out:
+// the end marker's shape and the legend's status word still say how the line ended.
 
 export interface EndPoint {
   id: string;
@@ -14,6 +16,8 @@ export interface EndPoint {
   y: number;
   /** Index of this label's own line in `curves`, which a label may cover before it is sent to the gutter. */
   curve?: number;
+  /** The label's measured width, px; `labelWidth` estimates it when absent. */
+  w?: number;
 }
 
 export interface Placed {
@@ -25,6 +29,8 @@ export interface Placed {
   /** The line's end the label names, in pixels: a caller draws a leader from it when the label sits away from it. */
   ax: number;
   ay: number;
+  /** The label's width, px (`labelWidth`). */
+  w: number;
 }
 
 export interface PlaceOptions {
@@ -34,8 +40,25 @@ export interface PlaceOptions {
   lead?: number;
 }
 
+/** A label whose box is further than this (px) from its line's end marker gets a leader. */
+const BESIDE = 8;
+/** The furthest a label's box may sit from its line's end (px); beyond it the label is left out. */
+export const MAX_REACH = 64;
+
+/**
+ * The leader tying a label to its line's end: from just outside the end marker (`r` px) to just outside the label's
+ * nearest edge, or null when the label sits right beside the marker.
+ */
+export function leaderOf(p: Placed, r = 5): { x1: number; y1: number; x2: number; y2: number } | null {
+  const nx = Math.min(Math.max(p.ax, p.x - 3), p.x + p.w + 3);
+  const ny = Math.min(Math.max(p.ay, p.y - H / 2 - 2), p.y + H / 2 + 2);
+  const d = Math.hypot(nx - p.ax, ny - p.ay);
+  if (d <= BESIDE) return null;
+  return { x1: p.ax + ((nx - p.ax) / d) * r, y1: p.ay + ((ny - p.ay) / d) * r, x2: nx, y2: ny };
+}
+
 /** Whether a placed label sits away from its line's end, so it needs a leader to show which line it names. */
-export const needsLeader = (p: Placed) => p.x - p.ax >= 12 && Math.abs(p.y - p.ay) > 3;
+export const needsLeader = (p: Placed) => leaderOf(p) !== null;
 
 interface Box {
   x0: number;
@@ -132,21 +155,24 @@ export function placeEndLabels(
     const e = ends[i]!;
     taken.push(spot);
     spots.set(i, spot);
-    placed.set(i, { id: e.id, label: e.label, x: spot.x0, y: (spot.y0 + spot.y1) / 2, ax: e.x, ay: e.y });
+    placed.set(i, { id: e.id, label: e.label, x: spot.x0, y: (spot.y0 + spot.y1) / 2, ax: e.x, ay: e.y, w: spot.x1 - spot.x0 });
   };
   const run = (round: (e: EndPoint, w: number) => Box | undefined) =>
     ends.forEach((e, i) => {
       if (placed.has(i)) return;
-      const spot = round(e, labelWidth(e.label));
+      const spot = round(e, e.w ?? labelWidth(e.label));
       if (spot) take(i, spot);
     });
   for (const round of rounds) run(round);
   if (gutter !== undefined && placed.size < ends.length) column(gutter);
-  // Whatever is still without a spot: the gutter at the free height nearest its line's end.
+  // Whatever is still without a spot: the gutter at the free height nearest its line's end, within reach.
   run((e, w) => {
-    for (let d = 0; d <= bounds.y1 - bounds.y0; d += 2)
+    // As near the line's end as the gutter allows: just right of it, or right-aligned in the bounds.
+    const x0 = Math.max(bounds.x0, Math.min(bounds.x1 - w, Math.max(e.x + 6, gutter ?? e.x + 6)));
+    if (x0 - e.x > MAX_REACH) return undefined;
+    for (let d = 0; d <= Math.min(MAX_REACH, bounds.y1 - bounds.y0); d += 2)
       for (const y of d ? [e.y - d, e.y + d] : [e.y]) {
-        const b = { x0: bounds.x1 - w, y0: y - H / 2, x1: bounds.x1, y1: y + H / 2 };
+        const b = { x0, y0: y - H / 2, x1: x0 + w, y1: y + H / 2 };
         if (fits(b)) return b;
       }
     return undefined;
@@ -159,7 +185,8 @@ export function placeEndLabels(
    * height apart, inside the bounds. Kept only if every label then fits; otherwise nothing changes.
    */
   function column(x: number) {
-    const members = ends.map((_, i) => i).filter((i) => !placed.has(i) || spots.get(i)!.x0 >= x);
+    // Only lines ending within reach of the gutter: a label far from its line's end is left out instead.
+    const members = ends.map((_, i) => i).filter((i) => (!placed.has(i) && x - ends[i]!.x <= MAX_REACH) || (placed.has(i) && spots.get(i)!.x0 >= x));
     const old = members.flatMap((i) => spots.get(i) ?? []);
     for (const b of old) taken.splice(taken.indexOf(b), 1);
     const step = H + Math.max(gap, pad + 1);
@@ -188,7 +215,7 @@ export function placeEndLabels(
     const moved = [...ys].some(([i, y]) => Math.abs(y - ends[i]!.y) > 3);
     const x0 = x + (moved ? (opts.lead ?? 6) : 6);
     const next = new Map<number, Box>();
-    for (const [i, y] of ys) next.set(i, { x0, y0: y - H / 2, x1: x0 + labelWidth(ends[i]!.label), y1: y + H / 2 });
+    for (const [i, y] of ys) next.set(i, { x0, y0: y - H / 2, x1: x0 + (ends[i]!.w ?? labelWidth(ends[i]!.label)), y1: y + H / 2 });
     const ok = [...next.values()].every((b) => fits(b));
     if (!ok) {
       taken.push(...old);

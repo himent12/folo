@@ -5,6 +5,7 @@
    */
   import type { Epoch } from '$lib/api/types';
   import { classInk } from '$lib/design/classInk.svelte';
+  import { unitTop } from '$lib/charts/domain';
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { tooltip } from '$lib/ui/tooltip';
@@ -31,13 +32,25 @@
       }))
       .sort((a, b) => b.map50_95 - a.map50_95);
   });
+  // The bars run 0–1 while any class reaches 0.5; below that a 0–1 bar is a dot, so they run from 0 to just over the
+  // column's best (../../lib/charts/domain unitTop, as the charts' y axes do), and the panel's meta line says so.
+  const barTop = $derived.by(() => {
+    const max = Math.max(0, ...rows.map((r) => r.map50_95));
+    const top = unitTop(max);
+    return max > 0 && top < 0.5 ? top : 1;
+  });
   const epochNo = $derived.by(() => {
     void version;
     return epochs.length ? epochs[epochs.length - 1]!.epoch : null;
   });
 </script>
 
-<Panel title="Per class" meta={epochNo ? `epoch ${epochNo}` : undefined} pad="none" id="per-class">
+<Panel
+  title="Per class"
+  meta={epochNo ? `epoch ${epochNo}${barTop < 1 ? ` · bars 0–${+barTop.toFixed(3)}` : ''}` : undefined}
+  pad="none"
+  id="per-class"
+>
   {#if loading}
     <div class="sk">{#each [0, 1, 2, 3] as i (i)}<Skeleton h="18px" />{/each}</div>
   {:else if rows.length === 0}
@@ -52,7 +65,7 @@
             <!-- "Δ prev" keeps the header short and on one line at every width; the full name is its tooltip and
                  accessible name. -->
             <th class="r delta-h" use:tooltip={'Change since the previous epoch'}><span aria-hidden="true">Δ prev</span><span class="sr-only">Change since the previous epoch</span></th>
-            <th class="bar-col"><span class="sr-only">AP50-95 bar</span></th>
+            <th class="bar-col"><span class="sr-only">{barTop < 1 ? `AP50-95 bar, scaled to 0–${+barTop.toFixed(3)}` : 'AP50-95 bar'}</span></th>
             {#if !compact}
               <th class="r">AP50</th>
               <th class="r">Precision</th>
@@ -70,7 +83,7 @@
                   <span aria-label="{c.delta > 0 ? 'up' : 'down'} {Math.abs(c.delta).toFixed(3)}">{c.delta > 0 ? '▲' : '▼'}&#8201;{Math.abs(c.delta).toFixed(3)}</span>
                 {:else}<span aria-label="no change">·</span>{/if}
               </td>
-              <td class="bar-col"><span class="bar"><span style:width="{c.map50_95 * 100}%"></span></span></td>
+              <td class="bar-col"><span class="bar"><span style:width="{Math.min(1, c.map50_95 / barTop) * 100}%"></span></span></td>
               {#if !compact}
                 <td class="r num">{c.map50.toFixed(3)}</td>
                 <td class="r num faint">{c.precision.toFixed(3)}</td>

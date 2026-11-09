@@ -744,6 +744,11 @@
                   onselect={pickFromImage}
                   alt={sourceName}
                 />
+                {#if notice === 'error'}
+                  <!-- A failed prediction: the image steps back and says, in its own frame, why it has no boxes (the
+                       notice above has the cause and the ways out), so it never reads as "nothing found". -->
+                  <div class="failed-veil"><span>No boxes: the prediction failed</span></div>
+                {/if}
                 {#if predicting}
                   <div class="scan" aria-hidden="true"><span></span></div>
                   <span class="busy" role="status">{runOn === 'server' || hub.api.mock ? `Detecting with ${model?.name}…` : PHASE_TEXT[engine.phase] || 'Starting…'}</span>
@@ -873,7 +878,10 @@
                           class:on={selectedIdx === i}
                           aria-selected={selectedIdx === i ? 'true' : undefined}
                           aria-label="{b.name}, score {score(b.score)}, {px(b.x2 - b.x1)} by {px(b.y2 - b.y1)} pixels"
-                          onpointerenter={() => (hover = b)}
+                          onpointerenter={(e) => {
+                            // A tap is not a hover: on touch the selection alone marks the row.
+                            if (e.pointerType !== 'touch') hover = b;
+                          }}
                           onpointerleave={() => (hover = null)}
                           onfocus={() => (picked = b)}
                           onclick={() => (picked = b)}
@@ -1211,6 +1219,25 @@
     gap: var(--space-2);
     margin-top: var(--space-2);
   }
+  .failed-veil {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: var(--space-4);
+    background: color-mix(in srgb, var(--bg-inset) 72%, transparent);
+    pointer-events: none;
+  }
+  .failed-veil span {
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    background: var(--bg-overlay);
+    box-shadow: var(--shadow-md);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+    text-align: center;
+  }
   .drop-hint {
     position: absolute;
     inset: var(--space-3);
@@ -1301,9 +1328,13 @@
   tbody tr {
     cursor: pointer;
   }
-  tbody tr:hover,
-  tbody tr.hot {
-    background: var(--bg-hover);
+  /* Hover (the pointer, or the box under it on the image) is a light step, only where a pointer can hover, and never
+     on the selected row, which keeps the selection's fill (base.css .on): one highlight per meaning. */
+  @media (hover: hover) {
+    tbody tr:hover:not(.on),
+    tbody tr.hot:not(.on) {
+      background: var(--bg-hover);
+    }
   }
   tbody tr:focus-visible {
     outline: 2px solid var(--focus);
