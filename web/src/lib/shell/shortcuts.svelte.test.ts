@@ -87,4 +87,11 @@ describe('single-key shortcuts preference', () => {
   it('the dialog lists every group, Datasets included', () => {
     expect([...new Set(shortcutList.map((s) => s.group))]).toEqual(['General', 'Navigation', 'Lists', 'Charts', 'Datasets']);
   });
+
+  it('marks exactly the keys Settings turns off: single characters outside a focused component', () => {
+    const single = shortcutList.filter((s) => s.single).map((s) => s.keys);
+    expect(single).toEqual(['?', '[', 'N', 'G O', 'G D', 'G R', 'G M', 'G P', 'G S', 'J K', 'X']);
+    // The image inspector's keys are its own (they work while it is open), so they stay listed as working.
+    expect(shortcutList.filter((s) => s.group === 'Datasets').every((s) => !s.single)).toBe(true);
+  });
 });

@@ -362,7 +362,7 @@ export const scenes = [
     setup: async (page) => {
       await page.getByRole('button', { name: 'Add dataset' }).first().click();
       await page.locator('dialog[open]').waitFor();
-      await page.locator('dialog[open] input[placeholder="D:/data/my-dataset"]').fill('D:/data/shapes');
+      await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/shapes');
       await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
       await until(page, 'text=Already registered as shapes');
       // The thumbnails render in real time (the page clock, which would close the toast, stays put).
@@ -947,6 +947,28 @@ export const scenes = [
       await page.mouse.move(0, 0);
     },
   },
+  // Settings' System panel (GET /api/system capabilities): tensor cores on (default), available but off, and absent.
+  ...[
+    { name: 'settings-system', search: '' },
+    { name: 'settings-system-tc-off', search: 'scenario=tensor-cores-off' },
+    { name: 'settings-system-no-tc', search: 'scenario=no-tensor-cores' },
+  ].map(
+    ({ name, search }) =>
+      /** @type {Scene} */ ({
+        name,
+        path: '/settings',
+        search,
+        // The whole page: the harness shoots from the top, and the panel sits near the bottom.
+        fullPage: true,
+        viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+        setup: async (page) => {
+          await until(page, '#system');
+          const details = page.locator('#system details.tech summary');
+          if (await details.count()) await details.click();
+          await page.mouse.move(0, 0);
+        },
+      }),
+  ),
   {
     // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
     name: 'shortcuts-off',

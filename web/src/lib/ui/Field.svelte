@@ -14,7 +14,15 @@
     error,
     children,
     aside,
-  }: { label: string; for?: string; hint?: string; error?: string | null; children: Snippet; aside?: Snippet } = $props();
+  }: {
+    label: string;
+    for?: string;
+    /** Helper text; identifiers in backticks are set as code (`folo serve`). */
+    hint?: string;
+    error?: string | null;
+    children: Snippet;
+    aside?: Snippet;
+  } = $props();
 </script>
 
 <div class="field" class:invalid={!!error}>
@@ -28,7 +36,7 @@
       <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>{error}</span>
     </p>
   {:else if hint}
-    <p class="msg" id={htmlFor ? `${htmlFor}-hint` : undefined}>{hint}</p>
+    <p class="msg" id={htmlFor ? `${htmlFor}-hint` : undefined}>{#each hint.split('`') as text, i (i)}{#if i % 2}<code>{text}</code>{:else}{text}{/if}{/each}</p>
   {/if}
 </div>
 
@@ -56,6 +64,10 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
+  }
+  .msg code {
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
   }
   .msg.error {
     display: flex;

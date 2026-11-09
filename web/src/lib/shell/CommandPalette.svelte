@@ -24,6 +24,7 @@
   import { mainNav, settingsNav } from './nav';
 
   let { open = $bindable(false), onshortcuts }: { open?: boolean; onshortcuts: () => void } = $props();
+  const touchOnly = typeof matchMedia !== 'undefined' && matchMedia('(hover: none) and (pointer: coarse)').matches;
 
   interface Item {
     id: string;
@@ -89,7 +90,8 @@
         icon: PanelLeft,
         run: () => sidebar.toggle(),
       },
-      { id: 'shortcuts', group: 'Actions', label: 'Keyboard shortcuts', keys: '?', icon: Keyboard, run: onshortcuts },
+      // Touch-only devices have no keys to look up.
+      ...(touchOnly ? [] : [{ id: 'shortcuts', group: 'Actions', label: 'Keyboard shortcuts', keys: '?', icon: Keyboard, run: onshortcuts }]),
     ];
     const r: Item[] = runs.map((x) => ({
       id: `run-${x.id}`,

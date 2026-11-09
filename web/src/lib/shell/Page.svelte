@@ -43,7 +43,7 @@
     lead?: Snippet;
     children: Snippet;
     wide?: boolean;
-    /** A form page: one centred 920 px measure (column and rail), the title on the column's edge. */
+    /** A form page (column and rail): the same content edge as every page, the column's measure set by the page. */
     narrow?: boolean;
     /** Phones: keep the actions beside the title block instead of wrapping them onto a row of their own. */
     inlineActions?: boolean;
@@ -93,9 +93,6 @@
   }
   .page.wide {
     max-width: none;
-  }
-  .page.narrow {
-    max-width: calc(920px + 2 * var(--space-6));
   }
   /* Title row: the title on the left, the actions on its right edge (centred on the title's line); the lead and meta
      lines span the whole width, so a long meta line never pushes the actions down or to the left. Dense placement puts

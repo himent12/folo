@@ -118,10 +118,13 @@
   .stopped .dot {
     border-radius: 1.5px;
   }
-  /* In tables: the hue is on the dot only, the word stays in ink. */
+  /* In tables: the hue is on the dot only, the word stays in ink. The badge takes the cell's own line box (and sits at
+     its top), so the word shares the row's baseline instead of a flex box's synthesized one a couple of px lower. */
   .plain {
     height: auto;
     padding: 0;
+    line-height: inherit;
+    vertical-align: top;
     background: none;
     color: var(--text-secondary);
     font-size: inherit;

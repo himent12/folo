@@ -7,7 +7,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset } from '$lib/api/types';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
-  import { ago, compact, num } from '$lib/format';
+  import { ago, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -82,7 +82,7 @@
     <div class="toolbar">
       <span class="count num">
         {#if datasets.data}
-          {datasets.data.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'} · {compact(totals.images)} images · {compact(totals.boxes)} boxes
+          {datasets.data.length} {datasets.data.length === 1 ? 'dataset' : 'datasets'} · {num(totals.images)} images · {num(totals.boxes)} boxes
         {:else}<Skeleton inline w="200px" h="10px" />{/if}
       </span>
       <div class="search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" /></div>
@@ -147,7 +147,8 @@
                 <td title={classTip(d)}>
                   {#if d.stats}<div class="strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} /></div>{:else}<span class="faint">—</span>{/if}
                 </td>
-                <td class="r num hide-md">{compact(d.stats?.boxes)}</td>
+                <!-- Full numbers, like the split columns beside it: one format per column. -->
+                <td class="r num hide-md">{num(d.stats?.boxes)}</td>
                 <td class="r faint hide-md">{ago(d.created)}</td>
               </tr>
             {/each}
@@ -166,7 +167,7 @@
                 <span class="m-meta num truncate">{num(d.splits.train)} train · {num(d.splits.val)} val · {num(d.splits.test)} test · {d.classes.length} classes</span>
               </span>
               <span class="m-side">
-                <span class="num">{compact(imageCount(d))}<span class="faint">&nbsp;img</span></span>
+                <span class="num">{num(imageCount(d))}<span class="faint">&nbsp;img</span></span>
                 {#if d.stats}<span class="m-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
               </span>
             </a>

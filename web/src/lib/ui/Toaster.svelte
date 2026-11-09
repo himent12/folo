@@ -149,6 +149,27 @@
     background: var(--bg-hover);
     color: var(--text-primary);
   }
+  /* Touch: both buttons are real 44 px boxes side by side (no invisible targets overlapping), pulled into the toast's
+     padding so the card keeps its height. */
+  @media (pointer: coarse) {
+    .toast {
+      align-items: center;
+    }
+    .icon {
+      align-self: flex-start;
+    }
+    .action,
+    .close {
+      height: 44px;
+      margin: calc(-1 * var(--space-2)) 0;
+    }
+    .action {
+      padding: 0 var(--space-3);
+    }
+    .close {
+      width: 44px;
+    }
+  }
   @media (max-width: 767px) {
     .toaster {
       right: var(--space-4);

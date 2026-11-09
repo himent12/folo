@@ -119,8 +119,10 @@
     border-radius: 999px;
     background: var(--text-secondary);
   }
+  /* One thumb in every engine: 14 px including its 3 px panel-coloured rim (20 px on touch). */
   input::-webkit-slider-thumb {
     -webkit-appearance: none;
+    box-sizing: border-box;
     width: 14px;
     height: 14px;
     margin-top: -5px; /* grid-ok: centres the 14 px thumb on the 4 px track */
@@ -131,8 +133,9 @@
     transition: transform var(--dur-fast) var(--ease-standard);
   }
   input::-moz-range-thumb {
-    width: 8px;
-    height: 8px;
+    box-sizing: border-box;
+    width: 14px;
+    height: 14px;
     border-radius: 50%;
     background: var(--text-primary);
     border: 3px solid var(--bg-panel);
@@ -153,6 +156,10 @@
       width: 20px;
       height: 20px;
       margin-top: -8px;
+    }
+    input::-moz-range-thumb {
+      width: 20px;
+      height: 20px;
     }
   }
   input:focus-visible::-webkit-slider-thumb {

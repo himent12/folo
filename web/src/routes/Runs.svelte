@@ -87,6 +87,8 @@
     failed: 'Failed',
   };
   const tone = (r: Run) => (r.status === 'running' ? 'accent' : 'neutral');
+  /** "From scratch" as a value of its own (capital F), "from <model>" after the dataset and model. */
+  const fromText = (from: ReturnType<typeof origin>) => (from.kind === 'scratch' ? 'from scratch' : `from ${from.label}`);
   // Nothing answers: the actions that need the server are disabled and say why (as on Datasets).
   const offline = $derived(!runs.data && isOffline(runs.error));
 </script>
@@ -205,7 +207,7 @@
                 </td>
                 <td class="lead">
                   <a class="name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
-                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span> · from {from.label}</span>
+                  <span class="sub ctx">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id} · <span class="mono">{r.config.arch}</span> · {fromText(from)}</span>
                 </td>
                 <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                 <td class="hide-lg muted">{dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</td>
@@ -215,6 +217,8 @@
                     <a href={href(`/models/${from.id}`)} onclick={(e) => e.stopPropagation()}>{from.label}</a>
                   {:else if from.kind === 'file'}
                     <span class="mono" title={from.path}>{from.label}</span>
+                  {:else if from.kind === 'scratch'}
+                    <span class="faint">From scratch</span>
                   {:else}
                     <span class="faint">{from.label}</span>
                   {/if}
@@ -240,16 +244,19 @@
     </div>
     {#if shown.length}
       <!-- Phones: stacked rows with the essentials (selection, name, status, score, progress). -->
+      <!-- Select mode: Compare (with its count) a secondary button, Cancel a ghost one, both 44 px targets on touch. -->
       <div class="rows-head">
-        <button type="button" class="pick" aria-pressed={choosing} onclick={() => (choosing ? ((picking = false), (selected = [])) : (picking = true))}
-          >{choosing ? 'Cancel' : 'Select to compare'}</button
-        >
         {#if choosing}
-          {#if selected.length >= 2}
-            <a class="pick go" href={href(`/runs/compare?ids=${selected.join(',')}`)}>Compare <span class="num">{selected.length}</span></a>
-          {:else}
-            <span class="pick-why">Select 2–4</span>
-          {/if}
+          <Button variant="ghost" onclick={() => ((picking = false), (selected = []))}>Cancel</Button>
+          <Gate reason={offline ? OFFLINE_REASON : selected.length < 2 ? 'Select 2–4 runs to compare' : null}>
+            {#snippet children(why)}
+              <Button icon={GitCompare} disabled={!!why} aria-describedby={why} href={href(`/runs/compare?ids=${selected.join(',')}`)}>
+                Compare{#if selected.length}<span class="num faint">{selected.length}</span>{/if}
+              </Button>
+            {/snippet}
+          </Gate>
+        {:else}
+          <Button variant="ghost" icon={GitCompare} onclick={() => (picking = true)}>Select to compare</Button>
         {/if}
         <span class="col" aria-hidden="true">Best mAP50-95</span>
       </div>
@@ -269,7 +276,8 @@
             <a class="r-main" href={href(`/runs/${r.id}`)}>
               <span class="r-text">
                 <span class="r-name"><StatusBadge status={r.status} plain dotOnly /><span class="name truncate">{r.name}</span></span>
-                <span class="r-meta num truncate">{failureCause(r) ?? STATUS[r.status]} · {r.epoch}/{r.epochs} · {dsName.get(r.config.dataset_id) ?? r.config.dataset_id}</span>
+                <!-- With the checkboxes in, the dataset steps out so the cause and progress keep the line. -->
+                <span class="r-meta num truncate">{failureCause(r) ?? STATUS[r.status]} · {r.epoch}/{r.epochs}{#if !choosing} · {dsName.get(r.config.dataset_id) ?? r.config.dataset_id}{/if}</span>
               </span>
               <span class="r-end"><span class="r-val num">{metric(r.best?.map50_95)}</span><span class="r-age">{ago(r.created)}</span></span>
             </a>
@@ -318,7 +326,8 @@
     width: 14px;
     height: 14px;
     margin: 0;
-    accent-color: var(--accent-line);
+    /* Neutral: a selected row's lime is its leading bar alone (the fill is ink, the check inverted). */
+    accent-color: var(--text-primary);
     cursor: pointer;
   }
   .runs .check input {
@@ -419,10 +428,10 @@
     .rows-head {
       display: flex;
       justify-content: space-between;
-      gap: var(--space-3);
-      height: 44px;
+      gap: var(--space-2);
+      height: 48px;
       align-items: center;
-      padding: 0 var(--space-4);
+      padding: 0 var(--space-4) 0 var(--space-1);
       font-size: var(--type-sm-size);
       color: var(--text-tertiary);
       border-bottom: 1px solid var(--line-subtle);
@@ -448,24 +457,6 @@
     }
     .col {
       margin-left: auto;
-    }
-    .pick-why {
-      color: var(--text-tertiary);
-    }
-    .pick {
-      display: inline-flex;
-      align-items: center;
-      gap: var(--space-1);
-      height: 44px;
-      color: var(--text-secondary);
-      font-size: var(--type-sm-size);
-      text-decoration: underline;
-      text-decoration-color: var(--line-strong);
-      text-underline-offset: 3px;
-    }
-    .pick[aria-pressed='true'],
-    .pick.go {
-      color: var(--text-primary);
     }
     .rows li:last-child {
       border-bottom: 0;

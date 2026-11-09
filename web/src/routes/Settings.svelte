@@ -1,5 +1,8 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
+  import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import CircleMinus from '@lucide/svelte/icons/circle-minus';
+  import CircleSlash from '@lucide/svelte/icons/circle-slash';
   import Monitor from '@lucide/svelte/icons/monitor';
   import Moon from '@lucide/svelte/icons/moon';
   import PlugZap from '@lucide/svelte/icons/plug-zap';
@@ -7,6 +10,8 @@
   import pkg from '../../package.json';
   import { HttpApi } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
+  import { Resource } from '$lib/api/resource.svelte';
+  import { isApple } from '$lib/keys';
   import { bytes } from '$lib/format';
   import { prefs, type ThemePref, type Units } from '$lib/prefs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -21,17 +26,30 @@
   import Segmented from '$lib/ui/Segmented.svelte';
   import Switch from '$lib/ui/Switch.svelte';
   import { toast } from '$lib/ui/toast.svelte';
+  import { capabilityRows, deviceSummary, type CapState } from './settings/capabilities';
   import ThemePreview from './settings/ThemePreview.svelte';
 
   setCrumbs({ label: 'Settings' });
 
-  const sections = [
+  // What the server can use (f16, tensor cores, mixed precision); servers older than `capabilities` show no panel. It
+  // sits low on the page: a real server answers once its GPU is up, and the panel must not push the forms down.
+  const sys = new Resource((s) => hub.api.system(s));
+  const caps = $derived(sys.data?.capabilities);
+  const capRows = $derived(caps ? capabilityRows(caps) : []);
+  const capMarks: Record<CapState, typeof CircleCheck> = { on: CircleCheck, off: CircleMinus, none: CircleSlash };
+
+  const sections = $derived([
     { id: 'connection', label: 'Connection' },
     { id: 'appearance', label: 'Appearance' },
     { id: 'units', label: 'Units' },
     { id: 'shortcuts', label: 'Shortcuts' },
+    ...(caps ? [{ id: 'system', label: 'System' }] : []),
     { id: 'about', label: 'About' },
-  ];
+  ]);
+  /** "Ctrl K" or "⌘ K": the one this platform uses. */
+  const paletteKeys = isApple ? '⌘ K' : 'Ctrl K';
+  /** A note in parts, identifiers (in backticks) set as code. */
+  const parts = (t: string) => t.split('`').map((text, i) => ({ text, code: i % 2 === 1 }));
 
   // Scroll-spy from geometry: the current section is the last one whose top has passed just below the top bar
   // (the first while nothing has; the last once the page is scrolled to the bottom).
@@ -241,7 +259,8 @@
 
       <Panel title="Keyboard shortcuts" id="shortcuts" divided>
         <div class="stack">
-          <div class="setting">
+          <!-- Touch-only devices have no keyboard to look shortcuts up for (the switch stays, for a paired one). -->
+          <div class="setting has-keys">
             <div class="setting-text">
               <p>
                 {#if keyPrefs.singleKeys}Press <Kbd keys="?" /> anywhere for all shortcuts{:else}All shortcuts{/if}
@@ -250,15 +269,53 @@
             </div>
             <Button onclick={showShortcuts}>Show shortcuts</Button>
           </div>
-          <div class="sep"></div>
+          <div class="sep has-keys"></div>
           <Switch
             label="Single-key shortcuts"
-            hint="N, G then a letter, [, ? and J / K / X in lists. Turn off if you use speech input or press keys by accident; Ctrl or ⌘ K and the arrow keys keep working."
+            hint="N, G then a letter, [, ? and J / K / X in lists. Turn off if you use speech input or press keys by accident; {paletteKeys} and the arrow keys keep working."
             checked={keyPrefs.singleKeys}
             onchange={(v) => (keyPrefs.singleKeys = v)}
           />
         </div>
       </Panel>
+
+      {#if caps && sys.data}
+        <!-- What runs on `device: auto` can use: each feature's state as a mark and a word, and in a sentence why not. -->
+        <Panel title="System" id="system" divided>
+          <div class="stack">
+            <div class="setting">
+              <div class="setting-text">
+                <p>Default device</p>
+                <p class="note">{deviceSummary(caps, sys.data.gpus, sys.data.cpu.name)}</p>
+              </div>
+              <span class="mono device">{caps.device}</span>
+            </div>
+            <ul class="caps" aria-label="Capabilities">
+              {#each capRows as c (c.id)}
+                {@const Mark = capMarks[c.state]}
+                <li class="cap">
+                  <div class="setting-text">
+                    <p>{c.label}</p>
+                    <p class="note">{#each parts(c.note) as p, i (i)}{#if p.code}<code>{p.text}</code>{:else}{p.text}{/if}{/each}</p>
+                  </div>
+                  <span class="cap-state" data-state={c.state}><Mark size={14} strokeWidth={1.75} aria-hidden="true" />{c.word}</span>
+                </li>
+              {/each}
+            </ul>
+            {#if capRows.some((c) => c.raw)}
+              <details class="tech">
+                <summary>Technical details</summary>
+                <dl>
+                  {#each capRows.filter((c) => c.raw) as c (c.id)}
+                    <dt>{c.label}</dt>
+                    <dd class="mono">{c.raw}</dd>
+                  {/each}
+                </dl>
+              </details>
+            {/if}
+          </div>
+        </Panel>
+      {/if}
 
       <Panel title="About" id="about" divided>
         <dl class="about">
@@ -294,7 +351,7 @@
 </Page>
 
 <style>
-  /* The form column (720) and a sticky rail of section anchors on its right, centred as one 920 px measure. */
+  /* The form column (720) on the shared content edge, and a sticky rail of section anchors on its right. */
   .layout {
     display: grid;
     grid-template-columns: minmax(0, 720px) 168px;
@@ -560,6 +617,50 @@
   }
   .setting-text .note {
     margin-top: 2px;
+  }
+  .device {
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+  }
+  .caps {
+    display: grid;
+  }
+  .cap {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: var(--space-3) 0;
+    border-top: 1px solid var(--line-subtle);
+  }
+  .cap:last-child {
+    padding-bottom: 0;
+  }
+  .cap-state {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1-5);
+    color: var(--text-secondary);
+  }
+  .cap-state[data-state='on'] {
+    color: var(--text-primary);
+  }
+  .cap-state[data-state='on'] :global(svg) {
+    color: var(--success-text);
+  }
+  .cap-state:not([data-state='on']) :global(svg) {
+    color: var(--text-tertiary);
+  }
+  .note code {
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+  }
+  /* Touch-only: no "Show shortcuts" (the palette drops its entry too). */
+  @media (hover: none) and (pointer: coarse) {
+    .has-keys {
+      display: none;
+    }
   }
   .about {
     display: grid;

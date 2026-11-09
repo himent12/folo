@@ -4,12 +4,14 @@
 // Scenarios (`?scenario=`): `normal` (default), `empty` (nothing registered yet), `error` (every call fails),
 // `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
 // `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
-// finished 5-epoch run the trainer warns is too short to learn from), for screenshots of those states.
+// finished 5-epoch run the trainer warns is too short to learn from), `tensor-cores-off` (tensor cores available but
+// not requested, so no amp) and `no-tensor-cores` (an adapter without them), for screenshots of those states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
   Arch,
   Box,
+  Capabilities,
   ClassMetrics,
   CreateDataset,
   CreateSyntheticDataset,
@@ -58,7 +60,16 @@ import {
 } from './runs';
 import { COCO80 } from './coco';
 
-export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged' | 'short-run';
+export type Scenario =
+  | 'normal'
+  | 'empty'
+  | 'error'
+  | 'loading'
+  | 'oom'
+  | 'gpu-unplugged'
+  | 'short-run'
+  | 'tensor-cores-off'
+  | 'no-tensor-cores';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -309,6 +320,25 @@ export class MockApi implements Api {
     return gpus;
   }
 
+  /** As the real server words them (docs/API.md): tensor cores on by default; the scenarios turn them off or remove them. */
+  #capabilities(): Capabilities {
+    const off = 'off (not requested: FOLO_GPU_TENSOR_CORES=1 or --tensor-cores)';
+    const none = `off: ${GPU_NAME} (Dx12) has no cooperative matrices in wgpu`;
+    const reason = this.scenario === 'tensor-cores-off' ? off : this.scenario === 'no-tensor-cores' ? none : null;
+    return {
+      device: 'gpu:0',
+      shader_f16: true,
+      tensor_cores: { available: this.scenario !== 'no-tensor-cores', enabled: reason === null, reason },
+      amp: {
+        available: reason === null,
+        reason:
+          reason === null
+            ? null
+            : `mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): gpu:0 has tensor cores ${reason}; train without amp (f32), or start folo serve with --tensor-cores on a GPU that has them`,
+      },
+    };
+  }
+
   system(): Promise<SystemInfo> {
     return this.#call(() => {
       const t = Date.now() / 1000;
@@ -317,6 +347,7 @@ export class MockApi implements Api {
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
         gpus: this.#gpus(),
         features: ['export_onnx_switches'],
+        capabilities: this.#capabilities(),
       };
     }, 60);
   }
