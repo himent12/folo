@@ -1231,7 +1231,7 @@ impl FoloApp {
             // Honest about what reaches this app: the server and the datasets registered with it;
             // `folo train` runs on its own (runs/ in the working folder).
             .child(cmd(0, "start it, then Connect in Settings"))
-            .child(cmd(1, "then Add a dataset → choose ./shapes"))
+            .child(cmd(1, "then Add dataset → choose ./shapes"))
             // Training from the terminal stands apart from the sequence above.
             .child(div().pt(px(6.)).child(caption(&t, "Independent CLI training")))
             .child(cmd(2, "trains here in the terminal; this run won't appear in Desktop"));
