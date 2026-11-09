@@ -581,6 +581,18 @@ export const scenes = [
     },
   },
   {
+    // fasteners-n's f16 export (as the server mock's m_53d2): Details says "Stored as f16 · fused, inference only" and,
+    // with no training record, nothing about training. Phones: the Details section.
+    name: 'model-f16',
+    path: '/models/m_fast_n_f16',
+    viewports: ['desktop', 'mobile'],
+    fullPage: true,
+    setup: async (page, { vp }) => {
+      await until(page, '#pr svg');
+      if (vp === 'mobile') await page.getByRole('radio', { name: 'Details' }).click();
+    },
+  },
+  {
     name: 'model-coco',
     path: '/models/m_coco_s',
     viewports: ['desktop', 'laptop'],

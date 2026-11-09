@@ -201,6 +201,17 @@
   const kpiGrid = $derived(phone.current);
   /** The detection head, from the file (`Model.head`; missing, from older servers, means o2m). */
   const HEAD_LABEL = { o2m: 'NMS (one-to-many)', o2o: 'End-to-end (no NMS)' } as const;
+  /**
+   * How the weights are stored (the file's folo.dtype and folo.fused, docs/API.md): "f16 · fused, inference only".
+   * Null when the server does not say; a dtype this client has no name for reads as unknown, as the API asks.
+   */
+  const stored = $derived.by(() => {
+    const m = model.data;
+    const p = m?.precision === 'f32' || m?.precision === 'f16' ? m.precision : null;
+    const fused = m?.fused === true;
+    if (!p && !fused) return null;
+    return [p, fused ? 'fused, inference only' : null].filter(Boolean).join(' · ');
+  });
   // What the four numbers mean, one tap away (the strip itself keeps to values and a short qualifier).
   let helpOpen = $state(false);
   // Phones: one summary line under the top bar; the rest of the provenance behind it.
@@ -419,6 +430,12 @@
               <div class="kv">
                 <dt>Trained for</dt>
                 <dd class="num">{num(m.trained_with.epochs)} {m.trained_with.epochs === 1 ? 'epoch' : 'epochs'} at {m.trained_with.imgsz} px</dd>
+              </div>
+            {/if}
+            {#if stored}
+              <div class="kv">
+                <dt>Stored as</dt>
+                <dd>{stored}</dd>
               </div>
             {/if}
             <div class="kv">

@@ -502,6 +502,17 @@ describe('New run: the top bar', () => {
 });
 
 describe('New run: start weights', () => {
+  it('never offers fused weights (an export loads for inference only) as a starting point', async () => {
+    await open();
+    target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-n"]')!.click();
+    flushSync();
+    const sel = target.querySelector<HTMLSelectElement>('select#weights')!;
+    await until(() => sel.querySelector('option:not([value="none"])'), 'trained folo-n weights');
+    const ids = [...sel.options].map((o) => o.value);
+    expect(ids).toContain('m_fast_n');
+    expect(ids).not.toContain('m_fast_n_f16');
+  });
+
   it('names a run without weights "From scratch", in the select and in the Summary', async () => {
     await open();
     expect(target.querySelector('select#weights option[value="none"]')?.textContent).toBe('From scratch');

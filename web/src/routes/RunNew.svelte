@@ -166,8 +166,9 @@
 
   const dataset = $derived(datasets.data?.find((d) => d.id === datasetId));
 
-  // Pretrained weights must match the architecture; switching size drops an incompatible choice.
-  const weightOptions = $derived((models.data ?? []).filter((m) => m.arch === arch));
+  // Pretrained weights must match the architecture; switching size drops an incompatible choice. Fused weights (an
+  // export) load for inference only, so they are never a starting point.
+  const weightOptions = $derived((models.data ?? []).filter((m) => m.arch === arch && m.fused !== true));
   $effect(() => {
     const opts = weightOptions;
     if (!models.data) return;

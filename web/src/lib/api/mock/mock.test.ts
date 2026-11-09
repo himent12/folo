@@ -218,3 +218,12 @@ describe('mock API: PR #69 behaviour', () => {
     expect(all.issues.filter((i) => i.severity === 'info').every((i) => i.fix === undefined)).toBe(true);
   });
 });
+
+describe('mock models', () => {
+  it("says how each model's weights are stored, with one fused f16 export", async () => {
+    const models = await new MockApi('normal', 0).models();
+    const exp = models.find((m) => m.id === 'm_fast_n_f16')!;
+    expect(exp).toMatchObject({ precision: 'f16', fused: true, trained_with: null, arch: 'folo-n' });
+    expect(models.filter((m) => m.id !== exp.id).every((m) => m.precision === 'f32' && m.fused === false)).toBe(true);
+  });
+});
