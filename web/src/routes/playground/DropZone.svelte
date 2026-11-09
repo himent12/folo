@@ -90,7 +90,9 @@
     display: grid;
     place-items: center;
     width: 100%;
-    flex: 1 0 280px;
+    flex: 1 1 280px;
+    /* Gives way in a short window (down to 160 px) before the samples under it would be pushed out. */
+    min-height: 160px;
     padding: var(--space-8) var(--space-6);
   }
   .zone.dragging {

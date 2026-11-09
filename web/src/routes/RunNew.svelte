@@ -229,6 +229,8 @@
   const ampBlock = $derived.by((): { why: string; raw?: string } | null => {
     if (!caps) return null;
     if (device === 'cpu') return { why: 'The CPU has no tensor cores. Pick a GPU to train in mixed precision.' };
+    // Auto on a server without a usable GPU is the CPU too: no GPU advice.
+    if (device === 'auto' && caps.device === 'cpu') return { why: 'This server has no usable GPU, so runs train on the CPU in f32.' };
     // `capabilities` describe the device `auto` resolves to; another GPU is left to the server.
     if (caps.amp.available || (device !== 'auto' && device !== caps.device)) return null;
     const raw = caps.amp.reason ?? caps.tensor_cores.reason ?? undefined;
@@ -242,7 +244,7 @@
       // an RTX 4080 SUPER has them there), none on DX12 or Metal. So only an NVIDIA RTX card seen through DX12 has a way.
       const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === caps.device);
       if (g?.backend === 'dx12' && /nvidia/i.test(g.name) && /\brtx\b/i.test(g.name))
-        return { why: 'DirectX 12 does not reach this GPU’s tensor cores. Restart the server on Vulkan: `FOLO_GPU_BACKEND=vulkan folo serve --tensor-cores`.', raw };
+        return { why: "DirectX 12 does not reach this GPU’s tensor cores. Restart the server on Vulkan, in PowerShell: `$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores`.", raw };
       return { why: 'This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.', raw };
     }
     return { why: 'Not available on this server. Train in f32 on this GPU.', raw };

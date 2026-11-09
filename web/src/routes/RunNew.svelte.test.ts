@@ -323,9 +323,9 @@ describe('New run: mixed precision', () => {
     expect(s.getAttribute('aria-describedby')).toBe('amp-why');
     // One plain sentence and one action docs/GPU.md confirms (an RTX 4080 SUPER has cooperative matrices on Vulkan).
     expect(target.querySelector('#amp-why')?.textContent).toBe(
-      'DirectX 12 does not reach this GPU’s tensor cores. Restart the server on Vulkan: FOLO_GPU_BACKEND=vulkan folo serve --tensor-cores.',
+      "DirectX 12 does not reach this GPU’s tensor cores. Restart the server on Vulkan, in PowerShell: $env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores.",
     );
-    expect(target.querySelector('#amp-why .mono')?.textContent).toBe('FOLO_GPU_BACKEND=vulkan folo serve --tensor-cores');
+    expect(target.querySelector('#amp-why .mono')?.textContent).toBe("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
     // The server's reason, verbatim and copyable, behind "Driver report".
     const report = target.querySelector('.amp .dev-detail')!;
     expect(report.querySelector('summary')?.textContent).toBe('Driver report');
@@ -351,6 +351,18 @@ describe('New run: mixed precision', () => {
     await until(sw, 'the switch');
     expect(target.querySelector('#amp-why')?.textContent).toBe('This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.');
     expect(target.querySelector('#amp-why')?.textContent).not.toContain('FOLO_GPU_BACKEND');
+  });
+
+  it('treats Auto on a server without a usable GPU as the CPU, with no GPU advice', async () => {
+    hub.api = api = new MockApi('no-tensor-cores', 0);
+    const sys = api.system.bind(api);
+    api.system = async () => {
+      const r = await sys();
+      return { ...r, capabilities: { ...r.capabilities!, device: 'cpu' } };
+    };
+    await open();
+    await until(sw, 'the switch');
+    expect(target.querySelector('#amp-why')?.textContent).toBe('This server has no usable GPU, so runs train on the CPU in f32.');
   });
 
   it('says how to turn tensor cores on when the server has them off', async () => {

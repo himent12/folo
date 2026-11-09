@@ -40,7 +40,8 @@ function gpuOf(c: Pick<Capabilities, 'device'>, gpus: Gpu[]): Gpu | undefined {
   return m ? gpus.find((x) => x.ordinal === Number(m[1])) : undefined;
 }
 
-const VULKAN_TC = 'Try Vulkan: `FOLO_GPU_BACKEND=vulkan folo serve --tensor-cores`.';
+// DirectX 12 means a Windows server, so the Vulkan commands are in PowerShell (the default Windows shell).
+const VULKAN_TC = "Try Vulkan, in PowerShell: `$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores`.";
 const SERVE_TC = 'Start `folo serve --tensor-cores` to use them.';
 
 function tensorRow(c: Capabilities, dx12: boolean): Pick<CapRow, 'note' | 'action'> {
@@ -62,6 +63,9 @@ function ampRow(c: Capabilities): Pick<CapRow, 'note' | 'action'> {
   if (c.amp.available) return { note: 'Runs can train in mixed precision (f16 compute, f32 weights): the Mixed precision switch in New run.', action: null };
   if (c.device === 'cpu') return { note: 'Needs a GPU with tensor cores; this server trains on the CPU, in f32.', action: null };
   if (!c.tensor_cores.enabled) {
+    // A failed self-test is not fixed by asking for them again (the server already did): say so, as the row above does.
+    if (/self-test/i.test(c.tensor_cores.reason ?? '') || /self-test/i.test(c.amp.reason ?? ''))
+      return { note: 'Needs the tensor cores, whose self-test failed on this server, so runs train in f32.', action: 'Run `folo doctor --tensor-cores` to see why.' };
     return c.tensor_cores.available
       ? { note: 'Needs the tensor cores, which are off on this server.', action: SERVE_TC.replace('them', 'it') }
       : { note: 'Needs a GPU with tensor cores, so runs train in f32.', action: null };
@@ -87,7 +91,7 @@ export function capabilityRows(c: Capabilities, gpus: Gpu[] = []): CapRow[] {
         : c.device === 'cpu'
           ? { note: 'The CPU computes in f32, so f16 inference runs in f32.', action: null }
           : dx12
-            ? { note: 'DirectX 12 computes in f32 only, so f16 inference runs in f32.', action: 'Try Vulkan: `FOLO_GPU_BACKEND=vulkan folo serve`.' }
+            ? { note: 'DirectX 12 computes in f32 only, so f16 inference runs in f32.', action: "Try Vulkan, in PowerShell: `$env:FOLO_GPU_BACKEND='vulkan'; folo serve`." }
             : { note: 'This GPU computes in f32 only, so f16 inference runs in f32.', action: null }),
       raw: null,
     },
