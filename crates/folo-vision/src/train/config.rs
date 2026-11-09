@@ -6,6 +6,7 @@ use folo_nn::optim::{OptimKind, auto_optimizer, effective_weight_decay};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::loss::LossConfig;
 use crate::model::HeadMode;
 
 /// `optimizer`: `auto`, `sgd` or `adamw` (docs/MODEL.md §8.2).
@@ -88,6 +89,9 @@ pub struct TrainConfig {
     pub augment: AugmentConfig,
     /// Validation batch size; `0` means `2 · batch` (§8.7).
     pub val_batch: usize,
+    /// Loss gains and assigner settings (docs/MODEL.md §7; `reg_max` is the model's, whatever is given here).
+    /// Missing in configs from before it: the §7 defaults.
+    pub loss: LossConfig,
 }
 
 impl Default for TrainConfig {
@@ -120,6 +124,7 @@ impl Default for TrainConfig {
             workers: default_workers(),
             augment: AugmentConfig::default(),
             val_batch: 0,
+            loss: LossConfig::default(),
         }
     }
 }
@@ -242,6 +247,22 @@ impl TrainConfig {
             return bad(format!("val_batch must be at most 4096, got {}", self.val_batch));
         }
         self.augment.validate().map_err(|e| Error::Config(format!("augment: {e}")))?;
+        let l = &self.loss;
+        for (name, v) in [
+            ("loss.box_gain", l.box_gain),
+            ("loss.cls_gain", l.cls_gain),
+            ("loss.dfl_gain", l.dfl_gain),
+            ("loss.tal.alpha", l.tal.alpha),
+            ("loss.tal.beta", l.tal.beta),
+            ("loss.tal.min_box_size", l.tal.min_box_size),
+        ] {
+            if !(v.is_finite() && v >= 0.0) {
+                return bad(format!("{name} must be a finite number >= 0, got {v}"));
+            }
+        }
+        if l.tal.topk == 0 || l.tal.topk2 == Some(0) {
+            return bad("loss.tal.topk and loss.tal.topk2 must be at least 1".into());
+        }
         let device = resolve_device(&self.device)?;
         if !self.device.trim().eq_ignore_ascii_case("auto") {
             super::can_place(device)?;

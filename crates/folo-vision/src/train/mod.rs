@@ -556,7 +556,7 @@ impl Trainer {
             },
         )?;
         let acc = GradAccumulator::new(&model.parameters());
-        let loss_cfg = LossConfig { reg_max: model.head.reg_max, ..LossConfig::default() };
+        let loss_cfg = LossConfig { reg_max: model.head.reg_max, ..cfg.loss };
 
         let file = match &opts.run_dir {
             Some(dir) => {

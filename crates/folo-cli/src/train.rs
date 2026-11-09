@@ -160,7 +160,7 @@ fn start(
     };
     let suffix = arch.strip_prefix("folo-").unwrap_or(&arch).to_string();
     let name = args.name.clone().unwrap_or_else(|| format!("{ds_name}-{suffix}"));
-    let mut cfg = config_of(args, name.clone(), absolute(data_arg), arch, weights_head);
+    let mut cfg = apply_sets(config_of(args, name.clone(), absolute(data_arg), arch, weights_head), &args.set)?;
     // Validate before creating the run folder, so a typo leaves nothing behind.
     cfg.validate().map_err(engine_error)?;
     let data = train_data(&ds)?;
@@ -234,6 +234,39 @@ fn config_of(
     }
 }
 
+/// `--set KEY=VALUE`: `cfg` with each dotted key of its JSON form replaced by the value (JSON when it parses as
+/// JSON, else a string). A key the config does not have, or a value its field cannot take, is `invalid_config`.
+fn apply_sets(cfg: TrainConfig, sets: &[String]) -> Result<TrainConfig, CliError> {
+    if sets.is_empty() {
+        return Ok(cfg);
+    }
+    let bad = |msg: String| {
+        CliError::new(ExitCode::Usage, "invalid_config", msg)
+            .hint("--set takes KEY=VALUE with a key of the run's config.json `train` object, e.g. --set momentum=0.9")
+    };
+    let mut v = serde_json::to_value(&cfg).expect("configs serialize");
+    for s in sets {
+        let Some((key, raw)) = s.split_once('=') else {
+            return Err(bad(format!("--set {s}: expected KEY=VALUE")));
+        };
+        let mut slot = &mut v;
+        for part in key.trim().split('.') {
+            let keys = slot.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "));
+            slot = match slot.get_mut(part) {
+                Some(next) => next,
+                None => {
+                    return Err(bad(format!(
+                        "--set {key}: no training key `{part}`{}",
+                        keys.map_or(String::new(), |k| format!(" (there are: {k})"))
+                    )));
+                }
+            };
+        }
+        *slot = serde_json::from_str(raw.trim()).unwrap_or_else(|_| json!(raw.trim()));
+    }
+    serde_json::from_value(v).map_err(|e| bad(format!("--set: {e}")))
+}
+
 fn resume(
     args: &TrainArgs,
     ckpt: &Path,
@@ -281,6 +314,14 @@ fn resume(
             folo_api::json::path(if best.is_file() { &best } else { ckpt }),
             if stored.dataset.is_empty() { "<dataset>" } else { &stored.dataset }
         )));
+    }
+    if !args.set.is_empty() {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "invalid_config",
+            "--set cannot change a resumed run (a resumed run keeps its settings)",
+        )
+        .hint("leave --set out, or start a new run from its weights with --model <run>/weights/best.folo"));
     }
     check_resume_flags(args, &stored)?;
     // weights/last.folo lives in <run>/weights/.
