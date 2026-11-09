@@ -711,11 +711,14 @@ impl FoloApp {
                 let hidden = p.boxes.len() - vis.len();
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
-                // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary, and
-                // Postprocess an outline (a faint fill in a tertiary edge), in the bar and its key
-                // alike, so the two short stages tell apart at a glance.
-                let (c_pre, c_model, c_nms) =
-                    (t.text_tertiary, t.text_secondary, crate::theme::alpha(t.text_tertiary, 0.3));
+                // One neutral ramp: Inference (the bulk) in secondary ink, Preprocess tertiary at half
+                // strength, and Postprocess an outline (a faint fill in a tertiary edge), in the bar
+                // and its key alike, so the three stages tell apart at a glance.
+                let (c_pre, c_model, c_nms) = (
+                    crate::theme::alpha(t.text_tertiary, 0.5),
+                    t.text_secondary,
+                    crate::theme::alpha(t.text_tertiary, 0.3),
+                );
                 let timing_el = div()
                     .w_full()
                     .flex()
@@ -1047,9 +1050,9 @@ impl FoloApp {
                             .child(hairline(&t))
                             .child(detections)
                             .children(timing)
-                            // The panel's padding after the last row (the fade below shows only while
-                            // more lies under it).
-                            .child(div().h(px(16.))),
+                            // Breathing room after the last row (the fade below shows only while more
+                            // lies under it); 8 px, so the rail fits without a scroll at 1280 × 800.
+                            .child(div().h(px(8.))),
                     ),
             )
             // A row cut by the rail's bottom edge fades out instead of stopping mid-glyph; at the end

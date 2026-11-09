@@ -1079,22 +1079,24 @@ impl FoloApp {
                 let blocked = self.amp_blocked(DEVICES[device]);
                 let off = blocked.is_some();
                 let amp_on = amp && !off;
-                let switch = self
-                    .switch(
+                // Blocked: a disabled switch (no hover, press or focus stop); the reason is beside it.
+                let switch = if off {
+                    self.switch_disabled("nr-amp", cx).into_any_element()
+                } else {
+                    self.switch(
                         "nr-amp",
                         amp_on,
                         window,
                         cx,
                         act(move |this, _, cx| {
-                            if let Some(f) = this.new_run.as_mut()
-                                && !off
-                            {
+                            if let Some(f) = this.new_run.as_mut() {
                                 f.amp = !f.amp;
                                 cx.notify();
                             }
                         }),
                     )
-                    .into_any_element();
+                    .into_any_element()
+                };
                 div()
                     .flex()
                     .items_center()
@@ -1916,8 +1918,11 @@ impl FoloApp {
             .map(|(i, b)| {
                 let hot = hover == Some(i);
                 let key = format!("insp-box-{i}");
+                let full_name = classes.get(b.class as usize).cloned().unwrap_or_default();
                 let row = div()
                     .id(SharedString::from(key.clone()))
+                    // The class column is 70 px; the full name on hover.
+                    .tooltip(crate::controls::tip(full_name, None))
                     .h(px(30.))
                     .px(px(8.))
                     .flex()

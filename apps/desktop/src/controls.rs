@@ -769,6 +769,29 @@ impl FoloApp {
         self.bind(el, key, 9., window, cx, action)
     }
 
+    /// A switch that can't be used now: off, its track the quiet line and its knob half strength,
+    /// with no pointer, hover or focus stop. The caller says why in the text beside it.
+    pub fn switch_disabled(&self, key: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = theme(cx);
+        div()
+            .id(SharedString::from(format!("{key}-disabled")))
+            .w(px(30.))
+            .h(px(18.))
+            .flex_none()
+            .rounded_full()
+            .bg(t.line_subtle)
+            .child(
+                div()
+                    .absolute()
+                    .top(px(2.))
+                    .left(px(2.))
+                    .size(px(14.))
+                    .rounded_full()
+                    .bg(if t.is_dark() { t.text_primary } else { gpui::white() })
+                    .opacity(0.5),
+            )
+    }
+
     /// A horizontal slider over `[min, max]`. Drag, click, or use arrows / Home / End.
     #[allow(clippy::too_many_arguments)]
     pub fn slider(
