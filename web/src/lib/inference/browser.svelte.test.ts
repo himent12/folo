@@ -202,9 +202,16 @@ describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {
   });
 
   it("takes the server's word where it gives one", () => {
-    expect(wasmFromSystem({ features: ['web_wasm'] } as SystemInfo)).toBe(true);
-    expect(wasmFromSystem({ features: ['queue_control'] } as SystemInfo)).toBeNull();
-    expect(wasmFromSystem(undefined)).toBeNull();
+    expect(wasmFromSystem({ features: ['web_wasm'] } as SystemInfo, true)).toBe(true);
+    expect(wasmFromSystem({ features: ['queue_control'] } as SystemInfo, true)).toBeNull();
+    expect(wasmFromSystem(undefined, true)).toBeNull();
+  });
+
+  // Review of round 25: Studio without its own runtime files, connected to another server that has them, offered the
+  // browser path and failed when it loaded. Another server's `web_wasm` says nothing of this page: the probe asks.
+  it("leaves a remote server's web_wasm to the probe", () => {
+    expect(wasmFromSystem({ features: ['run_cli', 'web_wasm'] } as SystemInfo, false)).toBeNull();
+    expect(wasmFromSystem({ features: ['web_wasm'] } as SystemInfo)).toBeNull();
   });
 
   it('reads a missing web_wasm as no runtime only from a server with the final list that served this page', () => {

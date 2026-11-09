@@ -15,9 +15,11 @@
    * An overflow menu: a "⋯" button that opens a short list of actions (links or buttons). Keyboard (WAI-ARIA menu
    * button): Enter, Space or ArrowDown on the button opens it on the first item (ArrowUp on the last); in the list,
    * the arrows wrap, Home and End go to the ends, typing a letter moves to the next item starting with it (typeahead),
-   * Escape closes it back to the button, Tab closes it and moves on.
+   * Escape closes it back to the button, Tab closes it and moves on. Roving tabindex: the item last focused is the one
+   * in the tab order.
    * On phones it is the shared bottom sheet (ui/Dialog, as the loss view's options): the items as full-width 44 px
    * rows under the sheet's title, never a popover that lands on the text beside its button (round 24's queued run).
+   * Tab there moves between the sheet's Close and that item (the arrows move among the items).
    */
   import Ellipsis from '@lucide/svelte/icons/ellipsis';
   import { tick } from 'svelte';
@@ -43,6 +45,8 @@
   let open = $state(false);
   let root = $state<HTMLElement>();
   let list = $state<HTMLElement>();
+  /** The item in the tab order (roving tabindex): the one focused last. */
+  let active = $state(0);
   const phone = new MediaQuery(media.phone, false);
   /** `fixed`: where the list sits, under the trigger's right edge. */
   let at = $state<{ top: number; right: number } | null>(null);
@@ -56,6 +60,7 @@
 
   async function show(at: 'first' | 'last' = 'first') {
     if (fixed) place();
+    active = at === 'first' ? 0 : items.length - 1;
     open = true;
     await tick();
     const all = entries();
@@ -94,6 +99,11 @@
     it.onclick?.();
   }
 
+  function onfocusin(e: FocusEvent) {
+    const i = entries().indexOf(e.target as HTMLElement);
+    if (i >= 0) active = i;
+  }
+
   function onkeydown(e: KeyboardEvent) {
     const all = entries();
     const i = all.indexOf(document.activeElement as HTMLElement);
@@ -108,7 +118,7 @@
       e.preventDefault();
       (e.key === 'Home' ? all[0] : all.at(-1))?.focus();
     } else if (e.key === 'Tab') {
-      // The phone sheet is modal: Tab moves on to its Close.
+      // The phone sheet is modal: Tab moves on to its Close, and from there back to the active item.
       if (!phone.current) hide(false);
     } else if (e.key.length === 1 && e.key !== ' ' && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
@@ -163,6 +173,7 @@
       style:top={fixed && at ? `${at.top}px` : undefined}
       style:right={fixed && at ? `${at.right}px` : undefined}
       {onkeydown}
+      {onfocusin}
     >
       {@render entriesList()}
     </div>
@@ -170,13 +181,14 @@
 </div>
 
 {#snippet entriesList()}
-  {#each items as it (it.label)}
+  {#each items as it, i (it.label)}
+    {@const tabindex = i === Math.min(active, items.length - 1) ? 0 : -1}
     {#if it.href}
-      <a role="menuitem" tabindex="-1" href={it.href} class:danger={it.danger} onclick={() => hide(false)}>
+      <a role="menuitem" {tabindex} href={it.href} class:danger={it.danger} onclick={() => hide(false)}>
         {#if it.icon}<it.icon size={16} strokeWidth={1.75} aria-hidden="true" />{/if}{it.label}
       </a>
     {:else}
-      <button role="menuitem" tabindex="-1" class:danger={it.danger} onclick={() => choose(it)}>
+      <button role="menuitem" {tabindex} class:danger={it.danger} onclick={() => choose(it)}>
         {#if it.icon}<it.icon size={16} strokeWidth={1.75} aria-hidden="true" />{/if}{it.label}
       </button>
     {/if}
@@ -187,7 +199,7 @@
 {#if phone.current}
   <Dialog bind:open title={label} size="sm">
     <!-- svelte-ignore a11y_interactive_supports_focus -->
-    <div class="sheet" id="{uid}-list" role="menu" aria-label={label} bind:this={list} {onkeydown}>
+    <div class="sheet" id="{uid}-list" role="menu" aria-label={label} bind:this={list} {onkeydown} {onfocusin}>
       {@render entriesList()}
     </div>
   </Dialog>

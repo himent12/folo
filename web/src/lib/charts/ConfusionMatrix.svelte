@@ -84,6 +84,8 @@
     if (next?.cols !== fit?.cols || next?.cell !== fit?.cell) fit = next;
   }
   function onscroll() {
+    // A deferred call (the next tick, an observer) can land after the matrix has gone.
+    if (!root) return;
     if (!fit) {
       moreRight = root.scrollLeft + root.clientWidth < root.scrollWidth - 1;
       range = null;
@@ -137,7 +139,9 @@
     if (!fixed) return;
     void fit;
     void n;
-    void tick().then(onscroll);
+    let live = true;
+    void tick().then(() => live && onscroll());
+    return () => (live = false);
   });
   // A label's length changes when the font settles: the label row is measured again, so it never cuts a name short.
   $effect(() => {

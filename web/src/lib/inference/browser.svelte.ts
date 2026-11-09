@@ -62,14 +62,16 @@ function loadWasm(): Promise<WasmModule> {
 }
 
 /**
- * Whether `/api/system` says this Studio build includes folo-wasm (the one place that reads `web_wasm`): `true` where it
- * lists it; `false` where a server that has the final list (it lists `run_cli`) leaves it out while it serves this very
- * page (`servedHere`: same origin, not Vite's dev server, whose files the server cannot see); `null` where it does
- * not say (older servers, another origin), and then `probeWasm` asks the files.
+ * Whether `/api/system` says this Studio build includes folo-wasm (the one place that reads `web_wasm`). The server
+ * speaks only for a page it serves (`servedHere`: same origin, not Vite's dev server, whose files the server cannot
+ * see): there, `true` where it lists it, and `false` where a server that has the final list (it lists `run_cli`) leaves
+ * it out. Anywhere else (another origin, the dev server, an older server that does not say) it is `null`, and then
+ * `probeWasm` asks this page's own files: another server's runtime is not this page's.
  */
 export function wasmFromSystem(system: SystemInfo | null | undefined, servedHere = false): boolean | null {
+  if (!servedHere) return null;
   if (hasFeature(system, 'web_wasm')) return true;
-  return servedHere && hasFeature(system, 'run_cli') ? false : null;
+  return hasFeature(system, 'run_cli') ? false : null;
 }
 
 /** Whether the server at `serverUrl` serves this page: the same origin, in a built Studio (not Vite's dev server). */

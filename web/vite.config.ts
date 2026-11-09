@@ -19,5 +19,6 @@ export default defineConfig({
     proxy: { '/api': { target: api, changeOrigin: true } },
   },
   build: { target: 'es2022', sourcemap: true },
-  test: { include: ['src/**/*.test.ts', 'scripts/**/*.test.mjs'], environment: 'node' },
+  // An unhandled error (a deferred callback outliving its component) fails the run, never only a warning.
+  test: { include: ['src/**/*.test.ts', 'scripts/**/*.test.mjs'], environment: 'node', dangerouslyIgnoreUnhandledErrors: false },
 });

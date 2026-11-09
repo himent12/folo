@@ -277,8 +277,8 @@
   // The probe is asked on each visit, again when the server reconnects (`system` is read again) and when the browser
   // comes back online: an unknown answer (offline) is never kept (lib/inference `probeWasm`).
   let probed = $state<boolean | null>(null);
-  /** The server's word on its own build counts for this page only when it served it. */
-  const fromServer = $derived(wasmFromSystem(system.data, servedBy(hub.serverUrl)));
+  /** The server's word on its own build counts for this page only when it served it (the demo's server always does). */
+  const fromServer = $derived(wasmFromSystem(system.data, hub.api.mock || servedBy(hub.serverUrl)));
   $effect(() => {
     if (hub.api.mock || fromServer !== null) return;
     let live = true;

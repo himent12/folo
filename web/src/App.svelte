@@ -68,7 +68,8 @@
     releaseFocus = null;
     void tick().then(() =>
       requestAnimationFrame(() => {
-        if (router.route.path === path) releaseFocus = holdRouteFocus(mainEl);
+        // `mainEl` is gone if the app was torn down before the frame.
+        if (mainEl && router.route.path === path) releaseFocus = holdRouteFocus(mainEl);
       }),
     );
   });
