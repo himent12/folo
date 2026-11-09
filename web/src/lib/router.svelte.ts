@@ -111,6 +111,9 @@ export type NavigationGuard = (to: Route, proceed: () => void) => boolean;
 /** How long a history traversal of the router's own may take before the router stops waiting for it. */
 const TRAVERSAL_MS = 1000;
 
+/** A route as the hash that shows it. */
+const hashOf = (r: Route) => `#${r.path}${String(r.query) ? `?${r.query}` : ''}`;
+
 /** The place in the tab's history an entry's state records (see `Router`), if it has one. */
 const posOf = (state: unknown): number | null => {
   const pos = (state as { pos?: unknown } | null)?.pos;
@@ -193,9 +196,10 @@ class Router {
       if (travel.on) this.route = parse(hash);
       return;
     }
-    // An entry without a place is new, right after this one. Nothing moved: the second event of a move.
+    // An entry without a place is taken for a new one, right after this one (it can also be one from before the
+    // app kept places, anywhere in the history: `#travel` copes). Nothing moved: the second event of a move.
     const pos = known ?? this.#pos + 1;
-    if (pos === this.#pos && hash === `#${this.route.path}${String(this.route.query) ? `?${this.route.query}` : ''}`) return;
+    if (pos === this.#pos && hash === hashOf(this.route)) return;
     const from = this.#pos;
     const proceed = () => {
       // A new entry is made again (the held one was left behind); an old one is travelled to.
@@ -217,11 +221,20 @@ class Router {
   #travel(pos: number, on: boolean) {
     this.#arrived();
     if (pos === this.#pos) return;
-    // A traversal that never arrives (the entry is gone) must not leave the router deaf: it takes the URL as it is.
+    // A traversal that never arrives must not leave the router deaf. On the way to a navigation that was let
+    // through, the URL is taken as it is. On the way back to the page that holds one, the entry was not where the
+    // router thought (it came from before the app kept places): the page stays all the same, written over the
+    // entry the tab is on, so that a held navigation is never gone through with.
+    const page = hashOf(this.route);
     const timer = setTimeout(() => {
       this.#travelling = null;
-      this.#pos = posOf(history.state) ?? this.#pos;
-      this.route = parse(location.hash);
+      if (on) {
+        this.#pos = posOf(history.state) ?? this.#pos;
+        this.route = parse(location.hash);
+      } else {
+        this.#pos = pos;
+        history.replaceState({ pos }, '', page);
+      }
     }, TRAVERSAL_MS);
     this.#travelling = { pos, on, timer };
     history.go(pos - this.#pos);

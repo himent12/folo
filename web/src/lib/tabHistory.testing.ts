@@ -17,11 +17,15 @@ export interface TabHistory {
   settle(): Promise<void>;
 }
 
-export function tabHistory(): TabHistory {
+/** The tab on its current page; `before`: the hashes of older entries without state, behind it. */
+export function tabHistory(before: string[] = []): TabHistory {
   const push = history.pushState.bind(history);
   const replace = history.replaceState.bind(history);
-  let entries: { url: string; state: unknown }[] = [{ url: location.href, state: history.state }];
-  let at = 0;
+  let entries: { url: string; state: unknown }[] = [
+    ...before.map((hash) => ({ url: new URL(hash, location.href).href, state: null })),
+    { url: location.href, state: history.state },
+  ];
+  let at = before.length;
 
   const add = (state: unknown, url: string | URL | null | undefined) => {
     push(state, '', url);
