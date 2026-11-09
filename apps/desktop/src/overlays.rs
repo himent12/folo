@@ -600,6 +600,16 @@ impl FoloApp {
         let error = f.error.clone();
         let submitting = f.submitting;
         let ds = datasets.get(ds_i).cloned();
+        // A Mixed precision switch that held focus when it became blocked (the device changed by
+        // key, or the server's answer arrived) has no focus stop any more: focus moves to the
+        // control before it, so keys keep working. Before the controls are built, so that one
+        // draws its ring this frame.
+        if self.amp_blocked(DEVICES[device]).is_some()
+            && self.focus.borrow().get("nr-amp").is_some_and(|f| f.is_focused(window))
+        {
+            let prev = self.fh("nr-close", cx);
+            window.focus(&prev);
+        }
         let label =
             |s: &str| text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(s.to_string());
         let field = |name: &str, control: AnyElement, help: Option<String>| {
@@ -1080,12 +1090,6 @@ impl FoloApp {
                 let off = blocked.is_some();
                 let amp_on = amp && !off;
                 // Blocked: a disabled switch (no hover, press or focus stop); the reason is beside it.
-                // If it held focus when it became blocked (the device changed by key, or the server's
-                // answer arrived), focus moves to the control before it, so keys keep working.
-                if off && self.focus.borrow().get("nr-amp").is_some_and(|f| f.is_focused(window)) {
-                    let prev = self.fh("nr-close", cx);
-                    window.focus(&prev);
-                }
                 let switch = if off {
                     self.switch_disabled("nr-amp", cx).into_any_element()
                 } else {
