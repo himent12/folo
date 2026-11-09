@@ -308,7 +308,7 @@
                   <td class="r score" class:strong={strongScore === 'map50'}>{metric(m.metrics?.map50)}</td>
                   <td class="hide-md">
                     {#if m.run_id}
-                      <a class="src" href={href(`/runs/${m.run_id}`)} onclick={(e) => e.stopPropagation()}>{sourceName(m)}</a>
+                      <a class="src" href={href(`/runs/${m.run_id}`)} title={sourceName(m)} onclick={(e) => e.stopPropagation()}>{sourceName(m)}</a>
                     {:else}
                       <span class="faint">—</span>
                     {/if}
@@ -480,6 +480,15 @@
   .src,
   td :global(.ident.src) {
     color: var(--text-secondary);
+  }
+  /* A run's name is free text with its own page (the link) and its whole name in the tooltip, so a long one shortens
+     with an ellipsis inside its 112 px column rather than widening the table past its panel (DESIGN_DIRECTION §2.3). */
+  a.src {
+    display: block;
+    max-width: 80px; /* grid-ok: the column's 112 px less its 16 px sides */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   /* The engine benchmarks: a collapsed row with a one-line summary; the comparison opens beneath it. */
   .bench {
