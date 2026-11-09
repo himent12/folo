@@ -134,16 +134,19 @@
       jumpEl.scrollTo({ left: Math.max(0, left - (jumpEl.clientWidth - on.offsetWidth) / 2), behavior: 'instant' });
   });
 
-  /** Goes to a section: its heading clear of the sticky chrome (scroll-margin-top), and focus on the section, so the
-   *  keyboard and a screen reader continue from there. It stays the current one until the person scrolls. */
-  function goTo(id: string) {
+  /** Goes to a section: its heading clear of the sticky chrome (scroll-margin-top), and focus on its heading, so the
+   *  keyboard and a screen reader continue from there. It stays the current one until the person scrolls. The focus
+   *  shows its ring only when a key led here (a jump link taken with Enter): opened from the URL or by a click, Chrome
+   *  would otherwise ring the heading as if tabbed to (round 26: a lime ring around the whole System panel). */
+  function goTo(id: string, keyboard = false) {
     chosen = id;
     current = id;
     const el = document.getElementById(id);
     if (!el) return;
     el.scrollIntoView({ block: 'start' });
-    if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1');
-    el.focus({ preventScroll: true });
+    const target = document.getElementById(`${id}-title`) ?? el;
+    if (!target.hasAttribute('tabindex')) target.setAttribute('tabindex', '-1');
+    target.focus({ preventScroll: true, ...(keyboard ? {} : { focusVisible: false }) });
     spy();
   }
 
@@ -151,6 +154,8 @@
   const asked = $derived(router.route.name === 'settings' ? router.route.query.get('section') : null);
   let opened: string | null = null;
   $effect(() => {
+    // Back to the bare page: the next `?section=` opens its section again, the one opened last included.
+    if (!asked) opened = null;
     if (!asked || asked === opened || !sections.some((s) => s.id === asked)) return;
     opened = asked;
     requestAnimationFrame(() => goTo(asked));
@@ -218,7 +223,8 @@
           aria-current={current === s.id ? 'location' : undefined}
           onclick={(e) => {
             e.preventDefault();
-            goTo(s.id);
+            // A click from the keyboard (Enter) has no pointer detail.
+            goTo(s.id, e.detail === 0);
           }}>{s.label}</a
         >{/each}
     </nav>
@@ -459,7 +465,8 @@
           aria-current={current === s.id ? 'location' : undefined}
           onclick={(e) => {
             e.preventDefault();
-            goTo(s.id);
+            // A click from the keyboard (Enter) has no pointer detail.
+            goTo(s.id, e.detail === 0);
           }}>{s.label}</a
         >{/each}
     </nav>

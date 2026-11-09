@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLEAR, LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, needsLeader, placeEndLabels, type Placed } from './endLabels';
+import { CLEAR, LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, memoPlaceEndLabels, needsLeader, placeEndLabels, type Placed } from './endLabels';
 
 const bounds = { x0: 0, y0: 0, x1: 600, y1: 300 };
 const line = (pts: [number, number][]) => pts.map(([x, y]) => ({ x, y }));
@@ -270,6 +270,60 @@ describe('placeEndLabels: leaders only from the gutter', () => {
     // Without the crowd, beside its end.
     const [p] = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own], bounds, 2, 500);
     expect(needsLeader(p!)).toBe(false);
+  });
+});
+
+describe('placeEndLabels: cost', () => {
+  /** A crowded comparison: four noisy 300-point runs, two ending mid-plot among the others (seeded). */
+  function crowded() {
+    let seed = 7;
+    const rand = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    const ends = [360, 820, 500, 820];
+    const curves = ends.map((xe, k) => {
+      let y = 60 + k * 50;
+      return Array.from({ length: 300 }, (_, i) => {
+        y = Math.min(270, Math.max(15, y + (rand() - 0.5) * 40));
+        return { x: 40 + ((xe - 40) * i) / 299, y };
+      });
+    });
+    const points = curves.map((c, k) => ({ id: `r${k}`, label: `shapes-hard-${k} · failed`, x: c[299]!.x, y: c[299]!.y, curve: k }));
+    return { points, curves, bounds: { x0: 40, y0: 8, x1: 958, y1: 278 } };
+  }
+
+  it('places four labels among four 300-point lines in well under a frame, the last resort included', () => {
+    // Round 26 review: the last resort tested every grid box of the plot against every segment, ~240 ms for four
+    // 150-point lines. The fastest of five runs, so a busy CI machine does not fail it; it was ~140 ms, now ~2 ms.
+    const { points, curves, bounds } = crowded();
+    const placed = placeEndLabels(points, curves, bounds, 2, 820, { lead: 14 });
+    expect(placed).toHaveLength(4);
+    // Some label went to the last resort: inside the plot, off its line's end.
+    expect(placed.some((p) => p.x < 820 && needsLeader(p))).toBe(true);
+    let best = Infinity;
+    for (let i = 0; i < 5; i++) {
+      const t = performance.now();
+      placeEndLabels(points, curves, bounds, 2, 820, { lead: 14 });
+      best = Math.min(best, performance.now() - t);
+    }
+    expect(best).toBeLessThan(10);
+  });
+
+  it('places again only when what it places changes (memoPlaceEndLabels)', () => {
+    const { points, curves, bounds } = crowded();
+    const place = memoPlaceEndLabels();
+    const first = place(points, curves, bounds, 2, 820, { lead: 14 });
+    expect(first).toEqual(placeEndLabels(points, curves, bounds, 2, 820, { lead: 14 }));
+    // Equal values in new arrays (a chart re-rendering): the same answer, not placed again.
+    const copy = <T extends object>(v: T[]) => v.map((o) => ({ ...o }));
+    expect(place(copy(points), curves.map(copy), { ...bounds }, 2, 820, { lead: 14 })).toBe(first);
+    // A line that moved, a resized plot, a renamed label: placed again.
+    const moved = curves.map((c, k) => (k === 1 ? c.map((p) => ({ x: p.x, y: p.y + 1 })) : c));
+    expect(place(points, moved, bounds, 2, 820, { lead: 14 })).not.toBe(first);
+    const again = place(points, curves, bounds, 2, 820, { lead: 14 });
+    expect(again).not.toBe(first);
+    expect(again).toEqual(first);
+    expect(place(points, curves, { ...bounds, x1: 900 }, 2, 820, { lead: 14 })).not.toBe(again);
+    const renamed = points.map((p, k) => (k === 0 ? { ...p, label: 'renamed' } : p));
+    expect(place(renamed, curves, { ...bounds, x1: 900 }, 2, 820, { lead: 14 })[0]!.label).toBe('renamed');
   });
 });
 

@@ -83,6 +83,18 @@
     open = false;
   }
 
+  // A chart's ⓘ left open across the phone breakpoint: its in-place region is gone and the popover takes over, so the
+  // popover is shown too (else the definition would vanish while aria-expanded still said it was open).
+  $effect(() => {
+    if (!open || controls || !native || !pop) return;
+    const el = pop;
+    untrack(() => {
+      if (el.matches(':popover-open')) return;
+      el.showPopover();
+      place();
+    });
+  });
+
   // A press on the button while it is open closes it. The popover's light dismiss closes it on the same press before
   // the click arrives, so the state is read on pointerdown, not on click (else the click would open it again).
   let pressedOpen: boolean | null = null;

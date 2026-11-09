@@ -79,7 +79,7 @@
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { END_LABELS_MIN, LABEL_GAP, labelWidth, leaderOf, placeEndLabels } from './endLabels';
+  import { END_LABELS_MIN, LABEL_GAP, labelWidth, leaderOf, memoPlaceEndLabels } from './endLabels';
   import { endMarkInk, LIVE_GROW, mergedEnds } from './endMarks';
   import { seriesText } from './ink';
   import { prefs } from '$lib/prefs.svelte';
@@ -303,9 +303,10 @@
     untrack(() => void yEase.set(d, { duration: log ? 0 : motion(240) }));
   });
   const yShown = $derived(yLog ? yExtent : yEase.current);
-  const y = $derived(
-    (yLog ? scaleLog().domain(yShown) : scaleLinear().domain(yShown)).range([height - margin.bottom, margin.top]),
-  );
+  const yScale = (d: [number, number]) => (yLog ? scaleLog().domain(d) : scaleLinear().domain(d)).range([height - margin.bottom, margin.top]);
+  const y = $derived(yScale(yShown));
+  /** The y scale the axis is easing to (`y` once the ease ends): end labels are placed against it, once per change. */
+  const yTo = $derived(yScale(yExtent));
   // When the x domain is fixed (e.g. 0..epochs), prefer a tick step that lands exactly on the end.
   // Default x labels: integers, or one decimal when the domain is too short for distinct integers.
   const xFormat = $derived(
@@ -370,32 +371,44 @@
     // A best ring around the end mark (./endMarks) is part of it: the leader starts outside the ring.
     return (merges.includes(id) ? mark + 3.75 : mark) + 2;
   };
-  const ends = $derived.by(() => {
+  const placeEnds = memoPlaceEndLabels();
+  // Placed against the y domain the axis eases to, not each frame of the 240 ms ease, and again only when the lines,
+  // the plot's size or the labels change (endLabels.ts memoPlaceEndLabels): placing is the costly part.
+  const placedEnds = $derived.by(() => {
     if (!showEnds) return [];
     const drawn = visible.filter((s) => endText(s) !== null);
-    const color = new Map(drawn.map((s) => [s.id, s.color]));
     const points = drawn
       .map((s) => {
         const p = s.points[s.points.length - 1];
         const curve = visible.indexOf(s);
         const label = endShown(s)!;
-        return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: y(p.y), curve, w: textWidth(label) } : null;
+        return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: yTo(p.y), curve, w: textWidth(label) } : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
       // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
       // easiest to lose among the others.
       .sort((a, b) => Number(b.id === highlight) - Number(a.id === highlight) || a.x - b.x);
-    const curves = visible.map((s) => s.points.filter((p) => Number.isFinite(p.y)).map((p) => ({ x: x(p.x), y: y(p.y) })));
+    const curves = visible.map((s) => s.points.filter((p) => Number.isFinite(p.y)).map((p) => ({ x: x(p.x), y: yTo(p.y) })));
     const bounds = { x0: margin.left, y0: margin.top, x1: width - 2, y1: height - margin.bottom };
-    return placeEndLabels(points, curves, bounds, 2, width - margin.right, { gap: LABEL_GAP, lead: LEAD }).map((e) => ({
-      ...e,
-      // A receded run is a context curve: its label in ink, so the one hue left on the plot is the run in front.
-      color: receding && e.id !== highlight ? 'var(--text-tertiary)' : (color.get(e.id) ?? 'var(--text-secondary)'),
-      // The label is text: the series' text ink (./ink), 4.5:1 where the line's own ink is only a 3:1 mark.
-      text: receding && e.id !== highlight ? 'var(--text-tertiary)' : seriesText(color.get(e.id) ?? 'var(--text-secondary)'),
-      // Every label is anchored to its end marker: one not right beside it is tied to it by a leader.
-      lead: leaderOf(e, endR(e.id)),
-    }));
+    return placeEnds(points, curves, bounds, 2, width - margin.right, { gap: LABEL_GAP, lead: LEAD });
+  });
+  const ends = $derived.by(() => {
+    const color = new Map(visible.map((s) => [s.id, s.color]));
+    const last = new Map(visible.map((s) => [s.id, s.points[s.points.length - 1]?.y ?? NaN]));
+    return placedEnds.map((p) => {
+      // While the axis eases, each label rides with its line's end: moved as far as the end is from where it will be.
+      const ay = y(last.get(p.id)!);
+      const e = { ...p, y: p.y + ay - p.ay, ay };
+      return {
+        ...e,
+        // A receded run is a context curve: its label in ink, so the one hue left on the plot is the run in front.
+        color: receding && e.id !== highlight ? 'var(--text-tertiary)' : (color.get(e.id) ?? 'var(--text-secondary)'),
+        // The label is text: the series' text ink (./ink), 4.5:1 where the line's own ink is only a 3:1 mark.
+        text: receding && e.id !== highlight ? 'var(--text-tertiary)' : seriesText(color.get(e.id) ?? 'var(--text-secondary)'),
+        // Every label is anchored to its end marker: one not right beside it is tied to it by a leader.
+        lead: leaderOf(e, endR(e.id)),
+      };
+    });
   });
 
   // The x mark: its line, its span hatched along the axis to the end of the domain, and its label above the plot beside
