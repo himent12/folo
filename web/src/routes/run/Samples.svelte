@@ -18,7 +18,18 @@
   import { MediaQuery } from 'svelte/reactivity';
   import { media } from '$lib/design/tokens';
 
-  let { runId, classes, epochsDone }: { runId: string; classes: string[]; epochsDone: number } = $props();
+  let {
+    runId,
+    classes,
+    epochsDone,
+    title = 'Validation samples',
+  }: {
+    runId: string;
+    classes: string[];
+    epochsDone: number;
+    /** "Validation samples", or the split they are really from ("Training-split samples", lib/evaluated). */
+    title?: string;
+  } = $props();
 
   let pick = $state<string>('latest');
   let show = $state<'both' | 'pred' | 'truth'>('both');
@@ -64,7 +75,7 @@
 </script>
 
 <!-- The epoch picker names the epoch, so phones drop the meta that repeats it (title and picker then share a row). -->
-<Panel title="Validation samples" meta={samples.data && !phone.current ? `epoch ${samples.data.epoch}` : undefined} id="samples">
+<Panel {title} meta={samples.data && !phone.current ? `epoch ${samples.data.epoch}` : undefined} id="samples">
   <!-- Before the first validation there is nothing to filter: the frame holds only its one line. -->
   {#snippet actions()}
     {#if epochsDone > 0}<div class="ctl">

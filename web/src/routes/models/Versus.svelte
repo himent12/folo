@@ -131,23 +131,30 @@
   <details class="how" bind:this={how}>
     <summary><ChevronDown size={14} aria-hidden="true" />How this was measured</summary>
     <div class="how-body">
-      <p>
-        One RTX 4080 SUPER (and an i7-14700KF for the CPU rows), 640 × 640 input. folo-n has untrained weights and YOLO26n
-        its COCO-pretrained ones, so almost no FOLO candidates pass the confidence threshold and its end-to-end times
-        include less NMS work than a trained model's (about 0.1–0.3 ms per image).
-      </p>
-      <p>Times and memory: lower is better. Images per second: higher is better.</p>
-      <p>
-        <span class="cv-m">Rows marked —:</span> the engines ran at different numeric precision (f32, TensorFloat-32, f16),
-        did different work, or ran under different load. Those rows keep both measurements and name the difference, but
-        no winner: the ratio would mix the engine with its conditions.
-      </p>
-      {#if caveats.length}
-        <ul>
-          {#each caveats as v (v.metric)}<li><span class="cv-m">{v.metric}:</span> {v.caveat}</li>{/each}
-        </ul>
-      {/if}
-      <p>Source: {BENCH_SOURCE.split(' · ')[0]}.</p>
+      <!-- The setup as facts, one per line, then the caveats as paragraphs at the measure: in a full-width panel they
+           take two columns where they fit (each at least 36ch), so the text fills the frame instead of one narrow
+           column at its left edge. -->
+      <dl class="facts">
+        <div><dt>Hardware</dt><dd>RTX 4080 SUPER; an i7-14700KF for the CPU rows</dd></div>
+        <div><dt>Input</dt><dd class="num">640 × 640 px</dd></div>
+        <div><dt>Precision</dt><dd>FOLO f32 throughout; YOLO26n f32, TensorFloat-32 or fp16, as each row says</dd></div>
+        <div><dt>Weights</dt><dd>folo-n untrained; YOLO26n COCO-pretrained</dd></div>
+        <div><dt>Load</dt><dd>FOLO's CPU forward ran under load from other jobs</dd></div>
+        <div><dt>Reading</dt><dd>Times and memory: lower is better. Images per second: higher is better.</dd></div>
+      </dl>
+      <div class="caveats">
+        <p>
+          <span class="cv-m">Untrained weights:</span> almost no FOLO candidates pass the confidence threshold, so its
+          end-to-end times include less NMS work than a trained model's (about 0.1–0.3 ms per image).
+        </p>
+        <p>
+          <span class="cv-m">Rows marked —:</span> the engines ran at different numeric precision (f32, TensorFloat-32,
+          f16), did different work, or ran under different load. Those rows keep both measurements and name the
+          difference, but no winner: the ratio would mix the engine with its conditions.
+        </p>
+        {#each caveats as v (v.metric)}<p><span class="cv-m">{v.metric}:</span> {v.caveat}</p>{/each}
+      </div>
+      <p class="src">Source: {BENCH_SOURCE.split(' · ')[0]}.</p>
     </div>
   </details>
 </Panel>
@@ -321,16 +328,42 @@
   .how[open] summary :global(svg) {
     transform: none;
   }
+  /* The fold's body spans the panel: a facts grid (term column, value), then the caveats in columns of at least 36ch,
+     each paragraph at the measure, so a 1,200 px panel holds two readable columns rather than one 40ch strip. */
   .how-body {
     display: grid;
-    gap: var(--space-2);
-    max-width: calc(var(--measure) + var(--space-4) * 2 + 18px);
-    padding: 0 var(--space-4) var(--space-4) calc(var(--space-4) + 18px);
+    gap: var(--space-4);
+    padding: var(--space-1) var(--space-4) var(--space-4) calc(var(--space-4) + 18px);
     color: var(--text-secondary);
   }
-  .how-body ul {
+  .facts {
     display: grid;
-    gap: var(--space-1);
+    grid-template-columns: repeat(auto-fill, minmax(36ch, 1fr));
+    gap: var(--space-1) var(--space-6);
+  }
+  .facts > div {
+    display: grid;
+    grid-template-columns: 80px minmax(0, 1fr);
+    gap: var(--space-3);
+    max-inline-size: var(--measure);
+  }
+  .facts dt {
+    color: var(--text-tertiary);
+  }
+  .facts dd {
+    color: var(--text-primary);
+  }
+  .caveats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(36ch, 1fr));
+    gap: var(--space-3) var(--space-6);
+    align-items: start;
+  }
+  .caveats p {
+    max-inline-size: var(--measure);
+  }
+  .src {
+    color: var(--text-tertiary);
   }
   .cv-m {
     color: var(--text-primary);

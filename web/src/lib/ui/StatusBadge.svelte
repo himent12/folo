@@ -1,4 +1,10 @@
 <script lang="ts">
+  /**
+   * A run's status as its mark and word. Two forms, one rule (DESIGN_DIRECTION 6): the tinted pill is the title form,
+   * beside the name of the one run a screen is about (the run page's header, Overview's live card), at most one per
+   * screen; everywhere else (tables, lists, Compare, meta lines) it is `plain`, dot + word. `statusPill.test.ts` holds
+   * the pill to those two places.
+   */
   import type { RunStatus } from '$lib/api/types';
 
   let {

@@ -3,7 +3,7 @@
 // validation images and the server evaluated its training split, one plain sentence saying so. Those numbers are never
 // called "validation". The confusion matrix's own thresholds are worded here too, apart from precision and recall's.
 
-import type { ModelEval, Split, SplitFallback } from '$lib/api/types';
+import type { Dataset, ModelEval, Split, SplitFallback } from '$lib/api/types';
 import { conf, num } from '$lib/format';
 
 export interface EvalSource {
@@ -29,6 +29,31 @@ export function evalSource(e: ModelEval): EvalSource {
     split: e.split ?? (fallback ? 'train' : null),
     fallback,
   };
+}
+
+/**
+ * What a training run's per-epoch scores are on (docs/API.md, Split fallback: training falls back as `/eval` does): the
+ * validation split, or the training split when its dataset has no validation images. Null until the dataset is known.
+ */
+export function runEvalSource(d: Pick<Dataset, 'id' | 'name' | 'splits'> | null | undefined): EvalSource | null {
+  if (!d) return null;
+  const empty = d.splits.val === 0;
+  return {
+    datasetId: d.id,
+    datasetName: d.name,
+    split: empty ? 'train' : 'val',
+    fallback: empty ? { requested: 'val', reason: 'empty_split', message: `${d.name} has no validation images` } : null,
+  };
+}
+
+/**
+ * The scores' name where a title names them: "Validation" ("Validation mAP50-95", "Validation samples"), else the
+ * split they are really on ("Training-split mAP50-95"). "Validation" while the split is unknown, as before.
+ */
+export function scoresTitle(s: EvalSource | null | undefined): string {
+  if (!s || s.split === null || s.split === 'val') return 'Validation';
+  const w = splitWord(s.split);
+  return `${w.charAt(0).toUpperCase()}${w.slice(1)}-split`;
 }
 
 export function matrixAt(e: ModelEval): MatrixAt | null {

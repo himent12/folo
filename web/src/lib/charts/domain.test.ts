@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { capTicks, holdDomain, logDomain, logMinors, logTicks, MAX_TICKS, niceDomain, stepDecimals, unitDomain, unitTop, unitZoomed } from './domain';
+import { capTicks, holdDomain, logDomain, logMinors, logTicks, MAX_TICKS, niceDomain, stepDecimals, unitDomain, unitTop, unitZoomed, withLabelRow } from './domain';
 
 describe('unitDomain', () => {
   it('fits a 0–1 metric to its data plus a little headroom, so the plot is never mostly empty', () => {
@@ -173,5 +173,19 @@ describe('invalid ranges', () => {
     expect(capTicks(NaN, 1)).toEqual([]);
     expect(logTicks(0, 1)).toEqual([]);
     expect(logTicks(1, Infinity)).toEqual([]);
+  });
+});
+
+describe('withLabelRow', () => {
+  it('leaves a label row over the highest line end on a labelled chart', () => {
+    // Compare at 360 px: runs up to 0.606 used to fit 0–0.64, the labels on the 0.6 gridline.
+    const fit = unitDomain(withLabelRow(0.606, 360), 360);
+    const below = (1 - 0.606 / fit.domain[1]) * 360;
+    expect(below).toBeGreaterThanOrEqual(24);
+  });
+
+  it('changes nothing it cannot help: no data, or a plot too short', () => {
+    expect(withLabelRow(0, 360)).toBe(0);
+    expect(withLabelRow(0.5, 40)).toBe(0.5);
   });
 });

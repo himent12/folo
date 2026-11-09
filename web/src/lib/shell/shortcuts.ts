@@ -44,6 +44,9 @@ export const shortcutList: { keys: string; label: string; group: string; single?
   { keys: 'X', label: 'Select the run to compare (Runs)', group: 'Lists', single: true },
   { keys: 'ArrowLeft ArrowRight', label: 'Move the chart cursor (focused chart)', group: 'Charts' },
   { keys: '1–6', label: 'Pick a metric tab (run page)', group: 'Charts', single: true },
+  // Legend toggles are buttons (aria-pressed): Space on a focused one, whatever the single-key setting.
+  { keys: 'Space', label: "Trace or untrace a run's line (Compare's chips)", group: 'Charts' },
+  { keys: 'Space', label: "Trace or untrace a class's curve (Model's per class)", group: 'Charts' },
   // The dataset image inspector's own keys: they work while it is open, whatever the setting.
   { keys: 'J K', label: 'Next / previous image (inspector)', group: 'Datasets' },
   { keys: '+ -', label: 'Zoom in / out (inspector)', group: 'Datasets' },

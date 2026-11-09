@@ -72,7 +72,12 @@ function tensorRow(c: Capabilities, dx12: boolean): Pick<CapRow, 'note' | 'fix'>
   return { note: t.reason ? sentence(t.reason) : 'Off on this server.', fix: DOCTOR };
 }
 
-function ampRow(c: Capabilities): Pick<CapRow, 'note' | 'fix'> {
+/**
+ * `tensorFix`: the Tensor cores row's command, if it has one. Mixed precision needs the tensor cores, so where they are
+ * not usable here it takes that same command, which `oneCommandEach` turns into a pointer ("See the command under
+ * Tensor cores."): a row never ends on a dead end when the row above holds the way out.
+ */
+function ampRow(c: Capabilities, tensorFix: Fix | null): Pick<CapRow, 'note' | 'fix'> {
   if (c.amp.available) return { note: 'Runs can train in mixed precision (f16 compute, f32 weights): the Mixed precision switch in New run.', fix: null };
   if (c.device === 'cpu') return { note: 'Needs a GPU with tensor cores; this server trains on the CPU, in f32.', fix: null };
   if (!c.tensor_cores.enabled) {
@@ -81,7 +86,7 @@ function ampRow(c: Capabilities): Pick<CapRow, 'note' | 'fix'> {
       return { note: 'Needs the tensor cores, whose self-test failed on this server, so runs train in f32.', fix: DOCTOR };
     return c.tensor_cores.available
       ? { note: 'Needs the tensor cores, which are off on this server.', fix: SERVE_TC }
-      : { note: 'Needs tensor cores this server can use, so runs train in f32.', fix: null };
+      : { note: 'Needs tensor cores this server can use, so runs train in f32.', fix: tensorFix };
   }
   return { note: c.amp.reason ? sentence(c.amp.reason) : 'Not available on this server.', fix: null };
 }
@@ -93,6 +98,7 @@ function ampRow(c: Capabilities): Pick<CapRow, 'note' | 'fix'> {
 export function capabilityRows(c: Capabilities, gpus: Gpu[] = []): CapRow[] {
   const t = c.tensor_cores;
   const dx12 = gpuOf(c, gpus)?.backend === 'dx12';
+  const tensor = tensorRow(c, dx12);
   return oneCommandEach([
     {
       id: 'f16',
@@ -113,7 +119,7 @@ export function capabilityRows(c: Capabilities, gpus: Gpu[] = []): CapRow[] {
       label: 'Tensor cores',
       state: t.enabled ? 'on' : t.available ? 'off' : 'none',
       word: t.enabled ? 'On' : t.available ? 'Off' : 'Not available',
-      ...tensorRow(c, dx12),
+      ...tensor,
       raw: t.enabled ? null : t.reason,
     },
     {
@@ -121,7 +127,7 @@ export function capabilityRows(c: Capabilities, gpus: Gpu[] = []): CapRow[] {
       label: 'Mixed precision training',
       state: c.amp.available ? 'on' : 'none',
       word: c.amp.available ? 'Available' : 'Not available',
-      ...ampRow(c),
+      ...ampRow(c, tensor.fix),
       raw: c.amp.available ? null : c.amp.reason,
     },
   ]);

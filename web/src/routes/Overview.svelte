@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { runProgress } from '$lib/api/progress';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import Activity from '@lucide/svelte/icons/activity';
   import Box from '@lucide/svelte/icons/box';
@@ -167,7 +168,7 @@
                       <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
                       <td class="hide-sm">
                         <div class="prog">
-                          <Progress value={r.epoch / r.epochs} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
+                          <Progress value={runProgress(r)} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />
                           <span class="num faint">{r.epoch}/{r.epochs}</span>
                         </div>
                       </td>

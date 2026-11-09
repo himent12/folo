@@ -24,6 +24,15 @@ export function runProgress(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps_
 }
 
 /**
+ * The run's progress as people read it, "37%": whole percents, rounded down (a run is never shown further along than it
+ * is). Every screen that prints progress says it through this one value (Overview's live card, the run page's epoch
+ * row), so two screens of one run never disagree in a decimal the step stream moves several times a second.
+ */
+export function progressText(run: Pick<Run, 'step' | 'epoch' | 'epochs' | 'steps_per_epoch' | 'status'>): string {
+  return `${Math.floor(runProgress(run) * 100 + 1e-9)}%`;
+}
+
+/**
  * The epochs at the end of a run with mosaic off: `min(close_mosaic, floor(epochs / 2))`, so at least half of a short
  * run keeps mosaic (docs/MODEL.md §8.6; folo-data `close_mosaic_epochs`, which the trainer applies itself).
  */

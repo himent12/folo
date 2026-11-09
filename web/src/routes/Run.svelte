@@ -38,6 +38,9 @@
   import { HEAD_LABEL } from './run/resolved';
   import Logs from './run/Logs.svelte';
   import Outcome from './run/Outcome.svelte';
+  import Callout from './run/Callout.svelte';
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
+  import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
   import PerClass from './run/PerClass.svelte';
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -55,6 +58,10 @@
   const datasets = new Resource((s) => hub.api.datasets(s));
   const run = $derived(live.run);
   const dataset = $derived(run ? datasets.data?.find((d) => d.id === run.config.dataset_id) : undefined);
+  // A dataset with no validation images trains and validates on its training split (docs/API.md, Split fallback): the
+  // page says so once, as the Model page does, and its titles name that split rather than "Validation".
+  const evalOn = $derived(runEvalSource(dataset));
+  const splitNotice = $derived(evalOn ? fallbackNotice(evalOn) : null);
 
   $effect(() => {
     setCrumbs({ label: 'Runs', path: '/runs' }, { label: run?.name ?? id });
@@ -390,6 +397,10 @@
       system={system.data ?? (system.error ? null : undefined)}
     />
 
+    {#if splitNotice && !waitingLayout}
+      <Callout tone="warning" icon={TriangleAlert} title={splitNotice.title} role="note" label="Evaluation split">{splitNotice.why}</Callout>
+    {/if}
+
     {#if waitingLayout}
       <!-- Waiting: the config as asked for, beside the queue and what the run will have. Nothing here is an
            empty frame, and no panel stretches to its neighbour's height. Below 1024 px the queue leads; phones show
@@ -435,6 +446,7 @@
       loading={live.loading}
       queued={queuedOnly}
       folded={section !== 'samples'}
+      {evalOn}
     />
 
     <!-- Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right, the two
@@ -457,7 +469,7 @@
     </div>
     <div class="detail" data-show={section} id="run-sec-panel" role={stacked.current ? 'tabpanel' : undefined} aria-labelledby={stacked.current ? `run-sec-${section}` : undefined}>
       <div class="main-col">
-        <div class="part" data-part="samples"><Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} /></div>
+        <div class="part" data-part="samples"><Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} title="{scoresTitle(evalOn)} samples" /></div>
         <div class="part" data-part="logs"><Logs logs={live.logs} version={live.version} live={active} /></div>
       </div>
       <aside class="rail" aria-label="Per-class results and config">

@@ -28,7 +28,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
-  import { niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE } from '$lib/charts/domain';
+  import { niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { defaultAxis, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
@@ -157,8 +157,11 @@
   // a 210 px plot. LineChart's margins add 8 px on top (24 under the zoom caption) and 22 px below.
   const plotPx = $derived(narrow ? 210 : 360);
   const height = $derived(plotPx + (zoomed ? 24 : 8) + 22);
-  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.64, not bunched in a 0–1 axis.
-  const fit = $derived(extent ? (metricDef.unit ? unitDomain(extent[1], plotPx) : niceDomain(extent[0], extent[1])) : undefined);
+  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.7, not bunched in a 0–1 axis. Where
+  // the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`).
+  const fit = $derived(
+    extent ? (metricDef.unit ? unitDomain(narrow ? extent[1] : withLabelRow(extent[1], plotPx), plotPx) : niceDomain(extent[0], extent[1])) : undefined,
+  );
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
   function valueOf(id: string): number | null {
     const pts = series.find((s) => s.id === id)?.points ?? [];

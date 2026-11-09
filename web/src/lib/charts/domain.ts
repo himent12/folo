@@ -93,6 +93,20 @@ export function unitTop(max: number): number {
   return Math.min(1, +(Math.ceil(h / q - 1e-9) * q).toPrecision(6));
 }
 
+/** The room a row of direct labels takes above the highest line end: the label's 16 px line and 8 px clear of it. */
+export const LABEL_ROW_PX = 24;
+
+/**
+ * The value to fit a 0–1 axis to on a chart that labels its lines' ends (`endLabels`, Compare): `max` raised so that,
+ * after `unitTop`'s headroom, the highest end sits at least a label row under the plot's top. A label set above its
+ * line's end then has its own row inside the plot instead of crowding the top gridline (round 23: 0–0.62 with the
+ * labels on the 0.6 line). Near 1 the top cannot rise (`unitTop` stops at 1): the labels move to the gutter instead.
+ */
+export function withLabelRow(max: number, plotPx: number): number {
+  if (!Number.isFinite(max) || max <= 0 || plotPx <= LABEL_ROW_PX * 2) return max;
+  return max / (1 - LABEL_ROW_PX / plotPx);
+}
+
 /** Whether a fitted 0–1 axis is zoomed in (its top under UNIT_ZOOM_BELOW). */
 export const unitZoomed = (fit: Fit | null | undefined) => !!fit && fit.domain[1] < UNIT_ZOOM_BELOW - 1e-9;
 

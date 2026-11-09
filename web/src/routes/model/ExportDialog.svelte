@@ -307,16 +307,16 @@
   {/if}
 
   {#snippet footer()}
-    {#if phase === 'done' && demo}
-      <!-- Nothing to download: the way to a real file is a server. -->
-      <Button variant="ghost" onclick={reset}>Export another</Button>
-      <Button variant="ghost" onclick={() => (open = false)}>Done</Button>
-      <Button variant="primary" icon={Plug} href={href('/settings')} onclick={() => (open = false)}>Connect to a server</Button>
-    {:else if phase === 'done'}
-      <!-- The f16 file's next step is Download, the one primary; Done only closes. ONNX has nothing to download. -->
-      <Button variant="ghost" onclick={reset}>Export another</Button>
-      {#if done === 'folo-f16'}
-        <Button variant="ghost" onclick={() => (open = false)}>Done</Button>
+    {#if phase === 'done'}
+      <!-- One shape for every result: "Export another" a quiet link at the footer's start (a way back, not an action on
+           the result), Done the secondary, and the result's next step the one primary at the end: Connect to a server in
+           the demo, Download for the f16 file; ONNX has nothing to download, so Done is the primary. -->
+      <button type="button" class="another" onclick={reset}>Export another</button>
+      {#if demo}
+        <Button onclick={() => (open = false)}>Done</Button>
+        <Button variant="primary" icon={Plug} href={href('/settings')} onclick={() => (open = false)}>Connect to a server</Button>
+      {:else if done === 'folo-f16'}
+        <Button onclick={() => (open = false)}>Done</Button>
         <Button variant="primary" icon={Download} onclick={download}>Download</Button>
       {:else}
         <Button variant="primary" onclick={() => (open = false)}>Done</Button>
@@ -591,5 +591,34 @@
   .where-label {
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
+  }
+  /* "Export another": a link at the footer's start, the buttons kept at its end. */
+  .another {
+    position: relative;
+    margin-right: auto;
+    align-self: center;
+    color: var(--text-primary);
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .another:hover {
+    text-decoration-color: currentColor;
+  }
+  /* A 44 px target around the link's text line (DESIGN_DIRECTION 9). */
+  .another::after {
+    content: '';
+    position: absolute;
+    inset: -12px -8px;
+  }
+  /* Phones: the buttons share the row's width; the link takes a line of its own above them. */
+  @media (max-width: 767px) {
+    .another {
+      flex: 0 0 100%;
+      margin: 0 0 var(--space-1);
+      text-align: center;
+    }
   }
 </style>

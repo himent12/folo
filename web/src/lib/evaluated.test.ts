@@ -10,6 +10,8 @@ import {
   matrixCounted,
   matrixVsPr,
   metricsLabel,
+  runEvalSource,
+  scoresTitle,
   sourceShort,
   TRAINED_ON,
   type EvalSource,
@@ -98,5 +100,20 @@ describe("the confusion matrix's thresholds", () => {
     const how = matrixVsPr(null, 'at conf 0.31 (best F1)');
     expect(how).toContain('which this server does not report');
     expect(how).not.toMatch(/0\.25|0\.45/);
+  });
+});
+
+describe('runEvalSource / scoresTitle', () => {
+  it("names the training split where a run's dataset has no validation images", () => {
+    const mini = runEvalSource({ id: 'ds_m', name: 'fasteners-mini', splits: { train: 24, val: 0, test: 0 } });
+    expect(mini).toMatchObject({ split: 'train', fallback: { requested: 'val', reason: 'empty_split' } });
+    expect(scoresTitle(mini)).toBe('Training-split');
+    expect(fallbackNotice(mini!)?.text).toBe(
+      'Evaluated on the training split: fasteners-mini has no validation images, so these scores are on images the model trained on, not new ones.',
+    );
+    const full = runEvalSource({ id: 'ds_f', name: 'fasteners', splits: { train: 1920, val: 360, test: 120 } });
+    expect(scoresTitle(full)).toBe('Validation');
+    expect(fallbackNotice(full!)).toBeNull();
+    expect(scoresTitle(runEvalSource(undefined))).toBe('Validation');
   });
 });
