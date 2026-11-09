@@ -1339,6 +1339,14 @@ impl FoloApp {
                             "Counts of objects and unmatched detections. Hover or focus a cell to read it."
                         }),
                     }))
+                    // The grid is one Tab stop: with keyboard focus, how to move in it.
+                    .when(ring, |d| {
+                        d.child(
+                            div()
+                                .pt(px(2.))
+                                .child(text(ty::XS, t.text_tertiary).child("Arrows move · Home / End row ends · Esc clears")),
+                        )
+                    })
                     .child(
                         div().pt(px(4.)).child(
                             text(ty::XS, t.text_tertiary)
@@ -1367,14 +1375,17 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(th(&t, "Class").w(px(200.)).flex_none())
-            .child(th(&t, "AP50").flex_1().min_w_0().text_right())
-            .child(th(&t, "AP50-95").flex_1().min_w_0().text_right())
-            .child(th(&t, "Precision").flex_1().min_w_0().text_right())
-            .child(th(&t, "Recall").flex_1().min_w_0().text_right());
+            // Class takes the width; the metrics sit in fixed 120 px columns at the right, close
+            // enough to read across (spread over the whole row they stood ~190 px apart).
+            .child(th(&t, "Class").flex_1().min_w(px(200.)))
+            .child(th(&t, "AP50").w(px(120.)).flex_none().text_right())
+            .child(th(&t, "AP50-95").w(px(120.)).flex_none().text_right())
+            .child(th(&t, "Precision").w(px(120.)).flex_none().text_right())
+            .child(th(&t, "Recall").w(px(120.)).flex_none().text_right());
         let focus = self.pr_isolated(ev, window);
         let pin = self.pr_pin;
-        let num = |v: String| text(ty::SM, t.text_secondary).tnum().flex_1().min_w_0().text_right().child(v);
+        let num =
+            |v: String| text(ty::SM, t.text_secondary).tnum().w(px(120.)).flex_none().text_right().child(v);
         let mut per: Vec<_> = ev.per_class.iter().collect();
         per.sort_by(|a, b| b.map50.total_cmp(&a.map50));
         // Numbers right-aligned (bar to their left), like every other table's metric columns.
@@ -1416,8 +1427,8 @@ impl FoloApp {
                     }))
                     .child(
                         div()
-                            .w(px(200.))
-                            .flex_none()
+                            .flex_1()
+                            .min_w(px(200.))
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -1435,7 +1446,7 @@ impl FoloApp {
                     // Only the headline metric carries a comparison bar; the others are plain
                     // numbers, so AP50-95 leads the row.
                     .child(num(f3(c.map50)))
-                    .child(div().flex_1().min_w_0().flex().justify_end().child(bar_value(
+                    .child(div().w(px(120.)).flex_none().flex().justify_end().child(bar_value(
                         &t,
                         c.map50_95,
                         f3(c.map50_95),

@@ -603,7 +603,9 @@ impl FoloApp {
                                 t.text_secondary
                             },
                         )
-                        .font_weight(if on { FontWeight::MEDIUM } else { FontWeight::NORMAL })
+                        // One weight either way: a Medium selected label is wider and nudged its
+                        // neighbours; the raised fill and primary ink mark the selection.
+                        .font_weight(FontWeight::NORMAL)
                         .whitespace_nowrap()
                         .tnum()
                         .child(label.to_string()),
@@ -673,7 +675,11 @@ impl FoloApp {
                     .whitespace_nowrap()
                     .child(label.into()),
             )
-            .when_some(count, |d, c| d.child(text(ty::XS, t.text_tertiary).tnum().child(int(c))));
+            .when_some(count, |d, c| {
+                d.child(
+                    text(ty::XS, if on { t.text_secondary } else { t.text_tertiary }).tnum().child(int(c)),
+                )
+            });
         self.bind(el, key, radius::SM, window, cx, action)
     }
 

@@ -433,6 +433,9 @@ pub struct FoloApp {
     play_image_gen: u64,
     /// Generation of the latest prediction request.
     play_pred_seq: u64,
+    /// The latest prediction hasn't answered: shown results are the previous ones (an IoU change
+    /// keeps them up meanwhile).
+    pub play_pred_pending: bool,
     /// Image generation and model the current `play_pred` belongs to.
     play_pred_for: Option<(u64, String)>,
 
@@ -589,6 +592,7 @@ impl FoloApp {
             play_load_seq: 0,
             play_image_gen: 0,
             play_pred_seq: 0,
+            play_pred_pending: false,
             play_pred_for: None,
             server_mode: ServerMode::Mock,
             server_url,
@@ -1664,7 +1668,9 @@ impl FoloApp {
 
     pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(form) = self.new_run.as_mut() else { return };
-        if form.submitting || form.epochs_invalid || form.lr_invalid || form.close_invalid {
+        // Auto sets its own rate, so an unparsed rate entry doesn't block it.
+        let lr_invalid = form.lr_invalid && form.optimizer != 0;
+        if form.submitting || form.epochs_invalid || lr_invalid || form.close_invalid {
             return;
         }
         let Some(ds) = self.store.datasets.ready().and_then(|d| d.get(form.dataset)).cloned() else { return };
@@ -1947,6 +1953,7 @@ impl FoloApp {
             cx.drop_image(old.image, None);
         }
         self.play_pred = Load::Idle;
+        self.play_pred_pending = false;
         self.play_pred_for = None;
         self.play_hover = None;
         self.play_zoom = 1.0;
@@ -1958,7 +1965,9 @@ impl FoloApp {
     pub fn set_play_target(&mut self, target: Option<crate::local::Target>, cx: &mut Context<Self>) {
         if self.play_target != target {
             self.play_target = target;
-            self.run_predict(cx);
+            // Another device's answer (and timing): "Detecting…" while it runs, not the previous
+            // result, or an OOM error and its Retry still live during the CPU fallback.
+            self.rerun_predict(cx);
         }
     }
 
@@ -1982,9 +1991,9 @@ impl FoloApp {
         .detach();
     }
 
-    /// Run the failed prediction again, showing "Detecting…" meanwhile (a plain rerun of the same
-    /// image and model keeps the old result up, which here is the error and its Retry button).
-    pub fn retry_predict(&mut self, cx: &mut Context<Self>) {
+    /// Predict again from scratch, showing "Detecting…" meanwhile (Retry, or another device). A plain
+    /// rerun of the same image and model, an IoU change, keeps the old result up instead.
+    pub fn rerun_predict(&mut self, cx: &mut Context<Self>) {
         self.play_pred_for = None;
         self.run_predict(cx);
     }
@@ -2006,6 +2015,7 @@ impl FoloApp {
             self.play_hover = None;
         }
         self.play_pred_seq += 1;
+        self.play_pred_pending = true;
         let seq = self.play_pred_seq;
         let target = self.play_target;
         // Taken with the backend handle: a switch after this makes the load's model throwaway.
@@ -2020,6 +2030,7 @@ impl FoloApp {
                 if seq == this.play_pred_seq {
                     this.play_pred = r.into();
                     this.play_pred_for = Some(key);
+                    this.play_pred_pending = false;
                 }
             },
         );
@@ -2994,6 +3005,7 @@ impl FoloApp {
         self.hold_loading = false;
         self.store.gpu_util.clear();
         self.play_pred = Load::Idle;
+        self.play_pred_pending = false;
         self.play_model = None;
         self.retry_all(cx);
     }

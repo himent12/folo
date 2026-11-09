@@ -1341,3 +1341,59 @@ Round 33 changes:
   - "8 of the 16" validation images.
   - Ages use tabular digits.
 - **Loading rows:** shaped like table rows, with no icon.
+
+## Round 33
+
+| Line | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | avg |
+|------|---|---|---|---|---|---|---|---|---|----|----|----|-----|
+| Opus 5.5 | 9 | 8 | 9 | 8 | 8 | 8 | 8 | 8 | 8 | 9 | 8 | 8 | 8.25 |
+| GPT-6.1 Sol | 9 | 9 | 8 | 9 | 8 | 9 | 8 | 8 | 8 | 8 | 9 | 8 | 8.4 |
+
+Both reviewers put the same issue first: under Auto, New run showed an editable learning rate (0.010) beside a helper saying the engine uses another (0.00111). Sol also found that an unparsed rate blocked an Auto run, and the code review caught that Retry stayed live during its own rerun.
+
+Opus flagged:
+- Segmented labels shifting when the selection turns Medium.
+- "16.0 GiB VRAM ▬ 94%" reading as memory use.
+- The 0.20 / 0.60 / 1.00 P/R axis.
+- "0.10×10⁻³".
+- Header actions enabled differently while loading.
+- Sparse per-class columns.
+- Overlays without motion. The palette and dialogs already fade in; toasts and the inspector didn't.
+
+Sol flagged:
+- Stale IoU results shown as current.
+- Selected chip counts at 4.43:1.
+- A picker that skipped the first 17 samples.
+- "Start training" when the run would queue.
+- "objects" against "Detections".
+- No keyboard hint on the matrix.
+- An unconditional rail fade.
+
+The sparkline cap is now a settled decision: one round called it a noise band, the next an empty one.
+
+Round 34 changes:
+- **New run:**
+  - Under Auto the rate is a read-only "Auto · 0.00111" (3 significant figures), with "Set by Auto; pick SGD or AdamW to choose your own".
+  - An unparsed rate no longer blocks Auto.
+  - "Queue training" / "Queuing…" holds in every state while another run is training.
+- **Playground:**
+  - "Updating…" heads the detections while a rerun is out.
+  - Changing where it runs shows "Detecting…", so an OOM error and Retry no longer stay live during the CPU fallback.
+  - Samples are the first four with boxes.
+  - The toolbar says "detections".
+  - The rail fade shows only with more below, and the rail ends with 16 px of padding.
+- **Charts:**
+  - P/R ticks run every 0.2 from a floor of 0.4 or more.
+  - The LR legend is normalised ("1.00×10⁻⁴").
+  - Per-class metrics sit in fixed 120 px columns.
+  - The confusion matrix shows "Arrows move · Home / End row ends · Esc clears" on keyboard focus.
+- **Controls:**
+  - Segment labels keep one weight.
+  - Selected chip counts use secondary ink.
+  - Toasts and the inspector fade in (160 ms; none under Reduce motion).
+- **Consistency:**
+  - The GPU meter reads "94% load".
+  - Open image needs a model in every state, and says why when disabled.
+  - The Overview KPI is "mAP50-95 · latest", as on the run page.
+  - The palette says "N commands" with an empty query.
+  - Queued runs read "Waiting to start", not "Waiting for GPU" (the queue waits on the current run).
