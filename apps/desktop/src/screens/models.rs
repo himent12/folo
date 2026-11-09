@@ -19,8 +19,9 @@ use crate::store::Load;
 use crate::theme::{alpha, radius, theme, ty};
 use crate::ui::*;
 
-/// Row-label column of the confusion matrix (fits "Share of all FP").
-const LABEL_W: f32 = 96.;
+/// Row-label column of the confusion matrix (fits "hexagon" and "FP share"); the columns get the
+/// rest, so class names head them in full at 1280.
+const LABEL_W: f32 = 64.;
 
 impl FoloApp {
     pub fn models(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -456,6 +457,12 @@ impl FoloApp {
         let body = match self.store.evals.get(id) {
             Some(Load::Ready(ev)) => {
                 let ev = ev.clone();
+                // Side by side only while the PR panel keeps 520 px beside the matrix (46 %, 440 px
+                // minimum), so its plot stays ~240 px wide; else one above the other.
+                let stacked = {
+                    let row = self.content_width(window) - 16.;
+                    row - (row * 0.46).max(440.) < 520.
+                };
                 let pr = self.pr_panel(&m, &ev, window, cx);
                 let cm = self.confusion_panel(&m, &ev, window, cx);
                 let table = self.class_table(&m, &ev, window, cx);
@@ -464,7 +471,7 @@ impl FoloApp {
                     .flex_col()
                     .gap(px(16.))
                     .child(kpis)
-                    .child(if window.viewport_size().width < px(1120.) {
+                    .child(if stacked {
                         // Narrow: one above the other, each full width.
                         div()
                             .flex()
@@ -474,18 +481,19 @@ impl FoloApp {
                             .child(div().flex().child(cm))
                     } else {
                         // The PR panel holds a plot and its legend: it takes the larger share, so the
-                        // plot keeps ~260 px at 1280; the matrix (42 %, 400 px minimum) fits its headings.
+                        // plot keeps ~240 px at 1280; the matrix (46 %, 440 px minimum) heads every column
+                        // with the class's full name.
                         div()
                             .flex()
                             .gap(px(16.))
                             .child(
-                                div().flex_grow().flex_basis(gpui::relative(0.58)).min_w_0().flex().child(pr),
+                                div().flex_grow().flex_basis(gpui::relative(0.54)).min_w_0().flex().child(pr),
                             )
                             .child(
                                 div()
                                     .flex_grow()
-                                    .flex_basis(gpui::relative(0.42))
-                                    .min_w(px(400.))
+                                    .flex_basis(gpui::relative(0.46))
+                                    .min_w(px(440.))
                                     .flex()
                                     .child(cm),
                             )
@@ -1273,7 +1281,7 @@ impl FoloApp {
                         .ellipsis()
                         .child(if r == n - 1 {
                             // Its denominator differs from the class rows': all false positives.
-                            if norm { "Share of all FP".to_string() } else { "False positives".to_string() }
+                            if norm { "FP share".to_string() } else { "FP count".to_string() }
                         } else {
                             labels[r].clone()
                         }),

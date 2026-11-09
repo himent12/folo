@@ -2204,3 +2204,36 @@ Opus's next items:
 - a chart annotation row;
 - single-line log rows with a duration column;
 - the stacked Best model table's dead zone.
+
+## Round 53
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 9 | 9 |
+| Typography | 8 | 8.5 |
+| Colour | 9 | 9 |
+| Spacing | 8 | 9 |
+| Components | 9 | 9 |
+| Dataviz | 8 | 9 |
+| Info/copy | 8 | 9 |
+| Consistency | 8 | 9 |
+| Interaction | 9 | 9 |
+| Accessibility | 9 | 9 |
+| Responsiveness | 8 | 9 |
+| Polish | 8 | 8.5 |
+| **Average** | **8.4** | **8.9** |
+
+**The 12 px text floor.** design/README has required 12 px since Studio #126: `xs` is for chart ticks only, `micro` for image chips. Desktop now meets it.
+- 134 call sites moved from `ty::XS` to `ty::SM`, plus chart axis titles, the readout, bar values, marker labels and the cursor chip.
+- Ticks render at a whole 11 px; they were 10.5.
+- A test fails on any `ty::XS` / `ty::MICRO` without a `small:` note.
+
+**Fallout from the larger text, fixed before merge:**
+- Size cells are 68 px.
+- The PR hint and the Mixed precision copy wrapped badly; both are rewritten.
+- Log lines broke inside "mAP50 0.745". GPUI's wrapper breaks before any non-word character, so a no-break space can't hold a pair together. Messages now render as a wrapping row of unbroken " · " fields.
+- The Playground crumb is Geist Mono, measured in mono. Its room is measured from the toolbar's real latency and count texts.
+
+**Stacked Best model per dataset** adds Architecture, mAP50 and Created.
+
+**Open:** confusion-matrix headings at 1280. The matrix gets 42% of a 1000 px row, about 47 px per cell, so long class names shorten. Making it all-or-nothing gave "cir. / squ. / sta.", which reads worse than one "hex.", so that change was reverted. The real fix is a layout one: more width for the matrix, or a stacked PR / matrix pair.

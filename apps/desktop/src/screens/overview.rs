@@ -254,7 +254,11 @@ impl FoloApp {
                 // Short windows: 0 / 0.50 / 1.00, so labels keep their distance in the lower plot.
                 map.y_ticks = if hero_h < 120. { 2 } else { 4 };
                 map.y_fmt = Some(|v| format!("{v:.2}"));
-                map.height = hero_h + 16.;
+                // One annotation lane above the plot, as on the run dashboard's charts: the ETA sits
+                // there, not inside the data. The card grows by the lane; short windows take it out
+                // of the plot instead, so Recent runs keeps its rows.
+                map.min_lanes = 1;
+                map.height = hero_h + 16. + if hero_h < 120. { 0. } else { 16. };
                 map.hover = hover;
                 map.on_hover = Some(on_hover);
                 map.x_name = "epoch";
