@@ -12,12 +12,17 @@
   /**
    * The loss chart's one control: a compact button naming the current view ("EMA 0.9 · Log") that opens a small panel
    * with the two choices behind it, smoothing and y scale, as native radio groups (arrow keys move within a group, Tab
-   * between them). Escape or a click outside closes it and focus returns to the button. On phones the panel is a bottom
-   * sheet over a scrim, like the other phone menus, so it never floats over the chart's legend.
+   * between them). On wider screens the panel is a non-modal popover: Escape, Tab away or a click outside closes it
+   * and Escape returns focus to the button. On phones it is the shared modal sheet (ui/Dialog: a visible Close and
+   * Done, focus held inside, the page inert, focus back on the button when it closes). A choice applies at once in
+   * both.
    */
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Check from '@lucide/svelte/icons/check';
   import { tick } from 'svelte';
+  import { MediaQuery } from 'svelte/reactivity';
+  import Button from '$lib/ui/Button.svelte';
+  import Dialog from '$lib/ui/Dialog.svelte';
 
   let { smoothing = $bindable(), scale = $bindable() }: { smoothing: Smoothing; scale: Scale } = $props();
 
@@ -25,6 +30,8 @@
   let open = $state(false);
   let root = $state<HTMLElement>();
   let trigger = $state<HTMLButtonElement>();
+  let sheetBody = $state<HTMLElement>();
+  const phone = new MediaQuery('max-width: 767px', false);
 
   const SMOOTHING: { value: Smoothing; label: string }[] = [
     { value: '0', label: 'Raw' },
@@ -40,7 +47,8 @@
   async function show() {
     open = true;
     await tick();
-    root?.querySelector<HTMLInputElement>('input:checked')?.focus();
+    // The chosen smoothing takes focus (in the sheet, once the dialog has opened and moved focus to its first control).
+    (phone.current ? sheetBody : root)?.querySelector<HTMLInputElement>('input:checked')?.focus();
   }
   function hide(refocus = true) {
     open = false;
@@ -54,12 +62,12 @@
       hide();
     }
   }
-  // Tabbing out of the panel closes it.
+  // Tabbing out of the popover closes it (the phone sheet is modal: it holds focus until Close or Done).
   function onfocusout(e: FocusEvent) {
-    if (open && root && !root.contains(e.relatedTarget as Node | null)) hide(false);
+    if (open && !phone.current && root && !root.contains(e.relatedTarget as Node | null)) hide(false);
   }
   $effect(() => {
-    if (!open) return;
+    if (!open || phone.current) return;
     const away = (e: PointerEvent) => {
       if (root && !root.contains(e.target as Node)) hide(false);
     };
@@ -96,17 +104,25 @@
     <span>{lossSummary(smoothing, scale)}</span>
     <ChevronDown size={14} strokeWidth={1.75} aria-hidden="true" />
   </button>
-  {#if open}
-    <!-- Phones: the scrim behind the sheet; a tap on it closes the sheet. -->
-    <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions (Escape closes it too) -->
-    <div class="scrim" aria-hidden="true" onclick={() => hide()}></div>
+  {#if open && !phone.current}
     <div class="panel" id="{uid}-panel" role="dialog" aria-label="Loss view" tabindex="-1">
-      <p class="sheet-title" aria-hidden="true">Loss view</p>
-      {@render group('smoothing', 'Smoothing', SMOOTHING, smoothing, (v) => (smoothing = v as Smoothing))}
-      {@render group('scale', 'Y scale', SCALE, scale, (v) => (scale = v as Scale))}
+      {@render groups()}
     </div>
   {/if}
 </div>
+
+{#snippet groups()}
+  {@render group('smoothing', 'Smoothing', SMOOTHING, smoothing, (v) => (smoothing = v as Smoothing))}
+  {@render group('scale', 'Y scale', SCALE, scale, (v) => (scale = v as Scale))}
+{/snippet}
+
+<!-- Phones: the shared modal sheet. Dialog returns focus to the button when it closes. -->
+{#if phone.current}
+  <Dialog bind:open title="Loss view" size="sm">
+    <div class="sheet" id="{uid}-panel" bind:this={sheetBody}>{@render groups()}</div>
+    {#snippet footer()}<Button onclick={() => (open = false)}>Done</Button>{/snippet}
+  </Dialog>
+{/if}
 
 <style>
   .lo {
@@ -206,10 +222,6 @@
   .opt.on {
     color: var(--text-primary);
   }
-  .scrim,
-  .sheet-title {
-    display: none;
-  }
   @media (pointer: coarse) {
     .trigger {
       height: 44px;
@@ -224,48 +236,10 @@
       transform: translateY(-2px);
     }
   }
-  @media (max-width: 767px) {
-    /* Phones: a bottom sheet over a scrim (as Dialog's phone sheets), clear of the home indicator. */
-    .scrim {
-      display: block;
-      position: fixed;
-      inset: 0;
-      z-index: var(--z-dialog);
-      background: var(--bg-scrim);
-      animation: fade var(--dur-slow) var(--ease-out);
-    }
-    .panel {
-      position: fixed;
-      top: auto;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      z-index: var(--z-dialog);
-      min-width: 0;
-      padding: var(--space-2) var(--space-2) calc(var(--space-4) + env(safe-area-inset-bottom));
-      border-width: 1px 0 0;
-      border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-      box-shadow: var(--shadow-lg);
-      animation: sheet var(--dur-slow) var(--ease-out);
-    }
-    .sheet-title {
-      display: block;
-      padding: var(--space-2) var(--space-3) var(--space-1);
-      font-size: var(--type-md-size);
-      line-height: var(--type-md-line);
-      font-weight: var(--weight-medium);
-      color: var(--text-primary);
-    }
-  }
-  @keyframes fade {
-    from {
-      opacity: 0;
-    }
-  }
-  @keyframes sheet {
-    from {
-      opacity: 0;
-      transform: translateY(24px);
-    }
+  /* The sheet's groups run edge to edge of its body, the options as full-width rows. */
+  .sheet {
+    display: grid;
+    gap: var(--space-1);
+    margin: 0 calc(-1 * var(--space-3));
   }
 </style>

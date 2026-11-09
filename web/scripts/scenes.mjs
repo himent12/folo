@@ -115,12 +115,13 @@ export const scenes = [
   },
   {
     // The short-run scenario's run (run_s5q1) set up again: shapes, folo-n from scratch, batch 32, 5 epochs. 25 batches an epoch
-    // make 13 optimizer steps, 65 in all: the Summary warns in one line with the trainer's fix (16 epochs, as the run
-    // page says), the reasons behind Why? (opened on desktop); below 960 px the dock says so too.
+    // make 13 optimizer steps, 65 in all: the Summary warns in a one-line callout above Start, the reasons and the
+    // trainer's fix (16 epochs, as the run page says) behind Why? (opened on desktop, closed on laptop); below 960 px
+    // the dock says so too.
     name: 'run-new-short',
     path: '/runs/new?dataset=ds_shapes',
     fullPage: false,
-    viewports: ['desktop', 'tablet', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, 'input#epochs');
       if (vp === 'mobile') await page.locator('#arch-pick [role="radio"]', { hasText: 'N' }).click();
@@ -131,6 +132,9 @@ export const scenes = [
       if (vp === 'mobile') {
         await page.locator('.dock-est').click();
         await page.locator('dialog[open]').waitFor();
+      } else if (vp === 'laptop') {
+        await until(page, '.summary .short');
+        await page.locator('.summary .short').scrollIntoViewIfNeeded();
       } else if (vp === 'desktop') {
         await until(page, '.summary .short');
         await page.locator('.summary .short button.more').click();
@@ -151,7 +155,7 @@ export const scenes = [
   },
   {
     // A server whose GPU has no tensor cores through DX12: the switch is off and disabled (its label a field label), one
-    // sentence and the way to Vulkan, and the server's own words under Driver report (opened, copyable).
+    // sentence, "In PowerShell:" and the Vulkan command on one copyable line, the Driver report folded (as it starts).
     name: 'run-new-amp-off',
     path: '/runs/new',
     search: 'scenario=no-tensor-cores',
@@ -159,7 +163,6 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '#amp-why');
-      await page.locator('.amp .dev-detail summary').click();
       await page.mouse.move(0, 0);
     },
   },
@@ -1038,14 +1041,26 @@ export const scenes = [
         // The whole page: the harness shoots from the top, and the panel sits near the bottom.
         fullPage: true,
         viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+        // The Driver report stays folded, as it starts in every state; settings-system-report opens it.
         setup: async (page) => {
           await until(page, '#system');
-          const details = page.locator('#system details.tech summary');
-          if (await details.count()) await details.click();
           await page.mouse.move(0, 0);
         },
       }),
   ),
+  {
+    // The server's own words opened under Driver report: wrapped prose in a well, copyable whole.
+    name: 'settings-system-report',
+    path: '/settings',
+    search: 'scenario=no-tensor-cores',
+    fullPage: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#system');
+      await page.locator('#system details.report summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
   {
     // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
     name: 'shortcuts-off',

@@ -188,8 +188,9 @@ describe('New run: short runs', () => {
     // fasteners: 1,920 train images at batch 16 are 30 optimizer steps an epoch; 5 epochs are 150, W = 90 of them.
     type('epochs', 5);
     const warn = await until(() => target.querySelector('.summary .short'));
-    // One line and the fix; the reasons behind "Why?".
-    expect(warn.querySelector('p')?.textContent?.trim()).toBe('Too short to learn: 150 optimizer steps.');
+    // One line, a callout without a fill; the reasons and the fix behind "Why?".
+    expect(warn.querySelector('p.callout')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Too short to learn: 150 steps. Why?');
+    expect(warn.querySelector('button.fix')).toBeNull();
     expect(warn.querySelector('.short-why')).toBeNull();
     const more = warn.querySelector<HTMLButtonElement>('button.more')!;
     expect(more.textContent).toBe('Why?');
@@ -217,7 +218,7 @@ describe('New run: short runs', () => {
     choose('weights', target.querySelectorAll<HTMLOptionElement>('select#weights option')[1]!.value);
     type('epochs', 5);
     const warn = await until(() => target.querySelector('.summary .short'));
-    expect(warn.querySelector('p')?.textContent?.trim()).toBe('Mostly warmup: 90 of 150 optimizer steps.');
+    expect(warn.querySelector('p.callout span')?.textContent?.trim()).toBe('Mostly warmup: 90 of 150 steps.');
     warn.querySelector<HTMLButtonElement>('button.more')!.click();
     flushSync();
     expect(warn.textContent).not.toContain('Too short');
@@ -275,7 +276,9 @@ describe('New run: the schedule in the Summary', () => {
     el.dispatchEvent(new Event('input', { bubbles: true }));
     flushSync();
     const warn = await until(() => target.querySelector('.summary .short'));
-    expect(warn.querySelector('p')?.textContent?.trim()).toBe('Too short to learn: 65 optimizer steps.');
+    expect(warn.querySelector('p.callout span')?.textContent?.trim()).toBe('Too short to learn: 65 steps.');
+    warn.querySelector<HTMLButtonElement>('button.more')!.click();
+    flushSync();
     expect(warn.querySelector('button.fix')?.textContent).toBe('Train 16 epochs');
   });
 });
@@ -321,18 +324,23 @@ describe('New run: mixed precision', () => {
     // Only the control is disabled: the label stays a field label, not disabled text.
     expect(s.closest('.field')?.classList.contains('sw-field')).toBe(true);
     expect(s.getAttribute('aria-describedby')).toBe('amp-why');
-    // One plain sentence and one action docs/GPU.md confirms (an RTX 4080 SUPER has cooperative matrices on Vulkan).
-    expect(target.querySelector('#amp-why')?.textContent).toBe(
-      "DirectX 12 does not reach this GPU’s tensor cores. Restart the server on Vulkan, in PowerShell: $env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores.",
-    );
-    expect(target.querySelector('#amp-why .mono')?.textContent).toBe("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
-    // The server's reason, verbatim and copyable, behind "Driver report".
-    const report = target.querySelector('.amp .dev-detail')!;
-    expect(report.querySelector('summary')?.textContent).toBe('Driver report');
-    expect(report.querySelector('code')?.textContent).toBe((await api.system()).capabilities!.amp.reason);
-    expect(report.querySelector('code')?.textContent).toContain('NVIDIA GeForce RTX 4080 SUPER (Dx12) has no cooperative matrices in wgpu');
+    // One plain sentence and one action docs/GPU.md confirms (an RTX 4080 SUPER has cooperative matrices on Vulkan):
+    // the shared remedy, the shell named, the command whole on one copyable line.
+    expect(target.querySelector('#amp-why')?.textContent).toBe('DirectX 12 does not reach this GPU’s tensor cores; restart the server on Vulkan.');
+    const remedy = target.querySelector('.amp .remedy')!;
+    expect(remedy.querySelector('.shell')?.textContent).toBe('In PowerShell:');
+    expect(remedy.querySelector('pre.line')?.textContent).toBe("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
+    expect(remedy.querySelector('pre.line')?.hasAttribute('data-scrolls')).toBe(true);
     const write = vi.fn(async () => {});
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
+    remedy.querySelector<HTMLButtonElement>('button[aria-label="Copy command"]')!.click();
+    expect(write).toHaveBeenCalledWith("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
+    // The server's reason, verbatim and copyable, folded behind "Driver report".
+    const report = remedy.querySelector<HTMLDetailsElement>('details.report')!;
+    expect(report.open).toBe(false);
+    expect(report.querySelector('summary')?.textContent).toBe('Driver report');
+    expect(report.querySelector('pre')?.textContent).toBe((await api.system()).capabilities!.amp.reason);
+    expect(report.querySelector('pre')?.textContent).toContain('NVIDIA GeForce RTX 4080 SUPER (Dx12) has no cooperative matrices in wgpu');
     report.querySelector<HTMLButtonElement>('button[aria-label="Copy driver report"]')!.click();
     expect(write).toHaveBeenCalledWith((await api.system()).capabilities!.amp.reason);
     const create = vi.spyOn(api, 'createRun');
@@ -369,8 +377,9 @@ describe('New run: mixed precision', () => {
     hub.api = api = new MockApi('tensor-cores-off', 0);
     await open();
     await until(sw, 'the switch');
-    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server. Restart it with folo serve --tensor-cores.');
-    expect(target.querySelector('#amp-why .mono')?.textContent).toBe('folo serve --tensor-cores');
+    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server; restart it with them on:');
+    expect(target.querySelector('.amp .shell')).toBeNull();
+    expect(target.querySelector('.amp pre.line')?.textContent).toBe('folo serve --tensor-cores');
   });
 
   it('is off on the CPU, and comes back on with the GPU', async () => {
@@ -512,14 +521,17 @@ describe('New run on a phone', () => {
     const pick = target.querySelector('#arch-pick')!;
     expect([...pick.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual(['N', 'S', 'M', 'L', 'X']);
     expect(target.querySelector('.a-sel')?.textContent).toBe('folo-s The default: fast and accurate.');
-    expect(target.querySelector('.a-specs')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('9.46M params · 21.6 GFLOPs · 7.87 ms');
+    expect(target.querySelector('.a-specs')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('9.46M params · 21.6 GFLOPs');
+    // Latency is the architecture's reference, said so, with where it was measured under it.
+    expect(target.querySelector('.a-lat')?.textContent).toBe('Reference latency 7.87 ms');
+    expect(target.querySelectorAll('.a-pick .a-specs')[1]?.textContent).toBe('RTX 4080 SUPER · 640 px · f32 · end to end');
     const compare = target.querySelector<HTMLDetailsElement>('details.a-compare')!;
     expect(compare.open).toBe(false);
     expect(compare.querySelectorAll('.arch')).toHaveLength(5);
     pick.querySelectorAll('button')[2]!.click();
     flushSync();
     expect(target.querySelector('.a-sel')?.textContent).toBe('folo-m More accuracy on busy scenes.');
-    expect(target.querySelector('.a-specs')?.textContent).toContain('latency not measured yet');
+    expect(target.querySelector('.a-lat')?.textContent).toBe('Reference latency not measured yet');
     expect(compare.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-m');
   });
 });

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import LossOptions, { lossSummary } from './LossOptions.svelte';
 
 describe('LossOptions', () => {
@@ -54,5 +54,57 @@ describe('LossOptions', () => {
     expect(button.getAttribute('aria-expanded')).toBe('false');
     expect(document.activeElement).toBe(button);
     unmount(c);
+  });
+
+  describe('on phones', () => {
+    const width = window.innerWidth;
+    const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
+    afterEach(() => setWidth(width));
+
+    it('is the shared modal sheet: visible Close and Done, Tab stays inside, choices apply at once, focus returns', async () => {
+      HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
+        this.open = true;
+      };
+      HTMLDialogElement.prototype.close ??= function (this: HTMLDialogElement) {
+        this.open = false;
+        this.dispatchEvent(new Event('close'));
+      };
+      setWidth(390);
+      const target = document.createElement('div');
+      document.body.appendChild(target);
+      const c = mount(LossOptions, { target, props: { smoothing: '0.9' as const, scale: 'log' as const } });
+      flushSync();
+      const button = target.querySelector<HTMLButtonElement>('button.trigger')!;
+      button.focus();
+      button.click();
+      flushSync();
+      await tick();
+      // A native modal <dialog> (the page inert behind it), not a div with role=dialog.
+      const dialog = document.querySelector<HTMLDialogElement>('dialog')!;
+      expect(dialog.open).toBe(true);
+      expect(target.querySelector('div[role="dialog"]')).toBeNull();
+      expect(dialog.querySelector('button[aria-label="Close"]')).not.toBeNull();
+      const done = [...dialog.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Done')!;
+      expect(done).toBeDefined();
+      const checked = dialog.querySelector<HTMLInputElement>('input:checked')!;
+      expect(document.activeElement).toBe(checked);
+      // Tab out of a group does not dismiss it.
+      checked.dispatchEvent(new FocusEvent('focusout', { bubbles: true, relatedTarget: done }));
+      flushSync();
+      expect(dialog.open).toBe(true);
+      // A choice applies at once.
+      const lin = dialog.querySelector<HTMLInputElement>('input[value="lin"]')!;
+      lin.checked = true;
+      lin.dispatchEvent(new Event('change', { bubbles: true }));
+      flushSync();
+      expect(button.textContent).toContain('EMA 0.9 · Linear');
+      done.click();
+      flushSync();
+      expect(dialog.open).toBe(false);
+      expect(button.getAttribute('aria-expanded')).toBe('false');
+      expect(document.activeElement).toBe(button);
+      unmount(c);
+      target.remove();
+    });
   });
 });
