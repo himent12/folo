@@ -288,10 +288,15 @@ pub fn split_label(dataset: &str, split: &str, images: Option<u64>) -> String {
 /// Where precision and recall were taken, as both pages caption them: the best-F1 confidence when
 /// known, the match rule, and the split ("best F1 · conf 0.31 · IoU 0.50 · val").
 pub fn pr_caption(conf: Option<f32>, split: &str) -> String {
-    match conf {
-        Some(c) => format!("best F1 · conf {} · IoU 0.50 · {split}", fmt_conf(c)),
-        None => format!("best F1 · IoU 0.50 · {split}"),
+    let mut s = match conf {
+        Some(c) => format!("best F1 · conf {} · IoU 0.50", fmt_conf(c)),
+        None => "best F1 · IoU 0.50".to_string(),
+    };
+    // A surface that names the split elsewhere (the model page's headline) leaves it out.
+    if !split.is_empty() {
+        s += &format!(" · {split}");
     }
+    s
 }
 
 /// One metadata line: `lead` (an architecture, say), an optional tag right after it, then the rest

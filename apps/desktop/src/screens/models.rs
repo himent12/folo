@@ -342,8 +342,8 @@ impl FoloApp {
             .and_then(|r| self.store.dataset_summary(&r.config.dataset_id))
             .map(|d| (d.name.clone(), if d.splits.val == 0 { "train" } else { "val" }));
         // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
-        let op_point =
-            pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), head_ds.as_ref().map_or("val", |(_, s)| *s));
+        // The headline names the split; this tile's narrow caption says where on the curve.
+        let op_point = pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), "");
         let tile = |content: gpui::Div| {
             div()
                 .flex_grow()

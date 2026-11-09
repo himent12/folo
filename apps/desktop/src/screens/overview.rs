@@ -702,9 +702,10 @@ impl FoloApp {
         // architecture and dataset always have their column.
         let vw = window.viewport_size().width;
         let created = true;
-        // From 1680 (where the content cap gives the list ~976 px) the name and dataset columns
-        // take the room instead of a dead band; below, the narrower set.
-        let full = vw >= px(1680.);
+        // Full width (stacked, below 1500) or from 1680 (the content cap gives ~976 px beside Best
+        // model), the name and dataset columns take the room instead of a dead band; 1500–1680,
+        // beside Best model, the narrower set.
+        let full = vw < px(1500.) || vw >= px(1680.);
         let (name_w, prog_w, best_w, when_w) =
             if full { (200., 160., 96., 80.) } else { (150., 120., 96., 80.) };
         let meta_w = if full { 180. } else { 130. };
