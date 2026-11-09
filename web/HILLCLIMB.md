@@ -51,6 +51,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r22 | Claude Opus 5.5 (152 sheets, 8 full-size) | 8 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8 | 8 |
 | r23 | GPT-6.1 Sol (169 sheets, 50 full-size) | 8 | 8.5 | 8.5 | 9 | 9 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8.5 | 8 |
 | r23 | Claude Opus 5.5 (169 sheets, 32 full-size) | 8 | 8 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8 | 8.5 | 8.5 | 8.5 | 8 | 8 |
+| r24 | GPT-6.1 Sol (175 sheets, 47 full-size) | 8.5 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8 |
+| r24 | Claude Opus 5.5 (175 sheets, 36 full-size) | 8 | 8 | 8 | 8 | 8 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8 | 8 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -79,6 +81,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r21 | 7.5 ↓ | 8 | 8 ↓ | 7.5 ↓ | 8 ↓ | 7.5 ↓ | 7.5 ↓ | 7.5 ↓ | 8 ↓ | 8.5 | 8 ↓ | 8 ↓ | 7.5 |
 | r22 | 8 ↑ | 8 | 8.5 ↑ | 8.5 ↑ | 8 | 8 ↑ | 8 ↑ | 8.5 ↑ | 8.5 ↑ | 8 ↓ | 8 | 8 | 8 |
 | r23 | 8 | 8 | 8 ↓ | 8.5 | 8.5 ↑ | 8.5 ↑ | 8 | 8 ↓ | 8.5 | 8.5 ↑ | 8 | 8 | 8 |
+| r24 | 8 | 8 | 8 | 8 ↓ | 8 ↓ | 8.5 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -176,3 +179,12 @@ end labels, a lime metric, a red value), a second focus style on inputs, phone s
 the work (the KPI grid above every Model section, Compare's legend, a queued run's full config), prose columns in
 wide frames, a New run preset that its own forecast says will not fit (the oom-retry scene's hard-coded batch), and
 demo facts that disagree on one screen (a toast against the live run, 37.5 % against 37.9 %).
+
+r24 (#143: #138's evaluation provenance; contrast-safe chart text ink, one focus style, status hue on marks; the work
+before the summary on phones; prose and dialog measures; the shared sheet handle; truthful demo facts): Sol's best
+round (eleven lines at 8.5 or 9; only 7 at 8, for scores that lose their evaluation context in summaries: Overview's
+best models, the Models list, pickers). Opus stays at 8 on most lines, and some of what it names came from this
+round's own changes: the best-epoch ring next to the live end ring (an "oo"), a failed run ending on a lime ring
+with no failure mark, a tablet bottom sheet without a scrim, list toolbars that vanish in empty and error states.
+The rest are laptop and tablet edges (cut model descriptions, the estimate box, wrapped callout buttons, tooltips
+over rows) and naming drift (loss series named three ways, raw vs smoothed unexplained).
