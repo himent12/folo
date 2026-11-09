@@ -1640,3 +1640,41 @@ Round 39 changes:
   - Shorter step copy.
   - The palette says "mAP50-95".
 - **Created columns** (Runs and Models) show the exact local time on hover.
+
+## Round 39
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.1 |
+| GPT-6.1 Sol | 8.4 |
+
+Both reviewers put one issue first: the blocked Mixed precision switch still hovered and showed a pointer while doing nothing. A disabled control has to look and act disabled.
+
+Opus also flagged:
+- The empty Overview's inert header buttons competing with "Add a dataset".
+- The wide empty page's header ending past the 1040 px column.
+- Step 1 wrapping to three lines and repeating the synth command.
+- Pre and Infer greys too close in the latency bar.
+- The Playground rail scrolling for a few pixels at 1280 × 800.
+
+Sol also flagged:
+- Overview's Created cells lacking the exact time.
+- The inspector's truncated class names.
+- Hover-only details with no keyboard route.
+
+Opus asked to unify "Precision / Recall" (the run page) with "Precision–recall" (the model page). They are different charts (two metrics over epochs, and a curve), so the brief now records the names as deliberate.
+
+The code review of #111 found nothing blocking. Its two notes were fixed before merge:
+- The latency key may wrap again at extreme timings.
+- Server reasons render as plain text.
+
+Round 40 changes:
+- **Switch:** a real disabled state (a quiet track, half-strength knob, no pointer, hover or focus stop), used for a blocked Mixed precision.
+- **First-run Overview:**
+  - No header actions.
+  - Step 1 reads "Add a YOLO or COCO folder, or generate one below."
+  - The step command chip is gone; the terminal card has the command.
+- **Playground:**
+  - Pre is tertiary at half strength.
+  - The rail's tail is 8 px.
+- **Hover details:** Overview's Recent runs show the exact time, and the inspector's class rows show the full name.
