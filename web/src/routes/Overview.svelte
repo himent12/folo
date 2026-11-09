@@ -123,11 +123,12 @@
       <div class="col-main">
         <Panel title="Recent runs" meta={runs.data ? `${recent.length} of ${runs.data.length}` : undefined} pad="none" id="recent-runs">
           {#snippet actions()}<Button size="sm" variant="ghost" iconRight={ArrowRight} href={href('/runs')}>All runs</Button>{/snippet}
-          <!-- The table frame in every state: placeholder rows while loading, the message inside it when there is nothing. -->
+          <!-- The table frame in every state: placeholder rows while loading, the message inside it when there is nothing
+               (without column heads over it, as on the list pages). -->
           <div class="scroll">
             <table class="table tall" aria-busy={!runs.data} aria-label="Recent runs">
-              <thead>
-                <!-- Fixed widths on the shared header row: one geometry loading, empty, offline and loaded. -->
+              {#if !offline && (runs.data ? recent.length > 0 : !runs.error)}<thead>
+                <!-- Fixed widths on the shared header row: one geometry loading and loaded. -->
                 <tr>
                   <th>Run</th>
                   <th style:width="112px">Status</th>
@@ -136,8 +137,7 @@
                   <th class="hide-sm" style:width="120px">mAP trend</th>
                   <th class="r hide-sm" style:width="96px">Created</th>
                 </tr>
-
-              </thead>
+              </thead>{/if}
               <tbody>
                 {#if offline}
                   <TableState cols={6}><p class="quiet">Recent runs show here once the server answers.</p></TableState>

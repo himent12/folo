@@ -25,6 +25,7 @@
     id,
     invalid = false,
     describedby,
+    disabled = false,
   }: {
     options: Option[];
     value: T;
@@ -36,6 +37,8 @@
     /** In error: a danger edge and focus ring (base.css); pair it with a Field error and `describedby`. */
     invalid?: boolean;
     describedby?: string;
+    /** The whole group off (a list toolbar over an empty or failed list keeps its place, DESIGN_DIRECTION §2.8). */
+    disabled?: boolean;
   } = $props();
 
   let root: HTMLDivElement;
@@ -77,6 +80,7 @@
   aria-label={label}
   aria-invalid={invalid || undefined}
   aria-describedby={describedby}
+  aria-disabled={disabled || undefined}
   bind:this={root}
   {onkeydown}
   tabindex="-1"
@@ -100,7 +104,7 @@
     tabindex={on ? 0 : -1}
     class:on
     class:icon-only={iconOnly && o.icon}
-    disabled={o.disabled}
+    disabled={disabled || o.disabled}
     onclick={() => select(o.value)}
     aria-label={iconOnly ? o.label : undefined}
     title={iconOnly ? o.label : undefined}

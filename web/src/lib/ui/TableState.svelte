@@ -1,9 +1,10 @@
 <script lang="ts">
   /**
    * An empty or error state in the frame the data would fill (DESIGN_DIRECTION §2.8): one row of a `.table`'s body
-   * spanning every column, under the real header row. The block is compact (the message and its actions with the
-   * panel's 16 px padding), never held at the loaded list's height; on phones, where the header row is hidden, the
-   * frame is the content plus 24 px. The message stays inline at the content's left edge (EmptyState / ErrorState).
+   * spanning every column. The table renders no column heads with it (nothing to head) and the list's toolbar stays
+   * above, disabled, so the frame starts where the loaded list's does. The block is compact (the message and its
+   * actions with the panel's 16 px padding), never held at the loaded list's height; on phones the frame is the
+   * content plus 24 px. The message stays inline at the content's left edge (EmptyState / ErrorState).
    */
   import type { Snippet } from 'svelte';
 

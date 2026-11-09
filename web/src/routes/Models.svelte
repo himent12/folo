@@ -138,6 +138,8 @@
   const shownCount = $derived(groups.reduce((a, g) => a + g.rows.length, 0));
   /** Rows to sort, or their skeleton: the sort mark shows only then. */
   const hasRows = $derived(models.data ? shownCount > 0 : !models.error);
+  /** Models to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
+  const hasData = $derived(models.data ? models.data.length > 0 : !models.error);
 
   /**
    * Each evaluation dataset's best model (highest mAP50-95), marked with tertiary "best" text whatever the sort: within
@@ -186,50 +188,56 @@
   <!-- Phones: one line, so the list starts 16 px under it. -->
   {#snippet subPhone()}<span>Ranked per evaluation dataset.</span>{/snippet}
 
-  {#if !models.error && (!models.data || models.data.length > 0)}
-    <!-- The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its own. -->
-    <div class="list-toolbar">
-      <div class="lt-filter">
-      {#if models.data}
-        <div class="seg" data-scrolls><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
-        <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
-        <div class="ds-pick">
-          <label for="models-ds">Dataset</label>
-          <Select id="models-ds" bind:value={dsFilter} options={dsOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))} />
-        </div>
-      {:else}
-        <!-- The same two controls at their loaded size: the dataset strip (a picker on phones). -->
-        <div class="seg ctl-sk" style:width="320px"><Skeleton h="100%" r="var(--radius-md)" /></div>
-        <div class="ds-pick" aria-hidden="true">
-          <span class="ds-label">Dataset</span>
-          <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
-        </div>
-      {/if}
+  <!-- The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its
+       own. It is always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or failed
+       list it is disabled, "All" alone and no counts. -->
+  <div class="list-toolbar">
+    <div class="lt-filter">
+    {#if models.data?.length}
+      <div class="seg" data-scrolls><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
+      <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
+      <div class="ds-pick">
+        <label for="models-ds">Dataset</label>
+        <Select id="models-ds" bind:value={dsFilter} options={dsOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))} />
       </div>
-        <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" /></div>
+    {:else if models.data || models.error}
+      <div class="seg"><Segmented label="Evaluation dataset" value="all" disabled options={[{ value: 'all', label: 'All' }]} /></div>
+      <div class="ds-pick">
+        <label for="models-ds">Dataset</label>
+        <Select id="models-ds" value="all" disabled options={[{ value: 'all', label: 'All' }]} />
+      </div>
+    {:else}
+      <!-- The same two controls at their loaded size: the dataset strip (a picker on phones). -->
+      <div class="seg ctl-sk" style:width="320px"><Skeleton h="100%" r="var(--radius-md)" /></div>
+      <div class="ds-pick" aria-hidden="true">
+        <span class="ds-label">Dataset</span>
+        <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
+      </div>
+    {/if}
     </div>
-  {/if}
+    <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name, arch or run" aria-label="Filter models" type="search" disabled={!hasData} /></div>
+  </div>
 
   <Panel pad="none">
-    <div class="scroll" class:state={(!!models.data && shownCount === 0) || (!!models.error && !models.data)}>
+    <!-- With no rows (empty, no match, an error) the frame drops its column heads and holds the state alone. -->
+    <div class="scroll" class:state={!hasRows}>
       <table class="table models" aria-busy={!models.data} aria-label="Models by evaluation dataset" use:rowNav>
-        <thead>
+        {#if hasRows}<thead>
           <tr>
-            <!-- With no rows (empty, no match, an error) the headers are plain labels: no sort mark over a message. -->
             {#each cols as c (c.key)}
               <SortHeader
                 label={c.label}
                 class={hideCls(c)}
                 align={c.num ? 'right' : 'left'}
                 width={c.w}
-                dir={sortKey === c.key && hasRows ? sortDir : null}
-                disabled={!models.data || shownCount === 0}
+                dir={sortKey === c.key ? sortDir : null}
+                disabled={!models.data}
                 onsort={() => sortBy(c)}
               />
             {/each}
 
           </tr>
-        </thead>
+        </thead>{/if}
         {#if models.error && !models.data}
           <tbody><TableState cols={cols.length}><ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" /></TableState></tbody>
         {:else if models.data?.length === 0}
@@ -539,9 +547,8 @@
     display: none;
   }
   @media (max-width: 767px) {
-    /* Phones show the grouped rows below; the table frame stays only to hold an empty or error state. */
-    .scroll:not(.state),
-    .scroll.state thead {
+    /* Phones show the grouped rows below; the table frame stays only to hold an empty or error state (no column heads at any width). */
+    .scroll:not(.state) {
       display: none;
     }
     /* The summary wraps under the title, on the title's edge (past the chevron). */

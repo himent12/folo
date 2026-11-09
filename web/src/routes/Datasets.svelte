@@ -69,6 +69,10 @@
 
   // Nothing answers: adding a dataset needs the server, so the action is disabled and says why (as on Runs).
   const offline = $derived(!datasets.data && isOffline(datasets.error));
+  /** Datasets to filter, or on their way: the toolbar is live (else it stays in place, disabled). */
+  const hasData = $derived(datasets.data ? datasets.data.length > 0 : !datasets.error);
+  /** Rows to head (or their skeleton): the column heads show; with none the frame holds the state alone. */
+  const hasRows = $derived(datasets.data ? shown.length > 0 : !datasets.error);
 
   const classTip = (d: Dataset) => `${d.classes.length} classes: ${d.classes.join(', ')}`;
 </script>
@@ -86,28 +90,30 @@
     </Gate>
   {/snippet}
 
-  {#if !datasets.error && (!datasets.data || datasets.data.length > 0)}
-    <div class="list-toolbar">
-      <div class="lt-filter"><Segmented
-        label="Filter datasets by format"
-        bind:value={format}
-        options={[
-          { value: 'all', label: 'All', meta: datasets.data ? String(formatCount('all')) : undefined },
-          { value: 'yolo', label: 'YOLO', meta: datasets.data ? String(formatCount('yolo')) : undefined },
-          { value: 'coco', label: 'COCO', meta: datasets.data ? String(formatCount('coco')) : undefined },
-        ]}
-      /></div>
-      <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" /></div>
-    </div>
-  {/if}
+  <!-- Always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or failed list it is
+       disabled and shows no counts. -->
+  <div class="list-toolbar">
+    <div class="lt-filter"><Segmented
+      label="Filter datasets by format"
+      bind:value={format}
+      disabled={!hasData}
+      options={[
+        { value: 'all', label: 'All', meta: datasets.data?.length ? String(formatCount('all')) : undefined },
+        { value: 'yolo', label: 'YOLO', meta: datasets.data?.length ? String(formatCount('yolo')) : undefined },
+        { value: 'coco', label: 'COCO', meta: datasets.data?.length ? String(formatCount('coco')) : undefined },
+      ]}
+    /></div>
+    <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name or path" aria-label="Filter datasets" type="search" disabled={!hasData} /></div>
+  </div>
 
   <Panel pad="none">
-    <div class="scroll" class:state={(!!datasets.data && shown.length === 0) || (!!datasets.error && !datasets.data)}>
+    <!-- With no rows (empty, no match, an error) the frame drops its column heads and holds the state alone. -->
+    <div class="scroll" class:state={!hasRows}>
       <table class="table ds" aria-busy={!datasets.data} aria-label="Datasets" use:rowNav>
-        <thead>
+        {#if hasRows}<thead>
           <tr>
-            <!-- One geometry in every state (DESIGN_DIRECTION 7): fixed widths on the header row that loading, empty,
-                 error and loaded share. A few rows across a wide panel take bounded widths (the path 280 px, cut with
+            <!-- One geometry in every state (DESIGN_DIRECTION 7): fixed widths on the header row that loading and
+                 loaded share. A few rows across a wide panel take bounded widths (the path 280 px, cut with
                  its full path in the title) and leave the slack to an empty last column, as Model's per class does;
                  below 1280, where the path and that column hide, the class balance takes what is left, at least
                  160 px (minmax(160px, 1fr)). -->
@@ -122,7 +128,7 @@
             <th scope="col" class="r hide-md" style:width="104px">Created</th>
             <th class="hide-lg rest" aria-hidden="true"></th>
           </tr>
-        </thead>
+        </thead>{/if}
         <tbody>
           {#if datasets.error && !datasets.data}
             <TableState cols={COLS}><ErrorState error={datasets.error} title="Could not load datasets" retry={() => datasets.refresh()} /></TableState>
@@ -253,9 +259,8 @@
     display: none;
   }
   @media (max-width: 767px) {
-    /* Phones show the rows below; the table frame stays only to hold an empty or error state. */
-    .scroll:not(.state),
-    .scroll.state thead {
+    /* Phones show the rows below; the table frame stays only to hold an empty or error state (no column heads at any width). */
+    .scroll:not(.state) {
       display: none;
     }
     .rows .name {
