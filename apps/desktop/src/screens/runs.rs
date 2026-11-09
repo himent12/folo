@@ -568,14 +568,9 @@ impl FoloApp {
         }
         let samples = self.samples_panel(&r, window, cx);
         let logs = self.logs_panel(&r, window, cx);
-        body = body.child(
-            div()
-                .flex()
-                .gap(px(16.))
-                // The same 3:2 columns as the chart rows above, so every gutter lines up.
-                .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(0.6)).child(samples))
-                .child(div().flex().min_w_0().flex_grow().flex_basis(gpui::relative(0.4)).child(logs)),
-        );
+        // Samples, then the log, each full width: an epoch's log line (~52 mono characters) reads on
+        // one line, as in a terminal, instead of wrapping in a 2/5 column at every window size.
+        body = body.child(div().flex().child(samples)).child(div().flex().child(logs));
         body = body.child(self.config_panel(&r, &ds_name, cx));
         self.page_frame(&t, header, body, cx)
     }
@@ -1270,16 +1265,14 @@ impl FoloApp {
                         div().flex_1().min_w(px(0.)).child(square).into_any_element()
                     })
                     .collect();
-                let mut it = tiles.into_iter();
-                let row1: Vec<AnyElement> = it.by_ref().take(4).collect();
-                let row2: Vec<AnyElement> = it.collect();
+                // One row of eight across the page's width (the log takes its own full-width row
+                // below), about the size the 3:5 column's two rows of four had.
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.))
                     .p(px(16.))
-                    .child(div().flex().items_start().gap(px(8.)).children(row1))
-                    .child(div().flex().items_start().gap(px(8.)).children(row2))
+                    .child(div().flex().items_start().gap(px(8.)).children(tiles))
                     .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
                         "Epoch {epoch} · 8 of 16 fixed validation images · predictions with score ≥ 0.30"
                     )))
@@ -1293,7 +1286,7 @@ impl FoloApp {
                 .p(px(12.))
                 .flex()
                 .gap(px(8.))
-                .children((0..4).map(|i| {
+                .children((0..8).map(|i| {
                     let mut sq = div().w_full().child(skeleton(&t, format!("smp{i}")));
                     sq.style().aspect_ratio = Some(1.0);
                     div().flex_1().min_w(px(0.)).child(sq)
