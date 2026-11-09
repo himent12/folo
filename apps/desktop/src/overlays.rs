@@ -977,6 +977,45 @@ impl FoloApp {
                         }),
                     ),
             )
+            // The head: one-to-many with NMS (the default), or the end-to-end head that predicts
+            // without it. A model property, so it closes the Model section.
+            .child({
+                let e2e = self.new_run.as_ref().is_some_and(|f| f.e2e);
+                let switch = self
+                    .switch(
+                        "nr-e2e",
+                        e2e,
+                        window,
+                        cx,
+                        act(|this, _, cx| {
+                            if let Some(f) = this.new_run.as_mut() {
+                                f.e2e = !f.e2e;
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .into_any_element();
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(16.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(label("End-to-end (no NMS)"))
+                            .child(
+                                text(ty::XS, t.text_tertiary)
+                                    .whitespace_normal()
+                                    .child("Adds a one-to-one head, so the model predicts without NMS"),
+                            ),
+                    )
+                    .child(switch)
+            })
             // Optimizer first: the learning rate beside it depends on it (Auto sets it).
             .child(section("Schedule"))
             .child(

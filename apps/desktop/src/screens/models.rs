@@ -257,7 +257,15 @@ impl FoloApp {
             .items_center()
             .gap(px(10.))
             .child(text(ty::XL, t.text_primary).child(m.name.clone()))
-            .child(badge(&t, m.arch.as_str(), Tone::Neutral));
+            .child(badge(&t, m.arch.as_str(), Tone::Neutral))
+            .when(run.as_ref().is_some_and(|r| r.config.head == crate::api::Head::O2o), |d| {
+                d.child(
+                    div()
+                        .id("model-head")
+                        .tooltip(crate::controls::tip("One-to-one head: predicts without NMS", None))
+                        .child(badge(&t, "end-to-end", Tone::Neutral)),
+                )
+            });
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
                 "{} px · {} classes · created {created}",
