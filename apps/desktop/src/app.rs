@@ -2061,6 +2061,16 @@ impl FoloApp {
             },
             move |this, r, _| {
                 if seq == this.play_pred_seq {
+                    // Every detection has a name to show: a class outside the model's list (a
+                    // mismatched server, an old export) reads "class N", never a blank row.
+                    let r = r.map(|mut p| {
+                        for b in &mut p.boxes {
+                            if b.name.trim().is_empty() {
+                                b.name = format!("class {}", b.class);
+                            }
+                        }
+                        p
+                    });
                     this.play_pred = r.into();
                     this.play_pred_for = Some(key);
                     this.play_pred_pending = false;

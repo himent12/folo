@@ -1362,7 +1362,8 @@ fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, names: &[String], s
     let mut rng = Rng::new(seed);
     let mut out = Vec::new();
     for b in truth {
-        if rng.f32() > 0.55 + 0.44 * q {
+        // A model can't find a class it wasn't trained on (a 3-class model on a 5-class image).
+        if b.class >= classes || rng.f32() > 0.55 + 0.44 * q {
             continue;
         }
         let (bw, bh) = (b.x2 - b.x1, b.y2 - b.y1);
