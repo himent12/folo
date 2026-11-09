@@ -239,8 +239,8 @@
     margin: 0 calc(-1 * var(--space-3));
   }
   /* The sheet's radio mark: a ring, filled in ink when chosen (neutral, like a checked row box). */
-  .mark {
-    flex-shrink: 0;
+  .opt .mark {
+    flex: none;
     display: grid;
     place-items: center;
     width: 18px;

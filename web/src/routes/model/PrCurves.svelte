@@ -421,7 +421,7 @@
     margin-top: calc(var(--space-2) * -1);
     background: var(--bg-panel);
   }
-  .to-curve {
+  .view.to-curve {
     margin-top: 0;
   }
   .filter {

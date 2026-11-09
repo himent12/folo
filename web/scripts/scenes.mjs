@@ -473,10 +473,15 @@ export const scenes = [
       await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/shapes');
       await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
       await until(page, 'text=Already registered as shapes');
-      // Stop the page clock (the shoot's runs in real time) so the toast is still up when the thumbnails have loaded.
+      // Hold the page clock (the shoot's runs in real time) so the toast is still up when the thumbnails have loaded:
+      // they decode in real time but wait on the mock's latency, so the clock steps 250 ms at a time, at most 2.5 s of
+      // the toast's 4.
       await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 100);
-      // The thumbnails render in real time (the page clock, which would close the toast, stays put).
-      await page.locator('.cell img.loaded').nth(17).waitFor({ timeout: 15000 }).catch(() => {});
+      for (let t = 0; t < 2500; t += 250) {
+        if (await page.locator('.cell img.loaded').nth(17).isVisible().catch(() => false)) break;
+        await page.clock.runFor(250);
+        await page.waitForTimeout(600);
+      }
     },
   },
   {
