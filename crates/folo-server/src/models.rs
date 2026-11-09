@@ -509,3 +509,30 @@ pub fn eval_of(r: &folo_vision::EvalReport) -> ModelEval {
         images: r.num_images.min(u32::MAX as u64) as u32,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trained_with_reads_folo_train_leniently() {
+        let t = |s: &str| trained_with(Some(&s.to_string()));
+        // The trainer's resolved config: the three fields, other keys ignored.
+        let full = r#"{"name":"a","epochs":80,"imgsz":512,"amp":true,"head":"o2o","augment":{"mosaic":1.0}}"#;
+        assert_eq!(t(full), Some(TrainedWith { amp: true, imgsz: 512, epochs: 80 }));
+        // Written before mixed precision: no `amp`.
+        assert_eq!(t(r#"{"epochs":3,"imgsz":64}"#), Some(TrainedWith { amp: false, imgsz: 64, epochs: 3 }));
+        // Missing, unparsable or without the fields: none, never an error.
+        assert_eq!(trained_with(None), None);
+        for bad in [
+            "",
+            "not json",
+            "[]",
+            r#"{"epochs":3}"#,
+            r#"{"epochs":-1,"imgsz":64}"#,
+            r#"{"amp":"yes","epochs":3,"imgsz":64}"#,
+        ] {
+            assert_eq!(t(bad), None, "{bad}");
+        }
+    }
+}
