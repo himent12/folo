@@ -203,6 +203,8 @@ impl FoloApp {
         // Short windows trade chart height for the sections below.
         // Short windows (620 px minimum): a lower plot, so two Recent runs rows show under the hero.
         let hero_h = if window.viewport_size().height < px(700.) { 108. } else { 132. };
+        // The card's padding (tighter with the short chart); the chart section's rule spans it.
+        let card_pad = if hero_h < 120. { 12. } else { 16. };
         let t = theme(cx);
         self.ensure_run_data(&r.id, cx);
         let ds = self
@@ -452,15 +454,22 @@ impl FoloApp {
                     .flex()
                     .flex_col()
                     .gap(px(if hero_h < 120. { 8. } else { 16. }))
-                    .p(px(if hero_h < 120. { 12. } else { 16. }))
+                    .p(px(card_pad))
                     .child(kpis)
                     .child(
+                        // The chart section opens on a full-width rule, as the run page's chart
+                        // panels open under their header's.
                         div()
                             .flex_1()
                             .min_w_0()
                             .flex()
                             .flex_col()
                             .gap(px(4.))
+                            .mx(px(-card_pad))
+                            .px(px(card_pad))
+                            .pt(px(card_pad))
+                            .border_t_1()
+                            .border_color(t.line_subtle)
                             .child(
                                 // Title, then the legend on its own left-aligned row, as on
                                 // the run dashboard's charts.
