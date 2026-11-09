@@ -19,7 +19,8 @@
   import { FROM_SCRATCH } from '$lib/lineage';
   import { publishedSummary } from '$lib/published';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
-  import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
+  import { bytes, compact, deviceName, duration, num, pricePerHour, sentence, usd, usdRange } from '$lib/format';
+  import { availabilityNote, hasCloud, limitText, maxCost, offerLine } from '$lib/cloud';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
   import { prefs } from '$lib/prefs.svelte';
   import { REF_CPU, REF_GPU, referenceSource } from '$lib/reference';
@@ -53,6 +54,7 @@
   import { HEAD_LABEL, accumulationText, optimizerLabel } from './run/resolved';
   import { balanced } from '$lib/ui/balancedGrid';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
+  import { CloudPick, LOCAL } from './runnew/cloudPick.svelte';
   import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
   import { media } from '$lib/design/tokens';
 
@@ -129,6 +131,11 @@
     return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
   });
   const system = new Resource((s) => hub.api.system(s));
+  // Run on (servers with the `cloud` feature): this machine or a cloud connection, its GPU and the time limit.
+  const cloudPick = new CloudPick(() => system.data);
+  const cloudOn = $derived(hasCloud(system.data));
+  /** A connection is chosen: the run trains on its GPU, not this machine's. */
+  const onCloud = $derived(cloudOn && cloudPick.cloud);
   const models = new Resource((s) => hub.api.models(s));
   const runs = new Resource((s) => hub.api.runs(s));
   // This server's measured speed (GET /api/system/throughput), where it has one: measured latency in the size table.
@@ -162,6 +169,8 @@
     lr0 = c.lr0;
     seed = c.seed;
     weights = c.weights ?? 'none';
+    // A cloud run's connection, GPU and limit, where they still exist (else this machine, and Run on says why).
+    cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU');
     augment = structuredClone(c.augment);
     closeEdited = true;
     name = `${c.name}-retry`;
@@ -278,7 +287,7 @@
 
   const batchN = $derived(Math.max(1, Math.round(Number(batch) || 16)));
   const imgszN = $derived(Number(imgsz) || 640);
-  const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
+  const onCpu = $derived(!onCloud && (device === 'cpu' || (device === 'auto' && !gpu)));
 
   // Mixed precision (TrainConfig.amp): shown only when the server says what `auto` can use (`capabilities`, absent from
   // older servers), and off where a run would fail with `not_supported`: one plain sentence, the command that works
@@ -288,7 +297,8 @@
   // again the switch is off, so the refusal is answered and the field says only why and how to turn it back on.
   type AmpBlock = { why: string; shell?: string; command?: string; raw?: string };
   const ampBlock = $derived.by((): AmpBlock | null => {
-    if (!caps) return null;
+    // A cloud run's mixed precision is the worker's to check when the instance boots, not this machine's.
+    if (!caps || onCloud) return null;
     if (device === 'cpu') return { why: 'The CPU has no tensor cores. Pick a GPU to train in mixed precision.' };
     // Auto on a server without a usable GPU is the CPU too: no GPU advice.
     if (device === 'auto' && caps.device === 'cpu') return { why: 'This server has no usable GPU, so runs train on the CPU in f32.' };
@@ -319,9 +329,10 @@
     }
     return { why: 'Not available on this server. Train in f32 on this GPU.', raw };
   });
-  const ampOn = $derived(amp && !!caps && !ampBlock);
+  const ampOn = $derived(amp && (onCloud || (!!caps && !ampBlock)));
   /** What the switch does, with the speed measured for this size (docs/BENCHMARKS.md), where there is one. */
   const ampHint = $derived.by(() => {
+    if (onCloud) return 'Checked on the instance when it boots.';
     const x = AMP_SPEEDUP[arch];
     return x ? `f16 on tensor cores: about ${x.toFixed(1)}× faster, 40% less memory.` : 'f16 on tensor cores: faster, about 40% less memory.';
   });
@@ -329,7 +340,7 @@
   /** Epochs without mosaic as the trainer runs them: every epoch when mosaic is 0, else at most half the run. */
   const closeRun = $derived(augment.mosaic <= 0 ? epochs : closeMosaicEpochs(augment.close_mosaic, epochs));
   /** This server's device is the reference machine's, so the reference's narrower range applies. */
-  const refMachine = $derived(onCpu ? system.data?.cpu.name === REF_CPU : gpu?.name === REF_GPU);
+  const refMachine = $derived(!onCloud && (onCpu ? system.data?.cpu.name === REF_CPU : gpu?.name === REF_GPU));
   /** The local estimate: docs/BENCHMARKS.md's reference, while the server's loads or where it has none. */
   const est = $derived(
     estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu, ampOn, { valImages: dataset?.splits.val ?? 0, closeEpochs: closeRun, sameMachine: refMachine }),
@@ -345,9 +356,17 @@
       : `${batchesOf} an epoch, one optimizer step each.`,
   );
   // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
-  const estReady = $derived(!!dataset && (system.data !== undefined || system.error !== undefined));
-  // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
-  const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
+  // A cloud run's figures wait for its GPU too.
+  const estReady = $derived(!!dataset && (system.data !== undefined || system.error !== undefined) && (!onCloud || !!cloudPick.compute));
+  // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess. A cloud
+  // run's memory is its offer's.
+  const gpuMem = $derived(onCloud ? cloudPick.offer?.vram_bytes || null : gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
+  /** Whether GPU memory applies: a GPU of this machine, or the cloud offer's. */
+  const memShown = $derived(onCloud ? !!cloudPick.offer : !onCpu && !!gpu);
+  // The cheapest offer with the memory these settings need (the reference model's forecast), until one is picked.
+  $effect(() => {
+    if (onCloud) cloudPick.preselect(dataset ? est.vramBytes : null);
+  });
 
   // A retry of a run that ran out of GPU memory: what changed since, and an estimate that agrees with the failure.
   const oomRun = $derived(source.data && source.data.status === 'failed' && isOom(source.data.error) ? source.data : null);
@@ -399,8 +418,11 @@
     dataset: !dataset ? 'Pick a dataset.' : null,
     weights: weights !== 'none' && picked?.arch !== arch ? 'Pick weights of the same model size.' : null,
     // The field says what to pick; the line beside Start only names the problem and leads there.
-    device: deviceErr ? `${devWord(device)} is not available.` : null,
-    amp: ampErr && ampOn ? 'Not available on this server now.' : null,
+    device: deviceErr && !onCloud ? `${devWord(device)} is not available.` : null,
+    amp: ampErr && ampOn && !onCloud ? 'Not available on this server now.' : null,
+    runon: cloudOn ? cloudPick.errors.runon : null,
+    offer: onCloud ? cloudPick.errors.offer : null,
+    hours: onCloud ? cloudPick.errors.hours : null,
   });
   const valid = $derived(prefilled && Object.values(errors).every((e) => e === null));
   const FIELD: Record<keyof typeof errors, string> = {
@@ -413,6 +435,9 @@
     weights: 'Start from',
     device: 'Device',
     amp: 'Mixed precision',
+    runon: 'Run on',
+    offer: 'GPU',
+    hours: 'Stop after',
   };
   const JUMP: Record<keyof typeof errors, Jump> = {
     name: 'name',
@@ -424,6 +449,9 @@
     weights: 'weights',
     device: 'device',
     amp: 'amp',
+    runon: 'runon',
+    offer: 'offer',
+    hours: 'hours',
   };
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = $derived.by(() => {
@@ -457,16 +485,19 @@
     epochs,
     batch: batchN,
     imgsz: imgszN,
-    device: device as Device,
+    // A cloud run's worker picks its own GPU (docs/API.md, Cloud runs).
+    device: onCloud ? 'auto' : (device as Device),
     optimizer,
     lr0,
     weights: weights === 'none' ? null : weights,
     augment: { ...augment, hsv: [...augment.hsv] as [number, number, number], close_mosaic: Math.min(augment.close_mosaic, epochs) },
     seed,
-    // Only to servers that report capabilities (older ones predate `amp`).
-    ...(caps ? { amp: ampOn } : {}),
+    // Only to servers that report capabilities (older ones predate `amp`), or train it in the cloud.
+    ...(caps || onCloud ? { amp: ampOn } : {}),
     // Left out for the default (missing means `o2m`, docs/API.md), so older servers see the request they know.
     ...(e2e ? { head: 'o2o' as const } : {}),
+    // Only once a connection and its GPU are chosen, and only to servers with the feature.
+    ...(onCloud && cloudPick.compute ? { compute: cloudPick.compute } : {}),
   });
 
   // The server's estimate (POST /api/runs/estimate, feature `run_estimate`): the first asked at once, every later one
@@ -489,7 +520,7 @@
     const seq = ++estSeq;
     // No request for these settings (none possible, or the answer is already in): none is pending either, even where
     // the one this replaced (since cancelled) was.
-    if (!canEstimate || !dataset || !isInt(epochs, 1, 10000) || errors.close) {
+    if (!canEstimate || !dataset || !isInt(epochs, 1, 10000) || errors.close || (onCloud && !cloudPick.compute)) {
       served = null;
       estimating = false;
       return;
@@ -548,9 +579,9 @@
         hi: r.est_total_s_high,
         vram: r.est_peak_vram_bytes ?? 0,
         vramMeasured: r.vram_source === 'measured',
-        basis: basisLine(r),
+        basis: onCloud ? 'The reference machine’s speed' : basisLine(r),
         rough: r.confidence === 'low',
-        how: confidenceLine(r),
+        how: onCloud ? sentence(r.basis.note) : confidenceLine(r),
         phases: r.phases,
         // A measured basis whose validation rate is still the reference's says so on that line.
         val: { images: r.val_images, rate: r.val_imgs_per_s, reference: r.basis.source === 'measured' && r.val_source === 'reference' },
@@ -582,13 +613,25 @@
    * One condition, one severity, on the meter and the line under it (the figure stays in ink): over the GPU's memory is
    * `danger` (likely won't fit), within 10% of it `warning` (tight; lib/oom's headroom), else neutral.
    */
-  const vramLevel = $derived(onCpu || !gpuMem ? null : vramPct > 1 ? ('danger' as const) : vramPct > 0.9 ? ('warning' as const) : null);
+  const vramLevel = $derived(!memShown || !gpuMem ? null : vramPct > 1 ? ('danger' as const) : vramPct > 0.9 ? ('warning' as const) : null);
   const noFit = $derived(vramLevel === 'danger');
   /**
    * Whether these settings fit the GPU: `fits`, `no` (forecast over its memory) or `unknown` (the adapter does not report
    * its memory, so nothing can be checked); null on the CPU, where GPU memory does not apply.
    */
-  const vramFit = $derived(onCpu ? null : !gpuMem ? ('unknown' as const) : noFit ? ('no' as const) : ('fits' as const));
+  const vramFit = $derived(!memShown ? null : !gpuMem ? ('unknown' as const) : noFit ? ('no' as const) : ('fits' as const));
+  // The time limit follows the estimate's high end until it is set by hand.
+  $effect(() => cloudPick.follow(estReady ? shown.hi : null));
+  /**
+   * What a cloud run costs: the server's range for these settings (`RunEstimate.cost`), else the offer's price over the
+   * time shown; the most it can cost, at its time limit. Null without a price (compute that is not billed).
+   */
+  const cloudCost = $derived.by(() => {
+    const price = onCloud ? (cloudPick.offer?.price_per_hour ?? null) : null;
+    if (price === null) return null;
+    const c = served?.est.cost;
+    return c ? { lo: c.est_usd_low, hi: c.est_usd_high } : { lo: (price * shown.lo) / 3600, hi: (price * shown.hi) / 3600 };
+  });
 
   // Settings forecast not to fit: the one primary becomes the change that fits ("Use batch 8"), chosen by lib/oom's
   // `fitFix` from the same forecast as the figure above (the server's estimate, else the reference model) with 10% of
@@ -636,8 +679,9 @@
     submitting = true;
     try {
       const run = await hub.api.createRun(config);
+      const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).
-      toast.success(`Started ${run.name}`, `${run.epochs} epochs of ${run.config.arch} on ${dataset?.name}.`);
+      toast.success(`Started ${run.name}`, `${run.epochs} epochs of ${run.config.arch} on ${dataset?.name}${where}.`);
       router.go(`/runs/${run.id}`);
     } catch (err) {
       if (err instanceof ApiError && (err.code === 'device_not_found' || (err.code === 'not_implemented' && device.startsWith('gpu:')))) {
@@ -655,7 +699,13 @@
         ampRefused = { device, message: err.message };
         void system.refresh();
         void jump('amp');
-      } else toast.error(err, 'Could not start the run');
+      } else {
+        // A cloud run's refusal at the control it is about (the GPU, Run on, Stop after), else a toast.
+        const field = cloudPick.refuse(err);
+        // page-level: the sheet closed when the form was sent.
+        if (field) void jump(field);
+        else toast.error(err, 'Could not start the run');
+      }
     } finally {
       submitting = false;
     }
@@ -689,7 +739,7 @@
     const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === device);
     return g ? `${device} · ${shortGpu(g.name)}` : device;
   });
-  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close';
+  type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close' | 'runon' | 'offer' | 'hours';
   /** The settings that shape the run, each a way back to its control. Optimizer and head only once not the default. */
   const review = $derived<{ key: Jump; label: string; value: string; mono?: boolean; warn?: boolean }[]>([
     { key: 'data', label: 'Data', value: dataset ? `${dataset.name} · ${compact(dataset.splits.train)} images` : '—', warn: !!errors.dataset },
@@ -697,8 +747,11 @@
     { key: 'epochs', label: 'Epochs', value: errors.epochs ? '—' : num(epochs), warn: !!errors.epochs },
     { key: 'batch', label: 'Batch', value: String(batchN) },
     { key: 'imgsz', label: 'Image size', value: `${imgszN} px` },
-    { key: 'device', label: 'Device', value: deviceLabel, warn: !!deviceMsg },
-    ...(caps ? [{ key: 'amp' as const, label: 'Mixed precision', value: ampOn ? 'On' : 'Off' }] : []),
+    // A cloud run says where it runs ("RunPod · RTX 4090") in the device's place.
+    onCloud
+      ? { key: 'runon' as const, label: 'Runs on', value: cloudPick.offer ? `${cloudPick.provider} · ${cloudPick.offer.gpu}` : cloudPick.provider, warn: !!errors.runon || !!errors.offer }
+      : { key: 'device' as const, label: 'Device', value: deviceLabel, warn: !!deviceMsg },
+    ...(caps || onCloud ? [{ key: 'amp' as const, label: 'Mixed precision', value: ampOn ? 'On' : 'Off' }] : []),
     {
       key: 'weights',
       label: 'Start from',
@@ -818,7 +871,7 @@
             <dd>{num(shown.val.images)} images · {num(shown.val.rate)} img/s</dd>
           </div>
           <div><dt>First epoch</dt><dd>+{num(shown.startup, 1)} s startup</dd></div>
-          {#if !onCpu && gpu}
+          {#if memShown}
             <!-- The Summary's figure, with what it stands on: a row's value is a number, never a source alone. -->
             <div><dt>Peak GPU memory</dt><dd>{roughBytes(vram)} {shown.vramMeasured ? 'measured' : 'reference'}</dd></div>
           {/if}
@@ -826,7 +879,18 @@
         <p class="how-note">{shown.how}{#if shown.updated}{' '}Last measured {shown.updated}.{/if}</p>
       </details>
     </dd>
-    {#if !onCpu && gpu}
+    {#if onCloud && cloudPick.offer && cloudPick.hours !== null}
+      <!-- Money before it is spent: the training's range, with what comes on top, and the most the run can cost, beside the time
+           they follow from (the memory and its meter stay together, last). -->
+      {#if cloudCost}
+        <dt>Est. cost</dt>
+        <dd class="num" class:rough={shown.rough} class:stale={estStale}>{usdRange(cloudCost.lo, cloudCost.hi)}</dd>
+        <dd class="cost-note">Training only: booting and the upload come on top.</dd>
+      {/if}
+      <dt>Limit</dt>
+      <dd class="num">{limitText(cloudPick.offer.price_per_hour, cloudPick.hours)}</dd>
+    {/if}
+    {#if memShown}
       <dt>Est. GPU memory</dt>
       <!-- The figure is a metric, in ink; its severity is the meter's and the line's under it (§2.6). A GPU that does not
            report its memory (0) gets no denominator. -->
@@ -834,9 +898,9 @@
     {/if}
   </dl>
   <!-- Some adapters report no memory size (`memory_bytes: 0`, e.g. through Vulkan): the estimate stands alone, said once. -->
-  {#if !onCpu && gpu && !gpuMem}<p class="calib">This GPU’s memory size isn’t reported.</p>{/if}
+  {#if memShown && !gpuMem}<p class="calib">{onCloud ? 'The offer does not say how much memory its GPU has.' : 'This GPU’s memory size isn’t reported.'}</p>{/if}
   {#if scale > 1 && !onCpu}<p class="calib">Scaled up from the failed run's settings, which did not fit.</p>{/if}
-  {#if !onCpu && gpuMem}
+  {#if memShown && gpuMem}
     <div class="vram" class:stale={estStale} aria-hidden="true"><i class={vramLevel} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
   <!-- Warnings in the rail are one-line callouts: the status's icon in its hue, the words and the Why? link in ink, no
@@ -845,7 +909,7 @@
     <!-- The change that fits is the action under it (Use batch 8); with none, the line says what to lower. -->
     <p class="callout danger" id="{where}-nofit" role="alert">
       <TriangleAlert size={14} aria-hidden="true" /><span
-        >Likely won't fit: this GPU has {bytes(gpuMem, prefs.units)}.{#if !fix && !fixLoading}{' '}No smaller batch, image size or model fits with 10% to spare.{/if}</span
+        >Likely won't fit: {onCloud && cloudPick.offer ? `the ${cloudPick.offer.gpu}` : 'this GPU'} has {bytes(gpuMem, prefs.units)}.{#if !fix && !fixLoading}{' '}No smaller batch, image size or model fits with 10% to spare.{/if}</span
       >
     </p>
   {:else if onCpu}
@@ -1076,6 +1140,127 @@
                 {#if was('imgsz')}<span class="was">was {oomRun?.config.imgsz}</span>{/if}
               </span>
             </Field>
+            {#if cloudOn}
+              <!-- Where the run trains (docs/CLOUD.md): this machine, or a cloud connection; the GPU and the time limit
+                   follow it. Not a Field: its hint holds a link, and a refusal at Start is said here. -->
+              <div class="field runon" class:invalid={!!errors.runon}>
+                <div class="dev-top"><label for="runon">Run on</label></div>
+                <Select
+                  id="runon"
+                  bind:value={cloudPick.target}
+                  onchange={(v) => cloudPick.choose(v)}
+                  invalid={!!errors.runon}
+                  describedby={errors.runon ? 'runon-error' : 'runon-hint'}
+                  options={[
+                    { value: LOCAL, label: 'This machine' },
+                    // A connection whose check failed cannot run anything: listed, off, its error the reason.
+                    ...(cloudPick.connections.data ?? []).map((c) => ({
+                      value: c.id,
+                      label: c.status === 'error' ? `${c.name} · ${c.error ?? 'check failed'}` : c.account ? `${c.name} · ${c.account}` : c.name,
+                      short: c.name,
+                      disabled: c.status === 'error',
+                      title: c.error ?? undefined,
+                    })),
+                  ]}
+                />
+                {#if errors.runon}
+                  <p class="sw-err" id="runon-error" role="alert"><CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>{errors.runon}</span></p>
+                {:else if cloudPick.lost}
+                  <p class="dev-hint" id="runon-hint">{cloudPick.lost}</p>
+                {:else if cloudPick.connection}
+                  <p class="dev-hint num" id="runon-hint">
+                    <Meta>
+                      {#if cloudPick.connection.name !== cloudPick.provider}<span>{cloudPick.provider}</span>{/if}
+                      {#if cloudPick.connection.account}<span>{cloudPick.connection.account}</span>{/if}
+                      {#if cloudPick.connection.balance_usd !== null}<span>Balance {usd(cloudPick.connection.balance_usd)}</span>{/if}
+                    </Meta>
+                  </p>
+                {:else if cloudPick.connections.data && !cloudPick.connections.data.length}
+                  <p class="dev-hint" id="runon-hint">Connect a cloud in <a class="hint-link" href={href('/settings?section=cloud')}>Settings</a> to train on a rented GPU.</p>
+                {:else}
+                  <p class="dev-hint" id="runon-hint">This server’s own GPU or CPU.</p>
+                {/if}
+              </div>
+              {#if onCloud}
+                {@const offers = cloudPick.offerList}
+                {@const chosen = cloudPick.offer}
+                <!-- The connection's offers, each with its price; the cheapest one with the memory these settings need is
+                     preselected. Loading, the select waits in place; an error is said in place with Retry. -->
+                <div class="field offer" class:invalid={!!errors.offer}>
+                  <div class="dev-top"><label for="offer">GPU</label></div>
+                  {#if cloudPick.offers.error && !offers}
+                    <div class="dev-line">
+                      <p class="sw-err" id="offer-error" role="alert"><CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>{sentence(cloudPick.offers.error instanceof Error ? cloudPick.offers.error.message : String(cloudPick.offers.error), true)}</span></p>
+                      <Button size="sm" icon={RotateCcw} onclick={() => cloudPick.retryOffers()}>Retry</Button>
+                    </div>
+                  {:else}
+                    <Select
+                      id="offer"
+                      value={cloudPick.offerId ?? ''}
+                      onchange={(v) => ((cloudPick.offerId = v), (cloudPick.offerChosen = true))}
+                      disabled={!offers}
+                      invalid={!!errors.offer}
+                      describedby={errors.offer ? 'offer-error' : 'offer-hint'}
+                      options={offers
+                        ? offers.map((o) => {
+                            const note = availabilityNote(o.availability);
+                            // Closed, the GPU and its memory; the price and the rest are the line under it.
+                            return {
+                              value: o.id,
+                              label: [offerLine(o, prefs.units), pricePerHour(o.price_per_hour), note].filter(Boolean).join(' · '),
+                              short: offerLine({ ...o, detail: null }, prefs.units),
+                              disabled: o.availability === 'none',
+                            };
+                          })
+                        : [{ value: cloudPick.offerId ?? '', label: 'Loading offers…' }]}
+                    />
+                    {#if errors.offer}
+                      <p class="sw-err" id="offer-error" role="alert"><CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>{errors.offer}</span></p>
+                    {:else if chosen}
+                      <p class="dev-hint num" id="offer-hint">
+                        <Meta>
+                          <span class="price">{chosen.price_per_hour === null ? 'Not billed' : pricePerHour(chosen.price_per_hour)}</span>
+                          {#if chosen.detail}<span>{chosen.detail}</span>{/if}
+                          {#if chosen.region}<span>{chosen.region}</span>{/if}
+                          {#if availabilityNote(chosen.availability)}<span>{availabilityNote(chosen.availability)}</span>{/if}
+                        </Meta>
+                      </p>
+                    {:else}
+                      <p class="dev-hint" id="offer-hint">{offers ? 'Nothing is available on this connection now.' : 'Asking the provider what it can run on.'}</p>
+                    {/if}
+                  {/if}
+                </div>
+                {@const most = chosen && cloudPick.hours !== null ? maxCost(chosen.price_per_hour, cloudPick.hours) : null}
+                <Field
+                  label="Stop after"
+                  for="hours"
+                  error={errors.hours}
+                  hint={cloudPick.provisions
+                    ? `The run is stopped and the instance terminated after this long at the latest.${most !== null ? ` It cannot cost more than ${usd(most)}.` : ''}`
+                    : 'The run is stopped after this long at the latest.'}
+                >
+                  <Input
+                    id="hours"
+                    type="number"
+                    min="0.25"
+                    max="720"
+                    step="0.25"
+                    bind:value={cloudPick.hours}
+                    oninput={() => (cloudPick.hoursEdited = true)}
+                    invalid={!!errors.hours}
+                    suffix="hours"
+                  />
+                </Field>
+              {/if}
+            {/if}
+            {#if onCloud}
+              <!-- The worker picks its GPU (the config sends `auto`): a fact in the device's place, not a control. -->
+              <div class="field dev">
+                <div class="dev-top"><span class="dev-label">Device</span></div>
+                <p class="dev-fact">{cloudPick.provisions ? 'The instance’s GPU' : 'The server’s GPU'}</p>
+                <p class="dev-hint">The worker picks it when it trains.</p>
+              </div>
+            {:else}
             <!-- Not a Field: a device the server cannot use gets a line with a way out and folded details. -->
             <div class="field dev" class:invalid={!!deviceMsg}>
               <div class="dev-top">
@@ -1112,7 +1297,8 @@
                 <p class="dev-hint" id="device-hint">Auto prefers the GPU over the CPU.</p>
               {/if}
             </div>
-            {#if caps}
+            {/if}
+            {#if caps || onCloud}
               <!-- A field on the same grid: the label's line carries the switch at the field's right edge, the hint (or,
                    where the server cannot train in mixed precision, why not and what to do) under it. Only the control
                    is disabled; the label keeps the field labels' colour. Hidden when the server does not say. -->
@@ -1330,7 +1516,8 @@
               >
               <!-- Over the memory: the figure against the GPU's in ink, and the verdict with its mark in the rail's one
                    severity. -->
-              {#if estReady && !onCpu && gpu}<span class:stale={estStale}
+              {#if estReady && cloudCost}<span class:stale={estStale}>{usdRange(cloudCost.lo, cloudCost.hi)}</span>{/if}
+              {#if estReady && memShown}<span class:stale={estStale}
                   >{#if noFit && gpuMem}{roughBytes(vram)} / {bytes(gpuMem, prefs.units)}{:else}{roughBytes(vram)} GPU memory{/if}</span
                 >{/if}
               {#if estReady && noFit}<span class="dock-warn danger"><TriangleAlert size={12} aria-hidden="true" />Likely won't fit</span>{/if}
@@ -1627,9 +1814,31 @@
     align-items: baseline;
     gap: var(--space-2);
   }
-  .dev-top label {
+  .dev-top label,
+  .dev-label {
     color: var(--text-secondary);
     font-weight: var(--weight-medium);
+  }
+  /* A cloud run's device: a fact on the control's line, at its height, so the row keeps its neighbour's geometry. */
+  .dev-fact {
+    display: flex;
+    align-items: center;
+    min-height: var(--control-md);
+    color: var(--text-primary);
+  }
+  /* The price of the chosen GPU, read first on its line. */
+  .dev-hint .price {
+    color: var(--text-secondary);
+  }
+  /* "Settings" in Run on's hint: an ink link to Settings › Cloud. */
+  .hint-link {
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .hint-link:hover {
+    text-decoration-color: var(--text-secondary);
   }
   .dev-top .was {
     font-size: var(--type-sm-size);
@@ -1855,6 +2064,14 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* What a cloud run's cost range leaves out: a quiet line under it, across the rail from its label's edge. */
+  .est dd.cost-note {
+    grid-column: 1 / -1;
+    margin-top: -2px;
+    color: var(--text-tertiary);
+    text-align: left;
+    white-space: normal;
   }
   /* A rough estimate (nothing close measured here) reads one step quieter than a measured one. */
   .est dd.rough {

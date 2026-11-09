@@ -39,6 +39,15 @@ afterEach(() => {
 });
 
 describe('Settings', () => {
+  it('lists Cloud after Connection only on a server with the cloud feature', async () => {
+    hub.api = new MockApi('cloud-off', 0);
+    c = mount(Settings, { target });
+    const jump = target.querySelector<HTMLElement>('nav.jump')!;
+    await until(() => jump.textContent?.includes('System'), 'the System section');
+    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).not.toContain('Cloud');
+    expect(target.querySelector('#cloud')).toBeNull();
+  });
+
   it('describes the server URL field by its hint', () => {
     hub.api = new MockApi('normal', 0);
     c = mount(Settings, { target });
@@ -52,7 +61,7 @@ describe('Settings', () => {
     c = mount(Settings, { target });
     const jump = target.querySelector<HTMLElement>('nav.jump')!;
     await until(() => jump.textContent?.includes('System'), 'the System section');
-    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Connection', 'Appearance', 'Units', 'Keyboard shortcuts', 'System', 'About']);
+    expect([...jump.querySelectorAll('a')].map((a) => a.textContent)).toEqual(['Connection', 'Cloud', 'Appearance', 'Units', 'Keyboard shortcuts', 'System', 'About']);
     const scroll = vi.fn();
     const system = target.querySelector<HTMLElement>('#system')!;
     system.scrollIntoView = scroll;

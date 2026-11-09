@@ -4,7 +4,8 @@
 import type { RunEventHandlers } from './client';
 import type { RunEventMap } from './types';
 
-const EVENTS: (keyof RunEventMap)[] = ['status', 'step', 'epoch', 'log'];
+/** Every event name a run's stream carries (docs/API.md, `GET /api/runs/{id}/events`); others are ignored. */
+export const EVENTS: (keyof RunEventMap)[] = ['status', 'step', 'epoch', 'log', 'queue', 'cloud'];
 
 export interface Backoff {
   /** Delay before the given (0-based) retry attempt, in ms. */

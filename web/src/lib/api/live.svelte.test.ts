@@ -775,3 +775,48 @@ describe('LiveRun: the training queue (docs/API.md, SSE queue)', () => {
     stop();
   });
 });
+
+describe('LiveRun: a cloud run (docs/API.md, SSE cloud)', () => {
+  const saved = hub.api;
+  afterEach(() => {
+    hub.api = saved;
+    vi.useRealTimers();
+  });
+
+  it('keeps the latest cloud event over a snapshot requested before it', async () => {
+    vi.useFakeTimers();
+    const run = await new MockApi('cloud-upload', 0).run('run_c9e4');
+    let handlers: RunEventHandlers = {};
+    const snaps: ReturnType<typeof deferred<Run>>[] = [];
+    hub.api = {
+      mock: false,
+      run: () => {
+        const d = deferred<Run>();
+        snaps.push(d);
+        return d.promise;
+      },
+      runMetrics: () => Promise.resolve({ steps: [], epochs: [] }),
+      runLogs: () => Promise.resolve({ lines: [] }),
+      runEvents: (_id: string, h: RunEventHandlers) => {
+        handlers = h;
+        return () => {};
+      },
+    } as unknown as Api;
+    hub.mode = 'live';
+    let live!: LiveRun;
+    const stop = $effect.root(() => {
+      live = new LiveRun(() => 'run_c9e4');
+    });
+    flushSync();
+    // The upload ends while the first snapshot (still uploading) is on its way.
+    const next = { ...run.cloud!, phase: 'training', progress: null };
+    handlers.cloud?.(next);
+    snaps[0]!.resolve(run);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.run?.cloud?.phase).toBe('training');
+    // State, not a change: a later event replaces it whole.
+    handlers.cloud?.({ ...next, phase: 'collecting', progress: { done_bytes: 1, total_bytes: 2 } });
+    expect(live.run?.cloud).toMatchObject({ phase: 'collecting', progress: { done_bytes: 1, total_bytes: 2 } });
+    stop();
+  });
+});

@@ -237,14 +237,17 @@ export class MockThroughput {
     return { device: 'gpu:0', device_name: GPU_NAME, training, inference };
   }
 
-  /** `POST /api/runs/estimate` for a config the caller has already checked (dataset, device). */
-  estimate(c: TrainConfig, trainImages: number, valImages: number): RunEstimate {
+  /**
+   * `POST /api/runs/estimate` for a config the caller has already checked (dataset, device). `cloudGpu`, for a config
+   * with `compute`: the offer's GPU, which this server never measured, so the estimate is the reference's for it.
+   */
+  estimate(c: TrainConfig, trainImages: number, valImages: number, cloudGpu?: string): RunEstimate {
     if (!Number.isInteger(c.epochs) || c.epochs < 1) throw new ApiError(400, 'invalid_config', '`epochs` must be at least 1.');
     if (c.imgsz % 32 !== 0 || c.imgsz < 64 || c.imgsz > 1280) throw new ApiError(400, 'invalid_config', '`imgsz` must be a multiple of 32 in 64..=1280.');
     if (c.batch < 1) throw new ApiError(400, 'invalid_config', '`batch` must be at least 1.');
-    const device = c.device === 'auto' ? 'gpu:0' : c.device;
+    const device = cloudGpu ? 'cloud' : c.device === 'auto' ? 'gpu:0' : c.device;
     const cpu = device === 'cpu';
-    const here = cpu ? CPU_NAME : GPU_NAME;
+    const here = cloudGpu ?? (cpu ? CPU_NAME : GPU_NAME);
     const amp = !!c.amp && !cpu;
     const rows = this.#training.filter((r) => r.source === 'measured' && r.device === device && r.measured_on === here && r.mosaic);
     const exact = rows.find((r) => r.arch === c.arch && r.imgsz === c.imgsz && r.batch === c.batch && r.amp === amp);
@@ -287,9 +290,13 @@ export class MockThroughput {
         row = refTrainRow(device, c.arch, c.imgsz, amp);
         source = 'reference';
         confidence = 'low';
-        // The mock's GPU is the reference machine's; its CPU is not.
-        spread = referenceSpread(!cpu);
-        note = cpu ? 'reference figures, not measured on this device' : 'reference figures (docs/BENCHMARKS.md) for this GPU model';
+        // The mock's GPU is the reference machine's; its CPU is not, and neither is a cloud offer's.
+        spread = referenceSpread(!cpu && !cloudGpu);
+        note = cloudGpu
+          ? `FOLO's reference benchmarks (RTX 4080 SUPER), scaled to these settings; the ${cloudGpu} may be faster or slower`
+          : cpu
+            ? 'reference figures, not measured on this device'
+            : 'reference figures (docs/BENCHMARKS.md) for this GPU model';
       }
     }
 

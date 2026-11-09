@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ago, atBestF1, bytes, compact, conf, deviceName, duration, eta, lr, metric, ms, pct } from './format';
+import { ago, atBestF1, bytes, compact, conf, deviceName, duration, eta, hoursText, lr, metric, ms, pct, pricePerHour, timeOfDay, usd, usdRange } from './format';
 
 describe('format', () => {
   it('formats metrics and percents', () => {
@@ -69,5 +69,42 @@ describe('operating point (docs/API.md, best_f1_conf)', () => {
     expect(atBestF1(0.312)).toBe('at conf 0.31 (best F1)');
     expect(atBestF1(null)).toBe('at the best-F1 confidence');
     expect(atBestF1(undefined)).toBe('at the best-F1 confidence');
+  });
+});
+
+describe('money and time limits (cloud compute)', () => {
+  it('writes a price per hour with two decimals, and a dash for compute that is not billed', () => {
+    expect(pricePerHour(0.69)).toBe('$0.69/h');
+    expect(pricePerHour(2.5)).toBe('$2.50/h');
+    expect(pricePerHour(null)).toBe('—');
+  });
+
+  it('writes a cost with two decimals, under a cent as <$0.01, from $100 in whole dollars', () => {
+    expect(usd(0.42)).toBe('$0.42');
+    expect(usd(0)).toBe('$0.00');
+    expect(usd(0.004)).toBe('<$0.01');
+    expect(usd(0.005)).toBe('$0.01');
+    expect(usd(99.994)).toBe('$99.99');
+    expect(usd(1240.4)).toBe('$1,240');
+    expect(usd(undefined)).toBe('—');
+  });
+
+  it('writes a range low to high, one amount when both ends read the same', () => {
+    expect(usdRange(0.12, 0.93)).toBe('$0.12–$0.93');
+    expect(usdRange(0.93, 0.12)).toBe('$0.12–$0.93');
+    expect(usdRange(0.421, 0.419)).toBe('$0.42');
+  });
+
+  it('writes hours as the limit is set', () => {
+    expect(hoursText(12)).toBe('12 h');
+    expect(hoursText(0.5)).toBe('0.5 h');
+    expect(hoursText(0.25)).toBe('0.25 h');
+  });
+
+  it('writes a deadline as a clock time, with the date when it is not today', () => {
+    const now = new Date(2026, 10, 8, 9, 0).getTime();
+    expect(timeOfDay(new Date(2026, 10, 8, 14, 32).toISOString(), now)).toBe('14:32');
+    expect(timeOfDay(new Date(2026, 10, 9, 2, 5).toISOString(), now)).toBe('Nov 9, 02:05');
+    expect(timeOfDay(null, now)).toBe('—');
   });
 });
