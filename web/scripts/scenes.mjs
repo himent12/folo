@@ -344,7 +344,7 @@ export const scenes = [
       const svg = page.locator('#ds-size svg[role=img]');
       await svg.evaluate((el, touch) => {
         const r = el.getBoundingClientRect();
-        const p = { clientX: r.left + r.width * 0.22, clientY: r.top + r.height * 0.6, bubbles: true };
+        const p = { clientX: r.left + r.width * 0.4, clientY: r.top + r.height * 0.6, bubbles: true };
         const types = touch ? ['pointerdown', 'pointerup'] : ['pointermove'];
         for (const type of types) el.dispatchEvent(new PointerEvent(type, { ...p, pointerType: touch ? 'touch' : 'mouse' }));
       }, vp === 'mobile');

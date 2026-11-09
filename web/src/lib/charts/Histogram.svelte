@@ -18,6 +18,7 @@
     color = 'var(--chart-2)',
     hoverColor,
     binLabel,
+    tickLabel,
     label,
     unit = 'boxes',
     marker,
@@ -31,6 +32,8 @@
     hoverColor?: string;
     /** Label for bin i (defaults to "a–b"). */
     binLabel?: (lo: number, hi: number, i: number) => string;
+    /** A shorter axis label for bin i (e.g. without the unit the panel names); defaults to the bin label. */
+    tickLabel?: (lo: number, hi: number, i: number) => string;
     label: string;
     unit?: string;
     /** A dashed vertical reference line at a value (e.g. a threshold on a bin edge), labelled on its lower side. */
@@ -49,6 +52,7 @@
   const bars = $derived(categoryBars(counts.length, m.left, width - m.right));
   const bw = $derived(bars[0]?.w ?? 0);
   const name = (i: number) => (binLabel ? binLabel(edges[i] ?? 0, edges[i + 1] ?? 0, i) : `${edges[i]}–${edges[i + 1]}`);
+  const tickName = (i: number) => (tickLabel ? tickLabel(edges[i] ?? 0, edges[i + 1] ?? 0, i) : name(i));
   const total = $derived(counts.reduce((a, b) => a + b, 0));
   const firstBin = $derived(Math.max(0, counts.findIndex((c) => c > 0)));
   const shareOf = (c: number) => (total ? ((c / total) * 100).toFixed(1) : '0');
@@ -189,7 +193,7 @@
           d="M{b.x + gap},{height - m.bottom} v{-Math.max(0, h - r)} q0,-{r} {r},-{r} h{Math.max(0, b.w - 2 * gap - 2 * r)} q{r},0 {r},{r} v{Math.max(0, h - r)} z"
         />
         {#if i % labelEvery === 0}
-          <text class="tick" x={b.x + b.w / 2} y={height - 6} text-anchor="middle">{name(i)}</text>
+          <text class="tick" x={b.x + b.w / 2} y={height - 6} text-anchor="middle">{tickName(i)}</text>
         {/if}
       {/each}
       {#if marker}

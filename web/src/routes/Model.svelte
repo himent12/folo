@@ -294,7 +294,6 @@
         <div class="kl-row">
           <span class="kl-vals">
             {#each kpis(m) as k, i (k.label)}
-              {#if i}<span class="sep" aria-hidden="true">·</span>{/if}
               <span class="kl-item"
                 >{#if k.short !== k.label}<span class="kl" aria-hidden="true">{k.short}</span><span class="sr-only">{k.label}</span>{:else}<span class="kl"
                     >{k.label}</span
@@ -711,13 +710,14 @@
     background: var(--bg-panel);
     overflow: hidden;
   }
+  /* No gap before the ⓘ: its 44 px target already sets it off. */
   .kl-row {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
     min-height: 44px;
     padding: 0 0 0 var(--space-3);
   }
+  /* Label-value pairs set apart by space alone (no dots; grey label, value in ink), so even an 80-class model's four fit one line at 390 px. */
   .kl-vals {
     display: flex;
     align-items: center;
@@ -754,9 +754,6 @@
   }
   .kpi-line b {
     font-weight: var(--weight-semibold);
-  }
-  .kpi-line .sep {
-    margin: 0;
   }
   /* Phones' confusion list: two-line 56 px rows (the pair and its share, then the counts behind it). */
   .rank-h {

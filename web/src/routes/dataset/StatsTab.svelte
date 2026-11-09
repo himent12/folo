@@ -161,7 +161,7 @@
   </Panel>
 
   <div class="two">
-    <Panel title="Box size" meta="how big objects are next to the image" id="ds-size">
+    <Panel title="Box size" meta="% of the image side" id="ds-size">
       {#snippet actions()}
         <!-- The precise reading, one step away: the plain line above is what most readers need. -->
         <button
@@ -176,6 +176,7 @@
         edges={stats.box_size_hist.edges}
         counts={stats.box_size_hist.counts}
         binLabel={(lo, hi) => sizeBinLabel(lo, hi)}
+        tickLabel={(lo, hi) => sizeBinLabel(lo, hi).replace('%', '')}
         label="Histogram of box sizes relative to the image side (square root of the area share), one bar per size range, with a marker at the 5% tiny-box threshold"
         color="var(--text-tertiary)"
         hoverColor="var(--text-primary)"
