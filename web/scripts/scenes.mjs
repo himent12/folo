@@ -142,7 +142,7 @@ export const scenes = [
     name: 'run-new-amp',
     path: '/runs/new',
     fullPage: true,
-    viewports: ['desktop', 'tablet', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, 'input#amp');
       await page.locator('.amp .switch').click();
@@ -150,17 +150,44 @@ export const scenes = [
     },
   },
   {
-    // A server whose GPU has no tensor cores (the DX12 adapter): the switch is off and disabled, with the reason, and the
-    // server's own words under Technical details (opened).
+    // A server whose GPU has no tensor cores through DX12: the switch is off and disabled (its label a field label), one
+    // sentence and the way to Vulkan, and the server's own words under Driver report (opened, copyable).
     name: 'run-new-amp-off',
     path: '/runs/new',
     search: 'scenario=no-tensor-cores',
     fullPage: true,
-    viewports: ['desktop', 'tablet', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       await until(page, '#amp-why');
       await page.locator('.amp .dev-detail summary').click();
       await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The end-to-end head (TrainConfig.head "o2o"): Advanced opened and the switch on, with its one line; the Summary's
+    // Head row and the CLI command (opened) carry it.
+    name: 'run-new-e2e',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#sec-train details.advanced > summary');
+      await page.locator('#sec-train details.advanced > summary').click();
+      await page.locator('.switch:has(#head)').click();
+      await page.locator('.summary details.cli > summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The Summary's schedule in plain words ("30 steps / epoch"); the batches behind it in a tooltip, here hovered.
+    name: 'run-new-steps',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'laptop'],
+    setup: async (page) => {
+      await until(page, '.summary .steps');
+      await page.locator('.summary .steps').hover();
+      await page.clock.runFor(600);
     },
   },
   {

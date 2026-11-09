@@ -268,6 +268,17 @@ export function startLogs(p: RunProfile, startedAt: number, datasetName: string,
     { t: t(120), level: 'info', message: `optimizer ${c.optimizer === 'auto' ? 'AdamW' : c.optimizer} lr0 ${c.lr0}  batch ${c.batch}  warmup 3 epochs, cosine to ${c.lr0 * 0.01}` },
     { t: t(200), level: 'info', message: `augment mosaic ${c.augment.mosaic} mixup ${c.augment.mixup} fliplr ${c.augment.fliplr} scale ${c.augment.scale}` },
     { t: t(260), level: 'info', message: `training ${c.epochs} epochs, ${p.stepsPerEpoch} steps/epoch` },
+    // folo_vision::train, for a `head: "o2o"` run (docs/MODEL.md §6.6).
+    ...(c.head === 'o2o'
+      ? [
+          {
+            t: t(260),
+            level: 'info',
+            message:
+              'head o2o: dual assignment (one-to-many + one-to-one losses, weights 0.8 / 0.2 → 0.1 / 0.9 over the run); validation uses the one-to-one head without NMS',
+          } satisfies LogLine,
+        ]
+      : []),
   ];
 }
 

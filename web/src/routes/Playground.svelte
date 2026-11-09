@@ -696,8 +696,8 @@
       </EmptyState>
     </Panel>
   {:else}
-    <!-- With an image, the main column takes the image's width at the canvas height (see .layout.fit). -->
-    <div class="layout" class:fit={!!source && !!dims} style:--arn={dims ? dims.width / dims.height : undefined}>
+    <!-- 8 + 4 columns; in one column (below 1024 px) the canvas takes the image's aspect (see .layout.fit). -->
+    <div class="layout" class:fit={!!source && !!dims}>
       <div class="main">
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div class="viewer" class:loaded={!!source} {ondragover} {ondragleave} {ondrop}>
@@ -1024,23 +1024,13 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
   }
+  /* The page grid's 8 + 4 split (the rail is always 4 columns), the same with or without an image. */
   .layout {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
     gap: var(--space-4);
     align-items: start;
     --stage-h: max(360px, calc(100dvh - 220px));
-  }
-  /* An image is shown whole at the canvas height: the main column is the image's width at that height (or what is
-     left beside a 320 px rail), and the canvas takes the image's aspect, so the image fills it edge to edge and the
-     toolbar and caption line up with it. The rail takes the rest. */
-  .layout.fit {
-    grid-template-columns: minmax(0, calc(var(--stage-h) * var(--arn))) minmax(320px, 1fr);
-  }
-  .layout.fit .stage {
-    height: auto;
-    aspect-ratio: var(--ar);
-    max-height: var(--stage-h);
   }
   .main,
   .aside {
@@ -1121,17 +1111,16 @@
     color: var(--text-inverse);
     box-shadow: none;
   }
-  /* The canvas takes the viewport minus the chrome above and below it. */
+  /* The canvas takes the viewport minus the chrome above and below it, empty or not; an image is shown whole in it
+     (contained, centred on the inset well). */
   .stage {
     position: relative;
     height: var(--stage-h);
     background: var(--bg-inset);
   }
-  /* Empty: as tall as its content (a capped drop target and the samples), not the canvas height. */
   .stage.empty {
     border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
     overflow: hidden;
-    height: auto;
   }
   .scan {
     position: absolute;
@@ -1564,9 +1553,18 @@
     }
   }
   @media (max-width: 1023px) {
-    .layout,
-    .layout.fit {
+    .layout {
       grid-template-columns: minmax(0, 1fr);
+    }
+    /* One column: the canvas takes the image's aspect at the full width, up to the canvas height, so the image fills
+       it edge to edge; empty, it is as tall as its content (the drop target and the samples). */
+    .layout.fit .stage {
+      height: auto;
+      aspect-ratio: var(--ar);
+      max-height: var(--stage-h);
+    }
+    .stage.empty {
+      height: auto;
     }
     /* The toolbar row takes the title row's place for the controls; no extra gap under the title. */
     .pg-tools {
