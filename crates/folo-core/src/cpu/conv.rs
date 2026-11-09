@@ -4,7 +4,7 @@ use rayon::prelude::*;
 
 use super::elementwise::SendPtr;
 use super::gemm::{
-    BiasAct, ColumnMap, KC, MR, NR, Operand, RowPtrs, Strided, gemm_arows, gemm_ex, gemm_rows,
+    BiasAct, ColumnMap, KC, MR, NR, Operand, RowPtrs, Strided, gemm, gemm_arows, gemm_ex, gemm_rows,
     pack_rows_into_panels,
 };
 use crate::backend::Conv2dParams;
@@ -329,6 +329,86 @@ impl ShiftedRows {
 const SHIFTED_PAR_MIN: usize = 1 << 16;
 const SHIFTED_TASK: usize = 1 << 14;
 
+/// B operand of the weight-gradient GEMM: element `(kidx, t)` with `t = img * ohw + s` is `col_img[kidx][s]`.
+struct Im2ColT<'a> {
+    x: &'a [f32],
+    grp: usize,
+    g: ConvGeom,
+}
+
+impl Operand for Im2ColT<'_> {
+    fn pack(&self, o0: usize, w: usize, k0: usize, kc: usize, width: usize, dst: &mut [f32]) {
+        let g = &self.g;
+        let khw = g.kh * g.kw;
+        let ohw = g.ohw();
+        let (sh, ph, pw) = (g.p.stride[0] as isize, g.p.padding[0] as isize, g.p.padding[1] as isize);
+        let (dh, dw) = (g.p.dilation[0] as isize, g.p.dilation[1] as isize);
+        let dst = &mut dst[..kc * width];
+        if w < width {
+            dst.fill(0.0);
+        }
+        for ii in 0..w {
+            let kidx = o0 + ii;
+            let (ci, r) = (kidx / khw, kidx % khw);
+            let (ky, kx) = ((r / g.kw) as isize, (r % g.kw) as isize);
+            let mut t = k0;
+            let mut kk = 0;
+            while kk < kc {
+                let (img, s) = (t / ohw, t % ohw);
+                let (oy, ox) = (s / g.ow, s % g.ow);
+                let len = (g.ow - ox).min(kc - kk);
+                let plane = (img * g.c + self.grp * g.cg() + ci) * g.h * g.w;
+                let iy = oy as isize * sh - ph + ky * dh;
+                im2col_segment(
+                    &self.x[plane..plane + g.h * g.w],
+                    g,
+                    iy,
+                    kx * dw - pw,
+                    ox,
+                    len,
+                    &mut dst[kk * width + ii..],
+                    width,
+                );
+                kk += len;
+                t += len;
+            }
+        }
+    }
+}
+
+/// A operand of the weight-gradient GEMM: element `(o, t)` with `t = img * ohw + s` is
+/// `grad[img][grp * og + o][s]`.
+struct GradRows<'a> {
+    gy: &'a [f32],
+    grp: usize,
+    g: ConvGeom,
+}
+
+impl Operand for GradRows<'_> {
+    fn pack(&self, o0: usize, w: usize, k0: usize, kc: usize, width: usize, dst: &mut [f32]) {
+        let g = &self.g;
+        let ohw = g.ohw();
+        let dst = &mut dst[..kc * width];
+        if w < width {
+            dst.fill(0.0);
+        }
+        let mut t = k0;
+        let mut kk = 0;
+        while kk < kc {
+            let (img, s) = (t / ohw, t % ohw);
+            let len = (ohw - s).min(kc - kk);
+            for ii in 0..w {
+                let row = (img * g.o + self.grp * g.og() + o0 + ii) * ohw + s;
+                for (q, &v) in self.gy[row..row + len].iter().enumerate() {
+                    dst[(kk + q) * width + ii] = v;
+                }
+            }
+            kk += len;
+            t += len;
+        }
+    }
+}
+
 /// One image's output gradient as the packed B of the weight-gradient GEMM (see [`gemm_arows`]): panel `q`
 /// (channels `q·NR..q·NR + NR` of the `og` in `gy`, `ohw` floats each) at `dst[q * cols * NR..]`, column `t` of
 /// the shifted rows at `+ t * NR`: output pixel `(oy, ox)` for `t = oy · wq + ox` with `ox < ow`, zero in the
@@ -432,18 +512,18 @@ unsafe impl Sync for ImageRows {}
 
 /// Tasks the weight gradient aims at (a function of the shape only, like every split here), and the most
 /// floats of K-part partial sums it keeps.
-const WGRAD_TASKS: usize = 64;
+const WGRAD_TASKS: usize = 128;
 const WGRAD_PARTIAL_MAX: usize = 1 << 22;
 
 /// `(parts, tiles)` of the `m x n x k` weight-gradient GEMM: K is cut into `parts` (each summed into its own
 /// partial `C`, the partials added in order), the rows of C into `tiles`. Depends on the shape only.
 fn wgrad_split(m: usize, n: usize, k: usize) -> (usize, usize) {
-    let target = ((2 * m * n * k) >> 20).clamp(1, WGRAD_TASKS);
+    let target = ((2 * m * n * k) >> 19).clamp(1, WGRAD_TASKS);
     let mut parts = (k / (2 * KC)).clamp(1, target);
     while parts > 1 && parts * m * n > WGRAD_PARTIAL_MAX {
         parts = parts.div_ceil(2);
     }
-    let tiles = target.div_ceil(parts).min(m.div_ceil(8 * MR)).max(1);
+    let tiles = target.div_ceil(parts).min(m.div_ceil(2 * MR)).max(1);
     (parts, tiles)
 }
 
@@ -837,21 +917,41 @@ fn col2im(col: &[f32], gx: &mut [f32], g: &ConvGeom, parallel: bool) {
     }
 }
 
-/// Gradient with respect to the weight, written into `gw` (`[O, C/groups, KH, KW]`, every element).
+/// Gradient with respect to the weight, written into `gw` (`[O, C/groups, KH, KW]`, zeroed).
 ///
-/// Per group, `dWᵀ = X_unfolded · gyᵀ`: a `kdim x og` GEMM over every output pixel of every image, whose A rows
-/// are the input's shifted rows (the forward's B operand, read in place, so the unfolded input is never packed)
-/// and whose B, the output gradient, is packed with zeros in the dropped columns. K (images × columns) is cut
-/// into parts and the rows into tiles by shape alone ([`wgrad_split`]); each part sums into its own partial in
-/// a fixed order and the partials are added in order, so the result does not depend on the thread count.
+/// Where [`wgrad_in_place`] holds, per group, `dWᵀ = X_unfolded · gyᵀ`: a `kdim x og` GEMM over every output
+/// pixel of every image, whose A rows are the input's shifted rows (the forward's B operand, read in place, so
+/// the unfolded input is never packed) and whose B, the output gradient, is packed with zeros in the dropped
+/// columns. K (images × columns) is cut into parts and the rows into tiles by shape alone ([`wgrad_split`]);
+/// each part sums into its own partial in a fixed order and the partials are added in order, so the result
+/// does not depend on the thread count. Elsewhere, `dW = gy · X_unfoldedᵀ` through [`gemm`] with the unfolded
+/// input packed block by block.
 pub(crate) fn conv2d_backward_weight(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom) {
     if g.is_depthwise() {
         return depthwise_backward_weight(x, gy, gw, g);
     }
     let (og, kdim) = (g.og(), g.kdim());
+    if !wgrad_in_place(g) {
+        let k = g.n * g.ohw();
+        for grp in 0..g.p.groups {
+            let a = GradRows { gy, grp, g: *g };
+            let b = Im2ColT { x, grp, g: *g };
+            gemm(og, kdim, k, &a, &b, &mut gw[grp * og * kdim..(grp + 1) * og * kdim], kdim, false, true);
+        }
+        return;
+    }
     for grp in 0..g.p.groups {
         backward_weight_group(x, gy, &mut gw[grp * og * kdim..(grp + 1) * og * kdim], g, grp);
     }
+}
+
+/// True if [`conv2d_backward_weight`] reads the input's shifted rows in place, false if it packs an unfolded
+/// input as it goes (the older path). Measured on folo-n's training shapes: the shifted rows win for stride-1
+/// kernels and for pointwise convs with many input channels; for strided convs and narrow pointwise ones, whose
+/// GEMMs do few flops per input element, writing the shifted-rows copy and the transposed gradient costs more
+/// than packing on the fly.
+fn wgrad_in_place(g: &ConvGeom) -> bool {
+    if g.is_pointwise() { g.cg() >= 64 } else { g.p.stride == [1, 1] }
 }
 
 fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, grp: usize) {

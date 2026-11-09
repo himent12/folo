@@ -352,6 +352,11 @@ fn conv2d_backward_matches_naive_over_geometries() {
         (3, 32, 40, [20, 20], [3, 3], p([1, 1], [1, 1], [1, 1], 1), false),
         (3, 16, 24, [21, 21], [3, 3], p([2, 2], [1, 1], [1, 1], 1), false),
         (1, 48, 64, [16, 16], [1, 1], p([1, 1], [0, 0], [1, 1], 1), false),
+        // The weight gradient over shifted rows: pointwise with many input channels, groups, K parts that
+        // cross images, rows that are not a whole number of vectors.
+        (3, 64, 24, [9, 11], [1, 1], p([1, 1], [0, 0], [1, 1], 1), false),
+        (2, 8, 36, [9, 8], [3, 3], p([1, 1], [1, 1], [1, 1], 2), false),
+        (5, 24, 20, [30, 27], [3, 3], p([1, 1], [1, 1], [1, 1], 1), false),
     ];
     for (i, (n, c, o, hw, k, prm, _)) in cases.into_iter().enumerate() {
         let x = randn(&[n, c, hw[0], hw[1]], 500 + i as u64).requires_grad_();

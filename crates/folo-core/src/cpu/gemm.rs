@@ -1274,22 +1274,23 @@ pub(crate) fn gemm_arows(
     while kb < k {
         let kc = KC.min(k - kb);
         let acc = accumulate || kb != 0;
-        let mut i = 0;
-        while i < m {
-            let mr = MR.min(m - i);
-            // SAFETY: the caller guarantees `k` floats from `a[r] + a_off`; `kb + kc <= k`.
-            let rows: [*const f32; MR] =
-                std::array::from_fn(|r| unsafe { a[i + if r < mr { r } else { 0 }].add(a_off + kb) });
-            for q in 0..panels {
-                let j = q * NR;
-                let bp = &b[q * b_stride + kb * NR..][..kc * NR];
+        // Each B panel stays in L1 while the A rows (in L2) sweep past it.
+        for q in 0..panels {
+            let j = q * NR;
+            let bp = &b[q * b_stride + kb * NR..][..kc * NR];
+            let mut i = 0;
+            while i < m {
+                let mr = MR.min(m - i);
+                // SAFETY: the caller guarantees `k` floats from `a[r] + a_off`; `kb + kc <= k`.
+                let rows: [*const f32; MR] =
+                    std::array::from_fn(|r| unsafe { a[i + if r < mr { r } else { 0 }].add(a_off + kb) });
                 // SAFETY: `bp` holds kc * NR floats, every row `kc` floats from `rows[r]`, and the C block
                 // [i..i+mr, j..j+nr] is inside `c` (asserted above), which this call borrows mutably.
                 unsafe {
                     kern(kc, &rows, bp.as_ptr(), c.as_mut_ptr().add(i * ldc + j), ldc, mr, NR.min(n - j), acc)
                 };
+                i += MR;
             }
-            i += MR;
         }
         kb += KC;
     }
