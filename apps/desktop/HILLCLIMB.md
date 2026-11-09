@@ -1979,3 +1979,57 @@ Round 48 changes:
 - **Playground:** a "Use 0.31, the model's best F1" shortcut.
 - **New run:** a hairline under the header while the body is scrolled.
 - **Brief:** inline Playground sliders are settled.
+
+## Round 48
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 8 | 9 |
+| Typography | 7 | 8 |
+| Colour | 8 | 9 |
+| Spacing | 8 | 9 |
+| Components | 8 | 9 |
+| Dataviz | 8 | 8 |
+| Info/copy | 8 | 8 |
+| Consistency | 8 | 9 |
+| Interaction | 8 | 8 |
+| Accessibility | 8 | 8 |
+| Responsiveness | 8 | 8 |
+| Polish | 8 | 8 |
+| **Average** | **7.9** | **8.4** |
+
+Round 48's own root fixes landed: every Playground box labelled, and stored precision never guessed. Both reviewers then named a deeper layer.
+
+Opus:
+- **Run subtitles:** built from separately spaced pieces, so the dot gaps were uneven and there was no ellipsis.
+- **Box rects:** not snapped to device pixels, leaving see-through halo pixels.
+- **Head tag:** rendered three ways.
+- **Precision and recall:** a tile on the run page but two on the model page, the latter with a wrapping caption.
+- **Best-F1 link:** mounted conditionally, so the rail reflowed and focus was lost.
+
+Sol:
+- **Confidence floor (blocking):** the best-F1 link could set a confidence below the predict fetch floor.
+- **Split naming:** "validation" asserted where the server may have used train.
+- **Fallback:** a 32-box limit on the corner fallback.
+- **Rounding:** two-decimal confidences.
+
+The code review of #133 found two blocking bugs, both fixed before merge. The best-F1 shortcut and then slider quantisation could each drop the threshold below the fetched floor. Predictions now record their floor, and any lower threshold refetches. The mock's `resolve()` now matches the trainer, warmup included (`folo_nn::warmup_iters`).
+
+API asks sent to the orchestrator:
+- `ModelEval` should carry its split and confusion-matrix settings.
+- `ValMetrics` should carry a per-epoch `best_f1_conf`.
+
+Round 49 changes:
+- **viz:**
+  - Box corners snap to device pixels.
+  - Right-anchored chips appear only when they fit the box.
+  - The corner fallback works at any count.
+  - Hovered or focused thumbnails reveal every label.
+- **Meta rows:** `ui::meta_row` builds run subtitles and Recent runs meta, with owned separators and a real ellipsis. The e2e tag rides the architecture everywhere.
+- **Model page:**
+  - One Precision / Recall tile with a one-line caption.
+  - The evaluated split is named (train when there is no validation).
+  - An honest "isn't available on this server" state.
+- **Playground:** a fixed best-F1 row ("Use 0.31 (best F1)", then "At best F1 (0.31)"), and `ui::fmt_conf` keeps a meaningful third decimal.
+- **Overview:** a taller hero in tall, wide windows.
+- **Brief:** settles New run's switch rows.
