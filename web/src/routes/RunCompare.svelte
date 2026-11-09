@@ -20,6 +20,7 @@
   import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Plus from '@lucide/svelte/icons/plus';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
@@ -243,6 +244,19 @@
   const SETTING_COL = 152;
   const RUN_COL_MIN = 136;
 
+  // Phones compare two runs at a time: a baseline (the pinned run, else the first) and one other, fully in view and
+  // paged with ‹ ›; values that differ from the baseline's are marked. "All runs" opens the whole table (it scrolls).
+  let allRuns = $state(false);
+  let otherAt = $state(0);
+  const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
+  const base = $derived(chosen.find((r) => r.id === pinned) ?? chosen[0]);
+  const others = $derived(chosen.filter((r) => r !== base));
+  const other = $derived(others[Math.min(otherAt, others.length - 1)]);
+  const shown = $derived(pairMode && base && other ? [base, other] : chosen);
+  const stepOther = (d: number) => (otherAt = (Math.min(otherAt, others.length - 1) + d + others.length) % others.length);
+  /** In pair mode, whether a run's value differs from the baseline's (the full table marks whole rows instead). */
+  const offBase = (r: Run, f: (r: Run) => string) => pairMode && r !== base && !!base && f(r) !== f(base);
+
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
 
@@ -302,7 +316,22 @@
 
     {#if chosen.length}
       <Panel title="Side by side" meta={sameRows.length ? `${diffRows.length} settings differ` : undefined} pad="none" id="cmp-table">
-        {#if tableRange}
+        {#if pairMode && other}
+          <!-- Phones: the baseline and one run beside it; the pager steps through the others. -->
+          <div class="pair num">
+            <button type="button" class="pg" aria-label="Previous run" onclick={() => stepOther(-1)}><ChevronLeft size={16} aria-hidden="true" /></button>
+            <span class="pair-what" aria-live="polite">Run {others.indexOf(other) + 2} of {chosen.length}<span class="faint">{' '}vs baseline</span></span>
+            <button type="button" class="pg" aria-label="Next run" onclick={() => stepOther(1)}><ChevronRight size={16} aria-hidden="true" /></button>
+            <button type="button" class="more" onclick={() => (allRuns = true)}>All {chosen.length} runs</button>
+          </div>
+        {:else if narrow && allRuns && chosen.length > 2}
+          <p class="t-range num">
+            {#if tableRange}{tableRange.first === tableRange.last ? `Run ${tableRange.first}` : `Runs ${tableRange.first}–${tableRange.last}`} of {chosen.length}<span
+                class="sep"
+                aria-hidden="true">·</span
+              >{/if}<button type="button" class="more" onclick={() => (allRuns = false)}>Two at a time</button>
+          </p>
+        {:else if tableRange}
           <!-- What the sideways scroll hides: the runs in view, and a way to the others. -->
           <p class="t-range num">
             {tableRange.first === tableRange.last ? `Run ${tableRange.first}` : `Runs ${tableRange.first}–${tableRange.last}`} of {chosen.length}{#if tableRange.last < chosen.length}<span class="sep" aria-hidden="true">·</span><button
@@ -314,39 +343,53 @@
         {/if}
         <div class="scroll" class:more={tableMore} bind:this={tableEl} onscroll={measureTable}>
           <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. -->
-          <table class="table fixed" style:min-width="{SETTING_COL + chosen.length * RUN_COL_MIN}px">
+          <table class="table fixed" class:two={pairMode} style:min-width={pairMode ? undefined : `${SETTING_COL + chosen.length * RUN_COL_MIN}px`}>
             <colgroup>
-              <col style:width="{SETTING_COL}px" />
-              {#each chosen as r (r.id)}<col />{/each}
+              <col class="c-set" style:width={pairMode ? undefined : `${SETTING_COL}px`} />
+              {#each shown as r (r.id)}<col />{/each}
             </colgroup>
             <thead>
               <tr>
                 <th></th>
-                {#each chosen as r (r.id)}
-                  <th><span class="th" style:--c={color(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>{r.name}</span></th>
+                {#each shown as r (r.id)}
+                  <th>
+                    <span class="th" style:--c={color(r.id)}><i data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class:truncate={!pairMode}>{r.name}</span></span>
+                    {#if pairMode && r === base}<span class="base-tag">Baseline</span>{/if}
+                  </th>
                 {/each}
               </tr>
             </thead>
             <tbody>
               <tr>
                 <td class="k">Status</td>
-                {#each chosen as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
+                {#each shown as r (r.id)}<td><StatusBadge status={r.status} plain /></td>{/each}
               </tr>
               <tr>
                 <td class="k">Best mAP50-95</td>
-                {#each chosen as r, i (r.id)}
-                  <td class="num" class:winner={sameData && i === bestIdx && chosen.length > 1}>{metric(r.best?.map50_95)}{#if sameData && i === bestIdx && chosen.length > 1}<span class="tag">best</span>{/if}</td>
+                {#each shown as r (r.id)}
+                  {@const win = sameData && r === chosen[bestIdx] && chosen.length > 1}
+                  <td class="num" class:winner={win}>{metric(r.best?.map50_95)}{#if win}<span class="tag">best</span>{/if}</td>
                 {/each}
               </tr>
               {#each diffRows as [k, f, id] (k)}
                 <tr>
                   <td class="k">{k}</td>
-                  {#each chosen as r (r.id)}<td class="num cfg diff">{@render cell(f(r), id)}</td>{/each}
+                  {#each shown as r (r.id)}
+                    <!-- Pair mode: a value that differs from the baseline's is marked (a dot and the weight) and an equal
+                         one recedes; the full table marks the whole row instead. -->
+                    {@const off = offBase(r, f)}
+                    <td class="num cfg" class:diff={!pairMode || off} class:same={pairMode && r !== base && !off}
+                      class:base={pairMode && r === base}
+                      >{#if off}<span class="chg" aria-hidden="true"></span>{/if}{@render cell(f(r), id)}{#if off}<span class="sr-only"
+                          >, differs from the baseline</span
+                        >{/if}</td
+                    >
+                  {/each}
                 </tr>
               {/each}
               {#if sameRows.length}
                 <tr class="fold">
-                  <td colspan={chosen.length + 1}>
+                  <td colspan={shown.length + 1}>
                     <button aria-expanded={showSame} onclick={() => (showSame = !showSame)}>
                       {showSame ? 'Hide' : 'Show'} {sameRows.length} identical {sameRows.length === 1 ? 'setting' : 'settings'}
                     </button>
@@ -356,7 +399,7 @@
                   {#each sameRows as [k, f, id] (k)}
                     <tr>
                       <td class="k">{k}</td>
-                      {#each chosen as r (r.id)}<td class="num cfg">{@render cell(f(r), id)}</td>{/each}
+                      {#each shown as r (r.id)}<td class="num cfg">{@render cell(f(r), id)}</td>{/each}
                     </tr>
                   {/each}
                 {/if}
@@ -650,6 +693,91 @@
   }
   .at.hint {
     color: var(--text-secondary);
+  }
+  /* Phones, two at a time: what is shown, the pager (44 px targets), and the way to the whole table. */
+  .pair {
+    display: flex;
+    align-items: center;
+    /* The ‹ chevron's glyph on the content edge; its 44 px target reaches into the padding. */
+    padding: 0 var(--space-4) 0 calc(var(--space-4) - 14px);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .pair-what {
+    text-align: center;
+  }
+  .pair .more {
+    margin-left: auto;
+  }
+  .pair .pg {
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+  }
+  .pair .pg:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+  .pair .more,
+  .t-range .more {
+    min-height: 44px;
+  }
+  .pair .more {
+    color: var(--text-secondary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .pair .more:hover {
+    color: var(--text-primary);
+  }
+  /* Two run columns share what the setting column leaves; the setting labels keep one column on every page. */
+  table.two .c-set {
+    width: 104px;
+  }
+  /* Nothing truncates: labels and run names wrap, and the two headers start on one line. */
+  table.two th,
+  table.two td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    vertical-align: top;
+  }
+  table.two th {
+    height: auto;
+    padding-block: var(--space-2);
+  }
+  table.two .th {
+    align-items: baseline;
+  }
+  table.two .th i {
+    transform: translateY(-3px);
+  }
+  .base-tag {
+    display: block;
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+  }
+  .chg {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-right: var(--space-1-5);
+    border-radius: 50%;
+    background: var(--text-primary);
+    vertical-align: 2px;
+  }
+  td.same {
+    color: var(--text-tertiary);
+  }
+  /* The baseline is the reference the other column is read against: plain body text. */
+  td.cfg.base {
+    color: var(--text-primary);
   }
   /* The one caveat that changes how to read the plot, always in view, on one line above it. */
   .caveat {

@@ -306,6 +306,19 @@ export const scenes = [
     },
   },
   // Nothing picked: the inline empty state with the standard secondary "Add run…" button.
+  {
+    // Phones: the side-by-side table two runs at a time, the baseline and the next run (paged once), differing values
+    // marked.
+    name: 'run-compare-pair-phone',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    fullPage: true,
+    setup: async (page) => {
+      await until(page, '#cmp-table .pair');
+      await page.getByRole('button', { name: 'Next run' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'mobile'] },
   // A queued run in the loaded frame: KPIs at "—", the chart's axes with what it waits for, the config in its rail.
   // A queued run: the dependency and start estimate lead, the empty frames stay compact until there is data.
