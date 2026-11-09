@@ -48,6 +48,11 @@ pub fn request_tensor_cores() -> bool {
 
 /// Dispatches encoded before the open batch is submitted on its own.
 const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
+/// Dispatches before the first submission after the device was idle. The limit then doubles with every submission
+/// up to [`MAX_DISPATCHES_PER_BATCH`], so the GPU starts on the head of a pass while the host still encodes the
+/// rest (a synchronised batch-1 forward otherwise spends a third of its latency encoding and submitting before
+/// the GPU has anything to do), and a long pass still costs only a handful of submissions.
+const FIRST_DISPATCHES_PER_BATCH: u32 = 16;
 /// Size of one uniform arena chunk (256 parameter slots).
 const UNIFORM_CHUNK: u64 = 64 * 1024;
 
@@ -228,15 +233,30 @@ struct UniformChunk {
     cpu: Vec<u8>,
 }
 
-#[derive(Default)]
 struct Batch {
     encoder: Option<wgpu::CommandEncoder>,
     pass: Option<wgpu::ComputePass<'static>>,
     dispatches: u32,
+    /// Dispatches at which the open batch is submitted (see [`FIRST_DISPATCHES_PER_BATCH`]).
+    limit: u32,
     chunks: Vec<UniformChunk>,
     /// Index of the chunk being filled and the byte cursor in it.
     chunk: usize,
     cursor: u64,
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self {
+            encoder: None,
+            pass: None,
+            dispatches: 0,
+            limit: FIRST_DISPATCHES_PER_BATCH,
+            chunks: Vec::new(),
+            chunk: 0,
+            cursor: 0,
+        }
+    }
 }
 
 struct Inner {
@@ -261,6 +281,9 @@ struct Inner {
     tensor_cores_status: Mutex<String>,
     /// The device was created with wgpu's experimental cooperative matrices (see [`GpuContext::device`]).
     experimental: bool,
+    /// Set while [`GpuContext::trace_begin`] records dispatches into `trace`.
+    tracing: AtomicBool,
+    trace: Mutex<Vec<TracedOp>>,
 }
 
 /// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
@@ -280,6 +303,24 @@ impl Staged {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+}
+
+/// One operation recorded by [`GpuContext::trace_begin`]: a kernel dispatch or a buffer copy, with everything
+/// needed to encode it again ([`GpuContext::replay`]). Profiling tools replay each operation of a forward pass
+/// on its own to see where the GPU time goes.
+pub struct TracedOp {
+    /// Kernel name, or `"copy"` for a buffer copy.
+    pub name: &'static str,
+    /// The kernel's specialisation constants (empty for a copy).
+    pub spec: String,
+    /// Workgroups dispatched (`[bytes / 4, 1, 1]` for a copy).
+    pub groups: [u32; 3],
+    kind: TracedKind,
+}
+
+enum TracedKind {
+    Dispatch { kernel: Kernel, buffers: Vec<wgpu::Buffer>, params: Params },
+    Copy { src: wgpu::Buffer, src_off: u64, dst: wgpu::Buffer, dst_off: u64, len: u64 },
 }
 
 /// Work counters since the context was created (see [`GpuContext::work_stats`]).
@@ -573,6 +614,8 @@ impl GpuContext {
                 tensor_cores: AtomicBool::new(false),
                 tensor_cores_status: Mutex::new(status),
                 experimental: coop,
+                tracing: AtomicBool::new(false),
+                trace: Mutex::default(),
             }),
         };
         if !coop {
@@ -708,6 +751,40 @@ impl GpuContext {
         WorkStats {
             dispatches: self.inner.dispatches.load(Ordering::Relaxed),
             submissions: self.inner.submissions.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Starts recording every dispatch and buffer copy encoded from now on (for profiling; see [`TracedOp`]).
+    /// The recorded operations keep their buffers alive until the trace is dropped.
+    pub fn trace_begin(&self) {
+        self.inner.trace.lock().expect("trace lock").clear();
+        self.inner.tracing.store(true, Ordering::Relaxed);
+    }
+
+    /// Stops recording and returns the operations since [`GpuContext::trace_begin`], in encoding order.
+    pub fn trace_end(&self) -> Vec<TracedOp> {
+        self.inner.tracing.store(false, Ordering::Relaxed);
+        std::mem::take(&mut *self.inner.trace.lock().expect("trace lock"))
+    }
+
+    /// Encodes a recorded operation again, on the buffers it ran on (their contents are whatever they hold
+    /// now: pooled buffers may have been reused, which does not change what the operation costs).
+    pub fn replay(&self, op: &TracedOp) -> Result<()> {
+        match &op.kind {
+            TracedKind::Dispatch { kernel, buffers, params } => {
+                let refs: Vec<&wgpu::Buffer> = buffers.iter().collect();
+                self.dispatch(kernel, &refs, params, op.groups)
+            }
+            TracedKind::Copy { src, src_off, dst, dst_off, len } => {
+                self.copy(src, *src_off, dst, *dst_off, *len);
+                Ok(())
+            }
+        }
+    }
+
+    fn record(&self, op: impl FnOnce() -> TracedOp) {
+        if self.inner.tracing.load(Ordering::Relaxed) {
+            self.inner.trace.lock().expect("trace lock").push(op());
         }
     }
 
@@ -947,6 +1024,12 @@ impl GpuContext {
         if len == 0 {
             return;
         }
+        self.record(|| TracedOp {
+            name: "copy",
+            spec: String::new(),
+            groups: [(len / 4).min(u32::MAX as u64) as u32, 1, 1],
+            kind: TracedKind::Copy { src: src.clone(), src_off, dst: dst.clone(), dst_off, len },
+        });
         let mut b = self.inner.batch.lock().expect("batch lock");
         self.encoder(&mut b).copy_buffer_to_buffer(src, src_off, dst, dst_off, len);
         self.bump(&mut b);
@@ -991,7 +1074,10 @@ impl GpuContext {
     /// and panics inside `Device::poll` (its message still reaches stderr through the panic hook), so the poll
     /// runs under `catch_unwind` and the loss is remembered, failing every later wait at once.
     fn wait_idle(&self) -> Result<()> {
-        self.poll_checked(wgpu::PollType::wait_indefinitely())
+        let polled = self.poll_checked(wgpu::PollType::wait_indefinitely());
+        // The GPU has nothing queued now: submit the head of the next pass early.
+        self.inner.batch.lock().expect("batch lock").limit = FIRST_DISPATCHES_PER_BATCH;
+        polled
     }
 
     /// One `Device::poll` that turns a lost device into [`GpuError::DeviceLost`]: before the poll if the loss is
@@ -1071,8 +1157,9 @@ impl GpuContext {
 
     fn bump(&self, b: &mut Batch) {
         b.dispatches += 1;
-        if b.dispatches >= MAX_DISPATCHES_PER_BATCH {
+        if b.dispatches >= b.limit {
             self.submit(b);
+            b.limit = (b.limit * 2).min(MAX_DISPATCHES_PER_BATCH);
         }
     }
 
@@ -1129,6 +1216,16 @@ impl GpuContext {
                 buffers.len()
             )));
         }
+        self.record(|| TracedOp {
+            name: kernel.name,
+            spec: kernel.spec.clone(),
+            groups,
+            kind: TracedKind::Dispatch {
+                kernel: kernel.clone(),
+                buffers: buffers.iter().map(|&b| b.clone()).collect(),
+                params: params.clone(),
+            },
+        });
         let mut guard = self.inner.batch.lock().expect("batch lock");
         let b = &mut *guard;
         if b.cursor + UNIFORM_SLOT > UNIFORM_CHUNK {

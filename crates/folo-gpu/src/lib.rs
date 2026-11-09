@@ -44,7 +44,7 @@ pub use backend::{
     register, tensor_from_buffer,
 };
 pub use context::{
-    AdapterSummary, Capabilities, GpuContext, GpuOptions, Staged, WorkStats, request_tensor_cores,
+    AdapterSummary, Capabilities, GpuContext, GpuOptions, Staged, TracedOp, WorkStats, request_tensor_cores,
 };
 pub use dtype::DType;
 pub use error::{GpuError, Result};
