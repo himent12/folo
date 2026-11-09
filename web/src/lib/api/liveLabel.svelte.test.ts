@@ -212,6 +212,33 @@ describe('LiveLabelJob ordering', () => {
     stop();
   });
 
+  it('does not let an answer bring back what a list asked for since the action began no longer has', async () => {
+    const { live, stop } = mount();
+    page.resolve({ total: 1, images: [img('1')] });
+    await vi.advanceTimersByTimeAsync(0);
+    // An upload in several requests begins; its first request adds image 2. The stream drops, someone else removes
+    // image 2, the stream comes back and the list is loaded again (without image 2).
+    const mark = live.mark();
+    page = deferred<LabelImagePage>();
+    handlers.reload?.({});
+    page.resolve({ total: 1, images: [img('1')] });
+    await vi.advanceTimersByTimeAsync(0);
+    // The upload's answer, with image 2 in it, comes last: the list is newer.
+    live.put([img('2')], mark);
+    expect(live.images.map((i) => i.id)).toEqual(['1']);
+
+    // The same while the newer list is still on its way: the answer shows until the list replaces it.
+    const again = live.mark();
+    page = deferred<LabelImagePage>();
+    handlers.reload?.({});
+    live.put([img('3')], again);
+    expect(live.images.map((i) => i.id)).toEqual(['1', '3']);
+    page.resolve({ total: 1, images: [img('1')] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.images.map((i) => i.id)).toEqual(['1']);
+    stop();
+  });
+
   it('loads again when the stream opens and after a reconnect, and calls a stream lost only after the grace', async () => {
     const { live, stop } = mount();
     page.resolve({ total: 1, images: [img('1')] });

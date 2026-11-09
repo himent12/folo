@@ -87,7 +87,7 @@ describe('New labeling job', () => {
 
   it('edits a job with boxes by renaming and adding classes, never removing one, and says why', async () => {
     const job = await hub.api.labelJob('lb_51d0');
-    open(JobDialog, { open: true, job, onsave: async () => {} });
+    open(JobDialog, { open: true, job, hasBoxes: true, onsave: async () => {} });
     expect(text()).toMatch(/rename a class or add one, not remove one/);
     expect(document.querySelectorAll('dialog[open] button[aria-label^="Remove"]')).toHaveLength(0);
     expect(document.querySelectorAll('dialog[open] input[aria-label^="Class"]')).toHaveLength(4);

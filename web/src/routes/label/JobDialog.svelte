@@ -25,18 +25,23 @@
   let {
     open = $bindable(false),
     job,
+    hasBoxes = false,
     onsave,
   }: {
     open?: boolean;
     /** The job to edit; none: a new one. */
     job?: LabelJob;
+    /**
+     * Edit: some image of the job has boxes, whatever its status (one whose relabeling failed keeps its old ones, and
+     * the job's box count leaves those out). Boxes name classes by their place, so none can then be removed.
+     */
+    hasBoxes?: boolean;
     /** Edit: saves the change (the page applies the answer). */
     onsave?: (change: { name: string; classes: string[] }) => Promise<unknown>;
   } = $props();
 
   const uid = $props.id();
   const editing = $derived(!!job);
-  const hasBoxes = $derived(!!job && job.counts.boxes > 0);
   let busy = $state(false);
   let error = $state.raw<unknown>(undefined);
   let touched = $state(false);

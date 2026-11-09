@@ -65,11 +65,16 @@ export class LiveLabelJob {
   #retry = $state(0);
   /** Every `job` event bumps it: a snapshot or an action's answer older than the latest event is not applied. */
   #jobSeq = 0;
-  /** The image changes heard while a load is in flight, one map per load. */
-  #inflight = new Set<Map<string, LabelImage | null>>();
-  /** Every image event (`image`, `removed`) bumps it; `#heard` keeps, per image, the value at its latest event. */
+  /** The loads in flight: when each was sent (on the `#imageSeq` clock) and the image changes heard since. */
+  #inflight = new Set<{ sent: number; changes: Map<string, LabelImage | null> }>();
+  /**
+   * The clock actions and loads are ordered by: every image event (`image`, `removed`) and every load sent bumps it.
+   * `#heard` keeps, per image, the value at its latest event; `#loaded` the value at which the list last shown was
+   * asked for.
+   */
   #imageSeq = 0;
   #heard = new Map<string, number>();
+  #loaded = 0;
   /** Every `removed` event bumps it: a load in pages that saw one may have skipped an image (the offsets shifted). */
   #removals = 0;
 
@@ -118,14 +123,16 @@ export class LiveLabelJob {
       const load = async () => {
         const my = ++issued;
         const seq = this.#jobSeq;
-        const changes = new Map<string, LabelImage | null>();
-        this.#inflight.add(changes);
+        const flight = { sent: ++this.#imageSeq, changes: new Map<string, LabelImage | null>() };
+        const { changes } = flight;
+        this.#inflight.add(flight);
         try {
           const [job, images, logs] = await Promise.all([api.labelJob(jobId), allImages(), api.labelLogs(jobId, 500).catch(() => ({ lines: [] }))]);
           if (closed || my < applied) return;
           applied = my;
           if (this.#jobSeq === seq || !this.job) this.job = job;
           this.images = applyChanges(images, changes);
+          this.#loaded = flight.sent;
           this.logs = mergeLogs(logs.lines, this.logs);
           this.version++;
           this.loading = false;
@@ -133,7 +140,7 @@ export class LiveLabelJob {
           heard = Date.now();
           if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? heard : null;
         } finally {
-          this.#inflight.delete(changes);
+          this.#inflight.delete(flight);
         }
       };
       // Re-synchronising (on open, on reconnect) never gives up silently: a gap would stay.
@@ -149,7 +156,7 @@ export class LiveLabelJob {
         this.lost = null;
         this.#heard.set(id, ++this.#imageSeq);
         if (!img) this.#removals++;
-        for (const m of this.#inflight) m.set(id, img);
+        for (const f of this.#inflight) f.changes.set(id, img);
         this.images = img ? upsertImage(this.images, img) : this.images.filter((x) => x.id !== id);
       };
 
@@ -225,21 +232,23 @@ export class LiveLabelJob {
   }
 
   /**
-   * Shows images as an action's answer has them (hand-drawn boxes, an upload), except the ones the stream has told of
-   * since `since` (the action's `mark()`): that event is as new as the answer or newer (a removal, a later edit).
+   * Shows images as an action's answer has them (hand-drawn boxes, an upload), except where something newer than
+   * the action's start (`since`, its `mark()`) is known: an image the stream has told of since (a removal, a later
+   * edit), and the whole answer once a list asked for after the action began is shown (that list has what the action
+   * did, or what became of it while the stream was down; what the action did later, the stream tells).
    */
   put(images: readonly LabelImage[], since: number) {
-    const fresh = images.filter((img) => (this.#heard.get(img.id) ?? -1) <= since);
+    const fresh = images.filter((img) => (this.#heard.get(img.id) ?? 0) <= since);
     if (!fresh.length) return;
     const changes = fresh.map((img) => [img.id, img] as const);
-    // A load in flight was sent before this answer: it applies the answer over what it gets, as an event.
-    for (const m of this.#inflight) for (const [id, img] of changes) m.set(id, img);
-    this.images = applyChanges(this.images, changes);
+    // A load sent before the action began may predate what it did: the answer goes over what that load gets.
+    for (const f of this.#inflight) if (f.sent <= since) for (const [id, img] of changes) f.changes.set(id, img);
+    if (this.#loaded <= since) this.images = applyChanges(this.images, changes);
   }
 
   /** Drops a deleted image (also from a load in flight, which may still have it). */
   drop(id: string) {
-    for (const m of this.#inflight) m.set(id, null);
+    for (const f of this.#inflight) f.changes.set(id, null);
     this.images = this.images.filter((x) => x.id !== id);
   }
 }

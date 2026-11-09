@@ -8,6 +8,7 @@ import { hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import type { Box, LabelImage } from '$lib/api/types';
 import { parse, router } from '$lib/router.svelte';
+import { tabHistory } from '$lib/tabHistory.testing';
 import { toast } from '$lib/ui/toast.svelte';
 import LabelJobPage from '../LabelJob.svelte';
 
@@ -149,14 +150,16 @@ describe('the labeling editor: leaving with unsaved boxes', () => {
   it('continues it after Save, with the boxes saved', async () => {
     await openEditor('1');
     click(inEditor('Add box'));
-    // A link or Back: the URL moves first.
-    history.replaceState(null, '', '#/runs');
-    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    // A followed link: the URL moves first, and the router brings the tab back while the question is open.
+    const tab = tabHistory();
+    tab.follow('#/runs');
+    await tab.settle();
     flushSync();
     expect(router.route.path).toBe('/datasets/label/lb_7c21');
     expect(location.hash).toBe('#/datasets/label/lb_7c21?image=1');
     click([...asking()!.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Save'));
     await vi.waitFor(() => expect(router.route.path).toBe('/runs'));
+    expect(tab.hashes()).toEqual(['#/datasets/label/lb_7c21?image=1', '#/runs']);
     expect((await hub.api.labelImages('lb_7c21', { limit: 1 })).images[0]!.boxes).toHaveLength(1);
   });
 

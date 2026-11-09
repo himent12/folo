@@ -3,7 +3,8 @@
    * The job page's rail: first the run, "Label N images" while some have no labels (naming the agent, model and effort
    * it will use), live progress with Stop while an agent works, and how the last run ended (a failed one with its cause,
    * the fix the server gives, and Try again); then who labels (agent, model, effort) and what it is told (the
-   * instructions, the classes).
+   * instructions, the classes). The instructions cannot be typed in while a run starts: what is saved then is what
+   * the agent gets.
    */
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import Pencil from '@lucide/svelte/icons/pencil';
@@ -179,7 +180,7 @@
         id="{uid}-instructions"
         bind:value={instructions}
         rows={5}
-        readonly={running}
+        readonly={running || starting}
         placeholder="Label every car and pedestrian, also partly hidden ones. Ignore reflections and posters."
         onblur={onsaveinstructions}
       />

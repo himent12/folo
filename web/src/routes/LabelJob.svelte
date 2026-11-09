@@ -306,7 +306,12 @@
   <Editor {live} {job} images={shown} imageId={imageParam} {choice} onnavigate={(to) => setQuery({ image: to })} />
   <AddImagesDialog bind:open={addOpen} bind:tab={addTab} {uploads} onbrowse={() => fileInput?.click()} />
   <DatasetDialog bind:open={datasetOpen} {job} oncreated={created} />
-  <JobDialog bind:open={editOpen} {job} onsave={(change) => live.act(() => hub.api.updateLabelJob(job.id, change))} />
+  <JobDialog
+    bind:open={editOpen}
+    {job}
+    hasBoxes={live.images.some((i) => i.boxes.length > 0)}
+    onsave={(change) => live.act(() => hub.api.updateLabelJob(job.id, change))}
+  />
 
   <Dialog
     bind:open={stopOpen}

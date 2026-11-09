@@ -108,21 +108,37 @@ if (typeof location !== 'undefined' && typeof history !== 'undefined') {
  */
 export type NavigationGuard = (to: Route, proceed: () => void) => boolean;
 
+/** How long a history traversal of the router's own may take before the router stops waiting for it. */
+const TRAVERSAL_MS = 1000;
+
+/** The place in the tab's history an entry's state records (see `Router`), if it has one. */
+const posOf = (state: unknown): number | null => {
+  const pos = (state as { pos?: unknown } | null)?.pos;
+  return typeof pos === 'number' ? pos : null;
+};
+
+/**
+ * The hash router. Every history entry the app has been on carries its place in the tab's history (`pos`, in the
+ * entry's state), so when the browser moves by itself (Back, Forward, a link, an edited URL) the router knows how far.
+ * That is what lets a guard hold such a navigation without damaging the history: the URL has already moved, so the
+ * router travels back to the page that holds it, and travels on again when the page lets go.
+ */
 class Router {
   route = $state<Route>(parse(typeof location === 'undefined' ? '' : location.hash));
   #guards = new Set<NavigationGuard>();
+  /** The place of the entry the app is on. */
+  #pos = 0;
+  /** A traversal of the router's own is under way, to the entry at `pos`: back to the page that holds a navigation, or `on` to the held one. */
+  #travelling: { pos: number; on: boolean; timer: ReturnType<typeof setTimeout> } | null = null;
 
   constructor() {
-    if (typeof window !== 'undefined') {
-      window.addEventListener('hashchange', () => {
-        const hash = location.hash;
-        const to = parse(hash);
-        // The URL has already moved (a link, Back): a held navigation puts back the page's own until it proceeds.
-        const shown = `#${this.route.path}${String(this.route.query) ? `?${this.route.query}` : ''}`;
-        if (this.#allowed(to, () => this.#show(hash))) this.route = to;
-        else history.replaceState(history.state, '', shown);
-      });
-    }
+    if (typeof window === 'undefined') return;
+    this.#pos = posOf(history.state) ?? 0;
+    this.#stamp(this.#pos);
+    // A traversal fires `popstate` (also between two entries with one URL), a followed link `hashchange`; most
+    // moves fire both, and the second finds nothing left to do.
+    window.addEventListener('popstate', () => this.#moved());
+    window.addEventListener('hashchange', () => this.#moved());
   }
 
   /** Holds navigations away while `guard` says so; returns its removal (call it when the page goes). */
@@ -148,18 +164,73 @@ class Router {
   }
 
   #navigate(hash: string, replace = false) {
-    if (replace) this.#show(hash);
-    else if (location.hash !== hash) {
+    this.#arrived();
+    if (replace) {
+      history.replaceState({ pos: this.#pos }, '', hash);
+      this.route = parse(hash);
+    } else if (location.hash !== hash) {
       // Guards have been asked. `pushState` fires no `hashchange`, so the route is set here.
-      history.pushState(null, '', hash);
+      history.pushState({ pos: ++this.#pos }, '', hash);
       this.route = parse(hash);
     }
   }
 
-  /** Shows `hash` in place of the current history entry. */
-  #show(hash: string) {
-    history.replaceState(null, '', hash);
-    this.route = parse(hash);
+  /** Records `pos` as the current entry's place, keeping whatever else its state holds. */
+  #stamp(pos: number) {
+    history.replaceState({ ...(history.state as object | null), pos }, '');
+  }
+
+  /** The browser moved by itself: to another entry (Back, Forward) or to a new one (a link, an edited URL). */
+  #moved() {
+    const hash = location.hash;
+    const known = posOf(history.state);
+    const travel = this.#travelling;
+    if (travel) {
+      // Only the entry the router is travelling to counts; anything else is an event of the move before.
+      if (known !== travel.pos) return;
+      this.#arrived();
+      this.#pos = travel.pos;
+      if (travel.on) this.route = parse(hash);
+      return;
+    }
+    // An entry without a place is new, right after this one. Nothing moved: the second event of a move.
+    const pos = known ?? this.#pos + 1;
+    if (pos === this.#pos && hash === `#${this.route.path}${String(this.route.query) ? `?${this.route.query}` : ''}`) return;
+    const from = this.#pos;
+    const proceed = () => {
+      // A new entry is made again (the held one was left behind); an old one is travelled to.
+      if (known === null) this.#navigate(hash);
+      else this.#travel(pos, true);
+    };
+    if (this.#allowed(parse(hash), proceed)) {
+      if (known === null) this.#stamp(pos);
+      this.#pos = pos;
+      this.route = parse(hash);
+    } else {
+      // The URL has already moved: back to the page that holds the navigation, its history as it was.
+      this.#pos = pos;
+      this.#travel(from, false);
+    }
+  }
+
+  /** Travels through the history to the entry at `pos`; `#moved` takes it from there. */
+  #travel(pos: number, on: boolean) {
+    this.#arrived();
+    if (pos === this.#pos) return;
+    // A traversal that never arrives (the entry is gone) must not leave the router deaf: it takes the URL as it is.
+    const timer = setTimeout(() => {
+      this.#travelling = null;
+      this.#pos = posOf(history.state) ?? this.#pos;
+      this.route = parse(location.hash);
+    }, TRAVERSAL_MS);
+    this.#travelling = { pos, on, timer };
+    history.go(pos - this.#pos);
+  }
+
+  /** Ends the wait for a traversal. */
+  #arrived() {
+    if (this.#travelling) clearTimeout(this.#travelling.timer);
+    this.#travelling = null;
   }
 }
 
