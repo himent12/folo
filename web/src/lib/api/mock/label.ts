@@ -691,7 +691,7 @@ export class MockLabeling {
       if (!im) continue;
       im.before = null;
       if (im.failures === 0 && hash(`${j.id}:${im.id}`) % 13 === 0) {
-        Object.assign(im, { status: 'failed', error: 'The reply did not mention this image.' });
+        Object.assign(im, { status: 'failed', error: 'the agent’s reply left this image out' });
         im.failures++;
         r.failed++;
         this.#log(j, at, 'warn', `${im.file}: not in the reply; marked failed`);

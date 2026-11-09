@@ -48,6 +48,7 @@ describe('agents and images', () => {
     expect(imageState(img('labeled', 3))).toBe('3 boxes, drawn by the agent');
     expect(imageState(img('labeled', 0, 'manual'))).toBe('No objects, edited by hand');
     expect(imageState(img('failed'))).toBe('The agent could not label it');
+    expect(imageState({ ...img('failed'), error: 'the reply left this image out' })).toBe('The agent could not label it: the reply left this image out');
   });
 });
 

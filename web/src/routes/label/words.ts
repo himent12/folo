@@ -62,10 +62,10 @@ export function usageFacts(u: LabelUsage): string[] {
   ];
 }
 
-/** An image's state in words, as its tile and the editor say it. */
+/** An image's state in words, as the editor says it: a failed one with the reason the server gives. */
 export function imageState(img: LabelImage): string {
   if (img.status === 'labeling') return 'The agent is labeling it';
-  if (img.status === 'failed') return 'The agent could not label it';
+  if (img.status === 'failed') return img.error ? `The agent could not label it: ${img.error}` : 'The agent could not label it';
   if (img.status === 'pending') return 'Not labeled yet';
   const n = img.boxes.length;
   const what = n === 0 ? 'No objects' : `${num(n)} ${n === 1 ? 'box' : 'boxes'}`;
