@@ -203,6 +203,13 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> i
 }
 
 /// Tinted label chip, 20 px tall.
+/// How a model's weights are stored, from its own record (`precision`, `fused`): "f16, fused",
+/// "f32", or `None` when the server doesn't say. Every surface that names it uses this.
+pub fn model_storage(m: &crate::api::Model) -> Option<String> {
+    let p = m.precision?.as_str();
+    Some(if m.fused == Some(true) { format!("{p}, fused") } else { p.to_string() })
+}
+
 /// The compact end-to-end tag in tables (the title rows carry the full badge and its help).
 pub fn e2e_tag(t: &Theme, id: impl Into<SharedString>) -> gpui::Stateful<Div> {
     use gpui::{InteractiveElement, StatefulInteractiveElement};

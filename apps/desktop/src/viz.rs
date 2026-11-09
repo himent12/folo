@@ -281,7 +281,14 @@ pub fn paint_image_with_boxes(
                     // five chips on a 280 px tile outshout the image. Boxes at least two chips tall,
                     // at most four chips a tile; the rest keep their outline (the inspector, and the
                     // class key above the grid, name them).
-                    if compact && !b.highlight && (r.size.height < ch * 2. || placed.len() >= 4) {
+                    // Measured on what's in view: a box cropped to a sliver at the tile's edge
+                    // can't carry a chip (the chip would sit on someone else's pixels), and in any
+                    // view a box less than half visible goes unlabelled unless it's selected.
+                    let area = |x: &Bounds<Pixels>| f32::from(x.size.width) * f32::from(x.size.height);
+                    let half_in = area(&visible) >= area(&r) * 0.5;
+                    if !b.highlight
+                        && (!half_in || compact && (visible.size.height < ch * 2. || placed.len() >= 4))
+                    {
                         continue;
                     }
                     // Preferred spots: above the top-left corner, inside it, below the bottom-left
@@ -342,12 +349,11 @@ pub fn paint_image_with_boxes(
                     let clear = (!dense)
                         .then(|| spots.clone().find(|o| open(o) && !crosses(&Bounds::new(*o, size(cw, ch)))))
                         .flatten();
-                    // A chip on a neighbour's outline can read as the neighbour's. Thumbnails, too
-                    // small to tell, leave such a box unlabelled (the inspector names it); larger
-                    // views keep the first free spot, where the chip's corner still meets its box.
-                    let free_spot = clear.or_else(|| {
-                        (dense || !compact || b.highlight).then(|| spots.clone().find(open)).flatten()
-                    });
+                    // A chip on a neighbour's outline can read as the neighbour's, at any size: such
+                    // a box goes unlabelled (the list beside the image, the inspector and hover name
+                    // it). The selected box always keeps its chip; very dense images skip the check.
+                    let free_spot =
+                        clear.or_else(|| (dense || b.highlight).then(|| spots.clone().find(open)).flatten());
                     // Nowhere free: skip this chip (the selected box's chip always shows), so two
                     // chips never paint over each other.
                     let Some(origin) = free_spot.or_else(|| {

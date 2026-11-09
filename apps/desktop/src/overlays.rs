@@ -1022,8 +1022,8 @@ impl FoloApp {
                                 epochs_bad.then_some("Enter a whole number from 1 to 10,000"),
                             ))
                             .child(text(ty::XS, t.text_tertiary).child(match ds.as_ref() {
-                                Some(d) => format!("Each one pass over {} training images", int(d.splits.train)),
-                                None => "Each one pass over the training images".to_string(),
+                                Some(d) => format!("One epoch = one pass over {} training images", int(d.splits.train)),
+                                None => "One epoch = one pass over the training images".to_string(),
                             })),
                     )
                     .child(
@@ -1088,7 +1088,17 @@ impl FoloApp {
                 )
             })
             .when(adv_open, |d| {
-                d
+                d.child(
+                    // Advanced's body: indented under the header's chevron, a rule down its left, so
+                    // what the disclosure encloses is visible; its parts are sub-heads, not sections.
+                    div()
+                        .ml(px(6.))
+                        .pl(px(18.))
+                        .border_l_1()
+                        .border_color(t.line_subtle)
+                        .flex()
+                        .flex_col()
+                        .gap(px(if short { 8. } else { 14. }))
                 // The head: one-to-many with NMS (the default), or the end-to-end head that predicts
                 // without it. It leads Advanced, as the model property among them.
                 .child({
@@ -1284,7 +1294,7 @@ impl FoloApp {
                         )
                         .child(switch)
                 })
-                .child(section("Augmentation"))
+                .child(text(ty::BASE, t.text_secondary).font_weight(FontWeight::MEDIUM).child("Augmentation"))
                 .child(
                     div()
                         .flex()
@@ -1306,6 +1316,7 @@ impl FoloApp {
                             format!("±{scale:.2}"),
                             scale_slider,
                         ))),
+                )
                 )
             })
             .when_some(note, |d, n| {

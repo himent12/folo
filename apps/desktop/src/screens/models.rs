@@ -149,9 +149,24 @@ impl FoloApp {
                             });
                             if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                         });
+                        // What its numbers were measured on: the dataset of the run that trained it
+                        // (mAPs compare only within one dataset), or that it isn't known.
+                        let eval_on = m
+                            .run_id
+                            .as_ref()
+                            .and_then(|r| self.store.run(r))
+                            .map(|r| {
+                                self.store
+                                    .dataset_summary(&r.config.dataset_id)
+                                    .map_or(r.config.dataset_id.clone(), |d| d.name.clone())
+                            })
+                            .map_or("Evaluation dataset unknown".to_string(), |d| format!("on {d}"))
+                            // Then the weights as stored, so an f16 export reads as one by its record,
+                            // not its name.
+                            + &model_storage(m).map_or(String::new(), |s| format!(" · {s}"));
                         let row = cols(div().id(SharedString::from(key.clone())))
-                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
-                            .h(px(36.))
+                            .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 48.)))
+                            .h(px(48.))
                             .border_b_1()
                             .border_color(t.line_subtle)
                             .cursor_pointer()
@@ -168,10 +183,10 @@ impl FoloApp {
                                     cx.stop_propagation();
                                 }
                             }))
-                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())))
+                            .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())).child(text(ty::XS, t.text_tertiary).w(px(name_w)).truncate().child(eval_on)))
                             .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
-                            .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
+                            .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| text(ty::SM, t.text_primary).tnum().child(f3(mm.map50_95)))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
                             .when(params_col, |d| d.child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}"))))
@@ -276,9 +291,11 @@ impl FoloApp {
             });
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
-                "{} px · {} classes{} · created {created}",
+                "{} px · {} classes{}{} · created {created}",
                 m.imgsz,
                 m.classes.len(),
+                // The weights as stored (precision, fused), when the record says.
+                model_storage(&m).map_or(String::new(), |s| format!(" · {s} weights")),
                 // How it was trained, when the record says (`trained_with`; exports have none).
                 if m.trained_with.is_some_and(|w| w.amp) { " · trained in f16" } else { "" },
             )));
@@ -757,9 +774,10 @@ impl FoloApp {
             })
             .ok();
         });
-        // The legend is a list beside the plot, best AP50 first; hover or focus isolates a curve.
+        // The legend is a list beside the plot, in class order (as the confusion matrix and the
+        // class table beside it run); hover or focus isolates a curve.
         let mut order: Vec<&crate::api::PrCurve> = ev.pr.iter().collect();
-        order.sort_by(|a, b| b.ap50.total_cmp(&a.ap50));
+        order.sort_by_key(|c| c.class);
         let chips: Vec<AnyElement> = order
             .into_iter()
             .map(|c| {
@@ -1462,7 +1480,8 @@ impl FoloApp {
         let num =
             |v: String| text(ty::SM, t.text_secondary).tnum().w(px(120.)).flex_none().text_right().child(v);
         let mut per: Vec<_> = ev.per_class.iter().collect();
-        per.sort_by(|a, b| b.map50.total_cmp(&a.map50));
+        // Class order, as the PR legend and the confusion matrix run.
+        per.sort_by_key(|c| c.class);
         // Numbers right-aligned (bar to their left), like every other table's metric columns.
         let rows: Vec<AnyElement> = per
             .into_iter()

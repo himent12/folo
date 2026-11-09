@@ -2087,6 +2087,16 @@ impl FoloApp {
         );
     }
 
+    /// A run's identity line, "folo-m · shapes-hard": architecture, then dataset, the one order every
+    /// surface uses (the hero, Recent runs, the run page, focus tips).
+    pub fn run_meta(&self, r: &Run) -> String {
+        let ds = self
+            .store
+            .dataset_summary(&r.config.dataset_id)
+            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+        format!("{} · {ds}", r.config.arch.as_str())
+    }
+
     /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own
     /// record says (`Model.head`, from its folo.config), so imported and orphaned models read right.
     pub fn model_e2e(&self, m: &Model) -> bool {

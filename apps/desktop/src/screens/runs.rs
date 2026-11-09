@@ -411,12 +411,11 @@ impl FoloApp {
             .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
         let started = r.started.as_deref().and_then(time::parse).map(|s| time::ago(s, now));
         let device = crate::ui::device_label(&r.device);
-        // The architecture; an end-to-end head is a badge by the title, as on the model page.
-        let arch = r.config.arch.as_str().to_string();
+        // An end-to-end head is a badge by the title, as on the model page.
         let e2e = r.config.head == crate::api::Head::O2o;
         let subtitle = text(ty::BASE, t.text_secondary).child(match started {
-            Some(s) => format!("{arch} · {ds_name} · {device} · started {s}"),
-            None => format!("{arch} · {ds_name} · {device}"),
+            Some(s) => format!("{} · {device} · started {s}", self.run_meta(&r)),
+            None => format!("{} · {device}", self.run_meta(&r)),
         });
 
         let mut actions = Vec::new();
