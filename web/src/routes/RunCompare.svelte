@@ -972,6 +972,8 @@
   /* The request beside what the run resolved it to ("(auto)", "(requested 0.01)"), and where P · R were read. */
   .note {
     margin-left: var(--space-1);
+    /* It wraps as a whole, never inside "(requested 0.01)". */
+    white-space: nowrap;
     font-size: var(--type-sm-size);
     font-weight: var(--weight-regular);
     color: var(--text-tertiary);

@@ -10,6 +10,7 @@
   import Check from '@lucide/svelte/icons/check';
   import Copy from '@lucide/svelte/icons/copy';
   import Download from '@lucide/svelte/icons/download';
+  import Info from '@lucide/svelte/icons/info';
   import { HttpApi, onnxFileName } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import type { ExportFormat, ExportResult, Model, OnnxSwitches } from '$lib/api/types';
@@ -205,7 +206,8 @@
     <!-- The ONNX graph, downloaded straight to this computer (servers with weights_onnx). -->
     <div class="done">
       <div class="done-head">
-        <span class="ok" aria-hidden="true"><Check size={14} strokeWidth={2.25} /></span>
+        <!-- The demo saves nothing: a neutral mark, not the success check. -->
+        <span class="ok" class:quiet={hub.api.mock} aria-hidden="true">{#if hub.api.mock}<Info size={14} />{:else}<Check size={14} strokeWidth={2.25} />{/if}</span>
         <span>{hub.api.mock ? 'Nothing to download in the demo' : 'Downloaded'}</span>
         {#if !hub.api.mock}<span class="size num">{bytes(file.size, prefs.units)}</span>{/if}
       </div>
@@ -448,6 +450,10 @@
     border-radius: 50%;
     background: var(--success-muted);
     color: var(--success-text);
+  }
+  .ok.quiet {
+    background: var(--bg-active);
+    color: var(--text-secondary);
   }
   .size {
     margin-left: auto;

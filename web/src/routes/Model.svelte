@@ -264,8 +264,8 @@
       </div>
       <div>
         <dt>Precision, recall</dt>
-        <dd>Measured at the confidence that gives the best F1 (precision and recall balanced, averaged over classes, at IoU 0.50): the model's best trade-off between missed objects and false boxes.{#if m.metrics?.best_f1_conf != null}
-            Here conf {conf(m.metrics.best_f1_conf)}, from the epoch that wrote these weights.{:else} This model's file does not say which
+        <dd>Measured at the confidence that gives the best F1 (precision and recall balanced, averaged over classes, at IoU 0.50): the model's best trade-off between missed objects and false boxes.{' '}{#if m.metrics?.best_f1_conf != null}Here
+            conf {conf(m.metrics.best_f1_conf)}, from the epoch that wrote these weights.{:else}This model's file does not say which
             threshold that was.{/if}</dd>
       </div>
       <div>

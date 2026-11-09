@@ -153,6 +153,8 @@
   /* The request beside the value it resolved to, in sans: "(auto)", "(requested 0.01)". */
   .note {
     margin-left: var(--space-1);
+    /* It wraps as a whole, never inside "(requested 0.01)". */
+    white-space: nowrap;
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
