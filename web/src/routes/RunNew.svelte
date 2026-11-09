@@ -8,6 +8,7 @@
   import Play from '@lucide/svelte/icons/play';
   import Shuffle from '@lucide/svelte/icons/shuffle';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import { tick, untrack } from 'svelte';
   import { ApiError, hub } from '$lib/api/index.svelte';
@@ -19,6 +20,7 @@
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { sidebar } from '$lib/shell/sidebarState.svelte';
   import Page from '$lib/shell/Page.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
@@ -82,7 +84,7 @@
   let shuffle = $state(1);
   let submitting = $state(false);
   let advancedOpen = $state(false);
-  /** Up to 1199 px the augmentation settings fold behind a one-line summary (wide screens always show them). */
+  /** The augmentation settings fold behind a one-line summary at every width until opened. */
   let augOpen = $state(false);
   /** Below 960 px the dock opens the summary as a sheet, so the run can be reviewed without scrolling down. */
   let sumOpen = $state(false);
@@ -90,6 +92,15 @@
   const datasets = new Resource(async (s) => {
     const list = await hub.api.datasets(s);
     return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
+  });
+  // While the form (and so its bottom dock) is on the page, <html data-page-dock> tells the shell that this page has its
+  // own action bar at the foot of narrow screens, so the tab bar can step aside for it.
+  const hasDock = $derived(!(datasets.error && !datasets.data) && !(datasets.data && datasets.data.length === 0));
+  $effect(() => {
+    if (!hasDock) return;
+    const root = document.documentElement;
+    root.toggleAttribute('data-page-dock', true);
+    return () => root.removeAttribute('data-page-dock');
   });
   const system = new Resource((s) => hub.api.system(s));
   const models = new Resource((s) => hub.api.models(s));
@@ -490,11 +501,12 @@
   {/if}
 {/snippet}
 
-<!-- Why Start is off, as a way to the field that needs changing (the field may be far away). -->
+<!-- Why Start is off, as a way to the field that needs changing (the field may be far away). The mark in front carries
+     the danger hue; the link itself is ink, since danger never means navigation. -->
 {#snippet whyLine(id: string, cls = '')}
   {#if showWhy && why}
     <p class="why {cls}" {id} role={id === 'start-why' ? 'status' : undefined}>
-      <button type="button" class="why-go" onclick={() => why && jump(why.key)}>{why.text}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></button>
+      <CircleAlert size={14} strokeWidth={2} aria-hidden="true" /><button type="button" class="why-go" onclick={() => why && jump(why.key)}>{why.text}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></button>
     </p>
   {/if}
 {/snippet}
@@ -534,14 +546,14 @@
           {:else}
             <!-- Phones: a compact picker and a one-line summary; the cards are for wider screens. -->
             <div class="ds-pick">
-              <Select id="dataset-pick" label="Dataset" bind:value={datasetId} options={datasets.data.map((d) => ({ value: d.id, label: d.name }))} />
+              <Select id="dataset-pick" label="Dataset" bind:value={datasetId} invalid={!!errors.dataset} options={datasets.data.map((d) => ({ value: d.id, label: d.name }))} />
               {#if dataset}
                 <p class="ds-line num">
                   {num(dataset.splits.train)} train · {num(dataset.splits.val)} val · {dataset.classes.length} classes · <span class="mono">{dataset.format}</span>
                 </p>
               {/if}
             </div>
-            <div class="cards" role="radiogroup" aria-label="Dataset">
+            <div class="cards" role="radiogroup" aria-label="Dataset" aria-invalid={errors.dataset ? 'true' : undefined}>
               {#each datasets.data as d (d.id)}
                 {@const on = d.id === datasetId}
                 <label class="card" class:on>
@@ -571,7 +583,7 @@
                 <span class="a-note">{a.note}</span>
                 <span class="a-v num">{compact(a.params)}</span>
                 <span class="a-v num">{num(a.flops, 1)}</span>
-                {#if a.ms !== undefined}<span class="a-v num">{num(a.ms, 2)} ms</span>{:else}<span class="a-v faint" title="Not measured"><span class="nm-long">not measured</span><span class="nm-short">—</span></span>{/if}
+                {#if a.ms !== undefined}<span class="a-v num">{num(a.ms, 2)} ms</span>{:else}<span class="a-v faint" title="Not measured yet">—</span>{/if}
                 <span class="tick" aria-hidden="true">{#if on}<Check size={14} strokeWidth={2.25} />{/if}</span>
               </label>
             {/each}
@@ -579,14 +591,16 @@
           <!-- Phones: the rows have no room for the notes, so the chosen size's purpose sits under them. -->
           <p class="a-sel"><span class="mono">{arch}</span> {archNote}</p>
           <p class="ref">
-            Latency is measured end to end on an RTX 4080 SUPER: one decoded 640 px image in, boxes out, NMS included (fp32).
-            <span class="nm-note">Sizes with a dash are not measured yet.</span>
+            Latency: end to end on an RTX 4080 SUPER, a decoded 640 px image in, boxes out, NMS included (fp32). A dash:
+            not measured yet.
           </p>
           <div class="row2">
-            <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster.">
+            <Field label="Start from" for="weights" hint="Fine-tuning from a trained model converges much faster." error={errors.weights}>
               <Select
                 id="weights"
                 bind:value={weights}
+                invalid={!!errors.weights}
+                describedby={errors.weights ? 'weights-error' : 'weights-hint'}
                 options={[{ value: 'none', label: 'Random init (from scratch)' }, ...weightOptions.map((m) => ({ value: m.id, label: `${m.name} · mAP ${m.metrics?.map50_95.toFixed(3) ?? '—'}` }))]}
               />
             </Field>
@@ -596,7 +610,7 @@
         <Panel title="3 · Training" id="sec-train">
           <div class="fields">
             <Field label="Epochs" for="epochs" error={errors.epochs}>
-              <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} suffix="epochs" />
+              <Input id="epochs" type="number" min="1" max="10000" step="1" bind:value={epochs} invalid={!!errors.epochs} aria-describedby={errors.epochs ? 'epochs-error' : undefined} suffix="epochs" />
             </Field>
             <Field label="Batch size" for="batch" hint="Per step. Lower it if you run out of GPU memory.">
               {#snippet aside()}{#if was('batch')}<span class="was">was {oomRun?.config.batch}</span>{/if}{/snippet}
@@ -656,10 +670,10 @@
               <Select id="opt" bind:value={optimizer} options={[{ value: 'auto', label: 'Auto (AdamW for short runs, else SGD)' }, { value: 'sgd', label: 'SGD + momentum' }, { value: 'adamw', label: 'AdamW' }]} />
             </Field>
             <Field label="Initial learning rate" for="lr0" error={errors.lr0} hint="Warmup 3 epochs, then cosine to 1%.">
-              <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!errors.lr0} />
+              <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!errors.lr0} aria-describedby={errors.lr0 ? 'lr0-error' : 'lr0-hint'} />
             </Field>
             <Field label="Seed" for="seed" hint="Same seed, same run." error={errors.seed}>
-              <Input id="seed" type="number" min="0" step="1" bind:value={seed} invalid={!!errors.seed} />
+              <Input id="seed" type="number" min="0" step="1" bind:value={seed} invalid={!!errors.seed} aria-describedby={errors.seed ? 'seed-error' : 'seed-hint'} />
             </Field>
             </div>
           </details>
@@ -694,7 +708,7 @@
                   {@render children()}
                 </div>
               {/snippet}
-              {#snippet mosaicCtl()}<Slider label="Mosaic" bind:value={augment.mosaic} min={0} max={1} step={0.05} hint="Stitch 4 images into one: more objects and context per sample." />{/snippet}
+              {#snippet mosaicCtl()}<Slider label="Mosaic" bind:value={augment.mosaic} min={0} max={1} step={0.05} hint="Stitch 4 images into one: more objects per sample." />{/snippet}
               {#snippet mixupCtl()}<Slider label="Mixup" bind:value={augment.mixup} min={0} max={1} step={0.05} hint="Blend two images and keep both sets of boxes." />{/snippet}
               {#snippet flipCtl()}<Slider label="Horizontal flip" bind:value={augment.fliplr} min={0} max={1} step={0.05} hint="Chance to mirror left-right." />{/snippet}
               {#snippet scaleCtl()}<Slider label="Scale" bind:value={augment.scale} min={0} max={0.9} step={0.05} format={(v) => `±${v.toFixed(2)}`} hint="Random zoom in and out." />{/snippet}
@@ -707,8 +721,8 @@
               {@render ctl('translate', translateCtl)}
               {@render ctl('hsv', hsvCtl)}
               <div class="aug-row">
-                <Field label="Close mosaic" for="close" hint="Train the last N epochs on plain images to settle the boxes." error={errors.close}>
-                  <Input id="close" type="number" min="0" step="1" max={epochs} bind:value={augment.close_mosaic} oninput={() => (closeEdited = true)} suffix="epochs" invalid={!!errors.close} />
+                <Field label="Close mosaic" for="close" hint="Train the last N epochs without mosaic to settle the boxes." error={errors.close}>
+                  <Input id="close" type="number" min="0" step="1" max={epochs} bind:value={augment.close_mosaic} oninput={() => (closeEdited = true)} suffix="epochs" invalid={!!errors.close} aria-describedby={errors.close ? 'close-error' : 'close-hint'} />
                 </Field>
               </div>
             </div>
@@ -717,7 +731,7 @@
               {#if dataset}
                 <AugPreview datasetId={dataset.id} images={sampleImages.data ?? []} classes={dataset.classes} {augment} {focus} seed={shuffle} />
               {/if}
-              <p class="aug-hint">Hover a setting to isolate it. Boxes move with the pixels, exactly as the trainer transforms them.</p>
+              <p class="aug-hint">Hover or focus a setting to see it alone. Boxes move with the pixels, as in training.</p>
             </div>
           </div>
         </Panel>
@@ -730,7 +744,7 @@
           <div class="sum">
             <div class="sum-col">
               <Field label="Run name" for="name" error={errors.name}>
-                <Input id="name" bind:value={name} oninput={() => (nameEdited = true)} invalid={!!errors.name} spellcheck="false" autocomplete="off" />
+                <Input id="name" bind:value={name} oninput={() => (nameEdited = true)} invalid={!!errors.name} aria-describedby={errors.name ? 'name-error' : undefined} spellcheck="false" autocomplete="off" />
               </Field>
               {@render reviewList(false)}
             </div>
@@ -762,16 +776,27 @@
       </aside>
 
       <!-- Narrow screens: the summary sits below the form, so keep the essentials and the action in reach. -->
-      <div class="dock" class:away={startVisible} role="region" aria-label="Start training" inert={startVisible}>
-        <!-- The reason Start is off travels with it (the Summary's line is out of view here). -->
-        {@render whyLine('dock-why', 'dock-why')}
-        <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
-          <span>{roughDuration(est.totalSeconds)}</span>
-          {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
-          {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.kind === 'warmup' ? 'Mostly warmup' : 'No mosaic'}</span>{/if}
-          {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
-          <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
-        </button>
+      <div
+        class="dock"
+        class:away={startVisible}
+        role="region"
+        aria-label="Start training"
+        inert={startVisible}
+        style:--dock-left={sidebar.collapsed ? 'var(--size-sidebar-collapsed)' : 'var(--size-sidebar)'}
+      >
+        <!-- The reason Start is off travels with it (the Summary's line is out of view here), in the estimate's place:
+             one row of chrome, not two. -->
+        {#if showWhy && why}
+          {@render whyLine('dock-why', 'dock-why')}
+        {:else}
+          <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
+            <span>{roughDuration(est.totalSeconds)}</span>
+            {#if !onCpu && gpu}<span class:warn={vramPct > 0.9}>{roughBytes(vram)} VRAM</span>{/if}
+            {#if short}<span class="dock-warn"><TriangleAlert size={12} aria-hidden="true" />{short.kind === 'warmup' ? 'Mostly warmup' : 'No mosaic'}</span>{/if}
+            {#if dataset}<span class="faint">{dataset.name} · {arch}</span>{/if}
+            <span class="dock-more"><ChevronUp size={14} strokeWidth={1.75} aria-hidden="true" /></span>
+          </button>
+        {/if}
         <Button type="submit" variant="primary" size="lg" icon={Play} loading={submitting} disabled={!valid} aria-describedby={showWhy ? 'dock-why' : undefined}
           >Start training</Button
         >
@@ -883,15 +908,11 @@
   .c-meta > span {
     white-space: nowrap;
   }
-  .nm-short,
-  .nm-note {
-    display: none;
-  }
   /* Model sizes: single-line rows (letter, name, note, the three specs, the check) on one grid with their header.
      A subgrid's edge tracks hold its border and padding, so the first and last are 12 + 1 px wider than their content. */
   .arches {
     display: grid;
-    grid-template-columns: 28px auto minmax(0, 1fr) repeat(2, 64px) 88px 28px;
+    grid-template-columns: 28px auto minmax(0, 1fr) repeat(3, 64px) 28px;
     column-gap: var(--space-3);
     row-gap: var(--space-1);
   }
@@ -948,6 +969,8 @@
     color: var(--text-primary);
   }
   .ref {
+    max-width: 360px;
+    text-wrap: pretty;
     margin-top: var(--space-2);
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
@@ -1081,6 +1104,13 @@
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
+  /* Helper text keeps a 12 px measure of at most ~60 characters, however wide the column. */
+  .aug-hint,
+  .aug-controls :global(.hint),
+  .aug-controls :global(.msg) {
+    max-width: 360px;
+    text-wrap: pretty;
+  }
   .sum,
   .sum-col {
     display: grid;
@@ -1100,16 +1130,25 @@
     }
   }
   .why {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
     margin-top: var(--space-2);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
-    color: var(--danger-text);
+    color: var(--text-primary);
   }
-  /* The reason Start is off leads to the field: a link in the danger ink, underlined on hover. */
+  .why > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--danger-solid);
+  }
+  /* The reason Start is off leads to the field: an ink link, underlined, the arrow in tertiary. */
   .why-go {
     display: inline;
+    min-width: 0;
     color: inherit;
-    text-align: inherit;
+    text-align: left;
     text-decoration: underline;
     text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
     text-underline-offset: 3px;
@@ -1122,8 +1161,15 @@
     display: inline;
     margin-left: var(--space-1);
     vertical-align: -1px;
+    color: var(--text-tertiary);
   }
   @media (pointer: coarse) {
+    .why {
+      align-items: center;
+    }
+    .why > :global(svg) {
+      margin-top: 0;
+    }
     .why-go {
       display: inline-block;
       min-height: 44px;
@@ -1206,8 +1252,7 @@
     background: var(--warning-solid);
   }
   .ds-pick,
-  .a-sel,
-  .aug-toggle {
+  .a-sel {
     display: none;
   }
   .ds-line {
@@ -1220,6 +1265,7 @@
     color: var(--text-tertiary);
   }
   .aug-toggle {
+    display: flex;
     align-items: center;
     gap: var(--space-2);
     min-height: var(--control-lg);
@@ -1264,6 +1310,13 @@
   }
   .aug-actions {
     display: contents;
+  }
+  .aug.shut,
+  .aug-actions.shut {
+    display: none;
+  }
+  .aug-toggle[aria-expanded='true'] {
+    margin-bottom: var(--space-3);
   }
   .warning {
     display: flex;
@@ -1438,40 +1491,20 @@
     .layout {
       grid-template-columns: minmax(0, 1fr) 300px;
     }
-    /* The notes keep their room: an unmeasured latency is a dash, explained under the rows. */
-    .arches {
-      grid-template-columns: 28px auto minmax(0, 1fr) repeat(3, 64px) 28px;
-    }
-    .nm-long {
-      display: none;
-    }
-    .nm-short,
-    .nm-note {
-      display: inline;
-    }
     /* The preview takes a little more of the narrower form, so its frames stay large enough to read. */
     .aug {
       grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
       gap: var(--space-4);
-    }
-    .aug-toggle {
-      display: flex;
-    }
-    .aug.shut,
-    .aug-actions.shut {
-      display: none;
-    }
-    .aug-toggle[aria-expanded='true'] {
-      margin-bottom: var(--space-3);
     }
   }
   @media (max-width: 959px) {
     .layout {
       padding-bottom: 64px;
     }
+    /* Beside the sidebar (its content may start at the left edge, so the bar starts where the page does). */
     .dock {
       position: fixed;
-      left: 0;
+      left: var(--dock-left, 0);
       right: 0;
       bottom: 0;
       z-index: var(--z-sticky);
@@ -1488,14 +1521,11 @@
         transform var(--dur-base) var(--ease-out),
         opacity var(--dur-base) var(--ease-out);
     }
-    .dock:has(.dock-why) {
-      flex-wrap: wrap;
-      row-gap: var(--space-2);
-    }
+    /* The reason sits on the dock's left, where the estimate would be. */
     .dock-why {
-      flex-basis: 100%;
+      flex: 1;
+      min-width: 0;
       margin-top: 0;
-      text-align: right;
     }
     .dock.away {
       transform: translateY(100%);
@@ -1551,15 +1581,12 @@
   @media (max-width: 767px) {
     /* Two columns: the estimate wraps on the left, a 44 px Start button holds the right; 16 px gutters. */
     .dock {
+      left: 0;
       bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       gap: var(--space-3);
       padding: var(--space-2) var(--space-4);
-    }
-    /* The reason Start is off takes its own row over both columns. */
-    .dock-why {
-      grid-column: 1 / -1;
     }
     .dock-est {
       position: relative;

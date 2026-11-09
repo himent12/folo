@@ -143,13 +143,20 @@ export const scenes = [
     },
   },
   {
+    // A setting isolates itself in the preview on hover or focus: the augmentation section opened, Mosaic focused (focus
+    // survives the harness's scroll to the top, a hover would not) and the preview showing mosaic alone. The whole page,
+    // since the section sits below the first screen.
     name: 'run-new-focus-mosaic',
-    fullPage: false,
+    fullPage: true,
     path: '/runs/new',
-    themes: ['dark'],
-    viewports: ['desktop'],
+    themes: ['dark', 'light'],
+    viewports: ['desktop', 'laptop'],
     setup: async (page) => {
-      await page.getByText('Mosaic', { exact: true }).first().hover();
+      await until(page, '.aug-toggle');
+      await page.locator('.aug-toggle').click();
+      await page.locator('#sec-aug input[type="range"]').first().focus();
+      await until(page, '.aug-row.focused');
+      await page.clock.runFor(500);
     },
   },
   {
@@ -282,6 +289,8 @@ export const scenes = [
       await page.locator('dialog[open] input[placeholder="D:/data/my-dataset"]').fill('D:/data/shapes');
       await page.locator('dialog[open] form').evaluate((f) => /** @type {HTMLFormElement} */ (f).requestSubmit());
       await until(page, 'text=Already registered as shapes');
+      // The thumbnails render in real time (the page clock, which would close the toast, stays put).
+      await page.locator('.cell img.loaded').nth(17).waitFor({ timeout: 15000 }).catch(() => {});
     },
   },
   {
@@ -291,6 +300,20 @@ export const scenes = [
     setup: async (page) => {
       await page.locator('.cell img.loaded').nth(6).waitFor();
       await page.waitForTimeout(400);
+    },
+  },
+  {
+    // Thumbnails mid-load and failed: a skeleton holds each tile until its image is ready (no boxes on an empty frame),
+    // and an image that could not be read says so, with Retry. Two images are made to fail after the first load.
+    name: 'dataset-images-unavailable',
+    path: '/datasets/ds_fasteners',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.locator('.cell img.loaded').nth(6).waitFor();
+      await page.locator('.cell img').evaluateAll((imgs) => [1, 4].forEach((i) => imgs[i]?.dispatchEvent(new Event('error'))));
+      await until(page, '.cell .failed');
+      await page.waitForTimeout(200);
     },
   },
   {

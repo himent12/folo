@@ -392,10 +392,6 @@
     void modelId;
     badFile = null;
   });
-  /** The cause of a failed prediction, for the caption under the image. */
-  const cause = $derived(
-    oom ? 'out of GPU memory' : error instanceof Error ? sentence(error.message).replace(/\.$/, '') : null,
-  );
   // Focus moves to the notice's heading as it appears, so it is announced and its actions are next in tab order.
   let noticeEl = $state<HTMLElement>();
   $effect(() => {
@@ -553,7 +549,7 @@
 
 {#snippet secondarySliders(inline: boolean)}
   <div title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
-    <Slider {inline} label={inline ? 'Overlap (IoU)' : 'Overlap threshold (IoU)'} bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Suppress lower-scoring boxes of the same class above this overlap." />
+    <Slider {inline} label={inline ? 'Overlap (IoU)' : 'Overlap threshold (IoU)'} bind:value={iou} min={0.05} max={0.95} step={0.05} hint="Suppress same-class overlaps above this." />
   </div>
   <Slider {inline} label="Max detections" bind:value={maxDet} min={1} max={300} step={1} format={(v) => String(Math.round(v))} hint="Keep at most this many boxes." />
 {/snippet}
@@ -594,7 +590,57 @@
   {:else if predicting}
     <div class="t-sk"><Skeleton h="28px" w="50%" /><Skeleton h="8px" /><Skeleton h="14px" /><Skeleton h="14px" /></div>
   {:else}
-    <p class="hint">Preprocess, inference and postprocess time of the last prediction.</p>
+    <p class="hint">Time per stage of the last prediction.</p>
+  {/if}
+{/snippet}
+
+{#snippet noticeStrip()}
+  <!-- What went wrong and the ways out, in one block: under the image (which stays whole) on wide screens, above it on
+       phones so the failure and its recovery are in the first screen. -->
+  {#if notice}
+    {#key notice}
+      <div class="notice" bind:this={noticeEl}>
+        {#if notice === 'file'}
+          <div class="need-file" role="alert">
+            <FileUp size={16} strokeWidth={1.75} aria-hidden="true" />
+            <div class="nf-body">
+              {#if badFile}
+                <p class="n-title bad">{badFile.why ? `${badFile.name} could not be loaded` : `${badFile.name} is not a .folo weights file`}</p>
+                <p class="nf-text">
+                  {#if badFile.why}{badFile.why} {/if}Choose {model?.name}'s <span class="mono">weights/best.folo</span> from its run's folder, or run it on the
+                  server.
+                </p>
+              {:else}
+                <p class="n-title">This server cannot send model files yet</p>
+                <p class="nf-text">
+                  To run {model?.name} in the browser, choose its <span class="mono">.folo</span> file (<span class="mono">weights/best.folo</span>
+                  in the run's folder), or run it on the server.
+                </p>
+              {/if}
+              <div class="nf-actions">
+                <Button size="sm" variant="primary" icon={FileUp} onclick={() => weightsInput.click()}>Choose .folo file</Button>
+                <Button size="sm" onclick={() => (runOn = 'server')}>Run on the server</Button>
+              </div>
+            </div>
+          </div>
+        {:else}
+          <ErrorState
+            {error}
+            title="Prediction failed"
+            retry={() => retryTick++}
+            compact
+            hint={oom ? (smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.') : undefined}
+          >
+            {#snippet actions()}
+              {#if oom}
+                <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>
+                {#if smaller}<Button size="sm" onclick={() => chooseModel(smaller.id)}>Use {smaller.name} <span class="mono">{smaller.arch}</span></Button>{/if}
+              {/if}
+            {/snippet}
+          </ErrorState>
+        {/if}
+      </div>
+    {/key}
   {/if}
 {/snippet}
 
@@ -669,6 +715,7 @@
                 <Button size="sm" variant="ghost" class="clear" icon={X} aria-label="Clear image" onclick={clear} />
               {/if}
             </div>
+            {#if phone.current}{@render noticeStrip()}{/if}
             <div class="stage" class:empty={!source} style:--ar={dims ? `${dims.width} / ${dims.height}` : undefined}>
               {#if !source}
                 <DropZone {dragging} {samples} onbrowse={() => fileInput.click()} onpick={() => (pickerOpen = true)} onsample={(ds, img) => setSource({ kind: 'dataset', ds, img })} />
@@ -696,55 +743,10 @@
                 {#if dragging}<div class="drop-hint"><span>Drop to replace</span></div>{/if}
               {/if}
             </div>
-            {#if notice}
-              <!-- Under the image, which stays in full view: what went wrong and the ways out. -->
-              {#key notice}
-                <div class="notice" bind:this={noticeEl}>
-                  {#if notice === 'file'}
-                    <div class="need-file" role="alert">
-                      <FileUp size={16} strokeWidth={1.75} aria-hidden="true" />
-                      <div class="nf-body">
-                        {#if badFile}
-                          <p class="n-title bad">{badFile.why ? `${badFile.name} could not be loaded` : `${badFile.name} is not a .folo weights file`}</p>
-                          <p class="nf-text">
-                            {#if badFile.why}{badFile.why} {/if}Choose {model?.name}'s <span class="mono">weights/best.folo</span> from its run's folder, or run it on the
-                            server.
-                          </p>
-                        {:else}
-                          <p class="n-title">This server cannot send model files yet</p>
-                          <p class="nf-text">
-                            To run {model?.name} in the browser, choose its <span class="mono">.folo</span> file (<span class="mono">weights/best.folo</span>
-                            in the run's folder), or run it on the server.
-                          </p>
-                        {/if}
-                        <div class="nf-actions">
-                          <Button size="sm" variant="primary" icon={FileUp} onclick={() => weightsInput.click()}>Choose .folo file</Button>
-                          <Button size="sm" onclick={() => (runOn = 'server')}>Run on the server</Button>
-                        </div>
-                      </div>
-                    </div>
-                  {:else}
-                    <ErrorState
-                      {error}
-                      title="Prediction failed"
-                      retry={() => retryTick++}
-                      compact
-                      hint={oom ? (smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.') : undefined}
-                    >
-                      {#snippet actions()}
-                        {#if oom}
-                          <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>
-                          {#if smaller}<Button size="sm" onclick={() => chooseModel(smaller.id)}>Use {smaller.name} <span class="mono">{smaller.arch}</span></Button>{/if}
-                        {/if}
-                      {/snippet}
-                    </ErrorState>
-                  {/if}
-                </div>
-              {/key}
-            {/if}
+            {#if !phone.current}{@render noticeStrip()}{/if}
             {#if source}
               <!-- Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. -->
-              <div class="qconf"><Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} /></div>
+              <div class="qconf" class:covered={sheetShown}><Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} /></div>
             {/if}
             {#if source && result}
               <!-- Phones: the picked detection in one line under the image, so its numbers are readable without the table. -->
@@ -769,7 +771,8 @@
                   {#if selectedIdx === null}<span class="tap">Tap a box to inspect</span>{/if}
                   <span class="faint">filtered in {result.ms < 0.01 ? '<0.01' : result.ms.toFixed(2)} ms</span>
                 {:else if notice === 'error'}
-                  <span class="failed truncate"><b>Prediction failed</b>{#if cause}<span class="sep" aria-hidden="true">·</span>{cause}{/if}</span>
+                  <!-- The notice says what failed; the caption only adds what it does not: which model, where. -->
+                  <span class="faint truncate">{model?.name} on {runOn === 'server' ? 'the server' : `this browser · ${BACKEND_NAME[runOn]}`}</span>
                   <span class="grow"></span>
                 {:else}
                   <span class="faint">{predicting ? 'Running inference…' : weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}</span>
@@ -799,7 +802,10 @@
                     <Button size="sm" variant="ghost" icon={X} aria-label="Close thresholds" onclick={closeSheet} />
                   </div>
                   <div class="sheet-body">
-                    <div class="more-sliders">{@render secondarySliders(true)}</div>
+                    <div class="more-sliders">
+                      <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
+                      {@render secondarySliders(true)}
+                    </div>
                     <div class="more-toggles">{@render displayToggles()}</div>
                   </div>
                 </div>
@@ -823,7 +829,9 @@
             </div>
             <div id="pg-panel" role="tabpanel" aria-labelledby="pg-{tab}">
               {#if !result}
-                <p class="placeholder">{predicting ? 'Running inference…' : 'Detections appear here once you run the model on an image.'}</p>
+                <p class="placeholder">
+                  {predicting ? 'Running inference…' : notice === 'error' ? 'No detections: the last prediction failed.' : 'Detections appear here once you run the model on an image.'}
+                </p>
               {:else if tab === 'json'}
                 <div class="json-wrap"><JsonView value={json} label="Prediction as JSON" /></div>
               {:else if !pred?.boxes.length}
@@ -1196,15 +1204,8 @@
     color: var(--text-primary);
     font-weight: var(--weight-medium);
   }
-  .vfoot .failed {
+  .vfoot .truncate {
     min-width: 0;
-  }
-  .vfoot .failed b {
-    color: var(--danger-text);
-  }
-  .vfoot .failed .sep {
-    margin: 0 var(--space-2);
-    color: var(--text-tertiary);
   }
   .fi + .fi::before {
     content: '·';
@@ -1482,9 +1483,11 @@
     justify-content: flex-end;
     margin-bottom: var(--space-1);
   }
-  .qconf :global(.slider.inline label),
-  .more-sliders :global(.slider.inline label) {
-    min-width: 80px;
+  /* One label column and one value column: every track (the pinned Confidence, the sheet's three) starts and ends at
+     the same x. */
+  .qconf :global(.slider.inline),
+  .more-sliders :global(.slider.inline) {
+    grid-template-columns: 112px minmax(0, 1fr) 40px;
   }
   .more-sliders :global(.slider.inline) {
     min-height: 44px;
@@ -1588,6 +1591,11 @@
       padding-left: var(--space-4);
       padding-right: var(--space-4);
     }
+    /* Above the image here: the toolbar's edge is over it, its own edge under it. */
+    .notice {
+      border-top: 0;
+      border-bottom: 1px solid var(--line-subtle);
+    }
     .viewer.loaded .vbar {
       padding-right: var(--space-2);
       gap: var(--space-2);
@@ -1652,6 +1660,10 @@
     }
     .pick-line .sep {
       color: var(--text-tertiary);
+    }
+    /* The open sheet holds Confidence as its first row; the pinned copy under it keeps its room but steps out. */
+    .qconf.covered {
+      visibility: hidden;
     }
     .qconf {
       display: flex;
