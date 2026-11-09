@@ -326,6 +326,11 @@ a.ident:hover {
 .table .r {
   text-align: right;
 }
+/* A loading row's placeholder bar (ui/Skeleton, a block) sits where the number will: on the right edge of a .r cell. */
+.table td.r > .sk {
+  margin-left: auto;
+}
+
 :where(.table) tbody tr.link {
   cursor: pointer;
   transition: background-color var(--dur-fast) var(--ease-standard);

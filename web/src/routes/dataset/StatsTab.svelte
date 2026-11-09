@@ -97,7 +97,7 @@
         <ul class="hitems">
           {#each findings as h (h.id)}
             {@const Icon = icons[h.severity]}
-            <li class={h.severity} class:wide={evidence === h.id}>
+            <li class={h.severity}>
               <span class="hicon"><Icon size={16} strokeWidth={1.75} aria-hidden="true" /></span>
               <div class="htext">
                 <p class="htitle"><span class="sr-only">{sevWord[h.severity]}: </span>{h.title}</p>
@@ -120,14 +120,16 @@
                     {/if}
                   </p>
                 {/if}
-                {#if h.issues && evidence === h.id}
-                  <!-- The evidence, under its finding: every file and line the check flagged, with its fix. -->
-                  <div class="evidence" id="ds-ev-{h.id}">
-                    <IssueList datasetId={dataset.id} path={dataset.path} severity={h.issues} severityFilter={false} {counts} />
-                  </div>
-                {/if}
               </div>
             </li>
+            {#if h.issues && evidence === h.id}
+              <!-- The evidence: every file and line the check flagged, with its fix, in a full-width row of its own under
+                   its finding's row (the grid packs the next finding into the cell beside it), never a card that
+                   spans both columns among half-width ones. -->
+              <li class="evidence" id="ds-ev-{h.id}">
+                <IssueList datasetId={dataset.id} path={dataset.path} severity={h.issues} severityFilter={false} {counts} />
+              </li>
+            {/if}
           {/each}
         </ul>
       </details>
@@ -332,14 +334,13 @@
     align-items: start;
   }
   /* From the laptop tier, the findings in two columns (row by row, so severity order still reads left to right, top to
-     bottom); a finding whose evidence is open takes the full width for its file list. */
+     bottom). Open evidence is a full-width row of its own under its finding's row: dense packing moves the next
+     finding up beside the opened one, so the cards keep their two-column grid. */
   @media (min-width: 1024px) {
     .hitems {
       grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-auto-flow: row dense;
       gap: var(--space-4) var(--space-8);
-    }
-    .hitems li.wide {
-      grid-column: 1 / -1;
     }
   }
   .hicon {
@@ -353,11 +354,15 @@
     gap: 2px;
     min-width: 0;
   }
-  .evidence {
-    justify-self: stretch;
+  /* Full width, its left edge on the findings' text (past the 16 px icon and its 12 px gap). */
+  .hitems li.evidence {
+    display: block;
+    grid-column: 1 / -1;
     min-width: 0;
-    margin-top: var(--space-2);
+    margin-top: calc(-1 * var(--space-2));
+    padding-left: calc(16px + var(--space-3));
   }
+
   .haction :global(.ev-chev) {
     transition: transform var(--dur-fast) var(--ease-standard);
   }

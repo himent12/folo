@@ -83,8 +83,8 @@
     background: var(--bg-inset);
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  /* The drop target: the canvas's height less the samples (280 px where the canvas follows its content), its message
-     centred between the corners. */
+  /* The drop target: beside the rail (from 1024 px) the canvas's height less the samples; in one column a content-sized
+     280–480 px (below), so the samples sit in the first screen. Its message is centred between the corners. */
   .finder {
     position: relative;
     display: grid;
@@ -227,6 +227,12 @@
     font-size: var(--type-sm-size);
     line-height: 16px;
   }
+  @media (max-width: 1023px) {
+    .finder {
+      flex: none;
+      height: clamp(280px, 40dvh, 480px);
+    }
+  }
   @media (max-width: 767px) {
     .zone {
       gap: var(--space-6);
@@ -234,7 +240,7 @@
     }
     /* Phones: as tall as the message and buttons need. */
     .finder {
-      flex: none;
+      height: auto;
       padding: var(--space-8) var(--space-4);
     }
     .samples ul {

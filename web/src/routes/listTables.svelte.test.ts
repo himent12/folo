@@ -115,7 +115,46 @@ describe('list tables: headers and columns hide together', () => {
   });
 });
 
+describe('list tables: one geometry in every state', () => {
+  // Every column but the flexible ones carries its width on the header row, which loading, empty, error and loaded
+  // share, so a column sits at the same x in each (round 21: runs-empty and models-empty set their columns apart).
+  const FLEX: Record<string, string[]> = { Runs: ['Run'], Models: ['Model'], Datasets: ['Path', 'Class balance'] };
+  for (const [name, page, path, sel] of LISTS) {
+    for (const scenario of ['normal', 'empty', 'loading', 'error'] as const) {
+      it(`${name} (${scenario}): every header but ${FLEX[name]!.join(' and ')} has a fixed width`, async () => {
+        await open(page, path, new MockApi(scenario, 0));
+        const table = await vi.waitFor(() => {
+          flushSync();
+          const t = target.querySelector<HTMLTableElement>(sel);
+          if (!t) throw new Error('no table');
+          return t;
+        });
+        const loose = [...table.querySelectorAll<HTMLElement>('thead th')]
+          .filter((th) => !th.classList.contains('check') && !th.style.width)
+          .map((th) => th.textContent?.trim());
+        expect(loose).toEqual(FLEX[name]);
+      });
+    }
+  }
+
+  it('Models: with no rows to sort, the headers carry no sort mark', async () => {
+    for (const scenario of ['empty', 'error'] as const) {
+      await open(Models as Component, '/models', new MockApi(scenario, 0));
+      await vi.waitFor(() => {
+        flushSync();
+        if (!target.querySelector('table.models tr.state')) throw new Error('no state yet');
+      });
+      expect(target.querySelectorAll('table.models [aria-sort]').length, scenario).toBe(0);
+      expect(target.querySelectorAll('table.models .sort.on').length, scenario).toBe(0);
+      unmount(c!);
+      c = undefined;
+      target.remove();
+    }
+  });
+});
+
 describe('responsive columns are one shared rule', () => {
+
   it('no component styles its own .hide-* columns (a scoped rule misses headers drawn by SortHeader)', () => {
     const src = resolve(process.cwd(), 'src');
     const files: string[] = [];

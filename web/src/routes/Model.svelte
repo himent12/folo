@@ -104,6 +104,8 @@
   // The ranked lists point into the matrix: each line is a button that reveals its cell (on a phone the matrix scrolls
   // sideways, so the background column starts out of view).
   let matrixView = $state<ConfusionMatrix>();
+  /** The curves panel's band / every-curve switch (many classes). */
+  let allCurves = $state(false);
   let exportOpen = $state(false);
   // Below the desktop tier the rail stacks under the PR panel: the details fold into one line so the matrix follows soon.
   const narrow = new MediaQuery(media.upToLaptop, false);
@@ -357,13 +359,29 @@
     <div class="detail" class:off={!showing('curves') && !showing('classes') && !showing('details')}>
       <div class="main-col" class:off={!showing('curves')}>
         <Panel title="Precision–recall" meta="precision by recall · IoU 0.5" pad="none" id="pr">
+          <!-- Many classes: the band / every-curve switch is the chart's one header control, so the legend row keeps one
+               line in the laptop's narrower column. -->
+          {#snippet actions()}
+            {#if ev && m.classes.length > 10}
+              <Segmented
+                size="sm"
+                label="Curves shown"
+                bind:value={() => (allCurves ? 'all' : 'band'), (v) => (allCurves = v === 'all')}
+                options={[
+                  { value: 'band', label: 'Band' },
+                  { value: 'all', label: 'All curves' },
+                ]}
+              />
+            {/if}
+          {/snippet}
           {#if ev}
             <PrCurves
               classes={m.classes}
               {ev}
               map50={m.metrics?.map50 ?? null}
               view="curves"
-              fill={!narrow.current}
+              bind:allCurves
+              modeInHeader
               bind:selected={prSelected}
               bind:hovered={prHovered}
               onback={backTo !== null ? backToClasses : undefined}
@@ -908,14 +926,27 @@
   .to-list:hover {
     color: var(--text-primary);
   }
-  /* Curves (8) and Details (4) in one row, stretched to one height (DESIGN_DIRECTION §2.2); the per-class table under
-     both. Each column's single panel fills its grid cell. */
+  /* One rule at every class count, decided by structure, not by stretching: the curves (8) at their fixed plot height,
+     the per-class table (their legend) under them in the same column, and Details (4) a sticky properties rail beside
+     both (DESIGN_DIRECTION §2.2, as on Linear's issue view). No panel is stretched to its neighbour, so the plot never
+     grows to a long rail and no frame holds empty space. */
   .detail {
     display: grid;
     grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-    grid-template-areas: 'pr rail' 'cls cls';
+    grid-template-areas: 'pr rail' 'cls rail';
+    align-items: start;
     gap: var(--space-4);
   }
+  @media (min-width: 1024px) {
+    .detail {
+      grid-template-rows: auto 1fr;
+    }
+    .rail {
+      position: sticky;
+      top: calc(var(--size-topbar) + var(--space-4));
+    }
+  }
+
   .main-col {
     grid-area: pr;
   }
@@ -967,8 +998,9 @@
     padding: 0 var(--space-4) var(--space-4);
   }
   /* The matrix takes the width its cells want (up to 48 px each); the rail follows 32 px after it and takes the rest,
-     sticking under the top bar while a tall matrix scrolls past. Where under 300 px would be left beside the matrix
-     (many classes at the laptop tier, phones), the rail wraps under it at full width instead of squeezing the cells. */
+     sticking under the top bar while a tall matrix scrolls past. Decided by the width left, never by class count: the
+     lists sit beside the matrix whenever their 280 px fits (a pair, its counts and its share on one line), and only
+     wrap under it at full width where it does not (many classes at the laptop tier, phones). */
   .cm-layout {
     display: flex;
     flex-wrap: wrap;
@@ -981,7 +1013,8 @@
     max-width: 100%;
   }
   .cm-rail {
-    flex: 1 1 300px;
+    flex: 1 1 280px;
+
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
     min-width: 0;

@@ -359,15 +359,17 @@
 </Page>
 
 <style>
-  /* The form column (720) on the shared content edge, and a sticky rail of section anchors at the content's right
-     edge: on a wide canvas the space between them is a margin the two frame, not a hole beside a stranded rail. */
+  /* Form page (DESIGN_DIRECTION 15): the form column (720) on the shared content edge and the sticky rail of section
+     anchors 24 px after it, the two one block; what a wide canvas has left over stays to their right, never a hole
+     between the form and its rail. */
   .layout {
     display: grid;
     grid-template-columns: minmax(0, 720px) 168px;
-    justify-content: space-between;
-    column-gap: var(--space-8);
+    justify-content: start;
+    column-gap: var(--space-6);
     align-items: start;
   }
+
   .toc {
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-6));

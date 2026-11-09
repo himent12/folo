@@ -263,14 +263,15 @@
   {#if runs.error && !runs.data}
     <ErrorState error={runs.error} retry={() => runs.refresh()} />
   {:else if ids.length === 0}
-    <Panel>
-      <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
-        {#snippet actions()}
-          <!-- One action: pick runs here when there are any, else go and make some. -->
-          {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
-        {/snippet}
-      </EmptyState>
-    </Panel>
+    <!-- Nothing to compare yet: the frameless empty state on the page's content edge, not a card stretched across an
+         empty canvas (DESIGN_DIRECTION 8). -->
+    <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
+      {#snippet actions()}
+        <!-- One action: pick runs here when there are any, else go and make some. -->
+        {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
+      {/snippet}
+    </EmptyState>
+
   {:else}
     <section class="compare" aria-label="Curves">
       {#if narrow}

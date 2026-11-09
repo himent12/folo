@@ -170,17 +170,19 @@
       >
         <thead>
           <tr>
+            <!-- One geometry in every state (DESIGN_DIRECTION 7): each column's width is fixed here, on the header row
+                 that loading, empty, error and loaded share; the run's name takes what is left. -->
             <th class="check"><span class="sr-only">Select for comparison</span></th>
             <th>Run</th>
-            <th>Status</th>
-            <th class="hide-lg">Dataset</th>
-            <th class="hide-lg">Model</th>
-            <th class="hide-lg">Started from</th>
-            <th>Progress</th>
-            <th class="r">Best mAP50-95</th>
-            <th class="hide-lg">mAP trend</th>
-            <th class="r hide-md">Created</th>
-            <th class="act"><span class="sr-only">Actions</span></th>
+            <th style:width="112px">Status</th>
+            <th class="hide-lg" style:width="112px">Dataset</th>
+            <th class="hide-lg" style:width="80px">Model</th>
+            <th class="hide-lg" style:width="128px">Started from</th>
+            <th style:width="136px">Progress</th>
+            <th class="r" style:width="128px">Best mAP50-95</th>
+            <th class="hide-lg" style:width="120px">mAP trend</th>
+            <th class="r hide-md" style:width="96px">Created</th>
+            <th class="act" style:width="48px"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
         <tbody>
@@ -346,20 +348,24 @@
   .scroll {
     overflow-x: auto;
   }
-  /* The checkbox column is a 12 px gutter (the name starts 24 px in, not 44): the box is laid over the gutter and the
-     name cell's leading padding when it shows, so revealing it never moves a thing. */
+  /* The checkbox has a real 32 px column, there whether the boxes show or not, so revealing them never moves a thing:
+     the box 12 px from the panel's edge, the name 14 px after it (its cell's leading padding 8). The whole cell is the
+     box's target. */
   .runs .check {
     position: relative;
-    width: 12px;
+    width: 32px;
     padding: 0;
+  }
+
+  .runs :is(th, td):nth-child(2) {
+    padding-left: var(--space-2);
   }
   .hit {
     position: absolute;
-    inset: 0 auto 0 0;
-    width: 24px;
+    inset: 0;
     display: flex;
     align-items: center;
-    justify-content: center;
+    padding-left: var(--space-3);
     cursor: pointer;
   }
   input[type='checkbox'] {
@@ -391,9 +397,9 @@
     }
     .hit {
       position: static;
-      width: auto;
       min-height: 48px;
     }
+
     input[type='checkbox'] {
       width: 20px;
       height: 20px;

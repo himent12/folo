@@ -14,6 +14,7 @@
     onsort,
     align = 'left',
     disabled = false,
+    width,
     class: klass = '',
   }: {
     label: string;
@@ -22,11 +23,14 @@
     onsort: () => void;
     align?: 'left' | 'right';
     disabled?: boolean;
+    /** The column's fixed width (DESIGN_DIRECTION 7: one geometry in every state); the name column leaves it out. */
+    width?: string;
     class?: string;
   } = $props();
 </script>
 
-<th scope="col" class="sortable {klass}" class:r={align === 'right'} aria-sort={dir ? (dir === 'asc' ? 'ascending' : 'descending') : undefined}>
+<th scope="col" class="sortable {klass}" class:r={align === 'right'} style:width aria-sort
+={dir ? (dir === 'asc' ? 'ascending' : 'descending') : undefined}>
   <button type="button" class="sort" class:on={!!dir} {disabled} onclick={onsort}>
     <span>{label}</span>
     <span class="mark" aria-hidden="true">
