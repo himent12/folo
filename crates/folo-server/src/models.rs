@@ -95,7 +95,7 @@ fn trained_with(train: Option<&String>) -> Option<TrainedWith> {
 }
 
 /// GFLOPs per image at 640 px (docs/MODEL.md §3, 80 classes); the class count changes them by well under 1%.
-fn gflops_640(arch: Arch) -> f64 {
+pub(crate) fn gflops_640(arch: Arch) -> f64 {
     match arch {
         Arch::N => 6.54,
         Arch::S => 21.59,

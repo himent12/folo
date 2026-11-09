@@ -222,6 +222,24 @@ pub fn read_model_file(path: &Path) -> Result<ModelFile> {
     ModelFile::from_bytes(bytes).map_err(nn_error)
 }
 
+/// The throughput table's name for `device` ([`crate::throughput::DeviceId`]): `gpu:<n>` with the adapter's name,
+/// or `cpu` with the CPU's.
+pub fn device_id(device: Device) -> crate::throughput::DeviceId {
+    static CPU_NAME: OnceLock<String> = OnceLock::new();
+    let device_name = match device {
+        Device::Cpu => CPU_NAME.get_or_init(|| crate::system::host_info().cpu_name).clone(),
+        Device::Gpu(_) => {
+            folo_gpu::context_for(device).map_or_else(|| device.to_string(), |c| c.summary().name.clone())
+        }
+    };
+    crate::throughput::DeviceId { device: device.to_string(), device_name }
+}
+
+/// The tensor-core kernels are on for `device`.
+pub fn tensor_cores_on(device: Device) -> bool {
+    folo_gpu::context_for(device).is_some_and(|c| c.tensor_cores())
+}
+
 /// Opens `.folo` weights for inference (EMA when present, fused, eval mode) on `device` at `precision`
 /// ([`effective_precision`]: f16 only where the device computes in it).
 pub fn open_model(path: &Path, device: Device, precision: Precision) -> Result<FoloModel> {
@@ -267,7 +285,16 @@ impl FileKey {
     }
 }
 
-type Cached = (FileKey, Device, Precision, Arc<Mutex<Predictor>>);
+/// A cached predictor and whether it has predicted yet (its first prediction includes warm-up: pipeline
+/// compilation, allocations). The flag lives under the predictor's lock, so exactly one request sees it unset.
+pub struct Loaded {
+    /// The predictor.
+    pub predictor: Predictor,
+    /// It has predicted at least once.
+    pub warm: bool,
+}
+
+type Cached = (FileKey, Device, Precision, Arc<Mutex<Loaded>>);
 
 /// An LRU cache of loaded predictors keyed by weights file, device and precision, so repeated predictions skip
 /// loading and fusing. A predictor serves one request at a time (its thresholds are set per call).
@@ -279,7 +306,7 @@ pub struct Predictors {
 impl Predictors {
     /// The predictor of `path` on `device` at `precision`, loaded on a miss (evicting the least recently used
     /// beyond [`PREDICTOR_CACHE`]).
-    pub fn get(&self, path: &Path, device: Device, precision: Precision) -> Result<Arc<Mutex<Predictor>>> {
+    pub fn get(&self, path: &Path, device: Device, precision: Precision) -> Result<Arc<Mutex<Loaded>>> {
         let key =
             FileKey::of(path).map_err(|e| Error::internal(format!("reading {}: {e}", path.display())))?;
         {
@@ -296,7 +323,8 @@ impl Predictors {
         // Loaded outside the lock: other models keep serving meanwhile (two misses on one file both load it).
         let model = open_model(path, device, precision)?;
         let cfg = PredictConfig { imgsz: model.imgsz(), ..PredictConfig::default() };
-        let p = Arc::new(Mutex::new(Predictor::new(model, cfg).map_err(engine_error)?));
+        let predictor = Predictor::new(model, cfg).map_err(engine_error)?;
+        let p = Arc::new(Mutex::new(Loaded { predictor, warm: false }));
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|(k, d, q, _)| !(k.path == key.path && *d == device && *q == precision));
         entries.push((key, device, precision, p.clone()));

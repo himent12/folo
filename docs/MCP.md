@@ -26,6 +26,7 @@ it:
 | datasets (register, synthetic, stats, issues, images) | real files under `--data-dir` | 3 fixed mock datasets, plus real folders / synthetic ones | the `folo serve`'s |
 | `train` | trains on the FOLO engine, one run at a time (FIFO queue) | simulated, 6 s per epoch | `POST /api/runs` |
 | `train` with `resume_run_id` | resumes from `weights/last.folo` (same id) | `not_implemented` | `POST /api/runs` with `resume_run_id` |
+| `folo://system/throughput`, `folo://estimate/...` | the throughput measured by this data dir's runs and predictions, else docs/BENCHMARKS.md's reference | the mock's table (measured and reference rows) | `GET /api/system/throughput`, `POST /api/runs/estimate` |
 | `run_status`, `list_runs`, `stop_run`, `reorder_run`, `compare_runs` | persisted runs (`runs/<id>/`), also those of earlier sessions | mock runs (API-created ones share one training slot) | `/api/runs/...` |
 | `list_models` | `best` / `last` weights of finished runs, plus `.folo` files under `models/` | mock models | `/api/models` |
 | `val` | folo-vision's evaluator on the requested split, `conf` / `iou` as given | derived from the model's metrics | `POST /api/val` |
@@ -175,11 +176,22 @@ Each resource read returns a JSON snapshot, unless stated otherwise.
   samples; about 110 KB for 1080p frames, against 250 KB at the old 256 px); `?tile=<px>` picks the cell size
   (clamped to 64..512).
 - `folo://predictions/{batch_id}`: per-image boxes of a `predict_batch` call (kept for the server's lifetime).
+- `folo://system/throughput`: the measured-speed table of `GET /api/system/throughput` (docs/API.md, *Throughput
+  and estimates*): training `imgs_per_s` per (device, arch, imgsz, batch, amp) with mosaic / close-mosaic /
+  validation rates, startup and `peak_vram_bytes`, and predict latency per (device, arch, imgsz, precision); every
+  row says `source` (`measured` on this server, or a docs/BENCHMARKS.md `reference`), `measured_on`, `samples` and
+  `updated`.
+- `folo://estimate/{dataset_id}{?arch,epochs,batch,imgsz,device,amp}`: how long a training run would take, before
+  starting it: `POST /api/runs/estimate` for that `TrainConfig` (fields left out take their defaults; any other query
+  parameter, a repeated one or a value of the wrong type is an invalid URI). The `RunEstimate` has `est_epoch_s`,
+  `est_total_s` with `est_total_s_low` / `est_total_s_high`, `est_peak_vram_bytes`, the mosaic and close-mosaic
+  `phases`, and where the numbers come from: `source`, `confidence` and `basis`. A resource rather than a tool: a
+  tool taking a whole `TrainConfig` would add about 7 KB to every session's `tools/list`.
 - `folo://docs/{name}`: repository docs (`ARCHITECTURE`, `API`, `CLI`, `MODEL`, `FORMAT`, `METRICS`, `MCP`, `AGENT_COOKBOOK`) as text/markdown
   (compiled into the binary).
 
-`resources/list` lists datasets, runs (with their metrics and epochs) and docs, 100 per page; images, samples and predictions
-are reached through `resources/templates/list`.
+`resources/list` lists datasets, runs (with their metrics and epochs), the throughput table and docs, 100 per page; images,
+samples, predictions and estimates are reached through `resources/templates/list`.
 
 ## Prompts
 Prompt retrieval (`prompts/get`) **only returns messages**. It never starts jobs or touches files; the agent then

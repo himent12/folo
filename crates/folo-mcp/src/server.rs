@@ -532,6 +532,21 @@ impl ServerHandler for FoloMcp {
                 let text = resources::doc(&name).ok_or_else(|| not_found(&uri))?;
                 ResourceContents::text(text, uri.clone()).with_mime_type("text/markdown")
             }
+            FoloUri::Throughput => {
+                let t = self.inner.blocking(|s| s.throughput()).await.map_err(|e| resource_error(&uri, e))?;
+                json_contents(&serde_json::to_value(t).unwrap_or_default())
+            }
+            FoloUri::Estimate(id, fields) => {
+                let e = self
+                    .inner
+                    .blocking(move |s| {
+                        c.dataset(s, &id)?;
+                        s.estimate_run(resources::estimate_config(&id, &fields)?)
+                    })
+                    .await
+                    .map_err(|e| resource_error(&uri, e))?;
+                json_contents(&serde_json::to_value(e).unwrap_or_default())
+            }
         };
         Ok(ReadResourceResult::new(vec![contents]).into())
     }

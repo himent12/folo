@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 pub mod codes;
 pub mod json;
+mod throughput;
+
+pub use throughput::*;
 
 /// API version string reported in [`Health::api`].
 pub const API_VERSION: &str = "v1";

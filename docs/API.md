@@ -438,6 +438,120 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   answers each with the same JSON as `/api/predict` (for webcam / screen demos). Later milestone; answers
   `501 not_implemented` for now.
 
+## Throughput and estimates
+Speed measured on this server, so clients can show this machine's numbers instead of static ones, and say where each
+number comes from. Servers with these endpoints list `throughput`, `run_estimate` and `benchmark` in `/api/system`'s
+`features`. Every number carries a `source`: `measured` (this server: training runs, `/api/predict` calls, benchmark
+probes) or `reference` (docs/BENCHMARKS.md's FOLO measurements on the dev machine, an RTX 4080 SUPER and an
+i7-14700KF, scaled by compute to other sizes; `note` says which and how).
+
+- `GET /api/system/throughput` → `ThroughputTable`: `training` rows keyed by (`device`, `arch`, `imgsz`, `batch`,
+  `amp`) and `inference` rows keyed by (`device`, `arch`, `imgsz`, `precision`, `tensor_cores`; `batch` is always 1).
+  Every row has a flat `imgs_per_s` (training: the mosaic epochs' median, else the close-mosaic epochs'; inference:
+  `1000 / latency_ms`) and `measured_on`, the adapter or CPU the number was measured on (a reference's is the dev
+  machine's, whatever this server has; `device` is the device of this server the row is for). Measured rows come
+  first, newest first; then a `reference` row for every arch at 640 and 320 px (batch 16), f32 and (GPU) amp / f16,
+  on the server's `device: auto` device and on the CPU, unless a measured row of that very adapter or CPU (`device`
+  and `measured_on`) has the same arch, imgsz, batch and amp / precision. Rows measured on another adapter under the
+  same ordinal (a data dir moved to another machine, a new GPU) stay listed next to the reference; estimates never
+  use them.
+- `POST /api/runs/estimate` body `TrainConfig` (as for `POST /api/runs`, with the same checks and errors:
+  `dataset_not_found`, `model_not_found`, `invalid_config`, `device_not_found`, `422 invalid_body`; nothing is
+  created) → `RunEstimate`: wall time per epoch and in total with a range, from the training row of the device the run
+  would use. The basis is the measured row with the run's arch, imgsz, batch and amp; else the nearest measured row
+  on that device by compute and batch (the same amp preferred), carried over by the reference's ratio between the two
+  settings (`basis.exact: false`; the reference has no batch dependence, so another batch keeps the rate); else the
+  reference itself. The headline fields are `est_epoch_s` (mean seconds per epoch, validation included),
+  `est_total_s` with `est_total_s_low` / `est_total_s_high`, and `est_peak_vram_bytes`.
+  - Each epoch trains `train_images` at the rate of its phase (mosaic epochs, then the last `close_mosaic` epochs,
+    capped at half the run as the trainer does; every epoch when `augment.mosaic` is 0) and validates `val_images`
+    (the val split, else the training split) at the validation rate; the first epoch adds `startup_s`.
+    `est_total_s = startup_s + Σ phases (epochs × (train_images / train_imgs_per_s + val_images / val_imgs_per_s))`
+    and `est_epoch_s = (est_total_s - startup_s) / epochs`.
+  - `confidence`: `high` for an exact measured row with at least 3 samples (range: the row's 10th–90th percentile
+    spread, at least ±10%), `medium` for an exact row with fewer samples (at least -20% / +30%) or one carried from
+    within 4x the compute with the same amp (-25% / +40%), `low` otherwise: a row further away or with the other
+    precision (-40% / +80%), or the reference (-30% / +60% on the reference machine, -60% / +200% elsewhere; `note`
+    then says it was not measured on this device).
+  - `est_peak_vram_bytes` (GPU only, `null` on the CPU): the measured peak of a row with the run's device, arch,
+    imgsz and amp at the nearest batch, scaled to the run's batch by the reference model; else the reference model (16
+    bytes per parameter plus the activations per image, docs/BENCHMARKS.md). `vram_source` says which.
+- `POST /api/system/benchmark` body `BenchmarkRequest` (all optional: `{ "arch": "folo-n", "imgsz": 320, "batch":
+  16, "amp": false, "budget_s": 4 }`) → `BenchmarkReport`. An explicit quick probe on the server's inference device
+  (`--device`): the trainer on a synthetic shapes split for 60% of `budget_s` (the first 30% of that is warm-up and
+  not counted; it never validates), then predictions of a random-init model on one JPEG, decoded each time as an
+  upload, for the rest. It takes the budget plus setup (building the model, compiling GPU pipelines): about 8 s for
+  the defaults on the RTX 4080 SUPER. Both results are added to the table as measured samples (the training row's
+  `probes` counts them); the loader renders synthetic images instead of decoding files, so a probe's training rate
+  is an approximation of a real dataset's. `409 run_active` while a run is queued or running (or another probe
+  runs); runs created during a probe wait for it. `400 invalid_body`: `imgsz` not a multiple of 32 in `64..=1280`,
+  `batch` outside `1..=64`, `budget_s` outside `1..=10`. `amp` without tensor cores is `501 not_supported`, a GPU out
+  of memory `507 gpu_out_of_memory`, as for a run.
+
+What real mode measures, in `<data dir>/throughput.json` (rewritten atomically; prediction samples at most every
+10 s and on shutdown; a malformed file is replaced by a new table). Each series keeps its last 32 values; `samples`
+counts all of them:
+- **Training**: every validated epoch of a run after the first of its session (the first, of a new or a resumed
+  run, compiles pipelines) whose last batch was finite (only then does its final `step` event cover the epoch). The rate is the epoch's last `step` event's `imgs_per_s` (its images over its training
+  time; loader waits included, validation excluded); the rest of `Epoch.duration_s` (validation and checkpoint
+  writes) gives the validation rate; the first epoch's extra time over the second gives `startup_s`;
+  `peak_vram_bytes` is the GPU buffer pool's peak since the run started (inference served meanwhile counts too).
+- **Inference**: every `/api/predict` call's `timing` (`total_ms`, image decode included, and `inference_ms`),
+  except a model's first after it is loaded and calls that overlap a run (one queued or training when the call
+  starts or ends, or the worker taking up or letting go of a run during it).
+- **ETA of running runs**: `Run.eta_s` (and `Step.eta_s`) is the run's own measured rate: the batches left at the
+  run's mean batch time, loader waits included, plus the validations left at their mean.
+
+The mock (`folo serve --mock`) has measured rows on its GPU for folo-n and folo-s at 640 (f32, from its runs), a
+folo-n 320 px amp probe and folo-n 640 predictions; everything else is the reference, so both sources show. Its
+estimates use them the same way; its benchmark answers at once with numbers near the reference (the scripted live
+run does not block it, runs created through the API do).
+
+```jsonc
+// ThroughputTable
+{ "device": "gpu:0", "device_name": "NVIDIA GeForce RTX 4080 SUPER",
+  "training": [TrainThroughput], "inference": [InferThroughput] }
+// TrainThroughput
+{ "device": "gpu:0", "measured_on": "NVIDIA GeForce RTX 4080 SUPER", "arch": "folo-n", "imgsz": 640, "batch": 16,
+  "amp": false,
+  "imgs_per_s": 212.4,           // the headline rate: mosaic's median, else close_mosaic's
+  "mosaic": Rate | null,         // epochs with mosaic
+  "close_mosaic": Rate | null,   // epochs without (the close-mosaic phase, or mosaic 0)
+  "val": Rate | null,            // validation images per second of an epoch's validation (and checkpoint) time
+  "startup_s": 5.4 | null,       // a session's first epoch over a steady one
+  "peak_vram_bytes": 3652000000 | null,  // GPU only; the largest seen
+  "source": "measured|reference", "samples": 99, "probes": 0,
+  "updated": "2026-11-07T21:14:09Z" | null,   // null for a reference
+  "note": null | "docs/BENCHMARKS.md: FOLO trainer, COCO train2017 (50 epochs, batch 16) on an ..." }
+// Rate: the median of the recent samples, their 10th / 90th percentiles (min / max below 10 samples); a
+// reference carries its expected range and 0 samples
+{ "imgs_per_s": 212.4, "low": 205.1, "high": 219.8, "samples": 81 }
+// InferThroughput (batch 1)
+{ "device": "gpu:0", "measured_on": "...", "arch": "folo-n", "imgsz": 640, "batch": 1, "precision": "f32|f16",
+  "tensor_cores": false, "latency_ms": 5.9, "latency_ms_low": 5.5, "latency_ms_high": 6.4,
+  "inference_ms": 3.1 | null, "imgs_per_s": 169.5, "source": "measured|reference", "samples": 214,
+  "updated": "..." | null, "note": null | "..." }
+// RunEstimate
+{ "device": "gpu:0", "device_name": "...", "train_images": 800, "val_images": 200, "batches_per_epoch": 50,
+  "epochs": 100,
+  "phases": [{ "phase": "mosaic", "epochs": 90, "train_imgs_per_s": 212.7, "train_s": 3.76, "val_s": 0.71,
+               "epoch_s": 4.47 },
+             { "phase": "close_mosaic", "epochs": 10, "train_imgs_per_s": 221.2, "train_s": 3.62, "val_s": 0.71,
+               "epoch_s": 4.33 }],
+  "val_imgs_per_s": 281.9, "startup_s": 5.5, "est_epoch_s": 4.5, "est_total_s": 451.2, "est_total_s_low": 406.1,
+  "est_total_s_high": 496.3,
+  "source": "measured|reference", "confidence": "high|medium|low",
+  "basis": { "source": "measured", "arch": "folo-n", "imgsz": 640, "batch": 16, "amp": false,
+             "measured_on": "NVIDIA GeForce RTX 4080 SUPER", "samples": 99, "updated": "..." | null,
+             "exact": true, "note": "measured on this device with these settings: 99 epochs of runs" },
+  "val_source": "measured|reference",
+  "est_peak_vram_bytes": 3652000000 | null, "vram_source": "measured|reference" | null }
+// BenchmarkReport
+{ "device": "gpu:0", "device_name": "...", "train_imgs_per_s": 344.7, "train_batches": 37, "latency_ms": 6.0,
+  "predictions": 247, "elapsed_s": 8.1,
+  "training": TrainThroughput, "inference": InferThroughput }   // the rows after the probe
+```
+
 ## Real mode
 `folo serve` without `--mock` keeps its state in the data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`):
 - `datasets.json`: the registry (`id`, `name`, `path`, `format`, `created`, and a snapshot of `classes` and
