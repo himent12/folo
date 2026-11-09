@@ -16,8 +16,9 @@ use axum::http::StatusCode;
 use folo_api::{
     AmpSupport, Arch, BBox, Capabilities, ClassMetrics, Dataset, DatasetFormat, DatasetIssue, ExportFormat,
     ExportResult, ExportSpec, GpuBackend, GpuInfo, Head, ImageInfo, ImagePage, IssuePage, IssueSeverity,
-    LogLine, Model, ModelEval, ModelMetrics, PrCurve, PredictResponse, RegisterDataset, Run, RunSamples,
-    Sample, ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, TrainConfig, TrainedWith,
+    LogLine, Model, ModelEval, ModelMetrics, ModelPrecision, PrCurve, PredictResponse, RegisterDataset, Run,
+    RunSamples, Sample, ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, TrainConfig,
+    TrainedWith,
 };
 
 use crate::error::{Error, Result};
@@ -775,6 +776,9 @@ impl MockStore {
                     metrics: Some(metrics),
                     head: d.head,
                     trained_with: Some(trained_with),
+                    // A run's checkpoint.
+                    precision: Some(ModelPrecision::F32),
+                    fused: Some(false),
                 };
                 let basis = EvalBasis::new(&run, entry);
                 if mid == "m_53d1" {
@@ -785,8 +789,10 @@ impl MockStore {
                             name: "r6-n-best-f16".into(),
                             bytes: model_bytes(params, true),
                             created: rfc3339(finished + 3600.0),
-                            // An export: `folo.train` is a checkpoint key, so the f16 file has none.
+                            // A `folo-f16` export: fused F16 weights, and no `folo.train` (a checkpoint key).
                             trained_with: None,
+                            precision: Some(ModelPrecision::F16),
+                            fused: Some(true),
                             ..base.clone()
                         },
                     });
@@ -887,6 +893,8 @@ impl MockStore {
                     imgsz: run.config.imgsz,
                     epochs: run.config.epochs,
                 }),
+                precision: Some(ModelPrecision::F32),
+                fused: Some(false),
             });
         }
         out.sort_by(|a, b| b.created.cmp(&a.created).then(a.id.cmp(&b.id)));

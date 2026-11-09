@@ -292,6 +292,10 @@ async fn train_evaluate_predict_and_reload() {
     let last: Model = ok(&app, get(&format!("/api/models/{model_id}-last"))).await;
     assert_eq!(last.metrics.unwrap().map50_95, m.epochs[1].val.map50_95);
     assert_eq!((last.head, last.trained_with), (Head::O2m, Some(trained)));
+    // Checkpoints are unfused f32 (`folo.dtype`, `folo.fused`).
+    for m in [&model, &last] {
+        assert_eq!((m.precision, m.fused), (Some(ModelPrecision::F32), Some(false)), "{}", m.id);
+    }
 
     // The models folder reads the same metadata: the checkpoint copied there keeps `trained_with`; an o2o weights
     // file (no `folo.train`) has none.
@@ -304,6 +308,21 @@ async fn train_evaluate_predict_and_reload() {
     let mut o2o = folo_vision::FoloModel::with_rng(config, &mut folo_core::rng::Rng::seed(3)).unwrap();
     o2o.set_classes(vec!["circle".into(), "square".into()]).unwrap();
     o2o.save(zoo.join("nms-free.folo")).unwrap();
+    // Precision and fusing from the header: an f16 export; files whose `folo.dtype` is missing or unknown, or whose
+    // `folo.fused` is unknown, still list with that field left out.
+    let weights = std::fs::read(zoo.join("nms-free.folo")).unwrap();
+    let mut half = Vec::new();
+    let file = folo_nn::io::ModelFile::from_bytes(weights.clone()).unwrap();
+    file.export_to(&mut half, folo_nn::io::FloatDType::F16).unwrap();
+    std::fs::write(zoo.join("half.folo"), half).unwrap();
+    let edited = [
+        ("bf16", "folo.dtype", Some("BF16")),
+        ("no-dtype", "folo.dtype", None),
+        ("odd-fused", "folo.fused", Some("maybe")),
+    ];
+    for (name, key, value) in edited {
+        std::fs::write(zoo.join(format!("{name}.folo")), with_metadata(&weights, key, value)).unwrap();
+    }
     let listed: ModelList = ok(&app, get("/api/models")).await;
     let by_name = |n: &str| listed.models.iter().find(|m| m.name == n).unwrap_or_else(|| panic!("{n}"));
     let copied = by_name("copied");
@@ -313,8 +332,24 @@ async fn train_evaluate_predict_and_reload() {
     );
     let nms_free = by_name("nms-free");
     assert_eq!((nms_free.head, nms_free.trained_with), (Head::O2o, None));
-    for p in ["copied.folo", "nms-free.folo"] {
-        std::fs::remove_file(zoo.join(p)).unwrap();
+    let f32 = Some(ModelPrecision::F32);
+    for (name, precision, fused) in [
+        ("copied", f32, Some(false)),
+        ("nms-free", f32, Some(false)),
+        ("half", Some(ModelPrecision::F16), Some(true)),
+        ("bf16", None, Some(false)),
+        ("no-dtype", None, Some(false)),
+        ("odd-fused", f32, None),
+    ] {
+        let m = by_name(name);
+        assert_eq!((m.precision, m.fused), (precision, fused), "{name}");
+        // Unknown is left out of the JSON, not sent as `null`.
+        let raw: Value = ok(&app, get(&format!("/api/models/{}", m.id))).await;
+        assert_eq!(raw.get("precision").is_some(), precision.is_some(), "{name}: {raw}");
+        assert_eq!(raw.get("fused").is_some(), fused.is_some(), "{name}: {raw}");
+    }
+    for p in ["copied", "nms-free", "half", "bf16", "no-dtype", "odd-fused"].map(|n| format!("{n}.folo")) {
+        std::fs::remove_file(zoo.join(&p)).unwrap();
     }
     err(&app, get("/api/models/m_none"), StatusCode::NOT_FOUND, "model_not_found").await;
 
@@ -731,4 +766,20 @@ async fn amp_run_without_tensor_cores_fails_with_not_supported() {
     let app = self::app(&store(&t.0.join("home")));
     let again: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
     assert_eq!(again.error_code.as_deref(), Some("not_supported"));
+}
+
+/// `bytes` (a `.folo` file) with metadata `key` set to `value` (removed for `None`); the tensor data is kept.
+fn with_metadata(bytes: &[u8], key: &str, value: Option<&str>) -> Vec<u8> {
+    let n = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let mut header: Value = serde_json::from_slice(&bytes[8..8 + n]).unwrap();
+    let meta = header["__metadata__"].as_object_mut().unwrap();
+    match value {
+        Some(v) => meta.insert(key.into(), v.into()),
+        None => meta.remove(key),
+    };
+    let header = serde_json::to_vec(&header).unwrap();
+    let mut out = (header.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&bytes[8 + n..]);
+    out
 }

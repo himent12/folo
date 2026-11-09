@@ -1,0 +1,148 @@
+/* Reset, base type and focus. Colours, sizes and motion come from tokens.css (design/tokens.json). */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  background: var(--bg-panel);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--type-base-size);
+  line-height: var(--type-base-line);
+  font-weight: var(--weight-regular);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  /* Anchored headings land below the sticky top bar. */
+  scroll-padding-top: calc(var(--size-topbar) + var(--space-6));
+}
+
+body {
+  min-height: 100dvh;
+  background: var(--bg-panel);
+}
+
+img,
+svg {
+  display: block;
+  max-width: 100%;
+}
+
+img {
+  height: auto;
+}
+
+button,
+input {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+}
+
+button {
+  cursor: pointer;
+  background: none;
+  border: 0;
+  padding: 0;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+ul,
+ol {
+  padding: 0;
+}
+
+table {
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+::selection {
+  background: var(--accent-muted);
+  color: var(--text-primary);
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: var(--size-focus-ring) solid var(--focus);
+  outline-offset: var(--size-focus-offset);
+  border-radius: var(--radius-sm);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 var(--space-1);
+  border: var(--size-hairline) solid var(--line-default);
+  border-radius: var(--radius-xs);
+  background: var(--bg-panel);
+  color: var(--text-tertiary);
+  font-family: var(--font-sans);
+  font-size: var(--type-xs-size);
+  line-height: 1;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.skip {
+  position: fixed;
+  top: var(--space-2);
+  left: var(--space-2);
+  z-index: var(--z-toast);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  background: var(--accent-solid);
+  color: var(--accent-on);
+  font-weight: var(--weight-medium);
+  transform: translateY(calc(-100% - var(--space-4)));
+}
+
+.skip:focus-visible {
+  transform: none;
+}
+
+.eyebrow {
+  color: var(--text-tertiary);
+  font-size: var(--type-sm-size);
+  line-height: var(--type-sm-line);
+  font-weight: var(--weight-medium);
+}
+
+.eyebrow-strong {
+  color: var(--text-secondary);
+}

@@ -64,6 +64,13 @@ impl std::ops::Deref for Theme {
     }
 }
 
+/// Where a class colour sits: on a photo, or on a panel of the app's own chrome.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Surface {
+    Photo,
+    Panel,
+}
+
 impl Theme {
     pub fn new(mode: Mode) -> Self {
         let c = match mode {
@@ -75,6 +82,16 @@ impl Theme {
 
     pub fn is_dark(&self) -> bool {
         self.mode == Mode::Dark
+    }
+
+    /// Class `i`'s colour for the surface it sits on: the palette as is on a photo (boxes, chips),
+    /// the stroke shade on a panel (bars, curves, legends), so it keeps 3:1 there. Every class
+    /// mark outside the image renderer goes through here (a test holds the line).
+    pub fn class_on(&self, i: u32, surface: Surface) -> Hsla {
+        match surface {
+            Surface::Photo => self.class(i),
+            Surface::Panel => self.class_stroke(i),
+        }
     }
 
     /// A class colour for thin strokes on a panel: the photo palette as is in dark mode, darkened
@@ -150,6 +167,33 @@ pub fn theme(cx: &App) -> Theme {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn class_colours_go_through_class_on() {
+        // A raw `t.class(` outside the image renderer and the swatch picks a shade by call site,
+        // which is how one class came to show in two shades. Use `class_on` or `class_swatch`.
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut stack = vec![src];
+        let mut bad = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                if !name.ends_with(".rs") || ["viz.rs", "theme.rs", "ui.rs"].contains(&name.as_str()) {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&p).unwrap();
+                if text.contains("t.class(") {
+                    bad.push(name);
+                }
+            }
+        }
+        assert!(bad.is_empty(), "raw t.class( in {bad:?}");
+    }
+
     use super::*;
 
     fn luminance(c: Hsla) -> f32 {

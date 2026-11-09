@@ -140,11 +140,14 @@ impl FoloApp {
                         let id = m.id.clone();
                         let key = format!("model-row-{}", m.id);
                         let ids_k = ids.clone();
-                        // Keyboard focus shows what hover does: the full name and the exact time.
+                        // Keyboard focus shows what hover does: the full name, the exact time, and
+                        // what the e2e tag means.
+                        let e2e = self.model_e2e(m);
                         let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
-                            time::parse(&m.created).map_or(m.name.clone(), |c| {
+                            let base = time::parse(&m.created).map_or(m.name.clone(), |c| {
                                 format!("{} · created {}", m.name, time::local_datetime(c))
-                            })
+                            });
+                            if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                         });
                         let row = cols(div().id(SharedString::from(key.clone())))
                             .when_some(focus_text, |d, s| d.child(crate::controls::focus_tip(&t, s, 36.)))
@@ -166,7 +169,7 @@ impl FoloApp {
                                 }
                             }))
                             .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())))
-                            .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t))))
+                            .child(div().w(px(150.)).flex_none().flex().items_center().gap(px(6.)).child(text(ty::SM, t.text_secondary).tnum().whitespace_nowrap().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(e2e_tag(&t, format!("e2e-m-{}", m.id)))))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
@@ -1464,7 +1467,6 @@ impl FoloApp {
         let rows: Vec<AnyElement> = per
             .into_iter()
             .map(|c| {
-                let color = t.class(c.class);
                 let class = c.class;
                 let key = format!("pc-row-{class}");
                 let hot = focus == Some(class);
@@ -1504,7 +1506,7 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(crate::ui::class_swatch(&t, color, 8.))
+                            .child(crate::ui::class_swatch(&t, c.class, 8.))
                             .child(
                                 text(ty::BASE, t.text_primary)
                                     .w(px(if pinned { 148. } else { 168. }))

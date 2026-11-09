@@ -215,6 +215,13 @@ export interface Model {
   head?: 'o2m' | 'o2o';
   /** Training settings from the file's `folo.train`; `null` for exports and imported weights (missing: older server). */
   trained_with?: TrainedWith | null;
+  /**
+   * Stored weight dtype, from the file's `folo.dtype`; missing = unknown (older server, a file without the key, or
+   * a dtype the server has no name for). Treat any other string as unknown too.
+   */
+  precision?: 'f32' | 'f16';
+  /** Conv+BN fused (`folo.fused`: an inference-only export); missing = unknown. */
+  fused?: boolean;
 }
 
 /** `Model.trained_with`. */

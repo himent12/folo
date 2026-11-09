@@ -564,7 +564,7 @@ impl FoloApp {
                     &format!("ds-class-{i}"),
                     name.clone(),
                     on,
-                    Some(t.class(i as u32)),
+                    Some(i as u32),
                     counts.get(i).copied(),
                     window,
                     cx,
@@ -894,7 +894,7 @@ impl FoloApp {
                             .flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(crate::ui::class_swatch(&t, t.class(i as u32), 8.))
+                            .child(crate::ui::class_swatch(&t, i as u32, 8.))
                             .child(text(ty::SM, t.text_secondary).truncate().child(name.clone())),
                     )
                     .child(
@@ -903,7 +903,7 @@ impl FoloApp {
                                 .h_full()
                                 .w(gpui::relative(c as f32 / max))
                                 .rounded(px(3.))
-                                .bg(crate::theme::alpha(t.class(i as u32), 0.85)),
+                                .bg(t.class_on(i as u32, crate::theme::Surface::Panel)),
                         ),
                     )
                     .child(text(ty::SM, t.text_primary).tnum().w(px(56.)).text_right().child(int(c)))

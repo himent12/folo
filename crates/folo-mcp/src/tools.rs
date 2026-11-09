@@ -925,6 +925,8 @@ impl Inner {
                 metrics: m.metrics,
                 head: m.head,
                 trained_with: m.trained_with,
+                precision: m.precision,
+                fused: m.fused,
             })
             .collect();
         let page = page_of(items, a.cursor.as_deref(), a.limit)?;

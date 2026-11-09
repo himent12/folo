@@ -149,20 +149,57 @@ pub struct Container {
 impl Container {
     /// Parse and validate `bytes` (the whole file) under docs/FORMAT.md's reader acceptance rules.
     pub fn parse(bytes: &[u8]) -> Result<Self> {
-        let bad = |m: String| Error::Format(m);
-        if bytes.len() < 8 {
-            return Err(bad(format!("{} bytes is too short for the 8-byte header length", bytes.len())));
+        Self::parse_header(bytes, bytes.len() as u64)
+    }
+
+    /// Read and validate only the header of the file at `path` (its first `8 + N` bytes), under the same rules
+    /// as [`Container::parse`]: the tensors must cover the rest of the file exactly, but the tensor data itself is
+    /// never read. For listing a file's metadata without loading its payload; [`Container::data`] needs the whole
+    /// file.
+    pub fn read_header(path: &Path) -> Result<Self> {
+        use std::io::Read;
+        let f = std::fs::File::open(path).map_err(|e| Error::io(path, e))?;
+        let file_len = f.metadata().map_err(|e| Error::io(path, e))?.len();
+        let mut prefix = Vec::with_capacity(8);
+        let mut f = f.take(8);
+        f.read_to_end(&mut prefix).map_err(|e| Error::io(path, e))?;
+        if let Ok(len) = <[u8; 8]>::try_from(prefix.as_slice()) {
+            // An N over the limit or past the end of the file is refused by `parse_header` without reading or
+            // allocating for it.
+            let n = u64::from_le_bytes(len);
+            if n <= MAX_HEADER && n <= file_len.saturating_sub(8) {
+                f.set_limit(n);
+                prefix.reserve(n as usize);
+                f.read_to_end(&mut prefix).map_err(|e| Error::io(path, e))?;
+            }
         }
-        let n = u64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
+        Self::parse_header(&prefix, file_len)
+    }
+
+    /// [`Container::parse`] of a `file_len`-byte file of which `prefix` holds the start: at least the 8-byte
+    /// length and the header (the data may be missing).
+    fn parse_header(prefix: &[u8], file_len: u64) -> Result<Self> {
+        let bad = |m: String| Error::Format(m);
+        if file_len < 8 || prefix.len() < 8 {
+            return Err(bad(format!("{file_len} bytes is too short for the 8-byte header length")));
+        }
+        let n = u64::from_le_bytes(prefix[..8].try_into().expect("8 bytes"));
         if n > MAX_HEADER {
             return Err(bad(format!("header length {n} exceeds the {MAX_HEADER}-byte limit")));
         }
+        if 8 + n > file_len {
+            return Err(bad(format!("header length {n} runs past the end of the {file_len}-byte file")));
+        }
         let n = n as usize;
         let data_start = 8 + n;
-        if data_start > bytes.len() {
-            return Err(bad(format!("header length {n} runs past the end of the {}-byte file", bytes.len())));
+        if data_start > prefix.len() {
+            // The file was shorter when it was read than when its length was taken.
+            return Err(bad(format!(
+                "header length {n} runs past the end of the {}-byte file",
+                prefix.len()
+            )));
         }
-        let header = &bytes[8..data_start];
+        let header = &prefix[8..data_start];
         if header.first() != Some(&b'{') {
             return Err(bad("the header must start with `{` (no leading whitespace or BOM)".into()));
         }
@@ -173,7 +210,7 @@ impl Container {
         let raw: RawHeader =
             serde_json::from_slice(&header[..end]).map_err(|e| bad(format!("header JSON: {e}")))?;
 
-        let data_len = bytes.len() - data_start;
+        let data_len = file_len - data_start as u64;
         let mut tensors = Vec::with_capacity(raw.entries.len());
         for (name, r) in raw.entries {
             let dtype = FileDType::parse(&r.dtype)
@@ -217,7 +254,7 @@ impl Container {
             }
             cursor = t.offsets.1;
         }
-        if cursor != data_len {
+        if cursor as u64 != data_len {
             return Err(bad(format!("the tensors cover {cursor} bytes but the data section has {data_len}")));
         }
         Ok(Container { metadata: raw.metadata, tensors, data_start })
@@ -499,5 +536,36 @@ mod tests {
         let c = Container::parse(&bf).unwrap();
         let e = decode(&c.tensors[0], c.data(&bf, &c.tensors[0])).unwrap_err().to_string();
         assert!(e.contains("BF16") && e.contains("not support"), "{e}");
+    }
+
+    #[test]
+    fn read_header_applies_the_same_rules_from_disk() {
+        let dir = std::env::temp_dir().join(format!("folo-nn-header-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("f.safetensors");
+        let read = |bytes: &[u8]| {
+            std::fs::write(&path, bytes).unwrap();
+            Container::read_header(&path)
+        };
+        let ok = file(
+            r#"{"__metadata__":{"folo.dtype":"F16"},"b":{"dtype":"F16","shape":[2],"data_offsets":[4,8]},"a":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}  "#,
+            &[0; 8],
+        );
+        let (whole, header) = (Container::parse(&ok).unwrap(), read(&ok).unwrap());
+        assert_eq!((header.metadata, header.tensors), (whole.metadata, whole.tensors));
+        // The tensors must still cover the data on disk: a byte too many or too few is refused.
+        let mut long = ok.clone();
+        long.push(0);
+        for bad in [&long[..], &ok[..ok.len() - 1]] {
+            assert!(read(bad).unwrap_err().to_string().contains("data section"));
+        }
+        // Too short for the length, a length past the end of the file, an oversized length.
+        assert!(read(&[1, 0, 0]).is_err());
+        assert!(read(&file("{}", &[])[..9]).unwrap_err().to_string().contains("runs past the end"));
+        let mut huge = (MAX_HEADER + 1).to_le_bytes().to_vec();
+        huge.push(b'{');
+        assert!(read(&huge).unwrap_err().to_string().contains("limit"));
+        assert!(Container::read_header(&dir.join("missing")).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

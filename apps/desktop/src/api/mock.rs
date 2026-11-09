@@ -350,6 +350,8 @@ impl MockBackend {
             metrics: Some(ModelMetrics { map50: m[0], map50_95: m[1], precision: m[2], recall: m[3] }),
             head: folo_api::Head::O2m,
             trained_with: None,
+            precision: Some(folo_api::ModelPrecision::F32),
+            fused: Some(false),
         };
         let mut models = vec![
             model(
@@ -435,6 +437,11 @@ impl MockBackend {
         if let Some(m) = models.iter_mut().find(|m| m.id == "m_44c0") {
             m.head = folo_api::Head::O2o;
             m.trained_with = Some(folo_api::TrainedWith { amp: true, imgsz: 640, epochs: 120 });
+        }
+        // shapes-n-f16 is the fused f16 export of shapes-n-best.
+        if let Some(m) = models.iter_mut().find(|m| m.id == "m_31ab") {
+            m.precision = Some(folo_api::ModelPrecision::F16);
+            m.fused = Some(true);
         }
 
         let cfg = |name: &str, ds: &str, arch: &str, epochs, batch, imgsz, device: &str, lr0| TrainConfig {

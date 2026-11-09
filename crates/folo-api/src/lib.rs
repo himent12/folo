@@ -584,6 +584,53 @@ pub struct Model {
     /// without it (exports, imported weights). Additive: missing reads as `null`.
     #[serde(default)]
     pub trained_with: Option<TrainedWith>,
+    /// Stored weight dtype, from the file's `folo.dtype` (docs/FORMAT.md): `f16` for half-precision exports,
+    /// `f32` otherwise. Left out when unknown: older servers, files without `folo.dtype`, and dtypes this API has no
+    /// name for (a client reads any value it does not know as unknown too).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient_precision")]
+    pub precision: Option<ModelPrecision>,
+    /// Whether Conv+BN are fused (`folo.fused`): an inference-only tensor set, as `folo export` writes; run
+    /// checkpoints are unfused. Left out when unknown (older servers, a `folo.fused` value other than
+    /// `"true"` / `"false"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fused: Option<bool>,
+}
+
+/// [`Model::precision`]: the floating dtype a model's weights are stored in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ModelPrecision {
+    /// 32-bit floats (training checkpoints, `folo export` without half precision).
+    F32,
+    /// 16-bit floats (`folo-f16` exports).
+    F16,
+}
+
+impl ModelPrecision {
+    /// `"f32"` or `"f16"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ModelPrecision::F32 => "f32",
+            ModelPrecision::F16 => "f16",
+        }
+    }
+
+    /// The API spelling (`"f32"`, `"f16"`); anything else is `None`.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "f32" => Some(ModelPrecision::F32),
+            "f16" => Some(ModelPrecision::F16),
+            _ => None,
+        }
+    }
+}
+
+/// Deserializes [`Model::precision`] leniently: `null` and values this version does not know (a newer server's)
+/// read as `None` instead of failing the whole object.
+fn lenient_precision<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<ModelPrecision>, D::Error> {
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.as_ref().and_then(serde_json::Value::as_str).and_then(ModelPrecision::parse))
 }
 
 /// [`Model::trained_with`]: the few training settings a front end shows next to a model.
@@ -1429,6 +1476,37 @@ mod tests {
         assert_eq!(v["head"], "o2o");
         assert_eq!(v["trained_with"], serde_json::json!({ "amp": true, "imgsz": 512, "epochs": 80 }));
         assert_eq!(serde_json::from_value::<Model>(v).unwrap(), m);
+    }
+
+    #[test]
+    fn model_precision_and_fused_are_additive() {
+        // A server older than `precision` and `fused`.
+        let old = r#"{"id":"m_1","name":"a","arch":"folo-n","imgsz":640,"classes":["x"],"params":1,"flops_g":1.0,
+            "bytes":1,"created":"2026-01-01T00:00:00Z","run_id":null,"metrics":null,"head":"o2m","trained_with":null}"#;
+        let m: Model = serde_json::from_str(old).unwrap();
+        assert_eq!((m.precision, m.fused), (None, None));
+        // Unknown stays absent on the wire (not `null`).
+        let v = serde_json::to_value(&m).unwrap();
+        let o = v.as_object().unwrap();
+        assert!(!o.contains_key("precision") && !o.contains_key("fused"), "{v}");
+        // Both round-trip.
+        for (p, s) in [(ModelPrecision::F32, "f32"), (ModelPrecision::F16, "f16")] {
+            assert_eq!((p.as_str(), ModelPrecision::parse(s)), (s, Some(p)));
+            let m = Model { precision: Some(p), fused: Some(p == ModelPrecision::F16), ..m.clone() };
+            let v = serde_json::to_value(&m).unwrap();
+            assert_eq!(
+                (&v["precision"], &v["fused"]),
+                (&serde_json::json!(s), &serde_json::json!(p == ModelPrecision::F16))
+            );
+            assert_eq!(serde_json::from_value::<Model>(v).unwrap(), m);
+        }
+        // A dtype this version has no name for (a newer server's), `null` or a non-string reads as unknown,
+        // never as an error.
+        for p in [r#""bf16""#, r#""F16""#, "null", "16"] {
+            let json =
+                old.replace(r#""trained_with":null"#, &format!(r#""trained_with":null,"precision":{p}"#));
+            assert_eq!(serde_json::from_str::<Model>(&json).unwrap().precision, None, "{p}");
+        }
     }
 
     #[test]

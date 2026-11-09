@@ -113,7 +113,8 @@ impl FoloApp {
         let cols = |d: gpui::Div| d.flex().items_center().gap(px(16.)).px(px(16.));
         // Single-line rows; secondary facts get their own columns as the window allows, age before
         // setup (so the default 1280 window tells an hour-old run from a week-old one). Budget
-        // (content width, Run keeps its 180 px; 1000 px at 1280 with Progress at 140): Dataset +136
+        // (content width, Run keeps its 148 px and Arch its 96 for an e2e tag; 1000 px at 1280 with
+        // Progress at 140): Dataset +136
         // from 1240, Created +96 from 1280, Size · batch +120 from 1440.
         let vw = window.viewport_size().width;
         let show_ds = vw >= px(1240.);
@@ -123,8 +124,8 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            .child(th(&t, "Run").flex_1().min_w(px(180.)))
-            .child(th(&t, "Arch").w(px(64.)).flex_none())
+            .child(th(&t, "Run").flex_1().min_w(px(148.)))
+            .child(th(&t, "Arch").w(px(96.)).flex_none())
             .when(show_ds, |d| d.child(th(&t, "Dataset").w(px(120.)).flex_none()))
             .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
@@ -210,10 +211,12 @@ impl FoloApp {
                 let key = format!("run-row-{}", r.id);
                 let ids_up = ids.clone();
                 // Keyboard focus shows what hover does: the full name and the exact time.
+                let e2e = r.config.head == crate::api::Head::O2o;
                 let focus_text = self.ring(&self.fh(key.clone(), cx), window).then(|| {
-                    created_at.map_or(r.name.clone(), |c| {
+                    let base = created_at.map_or(r.name.clone(), |c| {
                         format!("{} · created {}", r.name, time::local_datetime(c))
-                    })
+                    });
+                    if e2e { base + " · end-to-end head: predicts without NMS" } else { base }
                 });
                 let row = div()
                     .id(SharedString::from(key.clone()))
@@ -244,20 +247,30 @@ impl FoloApp {
                         div()
                             .id(SharedString::from(format!("rn-{}", r.id)))
                             .flex_1()
-                            .min_w(px(180.))
-                            .when(crate::ui::may_overflow(&r.name, ty::SM.size, 180.), |d| {
+                            .min_w(px(148.))
+                            .when(crate::ui::may_overflow(&r.name, ty::SM.size, 148.), |d| {
                                 d.tooltip(crate::controls::tip(r.name.clone(), None))
                             })
                             .child(
                                 text(ty::SM, t.text_primary)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .w(px(180.))
+                                    .w(px(148.))
                                     .truncate()
                                     .child(r.name.clone()),
                             ),
                     )
+                    // The architecture, and the same e2e tag as the model tables for an end-to-end run.
                     .child(
-                        text(ty::SM, t.text_secondary).w(px(64.)).flex_none().child(r.config.arch.as_str()),
+                        div()
+                            .w(px(96.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(text(ty::SM, t.text_secondary).child(r.config.arch.as_str()))
+                            .when(r.config.head == crate::api::Head::O2o, |d| {
+                                d.child(e2e_tag(&t, format!("e2e-r-{}", r.id)))
+                            }),
                     )
                     .when(show_ds, |d| {
                         d.child(
@@ -1277,7 +1290,7 @@ impl FoloApp {
                                 .flex()
                                 .items_center()
                                 .gap(px(6.))
-                                .child(crate::ui::class_swatch(&t, t.class(i as u32), 8.))
+                                .child(crate::ui::class_swatch(&t, i as u32, 8.))
                                 .child(text(ty::XS, t.text_secondary).child(name))
                         }),
                 ),

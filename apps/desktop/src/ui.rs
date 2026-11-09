@@ -204,8 +204,11 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> i
 
 /// Tinted label chip, 20 px tall.
 /// The compact end-to-end tag in tables (the title rows carry the full badge and its help).
-pub fn e2e_tag(t: &Theme) -> Div {
+pub fn e2e_tag(t: &Theme, id: impl Into<SharedString>) -> gpui::Stateful<Div> {
+    use gpui::{InteractiveElement, StatefulInteractiveElement};
     div()
+        .id(id.into())
+        .tooltip(crate::controls::tip(crate::app::FoloApp::E2E_HELP, None))
         .flex_none()
         .px(px(4.))
         .rounded(px(crate::theme::radius::XS))
@@ -502,10 +505,13 @@ pub fn swatch(color: Hsla, size: f32) -> Div {
     div().size(px(size)).flex_none().rounded(px(2.)).bg(color)
 }
 
-/// A class swatch: the exact palette hue with a 1 px inset `chart.swatch_edge`, so pale classes
-/// hold on light surfaces (design/README).
-pub fn class_swatch(t: &Theme, color: Hsla, size: f32) -> Div {
-    swatch(color, size).border_1().border_color(t.chart_swatch_edge)
+/// A class swatch: the hue its boxes have on the image, so the key matches the photo. Its 1 px
+/// edge is `chart.swatch_edge` in dark; in light, the class's own panel shade (3:1 on white), so
+/// the swatch also matches that class's bars and curves beside it.
+pub fn class_swatch(t: &Theme, class: u32, size: f32) -> Div {
+    use crate::theme::Surface;
+    let edge = if t.is_dark() { t.chart_swatch_edge } else { t.class_on(class, Surface::Panel) };
+    swatch(t.class_on(class, Surface::Photo), size).border_1().border_color(edge)
 }
 
 /// A row of key/value pairs for detail panes.

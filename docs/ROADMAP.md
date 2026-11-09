@@ -40,4 +40,5 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 
 ## M5 — polish
 - [x] README showcase, QUICKSTART, screenshots, llms.txt (#71); R6 example (examples/r6)
-- [ ] docs site
+- [x] docs site: `site/`, generated from docs/, README.md and the examples (search, link checking, llms.txt); build
+  and serve it locally with `cd site && npm ci && npm run dev` (site/README.md)

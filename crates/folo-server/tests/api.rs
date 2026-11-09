@@ -257,6 +257,13 @@ async fn models() {
             (run.config.head, run.config.amp, run.config.imgsz, run.epochs)
         );
     }
+    // Stored dtype and fusing: run checkpoints are unfused f32, the f16 export is fused f16; every model has both.
+    assert_eq!((by_id("m_53d2").precision, by_id("m_53d2").fused), (Some(ModelPrecision::F16), Some(true)));
+    for m in list.models.iter().filter(|m| m.id != "m_53d2") {
+        assert_eq!((m.precision, m.fused), (Some(ModelPrecision::F32), Some(false)), "{}", m.id);
+    }
+    let raw: serde_json::Value = ok(&app, get("/api/models/m_53d2")).await;
+    assert_eq!((&raw["precision"], &raw["fused"]), (&json!("f16"), &json!(true)));
 }
 
 #[tokio::test]

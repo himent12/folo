@@ -502,6 +502,8 @@ impl FoloApp {
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
         let e2e = model.as_ref().is_some_and(|m| self.model_e2e(m));
+        // The built-in demo's numbers are simulated: its timing says so.
+        let simulated = self.play_target.is_none() && !self.store.api.local_inference();
         let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
         let select = self.select(
             "play-model",
@@ -524,7 +526,8 @@ impl FoloApp {
                         Some(SharedString::from(format!(
                             "{}{}{}",
                             m.arch.as_str(),
-                            if self.model_e2e(m) { " · end-to-end" } else { "" },
+                            // Both heads named: each says how its boxes are made.
+                            if self.model_e2e(m) { " · end-to-end" } else { " · NMS" },
                             m.metrics.as_ref().map_or(String::new(), |x| format!(" · {:.3}", x.map50_95)),
                         ))),
                     )
@@ -553,7 +556,7 @@ impl FoloApp {
         let tight = window.viewport_size().height < px(700.);
         // Sliders on one line ("label · slider · value") in short windows, and whenever both show,
         // so the latency breakdown fits at 1280 x 800.
-        let inline = tight || !e2e;
+        let inline = true;
         let field = |label: &str, value: String, control: AnyElement, help: AnyElement| {
             let name = div()
                 .flex()
@@ -615,6 +618,15 @@ impl FoloApp {
                             d.child(select)
                         }
                     })
+                    // What's running, without opening the menu: architecture, input size and head.
+                    .when_some(model.as_ref(), |d, m| {
+                        d.child(text(ty::XS, t.text_tertiary).child(format!(
+                            "{} · {} px · {}",
+                            m.arch.as_str(),
+                            m.imgsz,
+                            if e2e { "end-to-end, no NMS" } else { "boxes filtered by NMS" }
+                        )))
+                    })
                     .when(no_models, |d| {
                         d.child(
                             text(ty::XS, t.text_tertiary)
@@ -671,7 +683,6 @@ impl FoloApp {
                     .enumerate()
                     .map(|(i, b)| {
                         let hot = active == Some(i);
-                        let color = t.class(b.class);
                         let key = format!("det-{i}");
                         // A cut class name shows in full on hover and on keyboard focus.
                         let long = may_overflow(&b.name, ty::SM.size, 68.);
@@ -698,7 +709,7 @@ impl FoloApp {
                                     cx.notify();
                                 }
                             }))
-                            .child(crate::ui::class_swatch(&t, color, 8.))
+                            .child(crate::ui::class_swatch(&t, b.class, 8.))
                             .child(text(ty::SM, t.text_primary).w(px(68.)).truncate().child(b.name.clone()))
                             // Size tells apart two boxes of the same class.
                             .child(
@@ -716,7 +727,7 @@ impl FoloApp {
                                         .h_full()
                                         .w(relative(b.score))
                                         .rounded_full()
-                                        .bg(t.class_stroke(b.class)),
+                                        .bg(t.class_on(b.class, crate::theme::Surface::Panel)),
                                 ),
                             )
                             .child(
@@ -774,18 +785,24 @@ impl FoloApp {
                                     .flex()
                                     .items_baseline()
                                     .gap(px(6.))
+                                    // Where the number comes from: the built-in demo simulates it; a
+                                    // server or this app times one image (not sustained throughput).
                                     .child(
                                         text(ty::SM, t.text_secondary)
                                             .font_weight(FontWeight::MEDIUM)
                                             .flex_none()
-                                            .child("Latency"),
+                                            .child(if simulated { "Simulated latency" } else { "Latency" }),
                                     )
                                     .child(text(ty::XS, t.text_tertiary).tnum().min_w_0().truncate().child(
-                                        format!(
-                                            "{} · {:.0} fps",
-                                            device_name(&p.device, self.store.system.ready()),
-                                            1000. / total
-                                        ),
+                                        // The demo has no device of its own to name.
+                                        if simulated {
+                                            "one image".to_string()
+                                        } else {
+                                            format!(
+                                                "{} · one image",
+                                                device_name(&p.device, self.store.system.ready()),
+                                            )
+                                        },
                                     )),
                             )
                             .child(metric(&t, format!("{:.1}", p.timing.total_ms), "ms", ty::LG, ty::XS)),
@@ -852,10 +869,19 @@ impl FoloApp {
                     .child(panel_header(&t, "Detections").h(px(32.)).child(
                         text(ty::XS, t.text_tertiary).tnum().child(if self.play_pred_pending {
                             "Updating…".to_string()
-                        } else if hidden > 0 {
-                            format!("{} shown · {hidden} below threshold", vis.len())
                         } else {
-                            vis.len().to_string()
+                            let n = if hidden > 0 {
+                                format!("{} shown · {hidden} below threshold", vis.len())
+                            } else {
+                                vis.len().to_string()
+                            };
+                            // Short windows: the latency breakdown may scroll away below, so its total
+                            // rides here too (said to be simulated in the demo, as the section is).
+                            match (tight, simulated) {
+                                (true, true) => format!("{n} · {:.1} ms simulated", p.timing.total_ms),
+                                (true, false) => format!("{n} · {:.1} ms", p.timing.total_ms),
+                                _ => n,
+                            }
                         }),
                     ))
                     .child(
