@@ -77,6 +77,13 @@ training and evaluation pipeline, a server, a CLI and a web studio.
 - `Tensor::to_device_(device)` moves a storage to another device **in place**: the device lives on the shared storage
   cell, so every clone and view follows and the tensor keeps its id (gradients and optimizer state stay keyed). This
   is how whole models move (`Module::to_device`).
+- Mixed precision (`folo_core::autocast`, like `torch.autocast`): while an `autocast()` guard is alive on the thread,
+  `conv2d_with` and `matmul` of tensors on a backend that computes in f16 run in f16 (`F32` operands cast by
+  recorded casts; a conv uses f16 copies of its weight and bias but is recorded against the f32 ones, and its
+  backward writes the weight gradient straight to f32 with `Backend::conv2d_backward_weight_as`), and softmax runs
+  in f32. Everything downstream runs in the dtype it receives; the fused train-mode BatchNorm takes f16 data with
+  f32 parameters and statistics. `Tensor::unscale_check_` (a `Backend::unscale_check` hook) is the loss scaler's
+  fused unscale and overflow flag.
 - Seeded RNG (`folo_core::rng::Rng`, xoshiro256++) for reproducible init, augmentation and tests. `Rng::ALGO`
   (`"xoshiro256pp"`), `state()` and `from_state()` save and resume the exact stream (the `folo.rng` checkpoint entry).
 
@@ -186,7 +193,12 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   `metrics.jsonl`; the CLI's progress view, `--json` and the server consume them. The device is a parameter:
   on a GPU (`place_model` moves the model; optimizer, EMA and gradient buffers follow) a feeder thread stages each
   `u8` batch for upload while the previous step runs, accumulation and clipping stay on the device, and the step
-  waits only for the loss items and one BatchNorm finiteness check. `folo_vision::val::validate`
+  waits only for the loss items and one BatchNorm finiteness check. Mixed precision (`amp`, MODEL.md §8.8; GPU
+  tensor cores only, else `not_supported`): the forward under `autocast` (f16 convs and products on tensor cores),
+  the loss in f32 on f32 copies of the head, backward of the loss times folo-nn's `GradScaler` scale, and at the end
+  of a window the unscale, clip and overflow check with one flag readback (an overflowing window skips its step and
+  backs the scale off); master weights, optimizer state, EMA and BatchNorm statistics stay f32, and the scaler is
+  the checkpoint's `folo.amp`. `folo_vision::val::validate`
   is the same validation for `folo val`.
 - **Predictor** (`folo_vision::predict::Predictor`): loads `.folo` (EMA when present), fuses BN, letterboxes (rect for
   one image, square for a batch), forward, decode, NMS, rescale to the original image, with a preprocess /

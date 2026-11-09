@@ -79,9 +79,9 @@ struct RunState {
     tail: Vec<Step>,
     /// The worker took the run off the queue (a stop now goes through the trainer).
     claimed: bool,
-    /// The trainer's final status, published once the worker has let go of the run (so a client that sees it may
-    /// resume or delete the run right away).
-    outcome: Option<(RunStatus, Option<String>)>,
+    /// The trainer's final status, error message and error code, published once the worker has let go of the run
+    /// (so a client that sees it may resume or delete the run right away).
+    outcome: Option<(RunStatus, Option<String>, Option<String>)>,
     /// Removed from the registry: every later request treats the run as unknown.
     deleted: bool,
 }
@@ -179,9 +179,21 @@ impl RunEntry {
 
     /// Moves to a final status outside the trainer (stopped while queued, failed to start, server restart).
     fn finish(&self, st: &mut RunState, status: RunStatus, error: Option<String>) {
+        self.finish_with_code(st, status, error, None);
+    }
+
+    /// [`RunEntry::finish`] with the failure's stable error code (`Run.error_code`).
+    fn finish_with_code(
+        &self,
+        st: &mut RunState,
+        status: RunStatus,
+        error: Option<String>,
+        code: Option<String>,
+    ) {
         let r = &mut st.file.run;
         r.status = status;
         r.error = error;
+        r.error_code = code;
         r.eta_s = None;
         r.finished = Some(now());
         r.epoch = st.file.epochs_done;
@@ -207,7 +219,7 @@ impl RunEntry {
                     r.status = RunStatus::Running;
                     self.persist(&st);
                 } else {
-                    st.outcome = Some((s.status, s.error.clone()));
+                    st.outcome = Some((s.status, s.error.clone(), s.error_code.clone()));
                     return;
                 }
             }
@@ -249,7 +261,9 @@ impl RunEntry {
 
 /// The `status` event of a run's current state, with its length (`steps_per_epoch` is 0 until the trainer is built).
 fn status_event(r: &Run) -> StatusEvent {
-    StatusEvent::new(r.status, r.error.clone()).with_length(r.epochs, r.steps_per_epoch)
+    StatusEvent::new(r.status, r.error.clone())
+        .with_length(r.epochs, r.steps_per_epoch)
+        .with_error_code(r.error_code.clone())
 }
 
 /// The model id of a run's `best.folo` (or of `last.folo` when there is no best yet), for a run that ended
@@ -402,6 +416,7 @@ impl Runs {
             device,
             model_id: None,
             error: None,
+            error_code: None,
         };
         let file =
             RunFile { run: run.clone(), dataset, weights, val_offset, epochs_done: 0, last_metrics: None };
@@ -489,21 +504,22 @@ impl Runs {
             }
             let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&entry)));
             let mut st = entry.state.lock().unwrap();
-            let (status, error) = match (ran, st.outcome.take()) {
+            let internal = || Some("internal".to_string());
+            let (status, error, code) = match (ran, st.outcome.take()) {
                 (Ok(()), Some(o)) => o,
                 (Ok(()), None) => {
-                    (RunStatus::Failed, Some("the trainer ended without a final status".into()))
+                    (RunStatus::Failed, Some("the trainer ended without a final status".into()), internal())
                 }
                 (Err(_), _) => {
                     let msg = "the trainer panicked (a bug)".to_string();
                     drop(st);
                     entry.log(LogLevel::Error, msg.clone());
                     st = entry.state.lock().unwrap();
-                    (RunStatus::Failed, Some(msg))
+                    (RunStatus::Failed, Some(msg), internal())
                 }
             };
             st.claimed = false;
-            entry.finish(&mut st, status, error);
+            entry.finish_with_code(&mut st, status, error, code);
             drop(st);
             *self.active.lock().unwrap() = None;
             self.idle.notify_all();
@@ -620,6 +636,7 @@ impl Runs {
         r.status = RunStatus::Queued;
         r.finished = None;
         r.error = None;
+        r.error_code = None;
         r.eta_s = None;
         st.tail.clear();
         e.stop.store(false, Ordering::Relaxed);
@@ -782,9 +799,9 @@ fn execute(e: &Arc<RunEntry>) {
     let trainer = build(e, &config, &dataset, weights);
     let mut trainer = match trainer {
         Ok(t) => t,
-        Err(msg) => {
+        Err((code, msg)) => {
             e.log(LogLevel::Error, msg.clone());
-            e.state.lock().unwrap().outcome = Some((RunStatus::Failed, Some(msg)));
+            e.state.lock().unwrap().outcome = Some((RunStatus::Failed, Some(msg), Some(code)));
             return;
         }
     };
@@ -806,13 +823,14 @@ fn build(
     config: &TrainConfig,
     dataset: &DatasetRef,
     weights: Option<PathBuf>,
-) -> std::result::Result<Trainer, String> {
-    let device = engine::resolve(&config.device).map_err(|err| err.body.message)?;
+) -> std::result::Result<Trainer, (String, String)> {
+    let device =
+        engine::resolve(&config.device).map_err(|err| (err.body.code.to_string(), err.body.message))?;
     let opts = folo_data::OpenOptions { format: data_format(dataset.format), verify_images: true };
     let ds = folo_data::open_with(Path::new(&dataset.path), &opts)
-        .map_err(|err| format!("opening the dataset {}: {err}", dataset.path))?;
+        .map_err(|err| ("data_error".to_string(), format!("opening the dataset {}: {err}", dataset.path)))?;
     if ds.train.is_empty() {
-        return Err("the dataset has no training images".into());
+        return Err(("invalid_dataset".into(), "the dataset has no training images".into()));
     }
     let data = TrainData {
         train: Arc::new(ds.split(Split::Train).clone()),
@@ -837,7 +855,7 @@ fn build(
         cfg.dataset = dataset.id.clone();
         Trainer::new(cfg, data, opts)
     };
-    t.map_err(|err| err.summary())
+    t.map_err(|err| (err.code().to_string(), err.summary()))
 }
 
 /// folo-data's format of an API format.
@@ -900,6 +918,7 @@ mod tests {
             device: "cpu".into(),
             model_id: None,
             error: None,
+            error_code: None,
         };
         let dataset = DatasetRef {
             id: "ds_1".into(),

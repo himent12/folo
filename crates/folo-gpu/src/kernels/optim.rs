@@ -13,6 +13,44 @@ static OPTIM: KernelDef = KernelDef {
     source: Source::Static(include_str!("../shaders/optim.wgsl")),
 };
 
+static UNSCALE: KernelDef = KernelDef {
+    name: "unscale_check",
+    storage: &[Access::ReadWrite, Access::ReadWrite],
+    source: Source::Static(
+        "@group(0) @binding(1) var<storage, read_write> X: array<f32>;\n\
+         @group(0) @binding(2) var<storage, read_write> FLAG: array<atomic<u32>>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+         \x20 if (i >= pu(0u)) { return; }\n\
+         \x20 let v = X[i] * pf(1u);\n\
+         \x20 X[i] = v;\n\
+         \x20 // Not finite: all exponent bits set (inf or NaN).\n\
+         \x20 if ((bitcast<u32>(v) & 0x7f800000u) == 0x7f800000u) { atomicOr(&FLAG[0], 1u); }\n\
+         }\n",
+    ),
+};
+
+/// The loss scaler's unscale and overflow check: `x *= factor` over `n` f32 elements in place, and
+/// `flag[0] |= 1` (a `u32`, never cleared here) if any result is inf or NaN. One dispatch.
+pub fn unscale_check(
+    ctx: &GpuContext,
+    x: &wgpu::Buffer,
+    n: usize,
+    factor: f32,
+    flag: &wgpu::Buffer,
+) -> Result<()> {
+    check_buf(x, n, DType::F32, "unscale_check input")?;
+    check_buf(flag, 1, DType::F32, "unscale_check flag")?;
+    if n == 0 {
+        return Ok(());
+    }
+    let k = ctx.kernel(&UNSCALE, Spec::new())?;
+    let p = Params::new().uz(n)?.f(factor);
+    ctx.dispatch(&k, &[x, flag], &p, ctx.grid_1d(n as u64, 256)?)
+}
+
 /// One update, with its hyper-parameters (the formulas are in `shaders/optim.wgsl` and folo-core's
 /// `OptimStep`).
 #[derive(Clone, Copy, Debug, PartialEq)]

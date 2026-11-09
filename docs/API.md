@@ -41,14 +41,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
 | 500 | `internal` | a bug or an IO failure |
-| 501 | `not_implemented` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs) |
+| 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (a training run with `"amp": true` without GPU tensor cores fails with it in `Run.error`) |
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
 - `GET /api/health` → `{ "status": "ok", "version": "0.1.0", "api": "v1", "mock": false }`
 - `GET /api/system` → `{ "cpu": { "name", "threads", "util" }, "memory": { "used_bytes", "total_bytes" },
   "gpus": [{ "ordinal", "name", "backend": "vulkan|dx12|metal", "memory_bytes", "util" | null }],
-  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches"] }`
+  "data_dir"?: "D:/folo-data", "features": ["export_onnx_switches"], "capabilities"?: Capabilities }`
   (`util` in `0..1`; CPU utilisation is measured since the previous call. `data_dir` is the real server's
   `--data-dir`, with `/` separators, where its runs, models and exports live; the mock server leaves it out. `features` lists optional API features
   the server implements, so a client can check before relying on one: `export_onnx_switches` (the export switches
@@ -56,6 +56,28 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
   `memory_bytes` is `0` and `util` `null`.
+- `Capabilities` (`/api/system`'s `capabilities`, also in `folo doctor --json` and MCP's `folo_info`) says what a
+  run with `device: auto` can use on this server, so a client can disable a switch, showing the reason, before it
+  submits a run:
+  ```json
+  { "device": "gpu:0", "shader_f16": true,
+    "tensor_cores": { "available": true, "enabled": false,
+                      "reason": "off (not requested: FOLO_GPU_TENSOR_CORES=1 or --tensor-cores)" },
+    "amp": { "available": false,
+             "reason": "mixed-precision training (amp) needs a GPU with tensor cores (f16 cooperative matrices): gpu:0 has tensor cores off (not requested: ...); train without amp (f32), or ..." } }
+  ```
+  `device` is what `auto` resolves to (`gpu:0` or `cpu`; the real server creates its GPU context on the first
+  request, as a run would). `shader_f16`: the device computes in f16, so `precision: f16` inference runs in half
+  precision (else it falls back to f32). `tensor_cores.available`: the adapter reports the 16×16×16 f16 → f32
+  cooperative matrices the tensor-core kernels need (docs/GPU.md, Tensor cores); `enabled`: they are on for this
+  server (`folo serve --tensor-cores` / `FOLO_GPU_TENSOR_CORES=1`, and the start-up self-test passed); `reason`:
+  why not, exactly as `folo doctor` prints it (`off (not requested: ...)`, `off: <adapter> (<backend>) has no
+  cooperative matrices in wgpu`, `off: the tensor-core self-test failed (...)`, ...), `null` when enabled.
+  `amp.available`: a run with `"amp": true` can start, the trainer's own check (`folo_vision::train::amp_support`, without its side effect)
+  for that device; `amp.reason` is the `not_supported` message such a run would fail with, `null` when available.
+  Every field has a default, so clients parse objects from older and newer servers; servers older than this field
+  leave out `capabilities`. Studio and Desktop can disable the Mixed precision switch when `amp.available` is
+  false and show `amp.reason`.
 
 ## Datasets
 - `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
@@ -230,7 +252,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   shape is stable (the MCP proxy uses it, docs/MCP.md).
 - `GET /api/runs/{id}/events` → SSE stream. Each SSE `event:` name is the payload type, `data:` is its JSON:
   - `status` `{ "status": "queued|running|stopping|stopped|completed|failed", "error": null | "...",
-    "steps_per_epoch": 50, "epochs": 100 }` (the run's length, as in `Run`)
+    "steps_per_epoch": 50, "epochs": 100 }` (the run's length, as in `Run`); a `failed` one also has `"error_code"`
+    (`Run.error_code`)
   - `step` `Step` (at most ~10 per second; steps in between are skipped, `/metrics` has them all)
   - `epoch` `Epoch` (after each validation)
   - `log` `{ "t", "level": "debug|info|warn|error", "message" }`
@@ -254,7 +277,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "lr0": 0.01, "weights": null, // or a model id to fine-tune from
   "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5, "scale": 0.5, "translate": 0.1,
                "close_mosaic": 10 },
-  "seed": 0 }
+  "seed": 0,
+  "amp": false }               // mixed-precision training (docs/MODEL.md §8.8): f16 on GPU tensor cores, f32 master
+                               // weights; needs `folo serve --tensor-cores` on a GPU with them, else the run fails
+                               // with `not_supported`
 // An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: epochs 1..=10000,
 // batch 1..=1024, imgsz a multiple of 32 in 32..=4096 (real mode trains at 64 or more), 0 < lr0 < 10.
 // POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.
@@ -262,6 +288,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // defaults, and "auto" resolves to the GPU when a model can be placed on it, else the CPU.
 // Run
 { "id": "run_7d1e", "name": "shapes-n", "status": "running", "config": TrainConfig, "created": "...",
+  // + "error_code": "not_supported" | "training_failed" | ... when failed (folo_api::codes; absent otherwise and from
+  //   older servers), next to "error" (the message); the final `status` event carries it too
   "started": "..." | null, "finished": null | "...",
   "epoch": 12,             // epoch in progress, 1-based (0 before the first step; the last epoch once finished)
   "epochs": 100,
@@ -381,6 +409,10 @@ start, except live-run timestamps):
   metric histories; and one live run (`run_3c02`, r6-operators / folo-s) whose SSE stream advances in real time: a
   100-epoch run compressed into ~10 minutes (6 s per epoch, ~7 steps per second), starting around epoch 12, then it
   loops (`status` back to `queued`, metrics restart).
+- `/api/system`'s `capabilities` reports the RTX 4080 SUPER with tensor cores on and `amp` available. To test the
+  other states, start the mock with `FOLO_MOCK_TENSOR_CORES=off` (tensor cores available but not requested, no
+  `amp`) or `FOLO_MOCK_TENSOR_CORES=none` (also `0` / `false`: the adapter through DX12, `gpus[0].backend` `dx12`,
+  no tensor cores, no `amp`; `shader_f16` stays true). The reasons are worded as the real server's.
 - `POST /api/runs` starts a simulated run (6 s per epoch) that can be stopped; when it completes, its model appears
   in `/api/models`. `POST /api/datasets` scans real folders; `POST /api/datasets/synthetic` makes a procedural
   dataset. Predictions are deterministic in the image bytes (or dataset image) and the model. `POST /api/val` derives

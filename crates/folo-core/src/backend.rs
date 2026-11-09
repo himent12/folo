@@ -14,7 +14,10 @@
 //!   [`Backend::computes_f16`] is true also gets `F16` data (every float operand of a call has the same dtype)
 //!   in the forward ops folo-core lets through (unary, binary, `where_cond`, reductions, softmax, matmul,
 //!   conv2d and the fused conv, pooling, upsampling, `detect_candidates`) and returns results of that dtype;
-//!   it may refuse `F16` elsewhere with [`Error::UnsupportedDType`].
+//!   it may refuse `F16` elsewhere with [`Error::UnsupportedDType`]. Mixed-precision training
+//!   ([`crate::autocast`]) also sends `F16` data to the gradients it uses (conv2d input and weight gradients,
+//!   `unary_backward`, max-pooling and upsampling backward) and to the fused BatchNorm (`F16` `x` / `grad` with
+//!   `F32` parameters and statistics; `y` and `dx` take `x`'s dtype).
 //! - Methods under "Compute" have a default implementation returning [`Error::NotSupported`], so a new backend
 //!   can start with the memory methods and grow. The user sees a clear "op X is not supported by backend Y"
 //!   and can move the tensor to the CPU with [`crate::Tensor::to_device`].
@@ -361,6 +364,24 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Result<Storage> {
         unsupported!(self, "conv2d_backward_weight")
     }
+    /// [`Backend::conv2d_backward_weight`] with the result stored as `out` (`F32`, or the operands' dtype): mixed
+    /// precision writes an `F16` conv's weight gradient straight to its `F32` master weight. The default computes
+    /// in the operands' dtype and casts.
+    fn conv2d_backward_weight_as(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight_shape: &Shape,
+        p: &Conv2dParams,
+        out: DType,
+    ) -> Result<Storage> {
+        let s = self.conv2d_backward_weight(x, grad, weight_shape, p)?;
+        if s.dtype() == out {
+            return Ok(s);
+        }
+        let whole = Layout::contiguous(weight_shape.clone());
+        self.cast(View::new(&s, &whole), out)
+    }
     /// Max pooling of `[N, C, H, W]`: returns the values and, per output element, the flat index `h * W + w`
     /// of the chosen input element within its plane (`I64`).
     fn max_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<(Storage, Storage)> {
@@ -485,7 +506,9 @@ pub trait Backend: Send + Sync + 'static {
     /// `invstd = 1 / sqrt(var + eps)` of the *biased* variance. Returns `(y, mean [C], invstd [C])`.
     /// With `running`, also updates the running statistics in place:
     /// `mean ← (1 − m) · mean + m · batch_mean`, `var ← (1 − m) · var + m · batch_var · n / (n − 1)`. Their
-    /// storages hold `[C]` contiguously from element 0. Reached through `Tensor::batch_norm_act_train`.
+    /// storages hold `[C]` contiguously from element 0. `x` may be `F16` on a backend that computes in it (`y` is
+    /// then `F16`); `weight`, `bias`, the statistics and the running statistics are always `F32`. Reached through
+    /// `Tensor::batch_norm_act_train`.
     fn batch_norm_act(
         &self,
         x: View<'_>,
@@ -498,7 +521,8 @@ pub trait Backend: Send + Sync + 'static {
         unsupported!(self, "batch_norm_act")
     }
     /// The gradients `(dx, dweight, dbias)` of [`Backend::batch_norm_act`] given the output gradient `grad`
-    /// and the forward's `mean` / `invstd`; `act` is differentiated at its recomputed input.
+    /// and the forward's `mean` / `invstd`; `act` is differentiated at its recomputed input. `x` and `grad` share
+    /// a dtype (`F32`, or `F16`), which `dx` takes; `dweight` and `dbias` are `F32`.
     #[allow(clippy::too_many_arguments)]
     fn batch_norm_act_backward(
         &self,
@@ -524,6 +548,13 @@ pub trait Backend: Send + Sync + 'static {
         step: &OptimStep,
     ) -> Result<()> {
         unsupported!(self, "optimizer_step")
+    }
+
+    /// Mixed precision (the loss scaler's unscale and overflow check): `x *= factor` in place over its first `n`
+    /// `F32` elements and, if any result is not finite, set the single `U32` element of `flag` to a nonzero value
+    /// (it is never cleared here). Reached through `Tensor::unscale_check_`.
+    fn unscale_check(&self, x: &mut Storage, n: usize, factor: f32, flag: &mut Storage) -> Result<()> {
+        unsupported!(self, "unscale_check")
     }
 
     // ----- Detector pre- and post-processing (optional; callers fall back to host code) -----

@@ -125,7 +125,7 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 ## Tools
 | tool | input | output (`structuredContent`) |
 |---|---|---|
-| `folo_info` | `{}` | `version`, `mode` (`embedded` / `mock` / `proxy`), `server`, `data_dir` (`/` separators; in proxy mode the server's, from `/api/system`), `read_only`, `confine`, `devices` (`cpu`, `gpus` with backend and memory; `memory_bytes` 0 when unknown), `scales` with params and GFLOPs at 640 and 320 |
+| `folo_info` | `{}` | `version`, `mode` (`embedded` / `mock` / `proxy`), `server`, `data_dir` (`/` separators; in proxy mode the server's, from `/api/system`), `read_only`, `confine`, `devices` (`cpu`, `gpus` with backend and memory; `memory_bytes` 0 when unknown), `capabilities` (what `device: auto` runs can use: `shader_f16`, `tensor_cores`, `amp` with the reason when unavailable; `/api/system`'s object, docs/API.md; `null` from an older server), `scales` with params and GFLOPs at 640 and 320 |
 | `list_datasets` | paging | page of `{ id, name, format, classes, splits }` |
 | `get_dataset` | `{ dataset_id }` | `Dataset` with `stats`, plus `issues`: errors, then warnings, each `{ kind, severity, file, line, message, fix }` (first 50; infos such as `empty_image` are only counted), `issue_counts: { error, warning, info, by_kind }` and `issues_total` |
 | `list_dataset_issues` | `{ dataset_id, severity?: "error"\|"warning"\|"info", kind?: string }` + paging | page of `{ kind, severity, file, line, message, fix? }` in dataset order (the `folo dataset check --fix-dry-run` objects), plus `counts` of all issues |
@@ -133,7 +133,7 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 | `register_dataset` | `{ name, path, format?: "auto"\|"yolo"\|"coco" }` | `Dataset`; a folder registered before (same canonical path) returns that dataset (the summary says "already registered") |
 | `create_synthetic_dataset` | `{ name, images?: 1000 (max 100000), classes?: string[], imgsz?: 640, seed?: 0 }` | `Dataset` |
 | `list_models` | paging | page of `{ id, name, arch, imgsz, classes, metrics }` |
-| `train` | `TrainConfig` (docs/API.md; `dataset_id` required), or `{ resume_run_id }` (other fields optional and must match the run) | `{ run_id, status }` |
+| `train` | `TrainConfig` (docs/API.md; `dataset_id` required), or `{ resume_run_id }` (other fields optional and must match the run). `amp: true` (mixed precision) needs GPU tensor cores: `FOLO_GPU_TENSOR_CORES=1` for `folo mcp`, `--tensor-cores` for the `folo serve` it proxies; the run fails with `not_supported` otherwise | `{ run_id, status }` |
 | `run_status` | `{ run_id, log_lines?: 20 (max 200) }` | `Run`, plus `last_step`, `last_epoch` and `log` (the last `log_lines` log lines; older ones are dropped first if the result would exceed 32 KB) |
 | `list_runs` | `{ status?: string }` + paging | page of `Run` summaries |
 | `stop_run` | `{ run_id }` | `Run` |

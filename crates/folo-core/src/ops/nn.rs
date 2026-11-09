@@ -1,14 +1,19 @@
 //! Matrix products, convolution, pooling and upsampling.
 
 use super::grads;
+use crate::autocast::casts;
 use crate::backend::{Conv2dParams, Pool2dParams, View};
 use crate::shape::DimVec;
-use crate::{Error, Result, Shape, Storage, Tensor};
+use crate::{DType, Error, Result, Shape, Storage, Tensor, no_grad};
 
 impl Tensor {
     /// Matrix product. Both operands need rank >= 2: `[.., m, k] @ [.., k, n] -> [.., m, n]`, with the batch
-    /// dims broadcast (so `[B, m, k] @ [k, n]` works and runs as one large GEMM).
+    /// dims broadcast (so `[B, m, k] @ [k, n]` works and runs as one large GEMM). Under [`crate::autocast`], `F32`
+    /// operands are cast to `F16` first (recorded casts) and the product is `F16`.
     pub fn matmul(&self, other: &Tensor) -> Result<Tensor> {
+        if casts(self) || casts(other) {
+            return self.to_dtype(DType::F16)?.matmul(&other.to_dtype(DType::F16)?);
+        }
         self.check_same_device(other, "matmul")?;
         self.check_float("matmul")?;
         other.check_float_like(self, "matmul")?;
@@ -124,9 +129,13 @@ impl Tensor {
         }
     }
 
-    /// [`Tensor::conv2d`] with per-axis parameters.
+    /// [`Tensor::conv2d`] with per-axis parameters. Under [`crate::autocast`] (on a device that computes in
+    /// `F16`) the conv runs in `F16` against the `F32` weight and bias (see the [`crate::autocast`] module docs).
     pub fn conv2d_with(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Tensor> {
         const OP: &str = "conv2d";
+        if casts(self) || casts(weight) {
+            return self.conv2d_autocast(weight, bias, p);
+        }
         let shape = self.check_conv2d(weight, bias, p)?;
         let s = self.conv2d_kernel(weight, bias, p)?;
         let out = Tensor::wrap(s, shape, OP)?;
@@ -158,6 +167,53 @@ impl Tensor {
             let mut gs = grads![gx, gw];
             if has_bias {
                 gs.push(Some(g.sum([0, 2, 3], false)?));
+            }
+            Ok(gs)
+        }))
+    }
+
+    /// The autocast conv: the input cast to `F16` (a recorded cast), `F16` copies of the weight and bias, an `F16`
+    /// result, recorded against the weight and bias themselves. Backward: the input gradient in `F16`, the weight
+    /// gradient written straight to the weight's dtype (`F32` master weights: f32 accumulation, no `F16` rounding
+    /// or overflow in between), the bias gradient summed in `F32`.
+    fn conv2d_autocast(&self, weight: &Tensor, bias: Option<&Tensor>, p: &Conv2dParams) -> Result<Tensor> {
+        const OP: &str = "conv2d";
+        let x = self.to_dtype(DType::F16)?;
+        let (w16, b16) = {
+            let _g = no_grad();
+            (weight.to_dtype(DType::F16)?, bias.map(|b| b.to_dtype(DType::F16)).transpose()?)
+        };
+        let shape = x.check_conv2d(&w16, b16.as_ref(), p)?;
+        let s = x.conv2d_kernel(&w16, b16.as_ref(), p)?;
+        let out = Tensor::wrap(s, shape, OP)?;
+        let (wt, bias_dtype, p) = (weight.clone(), bias.map(Tensor::dtype), *p);
+        let mut inputs = vec![&x, weight];
+        if let Some(b) = bias {
+            inputs.push(b);
+        }
+        let xs = x.clone();
+        Ok(out.track(OP, &inputs, move |g| {
+            let g = &g.contiguous()?;
+            let backend = g.backend()?;
+            let gx = if xs.requires_grad() {
+                let s = super::with_views([g, &w16], [g.layout(), w16.layout()], |[gv, wv]| {
+                    backend.conv2d_backward_input(gv, wv, xs.shape(), &p)
+                })?;
+                Some(Tensor::wrap(s, xs.shape().clone(), "conv2d_backward_input")?)
+            } else {
+                None
+            };
+            let gw = if wt.requires_grad() {
+                let s = super::with_views([&xs, g], [xs.layout(), g.layout()], |[xv, gv]| {
+                    backend.conv2d_backward_weight_as(xv, gv, wt.shape(), &p, wt.dtype())
+                })?;
+                Some(Tensor::wrap(s, wt.shape().clone(), "conv2d_backward_weight")?)
+            } else {
+                None
+            };
+            let mut gs = grads![gx, gw];
+            if let Some(bd) = bias_dtype {
+                gs.push(Some(g.to_dtype(DType::F32)?.sum([0, 2, 3], false)?.to_dtype(bd)?));
             }
             Ok(gs)
         }))

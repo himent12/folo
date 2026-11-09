@@ -36,6 +36,9 @@ pub enum Error {
     /// The request is valid but this build cannot do it yet.
     #[error("{0}")]
     Unsupported(String),
+    /// The request is valid but this machine cannot run it (mixed-precision training without GPU tensor cores).
+    #[error("{0}")]
+    NotSupported(String),
     /// A device (`gpu:<n>`) this machine has no usable adapter for; the message names the devices it has.
     #[error("{0}")]
     DeviceNotFound(String),
@@ -85,6 +88,7 @@ impl Error {
             }
             Error::Nn(_) | Error::Core(_) => "internal",
             Error::Unsupported(_) => "not_implemented",
+            Error::NotSupported(_) => "not_supported",
             Error::DeviceNotFound(_) => "device_not_found",
             Error::Failed(_) => "training_failed",
         }

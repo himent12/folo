@@ -96,6 +96,12 @@ pub const CODES: &[Code] = &[
     c("training_failed", 500, 1, "training diverged or produced no usable batch"),
     c("gpu_out_of_memory", 507, 1, "the GPU ran out of memory; lower batch or imgsz, or use a smaller arch"),
     c("not_implemented", 501, 4, "the feature exists in the interface but not yet in the engine"),
+    c(
+        "not_supported",
+        501,
+        4,
+        "valid, but this machine cannot run it (mixed-precision training without GPU tensor cores)",
+    ),
     c("server_unreachable", 502, 1, "proxy mode: `folo serve` does not answer (MCP)"),
     c("shutting_down", 503, 1, "the server is shutting down"),
     c("runtime", 500, 1, "the async runtime could not start (CLI)"),

@@ -115,8 +115,10 @@ impl GradAccumulator {
     /// device are clipped there without reading the norm back, and the result is then NaN (use
     /// [`GradAccumulator::global_norm`] to read it).
     pub fn clip_grad_norm(&mut self, max_norm: f64) -> Result<f64> {
-        if self.slots.iter().any(|s| s.valid && !s.param.device().is_cpu()) {
-            self.clip_grad_norm_device(max_norm)?;
+        if self.on_device() {
+            if max_norm > 0.0 {
+                self.clip_grad_norm_device(max_norm, 1.0)?;
+            }
             return Ok(f64::NAN);
         }
         let n = self.global_norm()?;
@@ -130,14 +132,47 @@ impl GradAccumulator {
         Ok(n)
     }
 
+    /// Mixed precision (docs/MODEL.md §8.8): the accumulated gradients came from a loss multiplied by a loss scale
+    /// `S`. Unscale them by `inv_scale = 1 / S`, then clip like [`GradAccumulator::clip_grad_norm`] (`max_norm <= 0`
+    /// disables clipping), and return whether every gradient is finite. When it returns `false` the step must be
+    /// skipped (the buffers then hold garbage until the next [`GradAccumulator::zero`]).
+    ///
+    /// On a device this is one host readback of a single value. With clipping, the unscale is folded into the
+    /// clipping factors (the norm of the unscaled gradients is `n / S`, so the threshold and the `1e-6` move by `S`
+    /// instead of every buffer being scaled twice), and the finiteness check is the clipping norm itself, which
+    /// the overflow-safe sum below makes non-finite exactly when some gradient is. Without clipping it is
+    /// [`crate::amp::unscale_`]: one fused unscale-and-check kernel per buffer and a shared flag.
+    pub fn unscale_clip(&mut self, inv_scale: f32, max_norm: f64) -> Result<bool> {
+        let _g = no_grad();
+        let bufs: Vec<&Tensor> =
+            self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
+        if bufs.is_empty() {
+            return Ok(true);
+        }
+        if self.on_device() && max_norm > 0.0 {
+            let r = self.clip_grad_norm_device(max_norm, inv_scale)?;
+            return Ok(r.item::<f32>()?.is_finite());
+        }
+        if !crate::amp::unscale_(&bufs, inv_scale)? {
+            return Ok(false);
+        }
+        self.clip_grad_norm(max_norm)?;
+        Ok(true)
+    }
+
+    fn on_device(&self) -> bool {
+        self.slots.iter().any(|s| s.valid && !s.param.device().is_cpu())
+    }
+
     /// [`GradAccumulator::clip_grad_norm`] for gradients on a device, without a host round trip: the norm (in
     /// `f32`) and the factor `max_norm / (n + 1e-6)` (or 1) are device scalars and every gradient is scaled by it.
     /// The squares are summed in units of the largest magnitude `s` (`n = s · sqrt(Σ (g / s)²)`), so finite
     /// gradients whose squares overflow `f32` still give their norm, as the CPU's `f64` sum does.
-    fn clip_grad_norm_device(&mut self, max_norm: f64) -> Result<()> {
-        if max_norm <= 0.0 {
-            return Ok(());
-        }
+    ///
+    /// `pre` (1, or the loss scaler's `1 / S`) is a factor the buffers still need: the norm is that of
+    /// `pre · g`, and every buffer ends up as `pre · g · min(1, max_norm / (n + 1e-6))`. Returns `n / s`, a device
+    /// scalar that is finite exactly when every gradient is (a non-finite peak makes the units 0 or NaN).
+    fn clip_grad_norm_device(&mut self, max_norm: f64, pre: f32) -> Result<Tensor> {
         let _g = no_grad();
         let bufs: Vec<&Tensor> =
             self.slots.iter().filter(|s| s.valid).map(|s| s.buf.as_ref().expect("valid")).collect();
@@ -157,19 +192,22 @@ impl GradAccumulator {
             .iter()
             .map(|b| Ok(b.mul(&h)?.mul(&h)?.square()?.sum_all()?.reshape([1])?))
             .collect::<Result<Vec<_>>>()?;
-        let r = cat(sq)?.sum_all()?.sqrt()?; // n / s
-        // n > max ⇔ r·sqrt(s) > max·h, and max / (n + 1e-6) = h · (max·h / (r + 1e-6·h²)), applied as two factors.
-        let max = max_norm as f32;
-        let clip = r.mul(&root)?.gt(&h.mul_scalar(max)?)?;
+        let r = cat(sq)?.sum_all()?.sqrt()?; // n_b / s, the norm of the buffers as they are
+        // The norm of `pre · g` is n = pre · n_b, so with max' = max / pre and eps' = 1e-6 / pre:
+        // n > max ⇔ r·sqrt(s) > max'·h, and pre · max / (n + 1e-6) = max / (n_b + eps') = h · (max·h / (r + eps'·h²)),
+        // applied as two factors (or `pre` alone below the threshold).
+        let (max, pre_f) = (max_norm as f32, pre as f64);
+        let clip = r.mul(&root)?.gt(&h.mul_scalar((max_norm / pre_f) as f32)?)?;
         let one = r.ones_like()?;
-        let k = h.mul_scalar(max)?.div(&r.add(&h.mul(&h)?.mul_scalar(1e-6)?)?)?;
-        let (f1, f2) = (clip.where_cond(&h, &one)?, clip.where_cond(&k, &one)?);
+        let k = h.mul_scalar(max)?.div(&r.add(&h.mul(&h)?.mul_scalar((1e-6 / pre_f) as f32)?)?)?;
+        let keep = if pre == 1.0 { one.clone() } else { one.mul_scalar(pre)? };
+        let (f1, f2) = (clip.where_cond(&h, &keep)?, clip.where_cond(&k, &one)?);
         for s in self.slots.iter().filter(|s| s.valid) {
             let b = s.buf.as_ref().expect("valid");
             b.mul_assign(&f1)?;
             b.mul_assign(&f2)?;
         }
-        Ok(())
+        Ok(r)
     }
 }
 

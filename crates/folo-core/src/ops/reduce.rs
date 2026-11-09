@@ -183,6 +183,11 @@ impl Tensor {
 
     fn softmax_impl(&self, dim: impl Dim, log: bool) -> Result<Tensor> {
         let name = if log { "log_softmax" } else { "softmax" };
+        // Under autocast an `F16` input runs in `F32`, as `torch.autocast` does: the backward `y · (g − Σ g·y)`
+        // cancels, which f16 storage of its terms would turn into noise.
+        if self.dtype() == DType::F16 && crate::autocast::autocast_dtype().is_some() {
+            return self.to_dtype(DType::F32)?.softmax_impl(dim, log);
+        }
         self.check_float(name)?;
         let d = dim.to_index(self.rank(), name)?;
         let b = self.backend()?;

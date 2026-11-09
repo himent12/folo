@@ -35,6 +35,17 @@ pub(crate) fn vec_prelude(vec: bool) -> &'static str {
     }
 }
 
+/// [`vec_prelude`] for elements stored as f16 (`E` is `f16` or `vec4<f16>`; `V4` widens to f32, `OUT` rounds).
+pub(crate) fn vec_prelude_f16(vec: bool) -> &'static str {
+    if vec {
+        "alias E = vec4<f16>;\nconst VEC: bool = true;\n\
+         fn V4(x: E) -> vec4<f32> { return vec4<f32>(x); }\nfn OUT(v: vec4<f32>) -> E { return vec4<f16>(v); }\n"
+    } else {
+        "alias E = f16;\nconst VEC: bool = false;\n\
+         fn V4(x: E) -> vec4<f32> { return vec4<f32>(f32(x)); }\nfn OUT(v: vec4<f32>) -> E { return f16(v.x); }\n"
+    }
+}
+
 /// WGSL for the unary function table shared by unary, bias+activation, GEMM and conv epilogues.
 pub(crate) const UNARY_FN: &str = include_str!("../shaders/unary_fn.wgsl");
 

@@ -7,9 +7,9 @@
 use std::path::Path;
 
 use folo_api::{
-    Dataset, ExportResult, ExportSpec, GpuInfo, LogLine, Model, ModelEval, PredictResponse, RegisterDataset,
-    Run, RunEvent, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset, TrainConfig, ValReport,
-    ValRequest,
+    Capabilities, Dataset, ExportResult, ExportSpec, GpuInfo, LogLine, Model, ModelEval, PredictResponse,
+    RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset,
+    TrainConfig, ValReport, ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -222,6 +222,11 @@ pub trait Store: Send + Sync + 'static {
     fn is_mock(&self) -> bool;
     /// GPUs to report in `/api/system`.
     fn gpus(&self) -> Vec<GpuInfo>;
+    /// What runs with `device: auto` can use, for `/api/system`'s `capabilities` (`None`: not reported). May block
+    /// (the real store creates the GPU context on first use).
+    fn capabilities(&self) -> Option<Capabilities> {
+        None
+    }
     /// The data dir to report in `/api/system` (`None`: the mock store).
     fn data_dir(&self) -> Option<&Path> {
         None

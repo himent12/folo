@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use axum::http::StatusCode;
-use folo_api::{GpuBackend, GpuInfo};
+use folo_api::{AmpSupport, Capabilities, GpuBackend, GpuInfo, TensorCoreSupport};
 use folo_core::Device;
 use folo_nn::io::{ModelFile, Purpose};
 use folo_vision::predict::f16_unavailable;
@@ -39,10 +39,20 @@ pub fn engine_error(e: folo_vision::Error) -> Error {
                 .hint("lower `batch` or `imgsz`, or use a smaller `arch` (folo-n, folo-s)")
         }
         E::Unsupported(_) => Error::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", msg),
+        E::NotSupported(_) => Error::new(StatusCode::NOT_IMPLEMENTED, "not_supported", msg)
+            .hint("train without `amp`, or start `folo serve --tensor-cores` on a GPU with tensor cores"),
         _ if e.code() == "invalid_weights" => {
             Error::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_weights", msg)
         }
-        _ => Error::internal(msg),
+        // Everything else keeps the engine's code with its status from the shared vocabulary (`training_failed`,
+        // `data_error`, `io_error`, `internal`, ...).
+        _ => {
+            let code = e.code();
+            let status = folo_api::codes::find(code)
+                .and_then(|c| StatusCode::from_u16(c.status).ok())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            Error::new(status, code, msg)
+        }
     }
 }
 
@@ -155,6 +165,46 @@ pub fn gpus() -> Vec<GpuInfo> {
     .clone()
 }
 
+/// `/api/system`'s `capabilities`: what a run with `device: auto` gets on this server. The device comes from
+/// [`resolve`] (so this registers the GPU backend on first use, as a run would); `shader_f16` is
+/// [`f16_unavailable`] (what f16 inference falls back on), tensor cores come from the device's folo-gpu context
+/// (`reason` is its status, the line `folo doctor` prints), and `amp` is the trainer's own
+/// [`folo_vision::train::amp_support`] answer for that device ([`folo_vision::train::amp_available`]: the same check
+/// without switching tensor cores back on, so a read changes nothing).
+pub fn capabilities() -> Capabilities {
+    let device = resolve("auto").unwrap_or(Device::Cpu);
+    let ctx = (!device.is_cpu()).then(|| folo_gpu::context_for(device)).flatten();
+    let tensor_cores = match &ctx {
+        Some(ctx) => {
+            let enabled = ctx.tensor_cores();
+            TensorCoreSupport {
+                available: ctx.summary().tensor_cores,
+                enabled,
+                reason: (!enabled).then(|| ctx.tensor_cores_status()),
+            }
+        }
+        None => TensorCoreSupport {
+            available: false,
+            enabled: false,
+            reason: Some(match folo_gpu::init() {
+                Err(e) => format!("off: no usable GPU ({e})"),
+                Ok(_) => "off: device auto runs on the CPU".to_string(),
+            }),
+        },
+    };
+    // Only the trainer's check decides; its `not_supported` message is the reason.
+    let amp = match folo_vision::train::amp_available(device) {
+        Ok(()) => AmpSupport { available: true, reason: None },
+        Err(e) => AmpSupport { available: false, reason: Some(e.to_string()) },
+    };
+    Capabilities {
+        device: device.to_string(),
+        shader_f16: f16_unavailable(device).is_none(),
+        tensor_cores,
+        amp,
+    }
+}
+
 /// Reads a `.folo` file into memory (never memory-mapped: on Windows a mapped file cannot be replaced, and a run's
 /// checkpoints are replaced while it trains).
 pub fn read_model_file(path: &Path) -> Result<ModelFile> {
@@ -259,5 +309,26 @@ impl Predictors {
     /// Drops every cached predictor of `path` (its file was replaced or deleted).
     pub fn forget(&self, path: &Path) {
         self.entries.lock().unwrap().retain(|(k, _, _, _)| k.path != path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every engine error keeps its stable code over HTTP; `not_supported` (an `amp` run without tensor cores) is
+    /// 501 with a hint, not a 500.
+    #[test]
+    fn engine_errors_keep_their_codes() {
+        use folo_vision::Error as E;
+        let e = engine_error(E::NotSupported("mixed-precision training (amp) needs tensor cores".into()));
+        assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_supported"));
+        assert!(e.body.hint.is_some());
+        for err in [E::Config("x".into()), E::Unsupported("x".into()), E::Failed("x".into())] {
+            let code = err.code();
+            let got = engine_error(err);
+            assert_eq!(got.body.code, code);
+            assert_eq!(got.status.as_u16(), folo_api::codes::find(code).unwrap().status);
+        }
     }
 }

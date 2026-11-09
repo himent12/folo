@@ -105,6 +105,15 @@ impl Emitter {
         self.emit(RunEvent::Status(StatusEvent::new(status, error).with_length(epochs, spe)));
     }
 
+    /// The final `failed` status, with the error's message and stable code.
+    pub(crate) fn failed(&mut self, code: &str, message: String) {
+        let (epochs, spe) = self.length;
+        let ev = StatusEvent::new(RunStatus::Failed, Some(message))
+            .with_length(epochs, spe)
+            .with_error_code(Some(code.to_string()));
+        self.emit(RunEvent::Status(ev));
+    }
+
     pub(crate) fn log(&mut self, level: LogLevel, message: impl Into<String>) {
         self.emit(RunEvent::Log(LogLine { t: rfc3339_now(), level, message: message.into() }));
     }

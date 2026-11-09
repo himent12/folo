@@ -1,8 +1,9 @@
 // Pass 1 of the BatchNorm backward: per (channel, chunk) partial sums of dz and dz · x̂, where
-// x̂ = (x - mean) · invstd, z = x̂ · w + b and dz = g · act'(z). Grid: (chunks, C). Params as bn_stats.wgsl.
+// x̂ = (x - mean) · invstd, z = x̂ · w + b and dz = g · act'(z); X and G are T (f32 or f16), the sums f32.
+// Grid: (chunks, C). Params as bn_stats.wgsl.
 // PART is [C, chunks, 2].
-@group(0) @binding(1) var<storage, read> X: array<f32>;
-@group(0) @binding(2) var<storage, read> G: array<f32>;
+@group(0) @binding(1) var<storage, read> X: array<T>;
+@group(0) @binding(2) var<storage, read> G: array<T>;
 @group(0) @binding(3) var<storage, read> MEAN: array<f32>;
 @group(0) @binding(4) var<storage, read> INVSTD: array<f32>;
 @group(0) @binding(5) var<storage, read> W: array<f32>;
@@ -30,8 +31,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) 
     loop {
         if (w.e >= end) { break; }
         let idx = (w.n * channels + c) * hw + w.i;
-        let xh = (X[idx] - m) * inv;
-        var dz = G[idx];
+        let xh = (f32(X[idx]) - m) * inv;
+        var dz = f32(G[idx]);
         if (ACT != 0u) {
             dz *= bn_act_grad(vec4<f32>(xh * wc + bc)).x;
         }

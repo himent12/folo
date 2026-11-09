@@ -266,7 +266,10 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let (va, vb, vc) = (spec.get_bool("VEC_A"), spec.get_bool("VEC_B"), spec.get_bool("VEC_C"));
     let (ta, tb) = (spec.get_bool("TRANS_A"), spec.get_bool("TRANS_B"));
     let check = spec.get_bool("CHECK");
-    let conv = spec.get_u32("CONV_MODE", 0) == 1;
+    // 0 = plain GEMM, 1 = conv forward, 2 = conv input gradient, 3 = conv weight gradient (as `super::gemm`).
+    let mode = spec.get_u32("CONV_MODE", 0);
+    let conv = mode != 0;
+    let split = spec.get_bool("SPLIT");
     let bias = spec.get_u32("BIAS_KIND", 0);
     let ct = if spec.get_bool("OUT_F16") { "f16" } else { "f32" };
     let (a_len, b_len) = (bm * sa, bk * sb);
@@ -296,12 +299,28 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     s.push_str(
         "fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) tid: u32,\n\
          \x20       @builtin(subgroup_id) sgid: u32, @builtin(subgroup_invocation_id) lane: u32) {\n\
-         \x20 let M = pu(0u); let N = pu(1u); let K = pu(2u);\n\
-         \x20 let lda = pu(3u); let ldb = pu(4u); let ldc = pu(5u);\n\
-         \x20 let b1 = wid.z / pu(6u); let b2 = wid.z % pu(6u);\n\
-         \x20 let offA = pu(8u) + b1 * pu(9u) + b2 * pu(10u);\n\
+         \x20 let M = pu(0u); let N = pu(1u);\n\
+         \x20 let lda = pu(3u); let ldb = pu(4u); let ldc = pu(5u);\n",
+    );
+    if split {
+        // wid.z = batch index * S + chunk; chunk `sidx` covers k in [kbeg, kbeg + KS) and writes its own C slab.
+        // All of it derives from `wid` and uniforms, so the K loop stays workgroup-uniform.
+        s.push_str(
+            "  let S = pu(28u); let zz = wid.z / S; let sidx = wid.z % S;\n\
+             \x20 let b1 = zz / pu(6u); let b2 = zz % pu(6u);\n\
+             \x20 let kbeg = sidx * pu(29u); let K = min(pu(2u), kbeg + pu(29u));\n\
+             \x20 let offC = pu(14u) + b1 * pu(15u) + b2 * pu(16u) + sidx * pu(30u);\n",
+        );
+    } else {
+        s.push_str(
+            "  let b1 = wid.z / pu(6u); let b2 = wid.z % pu(6u);\n\
+             \x20 let kbeg = 0u; let K = pu(2u);\n\
+             \x20 let offC = pu(14u) + b1 * pu(15u) + b2 * pu(16u);\n",
+        );
+    }
+    s.push_str(
+        "  let offA = pu(8u) + b1 * pu(9u) + b2 * pu(10u);\n\
          \x20 let offB = pu(11u) + b1 * pu(12u) + b2 * pu(13u);\n\
-         \x20 let offC = pu(14u) + b1 * pu(15u) + b2 * pu(16u);\n\
          \x20 let offBias = pu(18u) + b1 * pu(19u) + b2 * pu(20u);\n",
     );
     let _ = writeln!(s, "  let m0 = wid.y * {bm}u; let n0 = wid.x * {bn}u;");
@@ -326,16 +345,44 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             (false, true) => lines(bk, bn * bk),
         }
     };
-    if conv {
-        // One output pixel (B column) per invocation for the whole K loop, so its index math is done once.
-        let _ = writeln!(
-            s,
-            "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n\
-             \x20 let cj = n0 + {}; let cjok = cj < N;\n\
-             \x20 let coh = cj / OW; let cow = cj % OW;\n\
-             \x20 let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;",
-            pb.inner_expr()
-        );
+    // One B column per invocation for the whole K loop, so its index math is done once.
+    match mode {
+        // Forward: column = output pixel; B[k = (ci, kh, kw)][j] = X[ci][oh·SH − PH + kh·DH][ow·SW − PW + kw·DW].
+        1 => {
+            let _ = writeln!(
+                s,
+                "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n\
+                 \x20 let cj = n0 + {}; let cjok = cj < N;\n\
+                 \x20 let coh = cj / OW; let cow = cj % OW;\n\
+                 \x20 let cih0 = i32(coh * SH) - PH; let ciw0 = i32(cow * SW) - PW;",
+                pb.inner_expr()
+            );
+        }
+        // Input gradient: column = input pixel; B[k = (co, kh, kw)][j] =
+        // G[co][(ih + PH − kh·DH) / SH][(iw + PW − kw·DW) / SW] where both divisions are exact and in range, else 0.
+        2 => {
+            let _ = writeln!(
+                s,
+                "  let IW = pu(25u); let OH = pu(26u); let OW = pu(27u);\n\
+                 \x20 let cj = n0 + {}; let cjok = cj < N;\n\
+                 \x20 let cih = i32(cj / IW) + PH; let ciw = i32(cj % IW) + PW;",
+                pb.inner_expr()
+            );
+        }
+        // Weight gradient: k = (n, oh, ow) runs over the whole batch, column = (ci, kh, kw);
+        // A[m][k] = G[n][m][oh, ow], B[k][j] = X[n][ci][oh·SH − PH + kh·DH][ow·SW − PW + kw·DW].
+        3 => {
+            let _ = writeln!(
+                s,
+                "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n\
+                 \x20 let OHOW = pu(31u); let SAN = pu(32u); let SBN = pu(33u);\n\
+                 \x20 let cj = n0 + {}; let cjok = cj < N;\n\
+                 \x20 let cci = cj / (KH * KW); let cr = cj % (KH * KW);\n\
+                 \x20 let cdh = i32((cr / KW) * DH) - PH; let cdw = i32((cr % KW) * DW) - PW;",
+                pb.inner_expr()
+            );
+        }
+        _ => {}
     }
     let a_reg = if va { "vec4<f16>" } else { "f16" };
     let b_reg = if vb && !conv { "vec4<f16>" } else { "f16" };
@@ -350,13 +397,25 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
             let _ = writeln!(s, "  var acc{i}_{j} = coop_mat16x16<f32, C>();");
         }
     }
-    let _ = writeln!(s, "  let nt = (K + {bk}u - 1u) / {bk}u;");
+    let _ = writeln!(s, "  let nt = (K - kbeg + {bk}u - 1u) / {bk}u;");
 
     // --- global → registers (ordinary bounds-checked loads) --------------------------------------------------
     let mut load = String::new();
     for u in 0..pa.count {
         let (o, i) = (pa.outer(u), pa.inner_expr());
         let (idx, cond) = match (va, ta) {
+            // Weight gradient: k = (n, pixel) folds the batch into K and the gradient rows are `OHOW` long (a
+            // multiple of 4 for the vec4 form, so four consecutive k stay in one image).
+            (true, false) if mode == 3 => (
+                format!(
+                    "(offA + ((k0 + {i} * 4u) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + {i} * 4u) % OHOW) / 4u"
+                ),
+                format!("m0 + {o} < M && k0 + {i} * 4u < K"),
+            ),
+            (false, false) if mode == 3 => (
+                format!("offA + ((k0 + {i}) / OHOW) * SAN + (m0 + {o}) * OHOW + (k0 + {i}) % OHOW"),
+                format!("m0 + {o} < M && k0 + {i} < K"),
+            ),
             (true, false) => (
                 format!("offA / 4u + (m0 + {o}) * (lda / 4u) + k0 / 4u + {i}"),
                 format!("m0 + {o} < M && k0 + {i} * 4u < K"),
@@ -381,13 +440,34 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     }
     for u in 0..pb.count {
         let (o, i) = (pb.outer(u), pb.inner_expr());
-        let body = if conv {
+        let body = if mode == 1 {
             let _ = i;
             format!(
                 "    {{ let k = k0 + {o}; let ci = k / (KH * KW); let r = k % (KH * KW);\n\
                  \x20     let ih = cih0 + i32((r / KW) * DH); let iw = ciw0 + i32((r % KW) * DW);\n\
                  \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
                  \x20       rb{u} = MB[offB + (ci * IH + u32(ih)) * IW + u32(iw)];\n\
+                 \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
+            )
+        } else if mode == 2 {
+            format!(
+                "    {{ let k = k0 + {o}; let co = k / (KH * KW); let r = k % (KH * KW);\n\
+                 \x20     let th = cih - i32((r / KW) * DH); let tw = ciw - i32((r % KW) * DW);\n\
+                 \x20     var v = f16(0.0);\n\
+                 \x20     if (cjok && k < K && th >= 0 && tw >= 0) {{\n\
+                 \x20       let uh = u32(th); let uw = u32(tw);\n\
+                 \x20       if (uh % SH == 0u && uw % SW == 0u && uh / SH < OH && uw / SW < OW) {{\n\
+                 \x20         v = MB[offB + (co * OH + uh / SH) * OW + uw / SW];\n\
+                 \x20       }}\n\
+                 \x20     }}\n\
+                 \x20     rb{u} = v; }}\n"
+            )
+        } else if mode == 3 {
+            format!(
+                "    {{ let k = k0 + {o}; let nn = k / OHOW; let r = k % OHOW;\n\
+                 \x20     let ih = i32((r / OW) * SH) + cdh; let iw = i32((r % OW) * SW) + cdw;\n\
+                 \x20     if (cjok && k < K && ih >= 0 && ih < i32(IH) && iw >= 0 && iw < i32(IW)) {{\n\
+                 \x20       rb{u} = MB[offB + nn * SBN + (cci * IH + u32(ih)) * IW + u32(iw)];\n\
                  \x20     }} else {{ rb{u} = f16(0.0); }} }}\n"
             )
         } else {
@@ -505,13 +585,13 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     // The tensor-core ops must be in uniform control flow, and naga treats anything derived from the loop
     // counter as non-uniform. A `break` does not taint the statements after it, so each half starts with a
     // `break` check instead of being wrapped in an `if`.
-    let _ = writeln!(s, "  {{\n    let k0 = 0u;\n{load}  }}");
+    let _ = writeln!(s, "  {{\n    let k0 = kbeg;\n{load}  }}");
     let _ = writeln!(s, "  {{\n{}  }}", store(0));
     s.push_str("  workgroupBarrier();\n  var t = 0u;\n  loop {\n");
     for (cur, next) in [(0, 1), (1, 0)] {
         let _ = writeln!(
             s,
-            "   if (t >= nt) {{ break; }}\n   {{\n    let more = t + 1u < nt;\n    if (more) {{\n    let k0 = (t + 1u) * {bk}u;\n{load}    }}\n{}\
+            "   if (t >= nt) {{ break; }}\n   {{\n    let more = t + 1u < nt;\n    if (more) {{\n    let k0 = kbeg + (t + 1u) * {bk}u;\n{load}    }}\n{}\
              \x20   if (more) {{\n{}    }}\n    workgroupBarrier();\n   }}\n   t += 1u;",
             compute(cur),
             store(next)
@@ -817,7 +897,18 @@ pub(crate) fn encode_conv(
         .bool("TRANS_B", false)
         .bool("CHECK", check)
         .u32("CONV_MODE", 1);
+    spec = with_window(spec, d);
+    let Some(kernel) = build(ctx, spec) else { return Ok(false) };
+    let p = gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
+    let groups = grid(g, cfg, d.n * d.groups)?;
+    ctx.dispatch(&kernel, &[weight, x, bias, y], &p, groups)?;
+    Ok(true)
+}
+
+/// The conv window as the generator's specialisation constants.
+fn with_window(spec: Spec, d: &Conv2dDesc) -> Spec {
     let (kh, kw) = d.win.kernel;
+    let mut spec = spec;
     for (name, v) in [
         ("KH", kh as u32),
         ("KW", kw as u32),
@@ -828,17 +919,140 @@ pub(crate) fn encode_conv(
     ] {
         spec = spec.u32(name, v);
     }
-    let spec = spec.i32("PH", d.win.padding.0 as i32).i32("PW", d.win.padding.1 as i32);
-    let Some(kernel) = build(ctx, spec) else { return Ok(false) };
-    let p = gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
-    let groups = [
+    spec.i32("PH", d.win.padding.0 as i32).i32("PW", d.win.padding.1 as i32)
+}
+
+/// Workgroup grid of a GEMM view `g` with `layers` z-layers.
+fn grid(g: &GemmDesc, cfg: CoopConfig, layers: usize) -> Result<[u32; 3]> {
+    Ok([
         u32::try_from(g.n.div_ceil(cfg.bn as usize))
             .map_err(|_| GpuError::Limit("conv output too large".into()))?,
         u32::try_from(g.m.div_ceil(cfg.bm as usize))
-            .map_err(|_| GpuError::Limit("conv C_out too large".into()))?,
-        u32::try_from(d.n * d.groups).map_err(|_| GpuError::Limit("conv batch too large".into()))?,
-    ];
-    ctx.dispatch(&kernel, &[weight, x, bias, y], &p, groups)?;
+            .map_err(|_| GpuError::Limit("conv rows too large".into()))?,
+        u32::try_from(layers)
+            .ok()
+            .filter(|&z| z <= 65535)
+            .ok_or_else(|| GpuError::Limit("conv batch too large".into()))?,
+    ])
+}
+
+/// The input gradient of the f16 conv `d` on tensor cores (`CONV_MODE` 2, a transposed conv as implicit GEMM):
+/// `g` is the GEMM view built by [`super::conv::conv2d_backward_input`] (`M = C_in/groups`, `N = H·W`,
+/// `K = C_out/groups·KH·KW`), `wt` the weight permuted to `[groups, C_in/groups, C_out/groups, KH·KW]`, `grad` the
+/// output gradient and `gx` the f16 result. Returns `false` (nothing encoded) when the kernel failed to build.
+pub(crate) fn encode_conv_backward_input(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    g: &GemmDesc,
+    wt: &wgpu::Buffer,
+    grad: &wgpu::Buffer,
+    gx: &wgpu::Buffer,
+) -> Result<bool> {
+    let (oh, ow) = d.output()?;
+    let Some(cfg) = resolve(ctx, None, || pick_config(g.m, g.n, d.n * d.groups))? else { return Ok(false) };
+    let check = !g.m.is_multiple_of(cfg.bm as usize)
+        || !g.n.is_multiple_of(cfg.bn as usize)
+        || !g.k.is_multiple_of(cfg.bk as usize);
+    let spec = base_spec(g, DType::F16, cfg)
+        .bool("VEC_A", g.k.is_multiple_of(4))
+        .bool("VEC_B", false)
+        .bool("VEC_C", g.n.is_multiple_of(4))
+        .bool("TRANS_A", false)
+        .bool("TRANS_B", false)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 2);
+    let Some(kernel) = build(ctx, with_window(spec, d)) else { return Ok(false) };
+    let p = gemm_params(g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
+    ctx.dispatch(&kernel, &[wt, grad, ctx.dummy(), gx], &p, grid(g, cfg, d.n * d.groups)?)?;
+    Ok(true)
+}
+
+/// Tile configuration for a weight gradient (`M = C_out/groups` rows, `N = C_in/groups·KH·KW` columns): by `M`
+/// alone, since split-K supplies the occupancy.
+fn pick_config_weight_grad(m: usize, n: usize) -> CoopConfig {
+    match m {
+        0..=16 => CoopConfig::C16X256,
+        17..=32 => CoopConfig::C32X128,
+        _ if m.div_ceil(128) * 128 * 4 <= m * 5 && n >= 128 => CoopConfig::C128X128,
+        _ if n >= 128 => CoopConfig::C64X128,
+        _ => CoopConfig::C64X64,
+    }
+}
+
+/// Upper bound for split-K partial slabs, in f32 elements (64 MiB), as for the regular kernels.
+const MAX_PARTIAL_ELEMS: usize = 16 << 20;
+
+/// The weight gradient of the f16 conv `d` on tensor cores (`CONV_MODE` 3): `K = N·OH·OW` folds the batch into
+/// the reduction, `A` rows are output-gradient planes read across images, `B` the image gathered as a transposed
+/// im2col. `g` is the GEMM view built by [`super::conv::conv2d_backward_weight`]. `K` is split into chunks (one
+/// z-layer each, f32 partial slabs summed by a column reduction) when the weight alone has too few tiles to fill
+/// the GPU. `gw` is written as `out` (f32 or f16; partial sums stay f32). Returns `false` (nothing encoded) when
+/// the kernel failed to build.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_conv_backward_weight(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    g: &GemmDesc,
+    out: DType,
+    grad: &wgpu::Buffer,
+    x: &wgpu::Buffer,
+    gw: &wgpu::Buffer,
+) -> Result<bool> {
+    let (oh, ow) = d.output()?;
+    let Some(cfg) = resolve(ctx, None, || pick_config_weight_grad(g.m, g.n))? else { return Ok(false) };
+    let (ohow, np, wn) = (oh * ow, g.k, g.m * g.n * d.groups);
+    let bk = cfg.bk as usize;
+    // Aim for ~512 workgroups, each at least 16 K tiles deep.
+    let tiles = g.m.div_ceil(cfg.bm as usize) * g.n.div_ceil(cfg.bn as usize) * d.groups;
+    let want = 512usize
+        .div_ceil(tiles)
+        .min(np.div_ceil(16 * bk))
+        .min(MAX_PARTIAL_ELEMS / wn.max(1))
+        .min(65535 / d.groups)
+        .max(1);
+    let ks = np.div_ceil(want).next_multiple_of(bk);
+    let splits = np.div_ceil(ks);
+    // Partial slabs (and an f16 result) go through an f32 buffer and a column reduction / cast.
+    let tmp = if splits > 1 || out != DType::F32 {
+        Some(ctx.alloc(DType::F32.bytes(super::prod(&[splits, wn])?))?)
+    } else {
+        None
+    };
+    let target = tmp.as_ref().map_or(gw, |t| t.raw());
+    let check = !g.m.is_multiple_of(cfg.bm as usize)
+        || !g.n.is_multiple_of(cfg.bn as usize)
+        || !np.is_multiple_of(bk);
+    let spec = base_spec(g, DType::F32, cfg)
+        .bool("VEC_A", ohow.is_multiple_of(4))
+        .bool("VEC_B", false)
+        .bool("VEC_C", g.n.is_multiple_of(4))
+        .bool("TRANS_A", false)
+        .bool("TRANS_B", false)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 3)
+        .bool("SPLIT", splits > 1);
+    let Some(kernel) = build(ctx, with_window(spec, d)) else { return Ok(false) };
+    let p = gemm_params(g)?
+        .at(24)
+        .uz(d.h)?
+        .uz(d.w)?
+        .uz(oh)?
+        .uz(ow)?
+        .uz(splits)?
+        .uz(ks)?
+        .uz(wn)?
+        .uz(ohow)?
+        .uz(d.c_out * ohow)?
+        .uz(d.c_in * d.h * d.w)?;
+    ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), target], &p, grid(g, cfg, d.groups * splits)?)?;
+    if let Some(t) = &tmp {
+        if splits > 1 {
+            let op = super::reduce::ReduceOp::Sum;
+            super::reduce::reduce_as(ctx, op, (t.raw(), DType::F32), (gw, out), 1, splits, wn)?;
+        } else {
+            super::layout::cast(ctx, t.raw(), gw, wn, true)?;
+        }
+    }
     Ok(true)
 }
 

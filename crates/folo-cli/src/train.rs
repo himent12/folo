@@ -20,6 +20,11 @@ use crate::output::{CliError, ExitCode, Out};
 pub const STOP_FILE: &str = "stop";
 
 pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
+    // Mixed precision needs tensor cores, which the GPU device must be created with: ask before anything creates
+    // the shared context (also when resuming a mixed-precision run without repeating --amp).
+    if args.amp || args.resume.as_deref().is_some_and(checkpoint_uses_amp) {
+        folo_gpu::context::request_tensor_cores();
+    }
     crate::engine::init_device(&args.device);
     let stop = Arc::new(AtomicBool::new(false));
     watch_ctrl_c(stop.clone());
@@ -46,6 +51,13 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
     };
     finish(&summary, &run_dir, trainer.config(), out);
     Ok(())
+}
+
+/// Whether the training checkpoint at `ckpt` belongs to a mixed-precision run (`folo.train` has `amp: true`);
+/// `false` for anything unreadable (the resume then reports the problem).
+fn checkpoint_uses_amp(ckpt: &Path) -> bool {
+    let Ok(file) = folo_nn::io::ModelFile::open(ckpt) else { return false };
+    file.checkpoint().is_some_and(|c| c.train.get("amp").and_then(|v| v.as_bool()) == Some(true))
 }
 
 /// Removes the folder of a new run that failed before its first checkpoint, so nothing half-made is left behind
@@ -153,6 +165,7 @@ fn start(
         lr0: folo_vision::train::f32_decimal(args.lr0),
         lrf: args.lrf,
         cos_lr: args.cos_lr,
+        amp: args.amp,
         warmup_epochs: args.warmup_epochs,
         patience: args.patience,
         seed: args.seed,
@@ -297,6 +310,7 @@ fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Result<(), CliE
             "lr0" => (field("lr0"), json!(folo_vision::train::f32_decimal(args.lr0))),
             "lrf" => (field("lrf"), json!(args.lrf)),
             "cos_lr" => (field("cos_lr"), json!(args.cos_lr)),
+            "amp" => (field("amp"), json!(args.amp)),
             "warmup_epochs" => (field("warmup_epochs"), json!(args.warmup_epochs)),
             "patience" => (field("patience"), json!(args.patience)),
             "seed" => (field("seed"), json!(args.seed)),

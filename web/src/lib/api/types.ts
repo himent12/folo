@@ -39,6 +39,19 @@ export interface SystemInfo {
   data_dir?: string;
   /** Optional API features the server implements, e.g. `export_onnx_switches`; empty or absent from older ones. */
   features?: string[];
+  /** What `device: auto` runs can use (f16, tensor cores, amp); absent from older servers. */
+  capabilities?: Capabilities;
+}
+
+/** `/api/system`'s `capabilities` (docs/API.md). A `reason` is null exactly when the feature is usable. */
+export interface Capabilities {
+  /** What `device: auto` resolves to: `gpu:0` or `cpu`. */
+  device: string;
+  /** f16 inference runs in half precision (else it falls back to f32). */
+  shader_f16: boolean;
+  tensor_cores: { available: boolean; enabled: boolean; reason: string | null };
+  /** Mixed-precision training (`TrainConfig.amp`). */
+  amp: { available: boolean; reason: string | null };
 }
 
 // ---------- Datasets ----------
@@ -270,6 +283,8 @@ export interface TrainConfig {
   weights: string | null;
   augment: Augment;
   seed: number;
+  /** Mixed-precision training (docs/MODEL.md §8.8); missing from older servers (= false). */
+  amp?: boolean;
 }
 
 export interface Run {
@@ -289,6 +304,8 @@ export interface Run {
   device: string;
   model_id: string | null;
   error: string | null;
+  /** Stable error code when failed (e.g. `not_supported`); missing otherwise and from older servers. */
+  error_code?: string;
 }
 
 export interface Loss {
@@ -360,7 +377,7 @@ export interface RunLogs {
 /** SSE events on GET /api/runs/{id}/events, keyed by the SSE `event:` name. */
 export interface RunEventMap {
   /** steps_per_epoch is 0 until the run is built; both are absent from older servers. */
-  status: { status: RunStatus; error: string | null; steps_per_epoch?: number; epochs?: number };
+  status: { status: RunStatus; error: string | null; steps_per_epoch?: number; epochs?: number; error_code?: string };
   step: Step;
   epoch: Epoch;
   log: LogLine;

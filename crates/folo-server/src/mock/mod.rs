@@ -14,10 +14,10 @@ use std::sync::{Arc, RwLock};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Arch, BBox, ClassMetrics, Dataset, DatasetFormat, DatasetIssue, ExportFormat, ExportResult, ExportSpec,
-    GpuBackend, GpuInfo, ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval,
-    ModelMetrics, PrCurve, PredictResponse, RegisterDataset, Run, RunSamples, Sample, ScoredBox, Split,
-    Splits, SyntheticDataset, TrainConfig,
+    AmpSupport, Arch, BBox, Capabilities, ClassMetrics, Dataset, DatasetFormat, DatasetIssue, ExportFormat,
+    ExportResult, ExportSpec, GpuBackend, GpuInfo, ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine,
+    Model, ModelEval, ModelMetrics, PrCurve, PredictResponse, RegisterDataset, Run, RunSamples, Sample,
+    ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, TrainConfig,
 };
 
 use crate::error::{Error, Result};
@@ -475,7 +475,77 @@ pub struct MockStore {
     models: RwLock<Vec<StaticModel>>,
     runs: RwLock<Vec<(Arc<SimRun>, Arc<DatasetEntry>)>>,
     weights: weights::MockWeights,
+    tensor_cores: MockTensorCores,
 }
+
+/// Environment variable that picks the mock GPU's tensor-core state ([`MockTensorCores`]), so front ends can test
+/// every state of the Mixed precision switch: `on` (the default), `off` or `none` (also `0` / `false`).
+pub const ENV_MOCK_TENSOR_CORES: &str = "FOLO_MOCK_TENSOR_CORES";
+
+/// The mock GPU's tensor cores, as `/api/system`'s `capabilities` reports them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MockTensorCores {
+    /// The RTX 4080 SUPER through Vulkan with `--tensor-cores`: tensor cores and `amp` available.
+    #[default]
+    On,
+    /// The same adapter without `--tensor-cores`: available but not enabled, so no `amp`.
+    Off,
+    /// The adapter through DX12, where wgpu has no cooperative matrices: neither tensor cores nor `amp`.
+    None,
+}
+
+impl MockTensorCores {
+    /// [`ENV_MOCK_TENSOR_CORES`], or [`MockTensorCores::On`] when it is unset or unrecognised.
+    pub fn from_env() -> MockTensorCores {
+        Self::parse(&std::env::var(ENV_MOCK_TENSOR_CORES).unwrap_or_default())
+    }
+
+    /// An [`ENV_MOCK_TENSOR_CORES`] value (case-insensitive); anything unrecognised is [`MockTensorCores::On`].
+    pub fn parse(s: &str) -> MockTensorCores {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" => MockTensorCores::Off,
+            "none" | "0" | "false" | "no" => MockTensorCores::None,
+            _ => MockTensorCores::On,
+        }
+    }
+
+    fn backend(self) -> GpuBackend {
+        if self == MockTensorCores::None { GpuBackend::Dx12 } else { GpuBackend::Vulkan }
+    }
+
+    /// The capabilities the real server reports in this state.
+    fn capabilities(self) -> Capabilities {
+        let status = match self {
+            MockTensorCores::On => None,
+            MockTensorCores::Off => Some(folo_gpu::context::TENSOR_CORES_NOT_REQUESTED.to_string()),
+            MockTensorCores::None => {
+                Some(format!("off: {MOCK_GPU} (Dx12) has no cooperative matrices in wgpu"))
+            }
+        };
+        let amp = match &status {
+            None => AmpSupport { available: true, reason: None },
+            Some(s) => AmpSupport {
+                available: false,
+                reason: Some(
+                    folo_vision::train::amp_not_supported(&format!("gpu:0 has tensor cores {s}")).to_string(),
+                ),
+            },
+        };
+        Capabilities {
+            device: "gpu:0".into(),
+            shader_f16: true,
+            tensor_cores: TensorCoreSupport {
+                available: self != MockTensorCores::None,
+                enabled: status.is_none(),
+                reason: status,
+            },
+            amp,
+        }
+    }
+}
+
+/// The mock GPU.
+const MOCK_GPU: &str = "NVIDIA GeForce RTX 4080 SUPER";
 
 impl Default for MockStore {
     fn default() -> Self {
@@ -733,7 +803,14 @@ impl MockStore {
             models: RwLock::new(models),
             runs: RwLock::new(runs),
             weights: weights::MockWeights::new(),
+            tensor_cores: MockTensorCores::from_env(),
         }
+    }
+
+    /// The tensor-core state `/api/system`'s `capabilities` reports (default: [`MockTensorCores::from_env`]).
+    pub fn with_tensor_cores(mut self, tensor_cores: MockTensorCores) -> MockStore {
+        self.tensor_cores = tensor_cores;
+        self
     }
 
     fn dataset(&self, id: &str) -> Result<Arc<DatasetEntry>> {
@@ -830,11 +907,15 @@ impl Store for MockStore {
         let util = if busy { 0.9 + 0.06 * noise(&[t, 1]) } else { 0.03 + 0.02 * noise(&[t, 2]).abs() };
         vec![GpuInfo {
             ordinal: 0,
-            name: "NVIDIA GeForce RTX 4080 SUPER".into(),
-            backend: GpuBackend::Vulkan,
+            name: MOCK_GPU.into(),
+            backend: self.tensor_cores.backend(),
             memory_bytes: 17_171_480_576,
             util: Some((util * 100.0).round() / 100.0),
         }]
+    }
+
+    fn capabilities(&self) -> Option<Capabilities> {
+        Some(self.tensor_cores.capabilities())
     }
 
     fn list_datasets(&self) -> Result<Vec<Dataset>> {

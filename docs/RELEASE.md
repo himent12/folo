@@ -36,8 +36,9 @@ with a pre-release suffix (`0.2.0-rc.1`) makes a pre-release.
    The workflow runs again for the tag and creates the draft release `FOLO 0.2.0` with generated notes and every
    asset.
 4. **Review the draft** (`gh release view v0.2.0`, or Releases on GitHub):
-   - the assets: three CLI archives (macOS may be missing if its optional build failed; the run's summary says so),
-     `folo-desktop-x86_64-pc-windows-msvc.zip`, a `.sha256` per archive and `SHA256SUMS`;
+   - the assets: three CLI archives (macOS may be missing if its optional build failed or was skipped, see
+     [Runners](#runners); the run's summary says so), `folo-desktop-x86_64-pc-windows-msvc.zip`, a `.sha256` per
+     archive and `SHA256SUMS`;
    - the notes: edit them into a short summary of what changed (`gh release edit v0.2.0 --notes-file notes.md`);
    - optionally download an archive and run the [checks below](#checking-a-build).
 5. **Publish**: `gh release edit v0.2.0 --draft=false` (or "Publish release" on GitHub). Only now do
@@ -53,9 +54,9 @@ rebuilt.
 | how | what runs | creates a release |
 |---|---|---|
 | a PR touching the workflow, the install scripts, `scripts/build-wasm.sh` or the build scripts behind `--version` and `embed-web` | everything except macOS | no |
-| `gh workflow run release.yml --ref <branch or tag>` (Actions → release → Run workflow) | everything; `macos` (default on) adds the macOS build | no |
+| `gh workflow run release.yml --ref <branch or tag>` (Actions → release → Run workflow) | everything; `macos` (default on) adds the macOS build unless `FOLO_RELEASE_MACOS` is `false` | no |
 | the same with `-f tag=vX.Y.Z` | also the tag check and the notes preview | no |
-| pushing a tag `v*` | everything | a draft |
+| pushing a tag `v*` | everything (macOS unless `FOLO_RELEASE_MACOS` is `false`) | a draft |
 
 A dispatch runs the workflow file of the ref it is given, so a branch can rehearse changes to the workflow itself.
 To rehearse a commit that is not on a branch, put a throwaway tag on it that does not start with `v` (pushing a `v*`
@@ -69,17 +70,55 @@ git push origin :refs/tags/dryrun-0.2.0 && git tag -d dryrun-0.2.0     # once th
 ## What the workflow builds
 | job | runner | output |
 |---|---|---|
-| `plan` | ubuntu-latest | the version, the tag check (tag builds, and dispatches with `tag`) and the build matrix |
-| `web` | ubuntu-latest | `web/dist`: folo-wasm first (`scripts/build-wasm.sh` with SIMD128, wasm-bindgen-cli at the `Cargo.lock` version, binaryen's `wasm-opt` pinned by version and checksum), then `npm ci && npm run build`; fails unless `dist/folo-wasm/` has the module. Shared with every CLI build |
-| `cli` | windows-latest, ubuntu-22.04, macos-latest | `folo-<target>.zip` (Windows) / `.tar.gz`: a `folo-<target>/` folder with the binary (built with `--features embed-web`), `README.md` and the licenses |
-| `desktop` | windows-latest | `folo-desktop-x86_64-pc-windows-msvc.zip` with `folo-desktop.exe`, built with `--profile dist` (thin LTO, one codegen unit; apps/desktop's plain `release` profile is the faster-building development one) (skipped while `apps/desktop/Cargo.toml` does not exist) |
-| `release` | ubuntu-latest | checks every `.sha256`, writes `SHA256SUMS`, uploads everything as the `release-<version>` artifact, creates the draft release (tags only) or previews it (dispatches with `tag`) |
-| `install-test` | ubuntu-22.04, windows-latest | runs `scripts/install.sh` / `scripts/install.ps1` against those assets (`--base-url`), checks the installed `folo` (and `folo-desktop`), and checks that a tampered archive is refused |
+| `plan` | Linux | the version, the tag check (tag builds, and dispatches with `tag`) and the build matrix |
+| `web` | Linux | `web/dist`: folo-wasm first (`scripts/build-wasm.sh` with SIMD128, wasm-bindgen-cli at the `Cargo.lock` version, binaryen's `wasm-opt` pinned by version and checksum), then `npm ci && npm run build`; fails unless `dist/folo-wasm/` has the module. Shared with every CLI build |
+| `cli` | Windows, Linux (built in an `ubuntu:22.04` container), macOS (hosted `macos-latest`) | `folo-<target>.zip` (Windows) / `.tar.gz`: a `folo-<target>/` folder with the binary (built with `--features embed-web`), `README.md` and the licenses |
+| `desktop` | Windows | `folo-desktop-x86_64-pc-windows-msvc.zip` with `folo-desktop.exe`, built with `--profile dist` (thin LTO, one codegen unit; apps/desktop's plain `release` profile is the faster-building development one) (skipped while `apps/desktop/Cargo.toml` does not exist) |
+| `release` | Linux | checks every `.sha256`, writes `SHA256SUMS`, uploads everything as the `release-<version>` artifact, creates the draft release (tags only) or previews it (dispatches with `tag`) |
+| `install-test` | Linux, Windows | runs `scripts/install.sh` / `scripts/install.ps1` against those assets (`--base-url`), checks the installed `folo` (and `folo-desktop`), checks that a tampered archive is refused, and runs the installed Linux `folo` in an `ubuntu:22.04` container, where it must start without loader warnings |
 
-Targets: `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` (built on Ubuntu 22.04 so it runs on glibc 2.35 and
-newer) and `aarch64-apple-darwin` (macOS 11+). The macOS build is optional: it can fail without blocking the
-release, and tag builds skip it when the repository variable `FOLO_RELEASE_MACOS` is `false`. The desktop job is
-separate for the same reason; the release goes out with whatever desktop build succeeded.
+Targets: `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` (runs on glibc 2.35 and newer, see below) and
+`aarch64-apple-darwin` (macOS 11+).
+The macOS build is optional: it can fail without blocking the release, and tag builds and dispatches skip it when
+the repository variable `FOLO_RELEASE_MACOS` is `false`. The desktop job is separate for the same reason; the
+release goes out with whatever desktop build succeeded.
+
+## Runners
+The Linux and Windows jobs use the runners of `ci.yml` (docs/CI.md): the repository variables `RUNS_ON_LINUX` and
+`RUNS_ON_WINDOWS` (JSON `runs-on` values) select FOLO's self-hosted runners, a boat.dev Ubuntu 24.04 sandbox and the
+dev PC. When a variable is unset they fall back to GitHub-hosted runners: `ubuntu-22.04` for the Linux CLI build and
+the Linux install test, `ubuntu-latest` for the other Linux jobs, `windows-latest` for Windows. The `plan` job
+writes the chosen `runs-on` into each CLI matrix entry, and its summary lists them.
+
+- **macOS has no self-hosted runner**: the macOS build always runs on GitHub-hosted `macos-latest`. Set
+  `FOLO_RELEASE_MACOS` to `false` (`gh variable set FOLO_RELEASE_MACOS --body false`) whenever hosted runners are
+  unavailable, so tag builds and dispatches skip it instead of queueing a job GitHub refuses to start. **GitHub-hosted
+  billing (currently blocked: "recent account payments have failed or your spending limit needs to be increased")
+  must be fixed before macOS release builds can run**; until then releases ship without the macOS archive, so
+  `scripts/install.sh` fails on macOS and macOS users build from source.
+- **Clean builds.** Every release build starts from an empty `CARGO_TARGET_DIR` in `$RUNNER_TEMP` (the runner
+  deletes it after the job), on hosted and self-hosted runners alike, and there is no `rust-cache`. Release builds
+  are rare and their binaries ship, so they never reuse CI's persistent target dirs: nothing stale (an older
+  embedded Studio, another commit's `FOLO_GIT_SHA`, a different profile's build-script output) can reach an asset.
+  The cost is a full build per run (about as long as a hosted runner took).
+- **Tools.** The jobs install what they need: the Rust toolchain and targets (`dtolnay/rust-toolchain`),
+  wasm-bindgen-cli at the `Cargo.lock` version (`taiki-e/install-action`, checksummed), binaryen's `wasm-opt`
+  (pinned and checksummed) and Node 22 (`actions/setup-node`). They rely on the runner for `bash`, `curl`, `tar`,
+  `sha256sum`, `jq` (Linux), `objdump` (Linux), `docker` (Linux: the Ubuntu 22.04 build and check, with network
+  access for apt and crates.io) and `gh` (Linux, the `release` job); the boat sandboxes and the hosted images have them. Windows zips are written with Windows' own
+  `tar.exe` (bsdtar), so 7-Zip is not needed.
+- **glibc 2.35.** The Linux CLI is linked inside an `ubuntu:22.04` container (pinned by digest; `gcc` and
+  `libc6-dev` from apt, the job's Rust toolchain mounted read-only, cargo running as the runner's user), so it gets
+  Ubuntu 22.04's glibc whatever the runner runs. Linked on the 24.04 sandboxes, std's weak `pidfd_spawnp` /
+  `pidfd_getpid` imports carry a `GLIBC_2.39` version, and the loader then prints ``weak version `GLIBC_2.39' not
+  found`` on every start on older systems. Two checks hold the line: the `cli` job fails when `objdump -T` shows any
+  symbol version above 2.35 (weak ones included), and `install-test` runs the installed binary in `ubuntu:22.04` and
+  fails if `folo --version` writes anything to stderr.
+- **Windows retries.** The Windows `cargo build` steps run through `tools/ci-retry.sh`, which retries once on the
+  self-hosted dev PC when rustc crashes (docs/CI.md, Unstable self-hosted Windows host).
+- **Isolation.** The CLI smoke test and the install test use a throwaway `FOLO_HOME` in `$RUNNER_TEMP`, so they
+  never read the runner account's own `~/.folo` (on the dev PC, the developer's). The `release` job runs with a
+  `contents: write` token on the self-hosted Linux runner; docs/CI.md, Security, applies.
 
 Each CLI build is smoke-tested before packaging: `folo --version`; `folo doctor --json` must report the embedded
 Studio (`web_source: embedded`) with folo-wasm in it (`web_folo_wasm: true`); `folo serve --mock --port 0` must

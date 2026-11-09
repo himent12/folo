@@ -15,7 +15,10 @@
 //! ([`Backend::computes_f16`]): every forward op folo-core lets `F16` through takes f16 operands and returns
 //! f16 results. Storage is f16, the arithmetic f32: GEMM and conv accumulate in f32, reductions and softmax
 //! accumulate in f32, elementwise ops widen on load and round once on the store. Average pooling and the
-//! arg-reductions run on an f32 copy. Gradient kernels stay f32-only (f16 is for inference) and refuse f16 data.
+//! arg-reductions run on an f32 copy. The gradients a mixed-precision training step needs take f16 too: conv2d
+//! input and weight gradients (on tensor cores when the context has them on; the weight gradient can be written as
+//! f32, [`Backend::conv2d_backward_weight_as`]), the fused BatchNorm on f16 data with f32 parameters and statistics,
+//! and the max-pooling and nearest-upsampling gradients. The other gradient kernels refuse f16 data.
 //!
 //! Differences from the CPU backend: index ops cannot report out-of-range indices without a host round trip,
 //! so `index_select` / `gather` produce zeros and `index_add` / `scatter_add` skip such entries; the
@@ -254,7 +257,7 @@ fn kdt(d: CoreDType) -> crate::DType {
     if d == CoreDType::F16 { crate::DType::F16 } else { crate::DType::F32 }
 }
 
-/// Refuses f16 data in ops with f32 kernels only: the gradient kernels (half precision is for inference).
+/// Refuses f16 data in ops with f32 kernels only (the gradients mixed-precision training does not use).
 fn f32_only(v: &View<'_>, op: &'static str) -> Result<()> {
     match v.storage.dtype() {
         CoreDType::F16 => Err(Error::UnsupportedDType { op, dtype: CoreDType::F16 }),
@@ -368,10 +371,11 @@ impl GpuBackend {
         }
     }
 
-    fn bn_desc(&self, x: &Shape, act: Option<UnaryOp>, op: &'static str) -> Result<BnDesc> {
+    /// The BatchNorm problem of `x` (f32 or f16 data; the parameters and statistics are f32).
+    fn bn_desc(&self, x: &View<'_>, act: Option<UnaryOp>, op: &'static str) -> Result<BnDesc> {
         let act = bn_act(act).ok_or(Error::NotSupported { op, backend: BACKEND_NAME })?;
-        let (n, c, h, w) = nchw(x);
-        Ok(BnDesc { n, c, hw: h * w, act })
+        let (n, c, h, w) = nchw(x.shape());
+        Ok(BnDesc { n, c, hw: h * w, act, dtype: kdt(x.storage.dtype()) })
     }
 
     fn alloc(&self, dtype: CoreDType, len: usize) -> Result<GpuBuffer> {
@@ -748,13 +752,13 @@ impl Backend for GpuBackend {
         input_shape: &Shape,
         p: &Conv2dParams,
     ) -> Result<Storage> {
-        f32_only(&grad, "conv2d_backward_input")?;
-        let d = self.conv_desc(input_shape, w.shape(), p, CoreDType::F32);
+        let dtype = grad.storage.dtype();
+        let d = self.conv_desc(input_shape, w.shape(), p, dtype);
         let len = input_shape.numel();
-        let out = self.alloc(CoreDType::F32, len)?;
+        let out = self.alloc(dtype, len)?;
         let (gd, wd) = (self.dense(&grad)?, self.dense(&w)?);
         conv::conv2d_backward_input(&self.ctx, &d, gd.raw(), wd.raw(), out.raw()).core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn conv2d_backward_weight(
@@ -764,13 +768,25 @@ impl Backend for GpuBackend {
         weight_shape: &Shape,
         p: &Conv2dParams,
     ) -> Result<Storage> {
-        f32_only(&x, "conv2d_backward_weight")?;
-        let d = self.conv_desc(x.shape(), weight_shape, p, CoreDType::F32);
+        let dtype = x.storage.dtype();
+        self.conv2d_backward_weight_as(x, grad, weight_shape, p, dtype)
+    }
+
+    fn conv2d_backward_weight_as(
+        &self,
+        x: View<'_>,
+        grad: View<'_>,
+        weight_shape: &Shape,
+        p: &Conv2dParams,
+        out_dtype: CoreDType,
+    ) -> Result<Storage> {
+        let d = self.conv_desc(x.shape(), weight_shape, p, x.storage.dtype());
         let len = weight_shape.numel();
-        let out = self.alloc(CoreDType::F32, len)?;
+        let out = self.alloc(out_dtype, len)?;
         let (xd, gd) = (self.dense(&x)?, self.dense(&grad)?);
-        conv::conv2d_backward_weight(&self.ctx, &d, xd.raw(), gd.raw(), out.raw()).core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        conv::conv2d_backward_weight_as(&self.ctx, &d, xd.raw(), gd.raw(), out.raw(), kdt(out_dtype))
+            .core()?;
+        Ok(self.wrap(out_dtype, len, out))
     }
 
     fn max_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<(Storage, Storage)> {
@@ -801,14 +817,23 @@ impl Backend for GpuBackend {
                 got: indices.storage.dtype(),
             });
         }
-        f32_only(&grad, "max_pool2d_backward")?;
+        let dtype = grad.storage.dtype();
         let (n, c, h, w) = nchw(input_shape);
         let len = input_shape.numel();
-        let out = self.alloc(CoreDType::F32, len)?;
+        let out = self.alloc(dtype, len)?;
         let (gd, id) = (self.dense(&grad)?, self.dense(&indices)?);
-        pool_grad::max_pool2d_backward(&self.ctx, gd.raw(), id.raw(), out.raw(), (n * c, h, w), &pool2d(p))
-            .core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        let planes = (n * c, h, w);
+        pool_grad::max_pool2d_backward(
+            &self.ctx,
+            gd.raw(),
+            id.raw(),
+            out.raw(),
+            planes,
+            &pool2d(p),
+            kdt(dtype),
+        )
+        .core()?;
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn avg_pool2d(&self, x: View<'_>, p: &Pool2dParams) -> Result<Storage> {
@@ -874,11 +899,11 @@ impl Backend for GpuBackend {
     }
 
     fn upsample_nearest2d_backward(&self, grad: View<'_>, scale: [usize; 2]) -> Result<Storage> {
-        f32_only(&grad, "upsample_nearest2d_backward")?;
+        let dtype = grad.storage.dtype();
         let (n, c, oh, ow) = nchw(grad.shape());
         let (h, w) = (oh / scale[0], ow / scale[1]);
         let len = n * c * h * w;
-        let out = self.alloc(CoreDType::F32, len)?;
+        let out = self.alloc(dtype, len)?;
         let gd = self.dense(&grad)?;
         pool_grad::upsample_nearest2d_backward(
             &self.ctx,
@@ -886,9 +911,10 @@ impl Backend for GpuBackend {
             out.raw(),
             (n * c, h, w),
             (scale[0], scale[1]),
+            kdt(dtype),
         )
         .core()?;
-        Ok(self.wrap(CoreDType::F32, len, out))
+        Ok(self.wrap(dtype, len, out))
     }
 
     fn index_select(&self, x: View<'_>, dim: usize, idx: View<'_>) -> Result<Storage> {
@@ -983,13 +1009,11 @@ impl Backend for GpuBackend {
         act: Option<UnaryOp>,
         running: Option<RunningUpdate<'_>>,
     ) -> Result<(Storage, Storage, Storage)> {
-        let d = self.bn_desc(x.shape(), act, "batch_norm_act")?;
+        let d = self.bn_desc(&x, act, "batch_norm_act")?;
         let len = x.layout.numel();
-        let (y, mean, invstd) = (
-            self.alloc(CoreDType::F32, len)?,
-            self.alloc(CoreDType::F32, d.c)?,
-            self.alloc(CoreDType::F32, d.c)?,
-        );
+        let dtype = x.storage.dtype();
+        let (y, mean, invstd) =
+            (self.alloc(dtype, len)?, self.alloc(CoreDType::F32, d.c)?, self.alloc(CoreDType::F32, d.c)?);
         let (xd, wd, bd) = (self.dense(&x)?, self.dense(&weight)?, self.dense(&bias)?);
         let run = match &running {
             Some(r) => Some(BnRunning {
@@ -1013,7 +1037,7 @@ impl Backend for GpuBackend {
         )
         .core()?;
         Ok((
-            self.wrap(CoreDType::F32, len, y),
+            self.wrap(dtype, len, y),
             self.wrap(CoreDType::F32, d.c, mean),
             self.wrap(CoreDType::F32, d.c, invstd),
         ))
@@ -1029,13 +1053,11 @@ impl Backend for GpuBackend {
         invstd: View<'_>,
         act: Option<UnaryOp>,
     ) -> Result<(Storage, Storage, Storage)> {
-        let d = self.bn_desc(x.shape(), act, "batch_norm_act_backward")?;
+        let d = self.bn_desc(&x, act, "batch_norm_act_backward")?;
         let len = x.layout.numel();
-        let (dx, dw, db) = (
-            self.alloc(CoreDType::F32, len)?,
-            self.alloc(CoreDType::F32, d.c)?,
-            self.alloc(CoreDType::F32, d.c)?,
-        );
+        let dtype = x.storage.dtype();
+        let (dx, dw, db) =
+            (self.alloc(dtype, len)?, self.alloc(CoreDType::F32, d.c)?, self.alloc(CoreDType::F32, d.c)?);
         let (xd, gd) = (self.dense(&x)?, self.dense(&grad)?);
         let (wd, bd, md, id) =
             (self.dense(&weight)?, self.dense(&bias)?, self.dense(&mean)?, self.dense(&invstd)?);
@@ -1054,7 +1076,7 @@ impl Backend for GpuBackend {
         )
         .core()?;
         Ok((
-            self.wrap(CoreDType::F32, len, dx),
+            self.wrap(dtype, len, dx),
             self.wrap(CoreDType::F32, d.c, dw),
             self.wrap(CoreDType::F32, d.c, db),
         ))
@@ -1099,6 +1121,11 @@ impl Backend for GpuBackend {
         let s0 = state.first().map(|s| self.storage_buf(s)).transpose()?;
         let s1 = state.get(1).map(|s| self.storage_buf(s)).transpose()?;
         optim::optimizer_step(&self.ctx, &u, p, gd.raw(), s0, s1, n).core()
+    }
+
+    fn unscale_check(&self, x: &mut Storage, n: usize, factor: f32, flag: &mut Storage) -> Result<()> {
+        let (xb, fb) = (self.storage_buf(x)?, self.storage_buf(flag)?);
+        optim::unscale_check(&self.ctx, xb, n, factor, fb).core()
     }
 
     fn letterbox_rgb8(

@@ -4,6 +4,7 @@
 //! adapter (CI runners have none). Software adapters (WARP, llvmpipe) are skipped too unless
 //! `FOLO_GPU_TEST_SOFTWARE=1`, because shader compilation there is slow. Data comes from a seeded RNG.
 
+mod amp;
 pub(crate) mod backend;
 mod backend_net;
 mod conv;
