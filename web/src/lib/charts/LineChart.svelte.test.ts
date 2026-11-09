@@ -207,3 +207,81 @@ describe('LineChart layering and ticks', () => {
     unmount(c);
   });
 });
+
+describe('LineChart round 18', () => {
+  const mountAt = (props: Record<string, unknown>, w = 640) => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const c = mount(LineChart, { target, props: props as never });
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: w });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flushSync();
+    return { target, c };
+  };
+  const yTicks = (target: Element) => [...target.querySelectorAll('.ticks text[text-anchor="end"]')].map((t) => t.textContent);
+  const pts = (f: (x: number) => number) => Array.from({ length: 30 }, (_, x) => ({ x, y: f(x) }));
+
+  it('draws 3–5 y ticks in nice steps on a domain the caller fixed, with the decimals the step needs', () => {
+    const { target, c } = mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => x / 30) }], label: 't', yDomain: [0, 1] });
+    expect(yTicks(target)).toEqual(['0.00', '0.25', '0.50', '0.75', '1.00']);
+    unmount(c);
+  });
+
+  it('thins a log axis to at most five ticks: the ends and the decades', () => {
+    const { target, c } = mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => 0.3 + x / 3) }], label: 't', yLog: true, yDomain: [0.2, 10] });
+    expect(yTicks(target)).toEqual(['0.2', '1', '10']);
+    unmount(c);
+  });
+
+  it('labels short-named lines at their ends even on a phone, and paints a front line over a dotted one', () => {
+    const series = [
+      { id: 'box', label: 'box', color: 'orange', front: true, points: pts((x) => 1 - x / 60) },
+      { id: 'dfl', label: 'dfl', color: 'teal', pattern: 'dot' as const, points: pts((x) => 1 - x / 61) },
+      { id: 'tot', label: 'Total, EMA 0.9', endLabel: 'total', color: 'white', emphasis: true, points: pts((x) => 3 - x / 30) },
+      { id: 'raw', label: 'raw', color: 'white', ghost: true, points: pts((x) => 3 - x / 31) },
+    ];
+    const { target, c } = mountAt({ series, label: 'loss', endLabels: true }, 340);
+    const labels = [...target.querySelectorAll('.end-label')].map((t) => t.textContent).sort();
+    expect(labels).toEqual(['box', 'dfl', 'total']);
+    const strokes = [...target.querySelectorAll('path.line')].map((p) => (p as SVGElement).style.stroke);
+    expect(strokes.indexOf('orange')).toBeGreaterThan(strokes.indexOf('teal'));
+    expect(strokes.at(-1)).toBe('white');
+    unmount(c);
+  });
+
+  it('keeps long labels off a narrow plot', () => {
+    const series = [{ id: 'a', label: 'fasteners-s', color: 'red', points: pts((x) => x / 30) }];
+    const { target, c } = mountAt({ series, label: 'cmp', endLabels: true }, 340);
+    expect(target.querySelector('.end-label')).toBeNull();
+    unmount(c);
+  });
+
+  it('hints at the arrow keys while the plot has keyboard focus, until a value is read out', async () => {
+    const props = $state({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => x / 30) }], label: 't', legendNote: 'Last', hint: null as string | null });
+    const { target, c } = mountAt(props);
+    const svg = target.querySelector('svg[role=img]') as SVGSVGElement;
+    // happy-dom has no :focus-visible; a keyboard focus is what it would match.
+    svg.matches = ((sel: string) => sel === ':focus-visible') as unknown as typeof svg.matches;
+    svg.dispatchEvent(new FocusEvent('focus'));
+    flushSync();
+    expect(target.querySelector('.legend .note')!.textContent).toBe('← → to inspect');
+    svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    flushSync();
+    await tick();
+    expect(target.querySelector('.legend .note')!.textContent).toMatch(/^\d+$/);
+    svg.dispatchEvent(new FocusEvent('blur'));
+    flushSync();
+    expect(target.querySelector('.legend .note')!.textContent).toBe('Last');
+    unmount(c);
+  });
+
+  it('shows no hint on a mouse focus or hover', () => {
+    const { target, c } = mountAt({ series: [{ id: 'a', label: 'a', color: 'red', points: pts((x) => x / 30) }], label: 't', legendNote: 'Last' });
+    const svg = target.querySelector('svg[role=img]') as SVGSVGElement;
+    svg.matches = (() => false) as unknown as typeof svg.matches;
+    svg.dispatchEvent(new FocusEvent('focus'));
+    flushSync();
+    expect(target.querySelector('.legend .hint')).toBeNull();
+    unmount(c);
+  });
+});

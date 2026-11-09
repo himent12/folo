@@ -3,8 +3,8 @@
 //
 // Scenarios (`?scenario=`): `normal` (default), `empty` (nothing registered yet), `error` (every call fails),
 // `loading` (calls never resolve), `oom` (server inference runs out of GPU memory for every model but folo-n),
-// `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), for screenshots of
-// those states.
+// `gpu-unplugged` (a second GPU is listed until a run asks for it, then `404 device_not_found`), `short-run` (adds a
+// finished 5-epoch run the trainer warns is too short to learn from), for screenshots of those states.
 
 import { ApiError, type Api, type RunEventHandlers } from '../client';
 import type {
@@ -57,7 +57,7 @@ import {
 } from './runs';
 import { COCO80 } from './coco';
 
-export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged';
+export type Scenario = 'normal' | 'empty' | 'error' | 'loading' | 'oom' | 'gpu-unplugged' | 'short-run';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -86,7 +86,7 @@ function config(name: string, dataset_id: string, arch: Arch, epochs: number, ex
 const DEVICE = `${GPU_NAME} (vulkan)`;
 const FASTENER_EASE = [1.05, 1.1, 1.12, 0.92, 0.78, 1.0, 0.85, 0.7];
 
-function profiles(t0: number): RunProfile[] {
+function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
   const live = t0 - 222_000;
   const names = (id: string) => [...(specs.find((s) => s.id === id)?.classes ?? [])];
   const list: Omit<RunProfile, 'classNames'>[] = [
@@ -213,6 +213,27 @@ function profiles(t0: number): RunProfile[] {
       modelId: 'm_shapes_n',
       device: 'cpu (AMD Ryzen 9 7950X)',
     },
+    // `short-run`: 125 optimizer steps from scratch, so the trainer warns it is too short (and its warmup too long).
+    ...(scenario === 'short-run'
+      ? [
+          {
+            id: 'run_s5q1',
+            name: 'shapes-quick',
+            config: config('shapes-quick', 'ds_shapes', 'folo-n', 5, { batch: 32 }),
+            classes: 3,
+            classEase: [1.04, 1.0, 0.95],
+            stepsPerEpoch: 25,
+            epochSeconds: 6,
+            mapMax: 0.3,
+            tau: 40,
+            imgsPerS: 540,
+            createdAt: t0 - 2 * HOUR,
+            startedAt: t0 - 2 * HOUR + 2_000,
+            terminal: { status: 'completed' as const, atEpoch: 5 },
+            device: DEVICE,
+          },
+        ]
+      : []),
   ];
   return list.map((p) => ({ ...p, classNames: names(p.config.dataset_id) }));
 }
@@ -236,7 +257,7 @@ export class MockApi implements Api {
     readonly latency = 140,
   ) {
     this.#t0 = Date.now();
-    this.#runs = scenario === 'empty' ? [] : profiles(this.#t0);
+    this.#runs = scenario === 'empty' ? [] : profiles(this.#t0, scenario);
     this.#datasets = scenario === 'empty' ? [] : [...specs];
   }
 

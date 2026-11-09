@@ -25,7 +25,7 @@
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { niceDomain, unitDomain } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
-  import { defaultAxis, LENGTH_RATIO, lengthRatio, runX } from '$lib/charts/runAxis';
+  import { defaultAxis, runX } from '$lib/charts/runAxis';
   import { deviceName, duration, metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
@@ -63,16 +63,17 @@
 
   const chosen = $derived(ids.map((id) => runs.data?.find((r) => r.id === id)).filter((r): r is Run => !!r));
   // Runs of very different lengths (23 vs 150 epochs) would crush the short ones into the start of an epoch axis: then
-  // the axis defaults to "% of run" (each run over its own length, ../lib/charts/runAxis), and the control says so.
+  // the axis defaults to "By progress" (each run over its own length, ../lib/charts/runAxis), and the axis says why.
   let xChoice = $state<Axis | null>(null);
   const x = $derived<Axis>(xChoice ?? defaultAxis(chosen));
   const xAuto = $derived(xChoice === null && x === 'progress');
-  const ratio = $derived(Math.round(lengthRatio(chosen)));
-  const xOptions = $derived<{ value: Axis; label: string }[]>([
+  const X_OPTIONS: { value: Axis; label: string }[] = [
     { value: 'epoch', label: 'By epoch' },
-    { value: 'progress', label: xAuto ? '% of run · auto' : '% of run' },
-  ]);
-  const xWhy = $derived(lengthRatio(chosen) > LENGTH_RATIO ? (xAuto ? `Run lengths differ ${ratio}×, so x is % of each run's own length.` : `Run lengths differ ${ratio}×: % of run puts each over its own length.`) : '');
+    { value: 'progress', label: 'By progress' },
+  ];
+  // The normalised axis names itself; chosen for you, it also says why.
+  const xLabel = $derived(x === 'progress' ? (xAuto ? "% of each run's length · runs differ in length" : "% of each run's length") : undefined);
+  let hint = $state<string | null>(null);
   // Colours follow the run, not its position: removing one run never repaints the others.
   let slots = $state<Record<string, number>>({});
   $effect(() => {
@@ -137,8 +138,8 @@
         if (p.y > hi) hi = p.y;
       }
     if (!Number.isFinite(lo)) return undefined;
-    // LineChart's plot sits inside 8 px top and 22 px bottom margins.
-    return metricDef.unit ? unitDomain(hi, height - 30) : niceDomain(lo, hi);
+    // LineChart's plot sits inside 8 px top and 22 px bottom margins (36 under an axis name).
+    return metricDef.unit ? unitDomain(hi, height - (xLabel ? 44 : 30)) : niceDomain(lo, hi);
   });
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
   function valueOf(id: string): number | null {
@@ -251,7 +252,7 @@
              one caveat that changes how to read it, then the plot. The longer explanation sits in the disclosure. -->
         <header class="c-row">
           <Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={xOptions} />
+          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
         </header>
         {@render chips()}
         {#if !sameData && chosen.length > 1}<p class="caveat">Different datasets: scores are not directly comparable</p>{/if}
@@ -263,7 +264,7 @@
           </summary>
           <div class="about-body">
             {#if !sameData && chosen.length > 1}<p>The runs use different datasets: compare the shape of the curves, not their values.</p>{/if}
-            {#if xWhy}<p>{xWhy}</p>{/if}
+            {#if x === 'progress'}<p>By progress puts each run over its own length, so a short run and a long one compare by shape.</p>{/if}
             <p>Colours follow the run, not its rank. Tap a run to keep its line in front; Edit shows how each run
               started (fine-tuned or from scratch).</p>
             <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>
@@ -271,13 +272,11 @@
         </details>
       {:else}
         {@render chips()}
-        <p class="note">
-          Press a run to keep its line in front.{#if xWhy}{' '}{xWhy}{/if}{#if !sameData && chosen.length > 1}{' '}Different datasets:
-            compare the shape of the curves, not their values.{/if}
-        </p>
+        <!-- One line, and only when it changes how to read the plot; the axis names itself (and why it was chosen). -->
+        {#if !sameData && chosen.length > 1}<p class="caveat">Different datasets: compare the shape of the curves, not their values.</p>{/if}
         <header class="c-head">
           <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={xOptions} />
+          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
         </header>
         {@render plot()}
       {/if}
@@ -351,7 +350,9 @@
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
   <div class="chips" class:managing role="group" aria-label="Runs being compared">
     <div class="chips-head">
-      <span class="at num" aria-hidden="true">{readoutAt}</span>
+      <!-- The readout row: where the values are read, or how to read them while the plot has keyboard focus or on a
+           first touch. -->
+      <span class="at num" class:hint={!!hint} aria-hidden="true">{hint ?? readoutAt}</span>
       <!-- Phones: opening and removing runs sit behind one toggle, so the legend stays compact. -->
       <button type="button" class="manage" aria-pressed={managing} onclick={() => (managing = !managing)}>{managing ? 'Done' : 'Edit'}</button>
     </div>
@@ -408,7 +409,9 @@
       valueFormat={(v) => metric(v)}
       xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
       xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
+      {xLabel}
       bind:cursor
+      bind:hint
       legend={false}
       {highlight}
       endDots
@@ -419,9 +422,10 @@
 {/snippet}
 
 {#snippet adder()}
+  <!-- The face is a secondary Button's; the native picker lies over all of it, so any point of it opens the list. -->
   <label class="add">
-    <Plus size={14} />
-    <span class="sr-only">Add a run</span>
+    <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
+    <span aria-hidden="true">Add run…</span>
     <select
       aria-label="Add a run to the comparison"
       onchange={(e) => {
@@ -590,10 +594,6 @@
       inset: -8px;
     }
   }
-  .note {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
   .manage {
     display: none;
   }
@@ -619,16 +619,19 @@
   .t-range .more:hover {
     color: var(--text-primary);
   }
-  /* Phones: the one caveat that changes how to read the plot, always in view, on one line above it. */
+  .at.hint {
+    color: var(--text-secondary);
+  }
+  /* The one caveat that changes how to read the plot, always in view, on one line above it. */
   .caveat {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
   @media (max-width: 767px) {
-    /* Phones: a compact legend above the plot, one 44 px row per run (key, name, value), so every run is named and
-       the plot with its axis still sits in the first screen. Edit adds open / remove and, on a full-width line of its
-       own, how each run started. */
+    /* Phones: a compact legend above the plot (44 px rows of key, name, value), so every run is named and the plot with
+       its axis still sits in the first screen. Edit adds open / remove and, on a full-width line of its own, how each
+       run started. */
     .chips {
       grid-template-columns: minmax(0, 1fr);
       gap: 0;
@@ -683,6 +686,32 @@
       grid-row: 1;
       align-self: center;
       padding-top: 0;
+    }
+    /* At rest: two name / value pairs per row, each pair a 44 px toggle; Edit goes back to one run per row, with open,
+       remove and how each run started. Legend text is 12 px; the value keeps the body size. */
+    .chips:not(.managing) {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      column-gap: var(--space-3);
+    }
+    .chips:not(.managing) .chip {
+      margin-inline: 0;
+      padding: 0 0 0 var(--space-2);
+    }
+    .chips:not(.managing) .chip:nth-of-type(2) {
+      border-top-width: 1px;
+    }
+    .chips:not(.managing) .chip .key {
+      gap: 6px;
+    }
+    .chips:not(.managing) .chip .key i {
+      width: 12px;
+    }
+    .chips:not(.managing) .nm {
+      font-size: var(--type-sm-size);
+    }
+    .chips:not(.managing) .chip .v {
+      min-width: 2.8em;
+      padding-right: 0;
     }
     /* Edit: the start line under the whole row, past the key; the identifier keeps whole and ellipsizes (title has it). */
     .chips .chip .from {
@@ -788,26 +817,42 @@
   .fold button:hover {
     color: var(--text-primary);
   }
+  /* Adding a run: a native picker (the platform list is the most accessible) dressed as the standard secondary Button
+     (ui/Button): raised fill, default edge, 28 px, the icon and a medium label. */
   .add {
     position: relative;
     display: inline-flex;
     align-items: center;
     align-self: center;
     justify-self: start;
-    gap: 6px;
+    gap: var(--space-1-5);
     height: var(--control-md);
-    padding: 0 12px;
-    border-radius: var(--radius-full);
-    border: 1px solid var(--line-control);
-    color: var(--text-secondary);
+    padding: 0 var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--line-default);
+    background: var(--bg-raised);
+    box-shadow: var(--shadow-sm);
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
+    transition:
+      background-color var(--dur-fast) var(--ease-standard),
+      border-color var(--dur-fast) var(--ease-standard);
+  }
+  .add:hover {
+    border-color: var(--line-strong);
+    background: color-mix(in srgb, var(--bg-raised), var(--text-primary) 4%);
   }
   .add select {
-    appearance: none;
-    background: none;
-    border: 0;
-    color: inherit;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    opacity: 0;
     cursor: pointer;
-    padding-right: 4px;
+  }
+  @media (pointer: coarse) {
+    .add {
+      min-height: 44px;
+    }
   }
   .add:has(select:focus-visible) {
     outline: 2px solid var(--focus);

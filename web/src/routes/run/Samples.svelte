@@ -261,9 +261,8 @@
   .count .faint {
     color: #ffffff99;
   }
+  /* The state-height rule (DESIGN_DIRECTION §2.8): the header, then one compact line with the panel's padding. */
   .none {
-    padding: var(--space-6) 0;
-    text-align: center;
     color: var(--text-tertiary);
   }
   .big {

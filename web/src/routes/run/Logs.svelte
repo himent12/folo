@@ -40,34 +40,40 @@
   }
 </script>
 
-<Panel title="Logs" meta={String(total)} pad="none" id="logs">
-  {#snippet actions()}
-    <Segmented
-      size="sm"
-      label="Log level"
-      bind:value={level}
-      options={[
-        { value: 'all', label: 'All' },
-        { value: 'warn', label: 'Warn', meta: counts.warn ? String(counts.warn) : undefined },
-        { value: 'error', label: 'Error', meta: counts.error ? String(counts.error) : undefined },
-      ]}
-    />
-  {/snippet}
-  <div class="wrap">
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable region must be keyboard reachable) -->
-    <div class="log" bind:this={box} {onscroll} role="log" aria-live={live ? 'polite' : 'off'} aria-label="Training log" tabindex="0">
-      {#each shown as l, i (i)}
-        <p class="line {l.level}"><span class="t">{clock(l.t)}</span><span class="lv">{l.level}</span><span class="m">{l.message}</span></p>
-      {:else}
-        <p class="empty">No log lines{level !== 'all' ? ` at ${level} level` : ''} yet.</p>
-      {/each}
-    </div>
-    {#if !follow}
-      <div class="jump">
-        <Button size="sm" icon={ArrowDownToLine} onclick={() => ((follow = true), box && (box.scrollTop = box.scrollHeight))}>Follow</Button>
+{#snippet levels()}
+  <Segmented
+    size="sm"
+    label="Log level"
+    bind:value={level}
+    options={[
+      { value: 'all', label: 'All' },
+      { value: 'warn', label: 'Warn', meta: counts.warn ? String(counts.warn) : undefined },
+      { value: 'error', label: 'Error', meta: counts.error ? String(counts.error) : undefined },
+    ]}
+  />
+{/snippet}
+
+<!-- No lines at all (a queued run): the state-height rule, the header and one compact line; nothing to filter yet. -->
+<Panel title="Logs" meta={total ? String(total) : undefined} pad="none" id="logs" actions={total ? levels : undefined}>
+  {#if total === 0}
+    <p class="none">No log lines yet.</p>
+  {:else}
+    <div class="wrap">
+      <!-- svelte-ignore a11y_no_noninteractive_tabindex (scrollable region must be keyboard reachable) -->
+      <div class="log" bind:this={box} {onscroll} role="log" aria-live={live ? 'polite' : 'off'} aria-label="Training log" tabindex="0">
+        {#each shown as l, i (i)}
+          <p class="line {l.level}"><span class="t">{clock(l.t)}</span><span class="lv">{l.level}</span><span class="m">{l.message}</span></p>
+        {:else}
+          <p class="empty">No log lines{level !== 'all' ? ` at ${level} level` : ''} yet.</p>
+        {/each}
       </div>
-    {/if}
-  </div>
+      {#if !follow}
+        <div class="jump">
+          <Button size="sm" icon={ArrowDownToLine} onclick={() => ((follow = true), box && (box.scrollTop = box.scrollHeight))}>Follow</Button>
+        </div>
+      {/if}
+    </div>
+  {/if}
 </Panel>
 
 <style>
@@ -126,6 +132,10 @@
   .error .lv,
   .error .m {
     color: var(--danger-text);
+  }
+  .none {
+    padding: 0 var(--space-4) var(--space-4);
+    color: var(--text-tertiary);
   }
   .empty {
     padding: var(--space-4);

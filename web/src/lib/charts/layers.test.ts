@@ -25,3 +25,11 @@ describe('paintOrder', () => {
     expect(out.map((t) => t.id)).toEqual(['total', 'box', 'cls']);
   });
 });
+
+describe('paintOrder front', () => {
+  it('draws a front line over the patterned ones, under the emphasised ones', () => {
+    // The loss chart: total emphasised, box amber solid but in front of dfl's teal dots, cls dashed.
+    const out = paintOrder([s('total', 10, { emphasis: true }), s('box', 10, { front: true }), s('cls', 10, { pattern: 'dash' }), s('dfl', 10, { pattern: 'dot' })], (t) => t);
+    expect(out.map((t) => t.id)).toEqual(['cls', 'dfl', 'box', 'total']);
+  });
+});

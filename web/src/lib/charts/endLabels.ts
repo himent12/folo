@@ -1,7 +1,8 @@
 // Direct labels at the ends of lines (comparisons): each label takes the first spot beside its line's last point
 // that covers no curve and no other label, stepping further up or down when the near spots are taken; then the same
-// spots allowing the label over its own line (never another's); finally the clear gutter right of the plot at the
-// nearest free height. Only a label with no free spot anywhere is left out (the
+// spots allowing the label over its own line (never another's); finally the clear gutter right of the plot: as one
+// column in the order of the lines' ends when the caller says where the plot ends (so two lines ending together get
+// neighbouring labels), else at the nearest free height. Only a label with no free spot anywhere is left out (the
 // legend still names the line).
 
 export interface EndPoint {
@@ -66,10 +67,11 @@ const overlaps = (a: Box, b: Box) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 &
  * Places labels in rounds, nearest spots first: every label tries its near spots before any label takes a spot
  * further out, so one crowded line cannot take the spot another line's label needed. Within a round the caller's
  * order is the priority. `curves` are every drawn line in pixels; `bounds` is where labels may go (the plot plus the
- * right gutter). Output follows the input order.
+ * right gutter); `gutter`, the x where the plot ends and the gutter starts. Output follows the input order.
  */
-export function placeEndLabels(ends: readonly EndPoint[], curves: readonly (readonly Pt[])[], bounds: Box, pad = 2): Placed[] {
+export function placeEndLabels(ends: readonly EndPoint[], curves: readonly (readonly Pt[])[], bounds: Box, pad = 2, gutter?: number): Placed[] {
   const taken: Box[] = [];
+  const spots = new Map<number, Box>();
   const placed = new Map<number, Placed>();
   const fits = (b: Box, skip?: number) => {
     if (b.x0 < bounds.x0 || b.x1 > bounds.x1 || b.y0 < bounds.y0 || b.y1 > bounds.y1) return false;
@@ -94,9 +96,28 @@ export function placeEndLabels(ends: readonly EndPoint[], curves: readonly (read
   // Rounds: each level clear of every curve; then the near spots allowing a label over its own line (never
   // another's); last the right-hand gutter (no curve runs there), at the free height nearest the line's end.
   const rounds: ((e: EndPoint, w: number) => Box | undefined)[] = [];
-  for (let k = 0; k < LEVELS; k++) rounds.push((e, w) => ring(e, w, k).find((b) => fits(b)));
+  // With a gutter, a line that ends at the plot's right edge is labelled beside its end or in the ordered column below,
+  // never stepped further out (up into the plot or the gutter, across other lines and out of order); so is any spot
+  // further out that lies in the gutter.
+  const away = (e: EndPoint, b: Box, k: number) => gutter !== undefined && k > 0 && (b.x0 >= gutter || e.x >= gutter - 1);
+  for (let k = 0; k < LEVELS; k++) rounds.push((e, w) => ring(e, w, k).find((b) => !away(e, b, k) && fits(b)));
   rounds.push((e, w) => (e.curve === undefined ? undefined : ring(e, w, 0).find((b) => fits(b, e.curve))));
-  rounds.push((e, w) => {
+  const take = (i: number, spot: Box) => {
+    const e = ends[i]!;
+    taken.push(spot);
+    spots.set(i, spot);
+    placed.set(i, { id: e.id, label: e.label, x: spot.x0, y: (spot.y0 + spot.y1) / 2 });
+  };
+  const run = (round: (e: EndPoint, w: number) => Box | undefined) =>
+    ends.forEach((e, i) => {
+      if (placed.has(i)) return;
+      const spot = round(e, labelWidth(e.label));
+      if (spot) take(i, spot);
+    });
+  for (const round of rounds) run(round);
+  if (gutter !== undefined && placed.size < ends.length) column(gutter);
+  // Whatever is still without a spot: the gutter at the free height nearest its line's end.
+  run((e, w) => {
     for (let d = 0; d <= bounds.y1 - bounds.y0; d += 2)
       for (const y of d ? [e.y - d, e.y + d] : [e.y]) {
         const b = { x0: bounds.x1 - w, y0: y - H / 2, x1: bounds.x1, y1: y + H / 2 };
@@ -104,13 +125,51 @@ export function placeEndLabels(ends: readonly EndPoint[], curves: readonly (read
       }
     return undefined;
   });
-  for (const round of rounds)
-    ends.forEach((e, i) => {
-      if (placed.has(i)) return;
-      const spot = round(e, labelWidth(e.label));
-      if (!spot) return;
-      taken.push(spot);
-      placed.set(i, { id: e.id, label: e.label, x: spot.x0, y: (spot.y0 + spot.y1) / 2 });
-    });
   return ends.flatMap((_, i) => placed.get(i) ?? []);
+
+  /**
+   * The labels left without a spot and those already beside their line's end in the gutter, re-laid as one column in
+   * the order of their ends: each group of labels that would overlap is centred on its lines' ends and stacked one label
+   * height apart, inside the bounds. Kept only if every label then fits; otherwise nothing changes.
+   */
+  function column(x: number) {
+    const members = ends.map((_, i) => i).filter((i) => !placed.has(i) || spots.get(i)!.x0 >= x);
+    const old = members.flatMap((i) => spots.get(i) ?? []);
+    for (const b of old) taken.splice(taken.indexOf(b), 1);
+    const step = H + pad + 1;
+    const lo = bounds.y0 + H / 2;
+    const order = [...members].sort((a, b) => ends[a]!.y - ends[b]!.y || a - b);
+    type Group = { items: number[]; sum: number };
+    const top = (g: Group) => {
+      const n = g.items.length;
+      return Math.min(Math.max(g.sum / n - ((n - 1) * step) / 2, lo), bounds.y1 - H / 2 - (n - 1) * step);
+    };
+    const groups: Group[] = [];
+    for (const i of order) {
+      groups.push({ items: [i], sum: ends[i]!.y });
+      // Merge backwards while the newest group runs into the one above it.
+      while (groups.length > 1) {
+        const b = groups[groups.length - 1]!;
+        const a = groups[groups.length - 2]!;
+        if (top(a) + a.items.length * step <= top(b) + 1e-9) break;
+        groups.splice(groups.length - 2, 2, { items: [...a.items, ...b.items], sum: a.sum + b.sum });
+      }
+    }
+    const next = new Map<number, Box>();
+    for (const g of groups)
+      g.items.forEach((i, k) => {
+        const y = top(g) + k * step;
+        next.set(i, { x0: x + 6, y0: y - H / 2, x1: x + 6 + labelWidth(ends[i]!.label), y1: y + H / 2 });
+      });
+    const ok = [...next.values()].every((b) => fits(b));
+    if (!ok) {
+      taken.push(...old);
+      return;
+    }
+    for (const i of members) {
+      spots.delete(i);
+      placed.delete(i);
+    }
+    for (const [i, b] of next) take(i, b);
+  }
 }

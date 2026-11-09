@@ -1,18 +1,21 @@
 // Paint order of a line chart's series: context and ghost lines at the back, emphasised lines in front. Among the
 // ordinary lines, solid ones go first and patterned (dashed, dotted) ones over them, so a patterned line that runs
 // along a solid one keeps its pattern instead of disappearing under it; within each, the shorter ones last, so a run
-// that stopped early is drawn over the longer runs it would otherwise disappear under. Ties keep the caller's order.
+// that stopped early is drawn over the longer runs it would otherwise disappear under. A `front` line goes over every
+// ordinary one (a solid line a dotted one would otherwise cover, e.g. box under dfl in the loss chart), still under the
+// emphasised ones. Ties keep the caller's order.
 
 export interface Layered {
   points: readonly { x: number }[];
   ghost?: boolean;
   context?: boolean;
   emphasis?: boolean;
+  front?: boolean;
   dashed?: boolean;
   pattern?: 'dash' | 'dot' | 'dashdot';
 }
 
-const layer = (s: Layered) => (s.ghost || s.context ? 0 : s.emphasis ? 3 : s.pattern || s.dashed ? 2 : 1);
+const layer = (s: Layered) => (s.ghost || s.context ? 0 : s.emphasis ? 4 : s.front ? 3 : s.pattern || s.dashed ? 2 : 1);
 const end = (s: Layered) => s.points[s.points.length - 1]?.x ?? -Infinity;
 
 /** `items` in paint order (back to front); `of` picks each item's series. */

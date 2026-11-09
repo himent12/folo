@@ -47,7 +47,7 @@ export const scenes = [
     // The loss chart: total in ink, box / cls / dfl in their design/README.md hues (amber, violet dashed, teal dotted).
     name: 'run-loss',
     path: '/runs/run_c19a',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page) => {
       const tab = page.locator('[data-tab="loss"]');
       if (await tab.isVisible()) await tab.click();
@@ -57,7 +57,7 @@ export const scenes = [
     },
   },
   {
-    // The phone layout below the fold: the metrics instrument, then one section at a time (here: per-class results).
+    // Phones, one section at a time (here: per-class results): the chart folds to its one-line readout above it.
     name: 'run-live-phone-classes',
     path: '/runs/run_7d1e',
     advance: 4000,
@@ -65,10 +65,11 @@ export const scenes = [
     fullPage: true,
     setup: async (page) => {
       await page.getByRole('radio', { name: 'Classes' }).click();
+      await page.mouse.move(0, 0);
     },
   },
   // run_a2f0 ran out of GPU memory: the plain cause, the smaller settings as actions, the driver's report folded.
-  { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'run-failed', path: '/runs/run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
     name: 'run-failed-report',
     path: '/runs/run_a2f0',
@@ -215,9 +216,58 @@ export const scenes = [
       await page.locator('button.manage').click();
     },
   },
-  { name: 'run-compare-empty', path: '/runs/compare', themes: ['dark'], viewports: ['desktop'] },
+  // Nothing picked: the inline empty state with the standard secondary "Add run…" button.
+  { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'mobile'] },
   // A queued run in the loaded frame: KPIs at "—", the chart's axes with what it waits for, the config in its rail.
-  { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'mobile'] },
+  // A queued run: the dependency and start estimate lead, the empty frames stay compact until there is data.
+  { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  {
+    // A 5-epoch run from scratch: the trainer's warnings that it is too short to learn, as one callout.
+    name: 'run-short-warning',
+    path: '/runs/run_s5q1',
+    search: 'scenario=short-run',
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+  },
+  {
+    // Phones: with Logs picked, the chart folds to its one-line readout, so the log starts in the first screen.
+    name: 'run-phone-logs',
+    path: '/runs/run_7d1e',
+    advance: 4000,
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await page.getByRole('radio', { name: 'Logs' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Keyboard focus on a chart: the readout row says how to read it.
+    name: 'chart-key-hint',
+    path: '/runs/run_c19a',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      const svg = page.locator('#run-chart svg[role="img"]').first();
+      await svg.scrollIntoViewIfNeeded();
+      await page.keyboard.press('Tab');
+      await svg.focus();
+      await page.locator('#run-chart .legend .note.hint').waitFor({ state: 'visible', timeout: 3000 });
+    },
+  },
+  {
+    // A touch screen: the first chart of the session says "Tap to pin a value" (Compare: in its readout row).
+    name: 'chart-touch-hint',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.clock.runFor(2000);
+      await until(page, '.chips-head .at.hint');
+    },
+  },
   {
     // The loss chart's one control open: smoothing and y scale behind a single button.
     name: 'run-loss-options',
