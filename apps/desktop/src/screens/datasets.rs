@@ -739,7 +739,11 @@ impl FoloApp {
                         let key = format!("tile-{}", meta.id);
                         let reveal = this.fh(key.clone(), cx).is_focused(window)
                             || this.ds_hover_tile.as_deref() == Some(meta.id.as_str());
-                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, true, fit, reveal, cx);
+                        // While a class filter is on, its chip names the class: tiles at rest show
+                        // the matches' outlines without chips (a sparse few read as "only these"),
+                        // and a hovered or focused tile names every box.
+                        let labels = reveal || this.ds_class.is_none();
+                        let tile_el = this.tile(&ds_id, meta, this.ds_boxes, labels, fit, reveal, cx);
                         // "2 square · 1 triangle · +2": the two commonest classes, then the rest as a
                         // count, so the box colours aren't the only way to tell what a tile holds.
                         let (what, all) = {

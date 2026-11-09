@@ -711,6 +711,12 @@ impl FoloApp {
         let (name_w, prog_w, best_w, when_w) =
             if full { (200., 160., 96., 80.) } else { (150., 120., 96., 80.) };
         let meta_w = if full { 180. } else { 130. };
+        // Width past the set's need goes to the name, arch · dataset and progress (2 : 1 : 1, to
+        // their caps); only what's left opens before the numbers.
+        let [name_w, meta_w, prog_w] = crate::ui::share_spare(
+            list_w - if full { 918. } else { 778. },
+            [(name_w, 2., 280.), (meta_w, 1., 240.), (prog_w, 1., 200.)],
+        );
         let now = self.store.api.now();
         let all = self.view_all("ov-runs-all", Route::Runs, window, cx);
         let header = panel_header(&t, "Recent runs").child(all);

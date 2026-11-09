@@ -2191,12 +2191,20 @@ impl FoloApp {
                     .p(px(16.))
                     .border_b_1()
                     .border_color(t.line_subtle)
-                    .child(
-                        text(ty::BASE, t.text_primary)
-                            .font_family(crate::theme::MONO)
-                            .ellipsis()
-                            .child(meta.file.clone()),
-                    )
+                    .child({
+                        // The panel's 268 px hold ~33 monospace glyphs (0.6 em each); a longer
+                        // path ends in "…" and shows in full on hover.
+                        let long = meta.file.chars().count() as f32 * 0.6 * ty::BASE.size > 268.;
+                        div()
+                            .id("insp-file")
+                            .when(long, |d| d.tooltip(crate::controls::tip(meta.file.clone(), None)))
+                            .child(
+                                text(ty::BASE, t.text_primary)
+                                    .font_family(crate::theme::MONO)
+                                    .ellipsis()
+                                    .child(meta.file.clone()),
+                            )
+                    })
                     .child(
                         div()
                             .flex()

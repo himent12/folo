@@ -378,10 +378,16 @@ impl FoloApp {
                     // The built-in demo's number is simulated, and says so wherever it shows.
                     .when_some(self.play_pred.ready().map(|p| p.timing.total_ms), |d, ms| {
                         let sim = self.play_target.is_none() && !self.store.api.local_inference();
-                        d.child(
-                            text(ty::XS, t.text_secondary).flex_none().tnum().child(latency_text(ms, sim)),
-                        )
-                        .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                        // One rule between every group, the image's own (name, size) included, so
+                        // a narrow toolbar's spacer never reads as a missing divider.
+                        d.child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
+                            .child(
+                                text(ty::XS, t.text_secondary)
+                                    .flex_none()
+                                    .tnum()
+                                    .child(latency_text(ms, sim)),
+                            )
+                            .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line_subtle))
                     })
                     .when_some(count, |d, n| {
                         d.child(div().flex_none().flex().items_center().gap(px(6.)).child(

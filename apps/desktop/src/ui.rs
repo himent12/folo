@@ -681,6 +681,24 @@ pub fn int(n: u64) -> String {
 /// 5_400_000 → "5.1 MiB".
 /// Whether `s` set at `size` px in Geist may be wider than `width` px: a per-glyph estimate that
 /// errs wide (capitals and w / m count as wide), so a name that might be cut gets its full-name tip.
+/// A table's spare width, shared by weight: each column takes `weight` shares of `spare` on top
+/// of its base, up to its cap. What the caps leave stays where the table keeps its gap (before the
+/// numbers), so wide windows fill the columns first rather than open one dead band.
+pub fn share_spare<const N: usize>(spare: f32, cols: [(f32, f32, f32); N]) -> [f32; N] {
+    let weights: f32 = cols.iter().map(|c| c.1).sum();
+    let share = if weights > 0. { spare.max(0.) / weights } else { 0. };
+    cols.map(|(base, weight, cap)| (base + share * weight).min(cap.max(base)))
+}
+
+/// A flex table column on the same rule as `share_spare`, for rows whose cells need no known
+/// width: `basis` px, growing by `weight` up to `max`. Spare width past every cap goes to the
+/// first column given `.ml_auto()`.
+pub fn grow_col(d: Div, basis: f32, weight: f32, max: f32) -> Div {
+    let mut d = d.flex_basis(px(basis)).flex_shrink_0().min_w(px(basis)).max_w(px(max));
+    d.style().flex_grow = Some(weight);
+    d
+}
+
 pub fn may_overflow(s: &str, size: f32, width: f32) -> bool {
     let em: f32 = s
         .chars()
