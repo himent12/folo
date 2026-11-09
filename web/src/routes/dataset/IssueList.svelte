@@ -1,7 +1,8 @@
 <script lang="ts">
   /**
    * The `folo dataset check` issues, as `file:line`, the message and what a cleanup would do, paged 50 at a time. A
-   * severity filter (with the server's counts, where it sends them) narrows it, and inside a severity with several
+   * severity filter (with the server's counts, where it sends them; left out with `severityFilter={false}` where the
+   * list sits under one finding and its severity is fixed) narrows it, and inside a severity with several
    * kinds a sub-filter by check type; a caption above the rows says exactly which rows they are. The same check from a terminal is offered as a copyable command.
    */
   import Copy from '@lucide/svelte/icons/copy';
@@ -22,8 +23,9 @@
     datasetId,
     path,
     severity = $bindable('error'),
+    severityFilter = true,
     counts,
-  }: { datasetId: string; path: string; severity?: IssueSeverity; counts?: IssueCounts } = $props();
+  }: { datasetId: string; path: string; severity?: IssueSeverity; severityFilter?: boolean; counts?: IssueCounts } = $props();
 
   const PAGE = 50;
   /** Most issues read in total; past it the list says how many there are and points to the CLI. */
@@ -83,8 +85,11 @@
 </script>
 
 <div class="issues">
+  {#if severityFilter || kinds.length > 1 || kind !== 'all'}
   <div class="filters">
-    <Segmented label="Severity" size="sm" value={sev} options={sevOptions} onchange={setSeverity} />
+    {#if severityFilter}
+      <Segmented label="Severity" size="sm" value={sev} options={sevOptions} onchange={setSeverity} />
+    {/if}
     {#if kinds.length > 1 || kind !== 'all'}
       <span class="kind">
         <Select
@@ -100,6 +105,7 @@
       </span>
     {/if}
   </div>
+  {/if}
   {#if res.error && !res.data}
     <ErrorState error={res.error} retry={() => res.refresh()} compact title="Could not load the issues" />
   {:else if !res.data || res.loading}

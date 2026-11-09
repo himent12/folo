@@ -28,7 +28,7 @@ describe('ConfusionMatrix reveal', () => {
 });
 
 describe('ConfusionMatrix labels', () => {
-  it('labels shares from 5% in whole percentages (8, not 8.3), marks true zeros, and names every cell with its value', () => {
+  it('labels every share in whole percentages (8, not 8.3), with a dot as the fallback, and names every cell with its value', () => {
     const target = document.createElement('div');
     document.body.appendChild(target);
     // bearing: 50 right, 5 taken for nut (8.3%), 2 for bolt (3.3%), 3 missed (5.0%); nothing taken for bearing by bolt.
@@ -38,16 +38,17 @@ describe('ConfusionMatrix labels', () => {
       [2, 5, 50, 3],
       [1, 0, 0, 0],
     ];
-    const cm = mount(ConfusionMatrix, { target, props: { classes: ['bolt', 'nut', 'bearing'], matrix, sparseLabels: true, minCell: 32 } });
+    const cm = mount(ConfusionMatrix, { target, props: { classes: ['bolt', 'nut', 'bearing'], matrix, minCell: 32 } });
     flushSync();
     const cell = (r: number, c: number) => target.querySelector<HTMLElement>(`[data-r="${r}"][data-c="${c}"]`)!;
     expect(cell(2, 1).textContent!.trim()).toBe('8');
     expect(cell(2, 3).textContent!.trim()).toBe('5');
     expect(cell(2, 2).textContent!.trim()).toBe('83');
-    // 3–4%: labelled only in a full-size (72 px) cell, which a container query decides; under 3%: no label. Its value
-    // is always in its name; a true zero is the empty surface.
-    expect(cell(2, 0).querySelector('span.low')?.textContent).toBe('3');
-    expect(cell(2, 1).querySelector('span.low')).toBeNull();
+    // Small shares are numbered too; a container query swaps a number for the dot only where the cell is too narrow.
+    expect(cell(2, 0).querySelector('.v')?.textContent).toBe('3');
+    expect(cell(2, 0).querySelector('.mark')).not.toBeNull();
+    expect(cell(3, 0).querySelector('.v.long')?.textContent).toBe('100');
+    expect(cell(0, 1).querySelector('.v, .mark')).toBeNull();
     expect(cell(2, 0).getAttribute('aria-label')).toBe('bearing predicted as bolt: 2 of 60, 3%');
     expect(cell(2, 0).classList.contains('zero')).toBe(false);
     expect(cell(0, 1).classList.contains('zero')).toBe(true);

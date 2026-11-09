@@ -158,7 +158,7 @@
         <span class="size num">{bytes(result.bytes, prefs.units)}</span>
       </div>
       <div class="where">
-        <span class="where-label">On the server</span>
+        <span class="where-label">Saved on the server at</span>
         <div class="path">
           <code class="mono">{result.path}</code>
           <Button size="sm" variant="ghost" icon={copied ? Check : Copy} aria-label="Copy path" onclick={copy} />
@@ -169,8 +169,6 @@
           Studio cannot download ONNX files yet: the file stays on the machine running folo serve. Copy it from there, or
           run <span class="mono">folo export --format onnx</span> where you need it.
         </p>
-      {:else}
-        <p class="note">Also saved on the machine running folo serve.</p>
       {/if}
     </div>
   {:else}

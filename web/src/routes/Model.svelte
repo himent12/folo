@@ -186,14 +186,16 @@
    */
   const latency = (m: Model): number | undefined => e2eMs[m.arch];
   const kpis = (m: Model) => [
-    { label: 'mAP50-95', short: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
-    { label: 'mAP50', short: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
-    { label: 'Precision', short: 'P', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
-    { label: 'Recall', short: 'R', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
+    { label: 'mAP50-95', value: m.metrics?.map50_95, sub: 'IoU 0.50:0.95' },
+    { label: 'mAP50', value: m.metrics?.map50, sub: 'IoU 0.50' },
+    { label: 'Precision', value: m.metrics?.precision, sub: 'at the best-F1 confidence' },
+    { label: 'Recall', value: m.metrics?.recall, sub: 'at the best-F1 confidence' },
   ];
-  // Phones: the four numbers on one line in every section (Curves too), so the strip never changes shape between
-  // sections and each section starts on the first screen; what they mean is behind the ⓘ.
-  const kpiLine = $derived(phone.current);
+  // Phones: the four numbers as one compact 2 × 2 summary in every section (Curves too), so it never changes shape
+  // between sections and each section starts on the first screen; what they mean is behind the ⓘ.
+  const kpiGrid = $derived(phone.current);
+  /** The detection head, from the file (`Model.head`; missing, from older servers, means o2m). */
+  const HEAD_LABEL = { o2m: 'NMS (one-to-many)', o2o: 'End-to-end (no NMS)' } as const;
   // What the four numbers mean, one tap away (the strip itself keeps to values and a short qualifier).
   let helpOpen = $state(false);
   // Phones: one summary line under the top bar; the rest of the provenance behind it.
@@ -214,6 +216,7 @@
 {:else}
   {@const m = model.data}
   {@const run = context.data?.run}
+  {@const head = m.head ?? 'o2m'}
   {#snippet lineageNote()}
     <!-- Where the weights started: the run's `weights`, a model (linked), an imported file, or nothing. -->
     {#if lineage?.kind === 'model'}
@@ -244,7 +247,7 @@
         <dd>
           {#if context.data?.dataset}The validation split of {context.data.dataset.name}{:else}The validation split of the model's dataset{/if}{ev
             ? ` (${num(ev.images)} images)`
-            : ''}, at {m.imgsz} px with NMS IoU 0.7.
+            : ''}, at {m.imgsz} px, {head === 'o2o' ? 'end to end (the one-to-one head, no NMS)' : 'with NMS IoU 0.7'}.
         </dd>
       </div>
     </dl>
@@ -288,24 +291,20 @@
     {/snippet}
 
     <!-- One strip of numbers in ink: the headline metric, then the ones that support it, each with a short qualifier;
-         the ⓘ opens what they mean. Phones: the headline on its own row at 32 px, the other three as a row under it. -->
-    {#if kpiLine}
-      <section class="kpi-line num" aria-label="Validation metrics">
-        <div class="kl-row">
-          <span class="kl-vals">
-            {#each kpis(m) as k, i (k.label)}
-              <span class="kl-item"
-                >{#if k.short !== k.label}<span class="kl" aria-hidden="true">{k.short}</span><span class="sr-only">{k.label}</span>{:else}<span class="kl"
-                    >{k.label}</span
-                  >{/if}
-                <b>{metric(k.value)}</b></span
-              >
-            {/each}
-          </span>
-          <button type="button" class="kl-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
-            ><Info size={14} aria-hidden="true" /></button
-          >
-        </div>
+         the ⓘ opens what they mean. Phones: a 2 × 2 summary of label over value, the headline first. -->
+    {#if kpiGrid}
+      <section class="kpi-grid num" aria-label="Validation metrics">
+        <dl class="kg">
+          {#each kpis(m) as k, i (k.label)}
+            <div class="kg-cell" class:hero={i === 0}>
+              <dt>{k.label}</dt>
+              <dd>{metric(k.value)}</dd>
+            </div>
+          {/each}
+        </dl>
+        <button type="button" class="kg-help" aria-label="What these metrics mean" aria-expanded={helpOpen} aria-controls="metric-help" onclick={() => (helpOpen = !helpOpen)}
+          ><Info size={14} aria-hidden="true" /></button
+        >
         {#if helpOpen}{@render metricHelp()}{/if}
       </section>
     {:else}
@@ -376,6 +375,22 @@
               <dt>Compute</dt>
               <dd class="num">{num(m.flops_g, 1)} GFLOPs</dd>
             </div>
+            <div class="kv">
+              <dt>Head</dt>
+              <dd>{HEAD_LABEL[head]}</dd>
+            </div>
+            <!-- How it was trained, from the file's training record: none for exports, imported weights and older
+                 servers, so nothing is said then. -->
+            {#if m.trained_with}
+              <div class="kv">
+                <dt>Trained in</dt>
+                <dd>{m.trained_with.amp ? 'Mixed precision (f16)' : 'f32'}</dd>
+              </div>
+              <div class="kv">
+                <dt>Trained for</dt>
+                <dd class="num">{num(m.trained_with.epochs)} {m.trained_with.epochs === 1 ? 'epoch' : 'epochs'} at {m.trained_with.imgsz} px</dd>
+              </div>
+            {/if}
             <div class="kv">
               <dt>File size</dt>
               <dd class="num">{bytes(m.bytes, prefs.units)}</dd>
@@ -510,7 +525,7 @@
                ranked (each line shows its cell), and how to read the matrix. Up to 1199 px the rail follows the matrix,
                its two lists side by side. Phones lead with the matrix alone: the lists are the step back. -->
           <div class="cm-layout">
-            <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" sparseLabels minCell={32} scale /></div>
+            <div class="cm-main"><ConfusionMatrix bind:this={matrixView} classes={cm.classes} classIds={cm.ids} matrix={cm.matrix} label="Confusion matrix of {m.name}" minCell={32} scale /></div>
             <div class="cm-rail">
               {#if !phone.current}
                 {#each ranked as g (g.kind)}
@@ -549,8 +564,8 @@
                   <summary><ChevronDown size={14} aria-hidden="true" />How the shares are computed</summary>
                   <div class="how-body">
                     <p>Each row sums to 100% of that class's ground-truth boxes at IoU 0.5, in whole percentages ("&lt;1"
-                      under half a percent). Cells under 5% are labelled only when they are full size (from 3%); hover or
-                      tap any cell for its count. An empty cell had no objects at all.</p>
+                      under half a percent). A cell too small for its number shows a dot instead; hover, tap or focus any cell
+                      for its count. An empty cell had no objects at all.</p>
                     <p>The background row splits the false detections (boxes on no object) by the class they were given.</p>
                     {#if cm.partial}
                       <p>The {CM_MAX} classes with the most ground-truth boxes are shown by name; the other {m.classes.length - CM_MAX} are folded into Other.</p>
@@ -702,58 +717,69 @@
     line-height: 40px;
     letter-spacing: var(--type-3xl-tracking);
   }
-  /* Phones, every section: the four numbers on one 44 px line in the strip's frame, the ⓘ at its end; what they mean
-     opens under it. */
-  .kpi-line {
+  /* Phones, every section: a compact 2 × 2 summary in the strip's frame, mAP50-95 first. Each cell is its label over
+     its value, the cells parted by hairlines (1 px gaps over the line colour); the ⓘ sits in the top-right corner, and
+     what the numbers mean opens under the grid. */
+  .kpi-grid {
+    position: relative;
+    display: grid;
     border: 1px solid var(--line-default);
     border-radius: var(--radius-lg);
     background: var(--bg-panel);
     overflow: hidden;
   }
-  /* No gap before the ⓘ: its 44 px target already sets it off. */
-  .kl-row {
-    display: flex;
-    align-items: center;
-    min-height: 44px;
-    padding: 0 0 0 var(--space-3);
+  :global([data-theme='dark']) .kpi-grid {
+    border-color: var(--line-subtle);
   }
-  /* Label-value pairs set apart by space alone (no dots; grey label, value in ink), so even an 80-class model's four fit one line at 390 px. */
-  .kl-vals {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0 var(--space-2);
-    flex: 1;
+  .kg {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--line-subtle);
+  }
+  .kg-cell {
+    display: grid;
+    grid-template-rows: 16px 28px;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    background: var(--bg-panel);
     min-width: 0;
-    padding-block: var(--space-2);
   }
-  .kl-help {
+  .kg dt {
+    font-size: var(--type-sm-size);
+    line-height: 16px;
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .kg .hero dt {
+    color: var(--text-secondary);
+  }
+  .kg dd {
+    text-align: left;
+    font-size: var(--type-xl-size);
+    line-height: 28px;
+    letter-spacing: var(--type-xl-tracking);
+    font-weight: var(--weight-semibold);
+  }
+  .kg-help {
+    position: absolute;
+    top: 0;
+    right: 0;
     display: grid;
     place-items: center;
-    flex-shrink: 0;
     width: 44px;
     height: 44px;
     color: var(--text-tertiary);
   }
-  .kl-help:hover,
-  .kl-help[aria-expanded='true'] {
+  .kg-help:hover,
+  .kg-help[aria-expanded='true'] {
     color: var(--text-primary);
   }
-  .kpi-line .k-body {
+  .kg-help:focus-visible {
+    outline-offset: -4px;
+  }
+  .kpi-grid .k-body {
     border-top: 1px solid var(--line-subtle);
-  }
-  :global([data-theme='dark']) .kpi-line {
-    border-color: var(--line-subtle);
-  }
-  .kl-item {
-    white-space: nowrap;
-  }
-  .kl {
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
-  .kpi-line b {
-    font-weight: var(--weight-semibold);
   }
   /* Phones' confusion list: two-line 56 px rows (the pair and its share, then the counts behind it). */
   .rank-h {
@@ -853,27 +879,6 @@
   .rail {
     position: sticky;
     top: calc(var(--size-topbar) + var(--space-4));
-  }
-  /* Desktop: the Details panel stretches to the row, so its bottom meets the PR panel's; its title and list stay at the
-     top and stick under the top bar while the class table scrolls past. */
-  @media (min-width: 1200px) {
-    .detail {
-      align-items: stretch;
-    }
-    .rail {
-      position: static;
-    }
-    .rail :global(#details > header) {
-      position: sticky;
-      top: calc(var(--size-topbar) + var(--space-4));
-      z-index: 1;
-      border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-      background: var(--bg-panel);
-    }
-    .rail .details {
-      position: sticky;
-      top: calc(var(--size-topbar) + var(--space-4) + 40px);
-    }
   }
   /* Phones: the sections the picker is not showing. */
   .cm-part {
@@ -1212,33 +1217,6 @@
     }
     .two .kv {
       grid-template-columns: 96px minmax(0, 1fr);
-    }
-    /* The headline alone on the first row (32 / 600, with its qualifier); the three supporting values 3-up under it,
-       their qualifiers in the help. */
-    .kpis {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .kpi {
-      grid-template-rows: 16px 32px;
-      gap: var(--space-1);
-      padding: var(--space-3);
-    }
-    .kpi.hero {
-      grid-column: 1 / -1;
-      grid-template-rows: 16px 40px 16px;
-    }
-    .kpi:not(.hero) .k-sub {
-      display: none;
-    }
-    .k-value {
-      font-size: var(--type-2xl-size);
-      line-height: 32px;
-      letter-spacing: var(--type-2xl-tracking);
-    }
-    .hero .k-value {
-      font-size: var(--type-3xl-size);
-      line-height: 40px;
-      letter-spacing: var(--type-3xl-tracking);
     }
     .k-body {
       grid-template-columns: minmax(0, 1fr);

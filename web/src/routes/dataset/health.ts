@@ -217,6 +217,9 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
     });
   }
 
+  // The check's notes are its empty images: the empty-image finding opens them, or one of their own when the stats count
+  // none.
+  const notes = counts?.info ?? 0;
   if (images > 0 && s.empty_images > 0) {
     const e = s.empty_images / images;
     out.push({
@@ -228,6 +231,17 @@ export function healthChecks(d: Dataset, s: DatasetStats, counts?: IssueCounts):
         e > EMPTY_WARN
           ? 'Background images reduce false positives, but above ~10% they slow learning. Check that labels were not lost.'
           : 'Images without boxes act as background examples and reduce false positives. Up to ~10% is healthy.',
+      ...(notes > 0 ? { issues: 'info' as const, files: notes } : {}),
+    });
+  } else if (notes > 0) {
+    out.push({
+      id: 'check-notes',
+      severity: 'info',
+      title: `${int(notes)} ${notes === 1 ? 'note' : 'notes'} from the dataset check`,
+      short: `${int(notes)} check ${notes === 1 ? 'note' : 'notes'}`,
+      detail: 'Images without boxes. Nothing to fix: they act as background examples.',
+      issues: 'info',
+      files: notes,
     });
   }
 

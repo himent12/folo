@@ -1,13 +1,12 @@
 <script lang="ts">
   /**
-   * Dataset statistics. Health comes first, only when there are findings: one compact line (each severity's icon and a
-   * short summary of its findings, units named) that opens to the evidence, every finding with its next step. Then four
-   * numbers, the class balance as the focal chart, the two histograms in ink, and last the `folo dataset check` issues
-   * in their own section with a severity filter and, inside it, a filter by check type.
+   * Dataset statistics. Health comes first, only when there are findings: one compact line across the page (each
+   * severity's icon and a short summary of its findings, units named; Details at its right end) that opens to every
+   * finding with its next step. A finding backed by `folo dataset check` issues opens them under itself: the one issue
+   * list, filtered to that finding's severity (and inside it, by check type). Then four numbers, the class balance as
+   * the focal chart, and the two histograms in ink.
    */
-  import { tick } from 'svelte';
   import IssueList from './IssueList.svelte';
-  import ArrowDown from '@lucide/svelte/icons/arrow-down';
   import ArrowRight from '@lucide/svelte/icons/arrow-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
@@ -37,22 +36,9 @@
   // The line is the point; the evidence is one tap away.
   let healthOpen = $state(false);
 
-  // The check's issues get a section of their own (where the server ran the check, or labels are broken); its filter
-  // starts on the most severe level that has issues, and a finding backed by them moves it there.
-  const checkShown = $derived(stats.broken_labels > 0 || (!!counts && counts.error + counts.warning + counts.info > 0));
-  let listed = $state<IssueSeverity | null>(null);
-  const listSeverity = $derived<IssueSeverity>(
-    listed ?? (stats.broken_labels > 0 || (counts?.error ?? 0) > 0 ? 'error' : (counts?.warning ?? 0) > 0 ? 'warning' : 'info'),
-  );
-  /** Moves the list to `sev`, then takes the reader there: the section scrolls in and its heading takes focus. */
-  async function showIssues(sev: IssueSeverity) {
-    listed = sev;
-    await tick();
-    const heading = document.getElementById('ds-check-title');
-    heading?.setAttribute('tabindex', '-1');
-    heading?.focus({ preventScroll: true });
-    document.getElementById('ds-check')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-  }
+  // The finding whose check issues are open under it (one at a time: the list is the evidence of the finding it sits
+  // under, never a second copy elsewhere).
+  let evidence = $state<string | null>(null);
   const balance = $derived(
     stats.class_counts
       .map((count, cls) => ({ cls, count, name: dataset.classes[cls] ?? `class ${cls}` }))
@@ -67,10 +53,22 @@
   const icons = { danger: CircleAlert, warning: TriangleAlert, info: Info, ok: CircleCheck } satisfies Record<Severity, unknown>;
   const sevWord: Record<Severity, string> = { danger: 'Error', warning: 'Warning', info: 'Note', ok: 'OK' };
   const perLast = $derived(stats.boxes_per_image_hist.counts.length - 1);
-  const splitLine = $derived(`${num(dataset.splits.train)} train · ${num(dataset.splits.val)} val · ${num(dataset.splits.test)} test`);
   const classCount = $derived(`${dataset.classes.length} ${dataset.classes.length === 1 ? 'class' : 'classes'}`);
   const pct = (x: number) => (images ? `${((x / images) * 100).toFixed(1)}% of images` : '');
-  const showLabel = (sev: IssueSeverity) => (sev === 'error' ? 'Show the files' : sev === 'warning' ? 'Show the warnings' : 'Show the notes');
+  const evidenceNoun = (sev: IssueSeverity) => (sev === 'error' ? 'files' : sev === 'warning' ? 'warnings' : 'images');
+
+  /**
+   * Sets `wrap` on a line that would not fit its box on one line, so it can break between its parts instead of being
+   * cut off; measured on every resize, without the class.
+   */
+  function wrapWhenNarrow(node: HTMLElement) {
+    const ro = new ResizeObserver(() => {
+      node.classList.remove('wrap');
+      node.classList.toggle('wrap', node.scrollWidth > node.clientWidth + 1);
+    });
+    ro.observe(node);
+    return { destroy: () => ro.disconnect() };
+  }
 </script>
 
 <div class="stats">
@@ -101,15 +99,26 @@
                 {#if h.issues || h.action}
                   <p class="hacts">
                     {#if h.issues}
-                      {@const sev = h.issues}
-                      <button type="button" class="haction" onclick={() => showIssues(sev)}
-                        >{showLabel(sev)}<ArrowDown size={12} strokeWidth={2} aria-hidden="true" /></button
+                      {@const open = evidence === h.id}
+                      <button
+                        type="button"
+                        class="haction"
+                        aria-expanded={open}
+                        aria-controls="ds-ev-{h.id}"
+                        onclick={() => (evidence = open ? null : h.id)}
+                        >{open ? 'Hide' : 'Show'} the {evidenceNoun(h.issues)}<ChevronDown class="ev-chev" size={12} strokeWidth={2} aria-hidden="true" /></button
                       >
                     {/if}
                     {#if h.action}
                       <a class="haction" href={href(h.action.path)}>{h.action.label}<ArrowRight size={12} strokeWidth={2} aria-hidden="true" /></a>
                     {/if}
                   </p>
+                {/if}
+                {#if h.issues && evidence === h.id}
+                  <!-- The evidence, under its finding: every file and line the check flagged, with its fix. -->
+                  <div class="evidence" id="ds-ev-{h.id}">
+                    <IssueList datasetId={dataset.id} path={dataset.path} severity={h.issues} severityFilter={false} {counts} />
+                  </div>
                 {/if}
               </div>
             </li>
@@ -124,7 +133,13 @@
     <div class="kpi">
       <span class="k-label">Images</span>
       <span class="k-value num">{num(images)}</span>
-      <span class="k-sub num"><span class="wide">{splitLine}</span><span class="narrow">{classCount}</span></span>
+      <!-- The split counts break between train and the rest where one line would cut them off (tablets). -->
+      <span class="k-sub num splits" use:wrapWhenNarrow
+        ><span class="wide"><span class="seg">{num(dataset.splits.train)} train<span class="sep">{' · '}</span></span><span class="seg"
+            >{num(dataset.splits.val)} val · {num(dataset.splits.test)} test</span
+          ></span
+        ><span class="narrow">{classCount}</span></span
+      >
     </div>
     <div class="kpi">
       <span class="k-label">Boxes</span>
@@ -200,12 +215,6 @@
     </Panel>
   </div>
 
-  {#if checkShown}
-    <!-- The evidence: every file and line the check flagged, with the checker's message and its fix. -->
-    <Panel title="Dataset check findings" meta="from folo dataset check" id="ds-check">
-      <IssueList datasetId={dataset.id} path={dataset.path} bind:severity={() => listSeverity, (v) => (listed = v)} {counts} />
-    </Panel>
-  {/if}
 </div>
 
 <style>
@@ -213,14 +222,8 @@
     display: grid;
     gap: var(--space-4);
   }
-  /* "Show the files" scrolls the check's section to just under the top bar. */
-  .stats :global(#ds-check) {
-    scroll-margin-top: calc(var(--size-topbar) + var(--space-4));
-  }
-  /* Health: a compact card, at most 8 of the 12 columns, its summary right after the title (no dead middle). */
+  /* Health: full width like the panels under it, the summary right after the title and Details at the right end. */
   .health {
-    width: 100%;
-    max-width: calc((100% + var(--space-4)) * 2 / 3 - var(--space-4));
     background: var(--bg-panel);
     border: 1px solid var(--line-default);
     border-radius: var(--radius-lg);
@@ -328,6 +331,18 @@
     display: grid;
     justify-items: start;
     gap: 2px;
+    min-width: 0;
+  }
+  .evidence {
+    justify-self: stretch;
+    min-width: 0;
+    margin-top: var(--space-2);
+  }
+  .haction :global(.ev-chev) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .haction[aria-expanded='true'] :global(.ev-chev) {
+    transform: rotate(180deg);
   }
   .htitle {
     font-weight: var(--weight-medium);
@@ -385,7 +400,7 @@
   }
   .kpi {
     display: grid;
-    grid-template-rows: 16px 32px 16px;
+    grid-template-rows: 16px 32px minmax(16px, auto);
     gap: 6px;
     padding: var(--space-4);
     background: var(--bg-panel);
@@ -405,6 +420,16 @@
     line-height: 32px;
     letter-spacing: var(--type-2xl-tracking);
     font-weight: var(--weight-semibold);
+  }
+  /* Wrapped: train on the first line, val and test on the second (the row grows; the other cells keep their top). */
+  .splits:global(.wrap) {
+    white-space: normal;
+  }
+  .splits:global(.wrap) .seg {
+    display: block;
+  }
+  .splits:global(.wrap) .sep {
+    display: none;
   }
   .k-value.bad {
     color: var(--danger-text);
@@ -501,9 +526,6 @@
     .two {
       grid-template-columns: minmax(0, 1fr);
     }
-    .health {
-      max-width: none;
-    }
   }
   @media (max-width: 767px) {
     /* Phones: the title and Details on the first line, the severity summaries wrapping under them. */
@@ -531,7 +553,7 @@
     }
     /* A compact 2 × 2 grid: no hero tile, so the class balance starts on the first screen. */
     .kpi {
-      grid-template-rows: 16px 28px 16px;
+      grid-template-rows: 16px 28px minmax(16px, auto);
       gap: 2px;
       padding: var(--space-3);
     }
