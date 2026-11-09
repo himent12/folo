@@ -24,6 +24,10 @@
     context?: boolean;
     /** Thicker line drawn above the others (e.g. a mean over many thin per-class lines). */
     emphasis?: boolean;
+    /** Painted over the other ordinary lines, patterned ones included (./layers), but under emphasised ones. */
+    front?: boolean;
+    /** The direct label at the line's end (with `endLabels`): a short name instead of `label`, or false for none. */
+    endLabel?: string | false;
     /**
      * A band instead of a line: `points` is the upper edge, `lower` the lower edge at the same x positions (e.g. the
      * spread of many curves). Drawn as a soft fill under the lines; not in the legend or the readout.
@@ -51,7 +55,9 @@
   import { scaleLinear, scaleLog } from 'd3-scale';
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
+  import { capTicks, logTicks, MAX_TICKS, stepDecimals } from './domain';
   import { placeEndLabels } from './endLabels';
+  import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
   import { TouchGesture, type PinAction } from './pin';
 
@@ -73,6 +79,7 @@
     xTitle?: (x: number) => string;
     markers?: Marker[];
     legend?: boolean;
+    /** The most y ticks (3–5 are drawn; never more than five gridlines). */
     yTicks?: number;
     xTicks?: number;
     /** x ticks only on whole numbers (epochs): a 3-epoch run reads 0 1 2 3, not 0 0.5 1 … */
@@ -99,6 +106,11 @@
     highlight?: string | null;
     /** A small dot at each line's last point, so every series stays findable where lines overlap. */
     endDots?: boolean;
+    /**
+     * The reading hint ("← → to inspect" on keyboard focus, "Tap to pin a value" once per session on touch), or null.
+     * The legend shows it; a chart without one binds this to show it in its own readout row.
+     */
+    hint?: string | null;
   }
 
   let {
@@ -115,7 +127,7 @@
     xTitle,
     markers = [],
     legend = true,
-    yTicks = 4,
+    yTicks = MAX_TICKS,
     xTicks = 6,
     xInteger = false,
     cursor = $bindable(null),
@@ -128,6 +140,7 @@
     tooltip = false,
     highlight = null,
     endDots = false,
+    hint = $bindable(null),
   }: Props = $props();
   // A pulse the chart was mounted with is old news (a tab switch, a return to a finished run): only a newer one plays.
   const pulseBase = untrack(() => Math.max(0, ...markers.map((m) => m.pulse ?? 0)));
@@ -170,33 +183,33 @@
 
   const yTickValues = $derived.by(() => {
     if (yTickProp) return yTickProp.filter((t) => t >= yExtent[0] - 1e-9 && t <= yExtent[1] + 1e-9);
-    if (yLog) {
-      const [lo, hi] = yExtent;
-      const out: number[] = [];
-      for (let e = Math.floor(Math.log10(lo)); e <= Math.ceil(Math.log10(hi)); e++)
-        for (const m of [1, 2, 5]) {
-          const v = m * 10 ** e;
-          if (v >= lo && v <= hi) out.push(v);
-        }
-      return out.length > yTicks + 2 ? out.filter((_, i) => i % 2 === 0) : out;
-    }
-    return niceTicks(yExtent[0], yExtent[1], yTicks);
+    // 3–5 ticks in nice steps (./domain): more gridlines read as a texture, not a scale.
+    if (yLog) return logTicks(yExtent[0], yExtent[1]);
+    return capTicks(yExtent[0], yExtent[1], Math.min(yTicks, MAX_TICKS));
   });
 
-  // Decimals follow the tick step, so a 0..6 axis reads "0 2 4 6" and a 0..1 axis "0 0.5 1"; log ticks use 3 digits.
+  // Decimals follow the tick step, so a 0..6 axis reads "0 2 4 6", a 0..1 axis "0 0.5 1" and quarter steps
+  // "0.25 0.50"; log ticks use 3 digits.
   const yFormat = $derived.by(() => {
     if (yFormatProp) return yFormatProp;
     if (yLog) return (v: number) => String(+v.toPrecision(3));
     const step = yTickValues.length > 1 ? Math.abs(yTickValues[1]! - yTickValues[0]!) : 1;
-    const d = Math.max(0, Math.min(6, Math.ceil(-Math.log10(step) - 1e-9)));
+    const d = Math.min(6, stepDecimals(step));
     return (v: number) => v.toFixed(d);
   });
   const fmtValue = $derived(valueFormat ?? yFormatProp ?? ((v: number) => String(+v.toFixed(3))));
 
+  /** A line's direct label: its short `endLabel`, else its legend label; null for none. */
+  const endText = (s: Series) => (s.ghost || s.context || s.endLabel === false ? null : (s.endLabel ?? s.label));
+  /** Direct labels at each line's last point, each in a spot that covers no curve and no other label (endLabels.ts). */
+  // Narrow plots keep their width for data (the legend names the lines), unless every label is a short name such as
+  // the loss components' "box", "cls", "dfl".
+  const showEnds = $derived(endLabels && (width >= 560 || series.every((s) => (endText(s)?.length ?? 0) <= 6)));
+
   const margin = $derived.by(() => {
     const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
     // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px.
-    const labelW = endLabels && width >= 560 ? Math.min(130, Math.max(0, ...series.map((s) => Math.min(18, s.label.length))) * 6.8 + 10) : 0;
+    const labelW = showEnds ? Math.min(130, Math.max(0, ...series.map((s) => Math.min(18, endText(s)?.length ?? 0))) * 6.8 + 10) : 0;
     const left = Math.ceil(longest * 7) + 14;
     // An x-axis title gets its own line under the tick labels.
     return { top: yLabel ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
@@ -260,18 +273,16 @@
     });
   });
 
-  /** Direct labels at each line's last point, each in a spot that covers no curve and no other label (endLabels.ts). */
-  // Narrow plots keep their width for data: the legend names the lines instead.
-  const showEnds = $derived(endLabels && width >= 560);
   const ends = $derived.by(() => {
     if (!showEnds) return [];
-    const drawn = visible.filter((s) => !s.ghost && !s.context);
+    const drawn = visible.filter((s) => endText(s) !== null);
     const color = new Map(drawn.map((s) => [s.id, s.color]));
     const points = drawn
       .map((s) => {
         const p = s.points[s.points.length - 1];
         const curve = visible.indexOf(s);
-        return p && Number.isFinite(p.y) ? { id: s.id, label: s.label.length > 18 ? `${s.label.slice(0, 17)}…` : s.label, x: x(p.x), y: y(p.y), curve } : null;
+        const t = endText(s)!;
+        return p && Number.isFinite(p.y) ? { id: s.id, label: t.length > 18 ? `${t.slice(0, 17)}…` : t, x: x(p.x), y: y(p.y), curve } : null;
       })
       .filter((e): e is NonNullable<typeof e> => e !== null)
       // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
@@ -279,7 +290,7 @@
       .sort((a, b) => Number(b.id === highlight) - Number(a.id === highlight) || a.x - b.x);
     const curves = visible.map((s) => s.points.filter((p) => Number.isFinite(p.y)).map((p) => ({ x: x(p.x), y: y(p.y) })));
     const bounds = { x0: margin.left, y0: margin.top, x1: width - 2, y1: height - margin.bottom };
-    return placeEndLabels(points, curves, bounds).map((e) => ({ ...e, color: color.get(e.id) ?? 'var(--text-secondary)' }));
+    return placeEndLabels(points, curves, bounds, 2, width - margin.right).map((e) => ({ ...e, color: color.get(e.id) ?? 'var(--text-secondary)' }));
   });
 
   // ---- hover / keyboard cursor ----
@@ -333,6 +344,23 @@
     } else if (a.kind === 'set' && inPlot(a.px)) {
       cursor = x.invert(Math.min(width - margin.right, Math.max(margin.left, a.px)));
       pinned = true;
+      tapHint = false;
+    }
+  }
+
+  // Reading hints in the readout row (./hint): "← → to inspect" while the plot has keyboard focus, and on a touch
+  // screen "Tap to pin a value" on the first chart of the session, until it is tapped. A mouse gets neither.
+  let keyFocus = $state(false);
+  let tapHint = $state(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse)').matches && claimOnce(TAP_HINT_KEY));
+  const hintText = $derived(hasData ? chartHint({ reading: hover !== null, keyFocus, tap: tapHint }) : null);
+  $effect(() => {
+    hint = hintText;
+  });
+  function onfocus() {
+    try {
+      keyFocus = !!svgEl?.matches(':focus-visible');
+    } catch {
+      keyFocus = false;
     }
   }
   // A cursor cleared elsewhere (a synced chart, blur) is no longer pinned here.
@@ -484,7 +512,8 @@
 <div class="chart">
   {#if legend && keyed.length > 0}
     <ul class="legend" aria-hidden="true">
-      {#if (legendNote || hover) && !compact}<li class="note" class:at={!!hover}>{hover ? hover.title : legendNote}</li>{/if}
+      {#if hintText}<li class="note hint">{hintText}</li>
+      {:else if (legendNote || hover) && !compact}<li class="note" class:at={!!hover}>{hover ? hover.title : legendNote}</li>{/if}
       {#each keyed as s (s.id)}
         {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
         <li>
@@ -531,7 +560,8 @@
         {onpointerup}
         {onpointercancel}
         {onkeydown}
-        onblur={() => ((cursor = null), (spoken = ''))}
+        {onfocus}
+        onblur={() => ((cursor = null), (spoken = ''), (keyFocus = false))}
       >
         <g class="grid">
           {#each yTickValues as t (t)}
@@ -683,6 +713,11 @@
     font-variant-numeric: tabular-nums;
   }
   .legend .note.at {
+    color: var(--text-secondary);
+  }
+  /* A reading hint takes the note's place for as long as it applies, on narrow plots too. */
+  .legend .note.hint {
+    min-width: 0;
     color: var(--text-secondary);
   }
   /* Axis names are labels, not ticks: 12 px. */
@@ -858,6 +893,11 @@
     text-align: center;
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);
+  }
+  /* The panel colour behind the line, so a gridline never runs through it. */
+  .empty span {
+    padding: 0 var(--space-2);
+    background: var(--bg-panel);
   }
   .tip {
     position: absolute;

@@ -220,11 +220,41 @@ export function epochLog(p: RunProfile, ep: Epoch, startedAt: number): LogLine[]
   return lines;
 }
 
+/** Steps a run from scratch needs before the trainer stops warning (folo_vision::train::SHORT_RUN_STEPS). */
+const SHORT_RUN_STEPS = 200;
+
+/**
+ * The trainer's schedule warnings for a run, worded as folo_vision::train::schedule_warnings words them (docs/MODEL.md
+ * §8.4): a run from scratch shorter than 200 optimizer steps, and a warmup longer than half the run.
+ */
+export function scheduleWarnings(p: RunProfile, images: number): string[] {
+  const c = p.config;
+  const spe = p.stepsPerEpoch;
+  const total = c.epochs * spe;
+  const floor = Math.min(100, Math.floor(0.3 * total));
+  const warmup = Math.min(Math.max(Math.round(3 * spe), floor), Math.max(c.epochs - 1, 0) * spe);
+  const out: string[] = [];
+  if (!c.weights && total < SHORT_RUN_STEPS)
+    out.push(
+      `this run takes only ${total} optimizer steps (${c.epochs} epochs × ${spe}: ${images} training images, batch ${c.batch}); ` +
+        'a detector trained from scratch usually needs a few hundred steps to learn anything, so expect an mAP near 0. ' +
+        `Train for at least ${Math.ceil(SHORT_RUN_STEPS / Math.max(1, spe))} epochs, add images, or start from pretrained weights`,
+    );
+  if (warmup * 2 > total)
+    out.push(
+      `warmup takes ${warmup} of the run's ${total} optimizer steps, so the learning rate reaches lr0 only in the second half of the run; ` +
+        'lower warmup_epochs (now 3) or train for more epochs',
+    );
+  return out;
+}
+
 export function startLogs(p: RunProfile, startedAt: number, datasetName: string, images: number): LogLine[] {
   const t = (ms: number) => new Date(startedAt + ms).toISOString();
   const c = p.config;
   return [
     { t: t(0), level: 'info', message: `FOLO 0.1.0  ${c.arch}  device ${p.device}` },
+    // Straight after the first line, as the trainer writes them.
+    ...scheduleWarnings(p, images).map((message): LogLine => ({ t: t(0), level: 'warn', message })),
     { t: t(40), level: 'info', message: `dataset ${datasetName}: ${images} train images, ${p.classes} classes, imgsz ${c.imgsz}` },
     { t: t(90), level: 'debug', message: `model ${c.arch}: params ${archInfo[c.arch].params.toLocaleString('en-US')}, ${archInfo[c.arch].flops} GFLOPs` },
     { t: t(120), level: 'info', message: `optimizer ${c.optimizer === 'auto' ? 'AdamW' : c.optimizer} lr0 ${c.lr0}  batch ${c.batch}  warmup 3 epochs, cosine to ${c.lr0 * 0.01}` },

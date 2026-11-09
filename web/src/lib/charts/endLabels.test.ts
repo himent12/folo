@@ -69,3 +69,38 @@ describe('placeEndLabels', () => {
     expect(Math.abs(p!.y - 150)).toBeLessThanOrEqual(20);
   });
 });
+
+describe('placeEndLabels: the gutter column', () => {
+  it('stacks labels of lines that end together next to each other, in order, near their ends', () => {
+    // The loss chart near its end: total at 100, box and dfl meeting at 170, cls at 200; the plot ends at x = 500.
+    const flat = (y: number) => line([[0, y], [500, y]]);
+    const ends = [
+      { id: 'total', label: 'total', x: 500, y: 100, curve: 0 },
+      { id: 'box', label: 'box', x: 500, y: 170, curve: 1 },
+      { id: 'cls', label: 'cls', x: 500, y: 200, curve: 2 },
+      { id: 'dfl', label: 'dfl', x: 500, y: 171, curve: 3 },
+    ];
+    // Noisy curves fill the plot left of their ends, so only the gutter is free.
+    const hatch = Array.from({ length: 31 }, (_, i) => flat(i * 10));
+    const placed = placeEndLabels(ends, [flat(100), flat(170), flat(200), flat(171), ...hatch], bounds, 2, 500);
+    const at = Object.fromEntries(placed.map((p) => [p.id, p]));
+    expect(Object.keys(at).sort()).toEqual(['box', 'cls', 'dfl', 'total']);
+    // Each within two label heights of its own end (none sent past another line's label), none overlapping.
+    for (const e of ends) expect(Math.abs(at[e.id]!.y - e.y)).toBeLessThanOrEqual(28);
+    for (const a of placed)
+      for (const b of placed)
+        if (a !== b) expect(Math.abs(a.y - b.y) >= 14 || a.x + labelWidth(a.label) <= b.x || b.x + labelWidth(b.label) <= a.x).toBe(true);
+    // One ordered column: without it, dfl would take the nearest free height in the gutter, above total.
+    for (const e of ends) expect(at[e.id]!.x).toBe(506);
+    expect(at.total!.y).toBeLessThan(at.box!.y);
+    expect(at.box!.y).toBeLessThan(at.dfl!.y);
+    expect(at.dfl!.y).toBeLessThan(at.cls!.y);
+  });
+
+  it('keeps a crowded column inside the plot', () => {
+    const ends = ['a', 'b', 'c', 'd'].map((id, i) => ({ id, label: id, x: 500, y: 296 + i * 0.5 }));
+    const placed = placeEndLabels(ends, ends.map((e) => line([[0, e.y], [500, e.y]])), bounds, 2, 500);
+    expect(placed).toHaveLength(4);
+    for (const p of placed) expect(p.y + 7).toBeLessThanOrEqual(300);
+  });
+});

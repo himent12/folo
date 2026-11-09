@@ -15,7 +15,7 @@
    * tertiary with dash patterns); hue is reserved for entities (runs in Compare, classes).
    */
   import { tooltip } from '$lib/ui/tooltip';
-  import type { Snippet } from 'svelte';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse } from '$lib/charts/bestPulse';
   import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
@@ -35,15 +35,18 @@
     epochs,
     version,
     loading,
-    waiting,
+    queued = false,
+    folded = false,
   }: {
     run: Run;
     steps: Step[];
     epochs: Epoch[];
     version: number;
     loading: boolean;
-    /** A queued run: the one line its empty chart states (what it waits for), inside the axes it will fill. */
-    waiting?: Snippet;
+    /** A queued run with nothing yet: no KPI tabs (every one would read "—"), a short empty plot. */
+    queued?: boolean;
+    /** Phones: another section is picked, so the chart folds to its one-line readout (it opens on a tap). */
+    folded?: boolean;
   } = $props();
 
   type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
@@ -62,7 +65,15 @@
     tablet.addEventListener('change', on);
     return () => (phone.removeEventListener('change', on), tablet.removeEventListener('change', on));
   });
-  const height = $derived(narrow ? 168 : 320);
+  // A queued run's plot is the axes and one line: compact until there is data.
+  const height = $derived(queued ? (narrow ? 120 : 160) : narrow ? 168 : 320);
+  // Folded on phones while another section is picked; a tap on the readout opens it until the section changes.
+  let peek = $state(false);
+  $effect(() => {
+    void folded;
+    peek = false;
+  });
+  const fold = $derived(folded && narrow && !peek);
 
   const live = $derived(['queued', 'running', 'stopping'].includes(run.status));
   const progress = $derived(runProgress(run));
@@ -124,9 +135,11 @@
         return [
           { id: 'raw', label: 'total (raw)', color: INK, ghost: true, points: a > 0 ? total : [] },
           // Said in the legend, so the smoothed total never seems to contradict the KPI's raw last step.
-          { id: 'total', label: a > 0 ? `Total, EMA ${smoothing}` : 'Total, raw', color: INK, emphasis: true, points: smooth(total, a) },
+          { id: 'total', label: a > 0 ? `Total, EMA ${smoothing}` : 'Total, raw', endLabel: 'total', color: INK, emphasis: true, points: smooth(total, a) },
           // The components as design/README.md maps them in both apps: box amber, cls violet dashed, dfl teal dotted.
-          { id: 'box', label: 'box', color: 'var(--chart-2)', points: smooth(perStep((s) => s.loss.box), a) },
+          // Box and dfl run together late in a run (0.85 vs 0.83): box is painted over dfl's dots, and each line is
+          // labelled at its end, so both stay readable where they meet.
+          { id: 'box', label: 'box', color: 'var(--chart-2)', front: true, points: smooth(perStep((s) => s.loss.box), a) },
           { id: 'cls', label: 'cls', color: 'var(--chart-5)', pattern: 'dash', points: smooth(perStep((s) => s.loss.cls), a) },
           { id: 'dfl', label: 'dfl', color: 'var(--chart-4)', pattern: 'dot', points: smooth(perStep((s) => s.loss.dfl), a) },
         ];
@@ -278,7 +291,8 @@
 
 <section class="metrics" aria-label="Run metrics">
   <!-- Phones: a finished run's strip only repeats the completed banner above it (status, duration), so it goes. -->
-  <div class="strip" class:finished={run.status === 'completed'}>
+  <!-- Queued: the epoch row alone; the six tabs would all read "—" until the first step. -->
+  <div class="strip" class:finished={run.status === 'completed'} class:queued>
     <div class="epoch">
       <span class="label">Epoch</span>
       <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
@@ -295,71 +309,87 @@
         {#if run.status === 'queued'}Not started{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else if live}{(progress * 100).toFixed(1)}% · {run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}{#if closeFrom < 1}<span class="hatch-key">&nbsp;· <i aria-hidden="true"></i>no mosaic</span>{/if}{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
       </span>
     </div>
-    <!-- svelte-ignore a11y_interactive_supports_focus -->
-    <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
-      {#each tabs as t (t.id)}
-        <button
-          role="tab"
-          class="tab"
-          class:on={tab === t.id}
-          aria-selected={tab === t.id}
-          aria-controls="run-chart"
-          tabindex={tab === t.id ? 0 : -1}
-          data-tab={t.id}
-          onclick={() => (tab = t.id)}
-        >
-          <span class="label">{t.label}</span>
-          <span class="val num">{t.value}{#if t.unit && t.value !== '—'}<span class="unit">{t.unit}</span>{/if}</span>
-          <span class="cap num">{t.caption}</span>
-        </button>
-      {/each}
-    </div>
+    {#if !queued}
+      <!-- svelte-ignore a11y_interactive_supports_focus -->
+      <div class="tabs" role="tablist" aria-label="Metric to chart" {onkeydown}>
+        {#each tabs as t (t.id)}
+          <button
+            role="tab"
+            class="tab"
+            class:on={tab === t.id}
+            aria-selected={tab === t.id}
+            aria-controls="run-chart"
+            tabindex={tab === t.id ? 0 : -1}
+            data-tab={t.id}
+            onclick={() => (tab = t.id)}
+          >
+            <span class="label">{t.label}</span>
+            <span class="val num">{t.value}{#if t.unit && t.value !== '—'}<span class="unit">{t.unit}</span>{/if}</span>
+            <span class="cap num">{t.caption}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
   </div>
 
-  <div class="chart" id="run-chart" role="tabpanel" aria-label={current.title}>
-    <header>
-      <!-- Below 960 px the picker names the metric in place of the title (the tabs above are hidden). -->
-      {#if picking}<div class="pick">{@render picker()}</div>{/if}
-      <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}</span></h2>
-      <div class="ctl">
-        <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
-             segmented group. -->
-        {#if tab === 'loss'}<LossOptions bind:smoothing bind:scale />{/if}
-        {#if live && run.status !== 'queued'}
-          <Segmented
-            size="sm"
-            label="Chart range"
-            bind:value={horizon}
-            options={[
-              { value: 'observed', label: 'So far' },
-              { value: 'full', label: `All ${run.epochs}` },
-            ]}
-          />
+  <div class="chart" class:folded={fold} id="run-chart" role="tabpanel" aria-label={current.title}>
+    {#if folded && narrow}
+      <!-- Phones, another section picked: the chart as its one-line readout, which opens it in place. -->
+      <button type="button" class="readout" aria-expanded={!fold} aria-controls="run-chart-body" onclick={() => (peek = !peek)}>
+        <span class="r-l">{current.label}</span>
+        <span class="r-v num">{current.value}{#if current.unit && current.value !== '—'}<span class="unit">{current.unit}</span>{/if}</span>
+        <span class="r-c">{current.caption}</span>
+        <span class="r-a">{fold ? 'Show chart' : 'Hide chart'}<ChevronDown size={14} aria-hidden="true" /></span>
+      </button>
+    {/if}
+    {#if !fold}
+      <div class="chart-body" id="run-chart-body">
+        <header>
+          <!-- Below 960 px the picker names the metric in place of the title (the tabs above are hidden). -->
+          {#if picking}<div class="pick">{@render picker()}</div>{/if}
+          <h2><span class="t">{current.title}</span><span class="q">{current.qualifier}</span></h2>
+          <div class="ctl">
+            <!-- One control for the loss view (smoothing and y scale behind one button), so the header keeps at most one
+                 segmented group. -->
+            {#if tab === 'loss'}<LossOptions bind:smoothing bind:scale />{/if}
+            {#if live && run.status !== 'queued'}
+              <Segmented
+                size="sm"
+                label="Chart range"
+                bind:value={horizon}
+                options={[
+                  { value: 'observed', label: 'So far' },
+                  { value: 'full', label: `All ${run.epochs}` },
+                ]}
+              />
+            {/if}
+          </div>
+        </header>
+        {#if loading}
+          <ChartSkeleton {height} />
+        {:else}
+          {#key tab}
+            <LineChart
+              {series}
+              {height}
+              {xDomain}
+              xInteger
+              yDomain={fit?.domain}
+              yTickValues={fit && !fit.log ? fit.ticks : undefined}
+              yLog={tab === 'loss' && scale === 'log'}
+              yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
+              valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
+              xTitle={epochTitle}
+              curve={unit ? 'monotone' : 'linear'}
+              markers={best}
+              legendNote={live ? 'Latest' : 'Last'}
+              label="{current.title} by epoch"
+              endLabels={tab === 'loss'}
+              empty={queued ? 'Curves appear here once training starts' : unit ? 'Waiting for the first validation…' : 'Waiting for the first step…'}
+            />
+          {/key}
         {/if}
       </div>
-    </header>
-    {#if loading}
-      <ChartSkeleton {height} />
-    {:else}
-      {#key tab}
-        <LineChart
-          {series}
-          {height}
-          {xDomain}
-          xInteger
-          yDomain={fit?.domain}
-          yTickValues={fit && !fit.log ? fit.ticks : undefined}
-          yLog={tab === 'loss' && scale === 'log'}
-          yFormat={tab === 'lr' ? (v) => String(+(v / 10 ** lrExp).toFixed(2)) : undefined}
-          valueFormat={tab === 'lr' ? (v) => fmtLr(v) : tab === 'ips' ? (v) => `${num(v, 0)} img/s` : (v) => metric(v)}
-          xTitle={epochTitle}
-          curve={unit ? 'monotone' : 'linear'}
-          markers={best}
-          legendNote={live ? 'Latest' : 'Last'}
-          label="{current.title} by epoch"
-          empty={waiting ?? (unit ? 'Waiting for the first validation…' : 'Waiting for the first step…')}
-        />
-      {/key}
     {/if}
   </div>
 </section>
@@ -527,6 +557,83 @@
     gap: var(--space-2);
     padding: 0 var(--space-4) var(--space-4);
     min-width: 0;
+  }
+  .chart-body {
+    display: grid;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+  /* Queued: the epoch as one row (as on laptops), with no tabs under it. */
+  .strip.queued {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .strip.queued .epoch {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: auto;
+    align-items: center;
+    column-gap: var(--space-4);
+    border-right: 0;
+    padding: var(--space-3) var(--space-4);
+  }
+  .strip.queued .epoch .label {
+    display: none;
+  }
+  .strip.queued .big {
+    font-size: var(--type-2xl-size);
+    line-height: 32px;
+  }
+  /* Phones, another section picked: the chart folded to one 44 px readout row that opens it. */
+  .chart.folded {
+    padding-bottom: var(--space-1);
+  }
+  .readout {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    min-height: 44px;
+    margin-top: var(--space-1);
+    text-align: left;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    border-radius: var(--radius-md);
+  }
+  .readout:focus-visible {
+    outline-offset: -2px;
+  }
+  .r-l {
+    color: var(--text-tertiary);
+    white-space: nowrap;
+  }
+  .r-v {
+    color: var(--text-primary);
+    font-size: var(--type-base-size);
+    font-weight: var(--weight-semibold);
+    white-space: nowrap;
+  }
+  .r-c {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-tertiary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .r-a {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .readout:hover .r-a {
+    color: var(--text-primary);
+  }
+  .r-a :global(svg) {
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .readout[aria-expanded='true'] .r-a :global(svg) {
+    transform: rotate(180deg);
   }
   .chart header {
     display: flex;
