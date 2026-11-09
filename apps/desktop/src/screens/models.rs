@@ -1024,10 +1024,11 @@ impl FoloApp {
                     .child(
                         div()
                             .when(!legend_below, |d| d.w(px(252.)))
-                            .when(legend_below, |d| d.max_w(px(360.)).pt(px(0.)).pb(px(12.)).px(px(16.)))
                             .flex_none()
                             .p(px(8.))
                             .pt(px(12.))
+                            // Below the plot: inset like the plot, a little air before the panel edge.
+                            .when(legend_below, |d| d.max_w(px(360.)).pt(px(0.)).pb(px(12.)).px(px(16.)))
                             .flex()
                             .flex_col()
                             .gap(px(2.))
