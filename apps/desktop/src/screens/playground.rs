@@ -295,6 +295,11 @@ impl FoloApp {
             window,
             cx,
         );
+        // The image is its own Tab stop, and a press on it focuses it: the arrows then pan the
+        // image (zoomed) rather than stepping whichever slider had focus last.
+        let canvas_fh = self.fh("stage-canvas", cx);
+        let canvas_focused = canvas_fh.is_focused(window);
+        let canvas_ring = self.ring(&canvas_fh, window);
         let zoom_bar = div()
             .flex()
             .items_center()
@@ -438,6 +443,7 @@ impl FoloApp {
             .child(
                 div()
                     .id("stage-canvas")
+                    .track_focus(&canvas_fh)
                     .relative()
                     .flex_1()
                     .min_h_0()
@@ -461,7 +467,8 @@ impl FoloApp {
                     }))
                     .on_mouse_down(
                         gpui::MouseButton::Left,
-                        cx.listener(|this, ev: &gpui::MouseDownEvent, _, _| {
+                        cx.listener(move |this, ev: &gpui::MouseDownEvent, w, _| {
+                            w.focus(&canvas_fh);
                             this.play_drag = Some((ev.position, this.play_pan));
                         }),
                     )
@@ -522,7 +529,38 @@ impl FoloApp {
                             },
                         )
                         .size_full(),
-                    ),
+                    )
+                    // Focused, the stage says so: a focus-coloured inset edge (2 px from the
+                    // keyboard, like every ring; 1 px after a click), and from the keyboard, its keys.
+                    .when(canvas_focused, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .when(canvas_ring, |d| d.border_2())
+                                .when(!canvas_ring, |d| d.border_1())
+                                .border_color(t.focus),
+                        )
+                    })
+                    .when(canvas_ring, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .left(px(12.))
+                                .bottom(px(12.))
+                                .px(px(8.))
+                                .py(px(3.))
+                                .rounded(px(radius::SM))
+                                .bg(t.bg_overlay)
+                                .border_1()
+                                .border_color(t.line_default)
+                                .child(text(ty::SM, t.text_secondary).child(if zoom > 1.0 {
+                                    "Arrows pan · Shift ×4 · + − zoom · 0 fits"
+                                } else {
+                                    "+ − zoom · then arrows pan · 0 fits"
+                                })),
+                        )
+                    }),
             )
             .into_any_element()
     }

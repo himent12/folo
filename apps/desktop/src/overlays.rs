@@ -618,7 +618,7 @@ impl FoloApp {
                 changed.push("end-to-end".into());
             }
             if opt != 0 {
-                changed.push(format!("{} at {lr0}", OPT_LABELS[opt]));
+                changed.push(format!("{} at {}", OPT_LABELS[opt], crate::ui::fmt_lr(lr0 as f64)));
             }
             if f.amp {
                 changed.push("mixed precision".into());
@@ -781,11 +781,11 @@ impl FoloApp {
             let steps = (d.splits.train as usize).div_ceil(BATCHES[batch].max(64) as usize)
                 * epochs.round().max(1.) as usize;
             if steps > 10_000 {
-                ("SGD", "0.01".to_string())
+                ("SGD", crate::ui::fmt_lr(0.01))
             } else {
                 let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
-                // Its six decimals, written as the run dashboard writes rates (1.11×10⁻³).
-                ("AdamW", crate::charts::in_pow(lr, lr.log10().floor() as i32))
+                // Written as every rate is (1.11×10⁻³).
+                ("AdamW", crate::ui::fmt_lr(lr))
             }
         });
         // The adapter behind "GPU 0", named as the other screens name it.
@@ -1210,7 +1210,9 @@ impl FoloApp {
                                                 // A value, not an input: an outline, no well.
                                                 .border_1()
                                                 .border_color(t.line_subtle)
-                                                .child(text(ty::SM, t.text_tertiary).tnum().child(
+                                                .child(crate::ui::sci(
+                                                    ty::SM,
+                                                    t.text_tertiary,
                                                     match &auto_pick {
                                                         Some((_, lr)) => format!("Auto · {lr}"),
                                                         None => "Auto".to_string(),
@@ -1318,8 +1320,8 @@ impl FoloApp {
                     div()
                         .flex()
                         .gap(px(16.))
-                        .child(div().flex_1().child(valued("Mosaic", format!("{mosaic:.2}"), mosaic_slider)))
-                        .child(div().flex_1().child(valued("Mixup", format!("{mixup:.2}"), mixup_slider))),
+                        .child(div().flex_1().child(valued("Mosaic", crate::ui::fmt_aug(mosaic), mosaic_slider)))
+                        .child(div().flex_1().child(valued("Mixup", crate::ui::fmt_aug(mixup), mixup_slider))),
                 )
                 .child(
                     div()
@@ -1327,12 +1329,12 @@ impl FoloApp {
                         .gap(px(16.))
                         .child(div().flex_1().child(valued(
                             "Horizontal flip",
-                            format!("{fliplr:.2}"),
+                            crate::ui::fmt_aug(fliplr),
                             flip_slider,
                         )))
                         .child(div().flex_1().child(valued(
                             "Scale jitter",
-                            format!("±{scale:.2}"),
+                            crate::ui::fmt_scale(scale),
                             scale_slider,
                         ))),
                 )
@@ -2034,8 +2036,38 @@ impl FoloApp {
             .into_any_element()
     }
 
+    /// The inspector was asked for an image by id (`Inspector::want`): once the list is in, its
+    /// place in the filtered list. An image the dataset page's filters hide clears them (the
+    /// inspector walks that list); one the dataset doesn't have opens the first image.
+    fn land_inspector(&mut self) {
+        let Some((ds, want)) =
+            self.inspector.as_ref().and_then(|i| Some((i.dataset.clone(), i.want.clone()?)))
+        else {
+            return;
+        };
+        let Some(all) = self.store.images.get(&ds).and_then(|l| l.ready()) else { return };
+        let in_all = all.iter().position(|m| m.id == want);
+        let shown = self.filtered_indices(&ds).iter().position(|&i| all[i].id == want);
+        let index = match (shown, in_all) {
+            (Some(i), _) => i,
+            (None, Some(i)) => {
+                self.ds_split = None;
+                self.ds_class = None;
+                self.ds_empty_only = false;
+                // Unfiltered, the list is every image in order.
+                i
+            }
+            (None, None) => 0,
+        };
+        if let Some(i) = self.inspector.as_mut() {
+            i.index = index;
+            i.want = None;
+        }
+    }
+
     fn inspector_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        self.land_inspector();
         let insp = self.inspector.as_ref().unwrap();
         let ds_id = insp.dataset.clone();
         let n = self.filtered_indices(&ds_id).len();

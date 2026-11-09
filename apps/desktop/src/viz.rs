@@ -257,11 +257,11 @@ pub fn paint_image_with_boxes(
                     let strict = compact && !reveal;
                     // small: label chips drawn on images (design/README: `xs`, `micro` on thumbnails).
                     let fs = if compact { 10. } else { ty::XS.size };
-                    // Narrow views (thumbnails under 140 px) show the score only; the key names the hue.
-                    let name = if bounds.size.width < px(140.) {
-                        Default::default()
-                    } else {
-                        b.label.clone().unwrap_or_default()
+                    // Narrow views (thumbnails under 140 px) name the class by its first three
+                    // letters ("tri 0.73"), so no chip is a bare score known only by its hue.
+                    let name = match b.label.clone() {
+                        Some(l) if bounds.size.width < px(140.) => SharedString::from(abbrev(&l)),
+                        l => l.unwrap_or_default(),
                     };
                     // The selected box's chip takes the selection colour, like its outline.
                     let (chip_bg, ink) = if b.highlight {
@@ -529,6 +529,11 @@ pub fn hit_box(boxes: &[DrawBox], x: f32, y: f32) -> Option<usize> {
             ((a.1.x2 - a.1.x1) * (a.1.y2 - a.1.y1)).total_cmp(&((b.1.x2 - b.1.x1) * (b.1.y2 - b.1.y1)))
         })
         .map(|(i, _)| i)
+}
+
+/// A class name's chip form on a narrow thumbnail: its first three letters ("triangle" → "tri").
+pub fn abbrev(name: &str) -> String {
+    name.chars().take(3).collect()
 }
 
 #[cfg(test)]

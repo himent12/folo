@@ -27,7 +27,7 @@ foreach ($s in $scenarios) {
 }
 if ($Only.Count -eq 0) {
     # Minimum window size (960 x 620).
-    foreach ($s in @("overview", "overview+empty", "run-live", "dataset", "playground", "models", "new-run")) {
+    foreach ($s in @("overview", "overview+empty", "run-live", "run-live+charts-focus", "dataset", "playground", "models", "new-run")) {
         Shoot $s @{ Width = 960; Height = 620; Out = (Join-Path $Dir "$($s -replace '\+', '-')-min.png") }
     }
     # Large window (1680 x 1050).

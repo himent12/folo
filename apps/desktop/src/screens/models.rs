@@ -62,7 +62,7 @@ impl FoloApp {
         let name_w = {
             let content = self.content_width(window);
             // Architecture is 150 px (its "folo-s · 640 px" plus the e2e tag).
-            let fixed = [150., 130., 72., 72., 84.].iter().sum::<f32>()
+            let fixed = [150., 130., 72., 84., 84.].iter().sum::<f32>()
                 + if wide { 150. } else { 0. }
                 + if params_col { 72. } else { 0. };
             let columns = 6. + f32::from(u8::from(wide)) + f32::from(u8::from(params_col));
@@ -83,7 +83,7 @@ impl FoloApp {
             .child(self.sort_th("map", "mAP50-95", 130., true, window, cx))
             .child(self.sort_th("map50", "mAP50", 72., true, window, cx))
             .when(params_col, |d| d.child(num_cell(72., th(&t, "Params"))))
-            .child(self.sort_th("size", "Size", 72., true, window, cx))
+            .child(self.sort_th("size", "File size", 84., true, window, cx))
             .child(self.sort_th("created", "Created", 84., true, window, cx));
         // Keyed by the list's content (ids and the sorted fields), so a reload or another backend
         // with the same length never reuses a stale order.
@@ -201,7 +201,7 @@ impl FoloApp {
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| text(ty::SM, t.text_primary).tnum().child(f3(mm.map50_95)))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
                             .when(params_col, |d| d.child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{p} {pu}")))))
-                            .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}"))))
+                            .child(num_cell(84., text(ty::SM, t.text_secondary).tnum().child(format!("{b} {bu}"))))
                             .child(num_cell(84., {
                                 // Relative in the column, the exact local time on hover.
                                 let at = time::parse(&m.created);
@@ -1174,9 +1174,9 @@ impl FoloApp {
         // detected, the last row detections with no object.
         let row_sums: Vec<u32> = ev.confusion.iter().map(|r| r.iter().sum::<u32>().max(1)).collect();
         let max_count = ev.confusion.iter().flatten().copied().max().unwrap_or(1).max(1);
-        // The error ramp spans 0 to the largest confusion between classes (the false-positive row,
-        // a split of all false positives that sums to 100 %, is plain numbers), so the worst confusion is the
-        // darkest cell and small ones stay apart (the key states that maximum).
+        // The error ramp spans 0 to the largest error cell, false positives included (their row
+        // is a share of all false positives, a row % like the class rows'), so the worst error is
+        // the darkest cell and small ones stay apart (the key states that maximum).
         let frac_of =
             |r: usize, v: u32| if norm { v as f32 / row_sums[r] as f32 } else { v as f32 / max_count as f32 };
         let last = ev.confusion.len().saturating_sub(1);
@@ -1185,7 +1185,7 @@ impl FoloApp {
             .iter()
             .enumerate()
             .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, &v)| (r, c, v)))
-            .filter(|&(r, c, _)| r != c && r != last)
+            .filter(|&(r, c, _)| r != c && !(r == last && c == last))
             .map(|(r, _, v)| frac_of(r, v))
             .fold(0f32, f32::max)
             .max(1e-6);
@@ -1330,12 +1330,9 @@ impl FoloApp {
                     } else {
                         // Correct cells on the success ramp; errors on a danger ramp (linear from a
                         // faint floor up to the largest error), so small and large confusions stay apart.
+                        // The false-positive row is errors too: the same ramp and key.
                         if diag {
                             crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
-                        } else if r == n - 1 {
-                            // The false-positive split is read as numbers: a flat inset, no ramp (a
-                            // grey ramp beside the red one read as an encoding without a key).
-                            t.bg_inset
                         } else {
                             crate::theme::over(t.bg_panel, alpha(t.danger_solid, err_alpha(frac / max_err)))
                         }
@@ -1357,8 +1354,6 @@ impl FoloApp {
                     // Pick the label colour from the composited cell, not the theme.
                     let ink = if na || v == 0 {
                         t.text_tertiary
-                    } else if r == n - 1 && !diag {
-                        t.text_secondary
                     } else {
                         t.readable_on(crate::theme::over(t.bg_panel, fill))
                     };
@@ -1560,17 +1555,23 @@ impl FoloApp {
             .h(px(36.))
             .border_b_1()
             .border_color(t.line_subtle)
-            // Spare width is shared (Class 2 : each metric 1, to 360 / 160 px); past the caps it
-            // opens before the metrics, which stay close enough to read across.
-            .child(grow_col(th(&t, "Class"), 200., 2., 360.))
-            .child(grow_col(th(&t, "AP50"), 120., 1., 160.).ml_auto().text_right())
-            .child(grow_col(th(&t, "AP50-95"), 120., 1., 160.).text_right())
-            .child(grow_col(th(&t, "Precision"), 120., 1., 160.).text_right())
-            .child(grow_col(th(&t, "Recall"), 120., 1., 160.).text_right());
+            // The class column is a fixed 240; the four metric columns share the rest equally,
+            // their bars taking the spare width, so no gap opens between a name and its numbers
+            // however wide the window.
+            .child(div().w(px(CLASS_COL)).flex_none().child(th(&t, "Class")))
+            .child(metric_col().justify_end().child(th(&t, "AP50")))
+            .child(metric_col().justify_end().child(th(&t, "AP50-95")))
+            .child(metric_col().justify_end().child(th(&t, "Precision")))
+            .child(metric_col().justify_end().child(th(&t, "Recall")));
         let focus = self.pr_isolated(ev, window);
         let pin = self.pr_pin;
-        let num =
-            |v: String| grow_col(text(ty::SM, t.text_secondary).tnum(), 120., 1., 160.).text_right().child(v);
+        // Every metric the same way: a 0–1 bar that grows with the column, then the value.
+        let num = |v: f32| {
+            metric_col()
+                .gap(px(8.))
+                .child(div().flex_1().min_w(px(40.)).child(progress(&t, v, t.text_tertiary, 4.)))
+                .child(text(ty::SM, t.text_primary).tnum().w(px(40.)).flex_none().text_right().child(f3(v)))
+        };
         let mut per: Vec<_> = ev.per_class.iter().collect();
         // Class order, as the PR legend and the confusion matrix run.
         per.sort_by_key(|c| c.class);
@@ -1611,7 +1612,9 @@ impl FoloApp {
                         }
                     }))
                     .child(
-                        grow_col(div(), 200., 2., 360.)
+                        div()
+                            .w(px(CLASS_COL))
+                            .flex_none()
                             .flex()
                             .items_center()
                             .gap(px(8.))
@@ -1626,17 +1629,10 @@ impl FoloApp {
                             // The same pin as the PR legend's pinned row.
                             .when(pinned, |d| d.child(icon("icons/pin.svg", 12., t.text_secondary))),
                     )
-                    // Only the headline metric carries a comparison bar; the others are plain
-                    // numbers, so AP50-95 leads the row.
-                    .child(num(f3(c.map50)).ml_auto())
-                    .child(grow_col(div(), 120., 1., 160.).flex().justify_end().child(bar_value(
-                        &t,
-                        c.map50_95,
-                        f3(c.map50_95),
-                        t.text_tertiary,
-                    )))
-                    .child(num(format!("{:.3}", c.precision)))
-                    .child(num(format!("{:.3}", c.recall)));
+                    .child(num(c.map50))
+                    .child(num(c.map50_95))
+                    .child(num(c.precision))
+                    .child(num(c.recall));
                 // Keyboard: Enter/Space isolates (or releases) this class on the PR chart.
                 self.bind(
                     row,
@@ -1654,6 +1650,14 @@ impl FoloApp {
             .collect();
         panel(&t).overflow_hidden().child(head).children(rows).into_any_element()
     }
+}
+
+/// The per-class table's class column (swatch, a name to 168 px, a pin).
+const CLASS_COL: f32 = 240.;
+
+/// A per-class metric column: equal shares of the width after the class column, at least 120.
+fn metric_col() -> gpui::Div {
+    div().flex_1().min_w(px(120.)).flex().items_center()
 }
 
 /// A fixed-width table cell whose content sits flush right (headers and values share it, so they

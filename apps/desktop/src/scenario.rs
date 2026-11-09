@@ -26,28 +26,36 @@ pub const ALL: &[&str] = &[
     "overview+empty",
     "overview+error",
     "palette",
+    "palette+light",
     "datasets",
     "dataset",
     "dataset+light",
     "dataset+filter",
     "inspector",
+    "inspector+light",
     "runs",
     "run-live",
     "run-live+light",
     "run-live+hover",
+    "run-live+charts-focus",
     "run-done",
     "run-done+bottom",
+    "run-done+sample-focus",
     "run-failed",
     "new-run",
     "new-run+amp",
+    "new-run+light",
     "stop-confirm",
+    "stop-confirm+light",
     "models",
     "model",
     "model+light",
+    "model+table-focus",
     "playground",
     "playground+nms",
     "playground+empty",
     "playground+light",
+    "playground+canvas-focus",
     "settings",
     "toast",
     "kb-focus",
@@ -194,6 +202,24 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     if screen == "kb-focus" {
         app.kb = true;
         app.focus_key("ov-new", window, cx);
+    }
+    // Keyboard focus on a control with its own keys, its hint showing (scrolled into view).
+    let focus = [
+        ("charts-focus", "run-charts"),
+        ("sample-focus", "smp-2"),
+        ("table-focus", "pc-row-1"),
+        ("canvas-focus", "stage-canvas"),
+    ]
+    .into_iter()
+    .find(|(part, _)| s.has(part));
+    if let Some((part, key)) = focus {
+        if part == "canvas-focus" {
+            // Zoomed, so the arrows pan (the hint says so).
+            app.play_zoom = 2.0;
+        }
+        app.kb = true;
+        app.focus_key(key, window, cx);
+        app.reveal_pending = 30;
     }
     let _ = Load::<()>::Idle;
 }

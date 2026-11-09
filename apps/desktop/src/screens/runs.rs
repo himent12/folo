@@ -115,7 +115,7 @@ impl FoloApp {
         // setup (so the default 1280 window tells an hour-old run from a week-old one). Budget
         // (content width, Run keeps its 148 px and Arch its 96 for an e2e tag; 1000 px at 1280 with
         // Progress at 140): Dataset +136
-        // from 1240, Created +96 from 1280, Size · batch +120 from 1440.
+        // from 1240, Created +96 from 1280, Image size · batch +136 from 1440.
         let vw = window.viewport_size().width;
         let show_ds = vw >= px(1240.);
         let show_created = vw >= px(1280.);
@@ -125,9 +125,9 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").flex_1().min_w(px(148.)))
-            .child(th(&t, "Arch").w(px(96.)).flex_none())
+            .child(th(&t, "Architecture").w(px(96.)).flex_none())
             .when(show_ds, |d| d.child(th(&t, "Dataset").w(px(120.)).flex_none()))
-            .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
+            .when(wide, |d| d.child(th(&t, "Image size · batch").w(px(120.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
             .child(th(&t, "Progress").w(px(140.)).flex_none())
             .child(self.sort_th_on(
@@ -284,7 +284,7 @@ impl FoloApp {
                     .when(wide, |d| {
                         d.child(
                             text(ty::SM, t.text_tertiary)
-                                .w(px(104.))
+                                .w(px(120.))
                                 .flex_none()
                                 .tnum()
                                 .whitespace_nowrap()
@@ -1246,7 +1246,8 @@ impl FoloApp {
                 let view = self.sample_view;
                 let tiles: Vec<AnyElement> = samples
                     .iter()
-                    .map(|smp| {
+                    .enumerate()
+                    .map(|(n, smp)| {
                         let img = self.image(&smp.dataset_id, &smp.image_id, ImgKind::Thumb, cx);
                         let mut boxes: Vec<DrawBox> = Vec::new();
                         if view != SampleView::Predictions {
@@ -1273,7 +1274,42 @@ impl FoloApp {
                             .bg(t.bg_inset)
                             .child(image_canvas(&t, img, dims, boxes, Fit::Cover, true, false));
                         square.style().aspect_ratio = Some(1.0);
-                        div().flex_1().min_w(px(0.)).child(square).into_any_element()
+                        // Each sample is a Tab stop: click or Enter opens it in the inspector (the
+                        // image in full, its labels, and the dataset to walk from it).
+                        let (ds, image) = (smp.dataset_id.clone(), smp.image_id.clone());
+                        let tile = div()
+                            .id(SharedString::from(format!("smp-{n}")))
+                            .flex_1()
+                            .min_w(px(0.))
+                            .rounded(px(radius::MD))
+                            .cursor_pointer()
+                            .tooltip(crate::controls::tip("Open in the inspector", None))
+                            .child(
+                                square
+                                    .relative()
+                                    // Over an image a fill wouldn't show: the edge answers instead.
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .inset_0()
+                                            .rounded(px(radius::MD))
+                                            .border_1()
+                                            .border_color(gpui::transparent_black())
+                                            .group_hover(SharedString::from(format!("smp-{n}")), |s| {
+                                                s.border_color(t.line_strong)
+                                            }),
+                                    ),
+                            )
+                            .group(SharedString::from(format!("smp-{n}")));
+                        self.bind(
+                            tile,
+                            &format!("smp-{n}"),
+                            radius::MD,
+                            window,
+                            cx,
+                            act(move |this, w, cx| this.open_sample(ds.clone(), image.clone(), w, cx)),
+                        )
+                        .into_any_element()
                     })
                     .collect();
                 // One row of eight across the page's width (the log takes its own full-width row
@@ -1535,7 +1571,8 @@ impl FoloApp {
         let t = theme(cx);
         let c = &r.config;
         let a = &c.augment;
-        let mono_v = |s: String| text(ty::SM, t.text_primary).tnum().child(s);
+        // A rate's power of ten in a legible raised run (`sci`).
+        let mono_v = |s: String| crate::ui::sci(ty::SM, t.text_primary, s);
         let col1 = div()
             .flex_1()
             .flex()
@@ -1588,9 +1625,9 @@ impl FoloApp {
                             crate::api::ResolvedOptimizer::Adamw => "AdamW",
                         };
                         let how = if c.optimizer == crate::api::Optimizer::Auto { " (auto)" } else { "" };
-                        format!("{opt}{how} · lr0 {}", fmt_rate(s.lr0))
+                        format!("{opt}{how} · lr0 {}", crate::ui::fmt_lr(s.lr0))
                     }
-                    None => format!("{} · lr0 {}", c.optimizer.label(), c.lr0),
+                    None => format!("{} · lr0 {}", c.optimizer.label(), crate::ui::fmt_lr(c.lr0 as f64)),
                 }),
             ))
             .child(kv(
@@ -1601,17 +1638,31 @@ impl FoloApp {
                     if a.mosaic <= 0. {
                         "off".to_string()
                     } else if n < a.close_mosaic {
-                        format!("{:.1} · last {n} epochs ({} capped at half)", a.mosaic, a.close_mosaic)
+                        format!(
+                            "{} · last {n} epochs ({} capped at half)",
+                            crate::ui::fmt_aug(a.mosaic),
+                            a.close_mosaic
+                        )
                     } else {
-                        format!("{:.1} · last {n} epochs", a.mosaic)
+                        format!("{} · last {n} epochs", crate::ui::fmt_aug(a.mosaic))
                     }
                 }),
             ))
-            .child(kv(&t, "Mixup · flip", mono_v(format!("{:.2} · {:.2}", a.mixup, a.fliplr))))
+            .child(kv(
+                &t,
+                "Mixup · flip",
+                mono_v(format!("{} · {}", crate::ui::fmt_aug(a.mixup), crate::ui::fmt_aug(a.fliplr))),
+            ))
             .child(kv(
                 &t,
                 "HSV · scale",
-                mono_v(format!("{:.3}/{:.1}/{:.1} · {:.1}", a.hsv[0], a.hsv[1], a.hsv[2], a.scale)),
+                mono_v(format!(
+                    "{:.3}/{:.2}/{:.2} · {}",
+                    a.hsv[0],
+                    a.hsv[1],
+                    a.hsv[2],
+                    crate::ui::fmt_scale(a.scale)
+                )),
             ));
         panel(&t)
             .flex()
@@ -1698,16 +1749,6 @@ fn pr_floor(low: f32) -> f32 {
 fn log_fields(s: &str) -> Vec<String> {
     let s = slash_paths(s);
     s.split(" · ").enumerate().map(|(i, f)| if i > 0 { format!("· {f}") } else { f.to_string() }).collect()
-}
-
-/// A learning rate as typed (up to six decimals, no trailing zeros): 0.001667, 0.01; smaller
-/// ones in powers of ten (1×10⁻⁷), never "0".
-fn fmt_rate(v: f64) -> String {
-    if v != 0. && v.abs() < 1e-5 {
-        return crate::charts::in_pow(v, v.abs().log10().floor() as i32);
-    }
-    let s = format!("{v:.6}");
-    s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// `D:\data\x.folo` → `D:/data/x.folo`: only whitespace-separated words that start with a drive

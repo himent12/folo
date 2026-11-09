@@ -468,11 +468,12 @@ pub fn metric(
     unit_step: TypeStep,
 ) -> Div {
     // GPUI's flex baseline doesn't align mixed sizes, so bottom-align and lift the unit by the
-    // difference between the two lines' baselines.
+    // difference between the two lines' baselines. A space's width apart ("9.42 M", as text
+    // writes a number and its unit everywhere).
     div()
         .flex()
         .items_end()
-        .gap(px(2.))
+        .gap(px(4.))
         .whitespace_nowrap()
         .child(text(s, t.text_primary).tnum().child(value.into()))
         .when(!unit.is_empty(), |d| {
@@ -724,15 +725,6 @@ pub fn share_spare<const N: usize>(spare: f32, cols: [(f32, f32, f32); N]) -> [f
     cols.map(|(base, weight, cap)| (base + share * weight).min(cap.max(base)).floor())
 }
 
-/// A flex table column on the same rule as `share_spare`, for rows whose cells need no known
-/// width: `basis` px, growing by `weight` up to `max`. Spare width past every cap goes to the
-/// first column given `.ml_auto()`.
-pub fn grow_col(d: Div, basis: f32, weight: f32, max: f32) -> Div {
-    let mut d = d.flex_basis(px(basis)).flex_shrink_0().min_w(px(basis)).max_w(px(max));
-    d.style().flex_grow = Some(weight);
-    d
-}
-
 pub fn may_overflow(s: &str, size: f32, width: f32) -> bool {
     let em: f32 = s
         .chars()
@@ -775,6 +767,58 @@ pub fn count_si(n: u64) -> (String, &'static str) {
     } else {
         (n.to_string(), "")
     }
+}
+
+/// A learning rate, one way everywhere: 0.01 and up as typed ("0.01", "0.0125"); below that in
+/// its power of ten ("1.11×10⁻³"), as the learning-rate chart's legend writes it.
+pub fn fmt_lr(v: f64) -> String {
+    if v != 0. && v.abs() < 0.01 {
+        return crate::charts::in_pow(v, v.abs().log10().floor() as i32);
+    }
+    let s = format!("{v:.6}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Text that may hold a power of ten ("lr0 1.11×10⁻³"): the exponent drawn as an 11 px raised
+/// run ("−3") rather than the font's superscript glyphs, which render at 7–8 px. Text without
+/// one is plain `text`.
+pub fn sci(size: TypeStep, color: Hsla, s: String) -> Div {
+    const SUP: &str = "⁻⁰¹²³⁴⁵⁶⁷⁸⁹";
+    let Some(at) = s.find("×10") else { return text(size, color).tnum().child(s) };
+    let head_end = at + "×10".len();
+    let exp_len: usize = s[head_end..].chars().take_while(|c| SUP.contains(*c)).map(char::len_utf8).sum();
+    if exp_len == 0 {
+        return text(size, color).tnum().child(s);
+    }
+    let exp: String = s[head_end..head_end + exp_len]
+        .chars()
+        .map(|c| match c {
+            '⁻' => '−',
+            c => char::from_digit(SUP.chars().skip(1).position(|d| d == c).unwrap_or(0) as u32, 10)
+                .unwrap_or('0'),
+        })
+        .collect();
+    div()
+        .flex()
+        // Tops aligned and the exponent's line tight: it sits raised by about a third of the size.
+        .items_start()
+        .whitespace_nowrap()
+        .child(text(size, color).tnum().child(s[..head_end].to_string()))
+        // small: an exponent beside its value, 11 px (the superscript glyphs it replaces are smaller).
+        .child(text(ty::XS, color).line_height(px(ty::XS.size)).tnum().child(exp))
+        .when(head_end + exp_len < s.len(), |d| {
+            d.child(text(size, color).tnum().child(s[head_end + exp_len..].to_string()))
+        })
+}
+
+/// An augmentation strength (mosaic, mixup, flip): two decimals, as New run's sliders show it.
+pub fn fmt_aug(v: f32) -> String {
+    format!("{v:.2}")
+}
+
+/// The scale augmentation's range: "±0.50", as New run's slider shows it.
+pub fn fmt_scale(v: f32) -> String {
+    format!("±{v:.2}")
 }
 
 pub fn f3(v: f32) -> String {
@@ -1007,4 +1051,20 @@ pub fn select_bar(t: &Theme) -> Div {
 /// "1 dataset", "3 datasets".
 pub fn plural(n: usize, noun: &str) -> String {
     if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::{fmt_aug, fmt_lr, fmt_scale};
+
+    #[test]
+    fn rates_read_one_way() {
+        assert_eq!(fmt_lr(0.01), "0.01");
+        assert_eq!(fmt_lr(0.0125), "0.0125");
+        assert_eq!(fmt_lr(0.001111), "1.11×10⁻³");
+        assert_eq!(fmt_lr(0.001), "1.00×10⁻³");
+        assert_eq!(fmt_lr(1e-7), "1.00×10⁻⁷");
+        assert_eq!(fmt_aug(1.0), "1.00");
+        assert_eq!(fmt_scale(0.5), "±0.50");
+    }
 }

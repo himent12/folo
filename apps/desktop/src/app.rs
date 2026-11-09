@@ -171,6 +171,8 @@ pub struct Inspector {
     pub pan: (f32, f32),
     pub drag_from: Option<(gpui::Point<Pixels>, (f32, f32))>,
     pub hover_box: Option<usize>,
+    /// An image to land on once the dataset's image list is in (opened from a run's sample).
+    pub want: Option<String>,
 }
 
 /// Close mosaic: a whole number of epochs, at most the run's length.
@@ -491,6 +493,9 @@ pub struct FoloApp {
     /// Frames left to keep the page scrolled to its end (a review scene of a page's bottom): the
     /// page grows as its data lays out, so the end is pinned for a while, not once.
     pub scroll_end_pending: u8,
+    /// Frames left in which the focused control scrolls into the page's view once laid out (a
+    /// scenario that opens on keyboard focus below the fold).
+    pub reveal_pending: u8,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
     pub toast_hover: Option<u64>,
@@ -642,6 +647,7 @@ impl FoloApp {
             nr_estimate_last: None,
             nr_estimate_gen: 0,
             scroll_end_pending: 0,
+            reveal_pending: 0,
             toasts: Vec::new(),
             toast_hover: None,
             toasts_expanded: false,
@@ -2961,6 +2967,11 @@ impl Render for FoloApp {
             self.page_scroll.set_offset(gpui::point(px(0.), -max));
             window.request_animation_frame();
         }
+        if self.reveal_pending > 0 {
+            self.reveal_pending -= 1;
+            REVEAL.with(|r| *r.borrow_mut() = Some(vec![self.page_scroll.clone()]));
+            window.request_animation_frame();
+        }
         if self.open_new_run_pending && self.store.datasets.ready().is_some_and(|d| !d.is_empty()) {
             self.open_new_run_pending = false;
             self.open_new_run(None, window, cx);
@@ -3052,6 +3063,23 @@ impl Render for FoloApp {
                     cx.notify();
                 }
                 let m = &ev.keystroke.modifiers;
+                // Page Up / Down scroll the page about a screen (less 32 px, so a line of context
+                // stays) whenever the focused control didn't use them: a chart group keeps its one
+                // Tab stop and the page still pages.
+                if matches!(ev.keystroke.key.as_str(), "pageup" | "pagedown")
+                    && !this.modal_open()
+                    && this.palette.is_none()
+                    && !(m.control || m.alt || m.platform || m.shift)
+                {
+                    let s = &this.page_scroll;
+                    let (y, max) = (-s.offset().y, s.max_offset().height);
+                    let page = (s.bounds().size.height - px(32.)).max(px(32.));
+                    let to = if ev.keystroke.key == "pageup" { y - page } else { y + page };
+                    s.set_offset(gpui::point(s.offset().x, -to.clamp(px(0.), max)));
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
                 if this.route == Route::Playground
                     && this.play_image.is_some()
                     && !this.modal_open()
@@ -3272,11 +3300,34 @@ impl FoloApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.inspector =
-            Some(Inspector { dataset, index, zoom: 1.0, pan: (0., 0.), drag_from: None, hover_box: None });
+        self.inspector = Some(Inspector {
+            dataset,
+            index,
+            zoom: 1.0,
+            pan: (0., 0.),
+            drag_from: None,
+            hover_box: None,
+            want: None,
+        });
         self.inspector_return = window.focused(cx);
         window.focus(&self.inspector_focus);
         cx.notify();
+    }
+
+    /// Opens the inspector on one image of a dataset by id (a run's sample tile): it lands there
+    /// once the image list is in, and ←/→ then walk the dataset from it.
+    pub fn open_sample(
+        &mut self,
+        dataset: String,
+        image: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_dataset(&dataset, cx);
+        self.open_inspector(dataset, 0, window, cx);
+        if let Some(i) = self.inspector.as_mut() {
+            i.want = Some(image);
+        }
     }
 
     pub fn close_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {

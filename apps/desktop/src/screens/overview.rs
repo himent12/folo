@@ -329,70 +329,55 @@ impl FoloApp {
                 .when_some(detail, |d, s| d.child(text(ty::SM, t.text_tertiary).tnum().child(s)))
         };
         // One row of four KPIs above a full-width chart: no column beside the chart to leave a
-        // gap in, whatever the chart's height.
-        // Four equal tiles across the card with 1 px dividers, like the run, model and dataset strips
-        // (the row used to stop at ~60 % of the card).
+        // gap in, whatever the chart's height. Four equal tracks (a grid, so a tile's padding and
+        // divider can't make it wider than the others) with 1 px dividers, like the run, model and
+        // dataset strips.
+        let tile = |first: bool, body| {
+            div()
+                .min_w_0()
+                .when(!first, |d| d.border_l_1().border_color(t.line_subtle).pl(px(16.)))
+                .child(body)
+        };
         let kpis = div()
             .w_full()
-            .flex()
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .child(
-                        // Progress is drawn once, as the line under the card's header; here it's a
-                        // number like the other tiles' detail lines.
-                        div().flex_1().min_w_0().pl(px(0.)).child(kpi(
-                            "Epoch",
-                            metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM)
-                                .into_any_element(),
-                            Some(format!("{:.0}% complete", r.progress() * 100.)),
-                        )),
-                    )
-                    .child(
-                        div().flex_1().min_w_0().border_l_1().border_color(t.line_subtle).pl(px(16.)).child(
-                            kpi(
-                                // Named as on the run's dashboard.
-                                "mAP50-95 · latest",
-                                text(ty::X2XL, t.text_primary)
-                                    .tnum()
-                                    .child(map_now.map_or("–".into(), f3))
-                                    .into_any_element(),
-                                Some(best_line),
-                            ),
-                        ),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .child(
-                        div().flex_1().min_w_0().border_l_1().border_color(t.line_subtle).pl(px(16.)).child(
-                            kpi(
-                                "Throughput",
-                                metric(
-                                    &t,
-                                    ips.map_or("–".into(), |v| format!("{v:.0}")),
-                                    "img/s",
-                                    ty::X2XL,
-                                    ty::SM,
-                                )
-                                .into_any_element(),
-                                ips_avg.map(|a| format!("avg {a:.0}")),
-                            ),
-                        ),
-                    )
-                    .child(
-                        div().flex_1().min_w_0().border_l_1().border_color(t.line_subtle).pl(px(16.)).child(
-                            kpi(
-                                "Time left",
-                                duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(),
-                                elapsed,
-                            ),
-                        ),
-                    ),
-            );
+            .grid()
+            .grid_cols(4)
+            .child(tile(
+                true,
+                // Progress is drawn once, as the line under the card's header; here it's a
+                // number like the other tiles' detail lines.
+                kpi(
+                    "Epoch",
+                    metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), ty::X2XL, ty::SM)
+                        .into_any_element(),
+                    Some(format!("{:.0}% complete", r.progress() * 100.)),
+                ),
+            ))
+            .child(tile(
+                false,
+                kpi(
+                    // Named as on the run's dashboard.
+                    "mAP50-95 · latest",
+                    text(ty::X2XL, t.text_primary)
+                        .tnum()
+                        .child(map_now.map_or("–".into(), f3))
+                        .into_any_element(),
+                    Some(best_line),
+                ),
+            ))
+            .child(tile(
+                false,
+                kpi(
+                    "Throughput",
+                    metric(&t, ips.map_or("–".into(), |v| format!("{v:.0}")), "img/s", ty::X2XL, ty::SM)
+                        .into_any_element(),
+                    ips_avg.map(|a| format!("avg {a:.0}")),
+                ),
+            ))
+            .child(tile(
+                false,
+                kpi("Time left", duration_metric(&t, eta_s, ty::X2XL, ty::SM).into_any_element(), elapsed),
+            ));
         let footer = self.system_footer(cx);
         panel(&t)
             .flex_1()
@@ -525,9 +510,9 @@ impl FoloApp {
                         .px(px(16.))
                         .py(px(if hero_h < 120. { 12. } else { 16. }))
                         // One strip with 1 px dividers, as the loaded tiles sit.
-                        .child(div().flex().children((0..4).map(|c| {
+                        .child(div().grid().grid_cols(4).children((0..4).map(|c| {
                             div()
-                                .flex_1()
+                                .min_w_0()
                                 .h(px(72.))
                                 .pr(px(16.))
                                 .when(c > 0, |d| d.border_l_1().border_color(t.line_subtle).pl(px(16.)))
@@ -685,7 +670,8 @@ impl FoloApp {
         let full = list_w >= 918. + SLACK;
         let (name_w, prog_w, best_w, when_w) =
             if full { (200., 160., 96., 80.) } else { (150., 120., 96., 80.) };
-        let meta_w = if full { 180. } else { 130. };
+        // At least its heading, "Architecture · dataset".
+        let meta_w = if full { 180. } else { 150. };
         // Stacked, width past the set's need goes to the name, arch · dataset and
         // progress (2 : 1 : 1, to their caps); only what's left opens before the numbers. Beside
         // Best model the set stays as is: widened there, GPUI 0.2.2 laid the page out at its
@@ -707,7 +693,7 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").w(px(name_w)).flex_none())
-            .child(th(&t, "Arch · dataset").w(px(meta_w)).flex_none())
+            .child(th(&t, "Architecture · dataset").w(px(meta_w)).flex_none())
             .child(th(&t, "Status").w(px(96.)).flex_none())
             .child(th(&t, "Progress").w(px(prog_w)).flex_none())
             .child(div().flex_1())
