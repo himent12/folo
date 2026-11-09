@@ -2069,9 +2069,6 @@ impl FoloApp {
         );
     }
 
-    /// Why Mixed precision can't be used for a run on `device` (an entry of `DEVICES`), if it can't:
-    /// the CPU, or the server's own answer (`capabilities.amp`, the message such a run would fail
-    /// with). An older server without capabilities says nothing; the run's failure tells then.
     /// Whether `m` is end-to-end (the one-to-one head: it predicts without NMS). The model's own
     /// record says (`Model.head`, from its folo.config), so imported and orphaned models read right.
     pub fn model_e2e(&self, m: &Model) -> bool {
@@ -2082,6 +2079,9 @@ impl FoloApp {
     pub const E2E_HELP: &'static str =
         "End-to-end: predicts boxes directly, without non-maximum suppression (NMS)";
 
+    /// Why Mixed precision can't be used for a run on `device` (an entry of `DEVICES`), if it can't:
+    /// the CPU, or the server's own answer (`capabilities.amp`, the message such a run would fail
+    /// with). An older server without capabilities says nothing; the run's failure tells then.
     pub fn amp_blocked(&self, device: &str) -> Option<String> {
         if device == "cpu" {
             return Some("Off on the CPU: it needs a GPU with tensor cores".into());
