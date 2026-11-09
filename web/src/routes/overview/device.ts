@@ -18,9 +18,17 @@ export function runGpu(run: Pick<Run, 'device' | 'config'>, gpus: Gpu[]): Gpu | 
   return hits.length === 1 ? hits[0]! : null;
 }
 
-/** "RTX 4080 SUPER · GPU 93% busy": the run's device, with utilisation (`pct`, no space) when its GPU reports one. */
-export function deviceLine(run: Pick<Run, 'device' | 'config'>, gpus: Gpu[]): string {
+/**
+ * The run's device and, when its GPU reports one, its utilisation (`pct`, no space): ["RTX 4080 SUPER", "GPU 93% busy"],
+ * each a meta item of its own.
+ */
+export function deviceParts(run: Pick<Run, 'device' | 'config'>, gpus: Gpu[]): string[] {
   const name = deviceName(run.device);
   const g = runGpu(run, gpus);
-  return g && g.util !== null ? `${name} · GPU ${pct(g.util, 0)} busy` : name;
+  return g && g.util !== null ? [name, `GPU ${pct(g.util, 0)} busy`] : [name];
+}
+
+/** "RTX 4080 SUPER · GPU 93% busy": the device parts as one line. */
+export function deviceLine(run: Pick<Run, 'device' | 'config'>, gpus: Gpu[]): string {
+  return deviceParts(run, gpus).join(' · ');
 }

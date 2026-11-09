@@ -11,7 +11,7 @@
   import { Resource } from '$lib/api/resource.svelte';
   import { progressText, runProgress } from '$lib/api/progress';
   import { eta, lr, metric, num } from '$lib/format';
-  import { deviceLine } from './device';
+  import { deviceParts } from './device';
   import { runEvalSource, scoresTitle } from '$lib/evaluated';
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
@@ -79,7 +79,7 @@
 
   // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
-  const deviceText = $derived(run ? deviceLine(run, sys.data?.gpus ?? []) : '');
+  const deviceItems = $derived(run ? deviceParts(run, sys.data?.gpus ?? []) : []);
 </script>
 
 <!-- "Training now" is the status badge and the progress bar; the card's edge stays a plain hairline. -->
@@ -102,7 +102,7 @@
           <Ident value={run.config.arch} />
           <span class="num">{run.config.imgsz} px</span>
           <span class="num">batch {run.config.batch}</span>
-          <span class="dev num">{deviceText}</span>
+          {#each deviceItems as part (part)}<span class="dev num">{part}</span>{/each}
         </Meta>
       {:else}
         <!-- The trailing span takes the place of the device, which phones hide. -->

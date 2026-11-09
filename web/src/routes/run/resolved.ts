@@ -40,7 +40,7 @@ export function lrSetting(config: TrainConfig, resolved: ResolvedTrain | null | 
 /**
  * A batch and an optimizer step are two things (DESIGN_DIRECTION §2.23): the trainer sums the gradients of
  * `accumulate` batches into one optimizer step. The batch is the images per batch ("16"); the step is its own row,
- * "4 batches · effective batch 64", in the one wording New run's Summary uses beside its schedule (`accumulationText`).
+ * "Effective batch 64 (4 × 16)", in the one wording New run's Summary uses beside its schedule (`accumulationText`).
  */
 export function batchSetting(config: TrainConfig, resolved: ResolvedTrain | null | undefined): Setting {
   return { value: String(resolved?.batch ?? config.batch) };
@@ -51,17 +51,25 @@ export function accumulationText(accumulate: number, batch: number): string {
   return `${accumulate} ${accumulate === 1 ? 'batch' : 'batches'} per optimizer step · effective batch ${accumulate * batch}`;
 }
 
-/** The Per optimizer step row: "4 batches · effective batch 64" ("1 batch" when the run does not accumulate). */
-export function stepSetting(resolved: ResolvedTrain): Setting {
+/**
+ * The Effective batch row: the images behind one optimizer step, "64 (4 × 16)", four batches of 16 (the note short
+ * enough for a phone's Compare column; New run's schedule says it in words). No note when each batch is its own step.
+ */
+export function effectiveBatchSetting(resolved: ResolvedTrain): Setting {
   const a = resolved.accumulate;
-  return { value: a > 1 ? `${a} batches · effective batch ${a * resolved.batch}` : '1 batch' };
+  return a > 1 ? { value: String(a * resolved.batch), note: `(${a} × ${resolved.batch})` } : { value: String(resolved.batch) };
+}
+
+/** The warmup in epochs (one decimal under 10): 375 optimizer steps of 125 an epoch are 3. */
+export function warmupEpochs(resolved: ResolvedTrain): number {
+  const epochs = resolved.warmup_iters / Math.max(1, resolved.optimizer_steps_per_epoch);
+  return Number(epochs.toFixed(epochs < 10 ? 1 : 0));
 }
 
 /** The warmup in optimizer steps, and what that is in epochs: "100 optimizer steps (7.7 epochs)"; "None" without one. */
 export function warmupSetting(resolved: ResolvedTrain): Setting {
   if (resolved.warmup_iters <= 0) return { value: 'None' };
-  const epochs = resolved.warmup_iters / Math.max(1, resolved.optimizer_steps_per_epoch);
-  const e = Number(epochs.toFixed(epochs < 10 ? 1 : 0));
+  const e = warmupEpochs(resolved);
   return { value: `${resolved.warmup_iters} optimizer steps`, note: `(${e} ${e === 1 ? 'epoch' : 'epochs'})` };
 }
 

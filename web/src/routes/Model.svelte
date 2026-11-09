@@ -619,11 +619,14 @@
                 <dd class="latency lat-rows">
                   <span class="lat-k">Measured</span>
                   <span class="num">{latencyMs(here.latency_ms)}</span>
-                  <Meta class="figs num"><span>on this server</span><span>{latencyRange(here.latency_ms_low, here.latency_ms_high)}</span><span>{num(here.samples)} predictions</span><span>{m.imgsz} px</span><span>{here.precision}</span></Meta>
+                  <!-- Each row: where it was measured, then the conditions, as two lines of the same anatomy. -->
+                  <Meta class="figs num"><span>on this server</span><span>{latencyRange(here.latency_ms_low, here.latency_ms_high)}</span></Meta>
+                  <Meta class="figs num"><span>{num(here.samples)} predictions</span><span>{m.imgsz} px</span><span>{here.precision}</span></Meta>
                   <span class="lat-k">Reference</span>
                   {#if latency(m) !== undefined}
                     <span class="num">{latency(m)!.toFixed(2)} ms</span>
-                    <Meta class="figs num"><Ident value={m.arch} /><span>640 px</span><span>RTX 4080 SUPER</span></Meta>
+                    <Meta class="figs num"><span>on an RTX 4080 SUPER</span></Meta>
+                    <Meta class="figs num"><Ident value={m.arch} /><span>640 px</span></Meta>
                   {:else}
                     <span class="faint">Not measured for <Ident value={m.arch} /> yet</span>
                   {/if}
@@ -1471,7 +1474,8 @@
     grid-template-columns: max-content minmax(0, 1fr);
     column-gap: var(--space-3);
   }
-  .lat-rows > :not(.lat-k) {
+  /* Global: the conditions line is ui/Meta's own element. */
+  .lat-rows > :global(:not(.lat-k)) {
     grid-column: 2;
   }
   .lat-k {
@@ -1479,7 +1483,7 @@
     color: var(--text-tertiary);
   }
   .lat-rows > .lat-k:not(:first-child),
-  .lat-rows > .lat-k:not(:first-child) + * {
+  .lat-rows > .lat-k:not(:first-child) + :global(*) {
     margin-top: var(--space-2);
   }
   .classes {

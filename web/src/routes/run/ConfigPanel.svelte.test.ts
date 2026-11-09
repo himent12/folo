@@ -52,7 +52,7 @@ describe('ConfigPanel', () => {
     expect(r['Initial LR']?.textContent).toBe('0.000833 (requested 0.01)');
     // A batch and an optimizer step are two rows, never "per step" for a batch.
     expect(r['Batch']?.textContent).toBe('16');
-    expect(r['Per optimizer step']?.textContent).toBe('4 batches · effective batch 64');
+    expect(r['Effective batch']?.textContent).toBe('64 (4 × 16)');
     expect(r['Warmup']?.textContent).toBe('360 optimizer steps (3 epochs)');
     expect(r['LR decay']?.textContent).toBe('Linear to 1%');
     expect(r['Betas']?.textContent).toBe('0.9 · 0.999');

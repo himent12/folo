@@ -1098,6 +1098,11 @@
     align-items: center;
     gap: var(--space-2);
   }
+  /* On the title row, Run on sits on the model select's row, not centred on the select and its meta line together. */
+  .model-pick + .runon {
+    align-self: flex-start;
+    min-height: var(--control-md);
+  }
   .pick-label {
     color: var(--text-tertiary);
     font-size: var(--type-sm-size);

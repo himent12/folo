@@ -32,7 +32,7 @@
   import { nearest } from '$lib/charts/downsample';
   import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
-  import { batchSetting, stepSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
+  import { batchSetting, effectiveBatchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import Page from '$lib/shell/Page.svelte';
@@ -217,7 +217,7 @@
     ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain('From scratch'))],
     ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
     ['Batch', (r) => batchSetting(r.config, r.resolved)],
-    ['Per optimizer step', (r) => (r.resolved ? stepSetting(r.resolved) : plain('—'))],
+    ['Effective batch', (r) => (r.resolved ? effectiveBatchSetting(r.resolved) : plain('—'))],
     ['Image size', (r) => plain(`${r.config.imgsz} px`)],
     ['Optimizer', (r) => optimizerSetting(r.config, r.resolved)],
     ['LR', (r) => lrSetting(r.config, r.resolved)],

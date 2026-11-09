@@ -47,7 +47,7 @@
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
   import { progressText, runProgress, stepsPerEpoch } from '$lib/api/progress';
-  import { effectiveCloseMosaic } from './resolved';
+  import { effectiveCloseMosaic, warmupEpochs } from './resolved';
   import { conf, duration, eta, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -290,9 +290,14 @@
   const stepShort = $derived(lastStep ? stepEpWord : 'not yet');
   /** Precision and recall are read at each epoch's best-F1 confidence (docs/API.md, Operating point): the latest one. */
   const prConf = $derived(lastEpoch?.val.best_f1_conf);
+  const warmupWords = (r: NonNullable<Run['resolved']>) => {
+    const e = warmupEpochs(r);
+    return r.warmup_iters <= 0 ? 'no warmup' : `warmup ${e} ${e === 1 ? 'epoch' : 'epochs'}`;
+  };
   /** The LR schedule the trainer resolved (`Run.resolved`), else what the recipe defaults to. */
   const schedule = $derived(
-    run.resolved ? `warmup ${run.resolved.warmup_iters} steps · ${run.resolved.cos_lr ? 'cosine' : 'linear'}` : 'warmup 3 epochs · linear',
+    // In epochs, as the chart's axis is (Config has the optimizer steps beside them): short, and never a bare "steps".
+    run.resolved ? `${warmupWords(run.resolved)} · ${run.resolved.cos_lr ? 'cosine' : 'linear'}` : 'warmup 3 epochs · linear',
   );
   const tabs = $derived.by((): TabDef[] => [
     {
