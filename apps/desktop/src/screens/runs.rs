@@ -714,13 +714,13 @@ impl FoloApp {
                     ))),
                 stat_sized(
                     &t,
-                    // "final" only for a run that finished; a stopped or failed one ends on its last validated epoch.
+                    // "final" only for a run that finished; a stopped or failed one ends on its last evaluated epoch.
                     if live {
                         "mAP50-95 · latest"
                     } else if r.status == RunStatus::Completed {
                         "mAP50-95 · final"
                     } else {
-                        "mAP50-95 · last validated"
+                        "mAP50-95 · last evaluated"
                     },
                     last.map_or("–".into(), |e| f3(e.val.map50_95)),
                     big,
@@ -1211,6 +1211,8 @@ impl FoloApp {
 
     fn samples_panel(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        // The samples come from each epoch's evaluation: training images when there's no val split.
+        let images = if self.eval_split(r) == "train" { "training" } else { "validation" };
         let views = [SampleView::Predictions, SampleView::Truth, SampleView::Both];
         let sel = views.iter().position(|v| *v == self.sample_view).unwrap_or(0);
         let seg = self.segmented(
@@ -1228,8 +1230,10 @@ impl FoloApp {
                 .child(empty_state(
                     &t,
                     "icons/image.svg",
-                    "No validation yet",
-                    "Predictions on 8 of the 16 fixed validation images appear after the first epoch.",
+                    "No evaluation yet",
+                    &format!(
+                        "Predictions on 8 of the 16 fixed {images} images appear after the first epoch."
+                    ),
                     Tone::Neutral,
                 ))
                 .into_any_element(),
@@ -1279,7 +1283,7 @@ impl FoloApp {
                     .child(div().flex().items_start().gap(px(8.)).children(tiles))
                     // The caption says what the tiles show, view by view.
                     .child(text(ty::SM, t.text_tertiary).tnum().child(format!(
-                        "Epoch {epoch} · 8 of 16 fixed validation images · {}",
+                        "Epoch {epoch} · 8 of 16 fixed {images} images · {}",
                         match view {
                             SampleView::Predictions => "predictions with score ≥ 0.30",
                             SampleView::Truth => "ground-truth labels",
@@ -1307,7 +1311,13 @@ impl FoloApp {
             .flex_1()
             .flex()
             .flex_col()
-            .child(panel_header(&t, "Validation samples").child(seg))
+            .child(
+                panel_header(
+                    &t,
+                    if images == "training" { "Training samples" } else { "Validation samples" },
+                )
+                .child(seg),
+            )
             .child(
                 div().px(px(16.)).pt(px(10.)).flex().flex_wrap().gap(px(12.)).children(
                     self.store
