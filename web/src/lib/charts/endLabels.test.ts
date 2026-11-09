@@ -59,11 +59,14 @@ describe('placeEndLabels', () => {
     expect(tight.length).toBeLessThan(3);
   });
 
-  it('labels every line of a four-run comparison, and leaves out a label with no free spot within reach', () => {
+  it('labels every line of a four-run comparison, a line with no free spot within reach included', () => {
     // Horizontal lines every 10 px across the plot (x 0..500) leave no free spot near the point; the clear gutter is
-    // further than MAX_REACH from it, so the label is left out (the marker and the legend's status say how it ended).
+    // further than MAX_REACH from it, but a label is never left out while a clear box exists: it goes there on a leader.
     const hatch = Array.from({ length: 31 }, (_, i) => line([[0, i * 10], [500, i * 10]]));
-    expect(placeEndLabels([{ id: 'a', label: 'run-a', x: 300, y: 150 }], hatch, bounds)).toEqual([]);
+    const [far] = placeEndLabels([{ id: 'a', label: 'run-a', x: 300, y: 150 }], hatch, bounds);
+    expect(far).toBeDefined();
+    expect(far!.x).toBeGreaterThanOrEqual(500);
+    expect(needsLeader(far!)).toBe(true);
     // Near the gutter, it goes there, with a leader.
     const [p] = placeEndLabels([{ id: 'a', label: 'run-a', x: 600 - labelWidth('run-a') - MAX_REACH + 10, y: 150 }], hatch, bounds);
     expect(p).toBeDefined();
@@ -230,38 +233,54 @@ describe("placeEndLabels: other runs' lines are obstacles", () => {
     expect(distance(p!, other)).toBeGreaterThanOrEqual(CLEAR - 1e-6);
   });
 
-  it("never ties a label to its line with a leader that crosses another run's line, and leaves it out instead", () => {
+  it("never ties a label to its line with a leader that crosses another run's line where a clear spot allows", () => {
     // Round 24: "shapes-hard-m · failed" floated mid-plot, its leader running across two other runs' lines.
     const own = line([[0, 280], [200, 150]]);
-    const fan = Array.from({ length: 12 }, (_, i) => line([[0, 285 - i], [200, 150 - 30 + i * 5], [600, 150 - 30 + i * 5]]));
-    const placed = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, ...fan], bounds, 2);
-    for (const p of placed) {
-      const l = leaderOf(p, 5);
-      if (!l) continue;
-      for (const c of fan)
-        for (let i = 1; i < c.length; i++) {
-          const a = c[i - 1]!;
-          const b = c[i]!;
-          const o = (p1: { x: number; y: number }, q: { x: number; y: number }, r: { x: number; y: number }) => Math.sign((q.x - p1.x) * (r.y - p1.y) - (q.y - p1.y) * (r.x - p1.x));
-          const L1 = { x: l.x1, y: l.y1 };
-          const L2 = { x: l.x2, y: l.y2 };
-          expect(o(a, b, L1) !== o(a, b, L2) && o(L1, L2, a) !== o(L1, L2, b)).toBe(false);
-        }
-    }
-    // Lines every 5 px around the end leave no clear spot: no label (the legend chip carries the status).
-    expect(placed).toEqual([]);
+    const other = line([[0, 290], [190, 120], [300, 112], [600, 112]]);
+    const [p] = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, other], bounds, 2);
+    expect(p).toBeDefined();
+    const l = leaderOf(p!, 5);
+    if (l) expect(crosses(l, other)).toBe(false);
+  });
+
+  it('labels a line that ends among the others: the clear spot whose leader crosses the fewest lines, nearest its end', () => {
+    // Round 25: Compare's failed shapes-hard-m ended between two other runs with no free spot near it, and had no label.
+    const own = line([[0, 280], [200, 150]]);
+    const above = line([[100, 140], [600, 140]]);
+    const below = [160, 175, 190].map((y) => line([[100, y], [600, y]]));
+    const placed = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, above, ...below], bounds, 2, 560);
+    expect(placed).toHaveLength(1);
+    const p = placed[0]!;
+    // Above the one line, not below the three, and clear of every line it does not name.
+    expect(p.y).toBeLessThan(140);
+    const l = leaderOf(p, 5)!;
+    expect([above, ...below].filter((c) => crosses(l, c))).toEqual([above]);
+    for (const c of [above, ...below]) expect(distance(p, c)).toBeGreaterThanOrEqual(CLEAR - 1e-6);
   });
 });
 
 describe('placeEndLabels: leaders only from the gutter', () => {
-  it('keeps a label inside the plot beside its marker, never on a leader, where the plot edge is known', () => {
-    // A line ending mid-plot with others crowding every spot beside its end: it gets no floating label.
+  it('keeps a label inside the plot beside its marker or in the gutter while either has room', () => {
+    // A line ending mid-plot with others crowding every spot beside its end: no spot beside it, none in reach of the
+    // gutter, so it takes the last resort (a clear spot whose leader crosses the fewest lines) rather than no label.
     const own = line([[0, 280], [200, 150]]);
     const crowd = [line([[100, 150], [500, 150]]), line([[100, 132], [500, 132]]), line([[100, 168], [500, 168]])];
     const placed = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own, ...crowd], bounds, 2, 500);
-    for (const p of placed) expect(needsLeader(p) ? p.x >= 500 : true).toBe(true);
+    expect(placed).toHaveLength(1);
     // Without the crowd, beside its end.
     const [p] = placeEndLabels([{ id: 'a', label: 'shapes-hard-m · failed', x: 200, y: 150, curve: 0 }], [own], bounds, 2, 500);
     expect(needsLeader(p!)).toBe(false);
   });
 });
+
+function crosses(l: { x1: number; y1: number; x2: number; y2: number }, c: { x: number; y: number }[]): boolean {
+  const o = (p1: { x: number; y: number }, q: { x: number; y: number }, r: { x: number; y: number }) => Math.sign((q.x - p1.x) * (r.y - p1.y) - (q.y - p1.y) * (r.x - p1.x));
+  const L1 = { x: l.x1, y: l.y1 };
+  const L2 = { x: l.x2, y: l.y2 };
+  for (let i = 1; i < c.length; i++) {
+    const a = c[i - 1]!;
+    const b = c[i]!;
+    if (o(a, b, L1) !== o(a, b, L2) && o(L1, L2, a) !== o(L1, L2, b)) return true;
+  }
+  return false;
+}

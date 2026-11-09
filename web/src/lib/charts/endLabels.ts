@@ -8,8 +8,10 @@
 // height), so the clear space a reader sees is the space the rule names. Every label is anchored to its
 // line's end marker: one that does not sit right beside it gets a leader from the marker to the label's nearest edge
 // (`leaderOf`), so a label never floats free over another line. Other runs' lines are obstacles with a margin: a
-// label keeps CLEAR (6 px) off every line but its own, and its leader crosses none of them. A label with no free
-// spot within reach is left out: the end marker's shape and the legend's status word still say how the line ended.
+// label keeps CLEAR (6 px) off every line but its own, and its leader crosses none of them. Every line is labelled
+// (round 25 left a failed run's line, ending among the others, with only its cross): a label with no such spot takes
+// the clear spot, in the plot or the gutter, whose leader crosses the fewest other lines, nearest its line's end
+// (`lastResort`). Only a label with no clear box anywhere in the bounds is left out.
 
 export interface EndPoint {
   id: string;
@@ -227,7 +229,74 @@ export function placeEndLabels(
       }
     return undefined;
   });
+  // Still without a spot: any clear box in the bounds, tied to its line's end by a leader that crosses the fewest other
+  // lines (a line ending among the others, as Compare's failed shapes-hard-m), nearest the end. A label is never left
+  // out while a clear box exists.
+  run(lastResort);
   return ends.flatMap((_, i) => placed.get(i) ?? []);
+
+  /** The clear box for `e`'s label whose leader crosses the fewest other lines, then the nearest (a 4 px grid). */
+  function lastResort(e: EndPoint, w: number): Box | undefined {
+    const own = ownOf(e);
+    const spots: { b: Box; dist: number }[] = [];
+    for (let cy = bounds.y0 + H / 2; cy <= bounds.y1 - H / 2; cy += 4)
+      for (let x0 = bounds.x0; x0 + w <= bounds.x1; x0 += 4) {
+        const b = { x0, y0: cy - H / 2, x1: x0 + w, y1: cy + H / 2 };
+        const dx = Math.max(b.x0 - e.x, 0, e.x - b.x1);
+        const dy = Math.max(b.y0 - e.y, 0, e.y - b.y1);
+        spots.push({ b, dist: Math.hypot(dx, dy) });
+      }
+    spots.sort((a, b) => a.dist - b.dist);
+    let best: { b: Box; crossed: number } | undefined;
+    for (const { b } of spots) {
+      if (best?.crossed === 0) break;
+      if (!clearOf(b, e)) continue;
+      const lead = leaderOf({ id: e.id, label: e.label, x: b.x0, y: (b.y0 + b.y1) / 2, ax: e.x, ay: e.y, w });
+      let crossed = 0;
+      if (lead) {
+        const a = { x: lead.x1, y: lead.y1 };
+        const z = { x: lead.x2, y: lead.y2 };
+        for (let k = 0; k < curves.length; k++) {
+          if (k === own) continue;
+          const c = curves[k]!;
+          for (let i = from(c, Math.min(a.x, z.x)); i < c.length && c[i - 1]!.x <= Math.max(a.x, z.x); i++)
+            if (segmentsCross(c[i - 1]!, c[i]!, a, z)) {
+              crossed++;
+              break;
+            }
+        }
+      }
+      if (!best || crossed < best.crossed) best = { b, crossed };
+    }
+    return best?.b;
+  }
+
+  /** The first segment (its end index, at least 1) of an x-sorted curve that can reach `x0`. */
+  function from(c: readonly Pt[], x0: number): number {
+    let lo = 1;
+    let hi = c.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (c[mid]!.x < x0) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  /** Box `b` in the bounds, LABEL_GAP from every label, `pad` off its own line and `clear` off every other. */
+  function clearOf(b: Box, e: EndPoint): boolean {
+    if (b.x0 < bounds.x0 || b.x1 > bounds.x1 || b.y0 < bounds.y0 || b.y1 > bounds.y1) return false;
+    const room = { x0: b.x0 - gap, y0: b.y0 - gap, x1: b.x1 + gap, y1: b.y1 + gap };
+    if (taken.some((t) => overlaps(t, room))) return false;
+    const own = ownOf(e);
+    for (let k = 0; k < curves.length; k++) {
+      const m = k === own ? pad : clear;
+      const g = { x0: b.x0 - m, y0: b.y0 - m, x1: b.x1 + m, y1: b.y1 + m };
+      const c = curves[k]!;
+      for (let i = from(c, g.x0); i < c.length && c[i - 1]!.x <= g.x1; i++) if (segmentHits(c[i - 1]!, c[i]!, g)) return false;
+    }
+    return true;
+  }
 
   /**
    * The labels left without a spot and those already beside their line's end in the gutter, re-laid as one column in
