@@ -169,50 +169,87 @@ export function unitDomain(max: number, plotPx: number): Fit {
  * 0.61 drawn on 0–0.6, the differences in the top quarter).
  */
 export const FIT_BELOW = 0.3;
-/** Room under a fitted floor's percentile, as a share of the span above it, before the floor is rounded down. */
-const FIT_HEADROOM = 0.05;
+/**
+ * The grid a fitted axis's floor is rounded to: half the gridlines' step (a minor step: 0.05 for 0.1), unless that
+ * needs more decimals than the ticks and two (0.025 for 0.05), when the step itself, since the floor is written out
+ * ("y from 0.40") and "y from 0.425" reads as noise. The top is never written, so it always takes the half step.
+ */
+const floorGrid = (step: number) => (stepDecimals(step / 2) <= Math.max(2, stepDecimals(step)) ? step / 2 : step);
+
+/** Room under a fitted floor and over a fitted top, as a share of the span between them, before the ends are rounded. */
+const FIT_HEADROOM = 0.02;
 /** A floor under this share of the top cuts too little to be worth naming: the axis starts at 0 instead. */
 const FIT_MIN_FLOOR = 0.3;
 
 /**
- * Compare's "Fit" axis for a 0–1 metric: from the values' FIT_BELOW percentile (never above any line's last value, so
- * every end marker shows), less FIT_HEADROOM, rounded down to a tick of the step, up to `unitTop(max)`. The step and
- * ticks follow `unitDomain`'s rule (the same nice steps, 3–5 ticks, the highest floor and then the top tick nearest the
- * top, thinned for a short plot with the same decimals), so a fitted axis reads 0.4 · 0.5 · 0.6 at every width. A
- * floor that would sit at or near 0 (`FIT_MIN_FLOOR`) gives `unitDomain` itself. The chart says a fitted axis's floor
- * in its qualifier ("y from 0.40", `fitFloorNote`), since the line's early climb is cut at the baseline.
+ * Compare's "Fit" axis for a 0–1 metric. **The y domain hugs the data**: it runs from the values' FIT_BELOW percentile
+ * (never above any line's last value, so every end marker shows) to the data's maximum, each end with FIT_HEADROOM of
+ * room and then rounded outwards to a half step of the gridlines' step (the floor to `floorGrid`), so the top sits at
+ * most one minor step above the highest value and the floor at most one under the percentile (round 27: data peaking
+ * at 0.61 on a 0.40–0.70 axis, a quarter of the plot empty; now 0.40–0.625). The gridlines are the step's ticks inside
+ * the domain, 3–5 of them (`unitDomain`'s nice steps; a top on a half step is the plot's edge, not a tick, as 0–0.65
+ * reads 0 · 0.2 · 0.4 · 0.6); of the steps that allow that, the tightest domain wins, then a floor on a tick, then the
+ * larger step. Without `labelRow` the step and the domain depend on the values only, never on the plot's height, so a
+ * fitted axis reads the same at every width; a short plot keeps every second tick (THIN). With `labelRow` (a chart
+ * that labels its lines' ends) the top also leaves a label row (LABEL_ROW_PX of `plotPx`) over the highest end,
+ * measured on the fitted span. A floor that would sit at or near 0 (`FIT_MIN_FLOOR`) gives `unitDomain` itself. The
+ * chart says a fitted axis's floor in its qualifier ("y from 0.40", `fitFloorNote`), since the line's early climb is
+ * cut at the baseline.
  */
-export function unitFitDomain(values: readonly number[], ends: readonly number[], max: number, plotPx: number): Fit {
-  const top = unitTop(max);
+export function unitFitDomain(values: readonly number[], ends: readonly number[], max: number, plotPx: number, labelRow = false): Fit {
+  const fromZero = () => unitDomain(labelRow ? withLabelRow(max, plotPx) : max, plotPx);
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
-  if (!sorted.length) return unitDomain(max, plotPx);
+  if (!sorted.length || !(max > 0)) return fromZero();
   let low = sorted[Math.floor(FIT_BELOW * (sorted.length - 1))]!;
-  for (const e of ends) if (Number.isFinite(e)) low = Math.min(low, e);
-  const want = low - (top - low) * FIT_HEADROOM;
-  if (!(want > top * FIT_MIN_FLOOR)) return unitDomain(max, plotPx);
-  let best: { step: number; a: number; n: number } | null = null;
+  let endTop = -Infinity;
+  for (const e of ends)
+    if (Number.isFinite(e)) {
+      low = Math.min(low, e);
+      endTop = Math.max(endTop, e);
+    }
+  const r = labelRow && plotPx > LABEL_ROW_PX * 2 ? LABEL_ROW_PX / plotPx : 0;
+  const h = FIT_HEADROOM;
+  const want = low - (max - low) * h;
+  if (!(want > max * FIT_MIN_FLOOR) || !(max > low)) return fromZero();
+  type C = { step: number; lo: number; hi: number; n: number };
+  let best: C | null = null;
   for (const step of UNIT_STEPS) {
-    const a = Math.floor(want / step + 1e-9);
-    const n = Math.floor(top / step + 1e-9) - a + 1;
+    const grid = floorGrid(step);
+    const half = step / 2;
+    const lo = Math.floor(want / grid + 1e-9) * grid;
+    // The top: the data's maximum with its headroom, and (with labels) the highest end a label row under it, given
+    // this floor (top - end >= r * (top - lo), solved for top).
+    const need = Math.max((max - h * lo) / (1 - h), r ? (endTop - r * lo) / (1 - r) : -Infinity);
+    const hi = Math.min(1, Math.ceil(need / half - 1e-9) * half);
+    const n = Math.floor(hi / step + 1e-9) - Math.ceil(lo / step - 1e-9) + 1;
     if (n < MIN_TICKS || n > MAX_TICKS) continue;
-    const lo = a * step;
-    const blo = best ? best.a * best.step : -Infinity;
-    if (!best || lo > blo + 1e-9 || (Math.abs(lo - blo) <= 1e-9 && (n - 1) * step > (best.n - 1) * best.step + 1e-9)) best = { step, a, n };
+    const c = { step, lo, hi, n };
+    const onTick = (x: C) => Math.abs(x.lo / x.step - Math.round(x.lo / x.step)) < 1e-6;
+    const span = (x: C) => x.hi - x.lo;
+    if (!best || span(c) < span(best) - 1e-9 || (Math.abs(span(c) - span(best)) <= 1e-9 && (onTick(c) > onTick(best) || (onTick(c) === onTick(best) && step > best.step)))) best = c;
   }
-  if (!best || best.a * best.step < top * FIT_MIN_FLOOR) return unitDomain(max, plotPx);
-  const { step, a, n } = best;
+  if (!best || best.lo < best.hi * FIT_MIN_FLOOR) return fromZero();
+  const { step, n } = best;
   const d = stepDecimals(step);
-  const lo = +(a * step).toFixed(d);
-  const all = Array.from({ length: n }, (_, k) => +((a + k) * step).toFixed(d));
-  const every = THIN.find((k) => k < n && (plotPx * step * k) / (top - lo) >= MIN_GAP);
-  const ticks = every ? all.filter((_, k) => k % every === 0) : [lo, all[n - 1]!];
-  return { domain: [lo, top], ticks, decimals: d };
+  const lo = +best.lo.toFixed(stepDecimals(floorGrid(step)));
+  const hi = +best.hi.toFixed(stepDecimals(step / 2));
+  const first = Math.ceil(lo / step - 1e-9);
+  const all = Array.from({ length: n }, (_, k) => +((first + k) * step).toFixed(d));
+  const every = THIN.find((k) => k < n && (plotPx * step * k) / (hi - lo) >= MIN_GAP);
+  const ticks = every ? all.filter((_, k) => k % every === 0) : [all[0]!, all[n - 1]!];
+  return { domain: [lo, hi], ticks, decimals: d };
 }
 
-/** A fitted axis's floor in words for the chart's qualifier ("y from 0.40"), or null for an axis from 0. */
+/** A fitted axis's floor in words for the chart's qualifier ("y from 0.40", "y from 0.45"), or null for an axis from 0. */
 export function fitFloorNote(fit: Fit | null | undefined, decimals = 2): string | null {
+  const v = fitFloor(fit, decimals);
+  return v === null ? null : `y from ${v}`;
+}
+
+/** A fitted axis's floor as written (at least `decimals` places, more for a floor on a finer half step), or null. */
+export function fitFloor(fit: Fit | null | undefined, decimals = 2): string | null {
   if (!fit || !(fit.domain[0] > 0)) return null;
-  return `y from ${fit.domain[0].toFixed(Math.max(decimals, fit.decimals))}`;
+  return fit.domain[0].toFixed(Math.max(decimals, fit.decimals, stepDecimals(fit.domain[0])));
 }
 
 /**

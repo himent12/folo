@@ -70,7 +70,7 @@
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
   import { scoresTitle, type EvalSource } from '$lib/evaluated';
-  import LossOptions, { type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
+  import LossOptions, { DEFAULT_SMOOTHING, type Scale, type Smoothing } from '$lib/charts/LossOptions.svelte';
   import { holdDomain, logDomain, niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, type Fit, type Held } from '$lib/charts/domain';
   import { smooth, type Pt } from '$lib/charts/downsample';
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
@@ -150,7 +150,7 @@
   });
 
   // ---- chart data ----
-  let smoothing = $state<Smoothing>('0.9');
+  let smoothing = $state<Smoothing>(DEFAULT_SMOOTHING);
   // Log by default: the total starts near 8 while box / cls / dfl sit between 0.4 and 3, which a linear axis squashes
   // into its bottom quarter.
   let scale = $state<Scale>('log');
@@ -396,7 +396,7 @@
     ['box', 'box regression: how far predicted boxes are from the true ones.'],
     ['cls', 'classification: how wrong the class scores are.'],
     ['dfl', 'distribution focal: how sharply each box edge is placed.'],
-    ['EMA 0.9', 'smoothing; a higher value reacts more slowly. The Loss tab shows the last raw step and the smoothed total.'],
+    ['EMA', 'smoothing over steps (0.98: about the last 50); a higher value reacts more slowly. The Loss tab shows the last raw step and the smoothed total.'],
   ];
   const legendNote = $derived(unit ? (lastEpoch ? latestEp : undefined) : lastStep ? stepEp : undefined);
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CLEAR, GUTTER_SLOT, LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, memoPlaceEndLabels, needsLeader, placeEndLabels, type Placed } from './endLabels';
+import { CLEAR, columnCapacity, GUTTER_SLOT, KEY_W, LABEL_GAP, LABEL_H, labelWidth, leaderOf, MAX_REACH, memoPlaceEndLabels, MORE_ID, needsLeader, placeEndLabels, type Placed } from './endLabels';
 
 const bounds = { x0: 0, y0: 0, x1: 600, y1: 300 };
 const line = (pts: [number, number][]) => pts.map(([x, y]) => ({ x, y }));
@@ -125,12 +125,51 @@ describe('placeEndLabels: the gutter column', () => {
     const ends = ['a', 'b', 'c', 'd'].map((id, i) => ({ id, label: id, x: 500, y: 296 + i * 0.5 }));
     const placed = placeEndLabels(ends, ends.map((e) => line([[0, e.y], [500, e.y]])), bounds, 2, 500);
     expect(placed).toHaveLength(4);
-    for (const p of placed) expect(p.y + 7).toBeLessThanOrEqual(300);
+    for (const p of placed) expect(p.y + LABEL_H / 2).toBeLessThanOrEqual(300);
   });
 
-  it('gives each label in the column its own 14 px slot: lines ending together are labelled at their ends, no leaders', () => {
+  it('holds as many labels as the plot has slots, and folds the rest into "+N more", every label inside the bounds', () => {
+    // Round 27 review: 30 labels in 300 px put the first label's centre at −114 px.
+    const cap = columnCapacity(300);
+    expect(cap).toBe(Math.floor((300 - LABEL_H) / GUTTER_SLOT) + 1);
+    const ends = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `r${i}`, label: `run ${i}`, x: 500, y: 150 + i * 0.2 }));
+    const inside = (ps: Placed[]) => {
+      for (const p of ps) {
+        expect(p.y - LABEL_H / 2).toBeGreaterThanOrEqual(0);
+        expect(p.y + LABEL_H / 2).toBeLessThanOrEqual(300);
+      }
+      const ys = ps.map((p) => p.y).sort((a, b) => a - b);
+      for (let i = 1; i < ys.length; i++) expect(ys[i]! - ys[i - 1]!).toBeGreaterThanOrEqual(GUTTER_SLOT - 1e-9);
+    };
+    // At capacity: every line labelled, no entry folded.
+    const full = placeEndLabels(ends(cap), [], bounds, 2, 500);
+    expect(full).toHaveLength(cap);
+    expect(full.some((p) => p.id === MORE_ID)).toBe(false);
+    inside(full);
+    // One more: the first cap - 1 in the caller's order keep their labels, the last two fold into "+2 more".
+    const over = placeEndLabels(ends(cap + 1), [], bounds, 2, 500);
+    expect(over).toHaveLength(cap);
+    const more = over.at(-1)!;
+    expect(more).toMatchObject({ id: MORE_ID, label: '+2 more', detached: true, more: [`r${cap - 1}`, `r${cap}`] });
+    expect(over.slice(0, -1).map((p) => p.id)).toEqual(Array.from({ length: cap - 1 }, (_, i) => `r${i}`));
+    inside(over);
+    // Far over: 30 labels in a 120 px plot.
+    const small = { x0: 0, y0: 0, x1: 600, y1: 120 };
+    const many = placeEndLabels(ends(30), [], small, 2, 500);
+    expect(many).toHaveLength(columnCapacity(120));
+    for (const p of many) {
+      expect(p.y - LABEL_H / 2).toBeGreaterThanOrEqual(0);
+      expect(p.y + LABEL_H / 2).toBeLessThanOrEqual(120);
+    }
+    expect(many.at(-1)!.label).toBe(`+${30 - columnCapacity(120) + 1} more`);
+    // No room for even one label: none.
+    expect(placeEndLabels(ends(3), [], { x0: 0, y0: 0, x1: 600, y1: 10 }, 2, 500)).toEqual([]);
+  });
+
+  it('gives each label in the column its own 16 px slot: lines ending together are labelled at their ends, no leaders', () => {
     // Round 26: Run › Loss's box and dfl, ending 1 px apart at the plot's edge, were pushed 28 px apart with a "<" of
-    // leaders between them. In 14 px slots each sits within 7 px of its own end.
+    // leaders between them. Round 27: in 14 px slots they read as touching. In 16 px slots (each label's whole line)
+    // each sits within 8 px of its own end and their boxes never overlap.
     const flat = (y: number) => line([[0, y], [500, y]]);
     const ends = [
       { id: 'box', label: 'box', x: 500, y: 170, curve: 0 },
@@ -140,7 +179,8 @@ describe('placeEndLabels: the gutter column', () => {
     const placed = placeEndLabels(ends, [flat(170), flat(171), flat(210)], bounds, 2, 500, { gap: 10, lead: 14 });
     expect(placed).toHaveLength(3);
     const at = Object.fromEntries(placed.map((p) => [p.id, p]));
-    expect(GUTTER_SLOT).toBe(14);
+    expect(GUTTER_SLOT).toBe(16);
+    expect(GUTTER_SLOT).toBeGreaterThanOrEqual(LABEL_H);
     expect(at.dfl!.y - at.box!.y).toBe(GUTTER_SLOT);
     for (const e of ends) expect(Math.abs(at[e.id]!.y - e.y)).toBeLessThanOrEqual(GUTTER_SLOT / 2);
     expect(placed.some(needsLeader)).toBe(false);
@@ -297,21 +337,33 @@ describe("placeEndLabels: other runs' lines are obstacles", () => {
 });
 
 describe('placeEndLabels: leaders only from the gutter', () => {
-  it('labels a failed or stopped line in the gutter column at its last height, like a completed one', () => {
-    // Its spot beside the marker is clear, but a line that has ended is read with the others that ended, at the right.
+  it("labels a failed or stopped line beside its own end, not at the plot's edge", () => {
+    // Round 27: "shapes-hard-s · stopped", ending at 63 %, was labelled in the gutter at 100 %, far from its line.
     const own = line([[0, 280], [200, 150]]);
     const done = line([[0, 270], [500, 120]]);
     const ends = [
-      { id: 'a', label: 'shapes-hard-s · stopped', x: 200, y: 150, curve: 0, gutter: true },
+      { id: 'a', label: 'shapes-hard-s · stopped', x: 200, y: 150, curve: 0 },
       { id: 'b', label: 'fasteners-n', x: 500, y: 120, curve: 1 },
     ];
     const placed = placeEndLabels(ends, [own, done], bounds, 2, 500, { lead: 14 });
     const at = Object.fromEntries(placed.map((p) => [p.id, p]));
-    expect(at.a!.x).toBe(at.b!.x);
-    expect(at.a!.x).toBeGreaterThanOrEqual(500);
-    expect(at.a!.y).toBe(150);
-    expect(at.b!.y).toBe(120);
-    expect(leaderOf(at.a!)).toBeNull();
+    expect(at.a!.x).toBeLessThan(500);
+    expect(Math.hypot(at.a!.x - 200, at.a!.y - 150)).toBeLessThan(30);
+    expect(needsLeader(at.a!)).toBe(false);
+    expect(at.a!.detached).toBeUndefined();
+    expect(at.b!.x).toBeGreaterThanOrEqual(500);
+  });
+
+  it('keys a line ending inside the plot whose end has no clear spot: in the column with its swatch, no leader', () => {
+    // A failed run ending inside a bundle of other lines: every spot beside its end covers one of them.
+    const bundle = Array.from({ length: 12 }, (_, i) => line([[0, 100 + i * 8], [500, 100 + i * 8]]));
+    const own = line([[0, 300], [200, 146]]);
+    const ends = [{ id: 'f', label: 'shapes-hard-m · failed', x: 200, y: 146, curve: 0, w: 140 }];
+    const [p] = placeEndLabels(ends, [own, ...bundle], bounds, 2, 500, { lead: 14 });
+    expect(p!.x).toBeGreaterThanOrEqual(500);
+    expect(p!.detached).toBe(true);
+    expect(p!.w).toBe(140 + KEY_W);
+    expect(leaderOf(p!)).toBeNull();
   });
 
   it('never draws a leader across another label or another line, however the lines end', () => {
@@ -326,7 +378,6 @@ describe('placeEndLabels: leaders only from the gutter', () => {
         x: rnd() < 0.5 ? 440 : 100 + Math.floor(rnd() * 340),
         y: 100 + Math.floor(rnd() * 60),
         curve: i,
-        gutter: rnd() < 0.3,
       }));
       const curves = ends.map((e) => line([[0, e.y + 40 + rnd() * 40], [e.x * 0.5, e.y + rnd() * 20 - 10], [e.x, e.y]]));
       const placed = placeEndLabels(ends, curves, bounds, 2, 440, { lead: 14 });

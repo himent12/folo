@@ -33,3 +33,15 @@ describe('paintOrder front', () => {
     expect(out.map((t) => t.id)).toEqual(['cls', 'dfl', 'box', 'total']);
   });
 });
+
+describe('paintOrder ended runs', () => {
+  it('draws failed and stopped runs over the runs that ran on, solid or patterned', () => {
+    // Round 27: Compare's failed dotted run lay in the bundle of the others' climb. An ended solid run goes over a
+    // completed dotted one too: no series is hidden under the others.
+    const out = paintOrder(
+      [s('done', 150), s('live', 38, { end: 'live' }), s('stopped', 61, { pattern: 'dash', end: 'stopped' }), s('failed', 23, { end: 'failed' }), s('dotted', 100, { pattern: 'dot' })],
+      (t) => t,
+    );
+    expect(out.map((t) => t.id)).toEqual(['done', 'live', 'dotted', 'failed', 'stopped']);
+  });
+});
