@@ -239,14 +239,22 @@ impl FoloApp {
                             cx.stop_propagation();
                         }
                     }))
+                    // A name that may be cut shows in full on hover (and on focus, above).
                     .child(
-                        div().flex_1().min_w(px(180.)).child(
-                            text(ty::SM, t.text_primary)
-                                .font_weight(FontWeight::MEDIUM)
-                                .w(px(180.))
-                                .truncate()
-                                .child(r.name.clone()),
-                        ),
+                        div()
+                            .id(SharedString::from(format!("rn-{}", r.id)))
+                            .flex_1()
+                            .min_w(px(180.))
+                            .when(crate::ui::may_overflow(&r.name, ty::SM.size, 180.), |d| {
+                                d.tooltip(crate::controls::tip(r.name.clone(), None))
+                            })
+                            .child(
+                                text(ty::SM, t.text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .w(px(180.))
+                                    .truncate()
+                                    .child(r.name.clone()),
+                            ),
                     )
                     .child(
                         text(ty::SM, t.text_secondary).w(px(64.)).flex_none().child(r.config.arch.as_str()),

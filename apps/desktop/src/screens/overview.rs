@@ -815,13 +815,22 @@ impl FoloApp {
                             .active(|s| s.bg(t.bg_active))
                             // Same order as the Runs table: name, then status.
                             // One line per run: name, then dataset and architecture, then status as a dot.
+                            // A name that may be cut shows in full on hover (and on focus, above).
                             .child(
-                                text(ty::SM, t.text_primary)
-                                    .font_weight(FontWeight::MEDIUM)
+                                div()
+                                    .id(SharedString::from(format!("ov-rn-{}", r.id)))
                                     .w(px(name_w))
                                     .flex_none()
-                                    .truncate()
-                                    .child(r.name.clone()),
+                                    .when(crate::ui::may_overflow(&r.name, ty::SM.size, name_w), |d| {
+                                        d.tooltip(crate::controls::tip(r.name.clone(), None))
+                                    })
+                                    .child(
+                                        text(ty::SM, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .w_full()
+                                            .truncate()
+                                            .child(r.name.clone()),
+                                    ),
                             )
                             // Room for the dataset and architecture only on wide windows.
                             .when(wide, |d| {
@@ -1158,13 +1167,13 @@ impl FoloApp {
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "1",
                         "Add a dataset",
-                        "Add a YOLO or COCO folder, or generate a sample.",
+                        "A YOLO or COCO folder.",
                         true,
                     )))
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(
                         "2",
                         "Train a model",
-                        "Start a run and watch loss and mAP live.",
+                        "Watch loss and mAP live.",
                         false,
                     )))
                     .child(div().flex().flex_1().flex_basis(px(0.)).min_w_0().child(step(

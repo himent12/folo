@@ -232,6 +232,11 @@ pub fn paint_image_with_boxes(
                             None,
                         );
                     }
+                    // A name-only chip wider than the view would run off it: none (the inspector
+                    // and the detection list name the box in full).
+                    if score.is_empty() && name_line.width + px(10.) > bounds.size.width - px(4.) {
+                        continue;
+                    }
                     let gap = if score.is_empty() || name.is_empty() { px(0.) } else { px(5.) };
                     let cw = name_line.width + gap + score_line.width + px(10.);
                     let ch = px(if compact { 14. } else { 16. });
@@ -257,10 +262,13 @@ pub fn paint_image_with_boxes(
                         o.y >= bounds.top().max(rect.top()) && o.y + ch <= bounds.bottom().min(rect.bottom())
                     };
                     let free = |c: &Bounds<Pixels>| !placed.iter().any(|p| p.dilate(px(2.)).intersects(c));
-                    // More spots down the inside of the box, one chip height (+2 px) apart.
-                    let inside = (1..4).map(|k| {
-                        point(clamp_x(r.left() + px(1.)), r.top() + px(1.) + (ch + px(2.)) * k as f32)
-                    });
+                    // More spots down the inside of the box, one chip height (+2 px) apart, only
+                    // while they stay inside it: a chip below its box would read as another's.
+                    let inside = (1..4)
+                        .map(|k| {
+                            point(clamp_x(r.left() + px(1.)), r.top() + px(1.) + (ch + px(2.)) * k as f32)
+                        })
+                        .filter(|o| o.y + ch <= r.bottom() - px(1.));
                     let free_spot = candidates
                         .iter()
                         .copied()

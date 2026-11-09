@@ -1166,8 +1166,9 @@ impl FoloApp {
                                     Some(why) => text(ty::XS, t.text_tertiary).whitespace_normal().child(why),
                                     // The server confirmed it can; an older one can't say, so the need is stated.
                                     None if self.store.capabilities.is_some() => {
-                                        text(ty::XS, t.text_tertiary)
-                                            .child("Trains in f16 on this server's tensor cores")
+                                        text(ty::XS, t.text_tertiary).whitespace_normal().child(
+                                            "Trains in f16 on this server's tensor cores, in about 40 % less GPU memory",
+                                        )
                                     }
                                     None => rich(
                                         &t,
@@ -1219,6 +1220,11 @@ impl FoloApp {
             });
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
         let (secs, vram) = estimate(arch, epochs, BATCHES[batch], IMGSZ[imgsz], images as u32);
+        // Mixed precision trains in about 0.58x the memory (folo-n batch 16: 2022 vs 3474 MiB,
+        // docs/BENCHMARKS.md) and no faster at 640 px (the epoch is bound elsewhere), so only the
+        // memory moves.
+        let f16 = amp && self.amp_blocked(DEVICES[device]).is_none();
+        let vram = if f16 { vram * 0.58 } else { vram };
         let cpu = DEVICES[device] == "cpu";
         let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
@@ -1256,6 +1262,8 @@ impl FoloApp {
                     )
                     .child(text(ty::XS, t.text_tertiary).whitespace_nowrap().child(if cpu {
                         "Expect many times slower than a GPU"
+                    } else if fits && f16 {
+                        "Reference estimate in f16, not measured on this GPU"
                     } else if fits {
                         "Reference estimate, not measured on this GPU"
                     } else {
