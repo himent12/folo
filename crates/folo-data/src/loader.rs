@@ -51,7 +51,7 @@ impl Default for LoaderConfig {
         LoaderConfig {
             batch_size: 16,
             imgsz: 640,
-            workers: std::thread::available_parallelism().map_or(4, |n| n.get().min(8)),
+            workers: std::thread::available_parallelism().map_or(4, |n| n.get().min(16)),
             shuffle: true,
             drop_last: false,
             seed: 0,

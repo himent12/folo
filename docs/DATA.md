@@ -123,7 +123,7 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 
 ## DataLoader and determinism
 - `LoaderConfig { batch_size, imgsz, workers, shuffle, drop_last, seed, augment, epochs, prefetch_batches,
-  u8_images }`.
+  u8_images }`. `workers` defaults to the logical CPU count, at most 16.
 - Batches: `images` is `n * 3 * s * s` `f32` in `0..1` (`NCHW`, RGB), or, with `u8_images`, `images_u8` holds the same
   pixels as `u8` (`value / 255` is the float; a quarter of the bytes, for a GPU that converts them itself, as the
   trainer and validation do on a GPU) and `images` is empty. `shape = [n, 3, s, s]`, `targets` rows are
