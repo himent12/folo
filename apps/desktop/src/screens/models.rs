@@ -165,7 +165,7 @@ impl FoloApp {
                                 }
                             }))
                             .child(div().id(SharedString::from(format!("m-name-{}", m.id))).flex_1().min_w(px(200.)).when(crate::ui::may_overflow(&m.name, ty::SM.size, name_w), |d| d.tooltip(crate::controls::tip(m.name.clone(), None))).child(text(ty::SM, t.text_primary).font_weight(FontWeight::MEDIUM).w(px(name_w)).truncate().child(m.name.clone())))
-                            .child(text(ty::SM, t.text_secondary).w(px(110.)).flex_none().tnum().child(format!("{} · {} px", m.arch.as_str(), m.imgsz)))
+                            .child(div().w(px(110.)).flex_none().flex().flex_col().child(text(ty::SM, t.text_secondary).tnum().child(format!("{} · {} px", m.arch.as_str(), m.imgsz))).when(self.model_e2e(m), |d| d.child(text(ty::XS, t.text_tertiary).child("end-to-end"))))
                             .when(wide, |d| d.child(text(ty::SM, t.text_tertiary).w(px(150.)).flex_none().truncate().child(run.trim_start_matches("from ").to_string())))
                             .child(num_cell(130., metrics.as_ref().map_or(text(ty::SM, t.text_tertiary).child("–"), |mm| bar_value(&t, mm.map50_95, f3(mm.map50_95), t.text_tertiary))))
                             .child(num_cell(72., text(ty::SM, t.text_secondary).tnum().child(metrics.as_ref().map_or("–".into(), |mm| f3(mm.map50)))))
@@ -252,25 +252,31 @@ impl FoloApp {
             )
             .into_any_element();
         let export_btn = self.export_menu(&m, window, cx);
+        let e2e = self.model_e2e(&m);
         let title = div()
             .flex()
             .items_center()
             .gap(px(10.))
             .child(text(ty::XL, t.text_primary).child(m.name.clone()))
             .child(badge(&t, m.arch.as_str(), Tone::Neutral))
-            .when(run.as_ref().is_some_and(|r| r.config.head == crate::api::Head::O2o), |d| {
+            // End-to-end, with its help on hover and keyboard focus (the help icon's own stop).
+            .when(e2e, |d| {
                 d.child(
                     div()
-                        .id("model-head")
-                        .tooltip(crate::controls::tip("One-to-one head: predicts without NMS", None))
-                        .child(badge(&t, "end-to-end", Tone::Neutral)),
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(badge(&t, "end-to-end", Tone::Neutral))
+                        .child(self.help_icon("model-head-help", FoloApp::E2E_HELP, window, cx)),
                 )
             });
         let mut subtitle =
             div().flex().items_center().gap(px(6.)).child(text(ty::BASE, t.text_secondary).child(format!(
-                "{} px · {} classes · created {created}",
+                "{} px · {} classes{} · created {created}",
                 m.imgsz,
-                m.classes.len()
+                m.classes.len(),
+                // How it was trained, when the record says (`trained_with`; exports have none).
+                if m.trained_with.is_some_and(|w| w.amp) { " · trained in f16" } else { "" },
             )));
         if let Some(r) = run.clone() {
             let rid = r.id.clone();

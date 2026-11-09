@@ -121,7 +121,12 @@ pub fn paint_image_with_boxes(
         let mut placed: Vec<Bounds<Pixels>> = Vec::new();
         // Two passes: every box first, then every label chip, so no box stroke covers a chip.
         for pass in 0..2 {
-            for &b in &order {
+            // Boxes paint dimmed first, so the highlighted one sits on top; chips are placed the
+            // other way round, so the selected and matching boxes claim the free spots before
+            // dimmed ones (a class filter must not leave its own boxes unlabelled).
+            let seq: Vec<&DrawBox> =
+                if pass == 0 { order.clone() } else { order.iter().rev().copied().collect() };
+            for &b in &seq {
                 let color = t.class(b.class);
                 let a = if b.dim { 0.3 } else { 1.0 };
                 let p1 = to(b.x1, b.y1);
@@ -196,7 +201,7 @@ pub fn paint_image_with_boxes(
                     } else if b.dim {
                         // Muted but opaque (a translucent chip over a photo can't be read): the
                         // class tint on the panel colour, text picked for contrast on it.
-                        let muted = crate::theme::over(t.bg_panel, alpha(color, 0.4));
+                        let muted = crate::theme::over(t.bg_panel, alpha(color, 0.25));
                         (muted, t.readable_on(muted))
                     } else {
                         (color, chip_text)

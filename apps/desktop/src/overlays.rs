@@ -1001,7 +1001,16 @@ impl FoloApp {
                     .justify_between()
                     .gap(px(16.))
                     .child(
+                        // The label toggles too (the switch keeps the one Tab stop).
                         div()
+                            .id("nr-e2e-label")
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(f) = this.new_run.as_mut() {
+                                    f.e2e = !f.e2e;
+                                    cx.notify();
+                                }
+                            }))
                             .flex_1()
                             .min_w_0()
                             .flex()
@@ -1011,7 +1020,7 @@ impl FoloApp {
                             .child(
                                 text(ty::XS, t.text_tertiary)
                                     .whitespace_normal()
-                                    .child("Adds a one-to-one head, so the model predicts without NMS"),
+                                    .child("Predicts boxes directly, without non-maximum suppression (NMS)"),
                             ),
                     )
                     .child(switch)
@@ -1152,7 +1161,17 @@ impl FoloApp {
                     .justify_between()
                     .gap(px(16.))
                     .child(
+                        // The label toggles too when the switch can (it keeps the one Tab stop).
                         div()
+                            .id("nr-amp-label")
+                            .when(!off, |d| {
+                                d.cursor_pointer().on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(f) = this.new_run.as_mut() {
+                                        f.amp = !f.amp;
+                                        cx.notify();
+                                    }
+                                }))
+                            })
                             .flex_1()
                             .min_w_0()
                             .flex()
@@ -1167,7 +1186,7 @@ impl FoloApp {
                                     // The server confirmed it can; an older one can't say, so the need is stated.
                                     None if self.store.capabilities.is_some() => {
                                         text(ty::XS, t.text_tertiary).whitespace_normal().child(
-                                            "Trains in f16 on this server's tensor cores, in about 40 % less GPU memory",
+                                            "Trains in f16 on this server's tensor cores, in about 40% less GPU memory",
                                         )
                                     }
                                     None => rich(
