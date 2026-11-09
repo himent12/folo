@@ -69,6 +69,19 @@ fn rough_duration(secs: f64) -> String {
     }
 }
 
+/// An estimate's range, as rough as its ends: whole minutes under an hour ("7–15 min"), else
+/// hours to a tenth ("1.2–2.0 h").
+fn rough_range(lo: f64, hi: f64) -> String {
+    let (lo, hi) = (lo.min(hi).max(0.), lo.max(hi));
+    if hi < 60. {
+        format!("{:.0}–{:.0} s", lo.max(1.), hi.max(1.))
+    } else if hi < 3600. {
+        format!("{}–{} min", (lo / 60.).round().max(1.) as u64, (hi / 60.).round().max(1.) as u64)
+    } else {
+        format!("{:.1}–{:.1} h", lo / 3600., hi / 3600.)
+    }
+}
+
 /// Rough training cost of a configuration on this machine: (seconds, VRAM GiB).
 pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -> (f64, f32) {
     const GFLOPS: [f32; 5] = [6.6, 21.5, 48.0, 104.0, 165.0];
@@ -1332,20 +1345,121 @@ impl FoloApp {
                         .child(text(ty::SM, t.text_primary).child(n)),
                 )
             });
+        self.ensure_estimate(cx);
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
-        let (secs, vram) = estimate(arch, epochs, BATCHES[batch], IMGSZ[imgsz], images as u32);
+        let cpu = DEVICES[device] == "cpu";
+        // What the footer can honestly say. With the server's estimator: its answer for this
+        // config; while a changed config is out, the last answer marked as updating (if it was for
+        // the same kind of device); nothing for an unparsed value or a rejected config. Servers
+        // without one: the app's own reference figures.
+        enum Est {
+            Server(Box<crate::api::RunEstimate>, bool),
+            Pending,
+            Invalid,
+            Rejected(String),
+            Local,
+        }
+        let est = if !self.store.features.iter().any(|f| f == "run_estimate") {
+            Est::Local
+        } else if epochs_bad || lr_bad || close_bad {
+            Est::Invalid
+        } else {
+            match &self.nr_estimate {
+                Some((_, crate::store::Load::Ready(e))) => Est::Server(Box::new(e.clone()), false),
+                Some((_, crate::store::Load::Failed(e))) if e.code == "not_supported" => Est::Local,
+                Some((_, crate::store::Load::Failed(e))) => Est::Rejected(e.message.clone()),
+                _ => match &self.nr_estimate_last {
+                    Some(e) if (e.device == "cpu") == cpu => Est::Server(Box::new(e.clone()), true),
+                    _ => Est::Pending,
+                },
+            }
+        };
+        let (local_secs, local_vram) = estimate(arch, epochs, BATCHES[batch], IMGSZ[imgsz], images as u32);
         // Mixed precision trains in about 0.58x the memory (folo-n batch 16: 2022 vs 3474 MiB,
         // docs/BENCHMARKS.md) and no faster at 640 px (the epoch is bound elsewhere), so only the
         // memory moves.
         let f16 = amp && self.amp_blocked(DEVICES[device]).is_none();
-        let vram = if f16 { vram * 0.58 } else { vram };
-        let cpu = DEVICES[device] == "cpu";
+        let local_vram = if f16 { local_vram * 0.58 } else { local_vram };
+        let gib = (1u64 << 30) as f32;
+        // The device the estimate is for: the server's resolved one (Auto can land on the CPU).
+        let on_cpu = match &est {
+            Est::Server(e, _) => e.device == "cpu",
+            _ => cpu,
+        };
+        let vram = match &est {
+            Est::Server(e, _) => e.est_peak_vram_bytes.map(|b| b as f32 / gib),
+            _ => (!on_cpu).then_some(local_vram),
+        };
         let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
-        // GiB, like the estimate (MiB of activations / 1024) and every size the app shows.
-        let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / (1u64 << 30) as f32);
-        let fits = cpu || gpu_gb <= 0.0 || vram <= gpu_gb * 0.97;
+        // GiB, like the estimate and every size the app shows.
+        let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / gib);
+        // An answer being refreshed is never a warning: it's marked as updating instead.
+        let fits = !matches!(est, Est::Server(_, false) | Est::Local)
+            || on_cpu
+            || gpu_gb <= 0.0
+            || vram.is_none_or(|v| v <= gpu_gb * 0.97);
+        let place = if on_cpu { "CPU" } else { "GPU" };
+        let (headline, basis, note): (String, String, Option<String>) = match &est {
+            Est::Invalid => ("No estimate while a value is invalid".into(), String::new(), None),
+            Est::Pending => ("Estimating…".into(), String::new(), None),
+            Est::Rejected(msg) => (
+                "No estimate for this config".into(),
+                "The server couldn't estimate it".into(),
+                Some(msg.clone()),
+            ),
+            Est::Local if cpu => {
+                ("CPU selected · no time estimate".into(), "Expect many times slower than a GPU".into(), None)
+            }
+            _ if !fits => (
+                // No adapter name here: it can be long enough to reach the buttons.
+                format!("≈ {:.0} GiB needed, {gpu_gb:.0} GiB on this GPU", vram.unwrap_or(0.)),
+                "Lower the batch or image size".into(),
+                None,
+            ),
+            Est::Server(e, updating) => {
+                let range = rough_range(e.est_total_s_low, e.est_total_s_high);
+                let headline = match vram {
+                    Some(v) => {
+                        format!("≈ {} ({range}) · ≈ {v:.1} GiB GPU memory", rough_duration(e.est_total_s))
+                    }
+                    None => format!("≈ {} ({range}) on the CPU", rough_duration(e.est_total_s)),
+                };
+                // What the figures are, said plainly: measured here or reference rates, and how far
+                // to trust them (the server's own confidence).
+                let confidence = match e.confidence {
+                    crate::api::Confidence::High => "high",
+                    crate::api::Confidence::Medium => "medium",
+                    crate::api::Confidence::Low => "low",
+                };
+                let basis = if *updating {
+                    "Updating for the new settings…".to_string()
+                } else {
+                    match e.source {
+                        crate::api::ThroughputSource::Measured => {
+                            format!("Measured on this {place} · {confidence} confidence")
+                        }
+                        crate::api::ThroughputSource::Reference => {
+                            format!("Reference rates, not measured here · {confidence} confidence")
+                        }
+                    }
+                };
+                // How the server derived it, in its own sentence, on hover.
+                (headline, basis, Some(e.basis.note.clone()))
+            }
+            _ => (
+                format!("≈ {} · ≈ {local_vram:.1} GiB GPU memory", rough_duration(local_secs)),
+                if f16 {
+                    "Reference estimate in f16, not measured on this GPU".into()
+                } else {
+                    "Reference estimate, not measured on this GPU".into()
+                },
+                None,
+            ),
+        };
         let estimate_line = div()
+            .id("nr-estimate")
+            .when_some(note, |d, n| d.tooltip(crate::controls::tip(n, None)))
             .flex()
             .items_center()
             .gap(px(8.))
@@ -1365,24 +1479,11 @@ impl FoloApp {
                         text(ty::SM, if fits { t.text_secondary } else { t.warning_text })
                             .tnum()
                             .whitespace_nowrap()
-                            .child(if cpu {
-                                "CPU selected · no time estimate".to_string()
-                            } else if fits {
-                                format!("≈ {} · ≈ {vram:.1} GiB GPU memory", rough_duration(secs))
-                            } else {
-                                // No adapter name here: it can be long enough to reach the buttons.
-                                format!("≈ {vram:.0} GiB needed, {gpu_gb:.0} GiB on this GPU")
-                            }),
+                            .child(headline),
                     )
-                    .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(if cpu {
-                        "Expect many times slower than a GPU"
-                    } else if fits && f16 {
-                        "Reference estimate in f16, not measured on this GPU"
-                    } else if fits {
-                        "Reference estimate, not measured on this GPU"
-                    } else {
-                        "Lower the batch or image size"
-                    })),
+                    .when(!basis.is_empty(), |d| {
+                        d.child(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(basis))
+                    }),
             );
         let cancel = self.button(
             "nr-cancel",

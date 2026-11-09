@@ -482,6 +482,12 @@ pub struct FoloApp {
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
     pub confirm_stop: Option<String>,
+    /// The server's estimate for the New run form's config, keyed by that config (servers with
+    /// `run_estimate`); the last good answer stands while a changed config is out.
+    pub nr_estimate: Option<(String, Load<crate::api::RunEstimate>)>,
+    pub nr_estimate_last: Option<crate::api::RunEstimate>,
+    /// Bumped on every new estimate key (and on an invalid entry): only the latest settle timer asks.
+    pub nr_estimate_gen: u64,
     pub toasts: Vec<Toast>,
     /// The toast under the pointer (its expiry waits).
     pub toast_hover: Option<u64>,
@@ -629,6 +635,9 @@ impl FoloApp {
             restore_pending: false,
             narrow: false,
             confirm_stop: None,
+            nr_estimate: None,
+            nr_estimate_last: None,
+            nr_estimate_gen: 0,
             toasts: Vec::new(),
             toast_hover: None,
             toasts_expanded: false,
@@ -1707,34 +1716,16 @@ impl FoloApp {
         cx.notify();
     }
 
-    pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(device) = self.new_run.as_ref().map(|f| f.device) else { return };
-        let amp_ok = self.amp_blocked(DEVICES[device]).is_none();
-        let Some(form) = self.new_run.as_mut() else { return };
-        // Auto sets its own rate, so an unparsed rate entry doesn't block it.
-        let lr_invalid = form.lr_invalid && form.optimizer != 0;
-        if form.submitting || form.epochs_invalid || lr_invalid || form.close_invalid {
-            return;
-        }
-        let Some(ds) = self.store.datasets.ready().and_then(|d| d.get(form.dataset)).cloned() else { return };
-        let name = form.name.read(cx).text().trim().to_string();
-        if name.is_empty() {
-            form.error = Some(ApiError::new("invalid_name", "Give the run a name."));
-            // The error shows at the top of the form, by the Name field: go there.
-            let name_fh = form.name.read(cx).focus_handle(cx);
-            window.focus(&name_fh);
-            self.dialog_scroll.set_offset(point(px(0.), px(0.)));
-            cx.notify();
-            return;
-        }
-        form.submitting = true;
-        // Which form this request belongs to (its name input, kept by a restored draft): the
-        // dialog can be dismissed and another run submitted before this one answers.
-        let form_id = form.name.entity_id();
-        let config = carry_over(
+    /// The New run form as the config it would submit (its name as typed), or None without a
+    /// form or dataset. Submitting and the server's estimate both use it.
+    pub fn form_config(&self, cx: &App) -> Option<TrainConfig> {
+        let form = self.new_run.as_ref()?;
+        let amp_ok = self.amp_blocked(DEVICES[form.device]).is_none();
+        let ds = self.store.datasets.ready().and_then(|d| d.get(form.dataset))?;
+        Some(carry_over(
             form.base.as_ref(),
             TrainConfig {
-                name,
+                name: form.name.read(cx).text().trim().to_string(),
                 dataset_id: ds.id.clone(),
                 arch: ARCHS[form.arch],
                 epochs: form.epochs.round() as u32,
@@ -1757,7 +1748,95 @@ impl FoloApp {
                 amp: form.amp && amp_ok,
                 head: if form.e2e { Head::O2o } else { Head::O2m },
             },
+        ))
+    }
+
+    /// Asks the server how long the New run form's config would take (servers with
+    /// `run_estimate`), once per distinct config.
+    pub fn ensure_estimate(&mut self, cx: &mut Context<Self>) {
+        if !self.store.features.iter().any(|f| f == "run_estimate") {
+            return;
+        }
+        // A value being typed that doesn't parse yet: no estimate for the last good one.
+        if self
+            .new_run
+            .as_ref()
+            .is_some_and(|f| f.epochs_invalid || f.close_invalid || (f.lr_invalid && f.optimizer != 0))
+        {
+            // Cancel a pending ask; an unanswered key would otherwise stay "loading" for good.
+            self.nr_estimate_gen += 1;
+            if matches!(self.nr_estimate, Some((_, Load::Loading))) {
+                self.nr_estimate = None;
+            }
+            return;
+        }
+        let Some(mut config) = self.form_config(cx) else { return };
+        // The name doesn't change the estimate (and an empty one mustn't fail it).
+        config.name = "estimate".into();
+        let key = serde_json::to_string(&config).unwrap_or_default();
+        if self.nr_estimate.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        self.nr_estimate = Some((key.clone(), Load::Loading));
+        self.nr_estimate_gen += 1;
+        let generation = self.nr_estimate_gen;
+        // Settled first (250 ms; at once for the frozen scenes), so a slider drag asks once for
+        // the value it stops on rather than for every step.
+        if self.frozen {
+            self.request_estimate(key, config, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            this.update(cx, |this, cx| {
+                if this.nr_estimate_gen == generation {
+                    this.request_estimate(key, config, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn request_estimate(&mut self, key: String, config: TrainConfig, cx: &mut Context<Self>) {
+        self.fetch(
+            cx,
+            move |api| api.estimate_run(&config),
+            move |this, r, cx| {
+                if this.nr_estimate.as_ref().is_none_or(|(k, _)| *k != key) {
+                    return;
+                }
+                if let Ok(e) = &r {
+                    this.nr_estimate_last = Some(e.clone());
+                }
+                this.nr_estimate = Some((key, r.map_or_else(Load::Failed, Load::Ready)));
+                cx.notify();
+            },
         );
+    }
+
+    pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let config = self.form_config(cx);
+        let Some(form) = self.new_run.as_mut() else { return };
+        // Auto sets its own rate, so an unparsed rate entry doesn't block it.
+        let lr_invalid = form.lr_invalid && form.optimizer != 0;
+        if form.submitting || form.epochs_invalid || lr_invalid || form.close_invalid {
+            return;
+        }
+        let Some(config) = config else { return };
+        if config.name.is_empty() {
+            form.error = Some(ApiError::new("invalid_name", "Give the run a name."));
+            // The error shows at the top of the form, by the Name field: go there.
+            let name_fh = form.name.read(cx).focus_handle(cx);
+            window.focus(&name_fh);
+            self.dialog_scroll.set_offset(point(px(0.), px(0.)));
+            cx.notify();
+            return;
+        }
+        form.submitting = true;
+        // Which form this request belongs to (its name input, kept by a restored draft): the
+        // dialog can be dismissed and another run submitted before this one answers.
+        let form_id = form.name.entity_id();
         let _ = window;
         self.fetch(
             cx,
@@ -3184,6 +3263,10 @@ impl FoloApp {
     /// Swap the data source; everything reloads from the new backend.
     pub fn set_backend(&mut self, api: Arc<dyn Backend>, mode: ServerMode, cx: &mut Context<Self>) {
         self.backend_gen += 1;
+        // Estimates are the old server's (and a pending one's answer will be dropped).
+        self.nr_estimate = None;
+        self.nr_estimate_last = None;
+        self.nr_estimate_gen += 1;
         // A draft's dataset belongs to the old server.
         self.new_run_draft = None;
         self.new_run_draft_ds = None;

@@ -276,6 +276,10 @@ impl Backend for HttpBackend {
         self.post_empty(&format!("/runs/{}/stop", seg(id)))
     }
 
+    fn estimate_run(&self, config: &TrainConfig) -> ApiResult<RunEstimate> {
+        self.post("/runs/estimate", config)
+    }
+
     fn queue_run(&self, id: &str, req: QueueRequest) -> ApiResult<Run> {
         self.post(&format!("/runs/{}/queue", seg(id)), &req)
     }

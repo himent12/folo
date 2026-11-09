@@ -873,7 +873,7 @@ impl Backend for MockBackend {
         Ok(SystemResponse {
             system,
             data_dir: None,
-            features: vec!["queue_control".into(), "weights_onnx".into()],
+            features: vec!["queue_control".into(), "weights_onnx".into(), "run_estimate".into()],
             capabilities: Some(capabilities),
             gpu_pool: None,
         })
@@ -1144,6 +1144,90 @@ impl Backend for MockBackend {
         let run = Self::snapshot(&f);
         runs.insert(0, f);
         Ok(run)
+    }
+
+    fn estimate_run(&self, config: &TrainConfig) -> ApiResult<RunEstimate> {
+        self.check()?;
+        let ds = self
+            .datasets
+            .iter()
+            .find(|d| d.ds.id == config.dataset_id)
+            .ok_or_else(|| ApiError::new("dataset_not_found", "No such dataset"))?;
+        let train = ds.ds.splits.train;
+        // No validation split: validation runs on the training images (docs/API.md).
+        let val = if ds.ds.splits.val > 0 { ds.ds.splits.val } else { train };
+        // The demo has never trained here: reference rates (the app's own reference model),
+        // so the estimate says so and claims low confidence.
+        let arch = match config.arch.as_str() {
+            "folo-n" => 0,
+            "folo-s" => 1,
+            "folo-m" => 2,
+            "folo-l" => 3,
+            _ => 4,
+        };
+        let cpu = config.device == "cpu";
+        let (secs, vram_gib) =
+            crate::overlays::estimate(arch, config.epochs as f32, config.batch, config.imgsz, train as u32);
+        let secs = if cpu { secs * 25. } else { secs };
+        let vram_gib = if config.amp { vram_gib * 0.58 } else { vram_gib };
+        let epochs = config.epochs.max(1);
+        // Without mosaic every epoch is a close-mosaic one; else the last ones, capped at half.
+        let close =
+            if config.augment.mosaic <= 0. { epochs } else { config.augment.close_mosaic.min(epochs / 2) };
+        let startup = 6.0;
+        let epoch_s = secs / epochs as f64;
+        let rate = train as f64 / (epoch_s * 0.92);
+        let phase = |kind: PhaseKind, n: u32| EstimatePhase {
+            phase: kind,
+            epochs: n,
+            train_imgs_per_s: rate,
+            train_s: epoch_s * 0.92,
+            val_s: epoch_s * 0.08,
+            epoch_s,
+        };
+        let phases = [(PhaseKind::Mosaic, epochs - close), (PhaseKind::CloseMosaic, close)]
+            .into_iter()
+            .filter(|p| p.1 > 0)
+            .map(|(k, n)| phase(k, n))
+            .collect();
+        let device_name =
+            if cpu { "AMD Ryzen 9 7950X".to_string() } else { "NVIDIA GeForce RTX 4080 SUPER".to_string() };
+        Ok(RunEstimate {
+            device: if cpu { "cpu".into() } else { "gpu:0".into() },
+            device_name,
+            train_images: train,
+            val_images: val,
+            batches_per_epoch: train.div_ceil(config.batch.max(1) as u64),
+            epochs,
+            phases,
+            val_imgs_per_s: val as f64 / (epoch_s * 0.08),
+            startup_s: startup,
+            est_epoch_s: epoch_s,
+            est_total_s: secs + startup,
+            est_total_s_low: (secs + startup) * 0.7,
+            est_total_s_high: (secs + startup) * 1.5,
+            source: ThroughputSource::Reference,
+            confidence: Confidence::Low,
+            basis: EstimateBasis {
+                source: ThroughputSource::Reference,
+                arch: config.arch,
+                imgsz: 640,
+                batch: 16,
+                amp: false,
+                measured_on: "reference (RTX 4090)".into(),
+                samples: 0,
+                updated: None,
+                exact: false,
+                note: "Reference rates for this architecture at 640 px and batch 16, scaled to this \
+                       config; nothing has been measured on this machine yet."
+                    .into(),
+            },
+            val_source: ThroughputSource::Reference,
+            est_peak_vram_bytes: (!cpu).then_some((vram_gib as f64 * (1u64 << 30) as f64) as u64),
+            vram_source: (!cpu).then_some(ThroughputSource::Reference),
+            close_mosaic: close,
+            cli: None,
+        })
     }
 
     fn queue_run(&self, id: &str, _req: QueueRequest) -> ApiResult<Run> {

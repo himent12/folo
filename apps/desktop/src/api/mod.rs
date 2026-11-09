@@ -101,6 +101,12 @@ pub trait Backend: Send + Sync + 'static {
     fn run(&self, id: &str) -> ApiResult<Run>;
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run>;
     fn stop_run(&self, id: &str) -> ApiResult<Run>;
+    /// How long a config would train (`POST /api/runs/estimate`, servers with `run_estimate`): from
+    /// the server's measured throughput when it has one, else its reference rates, with a range and
+    /// a confidence.
+    fn estimate_run(&self, _config: &TrainConfig) -> ApiResult<RunEstimate> {
+        Err(ApiError::new("not_supported", "This server can't estimate a run"))
+    }
     /// Moves a waiting run in the training queue (`POST /api/runs/{id}/queue`, servers with the
     /// `queue_control` feature): `409 run_not_queued` once the worker has taken it.
     fn queue_run(&self, _id: &str, _req: QueueRequest) -> ApiResult<Run> {
