@@ -135,7 +135,11 @@ impl FoloApp {
                         let metrics = m.metrics;
                         let (p, pu) = count_si(m.params);
                         let (b, bu) = bytes(m.bytes);
-                        let run = m.run_id.as_ref().and_then(|r| self.store.run(r)).map_or("imported".to_string(), |r| format!("from {}", r.name));
+                        let published = m.source == Some(crate::api::ModelSource::Published);
+                        let run = m.run_id.as_ref().and_then(|r| self.store.run(r)).map_or(
+                            if published { "published".to_string() } else { "imported".to_string() },
+                            |r| format!("from {}", r.name),
+                        );
                         let id = m.id.clone();
                         let key = format!("model-row-{}", m.id);
                         let ids_k = ids.clone();
@@ -159,7 +163,16 @@ impl FoloApp {
                                     .dataset_summary(&r.config.dataset_id)
                                     .map_or(r.config.dataset_id.clone(), |d| d.name.clone())
                             })
-                            .map_or("Evaluation dataset unknown".to_string(), |d| format!("on {d}"))
+                            .map_or_else(
+                                // Published weights say what they are (`about`), not "unknown".
+                                || {
+                                    m.about
+                                        .clone()
+                                        .filter(|_| published)
+                                        .unwrap_or_else(|| "Evaluation dataset unknown".to_string())
+                                },
+                                |d| format!("on {d}"),
+                            )
                             // Then the weights as stored, so an f16 export reads as one by its record,
                             // not its name.
                             + &model_storage(m).map_or(String::new(), |s| format!(" · {s}"));
@@ -300,6 +313,15 @@ impl FoloApp {
                 // How it was trained, when the record says (`trained_with`; exports have none).
                 if m.trained_with.is_some_and(|w| w.amp) { " · trained in f16" } else { "" },
             )));
+        // Published weights (a `folo weights` download): what they are, in their own line, on hover.
+        if run.is_none() && m.source == Some(crate::api::ModelSource::Published) {
+            subtitle = subtitle.child(
+                div()
+                    .id("model-about")
+                    .when_some(m.about.clone(), |d, a| d.tooltip(crate::controls::tip(a, None)))
+                    .child(text(ty::BASE, t.text_tertiary).child("· published weights")),
+            );
+        }
         if let Some(r) = run.clone() {
             let rid = r.id.clone();
             let link = div()
