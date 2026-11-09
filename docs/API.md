@@ -230,7 +230,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   shape is stable (the MCP proxy uses it, docs/MCP.md).
 - `GET /api/runs/{id}/events` → SSE stream. Each SSE `event:` name is the payload type, `data:` is its JSON:
   - `status` `{ "status": "queued|running|stopping|stopped|completed|failed", "error": null | "...",
-    "steps_per_epoch": 50, "epochs": 100 }` (the run's length, as in `Run`)
+    "steps_per_epoch": 50, "epochs": 100 }` (the run's length, as in `Run`); a `failed` one also has `"error_code"`
+    (`Run.error_code`)
   - `step` `Step` (at most ~10 per second; steps in between are skipped, `/metrics` has them all)
   - `epoch` `Epoch` (after each validation)
   - `log` `{ "t", "level": "debug|info|warn|error", "message" }`
@@ -265,6 +266,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // defaults, and "auto" resolves to the GPU when a model can be placed on it, else the CPU.
 // Run
 { "id": "run_7d1e", "name": "shapes-n", "status": "running", "config": TrainConfig, "created": "...",
+  // + "error_code": "not_supported" | "training_failed" | ... when failed (folo_api::codes; absent otherwise and from
+  //   older servers), next to "error" (the message); the final `status` event carries it too
   "started": "..." | null, "finished": null | "...",
   "epoch": 12,             // epoch in progress, 1-based (0 before the first step; the last epoch once finished)
   "epochs": 100,

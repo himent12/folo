@@ -39,10 +39,20 @@ pub fn engine_error(e: folo_vision::Error) -> Error {
                 .hint("lower `batch` or `imgsz`, or use a smaller `arch` (folo-n, folo-s)")
         }
         E::Unsupported(_) => Error::new(StatusCode::NOT_IMPLEMENTED, "not_implemented", msg),
+        E::NotSupported(_) => Error::new(StatusCode::NOT_IMPLEMENTED, "not_supported", msg)
+            .hint("train without `amp`, or start `folo serve --tensor-cores` on a GPU with tensor cores"),
         _ if e.code() == "invalid_weights" => {
             Error::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_weights", msg)
         }
-        _ => Error::internal(msg),
+        // Everything else keeps the engine's code with its status from the shared vocabulary (`training_failed`,
+        // `data_error`, `io_error`, `internal`, ...).
+        _ => {
+            let code = e.code();
+            let status = folo_api::codes::find(code)
+                .and_then(|c| StatusCode::from_u16(c.status).ok())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            Error::new(status, code, msg)
+        }
     }
 }
 
@@ -259,5 +269,26 @@ impl Predictors {
     /// Drops every cached predictor of `path` (its file was replaced or deleted).
     pub fn forget(&self, path: &Path) {
         self.entries.lock().unwrap().retain(|(k, _, _, _)| k.path != path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every engine error keeps its stable code over HTTP; `not_supported` (an `amp` run without tensor cores) is
+    /// 501 with a hint, not a 500.
+    #[test]
+    fn engine_errors_keep_their_codes() {
+        use folo_vision::Error as E;
+        let e = engine_error(E::NotSupported("mixed-precision training (amp) needs tensor cores".into()));
+        assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_IMPLEMENTED, "not_supported"));
+        assert!(e.body.hint.is_some());
+        for err in [E::Config("x".into()), E::Unsupported("x".into()), E::Failed("x".into())] {
+            let code = err.code();
+            let got = engine_error(err);
+            assert_eq!(got.body.code, code);
+            assert_eq!(got.status.as_u16(), folo_api::codes::find(code).unwrap().status);
+        }
     }
 }

@@ -74,8 +74,10 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
 ## Mixed precision (`folo_nn::amp`)
 - `GradScaler`: dynamic loss scaling as `torch.cuda.amp.GradScaler` (docs/MODEL.md §8.8): `scale()` (initially
   `2^16`), `inv_scale()`, `update(found_inf)` (a skip backs off ×0.5 and restarts the count; 2000 finite steps in a
-  row grow ×2) returning `ScaleUpdate::{Kept, Grew, BackedOff}`, `skipped_steps()`, and the `folo.amp` checkpoint
-  entry (`contract()` / `from_contract()`, `to_json()` / `from_json()`, exact round trip).
+  row grow ×2) returning `ScaleUpdate::{Kept, Grew, BackedOff}`, `skipped_steps()`, `skip_streak()` (skips in a
+  row; the trainer fails a run at 50), and the `folo.amp` checkpoint entry (`contract()` / `from_contract()`,
+  `to_json()` / `from_json()`, exact round trip). The scale stays within `[MIN_SCALE, MAX_SCALE] = [2^-126, 2^126]`
+  (`usable_scale`: it and its inverse are normal f32 values); restored states outside it are refused.
 - `amp::unscale_(tensors, inv_scale)`: multiplies private gradient buffers by `1 / S` in place and returns whether all
   are finite. On a device each buffer takes one fused `Tensor::unscale_check_` kernel that also raises a shared
   device flag, read back once; elsewhere tensor ops.

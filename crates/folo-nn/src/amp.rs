@@ -24,6 +24,17 @@ pub const GROWTH_FACTOR: f64 = 2.0;
 pub const BACKOFF_FACTOR: f64 = 0.5;
 /// Finite steps in a row before the scale grows.
 pub const GROWTH_INTERVAL: u64 = 2000;
+/// Largest loss scale, `2^126`: training multiplies the loss by `S` and the gradients by `1 / S` in `f32`, and both
+/// have to be normal `f32` values (`2^127` is finite but its inverse `2^-127` is subnormal, which GPUs flush to 0).
+pub const MAX_SCALE: f64 = (1u128 << 126) as f64;
+/// Smallest loss scale, `2^-126` (its inverse `2^126` is the largest power of two whose inverse is normal).
+pub const MIN_SCALE: f64 = 1.0 / MAX_SCALE;
+
+/// Whether `s` works as a loss scale in `f32` arithmetic: `s` and `1 / s` are both normal `f32` values.
+pub fn usable_scale(s: f64) -> bool {
+    let f = s as f32;
+    f > 0.0 && f.is_normal() && (1.0 / f).is_normal()
+}
 
 /// Multiply every tensor of `grads` by `inv_scale` in place and return whether every result is finite: the loss
 /// scaler's unscale and overflow check. On a device each tensor takes one fused kernel
@@ -91,6 +102,9 @@ pub struct AmpContract {
     pub growth_tracker: u64,
     /// Steps skipped for non-finite gradients over the whole run.
     pub skipped_steps: u64,
+    /// Steps skipped in a row up to now (0 after a finite step): a run fails when it reaches its limit, and a
+    /// streak spanning a checkpoint continues after the resume.
+    pub skip_streak: u64,
 }
 
 /// Dynamic loss scaling (see the module docs).
@@ -102,6 +116,7 @@ pub struct GradScaler {
     growth_interval: u64,
     growth_tracker: u64,
     skipped_steps: u64,
+    skip_streak: u64,
 }
 
 impl Default for GradScaler {
@@ -113,6 +128,7 @@ impl Default for GradScaler {
             growth_interval: GROWTH_INTERVAL,
             growth_tracker: 0,
             skipped_steps: 0,
+            skip_streak: 0,
         }
     }
 }
@@ -123,8 +139,8 @@ impl GradScaler {
         Self::default()
     }
 
-    /// Explicit settings. `init_scale` must be positive and finite, `growth_factor > 1`,
-    /// `0 < backoff_factor < 1` and `growth_interval >= 1`.
+    /// Explicit settings. `init_scale` must be a usable `f32` scale ([`usable_scale`]: in `[2^-126, 2^126]`),
+    /// `growth_factor > 1`, `0 < backoff_factor < 1` and `growth_interval >= 1`.
     pub fn with_options(
         init_scale: f64,
         growth_factor: f64,
@@ -143,8 +159,7 @@ impl GradScaler {
     }
 
     fn validate(&self) -> Result<()> {
-        let ok = self.scale.is_finite()
-            && self.scale > 0.0
+        let ok = usable_scale(self.scale)
             && self.growth_factor.is_finite()
             && self.growth_factor > 1.0
             && self.backoff_factor > 0.0
@@ -192,24 +207,35 @@ impl GradScaler {
         self.skipped_steps
     }
 
+    /// Steps skipped in a row up to now (0 after a finite step).
+    pub fn skip_streak(&self) -> u64 {
+        self.skip_streak
+    }
+
     /// Record the outcome of an optimizer step (`found_inf`: some unscaled gradient was not finite, so the step
     /// was skipped), as `torch`'s `GradScaler.update`: a skip multiplies the scale by the backoff factor and
-    /// restarts the growth count; otherwise the count advances and, at the growth interval, the scale grows (if
-    /// the grown scale is still finite) and the count restarts.
+    /// restarts the growth count; otherwise the count advances and, at the growth interval, the scale grows and
+    /// the count restarts. The scale stays usable in `f32` ([`usable_scale`]): a growth past [`MAX_SCALE`] or a
+    /// backoff below [`MIN_SCALE`] leaves it where it is (the skip is still counted).
     pub fn update(&mut self, found_inf: bool) -> ScaleUpdate {
         if found_inf {
-            self.scale *= self.backoff_factor;
+            let backed = self.scale * self.backoff_factor;
+            if usable_scale(backed) {
+                self.scale = backed;
+            }
             self.growth_tracker = 0;
             self.skipped_steps += 1;
+            self.skip_streak += 1;
             return ScaleUpdate::BackedOff;
         }
+        self.skip_streak = 0;
         self.growth_tracker += 1;
         if self.growth_tracker < self.growth_interval {
             return ScaleUpdate::Kept;
         }
         self.growth_tracker = 0;
         let grown = self.scale * self.growth_factor;
-        if grown.is_finite() {
+        if usable_scale(grown) {
             self.scale = grown;
             ScaleUpdate::Grew
         } else {
@@ -226,11 +252,12 @@ impl GradScaler {
             growth_interval: self.growth_interval,
             growth_tracker: self.growth_tracker,
             skipped_steps: self.skipped_steps,
+            skip_streak: self.skip_streak,
         }
     }
 
     /// The scaler a `folo.amp` entry describes (validated as [`GradScaler::with_options`], plus
-    /// `growth_tracker < growth_interval`).
+    /// `growth_tracker < growth_interval` and `skip_streak <= skipped_steps`).
     pub fn from_contract(c: &AmpContract) -> Result<Self> {
         let s = GradScaler {
             scale: c.scale,
@@ -239,8 +266,14 @@ impl GradScaler {
             growth_interval: c.growth_interval,
             growth_tracker: c.growth_tracker,
             skipped_steps: c.skipped_steps,
+            skip_streak: c.skip_streak,
         };
         s.validate()?;
+        if s.skip_streak > s.skipped_steps {
+            return Err(Error::Invalid(format!(
+                "loss scaler state with more skips in a row than in all: {s:?}"
+            )));
+        }
         Ok(s)
     }
 
@@ -279,7 +312,10 @@ mod tests {
         assert_eq!(s.update(true), ScaleUpdate::BackedOff);
         assert_eq!((s.scale(), s.growth_tracker(), s.skipped_steps()), (32768.0, 0, 1));
         assert_eq!(s.update(true), ScaleUpdate::BackedOff);
-        assert_eq!((s.scale(), s.skipped_steps()), (16384.0, 2));
+        assert_eq!((s.scale(), s.skipped_steps(), s.skip_streak()), (16384.0, 2, 2));
+        // A finite step ends the streak; the run's total stays.
+        assert_eq!(s.update(false), ScaleUpdate::Kept);
+        assert_eq!((s.skipped_steps(), s.skip_streak()), (2, 0));
     }
 
     #[test]
@@ -301,10 +337,28 @@ mod tests {
     }
 
     #[test]
-    fn growth_stops_at_infinity() {
-        let mut s = GradScaler::with_options(f64::MAX, 2.0, 0.5, 1).unwrap();
-        assert_eq!(s.update(false), ScaleUpdate::Kept);
-        assert_eq!(s.scale(), f64::MAX);
+    fn the_scale_stays_a_usable_f32() {
+        let p = |e: i32| 2f64.powi(e);
+        assert_eq!((MAX_SCALE, MIN_SCALE), (p(126), p(-126)));
+        assert!(usable_scale(p(126)) && usable_scale(p(-126)) && usable_scale(1.0));
+        // 2^127 is a finite f32, but its inverse 2^-127 is subnormal (flushed to 0 on GPUs); 2^128 is inf in f32.
+        assert!(
+            !usable_scale(p(127)) && !usable_scale(p(128)) && !usable_scale(p(-127)) && !usable_scale(0.0)
+        );
+        let mut s = GradScaler::with_options(p(125), 2.0, 0.5, 1).unwrap();
+        assert_eq!(s.update(false), ScaleUpdate::Grew);
+        assert_eq!(s.scale(), p(126));
+        assert_eq!(s.update(false), ScaleUpdate::Kept, "no growth to 2^127");
+        assert_eq!(s.scale(), p(126));
+        assert!(((s.scale() as f32) * s.inv_scale() - 1.0).abs() < 1e-6 && s.inv_scale().is_normal());
+        let mut s = GradScaler::with_options(p(-126), 2.0, 0.5, 1).unwrap();
+        assert_eq!(s.update(true), ScaleUpdate::BackedOff);
+        assert_eq!((s.scale(), s.skipped_steps()), (p(-126), 1), "no backoff below 2^-126, the skip counts");
+        for bad in [p(127), p(128), f64::MAX, f64::INFINITY, p(-127)] {
+            assert!(GradScaler::with_options(bad, 2.0, 0.5, 1).is_err(), "{bad:e}");
+            let c = AmpContract { scale: bad, ..GradScaler::new().contract() };
+            assert!(GradScaler::from_contract(&c).is_err(), "{bad:e}");
+        }
     }
 
     #[test]
@@ -317,8 +371,11 @@ mod tests {
         assert_eq!(back, s);
         assert_eq!(back.scale().to_bits(), s.scale().to_bits());
         assert!(GradScaler::from_json("{\"scale\": 1.0}").is_err());
+        assert_eq!(back.skip_streak(), s.skip_streak());
         let mut c = s.contract();
         c.growth_tracker = c.growth_interval;
+        assert!(GradScaler::from_contract(&c).is_err());
+        let c = AmpContract { skip_streak: s.skipped_steps() + 1, ..s.contract() };
         assert!(GradScaler::from_contract(&c).is_err());
         for bad in [(0.0, 2.0, 0.5, 1), (1.0, 1.0, 0.5, 1), (1.0, 2.0, 1.0, 1), (1.0, 2.0, 0.5, 0)] {
             assert!(GradScaler::with_options(bad.0, bad.1, bad.2, bad.3).is_err(), "{bad:?}");

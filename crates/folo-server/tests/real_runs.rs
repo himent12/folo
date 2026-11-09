@@ -674,3 +674,33 @@ async fn no_runs_start_after_shutdown() {
     err(&app, post_json("/api/runs", resume), StatusCode::SERVICE_UNAVAILABLE, "shutting_down").await;
     assert_eq!(s.list_runs().unwrap().len(), 1, "a refused run is not created");
 }
+
+/// A run the trainer refuses asynchronously keeps the engine's error code: an `amp` run on the CPU fails with
+/// `not_supported` in its final `status` event and in `Run.error_code`, not as a bare message.
+#[tokio::test(flavor = "multi_thread")]
+async fn amp_run_without_tensor_cores_fails_with_not_supported() {
+    let t = TempDir::new("amp");
+    let s = store(&t.0.join("home"));
+    let app = app(&s);
+    let ds = dataset(&app, "amp", 4).await;
+    let mut cfg = tiny(&ds, 1);
+    cfg["amp"] = json!(true);
+    let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
+    assert!(run.config.amp && run.error_code.is_none());
+    let mut sse = Events::open(&app, &run.id).await;
+    let events = sse.until_status(&["completed", "failed"]).await;
+    let last = &events.last().unwrap().1;
+    assert_eq!(
+        (last["status"].as_str(), last["error_code"].as_str()),
+        (Some("failed"), Some("not_supported"))
+    );
+    assert!(last["error"].as_str().unwrap().contains("tensor cores"), "{last}");
+    let got: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
+    assert_eq!((got.status, got.error_code.as_deref()), (RunStatus::Failed, Some("not_supported")));
+    // The code survives a store restart (it is part of the persisted run).
+    drop(app);
+    tokio::task::spawn_blocking(move || s.shutdown()).await.unwrap();
+    let app = self::app(&store(&t.0.join("home")));
+    let again: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
+    assert_eq!(again.error_code.as_deref(), Some("not_supported"));
+}

@@ -804,9 +804,11 @@ Opt-in (`amp = true`, `folo train --amp`; default `false`), as `torch.autocast` 
   of non-finite batches, §8.3: `t`, `optim.__step`, `sched.__step` and `ema.__updates` unchanged) and the step is
   counted and logged. The check is done on the GPU; the step waits for one flag.
 - **Dynamic loss scaling**: `S = 2^16` at the start; a skipped step multiplies it by 0.5, and 2000 finite steps in a
-  row multiply it by 2 (PyTorch's defaults). The scaler state (`S`, the growth count, the skipped steps) is the
-  checkpoint's `folo.amp` (FORMAT.md), so a resume is bit-exact. 50 skipped steps in a row (the scale has backed off
-  by `2^50`) fail the run. A non-finite *loss* (an f16 forward overflow) is a non-finite batch (§8.3), not an
+  row multiply it by 2 (PyTorch's defaults). `S` stays in `[2^-126, 2^126]`, where it and `1 / S` are normal f32
+  values (the loss is scaled and the gradients unscaled in f32): a growth or backoff past the range leaves it. The
+  scaler state (`S`, the growth count, the skipped steps and the current run of them) is the checkpoint's
+  `folo.amp` (FORMAT.md), so a resume is bit-exact. 50 skipped steps in a row (the scale has backed off by `2^50`)
+  fail the run (`training_failed`), counted across resumes. A non-finite *loss* (an f16 forward overflow) is a non-finite batch (§8.3), not an
   overflow: the scale does not change the forward.
 - **Hardware**: tensor cores (folo-gpu's cooperative matrices: `shader-f16`, 16×16×16 f16 → f32, 32-wide subgroups;
   the RTX 4080 SUPER on Vulkan) are required, and `folo train --amp` requests them. Anything else (the CPU, a GPU

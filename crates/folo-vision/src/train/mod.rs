@@ -301,10 +301,9 @@ pub struct Trainer {
     /// The last checkpoint this trainer wrote or resumed from, and the epochs it holds (named when a lost GPU
     /// device fails the run).
     last_saved: Option<(PathBuf, u32)>,
-    /// The loss scaler of a mixed-precision run (`amp`).
+    /// The loss scaler of a mixed-precision run (`amp`). Its skip streak (fails the run at [`MAX_AMP_SKIPS`]) is
+    /// part of the checkpointed state.
     scaler: Option<GradScaler>,
-    /// Optimizer steps skipped in a row for non-finite gradients (mixed precision; fails at [`MAX_AMP_SKIPS`]).
-    amp_skip_streak: usize,
 }
 
 impl Trainer {
@@ -566,7 +565,6 @@ impl Trainer {
             extra_meta: BTreeMap::new(),
             last_saved: None,
             scaler,
-            amp_skip_streak: 0,
         })
     }
 
@@ -696,7 +694,7 @@ impl Trainer {
                     LogLevel::Error,
                     format!("run failed ({}): {}", e.code(), folo_api::codes::cap(&summary, 120)),
                 );
-                self.emitter.status(RunStatus::Failed, Some(summary));
+                self.emitter.failed(e.code(), summary);
             }
         }
         r
@@ -1018,8 +1016,7 @@ impl Trainer {
             let finite = self.acc.unscale_clip(scaler.inv_scale(), self.cfg.clip_grad_norm)?;
             let scale = scaler.scale();
             if scaler.update(!finite) == ScaleUpdate::BackedOff {
-                self.amp_skip_streak += 1;
-                let (streak, now) = (self.amp_skip_streak, scaler.scale());
+                let (streak, now) = (scaler.skip_streak() as usize, scaler.scale());
                 self.emitter.log(
                     LogLevel::Info,
                     format!(
@@ -1040,7 +1037,6 @@ impl Trainer {
                 }
                 return Ok(());
             }
-            self.amp_skip_streak = 0;
         } else if self.cfg.clip_grad_norm > 0.0 {
             self.acc.clip_grad_norm(self.cfg.clip_grad_norm)?;
         }
