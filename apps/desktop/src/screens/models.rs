@@ -1666,9 +1666,37 @@ fn short_name(name: &str) -> String {
 }
 
 /// Fill opacity of an error cell: linear over `frac`, the cell's share of the largest
-/// class-to-class confusion shown, from a faint 0.1 (still apart from the empty cells) to 0.8.
+/// class-to-class confusion shown, from a faint 0.1 (still apart from the empty cells) to 0.72.
 /// The square-root ramp it replaces lifted 1–4 % confusions toward full red, so the whole
-/// off-diagonal read as alarm.
+/// off-diagonal read as alarm. The top stops at 0.72 so the strongest cell's label (dark or white,
+/// whichever reads better) keeps 4.5:1 in both themes; at 0.8 neither did (4.36:1).
 fn err_alpha(frac: f32) -> f32 {
-    0.1 + 0.7 * frac.clamp(0., 1.)
+    0.1 + 0.62 * frac.clamp(0., 1.)
+}
+
+#[cfg(test)]
+mod matrix_tests {
+    use crate::theme::{Mode, Theme, alpha, over};
+    use gpui::{Hsla, Rgba};
+
+    fn contrast(a: Hsla, b: Hsla) -> f32 {
+        let lum = |c: Hsla| {
+            let c: Rgba = c.into();
+            let f = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn error_cells_keep_their_label_readable() {
+        for t in [Theme::new(Mode::Dark), Theme::new(Mode::Light)] {
+            for frac in (0..=100).map(|i| i as f32 / 100.) {
+                let cell = over(t.bg_panel, alpha(t.danger_solid, super::err_alpha(frac)));
+                let c = contrast(t.readable_on(cell), cell);
+                assert!(c >= 4.5, "{:?} error cell at {frac}: {c:.2}:1", t.mode);
+            }
+        }
+    }
 }

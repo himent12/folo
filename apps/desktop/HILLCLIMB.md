@@ -2268,3 +2268,35 @@ Fixed in-round after the reviews:
 - **Playground:** the NMS row height holds when switching models.
 
 **Open:** at the 1200 cap the log's 2/5 column can't fit an epoch line. Round 55 stacks samples (one row of eight) and the log.
+
+## Round 55
+
+| Line | Opus 5.5 | GPT-6.1 Sol |
+|------|----------|-------------|
+| Hierarchy | 9 | 9 |
+| Typography | 9 | 9 |
+| Colour | 9 | 9 |
+| Spacing | 9 | 9 |
+| Components | 9 | 9 |
+| Dataviz | 9 | 9 |
+| Info/copy | 9 | 9 |
+| Consistency | 9 | 9 |
+| Interaction | 9 | 9 |
+| Accessibility | 9 | 9 |
+| Responsiveness | 9 | 9 |
+| Polish | 9 | 9 |
+| **Average** | **9.0** | **9.0** |
+
+Both reviewers score 9 on every line. These are the final in-round reviews of #150; it took three design passes to get there.
+
+Round 55 changes:
+- **Run page:**
+  - The log takes its own full-width row, one line per entry.
+  - Validation samples sit in one row of eight.
+  - The samples caption says what each view shows.
+- **Model page:** PR and matrix sit side by side only while PR keeps 600 px for its plot and aligned side legend; otherwise they stack. A below-plot legend variant was tried and removed: it misaligned headers and left an empty band in the matrix panel.
+- **Filtered dataset grid, one chip per tile, chosen by the painter (`DrawBox::one_of`):** the first match it can place, largest first, takes the chip. The shared chip gets relaxed thumbnail rules: a chip's height plus 4 px, and a shared corner in a cluster. 14 of 15 shot tiles name a match.
+- **The P/R captions clip instead of ellipsizing.** That avoids a GPUI 0.2.2 panic: the text element reuses its `runs` across measure calls, and truncation shortens them in place, so a later untruncated measure slices inside "·". The general fix (patching GPUI) is with the orchestrator.
+- **Shot set:** `model` at 1680.
+
+Follow-up from Opus's last pass: the strongest error cell in the matrix measured 4.36:1. The error ramp now tops out at 0.72, and a test holds every step at 4.5:1 or better in both themes.
