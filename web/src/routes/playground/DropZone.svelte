@@ -9,6 +9,7 @@
   import Kbd from '$lib/ui/Kbd.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import { TOUCH_ONLY } from '$lib/shell/shortcuts';
+  import { media } from '$lib/design/tokens';
 
   let {
     dragging = false,
@@ -26,8 +27,12 @@
   } = $props();
 
   // A touch-only device (the shared detection, shell/shortcuts' TOUCH_ONLY) has no drag and drop and no Ctrl V: it
-  // leads with choosing an image and shows neither hint; a device with a mouse or trackpad shows both.
-  const touch = new MediaQuery(TOUCH_ONLY, false);
+  // leads with choosing an image and shows neither hint; a device with a mouse or trackpad shows both. The phone tier
+  // is the touch tier whatever reports the pointer, so a phone's copy is the same in every state (round 26: the
+  // no-WASM and no-WebGPU phones said "Drop an image… Ctrl V" where the empty one said "Choose an image").
+  const touchOnly = new MediaQuery(TOUCH_ONLY, false);
+  const phone = new MediaQuery(media.phone, false);
+  const touch = $derived(touchOnly.current || phone.current);
 </script>
 
 <!-- The viewfinder is the drop target and fills the canvas; the samples sit right under it, at the panel's foot. -->
@@ -39,7 +44,7 @@
     <span class="corner br" aria-hidden="true"></span>
 
     <div class="center">
-      {#if touch.current}
+      {#if touch}
         <p class="title">Choose an image to detect objects</p>
         <p class="desc">JPEG, PNG or WebP, from your photos, camera or files.</p>
       {:else}
@@ -47,7 +52,7 @@
         <p class="desc">JPEG, PNG or WebP. You can also paste from the clipboard with <span class="nowrap"><Kbd keys="Mod+V" />.</span></p>
       {/if}
       <div class="actions">
-        <Button variant="primary" icon={Upload} onclick={onbrowse}>{touch.current ? 'Choose an image' : 'Browse files'}</Button>
+        <Button variant="primary" icon={Upload} onclick={onbrowse}>{touch ? 'Choose an image' : 'Browse files'}</Button>
         <Button icon={Images} onclick={onpick}>Pick from a dataset</Button>
       </div>
     </div>

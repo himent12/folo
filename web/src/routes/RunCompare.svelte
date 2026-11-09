@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import { origin } from '$lib/lineage';
+  import { FROM_SCRATCH, origin } from '$lib/lineage';
 
   /**
    * The weights a run started from, by name: a model id resolves through the models list, a path shows its file name,
@@ -29,13 +29,14 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
-  import { niceDomain, unitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
+  import { fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
   import { conf, deviceName, duration, metric } from '$lib/format';
   import { batchSetting, effectiveBatchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { pageKeys } from '$lib/shell/pageCommands.svelte';
   import Page from '$lib/shell/Page.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
@@ -47,7 +48,7 @@
   import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
-  import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import StatusBadge, { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -88,9 +89,9 @@
   // Phones: the axis ⓘ opens in place under the control row (ui/infoSlot).
   const axisInfo = provideInfoSlot('cmp-axis-info');
   /** Phones: the progress axis explained in the ⓘ beside its control, with why it was chosen when it was. */
-  const progressWhy = $derived(
-    `By progress puts each run over its planned epochs (% of the plan), so a short plan and a long one compare by shape.${xAuto && reason ? ` Chosen for you: ${AXIS_REASON[reason]}.` : ''}`,
-  );
+  // Two lines at most (ui/InfoButton HELP_MAX); how the axis works is its fold.
+  const progressWhy = $derived(`Each run over % of its plan${xAuto && reason ? `; chosen because ${AXIS_REASON[reason]}` : ''}.`);
+  const PROGRESS_HOW = 'Each run is drawn over its own planned epochs, so a short plan and a long one compare by the shape of their curves.';
   // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
   // normalised axis names its unit; chosen for you, it also says why.
   const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto && reason ? ` · ${AXIS_REASON[reason]}` : ''}` : 'by epoch');
@@ -167,14 +168,31 @@
   // Runs that all scored low get a zoomed axis whose caption names the full 0–1 scale (./domain UNIT_ZOOM_BELOW).
   const zoomed = $derived(!!metricDef.unit && !!extent && unitTop(extent[1]) < UNIT_ZOOM_BELOW);
   // The plot itself is at least 360 px tall from 768 px up, so four curves that climb together still separate; phones
-  // a 210 px plot. LineChart's margins add 8 px on top (24 under the zoom caption) and 22 px below.
+  // a 210 px plot. LineChart's margins add 8 px on top (24 under a y caption) and 22 px below.
   const plotPx = $derived(narrow ? 210 : 360);
-  const height = $derived(plotPx + (zoomed ? 24 : 8) + 22);
-  // Fitted to the runs (./domain): four runs between 0.45 and 0.62 spread over 0–0.7, not bunched in a 0–1 axis. Where
-  // the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`).
-  const fit = $derived(
-    extent ? (metricDef.unit ? unitDomain(narrow ? extent[1] : withLabelRow(extent[1], plotPx), plotPx) : niceDomain(extent[0], extent[1])) : undefined,
-  );
+  // The y axis: "Fit" (the default) starts under the values the runs spend most of their length in, so the differences
+  // people came to compare fill the plot (round 26: 0–0.6 with the runs between 0.45 and 0.61, in its top quarter);
+  // "From 0" shows the whole climb. The top is fitted either way (./domain).
+  type YAxis = 'fit' | 'zero';
+  let yAxis = $state<YAxis>('fit');
+  const Y_OPTIONS: { value: YAxis; label: string }[] = [
+    { value: 'fit', label: 'Axis: Fit' },
+    { value: 'zero', label: 'Axis: From 0' },
+  ];
+  const ys = $derived(series.flatMap((s) => s.points.map((p) => p.y)));
+  const lastYs = $derived(series.map((s) => s.points.at(-1)?.y ?? NaN));
+  // Where the lines carry direct labels (768 px up) the top leaves a label row over the highest end (`withLabelRow`).
+  const fit = $derived.by(() => {
+    if (!extent) return undefined;
+    if (!metricDef.unit) return niceDomain(yAxis === 'zero' ? Math.min(0, extent[0]) : extent[0], extent[1]);
+    const max = narrow ? extent[1] : withLabelRow(extent[1], plotPx);
+    return yAxis === 'fit' ? unitFitDomain(ys, lastYs, max, plotPx) : unitDomain(max, plotPx);
+  });
+  /** A fitted axis's floor, said where the axis is named ("y from 0.40"), as a zoomed axis says its full scale. */
+  const floorNote = $derived(fitFloorNote(fit, metricDef.unit ? 2 : 0));
+  // Phones have no header qualifier: the floor goes in the y caption, after the zoom note.
+  const yCaption = $derived([zoomed ? UNIT_ZOOM_NOTE : '', narrow && floorNote ? floorNote : ''].filter(Boolean).join(' · ') || undefined);
+  const height = $derived(plotPx + (yCaption ? 24 : 8) + 22);
   // The chips are the legend: each shows its run's value under the cursor, or its latest value at rest.
   function valueOf(id: string): number | null {
     const pts = series.find((s) => s.id === id)?.points ?? [];
@@ -229,7 +247,7 @@
   const startOf = (r: Run) => startFrom(r.config.weights, models.data);
   const startLine = (r: Run) => {
     const from = startOf(r);
-    return from ? `Fine-tuned from ${from}` : 'From scratch';
+    return from ? `Fine-tuned from ${from}` : FROM_SCRATCH;
   };
   const setX = (v: Axis) => (xChoice = v);
 
@@ -241,7 +259,7 @@
   const rows = $derived<[string, (r: Run) => Setting][]>([
     ['Dataset', (r) => plain(datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id)],
     ['Model', (r) => ident(r.config.arch)],
-    ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain('From scratch'))],
+    ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain(FROM_SCRATCH))],
     ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
     ['Batch', (r) => batchSetting(r.config, r.resolved)],
     ['Effective batch', (r) => (r.resolved ? effectiveBatchSetting(r.resolved) : plain('—'))],
@@ -338,7 +356,15 @@
     otherAt = Math.max(0, chosen.filter((x) => x !== r).indexOf(prev!));
   }
   const other = $derived(others[Math.min(otherAt, others.length - 1)]);
+  // B: the next run becomes the baseline (in the chips' order, wrapping), the keyboard's Swap (shell/shortcuts lists it).
+  pageKeys((k) => {
+    if (k.toLowerCase() !== 'b' || chosen.length < 2 || !base) return false;
+    setBaseline(chosen[(chosen.indexOf(base) + 1) % chosen.length]!);
+    return true;
+  });
   const shown = $derived(pairMode && base && other ? [base, other] : chosen);
+  /** The phone pager's height: the pair's sticky head row holds just under it. */
+  let pairH = $state(0);
   const stepOther = (d: number) => (otherAt = (Math.min(otherAt, others.length - 1) + d + others.length) % others.length);
   /** Whether a run's value differs from the baseline's: marked (a dot and the weight); an equal one is tertiary. */
   const offBase = (r: Run, f: (r: Run) => Setting) => r !== base && !!base && settingText(f(r)) !== settingText(f(base));
@@ -351,16 +377,20 @@
 <!-- Phones lead with the plot: the explanation sits in the disclosure under the legend. -->
 <Page title="Compare runs" sub={narrow ? undefined : lede}>
   {#if runs.error && !runs.data}
-    <ErrorState error={runs.error} retry={() => runs.refresh()} />
+    <!-- The page's states sit in the chart's frame at the chart's height (DESIGN_DIRECTION 8), the shape the page will
+         have, never a frameless block in the corner of an empty canvas. -->
+    <section class="compare c-state" aria-label="Curves" style:min-height="{height}px">
+      <ErrorState error={runs.error} retry={() => runs.refresh()} compact />
+    </section>
   {:else if ids.length === 0}
-    <!-- Nothing to compare yet: the frameless empty state on the page's content edge, not a card stretched across an
-         empty canvas (DESIGN_DIRECTION 8). -->
-    <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
-      {#snippet actions()}
-        <!-- One action: pick runs here when there are any, else go and make some. -->
-        {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
-      {/snippet}
-    </EmptyState>
+    <section class="compare c-state" aria-label="Curves" style:min-height="{height}px">
+      <EmptyState icon={GitCompare} title="Pick runs to compare" description="Add two to four runs, or select them on the Runs page.">
+        {#snippet actions()}
+          <!-- One action: pick runs here when there are any, else go and make some. -->
+          {#if candidates.length}{@render adder()}{:else}<Button href={href('/runs')}>Go to Runs</Button>{/if}
+        {/snippet}
+      </EmptyState>
+    </section>
 
   {:else}
     <section class="compare" aria-label="Curves">
@@ -373,7 +403,7 @@
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
           <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
                line of words under the controls went (it pushed the plot down). -->
-          {#if x === 'progress'}<InfoButton chart label="About the progress axis" text={progressWhy} />{/if}
+          {#if x === 'progress'}<InfoButton chart label="About the progress axis" text={progressWhy} how={PROGRESS_HOW} />{/if}
         </header>
         <!-- The ⓘ opens here, under the controls, never as a popover over the legend and plot (ui/infoSlot). -->
         <InfoRegion slot={axisInfo} />
@@ -386,6 +416,14 @@
             <span>How to read this</span>
           </summary>
           <div class="about-body">
+            <!-- The y axis's choice: the control row has no room for it on a phone. -->
+            <div class="about-axis">
+              <p>{floorNote ? `The y axis starts at ${fit!.domain[0].toFixed(Math.max(2, fit!.decimals))}, under where the runs spend most of their length.` : 'The y axis starts at 0.'}</p>
+              <Segmented size="sm" label="Y axis" bind:value={yAxis} options={[
+                { value: 'fit', label: 'Fit' },
+                { value: 'zero', label: 'From 0' },
+              ]} />
+            </div>
             {#if x === 'progress'}<p>By progress puts each run over its planned epochs, so a short plan and a long one compare by shape.</p>{/if}
             <p>Each line ends in its run's status: a lime dot while it trains, a square where it was stopped, a cross
               where it failed.</p>
@@ -402,10 +440,14 @@
         <header class="c-head">
           <span class="c-what">
             <Segmented label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} />
-            <!-- The header qualifier: what the x axis is ("by epoch", "by progress, % of planned epochs"). -->
-            <span class="qual">{xQual}</span>
+            <!-- The header qualifier: what the x axis is ("by epoch", "by progress, % of planned epochs"), and where a
+                 fitted y axis starts ("y from 0.40"). -->
+            <span class="qual">{floorNote ? `${xQual} · ${floorNote}` : xQual}</span>
           </span>
-          <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
+          <span class="c-ctl">
+            <Select size="sm" label="Y axis" bind:value={yAxis} options={Y_OPTIONS} />
+            <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
+          </span>
         </header>
         {@render plot()}
       {/if}
@@ -414,8 +456,10 @@
     {#if chosen.length}
       <Panel title="Side by side" meta={sameRows.length ? `${diffRows.length} settings differ` : undefined} pad="none" id="cmp-table">
         {#if pairMode && other}
-          <!-- Phones: the baseline and one run beside it; the pager steps through the others. -->
-          <div class="pair num">
+          <!-- Phones: the baseline and one run beside it; the pager steps through the others. The pager and the pair's
+               head row (both names, Baseline, Swap) hold under the top bar while the table is in view, so the names
+               never scroll away from the settings being read. -->
+          <div class="pair num" bind:offsetHeight={pairH}>
             <button type="button" class="pg" aria-label="Previous run" onclick={() => stepOther(-1)}><ChevronLeft size={16} aria-hidden="true" /></button>
             <span class="pair-what" aria-live="polite">Run {chosen.indexOf(other) + 1} of {chosen.length}<span class="faint">{' '}vs baseline</span></span>
             <button type="button" class="pg" aria-label="Next run" onclick={() => stepOther(1)}><ChevronRight size={16} aria-hidden="true" /></button>
@@ -438,7 +482,7 @@
               >{/if}
           </p>
         {/if}
-        <div class="scroll" class:more={tableMore} bind:this={tableEl} onscroll={measureTable}>
+        <div class="scroll" class:more={tableMore} class:pairing={pairMode && !!other} style:--pair-h="{pairH}px" bind:this={tableEl} onscroll={measureTable}>
           <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. The widths
                live on the header row (no colgroup, whose keyed columns could outlive a page of runs), so the setting
                column is fixed and the run columns share the rest equally from the first render. -->
@@ -582,7 +626,7 @@
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it in the Edit
              sheet, on a full-width line of its own. "From <checkpoint>" (the tooltip says "Fine-tuned from"): the checkpoint
              is an identifier, a fact, so it is never cut; a narrow chip breaks it after a hyphen onto a second line. -->
-        <span class="from" class:tuned={!!from} title={startLine(r)} data-fact>{#if from}From <Ident value={from} class="src" />{:else}From scratch{/if}</span>
+        <span class="from" class:tuned={!!from} title={startLine(r)} data-fact>{#if from}From <Ident value={from} class="src" />{:else}{FROM_SCRATCH}{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
           <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -603,7 +647,7 @@
           <i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>
           <span class="m-what">
             <span class="m-name">{r.name}</span>
-            <span class="m-from" class:tuned={!!from}>{#if from}Fine-tuned from <Ident value={from} />{:else}From scratch{/if}</span>
+            <span class="m-from" class:tuned={!!from}>{#if from}Fine-tuned from <Ident value={from} />{:else}{FROM_SCRATCH}{/if}</span>
           </span>
           <a class="m-act" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={16} aria-hidden="true" /></a>
           <button type="button" class="m-act" aria-label="Remove {r.name}" title="Remove from the comparison" onclick={() => setIds(ids.filter((id) => id !== r.id))}
@@ -637,7 +681,7 @@
       valueFormat={(v) => metric(v)}
       xFormat={(v) => (x === 'epoch' ? String(Math.round(v)) : `${Math.round(v)}%`)}
       xTitle={(v) => (x === 'epoch' ? `Epoch ${Math.round(v)}` : `${v.toFixed(0)}% through`)}
-      yLabel={zoomed ? UNIT_ZOOM_NOTE : undefined}
+      yLabel={yCaption}
       bind:cursor
       bind:hint
       legend={false}
@@ -665,7 +709,7 @@
       }}
     >
       <option value="">Add run…</option>
-      {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {c.status}</option>{/each}
+      {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {STATUS_LABEL[c.status]}</option>{/each}
     </select>
   </label>
 {/snippet}
@@ -679,6 +723,12 @@
     border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     min-width: 0;
+  }
+  /* Nothing to draw yet (no runs picked, or the runs could not load): the chart panel's frame at the plot's height,
+     the message centred where the curves will be. */
+  .compare.c-state {
+    place-content: center;
+    justify-items: center;
   }
   /* The legend: one card per run (key, name, value under the cursor; how it started below), side by side. */
   .chips {
@@ -873,6 +923,24 @@
   }
   .pair-what {
     text-align: center;
+  }
+  /* Two at a time, the pair fits the width: no sideways scroller (which would also trap the sticky head), and the
+     pager and the head row stick under the top bar while the table is in view. */
+  .pair {
+    position: sticky;
+    top: var(--size-topbar);
+    z-index: var(--z-sticky);
+    background: var(--bg-panel);
+  }
+  .scroll.pairing {
+    overflow: visible;
+  }
+  .scroll.pairing :global(thead th) {
+    position: sticky;
+    top: calc(var(--size-topbar) + var(--pair-h, 0px));
+    z-index: var(--z-sticky);
+    background: var(--bg-panel);
+    box-shadow: inset 0 -1px 0 var(--line-subtle);
   }
   .pair .more {
     margin-left: auto;
@@ -1128,6 +1196,17 @@
     padding-top: var(--space-3);
     border-top: 1px solid var(--line-subtle);
   }
+  /* The chart's controls, right: the y axis's choice, then the x axis's. */
+  .c-ctl {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .about-axis {
+    display: grid;
+    gap: var(--space-2);
+    justify-items: start;
+  }
   .c-what {
     display: flex;
     align-items: center;
@@ -1193,6 +1272,10 @@
   @media (pointer: coarse) {
     .add {
       min-height: 44px;
+    }
+    /* The native picker lies unseen over the button, but iOS still zooms into a select under 16 px (touchText.test.ts). */
+    .add select {
+      font-size: var(--type-lg-size);
     }
   }
   .add:has(select:focus-visible) {

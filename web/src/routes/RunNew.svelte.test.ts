@@ -646,6 +646,23 @@ describe('New run on a phone', () => {
     expect(target.querySelector('.a-sel')?.textContent).toBe('folo-m More accuracy on busy scenes.');
     expect(compare.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-m');
   });
+
+  it('keeps one size selector: open, the comparison rows replace the compact pick until it closes', async () => {
+    setWidth(390);
+    await open();
+    const compare = target.querySelector<HTMLDetailsElement>('details.a-compare')!;
+    compare.open = true;
+    compare.dispatchEvent(new Event('toggle'));
+    flushSync();
+    expect(target.querySelector('#arch-pick')).toBeNull();
+    expect(target.querySelector('.a-sel')).toBeNull();
+    compare.querySelectorAll<HTMLInputElement>('input[name="arch"]')[0]!.click();
+    flushSync();
+    compare.open = false;
+    compare.dispatchEvent(new Event('toggle'));
+    flushSync();
+    expect(target.querySelector('#arch-pick [aria-checked="true"]')?.textContent?.trim()).toBe('N');
+  });
 });
 
 describe('New run: image size', () => {
@@ -988,7 +1005,12 @@ describe('New run: published weights (server PR #140)', () => {
     expect(target.querySelector('.a-from')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
       "folo-n, from folo-n-coco. The run trains the weights' size; another size starts from scratch.",
     );
-    expect(target.querySelector('#weights-hint')?.textContent).toMatch(/^folo-n trained from scratch on COCO/);
+    // What they are for in plain words; where they come from (the server's own description) one tap away, under it.
+    expect(target.querySelector('#weights-hint')?.textContent).toBe('Pretrained on COCO (80 classes) · good for fine-tuning');
+    expect(target.querySelector('#weights-about')).toBeNull();
+    target.querySelector<HTMLButtonElement>('button[aria-controls="weights-about"]')!.click();
+    flushSync();
+    expect(target.querySelector('#weights-about')?.textContent).toMatch(/^folo-n trained from scratch on COCO.* · mAP 0\.314/);
     const rv = (k: string) => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === k)?.querySelector('.rv-v')?.textContent;
     expect(rv('Model')).toBe('folo-n');
     expect(rv('Start from')).toBe('folo-n-coco');

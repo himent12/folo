@@ -55,6 +55,8 @@ Lines: 1 hierarchy & layout · 2 typography · 3 colour & theming · 4 spacing r
 | r24 | Claude Opus 5.5 (175 sheets, 36 full-size) | 8 | 8 | 8 | 8 | 8 | 8.5 | 8.5 | 8 | 8.5 | 8.5 | 8 | 8 | 8 |
 | r25 | GPT-6.1 Sol (192 sheets, 50 full-size) | 8 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8 | 9 | 9 | 8.5 | 8 | 8.5 | 8 |
 | r25 | Claude Opus 5.5 (192 sheets, 33 full-size) | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
+| r26 | GPT-6.1 Sol (195 sheets, 50 full-size) | 8.5 | 9 | 9 | 9 | 9 | 8.5 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 |
+| r26 | Claude Opus 5.5 (195 sheets, 33 full-size) | 8 | 8.5 | 9 | 8.5 | 8.5 | 8.5 | 8.5 | 8.5 | 9 | 9 | 8 | 8.5 | 8 |
 
 ## Per-line minimum (lower of the two reviewers)
 
@@ -85,6 +87,7 @@ Rounds with one reviewer are marked; their minimum is that reviewer's row.
 | r23 | 8 | 8 | 8 ↓ | 8.5 | 8.5 ↑ | 8.5 ↑ | 8 | 8 ↓ | 8.5 | 8.5 ↑ | 8 | 8 | 8 |
 | r24 | 8 | 8 | 8 | 8 ↓ | 8 ↓ | 8.5 | 8 | 8 | 8.5 | 8.5 | 8 | 8 | 8 |
 | r25 | 8 | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 ↑ | 8.5 | 8 | 8.5 ↑ | 9 ↑ | 8.5 | 8 | 8.5 ↑ | 8 |
+| r26 | 8 | 8.5 | 9 ↑ | 8.5 | 8.5 | 8.5 | 8.5 ↑ | 8.5 | 8.5 ↓ | 8.5 | 8 | 8.5 | 8 |
 
 r4 lowest lines: 6 data visualisation (5.5), 2 typography, 3 colour, 8 consistency (6). Diagnosis: 2, 3 and 8 are
 structural (no single rule for mono vs sans, class colours that changed between legend and box, two accents in light),
@@ -199,3 +202,11 @@ defect: the completion callout keeps "Try in Playground" on the text's row, whic
 rest are phone structure (Compare's preamble before the plot, tracing a class from Curves, New run's long Model
 section, Settings' strip clipped and its scrollspy on the wrong section), facts cut in the Playground model select,
 two lime rings at best and latest, lime still marking selection, the raw amp refusal and "per step" batch wording.
+
+r26 (#151: nothing clips on phones, one mark per meaning, ink selection, precise words): Sol's minimum reached 8.5
+with five 9s, and colour is 9 for both. The floor of 8 is Opus's 1 and 11: Runs' header wrapping while selecting at
+820, Compare's y axis from 0 squeezing the differences into the top quarter (and labels colliding at 820), phone
+error callouts stacking three buttons under a lime primary on a red tint, frameless Overview error and Compare empty
+states, New run's rail wrapping raggedly at 1024, and mostly empty panels for few classes or a near-perfect curve.
+Sol adds the stale Overview not saying what is current, touch inputs under 16 px, grey PR curves that cannot be
+identified where they are drawn, and the palette's idle list losing active runs to a case mismatch.

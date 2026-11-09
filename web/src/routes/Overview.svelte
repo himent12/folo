@@ -33,6 +33,8 @@
   import LiveRunCard from './overview/LiveRunCard.svelte';
   import Callout from './run/Callout.svelte';
   import WifiOff from '@lucide/svelte/icons/wifi-off';
+  import RefreshCwOff from '@lucide/svelte/icons/refresh-cw-off';
+  import { asOf, Now } from '$lib/api/freshness.svelte';
 
   setCrumbs({ label: 'Overview' });
 
@@ -50,9 +52,15 @@
   // Nothing loaded and every request failed: one page-level block says why and how to recover, instead of four panels
   // each saying the same thing (DESIGN_DIRECTION §2.8).
   const down = $derived(all.every((r) => !!r.error && !r.data));
-  // Something loaded, then the server stopped answering: keep it, and say once that it is stale.
+  // Something loaded, then the server stopped answering: keep it, and say once that it is stale. Two clocks, never
+  // confused (lib/api/freshness): the lists' snapshots and the live run's stream. While the stream still streams, only
+  // the lists are behind, and the notice says exactly that; the live card stays live. When the stream went quiet too,
+  // the server is not answering, and the card shows its last known state.
   const stale = $derived(!down && all.some((r) => r.stale !== undefined));
   const staleSince = $derived(Math.min(...all.map((r) => r.updated ?? Infinity)));
+  let streamLost = $state<number | null>(null);
+  const streaming = $derived(!!live && streamLost === null);
+  const now = new Now(() => stale);
   const fresh = $derived(datasets.data?.length === 0 && runs.data?.length === 0 && models.data?.length === 0);
   function retryAll() {
     void runs.refresh();
@@ -102,14 +110,24 @@
       </ol>
     </section>
   {:else if down}
-    <!-- Nothing loaded and every request failed: one recovery block on the page's content edge (Retry, Connection
-         settings), never four panels each saying the server has not answered. -->
-    <ErrorState error={runs.error} retry={retryAll} title="Could not load the overview" />
+    <!-- Nothing loaded and every request failed: one recovery block (Retry, Connection settings) in the frame the live
+         card would fill, the page's focal slot, never four panels each saying the server has not answered and never a
+         frameless block in the corner of an empty canvas (DESIGN_DIRECTION §2.8). -->
+    <div class="live">
+      <Panel title="Training"><ErrorState error={runs.error} retry={retryAll} title="Could not load the overview" compact /></Panel>
+    </div>
   {:else}
-    {#if stale}
+    {#if stale && streaming}
+      <div class="stale">
+        <Callout tone="warning" icon={RefreshCwOff} title="Lists not refreshing">
+          The lists below show what loaded {asOf(staleSince, now.current)}; the run training now is still live.
+          {#snippet actions()}<Button size="sm" onclick={retryAll}>Retry</Button>{/snippet}
+        </Callout>
+      </div>
+    {:else if stale}
       <div class="stale">
         <Callout tone="warning" icon={WifiOff} title="Server not answering">
-          Showing what loaded {ago(new Date(staleSince).toISOString())}.
+          Showing what loaded {asOf(staleSince, now.current)}.
           {#snippet actions()}<Button size="sm" onclick={retryAll}>Retry</Button>{/snippet}
         </Callout>
       </div>
@@ -121,7 +139,11 @@
         <!-- The live card itself with placeholder values, so nothing jumps when it arrives. -->
         <LiveRunCard run={null} />
       {:else if live}
-        {#key live.id}<LiveRunCard run={live} dataset={dsById.get(live.config.dataset_id)} />{/key}
+        {#key live.id}<LiveRunCard
+            run={live}
+            dataset={datasets.data ? (dsById.get(live.config.dataset_id) ?? null) : datasets.error ? null : undefined}
+            bind:lost={streamLost}
+          />{/key}
       {:else}
         <Panel title="Training">
           <EmptyState
@@ -270,14 +292,15 @@
           {:else}
             <ul class="dslist" use:balanced={{ n: Math.min(6, datasets.data.length), min: 280 }}>
               {#each datasets.data.slice(0, 6) as d (d.id)}
-                <li>
+                <!-- The link covers the card (a stretched link); the class balance, its own disclosure, sits above it. -->
+                <li class="d-card">
                   <a href={href(`/datasets/${d.id}`)}>
                     <span class="d-row">
                       <span class="d-name truncate">{d.name}</span>
                       <span class="d-nums num"><Meta line><span>{compact(total(d))} images</span><span>{d.classes.length} classes</span></Meta></span>
                     </span>
-                    {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
                   </a>
+                  {#if d.stats}<span class="d-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
                 </li>
               {/each}
             </ul>
@@ -502,16 +525,39 @@
   .dslist {
     padding: 0 var(--space-2) var(--space-2);
   }
-  .dslist a,
+  .d-card,
   .d-sk {
+    position: relative;
     display: grid;
     gap: 6px;
     padding: var(--space-2);
     border-radius: var(--radius-md);
     transition: background-color var(--dur-fast) var(--ease-standard);
   }
-  .dslist a:hover {
+  .d-card:has(> a:hover) {
     background: var(--bg-hover);
+  }
+  .d-card > a {
+    display: block;
+    min-width: 0;
+  }
+  /* The ring goes round the card the link covers. */
+  .d-card:has(> a:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .d-card > a:focus-visible {
+    outline: none;
+  }
+  .d-card > a::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  .d-strip {
+    position: relative;
+    z-index: 1;
   }
   .d-row {
     display: flex;

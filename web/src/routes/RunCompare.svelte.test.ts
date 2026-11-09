@@ -166,3 +166,24 @@ describe('Compare: the side by side reads against its baseline', () => {
     expect(table.querySelector('td.cfg.same')).toBeTruthy();
   });
 });
+
+describe('Compare: the keyboard', () => {
+  it('B makes the next run the baseline, wrapping, as Swap does one column at a time', async () => {
+    const runs = (await hub.api.runs()).filter((r) => r.status !== 'queued').slice(0, 3);
+    setWidth(1440);
+    router.route = parse(`#/runs/compare?ids=${runs.map((r) => r.id).join(',')}`);
+    c = mount(RunCompare, { target });
+    const table = await until(() => target.querySelector('#cmp-table table'), 'the table');
+    const baseline = () => table.querySelector('thead .base-tag')?.closest('th')?.querySelector('.th-name')?.textContent;
+    expect(baseline()).toBe(runs[0]!.name);
+    const press = () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'b', bubbles: true, cancelable: true }));
+      flushSync();
+    };
+    press();
+    expect(baseline()).toBe(runs[1]!.name);
+    press();
+    press();
+    expect(baseline()).toBe(runs[0]!.name);
+  });
+});

@@ -16,6 +16,8 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Arch, Augment, Dataset, DatasetImage, Device, Model, Optimizer, Run, RunEstimate, TrainConfig } from '$lib/api/types';
   import { modelChoices, scoreContext, scoreMeta, scoreText } from '$lib/scoreSummary';
+  import { FROM_SCRATCH } from '$lib/lineage';
+  import { publishedSummary } from '$lib/published';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
@@ -60,6 +62,8 @@
   /** Where the architectures' reference latency was measured (docs/BENCHMARKS.md), where the line already says 640 px
    *  and end to end. */
   const REF_WHERE = 'RTX 4080 SUPER, f32';
+  /** Phones: whether Compare sizes is open (its rows are then the one size picker). */
+  let sizesOpen = $state(false);
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery(media.phone, false);
 
@@ -197,11 +201,16 @@
   /** Start from's hint: the picked weights' score with all of its context, and what published weights are. */
   const startHint = $derived.by(() => {
     if (!picked) return 'Fine-tuning from a trained model converges much faster.';
-    // Published weights lead with what they are; trained ones are their score.
-    const meta = scoreMeta(picked.metrics?.map50_95, scoreCtx(picked));
-    const parts = isPublished(picked) ? [picked.about, meta] : [meta];
-    return parts.filter(Boolean).join(' · ') || 'Fine-tuning from a trained model converges much faster.';
+    // Published weights: what they are for, in plain words; their provenance and score are in the ⓘ beside the label
+    // (pickedAbout). Trained ones are their score with its context.
+    if (isPublished(picked)) return publishedSummary(picked);
+    return scoreMeta(picked.metrics?.map50_95, scoreCtx(picked)) || 'Fine-tuning from a trained model converges much faster.';
   });
+  /** Published weights' provenance: the server's description, then the score with what it is on. */
+  let aboutOpen = $state(false);
+  const pickedAbout = $derived(
+    picked && isPublished(picked) ? [picked.about, scoreMeta(picked.metrics?.map50_95, scoreCtx(picked))].filter(Boolean).join(' · ') : null,
+  );
   /** Published weights picked: the run's size is theirs, said under the size picker. */
   const pickedPublished = $derived(picked && isPublished(picked) ? picked : null);
   $effect(() => {
@@ -696,7 +705,7 @@
     {
       key: 'weights',
       label: 'Start from',
-      value: weights === 'none' ? 'From scratch' : (picked?.name ?? weights),
+      value: weights === 'none' ? FROM_SCRATCH : (picked?.name ?? weights),
       mono: weights !== 'none',
       warn: !!errors.weights,
     },
@@ -886,8 +895,8 @@
         <span class="a-size">{a.size}</span>
         <Ident value={a.arch} class="a-name" />
         <span class="a-note">{a.note}</span>
-        <span class="a-v num">{compact(a.params)}</span>
-        <span class="a-v num">{num(a.flops, 1)}</span>
+        <span class="a-v a-params num">{compact(a.params)}</span>
+        <span class="a-v a-flops num">{num(a.flops, 1)}</span>
         <!-- Each figure says where it comes from in its own cell (a tertiary word), so the caption under the table
              stays one line: "measured" on this GPU, "reference" for the architecture's benchmark. A dash is
              explained once, in the caption (DESIGN_DIRECTION 23), its word slot kept empty so dashes and figures share
@@ -953,7 +962,9 @@
             <div class="cards" role="radiogroup" aria-label="Dataset" aria-invalid={errors.dataset ? 'true' : undefined} use:balanced={{ n: datasets.data.length, min: 184, gap: 8 }}>
               {#each datasets.data as d (d.id)}
                 {@const on = d.id === datasetId}
-                <label class="card" class:on>
+                <!-- The label covers the card (a stretched label); the class balance, its own disclosure, sits above it. -->
+                <div class="card" class:on>
+                  <label class="c-hit">
                   <input type="radio" name="dataset" value={d.id} bind:group={datasetId} class="sr-only" />
                   <!-- Selection adds a mark and takes no fact away: the check before the name, the format kept. -->
                   <span class="c-top"
@@ -963,8 +974,9 @@
                   >
                   <!-- Breaks only between the parts, and a wrapped line never ends on "·" (ui/Meta). -->
                   <span class="c-meta num"><Meta><span>{compact(d.splits.train)} train</span><span>{compact(d.splits.val)} val</span><span>{d.classes.length} classes</span></Meta></span>
-                  {#if d.stats}<ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} />{/if}
-                </label>
+                  </label>
+                  {#if d.stats}<span class="c-strip"><ClassStrip counts={d.stats.class_counts} classes={d.classes} height={4} /></span>{/if}
+                </div>
               {/each}
             </div>
           {/if}
@@ -982,11 +994,15 @@
             <!-- Phones: the size as one segmented pick and one short recommendation in words; its figures (params,
                  compute, latency and where each was measured) fold into "Compare sizes", so the section stays the
                  pick, the recommendation and Start from. -->
-            <div class="a-pick">
-              <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
-              {#if selArch}<p class="a-sel"><Ident value={selArch.arch} /> {selArch.note}</p>{/if}
-            </div>
-            <details class="advanced a-compare">
+            <!-- One selection surface at a time: while Compare sizes is open its rows are the selector, and the compact
+                 pick and its sentence step aside until it closes. -->
+            {#if !sizesOpen}
+              <div class="a-pick">
+                <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
+                {#if selArch}<p class="a-sel"><Ident value={selArch.arch} /> {selArch.note}</p>{/if}
+              </div>
+            {/if}
+            <details class="advanced a-compare" bind:open={sizesOpen}>
               <summary><ChevronRight size={14} aria-hidden="true" /> Compare sizes <span class="faint">params, compute, latency</span></summary>
               {@render archTable()}
               {#if selArch}
@@ -1005,14 +1021,17 @@
             <!-- Closed, the select names the weights alone; their score and what it is on are the hint under it (never
                  cut at the select's edge), with published weights' own description (`Model.about`, also each option's
                  tooltip). The open list keeps the groups and each option's context. -->
+            <!-- Published weights: the plain line is the hint; where they come from (the server's own words) opens as a
+                 line under the field (InfoButton `controls`), never a popover over the fields below. -->
             <Field label="Start from" for="weights" hint={startHint} error={errors.weights}>
+              {#snippet aside()}{#if pickedAbout}<InfoButton label="Where these weights come from" controls="weights-about" bind:open={aboutOpen} />{/if}{/snippet}
               <Select
                 id="weights"
                 bind:value={weights}
                 onchange={pickWeights}
                 invalid={!!errors.weights}
                 options={[
-                  { value: 'none', label: 'From scratch' },
+                  { value: 'none', label: FROM_SCRATCH },
                   ...weightChoices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short })),
                   ...publishedOptions.map((m) => ({
                     value: m.id,
@@ -1024,6 +1043,7 @@
                 ]}
               />
             </Field>
+            {#if pickedAbout && aboutOpen}<p class="weights-about" id="weights-about">{pickedAbout}</p>{/if}
           </div>
         </Panel>
 
@@ -1406,10 +1426,25 @@
     margin-right: var(--space-1);
     vertical-align: -2px;
   }
-  .card:has(:focus-visible),
+  .card:has(input:focus-visible),
   .arch:has(:focus-visible) {
     outline: 2px solid var(--focus);
     outline-offset: 2px;
+  }
+  .c-hit {
+    display: grid;
+    gap: 6px;
+    cursor: pointer;
+  }
+  .c-hit::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+  }
+  .c-strip {
+    position: relative;
+    z-index: 1;
   }
   .c-top {
     display: flex;
@@ -1547,12 +1582,14 @@
     grid-auto-rows: auto minmax(var(--control-md), auto) auto;
     gap: 0 var(--space-5);
   }
+  /* Every field of a row starts on the row's shared tracks at their top (align-items: start): a two-line hint under
+     Batch and none under Epochs never shifts one field's label or control against its neighbour's. */
   .fields > :global(div.field) {
     grid-row: span 3;
     display: grid;
     grid-template-rows: subgrid;
     row-gap: 6px;
-    align-items: center;
+    align-items: start;
     padding-bottom: var(--space-4);
   }
   .fields > :global(div.field > :first-child) {
@@ -1860,6 +1897,21 @@
     text-align: right;
     white-space: nowrap;
   }
+  /* Below 1280 the rail (300 px) and the summary block are too narrow for a term and its value side by side ("90
+     epochs, / mosaic" wrapped while its value held one line): each phase is its term over its value, one column. */
+  @media (max-width: 1279px) {
+    .how-list {
+      grid-template-columns: minmax(0, 1fr);
+      row-gap: 0;
+    }
+    .how-list dd {
+      text-align: left;
+      white-space: normal;
+    }
+    .how-list > div + div > dt {
+      margin-top: 6px;
+    }
+  }
   .how-note {
     max-inline-size: var(--measure);
     margin-top: var(--space-2);
@@ -1876,19 +1928,31 @@
   .est dd.sched {
     overflow: visible;
   }
-  /* Accumulation, beside the schedule: a meta line under its value, across the row, wrapping rather than cut. */
+  /* Accumulation, beside the schedule: a meta line under the row, across the rail from its label's edge, wrapping
+     rather than cut. Left-aligned, as prose is: a right-aligned sentence that wraps leaves an orphan at the far edge. */
   .est dd.sched-acc {
     grid-column: 1 / -1;
     margin-top: -2px;
     color: var(--text-tertiary);
+    text-align: left;
     white-space: normal;
   }
-  /* The batches behind the steps: one quiet line under the row, at the value's right edge, across the row. */
+  /* Where published weights come from, opened from Start from's ⓘ: a quiet line under the field, at the measure. */
+  .weights-about {
+    margin-top: var(--space-2);
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  /* The batches behind the steps: one quiet sentence under the row, from the label's edge across the rail. */
   .est dd.steps-why {
     grid-column: 1 / -1;
     margin-top: -2px;
     color: var(--text-secondary);
+    text-align: left;
     white-space: normal;
+    text-wrap: pretty;
   }
   /* A switch field (Mixed precision, End-to-end): the Switch is the label's line, its track at the field's right edge,
      and the label reads as every field label (text.secondary, medium), also while only the control is disabled. */
@@ -2482,23 +2546,53 @@
     .cards {
       display: none;
     }
-    /* Model rows: the note gives way (it sits under the rows) so the three specs keep their columns; 44 px rows. */
+    /* Model rows: the note gives way (it sits under the rows) so params and compute keep their columns; latency and
+       its source are the name's meta line ("5.90 ms measured"), so every row is the same two lines, never a figure
+       wrapping its source word in some rows and not others (round 26). */
     .arches {
-      grid-template-columns: 28px minmax(0, 1fr) repeat(2, 52px) auto 28px;
+      grid-template-columns: 28px minmax(0, 1fr) repeat(2, 52px) 28px;
       column-gap: var(--space-2);
     }
-    /* The source word under its figure: the row grows a line rather than squeeze the size's name. */
-    .a-src {
-      display: block;
-      min-width: 0;
-      margin-left: 0;
-      text-align: right;
+    .a-head-lat {
+      display: none;
     }
     .a-head-lead {
       grid-column: 1 / 3;
     }
     .arch {
-      min-height: 44px;
+      min-height: 56px;
+      grid-template-rows: auto auto;
+      row-gap: 0;
+      padding-block: 6px;
+    }
+    .a-size {
+      grid-column: 1;
+      grid-row: 1 / 3;
+    }
+    .arch :global(.a-name) {
+      grid-column: 2;
+      grid-row: 1;
+    }
+    .a-params {
+      grid-column: 3;
+      grid-row: 1 / 3;
+    }
+    .a-flops {
+      grid-column: 4;
+      grid-row: 1 / 3;
+    }
+    .a-v.lat {
+      grid-column: 2;
+      grid-row: 2;
+      text-align: left;
+    }
+    .tick {
+      grid-column: 5;
+      grid-row: 1 / 3;
+    }
+    .a-src {
+      min-width: 0;
+      margin-left: var(--space-1);
     }
     .a-note {
       display: none;

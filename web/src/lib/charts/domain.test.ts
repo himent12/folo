@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { capTicks, holdDomain, logDomain, logMinors, logTicks, MAX_TICKS, niceDomain, stepDecimals, unitDomain, unitTop, unitZoomed, withLabelRow } from './domain';
+import { capTicks, FIT_BELOW, fitFloorNote, holdDomain, prDomain, PR_ZOOM, logDomain, logMinors, logTicks, MAX_TICKS, niceDomain, stepDecimals, unitDomain, unitFitDomain, unitTop, unitZoomed, withLabelRow } from './domain';
 
 describe('unitDomain', () => {
   it('fits a 0–1 metric to its data plus a little headroom, so the plot is never mostly empty', () => {
@@ -187,5 +187,82 @@ describe('withLabelRow', () => {
   it('changes nothing it cannot help: no data, or a plot too short', () => {
     expect(withLabelRow(0, 360)).toBe(0);
     expect(withLabelRow(0.5, 40)).toBe(0.5);
+  });
+});
+
+describe('unitFitDomain: the Fit axis of Compare', () => {
+  /** A run's climb: `n` epochs rising fast from 0 and levelling off at `end`. */
+  const climb = (n: number, end: number) => Array.from({ length: n }, (_, i) => end * (1 - Math.exp(-(i + 1) / (n * 0.12))));
+  // Round 26's comparison: four runs (37, 150, 61 and 23 epochs) that spend most of their length between 0.45 and 0.61.
+  const runs = [climb(37, 0.597), climb(150, 0.604), climb(61, 0.595), climb(23, 0.494)];
+  const values = runs.flat();
+  const ends = runs.map((r) => r.at(-1)!);
+
+  it('starts the axis under the values most of the lines spend their length in, not at 0', () => {
+    const f = unitFitDomain(values, ends, withLabelRow(0.606, 360), 360);
+    expect(f.domain[0]).toBeGreaterThan(0.3);
+    // Every line's end shows, with room under the lowest.
+    for (const e of ends) expect(e).toBeGreaterThan(f.domain[0]);
+    // At most FIT_BELOW of the values fall under the floor, give or take the rounding down to a tick.
+    const under = values.filter((v) => v < f.domain[0]).length / values.length;
+    expect(under).toBeLessThanOrEqual(FIT_BELOW + 0.02);
+    expect(f.domain[1]).toBe(unitDomain(withLabelRow(0.606, 360), 360).domain[1]);
+    expect(fitFloorNote(f)).toBe(`y from ${f.domain[0].toFixed(2)}`);
+  });
+
+  it('reads "y from 0.40" for runs whose 30th percentile is 0.425', () => {
+    const vs = [...Array(30).fill(0.2), ...Array(70).fill(0.425), 0.606];
+    const f = unitFitDomain(vs, [0.5, 0.606], withLabelRow(0.606, 360), 360);
+    expect(f.domain[0]).toBe(0.4);
+    expect(f.ticks).toEqual([0.4, 0.5, 0.6, 0.7]);
+    expect(fitFloorNote(f)).toBe('y from 0.40');
+  });
+
+  it("keeps round 23's tick rule: 3–5 ticks of the same nice steps, the same step at every height", () => {
+    for (const lo of [0.31, 0.42, 0.55, 0.68, 0.81, 0.9])
+      for (const max of [lo + 0.05, lo + 0.1, lo + 0.2, Math.min(1, lo + 0.35)]) {
+        const vs = [...Array(30).fill(lo * 0.5), ...Array(70).fill(lo), max];
+        const wide = unitFitDomain(vs, [max], max, 360);
+        const at = `${lo}–${max}`;
+        expect(wide.ticks.length, at).toBeGreaterThanOrEqual(3);
+        expect(wide.ticks.length, at).toBeLessThanOrEqual(5);
+        expect(wide.ticks[0], at).toBe(wide.domain[0]);
+        expect(wide.domain[0], at).toBeLessThanOrEqual(lo);
+        const step = wide.ticks[1]! - wide.ticks[0]!;
+        expect([0.001, 0.002, 0.0025, 0.005, 0.01, 0.02, 0.025, 0.05, 0.1, 0.2, 0.25, 0.5].some((s) => Math.abs(s - step) < 1e-9), at).toBe(true);
+        for (const px of [96, 122, 210, 290]) {
+          const f = unitFitDomain(vs, [max], max, px);
+          expect(f.domain, `${at} @ ${px}`).toEqual(wide.domain);
+          expect(f.decimals, `${at} @ ${px}`).toBe(wide.decimals);
+          for (const t of f.ticks) expect(wide.ticks, `${at} @ ${px}`).toContain(t);
+        }
+      }
+  });
+
+  it('starts at 0 when the floor would sit near it, or a line ends low', () => {
+    // Runs still climbing: their 30th percentile is near 0.
+    const early = [10, 12].flatMap((n) => Array.from({ length: n }, (_, i) => (0.35 * (i + 1)) / n));
+    expect(unitFitDomain(early, [0.3, 0.35], 0.35, 360)).toEqual(unitDomain(0.35, 360));
+    // A run that ended at 0.08 keeps its end marker on the plot: from 0.
+    expect(unitFitDomain(values, [...ends, 0.08], 0.606, 360)).toEqual(unitDomain(0.606, 360));
+    expect(unitFitDomain([], [], 0.606, 360)).toEqual(unitDomain(0.606, 360));
+    expect(fitFloorNote(unitDomain(0.606, 360))).toBeNull();
+  });
+});
+
+describe('prDomain', () => {
+  const curve = (pts: [number, number][]) => pts.map(([x, y]) => ({ x, y }));
+  it('zooms a near-perfect model to 0.8–1 and says so; any class dipping keeps the 0–1 frame', () => {
+    // Round 26: model-o2o, three classes at AP50 0.995, a flat line on the top edge of a 300 px 0–1 plot.
+    const good = [curve([[0, 1], [0.5, 0.998], [0.9, 0.99], [0.97, 0.93], [0.99, 0.6]]), curve([[0, 1], [0.94, 0.95], [0.98, 0.4]])];
+    const z = prDomain(good)!;
+    expect(z.domain).toEqual([PR_ZOOM.floor, 1]);
+    expect(z.ticks).toEqual([0.8, 0.85, 0.9, 0.95, 1]);
+    expect(z.decimals).toBe(2);
+    expect(PR_ZOOM.plotPx).toBe(200);
+    // One class under 0.9 before recall 0.95: the whole frame.
+    expect(prDomain([...good, curve([[0, 1], [0.6, 0.88], [0.9, 0.5]])])).toBeNull();
+    // No data: the whole frame.
+    expect(prDomain([[], []])).toBeNull();
   });
 });

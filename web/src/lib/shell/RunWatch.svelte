@@ -34,4 +34,7 @@
       watched.runs = next;
     });
   });
+  $effect(() => {
+    watched.since = runs.stale !== undefined ? runs.updated : null;
+  });
 </script>

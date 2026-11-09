@@ -3,7 +3,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { flushSync, mount, unmount } from 'svelte';
 import { describe, expect, it } from 'vitest';
-import InfoButton from './InfoButton.svelte';
+import InfoButton, { HELP_MAX } from './InfoButton.svelte';
 import InfoPanel from './InfoPanel.test.svelte';
 
 // happy-dom has no Popover API, so these run InfoButton's own open state (the same one a browser without popovers
@@ -59,6 +59,36 @@ describe('InfoButton', () => {
     document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
     flushSync();
     expect(button.getAttribute('aria-expanded')).toBe('false');
+    done();
+  });
+
+  it('stays on screen when its fold opens: placed again, scrolling within the room it has', () => {
+    const { button, done } = setup({ text: 'Loss: how wrong the model is.', how: 'A long method.' });
+    const pop = document.getElementById(button.getAttribute('aria-controls')!)!;
+    // A 600 px tall window, the button low on it; the popover 120 px tall, 500 px once its fold is open.
+    const inner = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 600 });
+    let natural = 120;
+    const rect = (x: number, y: number, w: number, h: number) => ({ x, y, left: x, top: y, width: w, height: h, right: x + w, bottom: y + h }) as DOMRect;
+    button.getBoundingClientRect = () => rect(300, 400, 24, 24);
+    pop.getBoundingClientRect = () => rect(0, 0, 320, pop.style.maxHeight ? parseFloat(pop.style.maxHeight) : natural);
+    flushSync();
+    button.click();
+    flushSync();
+    const y = () => Number(pop.style.translate.split(' ')[1]!.replace('px', ''));
+    expect(y()).toBeGreaterThanOrEqual(424);
+    expect(pop.style.maxHeight).toBe('');
+    natural = 500;
+    const fold = pop.querySelector('details')!;
+    fold.open = true;
+    fold.dispatchEvent(new Event('toggle'));
+    const height = parseFloat(pop.style.maxHeight);
+    expect(height).toBeLessThan(500);
+    expect(y()).toBeGreaterThanOrEqual(0);
+    expect(y() + height).toBeLessThanOrEqual(600);
+    // Above the button (the side with more room), its foot by the button.
+    expect(y() + height).toBeLessThanOrEqual(400);
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: inner });
     done();
   });
 
@@ -191,6 +221,34 @@ describe('InfoButton', () => {
       }
     }
     expect(bad).toEqual([]);
+  });
+
+  it("keeps every definition to two lines (HELP_MAX), its detail folded under How it's computed", () => {
+    const src = join(__dirname, '..', '..');
+    const files = (dir: string): string[] =>
+      readdirSync(dir).flatMap((n) => {
+        const p = join(dir, n);
+        return statSync(p).isDirectory() ? files(p) : n.endsWith('.svelte') && !n.endsWith('.test.svelte') ? [p] : [];
+      });
+    const long: string[] = [];
+    let seen = 0;
+    for (const f of files(src)) {
+      for (const m of readFileSync(f, 'utf-8').matchAll(/<InfoButton\b(?:[^<>]|=>)*?\btext="([^"]*)"/g)) {
+        seen++;
+        if (m[1]!.length > HELP_MAX) long.push(`${relative(src, f)}: ${m[1]!.length} characters: ${m[1]}`);
+      }
+    }
+    expect(seen).toBeGreaterThan(0);
+    expect(long).toEqual([]);
+    // The fold: closed on every opening, the detail behind it.
+    const { target, button, done } = setup({ text: 'A short line.', how: 'Size = √(box area ÷ image area).' });
+    button.click();
+    flushSync();
+    const fold = target.querySelector<HTMLDetailsElement>('details.info-how')!;
+    expect(fold.querySelector('summary')?.textContent).toBe("How it's computed");
+    expect(fold.open).toBe(false);
+    expect(fold.textContent).toContain('Size = √(box area');
+    done();
   });
 
   it('every ⓘ in the app is an InfoButton, never a hover-only icon button', () => {

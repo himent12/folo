@@ -105,7 +105,7 @@ describe('Model on a phone: the work before the summary', () => {
   const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
   afterEach(() => setWidth(width));
 
-  it('puts the section picker first, opens Curves on the 2 × 2 grid and the other sections on one folded line', async () => {
+  it('puts the section picker first and opens every section, Curves included, on one folded line', async () => {
     setWidth(390);
     router.route = parse('#/models/m_fast_n');
     c = mount(Model, { target });
@@ -116,9 +116,9 @@ describe('Model on a phone: the work before the summary', () => {
     expect(panel.contains(kpi)).toBe(true);
     expect(panel.firstElementChild).toBe(kpi);
     expect(target.querySelector('section.kpis')).toBeNull();
-    // Curves: the full grid, no folded line.
-    expect(kpi.querySelectorAll('.kg-cell')).toHaveLength(4);
-    expect(kpi.querySelector('.kpi-line')).toBeNull();
+    // Curves: the headline on one line too, so the chart leads the section.
+    expect(kpi.querySelectorAll('.kg-cell')).toHaveLength(0);
+    expect(kpi.querySelector('.kpi-line')).not.toBeNull();
     // Classes: the headline on one line that unfolds the same four cells.
     target.querySelector<HTMLButtonElement>('#model-sec-classes')!.click();
     flushSync();

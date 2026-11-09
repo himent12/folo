@@ -76,6 +76,19 @@ export const scenes = [
   // The live run at the moment run-live shows it (the same `advance`), so the two screens' epoch and progress agree.
   { name: 'overview', path: '/', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // A class-balance strip is one disclosure: opened, each class's name, box count and share, largest first.
+    name: 'datasets-class-balance',
+    path: '/datasets',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      const strip = page.locator('.cs-btn:visible').first();
+      await strip.waitFor();
+      await strip.click();
+      await page.mouse.move(0, 0);
+    },
+  },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
@@ -453,6 +466,19 @@ export const scenes = [
     },
   },
   {
+    // Phones: the y axis's choice (Fit / From 0) in How to read this, the control row having no room; From 0 chosen,
+    // so the plot shows the whole climb and the y caption no floor.
+    name: 'run-compare-yaxis-phone',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, '.chip .key');
+      await page.locator('details.about > summary').click();
+      await page.locator('.about-axis').getByRole('radio', { name: 'From 0' }).click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
     // "By epoch", chosen by hand over the default "By progress": one epoch scale to the longest plan. On a tablet the
     // header keeps one layout whatever the axis (the qualifier wraps under the metric tabs, the control on their row).
     name: 'run-compare-epoch',
@@ -520,7 +546,24 @@ export const scenes = [
       await page.mouse.move(0, 0);
     },
   },
-  { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'mobile'] },
+  {
+    // Scrolled into the pair's settings: the pager and the head row (both names, Baseline, Swap) hold under the top bar
+    // while the table is in view.
+    name: 'run-compare-pair-sticky',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    viewports: ['mobile'],
+    fullPage: false,
+    keepScroll: true,
+    setup: async (page) => {
+      await until(page, '#cmp-table .pair');
+      await page.evaluate(() => {
+        const rows = document.querySelectorAll('#cmp-table tbody tr');
+        rows[Math.min(6, rows.length - 1)]?.scrollIntoView({ block: 'center' });
+      });
+      await page.mouse.move(0, 0);
+    },
+  },
+  { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'laptop', 'mobile'] },
   // A queued run, first of two waiting: its place, what it waits for and when it should start lead; from 768 px up the
   // config beside the queue and one quiet list of what the run will have (no empty frames). Phones keep their sections.
   { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -1076,6 +1119,52 @@ export const scenes = [
     },
   },
   {
+    // A quiet grey PR curve identified where it is drawn: the pointer near it picks out its class, which takes its hue
+    // and its name and precision in the readout ("Click to trace"). Phones: a tap, and the readout offers Trace.
+    name: 'model-pr-pick',
+    path: '/models/m_fast_n',
+    keepScroll: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    fullPage: false,
+    setup: async (page, { vp }) => {
+      await until(page, '#pr svg');
+      await page.locator('#pr').scrollIntoViewIfNeeded();
+      // A point three-quarters along the third grey curve, in page coordinates.
+      const at = await page.locator('#pr path.line.context').nth(2).evaluate((p) => {
+        const path = /** @type {SVGPathElement} */ (p);
+        const pt = path.getPointAtLength(path.getTotalLength() * 0.75);
+        const r = /** @type {SVGSVGElement} */ (path.ownerSVGElement).getBoundingClientRect();
+        return { x: r.left + pt.x, y: r.top + pt.y };
+      });
+      if (vp !== 'mobile') {
+        await page.mouse.move(at.x, at.y);
+        return;
+      }
+      await page.locator('#pr svg[aria-roledescription=chart]').evaluate((svg, a) => {
+        for (const type of ['pointerdown', 'pointerup'])
+          svg.dispatchEvent(new PointerEvent(type, { pointerType: 'touch', clientX: a.x, clientY: a.y, bubbles: true }));
+      }, at);
+      await page.clock.runFor(100);
+    },
+  },
+  {
+    // Wider screens trace classes as phones do: Trace a class opens the classes as chips under the readout row, the
+    // traced first; two traced here.
+    name: 'model-trace-wide',
+    path: '/models/m_fast_n',
+    keepScroll: true,
+    viewports: ['desktop', 'laptop', 'tablet'],
+    fullPage: false,
+    setup: async (page) => {
+      await until(page, '#pr svg');
+      await page.locator('#pr button.trace').click();
+      await page.locator('#pr .t-chip').nth(1).click();
+      await page.locator('#pr .t-chip').nth(3).click();
+      await page.mouse.move(0, 0);
+      await page.locator('#pr').scrollIntoViewIfNeeded();
+    },
+  },
+  {
     // Phones: the Confusion section opens on the ranked confusions and misses, the matrix one step away.
     name: 'model-phone-confusion',
     path: '/models/m_fast_n',
@@ -1206,7 +1295,11 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, '#pr svg');
-      if (vp === 'mobile') await page.locator('button.meta-line').click();
+      if (vp === 'mobile') {
+        await page.locator('button.meta-line').click();
+        // Phones open every section on the folded headline: unfold the grid its ⓘ sits in.
+        await page.locator('.kpi-line').click();
+      }
       await page.getByRole('button', { name: 'What these metrics mean' }).click();
       await page.clock.runFor(1500);
     },
@@ -1377,9 +1470,13 @@ export const scenes = [
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   // Nothing loads: one recovery block on the page (Retry, Connection settings), not four panels each saying so.
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
-  // The server stops answering after the first loads: the page keeps what it has under one stale-data notice (the runs
-  // poll every 5 s, so the first failed poll is past 5 s).
-  { name: 'overview-stale', path: '/', search: 'scenario=stale', advance: 7000, viewports: ['desktop', 'mobile'] },
+  // The server stops answering after the first loads, its live stream too: the page keeps what it has under one
+  // stale-data notice, and the live card shows its last known state ("Last known: Running · 2m ago", "~7m left, as of
+  // 2m ago", no heartbeat). Two minutes on, so the ages read as minutes.
+  { name: 'overview-stale', path: '/', search: 'scenario=stale', advance: 125_000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // Only the lists stop refreshing; the live run's stream still streams: the notice says the lists are behind and the
+  // live card stays live.
+  { name: 'overview-stale-lists', path: '/', search: 'scenario=stale-lists', advance: 125_000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   // A model scored on its training split (fasteners-mini has no validation images): Best models tags its score
   // ("Training split"), ranks it only within its own dataset and split, and counts imported and published weights apart.
   { name: 'overview-train-split', path: '/', search: 'scenario=train-split', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },

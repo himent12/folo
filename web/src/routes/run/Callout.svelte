@@ -3,8 +3,12 @@
    * A run banner, one line (web/DESIGN_DIRECTION.md §4.4, the Vercel callout): status icon, title, cause, one action,
    * and a disclosure for the details. Only the icon and the title take the status hue; the cause stays in
    * text.secondary. Below the laptop tier the actions go under the text (on a row of their own, every callout, never
-   * beside a title they would cut); on phones the cause also wraps under the title; a `stack` callout
-   * gives its first action the full width (the one fix to take), the disclosure under it. An `also` line under the
+   * beside a title they would cut); on phones the cause also wraps under the title, and the actions are one button and
+   * a row of text links (ui/Button's `.cta-links`): the lime primary across the callout, every other action a link
+   * after it, never a stack of full-width buttons before the content; a `stack` callout gives its first action the
+   * full width even when it is not the primary, the disclosure under it. An actions snippet that renders nothing leaves
+   * no row. Danger and warning callouts are the panel surface with a 2 px status edge, never a tint under the lime
+   * primary. An `also` line under the
    * first, with its own mark and hue, joins a second finding about the same run (a completed run's outcome, then the
    * trainer's warning that it was too short to learn), so one run never stacks two banners.
    */
@@ -74,7 +78,7 @@
     </p>
   {/if}
   {#if actions || more}
-    <div class="c-acts cta-row">
+    <div class="c-acts cta-row cta-links">
       {#if actions}{@render actions()}{/if}
       {#if more}
         <button type="button" class="c-more" aria-expanded={open} aria-controls="{uid}-more" onclick={() => (open = !open)}>{moreLabel}</button>
@@ -101,17 +105,21 @@
   .callout > :global(svg) {
     flex-shrink: 0;
   }
-  /* The status shows through the mark and the callout's tint only: titles and links are ink (DESIGN_DIRECTION §2.6),
-     so a red title never shouts over the cause and an amber one never turns weak in light; the cause reads in
-     text.secondary. A callout that needs action (danger, warning) is a banner, so it takes its status's muted tint. */
+  /* The status shows through the mark and a 2 px edge only: titles and links are ink (DESIGN_DIRECTION §2.6), so a red
+     title never shouts over the cause and an amber one never turns weak in light; the cause reads in text.secondary.
+     A callout that needs action (danger, warning) is a banner: the panel surface with its status's 2 px left edge (the
+     frame's 1 px, recoloured, and 1 px inside it, so nothing moves), never a tinted fill: the fix it offers is often
+     the lime primary, and lime on a red or amber tint reads as neither (round 26). */
   .danger > :global(svg) {
     color: var(--danger-text);
   }
   .callout.danger {
-    background: linear-gradient(var(--danger-muted) 0 0), var(--bg-panel);
+    border-left-color: var(--danger-solid);
+    box-shadow: inset 1px 0 0 var(--danger-solid);
   }
   .callout.warning {
-    background: linear-gradient(var(--warning-muted) 0 0), var(--bg-panel);
+    border-left-color: var(--warning-solid);
+    box-shadow: inset 1px 0 0 var(--warning-solid);
   }
   .success > :global(svg) {
     color: var(--success-text);
@@ -167,6 +175,11 @@
     align-items: center;
     justify-content: flex-end;
     gap: var(--space-2);
+  }
+  /* An actions snippet that renders nothing this time (a completed run with no saved model has no Try in Playground)
+     leaves no row: no 12 px gap and no empty button-height strip under the text. */
+  .c-acts:not(:has(*)) {
+    display: none;
   }
   /* The disclosure: the system chevron (as in ErrorState) and a quiet label. */
   .c-more {
@@ -271,10 +284,16 @@
       font-size: inherit;
       line-height: inherit;
     }
+    /* One button and a row of text links (ui/Button's .cta-links): the primary across the callout, the other ways out
+       as links after it, never a stack of full-width buttons before the content. */
     .c-acts {
       grid-column: 2;
       justify-content: flex-start;
       flex-wrap: wrap;
+      gap: var(--space-1) var(--space-4);
+    }
+    .c-acts:has(> :global(.btn.primary)) {
+      grid-column: 1 / -1;
     }
     .c-detail {
       grid-column: 2;

@@ -458,3 +458,45 @@ describe('LineChart end marks (DESIGN_DIRECTION §2.4: one thing per mark)', () 
     unmount(c);
   });
 });
+
+describe('LineChart pick', () => {
+  it('picks out the line nearest the pointer where it is drawn, and a click acts on it', () => {
+    // Round 26: the PR chart's grey class curves could be told apart only from the table.
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const flat = (id: string, y: number) => ({ id, label: id, color: 'grey', context: true, points: [0, 5, 10].map((x) => ({ x, y })) });
+    const picks: string[] = [];
+    const props = $state({
+      series: [flat('c0', 0.2), flat('c1', 0.8), { id: 'mean', label: 'mean', color: 'black', points: [0, 10].map((x) => ({ x, y: 0.5 })) }],
+      label: 'pr',
+      height: 200,
+      yDomain: [0, 1] as [number, number],
+      legend: false,
+      pick: (s: { id: string }) => s.id.startsWith('c'),
+      picked: null as string | null,
+      onpick: (id: string) => picks.push(id),
+    });
+    const c = mount(LineChart, { target, props });
+    Object.defineProperty(target.querySelector('.plot')!, 'clientWidth', { value: 400 });
+    target.querySelector('.plot')!.dispatchEvent(new Event('resize'));
+    flushSync();
+    const svg = target.querySelector('svg[aria-roledescription=chart]')!;
+    // The plot runs from y = 8 (1.0) to y = 178 (0.0): 0.8 is drawn at y = 42, 0.2 at 144, the mean at 93.
+    const move = (clientX: number, clientY: number) => {
+      svg.dispatchEvent(new PointerEvent('pointermove', { clientX, clientY, bubbles: true }));
+      flushSync();
+    };
+    move(200, 47);
+    expect(props.picked).toBe('c1');
+    svg.dispatchEvent(new PointerEvent('pointerup', { clientX: 200, clientY: 47, button: 0, bubbles: true }));
+    expect(picks).toEqual(['c1']);
+    move(200, 140);
+    expect(props.picked).toBe('c0');
+    // Near no pickable line (the mean is not one): nothing.
+    move(200, 93);
+    expect(props.picked).toBeNull();
+    svg.dispatchEvent(new PointerEvent('pointerup', { clientX: 200, clientY: 93, button: 0, bubbles: true }));
+    expect(picks).toEqual(['c1']);
+    unmount(c);
+  });
+});

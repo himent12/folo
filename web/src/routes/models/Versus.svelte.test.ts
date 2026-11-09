@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
-import { comparable, unlike, unlikeSentence, versusYolo26n } from '$lib/benchmarks';
+import { comparable, unlike, unlikeCondition, versusYolo26n } from '$lib/benchmarks';
 import { MockApi } from '$lib/api/mock';
 import Versus from './Versus.svelte';
 
@@ -15,7 +15,7 @@ afterEach(() => {
 });
 
 describe('Engine speed table', () => {
-  it('ties every value to its metric and engine through headers, with the engine named in the markup', () => {
+  it('ties every value to its metric and engine through headers: one header row names the engines, no row repeats them', () => {
     target = document.createElement('div');
     document.body.appendChild(target);
     c = mount(Versus, { target });
@@ -26,13 +26,17 @@ describe('Engine speed table', () => {
       const metric = tr.querySelector('th[scope="row"]');
       expect(metric?.textContent).toContain(versusYolo26n[i]!.metric);
       const cells = [...tr.querySelectorAll('td')];
-      expect(cells.map((td) => td.querySelector('.cl')?.textContent)).toEqual(['folo-n', 'YOLO26n', 'folo-n vs YOLO26n']);
+      expect(cells.map((td) => target.querySelector(`#${(td.getAttribute('headers') ?? '').split(' ')[1]}`)?.textContent)).toEqual([
+        'folo-n',
+        'YOLO26n',
+        'folo-n vs YOLO26n',
+      ]);
       for (const td of cells) {
         const ids = (td.getAttribute('headers') ?? '').split(' ');
         expect(ids[0]).toBe(metric?.id);
-        const col = target.querySelector(`#${ids[1]}`);
-        expect(col?.getAttribute('scope')).toBe('col');
-        expect(col?.textContent).toBe(td.querySelector('.cl')?.textContent);
+        expect(target.querySelector(`#${ids[1]}`)?.getAttribute('scope')).toBe('col');
+        // The engine is named once, in the header row; a cell holds its value alone.
+        expect(td.textContent).not.toMatch(/folo-n|YOLO26n/);
       }
     });
   });
@@ -42,10 +46,10 @@ describe('Engine speed table', () => {
     document.body.appendChild(target);
     c = mount(Versus, { target });
     flushSync();
-    const leads = [...target.querySelectorAll('tbody td.lead')].map((td) => [...td.childNodes].slice(1).map((n) => n.textContent?.trim()).filter(Boolean).join(' | '));
+    const leads = [...target.querySelectorAll('tbody td.lead')].map((td) => [...td.childNodes].map((n) => n.textContent?.replace(/ /g, ' ').trim()).filter(Boolean).join(' | '));
     versusYolo26n.forEach((v, i) => {
-      // The desktop's "—" and difference, then the phone's one-line form of the same conditions.
-      if (!comparable(v)) expect(leads[i]).toBe(`— | ${unlike[v.metric]!.differs} | ${unlikeSentence(unlike[v.metric]!)}`);
+      // The desktop's "—" and difference, then the phone's line of the same condition (no "no winner": the legend's).
+      if (!comparable(v)) expect(leads[i]).toBe(`— | ${unlike[v.metric]!.differs} | — ${unlikeCondition(unlike[v.metric]!)}`);
       else if (v.unit === 'MiB') expect(leads[i]).toMatch(/^\d+% (less|more) memory$/);
       else expect(leads[i]).toMatch(/^\d+\.\d\d× (faster|slower)$/);
     });
@@ -72,10 +76,14 @@ describe('Engine speed table', () => {
       { m: 'CPU end to end, batch 1', why: 'less NMS work for FOLO' },
       { m: 'Training peak GPU memory', why: 'train step vs trainer' },
     ]);
-    expect(target.querySelector('.foot')?.textContent).toContain(`6 of ${versusYolo26n.length} rows ran under different conditions`);
+    // One legend over the table says what "—" means; no row repeats "no winner".
+    const legend = target.querySelector('.legend');
+    expect(legend?.compareDocumentPosition(target.querySelector('table.vs')!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(legend?.textContent?.replace(/\s+/g, ' ')).toContain(`No winner: conditions differ · 6 of ${versusYolo26n.length} rows`);
+    expect(target.querySelector('table.vs')?.textContent).not.toMatch(/no winner/i);
     const how = target.querySelector<HTMLDetailsElement>('details.how')!;
     expect(how.open).toBe(false);
-    target.querySelector<HTMLButtonElement>('.foot button')!.click();
+    target.querySelector<HTMLButtonElement>('.legend button')!.click();
     await tick();
     expect(how.open).toBe(true);
     expect(document.activeElement).toBe(how.querySelector('summary'));

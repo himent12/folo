@@ -10,7 +10,9 @@
   import { hub } from '$lib/api/index.svelte';
   import { Resource } from '$lib/api/resource.svelte';
   import { progressText, runProgress } from '$lib/api/progress';
-  import { eta, lr, metric, num } from '$lib/format';
+  import { lr, metric, num } from '$lib/format';
+  import { etaText, lastKnown, Now } from '$lib/api/freshness.svelte';
+  import { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
   import { deviceParts } from './device';
   import { runEvalSource, scoresTitle } from '$lib/evaluated';
   import { href } from '$lib/router.svelte';
@@ -23,12 +25,30 @@
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
 
-  /** `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. */
-  let { run: initial, dataset }: { run: Run | null; dataset?: Dataset } = $props();
+  /**
+   * `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. `lost`
+   * (bindable) reports when the run's stream went quiet (`LiveRun.lost`), so the page can tell a server that stopped
+   * answering from lists that alone failed to refresh. `dataset`: undefined while the datasets load, null when the run's
+   * is not to be had (its split then unknown: "Evaluation").
+   */
+  let {
+    run: initial,
+    dataset,
+    lost = $bindable(null),
+  }: { run: Run | null; dataset?: Dataset | null; lost?: number | null } = $props();
+  // What the scores are on (lib/evaluated `scoresTitle`), one word in every state: until the dataset is known it is a
+  // placeholder, never a guess that changes when it arrives ("Evaluation" in the skeleton, "Validation" loaded).
+  const scores = $derived(dataset === undefined ? null : scoresTitle(runEvalSource(dataset)));
 
   const runId = $derived(initial?.id ?? null);
   const live = new LiveRun(() => runId);
   const run = $derived(live.run ?? initial);
+  // The stream went quiet: what the card shows is the last known state, as of then. The status says so, the estimate
+  // is qualified and the live marks (the badge's heartbeat, the line's lime end) stop (DESIGN_DIRECTION §2.8).
+  $effect(() => {
+    lost = live.lost;
+  });
+  const now = new Now(() => live.lost !== null);
 
   let cursor = $state<number | null>(null);
   // Phones: a shorter plot, so the recent runs below start on the first screen.
@@ -41,7 +61,7 @@
       map: [
         // One run, so ink rather than a hue (hue identifies entities): the focal metric solid with the page's one area
         // fill; the secondary a 1 px tertiary dash, so the focal series reads first.
-        { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, end: 'live' as const, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50_95 })) },
+        { id: 'm95', label: 'mAP50-95', color: 'var(--text-primary)', area: true, end: live.lost === null ? ('live' as const) : undefined, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50_95 })) },
         { id: 'm50', label: 'mAP50', color: 'var(--text-tertiary)', pattern: 'dash' as const, thin: true, points: live.epochs.map((e) => ({ x: e.epoch, y: e.val.map50 })) },
       ],
       lastStep: live.steps[live.steps.length - 1],
@@ -79,7 +99,8 @@
 
   // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
-  const deviceItems = $derived(run ? deviceParts(run, sys.data?.gpus ?? []) : []);
+  // The GPU's load is a live reading: once the server stops answering it is dropped, not shown as current.
+  const deviceItems = $derived(run ? deviceParts(run, sys.stale === undefined ? (sys.data?.gpus ?? []) : []) : []);
 </script>
 
 <!-- "Training now" is the status badge and the progress bar; the card's edge stays a plain hairline. -->
@@ -87,7 +108,7 @@
   <header>
     <div class="title-row">
       {#if run}
-        <StatusBadge status={run.status} />
+        <StatusBadge status={run.status} lastKnown={live.lost !== null ? lastKnown(STATUS_LABEL[run.status], live.lost, now.current) : undefined} />
         <h2 id="live-title"><a href={href(`/runs/${run.id}`)}>{run.name}</a></h2>
       {:else}
         <Skeleton w="80px" h="20px" r="var(--radius-full)" />
@@ -118,11 +139,12 @@
     <div class="stats">
       <div class="epoch">
         <Stat label="Epoch" value={run ? num(run.epoch) : ''} unit={run ? `/ ${run.epochs}` : undefined} size="lg" loading={!run} />
-        <Progress value={progress} size="sm" label="Training progress" />
+        <!-- Lime is "now": a last known progress is drawn in ink. -->
+        <Progress value={progress} size="sm" label="Training progress" tone={live.lost !== null ? 'neutral' : 'accent'} />
         <p class="eta num">
           {#if run}
             <span>{progressText(run)}</span>
-            <span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : '—'}</span>
+            <span>{etaText(run.eta_s, live.lost, now.current)}</span>
           {:else}
             <span>&#8203;<Skeleton inline w="40px" h="10px" /></span><span>&#8203;<Skeleton inline w="64px" h="10px" /></span>
           {/if}
@@ -139,7 +161,7 @@
     <div class="chart">
       <!-- "Latest · ep N" is said once: in the legend's note where the legend has room for it; on phones in the title,
            so the legend holds only the two series and their values, on one row. -->
-      <p class="chart-title">{scoresTitle(runEvalSource(dataset))} mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : `by epoch, so far${run?.best ? ` · ○ best at ep ${run.best.epoch}` : ''}`}</span></p>
+      <p class="chart-title">{#if scores}{scores}{:else}<Skeleton inline w="72px" h="12px" />{/if} mAP <span class="faint">{narrow && lastEpoch ? `Latest · ep ${lastEpoch}` : `by epoch, so far${run?.best ? ` · ○ best at ep ${run.best.epoch}` : ''}`}</span></p>
       {#if !run || live.loading}
         <ChartSkeleton height={chartH} />
       {:else}
@@ -158,7 +180,7 @@
           markers={best}
           endDots
           legendNote={narrow ? undefined : lastEpoch ? `Latest · ep ${lastEpoch}` : 'Latest'}
-          label="{scoresTitle(runEvalSource(dataset))} mAP by epoch"
+          label="{scores ?? 'Evaluation'} mAP by epoch"
           empty="Waiting for the first validation…"
         />
       {/if}
@@ -180,10 +202,12 @@
     gap: 2px var(--space-3);
     padding: var(--space-4) var(--space-3) var(--space-3) var(--space-5);
   }
+  /* The name wraps under a long status ("Last known: Running · 2m ago" on a phone) rather than be cut to "f…". */
   .title-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-1) var(--space-3);
     min-width: 0;
   }
   h2 {

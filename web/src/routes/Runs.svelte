@@ -31,7 +31,7 @@
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
-  import { origin } from '$lib/lineage';
+  import { FROM_SCRATCH, origin } from '$lib/lineage';
   import Menu from '$lib/ui/Menu.svelte';
   import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
   import type { QueueRequest } from '$lib/api/types';
@@ -161,7 +161,8 @@
   {#snippet actions()}
     {#if runs.data?.length !== 0}
       <span class="compare">
-        <!-- What Compare needs, in words beside it (a disabled button's tooltip never shows to touch or the keyboard). -->
+        <!-- What Compare needs, in words beside it (a disabled button's tooltip never shows to touch or the keyboard).
+             From 1024 px up; on tablets it sits in the toolbar's first row, so the header keeps one action row. -->
         {#if runs.data && !offline}<span class="cmp-hint" role="status" data-gate-why>{compareHint(selected.length)}</span>{/if}
         <Gate reason={offline ? OFFLINE_REASON : compareReason(selected.length)}>
           {#snippet children(why)}
@@ -195,6 +196,8 @@
         { value: 'failed', label: 'Failed', meta: runs.data?.length ? String(count('failed')) : undefined },
       ]}
     /></div>
+    <!-- Tablets: Compare's prerequisite at the end of the filter's row, under the header's one row of actions. -->
+    {#if runs.data?.length && !offline}<span class="tool-hint" role="status" data-gate-why>{compareHint(selected.length)}</span>{/if}
     <div class="lt-search"><Input icon={Search} bind:value={query} placeholder="Filter by name, model or dataset" aria-label="Filter runs" disabled={!filterable} /></div>
   </div>
 
@@ -289,7 +292,7 @@
                   {:else if from.kind === 'file'}
                     <Ident value={from.label} title={from.path} />
                   {:else if from.kind === 'scratch'}
-                    <span class="faint">From scratch</span>
+                    <span class="faint">{FROM_SCRATCH}</span>
                   {:else}
                     <Ident value={from.label} class="faint" />
                   {/if}
@@ -413,6 +416,7 @@
   }
   /* The prerequisite, beside the action it gates: 12 px secondary, one line. */
   .cmp-hint,
+  .tool-hint,
   .rows-hint {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
@@ -422,8 +426,20 @@
     align-self: center;
     white-space: nowrap;
   }
-  .rows-hint {
+  .rows-hint,
+  .tool-hint {
     display: none;
+  }
+  /* Tablets: a page header's actions never wrap (shell/Page), so the hint leaves Compare's side for the toolbar. */
+  @media (min-width: 768px) and (max-width: 1023px) {
+    .cmp-hint {
+      display: none;
+    }
+    .tool-hint {
+      display: block;
+      margin-left: auto;
+      white-space: nowrap;
+    }
   }
   .scroll {
     overflow-x: auto;
@@ -660,9 +676,11 @@
     .r-check input[type='checkbox']:disabled {
       cursor: not-allowed;
     }
+    /* Off (four runs picked, the most Compare takes): an outline only, the control edge at half strength, so it never
+       reads as filled, and a filled square means checked (round 26: a dark inset fill read as checked). */
     .r-check input[type='checkbox']:disabled::before {
-      background: var(--bg-inset);
-      box-shadow: inset 0 0 0 1.5px var(--line-subtle);
+      background: transparent;
+      box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--line-control) 50%, transparent);
     }
     /* Focus rings the drawn square, not the invisible target around it. */
     .r-check input[type='checkbox']:focus-visible {

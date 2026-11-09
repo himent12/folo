@@ -8,7 +8,7 @@
    * Standard page frame: title row (title, optional meta line and actions) above the content.
    *
    * One rule for the actions on every page: from 768 px up they sit on the title row, right-aligned, whatever the
-   * length of the lead and meta lines (which run the full width under and above it). Below 768 px a page passes its
+   * length of the lead and meta lines (which run the full width under and above it), and on one row: they never wrap. Below 768 px a page passes its
    * secondary actions as `more`: they are buttons on wider screens and one ⋯ menu on phones, beside `actions` (the
    * primary, which keeps a short word there).
    *
@@ -108,8 +108,10 @@
   }
   /* Title row: the title on the left, the actions on its right edge (centred on the title's line); the lead and meta
      lines span the whole width, so a long meta line never pushes the actions down or to the left. Dense placement puts
-     the actions back up beside the title, after the meta line in the source. The title keeps at least 40 % (240 px),
-     and a long action row wraps right-aligned instead of squeezing it. */
+     the actions back up beside the title, after the meta line in the source. The title keeps at least 40 % (240 px).
+     **The actions never wrap onto a second row, at any tier** (DESIGN_DIRECTION §10): a page whose actions would not
+     fit beside its title at 768 px moves the extra (a hint, a secondary action) into its content or its ⋯ menu, never
+     a second row that leaves the title floating between them (the shoot's QA lists a wrapped header). */
   header {
     display: grid;
     grid-template-columns: minmax(min(40%, 240px), 1fr) auto;
@@ -155,7 +157,7 @@
     align-items: center;
     justify-content: flex-end;
     gap: var(--space-2);
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     min-width: 0;
   }
   /* An actions snippet with nothing to show this time (e.g. no create action over an empty list) takes no room. */

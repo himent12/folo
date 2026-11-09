@@ -2,4 +2,5 @@
 
 import type { Run } from '$lib/api/types';
 
-export const watched = $state<{ runs: Run[] | undefined }>({ runs: undefined });
+/** `since`: when the list last arrived, while its polls fail (the list is then a snapshot, not the current state). */
+export const watched = $state<{ runs: Run[] | undefined; since: number | null }>({ runs: undefined, since: null });

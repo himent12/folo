@@ -26,7 +26,7 @@
   import Meta from '$lib/ui/Meta.svelte';
   import { rowNav } from '$lib/ui/rowNav';
   import { unlike, versusYolo26n } from '$lib/benchmarks';
-  import { origin, originTip } from '$lib/lineage';
+  import { FROM_SCRATCH, origin, originTip } from '$lib/lineage';
   import { filterLabel, groupKey, groupLabel, rankKey, scoreContext, splitLabel, type ScoreContext } from '$lib/scoreSummary';
   import { loadThroughput, measuredLatency, measuredTraining } from '$lib/throughput';
 
@@ -68,6 +68,11 @@
   // its run's dataset, on its validation split or, when the dataset has none, its training split. The list is grouped
   // by that, each group headed by what its scores are on ("Validation split of fasteners") and ranked on its own.
   // Published weights and imported files have no known split here: a group each, after the datasets, never ranked.
+  // The filter picks a group of the list: an evaluation dataset, or a source with none ("Published weights",
+  // "Imported"), so it is "Group", never "Dataset". Its accessible name says what it filters; the phone picker's keeps
+  // its visible word first (WCAG 2.5.3, label in name).
+  const GROUP_NAME = 'Filter by evaluation dataset or source';
+  const GROUP_LABEL = `Group: ${GROUP_NAME.charAt(0).toLowerCase()}${GROUP_NAME.slice(1)}`;
   const dsById = $derived(new Map<string, Dataset>((datasets.data ?? []).map((d) => [d.id, d])));
   const evalSet = (m: Model) => {
     const ctx = scoreContext(m, runById, dsById);
@@ -209,23 +214,23 @@
   <div class="list-toolbar">
     <div class="lt-filter">
     {#if models.data?.length}
-      <div class="seg" data-scrolls><Segmented label="Evaluation dataset" bind:value={dsFilter} options={dsOptions} /></div>
+      <div class="seg" data-scrolls><Segmented label={GROUP_NAME} bind:value={dsFilter} options={dsOptions} /></div>
       <!-- Phones: every dataset in a native picker; a strip that scrolls sideways hides the last ones. -->
       <div class="ds-pick">
-        <label for="models-ds">Dataset</label>
-        <Select id="models-ds" bind:value={dsFilter} options={dsOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))} />
+        <label for="models-ds">Group</label>
+        <Select id="models-ds" label={GROUP_LABEL} bind:value={dsFilter} options={dsOptions.map((o) => ({ value: o.value, label: `${o.label} · ${o.meta}` }))} />
       </div>
     {:else if models.data || models.error}
-      <div class="seg"><Segmented label="Evaluation dataset" value="all" disabled options={[{ value: 'all', label: 'All' }]} /></div>
+      <div class="seg"><Segmented label={GROUP_NAME} value="all" disabled options={[{ value: 'all', label: 'All' }]} /></div>
       <div class="ds-pick">
-        <label for="models-ds">Dataset</label>
-        <Select id="models-ds" value="all" disabled options={[{ value: 'all', label: 'All' }]} />
+        <label for="models-ds">Group</label>
+        <Select id="models-ds" label={GROUP_LABEL} value="all" disabled options={[{ value: 'all', label: 'All' }]} />
       </div>
     {:else}
       <!-- The same two controls at their loaded size: the dataset strip (a picker on phones). -->
       <div class="seg ctl-sk" style:width="320px"><Skeleton h="100%" r="var(--radius-md)" /></div>
       <div class="ds-pick" aria-hidden="true">
-        <span class="ds-label">Dataset</span>
+        <span class="ds-label">Group</span>
         <span class="ctl-sk"><Skeleton h="100%" r="var(--radius-md)" /></span>
       </div>
     {/if}
@@ -319,7 +324,7 @@
                     {:else if parent?.kind === 'file'}
                       <Ident value={parent.label} class="src" title={parent.path} />
                     {:else}
-                      {#if parent && parent.kind !== 'scratch'}<Ident value={parent.label} class="faint" title={originTip(parent)} />{:else}<span class="faint">{parent ? 'From scratch' : '—'}</span>{/if}
+                      {#if parent && parent.kind !== 'scratch'}<Ident value={parent.label} class="faint" title={originTip(parent)} />{:else}<span class="faint">{parent ? FROM_SCRATCH : '—'}</span>{/if}
                     {/if}
                   </td>
                   <td class="r faint" title={date(m.created)}>{ago(m.created)}</td>

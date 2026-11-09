@@ -121,6 +121,38 @@ describe('CommandPalette with no query', () => {
     expect(selected()).toBe(first);
   });
 
+  it('lists the runs in flight, by their status, not their display word', async () => {
+    const api = hub.api as MockApi;
+    const active = (await api.runs()).filter((r) => ['running', 'stopping', 'queued'].includes(r.status));
+    expect(active.length).toBeGreaterThan(0);
+    await openWith('', '[id^="pi-run-"]');
+    const listed = [...document.querySelectorAll<HTMLElement>('[id^="pi-run-"]')].map((o) => o.id.replace('pi-run-', ''));
+    expect(listed.sort()).toEqual(active.map((r) => r.id).sort());
+  });
+
+  it('announces the result count once typing pauses, and keeps focus in the field', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const input = await openWith('fasteners');
+      input.focus();
+      const status = document.querySelector<HTMLElement>('[role="status"]')!;
+      expect(status.getAttribute('aria-live')).toBe('polite');
+      expect(status.textContent).toBe('');
+      vi.advanceTimersByTime(600);
+      flushSync();
+      expect(status.textContent).toBe(`${options().length} results`);
+      input.value = 'zzzzqqq';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+      vi.advanceTimersByTime(600);
+      flushSync();
+      expect(status.textContent).toBe('No results');
+      expect(document.activeElement).toBe(input);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('lists the page commands first, then the items chosen last', async () => {
     localStorage.setItem('folo.palette.recent', JSON.stringify(['nav-models']));
     const { pageCommandList } = await import('./pageCommands.svelte');
