@@ -741,19 +741,22 @@ impl FoloApp {
             "43.7 M params · 104 GFLOPs",
             "68.2 M params · 165 GFLOPs",
         ];
+        // A slider row as the Playground rail writes one: name · slider · value, on one line.
         let valued = |name: &str, value: String, control: AnyElement| {
             div()
                 .flex()
-                .flex_col()
-                .gap(px(8.))
+                .items_center()
+                .gap(px(10.))
+                .child(div().w(px(100.)).flex_none().child(label(name)))
+                .child(div().flex_1().min_w_0().child(control))
                 .child(
                     div()
+                        .w(px(44.))
+                        .flex_none()
                         .flex()
-                        .justify_between()
-                        .child(label(name))
+                        .justify_end()
                         .child(text(ty::SM, t.text_primary).tnum().child(value)),
                 )
-                .child(control)
         };
         // Short windows (the 620 px minimum): tighter rhythm and no restating helpers in the Model
         // rows, so the Schedule's controls are in view without scrolling.

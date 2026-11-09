@@ -360,7 +360,7 @@ impl FoloApp {
         panel(&t)
             .flex()
             .child(
-                div().flex_none().w(px(if narrow_strip { 220. } else { 300. })).px(px(16.)).py(px(pad)).child(
+                div().flex_none().w(px(if narrow_strip { 244. } else { 300. })).px(px(16.)).py(px(pad)).child(
                     // The split bar on the strip's first detail line (where the others' captions
                     // sit), its legend on the second: the same grid as every tile beside it.
                     stat(
