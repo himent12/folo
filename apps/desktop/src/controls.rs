@@ -96,9 +96,13 @@ impl FoloApp {
         let ring = self.ring(&fh, window);
         let t = theme(cx);
         let on_click = action.clone();
+        let click_fh = fh.clone();
         el.track_focus(&fh)
             .relative()
             .on_click(cx.listener(move |this, _, window, cx| {
+                // The clicked control takes focus first (keys then act on it, not on whatever had
+                // focus before); the action may still move focus on, as dialogs do.
+                window.focus(&click_fh);
                 on_click(this, window, cx);
                 cx.notify();
             }))
