@@ -204,8 +204,11 @@ pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> i
 
 /// Tinted label chip, 20 px tall.
 /// The compact end-to-end tag in tables (the title rows carry the full badge and its help).
-pub fn e2e_tag(t: &Theme) -> Div {
+pub fn e2e_tag(t: &Theme, id: impl Into<SharedString>) -> gpui::Stateful<Div> {
+    use gpui::{InteractiveElement, StatefulInteractiveElement};
     div()
+        .id(id.into())
+        .tooltip(crate::controls::tip(crate::app::FoloApp::E2E_HELP, None))
         .flex_none()
         .px(px(4.))
         .rounded(px(crate::theme::radius::XS))

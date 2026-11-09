@@ -217,10 +217,15 @@ pub fn paint_image_with_boxes(
                     let (chip_bg, ink) = if b.highlight {
                         (t.accent_solid, t.accent_on)
                     } else if b.dim {
-                        // Muted but opaque (a translucent chip over a photo can't be read): the
-                        // class tint on the panel colour, text picked for contrast on it.
+                        // Thumbnails: a dimmed box keeps only its faded outline, so the filtered
+                        // class's chips carry the tile.
+                        if compact {
+                            continue;
+                        }
+                        // Larger views: muted but opaque (a translucent chip over a photo can't be
+                        // read), its text a step back from the matches'.
                         let muted = crate::theme::over(t.bg_panel, alpha(color, 0.25));
-                        (muted, t.readable_on(muted))
+                        (muted, crate::theme::alpha(t.readable_on(muted), 0.7))
                     } else {
                         (color, chip_text)
                     };

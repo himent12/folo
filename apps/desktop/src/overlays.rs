@@ -1024,7 +1024,7 @@ impl FoloApp {
                             .child(
                                 text(ty::XS, t.text_tertiary)
                                     .whitespace_normal()
-                                    .child("Predicts boxes directly, without non-maximum suppression (NMS)"),
+                                    .child("Predicts boxes directly, with no NMS step"),
                             ),
                     )
                     .child(switch)
@@ -1195,7 +1195,7 @@ impl FoloApp {
                                     // The server confirmed it can; an older one can't say, so the need is stated.
                                     None if self.store.capabilities.is_some() => {
                                         text(ty::XS, t.text_tertiary).whitespace_normal().child(
-                                            "Trains in f16 on this server's tensor cores: about 40% less GPU memory, same speed at 640 px",
+                                            "Trains in f16 on this server's tensor cores: about 40% less GPU memory (at 640 px, not faster)",
                                         )
                                     }
                                     None => rich(

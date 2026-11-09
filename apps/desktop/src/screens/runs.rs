@@ -124,7 +124,7 @@ impl FoloApp {
             .border_b_1()
             .border_color(t.line_subtle)
             .child(th(&t, "Run").flex_1().min_w(px(180.)))
-            .child(th(&t, "Arch").w(px(64.)).flex_none())
+            .child(th(&t, "Arch").w(px(96.)).flex_none())
             .when(show_ds, |d| d.child(th(&t, "Dataset").w(px(120.)).flex_none()))
             .when(wide, |d| d.child(th(&t, "Size · batch").w(px(104.)).flex_none()))
             .child(th(&t, "Status").w(px(96.)).flex_none())
@@ -256,8 +256,18 @@ impl FoloApp {
                                     .child(r.name.clone()),
                             ),
                     )
+                    // The architecture, and the same e2e tag as the model tables for an end-to-end run.
                     .child(
-                        text(ty::SM, t.text_secondary).w(px(64.)).flex_none().child(r.config.arch.as_str()),
+                        div()
+                            .w(px(96.))
+                            .flex_none()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(text(ty::SM, t.text_secondary).child(r.config.arch.as_str()))
+                            .when(r.config.head == crate::api::Head::O2o, |d| {
+                                d.child(e2e_tag(&t, format!("e2e-r-{}", r.id)))
+                            }),
                     )
                     .when(show_ds, |d| {
                         d.child(

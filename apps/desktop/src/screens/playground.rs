@@ -554,7 +554,7 @@ impl FoloApp {
         let tight = window.viewport_size().height < px(700.);
         // Sliders on one line ("label · slider · value") in short windows, and whenever both show,
         // so the latency breakdown fits at 1280 x 800.
-        let inline = tight || !e2e;
+        let inline = true;
         let field = |label: &str, value: String, control: AnyElement, help: AnyElement| {
             let name = div()
                 .flex()
@@ -681,7 +681,8 @@ impl FoloApp {
                     .enumerate()
                     .map(|(i, b)| {
                         let hot = active == Some(i);
-                        let color = t.class(b.class);
+                        // The bar's shade (darkened in light mode), so swatch and bar read as one class.
+                        let color = t.class_stroke(b.class);
                         let key = format!("det-{i}");
                         // A cut class name shows in full on hover and on keyboard focus.
                         let long = may_overflow(&b.name, ty::SM.size, 68.);

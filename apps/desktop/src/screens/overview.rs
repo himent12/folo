@@ -845,11 +845,17 @@ impl FoloApp {
                             // Room for the dataset and architecture only on wide windows.
                             .when(wide, |d| {
                                 d.child(
-                                    text(ty::XS, t.text_tertiary)
-                                        .w(px(meta_w))
-                                        .flex_none()
-                                        .truncate()
-                                        .child(format!("{ds} · {}", r.config.arch.as_str())),
+                                    text(ty::XS, t.text_tertiary).w(px(meta_w)).flex_none().truncate().child(
+                                        format!(
+                                            "{ds} · {}{}",
+                                            r.config.arch.as_str(),
+                                            if r.config.head == crate::api::Head::O2o {
+                                                " · e2e"
+                                            } else {
+                                                ""
+                                            }
+                                        ),
+                                    ),
                                 )
                             })
                             .child(div().w(px(96.)).flex_none().child(status_dot(
@@ -981,7 +987,9 @@ impl FoloApp {
                                             .child(format!("{} · {} px", m.arch.as_str(), m.imgsz)),
                                     )
                                     // The same compact tag as the Models table.
-                                    .when(self.model_e2e(&m), |d| d.child(e2e_tag(&t))),
+                                    .when(self.model_e2e(&m), |d| {
+                                        d.child(e2e_tag(&t, format!("e2e-ov-{}", m.id)))
+                                    }),
                             )
                             .child(div().w(px(96.)).flex_none().flex().justify_end().child(bar_value(
                                 &t,
