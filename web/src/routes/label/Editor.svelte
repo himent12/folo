@@ -284,7 +284,7 @@
           <span use:tooltip={{ text: 'Previous', keys: 'K' }}><Button variant="ghost" size="sm" icon={ChevronLeft} aria-label="Previous image" disabled={idx <= 0} onclick={() => step(-1)} /></span>
           <span class="pos num">{#if idx >= 0}{num(idx + 1)} of {num(images.length)}{:else}Not in this filter{/if}</span>
           <span use:tooltip={{ text: 'Next', keys: 'J' }}><Button variant="ghost" size="sm" icon={ChevronRight} aria-label="Next image" disabled={idx < 0 || idx >= images.length - 1} onclick={() => step(1)} /></span>
-          {#if locked}<p class="lock" role="status"><span class="dot" aria-hidden="true"></span>{locked}</p>{:else}<p class="tip">Drag on the image to draw a box, a box to move it, a handle to resize it. Arrow keys move the selected box; Alt+arrows resize it.</p>{/if}
+          {#if locked}<p class="lock" role="status"><span class="dot" aria-hidden="true"></span>{locked}</p>{:else}<p class="tip">Drag to draw, move or resize a box. Arrows move the selected box, Alt+arrows resize it.</p>{/if}
         </div>
         <div class="canvas-box">
           <EditCanvas jobId={job.id} {img} classes={job.classes} boxes={draft} bind:selected {hovered} cls={lastClass} disabled={!!locked} onchange={edit} />
