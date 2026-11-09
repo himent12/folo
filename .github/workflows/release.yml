@@ -397,6 +397,11 @@ jobs:
     if: ${{ !cancelled() && needs.cli.result == 'success' }}
     runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
     timeout-minutes: 15
+    # One writer per release at a time, whatever the ref: a tag push and dispatches from different branches for the
+    # same tag would otherwise edit, upload and prune the same draft at once and mix assets of different commits.
+    concurrency:
+      group: release-draft-${{ needs.plan.outputs.tag || github.ref }}
+      cancel-in-progress: false
     permissions:
       contents: write
     steps:

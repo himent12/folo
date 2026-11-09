@@ -61,6 +61,8 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
 - Capability reporting in `/api/system` (f16, tensor cores, AMP) (#108); `head`, `trained_with`, `precision` and
   `fused` on models (#117, #123); operating-point confidence, the resolved optimizer, queue control and ONNX download
   (#129); measured throughput, run estimates and a benchmark probe (#130); evaluation provenance (#138).
+- `folo serve` releases a run's GPU memory when it ends and an idle model's after inference, lists published weights
+  as models and refuses `--amp` up front where it cannot run (#140).
 - `folo mcp`: an MCP server (rmcp, stdio) with 18 tools, `folo://` resources and prompts, embedded or proxying a
   running `folo serve`, able to drive real training end to end (#2, #36, #49).
 - The CLI is agent-friendly: `--json` everywhere, stable exit and error codes, `folo describe --json`, `folo doctor`
@@ -91,5 +93,3 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
   `install.sh` stops on macOS. Build from source there.
 - The repository is private: the install scripts need a token (`GH_TOKEN`, `GITHUB_TOKEN` or a logged-in `gh`).
 - `weights-v1` (`folo-n-coco`) is still a draft release, so only repository writers can `folo weights pull` it.
-- `folo serve` keeps its finished runs' GPU buffer pool (several GB), which slows other GPU jobs until it restarts
-  (docs/DOGFOOD-3.md, X1).

@@ -145,10 +145,9 @@ export function renderLanding(md: MarkdownIt, page: ParsedPage, slug: string): L
   // The numbers: the whole section (the comparison table and its caveats).
   const numbersHtml = section(numbers, 'l-numbers', `<div class="l-prose prose">${render(numbers.tokens)}</div>`, 'Benchmarks');
 
-  // Quickstart: everything before its first subsection.
-  const h3 = quick.tokens.findIndex((t) => t.type === 'heading_open');
-  const quickTokens = h3 < 0 ? quick.tokens : quick.tokens.slice(0, h3);
-  const quickHtml = section(quick, 'l-quick', `<div class="l-prose prose">${render(quickTokens)}</div>`, 'Get started');
+  // Quickstart: the whole section (install, a first model, building from source), so its subsections are anchors too.
+  for (const t of quick.tokens) if (t.type === 'heading_open' && attr(t, 'id')) anchors.add(attr(t, 'id'));
+  const quickHtml = section(quick, 'l-quick', `<div class="l-prose prose">${render(quick.tokens)}</div>`, 'Get started');
 
   // Studio and Desktop: the first paragraph and a screenshot each (Studio's second one; the first is the hero's).
   const app = (s: Section, name: string, href: string, shotIndex: number) => {
