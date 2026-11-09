@@ -6,7 +6,9 @@ use super::elementwise::SendPtr;
 use super::gemm::{
     BiasAct, ColumnMap, NR, Operand, RowPtrs, Strided, gemm, gemm_ex, gemm_rows, pack_rows_into_panels,
 };
-use crate::backend::{Conv2dParams, UnaryOp};
+use crate::backend::Conv2dParams;
+#[cfg(any(target_arch = "x86_64", test))]
+use crate::backend::UnaryOp;
 
 /// Geometry shared by the kernels. All tensors are contiguous NCHW / OIHW.
 #[derive(Clone, Copy, Debug)]
