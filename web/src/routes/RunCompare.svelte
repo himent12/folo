@@ -414,10 +414,13 @@
              lies over its neighbour. -->
         <header class="c-row">
           <span class="c-metric"><Select label="Metric" bind:value={metricId} options={METRICS.map((m) => ({ value: m.id, label: m.label }))} /></span>
-          <span class="c-x"><Select label="X axis" bind:value={() => x, setX} options={X_PHONE} /></span>
-          <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
-               line of words under the controls went (it pushed the plot down). -->
-          {#if x === 'progress'}<span class="i-slot"><InfoButton chart label="About the progress axis" text={progressWhy} how={PROGRESS_HOW} /></span>{/if}
+          <!-- The x axis and its ⓘ move together: on the narrowest phones both wrap under the metric, never the ⓘ alone. -->
+          <span class="c-xi">
+            <span class="c-x"><Select label="X axis" bind:value={() => x, setX} options={X_PHONE} /></span>
+            <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
+                 line of words under the controls went (it pushed the plot down). -->
+            {#if x === 'progress'}<span class="i-slot"><InfoButton chart label="About the progress axis" text={progressWhy} how={PROGRESS_HOW} /></span>{/if}
+          </span>
         </header>
         <!-- The ⓘ opens here, under the controls, never as a popover over the legend and plot (ui/infoSlot). -->
         <InfoRegion slot={axisInfo} />
@@ -594,7 +597,7 @@
 </Page>
 
 
-{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{#if v.about}<span class="k-sub v-about">{v.about}</span>{/if}{/snippet}
+{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14 && !/\s/.test(v.value)} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{#if v.about}<span class="k-sub v-about">{v.about}</span>{/if}{/snippet}
 
 {#snippet chips()}
   <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
@@ -1155,9 +1158,11 @@
   }
   /* Phones: metric picker and x axis share one row above the legend. The metric takes what is left (at least 140 px,
      so "mAP50-95" shows whole at 16 px touch text); the x axis is as wide as its longest word; the ⓘ has a real 44 px
-     slot, its touch target inside it rather than over the select beside it. */
+     slot, its touch target inside it rather than over the select beside it. On the narrowest phones (320 px) the x axis
+     and its ⓘ wrap to a second line rather than overflow. */
   .c-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--space-2);
   }
@@ -1169,8 +1174,13 @@
   .c-metric > :global(.select) {
     flex: 1;
   }
-  .c-x {
+  .c-xi {
     flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+  }
+  .c-x {
     display: flex;
   }
   .i-slot {
@@ -1335,10 +1345,14 @@
     white-space: normal;
     overflow-wrap: break-word;
   }
-  /* A short value ("360 steps", "0.000833") stays whole; a value in words ("Mixed precision (f16)", "End-to-end (no
-     NMS)") wraps at its spaces in a narrow column, never cut. */
+  /* A short value of one word ("0.000833", "AdamW") stays whole; a value in words ("360 steps", "last 10 epochs",
+     "Mixed precision (f16)") wraps at its spaces in a narrow column (a 320 px phone), never cut. So does the request
+     beside a value ("(requested 0.01)"), which elsewhere keeps to one line. */
   .val.whole {
     white-space: nowrap;
+  }
+  .fixed td.cfg :global(.ui-note) {
+    white-space: normal;
   }
   /* A run's head: its name over its role (Baseline, or Swap), each on a line of its own. */
   .th {

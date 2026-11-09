@@ -8,6 +8,7 @@ import { hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router.svelte';
 import { toast } from '$lib/ui/toast.svelte';
+import Run from './Run.svelte';
 import Runs from './Runs.svelte';
 
 let target: HTMLElement;
@@ -108,5 +109,28 @@ describe('Runs: the training queue', () => {
     flushSync();
     expect(target.querySelectorAll('td.act button')).toHaveLength(0);
     expect(place('run_q7c5')).toBeUndefined();
+  });
+});
+
+describe('Run: a waiting run on a server without estimates', () => {
+  it('says the runs in front have no known length, never "starts in about" the training run’s time left alone', async () => {
+    hub.api = new MockApi('no-throughput', 0);
+    hub.mode = 'mock';
+    router.route = parse('#/runs/run_q7c5');
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(Run as Component, { target });
+    const text = await vi.waitFor(
+      () => {
+        flushSync();
+        const t = [...target.querySelectorAll('p, div')].map((e) => e.textContent ?? '').find((t) => /Starts (in|after)/.test(t) && /\(.*\)\./.test(t));
+        if (!t) throw new Error('no queue line yet');
+        return t.replace(/\s+/g, ' ');
+      },
+      { timeout: 4000, interval: 10 },
+    );
+    expect(text).not.toMatch(/Starts in about/);
+    expect(text).toMatch(/Starts in more than|Starts after/);
+    expect(text).toMatch(/not known yet/);
   });
 });

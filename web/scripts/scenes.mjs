@@ -2,7 +2,7 @@
 // (default: dark + light, desktop + mobile). `setup(page)` drives the UI into the state before the shot.
 // `search` adds query params to the page URL (e.g. `scenario=empty` for the mock), next to `mock=1`.
 
-/** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'tablet' | 'mobile')[], advance?: number, search?: string,
+/** @typedef {{ name: string, path: string, themes?: ('dark' | 'light')[], viewports?: ('desktop' | 'laptop' | 'tablet' | 'mobile' | 'small')[], advance?: number, search?: string,
  *   fullPage?: boolean, keepScroll?: boolean, touch?: false, setup?: (page: import('playwright-core').Page, ctx: { vp: string, theme: string }) => Promise<void> }} Scene */
 // `touch: false` keeps a scene out of --qa's coarse-pointer pass over phone states: a scene about a keyboard feature
 // (shortcuts) or one that sets up touch itself (the touch hint).
@@ -471,7 +471,8 @@ export const scenes = [
   // One run trained 150 epochs, the others 23 to 61: the x axis defaults to "By progress" (the header says why, "one run
   // trained far longer"), so the three shorter runs are not squeezed into the first 40 % of an epoch axis; each line ends
   // in its run's status mark.
-  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
+  // `small` (320 px): the phone control row must hold at the narrowest phone too, its values whole.
+  { name: 'run-compare', path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0', viewports: ['desktop', 'laptop', 'tablet', 'mobile', 'small'] },
   {
     // Phones: the automatic axis's reason opened from the ⓘ beside the axis control, in place under the controls (the
     // legend and the plot move down, never covered).

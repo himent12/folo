@@ -37,6 +37,8 @@ const VIEWPORTS = {
   // Below the 960 px laptop tier: one column, the section picker, the New run dock.
   tablet: { width: 820, height: 1180 },
   mobile: { width: 390, height: 844 },
+  // The narrowest phone a layout must hold (iPhone SE, 1st gen): only the scenes that list it, for --qa's checks.
+  small: { width: 320, height: 640 },
 };
 // Fixed wall clock so relative times ("3 min ago") and the mock's live run are identical every round.
 const FIXED_NOW = new Date('2026-11-08T14:30:00Z');
@@ -461,7 +463,7 @@ const overflows = [];
  * Opens one scene in one theme and viewport, sets it up, runs both checks and (without --qa) takes the shot.
  * @param {import('./scenes.mjs').Scene} scene
  * @param {'dark' | 'light'} theme
- * @param {'desktop' | 'laptop' | 'tablet' | 'mobile'} vp
+ * @param {'desktop' | 'laptop' | 'tablet' | 'mobile' | 'small'} vp
  * @param {boolean} [touch] a touch screen (`pointer: coarse`, `hover: none`): --qa's second pass over phone states
  * @returns {Promise<boolean>} whether the page showed a phone section picker
  */
@@ -470,7 +472,7 @@ async function shoot(scene, theme, vp, touch = false) {
   const context = await browser.newContext({
     viewport: VIEWPORTS[vp],
     hasTouch: touch,
-    deviceScaleFactor: vp === 'mobile' ? 2 : 1,
+    deviceScaleFactor: vp === 'mobile' || vp === 'small' ? 2 : 1,
     colorScheme: theme === 'light' ? 'light' : 'dark',
     reducedMotion: 'reduce',
   });
@@ -514,7 +516,7 @@ async function shoot(scene, theme, vp, touch = false) {
     );
     count++;
     if (qa) return picker;
-    const full = scene.fullPage ?? vp !== 'mobile';
+    const full = scene.fullPage ?? (vp !== 'mobile' && vp !== 'small');
     // Capture what a user sees: from the top, with no stray focus ring on the skip link. For full-page shots the
     // viewport grows to the document's height, so sticky and fixed bars (top bar, tab bar, docks) sit where they
     // belong instead of wherever the viewport happened to be when the image was stitched.
@@ -550,8 +552,8 @@ async function shoot(scene, theme, vp, touch = false) {
   return picker;
 }
 
-/** --qa's sizes: tablet and mobile; FOLO_QA_SIZES=laptop,tablet (comma-separated) checks others on demand. */
-const qaSizes = (process.env.FOLO_QA_SIZES ?? 'tablet,mobile').split(',').map((v) => v.trim());
+/** --qa's sizes: tablet, mobile and small (the scenes listing it); FOLO_QA_SIZES=laptop,tablet (comma-separated) checks others on demand. */
+const qaSizes = (process.env.FOLO_QA_SIZES ?? 'tablet,mobile,small').split(',').map((v) => v.trim());
 /** --qa's states, run by a small pool below. @type {(() => Promise<void>)[]} */
 const qaJobs = [];
 try {
@@ -574,7 +576,7 @@ try {
         if ((await shoot(scene, first, vp)) && first === 'dark' && themes.includes('light')) await shoot(scene, 'light', vp);
       });
       // A scene about a fine or a coarse pointer in particular (keyboard shortcuts, the touch hint) sets `touch: false`.
-      if (vp === 'mobile' && scene.touch !== false) qaJobs.push(async () => void (await shoot(scene, first, vp, true)));
+      if ((vp === 'mobile' || vp === 'small') && scene.touch !== false) qaJobs.push(async () => void (await shoot(scene, first, vp, true)));
     }
   }
   // Each state has its own context and paused clock, so --qa runs several at once: FOLO_QA_JOBS, default up to 8 (most

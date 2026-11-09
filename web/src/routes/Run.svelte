@@ -99,8 +99,9 @@
   // in about …" an estimate rather than a guess. One that cannot be estimated stays unknown, and the page says so.
   const frontLengths = new Resource(async (s) => {
     const key = frontKey;
-    if (!key || !hasFeature(system.data, 'run_estimate')) return { key, lengths: [] as Length[] };
     const rs = untrack(() => inFront);
+    // No estimates on this server: every run in front stays unknown (one null each), never "nothing in front".
+    if (!key || !hasFeature(system.data, 'run_estimate')) return { key, lengths: rs.map((): Length => null) };
     const lengths = await Promise.all(
       rs.map((r) =>
         hub.api.estimateRun({ ...r.config, name: r.name }, s).then(
