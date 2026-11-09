@@ -650,9 +650,11 @@
   .note.action {
     color: var(--text-secondary);
   }
-  /* An action's command may break between its words (a phone cannot fit FOLO_GPU_BACKEND=vulkan folo serve … whole). */
+  /* An action's command may break between its words, and inside a long one (a phone cannot fit
+     $env:FOLO_GPU_BACKEND='vulkan'; whole). */
   .note.action code {
     white-space: normal;
+    overflow-wrap: anywhere;
   }
   .cap .setting-text {
     flex: 1;
