@@ -31,6 +31,7 @@
   import Field from '$lib/ui/Field.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Remedy from '$lib/ui/Remedy.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
@@ -38,6 +39,7 @@
   import Switch from '$lib/ui/Switch.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import { tooltip } from '$lib/ui/tooltip';
+  import { VULKAN } from './settings/capabilities';
   import AugPreview, { type AugKey } from './runnew/AugPreview.svelte';
   import { AMP_SPEEDUP, arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, oomScale, shortRun, warmup } from './runnew/estimate';
 
@@ -45,6 +47,8 @@
   // This page is the create action: the top bar's New run steps aside instead of showing a pressed, disabled copy.
   ownCreateAction();
 
+  /** Where the architectures' reference latency was measured (docs/BENCHMARKS.md). */
+  const LATENCY_REF = 'RTX 4080 SUPER · 640 px · f32 · end to end';
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery('max-width: 767px', false);
 
@@ -223,10 +227,10 @@
   const onCpu = $derived(device === 'cpu' || (device === 'auto' && !gpu));
 
   // Mixed precision (TrainConfig.amp): shown only when the server says what `auto` can use (`capabilities`, absent from
-  // older servers), and off where a run would fail with `not_supported`: one plain sentence and one action that works
-  // (identifiers in backticks), the server's own words kept verbatim behind "Driver report".
+  // older servers), and off where a run would fail with `not_supported`: one plain sentence, the command that works
+  // (ui/Remedy: the shell, one unwrapped copyable line), the server's own words kept verbatim behind "Driver report".
   const caps = $derived(system.data?.capabilities);
-  const ampBlock = $derived.by((): { why: string; raw?: string } | null => {
+  const ampBlock = $derived.by((): { why: string; shell?: string; command?: string; raw?: string } | null => {
     if (!caps) return null;
     if (device === 'cpu') return { why: 'The CPU has no tensor cores. Pick a GPU to train in mixed precision.' };
     // Auto on a server without a usable GPU is the CPU too: no GPU advice.
@@ -237,14 +241,14 @@
     const t = caps.tensor_cores;
     if (t.available && !t.enabled) {
       if (/self-test/i.test(t.reason ?? '')) return { why: "The server's tensor-core self-test failed. Train in f32 on this GPU.", raw };
-      return { why: 'Tensor cores are off on this server. Restart it with `folo serve --tensor-cores`.', raw };
+      return { why: 'Tensor cores are off on this server; restart it with them on:', command: 'folo serve --tensor-cores', raw };
     }
     if (!t.available) {
       // docs/GPU.md: wgpu has cooperative matrices on Vulkan only (NVIDIA tensor cores through SPV_KHR_cooperative_matrix;
       // an RTX 4080 SUPER has them there), none on DX12 or Metal. So only an NVIDIA RTX card seen through DX12 has a way.
       const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === caps.device);
       if (g?.backend === 'dx12' && /nvidia/i.test(g.name) && /\brtx\b/i.test(g.name))
-        return { why: "DirectX 12 does not reach this GPU’s tensor cores. Restart the server on Vulkan, in PowerShell: `$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores`.", raw };
+        return { why: 'DirectX 12 does not reach this GPU’s tensor cores; restart the server on Vulkan.', shell: 'PowerShell', command: `${VULKAN} --tensor-cores`, raw };
       return { why: 'This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.', raw };
     }
     return { why: 'Not available on this server. Train in f32 on this GPU.', raw };
@@ -259,11 +263,11 @@
   const est = $derived(estimate(arch, dataset?.splits.train ?? 0, epochs, batchN, imgszN, onCpu, ampOn));
   /** The trainer's schedule: optimizer steps an epoch, fewer than batches when gradients accumulate. */
   const sched = $derived(warmup(dataset?.splits.train ?? 0, Number.isInteger(epochs) && epochs > 0 ? epochs : 1, batchN));
-  /** The batches behind the steps, for the Summary's tooltip and its accessible description. */
+  /** The batches behind the steps, for the Summary's tooltip and its accessible description: one line in the rail. */
   const stepsWhy = $derived(
     sched.accumulate > 1
-      ? `${num(est.stepsPerEpoch)} batches of ${batchN} images; ${sched.accumulate} make one optimizer step.`
-      : `${num(est.stepsPerEpoch)} batches of ${batchN} images, one optimizer step each.`,
+      ? `${num(est.stepsPerEpoch)} batches of ${batchN}; ${sched.accumulate} per optimizer step.`
+      : `${num(est.stepsPerEpoch)} batches of ${batchN}, one step each.`,
   );
   // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess.
   const gpuMem = $derived(gpu && gpu.memory_bytes > 0 ? gpu.memory_bytes : null);
@@ -546,39 +550,37 @@
   {#if !onCpu && gpuMem}
     <div class="vram" aria-hidden="true"><i class:warn={vramPct > 0.9} style:width={pct2(Math.min(1, vramPct))}></i></div>
   {/if}
+  <!-- Warnings in the rail are one-line callouts in the status's text colour with its icon, no tinted fill (fills are
+       for banners), right above Start. -->
   {#if vramPct > 1}
-    <p class="warning" role="alert">
-      <TriangleAlert size={14} /> This likely runs out of GPU memory. Try batch {Math.max(1, Math.floor(batchN / Math.ceil(vramPct)))} or a smaller image size.
+    <p class="callout danger" role="alert">
+      <TriangleAlert size={14} aria-hidden="true" /><span>This likely runs out of GPU memory. Try batch {Math.max(1, Math.floor(batchN / Math.ceil(vramPct)))} or a smaller image size.</span>
     </p>
   {:else if onCpu}
-    <p class="warning soft"><TriangleAlert size={14} /> Training on the CPU is roughly 14× slower than on a GPU.</p>
+    <p class="callout"><TriangleAlert size={14} aria-hidden="true" /><span>Training on the CPU is roughly 14× slower than on a GPU.</span></p>
   {/if}
   {#if short}
-    <!-- The trainer's warnings (folo_vision::train::schedule_warnings) as one line and its fix; the reasons behind Why?. -->
-    <div class="warning soft short">
-      <TriangleAlert size={14} />
-      <div class="short-body">
-        <p>
-          {#if short.scratch}Too short to learn: {num(short.steps)} optimizer steps.{:else}Mostly warmup: {num(short.warmup)} of {num(short.steps)} optimizer steps.{/if}
-        </p>
-        <div class="short-acts">
+    <!-- The trainer's warnings (folo_vision::train::schedule_warnings) as one line; the reasons and the fix behind Why?. -->
+    <div class="short">
+      <p class="callout">
+        <TriangleAlert size={14} aria-hidden="true" />
+        <span>{#if short.scratch}Too short to learn: {num(short.steps)} steps.{:else}Mostly warmup: {num(short.warmup)} of {num(short.steps)} steps.{/if}</span>
+        <button type="button" class="more" aria-expanded={shortWhy} aria-controls="{where}-short-why" onclick={() => (shortWhy = !shortWhy)}>Why?</button>
+      </p>
+      {#if shortWhy}
+        <div class="short-why" id="{where}-short-why">
+          {#if short.scratch}
+            <p>
+              {num(short.steps)} optimizer steps: {num(epochs)} epochs × {num(short.stepsPerEpoch)}{#if short.accumulate > 1}{' '}({num(est.stepsPerEpoch)} batches of {batchN}, {short.accumulate} per step){/if}.
+              Trained from scratch, a detector needs a few hundred steps to learn anything, so expect an mAP near&nbsp;0.
+            </p>
+          {/if}
+          {#if short.warmupHeavy}
+            <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks only in the second half of the run.</p>
+          {/if}
           <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
-          <button type="button" class="more" aria-expanded={shortWhy} aria-controls="{where}-short-why" onclick={() => (shortWhy = !shortWhy)}>Why?</button>
         </div>
-        {#if shortWhy}
-          <div class="short-why" id="{where}-short-why">
-            {#if short.scratch}
-              <p>
-                {num(short.steps)} optimizer steps: {num(epochs)} epochs × {num(short.stepsPerEpoch)}{#if short.accumulate > 1}{' '}({num(est.stepsPerEpoch)} batches of {batchN}, {short.accumulate} per step){/if}.
-                Trained from scratch, a detector needs a few hundred steps to learn anything, so expect an mAP near&nbsp;0.
-              </p>
-            {/if}
-            {#if short.warmupHeavy}
-              <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks only in the second half of the run.</p>
-            {/if}
-          </div>
-        {/if}
-      </div>
+      {/if}
     </div>
   {/if}
 {/snippet}
@@ -613,10 +615,8 @@
       </label>
     {/each}
   </div>
-  <p class="ref">
-    Latency: end to end on an RTX 4080 SUPER, a decoded 640 px image in, boxes out, NMS included (fp32). A dash:
-    not measured yet.
-  </p>
+  <!-- At most two lines: what the figure is (the architecture's reference, not this device or these weights). -->
+  <p class="ref">Latency: each size's reference, {LATENCY_REF}. A dash: not measured yet.</p>
 {/snippet}
 
 {#snippet estimates(withName: boolean)}
@@ -684,9 +684,15 @@
               <Segmented id="arch-pick" label="Model size" bind:value={arch} options={arches.map((a) => ({ value: a.arch, label: a.size }))} />
               {#if selArch}
                 <p class="a-sel"><span class="mono">{selArch.arch}</span> {selArch.note}</p>
-                <p class="a-specs num">
-                  {compact(selArch.params)} params · {num(selArch.flops, 1)} GFLOPs · {selArch.ms !== undefined ? `${num(selArch.ms, 2)} ms` : 'latency not measured yet'}
-                </p>
+                <p class="a-specs num">{compact(selArch.params)} params · {num(selArch.flops, 1)} GFLOPs</p>
+                <!-- The architecture's reference figure, named as one, with where it was measured under it: not this
+                     device, not these weights. -->
+                {#if selArch.ms !== undefined}
+                  <p class="a-lat num">Reference latency <span class="a-lat-v">{num(selArch.ms, 2)} ms</span></p>
+                  <p class="a-specs">{LATENCY_REF}</p>
+                {:else}
+                  <p class="a-lat">Reference latency not measured yet</p>
+                {/if}
               {/if}
             </div>
             <details class="advanced a-compare">
@@ -766,7 +772,7 @@
                   {/if}
                 </div>
               {:else}
-                <p class="dev-hint">Auto uses the GPU when there is one, else the CPU.</p>
+                <p class="dev-hint">Auto prefers the GPU over the CPU.</p>
               {/if}
             </div>
             {#if caps}
@@ -776,18 +782,7 @@
               <div class="field sw-field amp" class:off={!!ampBlock}>
                 <Switch id="amp" label="Mixed precision" checked={ampOn} onchange={(v) => (amp = v)} disabled={!!ampBlock} describedby={ampBlock ? 'amp-why' : 'amp-hint'} />
                 {#if ampBlock}
-                  <div class="sw-why">
-                    <p id="amp-why">{#each ampBlock.why.split('`') as text, i (i)}{#if i % 2}<span class="mono">{#each text.split(' ') as w, j (j)}{#if j > 0}{' '}{/if}<span class="word">{w}</span>{/each}</span>{:else}{text}{/if}{/each}</p>
-                    {#if ampBlock.raw}
-                      <details class="dev-detail">
-                        <summary><ChevronRight size={12} aria-hidden="true" />Driver report</summary>
-                        <div class="cli-body">
-                          <code>{ampBlock.raw}</code>
-                          <span class="cli-copy"><Button size="sm" variant="ghost" icon={Copy} aria-label="Copy driver report" title="Copy driver report" onclick={() => ampBlock?.raw && copy(ampBlock.raw, 'Driver report copied')} /></span>
-                        </div>
-                      </details>
-                    {/if}
-                  </div>
+                  <div class="sw-why"><Remedy compact id="amp-why" cause={ampBlock.why} shell={ampBlock.shell} command={ampBlock.command} report={ampBlock.raw} /></div>
                 {:else}
                   <p class="sw-hint" id="amp-hint">{ampHint}</p>
                 {/if}
@@ -1114,7 +1109,7 @@
     color: var(--text-primary);
   }
   .ref {
-    max-width: 360px;
+    max-width: 60ch;
     text-wrap: pretty;
     margin-top: var(--space-2);
     font-size: var(--type-sm-size);
@@ -1401,32 +1396,23 @@
     grid-row: auto;
     grid-template-rows: none;
   }
+  /* Where the server cannot train in mixed precision, its remedy (ui/Remedy: a sentence, the command on one line) takes
+     the row's full width, so the command fits whole; the switch keeps its column's width. */
+  .fields > .sw-field.amp.off {
+    grid-column: 1 / -1;
+  }
+  .fields > .sw-field.amp.off > :global(.switch) {
+    width: calc(50% - var(--space-5) / 2);
+  }
   .fields > .sw-field > .sw-why {
     align-self: start;
-    display: grid;
-    gap: var(--space-1);
+    min-width: 0;
   }
   .sw-hint {
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
     text-wrap: pretty;
-  }
-  .sw-why p {
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-secondary);
-    text-wrap: pretty;
-  }
-  /* A command breaks only between its words (never after the dashes of `--tensor-cores`). */
-  .sw-why .mono {
-    color: var(--text-primary);
-  }
-  .sw-why .word {
-    white-space: nowrap;
-  }
-  .sw-why .cli-body {
-    margin-top: var(--space-1);
   }
   @media (pointer: coarse) {
     .sw-field :global(.switch) {
@@ -1467,6 +1453,16 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
+  }
+  .a-lat {
+    margin-top: var(--space-1);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .a-lat-v {
+    color: var(--text-primary);
+    font-weight: var(--weight-medium);
   }
   .a-compare[open] .arches {
     margin-top: var(--space-3);
@@ -1545,43 +1541,44 @@
   .aug-toggle[aria-expanded='true'] {
     margin-bottom: var(--space-3);
   }
-  .warning {
+  /* A callout: one line in the status's text colour after its icon, at 12 px, no fill (tinted fills are for banners). */
+  .callout {
     display: flex;
+    align-items: flex-start;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-radius: var(--radius-md);
-    background: var(--danger-muted);
-    color: var(--danger-text);
     font-size: var(--type-sm-size);
-  }
-  .warning.soft {
-    background: var(--warning-muted);
+    line-height: var(--type-sm-line);
     color: var(--warning-text);
-  }
-  /* Callouts break lines evenly, never leaving one short word (or "0.") alone on the last line. */
-  .warning,
-  .warning p {
     text-wrap: pretty;
   }
-  .short-body {
-    display: grid;
-    gap: var(--space-1);
+  .callout.danger {
+    color: var(--danger-text);
+  }
+  .callout > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 3px; /* grid-ok: the 14 px icon centred on the 20 px first line */
+  }
+  .callout > span {
     min-width: 0;
   }
-  .short-acts {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-1) var(--space-4);
+  .short {
+    display: grid;
+    gap: var(--space-2);
   }
+  /* The reasons and the fix, under the line, indented to its text. */
   .short-why {
     display: grid;
-    gap: var(--space-1);
-    margin-top: var(--space-1);
+    justify-items: start;
+    gap: var(--space-2);
+    padding-left: 22px; /* grid-ok: the icon (14) and the gap (8) */
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
+    text-wrap: pretty;
   }
-  /* "Why?" opens the reasons: quieter than the fix beside it. */
+  /* "Why?" opens the reasons and the fix, right after the line's text. */
   .more {
+    flex-shrink: 0;
     color: var(--warning-text);
     text-decoration: underline;
     text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
@@ -1591,7 +1588,7 @@
   .more:hover {
     text-decoration-color: currentColor;
   }
-  /* The fix a short-run warning suggests, one click away. */
+  /* The fix a short-run warning suggests, under its reasons. */
   .fix {
     color: var(--text-primary);
     font-weight: var(--weight-medium);
@@ -1647,10 +1644,6 @@
   .was {
     color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
-  }
-  .warning :global(svg) {
-    flex-shrink: 0;
-    margin-top: 4px;
   }
   .cli {
     margin-top: calc(-1 * var(--space-1));
@@ -1913,6 +1906,9 @@
     .fields > .sw-field {
       grid-row: auto;
       grid-template-rows: none;
+    }
+    .fields > .sw-field.amp.off > :global(.switch) {
+      width: auto;
     }
     .aug-preview {
       position: static;

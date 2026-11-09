@@ -1,6 +1,5 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
-  import Copy from '@lucide/svelte/icons/copy';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import CircleMinus from '@lucide/svelte/icons/circle-minus';
   import CircleSlash from '@lucide/svelte/icons/circle-slash';
@@ -19,11 +18,13 @@
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
   import { showShortcuts } from '$lib/shell/shortcuts';
   import Button from '$lib/ui/Button.svelte';
+  import DriverReport from '$lib/ui/DriverReport.svelte';
   import Field from '$lib/ui/Field.svelte';
   import Kbd from '$lib/ui/Kbd.svelte';
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import Input from '$lib/ui/Input.svelte';
   import Panel from '$lib/ui/Panel.svelte';
+  import Remedy from '$lib/ui/Remedy.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Switch from '$lib/ui/Switch.svelte';
   import { toast } from '$lib/ui/toast.svelte';
@@ -53,14 +54,6 @@
   const parts = (t: string) => t.split('`').map((text, i) => ({ text, code: i % 2 === 1 }));
   /** The server's own reasons as plain text, for an issue or a terminal. */
   const report = $derived(caps && sys.data ? driverReport(capRows, caps.device, deviceSummary(caps, sys.data.gpus, sys.data.cpu.name)) : '');
-  async function copyReport() {
-    try {
-      await navigator.clipboard.writeText(report);
-      toast.success('Driver report copied');
-    } catch (e) {
-      toast.error(e, 'Could not copy the driver report');
-    }
-  }
 
   // Scroll-spy from geometry: the current section is the last one whose top has passed just below the top bar
   // (the first while nothing has; the last once the page is scrolled to the bottom).
@@ -229,7 +222,14 @@
           {#each themes as t (t.value)}
             {@const on = prefs.theme === t.value}
             <label class="theme" class:on>
-              <input type="radio" name="theme" value={t.value} checked={on} onchange={() => (prefs.theme = t.value)} />
+              <input
+                type="radio"
+                name="theme"
+                value={t.value}
+                checked={on}
+                aria-label={on ? `${t.label}, current` : t.label}
+                onchange={() => (prefs.theme = t.value)}
+              />
               <span class="preview">
                 {#if t.value === 'system'}
                   <span class="split dark-half"><ThemePreview theme="dark" /></span>
@@ -238,10 +238,10 @@
                   <ThemePreview theme={t.value} />
                 {/if}
               </span>
-              <!-- The selection said in words too ("Current"), not only by the ring. -->
+              <!-- The selection said in words too ("Current"), not only by the ring: under the card's own name, inside
+                   its column, so it never reads as marking the card beside it. -->
               <span class="theme-label">
-                <t.icon size={14} strokeWidth={1.75} aria-hidden="true" />
-                {t.label}
+                <span class="theme-name"><t.icon size={14} strokeWidth={1.75} aria-hidden="true" />{t.label}</span>
                 {#if on}<span class="current"><Check size={12} strokeWidth={2.25} aria-hidden="true" />Current</span>{/if}
               </span>
             </label>
@@ -310,23 +310,16 @@
                   <div class="setting-text">
                     <p>{c.label}</p>
                     <p class="note">{#each parts(c.note) as p, i (i)}{#if p.code}<code>{p.text}</code>{:else}{p.text}{/if}{/each}</p>
-                    {#if c.action}
-                      <p class="note action">{#each parts(c.action) as p, i (i)}{#if p.code}<code>{p.text}</code>{:else}{p.text}{/if}{/each}</p>
-                    {/if}
                   </div>
                   <span class="cap-state" data-state={c.state}><Mark size={14} strokeWidth={1.75} aria-hidden="true" />{c.word}</span>
+                  <!-- The fix under the row, across its full width: the command is one line that never wraps. -->
+                  {#if c.fix}<div class="cap-fix"><Remedy cause={c.fix.say} shell={c.fix.shell} command={c.fix.command} /></div>{/if}
                 </li>
               {/each}
             </ul>
             {#if capRows.some((c) => c.raw)}
               <!-- The server's words, verbatim, for an issue or a terminal: folded, and copied whole. -->
-              <details class="tech">
-                <summary>Driver report</summary>
-                <div class="report">
-                  <pre class="mono" aria-label="Driver report">{report}</pre>
-                  <Button size="sm" icon={Copy} onclick={copyReport}>Copy</Button>
-                </div>
-              </details>
+              <DriverReport {report} />
             {/if}
           </div>
         </Panel>
@@ -366,11 +359,13 @@
 </Page>
 
 <style>
-  /* The form column (720) on the shared content edge, and a sticky rail of section anchors on its right. */
+  /* The form column (720) on the shared content edge, and a sticky rail of section anchors at the content's right
+     edge: on a wide canvas the space between them is a margin the two frame, not a hole beside a stranded rail. */
   .layout {
     display: grid;
     grid-template-columns: minmax(0, 720px) 168px;
-    gap: var(--space-8);
+    justify-content: space-between;
+    column-gap: var(--space-8);
     align-items: start;
   }
   .toc {
@@ -611,23 +606,27 @@
     clip-path: polygon(100% 0, 100% 100%, 0 100%);
   }
   .theme-label {
+    display: grid;
+    justify-items: start;
+  }
+  .theme-name {
     display: flex;
     align-items: center;
     gap: var(--space-1-5);
     color: var(--text-secondary);
     font-weight: var(--weight-medium);
   }
-  .on .theme-label {
+  .on .theme-name {
     color: var(--text-primary);
   }
+  /* Under the name, starting where the name's text does (past its 14 px icon and the 6 px gap). */
   .current {
     display: inline-flex;
     align-items: center;
     gap: var(--space-1);
-    flex-shrink: 0;
-    margin-left: auto;
+    padding-left: 20px;
     font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
+    line-height: var(--type-sm-line);
     color: var(--text-secondary);
   }
   /* Helper text keeps a readable measure (DESIGN_DIRECTION §2.3: ≤ 60 characters a line). */
@@ -647,36 +646,8 @@
   .setting-text .note {
     margin-top: 2px;
   }
-  .note.action {
-    color: var(--text-secondary);
-  }
-  /* An action's command may break between its words, and inside a long one (a phone cannot fit
-     $env:FOLO_GPU_BACKEND='vulkan'; whole). */
-  .note.action code {
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
   .cap .setting-text {
-    flex: 1;
     min-width: 0;
-  }
-  .report {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: start;
-    gap: var(--space-3);
-    margin-top: var(--space-2);
-    padding: var(--space-3);
-    border-radius: var(--radius-md);
-    background: var(--bg-inset);
-    border: 1px solid var(--line-subtle);
-  }
-  .report pre {
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-secondary);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
   }
   .device {
     font-size: var(--type-sm-size);
@@ -685,13 +656,18 @@
   .caps {
     display: grid;
   }
+  /* A capability: its name and sentence, the state on the right, and its fix (when there is one) across both. */
   .cap {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
-    justify-content: space-between;
-    gap: var(--space-4);
+    gap: var(--space-3) var(--space-4);
     padding: var(--space-3) 0;
     border-top: 1px solid var(--line-subtle);
+  }
+  .cap-fix {
+    grid-column: 1 / -1;
+    min-width: 0;
   }
   .cap:last-child {
     padding-bottom: 0;
@@ -747,15 +723,6 @@
   @media (max-width: 767px) {
     .themes {
       gap: var(--space-2);
-    }
-    /* A third of a phone is too narrow for the name and "Current" side by side: "Current" goes under the name. */
-    .theme-label {
-      flex-wrap: wrap;
-      row-gap: 0;
-    }
-    .current {
-      flex-basis: 100%;
-      margin-left: 0;
     }
     .row-actions :global(.btn) {
       width: 100%;

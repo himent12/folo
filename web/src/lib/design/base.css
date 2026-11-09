@@ -207,6 +207,32 @@ table {
   /* Hoverable while shown (WCAG 1.4.13): the pointer can move onto it to read it. */
   pointer-events: auto;
 }
+/* The arrow: a square turned 45°, in the tooltip's fill, half of it out on the anchor's side and centred on the
+   anchor (--arrow, from ui/tooltip.ts placeTip), wherever the tooltip had to shift to stay inside its bounds. */
+.folo-tooltip::after {
+  content: '';
+  position: absolute;
+  width: 8px;
+  height: 8px;
+  background: inherit;
+  transform: rotate(45deg);
+}
+.folo-tooltip[data-side='top']::after {
+  bottom: -4px;
+  left: calc(var(--arrow, 50%) - 4px);
+}
+.folo-tooltip[data-side='bottom']::after {
+  top: -4px;
+  left: calc(var(--arrow, 50%) - 4px);
+}
+.folo-tooltip[data-side='left']::after {
+  right: -4px;
+  top: calc(var(--arrow, 50%) - 4px);
+}
+.folo-tooltip[data-side='right']::after {
+  left: -4px;
+  top: calc(var(--arrow, 50%) - 4px);
+}
 .folo-tooltip-keys {
   display: inline-flex;
   gap: 2px;
