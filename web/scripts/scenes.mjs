@@ -330,13 +330,13 @@ export const scenes = [
   { name: 'runs', path: '/runs' },
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
-  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     // Phones open on the Curves section (the matrix is behind the section picker).
     name: 'model-detail',
     path: '/models/m_fast_n',
-    viewports: ['desktop', 'laptop', 'mobile'],
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
     setup: (page, { vp }) => until(page, vp === 'mobile' ? '#pr svg' : '#cm .cell'),
   },
   {
@@ -594,8 +594,59 @@ export const scenes = [
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
   { name: 'runs-empty', path: '/runs', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   // Empty and error states sit in the table frame (header row, the message inside, a few rows tall).
-  { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
-  { name: 'datasets-error', path: '/datasets', search: 'scenario=error', viewports: ['desktop'] },
+  { name: 'runs-error', path: '/runs', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'datasets-error', path: '/datasets', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // Offline: the create action is disabled and says why on hover (and to assistive tech).
+    name: 'datasets-error-why',
+    path: '/datasets',
+    search: 'scenario=error',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'header .gate');
+      const box = await page.locator('main header .gate').first().boundingBox();
+      if (!box) throw new Error('datasets-error-why: no Add dataset');
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.clock.runFor(600);
+    },
+  },
+  {
+    // Row checkboxes appear on hover (the pointer is on the second row) and are hidden elsewhere.
+    name: 'runs-hover',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.locator('tr[data-row]').nth(1).hover();
+    },
+  },
+  {
+    // Once one run is selected every row shows its checkbox, so picking the rest is one click each.
+    name: 'runs-selected',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.locator('tr[data-row] .check label').first().click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Invalid fields: the danger edge, the danger focus ring on the focused one, and the message with its icon.
+    name: 'datasets-add-invalid',
+    path: '/datasets',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Add dataset' }).first().click();
+      await page.locator('dialog[open]').waitFor();
+      await page.locator('dialog[open] button[type="submit"]').click();
+      await page.locator('dialog[open] input[aria-invalid="true"]').first().focus();
+    },
+  },
   {
     name: 'datasets-nomatch',
     path: '/datasets',

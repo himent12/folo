@@ -141,6 +141,10 @@
     flex-wrap: wrap;
     min-width: 0;
   }
+  /* An actions snippet with nothing to show this time (e.g. no create action over an empty list) takes no room. */
+  .actions:empty {
+    display: none;
+  }
   .more-wide {
     display: contents;
   }

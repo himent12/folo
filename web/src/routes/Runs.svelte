@@ -108,7 +108,8 @@
     {/if}
   {/snippet}
 
-  {#if !runs.data || runs.data.length > 0}<div class="toolbar">
+  <!-- Filters only with runs to filter (or while they load): not over an empty or failed list, as on Models and Datasets. -->
+  {#if runs.data ? runs.data.length > 0 : !runs.error}<div class="toolbar">
     <Segmented
       label="Filter runs by status"
       bind:value={filter}
