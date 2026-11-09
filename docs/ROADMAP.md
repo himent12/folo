@@ -12,8 +12,8 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] vision-post: box ops, IoU family, NMS, mAP / PR metrics, confusion matrix, TAL assigner (#5, #15); pycocotools parity (#20)
 - [x] server + CLI skeleton with `--mock` (#7); real dataset commands and store (#29)
 - [x] gpu: wgpu device, buffer pool, WGSL kernels (SGEMM ~31 TFLOPS on RTX 4080 SUPER) (#10)
-- [~] Studio (web/): all screens, in-browser Playground, real-server smoke, mixed-precision and capability-aware New run; one breakpoint system and blank-section QA in CI (#126); hill-climb round 22 (r21: Sol min 8, Opus min 7.5)
-- [~] Desktop (apps/desktop, GPUI): all screens, real server, local GPU inference, capability-aware New run; hill-climb round 48 (r47 #131: Opus 8.4 with 6/12 lines at 9, Sol 8.6 with 7/12)
+- [~] Studio (web/): all screens, in-browser Playground, real-server smoke, mixed-precision and capability-aware New run; one breakpoint system and blank-section QA in CI (#126); hill-climb round 28 (r26: Sol min 8.5, Opus min 8; r27: line 11 at 8 from both)
+- [~] Desktop (apps/desktop, GPUI): all screens, real server, local GPU inference, capability-aware New run; hill-climb round 56 (in-round reviews reached 9 on every line at r55 #150; an independent check with fresh reviewers on main gave Opus 8.75 / Sol 8.8, so r56 #161 fixes those findings)
 
 ## M2 — learning end to end
 - [x] nn: layers, init, SGD/AdamW, schedules, EMA, .folo IO (#21)
@@ -29,13 +29,14 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] AMP training on tensor cores: folo-n 307 img/s vs yolo26n AMP 252 (#101); /api/system capabilities (#108)
 - [x] NMS-free one-to-one head, `--head o2o` (#109)
 - [x] CPU end-to-end latency below yolo26n at b1 (fused letterbox, direct stem conv, in-place parallel decode; #127)
-- [~] CPU GEMM per-thread throughput (forward at 8 threads ~37 ms vs Ultralytics 22.8)
+- [x] CPU per-core efficiency: B packing, depthwise AVX2, fused bias+SiLU, dedicated pool (#137; folo-n forward 14.8-18.7 ms at 8 threads vs Ultralytics 22.8)
 
 ## M4 — real use
 - [x] real datasets from disk (YOLO, COCO), export folo-f16
 - [x] server runs real training + inference (#42); `folo mcp` (#36) driving real training (#49); agent cookbook
 - [x] in-browser inference (wasm + WebGPU, ~14 ms folo-n @640 in Chrome) (#51), in Studio's Playground (#57, #70), shipped in release builds (#78)
-- [x] release pipeline: tagged binaries with embedded Studio, install scripts (#22)
+- [x] release pipeline: tagged binaries with embedded Studio, install scripts (#22); self-hosted runners (#104); v0.1.0 CHANGELOG, draft-by-dispatch, wasm and install-script assets (#145). `v0.1.0` exists as a draft release; publishing is the owner's call
+- [~] COCO long schedule: folo-n 300 epochs from scratch, `weights-v2` draft (#144)
 - [x] dogfooding: reports 1 (#59 → #69) and 2 (#93 → #99)
 - [x] ONNX export with onnxruntime parity in CI (#87)
 - [x] COCO-pretrained folo-n: loader + COCOeval + `folo weights` (#72); 50 epochs from scratch, val2017 AP 0.314 / AP50 0.455 (pycocotools parity); R6 fine-tune from COCO beats the 410-epoch scratch run in 100 epochs; `weights-v1` draft release (#128)
@@ -43,6 +44,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 
 ## M5 — polish
 - [x] README showcase, QUICKSTART, screenshots, llms.txt (#71); R6 example (examples/r6)
-- [~] dogfooding report 3 (pretrained weights, o2o, AMP, docs site, MCP)
+- [x] dogfooding report 3 (#134) and its fixes: GPU memory released after runs, published weights as models, AMP refused up front, server-built CLI command (#140); eval provenance (#138)
+- [x] test hygiene: every test cleans up its temp dirs, `FOLO_TEST_TMP`, CI fails on leftovers (#160)
 - [x] docs site: `site/`, generated from docs/, README.md and the examples (search, link checking, llms.txt; #122); build
   and serve it locally with `cd site && npm ci && npm run dev` (site/README.md)
