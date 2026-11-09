@@ -318,10 +318,10 @@ pub(crate) fn gen_gemm(spec: &Spec) -> String {
         2 => s.push_str("  let IH = pu(24u); let IW = pu(25u); let OH = pu(26u); let OW = pu(27u);\n"),
         // Weight gradient: k = (n, oh, ow) runs over the whole batch; A[m][k] = G[n][m][oh, ow] and
         // B[k][j = (ci, kh, kw)] = X[n][ci][oh*SH - PH + kh*DH][ow*SW - PW + kw*DW].
-        3 => s.push_str(
-            "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n\
-             let OHOW = pu(31u); let SAN = pu(32u); let SBN = pu(33u);\n",
-        ),
+        3 => {
+            s.push_str(&super::conv::weight_grad_dims(spec));
+            s.push_str("  let SAN = pu(32u); let SBN = pu(33u);\n");
+        }
         _ => {}
     }
     // Per-thread tile coordinates for the loads.

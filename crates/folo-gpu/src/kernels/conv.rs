@@ -387,6 +387,22 @@ fn coop_grad(ctx: &GpuContext, d: &Conv2dDesc) -> bool {
     d.dtype == DType::F16 && ctx.tensor_cores() && !d.is_depthwise()
 }
 
+/// The weight gradient's spatial sizes as specialisation constants (`SP_IH`, `SP_IW`, `SP_OH`, `SP_OW`): its B
+/// gather divides every `k = (n, oh, ow)` by `OH·OW` and `OW`, which a constant divisor turns into a multiply.
+pub(crate) fn weight_grad_spec(spec: Spec, d: &Conv2dDesc, oh: usize, ow: usize) -> Spec {
+    spec.u32("SP_IH", d.h as u32).u32("SP_IW", d.w as u32).u32("SP_OH", oh as u32).u32("SP_OW", ow as u32)
+}
+
+/// The weight-gradient generators' `IH`, `IW`, `OW` and `OHOW`: the constants of [`weight_grad_spec`] when the
+/// spec has them, else the uniforms.
+pub(crate) fn weight_grad_dims(spec: &Spec) -> String {
+    if spec.get_u32("SP_OW", 0) > 0 {
+        "  let IH = SP_IH; let IW = SP_IW; let OW = SP_OW; let OHOW = SP_OH * SP_OW;\n".into()
+    } else {
+        "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u); let OHOW = pu(31u);\n".into()
+    }
+}
+
 fn conv_spec(spec: Spec, d: &Conv2dDesc) -> Spec {
     let (kh, kw) = d.win.kernel;
     let mut spec = spec;
@@ -613,7 +629,7 @@ pub fn conv2d_backward_weight_as(
         .u32("CONV_MODE", 3)
         .bool("SPLIT", splits > 1)
         .bool("OUT_F32", c_f32 && dt == DType::F16);
-    let kernel = ctx.kernel(&GEMM, conv_spec(spec, d))?;
+    let kernel = ctx.kernel(&GEMM, weight_grad_spec(conv_spec(spec, d), d, oh, ow))?;
     let p = gemm_params(&g)?
         .at(24)
         .uz(d.h)?

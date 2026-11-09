@@ -374,11 +374,11 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
         3 => {
             let _ = writeln!(
                 s,
-                "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u);\n\
-                 \x20 let OHOW = pu(31u); let SAN = pu(32u); let SBN = pu(33u);\n\
+                "{}  let SAN = pu(32u); let SBN = pu(33u);\n\
                  \x20 let cj = n0 + {}; let cjok = cj < N;\n\
                  \x20 let cci = cj / (KH * KW); let cr = cj % (KH * KW);\n\
                  \x20 let cdh = i32((cr / KW) * DH) - PH; let cdw = i32((cr % KW) * DW) - PW;",
+                super::conv::weight_grad_dims(spec),
                 pb.inner_expr()
             );
         }
@@ -1031,7 +1031,8 @@ pub(crate) fn encode_conv_backward_weight(
         .bool("CHECK", check)
         .u32("CONV_MODE", 3)
         .bool("SPLIT", splits > 1);
-    let Some(kernel) = build(ctx, with_window(spec, d)) else { return Ok(false) };
+    let spec = super::conv::weight_grad_spec(with_window(spec, d), d, oh, ow);
+    let Some(kernel) = build(ctx, spec) else { return Ok(false) };
     let p = gemm_params(g)?
         .at(24)
         .uz(d.h)?

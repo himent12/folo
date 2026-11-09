@@ -222,7 +222,11 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   gradient planes read across images, and `B` is the image gathered as a transposed im2col (each thread owns one
   `(c_in, kh, kw)` column). `SPLIT = true` splits `K` into chunks, one per extra workgroup layer, each writing a
   partial weight slab that a column reduction sums: early layers have only a few output tiles but hundreds of
-  thousands of `K` steps.
+  thousands of `K` steps. The spatial sizes (`IH`, `IW`, `OH`, `OW`) are specialisation constants here (in both
+  generators), because the gather divides every `k = (n, oh, ow)` by `OH·OW` and `OW`: a constant divisor is a
+  multiply and a shift, a runtime one a dozen instructions. That made the tensor-core weight gradients of a folo-n
+  step about 5 ms faster (the AMP step 366 → 449 img/s); the f32 kernels are bound elsewhere and did not change.
+  A training run compiles one weight-gradient pipeline per layer shape (a few dozen).
 
 #### What was tried (RTX 4080 SUPER, Vulkan, square SGEMM, GFLOPS)
 
@@ -528,8 +532,7 @@ update kernel.
   GEMM and convs keep f32 tiles and f32 FMAs (f16 saves memory traffic, not arithmetic: on Ada, non-tensor f16
   math is no faster than f32), which is why mixed-precision training refuses to run without them. The
   transposed-operand tensor-core GEMMs scatter into workgroup memory with scalar stores and are 15–40% slower than
-  the plain layout (the attention products use them). The weight-gradient gather divides by the runtime `OH·OW`
-  per element; incremental index tracking would save integer work.
+  the plain layout (the attention products use them).
 - The f16 depthwise conv is slower than the f32 one (2-byte scalar loads); vectorising it is a follow-up.
 - Timings are wall-clock; GPU timestamp queries would make small-kernel numbers more precise.
 - `max_pool2d` has no `ceil_mode`; upsampling is nearest-only.
