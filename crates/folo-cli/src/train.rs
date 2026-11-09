@@ -317,7 +317,11 @@ fn resume(
         stop,
         ..TrainOptions::default()
     };
-    let overrides = ResumeOverrides { workers: args.workers, device: Some(args.device.clone()) };
+    let overrides = ResumeOverrides {
+        workers: args.workers,
+        device: Some(args.device.clone()),
+        data_format: Some(format),
+    };
     Ok((Trainer::resume(ckpt, data, opts, overrides).map_err(engine_error)?, run_dir))
 }
 

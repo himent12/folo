@@ -232,6 +232,8 @@ pub struct ResumeOverrides {
     pub workers: Option<usize>,
     /// Device.
     pub device: Option<String>,
+    /// How the dataset is read ([`TrainConfig::data_format`]), kept in the resumed run's checkpoints.
+    pub data_format: Option<folo_data::Format>,
 }
 
 /// How a run ended.
@@ -386,6 +388,9 @@ impl Trainer {
         }
         if let Some(d) = overrides.device {
             cfg.device = d;
+        }
+        if let Some(f) = overrides.data_format {
+            cfg.data_format = f;
         }
         cfg.augment.close_mosaic_fixed = Some(resumed_close_mosaic(&c.train, &cfg));
         if let Some(n) = c.train.get(TRAIN_IMAGES_KEY).and_then(|v| v.as_u64())

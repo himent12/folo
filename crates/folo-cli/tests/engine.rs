@@ -462,32 +462,77 @@ fn format_picks_the_labels_and_resume_keeps_it() {
     }
     let project = root.join("runs");
     let run = project.join("coco");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
-        .args(["train", "--json", "--device", "cpu", "--data", s(&data), "--format", "coco", "--imgsz", "64"])
-        .args(["--batch", "4", "--epochs", "4", "--workers", "1", "--project", s(&project), "--name", "coco"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
-    let mut last = Value::Null;
-    for line in stdout.lines() {
-        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
-        if v["event"] == "epoch" && last["event"] != "epoch" {
-            let (code, _, stderr) = folo(&["stop", "--json", s(&run)]);
-            assert_eq!(code, 0, "{stderr}");
+    // Runs `folo train` with `args` and stops it after its first epoch; returns the final record.
+    let train_one_epoch = |args: &[&str]| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_folo"))
+            .args(["train", "--json", "--device", "cpu", "--workers", "1"])
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut last = Value::Null;
+        for line in stdout.lines() {
+            let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            if v["event"] == "epoch" && last["event"] != "epoch" {
+                let (code, _, stderr) = folo(&["stop", "--json", s(&run)]);
+                assert_eq!(code, 0, "{stderr}");
+            }
+            last = v;
         }
-        last = v;
-    }
-    assert!(child.wait().unwrap().success());
+        assert!(child.wait().unwrap().success());
+        last
+    };
+    let last = train_one_epoch(&[
+        "--data",
+        s(&data),
+        "--format",
+        "coco",
+        "--imgsz",
+        "64",
+        "--batch",
+        "4",
+        "--epochs",
+        "6",
+        "--project",
+        s(&project),
+        "--name",
+        "coco",
+    ]);
     assert_eq!(last["status"], "stopped", "{last}");
     let config: Value =
         serde_json::from_str(&std::fs::read_to_string(run.join("config.json")).unwrap()).unwrap();
     assert_eq!(config["classes"], serde_json::json!(["ring", "square"]), "read as COCO");
-    // Resumed without --format: still COCO (as auto, the folder reads as YOLO, with another class list).
+    // A checkpoint from before `data_format` (auto): resumed once with --format coco, which its later checkpoints
+    // keep, so the next resume needs no --format either.
     let ckpt = run.join("weights/last.folo");
+    set_train_key(&ckpt, "data_format", serde_json::json!("auto"));
+    let last = train_one_epoch(&["--resume", s(&ckpt), "--format", "coco"]);
+    assert_eq!(last["status"], "stopped", "{last}");
+    // Resumed without --format: still COCO (as auto, the folder reads as YOLO, with another class list).
     let (code, lines, stderr) = folo(&["train", "--json", "--resume", s(&ckpt), "--json-events", "epoch"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(lines.last().unwrap()["status"], "completed", "{:?}", lines.last());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Sets `key` of the `folo.train` config stored in the checkpoint at `path` (its header only; the tensor data, whose
+/// offsets are relative to the end of the header, is kept).
+fn set_train_key(path: &Path, key: &str, value: Value) {
+    let bytes = std::fs::read(path).unwrap();
+    let n = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let mut header: Value = serde_json::from_slice(&bytes[8..8 + n]).unwrap();
+    let meta = header["__metadata__"].as_object_mut().unwrap();
+    let mut train: Value = serde_json::from_str(meta["folo.train"].as_str().unwrap()).unwrap();
+    train[key] = value;
+    meta.insert("folo.train".into(), Value::String(train.to_string()));
+    let mut h = serde_json::to_vec(&header).unwrap();
+    while !h.len().is_multiple_of(8) {
+        h.push(b' ');
+    }
+    let mut out = (h.len() as u64).to_le_bytes().to_vec();
+    out.extend_from_slice(&h);
+    out.extend_from_slice(&bytes[8 + n..]);
+    std::fs::write(path, out).unwrap();
 }

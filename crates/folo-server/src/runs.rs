@@ -1158,7 +1158,8 @@ fn build(
     };
     let last = e.dir.join("weights").join("last.folo");
     let t = if last.is_file() {
-        let overrides = ResumeOverrides { workers: None, device: Some(device.to_string()) };
+        let overrides =
+            ResumeOverrides { workers: None, device: Some(device.to_string()), data_format: Some(format) };
         Trainer::resume(&last, data, opts, overrides)
     } else {
         let mut cfg = folo_vision::TrainConfig::from_api(config);
