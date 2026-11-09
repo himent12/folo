@@ -452,10 +452,7 @@ impl FoloApp {
                 }
                 let note = if no_amp {
                     cfg.amp = false;
-                    Some(
-                        "Mixed precision turned off: this server's GPU has no tensor cores enabled."
-                            .to_string(),
-                    )
+                    Some("Mixed precision turned off: it isn't available on this run's device.".to_string())
                 } else {
                     oom.then(|| crate::app::retry_batch(cfg.batch)).flatten().map(|to| {
                         let from = cfg.batch;
@@ -532,7 +529,7 @@ impl FoloApp {
         let t = theme(cx);
         let msg = r.error.clone().unwrap_or_else(|| "The run failed.".into());
         let hint = if r.error_code.as_deref() == Some("not_supported") && r.config.amp {
-            "Mixed precision needs tensor cores (start folo serve with --tensor-cores on such a GPU). New run from this config trains without it.".to_string()
+            "Mixed precision needs a GPU with tensor cores (and folo serve --tensor-cores); this run's device had none. New run from this config trains without it.".to_string()
         } else if is_gpu_oom(&msg) {
             match crate::app::retry_batch(r.config.batch) {
                 Some(to) => format!(
