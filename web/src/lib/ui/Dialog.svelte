@@ -95,8 +95,9 @@
     box-shadow: var(--shadow-lg);
     overflow: hidden;
   }
+  /* 480 px is the floor wherever the viewport allows: a 13 px body in a narrower box wraps every other word. */
   dialog.sm {
-    width: min(400px, calc(100vw - 32px));
+    width: min(480px, calc(100vw - 32px));
   }
   dialog.lg {
     width: min(720px, calc(100vw - 32px));
@@ -135,12 +136,16 @@
     font-weight: var(--weight-semibold);
   }
   header p {
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
     color: var(--text-secondary);
   }
   /* A body taller than the dialog scrolls, with a shadow at each edge that has more behind it: the two covers in the
      dialog's colour scroll with the content (local) and hide the edge shades (scroll) once the end is reached. */
   .body {
     padding: var(--space-2) var(--space-5) var(--space-5);
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
     overflow-y: auto;
     background:
       linear-gradient(var(--bg-overlay) 50%, transparent) top / 100% 32px no-repeat local,
@@ -185,7 +190,8 @@
     footer {
       padding-bottom: calc(var(--space-3) + env(safe-area-inset-bottom));
     }
-    footer > :global(*) {
+    footer > :global(*),
+    footer > :global(.gate) > :global(*) {
       flex: 1;
     }
     .body:last-child {

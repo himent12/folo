@@ -11,6 +11,7 @@
   import Box from '@lucide/svelte/icons/box';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import Keyboard from '@lucide/svelte/icons/keyboard';
+  import ScanSearch from '@lucide/svelte/icons/scan-search';
   import { hub } from '$lib/api/index.svelte';
   import { failureCause } from '$lib/oom';
   import type { Dataset, Model, Run } from '$lib/api/types';
@@ -20,7 +21,7 @@
   import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
   import type { IconType } from '$lib/ui/types';
   import { rememberFocus } from '$lib/ui/focus';
-  import { fuzzy, highlight } from './commands';
+  import { highlight, rank } from './commands';
   import { mainNav, settingsNav } from './nav';
 
   let { open = $bindable(false), onshortcuts }: { open?: boolean; onshortcuts: () => void } = $props();
@@ -33,6 +34,10 @@
     hint?: string;
     keys?: string;
     icon: IconType;
+    /** Other phrasings it answers to (commands.rank). */
+    match?: string[];
+    /** An action about one run, dataset or model: offered once the query names it. */
+    scoped?: boolean;
     run: () => void;
   }
 
@@ -79,6 +84,7 @@
         id: 'theme',
         group: 'Actions',
         label: `Switch theme (now ${prefs.theme})`,
+        match: ['Toggle theme', 'Dark theme', 'Light theme'],
         icon: SunMoon,
         run: () => prefs.cycleTheme(),
       },
@@ -117,18 +123,35 @@
       icon: Box,
       run: go(`/models/${x.id}`),
     }));
-    return [...nav, ...actions, ...r, ...d, ...m];
+    // Actions that take what the query names: train on a dataset, try a model. Ranked with the entities themselves.
+    const onEntity: Item[] = [
+      ...datasets.map((x) => ({
+        id: `act-train-${x.id}`,
+        group: 'Actions',
+        label: `New run on ${x.name}`,
+        hint: 'Train a detector on this dataset',
+        match: [x.name, `Train ${x.name}`],
+        scoped: true,
+        icon: Plus,
+        run: go(`/runs/new?dataset=${encodeURIComponent(x.id)}`),
+      })),
+      ...models.map((x) => ({
+        id: `act-try-${x.id}`,
+        group: 'Actions',
+        label: `Open ${x.name} in Playground`,
+        hint: 'Run it on an image',
+        match: [x.name, `Playground ${x.name}`, `Try ${x.name}`],
+        scoped: true,
+        icon: ScanSearch,
+        run: go(`/playground?model=${encodeURIComponent(x.id)}`),
+      })),
+    ];
+    // With no query: navigation, the actions and the runs in flight.
+    const idle = (i: Item) => i.group === 'Go to' || i.group === 'Actions' || (i.group === 'Runs' && /running|queued/.test(i.hint ?? ''));
+    return [...nav, ...actions, ...onEntity, ...r.map((i) => ({ ...i, scoped: !idle(i) })), ...d.map((i) => ({ ...i, scoped: true })), ...m.map((i) => ({ ...i, scoped: true }))];
   });
 
-  const results = $derived.by(() => {
-    if (!query.trim()) return items.filter((i) => i.group === 'Go to' || i.group === 'Actions' || (i.group === 'Runs' && /running|queued/.test(i.hint ?? '')));
-    return items
-      .map((i) => ({ i, s: Math.max(fuzzy(query, i.label), fuzzy(query, `${i.group} ${i.label}`) - 20) }))
-      .filter((x) => x.s >= 0)
-      .sort((a, b) => b.s - a.s)
-      .slice(0, 40)
-      .map((x) => x.i);
-  });
+  const results = $derived(rank(items, query));
 
   const grouped = $derived.by(() => {
     const out: { group: string; items: { item: Item; n: number }[] }[] = [];

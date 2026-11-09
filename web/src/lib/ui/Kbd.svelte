@@ -15,11 +15,12 @@
     display: inline-flex;
     gap: 2px;
   }
+  /* 12 px caps (type.sm): the key names are labels, so they meet the 12 px floor (DESIGN_DIRECTION §2.14). */
   kbd {
     display: inline-grid;
     place-items: center;
-    min-width: 18px;
-    height: 18px;
+    min-width: 20px;
+    height: 20px;
     padding: 0 4px;
     border-radius: var(--radius-xs);
     border: 1px solid var(--line-default);
@@ -27,7 +28,7 @@
     background: var(--bg-raised);
     color: var(--text-secondary);
     font-family: var(--font-sans);
-    font-size: var(--type-xs-size);
+    font-size: var(--type-sm-size);
     line-height: 1;
     font-weight: var(--weight-medium);
   }

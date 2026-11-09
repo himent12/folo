@@ -213,7 +213,7 @@ table {
 }
 .folo-tooltip kbd {
   font-family: var(--font-sans);
-  font-size: var(--type-micro-size);
+  font-size: var(--type-sm-size);
   padding: 0 4px;
   border-radius: 3px;
   background: color-mix(in srgb, var(--bg-app) 14%, transparent);

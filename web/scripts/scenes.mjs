@@ -39,7 +39,7 @@ async function unplugGpu(/** @type {import('playwright-core').Page} */ page) {
 
 /** @type {Scene[]} */
 export const scenes = [
-  { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'overview', path: '/', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -491,7 +491,7 @@ export const scenes = [
     },
   },
   { name: 'runs', path: '/runs' },
-  { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'models-empty', path: '/models', search: 'scenario=empty' },
   { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
@@ -805,7 +805,7 @@ export const scenes = [
       await page.clock.runFor(1000);
     },
   },
-  { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'mobile'] },
+  { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   { name: 'overview-empty', path: '/', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   { name: 'overview-loading', path: '/', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'overview-error', path: '/', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
@@ -860,6 +860,9 @@ export const scenes = [
     setup: async (page) => {
       await page.getByRole('button', { name: 'Add dataset' }).first().click();
       await page.locator('dialog[open]').waitFor();
+      // Register stays disabled until there is a folder path; a name the server would refuse is checked on submit.
+      await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/my dataset');
+      await page.locator('dialog[open] input[id$="-name"]').fill('my dataset!');
       await page.locator('dialog[open] button[type="submit"]').click();
       await page.locator('dialog[open] input[aria-invalid="true"]').first().focus();
     },

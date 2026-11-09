@@ -60,7 +60,9 @@
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);
   }
+  /* Helper text keeps a readable measure (DESIGN_DIRECTION §2.3: ≤ 60 characters a line). */
   .msg {
+    max-width: 60ch;
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);

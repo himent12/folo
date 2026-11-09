@@ -38,12 +38,12 @@ The screens are competent everywhere and memorable nowhere. Each weak area trace
 11. **Invalid fields.** A field in error (`aria-invalid="true"` on an Input, a Select, a Segmented group or a chips field) has a `danger.solid` 1 px edge at rest and on hover, and when focused a danger ring instead of the lime one (`base.css` overrides `--line-control`, `--line-control-hover` and `--focus` on it). The Field's message under it is `danger.text` with a danger icon, `role="alert"`, and the control's `aria-describedby`, so the error is never red text alone.
 12. **390 px is its own concept.** Top bar always back (or logo) + page title + search; the H1 is not repeated. Lists are 56 px rows (name, one meta line, metric right), never cards. A detail page leads with its focal object; everything else sits behind a segmented control. Dialogs become bottom sheets; rails become sheets opened from a header button. A title-only page header takes no room on phones (the top bar has the title), so the first content sits 16 px under the bar on every screen. A page with a bottom dock (New run's Start bar) hides the tab bar while the dock is mounted (`use:dock` from `shell/dock.ts` sets `<html data-dock>`: `--tabbar-h` drops to 0 and the dock moves to the screen's edge), so the fixed chrome at the bottom is one bar.
 13. **Buttons.** One primary per viewport. In light, the lime primary carries a neutral 1 px `line.default` edge outside the fill (never an olive one). Disabled filled buttons, primary included, look the same in both themes: `bg.raised`, `text.disabled` label, `line.default` edge, no shadow (never a faded lime); a loading button keeps its look and shows the spinner. The quiet destructive control on a page (Stop) is a secondary button with `danger.text` label and icon, no tinted fill; its dialog holds the solid confirm. One action has one name everywhere ("Generate sample set").
-14. **Supporting text is at least 12 px** (`type.sm`): meta lines, captions, badges, tab-bar labels, technical details. 11 px is for chart ticks only; 10 px for key hints only.
+14. **Supporting text is at least 12 px** (`type.sm`): meta lines, captions, badges, tab-bar labels, technical details, key caps (`ui/Kbd`, 20 px tall, and the tooltip's keys). 11 px is for chart ticks only. Dialogs set their body and description in `base` 13 px, at least 480 px wide where the viewport allows (`ui/Dialog`; phones get a bottom sheet). Helper lines (Field and Switch hints, Settings notes) stop at 60 characters a line.
 15. **Form pages** (Settings) use `Page narrow`: the 720 px form column starts on the shared content edge, like every page's title and first panel, with a sticky rail of section anchors on its right.
 
 ## 3. Per screen
 
-**Overview.** Focal point: the live run. Remove the demo-data subtitle (the sidebar says it), the Datasets / Playground header buttons (they duplicate nav), the Datasets card row and the System card's two rings (fold GPU and memory into one meta line on the live card: `RTX 4080 SUPER · 94 % · 21.4 / 64 GiB`). Live run full width: epoch hero left (4 cols), mAP chart (8 cols, the page's one area fill). Below: Recent runs (8) + Best models rail (4). One hero, one table.
+**Overview.** Focal point: the live run. Remove the demo-data subtitle (the sidebar says it), the Datasets / Playground header buttons (they duplicate nav), the Datasets card row and the System card's two rings (fold GPU and memory into one meta line on the live card: `RTX 4080 SUPER · 94 % · 21.4 / 64 GiB`). Live run full width: epoch hero left (4 cols), mAP chart (8 cols, the page's one area fill). Below: Recent runs (8) + Best models rail (4). One hero, one table. A fresh install shows the three steps and, under them, the live card's frame in still placeholder geometry, so the page shows what it becomes.
 
 **Datasets list.** Almost right. Single-line 36 px rows: name, format as tertiary text (no boxed badge), path mono tertiary, split counts as columns, the class-balance strip 160×6 as the signature. Empty state: no in-panel primary (the header has it). Migrate to `DataTable`.
 
@@ -63,7 +63,7 @@ The screens are competent everywhere and memorable nowhere. Each weak area trace
 
 **Playground.** The strongest screen. No mono numbers; canvas height viewport − 220; threshold helper paragraphs become tooltips; timing phases in neutral shades. Phones: full-bleed image, thresholds in a bottom sheet, the confidence slider pinned.
 
-**Settings.** Forms max 720 px. Drop the shortcuts table (link the `?` dialog). Theme previews in neutral ink. Reconnect secondary until the URL changes.
+**Settings.** Forms max 720 px. Drop the shortcuts table (link the `?` dialog). Theme previews in neutral ink. Reconnect secondary until the URL changes. Theme previews are one radiogroup, each card's name under it and the chosen one saying "Current" in words, not only with its ring. System: each capability is one plain sentence and at most one action that docs/CLI.md or docs/GPU.md backs ("Start `folo serve --tensor-cores` to use them"); the server's own words sit in a folded, copyable Driver report.
 
 ## 4. What a 9 looks like here
 
@@ -95,9 +95,26 @@ densest screens a focal point. Do 1–4 before any further per-issue fixes.
 
 ## 6. Checks in the shoot
 
-`npm run shoot` checks every shot after its setup for horizontal overflow: the page wider than the viewport, and any
-element whose content is wider than its box (`scrollWidth > clientWidth + 1`, innermost box, naming its widest child).
-It skips hidden content, ellipsis truncation, negative-margin hit areas, positioned decorations and deliberate scrollers
+`npm run shoot` runs two checks on every shot after its setup and lists what they find together, printed last, boxed,
+and saved to `qa.txt` beside the shots (`qa-<filter>.txt` with `--only`). The list never fails the shoot; review it with
+the screenshots. It must be empty before a round goes to review.
+
+**Blank sections.** A selected control whose content renders nothing is the bug round 19 shipped (the phone rule that
+hid every `.rail` left Model's Details, Run's Classes and a queued run's Config blank behind a selected picker):
+- every selected tab (`[role=tab][aria-selected=true]`) and every checked radio with `aria-controls`: the element it
+  controls must exist, be visible (not `display: none`, itself or through an ancestor) and be taller than 40 px;
+- every checked radio of a section picker without `aria-controls` (a Segmented labelled "Show", or one in
+  `.phone-pick`): the content under the picker in `main` must reach 40 px;
+- `main`: the content under the page header (`.page > header`, or main's top when the header takes no room) must reach
+  80 px.
+
+Content is what a reader sees: text, images, canvases, SVG, form controls, and boxes with a fill or an edge (panel
+frames, skeleton blocks); fixed bars (the tab bar, docks) don't count. A section picker's sections should therefore keep
+their content in the page's own region, not in a column a breakpoint can hide. The check was proven against the round-19
+rule: put back `.app :global(.rail) { display: none }` in `App.svelte` and it flags `model-detail-details`,
+`run-live-phone-classes` and `run-queued` at mobile.
+
+**Horizontal overflow.** The page wider than the viewport, and any element whose content is wider than its box
+(`scrollWidth > clientWidth + 1`, innermost box, naming its widest child). It skips hidden content, ellipsis truncation, negative-margin hit areas, positioned decorations and deliberate scrollers
 (`data-scrolls`, or an `overflow-x: auto` box with a fade mask). A plain scrollbar is not a deliberate scroller: a list
-table that needs one at a width it was designed for is the bug the check exists to catch. The list never fails the
-shoot; it prints last, boxed, and goes to `overflow.txt` beside the shots. Review it with the screenshots.
+table that needs one at a width it was designed for is the bug the check exists to catch. Both checks share the list above.
