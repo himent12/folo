@@ -30,6 +30,10 @@ pub enum Btn {
     Primary,
     Secondary,
     Danger,
+    /// A dialog's destructive commit: the Danger tint with a danger edge, so it outweighs the safe
+    /// choice beside it. (A solid red fill fails AA with white text in both themes, and the
+    /// tokens have no on-danger ink.)
+    DangerCommit,
 }
 
 /// Hover tooltip: one short line on the overlay surface.
@@ -132,7 +136,7 @@ impl FoloApp {
         let pressed = match kind {
             Btn::Primary => crate::theme::over(t.accent_solid, gpui::hsla(0., 0., 0., 0.14)),
             Btn::Secondary => crate::theme::over(t.bg_raised, t.bg_active),
-            Btn::Danger => crate::theme::alpha(t.danger_solid, 0.28),
+            Btn::Danger | Btn::DangerCommit => crate::theme::alpha(t.danger_solid, 0.28),
         };
         let label: SharedString = label.into();
         let el = div()
@@ -526,7 +530,8 @@ impl FoloApp {
             .rounded(px(radius::MD))
             .bg(t.bg_inset)
             .border_1()
-            .border_color(t.line_default)
+            // Its edge is what marks it, as on inputs and selects beside it: line.control.
+            .border_color(t.line_control)
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
                 // Steps to the next option that can be chosen in that direction, wrapping (also from
                 // a selection that is itself disabled).
@@ -1156,6 +1161,9 @@ pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
             (t.bg_raised, t.text_primary, Some(t.line_default), crate::theme::over(t.bg_raised, t.bg_hover))
         }
         Btn::Danger => (t.danger_muted, t.danger_text, None, crate::theme::alpha(t.danger_solid, 0.2)),
+        Btn::DangerCommit => {
+            (t.danger_muted, t.danger_text, Some(t.danger_solid), crate::theme::alpha(t.danger_solid, 0.2))
+        }
     }
 }
 

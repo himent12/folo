@@ -705,11 +705,10 @@ impl FoloApp {
                 let total = p.timing.total_ms.max(0.001);
                 let seg = |v: f64, c| div().h_full().w(relative((v / total) as f32)).bg(c);
                 // One neutral ramp; the model step strongest without shouting.
-                let (c_pre, c_model, c_nms) = (
-                    crate::theme::alpha(t.text_tertiary, 0.4),
-                    t.text_tertiary,
-                    crate::theme::alpha(t.text_tertiary, 0.65),
-                );
+                // Inference (the bulk) in secondary ink, the two short stages in tertiary at two
+                // strengths, so the segments and their swatches tell apart.
+                let (c_pre, c_model, c_nms) =
+                    (t.text_tertiary, t.text_secondary, crate::theme::alpha(t.text_tertiary, 0.55));
                 let timing_el = div()
                     .w_full()
                     .flex()
@@ -759,7 +758,7 @@ impl FoloApp {
                                     .items_center()
                                     .gap(px(5.))
                                     .whitespace_nowrap()
-                                    .child(swatch(c, 6.))
+                                    .child(swatch(c, 8.))
                                     .child(text(ty::XS, t.text_tertiary).child(n))
                                     .child(text(ty::XS, t.text_secondary).tnum().child(format!("{v:.1} ms")))
                             }),

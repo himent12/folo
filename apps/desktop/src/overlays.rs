@@ -1186,9 +1186,10 @@ impl FoloApp {
                     .flex_none()
                     .items_center()
                     .gap(px(8.))
-                    .child(div().mr(px(4.)).child(shortcut(&t, &["Ctrl", "Enter"])))
                     .child(cancel)
-                    .child(start),
+                    .child(start)
+                    // Ctrl Enter triggers the button it follows.
+                    .child(shortcut(&t, &["Ctrl", "Enter"])),
             );
         self.dialog_frame(
             &t,
@@ -1401,7 +1402,7 @@ impl FoloApp {
         let stop = self.button(
             "stop-confirm",
             "Stop run",
-            Btn::Danger,
+            Btn::DangerCommit,
             Some("icons/stop.svg"),
             window,
             cx,

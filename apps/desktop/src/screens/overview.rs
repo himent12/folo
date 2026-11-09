@@ -1098,7 +1098,7 @@ impl FoloApp {
                                 .font_weight(FontWeight::MEDIUM)
                                 .child(title.to_string()),
                         )
-                        .child(rich(&t, ty::SM, t.text_tertiary, body).justify_start()),
+                        .child(rich(&t, ty::SM, t.text_tertiary, body).text_left()),
                 )
         };
         let steps = panel(&t)
