@@ -2,7 +2,9 @@
 // registers them with `pageCommands(() => [...])` in its script, and they leave with it. The palette lists them first,
 // under "This page", with no query and for a matching one.
 
+import { untrack } from 'svelte';
 import { isTyping } from '$lib/keys';
+import { toast } from '$lib/ui/toast.svelte';
 import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
 import type { IconType } from '$lib/ui/types';
 
@@ -26,10 +28,9 @@ export const pageCommandList = $state<{ items: PageCommand[] }>({ items: [] });
 export function pageCommands(get: () => PageCommand[]) {
   $effect(() => {
     const mine = get();
-    pageCommandList.items = [...pageCommandList.items.filter((c) => !mine.some((m) => m.id === c.id)), ...mine];
-    return () => {
-      pageCommandList.items = pageCommandList.items.filter((c) => !mine.includes(c));
-    };
+    // Only `get` is tracked: the list is read and written here, so reading it as a dependency would loop.
+    untrack(() => (pageCommandList.items = [...pageCommandList.items.filter((c) => !mine.some((m) => m.id === c.id)), ...mine]));
+    return () => untrack(() => (pageCommandList.items = pageCommandList.items.filter((c) => !mine.includes(c))));
   });
 }
 
@@ -52,7 +53,6 @@ export function pageKeys(handler: (key: string) => boolean) {
 
 /** Copies `text` and says so (a toast), or says it could not (no clipboard permission). */
 export async function copyText(text: string, what: string) {
-  const { toast } = await import('$lib/ui/toast.svelte');
   try {
     await navigator.clipboard.writeText(text);
     toast.success(`Copied ${what}`, text);

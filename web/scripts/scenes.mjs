@@ -436,7 +436,7 @@ export const scenes = [
     viewports: ['desktop', 'laptop', 'mobile'],
     setup: async (page, { vp }) => {
       await until(page, '#ds-size svg');
-      const svg = page.locator('#ds-size svg[role=img]');
+      const svg = page.locator('#ds-size svg[aria-roledescription=chart]');
       await svg.evaluate((el, touch) => {
         const r = el.getBoundingClientRect();
         const p = { clientX: r.left + r.width * 0.4, clientY: r.top + r.height * 0.6, bubbles: true };
