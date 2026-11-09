@@ -6,6 +6,11 @@
    translucent edge composites over it and reads darker than its neighbours. */
 :root {
   --line-panel: var(--line-default);
+  /* The measure of helper and explanatory text (DESIGN_DIRECTION §2.3, "Measure"): about 60 characters a line. A `ch`
+     is the width of Geist's 0, a tabular digit about 1.5 average characters wide, so 40ch is ~60 characters (60ch ran
+     ~90). Every paragraph that explains (hints, notes, findings, a Why? fold, an empty state's sentence) caps its
+     `max-inline-size` here, through `.measure` or its own rule; `copy.test.ts` rejects a measure of its own. */
+  --measure: 40ch;
 }
 :root[data-theme='dark'] {
   --line-panel: var(--line-subtle);
@@ -177,6 +182,11 @@ a.ident:hover {
 /* Words that must stay on one line: a key group and the punctuation after it ("Ctrl V."), a value and its unit. */
 .nowrap {
   white-space: nowrap;
+}
+
+/* Helper and explanatory text at the readable measure (`--measure`). */
+.measure {
+  max-inline-size: var(--measure);
 }
 
 .truncate {
@@ -367,6 +377,11 @@ a.ident:hover {
 }
 :where(.table) tbody tr[tabindex]:focus-visible:not(.on, [aria-selected='true']) {
   background: var(--bg-hover);
+}
+/* On a selected row the ring is ink: 4 px in, it is only 2 px clear of the 2 px lime bar, and two lime marks that
+   close read as one lime block. The row's one lime mark is its bar (DESIGN_DIRECTION §2.7). */
+:where(.table) tbody tr[tabindex]:focus-visible:is(.on, [aria-selected='true']) {
+  outline-color: var(--text-primary);
 }
 /* Links inside a row (the name, a source run) underline on hover; the row is the bigger target. */
 :where(.table) td a:hover {

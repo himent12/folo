@@ -162,8 +162,13 @@
     </div>
     <div class="kpi">
       <span class="k-label">Broken labels</span>
-      <span class="k-value num" class:bad={stats.broken_labels > 0}>{num(stats.broken_labels)}</span>
-      <span class="k-sub">{stats.broken_labels > 0 ? 'not trained on' : 'all labels parse'}</span>
+      <!-- The count is a metric, in ink; the status is the mark and its words in the caption (§2.6). -->
+      <span class="k-value num">{num(stats.broken_labels)}</span>
+      {#if stats.broken_labels > 0}
+        <span class="k-sub k-status"><CircleAlert size={12} strokeWidth={2} aria-hidden="true" />not trained on</span>
+      {:else}
+        <span class="k-sub">all labels parse</span>
+      {/if}
     </div>
   </section>
 
@@ -373,7 +378,7 @@
     font-weight: var(--weight-medium);
   }
   .hdetail {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-secondary);
@@ -454,7 +459,13 @@
   .splits:global(.wrap) .sep {
     display: none;
   }
-  .k-value.bad {
+  .k-status {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+  }
+  .k-status > :global(svg) {
+    flex-shrink: 0;
     color: var(--danger-text);
   }
   .two {

@@ -3,6 +3,7 @@
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import CircleMinus from '@lucide/svelte/icons/circle-minus';
   import CircleSlash from '@lucide/svelte/icons/circle-slash';
+  import FlaskConical from '@lucide/svelte/icons/flask-conical';
   import Monitor from '@lucide/svelte/icons/monitor';
   import Moon from '@lucide/svelte/icons/moon';
   import PlugZap from '@lucide/svelte/icons/plug-zap';
@@ -140,7 +141,8 @@
       <Panel title="Connection" id="connection" divided>
         <div class="stack">
           <div class="status" data-mode={hub.mode}>
-            <span class="led" aria-hidden="true"></span>
+            <!-- Demo data is a mode, not a degraded state: the sidebar's neutral flask, never the warning hue. -->
+            {#if hub.mode === 'mock'}<FlaskConical class="led-glyph" size={16} strokeWidth={1.75} aria-hidden="true" />{:else}<span class="led" aria-hidden="true"></span>{/if}
             <div class="status-text">
               {#if hub.mode === 'live'}
                 <p class="s-title">Live <span class="mono faint">folo serve {hub.version}</span></p>
@@ -208,7 +210,7 @@
                 </dd>
               {/if}
               <dt>A blank URL</dt>
-              <dd>Uses the address this page was served from{#if origin} (<span class="mono">{origin}</span>){/if}.</dd>
+              <dd>Uses the address this page was served from{#if origin}{' '}(<span class="mono">{origin}</span>){/if}.</dd>
             </dl>
           </details>
 
@@ -337,12 +339,8 @@
           <dd class="num">{pkg.version}</dd>
           <dt>Server</dt>
           <dd class="num">{#if hub.mode === 'live'}<span class="mono">folo serve</span> {hub.version}{:else if hub.mode === 'mock'}Built-in demo {hub.version}{:else}—{/if}</dd>
-          <dt>HTTP API</dt>
-          <dd class="mono">docs/API.md</dd>
-          <dt>Architecture</dt>
-          <dd class="mono">docs/ARCHITECTURE.md</dd>
-          <dt>Design system</dt>
-          <dd class="mono">design/README.md</dd>
+          <dt>Documentation</dt>
+          <dd>The quickstart, HTTP API and command-line guides in FOLO's repository</dd>
           <dt>Command line</dt>
           <dd class="mono">folo --help</dd>
         </dl>
@@ -444,9 +442,10 @@
     background: var(--success-solid);
     box-shadow: 0 0 0 3px var(--success-muted);
   }
-  [data-mode='mock'] .led {
-    background: var(--warning-solid);
-    box-shadow: 0 0 0 3px var(--warning-muted);
+  .status :global(.led-glyph) {
+    flex-shrink: 0;
+    margin-top: 2px;
+    color: var(--text-tertiary);
   }
   .status-text {
     display: grid;
@@ -639,7 +638,7 @@
   }
   /* Helper text keeps a readable measure (DESIGN_DIRECTION §2.3: ≤ 60 characters a line). */
   .note {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     margin-top: var(--space-3);
     font-size: var(--type-sm-size);
     color: var(--text-tertiary);

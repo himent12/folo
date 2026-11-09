@@ -194,6 +194,10 @@
   .c-detail[hidden] {
     display: none;
   }
+  /* The reasons behind Why? and More fixes read at the measure; buttons and the driver's report keep the width. */
+  .c-detail :global(p:not(.d-head)) {
+    max-inline-size: var(--measure);
+  }
   @media (pointer: coarse) {
     .c-more {
       min-height: 44px;

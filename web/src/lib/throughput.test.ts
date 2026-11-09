@@ -68,9 +68,10 @@ describe('what an estimate stands on', () => {
     expect(basisLine(est({ exact: false, arch: 'folo-s' }))).toBe('Scaled from folo-s at 640 px on this GPU');
   });
   it('says when the reference is not from this kind of device', () => {
-    expect(basisLine(est({ source: 'reference' }))).toBe('Reference figures, same GPU model');
+    // A reference range is wide, and the line says why.
+    expect(basisLine(est({ source: 'reference' }))).toBe('Reference benchmarks · no run measured here yet');
     expect(basisLine(est({ source: 'reference', measured_on: 'Intel Core i7-14700KF' }, { device: 'cpu', device_name: 'AMD Ryzen 9' }))).toBe(
-      'Reference figures, not measured here',
+      'Wide range: no run measured on this CPU yet',
     );
   });
   it('says what each confidence means for the range', () => {

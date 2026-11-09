@@ -201,7 +201,7 @@
   }
   /* The engine's sentences at a readable measure. */
   .why {
-    max-width: 72ch;
+    max-inline-size: var(--measure);
   }
   .why + .why {
     margin-top: var(--space-2);

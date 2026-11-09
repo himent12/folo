@@ -169,10 +169,12 @@ describe('New run after running out of GPU memory', () => {
     const startBtn = [...target.querySelectorAll<HTMLButtonElement>('.start button[type="submit"]')][0]!;
     expect(startBtn.className).toContain('secondary');
     expect(startBtn.getAttribute('aria-describedby')).toContain('rail-nofit');
-    // One condition, one severity: the figure, the meter and the line are all danger.
+    // One condition, one severity: the meter and the line are danger; the figure, a metric, stays in ink.
     expect(target.querySelector('#rail-nofit')?.className).toContain('danger');
     expect(target.querySelector('.summary .vram i')?.className).toContain('danger');
-    expect(target.querySelector('.summary .est dd.danger')?.textContent).toMatch(/~26\.\d GiB/);
+    const fig = [...target.querySelectorAll('.summary .est dd')].find((d) => /GiB/.test(d.textContent ?? ''))!;
+    expect(fig.textContent).toMatch(/~26\.\d GiB/);
+    expect(fig.className).not.toMatch(/danger|warn/);
     // The dock (narrow screens) carries the figure against the GPU's, the verdict and the fix as its one button.
     const dock = target.querySelector('.dock')!;
     expect(dock.querySelector('.dock-est')?.textContent?.replace(/\s+/g, ' ')).toMatch(/~26\.\d GiB \/ 16\.0 GiB.*Likely won't fit/);
@@ -232,7 +234,7 @@ describe('New run: short runs', () => {
     expect(more.getAttribute('aria-expanded')).toBe('true');
     const why = warn.querySelector(`#${more.getAttribute('aria-controls')}`)!;
     const text = why.textContent!.replace(/[ \t\n]+/g, ' ');
-    expect(text).toContain('150 optimizer steps: 5 epochs × 30 (120 batches of 16, 4 per step).');
+    expect(text).toContain('5 epochs × 30 steps. From scratch, a detector needs a few hundred');
     // "0" never ends up alone on a line, and the prose names no config keys.
     expect(text).toContain('expect an mAP near 0.');
     expect(text).toContain('Warmup takes 90 of the 150 steps');
@@ -730,7 +732,7 @@ describe('New run: the estimate', () => {
     const ask = vi.spyOn(api, 'estimateRun');
     await open();
     await until(() => basis(), 'the estimate');
-    expect(basis()).toBe('Reference figures, same GPU model');
+    expect(basis()).toBe('Reference benchmarks · no run measured here yet');
     expect(time()).toMatch(/^\d+–\d+ min$/);
     expect(rough()).toBe(true);
     expect(target.querySelector('.summary .how-note')?.textContent).toContain('does not estimate runs');

@@ -19,8 +19,8 @@
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
   import { prefs } from '$lib/prefs.svelte';
-  import { REF_CPU, REF_GPU } from '$lib/reference';
-  import { basisLine, confidenceLine, hasFeature, latencyMs, latencyRange, measuredLatency, timeRange, updatedWords } from '$lib/throughput';
+  import { REF_CPU, REF_GPU, referenceSource } from '$lib/reference';
+  import { basisLine, confidenceLine, hasFeature, referenceBasis, latencyMs, latencyRange, measuredLatency, timeRange, updatedWords } from '$lib/throughput';
   import { href, router } from '$lib/router.svelte';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import { dock } from '$lib/shell/dock';
@@ -464,13 +464,13 @@
       hi: est.highSeconds,
       vram: est.vramBytes,
       vramMeasured: false,
-      basis: refMachine ? `Reference figures, same ${onCpu ? 'CPU' : 'GPU'} model` : 'Reference figures, not measured here',
+      basis: referenceBasis(refMachine, onCpu),
       rough: true,
       how: !canEstimate
-        ? "This server does not estimate runs: docs/BENCHMARKS.md's figures, carried over to these settings."
+        ? `Estimated from ${referenceSource(onCpu)}, scaled to these settings: this server does not estimate runs.`
         : estimating
           ? "Loading this server's estimate."
-          : "This server could not estimate these settings: docs/BENCHMARKS.md's figures, carried over to them.",
+          : `Estimated from ${referenceSource(onCpu)}, scaled to these settings: this server could not estimate them.`,
       phases: est.phases,
       val: { images: est.valImages, rate: est.valImgsPerS, reference: false },
       startup: est.startupS,
@@ -481,8 +481,8 @@
   const vram = $derived(shown.vram * (shown.vramMeasured ? 1 : scale));
   const vramPct = $derived(gpuMem ? vram / gpuMem : 0);
   /**
-   * One condition, one severity, on the figure, the meter and the line under it: over the GPU's memory is `danger`
-   * (likely won't fit), within 10% of it `warning` (tight; lib/oom's headroom), else neutral.
+   * One condition, one severity, on the meter and the line under it (the figure stays in ink): over the GPU's memory is
+   * `danger` (likely won't fit), within 10% of it `warning` (tight; lib/oom's headroom), else neutral.
    */
   const vramLevel = $derived(onCpu || !gpuMem ? null : vramPct > 1 ? ('danger' as const) : vramPct > 0.9 ? ('warning' as const) : null);
   const noFit = $derived(vramLevel === 'danger');
@@ -698,7 +698,8 @@
     </dd>
     {#if !onCpu && gpu}
       <dt>Est. GPU memory</dt>
-      <dd class="num {vramLevel ?? ''}">{roughBytes(vram)} <span class="faint">/ {gpuMem ? bytes(gpuMem, prefs.units) : 'GPU memory unknown'}</span></dd>
+      <!-- The figure is a metric, in ink; its severity is the meter's and the line's under it (§2.6). -->
+      <dd class="num">{roughBytes(vram)} <span class="faint">/ {gpuMem ? bytes(gpuMem, prefs.units) : 'GPU memory unknown'}</span></dd>
     {/if}
   </dl>
   {#if scale > 1 && !onCpu}<p class="calib">Scaled up from the failed run's settings, which did not fit.</p>{/if}
@@ -728,13 +729,11 @@
       {#if shortWhy}
         <div class="short-why" id="{where}-short-why">
           {#if short.scratch}
-            <p>
-              {num(short.steps)} optimizer steps: {num(epochs)} epochs × {num(short.stepsPerEpoch)}{#if short.accumulate > 1}{' '}({num(est.stepsPerEpoch)} batches of {batchN}, {short.accumulate} per step){/if}.
-              Trained from scratch, a detector needs a few hundred steps to learn anything, so expect an mAP near&nbsp;0.
-            </p>
+            <!-- Two short sentences: the batches behind the steps are the Schedule row's tooltip. -->
+            <p>{num(epochs)} epochs × {num(short.stepsPerEpoch)} steps. From scratch, a detector needs a few hundred, so expect an mAP near&nbsp;0.</p>
           {/if}
           {#if short.warmupHeavy}
-            <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks only in the second half of the run.</p>
+            <p>Warmup takes {num(short.warmup)} of the {num(short.steps)} steps, so the learning rate peaks late.</p>
           {/if}
           <button type="button" class="fix" onclick={() => (epochs = short.epochs)}>Train {num(short.epochs)} epochs</button>
         </div>
@@ -1118,8 +1117,9 @@
           <button type="button" class="dock-est num" aria-haspopup="dialog" aria-label="Show the run summary" onclick={() => (sumOpen = true)}>
             <Meta>
               <span class:rough={shown.rough}>{timeRange(shown.lo, shown.hi)}</span>
-              <!-- Over the memory: the figure against the GPU's and the verdict, in the one severity the rail uses. -->
-              {#if !onCpu && gpu}<span class={vramLevel}
+              <!-- Over the memory: the figure against the GPU's in ink, and the verdict with its mark in the rail's one
+                   severity. -->
+              {#if !onCpu && gpu}<span
                   >{#if noFit && gpuMem}{roughBytes(vram)} / {bytes(gpuMem, prefs.units)}{:else}{roughBytes(vram)} GPU memory{/if}</span
                 >{/if}
               {#if noFit}<span class="dock-warn danger"><TriangleAlert size={12} aria-hidden="true" />Likely won't fit</span>{/if}
@@ -1312,7 +1312,7 @@
     color: var(--text-primary);
   }
   .ref {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     text-wrap: pretty;
     margin-top: var(--space-2);
     font-size: var(--type-sm-size);
@@ -1574,12 +1574,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .est dd.warning {
-    color: var(--warning-text);
-  }
-  .est dd.danger {
-    color: var(--danger-text);
-  }
   /* A rough estimate (nothing close measured here) reads one step quieter than a measured one. */
   .est dd.rough {
     color: var(--text-secondary);
@@ -1645,6 +1639,7 @@
     white-space: nowrap;
   }
   .how-note {
+    max-inline-size: var(--measure);
     margin-top: var(--space-2);
     text-align: left;
     color: var(--text-tertiary);
@@ -1862,6 +1857,7 @@
   .short-why {
     display: grid;
     justify-items: start;
+    max-inline-size: calc(var(--measure) + 22px);
     gap: var(--space-2);
     padding-left: 22px; /* grid-ok: the icon (14) and the gap (8) */
     font-size: var(--type-sm-size);
@@ -2097,11 +2093,10 @@
       display: grid;
       color: var(--text-tertiary);
     }
-    .dock-est .warning,
     .dock-warn {
       color: var(--warning-text);
     }
-    .dock-est .danger {
+    .dock-warn.danger {
       color: var(--danger-text);
     }
     .dock-warn {

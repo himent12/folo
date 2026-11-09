@@ -103,7 +103,7 @@
     color: var(--text-primary);
   }
   .desc {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     color: var(--text-secondary);
   }
   .actions {

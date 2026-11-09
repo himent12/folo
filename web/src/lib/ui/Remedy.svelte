@@ -53,7 +53,7 @@
   }
   /* Helper text keeps a readable measure (≤ 60 characters a line); the command under it runs the full width. */
   .cause {
-    max-width: 60ch;
+    max-inline-size: var(--measure);
     color: var(--text-secondary);
     text-wrap: pretty;
   }

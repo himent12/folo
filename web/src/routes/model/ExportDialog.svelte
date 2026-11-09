@@ -502,6 +502,7 @@
     color: var(--text-primary);
   }
   .note {
+    max-inline-size: var(--measure);
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
@@ -562,6 +563,7 @@
   /* The demo's word before an export: a neutral note with its mark, under the formats. */
   .demo-note {
     display: flex;
+    max-inline-size: calc(var(--measure) + 22px);
     align-items: flex-start;
     gap: var(--space-2);
     margin-top: var(--space-4);
