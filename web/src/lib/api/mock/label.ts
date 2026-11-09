@@ -29,16 +29,24 @@ import { AGENT_NAME, classChangeError, classesError, INSTRUCTIONS_MAX, JOB_NAME_
 import { imageSize, inventBoxes, predictBoxes, round } from './boxes';
 import { image, specs, type MockDatasetSpec } from './datasets';
 import { renderImage } from './render';
-import { hash } from './rng';
+import { hash, hashBytes } from './rng';
 
 /** One agent call ends every this many ms. */
 export const BATCH_MS = 1500;
 const MIN = 60_000;
 const HOUR = 60 * MIN;
-/** A job's image limit (docs/API.md). */
+/** A job's image limit (docs/API.md), and why an image past it is skipped. */
 const MAX_IMAGES = 10_000;
+const FULL = `a job holds at most ${MAX_IMAGES} images`;
 /** Over this many images added at once, the stream says `reload` instead of one `image` event each (docs/API.md). */
 const BULK = 100;
+
+/** What `start` takes at most (docs/API.md): a model name's characters, images per call, calls at a time. */
+const MODEL_MAX = 100;
+const BATCH_MAX = 16;
+const PARALLEL_MAX = 8;
+/** Whether an optional count is absent or a whole number in `1..=max`. */
+const inRange = (v: number | null | undefined, max: number) => v === null || v === undefined || (Number.isInteger(v) && v >= 1 && v <= max);
 
 /** Images per call when a run names none (docs/API.md: Claude Code 4, Codex 8). */
 const DEFAULT_BATCH: Record<LabelAgentId, number> = { claude: 4, codex: 8 };
@@ -153,7 +161,10 @@ function addUsage(a: LabelUsage, b: LabelUsage) {
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
-const n = (x: number) => x.toLocaleString('en-US');
+/** `word` for `k` of them, as the server's log writes it. */
+const plural = (k: number, word: string) => (k === 1 ? word : word === 'box' ? 'boxes' : `${word}s`);
+/** Why an image the reply did not mention failed (the server's words). */
+const LEFT_OUT = "the agent's reply left this image out";
 
 export class MockLabeling {
   #jobs: Job[] = [];
@@ -178,12 +189,12 @@ export class MockLabeling {
 
     // Its last run ended early: Claude Code was not signed in on the server's machine.
     const failed = this.#make('lb_9e44', 'parts-bench', ['bolt', 'nut', 'washer'], '', t0 - 26 * HOUR);
-    this.#addFrom(failed, spec('ds_fasteners'), 1500, 24, 'bench', t0 - 26 * HOUR);
-    this.#run(failed, { agent: 'claude', model: 'haiku', effort: 'low', image_ids: failed.images.slice(0, 8).map((i) => i.id) }, t0 - 26 * HOUR + MIN);
+    this.#addFrom(failed, spec('ds_fasteners'), 1500, 24, 'bench');
+    this.#run(failed, { agent: 'claude', image_ids: failed.images.slice(0, 8).map((i) => i.id) }, t0 - 26 * HOUR + MIN);
     this.advance(failed, t0);
     this.#fail(
       failed,
-      { agent: 'claude', model: 'sonnet', effort: 'low' },
+      { agent: 'claude' },
       t0 - 25 * HOUR,
       'Not logged in · Please run /login',
       'Sign in to Claude Code on the server’s machine (run `claude` and follow /login), then start the run again.',
@@ -197,10 +208,10 @@ export class MockLabeling {
       'Label every bolt, nut, washer and screw, also partly hidden ones. A spring washer is a washer.',
       t0 - 5 * HOUR,
     );
-    this.#addFrom(done, spec('ds_fasteners'), 600, 36, 'line', t0 - 5 * HOUR);
-    this.#run(done, { agent: 'claude', model: 'haiku', effort: 'low' }, t0 - 3 * HOUR);
+    this.#addFrom(done, spec('ds_fasteners'), 600, 36, 'line');
+    this.#run(done, { agent: 'claude' }, t0 - 3 * HOUR);
     this.advance(done, t0 - 3 * HOUR + 30 * MIN);
-    this.#run(done, { agent: 'claude', model: 'sonnet', effort: 'medium', note: 'Washers under a nut count too.' }, t0 - 2 * HOUR);
+    this.#run(done, { agent: 'claude', note: 'Washers under a nut count too.' }, t0 - 2 * HOUR);
     this.advance(done, t0);
     done.images.slice(4, 7).forEach((im, k) => {
       im.boxes = im.boxes.slice(0, Math.max(1, im.boxes.length - k));
@@ -219,7 +230,7 @@ export class MockLabeling {
       'Label every circle, square, triangle and star, also partly hidden ones. Ignore hexagons and crosses.',
       t0 - 40 * MIN,
     );
-    this.#addFrom(live, spec('ds_shapes_hard'), 0, 96, 'tray', t0 - 40 * MIN);
+    this.#addFrom(live, spec('ds_shapes_hard'), 0, 96, 'tray');
     this.#run(live, { agent: 'claude', model: 'sonnet', effort: 'low' }, t0 - 12_000);
     this.advance(live, t0);
 
@@ -231,7 +242,7 @@ export class MockLabeling {
       'Label every bolt, nut, washer and screw, also partly hidden ones. Ignore the rivets on the conveyor.',
       t0 - 20 * MIN,
     );
-    this.#addFrom(fresh, spec('ds_fasteners'), 900, 40, 'bin', t0 - 20 * MIN);
+    this.#addFrom(fresh, spec('ds_fasteners'), 900, 40, 'bin');
   }
 
   #make(id: string, name: string, classes: string[], instructions: string, at: number): Job {
@@ -241,12 +252,11 @@ export class MockLabeling {
   }
 
   /** `count` images of `spec` from `first` on, named like a camera's files (`bin-0901.jpg`). */
-  #addFrom(job: Job, spec: MockDatasetSpec, first: number, count: number, prefix: string, at: number) {
+  #addFrom(job: Job, spec: MockDatasetSpec, first: number, count: number, prefix: string) {
     for (let index = first; index < first + count; index++) {
       const d = image(spec, index);
       job.images.push(this.#img(job, `${prefix}-${String(index + 1).padStart(4, '0')}.jpg`, d.width, d.height, { spec, index }));
     }
-    this.#log(job, at, 'info', `added ${count} images from D:/photos/${prefix}`);
   }
 
   #img(job: Job, file: string, width: number, height: number, from: Img['from']): Img {
@@ -374,7 +384,7 @@ export class MockLabeling {
     const folder = body.path ? this.#folder(body.path) : null;
     const id = `lb_${(hash(body.name + now + this.#next++) & 0xffff).toString(16).padStart(4, '0')}`;
     const job = this.#make(id, body.name.trim(), body.classes.map((c) => c.trim()), body.instructions ?? '', now);
-    if (folder) this.#import(job, folder, body.path ?? '', now);
+    if (folder) this.#import(job, folder);
     return this.#toJob(job);
   }
 
@@ -416,28 +426,28 @@ export class MockLabeling {
     return s;
   }
 
-  #import(job: Job, spec: MockDatasetSpec, path: string, now: number): LabelImagesAdded {
+  #import(job: Job, spec: MockDatasetSpec): LabelImagesAdded {
     const added: Img[] = [];
     const skipped: SkippedImage[] = [];
     const total = spec.splits.train + spec.splits.val + spec.splits.test;
     for (let index = 0; index < total; index++) {
       const d = image(spec, index);
       if (job.images.some((i) => 'spec' in i.from && i.from.spec.id === spec.id && i.from.index === index))
-        skipped.push({ file: d.file, reason: 'already in this job' });
-      else if (job.images.length >= MAX_IMAGES) skipped.push({ file: d.file, reason: `the job is full (${n(MAX_IMAGES)} images)` });
+        skipped.push({ file: d.file, reason: 'the job already has this file' });
+      else if (job.images.length >= MAX_IMAGES) skipped.push({ file: d.file, reason: FULL });
       else {
         const im = this.#img(job, this.#unique(job, d.file.split('/').pop() ?? d.file), d.width, d.height, { spec, index });
         job.images.push(im);
         added.push(im);
       }
     }
-    return this.#added(job, added, skipped, `added ${n(added.length)} images from ${path}`, now);
+    return this.#added(job, added, skipped);
   }
 
   importPath(id: string, path: string, now: number): LabelImagesAdded {
     const j = this.#job(id);
     this.advance(j, now);
-    return this.#import(j, this.#folder(path), path, now);
+    return this.#import(j, this.#folder(path));
   }
 
   async upload(id: string, files: File[], now: number): Promise<LabelImagesAdded> {
@@ -445,30 +455,34 @@ export class MockLabeling {
     const added: Img[] = [];
     const skipped: SkippedImage[] = [];
     for (const f of files) {
-      const key = `upload:${f.name}:${f.size}:${f.lastModified}`;
-      if (j.images.some((i) => 'blob' in i.from && i.from.key === key)) {
-        skipped.push({ file: f.name, reason: 'an image with the same bytes is already in this job' });
+      // As on the server, an upload is the same image as one the job has when its bytes are the same, whatever its
+      // name; another file under a taken name is added under a name of its own.
+      let size: { width: number; height: number };
+      try {
+        size = await imageSize(f);
+      } catch {
+        skipped.push({ file: f.name, reason: 'not a readable image' });
+        continue;
+      }
+      const key = `upload:${hashBytes(new Uint8Array(await f.arrayBuffer()))}`;
+      const same = j.images.find((i) => 'blob' in i.from && i.from.key === key);
+      if (same) {
+        skipped.push({ file: f.name, reason: `the job already has this image (${same.file})` });
         continue;
       }
       if (j.images.length >= MAX_IMAGES) {
-        skipped.push({ file: f.name, reason: `the job is full (${n(MAX_IMAGES)} images)` });
+        skipped.push({ file: f.name, reason: FULL });
         continue;
       }
-      try {
-        const { width, height } = await imageSize(f);
-        const im = this.#img(j, this.#unique(j, f.name), width, height, { blob: f, key });
-        j.images.push(im);
-        added.push(im);
-      } catch {
-        skipped.push({ file: f.name, reason: 'not an image FOLO can read (JPEG, PNG, BMP or WebP)' });
-      }
+      const im = this.#img(j, this.#unique(j, f.name), size.width, size.height, { blob: f, key });
+      j.images.push(im);
+      added.push(im);
     }
     this.advance(j, now);
-    return this.#added(j, added, skipped, `added ${n(added.length)} uploaded ${added.length === 1 ? 'image' : 'images'}`, now);
+    return this.#added(j, added, skipped);
   }
 
-  #added(job: Job, added: Img[], skipped: SkippedImage[], what: string, now: number): LabelImagesAdded {
-    if (added.length) this.#log(job, now, 'info', skipped.length ? `${what}; ${n(skipped.length)} skipped` : what);
+  #added(job: Job, added: Img[], skipped: SkippedImage[]): LabelImagesAdded {
     const out = this.#toJob(job);
     if (added.length > BULK) this.#emit(job.id, (h) => h.reload?.({}));
     else for (const im of added) this.#emit(job.id, (h) => h.image?.(this.#toImage(im)));
@@ -515,7 +529,6 @@ export class MockLabeling {
     }
     this.#claim(j, im);
     Object.assign(im, { boxes: clipped, status: 'labeled', source: 'manual', error: null });
-    this.#log(j, now, 'info', `${im.file}: ${clipped.length} ${clipped.length === 1 ? 'box' : 'boxes'} drawn by hand`);
     this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
     const out = this.#toJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
@@ -540,15 +553,19 @@ export class MockLabeling {
     this.advance(j, now);
     if (body.agent !== 'claude' && body.agent !== 'codex')
       throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(body.agent)}\`, expected \`claude\` or \`codex\``);
+    // In the server's order: the body's fields, then the agent, then the job.
+    if ([...(body.note ?? '')].length > NOTE_MAX) throw new ApiError(400, 'invalid_body', `note must be at most ${NOTE_MAX} characters`);
+    const model = body.model?.trim() || null;
+    if (model && !/^[A-Za-z0-9._:/[\]-]{1,100}$/.test(model))
+      throw new ApiError(400, 'invalid_body', `model must be at most ${MODEL_MAX} characters of A-Z a-z 0-9 . _ : / - [ ]`);
+    if (!inRange(body.batch, BATCH_MAX)) throw new ApiError(400, 'invalid_body', `batch must be in 1..=${BATCH_MAX}`);
+    if (!inRange(body.parallel, PARALLEL_MAX)) throw new ApiError(400, 'invalid_body', `parallel must be in 1..=${PARALLEL_MAX}`);
     const agent = mockAgents(this.codex).find((a) => a.id === body.agent);
     if (!agent?.available) throw new ApiError(501, 'not_supported', `${AGENT_NAME[body.agent]} is not installed on the server's machine.`, agent?.hint);
-    if (body.model && !/^[A-Za-z0-9._:/[\]-]{1,100}$/.test(body.model))
-      throw new ApiError(400, 'invalid_body', 'field `model`: letters, digits and `. _ : / - [ ]` only, at most 100');
-    if ((body.note ?? '').length > NOTE_MAX) throw new ApiError(400, 'invalid_body', `field \`note\`: at most ${NOTE_MAX} characters`);
     if (this.#active(j)) throw new ApiError(409, 'label_job_active', `An agent is already labeling ${j.name}.`, 'Wait for the run to finish, or stop it first.');
     const unknown = body.image_ids?.find((x) => !j.images.some((i) => i.id === x));
-    if (unknown) throw new ApiError(400, 'invalid_body', `field \`image_ids\`: job ${j.name} has no image ${unknown}`);
-    this.#run(j, body, now);
+    if (unknown) throw new ApiError(400, 'invalid_body', `image_ids: the job has no image '${unknown}'`);
+    this.#run(j, { ...body, model, image_ids: body.image_ids ? [...new Set(body.image_ids)] : body.image_ids }, now);
     if (!j.run?.ids.length) {
       j.run = null;
       throw new ApiError(400, 'invalid_body', 'nothing to label: every image of the job is labeled', 'Start with `scope: all` to label them again.');
@@ -566,11 +583,12 @@ export class MockLabeling {
     j.run = r;
     j.runs++;
     if (!ids.length) return;
+    const calls = Math.ceil(ids.length / r.batch);
     this.#log(
       j,
       at,
       'info',
-      `run started: ${n(ids.length)} ${ids.length === 1 ? 'image' : 'images'} with ${AGENT_NAME[r.agent]} (${r.model ?? 'default model'}, ${r.effort} effort), ${r.batch} per call, ${r.parallel} at a time${r.note ? `; note: ${r.note}` : ''}`,
+      `${AGENT_NAME[r.agent]} (${r.model ?? 'its default model'}, ${r.effort} effort) starts on ${ids.length} ${plural(ids.length, 'image')}: ${calls} ${plural(calls, 'call')} of up to ${r.batch}`,
     );
     this.#send(j);
   }
@@ -606,8 +624,7 @@ export class MockLabeling {
     Object.assign(r, { outcome: 'failed', finishedAt: at + 4000, error, hint });
     r.usage.calls = 1;
     j.usage.calls += 1;
-    this.#log(j, at + 4000, 'error', `${AGENT_NAME[r.agent]} exited with an error: ${error}`);
-    this.#log(j, at + 4000, 'error', `run failed after 1 call: ${n(r.ids.length)} images left as they were`);
+    this.#log(j, at + 4000, 'error', `${AGENT_NAME[r.agent]} stopped: ${error} (${this.#summary(r)})`);
   }
 
   stop(id: string, now: number): LabelJob {
@@ -617,7 +634,7 @@ export class MockLabeling {
     if (!r || r.outcome) throw new ApiError(409, 'label_job_not_active', `No agent is labeling ${j.name}.`);
     if (r.stopAt === null) {
       r.stopAt = now + 1000;
-      this.#log(j, now, 'warn', 'stop requested: ending the calls in flight');
+      this.#log(j, now, 'info', 'stop requested');
     }
     const out = this.#toJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
@@ -686,18 +703,21 @@ export class MockLabeling {
     const ids = this.#batch(r, k).filter((id) => !r.left.has(id));
     if (!ids.length) return;
     let boxes = 0;
+    let labeled = 0;
+    let leftOut = false;
     for (const id of ids) {
       const im = j.images.find((i) => i.id === id);
       if (!im) continue;
       im.before = null;
       if (im.failures === 0 && hash(`${j.id}:${im.id}`) % 13 === 0) {
-        Object.assign(im, { status: 'failed', error: 'the agent’s reply left this image out' });
+        Object.assign(im, { status: 'failed', error: LEFT_OUT });
         im.failures++;
         r.failed++;
-        this.#log(j, at, 'warn', `${im.file}: not in the reply; marked failed`);
+        leftOut = true;
       } else {
         Object.assign(im, { status: 'labeled', boxes: this.#draft(j, im, r), source: 'agent', error: null });
         boxes += im.boxes.length;
+        labeled++;
         r.done++;
       }
       this.#emit(j.id, (h) => h.image?.(this.#toImage(im)));
@@ -705,13 +725,10 @@ export class MockLabeling {
     const usage = this.#usage(j, r, k, ids.length, boxes);
     addUsage(r.usage, usage);
     addUsage(j.usage, usage);
-    this.#log(
-      j,
-      at,
-      'info',
-      `call ${k + 1}: ${ids.length} ${ids.length === 1 ? 'image' : 'images'}, ${boxes} ${boxes === 1 ? 'box' : 'boxes'} · ${n(usage.input_tokens)} tokens in (${n(usage.cached_input_tokens)} cached), ${n(usage.output_tokens)} out`,
-    );
-    if (hash(`${j.id}:drop:${k}:${j.runs}`) % 6 === 0) this.#log(j, at, 'warn', `call ${k + 1}: 1 box dropped: its label is not one of the job's classes`);
+    // The server's lines for a call: what it labeled and used, then what it dropped and why images failed.
+    this.#log(j, at, 'info', `call ${k + 1}: ${labeled} ${plural(labeled, 'image')} labeled, ${boxes} ${plural(boxes, 'box')} · ${usage.input_tokens} tokens in, ${usage.output_tokens} out`);
+    if (hash(`${j.id}:drop:${k}:${j.runs}`) % 6 === 0) this.#log(j, at, 'warn', `call ${k + 1}: 1 box dropped (a label that is not a class, or a box that is not one)`);
+    if (leftOut) this.#log(j, at, 'warn', `call ${k + 1}: ${LEFT_OUT}`);
   }
 
   /** The agent's boxes for an image: its objects as a decent model finds them, in the job's classes. */
@@ -747,17 +764,17 @@ export class MockLabeling {
     r.outcome = outcome;
     r.finishedAt = at;
     r.stopAt = null;
-    const left = r.ids.length - r.left.size - r.done - r.failed;
-    this.#log(
-      j,
-      at,
-      outcome === 'completed' ? 'info' : 'warn',
-      outcome === 'completed'
-        ? `run completed: ${n(r.done)} labeled, ${n(r.failed)} failed, ${n(r.usage.calls)} calls`
-        : `run stopped: ${n(r.done)} labeled, ${n(left)} ${left === 1 ? 'image' : 'images'} left as they were`,
-    );
+    const name = AGENT_NAME[r.agent];
+    this.#log(j, at, 'info', outcome === 'completed' ? `${name} is done: ${this.#summary(r)}` : `${name} was stopped: ${this.#summary(r)}`);
     const out = this.#toJob(j);
     this.#emit(j.id, (h) => h.job?.(out));
+  }
+
+  /** A run's figures as the server's last log line has them. */
+  #summary(r: Run): string {
+    const total = r.ids.length - r.left.size;
+    const u = r.usage;
+    return `${r.done} of ${total} ${plural(total, 'image')} labeled, ${r.failed} failed · ${u.calls} ${plural(u.calls, 'call')}, ${u.input_tokens} tokens in, ${u.output_tokens} out`;
   }
 
   // ---------- datasets ----------
@@ -784,7 +801,7 @@ export class MockLabeling {
     const boxes = counts.reduce((a, b) => a + b, 0);
     const dsId = `ds_${(hash(name + now) & 0xffff).toString(16).padStart(4, '0')}`;
     j.datasetId = dsId;
-    this.#log(j, now, 'info', `dataset ${name} written: ${n(labeled.length - val)} train, ${n(val)} val images, ${n(boxes)} boxes`);
+    this.#log(j, now, 'info', `dataset '${name}' made: ${labeled.length - val} train and ${val} val images`);
     return {
       ...look,
       id: dsId,
