@@ -30,6 +30,10 @@ pub enum Btn {
     Primary,
     Secondary,
     Danger,
+    /// A dialog's destructive commit: the Danger tint with a danger edge, so it outweighs the safe
+    /// choice beside it. (A solid red fill fails AA with white text in both themes, and the
+    /// tokens have no on-danger ink.)
+    DangerCommit,
 }
 
 /// Hover tooltip: one short line on the overlay surface.
@@ -132,7 +136,7 @@ impl FoloApp {
         let pressed = match kind {
             Btn::Primary => crate::theme::over(t.accent_solid, gpui::hsla(0., 0., 0., 0.14)),
             Btn::Secondary => crate::theme::over(t.bg_raised, t.bg_active),
-            Btn::Danger => crate::theme::alpha(t.danger_solid, 0.28),
+            Btn::Danger | Btn::DangerCommit => crate::theme::alpha(t.danger_solid, 0.28),
         };
         let label: SharedString = label.into();
         let el = div()
@@ -526,7 +530,8 @@ impl FoloApp {
             .rounded(px(radius::MD))
             .bg(t.bg_inset)
             .border_1()
-            .border_color(t.line_default)
+            // Its edge is what marks it, as on inputs and selects beside it: line.control.
+            .border_color(t.line_control)
             .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, window, cx| {
                 // Steps to the next option that can be chosen in that direction, wrapping (also from
                 // a selection that is itself disabled).
@@ -567,6 +572,7 @@ impl FoloApp {
             .children(options.iter().enumerate().map(|(i, label)| {
                 let on = i == selected;
                 let f = on_select.clone();
+                let group = key.to_string();
                 let why = off[i].clone();
                 let dead = why.is_some();
                 div()
@@ -582,7 +588,7 @@ impl FoloApp {
                     .when(!dead, |d| d.cursor_pointer())
                     .border_1()
                     .border_color(gpui::transparent_black())
-                    .when(on, |d| d.bg(t.bg_raised).border_color(t.line_strong))
+                    .when(on, |d| d.bg(t.bg_raised).border_color(t.line_control))
                     .when(!on && !dead, |d| d.hover(|s| s.bg(t.bg_hover)))
                     // The selected option answers the pointer too: hover tint over its raised fill.
                     .when(on, |d| {
@@ -592,6 +598,7 @@ impl FoloApp {
                     .when(!dead, |d| d.active(|s| s.bg(t.bg_active)))
                     .when(!dead, |d| {
                         d.on_click(cx.listener(move |this, _, window, cx| {
+                            window.focus(&this.fh(group.clone(), cx));
                             f(this, i, window, cx);
                             cx.notify();
                         }))
@@ -720,7 +727,7 @@ impl FoloApp {
             .cursor_pointer()
             .bg(if on { t.accent_fill() } else { t.line_control })
             // Hover and pressed are fills a step apart, like every other control.
-            .when(!on, |d| d.hover(|s| s.bg(t.text_disabled)).active(|s| s.bg(t.text_tertiary)))
+            .when(!on, |d| d.hover(|s| s.bg(t.text_tertiary)).active(|s| s.bg(t.text_secondary)))
             .when(on, |d| {
                 let hot = crate::theme::over(t.accent_fill(), t.bg_hover);
                 let down = crate::theme::over(t.accent_fill(), t.bg_active);
@@ -999,7 +1006,9 @@ impl FoloApp {
                     .size_full(),
                 )
             })
-            .on_click(cx.listener(move |this, _, _, cx| {
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // The clicked select takes focus, so the keys then work its menu.
+                window.focus(&this.fh(key, cx));
                 this.menu_open = if this.menu_open == Some(key) { None } else { Some(key) };
                 this.menu_hl = selected;
                 this.menu_scroll.scroll_to_item(selected);
@@ -1156,6 +1165,9 @@ pub fn btn_colors(t: &Theme, kind: Btn) -> (Hsla, Hsla, Option<Hsla>, Hsla) {
             (t.bg_raised, t.text_primary, Some(t.line_default), crate::theme::over(t.bg_raised, t.bg_hover))
         }
         Btn::Danger => (t.danger_muted, t.danger_text, None, crate::theme::alpha(t.danger_solid, 0.2)),
+        Btn::DangerCommit => {
+            (t.danger_muted, t.danger_text, Some(t.danger_solid), crate::theme::alpha(t.danger_solid, 0.2))
+        }
     }
 }
 

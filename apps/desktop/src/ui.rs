@@ -81,34 +81,35 @@ pub fn caption(t: &Theme, label: &str) -> Div {
     text(ty::XS, t.text_tertiary).font_weight(FontWeight::MEDIUM).whitespace_nowrap().child(label.to_string())
 }
 
-/// Centered text where `backticked` spans render as inline code chips.
+/// Centred text (`.text_left()` to align it left) where `backticked` spans render as inline code:
+/// one text element, so words space and wrap as body text does, with code in Geist Mono on a
+/// chip fill (a no-break space either side for its padding).
 pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
-    let mut d = div().flex().flex_wrap().items_baseline().justify_center().text_color(color);
+    let (sans, mono) = (gpui::font(crate::theme::SANS), gpui::font(crate::theme::MONO));
+    let mut text = String::new();
+    let mut runs = Vec::new();
     for (i, part) in content.split('`').enumerate() {
         if part.is_empty() {
             continue;
         }
-        if i % 2 == 1 {
-            d = d.child(
-                div()
-                    .mx(px(1.))
-                    .px(px(4.))
-                    .rounded(px(radius::XS))
-                    .bg(t.bg_active)
-                    .font_family(crate::theme::MONO)
-                    .text_size(px(s.size - 1.))
-                    .line_height(px(s.line))
-                    .text_color(t.text_primary)
-                    .child(part.to_string()),
-            );
-        } else {
-            // One item per word so the line wraps between words, keeping the spaces.
-            for w in part.split_inclusive(' ') {
-                d = d.child(text(s, color).whitespace_nowrap().child(w.replace(' ', "\u{a0}")));
-            }
-        }
+        let code = i % 2 == 1;
+        let seg = if code { format!("\u{a0}{part}\u{a0}") } else { part.to_string() };
+        runs.push(gpui::TextRun {
+            len: seg.len(),
+            font: if code { mono.clone() } else { sans.clone() },
+            color: if code { t.text_primary } else { color },
+            background_color: code.then_some(t.bg_active),
+            underline: None,
+            strikethrough: None,
+        });
+        text.push_str(&seg);
     }
-    d
+    div()
+        .text_size(px(s.size))
+        .line_height(px(s.line))
+        .text_color(color)
+        .text_center()
+        .child(gpui::StyledText::new(text).with_runs(runs))
 }
 
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {

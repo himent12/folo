@@ -49,8 +49,7 @@ impl FoloApp {
                 .child(div().flex_none().flex().justify_end().child(control))
         };
         // Command names render as code chips, as on Overview.
-        let help =
-            |s: &str| crate::ui::rich(&t, ty::SM, t.text_tertiary, s).justify_start().into_any_element();
+        let help = |s: &str| crate::ui::rich(&t, ty::SM, t.text_tertiary, s).text_left().into_any_element();
         let mode_sel = if self.server_mode == ServerMode::Mock { 0 } else { 1 };
         let mode_seg = self.segmented(
             "set-server",

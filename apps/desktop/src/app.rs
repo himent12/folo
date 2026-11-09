@@ -1907,6 +1907,11 @@ impl FoloApp {
     }
 
     pub fn play_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        // Also after a picker that opened while models were there, if they've gone since.
+        if let Some(why) = self.open_image_blocked() {
+            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+            return;
+        }
         let name: SharedString =
             path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default().into();
         let n2 = name.to_string();
@@ -2045,7 +2050,31 @@ impl FoloApp {
         );
     }
 
+    /// Why Open image can't run now, if it can't: the model list failed (with the runs list too:
+    /// not connected) or is still loading, or there's no model yet. Only the models decide: a
+    /// failed runs list alone doesn't stop inference. The button, Ctrl+O and the palette share this.
+    pub fn open_image_blocked(&self) -> Option<&'static str> {
+        if self.store.models.error().is_some() {
+            Some(if self.store.runs.error().is_some() {
+                "Not connected"
+            } else {
+                "Models didn't load: retry under Best models"
+            })
+        } else if self.store.models.ready().is_none() {
+            Some("Loading models…")
+        } else if self.store.models.ready().is_some_and(|m| m.is_empty()) {
+            Some("Train a model first")
+        } else {
+            None
+        }
+    }
+
     pub fn pick_image(&mut self, cx: &mut Context<Self>) {
+        // The shortcut and palette obey the button's rule, and say why.
+        if let Some(why) = self.open_image_blocked() {
+            self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
+            return;
+        }
         let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: true,
             directories: false,
@@ -2806,6 +2835,11 @@ impl Render for FoloApp {
                         Some("Then drop the image again.".into()),
                         cx,
                     );
+                    return;
+                }
+                // A drop obeys Open image's rule (and says why) before it navigates anywhere.
+                if let Some(why) = this.open_image_blocked() {
+                    this.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
                     return;
                 }
                 if let Some(p) = paths.paths().first().cloned() {

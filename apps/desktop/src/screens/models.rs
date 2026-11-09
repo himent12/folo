@@ -1185,8 +1185,8 @@ impl FoloApp {
                     } else if v == 0 {
                         crate::theme::over(t.bg_panel, t.bg_hover)
                     } else {
-                        // Correct cells on the success ramp; errors on a danger ramp (square root up
-                        // to the largest error), so small and large confusions stay apart.
+                        // Correct cells on the success ramp; errors on a danger ramp (linear from a
+                        // faint floor up to the largest error), so small and large confusions stay apart.
                         if diag {
                             crate::theme::over(t.bg_inset, alpha(base, (0.35 + 0.6 * frac).min(0.95)))
                         } else if r == n - 1 {
@@ -1537,10 +1537,12 @@ fn short_name(name: &str) -> String {
     if short.chars().count() < name.chars().count() { format!("{short}.") } else { short }
 }
 
-/// Fill opacity of an error cell: a square-root ramp over `frac`, the cell's share of the largest
-/// class-to-class confusion shown.
+/// Fill opacity of an error cell: linear over `frac`, the cell's share of the largest
+/// class-to-class confusion shown, from a faint 0.1 (still apart from the empty cells) to 0.8.
+/// The square-root ramp it replaces lifted 1–4 % confusions toward full red, so the whole
+/// off-diagonal read as alarm.
 fn err_alpha(frac: f32) -> f32 {
-    0.8 * frac.clamp(0., 1.).sqrt()
+    0.1 + 0.7 * frac.clamp(0., 1.)
 }
 
 /// Weight precision inferred from file size per parameter (the API doesn't report it).
