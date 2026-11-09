@@ -19,8 +19,8 @@
     padding: var(--space-3);
     border-radius: var(--radius-md);
     background: var(--bg-raised);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
+    font-size: var(--type-base-size);
+    line-height: var(--type-base-line);
     color: var(--text-secondary);
   }
   .info-region[hidden] {

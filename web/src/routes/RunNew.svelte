@@ -16,6 +16,8 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Arch, Augment, Dataset, DatasetImage, Device, Model, Optimizer, Run, RunEstimate, TrainConfig } from '$lib/api/types';
   import { modelChoices, scoreContext, scoreMeta, scoreText } from '$lib/scoreSummary';
+  import { FROM_SCRATCH } from '$lib/lineage';
+  import { publishedSummary } from '$lib/published';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, sentence } from '$lib/format';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
@@ -199,11 +201,16 @@
   /** Start from's hint: the picked weights' score with all of its context, and what published weights are. */
   const startHint = $derived.by(() => {
     if (!picked) return 'Fine-tuning from a trained model converges much faster.';
-    // Published weights lead with what they are; trained ones are their score.
-    const meta = scoreMeta(picked.metrics?.map50_95, scoreCtx(picked));
-    const parts = isPublished(picked) ? [picked.about, meta] : [meta];
-    return parts.filter(Boolean).join(' · ') || 'Fine-tuning from a trained model converges much faster.';
+    // Published weights: what they are for, in plain words; their provenance and score are in the ⓘ beside the label
+    // (pickedAbout). Trained ones are their score with its context.
+    if (isPublished(picked)) return publishedSummary(picked);
+    return scoreMeta(picked.metrics?.map50_95, scoreCtx(picked)) || 'Fine-tuning from a trained model converges much faster.';
   });
+  /** Published weights' provenance: the server's description, then the score with what it is on. */
+  let aboutOpen = $state(false);
+  const pickedAbout = $derived(
+    picked && isPublished(picked) ? [picked.about, scoreMeta(picked.metrics?.map50_95, scoreCtx(picked))].filter(Boolean).join(' · ') : null,
+  );
   /** Published weights picked: the run's size is theirs, said under the size picker. */
   const pickedPublished = $derived(picked && isPublished(picked) ? picked : null);
   $effect(() => {
@@ -698,7 +705,7 @@
     {
       key: 'weights',
       label: 'Start from',
-      value: weights === 'none' ? 'From scratch' : (picked?.name ?? weights),
+      value: weights === 'none' ? FROM_SCRATCH : (picked?.name ?? weights),
       mono: weights !== 'none',
       warn: !!errors.weights,
     },
@@ -1014,14 +1021,17 @@
             <!-- Closed, the select names the weights alone; their score and what it is on are the hint under it (never
                  cut at the select's edge), with published weights' own description (`Model.about`, also each option's
                  tooltip). The open list keeps the groups and each option's context. -->
+            <!-- Published weights: the plain line is the hint; where they come from (the server's own words) opens as a
+                 line under the field (InfoButton `controls`), never a popover over the fields below. -->
             <Field label="Start from" for="weights" hint={startHint} error={errors.weights}>
+              {#snippet aside()}{#if pickedAbout}<InfoButton label="Where these weights come from" controls="weights-about" bind:open={aboutOpen} />{/if}{/snippet}
               <Select
                 id="weights"
                 bind:value={weights}
                 onchange={pickWeights}
                 invalid={!!errors.weights}
                 options={[
-                  { value: 'none', label: 'From scratch' },
+                  { value: 'none', label: FROM_SCRATCH },
                   ...weightChoices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short })),
                   ...publishedOptions.map((m) => ({
                     value: m.id,
@@ -1033,6 +1043,7 @@
                 ]}
               />
             </Field>
+            {#if pickedAbout && aboutOpen}<p class="weights-about" id="weights-about">{pickedAbout}</p>{/if}
           </div>
         </Panel>
 
@@ -1925,6 +1936,14 @@
     color: var(--text-tertiary);
     text-align: left;
     white-space: normal;
+  }
+  /* Where published weights come from, opened from Start from's ⓘ: a quiet line under the field, at the measure. */
+  .weights-about {
+    margin-top: var(--space-2);
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
   }
   /* The batches behind the steps: one quiet sentence under the row, from the label's edge across the rail. */
   .est dd.steps-why {

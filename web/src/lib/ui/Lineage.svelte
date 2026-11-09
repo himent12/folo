@@ -5,10 +5,10 @@
    * its file name, the full path in the tooltip; "From scratch" in sans. Resolve the origin with `$lib/lineage`.
    */
   import { href } from '$lib/router.svelte';
-  import { originTip, type Origin } from '$lib/lineage';
+  import { FROM_SCRATCH, originTip, type Origin } from '$lib/lineage';
   import Ident from './Ident.svelte';
 
-  let { origin, link = true, scratch = 'From scratch' }: { origin: Origin; link?: boolean; scratch?: string } = $props();
+  let { origin, link = true, scratch = FROM_SCRATCH }: { origin: Origin; link?: boolean; scratch?: string } = $props();
 </script>
 
 {#if origin.kind === 'scratch'}{scratch}{:else if origin.kind === 'model'}<Ident

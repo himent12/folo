@@ -31,7 +31,7 @@
   import Lineage from '$lib/ui/Lineage.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
-  import { origin } from '$lib/lineage';
+  import { FROM_SCRATCH, origin } from '$lib/lineage';
   import Menu from '$lib/ui/Menu.svelte';
   import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
   import type { QueueRequest } from '$lib/api/types';
@@ -292,7 +292,7 @@
                   {:else if from.kind === 'file'}
                     <Ident value={from.label} title={from.path} />
                   {:else if from.kind === 'scratch'}
-                    <span class="faint">From scratch</span>
+                    <span class="faint">{FROM_SCRATCH}</span>
                   {:else}
                     <Ident value={from.label} class="faint" />
                   {/if}
@@ -676,9 +676,11 @@
     .r-check input[type='checkbox']:disabled {
       cursor: not-allowed;
     }
+    /* Off (four runs picked, the most Compare takes): an outline only, the control edge at half strength, so it never
+       reads as filled, and a filled square means checked (round 26: a dark inset fill read as checked). */
     .r-check input[type='checkbox']:disabled::before {
-      background: var(--bg-inset);
-      box-shadow: inset 0 0 0 1.5px var(--line-subtle);
+      background: transparent;
+      box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--line-control) 50%, transparent);
     }
     /* Focus rings the drawn square, not the invisible target around it. */
     .r-check input[type='checkbox']:focus-visible {

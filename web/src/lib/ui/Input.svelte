@@ -135,11 +135,16 @@
     font-size: var(--type-sm-size);
     white-space: nowrap;
   }
-  /* Touch: 44 px controls. */
+  /* Touch: 44 px controls, and the typed text at 16 px (type.lg), under which iOS zooms the page into the field on
+     focus (touchText.test.ts). The suffix and the labels around the field keep their sizes. */
   @media (pointer: coarse) {
     .input,
     .sm {
       height: 44px;
+    }
+    input,
+    .sm input {
+      font-size: var(--type-lg-size);
     }
   }
 </style>

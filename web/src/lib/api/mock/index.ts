@@ -7,7 +7,8 @@
 // finished 5-epoch run the trainer warns is too short to learn from), `tensor-cores-off` and `no-tensor-cores` (no
 // mixed-precision training: the server's `FOLO_MOCK_TENSOR_CORES=off` / `none`), `train-split` (adds a finished run on a dataset with no validation images), `finishing` (the run training reaches its
 // last epoch 3 s after load, for the toast that says so), `no-throughput` (a server from before measured throughput:
-// no `throughput`, `run_estimate`, `benchmark` or `run_cli` feature, and those endpoints answer 404) and `amp-refused`
+// no `throughput`, `run_estimate`, `benchmark` or `run_cli` feature, and those endpoints answer 404), `stale` (the server
+// stops answering, its live stream too, 3 s after load), `stale-lists` (the requests stop, the live stream keeps streaming) and `amp-refused`
 // (the server restarted without tensor cores after the page loaded: `/api/system` said mixed precision was available,
 // `POST /api/runs` refuses it with `501 not_supported`, and `/api/system` says so from then on), for screenshots of
 // those states.
@@ -94,8 +95,12 @@ export type Scenario =
   | 'train-split'
   | 'no-throughput'
   | 'amp-refused'
-  // The server answers the first loads, then stops (STALE_AFTER): pages keep what they have and say it is stale.
+  // The server answers the first loads, then stops (STALE_AFTER): pages keep what they have and say it is stale, and
+  // the live run's stream drops too, so its card shows the last known state.
   | 'stale'
+  // The same, but only the requests stop answering: the live run's stream keeps streaming, so its card stays live
+  // and the page says the lists alone are not refreshing.
+  | 'stale-lists'
   // A Studio build without folo-wasm: /api/system does not list `web_wasm`, so Playground's browser choices are off.
   | 'no-wasm';
 
@@ -471,7 +476,7 @@ export class MockApi implements Api {
   async #call<T>(fn: () => T, latency?: number): Promise<T> {
     if (this.scenario === 'loading') return new Promise<T>(() => {});
     if (this.latency > 0 && (latency ?? this.latency) > 0) await sleep((latency ?? this.latency) * (0.7 + 0.6 * Math.random()));
-    if (this.scenario === 'error' || (this.scenario === 'stale' && Date.now() - this.#t0 > STALE_AFTER))
+    if (this.scenario === 'error' || ((this.scenario === 'stale' || this.scenario === 'stale-lists') && Date.now() - this.#t0 > STALE_AFTER))
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
     this.#schedule(Date.now());
     return fn();
@@ -1174,8 +1179,15 @@ export class MockApi implements Api {
       h.connection?.('open');
       h.status?.({ status: last.status, error: p.terminal?.error ?? null });
     }, 30);
+    let dropped = false;
     const timer = setInterval(() => {
       const now = Date.now();
+      // `stale`: the server stops, its stream with it (EventSource then reports each failed retry).
+      if (this.scenario === 'stale' && now - this.#t0 > STALE_AFTER) {
+        if (!dropped) h.connection?.('reconnecting');
+        dropped = true;
+        return;
+      }
       this.#schedule(now);
       // A `queue` event whenever the place or the count changed (docs/API.md: state, not changes); before `running`.
       const q = place();

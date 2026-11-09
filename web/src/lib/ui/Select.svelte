@@ -141,6 +141,7 @@
     .shown,
     .sm .shown {
       line-height: 44px;
+      font-size: var(--type-lg-size);
     }
   }
   .chev {
@@ -155,11 +156,13 @@
   .sm .chev {
     right: 6px;
   }
-  /* Touch: 44 px controls. */
+  /* Touch: 44 px controls, and the select's text at 16 px (type.lg), under which iOS zooms the page into it on focus
+     (touchText.test.ts). */
   @media (pointer: coarse) {
     select,
     .sm select {
       height: 44px;
+      font-size: var(--type-lg-size);
     }
   }
 </style>

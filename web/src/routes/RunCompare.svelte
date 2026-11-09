@@ -1,5 +1,5 @@
 <script lang="ts" module>
-  import { origin } from '$lib/lineage';
+  import { FROM_SCRATCH, origin } from '$lib/lineage';
 
   /**
    * The weights a run started from, by name: a model id resolves through the models list, a path shows its file name,
@@ -36,6 +36,7 @@
   import { batchSetting, effectiveBatchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
+  import { pageKeys } from '$lib/shell/pageCommands.svelte';
   import Page from '$lib/shell/Page.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
@@ -47,7 +48,7 @@
   import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
-  import StatusBadge from '$lib/ui/StatusBadge.svelte';
+  import StatusBadge, { STATUS_LABEL } from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
@@ -88,9 +89,9 @@
   // Phones: the axis ⓘ opens in place under the control row (ui/infoSlot).
   const axisInfo = provideInfoSlot('cmp-axis-info');
   /** Phones: the progress axis explained in the ⓘ beside its control, with why it was chosen when it was. */
-  const progressWhy = $derived(
-    `By progress puts each run over its planned epochs (% of the plan), so a short plan and a long one compare by shape.${xAuto && reason ? ` Chosen for you: ${AXIS_REASON[reason]}.` : ''}`,
-  );
+  // Two lines at most (ui/InfoButton HELP_MAX); how the axis works is its fold.
+  const progressWhy = $derived(`Each run over % of its plan${xAuto && reason ? `; chosen because ${AXIS_REASON[reason]}` : ''}.`);
+  const PROGRESS_HOW = 'Each run is drawn over its own planned epochs, so a short plan and a long one compare by the shape of their curves.';
   // The x axis is named in the chart's header, as on every chart (DESIGN_DIRECTION §2.4), never under the plot: the
   // normalised axis names its unit; chosen for you, it also says why.
   const xQual = $derived(x === 'progress' ? `by progress, % of planned epochs${xAuto && reason ? ` · ${AXIS_REASON[reason]}` : ''}` : 'by epoch');
@@ -246,7 +247,7 @@
   const startOf = (r: Run) => startFrom(r.config.weights, models.data);
   const startLine = (r: Run) => {
     const from = startOf(r);
-    return from ? `Fine-tuned from ${from}` : 'From scratch';
+    return from ? `Fine-tuned from ${from}` : FROM_SCRATCH;
   };
   const setX = (v: Axis) => (xChoice = v);
 
@@ -258,7 +259,7 @@
   const rows = $derived<[string, (r: Run) => Setting][]>([
     ['Dataset', (r) => plain(datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id)],
     ['Model', (r) => ident(r.config.arch)],
-    ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain('From scratch'))],
+    ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain(FROM_SCRATCH))],
     ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
     ['Batch', (r) => batchSetting(r.config, r.resolved)],
     ['Effective batch', (r) => (r.resolved ? effectiveBatchSetting(r.resolved) : plain('—'))],
@@ -355,6 +356,12 @@
     otherAt = Math.max(0, chosen.filter((x) => x !== r).indexOf(prev!));
   }
   const other = $derived(others[Math.min(otherAt, others.length - 1)]);
+  // B: the next run becomes the baseline (in the chips' order, wrapping), the keyboard's Swap (shell/shortcuts lists it).
+  pageKeys((k) => {
+    if (k.toLowerCase() !== 'b' || chosen.length < 2 || !base) return false;
+    setBaseline(chosen[(chosen.indexOf(base) + 1) % chosen.length]!);
+    return true;
+  });
   const shown = $derived(pairMode && base && other ? [base, other] : chosen);
   /** The phone pager's height: the pair's sticky head row holds just under it. */
   let pairH = $state(0);
@@ -396,7 +403,7 @@
           <Segmented size="sm" label="X axis" value={x} onchange={setX} options={X_OPTIONS} />
           <!-- The normalised axis, and why it was chosen, one tap away beside its control: the ticks say "%", so the
                line of words under the controls went (it pushed the plot down). -->
-          {#if x === 'progress'}<InfoButton chart label="About the progress axis" text={progressWhy} />{/if}
+          {#if x === 'progress'}<InfoButton chart label="About the progress axis" text={progressWhy} how={PROGRESS_HOW} />{/if}
         </header>
         <!-- The ⓘ opens here, under the controls, never as a popover over the legend and plot (ui/infoSlot). -->
         <InfoRegion slot={axisInfo} />
@@ -619,7 +626,7 @@
              toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it in the Edit
              sheet, on a full-width line of its own. "From <checkpoint>" (the tooltip says "Fine-tuned from"): the checkpoint
              is an identifier, a fact, so it is never cut; a narrow chip breaks it after a hyphen onto a second line. -->
-        <span class="from" class:tuned={!!from} title={startLine(r)} data-fact>{#if from}From <Ident value={from} class="src" />{:else}From scratch{/if}</span>
+        <span class="from" class:tuned={!!from} title={startLine(r)} data-fact>{#if from}From <Ident value={from} class="src" />{:else}{FROM_SCRATCH}{/if}</span>
         <span class="acts">
           <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
           <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
@@ -640,7 +647,7 @@
           <i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>
           <span class="m-what">
             <span class="m-name">{r.name}</span>
-            <span class="m-from" class:tuned={!!from}>{#if from}Fine-tuned from <Ident value={from} />{:else}From scratch{/if}</span>
+            <span class="m-from" class:tuned={!!from}>{#if from}Fine-tuned from <Ident value={from} />{:else}{FROM_SCRATCH}{/if}</span>
           </span>
           <a class="m-act" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={16} aria-hidden="true" /></a>
           <button type="button" class="m-act" aria-label="Remove {r.name}" title="Remove from the comparison" onclick={() => setIds(ids.filter((id) => id !== r.id))}
@@ -702,7 +709,7 @@
       }}
     >
       <option value="">Add run…</option>
-      {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {c.status}</option>{/each}
+      {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {STATUS_LABEL[c.status]}</option>{/each}
     </select>
   </label>
 {/snippet}
@@ -1265,6 +1272,10 @@
   @media (pointer: coarse) {
     .add {
       min-height: 44px;
+    }
+    /* The native picker lies unseen over the button, but iOS still zooms into a select under 16 px (touchText.test.ts). */
+    .add select {
+      font-size: var(--type-lg-size);
     }
   }
   .add:has(select:focus-visible) {
