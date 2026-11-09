@@ -1806,3 +1806,42 @@ Round 44 changes:
 - **Targets:** help icons and sliders get 28 px targets within their old footprint.
 - **Playground:** inline sliders whenever both show.
 - **New run:** switch rows keep to the left column. Mixed precision help says "same speed at 640 px".
+
+## Round 44
+
+| Reviewer | avg |
+|----------|-----|
+| Opus 5.5 | 8.0 |
+| GPT-6.1 Sol | 8.6 |
+
+Sol gave 9s on eight lines and asked for:
+- The selected model's architecture and head under the closed Playground picker, with "NMS" named for conventional models too.
+- Epochs in view at New run's minimum size.
+- Stored weight precision beside the file size. The orchestrator is adding `Model.precision`.
+
+Opus scored every line 8 and asked for:
+- Always-inline Playground sliders, since the layout jumped between models.
+- The e2e tag with help, and in every table.
+- Dimmed boxes unlabelled in thumbnails.
+- One class shade per class in light theme.
+- Shorter New run help.
+- Collision-aware chip placement in crowded clusters.
+
+Both caught the Best models "folo-s · 640" truncation, a bug the e2e tag introduced; it was fixed before merge.
+
+The code review of #119 found one blocking bug, also fixed before merge: the Models name width still budgeted the old 110 px Architecture column.
+
+From round 45 on, the orchestrator asked for the larger items set aside so far, and for each reviewer's lowest line to be fixed at its root.
+
+Round 45 changes:
+- **Chip placement:** eight candidate spots, one at each corner outside and inside. A chip prefers a spot that crosses no other box's outline, and falls back to any free spot only in a cluster.
+- **Playground:**
+  - Sliders are always inline.
+  - The picker names both heads.
+  - A model line shows "folo-s · 640 px · end-to-end, no NMS".
+- **New run:**
+  - Epochs comes before Optimizer.
+  - One-line End-to-end help, and Mixed precision "(at 640 px, not faster)".
+- **e2e tag:** it has a tooltip and appears in the Runs list and Recent runs.
+- **Dimmed boxes:** no chip in thumbnails, and stepped-back text in larger views.
+- **Light theme:** swatches use their bars' stroke shade.
