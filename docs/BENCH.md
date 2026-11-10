@@ -223,13 +223,15 @@ distance (×2.5).
 | folo-n-coco-long (COCO AP 0.317), run by FOLO | 52.9 | 0.354 (0.324–0.390) | 0.74 | 0.29 | 0.95 | 0.68 |
 | the same weights as ONNX in onnxruntime, sent as an external entry | 52.8 | 0.356 (0.325–0.394) | 0.73 | 0.29 | 0.95 | 0.68 |
 | folo-n-coco (COCO AP 0.314), run by FOLO | 52.2 | 0.359 (0.330–0.392) | 0.71 | 0.30 | 0.93 | 0.68 |
-| Claude Code, Haiku, 24 images, unchanged only (partial) | 29.3 | 0.353 (0.264–0.445) | not run | 0 | none | 0.67 |
+| Claude Code, Haiku, 24 images, unchanged only (partial) | 30.0 | 0.372 (0.269–0.473) | not run | 0 | none | 0.65 |
 
-A model entry ran its 6,000 images (300 under 20 passes) in about 17 s. The two checkpoints' intervals overlap:
+A model entry runs 6,000 images (300 under 20 passes): about 17 s with the machine to itself and about a
+minute while other builds had its CPU, because making the 5,700 changed images (decode, condition, JPEG, decode)
+is CPU work. The two checkpoints' intervals overlap:
 on these 300 images they are not clearly different, as their COCO AP says too. The external entry is the first
 row's model through another runtime, another resize and another NMS: it lands within 0.1 of its score, which is
 what "the same bytes for every contestant" is for. Occlusion at severity 4 left the first model a third of its
-accuracy; overexposure cost it almost nothing. Claude Code's six calls cost $0.011; 69% of its boxes were right,
+accuracy; overexposure cost it almost nothing. Claude Code's six calls cost $0.012; 65% of its 123 boxes were right (69% in an earlier run of the same 24 images),
 under the 90% the self-labeling axis asks for, so that axis is 0.
 
 **A self-improvement loop.** Synthetic shapes (four classes, 320 px). A folo-n teacher trained on 480 labeled
