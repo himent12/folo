@@ -915,8 +915,9 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   bytes are on disk, so memory stays at about one part) and, on `complete`, moved to `<data dir>/datasets/<name>`
   (the name lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registered with `format` (default
   `auto`). Only regular files and directories with relative paths inside the folder are accepted: absolute paths,
-  `..`, links and devices are `422 invalid_upload` on the part that carries them, and so is a stream that is not a
-  tar archive; the session is then dropped.
+  `..`, links and devices are `422 invalid_upload` on the part that carries them, and so are two files whose paths
+  differ only by letter case or a trailing dot or space (`A.jpg` and `a.jpg`: one would overwrite the other on
+  Windows; the message names both) and a stream that is not a tar archive; the session is then dropped.
   FOLO itself sends datasets in a canonical YOLO layout (docs/CLOUD.md, *Dataset*).
 - **Models** (`kind: model`): the stream is one `.folo` file, stored as `<data dir>/models/<name>.folo` (the name
   reduced as for the `Content-Disposition` of `/weights`, `-2`, ... when taken) and listed like any file there. `422 invalid_weights` when its
