@@ -43,7 +43,7 @@ Every condition takes an image and gives back an image of the same size, the sam
 benchmark's seed, the image and the severity decide where noise falls). Severity 1 is barely visible; severity 5
 is severe, and a person can still do the job.
 
-<!-- conditions:begin (crates/folo-bench/src/conditions.rs is the source; its test keeps this table in step) -->
+<!-- conditions:begin (crates/folo-bench/src/conditions/mod.rs is the source; its test keeps this table in step) -->
 | id | Name | Group | What it does | Parameter | 1 | 2 | 3 | 4 | 5 |
 |---|---|---|---|---|---|---|---|---|---|
 | `low_light` | Low light | light | Darkens the scene as a short exposure does and adds the sensor noise that comes with it: dusk, indoors, night. | gain in linear light, noise `n` (σ = n·√(signal + 0.004)) | ×0.6 n 0.02 | ×0.4 n 0.03 | ×0.25 n 0.04 | ×0.15 n 0.05 | ×0.08 n 0.06 |

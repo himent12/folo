@@ -1,6 +1,6 @@
-// The `folo train` command for a TrainConfig: the inverse of the CLI's own mapping (crates/folo-cli/src/train.rs builds
-// a TrainConfig from TrainArgs, whose flags and defaults are crates/folo-cli/src/cli.rs). FLAGS is the one table of
-// that mapping: a flag, the config value it carries and the clap default it can leave out. The commands it makes are
+// The `folo train` command for a TrainConfig: the inverse of the CLI's own mapping (crates/folo-cli/src/train/config.rs
+// builds a TrainConfig from TrainArgs, whose flags and defaults are crates/folo-cli/src/cli.rs). FLAGS is the one table
+// of that mapping: a flag, the config value it carries and the clap default it can leave out. The commands it makes are
 // parsed by the real clap parser in crates/folo-cli/tests/studio_cli.rs (fixture: routes/runnew/cli-fixtures.json).
 
 import type { Model, TrainConfig } from '$lib/api/types';
