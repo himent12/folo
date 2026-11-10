@@ -13,6 +13,8 @@ import BenchCompare from '../BenchCompare.svelte';
 import BenchEntry from '../BenchEntry.svelte';
 import BenchLoop from '../BenchLoop.svelte';
 import BenchmarkPage from '../Benchmark.svelte';
+import type { Bench, BenchEntry as BenchEntryT, BenchResult as BenchResultT } from '$lib/api/types';
+import CalibrationSection from './entry/CalibrationSection.svelte';
 import { GALLERY_PAGE } from './entry/ImagesSection.svelte';
 import NewLoopDialog from './NewLoopDialog.svelte';
 
@@ -432,6 +434,20 @@ describe('the failure gallery', () => {
     expect(tiles()).toHaveLength(2 * GALLERY_PAGE);
     expect(document.querySelector('dialog[open] .v-pos')?.textContent).toBe('31 of 360');
     expect(document.querySelectorAll('dialog[open] .v-list li').length).toBeGreaterThan(0);
+  });
+});
+
+describe('the calibration panel', () => {
+  it('keeps the whole reading of a model close on average with one full bin far off, under its tone', async () => {
+    // 100 detections: one bin of 22 eleven points overconfident (ECE 0.024, under 0.03: close), the rest thin and on the
+    // diagonal. No bin near the diagonal is full enough to quote, and one is far off: "read the bins".
+    const bin = (lo: number, count: number, gap = 0) => ({ lo, hi: lo + 0.1, count, confidence: lo + 0.05, precision: lo + 0.05 - gap });
+    const bins = [{ lo: 0, hi: 0.1, count: 0, confidence: null, precision: null }, bin(0.1, 0), bin(0.2, 15), bin(0.3, 15), bin(0.4, 15), bin(0.5, 22, 0.11), bin(0.6, 15), bin(0.7, 18), bin(0.8, 0), bin(0.9, 0)];
+    const result = { calibration: { ece: 0.0242, detections: 100, bins } } as unknown as BenchResultT;
+    c = mount(CalibrationSection, { target, props: { result, entry: {} as BenchEntryT, bench: {} as Bench } });
+    flushSync();
+    expect(document.querySelector('#calibration .tone')?.textContent).toBe('Well calibrated');
+    expect(document.querySelector('#calibration .sentence')?.textContent).toBe('Close to the diagonal on average (ECE 0.02). Some of its scores are off by more: read the bins.');
   });
 });
 
