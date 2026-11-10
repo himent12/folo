@@ -13,7 +13,11 @@ import BenchCompare from '../BenchCompare.svelte';
 import BenchEntry from '../BenchEntry.svelte';
 import BenchLoop from '../BenchLoop.svelte';
 import BenchmarkPage from '../Benchmark.svelte';
+import type { Bench, BenchEntry as BenchEntryT, BenchResult as BenchResultT } from '$lib/api/types';
+import AccuracySection from './entry/AccuracySection.svelte';
+import CalibrationSection from './entry/CalibrationSection.svelte';
 import { GALLERY_PAGE } from './entry/ImagesSection.svelte';
+import SelfLabelSection from './entry/SelfLabelSection.svelte';
 import NewLoopDialog from './NewLoopDialog.svelte';
 
 let target: HTMLElement;
@@ -162,6 +166,21 @@ describe('the compare page', () => {
     expect(go).toHaveBeenLastCalledWith('/benchmarks/bn_3c90/compare?entries=be_f101,be_f103,be_f102', { replace: true });
   });
 
+  it('shows an entry the link names twice once', async () => {
+    await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_f101,be_f104');
+    await settle(40);
+    expect([...document.querySelectorAll('.chips .chip .nm')].map((x) => x.textContent)).toEqual(['fasteners-s-v1', 'Claude Code (sonnet)']);
+    expect(document.querySelectorAll('.cmp thead th.e-col')).toHaveLength(2);
+  });
+
+  it('says why calibration was not measured for an entry with confidences that never reach 0.1', async () => {
+    await page(BenchCompare, '/benchmarks/bn_7a41/compare?entries=be_p201,be_p205');
+    await settle(40);
+    const note = [...document.querySelectorAll('.pair p.note')].map((p) => p.textContent ?? '').find((t) => /yolo26n-pond-raw/.test(t)) ?? '';
+    expect(note).toMatch(/yolo26n-pond-raw: no detection reached confidence 0\.1/);
+    expect(note).not.toMatch(/no confidences/);
+  });
+
   it('explains a link with fewer than two finished entries, with the way back', async () => {
     await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_gone');
     expect(text()).toMatch(/Add one more entry to compare/);
@@ -286,6 +305,29 @@ describe('New loop', () => {
     expect(document.querySelector('dialog[open] .error-state, dialog[open] [role=alert]')?.textContent ?? '').not.toMatch(/Could not start the loop/);
   });
 
+  it('keeps its forecast while the benchmark changes under it (a `bench` event and the lists loaded again)', async () => {
+    await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f103');
+    await settle(40);
+    button(/^Test it: start a loop/)!.click();
+    await settle();
+    expect(document.querySelector('dialog[open] .fc')?.getAttribute('data-forecast')).toBe('ok');
+    const results = vi.spyOn(hub.api, 'benchResult');
+    // What the dialog shows as the event lands (this handler runs after the page's).
+    let during: string | null | undefined;
+    const off = hub.api.benchEvents('bn_3c90', {
+      bench: () => {
+        flushSync();
+        during = document.querySelector('dialog[open] .fc')?.getAttribute('data-forecast');
+      },
+    });
+    await hub.api.updateBench('bn_3c90', { name: 'Fasteners, renamed' });
+    off();
+    expect(during).toBe('ok');
+    await settle(40);
+    expect(results).not.toHaveBeenCalled();
+    expect(document.querySelector('dialog[open] .fc')?.getAttribute('data-forecast')).toBe('ok');
+  });
+
   it('reads a good teacher’s labels off its entry, quietly', async () => {
     await dialog('m_fast_n');
     const fc = document.querySelector('dialog[open] .fc')!;
@@ -402,6 +444,15 @@ describe('the loops tab', () => {
     await page(BenchmarkPage, '/benchmarks/bn_3c90?tab=loops');
     expect(text()).toMatch(/Training gen 1/);
   });
+
+  it('gives a loop with one generation scored one score on phones, never a change from it to itself', async () => {
+    await page(BenchmarkPage, '/benchmarks/bn_5e12?tab=loops');
+    const loop = (await hub.api.benchLoops('bn_5e12')).find((l) => l.name === 'shapes-n-early loop')!;
+    const scored = loop.generations.filter((g) => g.score !== null);
+    expect(scored).toHaveLength(1);
+    const li = [...document.querySelectorAll('ul.rows li')].find((r) => /shapes-n-early loop/.test(r.textContent ?? ''))!;
+    expect(li.querySelector('.m-meta')?.textContent).not.toMatch(/→/);
+  });
 });
 
 describe('the failure gallery', () => {
@@ -412,6 +463,67 @@ describe('the failure gallery', () => {
     expect(tiles.length).toBeGreaterThan(0);
     // One shape for every tile (4:3, the pond's commonest), never the first photo's.
     expect(new Set(tiles.map((t) => Number(/aspect-ratio:\s*([\d.]+)/.exec(t.getAttribute('style') ?? '')?.[1]).toFixed(2)))).toEqual(new Set(['1.33']));
+  });
+
+  it('keeps its pages and the image open when the benchmark changes under it (a `bench` event)', async () => {
+    await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f101');
+    await settle(40);
+    const tiles = () => document.querySelectorAll('#images .tile:not(.sk)');
+    button(/^Show 24 more/)!.click();
+    await settle(40);
+    expect(tiles()).toHaveLength(2 * GALLERY_PAGE);
+    (tiles()[30] as HTMLButtonElement).click();
+    await settle();
+    expect(document.querySelector('dialog[open] .v-pos')?.textContent).toBe('31 of 360');
+    const pages = vi.spyOn(hub.api, 'benchEntryImages');
+    // A rename elsewhere: the stream sends the benchmark again, and the lists load again.
+    await hub.api.updateBench('bn_3c90', { name: 'Fasteners, renamed' });
+    await settle(40);
+    expect(pages).not.toHaveBeenCalled();
+    expect(tiles()).toHaveLength(2 * GALLERY_PAGE);
+    expect(document.querySelector('dialog[open] .v-pos')?.textContent).toBe('31 of 360');
+    expect(document.querySelectorAll('dialog[open] .v-list li').length).toBeGreaterThan(0);
+  });
+});
+
+describe('the calibration panel', () => {
+  it('keeps the whole reading of a model close on average with one full bin far off, under its tone', async () => {
+    // 100 detections: one bin of 22 eleven points overconfident (ECE 0.024, under 0.03: close), the rest thin and on the
+    // diagonal. No bin near the diagonal is full enough to quote, and one is far off: "read the bins".
+    const bin = (lo: number, count: number, gap = 0) => ({ lo, hi: lo + 0.1, count, confidence: lo + 0.05, precision: lo + 0.05 - gap });
+    const bins = [{ lo: 0, hi: 0.1, count: 0, confidence: null, precision: null }, bin(0.1, 0), bin(0.2, 15), bin(0.3, 15), bin(0.4, 15), bin(0.5, 22, 0.11), bin(0.6, 15), bin(0.7, 18), bin(0.8, 0), bin(0.9, 0)];
+    const result = { calibration: { ece: 0.0242, detections: 100, bins } } as unknown as BenchResultT;
+    c = mount(CalibrationSection, { target, props: { result, entry: {} as BenchEntryT, bench: {} as Bench } });
+    flushSync();
+    expect(document.querySelector('#calibration .tone')?.textContent).toBe('Well calibrated');
+    expect(document.querySelector('#calibration .sentence')?.textContent).toBe('Close to the diagonal on average (ECE 0.02). Some of its scores are off by more: read the bins.');
+  });
+});
+
+describe('the accuracy panel', () => {
+  it('says a size is missing from the images an entry ran, not from a benchmark it ran a part of', async () => {
+    // An agent's 48 of 360 images hold no small object; the others may (the server measures the images it ran).
+    const accuracy = { map50_95: 0.4, ci95: [0.35, 0.45], map50: 0.6, map75: 0.4, precision: 0.8, recall: 0.5, f1: 0.6, best_conf: 1, map_small: null, map_medium: 0.4, map_large: 0.45, per_class: [] };
+    const bench = { classes: [], images: 360 } as unknown as Bench;
+    c = mount(AccuracySection, { target, props: { result: { accuracy } as unknown as BenchResultT, entry: { images: 48, scored: false, missing_classes: [] } as unknown as BenchEntryT, bench } });
+    flushSync();
+    const small = [...document.querySelectorAll('#accuracy .sizes li')].find((li) => /Small/.test(li.textContent ?? ''))!;
+    expect(small.textContent).not.toMatch(/in this benchmark/);
+    expect(small.textContent).toMatch(/None in the 48 images it ran/);
+  });
+});
+
+describe('the self-labeling panel', () => {
+  it('calls the labels of a contestant without confidences that reaches 90% its labels, not detections none of which are kept', async () => {
+    // An agent: one operating point, 40 boxes, 95% right, covering 62% of all objects: its axis is 0.62.
+    const point = { confidence: 0, precision: 0.95, recall: 0.62, labels: 40 };
+    const self_labeling = { target_precision: 0.9, threshold: null, precision: 0.95, recall: 0.62, mean_iou: 0.8, labels_per_image: 0.83, labels: 40, readiness: 'ready', curve: [point] };
+    const result = { self_labeling } as unknown as BenchResultT;
+    c = mount(SelfLabelSection, { target, props: { result, entry: { scored: false, images: 48 } as BenchEntryT, loop: null } });
+    flushSync();
+    const kv = Object.fromEntries([...document.querySelectorAll('#self-labeling .kv > div')].map((d) => [d.querySelector('dt')!.textContent, d.querySelector('dd')!.textContent]));
+    expect(kv['Axis (objects at 90%)']).toBe('62%');
+    expect(Object.keys(kv).some((k) => /none kept/.test(k))).toBe(false);
   });
 });
 

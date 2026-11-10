@@ -44,7 +44,7 @@
   import DesignDialog from './bench/DesignDialog.svelte';
   import EditBenchDialog from './bench/EditBenchDialog.svelte';
   import Leaderboard from './bench/Leaderboard.svelte';
-  import { comparePath, compareHint, compareReason, keepSelection } from './bench/leaderboard';
+  import { boardOrder, comparePath, compareHint, compareReason, keepSelection } from './bench/leaderboard';
   import LoopsTab from './bench/LoopsTab.svelte';
   import NewLoopDialog from './bench/NewLoopDialog.svelte';
   import PlanTab from './bench/PlanTab.svelte';
@@ -160,6 +160,8 @@
     if (kept.length !== selected.length) untrack(() => (selected = kept));
   });
   const comparing = $derived(selected.length >= 2);
+  /** The entries as the leaderboard shows them (one graded on an earlier version after the current ones): Compare's order. */
+  const board = $derived(bench ? boardOrder(live.entries, bench.fingerprint) : live.entries);
   let addOpen = $state(router.route.query.get('add') !== null);
   let addKind = $state<EntryKind>(((k) => (k === 'agent' || k === 'external' ? k : 'model'))(router.route.query.get('add')));
   function started(e: BenchEntry) {
@@ -271,7 +273,7 @@
     if (!b) return [];
     const out: PageCommand[] = [];
     if (!addWhy) out.push({ id: 'bench-add', label: 'Add entry', match: ['New entry', 'Benchmark a model'], icon: Plus, run: () => ((addKind = 'model'), (addOpen = true)) });
-    if (comparing) out.push({ id: 'bench-compare', label: 'Compare selected entries', icon: GitCompare, run: () => router.go(comparePath(b.id, selected, live.entries)) });
+    if (comparing) out.push({ id: 'bench-compare', label: 'Compare selected entries', icon: GitCompare, run: () => router.go(comparePath(b.id, selected, board)) });
     if (editable) out.push({ id: 'bench-design', label: 'Design the plan with an agent', icon: Sparkles, run: () => (setQuery({ tab: 'conditions' }), (designOpen = true)) });
     for (const e of live.entries.filter((x) => x.status === 'running' || x.status === 'queued'))
       out.push({ id: `bench-stop-${e.id}`, label: `Stop entry ${e.name}`, icon: Square, run: () => (stopping = e) });
@@ -298,7 +300,8 @@
       <ErrorState error={live.error} title="Could not load this benchmark" retry={() => live.retry()} />
     {/if}
   </Page>
-{:else if !bench}
+{:else if !bench || live.loading}
+  <!-- Until the lists load too: the stream's first `bench` event can come first, and an empty list is no board. -->
   <div class="sk-page" aria-busy="true" aria-label="Loading benchmark">
     <div class="sk-head"><Skeleton w="min(240px, 60%)" h="24px" /><Skeleton w="min(420px, 90%)" h="14px" /></div>
     <div class="sk-head"><Skeleton w="min(500px, 90%)" h="12px" /><Skeleton w="min(380px, 70%)" h="12px" /></div>
@@ -345,7 +348,7 @@
           {#if tab === 'leaderboard'}<span class="cmp-hint" role="status" data-gate-why>{compareHint(selected.length)}</span>{/if}
           <Gate reason={compareReason(selected.length)}>
             {#snippet children(why)}
-              <Button variant={comparing ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={comparing ? href(comparePath(bench.id, selected, live.entries)) : undefined}>
+              <Button variant={comparing ? 'primary' : 'secondary'} icon={GitCompare} disabled={!!why} aria-describedby={why} href={comparing ? href(comparePath(bench.id, selected, board)) : undefined}>
                 Compare{#if selected.length}<span class="num count">{selected.length}</span>{/if}
               </Button>
             {/snippet}
@@ -419,7 +422,7 @@
           onadd={() => ((addKind = 'model'), (addOpen = true))}
           onstop={(e) => (stopping = e)}
           ondelete={(e) => (removing = e)}
-          oncompare={() => router.go(comparePath(bench.id, selected, live.entries))}
+          oncompare={() => router.go(comparePath(bench.id, selected, board))}
         />
       {/if}
     </div>

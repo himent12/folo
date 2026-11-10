@@ -319,7 +319,10 @@ export class MockBench {
 
   toBench(b: MBench): Bench {
     const entries = rankEntries(this.#entriesOf(b).map((e) => this.toEntry(e)));
-    const top = entries.find((e) => e.status === 'done' && e.score);
+    // The leader as the server names it: done, on the benchmark's own fingerprint (one graded before the engine
+    // changed ranks below every current entry, so it never leads).
+    const fp = fingerprintOf(b);
+    const top = entries.find((e) => e.status === 'done' && e.score && e.fingerprint === fp);
     const class_boxes = b.classes.map(() => 0);
     for (const im of b.images) for (const x of im.boxes) class_boxes[x.class] = (class_boxes[x.class] ?? 0) + 1;
     return {
@@ -335,7 +338,7 @@ export class MockBench {
       class_boxes,
       plan: clonePlan(b.plan),
       seed: b.seed,
-      fingerprint: fingerprintOf(b),
+      fingerprint: fp,
       entries: entries.length,
       best: top?.score ? { entry_id: top.id, name: top.name, score: top.score.total, partial: top.score.partial } : null,
       // Exactly when DELETE answers 409 bench_active: an entry queued, running or stopping, or a loop running.

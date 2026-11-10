@@ -11,6 +11,7 @@
    * more" loading the next. A tile opens a large view with the boxes, the legend, every box with its class and
    * confidence, and previous / next (the arrow keys too), which loads the next page when it reaches the end.
    */
+  import { untrack } from 'svelte';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import { hub } from '$lib/api/index.svelte';
@@ -61,14 +62,19 @@
       if (my === seq) loading = false;
     }
   }
+  // By id: the page hands down a new benchmark and entry on every `bench` event (and every load of the lists after one),
+  // which must not send the gallery back to its first page.
+  const benchId = $derived(bench.id);
+  const entryId = $derived(entry.id);
   $effect(() => {
     void sort;
-    void entry.id;
+    void benchId;
+    void entryId;
     if (hub.mode === 'connecting') return;
     void hub.epoch;
     images = [];
     total = null;
-    void load(true);
+    untrack(() => void load(true));
   });
 
   /** What a tile says under its image: what it found right, missed and got wrong, in words. */
@@ -94,7 +100,7 @@
     active = null;
     if (!im) return;
     let gone = false;
-    hub.api.benchImageUrl(bench.id, im.image.id).then(
+    hub.api.benchImageUrl(benchId, im.image.id).then(
       (u) => !gone && (fullUrl = u),
       () => {},
     );

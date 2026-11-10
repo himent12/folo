@@ -74,6 +74,8 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
   const known = ctx.imageIds ? new Set(ctx.imageIds) : null;
   const planned = new Map(ctx.plan.conditions.map((c) => [c.condition, c.severities]));
   const seen = o.seen ?? new Set<string>();
+  /** This call's records by key, as their boxes: what a repeat is compared with. */
+  const here = new Map<string, string>();
   /** Per condition and severity, the images answered. */
   const under = new Map<string, Map<number, Set<string>>>();
   const clean = new Set<string>();
@@ -97,7 +99,11 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
       if (!planned.get(cond)!.includes(sev)) return at(i, `${name(cond)} runs at severities ${planned.get(cond)!.join(', ')}, not ${sev}.`);
     }
     const key = predictionKey(r.image, cond as string | null, sev as number | null);
-    if (seen.has(key)) return at(i, `image "${r.image}"${cond ? ` under ${name(cond)} ${sev}` : ''} is answered twice.`);
+    // A record of these records repeated with the same boxes is taken once, as the server takes it (a repeat with other
+    // boxes, or of one received in an earlier part, is refused).
+    if (here.has(key) && here.get(key) === JSON.stringify(r.boxes)) continue;
+    here.set(key, JSON.stringify(r.boxes));
+    if (seen.has(key)) return at(i,`image "${r.image}"${cond ? ` under ${name(cond)} ${sev}` : ''} is answered twice.`);
     seen.add(key);
     if (!Array.isArray(r.boxes)) return at(i, '"boxes" must be an array (empty when nothing was found).');
     if (r.boxes.length > MAX_BOXES_PER_RECORD) return at(i, `${num(r.boxes.length)} boxes: one record carries at most ${num(MAX_BOXES_PER_RECORD)}.`);
@@ -204,6 +210,8 @@ export interface ExternalSender {
   start: (body: StartBenchEntry) => Promise<BenchEntry>;
   send: (entryId: string, predictions: BenchPrediction[]) => Promise<BenchEntry>;
   finish: (entryId: string) => Promise<BenchEntry>;
+  /** The entry as it is now (a finish whose answer was lost may have scored it). */
+  get: (entryId: string) => Promise<BenchEntry>;
   stop: (entryId: string) => Promise<unknown>;
   remove: (entryId: string) => Promise<unknown>;
 }
@@ -235,7 +243,8 @@ const retryable = (e: unknown) => !(e instanceof ApiError) || e.status === 0 || 
 /**
  * Sends an external entry: in one request when it is small (`maxBytes` of JSON or less), else as an open entry filled
  * in parts (./partsOf) and finished, telling `progress` after each part. A part whose answer was lost (the network, a
- * 5xx) is sent once more: the server takes a record it already has with the same boxes again (an idempotent retry).
+ * 5xx) is sent once more: the server takes a record it already has with the same boxes again (an idempotent retry); so
+ * is the finish, and when the first one scored the entry, the entry is read and kept.
  * Any failure once the entry exists (a part refused, the finish refused, the network twice, `signal` aborted by the
  * person) stops the entry and deletes it, so nothing is left on the leaderboard; it throws an ExternalSendError that
  * says what is left when the stop or the delete failed too.
@@ -271,7 +280,18 @@ export async function sendExternal(
       sent += part.length;
       progress({ sent, total, entry });
     }
-    return await once(() => api.finish(entry.id));
+    let tries = 0;
+    return await once(async () => {
+      try {
+        return await api.finish(entry.id);
+      } catch (err) {
+        // A finish sent again after its answer was lost finds the entry no longer open when the first one scored it.
+        if (tries++ === 0 || !(err instanceof ApiError && err.code === 'bench_entry_not_open')) throw err;
+        const now = await api.get(entry.id);
+        if (now.status !== 'done') throw err;
+        return now;
+      }
+    });
   } catch (e) {
     // Leave nothing behind: stop the open entry, then delete it; say exactly what is left if either fails.
     const name = `an unfinished entry “${o.name}”`;

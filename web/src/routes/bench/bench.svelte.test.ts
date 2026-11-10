@@ -286,6 +286,71 @@ describe('the benchmark page', () => {
     expect(go).not.toHaveBeenCalled();
   });
 
+  it('shows the weight the plan has again once its edits are discarded', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = () => document.querySelector<HTMLInputElement>('input[aria-label="Weight of Haze"]')!;
+    expect(weight().value).toBe('1');
+    weight().value = '3';
+    weight().dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(text()).toMatch(/Unsaved changes/);
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Discard')!.click();
+    flushSync();
+    expect(text()).not.toMatch(/Unsaved changes/);
+    expect(weight().value).toBe('1');
+  });
+
+  it('keeps the preview on its image when the benchmark changes under it (a `bench` event)', async () => {
+    // happy-dom has no canvas to draw the mock's images: any URL does.
+    const url = vi.spyOn(hub.api, 'benchImageUrl').mockImplementation(async (_b, im, o) => `blob:${im}/${o?.condition ?? ''}`);
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.getAttribute('aria-label') === 'Next image')!.click();
+    await settle();
+    expect(document.querySelector('.stage .side.changed')).not.toBeNull();
+    const list = vi.spyOn(hub.api, 'benchImages');
+    url.mockClear();
+    await hub.api.updateBench('bn_9f03', { name: 'Renamed elsewhere' });
+    flushSync();
+    // Never back to a skeleton while it loads again: nothing loads again.
+    expect(document.querySelector('.stage .side.changed')).not.toBeNull();
+    await settle();
+    expect(list).not.toHaveBeenCalled();
+    expect(url).not.toHaveBeenCalled();
+    expect(document.querySelector('.pv .file')?.textContent).toBe((await hub.api.benchImages('bn_9f03', { offset: 1, limit: 1 })).images[0]!.file);
+  });
+
+  it('opens Compare with the entries in the board’s order, one graded on an earlier version last', async () => {
+    await page('/benchmarks/bn_3c90');
+    const box = (id: string) => document.querySelector<HTMLInputElement>(`table.board tbody tr[data-id="${id}"] input[type="checkbox"]`)!;
+    // fasteners-s-v1 now (be_f101) and as graded before the engine changed (be_f100, a higher score, shown below).
+    box('be_f100').click();
+    flushSync();
+    box('be_f101').click();
+    flushSync();
+    const order = [...document.querySelectorAll<HTMLElement>('table.board tbody tr[data-id]')].map((r) => r.dataset.id).filter((x) => x === 'be_f100' || x === 'be_f101');
+    expect(order).toEqual(['be_f101', 'be_f100']);
+    const compare = [...document.querySelectorAll<HTMLElement>('header a')].find((b) => /^Compare/.test(b.textContent?.trim() ?? ''))!;
+    expect(compare.getAttribute('href')).toBe('#/benchmarks/bn_3c90/compare?entries=be_f101,be_f100');
+  });
+
+  it('waits for its entries before it shows a leaderboard or a plan, though the stream names the benchmark first', async () => {
+    vi.useFakeTimers();
+    try {
+      // The stream's first `bench` event (30 ms) comes before the lists (140 ms, the demo's own latency).
+      hub.api = new MockApi('normal', 140);
+      router.route = parse('#/benchmarks/bn_3c90');
+      open(BenchmarkPage as Component, {});
+      await vi.advanceTimersByTimeAsync(60);
+      flushSync();
+      expect(text()).not.toMatch(/No entries yet/);
+      await vi.advanceTimersByTimeAsync(400);
+      flushSync();
+      expect(document.querySelectorAll('table.board tbody tr[data-id]').length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('picks finished entries for Compare, at most four, and makes Compare the one primary from two', async () => {
     await page('/benchmarks/bn_3c90');
     const boxes = [...document.querySelectorAll<HTMLInputElement>('table.board tbody input[type="checkbox"]')];

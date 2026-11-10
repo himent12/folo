@@ -50,7 +50,7 @@ describe('checkPredictions', () => {
     expect(err([{ image: '1', boxes: [{ ...box, score: 2 }] }])).toMatch(/"score" must be between 0 and 1/);
     expect(err([{ image: '1', boxes: [{ class: 0, x1: 'a' }] }])).toMatch(/must be numbers/);
     expect(err([{ image: '1' }])).toMatch(/"boxes" must be an array/);
-    expect(err([...clean, clean[0]])).toMatch(/^Record 3: image "1" is answered twice/);
+    expect(err([...clean, { image: '1', boxes: [] }])).toMatch(/^Record 3: image "1" is answered twice/);
     expect(err([...clean, { image: '1', condition: 'rain', severity: 1, boxes: [] }])).toMatch(/unknown condition "rain"/);
     expect(err([...clean, { image: '1', condition: 'low_light', severity: 1, boxes: [] }])).toMatch(/Low light is not in this benchmark's plan/);
     expect(err([...clean, { image: '1', condition: 'haze', severity: 2, boxes: [] }])).toMatch(/Haze runs at severities 1, 3, not 2/);
@@ -110,6 +110,15 @@ describe('a large file, sent in parts', () => {
     for (const p of rp) expect(estimateBytes(p)).toBeLessThanOrEqual(PART_BYTES);
   });
 
+  it('takes a record repeated with the same boxes once, as the server does, and refuses one repeated with other boxes', () => {
+    // docs/API.md: "A record that repeats one with exactly the same boxes ... is accepted and ignored".
+    const r = checkPredictions([...clean, { ...clean[0]!, boxes: [{ ...box }] }], ctx);
+    expect(r.ok && r.summary).toEqual({ images: 2, conditions: [], missing: ['haze', 'jpeg'], boxes: 1, scores: true });
+    expect(r.ok && r.predictions).toHaveLength(2);
+    const other = checkPredictions([...clean, { image: '1', boxes: [{ ...box, x2: 31 }] }], ctx);
+    expect(!other.ok && other.error).toMatch(/^Record 3: image "1" is answered twice/);
+  });
+
   it('refuses a record with more than 1000 boxes, and a part that repeats a record received before', () => {
     const r = checkPredictions([rec('1', null, null, 1001), clean[1]], ctx);
     expect(!r.ok && r.error).toBe('Record 1: 1,001 boxes: one record carries at most 1,000.');
@@ -123,10 +132,12 @@ describe('a large file, sent in parts', () => {
 
   /** A server that records the calls; `failPart` refuses the n-th part (1-based), `dropPart` loses its answer once
    *  (the network), `failFinish` refuses the finish, `hangPart` never answers, `failStop` / `failRemove` fail the clean-up. */
-  function fake(o: { failPart?: number; dropPart?: number[]; failFinish?: boolean; hangPart?: number; failStop?: boolean; failRemove?: boolean } = {}) {
+  function fake(o: { failPart?: number; dropPart?: number[]; failFinish?: boolean; dropFinish?: boolean; hangPart?: number; failStop?: boolean; failRemove?: boolean } = {}) {
     const calls: string[] = [];
     const entry = (status: BenchEntry['status']) => ({ id: 'be_x', status }) as BenchEntry;
     let n = 0;
+    /** What the server holds: done once a finish went through, whether or not its answer arrived. */
+    let held: BenchEntry['status'] = 'running';
     const api: ExternalSender = {
       start: async (b) => (calls.push(`start open=${(b.contestant as { open?: boolean }).open ?? false} records=${(b.contestant as { predictions?: unknown[] }).predictions?.length}`), entry(b.contestant.kind === 'external' && (b.contestant as { open?: boolean }).open ? 'running' : 'done')),
       send: async (_, ps) => {
@@ -140,11 +151,16 @@ describe('a large file, sent in parts', () => {
       finish: async () => {
         calls.push('finish');
         if (o.failFinish) throw new ApiError(400, 'invalid_body', 'Image "2" has no record without a condition.');
+        if (held !== 'running') throw new ApiError(409, 'bench_entry_not_open', `big is not an open external entry (it is ${held}).`);
+        held = 'done';
+        if (o.dropFinish) throw new ApiError(0, 'network', 'Cannot reach the FOLO server.');
         return entry('done');
       },
+      get: async () => (calls.push('get'), entry(held)),
       stop: async () => {
         calls.push('stop');
         if (o.failStop) throw new ApiError(0, 'network', 'Cannot reach the FOLO server.');
+        if (held !== 'running') throw new ApiError(409, 'bench_entry_not_active', 'big has ended.');
         return entry('stopped');
       },
       remove: async () => {
@@ -199,6 +215,15 @@ describe('a large file, sent in parts', () => {
     const removeFails = fake({ failPart: 1, failRemove: true });
     const e2 = (await sendExternal(removeFails.api, body, () => {}, undefined, 200).catch((e: unknown) => e)) as ExternalSendError;
     expect(e2.left).toBe('an unfinished entry “big” (stopped) is still on the leaderboard: delete it there.');
+  });
+
+  it('takes the entry as scored when the finish went through but its answer was lost', async () => {
+    // The finish is sent again; the server, which scored it the first time, answers 409 bench_entry_not_open.
+    const lost = fake({ dropFinish: true });
+    const e = await sendExternal(lost.api, body, () => {}, undefined, 200);
+    expect(e.status).toBe('done');
+    expect(lost.calls).not.toContain('stop');
+    expect(lost.calls).not.toContain('remove');
   });
 
   it('sends a part again once when its answer was lost, and gives up the second time', async () => {

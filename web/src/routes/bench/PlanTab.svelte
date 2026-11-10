@@ -6,6 +6,7 @@
    * edited here (saved with Save plan; the page holds the edits and asks before they are lost) or designed by an agent;
    * after, it reads as a fixed test, with the one-line reason why.
    */
+  import { untrack } from 'svelte';
   import Eye from '@lucide/svelte/icons/eye';
   import Lock from '@lucide/svelte/icons/lock';
   import Sparkles from '@lucide/svelte/icons/sparkles';
@@ -62,6 +63,15 @@
   $effect(() => {
     void bench.id;
     typed = {};
+  });
+  // A draft changed from outside the field (Discard, a condition off and on, a save) drops what was typed for a weight
+  // it no longer has: the field shows the plan's.
+  $effect(() => {
+    const d = draft;
+    untrack(() => {
+      const kept = Object.entries(typed).filter(([id, t]) => Number(t) === planCondition(d, id)?.weight);
+      if (kept.length !== Object.keys(typed).length) typed = Object.fromEntries(kept);
+    });
   });
 
   const groups = $derived(GROUPS.map((g) => ({ g, conditions: catalog.conditions.filter((c) => c.group === g) })).filter((x) => x.conditions.length));
