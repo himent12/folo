@@ -537,7 +537,10 @@ training step, peak memory); its numbers and the comparison with Ultralytics are
 [BENCHMARKS.md](BENCHMARKS.md#folo-on-the-gpu). In short, folo-n at 640: 2.99 ms batch-1 forward, 1385–1461 img/s
 at batch 16, 5.18 ms / 722 img/s end to end through the predictor at batch 1 / 16, 219 img/s training step at batch 16 (143 before the loss moved to the GPU), 3.5 GiB training peak; with mixed precision (`--amp`, f16 on tensor cores) 307 img/s against 247 f32 in the same quiet session, at 2.0 GiB. The fused kernels' effect on the training step:
 the SGD update went from 62 ms (about ten elementwise dispatches and copies per parameter) to 5 ms with the fused
-update kernel.
+update kernel, and to about 2 ms with the multi-tensor one. The training-step hill-climb (submission every 64
+dispatches, constant-size weight gradients, stride-phase input gradients, multi-tensor updates, weight-gradient
+tiles by shape; docs/hill/gpu-train.md) took the folo-n step from 226 to 307 img/s in f32 and 292 to 502 with AMP,
+and folo-s from 105 to 140 / 167 to 246, on a host shared with other jobs (alternated A/B, medians of 3 rounds).
 
 ## Known limitations / follow-ups
 
