@@ -8,12 +8,9 @@
 <script lang="ts">
   import { tick, untrack, type Snippet } from 'svelte';
   import { scaleLinear, scaleLog } from 'd3-scale';
-  import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
-  import { downsample, nearest, ticks as niceTicks } from './downsample';
-  import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { END_LABELS_MIN, KEY_W, LABEL_GAP, labelWidth, leaderOf, memoPlaceEndLabels } from './endLabels';
-  import { LIVE_GROW, mergedEnds } from './endMarks';
-  import { seriesText } from './ink';
+  import { nearest } from './downsample';
+  import { logMinors, MAX_TICKS } from './domain';
+  import { END_LABELS_MIN, memoPlaceEndLabels } from './endLabels';
   import { prefs } from '$lib/prefs.svelte';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
   import { paintOrder } from './layers';
@@ -23,7 +20,12 @@
   import { cubicOut } from 'svelte/easing';
   import { motion } from '$lib/ui/motion';
   import { media } from '$lib/design/tokens';
-  import { dashOf, endShown, endText, inkOf, latest, patternOf } from './lineSeries';
+  import { patternOf, dashOf, inkOf, seriesSummary, strokeWidth } from './lineSeries';
+  import { capInPlotOf, marginOf, markOf, xExtentOf, xTicksOf, yExtentOf, yFormatOf, yTicksOf } from './lineAxes';
+  import { mergesOf, pathsOf } from './linePaths';
+  import { endRadius, endsOf, placedEndsOf } from './lineEndLabels';
+  import { hoverOf, pickNearest, pillOf } from './lineHover';
+  import { textMeasurer } from './textWidth';
   import ChartLegend from './ChartLegend.svelte';
   import ChartTooltip from './ChartTooltip.svelte';
   import LineEnds from './LineEnds.svelte';
@@ -144,106 +146,21 @@
   const visible = $derived(series.filter((s) => s.points.length > 0));
   const hasData = $derived(visible.length > 0);
 
-  const xExtent = $derived.by((): [number, number] => {
-    if (xDomain) return xDomain;
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const s of visible) {
-      const a = s.points[0];
-      const b = s.points[s.points.length - 1];
-      if (a && a.x < lo) lo = a.x;
-      if (b && b.x > hi) hi = b.x;
-    }
-    if (!Number.isFinite(lo)) return [0, 1];
-    return lo === hi ? [lo - 1, hi + 1] : [lo, hi];
-  });
-
-  const yExtent = $derived.by((): [number, number] => {
-    if (yDomain) return yDomain;
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const s of visible)
-      for (const p of s.points) {
-        if (!Number.isFinite(p.y) || (yLog && p.y <= 0)) continue;
-        if (p.y < lo) lo = p.y;
-        if (p.y > hi) hi = p.y;
-      }
-    if (!Number.isFinite(lo)) return yLog ? [0.1, 1] : [0, 1];
-    if (yLog) return [lo * 0.9, hi * 1.1];
-    const pad = (hi - lo) * 0.08 || Math.abs(hi) * 0.1 || 1;
-    return [lo >= 0 && lo - pad < 0 ? 0 : lo - pad, hi + pad];
-  });
-
-  const yTickValues = $derived.by(() => {
-    if (yTickProp) return yTickProp.filter((t) => t >= yExtent[0] - 1e-9 && t <= yExtent[1] + 1e-9);
-    // 3–5 ticks in nice steps (./domain): more gridlines read as a texture, not a scale.
-    if (yLog) return logTicks(yExtent[0], yExtent[1]);
-    return capTicks(yExtent[0], yExtent[1], Math.min(yTicks, MAX_TICKS));
-  });
+  const xExtent = $derived(xExtentOf(xDomain, visible));
+  const yExtent = $derived(yExtentOf(yDomain, visible, yLog));
+  const yTickValues = $derived(yTicksOf(yTickProp, yExtent, yLog, yTicks));
   // A log axis labels its decades and ends; the 2s and 5s between them stay as unlabelled minor gridlines, so the
   // scale reads evenly (0.2 · 0.5 · 1 · 2 · 5 · 10) without crowding the labels.
   const yMinor = $derived(yLog && !yTickProp ? logMinors(yExtent[0], yExtent[1]) : []);
-
-  // Decimals follow the tick step, so a 0..6 axis reads "0 2 4 6", a 0..1 axis "0 0.5 1" and quarter steps
-  // "0.25 0.50"; a fitted domain's own decimals win (`yDecimals`), as its ticks may skip steps; log ticks use 3 digits.
-  const yFormat = $derived.by(() => {
-    if (yFormatProp) return yFormatProp;
-    if (yLog) return (v: number) => String(+v.toPrecision(3));
-    const step = yTickValues.length > 1 ? Math.abs(yTickValues[1]! - yTickValues[0]!) : 1;
-    const d = Math.min(6, yDecimals ?? stepDecimals(step));
-    return (v: number) => v.toFixed(d);
-  });
+  const yFormat = $derived(yFormatOf(yFormatProp, yLog, yTickValues, yDecimals));
   const fmtValue = $derived(valueFormat ?? yFormatProp ?? ((v: number) => String(+v.toFixed(3))));
-
-  /**
-   * An end label's width as drawn (12 px medium Geist, from the type tokens), so a label beside its marker really sits
-   * beside it; `labelWidth`'s estimate where there is no canvas (tests).
-   */
-  let measurer: CanvasRenderingContext2D | null | undefined;
-  function textWidth(t: string): number {
-    if (measurer === undefined) {
-      try {
-        const cs = getComputedStyle(document.documentElement);
-        measurer = document.createElement('canvas').getContext('2d');
-        if (measurer) measurer.font = `${cs.getPropertyValue('--weight-semibold').trim() || 600} ${cs.getPropertyValue('--type-sm-size').trim()} ${cs.getPropertyValue('--font-sans')}`;
-      } catch {
-        measurer = null;
-      }
-    }
-    const w = measurer?.measureText(t).width;
-    // Measured at the highlighted (semibold) weight, the widest a label is drawn, plus the halo.
-    return w ? Math.ceil(w) + 4 : labelWidth(t);
-  }
+  const textWidth = textMeasurer();
   /** Direct labels at each line's last point, each in a spot that covers no curve and no other label (endLabels.ts). */
   // One rule for every chart (DESIGN_DIRECTION §2.4): a plot under 560 px (every phone) has no direct labels, short
   // names included, and keeps that width for data; its legend carries each line's name, value and how it ended.
   const showEnds = $derived(endLabels && width >= END_LABELS_MIN);
-
-  const margin = $derived.by(() => {
-    const longest = Math.max(...yTickValues.map((v) => yFormat(v).length), 1);
-    // ~7 px per character at 11 px Geist (tabular digits); end labels are 12 px, measured (textWidth).
-    // Plus room for a leader, when labels are moved apart (LEAD).
-    // A line that ends inside the plot may be labelled in the column, keyed by its swatch (KEY_W) before its name.
-    const key = (s: Series) => ((s.points.at(-1)?.x ?? Infinity) < xExtent[1] ? KEY_W : 0);
-    const widest = Math.max(0, ...series.map((s) => [endShown(s), s] as const).map(([t, s]) => (t === null ? 0 : textWidth(t) + key(s))));
-    // The gutter column holds the widest label whole.
-    const labelW = showEnds ? Math.min(GUTTER_MAX, widest + 6) + LEAD - 6 : 0;
-    const left = Math.ceil(longest * 7) + 14;
-    // An x-axis title gets its own line under the tick labels; a y-axis name or an x mark's label one above the plot,
-    // unless the y caption fits over the top tick (capInPlot).
-    return { top: (yLabel && !capInPlot) || xMark ? 24 : 8, right: 12 + labelW, bottom: xLabel ? 36 : 22, left };
-  });
-  /**
-   * A y caption ("y from 0.40", the zoom note) sits right over its axis's top tick label, never a row higher with the
-   * plot's headroom between them: where the domain leaves at least a line (16 px) above the top tick, the caption goes
-   * there and the plot keeps the row. Linear axes only; an x mark's label keeps the row above the plot.
-   */
-  const capInPlot = $derived.by(() => {
-    if (!yLabel || xMark || yLog || !yTickValues.length) return false;
-    const span = yExtent[1] - yExtent[0];
-    const room = span > 0 ? ((yExtent[1] - Math.max(...yTickValues)) / span) * (height - 8 - (xLabel ? 36 : 22)) : 0;
-    return room >= 16;
-  });
+  const margin = $derived.by(() => marginOf(yTickValues, yFormat, xExtent, series, textWidth, showEnds, yLabel, capInPlot, xMark, xLabel));
+  const capInPlot = $derived(capInPlotOf(yLabel, xMark, yLog, yTickValues, yExtent, height, xLabel));
 
   const x = $derived(scaleLinear().domain(xExtent).range([margin.left, Math.max(margin.left + 1, width - margin.right)]));
   // A y domain change eases over 240 ms (callers re-fit at most once per epoch, ./domain holdDomain; values themselves
@@ -260,160 +177,24 @@
   const y = $derived(yScale(yShown));
   /** The y scale the axis is easing to (`y` once the ease ends): end labels are placed against it, once per change. */
   const yTo = $derived(yScale(yExtent));
-  // When the x domain is fixed (e.g. 0..epochs), prefer a tick step that lands exactly on the end.
   // Default x labels: integers, or one decimal when the domain is too short for distinct integers.
   const xFormat = $derived(
     xFormatProp ?? ((v: number) => (xExtent[1] - xExtent[0] < 5 ? String(+v.toFixed(1)) : String(Math.round(v)))),
   );
 
-  const xTickValues = $derived.by(() => {
-    const want = Math.max(2, Math.min(xTicks, Math.floor(width / 70)));
-    const [lo, hi] = xExtent;
-    if (xInteger && hi - lo <= want) {
-      const out: number[] = [];
-      for (let v = Math.ceil(lo); v <= Math.floor(hi); v++) out.push(v);
-      if (out.length >= 2) return out;
-    }
-    if (!xDomain) return niceTicks(lo, hi, want);
-    for (let c = want; c >= 2; c--) {
-      const t = niceTicks(lo, hi, c);
-      if (t[t.length - 1] === hi) return t;
-    }
-    return niceTicks(lo, hi, want);
-  });
-
-  const paths = $derived.by(() => {
-    const c = curve === 'monotone' ? curveMonotoneX : curveLinear;
-    const buckets = Math.max(32, Math.floor((width - margin.left - margin.right) / 1.5));
-    const ok = (p: Pt) => Number.isFinite(p.y) && (!yLog || p.y > 0);
-    const ln = d3line<Pt>()
-      .defined(ok)
-      .x((p) => x(p.x))
-      .y((p) => y(p.y))
-      .curve(c);
-    const ar = d3area<Pt>()
-      .defined(ok)
-      .x((p) => x(p.x))
-      .y0(height - margin.bottom)
-      .y1((p) => y(p.y))
-      .curve(c);
-    return visible.map((s) => {
-      if (s.lower) {
-        const lo = s.lower;
-        const zipped = s.points.map((p, i) => ({ x: p.x, y: p.y, y0: lo[i]?.y ?? p.y }));
-        const band = d3area<{ x: number; y: number; y0: number }>()
-          .defined((p) => Number.isFinite(p.y) && Number.isFinite(p.y0))
-          .x((p) => x(p.x))
-          .y0((p) => y(p.y0))
-          .y1((p) => y(p.y))
-          .curve(c);
-        return { s, d: '', a: '', b: band(zipped) ?? '' };
-      }
-      const pts = downsample(s.points, buckets);
-      return { s, d: ln(pts) ?? '', a: s.area ? (ar(pts) ?? '') : '', b: '' };
-    });
-  });
-
-  /** How far right of the plot the label column moves when it needs leaders: short ones, fanning from each line's end. */
-  const LEAD = 14;
-  /** The widest the gutter column grows for its labels, px ("shapes-hard-m · failed" at 12 px semibold is ~150, keyed ~168). */
-  const GUTTER_MAX = 196;
-  /** Where a leader starts: just outside the line's end marker (the live ring is wider), px from its centre. */
-  const endR = (id: string) => {
-    if (!endDots) return 3;
-    const r = receding && id === highlight ? 4 : 3;
-    const mark = visible.find((s) => s.id === id)?.end === 'live' ? r + LIVE_GROW : r;
-    // A best ring around the end mark (./endMarks) is part of it: the leader starts outside the ring.
-    return (merges.includes(id) ? mark + 3.75 : mark) + 2;
-  };
+  const xTickValues = $derived(xTicksOf(width, xTicks, xExtent, xInteger, xDomain));
+  const paths = $derived(pathsOf(visible, curve, width, margin, height, x, y, yLog));
+  const endR = (id: string) => endRadius(id, endDots, receding, highlight, visible, merges);
   const placeEnds = memoPlaceEndLabels();
-  // Placed against the y domain the axis eases to, not each frame of the 240 ms ease, and again only when the lines,
-  // the plot's size or the labels change (endLabels.ts memoPlaceEndLabels): placing is the costly part.
-  const placedEnds = $derived.by(() => {
-    if (!showEnds) return [];
-    const drawn = visible.filter((s) => endText(s) !== null);
-    const points = drawn
-      .map((s) => {
-        const p = s.points[s.points.length - 1];
-        const curve = visible.indexOf(s);
-        const label = endShown(s)!;
-        // A line that has ended short of the plot's edge (failed, stopped) is labelled beside its end like any other.
-        return p && Number.isFinite(p.y) ? { id: s.id, label, x: x(p.x), y: yTo(p.y), curve, w: textWidth(label) } : null;
-      })
-      .filter((e): e is NonNullable<typeof e> => e !== null)
-      // The highlighted line is labelled first, so it never loses its spot; then the shortest lines, which are the
-      // easiest to lose among the others.
-      .sort((a, b) => Number(b.id === highlight) - Number(a.id === highlight) || a.x - b.x);
-    const curves = visible.map((s) => s.points.filter((p) => Number.isFinite(p.y)).map((p) => ({ x: x(p.x), y: yTo(p.y) })));
-    const bounds = { x0: margin.left, y0: margin.top, x1: width - 2, y1: height - margin.bottom };
-    return placeEnds(points, curves, bounds, 2, width - margin.right, { gap: LABEL_GAP, lead: LEAD });
-  });
-  const ends = $derived.by(() => {
-    const color = new Map(visible.map((s) => [s.id, s.color]));
-    const last = new Map(visible.map((s) => [s.id, s.points[s.points.length - 1]?.y ?? NaN]));
-    const byId = new Map(visible.map((s) => [s.id, s]));
-    return placedEnds.map((p) => {
-      // While the axis eases, each label rides with its line's end: moved as far as the end is from where it will be.
-      // The column's "+N more" entry has no line, and stays where it was placed.
-      const ay = last.has(p.id) ? y(last.get(p.id)!) : p.ay;
-      const e = { ...p, y: p.y + ay - p.ay, ay };
-      const s = byId.get(e.id);
-      return {
-        ...e,
-        // A keyed label (in the column, away from its line's end) starts with the line's swatch: its ink and dash.
-        key: e.detached && s ? s : null,
-        tx: e.detached && s ? e.x + KEY_W : e.x,
-        // A receded run is a context curve: its label in ink, so the one hue left on the plot is the run in front.
-        color: receding && e.id !== highlight ? 'var(--text-tertiary)' : (color.get(e.id) ?? 'var(--text-secondary)'),
-        // The label is text: the series' text ink (./ink), 4.5:1 where the line's own ink is only a 3:1 mark.
-        text: receding && e.id !== highlight ? 'var(--text-tertiary)' : seriesText(color.get(e.id) ?? 'var(--text-secondary)'),
-        // Every label is anchored to its end marker: one not right beside it is tied to it by a leader.
-        lead: leaderOf(e, endR(e.id)),
-      };
-    });
-  });
-
-  // The x mark: its line, its span hatched along the axis to the end of the domain, and its label above the plot beside
-  // the line (on its left when the right has no room).
-  const mark = $derived.by(() => {
-    if (!xMark || !(xMark.x > xExtent[0] && xMark.x < xExtent[1])) return null;
-    const px = x(xMark.x);
-    const end = width - margin.right;
-    const before = px + 4 + labelWidth(xMark.label) > end;
-    return { px, end, label: xMark.label, tx: before ? px - 4 : px + 4, anchor: before ? 'end' : 'start' };
-  });
+  const placedEnds = $derived(placedEndsOf(showEnds, visible, x, yTo, textWidth, highlight, margin, width, height, placeEnds));
+  const ends = $derived.by(() => endsOf(visible, placedEnds, y, receding, highlight, endR));
+  const mark = $derived(markOf(xMark, xExtent, x, width, margin));
 
   // ---- hover / keyboard cursor ----
   const keyed = $derived(visible.filter((s) => !s.ghost && !s.context && !s.lower));
   const longestSeries = $derived(keyed.reduce<Series | undefined>((m, s) => (!m || s.points.length > m.points.length ? s : m), undefined));
 
-  const hover = $derived.by(() => {
-    if (cursor === null || cursor === undefined || !hasData) return null;
-    if (cursor < xExtent[0] || cursor > xExtent[1]) return null;
-    const c = cursor as number;
-    const rows = keyed
-      .map((s) => {
-        const pts = s.points;
-        const first = pts[0];
-        const last = pts[pts.length - 1];
-        if (!first || !last) return null;
-        // A series only reads out where it has data: never its last value under a cursor past its end.
-        const tol = pts.length > 1 ? (last.x - first.x) / (pts.length - 1) / 2 : 0.5;
-        if (c < first.x - tol || c > last.x + tol) return null;
-        const p = pts[nearest(pts, c)];
-        return p ? { s, p } : null;
-      })
-      .filter((r): r is { s: Series; p: Pt } => r !== null);
-    if (!rows.length) return null;
-    // Title at the series with the densest sampling (closest to the cursor); rows sampled elsewhere say where.
-    const ref = rows.reduce((a, b) => (Math.abs(b.p.x - c) < Math.abs(a.p.x - c) ? b : a));
-    const title = xTitle ? xTitle(ref.p.x) : xFormat(ref.p.x);
-    const labelled = rows.map((r) => {
-      const t = xTitle ? xTitle(r.p.x) : xFormat(r.p.x);
-      return { ...r, at: t === title ? null : t };
-    });
-    return { rows: labelled, px: x(ref.p.x), xv: ref.p.x, title };
-  });
+  const hover = $derived(hoverOf(cursor, hasData, xExtent, keyed, xTitle, xFormat, x));
 
   const local = (e: PointerEvent) => {
     const rect = (e.currentTarget as SVGElement).getBoundingClientRect();
@@ -466,35 +247,8 @@
   /** How near a line the pointer picks it out (`pick`), px: a mouse, and a finger. */
   const PICK_PX = 10;
   const PICK_TOUCH_PX = 20;
-  /** The pickable series whose drawn line passes nearest (px, py), within `r` px; null for none. */
   function pickAt(px: number, py: number, r: number): string | null {
-    if (!pick || !inPlot(px)) return null;
-    let best: string | null = null;
-    let bd = r;
-    for (const s of visible) {
-      if (!pick(s)) continue;
-      const pts = s.points;
-      for (let i = 1; i < pts.length; i++) {
-        const a = pts[i - 1]!;
-        const b = pts[i]!;
-        if (!Number.isFinite(a.y) || !Number.isFinite(b.y)) continue;
-        const ax = x(a.x);
-        const bx = x(b.x);
-        if (Math.max(ax, bx) < px - bd || Math.min(ax, bx) > px + bd) continue;
-        const ay = y(a.y);
-        const by = y(b.y);
-        // Distance from the point to the segment.
-        const dx = bx - ax;
-        const dy = by - ay;
-        const t = dx || dy ? Math.min(1, Math.max(0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy))) : 0;
-        const d = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-        if (d < bd) {
-          bd = d;
-          best = s.id;
-        }
-      }
-    }
-    return best;
+    return pickNearest(pick, inPlot, visible, x, y, px, py, r);
   }
   $effect(() => {
     if (!pinned) return;
@@ -554,30 +308,13 @@
 
   // Narrow plots: the cursor's x reads out on the axis, not in the legend's note.
   const compact = $derived(width > 0 && width < 480);
-  const pill = $derived.by(() => {
-    if (!compact || !hover) return null;
-    const w = Math.ceil(hover.title.length * 6.8) + 12;
-    const cx = Math.min(width - w / 2 - 1, Math.max(w / 2 + 1, hover.px));
-    return { w, cx, text: hover.title };
-  });
+  const pill = $derived(pillOf(compact, hover, width));
 
   // Keyboard scrubbing announces the values under the cursor. The text is written from the key handler itself, so
   // pointer movement here or on a linked chart never produces announcements.
   let spoken = $state('');
 
-  /** Per-series summary for assistive tech: latest, minimum and maximum. */
-  const summary = $derived(
-    keyed.map((s) => {
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (const p of s.points) {
-        if (!Number.isFinite(p.y)) continue;
-        if (p.y < lo) lo = p.y;
-        if (p.y > hi) hi = p.y;
-      }
-      return { s, last: latest(s), lo: Number.isFinite(lo) ? lo : null, hi: Number.isFinite(hi) ? hi : null };
-    }),
-  );
+  const summary = $derived(seriesSummary(keyed));
 
   function onkeydown(e: KeyboardEvent) {
     const s = longestSeries;
@@ -604,16 +341,7 @@
   }
 
   const light = $derived(prefs.resolvedTheme === 'light');
-  /** Stroke width of a series' line in px, as the `.line` classes below draw it. */
-  function widthOf(s: Series): number {
-    if (s.ghost || s.context || s.thin) return 1;
-    const p = patternOf(s);
-    if (receding && s.id === highlight) return p === 'dot' ? 3.5 : 3;
-    // Receded: a 1 px context curve, dots a little heavier so a dotted run keeps its rhythm.
-    if (receding) return p === 'dot' ? 1.75 : 1;
-    if (s.emphasis || (highlight !== null && s.id === highlight)) return p === 'dot' ? 3.25 : 2.75;
-    return p === 'dot' ? 2.25 : p ? (light ? 2 : 1.5) : 1.75;
-  }
+  const widthOf = (s: Series): number => strokeWidth(s, receding, highlight, light);
   /** A highlighted series with `recede`: it alone keeps weight and hue. */
   const receding = $derived(recede && highlight !== null && visible.some((s) => s.id === highlight));
   /** Drawn as a context curve: a series of that kind, or a run receded behind the highlighted one. */
@@ -624,22 +352,7 @@
     return [...items.filter((t) => id(t) !== highlight), ...items.filter((t) => id(t) === highlight)];
   }
 
-
-  // A best ring on its line's end (or so close that the two would overlap) is drawn around the end mark, as one mark
-  // (./endMarks); apart, each keeps its own shape. Only markers in the x domain, and only where end marks are drawn.
-  const merges = $derived.by((): (string | null)[] => {
-    if (!endDots || !hasData) return markers.map(() => null);
-    const ends = keyed.flatMap((s) => {
-      const p = s.points[s.points.length - 1];
-      // Outer radii as drawn below: the mark (3 px, the live dot LIVE_GROW more) with its 0.75 px halo.
-      return p && Number.isFinite(p.y) ? [{ id: s.id, end: s.end, x: x(p.x), y: y(p.y), r: (s.end === 'live' ? 3 + LIVE_GROW : 3) + 0.75 }] : [];
-    });
-    const inDomain = (m: Marker) => m.x >= xExtent[0] && m.x <= xExtent[1];
-    return mergedEnds(
-      markers.map((m) => (inDomain(m) ? { x: x(m.x), y: y(m.y) } : { x: -1e9, y: -1e9 })),
-      ends,
-    );
-  });
+  const merges = $derived(mergesOf(endDots, hasData, markers, keyed, x, y, xExtent));
   /** The marker drawn inside series `id`'s end mark, if any. */
   const mergedInto = (id: string): Marker | null => {
     const i = merges.indexOf(id);

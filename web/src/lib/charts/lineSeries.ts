@@ -115,3 +115,28 @@ export const latest = (s: Series) => {
   }
   return null;
 };
+
+/** Per-series summary for assistive tech: latest, minimum and maximum. */
+export function seriesSummary(keyed: Series[]) {
+  return keyed.map((s) => {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const p of s.points) {
+      if (!Number.isFinite(p.y)) continue;
+      if (p.y < lo) lo = p.y;
+      if (p.y > hi) hi = p.y;
+    }
+    return { s, last: latest(s), lo: Number.isFinite(lo) ? lo : null, hi: Number.isFinite(hi) ? hi : null };
+  });
+}
+
+/** Stroke width of a series' line in px, as LineChart's `.line` classes draw it (`light`: the light theme). */
+export function strokeWidth(s: Series, receding: boolean, highlight: string | null, light: boolean): number {
+  if (s.ghost || s.context || s.thin) return 1;
+  const p = patternOf(s);
+  if (receding && s.id === highlight) return p === 'dot' ? 3.5 : 3;
+  // Receded: a 1 px context curve, dots a little heavier so a dotted run keeps its rhythm.
+  if (receding) return p === 'dot' ? 1.75 : 1;
+  if (s.emphasis || (highlight !== null && s.id === highlight)) return p === 'dot' ? 3.25 : 2.75;
+  return p === 'dot' ? 2.25 : p ? (light ? 2 : 1.5) : 1.75;
+}
