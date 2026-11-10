@@ -93,6 +93,7 @@ fn studio_train_commands_parse() {
             OptimizerArg::Auto => "auto",
             OptimizerArg::Sgd => "sgd",
             OptimizerArg::Adamw => "adamw",
+            OptimizerArg::Musgd => "musgd",
         };
         assert_eq!(optimizer, x["optimizer"].as_str().unwrap(), "{name}");
         assert_eq!(t.lr0, f32_of(&x["lr0"]), "{name}");

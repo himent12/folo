@@ -5,6 +5,30 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 
 ## Unreleased
 
+### Engine hill-climb
+- Faster everywhere the GPU is used, measured against the previous build on the same machine
+  ([docs/BENCHMARKS.md](docs/BENCHMARKS.md#hill-climb-2026-11-09), notebooks in `docs/hill/`): folo-n
+  batch-1 GPU forward 2.88 → 2.09 ms, end to end at batch 16 960 → 1898 img/s on tensor cores, the training step 242
+  → 327 img/s in f32 and 345 → 537 with `--amp` (folo-s 121 → 151 / 194 → 273), a whole `folo train` epoch 216 → 347
+  img/s (f32) and 302 → 500 (AMP), `folo val` on COCO val2017 29.6 → 8.9 s with the same mAP. On the CPU the training
+  step is 25% faster and `predict_batch` 32–47%; batch-1 latency is unchanged.
+- **`--optimizer musgd`** (Ultralytics 8.4's MuSGD: a Muon-orthogonalised update plus SGD) and two `auto` rule
+  changes: rule 2 floors the AdamW LR of short runs at 0.001 (80-class runs from scratch learned almost nothing at
+  the old 0.000119), rule 3 picks MuSGD for runs over 10,000 iterations (its +0.031 AP over SGD on the COCO proxy was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run; a long COCO run under rule 3 is the follow-up). Checkpoints resume with the rule they were
+  started with (`TrainConfig.auto_rule`; a missing field is rule 1), so resumed runs keep their optimizer;
+  `--set auto_rule=2` keeps SGD for a new long run. `--set KEY=VALUE` sets any `train` config key.
+- The data loader defaults to up to 16 workers (was 8); the next epoch's loader starts once the previous epoch has taken
+  its last batch (it works during validation and the checkpoint writes), and checkpoints download in one transfer
+  per dtype and 128 MiB chunk.
+- The GPU submits its command batch every 64 dispatches (was 1024), starting at 16 after an idle wait so the GPU
+  starts early (`FOLO_GPU_FLUSH_EVERY` overrides it); `FOLO_GPU_PROFILE=1` turns on the per-kernel GPU timer
+  (docs/GPU.md, Profiling).
+- Gradient clipping runs in three multi-tensor kernels. A GPU run resumed from a checkpoint written by an earlier
+  build continues normally, but not bit-identically to how that build would have continued while clipping is active
+  (the sum of squares adds in another fixed order); resume within one build stays bit-exact.
+- CPU `predict_batch` runs a batch as concurrent forwards of two images; each image's predictions are those it gets
+  alone.
+
 ### Cloud compute
 - Train a run on a GPU that is not in this machine: one rented from **RunPod** for the length of the run, or
   another FOLO server of yours (`remote`). The run stays a run of this server, with the same metrics, logs,

@@ -1059,13 +1059,20 @@ fn default_lr0() -> f32 {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Optimizer {
-    /// SGD for long runs, AdamW for short ones.
+    /// MuSGD for long runs, AdamW for short ones (docs/MODEL.md §8.2).
     #[default]
     Auto,
     /// SGD with Nesterov momentum.
     Sgd,
     /// AdamW.
     Adamw,
+    /// SGD plus a Muon (orthogonalised momentum) update on conv weights (docs/MODEL.md §8.2).
+    Musgd,
+    /// A value this build does not know (from a newer server or client): decodes instead of failing the whole
+    /// record, and is refused where a run would train with it (`invalid_config`). Never sent; not in the schema.
+    #[serde(other)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    Unknown,
 }
 
 /// Augmentation settings.
@@ -1231,6 +1238,13 @@ pub enum ResolvedOptimizer {
     Sgd,
     /// AdamW (decoupled weight decay).
     Adamw,
+    /// MuSGD: SGD plus a Muon update on conv weights.
+    Musgd,
+    /// An optimizer this build does not know (a run of a newer server): decodes instead of failing the whole
+    /// `Run`. Never sent; not in the schema.
+    #[serde(other)]
+    #[cfg_attr(feature = "schema", schemars(skip))]
+    Unknown,
 }
 
 /// `POST /api/runs/{id}/queue`: moves a waiting run in the training queue. Exactly one of `action` and `position`.
@@ -1709,6 +1723,38 @@ pub struct ValTiming {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An optimizer value from a newer build decodes as `Unknown` (a client built before it keeps listing runs);
+    /// the known ones still decode as themselves.
+    #[test]
+    fn unknown_optimizers_decode() {
+        let opt = |s: &str| serde_json::from_value::<Optimizer>(serde_json::json!(s)).unwrap();
+        let res = |s: &str| serde_json::from_value::<ResolvedOptimizer>(serde_json::json!(s)).unwrap();
+        assert_eq!(
+            [opt("auto"), opt("sgd"), opt("adamw"), opt("musgd")],
+            [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw, Optimizer::Musgd]
+        );
+        assert_eq!(opt("lion"), Optimizer::Unknown);
+        assert_eq!(
+            [res("sgd"), res("adamw"), res("musgd")],
+            [ResolvedOptimizer::Sgd, ResolvedOptimizer::Adamw, ResolvedOptimizer::Musgd]
+        );
+        assert_eq!(res("lion"), ResolvedOptimizer::Unknown);
+        // Inside a config, as a newer server's run carries it.
+        let c: TrainConfig =
+            serde_json::from_value(serde_json::json!({"dataset_id": "ds_1", "optimizer": "lion"})).unwrap();
+        assert_eq!(c.optimizer, Optimizer::Unknown);
+    }
+
+    /// The schema (MCP inputs, `folo describe`) offers only the values a client may send.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn schema_leaves_unknown_out() {
+        for s in [schemars::schema_for!(Optimizer), schemars::schema_for!(ResolvedOptimizer)] {
+            let v = serde_json::to_value(&s).unwrap().to_string();
+            assert!(v.contains("musgd") && !v.contains("unknown"), "{v}");
+        }
+    }
 
     #[test]
     fn system_capabilities_are_additive() {

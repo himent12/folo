@@ -13,6 +13,12 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 - Creating endpoints answer `201 Created` with the new object; deletes answer `204 No Content`; everything else `200`.
 - Request bodies are JSON (`Content-Type: application/json`) except multipart uploads (`/api/predict`,
   `/api/label/jobs/{id}/images`). Unknown fields are ignored; missing optional fields take the defaults listed here.
+- Enum values grow: a client reads a value it does not know as unknown rather than failing the whole record (the Rust
+  types decode `TrainConfig.optimizer` and `ResolvedTrain.optimizer` into an `Unknown` variant, which a server refuses
+  with `invalid_config` where a run would train with it). Version skew: clients built before `musgd` (FOLO Desktop,
+  `folo-client`, a `folo serve` polling a remote server or a RunPod worker, before the release that added it) decode
+  `Run` strictly and fail on a run whose `config.optimizer` or `resolved.optimizer` is `musgd` (`unknown variant
+  'musgd'`), which fails their whole runs list: update those clients together with a server that can train MuSGD.
 - Responses are gzip-compressed when the client sends `Accept-Encoding: gzip` (never images, SSE or weights
   files: `application/octet-stream`).
 - CORS: by default only browser origins on `localhost`, `127.0.0.1` or `[::1]` (any port, e.g. the Vite dev server
@@ -446,7 +452,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // TrainConfig (only dataset_id is required; the rest shows the defaults)
 { "name": "", "dataset_id": "ds_8f2c", "arch": "folo-n", "epochs": 100, "batch": 16, "imgsz": 640,
   "device": "auto",            // auto | cpu | gpu:<n>
-  "optimizer": "auto",         // auto | sgd | adamw
+  "optimizer": "auto",         // auto | sgd | adamw | musgd (docs/MODEL.md §8.2)
   "lr0": 0.01, "weights": null, // or a model id to fine-tune from (a published name such as "folo-n-coco" too);
                                // the run then trains the weights' architecture, whatever `arch` says
   "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5, "scale": 0.5, "translate": 0.1,
@@ -494,7 +500,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // While phase is provisioning, booting or syncing the status is `queued` (nothing trains yet): show the phase.
 // ResolvedTrain: the settings the run trains with. `config` stays what was requested ("optimizer": "auto",
 // "lr0": 0.01); these are what that became (docs/MODEL.md §8.2, §8.4), as in the run folder's config.json.
-{ "optimizer": "sgd|adamw",     // never auto
+{ "optimizer": "sgd|adamw|musgd", // never auto
   "lr0": 0.001429,              // base LR of every parameter group: auto's pick, else config.lr0
   "lrf": 0.01, "cos_lr": false, // the last step runs at lr0 · lrf; linear or cosine decay
   "momentum": 0.9,              // SGD momentum, or AdamW β1, after warmup
@@ -551,6 +557,11 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   - `postprocess_ms`: decoding the head outputs into candidates (on a GPU, a small kernel), reading them back, NMS
     and mapping the boxes to image pixels;
   - `total_ms`: their sum.
+  `/api/predict` (and MCP's `predict_batch`, which calls it per image) times one image per call, so these are that
+  call's stages. A batch through the library (`Predictor::predict_batch`) gives each image its pass's stage times
+  divided by the images in it; on the CPU the batch runs as chunks of two images side by side, each image getting
+  half its chunk's times, so the images' `total_ms` add up to more than the batch's wall time (by about the number
+  of chunks running at once): per image they are a share of the work, not the time a caller waited.
   The browser runtime (docs/WASM.md) cannot wait for WebGPU mid-pipeline, so there `inference_ms` also holds the
   on-device head decode and its readback. FOLO Desktop's Local GPU uses the same predictor as the server.
 - `GET /api/predict/stream?model_id=..&conf=..` — WebSocket: the client sends JPEG frames (binary), the server
@@ -612,7 +623,10 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   one (so a folder holding both reads the same); `--weights` is the published name for published weights,
   else the `.folo` file the run started from (so no `--model`: the CLI takes the architecture from the weights,
   and `--head` is always given, since the CLI's default is the weights file's head); settings equal to the
-  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). `cli` is quoted for PowerShell,
+  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). An `auto` run that trained under
+  an older `auto` rule than a new run takes (its `config.json` `train.auto_rule`, rule 1 when absent) ends with
+  `--set auto_rule=N`, so a long run made before rule 3 repeats with SGD, not MuSGD. A run whose optimizer this
+  server does not know (made by a newer FOLO) gets `400 invalid_config` instead of a command that would train `auto`. `cli` is quoted for PowerShell,
   as Studio shows commands: arguments with spaces or shell characters are single-quoted, a quote inside doubled
   (`'O''Brien'`, also for the typographic quotes PowerShell reads as quotes); POSIX shells read the same words
   unless an argument holds a quote. `argv` is the same command unquoted, for spawning without a shell (the

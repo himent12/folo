@@ -5,7 +5,7 @@ mod common;
 use common::*;
 use folo_data::{
     BBox, Dataset, Format, Image, ImageFormat, IssueKind, OpenOptions, Split, encode, jpeg_exif_orientation,
-    open, open_with, probe_size, read_image,
+    open, open_splits, open_with, probe_size, read_image,
 };
 
 fn approx(a: f32, b: f32) -> bool {
@@ -385,4 +385,79 @@ fn coco_ground_truth_of_a_yolo_dataset_says_it_is_yolo() {
     let empty = TempDir::new("coco-gt-of-nothing");
     let err = folo_data::open_coco_ground_truth(empty.path(), Split::Val).unwrap_err().to_string();
     assert!(err.contains(folo_data::UNDETECTED), "{err}");
+}
+
+/// `open_splits` builds the asked splits exactly as a full open does and never reads the others' images.
+#[test]
+fn open_splits_reads_only_the_asked_splits() {
+    let t = TempDir::new("splits");
+    // YOLO with names: a corrupt training image is neither probed nor reported when only val is opened.
+    let y = t.join("yolo");
+    write(&y.join("data.yaml"), "train: images/train\nval: images/val\ntest: images/test\nnames: [a, b]\n");
+    write_png(&y.join("images/train/1.png"), 8, 8, [0; 3]);
+    write(&y.join("images/train/2.jpg"), b"\xFF\xD8 not a jpeg");
+    write_png(&y.join("images/val/3.png"), 12, 10, [0; 3]);
+    write(&y.join("labels/val/3.txt"), "1 0.5 0.5 0.5 0.5\n");
+    write_png(&y.join("images/test/4.png"), 8, 8, [0; 3]);
+    let opts = OpenOptions::default();
+    let full = open(&y).unwrap();
+    let val = open_splits(&y, &opts, &[Split::Val]).unwrap();
+    assert_eq!(val.classes, full.classes);
+    assert_eq!(val.split_sizes(), [0, 1, 0]);
+    assert_eq!(val.val.entries(), full.val.entries());
+    assert_eq!(full.report.count(IssueKind::CorruptImage), 1);
+    assert_eq!(val.report.count(IssueKind::CorruptImage), 0);
+    let both = open_splits(&y, &opts, &[Split::Train, Split::Val]).unwrap();
+    assert_eq!(both.split_sizes(), [1, 1, 0]);
+    assert_eq!(both.train.entries(), full.train.entries());
+    // Without names the classes come from every split's labels, so the whole dataset is opened.
+    write(&y.join("data.yaml"), "train: images/train\nval: images/val\n");
+    write(&y.join("labels/train/1.txt"), "4 0.5 0.5 0.5 0.5\n");
+    let val = open_splits(&y, &opts, &[Split::Val]).unwrap();
+    assert_eq!(val.classes.len(), 5);
+    assert_eq!(val.classes, open(&y).unwrap().classes);
+
+    // COCO: the class ids count the categories of every file, also the ones of the split not opened.
+    let c = t.join("coco");
+    write_png(&c.join("val2017/9.png"), 20, 20, [5; 3]);
+    let train = serde_json::json!({
+        "images": [{"id": 1, "file_name": "missing.png", "width": 10, "height": 10}],
+        "annotations": [{"image_id": 1, "category_id": 2, "bbox": [0, 0, 5, 5]}],
+        "categories": [{"id": 2, "name": "zebra"}, {"id": 7, "name": "dog"}]
+    });
+    write(&c.join("annotations/instances_train2017.json"), serde_json::to_vec(&train).unwrap());
+    let val = serde_json::json!({
+        "images": [{"id": "a", "file_name": "9.png", "width": 20, "height": 20}],
+        "annotations": [{"image_id": "a", "category_id": 7, "bbox": [0, 0, 10, 10]}],
+        "categories": [{"id": 7, "name": "dog"}]
+    });
+    write(&c.join("annotations/instances_val2017.json"), serde_json::to_vec(&val).unwrap());
+    let full = open(&c).unwrap();
+    assert_eq!(full.report.count(IssueKind::MissingImage), 1);
+    let only = open_splits(&c, &opts, &[Split::Val]).unwrap();
+    assert_eq!(only.classes, ["zebra", "dog"]);
+    assert_eq!(only.classes, full.classes);
+    assert_eq!(only.split_sizes(), [0, 1, 0]);
+    assert_eq!(only.val.entries(), full.val.entries());
+    assert_eq!(only.val.boxes(0)[0].class, 1);
+    assert_eq!(only.report.count(IssueKind::MissingImage), 0, "train images are not checked");
+    // A train file the full open would skip (no `images` array) adds no categories either way, and one read
+    // through the fallback (a duplicate key) gives the same classes.
+    for text in [
+        r#"{"images": {"not": "an array"}, "categories": [{"id": 1, "name": "cat"}]}"#,
+        r#"{"images": [], "images": [], "categories": [{"id": 1, "name": "cat"}]}"#,
+        r#"[1, 2]"#,
+        r#"{ broken"#,
+    ] {
+        write(&c.join("annotations/instances_train2017.json"), text);
+        let full = open(&c).unwrap();
+        let only = open_splits(&c, &opts, &[Split::Val]).unwrap();
+        assert_eq!(only.classes, full.classes, "{text}");
+        assert_eq!(only.val.entries(), full.val.entries(), "{text}");
+    }
+    // Only a train file: asking for val opens an empty val split, as the full open does.
+    std::fs::remove_file(c.join("annotations/instances_val2017.json")).unwrap();
+    write(&c.join("annotations/instances_train2017.json"), serde_json::to_vec(&train).unwrap());
+    let only = open_splits(&c, &opts, &[Split::Val]).unwrap();
+    assert_eq!((only.split_sizes(), only.classes.len()), ([0, 0, 0], 2));
 }

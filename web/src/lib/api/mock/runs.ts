@@ -325,8 +325,9 @@ export function resolveTrain(c: TrainConfig, images: number, classes: number, st
   let warmupBias = 0.1;
   if (c.optimizer === 'auto') {
     const iterations = Math.ceil(images / Math.max(c.batch, nbs, 1)) * c.epochs;
-    kind = iterations > 10_000 ? 'sgd' : 'adamw';
-    lr0 = kind === 'sgd' ? 0.01 : Math.round(((0.002 * 5) / (4 + classes)) * 1e6) / 1e6;
+    // docs/MODEL.md §8.2, `auto_rule` 3: MuSGD for long runs, AdamW at the reference fit floored at 0.001.
+    kind = iterations > 10_000 ? 'musgd' : 'adamw';
+    lr0 = kind === 'musgd' ? 0.01 : Math.max(Math.round(((0.002 * 5) / (4 + classes)) * 1e6) / 1e6, 0.001);
     momentum = 0.9;
     warmupBias = 0;
   } else kind = c.optimizer;
@@ -400,7 +401,7 @@ export function startLogs(p: RunProfile, startedAt: number, datasetName: string,
           {
             t: t(120),
             level: 'info',
-            message: `optimizer ${p.resolved.optimizer === 'adamw' ? 'AdamW' : 'SGD'}${c.optimizer === 'auto' ? ' (auto)' : ''} lr0 ${p.resolved.lr0}  batch ${c.batch} × accumulate ${p.resolved.accumulate}  warmup ${p.resolved.warmup_iters} steps, ${p.resolved.cos_lr ? 'cosine' : 'linear'} to ${r6(p.resolved.lr0 * p.resolved.lrf)}`,
+            message: `optimizer ${({ sgd: 'SGD', adamw: 'AdamW', musgd: 'MuSGD' } as const)[p.resolved.optimizer]}${c.optimizer === 'auto' ? ' (auto)' : ''} lr0 ${p.resolved.lr0}  batch ${c.batch} × accumulate ${p.resolved.accumulate}  warmup ${p.resolved.warmup_iters} steps, ${p.resolved.cos_lr ? 'cosine' : 'linear'} to ${r6(p.resolved.lr0 * p.resolved.lrf)}`,
           } satisfies LogLine,
         ]
       : []),

@@ -30,6 +30,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] NMS-free one-to-one head, `--head o2o` (#109)
 - [x] CPU end-to-end latency below yolo26n at b1 (fused letterbox, direct stem conv, in-place parallel decode; #127)
 - [x] CPU per-core efficiency: B packing, depthwise AVX2, fused bias+SiLU, dedicated pool (#137; folo-n forward 14.8-18.7 ms at 8 threads vs Ultralytics 22.8)
+- [~] engine hill-climb, five areas merged in `hill/integration` (docs/BENCHMARKS.md, Hill-climb; notebooks in docs/hill/): folo-n GPU forward b1 2.09 ms, e2e b16 1898 img/s on tensor cores, train step 327 / 537 img/s (f32 / AMP, yolo26n 202 / 252), trainer sustained 347 / 500 img/s (row 10, bars 199 / 224), COCO `folo val` 29.6 → 8.9 s, CPU train step −25% and `predict_batch` +32–47%; MuSGD and `auto` rules 2 and 3. Not moved: CPU batch-1 latency
 
 ## M4 — real use
 - [x] real datasets from disk (YOLO, COCO), export folo-f16

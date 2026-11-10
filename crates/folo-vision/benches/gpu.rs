@@ -3,7 +3,10 @@
 //! `FOLO_BENCH_PRECISION=f32,f16,f16tc` the inference precisions, default all three, f16 only where the GPU
 //! computes in it and `f16tc` (f16 on tensor cores) only with `FOLO_GPU_TENSOR_CORES=1` on an adapter that has them;
 //! `FOLO_BENCH_SECTIONS=forward,predict,train` the sections, default all; `FOLO_BENCH_TRAIN=f32,amp` the
-//! training precisions, default both, `amp` only on a context with tensor cores).
+//! training precisions, default both, `amp` only on a context with tensor cores; `FOLO_BENCH_CLIP=1` adds the
+//! trainer's global-norm gradient clipping (`clip_grad_norm` 10, through a `GradAccumulator` as in training) to
+//! the training step, default off so the documented rows stay comparable; `FOLO_BENCH_OPTIM=musgd` trains with
+//! MuSGD instead of SGD).
 //!
 //! Per scale, 80 classes, 640×640, untrained (seed-0) weights, inference in f32 and f16 (half precision: f16
 //! weights and activations, f32 accumulation; the input is f16 too, and the predictor letterboxes into f16):
@@ -37,7 +40,7 @@ use folo_core::rng::Rng;
 use folo_core::{DType, Device, Tensor, no_grad};
 use folo_data::{Image, Letterbox, LetterboxOptions};
 use folo_gpu::GpuContext;
-use folo_nn::optim::{GradAccumulator, Optimizer, Sgd, StandardGroups};
+use folo_nn::optim::{GradAccumulator, MuSgd, Optimizer, Sgd, StandardGroups};
 use folo_nn::{GradScaler, Module};
 use folo_vision::boxes::Xyxy;
 use folo_vision::loss::{ImageTargets, LossConfig, detection_loss, detection_loss_host};
@@ -230,12 +233,21 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     let cfg = ModelConfig::new(scale, 80).expect("config");
     let rng = &mut Rng::seed(1);
     let label = if amp { "amp" } else { "f32" };
+    // The trainer's default clipping (docs/MODEL.md §8.3), off unless `FOLO_BENCH_CLIP=1`.
+    let clip = if std::env::var("FOLO_BENCH_CLIP").is_ok_and(|v| v == "1") { 10.0 } else { 0.0 };
+    let label = if clip > 0.0 { format!("{label}, clip {clip}") } else { label.to_string() };
     println!("\nfolo-{scale} training ({label})");
     println!("  [gpu load before train: {}]", gpu_load());
     let mut model = FoloModel::new(cfg).expect("model");
     model.to_device(dev).expect("to_device");
     let groups = StandardGroups::from_module(&model).into_groups(0.01, 0.937, 5e-4);
-    let mut opt = Sgd::new(groups).expect("sgd");
+    let musgd = std::env::var("FOLO_BENCH_OPTIM").is_ok_and(|v| v == "musgd");
+    let optim = if musgd { "MuSGD" } else { "SGD" };
+    let mut opt: Box<dyn Optimizer> = if musgd {
+        Box::new(MuSgd::new(groups).expect("musgd"))
+    } else {
+        Box::new(Sgd::new(groups).expect("sgd"))
+    };
     let mut acc = GradAccumulator::new(&model.parameters());
     let mut scaler = GradScaler::new();
     let mut skipped = 0;
@@ -258,11 +270,26 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     // as training does, with the loss's one readback as its only wait, and is synchronised at the end. `host`
     // takes the host assigner (the previous loss, `detection_loss_host`) for comparison. Returns the step time
     // and the four phase times.
+    // `FOLO_GPU_PROFILE=1`: GPU time per kernel label, per phase (the context's timestamp queries).
+    let profile: std::cell::RefCell<[Profile; 4]> = Default::default();
     let mut step = |split: bool, host: bool| {
-        let sync = |on: bool| {
+        let mut phase = 0;
+        // Host time spent encoding each phase (until its synchronisation starts).
+        let mut enc = [Duration::ZERO; 4];
+        let mut mark = Instant::now();
+        let mut sync = |on: bool| {
+            enc[phase] = mark.elapsed();
             if on {
                 synchronize(dev).expect("sync");
             }
+            for r in ctx.profile_take() {
+                let mut p = profile.borrow_mut();
+                let e = p[phase].entry(r.label).or_default();
+                e.0 += r.count;
+                e.1 += r.ms;
+            }
+            phase += 1;
+            mark = Instant::now();
         };
         let t0 = Instant::now();
         let out = {
@@ -292,19 +319,26 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
             acc.zero();
             acc.add(&grads).expect("accumulate");
             drop(grads);
-            let finite = acc.unscale_clip(scaler.inv_scale(), 0.0).expect("unscale");
+            let finite = acc.unscale_clip(scaler.inv_scale(), clip).expect("unscale");
             if finite {
                 opt.step(&acc).expect("step");
             } else {
                 skipped += 1;
             }
             scaler.update(!finite);
+        } else if clip > 0.0 {
+            // The trainer's f32 window end: the gradients in the accumulator, clipped on the device, then the step.
+            acc.zero();
+            acc.add(&grads).expect("accumulate");
+            drop(grads);
+            acc.clip_grad_norm(clip).expect("clip");
+            opt.step(&acc).expect("step");
         } else {
             opt.step(&grads).expect("step");
             drop(grads);
         }
         sync(true);
-        (t0.elapsed(), [t1 - t0, t2 - t1, t3 - t2, t3.elapsed()])
+        (t0.elapsed(), [t1 - t0, t2 - t1, t3 - t2, t3.elapsed()], enc)
     };
     let w0 = ctx.work_stats();
     for _ in 0..3 {
@@ -314,28 +348,87 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     ctx.reset_peak_memory();
     let s = stats((0..10).map(|_| step(false, false).0).collect());
     let peak = ctx.pool_stats().peak_live_bytes;
-    row(&format!("train step b16 ({label}, SGD)"), &s, 16);
+    row(&format!("train step b16 ({label}, {optim})"), &s, 16);
     let mut split = |host: bool| {
         step(true, host);
-        let runs: Vec<[Duration; 4]> = (0..10).map(|_| step(true, host).1).collect();
-        let m = |i: usize| stats(runs.iter().map(|r| r[i]).collect()).median;
-        (m(0), m(1), m(2), m(3))
+        let runs: Vec<([Duration; 4], [Duration; 4])> =
+            (0..10).map(|_| step(true, host)).map(|r| (r.1, r.2)).collect();
+        let m = |i: usize| stats(runs.iter().map(|r| r.0[i]).collect()).median;
+        let e = |i: usize| stats(runs.iter().map(|r| r.1[i]).collect()).median;
+        ((m(0), m(1), m(2), m(3)), [e(0), e(1), e(2), e(3)])
     };
-    let (f, l, b, o) = split(false);
+    let ((f, l, b, o), enc) = split(false);
     println!(
         "    split (medians, each phase synchronised): forward {f:.1} ms, loss {l:.1} ms, backward {b:.1} ms, \
          {} {o:.1} ms; {} dispatches and {} submissions per step; peak {:.0} MiB",
-        if amp { "unscale + check + SGD" } else { "SGD" },
+        if amp { format!("unscale + check + {optim}") } else { optim.to_string() },
         (w1.dispatches - w0.dispatches) / 3,
         (w1.submissions - w0.submissions) / 3,
         mib(peak)
     );
+    println!(
+        "    host encode time of each phase (medians): forward {:.1} ms, loss {:.1} ms, backward {:.1} ms, step {:.1} ms",
+        enc[0], enc[1], enc[2], enc[3]
+    );
+    if !amp && !ctx.profiling() {
+        let ((_, l, b, _), _) = split(true);
+        println!("    host assigner instead (detection_loss_host): loss {l:.1} ms, backward {b:.1} ms");
+    }
+    if ctx.profiling() {
+        // Every step above was timed (profiling waits at each submission, so the wall-clock rows above are not
+        // the real ones); count these steps only.
+        profile.take();
+        const STEPS: usize = 5;
+        for _ in 0..STEPS {
+            step(true, false);
+        }
+        print_profile(&profile.borrow(), STEPS);
+    }
     if amp {
         println!("    loss scale {} after {skipped} skipped steps", scaler.scale());
-        return;
     }
-    let (_, l, b, _) = split(true);
-    println!("    host assigner instead (detection_loss_host): loss {l:.1} ms, backward {b:.1} ms");
+}
+
+/// GPU milliseconds and dispatch counts per kernel label.
+type Profile = std::collections::HashMap<String, (u64, f64)>;
+
+/// The per-phase kernel timings of `steps` profiled training steps, per step: totals by label group (the label's
+/// first word), then the largest single labels.
+fn print_profile(profile: &[Profile; 4], steps: usize) {
+    let per = 1.0 / steps as f64;
+    for (name, rows) in ["forward", "loss", "backward", "optimizer"].iter().zip(profile) {
+        let total: f64 = rows.values().map(|r| r.1).sum();
+        let count: u64 = rows.values().map(|r| r.0).sum();
+        println!(
+            "    profile {name}: {:.2} ms GPU time in {} dispatches per step",
+            total * per,
+            count / steps as u64
+        );
+        let mut groups: Vec<(String, u64, f64)> = Vec::new();
+        for (label, &(n, ms)) in rows {
+            // `tag args/kernel` -> `tag/kernel`.
+            let tag = label.split(' ').next().unwrap_or(label);
+            let kernel = label.rsplit('/').next().unwrap_or("");
+            let key = if label.contains('/') { format!("{tag}/{kernel}") } else { tag.to_string() };
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => {
+                    g.1 += n;
+                    g.2 += ms;
+                }
+                None => groups.push((key, n, ms)),
+            }
+        }
+        groups.sort_by(|a, b| b.2.total_cmp(&a.2));
+        for (key, n, ms) in groups.iter().filter(|g| g.2 * per >= 0.02) {
+            println!("      {:>7.2} ms {:>5} x  {key}", ms * per, n / steps as u64);
+        }
+        let mut top: Vec<(&String, &(u64, f64))> = rows.iter().collect();
+        top.sort_by(|a, b| b.1.1.total_cmp(&a.1.1));
+        println!("      largest labels:");
+        for (label, (n, ms)) in top.iter().take(45).filter(|r| r.1.1 * per >= 0.05) {
+            println!("        {:>7.2} ms {:>4} x  {label}", ms * per, n / steps as u64);
+        }
+    }
 }
 
 fn main() {

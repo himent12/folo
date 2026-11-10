@@ -3,8 +3,8 @@
 //! Three paths:
 //! - **1×1, stride 1, no padding**: a plain batched GEMM per (image, group): `Y[n,g] = W[g] · X[n,g]`, with
 //!   `vec4` loads when `H·W` is a multiple of 4.
-//! - **Depthwise** (`groups == C_in`, `C_out` a multiple of `C_in`): a direct kernel, one output per thread
-//!   (the GEMM view would have a single row per group).
+//! - **Depthwise** (`groups == C_in`, `C_out` a multiple of `C_in`): a direct kernel, four adjacent outputs of a
+//!   row per thread (the GEMM view would have a single row per group).
 //! - **Everything else**: implicit GEMM. `M = C_out/groups`, `N = OH·OW`, `K = C_in/groups·KH·KW`; the GEMM
 //!   generator's `CONV` mode gathers the `B` tile straight from the image (each thread keeps one output pixel
 //!   for the whole K loop, so the index math is a few constant divisions per element), so no im2col buffer is
@@ -25,6 +25,8 @@
 //! on, the f16 input and weight gradients run on [`coop`]'s `CONV_MODE` 2 / 3 kernels (1×1 input gradients as a
 //! GEMM over the transposed weight), and the weight gradient can be written as f32 directly
 //! ([`conv2d_backward_weight_as`]).
+
+use std::fmt::Write as _;
 
 use super::{check_buf, prod};
 use crate::DType;
@@ -147,8 +149,76 @@ impl Conv2dDesc {
     }
 }
 
-fn gen_depthwise(_: &Spec) -> String {
-    format!("{UNARY_FN}{}", include_str!("../shaders/depthwise.wgsl"))
+/// Outputs per invocation of the depthwise kernel (adjacent along a row).
+const DW_VX: u32 = 4;
+
+fn gen_depthwise(spec: &Spec) -> String {
+    let g = |name: &str| spec.get_u32(name, 1);
+    let (kh, kw, sw, dh, dw) = (g("KH"), g("KW"), g("SW"), g("DH"), g("DW"));
+    // Input columns the DW_VX outputs of a row read: (DW_VX - 1) · SW + (KW - 1) · DW + 1.
+    let span = (DW_VX - 1) * sw + (kw - 1) * dw + 1;
+    let mut taps = String::from(
+        "fn taps(acc: ptr<function, array<f32, DW_VX>>, base: u32, wbase: u32, iy0: i32, ix0: i32, h: i32,          w: i32) {
+",
+    );
+    for t in 0..kh * kw {
+        let _ = writeln!(taps, "    let w{t} = f32(Wt[wbase + {t}u]);");
+    }
+    for ky in 0..kh {
+        let _ = writeln!(
+            taps,
+            "    {{
+        let iy = iy0 + {};",
+            ky * dh
+        );
+        taps.push_str(
+            "        if (iy >= 0 && iy < h) {
+            let row = base + u32(iy) * u32(w);
+",
+        );
+        for j in 0..span {
+            let _ = writeln!(taps, "            let x{j} = ld(row, ix0 + {j}, w);");
+        }
+        for v in 0..DW_VX {
+            for kx in 0..kw {
+                let _ = writeln!(
+                    taps,
+                    "            (*acc)[{v}] = fma(x{}, w{}, (*acc)[{v}]);",
+                    v * sw + kx * dw,
+                    ky * kw + kx
+                );
+            }
+        }
+        taps.push_str(
+            "        }
+    }
+",
+        );
+    }
+    taps.push_str(
+        "}
+",
+    );
+    // Constant indices only, so `acc` stays in registers.
+    taps.push_str(
+        "fn store(acc: ptr<function, array<f32, DW_VX>>, out: u32, ox0: u32, ow: u32, b: f32) {
+",
+    );
+    for v in 0..DW_VX {
+        let _ = writeln!(
+            taps,
+            "    if (ox0 + {v}u < ow) {{ Y[out + {v}u] = T(unary1(ACT, (*acc)[{v}] + b, pf(6u))); }}"
+        );
+    }
+    taps.push_str(
+        "}
+",
+    );
+    format!(
+        "const DW_VX: u32 = {DW_VX}u;
+{UNARY_FN}{taps}{}",
+        include_str!("../shaders/depthwise.wgsl")
+    )
 }
 
 static DEPTHWISE: KernelDef = KernelDef {
@@ -196,8 +266,17 @@ pub fn conv2d_with_config(
             .u32("ACT", d.act.code())
             .f16(d.dtype == DType::F16);
         let k = ctx.kernel(&DEPTHWISE, spec)?;
-        let total = d.n * d.c_out * oh * ow;
-        let p = Params::new().uz(total)?.uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?.uz(d.c_out)?.f(d.act.alpha());
+        let qw = ow.div_ceil(DW_VX as usize);
+        let total = d.n * d.c_out * oh * qw;
+        let p = Params::new()
+            .uz(total)?
+            .uz(d.h)?
+            .uz(d.w)?
+            .uz(oh)?
+            .uz(ow)?
+            .uz(d.c_out)?
+            .f(d.act.alpha())
+            .uz(qw)?;
         ctx.dispatch(&k, &[x, weight, bias.unwrap_or(ctx.dummy()), y], &p, ctx.grid_1d(total as u64, 256)?)?;
         return Ok((oh, ow));
     }
@@ -221,13 +300,13 @@ pub fn conv2d_with_config(
     }
 
     if d.is_pointwise() {
-        let cfg = cfg.unwrap_or_else(|| gemm::pick_config(ctx, &g));
+        let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
         gemm::gemm_with_config(ctx, &g, weight, x, bias, y, cfg)?;
         return Ok((oh, ow));
     }
 
     // Implicit GEMM.
-    let cfg = cfg.unwrap_or_else(|| gemm::pick_config(ctx, &g));
+    let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
     gemm::check_config(ctx, cfg)?;
     let check = !g.m.is_multiple_of(cfg.bm as usize)
         || !g.n.is_multiple_of(cfg.bn as usize)
@@ -370,6 +449,197 @@ static DEPTHWISE_GRAD: KernelDef = KernelDef {
     source: Source::Generated(gen_depthwise_grad),
 };
 
+/// WGSL of the stride-phase input gradient's output mapping: phase column `j = (a, b)` is input pixel
+/// `(IH0 + a·SH, IW0 + b·SW)` of the plane. An epilogue walks a run of consecutive columns with a cursor
+/// (`ppix_at` once, then `ppix_next`), so it divides once per run rather than per element. Params: 25 = `W`,
+/// 28 = `IH0`, 29 = `IW0`, 33 = the phase's width.
+pub(crate) const PHASE_PIXEL: &str = "struct PPix { a: u32, b: u32 }\n\
+    fn ppix_at(j: u32) -> PPix { return PPix(j / pu(33u), j % pu(33u)); }\n\
+    fn ppix_off(p: PPix) -> u32 { return (pu(28u) + SH * p.a) * pu(25u) + pu(29u) + SW * p.b; }\n\
+    fn ppix_next(p: ptr<function, PPix>) {\n\
+    \x20 (*p).b += 1u;\n\
+    \x20 if ((*p).b == pu(33u)) { (*p).b = 0u; (*p).a += 1u; }\n}\n";
+
+/// Packs a conv weight `[C_out, C_in/groups, KH, KW]` for the stride-phase input gradient: phase
+/// `ph = (rh, rw)` gets the block `[groups, C_in/groups, C_out/groups, th, tw]` of the taps `kh = rh + SH·th`,
+/// `kw = rw + SW·tw` at offset `ph · BMAX` (a row-major `A` with `K = C_out/groups · th · tw` per group).
+/// Params: 0 = threads (`phases · C_in · C_out/groups · TMAX`), 1 = groups, 2 = `C_in/groups`, 3 = `C_out/groups`,
+/// 4 = `BMAX`.
+fn gen_phase_pack(_: &Spec) -> String {
+    "@group(0) @binding(1) var<storage, read> W: array<T>;\n\
+     @group(0) @binding(2) var<storage, read_write> PK: array<T>;\n\
+     @compute @workgroup_size(256)\n\
+     fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+     \x20       @builtin(local_invocation_index) lid: u32) {\n\
+     \x20 let i = linear_id(wid, nwg, lid, 256u);\n\
+     \x20 if (i >= pu(0u)) { return; }\n\
+     \x20 let cin_g = pu(2u); let cout_g = pu(3u);\n\
+     \x20 let t = i % TMAX; var q = i / TMAX;\n\
+     \x20 let co = q % cout_g; q = q / cout_g;\n\
+     \x20 let ci = q % cin_g; q = q / cin_g;\n\
+     \x20 let g = q % pu(1u); let ph = q / pu(1u);\n\
+     \x20 let rh = ph / SW; let rw = ph % SW;\n\
+     \x20 if (rh >= KH || rw >= KW) { return; }\n\
+     \x20 let nh = (KH - rh + SH - 1u) / SH; let nw = (KW - rw + SW - 1u) / SW;\n\
+     \x20 if (t >= nh * nw) { return; }\n\
+     \x20 let kh = rh + SH * (t / nw); let kw = rw + SW * (t % nw);\n\
+     \x20 PK[ph * pu(4u) + ((g * cin_g + ci) * cout_g + co) * nh * nw + t] =\n\
+     \x20   W[(((g * cout_g + co) * cin_g + ci) * KH + kh) * KW + kw];\n}\n"
+        .into()
+}
+
+static PHASE_PACK: KernelDef = KernelDef {
+    name: "conv2d_phase_pack",
+    storage: &[Access::Read, Access::ReadWrite],
+    source: Source::Generated(gen_phase_pack),
+};
+
+/// One stride phase of a strided conv's input gradient: the input pixels `(ih, iw)` with
+/// `(ih + PH) % SH == rh` and `(iw + PW) % SW == rw`, which only the taps `kh ≡ rh`, `kw ≡ rw` (mod the stride) read.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Phase {
+    /// Taps per axis (`th`, `tw`): `kh = rh + SH·t` for `t < th`.
+    pub taps: (usize, usize),
+    /// First input row and column of the phase.
+    pub first: (usize, usize),
+    /// Output pixel of phase pixel `(0, 0)` and tap `(0, 0)`: phase pixel `(a, b)` and tap `(t, u)` read output
+    /// pixel `(base.0 + a − t, base.1 + b − u)`.
+    pub base: (usize, usize),
+    /// Phase rows and columns.
+    pub size: (usize, usize),
+}
+
+impl Phase {
+    /// The `SH · SW` phases of `d` (dilation 1), row-major in `(rh, rw)`.
+    fn all(d: &Conv2dDesc) -> Vec<Phase> {
+        let axis = |r: usize, s: usize, p: usize, k: usize, len: usize| {
+            let taps = if r < k { (k - r).div_ceil(s) } else { 0 };
+            // The smallest i >= 0 with (i + p) % s == r.
+            let first = (r + s - p % s) % s;
+            let size = if first < len { (len - first).div_ceil(s) } else { 0 };
+            (taps, first, (first + p - r) / s, size)
+        };
+        let (sh, sw) = d.win.stride;
+        let mut out = Vec::with_capacity(sh * sw);
+        for rh in 0..sh {
+            for rw in 0..sw {
+                let h = axis(rh, sh, d.win.padding.0, d.win.kernel.0, d.h);
+                let w = axis(rw, sw, d.win.padding.1, d.win.kernel.1, d.w);
+                out.push(Phase { taps: (h.0, w.0), first: (h.1, w.1), base: (h.2, w.2), size: (h.3, w.3) });
+            }
+        }
+        out
+    }
+
+    /// The phase's spec constants (the tap counts; at least 1, a phase without taps runs with `K = 0`).
+    pub(crate) fn spec(&self, spec: Spec) -> Spec {
+        spec.bool("PHASE", true).u32("PTH", self.taps.0.max(1) as u32).u32("PTW", self.taps.1.max(1) as u32)
+    }
+
+    /// The parameters after the conv sizes (24..27): 28 = first row, 29 = first column, 30 / 31 = base, 32 / 33 =
+    /// phase rows / columns.
+    pub(crate) fn params(&self, p: Params) -> Result<Params> {
+        p.at(28)
+            .uz(self.first.0)?
+            .uz(self.first.1)?
+            .uz(self.base.0)?
+            .uz(self.base.1)?
+            .uz(self.size.0)?
+            .uz(self.size.1)
+    }
+}
+
+/// Whether the input gradient of `d` takes the stride-phase decomposition: strided, dilation 1, not depthwise.
+fn phased(d: &Conv2dDesc) -> bool {
+    d.win.stride != (1, 1) && d.win.dilation == (1, 1) && !d.is_depthwise()
+}
+
+/// The input gradient of a strided conv (dilation 1) by stride phase: a transposed conv reads, for an input pixel,
+/// only the taps congruent to its phase (at 3×3 stride 2: 1, 2, 2 or 4 of the 9), so each phase is a dense
+/// implicit GEMM with `K = C_out/groups · th · tw` and none of the multiply-adds by the zeros a stride leaves.
+/// The weight is packed per phase once ([`gen_phase_pack`]), then one GEMM per phase writes its pixels (a strided
+/// subset of `gx`; the phases tile it).
+fn conv2d_backward_input_phased(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    grad: &wgpu::Buffer,
+    weight: &wgpu::Buffer,
+    gx: &wgpu::Buffer,
+    coop: bool,
+) -> Result<()> {
+    let (oh, ow) = d.output()?;
+    let dt = d.dtype;
+    let (kh, kw) = d.win.kernel;
+    let (sh, sw) = d.win.stride;
+    let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
+    let (hw_in, hw_out) = (d.h * d.w, oh * ow);
+    let tmax = kh.div_ceil(sh) * kw.div_ceil(sw);
+    let bmax = prod(&[d.c_in, cout_g, tmax])?;
+    let packed = ctx.alloc(dt.bytes(prod(&[sh * sw, bmax])?))?;
+    let threads = prod(&[sh * sw, bmax])?;
+    let k = ctx.kernel(&PHASE_PACK, d.win.spec().u32("TMAX", tmax as u32).f16(dt == DType::F16))?;
+    let p = Params::new().uz(threads)?.uz(d.groups)?.uz(cin_g)?.uz(cout_g)?.uz(bmax)?;
+    ctx.dispatch(&k, &[weight, packed.raw()], &p, ctx.grid_1d(threads as u64, 256)?)?;
+    for (i, ph) in Phase::all(d).iter().enumerate() {
+        let n_ph = ph.size.0 * ph.size.1;
+        if n_ph == 0 {
+            continue;
+        }
+        let k_dim = cout_g * ph.taps.0 * ph.taps.1;
+        let mut g = GemmDesc::new(cin_g, n_ph, k_dim, false, false, d.n);
+        g.batch = (d.n, d.groups);
+        g.lda = k_dim;
+        g.ldb = hw_out;
+        g.ldc = hw_in;
+        g.a = BatchStrides { offset: i * bmax, outer: 0, inner: cin_g * k_dim };
+        g.b = BatchStrides { offset: 0, outer: d.c_out * hw_out, inner: cout_g * hw_out };
+        g.c = BatchStrides { offset: 0, outer: d.c_in * hw_in, inner: cin_g * hw_in };
+        g.dtype = dt;
+        let vec_a = k_dim.is_multiple_of(4) && bmax.is_multiple_of(4);
+        if coop && coop::encode_conv_backward_input_phase(ctx, d, &g, ph, vec_a, packed.raw(), grad, gx)? {
+            continue;
+        }
+        let cfg = gemm::pick_config(ctx, &g);
+        gemm::check_config(ctx, cfg)?;
+        let check = !g.m.is_multiple_of(cfg.bm as usize)
+            || !g.n.is_multiple_of(cfg.bn as usize)
+            || !g.k.is_multiple_of(cfg.bk as usize)
+            || k_dim == 0;
+        let spec = base_spec(&g, cfg)
+            .bool("VEC_A", vec_a)
+            .bool("VEC_B", false)
+            .bool("VEC_C", false)
+            .bool("TRANS_A", false)
+            .bool("TRANS_B", false)
+            .bool("CHECK", check)
+            .u32("CONV_MODE", 2);
+        let kernel = ctx.kernel(&GEMM, ph.spec(conv_spec(spec, d)))?;
+        let p = ph.params(gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?)?;
+        let groups = [
+            n_ph.div_ceil(cfg.bn as usize) as u32,
+            cin_g.div_ceil(cfg.bm as usize) as u32,
+            u32::try_from(d.n * d.groups).unwrap_or(u32::MAX),
+        ];
+        ctx.dispatch(&kernel, &[packed.raw(), grad, ctx.dummy(), gx], &p, groups)?;
+    }
+    Ok(())
+}
+
+/// Tile configuration of a regular (not tensor-core) weight gradient with `m = C_out/groups` rows and
+/// `n = C_in/groups·KH·KW` columns, by the shape alone: split-K supplies the workgroups, so the tile is picked for
+/// arithmetic intensity (as [`coop`]'s weight gradients) rather than by [`gemm::pick_config`]'s occupancy rule,
+/// which always ended at the 64×64 tile with 4×4 outputs per thread here.
+pub(crate) fn pick_config_weight_grad(ctx: &GpuContext, m: usize, n: usize) -> TileConfig {
+    let cfg = match m {
+        _ if n < 128 => TileConfig::SMALL,
+        // Weight gradients with at most 32 output channels.
+        0..=32 => TileConfig::ROWS32,
+        _ if m.div_ceil(128) * 128 * 4 <= m * 5 => TileConfig::LARGE,
+        _ => TileConfig::MEDIUM,
+    };
+    if cfg.workgroup_bytes() <= ctx.caps().max_workgroup_storage { cfg } else { TileConfig::SMALL }
+}
+
 /// Largest `KH · KW` the direct depthwise weight-gradient kernel unrolls; bigger kernels use the GEMM path.
 const MAX_DEPTHWISE_TAPS: usize = 49;
 /// Upper bound for split-K partial slabs, in f32 elements (64 MiB).
@@ -385,6 +655,22 @@ fn check_grad_desc(ctx: &GpuContext, d: &Conv2dDesc) -> Result<(usize, usize)> {
 /// (those have direct kernels).
 fn coop_grad(ctx: &GpuContext, d: &Conv2dDesc) -> bool {
     d.dtype == DType::F16 && ctx.tensor_cores() && !d.is_depthwise()
+}
+
+/// The weight gradient's spatial sizes as specialisation constants (`SP_IH`, `SP_IW`, `SP_OH`, `SP_OW`): its B
+/// gather divides every `k = (n, oh, ow)` by `OH·OW` and `OW`, which a constant divisor turns into a multiply.
+pub(crate) fn weight_grad_spec(spec: Spec, d: &Conv2dDesc, oh: usize, ow: usize) -> Spec {
+    spec.u32("SP_IH", d.h as u32).u32("SP_IW", d.w as u32).u32("SP_OH", oh as u32).u32("SP_OW", ow as u32)
+}
+
+/// The weight-gradient generators' `IH`, `IW`, `OW` and `OHOW`: the constants of [`weight_grad_spec`] when the
+/// spec has them, else the uniforms.
+pub(crate) fn weight_grad_dims(spec: &Spec) -> String {
+    if spec.get_u32("SP_OW", 0) > 0 {
+        "  let IH = SP_IH; let IW = SP_IW; let OW = SP_OW; let OHOW = SP_OH * SP_OW;\n".into()
+    } else {
+        "  let IH = pu(24u); let IW = pu(25u); let OW = pu(27u); let OHOW = pu(31u);\n".into()
+    }
 }
 
 fn conv_spec(spec: Spec, d: &Conv2dDesc) -> Spec {
@@ -438,6 +724,9 @@ pub fn conv2d_backward_input(
         return ctx.dispatch(&k, &[grad, weight, gx], &p, ctx.grid_1d(total as u64, 256)?);
     }
     let coop = coop_grad(ctx, d);
+    if phased(d) {
+        return conv2d_backward_input_phased(ctx, d, grad, weight, gx, coop);
+    }
     if d.is_pointwise() && !coop {
         // gx[n, g] = W[g]^T · G[n, g].
         let mut g = GemmDesc::new(cin_g, hw_in, cout_g, true, false, d.n);
@@ -587,7 +876,7 @@ pub fn conv2d_backward_weight_as(
     if coop_grad(ctx, d) && coop::encode_conv_backward_weight(ctx, d, &g, out, grad, x, gw)? {
         return Ok(());
     }
-    let cfg = gemm::pick_config(ctx, &g);
+    let cfg = pick_config_weight_grad(ctx, cout_g, ncols);
     gemm::check_config(ctx, cfg)?;
     let bk = cfg.bk as usize;
     // Split K when the weight alone has too few tiles: aim for ~512 workgroups, each at least 16 K tiles deep.
@@ -613,7 +902,7 @@ pub fn conv2d_backward_weight_as(
         .u32("CONV_MODE", 3)
         .bool("SPLIT", splits > 1)
         .bool("OUT_F32", c_f32 && dt == DType::F16);
-    let kernel = ctx.kernel(&GEMM, conv_spec(spec, d))?;
+    let kernel = ctx.kernel(&GEMM, weight_grad_spec(conv_spec(spec, d), d, oh, ow))?;
     let p = gemm_params(&g)?
         .at(24)
         .uz(d.h)?

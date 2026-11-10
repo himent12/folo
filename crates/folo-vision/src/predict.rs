@@ -326,8 +326,10 @@ impl Predictor {
         Ok(self.run(std::slice::from_ref(img), self.cfg.rect)?.pop().expect("one image in, one out"))
     }
 
-    /// A batch in one forward pass: every image is letterboxed to the square `imgsz × imgsz` canvas. Each
-    /// prediction's timing is the batch's divided by its size.
+    /// A batch: every image is letterboxed to the square `imgsz × imgsz` canvas. On a GPU it is one forward
+    /// pass; on the CPU, chunks of two images run side by side (the same predictions as one pass). Each
+    /// prediction's timing is its pass's (or chunk's) divided by its size; with chunks side by side the images'
+    /// totals add up to more than the call's wall time (docs/API.md, `timing`).
     pub fn predict_batch(&self, imgs: &[Image]) -> Result<Vec<Prediction>> {
         if imgs.is_empty() {
             return Ok(Vec::new());
@@ -336,8 +338,23 @@ impl Predictor {
     }
 
     fn run(&self, imgs: &[Image], rect: bool) -> Result<Vec<Prediction>> {
+        /// Images per forward when the CPU predicts a batch (see below). One, two and four measured within
+        /// 5% of each other at batch 16 on 28 threads, and all about 20% faster than one batched forward.
+        const CPU_BATCH_CHUNK: usize = 2;
         // On the CPU every stage (letterbox, forward, decode) runs from inside the rayon pool.
         if self.model.device().is_cpu() {
+            // A batch runs as chunks of about two images whose forwards run side by side (each op's tasks
+            // spread over the pool by work stealing), which keeps every kernel nearer one core's efficiency
+            // than one batched forward across all threads. Every image's result is the same either way (the
+            // CPU kernels compute each image on its own, in an order that depends only on its shape).
+            let chunk = CPU_BATCH_CHUNK;
+            if imgs.len() > chunk {
+                return folo_core::cpu::in_pool(|| {
+                    let parts: Vec<Vec<Prediction>> =
+                        imgs.par_chunks(chunk).map(|c| self.run_here(c, false)).collect::<Result<_>>()?;
+                    Ok(parts.into_iter().flatten().collect())
+                });
+            }
             folo_core::cpu::in_pool(|| self.run_here(imgs, rect))
         } else {
             self.run_here(imgs, rect)
@@ -531,15 +548,60 @@ pub fn letterbox_on_device_as(
     }
     let n = taps.len();
     let taps = Tensor::from_vec(taps, [n])?.to_device(device)?;
-    // Host copies in parallel; the uploads (one per image) are queued in order.
-    let host: Vec<Tensor> = imgs
-        .par_iter()
-        .map(|im| Tensor::from_vec(im.data.clone(), [im.height as usize, im.width as usize, 3]))
-        .collect::<folo_core::Result<_>>()?;
-    let dev_imgs = host.iter().map(|t| t.to_device(device)).collect::<folo_core::Result<Vec<_>>>()?;
+    let dev_imgs = upload_images(imgs, device)?;
     let refs: Vec<&Tensor> = dev_imgs.iter().collect();
     let out = [h as usize, w as usize];
     Ok(Tensor::letterbox_rgb8(&refs, &taps, &geoms, out, folo_data::PAD_VALUE, INV_255, dtype)?)
+}
+
+/// The `u8` images as `[H, W, 3]` tensors on `device`. On a folo-gpu device all of them share one upload: the
+/// pixels are copied in parallel straight into reused, mapped staging memory ([`folo_gpu::GpuContext::upload_with`])
+/// and each image is a view of the one device buffer (at a 4-byte aligned offset, which the letterbox kernel
+/// reads in place). Elsewhere each image is uploaded on its own.
+fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
+    let Some(ctx) = folo_gpu::context_for(device) else {
+        let host: Vec<Tensor> = imgs
+            .par_iter()
+            .map(|im| Tensor::from_vec(im.data.clone(), [im.height as usize, im.width as usize, 3]))
+            .collect::<folo_core::Result<_>>()?;
+        return Ok(host.iter().map(|t| t.to_device(device)).collect::<folo_core::Result<_>>()?);
+    };
+    let mut offsets = Vec::with_capacity(imgs.len());
+    let mut total = 0usize;
+    for im in imgs {
+        offsets.push(total);
+        total += im.data.len().next_multiple_of(4);
+    }
+    // `WriteOnly<[u8]>` is not `Send`, its fixed-size chunks are: the mapping is filled in 64 KiB chunks in
+    // parallel, each from the image bytes it covers (the padding between images stays unwritten).
+    const CHUNK: usize = 64 * 1024;
+    let fill = |start: usize, mut dst: folo_gpu::WriteOnly<'_, [u8]>| {
+        let end = start + dst.len();
+        for (im, &off) in imgs.iter().zip(&offsets) {
+            let (a, b) = (start.max(off), end.min(off + im.data.len()));
+            if a < b {
+                dst.slice(a - start..b - start).copy_from_slice(&im.data[a - off..b - off]);
+            }
+        }
+    };
+    let (buf, ()) = ctx
+        .upload_with(total as u64, |dst| {
+            let body = dst.len() / CHUNK * CHUNK;
+            let (chunks, tail) = dst.split_at(body);
+            let (chunks, _) = chunks.into_chunks::<CHUNK>();
+            let chunks: Vec<_> = chunks.into_iter().enumerate().collect();
+            chunks.into_par_iter().for_each(|(i, c)| fill(i * CHUNK, c.into()));
+            fill(body, tail);
+        })
+        .map_err(folo_core::Error::from)?;
+    let all = folo_gpu::tensor_from_buffer(device, DType::U8, [total], buf)?;
+    Ok(imgs
+        .iter()
+        .zip(offsets)
+        .map(|(im, off)| {
+            all.narrow(0, off, im.data.len())?.reshape([im.height as usize, im.width as usize, 3])
+        })
+        .collect::<folo_core::Result<_>>()?)
 }
 
 /// The common canvas `[width, height]` of a letterbox batch: one geometry per image, computed for its size,

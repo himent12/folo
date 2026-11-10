@@ -537,7 +537,7 @@ impl SimRun {
 
     /// Sets `Run.resolved` to what the real trainer resolves this run's config to on `train_images` training images.
     pub fn resolved_for(mut self, train_images: u64) -> SimRun {
-        let cfg = folo_vision::TrainConfig::from_api(&self.config);
+        let cfg = folo_vision::TrainConfig::from_api(&self.config).expect("mock configs are known");
         self.resolved = Some(cfg.resolved_train(train_images as usize, self.classes.len()));
         self
     }

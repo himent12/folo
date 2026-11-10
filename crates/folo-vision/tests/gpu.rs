@@ -193,8 +193,10 @@ fn letterbox_on_device_is_exact() {
         (&[(1001, 333)], &square, 320),
         (&[(640, 480), (333, 777), (2000, 1500), (17, 9)], &square, 256),
     ];
-    for (k, (sizes, opts, s)) in cases.iter().enumerate() {
-        let imgs: Vec<_> = sizes.iter().enumerate().map(|(i, &(w, h))| noisy_image(w, h, i as u32)).collect();
+    // Twice: the second pass writes into the staging buffers the first one left mapped for reuse.
+    for (k, (sizes, opts, s)) in cases.iter().chain(&cases).enumerate() {
+        let imgs: Vec<_> =
+            sizes.iter().enumerate().map(|(i, &(w, h))| noisy_image(w, h, (i + k) as u32)).collect();
         let boxes: Vec<Letterbox> =
             imgs.iter().map(|i| Letterbox::compute(i.width, i.height, *s, *s, opts)).collect();
         let want = letterbox_on_host(&imgs, &boxes).unwrap();

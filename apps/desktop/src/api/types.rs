@@ -103,6 +103,8 @@ impl Label for Optimizer {
             Optimizer::Auto => "auto",
             Optimizer::Sgd => "sgd",
             Optimizer::Adamw => "adamw",
+            Optimizer::Musgd => "musgd",
+            Optimizer::Unknown => "unknown",
         }
     }
 }

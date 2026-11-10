@@ -82,7 +82,7 @@ Every tensor name falls into exactly one namespace, decided by its first dotted 
 |---|---|
 | *(model)* | anything not starting with a reserved prefix: parameters and buffers from `Module::named_parameters()` / named buffers, e.g. `backbone.stage2.block0.cv1.conv.weight`, `...bn.running_mean`, `...bn.running_var`. BatchNorm `num_batches_tracked` is not stored |
 | `ema.` | `ema.<model name>` for **every** model parameter and floating buffer (complete coverage), plus the scalar `ema.__updates: I64` |
-| `optim.` | `optim.<model name>.<state>` (`momentum_buffer` for SGD; `exp_avg`, `exp_avg_sq` for AdamW), plus `optim.__step: I64` |
+| `optim.` | `optim.<model name>.<state>` (`momentum_buffer` for SGD; `exp_avg`, `exp_avg_sq` for AdamW; `momentum_buffer` and, on the conv weights of the `decay` groups, `muon_buffer` for MuSGD), plus `optim.__step: I64` |
 | `sched.` | scheduler scalars, e.g. `sched.__step: I64` |
 | `__` (top level) | reserved for future use. Readers ignore unknown `__*` tensors with a warning |
 
@@ -97,7 +97,7 @@ separately.
 
 ### Optimizer contract (`folo.optim`)
 ```jsonc
-{ "type": "sgd" | "adamw",
+{ "type": "sgd" | "adamw" | "musgd",
   "groups": [ { "name": "decay", "params": ["backbone.stem.conv.weight", "..."],
                 "lr": 0.01, "momentum": 0.937, "nesterov": true, "weight_decay": 0.0005,
                 "betas": [0.9, 0.999], "eps": 1e-8 } ],   // the fields that apply to `type`
@@ -106,7 +106,7 @@ separately.
 Every model parameter appears in exactly one group. `lr` is the group's base LR, before the scheduler multiplier.
 Loaders must reject a checkpoint whose optimizer type or parameter set does not match the model being resumed.
 State tensors must be complete: every parameter in a group has each state tensor its optimizer type uses
-(`momentum_buffer` for SGD with momentum > 0; `exp_avg` and `exp_avg_sq` for AdamW), with the parameter's shape and dtype
+(`momentum_buffer` for SGD with momentum > 0; `exp_avg` and `exp_avg_sq` for AdamW; for MuSGD `momentum_buffer` on every parameter and `muon_buffer` on every rank-2/4 parameter of a `decay` / `decay.*` group, docs/MODEL.md §8.2; its groups carry `momentum` and `nesterov` like SGD's), with the parameter's shape and dtype
 `F32`. Missing or mismatched state is an error on resume. The only exception is a checkpoint with `step == 0`, which may
 omit state tensors (they are initialised to zero).
 

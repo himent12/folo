@@ -108,6 +108,18 @@ impl<M: Module> ModelEma<M> {
     pub fn update(&mut self, source: &dyn Module) -> Result<()> {
         let d = self.decay_at(self.updates + 1);
         let (d32, w) = (d as f32, (1.0 - d) as f32);
+        // On a device, every tracked tensor in one multi-tensor update (16 per dispatch on the GPU).
+        let (mine, theirs) = (tracked(&self.module), tracked(source));
+        if mine.iter().any(|(_, e)| !e.device().is_cpu()) && matches(&mine, &theirs) {
+            let _g = no_grad();
+            let es: Vec<&Tensor> = mine.iter().map(|(_, t)| t).collect();
+            let ms: Vec<&Tensor> = theirs.iter().map(|(_, t)| t).collect();
+            let none = vec![Vec::new(); es.len()];
+            if Tensor::optimizer_step_many_(&es, &ms, &none, &OptimStep::Axpby { a: d32, b: w })? {
+                self.updates += 1;
+                return Ok(());
+            }
+        }
         self.zip(source, |e, m| {
             if e.device().is_cpu() && e.is_contiguous() && m.device().is_cpu() {
                 return m
@@ -135,12 +147,7 @@ impl<M: Module> ModelEma<M> {
     /// same tracked names, shapes and dtypes.
     fn zip(&self, source: &dyn Module, f: impl Fn(&Tensor, &Tensor) -> Result<()>) -> Result<()> {
         let (mine, theirs) = (tracked(&self.module), tracked(source));
-        let same = mine.len() == theirs.len()
-            && mine
-                .iter()
-                .zip(&theirs)
-                .all(|((a, x), (b, y))| a == b && x.shape() == y.shape() && x.dtype() == y.dtype());
-        if !same {
+        if !matches(&mine, &theirs) {
             return Err(Error::Invalid(
                 "ModelEma: the source model's tensors do not match the EMA model's".into(),
             ));
@@ -151,6 +158,15 @@ impl<M: Module> ModelEma<M> {
         }
         Ok(())
     }
+}
+
+/// Whether two tracked lists pair up: the same names, shapes and dtypes.
+fn matches(mine: &[(String, Tensor)], theirs: &[(String, Tensor)]) -> bool {
+    mine.len() == theirs.len()
+        && mine
+            .iter()
+            .zip(theirs)
+            .all(|((a, x), (b, y))| a == b && x.shape() == y.shape() && x.dtype() == y.dtype())
 }
 
 /// Parameters and `F32` buffers, canonical order.

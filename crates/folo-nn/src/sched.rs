@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::optim::{BIAS_GROUP, Optimizer, ParamGroup};
+use crate::optim::{Optimizer, ParamGroup, is_bias_group};
 use crate::{Error, Result};
 
 /// The decay shape after warmup.
@@ -181,7 +181,7 @@ impl LrSchedule {
     pub fn lr_at(&self, t: u64, group: &ParamGroup) -> f64 {
         let target = group.base_lr * self.lf(t);
         if t < self.c.warmup_iters {
-            let start = if group.name == BIAS_GROUP { self.c.warmup_bias_lr } else { 0.0 };
+            let start = if is_bias_group(&group.name) { self.c.warmup_bias_lr } else { 0.0 };
             interp(t, self.c.warmup_iters, start, target)
         } else {
             target

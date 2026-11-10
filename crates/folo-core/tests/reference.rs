@@ -352,6 +352,11 @@ fn conv2d_backward_matches_naive_over_geometries() {
         (3, 32, 40, [20, 20], [3, 3], p([1, 1], [1, 1], [1, 1], 1), false),
         (3, 16, 24, [21, 21], [3, 3], p([2, 2], [1, 1], [1, 1], 1), false),
         (1, 48, 64, [16, 16], [1, 1], p([1, 1], [0, 0], [1, 1], 1), false),
+        // The weight gradient over shifted rows: pointwise with many input channels, groups, K parts that
+        // cross images, rows that are not a whole number of vectors.
+        (3, 64, 24, [9, 11], [1, 1], p([1, 1], [0, 0], [1, 1], 1), false),
+        (2, 8, 36, [9, 8], [3, 3], p([1, 1], [1, 1], [1, 1], 2), false),
+        (5, 24, 20, [30, 27], [3, 3], p([1, 1], [1, 1], [1, 1], 1), false),
     ];
     for (i, (n, c, o, hw, k, prm, _)) in cases.into_iter().enumerate() {
         let x = randn(&[n, c, hw[0], hw[1]], 500 + i as u64).requires_grad_();
@@ -494,4 +499,48 @@ fn conv2d_huge_stride_allocates_only_used_phases() {
     let w = randn(&[4, 3, 3, 2], 1703);
     let y = x.conv2d_with(&w, None, &prm).unwrap();
     assert_close(&y.to_vec::<f32>().unwrap(), &naive_conv(&x, &w, None, &prm), 1e-4, "stride 3x5 dilated");
+}
+
+#[test]
+fn conv2d_weight_grad_ignores_recycled_buffer_contents() {
+    // The stride-1 weight gradient reads the input's shifted rows as A, and the dropped columns of the last
+    // output row run past each plane into the gap before the next (multiplied by the zero columns of the
+    // packed gradient). Recycled NaN buffers of the shifted-rows copy's length must not reach the result.
+    let p = |pad: [usize; 2], d: [usize; 2], g: usize| Conv2dParams {
+        stride: [1, 1],
+        padding: pad,
+        dilation: d,
+        groups: g,
+    };
+    // (n, c, o, [h, w], [kh, kw], params): kw 3 and 5, a dilation of 2, groups, ragged sizes, one image and several.
+    type Case = (usize, usize, usize, [usize; 2], [usize; 2], Conv2dParams);
+    let cases: Vec<Case> = vec![
+        (1, 32, 8, [11, 11], [3, 3], p([1, 1], [1, 1], 1)),
+        (2, 24, 12, [13, 10], [5, 5], p([2, 2], [1, 1], 1)),
+        (3, 20, 10, [12, 10], [3, 3], p([2, 2], [2, 2], 1)),
+        (2, 48, 16, [11, 13], [3, 3], p([1, 1], [1, 1], 2)),
+        (1, 20, 8, [9, 17], [3, 5], p([1, 2], [1, 1], 1)),
+        (5, 24, 20, [30, 27], [3, 3], p([1, 1], [1, 1], 1)),
+    ];
+    for (i, (n, c, o, hw, k, prm)) in cases.into_iter().enumerate() {
+        // The shifted-rows copy of one image's group: `cg` planes `pstride` apart (an odd number of 16-float
+        // lines), then `wq + 16` floats of slack.
+        let (hq, wq) = (hw[0] + 2 * prm.padding[0], hw[1] + 2 * prm.padding[1]);
+        let pstride = ((hq * wq).div_ceil(16) | 1) * 16;
+        let len = c / prm.groups * pstride + wq + 16;
+        assert!(len >= 4096, "case {i}: the copy must be long enough to be recycled");
+        drop((0..2 * n * prm.groups + 4).map(|_| Tensor::full([len], f32::NAN)).collect::<Vec<_>>());
+        let x = randn(&[n, c, hw[0], hw[1]], 1800 + i as u64).requires_grad_();
+        let w = randn(&[o, c / prm.groups, k[0], k[1]], 1900 + i as u64).requires_grad_();
+        let y = x.conv2d_with(&w, None, &prm).unwrap();
+        let r = randn(y.dims(), 2000 + i as u64);
+        let g = y.mul(&r).unwrap().sum_all().unwrap().backward().unwrap();
+        let (_, ew) = naive_conv_grads(&x, &w, &r, &prm);
+        assert_close(
+            &g.get(&w).unwrap().to_vec::<f32>().unwrap(),
+            &ew,
+            1e-4,
+            &format!("case {i} grad weight after recycled NaN buffers"),
+        );
+    }
 }

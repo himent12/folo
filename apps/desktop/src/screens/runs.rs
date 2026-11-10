@@ -1308,6 +1308,8 @@ impl FoloApp {
             let opt = match s.optimizer {
                 crate::api::ResolvedOptimizer::Sgd => "SGD",
                 crate::api::ResolvedOptimizer::Adamw => "AdamW",
+                crate::api::ResolvedOptimizer::Musgd => "MuSGD",
+                crate::api::ResolvedOptimizer::Unknown => "an unknown optimizer",
             };
             let auto = if r.config.optimizer == crate::api::Optimizer::Auto { " (auto)" } else { "" };
             let decay = if s.cos_lr { "cosine" } else { "linear" };
@@ -1833,6 +1835,8 @@ impl FoloApp {
                         let opt = match s.optimizer {
                             crate::api::ResolvedOptimizer::Sgd => "SGD",
                             crate::api::ResolvedOptimizer::Adamw => "AdamW",
+                            crate::api::ResolvedOptimizer::Musgd => "MuSGD",
+                            crate::api::ResolvedOptimizer::Unknown => "Unknown",
                         };
                         let how = if c.optimizer == crate::api::Optimizer::Auto { " (auto)" } else { "" };
                         format!("{opt}{how} · lr0 {}", crate::ui::fmt_lr(s.lr0))
