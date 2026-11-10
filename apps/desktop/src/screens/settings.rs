@@ -224,11 +224,12 @@ impl FoloApp {
                 motion.into_any_element(),
             ));
 
-        let actions: [(&str, &[&str]); 7] = [
+        let actions: [(&str, &[&str]); 8] = [
             ("Command palette", &["Ctrl", "K"]),
             ("New run", &["Ctrl", "N"]),
             ("Open image", &["Ctrl", "O"]),
             ("Switch theme", &["Ctrl", "Shift", "L"]),
+            ("Full screen", &["F11"]),
             ("Back", &["Alt", "←"]),
             ("Close / back", &["Esc"]),
             ("Start training (in the dialog)", &["Ctrl", "Enter"]),

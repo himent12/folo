@@ -213,6 +213,14 @@ impl FoloApp {
             keys: &["Ctrl", "Shift", "L"],
             action: act(|this, _, cx| this.toggle_theme(cx)),
         });
+        items.push(PaletteItem {
+            group: "Actions",
+            icon: "icons/maximize.svg",
+            title: "Toggle full screen".into(),
+            detail: String::new(),
+            keys: &["F11"],
+            action: act(|_, w, _| w.toggle_fullscreen()),
+        });
         if let Some(live) = self.store.live_run() {
             let id = live.id.clone();
             items.push(PaletteItem {

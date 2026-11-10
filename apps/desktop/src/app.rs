@@ -35,6 +35,7 @@ actions!(
         GoPlayground,
         GoSettings,
         ToggleTheme,
+        ToggleFullscreen,
         Back,
         Dismiss,
         OpenImage,
@@ -58,6 +59,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-5", GoPlayground, None),
         KeyBinding::new("ctrl-,", GoSettings, None),
         KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
+        KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("alt-left", Back, None),
         KeyBinding::new("escape", Dismiss, None),
         KeyBinding::new("ctrl-o", OpenImage, None),
@@ -2585,6 +2587,10 @@ impl FoloApp {
         let t = theme(cx);
         let crumbs = self.breadcrumbs();
         let maximized = window.is_maximized();
+        // In full screen GPUI reports no caption areas, so Windows doesn't act on the buttons: they
+        // take their own clicks then. Only then, since otherwise the caption press already acts
+        // (on mouse up) and a click handler would act a second time.
+        let fullscreen = window.is_fullscreen();
         let win_btn = |id: &'static str, icon_path: &'static str, area: WindowControlArea, close: bool| {
             div()
                 .id(id)
@@ -2700,14 +2706,30 @@ impl FoloApp {
                     .child(text(ty::SM, t.text_tertiary).flex_1().child("Search or jump to…"))
                     .child(shortcut(&t, &["Ctrl", "K"])),
             )
-            .child(win_btn("win-min", "icons/win-min.svg", WindowControlArea::Min, false))
-            .child(win_btn(
-                "win-max",
-                if maximized { "icons/win-restore.svg" } else { "icons/win-max.svg" },
-                WindowControlArea::Max,
-                false,
+            .child(
+                win_btn("win-min", "icons/win-min.svg", WindowControlArea::Min, false)
+                    .when(fullscreen, |d| d.on_click(|_, w, _| w.minimize_window())),
+            )
+            .child(
+                win_btn(
+                    "win-max",
+                    if maximized || fullscreen { "icons/win-restore.svg" } else { "icons/win-max.svg" },
+                    WindowControlArea::Max,
+                    false,
+                )
+                // Full screen's "restore" leaves full screen.
+                .when(fullscreen, |d| d.on_click(|_, w, _| w.toggle_fullscreen())),
+            )
+            .child(win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true).when(
+                fullscreen,
+                |d| {
+                    // Closing this way skips the window's should-close hook: remember here.
+                    d.on_click(cx.listener(|this, _, w, cx| {
+                        this.save_window_state(w, cx);
+                        w.remove_window();
+                    }))
+                },
             ))
-            .child(win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true))
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, Option<Route>)> {
@@ -3234,6 +3256,7 @@ impl Render for FoloApp {
             )
             .on_action(cx.listener(|this, _: &GoSettings, w, cx| this.nav_shortcut(Route::Settings, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
+            .on_action(cx.listener(|_, _: &ToggleFullscreen, w, _| w.toggle_fullscreen()))
             .on_action(cx.listener(|this, _: &Back, w, cx| {
                 if !this.modal_open() {
                     this.back(w, cx)
