@@ -125,6 +125,24 @@ async fn busy_once(State(busy): State<Arc<AtomicBool>>, req: Request, next: Next
     next.run(req).await
 }
 
+/// While its flag is set, the next `POST /api/runs` reaches the worker, and its answer is lost: the proxy answers
+/// `502` once the run it created has ended there (the flag clears).
+async fn lose_answer(
+    State((lose, worker)): State<(Arc<AtomicBool>, Arc<RealStore>)>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let post = req.method() == axum::http::Method::POST && req.uri().path() == "/api/runs";
+    if !(post && lose.swap(false, Ordering::SeqCst)) {
+        return next.run(req).await;
+    }
+    let _created = next.run(req).await;
+    while worker.list_runs().unwrap().iter().any(|r| r.status.is_active()) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    (StatusCode::BAD_GATEWAY, "proxy: the answer was lost").into_response()
+}
+
 async fn gate(State(g): State<Arc<Gates>>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if g.down.load(Ordering::SeqCst) {
@@ -1124,6 +1142,108 @@ fn a_run_resumed_on_a_remote_server_does_not_take_its_old_worker_run_for_the_new
     assert_eq!(epochs(&m), [1, 2]);
     drop(store);
     drop(live);
+}
+
+/// A control plane connected to a `remote` worker that loses its answer to the next `POST /api/runs` while
+/// `lose` is set ([`lose_answer`]).
+struct Lossy {
+    store: Arc<RealStore>,
+    worker: Arc<RealStore>,
+    lose: Arc<AtomicBool>,
+    ds: Dataset,
+    conn: String,
+    home: PathBuf,
+    _live: Live,
+}
+
+impl Lossy {
+    fn new(t: &TestDir) -> Lossy {
+        let worker = Arc::new(RealStore::open(t.join("worker")).recheck_every(Duration::ZERO).device("cpu"));
+        let options = Options { token: Token::new("remote-token-0123456789"), ..Options::default() };
+        let lose = Arc::new(AtomicBool::new(false));
+        let router = Server::new(worker.clone(), options)
+            .router()
+            .layer(axum::middleware::from_fn_with_state((lose.clone(), worker.clone()), lose_answer));
+        let live = Live::start(router);
+        let home = t.join("home");
+        let store = Arc::new(
+            RealStore::open_with_cloud(home.clone(), folo_cloud::providers(), fast())
+                .recheck_every(Duration::ZERO),
+        );
+        let ds = dataset(&store);
+        let values = BTreeMap::from([
+            ("url".to_string(), live.url.clone()),
+            ("token".to_string(), "remote-token-0123456789".to_string()),
+        ]);
+        let conn = store
+            .connect_cloud(ConnectCloud { provider: "remote".into(), name: String::new(), values })
+            .unwrap()
+            .id;
+        Lossy { store, worker, lose, ds, conn, home, _live: live }
+    }
+
+    /// A one-epoch run there, from `weights`.
+    fn config(&self, weights: Option<&str>) -> TrainConfig {
+        serde_json::from_value(json!({
+            "dataset_id": self.ds.id, "epochs": 1, "batch": 2, "imgsz": 64, "augment": { "close_mosaic": 1 },
+            "weights": weights, "compute": { "connection_id": self.conn, "offer_id": "cpu" }
+        }))
+        .unwrap()
+    }
+}
+
+#[test]
+fn a_worker_run_that_completed_before_its_lost_answer_was_found_is_not_trained_again() {
+    no_gpu();
+    let t = TestDir::new("cloud-lost-start");
+    let l = Lossy::new(&t);
+    // The worker took the run and it completed there before anyone asked again: it is that run, not a second.
+    l.lose.store(true, Ordering::SeqCst);
+    let run = l.store.create_run(l.config(None)).unwrap();
+    let done = finished(&l.store, &run.id);
+    assert!(!l.lose.load(Ordering::SeqCst), "the answer was lost once");
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&l.store, &run.id));
+    assert_eq!(l.worker.list_runs().unwrap().len(), 1, "trained once");
+    assert_eq!(epochs(&l.store.run_metrics(&run.id, &MetricsQuery::default()).unwrap()), [1]);
+}
+
+#[test]
+fn a_worker_run_that_failed_before_its_lost_answer_was_found_is_not_posted_again() {
+    no_gpu();
+    let t = TestDir::new("cloud-lost-failed");
+    let l = Lossy::new(&t);
+    let (store, worker, home) = (&l.store, &l.worker, &l.home);
+    let run = store.create_run(l.config(None)).unwrap();
+    assert_eq!(finished(store, &run.id).status, RunStatus::Completed);
+    // Weights that list (their header reads) and do not load (a tensor of the model is not there under its name):
+    // the worker takes the run, and it fails there.
+    let best = std::fs::read(home.join("runs").join(&run.id).join("weights").join("best.folo")).unwrap();
+    let n = u64::from_le_bytes(best[..8].try_into().unwrap()) as usize;
+    let header = std::str::from_utf8(&best[8..8 + n]).unwrap();
+    let tensors: Value = serde_json::from_str(header.trim_end()).unwrap();
+    let name = tensors.as_object().unwrap().keys().find(|k| k.starts_with("backbone.")).unwrap().clone();
+    let renamed = format!("{}~", &name[..name.len() - 1]);
+    let header = header.replacen(&format!("\"{name}\""), &format!("\"{renamed}\""), 1);
+    let file = [&best[..8], header.as_bytes(), &best[8 + n..]].concat();
+    std::fs::create_dir_all(home.join("models")).unwrap();
+    std::fs::write(home.join("models").join("broken.folo"), file).unwrap();
+    let models = store.list_models().unwrap();
+    let broken =
+        models.iter().find(|m| m.name == "broken").unwrap_or_else(|| panic!("{models:?}")).id.clone();
+    l.lose.store(true, Ordering::SeqCst);
+    let run = store.create_run(l.config(Some(&broken))).unwrap();
+    let done = finished(store, &run.id);
+    assert!(!l.lose.load(Ordering::SeqCst), "the answer was lost once");
+    let w = worker.list_runs().unwrap();
+    assert_eq!(w.len(), 2, "the failed run is not posted again: {w:?}");
+    let failed: Vec<&Run> = w.iter().filter(|r| r.status == RunStatus::Failed).collect();
+    assert_eq!(failed.len(), 1, "{w:?}");
+    assert_eq!(
+        (done.status, &done.error_code),
+        (RunStatus::Failed, &failed[0].error_code),
+        "{:?}",
+        log_of(store, &run.id)
+    );
 }
 
 // ---- /api/cloud ----------------------------------------------------------------------------------------------------
