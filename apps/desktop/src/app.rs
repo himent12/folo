@@ -396,6 +396,8 @@ pub struct FoloApp {
     pub hold_loading: bool,
     /// Where the window and theme are remembered on close (`window_state`); `None` for screenshots.
     pub state_path: Option<std::path::PathBuf>,
+    /// How the window showed in the last frame drawn (none are drawn while it is minimized).
+    pub shown_mode: crate::window_state::WindowMode,
 
     pub root_focus: FocusHandle,
     pub focus: RefCell<HashMap<SharedString, FocusHandle>>,
@@ -627,6 +629,7 @@ impl FoloApp {
             frozen,
             hold_loading: false,
             state_path: None,
+            shown_mode: crate::window_state::WindowMode::Windowed,
             root_focus,
             focus: RefCell::new(HashMap::new()),
             switch_seen: RefCell::new(HashMap::new()),
@@ -1367,6 +1370,7 @@ impl FoloApp {
             gpui::WindowBounds::Maximized(b) => (b, WindowMode::Maximized),
             gpui::WindowBounds::Fullscreen(b) => (b, WindowMode::Fullscreen),
         };
+        let mode = crate::window_state::closing_mode(mode, self.shown_mode);
         let state = State {
             window: Some(Placement {
                 x: b.origin.x.into(),
@@ -3259,6 +3263,13 @@ impl Render for FoloApp {
             self.open_new_run(None, window, cx);
         }
         self.narrow = window.viewport_size().width < px(1120.);
+        self.shown_mode = if window.is_fullscreen() {
+            crate::window_state::WindowMode::Fullscreen
+        } else if window.is_maximized() {
+            crate::window_state::WindowMode::Maximized
+        } else {
+            crate::window_state::WindowMode::Windowed
+        };
         let t = theme(cx);
         self.ensure_core(cx);
         self.ensure_cloud(cx);
