@@ -1,10 +1,11 @@
 # Alternate benchmark binaries run by run on Windows, at a process priority and CPU affinity, and report how many
 # cores the rest of the machine used during each run (docs/hill/cpu.md, docs/BENCHMARKS.md "Per-core efficiency").
 #
-#   powershell -File tools/bench-ab.ps1 -Runs "base=D:\a\bench.exe","new=D:\b\bench.exe" -Rounds 3 `
+#   powershell -File tools/bench-ab.ps1 -Runs "base=D:\a\bench.exe;new=D:\b\bench.exe" -Rounds 3 `
 #       -Threads 8 -Affinity 5555 -Env "FOLO_BENCH_ITERS=60"
 #
-# -Runs      label=path pairs, run in this order every round
+# -Runs      label=path pairs separated by `;`, run in this order every round (one string: `-File` hands a comma
+#            list over joined into one argument)
 # -Threads   RAYON_NUM_THREADS for the run (0: leave unset)
 # -Affinity  hex mask of logical CPUs ("" = all). On an i7-14700KF: 5555 = one thread on each of the 8 P-cores,
 #            55 = 4 P-cores, 4 = one P-core, FFFF = both threads of every P-core
