@@ -870,8 +870,11 @@ impl Exec {
             match client.post::<_, Run>("/runs", &body) {
                 Ok(r) => break r,
                 Err(e) if e.is_transient() && attempt < ATTEMPTS => {
+                    // Only an active one: a `remote` server keeps the ended runs of the run's earlier attempts,
+                    // under the same name.
                     if let Ok(list) = client.get::<RunList>("/runs")
-                        && let Some(r) = list.runs.into_iter().find(|r| r.name == name)
+                        && let Some(r) =
+                            list.runs.into_iter().find(|r| r.name == name && r.status.is_active())
                     {
                         break r;
                     }

@@ -109,6 +109,18 @@ async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> 
     next.run(req).await
 }
 
+/// While set, answers the next `POST /api/runs` with a proxy's `503` (the request never reaches the server), and
+/// clears.
+async fn busy_once(State(busy): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
+    if req.method() == axum::http::Method::POST
+        && req.uri().path() == "/api/runs"
+        && busy.swap(false, Ordering::SeqCst)
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, "proxy: busy").into_response();
+    }
+    next.run(req).await
+}
+
 async fn gate(State(g): State<Arc<Gates>>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if g.down.load(Ordering::SeqCst) {
@@ -997,6 +1009,54 @@ fn a_remote_server_is_used_as_it_is_and_keeps_the_dataset() {
     }
     assert!(store.cloud_instances().unwrap().is_empty(), "no ledger record");
     assert_eq!((worker.list_datasets().unwrap().len(), worker.list_runs().unwrap().len()), (1, 2));
+    drop(store);
+    drop(live);
+}
+
+#[test]
+fn a_run_resumed_on_a_remote_server_does_not_take_its_old_worker_run_for_the_new_one() {
+    no_gpu();
+    let t = TestDir::new("cloud-remote-resume");
+    let worker = Arc::new(RealStore::open(t.join("worker")).recheck_every(Duration::ZERO).device("cpu"));
+    let options = Options { token: Token::new("remote-token-0123456789"), ..Options::default() };
+    let busy = Arc::new(AtomicBool::new(false));
+    let router = Server::new(worker.clone(), options)
+        .router()
+        .layer(axum::middleware::from_fn_with_state(busy.clone(), busy_once));
+    let live = Live::start(router);
+    let store = Arc::new(
+        RealStore::open_with_cloud(t.join("home"), folo_cloud::providers(), fast())
+            .recheck_every(Duration::ZERO),
+    );
+    let ds = dataset(&store);
+    let values = BTreeMap::from([
+        ("url".to_string(), live.url.clone()),
+        ("token".to_string(), "remote-token-0123456789".to_string()),
+    ]);
+    let conn =
+        store.connect_cloud(ConnectCloud { provider: "remote".into(), name: String::new(), values }).unwrap();
+    let config: TrainConfig = serde_json::from_value(json!({
+        "dataset_id": ds.id, "epochs": 2, "batch": 2, "imgsz": 64, "augment": { "close_mosaic": 1 },
+        "compute": { "connection_id": conn.id, "offer_id": "cpu" }
+    }))
+    .unwrap();
+    // Stopped after its first epoch: the worker keeps that run, stopped, under the run's name.
+    worker.hold_runs_after_epochs(true);
+    let run = store.create_run(config).unwrap();
+    until("epoch 1 here", || run_of(&store, &run.id).best);
+    store.stop_run(&run.id).unwrap();
+    assert_eq!(finished(&store, &run.id).status, RunStatus::Stopped);
+    worker.hold_runs_after_epochs(false);
+
+    // Resumed there, and the first request for the new worker run never reaches the worker.
+    busy.store(true, Ordering::SeqCst);
+    resume(&store, &run.id, json!({}));
+    let done = finished(&store, &run.id);
+    assert!(!busy.load(Ordering::SeqCst), "the request was refused once");
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
+    assert_eq!(worker.list_runs().unwrap().len(), 2, "a new worker run");
+    let m = store.run_metrics(&run.id, &MetricsQuery::default()).unwrap();
+    assert_eq!(epochs(&m), [1, 2]);
     drop(store);
     drop(live);
 }
