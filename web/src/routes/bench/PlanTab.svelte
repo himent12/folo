@@ -418,6 +418,16 @@
       position: static;
       order: -1;
     }
+    /* Twelve rows under a preview: denser, each condition's sentence on demand (its eye shows it in the preview, where
+       the condition is seen), the row being previewed keeping it. */
+    .cond {
+      padding-top: var(--space-2);
+      padding-bottom: var(--space-2);
+    }
+    .cond:not(.shown) .c-main :global(.switch .hint),
+    .cond:not(.shown) .c-desc {
+      display: none;
+    }
   }
   /* Phones: the condition (and its switch) over its severities and weight, the preview button beside it. */
   @media (max-width: 767px) {

@@ -12,8 +12,8 @@
   /**
    * An entry's five axes at a glance: one small bar per axis in the score's order (accuracy, robustness, self-labeling,
    * calibration, localization), each filled to its value on 0–1 in neutral ink. An axis that was not measured is an
-   * empty dashed slot, never a zero bar (a zero is a solid track with nothing in it). The values are its tooltip and
-   * its accessible name.
+   * empty dashed slot, never a zero bar (a zero is a solid track with nothing in it). Each bar names its axis and value
+   * on hover (the leaderboard's header letters and foot key name them at rest); all five are its accessible name.
    */
   import { tooltip } from '$lib/ui/tooltip';
 
@@ -21,12 +21,12 @@
   const text = $derived(axesText(axes));
 </script>
 
-<span class="axes" role="img" aria-label="Axes: {text}" use:tooltip={text}>
+<span class="axes" role="img" aria-label="Axes: {text}">
   {#each axes as a (a.axis)}
     {#if a.value === null}
-      <span class="bar none" data-axis={a.axis}></span>
+      <span class="bar none" data-axis={a.axis} use:tooltip={`${AXIS_NAME[a.axis]}: not measured`}></span>
     {:else}
-      <span class="bar" data-axis={a.axis}><span class="fill" style:height="{Math.max(0, Math.min(1, a.value)) * 100}%"></span></span>
+      <span class="bar" data-axis={a.axis} use:tooltip={`${AXIS_NAME[a.axis]} ${a.value.toFixed(2)}`}><span class="fill" style:height="{Math.max(0, Math.min(1, a.value)) * 100}%"></span></span>
     {/if}
   {/each}
 </span>

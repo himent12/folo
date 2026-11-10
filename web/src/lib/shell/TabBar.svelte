@@ -1,8 +1,9 @@
 <script lang="ts">
   import { router, section, href } from '$lib/router.svelte';
-  import { tabNav } from './nav';
+  import { tabNav, tabOf } from './nav';
 
-  const current = $derived(section(router.route.name));
+  // A section that lives under a tab (Benchmarks under Models) makes that tab current.
+  const current = $derived(tabOf(section(router.route.name)));
 </script>
 
 <nav class="tabbar" aria-label="Main" data-tip-chrome>

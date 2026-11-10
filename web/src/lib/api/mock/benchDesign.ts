@@ -107,7 +107,7 @@ export function designPlan(text: string, agent: LabelAgentId, model: string | nu
   }
   const conditions = CONDITIONS.map((c) => by.get(c.id)).filter((c): c is BenchPlanCondition => !!c);
   const top = [...conditions].sort((a, b) => b.weight - a.weight).filter((c, _, all) => c.weight === all[0]!.weight);
-  // A name in a sentence: lower case, but an acronym keeps its capitals ("JPEG artifacts").
+  // A name in a sentence: lower case, but an acronym keeps its capitals ("JPEG compression").
   const inText = (name: string) => name.replace(/^[A-Z][a-z]/, (m) => m.toLowerCase());
   const left = CONDITIONS.filter((c) => !by.has(c.id)).map((c) => inText(c.name));
   const rationale = hits.length

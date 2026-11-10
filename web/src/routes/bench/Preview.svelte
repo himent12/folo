@@ -113,7 +113,7 @@
     {#if error && !image}
       <ErrorState {error} title="Could not load the images" compact />
     {:else}
-      <div class="stage" style:aspect-ratio={ratio}>
+      <div class="stage" style:aspect-ratio={ratio} style:--ar={image ? image.width / image.height : 4 / 3}>
         {#if image && plainUrl && changedUrl}
           <div class="side plain" style:clip-path="inset(0 {100 - split}% 0 0)">
             <DetectionView src={plainUrl} width={image.width} height={image.height} truth={boxes ? image.boxes : []} classes={bench.classes} labels={false} alt="{image.file}, unchanged" />
@@ -175,11 +175,13 @@
     overflow: hidden;
     background: var(--bg-inset);
   }
-  /* Below 1024 px the preview spans the column: it stops at half the viewport's height (the image letterboxed in it),
-     so the plan starts in the first screen, as the Playground's canvas does on a tablet. */
+  /* Below 1024 px the preview spans the column up to half the viewport's height, so the plan starts in the first
+     screen (as the Playground's canvas does on a tablet): a tall or square image takes the width that height allows,
+     centred, never letterboxed in a frame wider than it. */
   @media (max-width: 1023px) {
     .stage {
-      max-height: 50dvh;
+      width: min(100%, calc(50dvh * var(--ar)));
+      margin-inline: auto;
     }
   }
   .side {

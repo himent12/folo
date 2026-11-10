@@ -6,6 +6,7 @@
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import Pencil from '@lucide/svelte/icons/pencil';
   import Plus from '@lucide/svelte/icons/plus';
+  import Repeat from '@lucide/svelte/icons/repeat';
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import Square from '@lucide/svelte/icons/square';
   import Trash from '@lucide/svelte/icons/trash-2';
@@ -14,7 +15,7 @@
   import { LiveBench } from '$lib/api/liveBench.svelte';
   import { lastKnown, Now } from '$lib/api/freshness.svelte';
   import { Resource } from '$lib/api/resource.svelte';
-  import type { BenchEntry, BenchPlan } from '$lib/api/types';
+  import type { BenchEntry, BenchLoop, BenchPlan } from '$lib/api/types';
   import { clonePlan, samePlan } from '$lib/bench/plan';
   import { isEntryActive, isLoopActive, planEditable } from '$lib/bench/rules';
   import { media } from '$lib/design/tokens';
@@ -45,8 +46,8 @@
   import Leaderboard from './bench/Leaderboard.svelte';
   import { comparePath, compareHint, compareReason, keepSelection } from './bench/leaderboard';
   import LoopsTab from './bench/LoopsTab.svelte';
+  import NewLoopDialog from './bench/NewLoopDialog.svelte';
   import PlanTab from './bench/PlanTab.svelte';
-  import { BenchResults } from './bench/results.svelte';
   import { cannotBench } from './bench/support';
   import Unsupported from './bench/Unsupported.svelte';
   import { classesText, entriesText, FINGERPRINT_HELP, FROZEN, imagesText, shortFingerprint, sourceKind, sourcePath } from './bench/words';
@@ -57,7 +58,11 @@
     const t = router.route.query.get('tab');
     return t === 'conditions' || t === 'loops' ? t : 'leaderboard';
   });
-  const loopParam = $derived(router.route.query.get('loop'));
+  // `?tab=loops&loop=…` (the loops' first links) opens the loop's own page.
+  $effect(() => {
+    const l = router.route.query.get('loop');
+    if (l && id) router.go(`/benchmarks/${encodeURIComponent(id)}/loops/${encodeURIComponent(l)}`, { replace: true });
+  });
 
   const system = new Resource((s) => hub.api.system(s));
   const catalog = new Resource((s) => hub.api.benchCatalog(s));
@@ -66,10 +71,6 @@
   const datasets = new Resource((s) => hub.api.datasets(s));
   const jobs = new Resource((s) => hub.api.labelJobs(s));
   const live = new LiveBench(() => id || null);
-  const results = new BenchResults(
-    () => id || null,
-    () => live.entries,
-  );
   const choice = new AgentChoice(() => agents.data);
   const bench = $derived(live.bench);
   const unsupported = $derived(cannotBench(system.data, live.error));
@@ -162,7 +163,7 @@
   let addKind = $state<EntryKind>(((k) => (k === 'agent' || k === 'external' ? k : 'model'))(router.route.query.get('add')));
   function started(e: BenchEntry) {
     live.putEntry(e, live.mark());
-    if (tab !== 'leaderboard') setQuery({ tab: null, loop: null });
+    if (tab !== 'leaderboard') setQuery({ tab: null });
     // page-level: the dialog has closed (AddEntryDialog closes before it calls this).
     toast.success(e.status === 'done' ? 'Entry scored' : 'Entry added', e.status === 'done' && e.score ? `${e.name} · score ${e.score.total.toFixed(1)}` : `${e.name} · ${e.status === 'queued' ? 'waiting for the GPU' : 'running'}`);
   }
@@ -210,7 +211,16 @@
   let deleteOpen = $state(false);
   let deleteBusy = $state(false);
   const deleteStatus = new DialogStatus();
-  const busyWhy = $derived(live.entries.some(isEntryActive) || live.loops.some(isLoopActive) ? 'Stop its running entries and loops first' : null);
+  // The server's own word (`Bench.active`, exactly when DELETE answers 409 bench_active), and what the page has heard since.
+  const busyWhy = $derived(bench?.active || live.entries.some(isEntryActive) || live.loops.some(isLoopActive) ? 'Stop its running entries and loops first' : null);
+
+  // ---------- loops ----------
+  let loopOpen = $state(false);
+  function loopStarted(l: BenchLoop) {
+    live.putLoop(l, live.mark());
+    // page-level: the dialog has closed.
+    toast.success(`Loop ${l.name} started`, 'Its first generation is under way.', { label: 'Open loop', run: () => router.go(`/benchmarks/${encodeURIComponent(id)}/loops/${encodeURIComponent(l.id)}`) });
+  }
   async function remove() {
     if (!bench) return;
     deleteBusy = true;
@@ -264,6 +274,7 @@
     if (editable) out.push({ id: 'bench-design', label: 'Design the plan with an agent', icon: Sparkles, run: () => (setQuery({ tab: 'conditions' }), (designOpen = true)) });
     for (const e of live.entries.filter((x) => x.status === 'running' || x.status === 'queued'))
       out.push({ id: `bench-stop-${e.id}`, label: `Stop entry ${e.name}`, icon: Square, run: () => (stopping = e) });
+    if (!offline) out.push({ id: 'bench-loop-new', label: 'New self-improvement loop', match: ['New loop'], icon: Repeat, run: () => (setQuery({ tab: 'loops' }), (loopOpen = true)) });
     out.push({ id: 'bench-fingerprint', label: 'Copy fingerprint', icon: Copy, run: () => void copyFingerprint() });
     return out;
   });
@@ -325,7 +336,7 @@
     {#snippet actions()}
       {#if phone.current}
         <Gate reason={addWhy}>
-          {#snippet children(why)}<Button variant="primary" icon={Plus} disabled={!!why} aria-describedby={why} onclick={() => ((addKind = 'model'), (addOpen = true))}>Add entry</Button>{/snippet}
+          {#snippet children(why)}<Button variant={comparing ? 'secondary' : 'primary'} icon={Plus} disabled={!!why} aria-describedby={why} onclick={() => ((addKind = 'model'), (addOpen = true))}>Add entry</Button>{/snippet}
         </Gate>
         <Menu label="More benchmark actions" items={menu} />
       {:else}
@@ -370,7 +381,7 @@
           { value: 'loops', label: 'Loops', meta: String(live.loops.length) },
         ]}
         value={tab}
-        onchange={(t) => setQuery({ tab: t === 'leaderboard' ? null : t, loop: null })}
+        onchange={(t) => setQuery({ tab: t === 'leaderboard' ? null : t })}
       />
     </div>
 
@@ -394,12 +405,11 @@
           <Skeleton h="480px" r="var(--radius-lg)" />
         {/if}
       {:else if tab === 'loops'}
-        <LoopsTab {bench} loops={live.loops} entries={live.entries} datasets={datasets.data} jobs={jobs.data} expanded={loopParam} ontoggle={(l) => setQuery({ loop: l })} />
+        <LoopsTab {bench} loops={live.loops} entries={live.entries} datasets={datasets.data} jobs={jobs.data} onnew={() => (loopOpen = true)} {offline} />
       {:else}
         <Leaderboard
           {bench}
           entries={live.entries}
-          {results}
           catalog={catalog.data}
           agents={agents.data}
           bind:selected
@@ -407,6 +417,7 @@
           onadd={() => ((addKind = 'model'), (addOpen = true))}
           onstop={(e) => (stopping = e)}
           ondelete={(e) => (removing = e)}
+          oncompare={() => router.go(comparePath(bench.id, selected, live.entries))}
         />
       {/if}
     </div>
@@ -439,6 +450,7 @@
       onuse={(p) => (draft = clonePlan(p))}
     />
   {/if}
+  <NewLoopDialog bind:open={loopOpen} {bench} models={models.data} datasets={datasets.data} jobs={jobs.data} entries={live.entries} onstarted={loopStarted} />
   <EditBenchDialog bind:open={editOpen} {bench} onsave={(change) => live.act(() => hub.api.updateBench(bench.id, change))} />
 
   <Dialog

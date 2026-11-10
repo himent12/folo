@@ -2230,11 +2230,111 @@ export const scenes = [
       await page.mouse.move(0, 0);
     },
   },
-  // Loops: one improved over three generations (opened), one held.
-  { name: 'bench-loops', path: '/benchmarks/bn_5e12?tab=loops&loop=bl_07d1', viewports: ['desktop', 'mobile'], setup: async (page, { vp }) => until(page, vp === 'mobile' ? 'ul.rows .detail' : 'table.loops .detail') },
-  // An entry's page (the seam the result view replaces), and Compare's.
-  { name: 'bench-entry', path: '/benchmarks/bn_3c90/entries/be_f104', viewports: ['desktop', 'mobile'] },
-  { name: 'bench-compare', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f102,be_f103', viewports: ['desktop'] },
+  // ---------- the result screens ----------
+  // Loops: the tab (one improved over three generations, one held), New loop from it.
+  { name: 'bench-loops', path: '/benchmarks/bn_5e12?tab=loops', viewports: ['desktop', 'mobile'], setup: async (page, { vp }) => until(page, vp === 'mobile' ? 'ul.rows a.m-row' : 'table.loops tbody tr') },
+  {
+    // New loop on Fasteners val: the eligible teachers first, the student, the summary of what it will cost.
+    name: 'bench-loop-new',
+    path: '/benchmarks/bn_3c90?tab=loops',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("New loop")');
+      await page.locator('button:has-text("New loop")').first().click();
+      await until(page, 'dialog[open] .s-text');
+      await page.locator('dialog[open] [role=radiogroup][aria-label="Generations"] [role=radio]').nth(2).click();
+      await page.clock.runFor(600);
+      await page.mouse.move(0, 0);
+    },
+  },
+  // A loop's page: improved over three generations, held after one, and one running now (its student training).
+  { name: 'bench-loop-improved', path: '/benchmarks/bn_5e12/loops/bl_07d1', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: async (page) => until(page, '.top svg[aria-roledescription=chart]') },
+  { name: 'bench-loop-held', path: '/benchmarks/bn_5e12/loops/bl_5h02', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.top svg[aria-roledescription=chart]') },
+  { name: 'bench-loop-running', path: '/benchmarks/bn_3c90/loops/bl_f3a0', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.steps li') },
+  { name: 'bench-loop-mobile-full', path: '/benchmarks/bn_5e12/loops/bl_07d1', fullPage: true, viewports: ['mobile'], setup: async (page) => until(page, '.top svg[aria-roledescription=chart]') },
+
+  // An entry's result: a complete scored model, its whole page (desktop to phone), and the phone's first screen.
+  { name: 'bench-entry', path: '/benchmarks/bn_3c90/entries/be_f101', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: async (page) => until(page, '#images .tile img') },
+  { name: 'bench-entry-full', path: '/benchmarks/bn_3c90/entries/be_f101', fullPage: true, viewports: ['mobile'], setup: async (page) => until(page, '#images .tile img') },
+  // An agent: partial (48 images, unchanged only, no confidences): robustness and calibration not measured, one point.
+  { name: 'bench-entry-agent', path: '/benchmarks/bn_3c90/entries/be_f104', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '#images .tile') },
+  // An external model with no confidences that answered 4 of 7 conditions, and one whose confidences never reach 90%.
+  { name: 'bench-entry-external', path: '/benchmarks/bn_7a41/entries/be_p203', viewports: ['desktop'], setup: async (page) => until(page, '#robustness .heat') },
+  { name: 'bench-entry-never', path: '/benchmarks/bn_7a41/entries/be_p204', viewports: ['desktop'], setup: async (page) => until(page, '#self-labeling svg') },
+  // A model that knows two of the eight classes: its per-class list marks the rest.
+  { name: 'bench-entry-mini', path: '/benchmarks/bn_3c90/entries/be_f106', viewports: ['desktop'], setup: async (page) => until(page, '#accuracy .pc li') },
+  // Running (haze, live), failed (not signed in), loading.
+  { name: 'bench-entry-running', path: '/benchmarks/bn_3c90/entries/be_f108', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.passes li') },
+  { name: 'bench-entry-failed', path: '/benchmarks/bn_3c90/entries/be_f107', viewports: ['desktop', 'mobile'] },
+  { name: 'bench-entry-loading', path: '/benchmarks/bn_3c90/entries/be_f101', search: 'scenario=loading', viewports: ['desktop', 'mobile'] },
+  {
+    // Where it breaks: a cell chosen, the condition's curve against the others and the image under it.
+    name: 'bench-entry-robustness',
+    path: '/benchmarks/bn_3c90/entries/be_f101',
+    fullPage: false,
+    keepScroll: true,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#robustness .heat button.cell');
+      await page.locator('#robustness .heat button.cell').nth(3).click();
+      await page.evaluate(() => document.getElementById('robustness')?.scrollIntoView({ block: 'start' }));
+      await until(page, '#robustness .stage img');
+      await page.clock.runFor(800);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The failure gallery's large view: the boxes right, wrong and missed, each listed with its class and confidence.
+    name: 'bench-entry-viewer',
+    path: '/benchmarks/bn_3c90/entries/be_f101',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#images .tile img');
+      await page.locator('#images .tile').first().click();
+      await until(page, 'dialog[open] .v-img img');
+      await page.clock.runFor(600);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // An entry's next step: a loop with this model as the first teacher.
+    name: 'bench-entry-loop',
+    path: '/benchmarks/bn_3c90/entries/be_f103',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("Test it: start a loop")');
+      await page.locator('button:has-text("Test it: start a loop")').click();
+      await until(page, 'dialog[open] .s-text');
+      await page.clock.runFor(600);
+      await page.mouse.move(0, 0);
+    },
+  },
+
+  // Compare: two entries, four (an agent and a model that knows two classes among them: not like for like), and a
+  // link with one entry left.
+  { name: 'bench-compare', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f103', viewports: ['desktop', 'laptop', 'mobile'], setup: async (page) => until(page, '.pair svg[aria-roledescription=chart]') },
+  { name: 'bench-compare-4', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f102,be_f104,be_f106', viewports: ['desktop', 'tablet', 'mobile'], setup: async (page) => until(page, '.pair svg[aria-roledescription=chart]') },
+  { name: 'bench-compare-4-full', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f102,be_f104,be_f106', fullPage: true, viewports: ['mobile'], setup: async (page) => until(page, '.pair svg[aria-roledescription=chart]') },
+  { name: 'bench-compare-one', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_gone', viewports: ['desktop', 'mobile'] },
+
+  // Phones: Benchmarks under the Models tab, a strip of the two at the top of each list; picking entries to compare.
+  { name: 'bench-nav-models', path: '/models', viewports: ['mobile'], setup: async (page) => until(page, 'nav.sections a') },
+  {
+    name: 'bench-board-pick',
+    path: '/benchmarks/bn_3c90',
+    viewports: ['mobile'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("Select")');
+      await page.locator('button:has-text("Select")').click();
+      const boxes = page.locator('ul.rows .m-check input');
+      await boxes.nth(0).check();
+      await boxes.nth(2).check();
+      await page.mouse.move(0, 0);
+    },
+  },
   // `folo serve --mock` (or an older server): the section says what it needs.
   { name: 'bench-unavailable', path: '/benchmarks', search: 'scenario=no-bench', viewports: ['desktop', 'mobile'] },
 ];

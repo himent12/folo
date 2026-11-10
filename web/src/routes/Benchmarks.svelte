@@ -10,6 +10,7 @@
   import { ago, date, num } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
+  import PhoneSections from '$lib/shell/PhoneSections.svelte';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
@@ -24,11 +25,13 @@
   import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import SortHeader from '$lib/ui/SortHeader.svelte';
+  import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import TableState from '$lib/ui/TableState.svelte';
+  import { tooltip } from '$lib/ui/tooltip';
   import NewBenchDialog from './bench/NewBenchDialog.svelte';
   import { cannotBench } from './bench/support';
   import Unsupported from './bench/Unsupported.svelte';
-  import { entriesText, imagesText, scoreText, sourceKind } from './bench/words';
+  import { entriesText, entryStatus, imagesText, scoreText, sourceKind } from './bench/words';
 
   setCrumbs({ label: 'Benchmarks' });
   ownCreateAction();
@@ -76,14 +79,16 @@
   }
 
   let query = $state('');
-  let filter = $state<'all' | 'dataset' | 'label_job'>('all');
-  const count = (f: typeof filter) => (benches.data ?? []).filter((b) => f === 'all' || b.source.kind === f).length;
+  // Where the images came from, or what runs now (`Bench.active`: an entry or a loop queued or running).
+  let filter = $state<'all' | 'dataset' | 'label_job' | 'active'>('all');
+  const keep = (b: Bench, f: typeof filter) => f === 'all' || (f === 'active' ? b.active : b.source.kind === f);
+  const count = (f: typeof filter) => (benches.data ?? []).filter((b) => keep(b, f)).length;
   const shown = $derived.by(() => {
     const q = query.trim().toLowerCase();
     const col = cols.find((c) => c.key === sortKey) ?? cols[0]!;
     const sign = sortDir === 'asc' ? 1 : -1;
     return (benches.data ?? [])
-      .filter((b) => (filter === 'all' || b.source.kind === filter) && (!q || `${b.name} ${b.source_name} ${b.classes.join(' ')} ${b.best?.name ?? ''}`.toLowerCase().includes(q)))
+      .filter((b) => keep(b, filter) && (!q || `${b.name} ${b.source_name} ${b.classes.join(' ')} ${b.best?.name ?? ''}`.toLowerCase().includes(q)))
       .sort((a, b) => {
         const x = col.get(a);
         const y = col.get(b);
@@ -113,18 +118,20 @@
     {/if}
   {/snippet}
 
+  <PhoneSections label="Models and benchmarks" items={[{ label: 'Models', path: '/models', current: false }, { label: 'Benchmarks', path: '/benchmarks', current: true }]} />
   {#if unsupported}
     <Unsupported />
   {:else}
     <div class="list-toolbar">
       <div class="lt-filter"><Segmented
-        label="Filter benchmarks by where their images came from"
+        label="Filter benchmarks by where their images came from, or by what runs now"
         bind:value={filter}
         disabled={!hasData}
         options={[
           { value: 'all', label: 'All', meta: benches.data?.length ? String(count('all')) : undefined },
           { value: 'dataset', label: 'Datasets', meta: benches.data?.length ? String(count('dataset')) : undefined },
           { value: 'label_job', label: 'Labeling jobs', meta: benches.data?.length ? String(count('label_job')) : undefined },
+          { value: 'active', label: 'Running', meta: benches.data?.length ? String(count('active')) : undefined },
         ]}
       /></div>
       <div class="lt-search"><Input bind:value={query} icon={Search} placeholder="Filter by name, source or class" aria-label="Filter benchmarks" type="search" disabled={!hasData} /></div>
@@ -170,7 +177,12 @@
             {:else}
               {#each shown as b (b.id)}
                 <tr class="link" data-row aria-label={b.name} onclick={() => open(b)}>
-                  <td class="name-cell"><a class="name truncate" href={href(`/benchmarks/${b.id}`)} onclick={(e) => e.stopPropagation()} title={b.name}>{b.name}</a></td>
+                  <td class="name-cell">
+                    <span class="nm-row">
+                      <a class="name truncate" href={href(`/benchmarks/${b.id}`)} onclick={(e) => e.stopPropagation()} title={b.name}>{b.name}</a>
+                      {#if b.active}<span class="run" use:tooltip={'An entry or a loop is running'}><StatusBadge plain dotOnly state={entryStatus({ status: 'running' })} /></span>{/if}
+                    </span>
+                  </td>
                   <td class="hide-md src"><Meta line><span>{b.source_name}</span><span>{sourceKind(b.source)}</span></Meta></td>
                   <td class="r num muted">{num(b.images)}</td>
                   <td class="r num muted hide-lg">{b.classes.length}</td>
@@ -178,7 +190,7 @@
                   <td class="r num muted">{num(b.entries)}</td>
                   <td class="leader">
                     {#if b.best}
-                      <span class="lead-row"><span class="l-name truncate" title={b.best.name}>{b.best.name}</span><span class="l-score num">{scoreText(b.best.score)}</span></span>
+                      <span class="lead-row"><span class="l-name truncate" title={b.best.name}>{b.best.name}</span><span class="l-score num">{#if b.best.partial}<span class="partial" use:tooltip={'The leader’s score is partial: it compares only loosely with complete entries'}>partial</span>{/if}{scoreText(b.best.score)}</span></span>
                     {:else}
                       <NoValue label={b.entries ? 'no finished entry yet' : 'no entries yet'} />
                     {/if}
@@ -197,11 +209,11 @@
             <li>
               <a href={href(`/benchmarks/${b.id}`)}>
                 <span class="m-main">
-                  <span class="name truncate">{b.name}</span>
+                  <span class="nm-row"><span class="name truncate">{b.name}</span>{#if b.active}<StatusBadge plain dotOnly state={entryStatus({ status: 'running' })} />{/if}</span>
                   <span class="m-meta num"><Meta><span>{b.source_name}</span><span>{imagesText(b.images)}</span><span>{entriesText(b.entries)}</span></Meta></span>
                 </span>
                 <span class="m-side">
-                  {#if b.best}<span class="num m-score"><span class="sr-only">Leader's score </span>{scoreText(b.best.score)}</span><span class="m-who truncate">{b.best.name}</span>{:else}<NoValue label="no entries yet" />{/if}
+                  {#if b.best}<span class="num m-score"><span class="sr-only">Leader's score </span>{#if b.best.partial}<span class="partial">partial</span>{/if}{scoreText(b.best.score)}</span><span class="m-who truncate">{b.best.name}</span>{:else}<NoValue label="no entries yet" />{/if}
                 </span>
               </a>
             </li>
@@ -258,6 +270,24 @@
   }
   .l-score {
     font-weight: var(--weight-medium);
+  }
+  /* "partial" before a partial leader's score, a tertiary word (the leaderboard's mark). */
+  .partial {
+    margin-right: var(--space-2);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-tertiary);
+  }
+  /* The name, then the running mark when an entry or a loop of it runs. */
+  .nm-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-width: 0;
+  }
+  .run {
+    flex-shrink: 0;
+    display: inline-flex;
   }
   .rows {
     display: none;

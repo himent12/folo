@@ -237,7 +237,7 @@ describe('the list', () => {
     router.route = parse('#/benchmarks');
     open(Benchmarks as Component, {});
     await settle(20);
-    expect([...document.querySelectorAll('table.benches tbody tr[data-row] td:first-child')].map((x) => x.textContent?.trim())).toEqual(['Sorting tray, night shift', 'Fasteners val', 'Pond fish', 'Shapes val']);
+    expect([...document.querySelectorAll('table.benches tbody tr[data-row] td:first-child a.name')].map((x) => x.textContent?.trim())).toEqual(['Sorting tray, night shift', 'Fasteners val', 'Pond fish', 'Shapes val']);
     unmount(c!);
     c = undefined;
     hub.api = new MockApi('empty', 0);

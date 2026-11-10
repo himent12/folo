@@ -198,7 +198,8 @@ export function generateResult(input: ResultInput): GeneratedResult {
   if (!input.scored) {
     const p = s.point ?? { precision: 0.9, recall: 0.5 };
     const rec = r4(clamp(p.recall * share));
-    curve = [{ confidence: 1, precision: r4(p.precision), recall: rec, labels: Math.round((T * rec) / Math.max(0.01, p.precision)) }];
+    // One operating point, kept from confidence 0: every detection it gave (they all count as score 1).
+    curve = [{ confidence: 0, precision: r4(p.precision), recall: rec, labels: Math.round((T * rec) / Math.max(0.01, p.precision)) }];
   } else {
     const rmax = clamp(0.52 + map50_95 * 0.72, 0, 0.97) * share;
     const b = 1.6;
@@ -218,15 +219,21 @@ export function generateResult(input: ResultInput): GeneratedResult {
     });
   }
   const op = labelOperatingPoint(curve);
-  const best = curve.reduce<BenchLabelPoint | null>((a, p) => (p.precision !== null && (!a || (a.precision ?? 0) < p.precision) ? p : a), null);
   const selfRecall = op.point?.recall ?? 0;
+  // At t*, the labels kept there; when no threshold reaches the target (and for a contestant without confidences that
+  // misses it), every detection it gave: the curve's first point, t = 0.00 (as the engine reports it).
+  const at = op.point ?? curve[0]!;
+  const mean_iou =
+    matches > 0 && localization.mean_iou !== null && at.labels > 0
+      ? r4(clamp(localization.mean_iou + (op.point ? 0.012 : -0.008), 0.5, 1))
+      : null;
   const self_labeling: BenchSelfLabeling = {
     target_precision: TARGET_PRECISION,
     threshold: op.threshold,
-    precision: (op.point ?? (input.scored ? best : curve[0]))?.precision ?? 0,
+    precision: at.precision ?? 0,
     recall: selfRecall,
-    mean_iou: matches > 0 && localization.mean_iou !== null ? r4(clamp(localization.mean_iou + 0.012, 0.5, 1)) : null,
-    labels_per_image: op.point ? r2(op.point.labels / Math.max(1, input.images.length)) : 0,
+    mean_iou,
+    labels_per_image: r2(at.labels / Math.max(1, input.images.length)),
     readiness: readiness(selfRecall),
     curve,
   };
@@ -261,7 +268,9 @@ export function imageDetections(
   // A contestant without confidences answers with what it is sure of (its own cut); every score is then 1.
   const detections: BenchDetection[] = raw
     .filter((b) => b.score >= (o.scored ? o.bestConf : 0.32))
-    .map(({ class: c, x1, y1, x2, y2, score }) => ({ class: c, x1, y1, x2, y2, score: o.scored ? score : 1 }));
+    .map(({ class: c, x1, y1, x2, y2, score }) => ({ class: c, x1, y1, x2, y2, score: o.scored ? score : 1 }))
+    // Highest confidence first, as the server sends them.
+    .sort((a, b) => b.score - a.score);
   const used = new Set<Box>();
   let right = 0;
   for (const d of detections) {

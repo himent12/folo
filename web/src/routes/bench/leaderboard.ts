@@ -80,6 +80,35 @@ export function intervalDomain(intervals: readonly (readonly [number, number])[]
   return [Number(a.toFixed(2)), Number(b.toFixed(2))];
 }
 
+/** How far under the leader's interval an entry's interval may end and still be on the scale. */
+export const FOCUS = 0.1;
+
+/**
+ * The leaderboard's interval scale, focused on the leaders: an entry far behind (its interval ending more than FOCUS
+ * under the leader's) would stretch the scale and crowd the leaders' whiskers against its edge, so it is left off the
+ * scale and drawn as an off-scale mark at the left edge with its value (`below`). `rows` are the finished entries in
+ * leaderboard order, the leader first. Null with no interval.
+ */
+export function intervalScale(rows: readonly { id: string; ci: readonly [number, number] | null }[]): { domain: [number, number]; below: Set<string> } | null {
+  const known = rows.filter((r): r is { id: string; ci: readonly [number, number] } => !!r.ci);
+  const lead = known[0];
+  if (!lead) return null;
+  const floor = lead.ci[0] - FOCUS;
+  const below = new Set(known.filter((r) => r.ci[1] < floor).map((r) => r.id));
+  const domain = intervalDomain(known.filter((r) => !below.has(r.id)).map((r) => r.ci));
+  return domain ? { domain, below } : null;
+}
+
+/** Ticks of a leaderboard scale: its ends and the 0.05 steps between them, at most five (every other one past that). */
+export function scaleTicks(domain: readonly [number, number]): number[] {
+  const n = Math.round((domain[1] - domain[0]) / 0.05);
+  const step = n > 4 ? Math.ceil(n / 4) : 1;
+  const out: number[] = [];
+  for (let k = 0; k <= n; k += step) out.push(+(domain[0] + k * 0.05).toFixed(2));
+  if (out.at(-1) !== domain[1]) out.push(domain[1]);
+  return out;
+}
+
 /** Where a value falls on a domain, 0..1 (clamped). */
 export function along(domain: readonly [number, number], v: number): number {
   const [a, b] = domain;

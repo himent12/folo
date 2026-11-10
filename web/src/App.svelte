@@ -18,6 +18,7 @@
   import Benchmarks from './routes/Benchmarks.svelte';
   import BenchCompare from './routes/BenchCompare.svelte';
   import BenchEntry from './routes/BenchEntry.svelte';
+  import BenchLoop from './routes/BenchLoop.svelte';
   import Dataset from './routes/Dataset.svelte';
   import Datasets from './routes/Datasets.svelte';
   import LabelJob from './routes/LabelJob.svelte';
@@ -49,6 +50,7 @@
     benchmark: Benchmark,
     'bench-entry': BenchEntry,
     'bench-compare': BenchCompare,
+    'bench-loop': BenchLoop,
     playground: Playground,
     settings: Settings,
   };

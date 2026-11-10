@@ -78,9 +78,10 @@ export function backPath(route: { name: string; params?: Record<string, string> 
     'label-jobs': '/datasets',
     'label-job': '/datasets/label',
     benchmark: '/benchmarks',
-    // An entry's result and a comparison go back to their benchmark.
+    // An entry's result and a comparison go back to their benchmark, a loop to its benchmark's loops.
     'bench-entry': bench,
     'bench-compare': bench,
+    'bench-loop': `${bench}?tab=loops`,
   };
   return back[route.name] ?? null;
 }

@@ -8,7 +8,7 @@ const ctx: PredictionContext = {
   classes: 3,
   plan,
   catalog: ['haze', 'jpeg', 'low_light'],
-  names: { haze: 'Haze', jpeg: 'JPEG artifacts', low_light: 'Low light' },
+  names: { haze: 'Haze', jpeg: 'JPEG compression', low_light: 'Low light' },
 };
 const box = { class: 0, score: 0.9, x1: 1, y1: 2, x2: 30, y2: 40 };
 const clean = [

@@ -5,6 +5,7 @@ import { conditionRetention, expectedCalibrationError, histogramMeanIou, labelOp
 import { conditionBoxes, distanceScale } from './benchConditions';
 import { designPlan } from './benchDesign';
 import { MockApi } from './index';
+import benchDoc from '../../../../../docs/BENCH.md?raw';
 
 const NOW = Date.parse('2026-11-09T12:00:00Z');
 
@@ -365,6 +366,106 @@ describe('MockApi vision benchmarks: loops', () => {
     await expect(api.startBenchLoop('bn_5e12', { teacher: 'm_fast_n', pool: { kind: 'dataset', dataset_id: 'ds_shapes' } })).rejects.toMatchObject({ code: 'invalid_body' });
     await expect(api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_n', pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'val' } })).rejects.toMatchObject({ code: 'invalid_dataset' });
     close();
+  });
+});
+
+describe('MockApi vision benchmarks: the contract as the engine fills it', () => {
+  it("names and words the conditions as docs/BENCH.md's table does", async () => {
+    const table = benchDoc.slice(benchDoc.indexOf('<!-- conditions:begin'), benchDoc.indexOf('<!-- conditions:end'));
+    const rows = table
+      .split('\n')
+      .filter((l) => l.startsWith('| `'))
+      .map((l) => l.split('|').map((c) => c.trim()))
+      .map((c) => ({ id: c[1]!.replace(/`/g, ''), name: c[2]!, group: c[3]!, description: c[4]! }));
+    expect(rows).toHaveLength(12);
+    const cat = await new MockApi('normal', 0).benchCatalog();
+    expect(cat.conditions).toEqual(rows);
+  });
+
+  it('says which benchmarks are active and whether the leader is partial', async () => {
+    const api = new MockApi('normal', 0);
+    for (const b of await api.benches()) {
+      const entries = await api.benchEntries(b.id);
+      const loops = await api.benchLoops(b.id);
+      const busy = entries.some((e) => ['queued', 'running', 'stopping'].includes(e.status)) || loops.some((l) => l.status === 'running' || l.status === 'stopping');
+      expect(b.active).toBe(busy);
+      const lead = entries.find((e) => e.status === 'done');
+      if (lead) expect(b.best).toEqual({ entry_id: lead.id, name: lead.name, score: lead.score!.total, partial: lead.score!.partial });
+      else expect(b.best).toBeNull();
+    }
+    const by = new Map((await api.benches()).map((b) => [b.name, b]));
+    expect(by.get('Fasteners val')!.active).toBe(true);
+    expect(by.get('Shapes val')!.active).toBe(false);
+    // Deleting answers 409 exactly while it is active.
+    await expect(api.deleteBench(by.get('Fasteners val')!.id)).rejects.toMatchObject({ status: 409, code: 'bench_active' });
+  });
+
+  it("repeats each finished entry's interval and the conditions it ran; nothing before it is done", async () => {
+    const api = new MockApi('normal', 0);
+    for (const b of await api.benches()) {
+      for (const e of await api.benchEntries(b.id)) {
+        if (e.status !== 'done') {
+          expect(e.ci95).toBeNull();
+          expect(e.conditions_run).toBe(0);
+          continue;
+        }
+        const r = await api.benchResult(b.id, e.id);
+        expect(e.ci95).toEqual(r.accuracy.ci95);
+        expect(e.conditions_run).toBe(r.robustness?.conditions.length ?? 0);
+        expect(e.conditions_run).toBeLessThanOrEqual(b.plan.conditions.length);
+      }
+    }
+    const pond = await api.benchEntries('bn_7a41');
+    expect(pond.find((e) => e.id === 'be_p203')!.conditions_run).toBe(4);
+  });
+
+  it('reports all detections (t = 0.00) when no threshold reaches 90% precision', async () => {
+    const api = new MockApi('normal', 0);
+    const r = await api.benchResult('bn_7a41', 'be_p204');
+    const s = r.self_labeling;
+    expect(r.entry.scored).toBe(true);
+    expect(s.curve.every((p) => p.precision === null || p.precision < 0.9)).toBe(true);
+    expect(s.threshold).toBeNull();
+    expect(s.recall).toBe(0);
+    expect(s.readiness).toBe('not_ready');
+    const all = s.curve[0]!;
+    expect(all.confidence).toBe(0);
+    expect(s.precision).toBe(all.precision);
+    expect(s.labels_per_image).toBeCloseTo(all.labels / r.entry.images, 2);
+    expect(r.entry.score!.axes[2]!.value).toBe(0);
+  });
+
+  it("gives a contestant without confidences one operating point, at confidence 0", async () => {
+    const api = new MockApi('normal', 0);
+    for (const [b, e] of [['bn_3c90', 'be_f104'], ['bn_7a41', 'be_p203']] as const) {
+      const r = await api.benchResult(b, e);
+      expect(r.self_labeling.curve).toHaveLength(1);
+      expect(r.self_labeling.curve[0]!.confidence).toBe(0);
+      expect(r.self_labeling.threshold).toBeNull();
+      expect(r.calibration).toBeNull();
+    }
+  });
+
+  it('keeps a plan without conditions from making its entries partial', async () => {
+    const api = new MockApi('normal', 0);
+    await api.updateBench('bn_9f03', { plan: { conditions: [], rationale: null, designed_by: null } });
+    const images = (await api.benchImages('bn_9f03', { limit: 1000 })).images;
+    const predictions = images.map((i) => ({ image: i.id, boxes: i.boxes.map((b) => ({ ...b, score: 0.9 })) }));
+    const e = await api.startBenchEntry('bn_9f03', { name: 'all', contestant: { kind: 'external', predictions } });
+    expect(e.score!.axes[1]!.value).toBeNull();
+    expect(e.score!.partial).toBe(false);
+    expect(e.conditions_run).toBe(0);
+  });
+
+  it('has a loop running as the demo opens, its first student training on its teacher’s labels', async () => {
+    const api = new MockApi('normal', 0);
+    const l = await api.benchLoop('bn_3c90', 'bl_f3a0');
+    expect(l).toMatchObject({ status: 'running', phase: 'training', verdict: null });
+    expect(l.generations).toHaveLength(2);
+    expect(l.generations[0]!.entry_id).toBe('be_f103');
+    expect(l.generations[1]!.labels!.threshold).toBeGreaterThan(0);
+    expect(l.generations[1]!.run_id).toMatch(/^run_/);
+    expect(l.generations[1]!.model_id).toBeNull();
   });
 });
 

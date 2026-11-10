@@ -1,6 +1,5 @@
-// The results of a leaderboard's finished entries, loaded once each (a finished entry's result never changes). The
-// leaderboard needs two things only results carry: each entry's 95% interval of mAP@0.5:0.95 (the list's `BenchEntry`
-// has the mAP but not its interval) and, for an external entry, how many of the plan's conditions it answered.
+// The results of finished entries, loaded once each (a finished entry's result never changes): Compare's charts need
+// each entry's whole result. (The leaderboard reads its interval and conditions from `BenchEntry` itself.)
 
 import { untrack } from 'svelte';
 import { SvelteMap } from 'svelte/reactivity';
@@ -32,7 +31,7 @@ export class BenchResults {
             try {
               this.#results.set(entryId, await api.benchResult(id, entryId));
             } catch {
-              // The row draws no interval; the entry's own page says what is wrong.
+              // Its charts stay empty; the entry's own page says what is wrong.
             }
           }
         };

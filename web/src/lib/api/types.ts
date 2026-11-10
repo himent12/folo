@@ -1150,6 +1150,8 @@ export interface BenchBest {
   name: string;
   /** `0..=100`. */
   score: number;
+  /** The leader's `score.partial`: its number compares only loosely with complete entries. */
+  partial: boolean;
 }
 
 /**
@@ -1182,6 +1184,8 @@ export interface Bench {
   entries: number;
   /** The finished entry with the highest score; null before the first. */
   best: BenchBest | null;
+  /** An entry or a loop of it is queued, running or stopping (exactly when DELETE answers `409 bench_active`). */
+  active: boolean;
 }
 
 /** `POST /api/bench/benchmarks`. */
@@ -1378,6 +1382,10 @@ export interface BenchEntry {
   score: BenchScore | null;
   /** mAP@0.5:0.95 on the unchanged images, repeated here for lists; null until `done`. */
   map50_95: number | null;
+  /** The 95% interval of `map50_95` (`BenchAccuracy.ci95`), for lists; null until `done`. */
+  ci95: [number, number] | null;
+  /** How many of the plan's conditions it ran completely; 0 when none ran or it has not finished. */
+  conditions_run: number;
   /** A model contestant, once `done`. */
   speed?: BenchSpeed | null;
   /** What an agent contestant's calls used. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BenchEntry } from '$lib/api/types';
-import { along, compareHint, compareIds, comparePath, compareReason, intervalDomain, keepSelection, overlaps, ranks, toggleSelection } from './leaderboard';
+import { along, compareHint, compareIds, comparePath, compareReason, intervalDomain, intervalScale, keepSelection, overlaps, ranks, scaleTicks, toggleSelection } from './leaderboard';
 
 const e = (id: string, total: number | null, status: BenchEntry['status'] = total === null ? 'running' : 'done') => ({ id, status, score: total === null ? null : { total, partial: false, axes: [] } }) as unknown as BenchEntry;
 
@@ -57,5 +57,29 @@ describe('the intervals scale', () => {
     expect(along([0.5, 0.7], 0.1)).toBe(0);
     expect(overlaps([0.56, 0.62], [0.6, 0.67])).toBe(true);
     expect(overlaps([0.3, 0.48], [0.6, 0.67])).toBe(false);
+  });
+});
+
+describe('the focused scale', () => {
+  it('keeps the leaders readable: an entry far behind is off the scale, marked below it', () => {
+    const rows = [
+      { id: 'a', ci: [0.62, 0.66] as [number, number] },
+      { id: 'b', ci: [0.58, 0.63] as [number, number] },
+      { id: 'c', ci: [0.53, 0.57] as [number, number] },
+      { id: 'd', ci: [0.14, 0.17] as [number, number] },
+      { id: 'e', ci: null },
+    ];
+    const s = intervalScale(rows)!;
+    expect([...s.below]).toEqual(['d']);
+    expect(s.domain).toEqual([0.5, 0.7]);
+    // Without the far one the scale is as before.
+    expect(intervalScale(rows.slice(0, 2))!.domain).toEqual([0.55, 0.7]);
+    expect(intervalScale([{ id: 'x', ci: null }])).toBeNull();
+  });
+
+  it('ticks its ends and steps between them, at most five', () => {
+    expect(scaleTicks([0.55, 0.7])).toEqual([0.55, 0.6, 0.65, 0.7]);
+    expect(scaleTicks([0.35, 0.7])).toEqual([0.35, 0.45, 0.55, 0.65, 0.7]);
+    expect(scaleTicks([0, 0.1])).toEqual([0, 0.05, 0.1]);
   });
 });

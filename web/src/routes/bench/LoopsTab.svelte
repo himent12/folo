@@ -2,21 +2,25 @@
   /**
    * A benchmark's self-improvement loops (docs/BENCH.md, Self-improvement loops): each with its teacher and student,
    * where it stands (its phase while it runs), its generations' scores as a small line from the first teacher to the
-   * last student, and its verdict. A row opens its detail under it (./LoopDetail, the seam the loop's own view
-   * replaces), kept in the URL (`?tab=loops&loop=…`) so it can be linked.
+   * last student, and its verdict. A row opens the loop's own page (`#/benchmarks/{id}/loops/{loopId}`, ../BenchLoop);
+   * "New loop" starts one.
    */
-  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Plus from '@lucide/svelte/icons/plus';
   import Repeat from '@lucide/svelte/icons/repeat';
   import type { Bench, BenchEntry, BenchLoop, Dataset, LabelJob } from '$lib/api/types';
   import Sparkline from '$lib/charts/Sparkline.svelte';
   import { ago, date } from '$lib/format';
+  import { href, router } from '$lib/router.svelte';
+  import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
+  import Gate from '$lib/ui/Gate.svelte';
+  import { OFFLINE_REASON } from '$lib/ui/offline';
   import Ident from '$lib/ui/Ident.svelte';
   import Meta from '$lib/ui/Meta.svelte';
   import NoValue from '$lib/ui/NoValue.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
-  import LoopDetail from './LoopDetail.svelte';
   import { loopStatus, scoreText, VERDICT } from './words';
 
   let {
@@ -25,18 +29,20 @@
     entries,
     datasets,
     jobs,
-    expanded,
-    ontoggle,
+    onnew,
+    offline = false,
   }: {
     bench: Bench;
     loops: readonly BenchLoop[];
     entries: readonly BenchEntry[];
     datasets: readonly Dataset[] | undefined;
     jobs: readonly LabelJob[] | undefined;
-    /** The loop opened under its row, or null. */
-    expanded: string | null;
-    ontoggle: (id: string | null) => void;
+    /** Opens "New loop". */
+    onnew: () => void;
+    /** The server does not answer: a loop cannot start. */
+    offline?: boolean;
   } = $props();
+  const path = (l: BenchLoop) => `/benchmarks/${bench.id}/loops/${l.id}`;
 
   const pool = (l: BenchLoop) => {
     const p = l.config.pool;
@@ -51,12 +57,25 @@
 </script>
 
 <Panel title="Self-improvement loops" meta={loops.length ? String(loops.length) : undefined} pad="none">
+  {#snippet actions()}
+    {#if loops.length}
+      <Gate reason={offline ? OFFLINE_REASON : null}>
+        {#snippet children(why)}<Button size="sm" icon={Plus} disabled={!!why} aria-describedby={why} onclick={onnew}>New loop</Button>{/snippet}
+      </Gate>
+    {/if}
+  {/snippet}
   {#if !loops.length}
     <EmptyState
       icon={Repeat}
       title="No loops yet"
       description="A loop tests whether a model's own labels can train a better one: it labels a pool of images by itself, a student trains on those labels alone, and this benchmark grades the student."
-    />
+    >
+      {#snippet actions()}
+        <Gate reason={offline ? OFFLINE_REASON : null}>
+          {#snippet children(why)}<Button icon={Plus} disabled={!!why} aria-describedby={why} onclick={onnew}>New loop</Button>{/snippet}
+        </Gate>
+      {/snippet}
+    </EmptyState>
   {:else}
     <div class="scroll">
       <table class="table tall loops" aria-label="Self-improvement loops of {bench.name}">
@@ -72,12 +91,11 @@
         </thead>
         <tbody>
           {#each loops as l (l.id)}
-            {@const open = expanded === l.id}
             {@const s = scores(l)}
             {@const arch = teacherArch(l)}
-            <tr class="link" class:on={open} aria-expanded={open} aria-label={l.name} onclick={() => ontoggle(open ? null : l.id)}>
+            <tr class="link" aria-label={l.name} onclick={() => router.go(path(l))}>
               <td class="lead">
-                <span class="name">{l.name}</span>
+                <a class="name" href={href(path(l))} onclick={(e) => e.stopPropagation()}>{l.name}</a>
                 <span class="sub"
                   ><Meta line>
                     {#if arch}<span>teacher <Ident value={arch} /></span>{/if}
@@ -97,31 +115,24 @@
               </td>
               <td>{#if l.verdict}<span class="verdict" title={VERDICT[l.verdict].means}>{VERDICT[l.verdict].word}</span>{:else}<NoValue label="no verdict yet" />{/if}</td>
               <td class="r faint hide-md" title={date(l.created)}>{ago(l.created)}</td>
-              <td class="chev-cell"><span class="chev" class:open><ChevronDown size={16} strokeWidth={1.75} aria-hidden="true" /></span></td>
+              <td class="chev-cell"><ChevronRight size={16} strokeWidth={1.75} aria-hidden="true" /></td>
             </tr>
-            {#if open}
-              <tr class="detail-row">
-                <td colspan="6"><LoopDetail {bench} loop={l} {entries} /></td>
-              </tr>
-            {/if}
           {/each}
         </tbody>
       </table>
     </div>
-    <!-- Phones: the name over its status and scores, the verdict on the right; a tap opens the detail under it. -->
+    <!-- Phones: the name over its status and scores, the verdict on the right; a tap opens the loop. -->
     <ul class="rows" aria-label="Self-improvement loops of {bench.name}">
       {#each loops as l (l.id)}
-        {@const open = expanded === l.id}
         {@const s = scores(l)}
-        <li class:on={open}>
-          <button type="button" class="m-row" aria-expanded={open} onclick={() => ontoggle(open ? null : l.id)}>
+        <li>
+          <a class="m-row" href={href(path(l))}>
             <span class="m-main">
               <span class="name truncate">{l.name}</span>
-              <span class="m-meta num"><Meta><span>{loopStatus(l).label}</span>{#if s.length}<span>{scoreText(s[0]!)} → {scoreText(s.at(-1)!)}</span>{/if}<span>{l.generations.length - 1} {l.generations.length === 2 ? 'generation' : 'generations'}</span></Meta></span>
+              <span class="m-meta num"><Meta><span>{loopStatus(l).label}</span>{#if s.length}<span>{scoreText(s[0]!)} → {scoreText(s.at(-1)!)}</span>{/if}<span>{(l.config.generations ?? 1)} {(l.config.generations ?? 1) === 1 ? 'generation' : 'generations'}</span></Meta></span>
             </span>
             <span class="m-side">{#if l.verdict}<span class="verdict">{VERDICT[l.verdict].word}</span>{:else}<StatusBadge plain dotOnly state={loopStatus(l)} />{/if}</span>
-          </button>
-          {#if open}<LoopDetail {bench} loop={l} {entries} />{/if}
+          </a>
         </li>
       {/each}
     </ul>
@@ -134,6 +145,7 @@
   }
   .name {
     display: block;
+    color: var(--text-primary);
   }
   .gens {
     display: flex;
@@ -151,17 +163,6 @@
     padding-right: var(--space-3);
     color: var(--text-tertiary);
   }
-  .chev {
-    display: inline-flex;
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  .chev.open {
-    transform: rotate(180deg);
-  }
-  .detail-row td {
-    padding: 0;
-    background: var(--bg-raised);
-  }
   .rows {
     display: none;
   }
@@ -175,8 +176,8 @@
     .rows li + li {
       border-top: 1px solid var(--line-subtle);
     }
-    .rows li.on {
-      background: var(--bg-raised);
+    .m-row:active {
+      background: var(--bg-hover);
     }
     .m-row {
       display: flex;

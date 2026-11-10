@@ -3,9 +3,9 @@
 // - "Fasteners val": fasteners' validation split with the default plan and an entry of every kind and state: two FOLO
 //   models with full results, an external yolo26n, Claude Code and Codex on 48 unchanged images (partial, with what
 //   their calls used), a model that knows two of the eight classes, an agent that failed (not signed in), and the f16
-//   export running now.
+//   export running now; and a self-improvement loop of fasteners-n-best, its first student training.
 // - "Pond fish": made from a labeling job that has been deleted since (the benchmark keeps its own copy), with a plan
-//   Claude Code designed for murky water, and three entries.
+//   Claude Code designed for murky water, and four entries (one whose confidences never reach 90% precision).
 // - "Shapes val": two self-improvement loops, one that improved over three generations and one that held.
 
 import type { BenchContestant, Model } from '../types';
@@ -289,6 +289,16 @@ export function seedBenches(mb: MockBench, t0: number) {
     runs: 1500,
   });
 
+  // A quick int8 export of the same detector: its confidences never reach 9 in 10 right, so it cannot label for itself.
+  entry(pond, {
+    id: 'be_p204',
+    name: 'yolo26n-pond-int8',
+    contestant: { kind: 'external' },
+    at: t0 - DAY + 3 * HOUR,
+    skill: { map: 0.418, fragility: 1.3, fragile: { haze: 1.2, color_cast: 1.6 }, ece: 0.112, iou: 0.74, selfRecall: 0 },
+    runs: 1500,
+  });
+
   // ---------- Sorting tray, night shift: fresh ----------
   const hard = spec('ds_shapes_hard');
   bench({
@@ -348,6 +358,12 @@ export function seedBenches(mb: MockBench, t0: number) {
     mb.addLoop(l);
     return l;
   };
+  // Running as the demo opens: fasteners-n-best's own labels of the fasteners training split, the student training
+  // now (its teacher's complete entry is reused), then benchmarked once the GPU is free.
+  if (models.has('m_fast_n')) {
+    mb.startLoop(fastVal.id, { teacher: 'm_fast_n', pool: { kind: 'dataset', dataset_id: fast.id, split: 'train' }, generations: 2, student: { arch: 'folo-s' } }, t0 - 8 * SEC, 'bl_f3a0');
+    mb.advance(t0);
+  }
   loop({ id: 'bl_5h02', name: 'shapes-s-best', teacher: s0, teacherModel: 'm_shapes_s', student: 'folo-s', pool: { dataset: spec('ds_shapes_hard'), split: 'train' }, gens: [s0, s1], at: t0 - 6 * DAY + 10 * MIN });
   loop({ id: 'bl_07d1', name: 'shapes-n-best', teacher: n0, teacherModel: 'm_shapes_n', student: 'folo-s', pool: { dataset: shapes, split: 'train' }, gens: [n0, n1, n2, n3], at: t0 - 8 * DAY + 5 * MIN });
 }

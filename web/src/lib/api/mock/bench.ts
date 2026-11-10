@@ -268,7 +268,9 @@ export class MockBench {
       seed: b.seed,
       fingerprint: fingerprintOf(b),
       entries: entries.length,
-      best: top?.score ? { entry_id: top.id, name: top.name, score: top.score.total } : null,
+      best: top?.score ? { entry_id: top.id, name: top.name, score: top.score.total, partial: top.score.partial } : null,
+      // Exactly when DELETE answers 409 bench_active: an entry queued, running or stopping, or a loop running.
+      active: entries.some((e) => isEntryActive(e)) || this.#loops.some((l) => l.benchId === b.id && !l.end),
     };
   }
 
@@ -315,6 +317,9 @@ export class MockBench {
       missing_classes: e.missing.map((i) => b.classes[i] ?? String(i)),
       score: r ? r.score : null,
       map50_95: r ? r.accuracy.map50_95 : null,
+      ci95: r ? [r.accuracy.ci95[0], r.accuracy.ci95[1]] : null,
+      // The plan's conditions it ran at every planned severity: what its robustness is over.
+      conditions_run: r ? (r.robustness?.conditions.length ?? 0) : 0,
       speed: r && e.speed ? { ...e.speed } : null,
       usage: e.usage ? this.#usageAt(e, done, total) : null,
       error: e.end?.error ?? null,
@@ -766,7 +771,8 @@ export class MockBench {
     return this.toLoop(this.#loop(b, loopId));
   }
 
-  startLoop(id: string, body: StartBenchLoop, now: number): BenchLoop {
+  /** `fixedId`: the seed's loop that runs as the demo opens has a stable id, so it can be linked (./benchSeed). */
+  startLoop(id: string, body: StartBenchLoop, now: number, fixedId?: string): BenchLoop {
     const b = this.#bench(id);
     this.advance(now);
     const m = this.host.models().find((x) => x.id === body.teacher);
@@ -790,7 +796,7 @@ export class MockBench {
     };
     const r = rng(hash(`loop:${b.id}:${m.id}:${now}`));
     const l: MLoop = {
-      id: this.id('bl', m.id + now),
+      id: fixedId ?? this.id('bl', m.id + now),
       benchId: b.id,
       name: config.name as string,
       createdAt: now,

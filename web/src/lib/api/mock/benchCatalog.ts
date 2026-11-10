@@ -1,5 +1,5 @@
 // The mock's vision-benchmark catalog (docs/BENCH.md, Conditions and The score): the twelve conditions, the default
-// plan and the five axes, worded as a server's catalog would be. How hard each condition is for a typical detector is
+// plan and the five axes, worded as docs/BENCH.md's table (the server's catalog) words them. How hard each condition is for a typical detector is
 // the mock's own (`HARDNESS`): what its results are generated from.
 
 import type { BenchAxisInfo, BenchCatalog, BenchCondition, BenchConditionGroup } from '../types';
@@ -8,18 +8,18 @@ import { AXES, AXIS_NAME, AXIS_WEIGHT, MAX_SEVERITY } from '../../bench/rules';
 const c = (id: string, name: string, group: BenchConditionGroup, description: string): BenchCondition => ({ id, name, group, description });
 
 export const CONDITIONS: BenchCondition[] = [
-  c('low_light', 'Low light', 'light', 'Darker, with the grain a camera adds when it pushes its gain: dusk, night, a dim room.'),
-  c('overexposure', 'Overexposure', 'light', 'Brighter until highlights clip: direct sun, a flash, a window behind the scene.'),
-  c('low_contrast', 'Low contrast', 'light', 'Tones pulled towards grey: flat light, a dull overcast day, a cheap sensor.'),
-  c('defocus', 'Defocus', 'blur', 'A lens out of focus: the whole image softens evenly.'),
-  c('motion_blur', 'Motion blur', 'blur', 'Streaks along the movement: a moving camera, a conveyor, a long exposure.'),
-  c('sensor_noise', 'Sensor noise', 'noise', 'Grain in every pixel, as a small sensor gives in poor light.'),
-  c('haze', 'Haze', 'medium', 'A veil that washes out detail: fog, smoke, murky water.'),
-  c('color_cast', 'Colour cast', 'medium', 'A tint over the whole image: green water, sodium lamps, a wrong white balance.'),
-  c('jpeg', 'JPEG artifacts', 'digital', 'Blocks and ringing from heavy compression: a low-bitrate stream, a photo saved many times.'),
-  c('low_resolution', 'Low resolution', 'digital', 'Fewer pixels, scaled back up: a cheap or digitally zoomed camera.'),
-  c('distance', 'Distance', 'geometry', 'Objects farther away: the scene shrinks towards its centre, and the boxes with it.'),
-  c('occlusion', 'Occlusion', 'geometry', 'Parts of the objects hidden behind something: leaves, a hand, another object.'),
+  c('low_light', 'Low light', 'light', 'Darkens the scene as a short exposure does and adds the sensor noise that comes with it: dusk, indoors, night.'),
+  c('overexposure', 'Overexposure', 'light', 'Brightens the scene as a long exposure does, clipping highlights to white: glare, a bright sky, a flash too close.'),
+  c('low_contrast', 'Low contrast', 'light', "Pulls every pixel toward the image's mean grey: flat light, an overcast day, a washed-out screen."),
+  c('defocus', 'Defocus', 'blur', 'Blurs the image as a lens out of focus does.'),
+  c('motion_blur', 'Motion blur', 'blur', 'Smears the image along one direction, as a moving camera or subject does during the exposure.'),
+  c('sensor_noise', 'Sensor noise', 'noise', 'Adds grain to every pixel and channel, as a small or hot sensor does.'),
+  c('haze', 'Haze', 'medium', 'Scatters light: blends the scene toward a bright veil and softens detail, as fog, smoke or murky water do.'),
+  c('color_cast', 'Colour cast', 'medium', 'Absorbs red and tints the scene blue-green, as water does with depth (or tinted light).'),
+  c('jpeg', 'JPEG compression', 'digital', 'Re-encodes the image as a low-quality JPEG, with the blocks and smeared colour of strong compression.'),
+  c('low_resolution', 'Low resolution', 'digital', 'Downscales the image and scales it back up, so fine detail is lost: a cheap camera, a digital zoom.'),
+  c('distance', 'Distance', 'geometry', 'Shrinks the whole scene onto a canvas of the same size, so every object is smaller, as if seen from farther away; the true boxes move with it.'),
+  c('occlusion', 'Occlusion', 'geometry', 'Covers part of every object with a flat patch, as something in front of it would; the true boxes stay.'),
 ];
 
 /** What share of a typical detector's accuracy each condition takes away at severity 5 (the mock's results). */

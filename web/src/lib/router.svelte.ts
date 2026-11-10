@@ -17,6 +17,7 @@ export type RouteName =
   | 'benchmark'
   | 'bench-entry'
   | 'bench-compare'
+  | 'bench-loop'
   | 'playground'
   | 'settings'
   | 'not-found';
@@ -45,6 +46,7 @@ const table: [RouteName, RegExp, string[]][] = [
   ['benchmarks', /^\/benchmarks$/, []],
   ['bench-compare', /^\/benchmarks\/([^/]+)\/compare$/, ['id']],
   ['bench-entry', /^\/benchmarks\/([^/]+)\/entries\/([^/]+)$/, ['id', 'entryId']],
+  ['bench-loop', /^\/benchmarks\/([^/]+)\/loops\/([^/]+)$/, ['id', 'loopId']],
   ['benchmark', /^\/benchmarks\/([^/]+)$/, ['id']],
   ['playground', /^\/playground$/, []],
   ['settings', /^\/settings$/, []],
@@ -77,7 +79,7 @@ export function section(name: RouteName): string {
   if (name === 'dataset' || name === 'label-jobs' || name === 'label-job') return 'datasets';
   if (name === 'run' || name === 'run-new' || name === 'run-compare') return 'runs';
   if (name === 'model') return 'models';
-  if (name === 'benchmark' || name === 'bench-entry' || name === 'bench-compare') return 'benchmarks';
+  if (name === 'benchmark' || name === 'bench-entry' || name === 'bench-compare' || name === 'bench-loop') return 'benchmarks';
   return name;
 }
 
