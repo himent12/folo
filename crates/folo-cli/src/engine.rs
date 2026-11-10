@@ -10,13 +10,22 @@ pub fn open_dataset(
     arg: &str,
     format: folo_data::Format,
 ) -> Result<(folo_data::LoadedDataset, String), CliError> {
+    open_dataset_splits(arg, format, &folo_data::Split::ALL)
+}
+
+/// [`open_dataset`] building only `splits` (folo_data::open_splits); the others come back empty.
+pub fn open_dataset_splits(
+    arg: &str,
+    format: folo_data::Format,
+    splits: &[folo_data::Split],
+) -> Result<(folo_data::LoadedDataset, String), CliError> {
     let path = Path::new(arg);
     if !path.exists() {
         return Err(CliError::new(ExitCode::NotFound, "dataset_not_found", format!("{arg} does not exist"))
             .hint("pass a YOLO / COCO dataset folder or its data.yaml"));
     }
     let opts = folo_data::OpenOptions { format, ..folo_data::OpenOptions::default() };
-    let ds = folo_data::open_with(path, &opts).map_err(|e| {
+    let ds = folo_data::open_splits(path, &opts, splits).map_err(|e| {
         CliError::new(ExitCode::Runtime, "invalid_dataset", e.to_string())
             .hint("see docs/DATA.md for the supported layouts")
     })?;

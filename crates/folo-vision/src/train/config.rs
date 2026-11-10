@@ -129,9 +129,11 @@ pub fn f32_decimal(v: f32) -> f64 {
     v.to_string().parse().unwrap_or(v as f64)
 }
 
-/// `min(available cores, 8)`.
+/// `min(available cores, 16)`: decoding and mosaic of large images (four decodes per sample) need more than 8
+/// workers to keep up with a GPU (1920x1080 JPEGs: 83 mosaic samples/s on 8 workers, 140 on 16), and the batches
+/// do not depend on the count.
 pub fn default_workers() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get().min(8))
+    std::thread::available_parallelism().map_or(4, |n| n.get().min(16))
 }
 
 /// What the optimizer settings resolve to for a given training set (docs/MODEL.md §8.2).

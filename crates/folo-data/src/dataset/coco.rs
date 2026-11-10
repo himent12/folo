@@ -192,6 +192,75 @@ impl Sections {
         Ok(Sections { images: top.images, categories: top.categories, annotations })
     }
 
+    /// [`Sections::parse`] for a file of a split that is not opened: the categories as `parse` reads them, and
+    /// `images` only as far as whether it is an array (an empty one stands for it), no annotations.
+    fn parse_categories(bytes: &[u8]) -> serde_json::Result<Self> {
+        /// Whether a JSON value is an array, read without building it.
+        struct IsArray(bool);
+        impl<'de> serde::Deserialize<'de> for IsArray {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                struct V;
+                impl<'de> serde::de::Visitor<'de> for V {
+                    type Value = IsArray;
+                    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                        f.write_str("any JSON value")
+                    }
+                    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<IsArray, A::Error> {
+                        while a.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                        Ok(IsArray(true))
+                    }
+                    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut a: A) -> Result<IsArray, A::Error> {
+                        while a.next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?.is_some() {}
+                        Ok(IsArray(false))
+                    }
+                    fn visit_bool<E>(self, _: bool) -> Result<IsArray, E> {
+                        Ok(IsArray(false))
+                    }
+                    fn visit_i64<E>(self, _: i64) -> Result<IsArray, E> {
+                        Ok(IsArray(false))
+                    }
+                    fn visit_u64<E>(self, _: u64) -> Result<IsArray, E> {
+                        Ok(IsArray(false))
+                    }
+                    fn visit_f64<E>(self, _: f64) -> Result<IsArray, E> {
+                        Ok(IsArray(false))
+                    }
+                    fn visit_str<E>(self, _: &str) -> Result<IsArray, E> {
+                        Ok(IsArray(false))
+                    }
+                    fn visit_unit<E>(self) -> Result<IsArray, E> {
+                        Ok(IsArray(false))
+                    }
+                }
+                d.deserialize_any(V)
+            }
+        }
+        #[derive(serde::Deserialize)]
+        struct CategoriesTop {
+            images: Option<IsArray>,
+            categories: Option<Value>,
+        }
+        let marker = |is_array: bool| is_array.then(|| Value::Array(Vec::new()));
+        let from_value = |v: Value| Sections {
+            images: marker(v.get("images").is_some_and(Value::is_array)),
+            categories: v.get("categories").cloned(),
+            annotations: Vec::new(),
+        };
+        if !is_object(bytes) {
+            return Ok(from_value(serde_json::from_slice(bytes)?));
+        }
+        match serde_json::from_slice::<CategoriesTop>(bytes) {
+            Ok(t) => Ok(Sections {
+                images: marker(t.images.is_some_and(|a| a.0)),
+                categories: t.categories,
+                annotations: Vec::new(),
+            }),
+            // Duplicate top-level keys and the like: the `Value` reading (last key wins), as `parse` does.
+            Err(e) if !e.is_syntax() && !e.is_eof() => Ok(from_value(serde_json::from_slice(bytes)?)),
+            Err(e) => Err(e),
+        }
+    }
+
     fn parse_value(v: Value) -> serde_json::Result<Self> {
         let annotations = v
             .get("annotations")
@@ -212,15 +281,23 @@ pub(crate) fn open_jsons(
     root: &Path,
     jsons: Vec<(Split, PathBuf)>,
     opts: &OpenOptions,
+    wanted: &[Split],
 ) -> Result<LoadedDataset> {
     let mut report = LoadReport::default();
     let mut categories: BTreeMap<u64, String> = BTreeMap::new();
     let mut parsed = Vec::new();
+    // Files of the splits not wanted, read for their categories only (every file's count for the class ids).
+    let mut other_files = Vec::new();
     for (split, path) in jsons {
         let bytes = crate::guard::check(&path)
             .and_then(|_| std::fs::read(&path))
             .map_err(|e| DataError::io(&path, e))?;
-        let sections = match Sections::parse(&bytes) {
+        let sections = if wanted.contains(&split) {
+            Sections::parse(&bytes)
+        } else {
+            Sections::parse_categories(&bytes)
+        };
+        let sections = match sections {
             Ok(s) => s,
             Err(e) => {
                 report.push(IssueKind::BrokenLabel, &path, format!("invalid JSON: {e}"));
@@ -248,6 +325,10 @@ pub(crate) fn open_jsons(
                     format!("category {id} is named both {prev:?} and {name:?}"),
                 );
             }
+        }
+        if !wanted.contains(&split) {
+            other_files.push(path);
+            continue;
         }
         let mut imgs = Vec::with_capacity(images.len());
         for im in images {
@@ -283,7 +364,7 @@ pub(crate) fn open_jsons(
         }
         parsed.push(Parsed { split, path, images: imgs, anns });
     }
-    if parsed.is_empty() {
+    if parsed.is_empty() && other_files.is_empty() {
         return Err(DataError::Format(format!(
             "no readable COCO annotation file in {}",
             crate::paths::shown(root)
@@ -293,6 +374,7 @@ pub(crate) fn open_jsons(
     let classes: Vec<String> = categories.into_values().collect();
 
     let mut deps: std::collections::BTreeSet<PathBuf> = std::iter::once(root.to_path_buf()).collect();
+    deps.extend(other_files);
     let mut by_split: BTreeMap<Split, Vec<Candidate>> = BTreeMap::new();
     for p in parsed {
         deps.insert(p.path.clone());
