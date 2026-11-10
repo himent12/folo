@@ -3,13 +3,14 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 
 use crate::error::{GpuError, Result};
 use crate::pipeline::{Kernel, KernelDef, KernelKey, Params, Spec, UNIFORM_SLOT};
 use crate::pool::{BufferPool, GpuBuffer, PoolStats, size_class};
+use crate::profile::{ProfileRow, Profiler};
 
 /// Environment variable that picks the adapter: an index into [`GpuContext::enumerate`] or a case-insensitive
 /// substring of the adapter name (for example `FOLO_GPU_ADAPTER=4080` or `FOLO_GPU_ADAPTER=1`).
@@ -46,12 +47,20 @@ pub fn request_tensor_cores() -> bool {
     }
 }
 
-/// Dispatches encoded before the open batch is submitted on its own.
-const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
-/// Dispatches before the first submission after the device was idle. The limit then doubles with every submission
-/// up to [`MAX_DISPATCHES_PER_BATCH`], so the GPU starts on the head of a pass while the host still encodes the
-/// rest (a synchronised batch-1 forward otherwise spends a third of its latency encoding and submitting before
-/// the GPU has anything to do), and a long pass still costs only a handful of submissions.
+/// Environment variable that overrides the flush interval ([`GpuContext::set_flush_interval`]) of contexts created
+/// afterwards, for experiments (`FOLO_GPU_FLUSH_EVERY=1024`).
+pub const ENV_FLUSH_EVERY: &str = "FOLO_GPU_FLUSH_EVERY";
+/// Dispatches encoded before the open batch is submitted on its own, by default. Small batches keep the GPU busy:
+/// it starts on a batch while the host encodes the next, instead of waiting for one long submission. 64 made the
+/// folo-n training step about 20% faster than 1024 (docs/GPU.md, Command batching); 16 is slower again, because
+/// every submission costs host time.
+pub const DEFAULT_FLUSH_INTERVAL: u32 = 64;
+/// Largest flush interval.
+pub const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
+/// Dispatches before the first submission after the device was idle (or the flush interval, when that is smaller).
+/// The limit then doubles with every submission up to the flush interval, so the GPU starts on the head of a pass
+/// while the host still encodes the rest (a synchronised batch-1 forward otherwise spends a third of its latency
+/// encoding and submitting before the GPU has anything to do).
 const FIRST_DISPATCHES_PER_BATCH: u32 = 16;
 /// Idle staging buffers [`GpuContext::upload_with`] keeps mapped for reuse.
 const STAGING_KEEP: usize = 4;
@@ -228,6 +237,8 @@ pub struct Capabilities {
     pub max_workgroups_per_dim: u32,
     /// Uniform buffer offset alignment.
     pub uniform_align: u32,
+    /// Storage buffers one kernel can bind.
+    pub max_storage_buffers: u32,
 }
 
 struct UniformChunk {
@@ -288,6 +299,10 @@ struct Inner {
     trace: Mutex<Vec<TracedOp>>,
     /// Mapped, idle staging buffers of [`GpuContext::upload_with`], ready for the next upload.
     staging: Arc<Mutex<Vec<wgpu::Buffer>>>,
+    /// Dispatches after which the open batch is submitted on its own ([`GpuContext::set_flush_interval`]).
+    flush_every: AtomicU32,
+    /// Per-kernel timestamp queries (`FOLO_GPU_PROFILE=1`, see [`crate::profile`]).
+    profiler: Option<Mutex<Profiler>>,
 }
 
 /// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
@@ -529,6 +544,10 @@ impl GpuContext {
         if options.enable_f16 && adapter.features().contains(wgpu::Features::SHADER_F16) {
             features |= wgpu::Features::SHADER_F16;
         }
+        let profile = Profiler::wanted(&adapter);
+        if profile {
+            features |= Profiler::features();
+        }
         let mut status = String::from(TENSOR_CORES_NOT_REQUESTED);
         let want_coop = options.tensor_cores
             && match crate::kernels::coop::unavailable_reason(&adapter, features) {
@@ -593,7 +612,9 @@ impl GpuContext {
             max_workgroup_storage: dl.max_compute_workgroup_storage_size,
             max_workgroups_per_dim: dl.max_compute_workgroups_per_dimension,
             uniform_align: dl.min_uniform_buffer_offset_alignment,
+            max_storage_buffers: dl.max_storage_buffers_per_shader_stage,
         };
+        let profiler = profile.then(|| Mutex::new(Profiler::new(&device, &queue)));
         let dummy = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("folo-gpu dummy"),
             size: 256,
@@ -621,6 +642,14 @@ impl GpuContext {
                 tracing: AtomicBool::new(false),
                 trace: Mutex::default(),
                 staging: Arc::default(),
+                flush_every: AtomicU32::new(
+                    std::env::var(ENV_FLUSH_EVERY)
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(DEFAULT_FLUSH_INTERVAL)
+                        .clamp(1, MAX_DISPATCHES_PER_BATCH),
+                ),
+                profiler,
             }),
         };
         if !coop {
@@ -751,6 +780,17 @@ impl GpuContext {
         &self.inner.dummy
     }
 
+    /// Submit the open batch on its own once it holds `dispatches` dispatches (clamped to
+    /// `1..=`[`MAX_DISPATCHES_PER_BATCH`]; the default is [`DEFAULT_FLUSH_INTERVAL`], or [`ENV_FLUSH_EVERY`]).
+    pub fn set_flush_interval(&self, dispatches: u32) {
+        self.inner.flush_every.store(dispatches.clamp(1, MAX_DISPATCHES_PER_BATCH), Ordering::Relaxed);
+    }
+
+    /// The current flush interval ([`GpuContext::set_flush_interval`]).
+    pub fn flush_interval(&self) -> u32 {
+        self.inner.flush_every.load(Ordering::Relaxed)
+    }
+
     /// Dispatch and submission counters (benchmarks use the difference across a pass).
     pub fn work_stats(&self) -> WorkStats {
         WorkStats {
@@ -839,6 +879,26 @@ impl GpuContext {
         };
         self.wait_idle()?;
         Ok(released)
+    }
+
+    fn profiler(&self) -> Option<std::sync::MutexGuard<'_, Profiler>> {
+        self.inner.profiler.as_ref().map(|p| p.lock().expect("profiler lock"))
+    }
+
+    /// Whether this context times every kernel (`FOLO_GPU_PROFILE=1` on an adapter with timestamp queries inside
+    /// passes; see [`crate::profile`]).
+    pub fn profiling(&self) -> bool {
+        self.inner.profiler.is_some()
+    }
+
+    /// Submits the open batch, waits for it, and returns the GPU time per label since the last call (largest
+    /// first), resetting the totals. Empty unless [`GpuContext::profiling`].
+    pub fn profile_take(&self) -> Vec<ProfileRow> {
+        if !self.profiling() {
+            return Vec::new();
+        }
+        self.flush();
+        self.profiler().map(|mut p| p.take()).unwrap_or_default()
     }
 
     /// Number of compiled pipelines in the cache.
@@ -1094,7 +1154,17 @@ impl GpuContext {
             kind: TracedKind::Copy { src: src.clone(), src_off, dst: dst.clone(), dst_off, len },
         });
         let mut b = self.inner.batch.lock().expect("batch lock");
-        self.encoder(&mut b).copy_buffer_to_buffer(src, src_off, dst, dst_off, len);
+        let mut prof = self.profiler();
+        let q = prof.as_mut().map(|p| p.begin("copy"));
+        let enc = self.encoder(&mut b);
+        if let (Some(p), Some(q)) = (&prof, q) {
+            enc.write_timestamp(&p.set, q);
+        }
+        enc.copy_buffer_to_buffer(src, src_off, dst, dst_off, len);
+        if let (Some(p), Some(q)) = (&prof, q) {
+            enc.write_timestamp(&p.set, q + 1);
+        }
+        drop(prof);
         self.bump(&mut b);
     }
 
@@ -1105,7 +1175,17 @@ impl GpuContext {
             return;
         }
         let mut b = self.inner.batch.lock().expect("batch lock");
-        self.encoder(&mut b).clear_buffer(buf, 0, Some(bytes));
+        let mut prof = self.profiler();
+        let q = prof.as_mut().map(|p| p.begin("clear"));
+        let enc = self.encoder(&mut b);
+        if let (Some(p), Some(q)) = (&prof, q) {
+            enc.write_timestamp(&p.set, q);
+        }
+        enc.clear_buffer(buf, 0, Some(bytes));
+        if let (Some(p), Some(q)) = (&prof, q) {
+            enc.write_timestamp(&p.set, q + 1);
+        }
+        drop(prof);
         self.bump(&mut b);
     }
 
@@ -1220,15 +1300,18 @@ impl GpuContext {
 
     fn bump(&self, b: &mut Batch) {
         b.dispatches += 1;
-        if b.dispatches >= b.limit {
+        let every = self.inner.flush_every.load(Ordering::Relaxed);
+        if b.dispatches >= b.limit.min(every) {
             self.submit(b);
-            b.limit = (b.limit * 2).min(MAX_DISPATCHES_PER_BATCH);
+            b.limit = (b.limit * 2).min(every);
         }
     }
 
     fn submit(&self, b: &mut Batch) {
         b.pass = None;
-        let Some(enc) = b.encoder.take() else { return };
+        let Some(mut enc) = b.encoder.take() else { return };
+        let mut prof = self.profiler();
+        let timed = prof.as_ref().and_then(|p| p.resolve(&mut enc));
         let used = if b.cursor == 0 { b.chunk } else { b.chunk + 1 };
         for (i, c) in b.chunks.iter().enumerate().take(used) {
             let len = if i == b.chunk { b.cursor } else { UNIFORM_CHUNK } as usize;
@@ -1238,6 +1321,9 @@ impl GpuContext {
         }
         self.inner.queue.submit([enc.finish()]);
         self.inner.submissions.fetch_add(1, Ordering::Relaxed);
+        if let (Some(p), Some(bytes)) = (prof.as_mut(), timed) {
+            p.collect(&self.inner.device, bytes);
+        }
         b.dispatches = 0;
         b.chunk = 0;
         b.cursor = 0;
@@ -1337,7 +1423,16 @@ impl GpuContext {
         let pass = b.pass.as_mut().expect("pass");
         pass.set_pipeline(&kernel.pipeline);
         pass.set_bind_group(0, &bind, &[]);
+        let mut prof = self.profiler();
+        let q = prof.as_mut().map(|p| p.begin(kernel.name));
+        if let (Some(p), Some(q)) = (&prof, q) {
+            pass.write_timestamp(&p.set, q);
+        }
         pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+        if let (Some(p), Some(q)) = (&prof, q) {
+            pass.write_timestamp(&p.set, q + 1);
+        }
+        drop(prof);
         self.inner.dispatches.fetch_add(1, Ordering::Relaxed);
         self.bump(b);
         Ok(())
