@@ -2565,6 +2565,8 @@ impl FoloApp {
                 .items_center()
                 .justify_center()
                 .window_control_area(area)
+                // See `titlebar-drag`: the press must reach Windows, not focus the root.
+                .occlude()
                 .hover(move |s| if close { s.bg(gpui::rgb(0xC42B1C)) } else { s.bg(t.bg_hover) })
                 .active(|s| s.opacity(0.8))
                 .child(
@@ -2600,6 +2602,11 @@ impl FoloApp {
                     // The crumbs' 4 px pads put their text on the page gutter.
                     .pl(px(self.gutter() - 4.))
                     .window_control_area(WindowControlArea::Drag)
+                    // A caption press goes to GPUI first and only reaches Windows (drag, double-click
+                    // maximize, the caption buttons) if nothing prevents its default. The focus-tracked
+                    // root would (focusing itself does), so the chrome hides the root from the hit
+                    // test. The crumbs above it still take their own clicks.
+                    .occlude()
                     .children(crumbs.into_iter().enumerate().map(|(i, (label, route))| {
                         let last = route.is_none();
                         let crumb = div().id(("crumb", i)).px(px(4.)).py(px(2.)).rounded(px(4.)).child(
@@ -2764,6 +2771,8 @@ impl FoloApp {
                     .gap(px(10.))
                     .px(px(if compact { 18. } else { 16. }))
                     .window_control_area(WindowControlArea::Drag)
+                    // See `titlebar-drag`.
+                    .occlude()
                     .child(logo(&t, 20.))
                     .when(!compact, |d| {
                         d.child(
