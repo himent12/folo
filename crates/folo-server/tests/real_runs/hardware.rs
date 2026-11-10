@@ -240,7 +240,7 @@ async fn throughput_from_runs_predictions_and_a_probe() {
     // Persisted: a new store on the same data dir reads it back.
     s.shutdown();
     assert!(home.join("throughput.json").is_file());
-    let app2 = crate::app(&store(&home));
+    let app2 = super::harness::app(&store(&home));
     let back: ThroughputTable = ok(&app2, get("/api/system/throughput")).await;
     let measured = |t: &ThroughputTable| {
         (

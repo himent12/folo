@@ -7,6 +7,3 @@ mod harness;
 mod published;
 mod queue;
 mod training;
-
-// For `crate::app` in hardware.rs, where a local `app` hides the function.
-use harness::app;
