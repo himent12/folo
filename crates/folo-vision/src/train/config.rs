@@ -9,7 +9,7 @@ use crate::error::{Error, Result};
 use crate::loss::LossConfig;
 use crate::model::HeadMode;
 
-/// `optimizer`: `auto`, `sgd` or `adamw` (docs/MODEL.md §8.2).
+/// `optimizer`: `auto`, `sgd`, `adamw` or `musgd` (docs/MODEL.md §8.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OptimizerChoice {
@@ -20,6 +20,8 @@ pub enum OptimizerChoice {
     Sgd,
     /// AdamW (decoupled weight decay).
     Adamw,
+    /// MuSGD: SGD plus a Muon (orthogonalised momentum) update on conv weights.
+    Musgd,
 }
 
 /// A training run's settings. The JSON shape is docs/API.md's `TrainConfig` (`dataset_id` and `weights` are the
@@ -181,6 +183,7 @@ impl TrainConfig {
                 folo_api::Optimizer::Auto => OptimizerChoice::Auto,
                 folo_api::Optimizer::Sgd => OptimizerChoice::Sgd,
                 folo_api::Optimizer::Adamw => OptimizerChoice::Adamw,
+                folo_api::Optimizer::Musgd => OptimizerChoice::Musgd,
             },
             lr0: f32_decimal(c.lr0),
             amp: c.amp,
@@ -323,8 +326,12 @@ impl TrainConfig {
                     warmup_bias_lr: a.warmup_bias_lr,
                 }
             }
-            OptimizerChoice::Sgd | OptimizerChoice::Adamw => ResolvedOptim {
-                kind: if self.optimizer == OptimizerChoice::Sgd { OptimKind::Sgd } else { OptimKind::AdamW },
+            OptimizerChoice::Sgd | OptimizerChoice::Adamw | OptimizerChoice::Musgd => ResolvedOptim {
+                kind: match self.optimizer {
+                    OptimizerChoice::Sgd => OptimKind::Sgd,
+                    OptimizerChoice::Musgd => OptimKind::MuSgd,
+                    _ => OptimKind::AdamW,
+                },
                 lr0: self.lr0,
                 momentum: self.momentum,
                 warmup_bias_lr: self.warmup_bias_lr,
@@ -344,10 +351,10 @@ impl ResolvedOptim {
     ) -> folo_api::ResolvedTrain {
         let adamw = self.kind == OptimKind::AdamW;
         folo_api::ResolvedTrain {
-            optimizer: if adamw {
-                folo_api::ResolvedOptimizer::Adamw
-            } else {
-                folo_api::ResolvedOptimizer::Sgd
+            optimizer: match self.kind {
+                OptimKind::Sgd => folo_api::ResolvedOptimizer::Sgd,
+                OptimKind::AdamW => folo_api::ResolvedOptimizer::Adamw,
+                OptimKind::MuSgd => folo_api::ResolvedOptimizer::Musgd,
             },
             lr0: self.lr0,
             lrf: cfg.lrf,
@@ -386,6 +393,7 @@ impl ResolvedOptim {
         let kind = match o.get("type")?.as_str()? {
             "sgd" => OptimKind::Sgd,
             "adamw" => OptimKind::AdamW,
+            "musgd" => OptimKind::MuSgd,
             _ => return None,
         };
         let resolved = ResolvedOptim {

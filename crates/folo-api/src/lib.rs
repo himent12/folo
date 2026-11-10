@@ -1060,6 +1060,8 @@ pub enum Optimizer {
     Sgd,
     /// AdamW.
     Adamw,
+    /// SGD plus a Muon (orthogonalised momentum) update on conv weights (docs/MODEL.md §8.2).
+    Musgd,
 }
 
 /// Augmentation settings.
@@ -1222,6 +1224,8 @@ pub enum ResolvedOptimizer {
     Sgd,
     /// AdamW (decoupled weight decay).
     Adamw,
+    /// MuSGD: SGD plus a Muon update on conv weights.
+    Musgd,
 }
 
 /// `POST /api/runs/{id}/queue`: moves a waiting run in the training queue. Exactly one of `action` and `position`.

@@ -669,6 +669,24 @@ p = p · (1 − lr · wd)              (decay group only)
 m = β1·m + (1 − β1)·g;   v = β2·v + (1 − β2)·g²
 p = p − lr · (m / (1 − β1^t)) / (sqrt(v / (1 − β2^t)) + eps)
 ```
+**MuSGD** (`optimizer = musgd`; Ultralytics 8.4's `MuSGD` with its trainer's groups, `folo_nn::optim::MuSgd`). Six
+groups: the three above, each split into the head's class branches (`head.cls.*`, `head.o2o.cls.*`: groups
+`decay.cls`, `bn.cls`, `bias.cls`) at `3 · lr0` and the rest at `lr0`; the schedule (§8.4) treats `bias.cls` as a
+bias group. Every group takes the SGD update above (Nesterov, `momentum_buffer`). Before it, every parameter of
+rank 2 or 4 in a `decay` group (every conv weight) also takes a Muon step with the group's current `lr` and `μ`:
+```
+m = μ · m + (1 − μ) · g                      (muon_buffer, starts at zero)
+u = μ · m + (1 − μ) · g                      (Nesterov)
+X = u as [d0, d1·d2·d3] / (‖u‖_F + 1e-7), transposed if it has more rows than columns
+5 times:  A = X·Xᵀ;  X = 3.4445·X + (−4.7750·A + 2.0315·A·A)·X      (then transposed back)
+p = p − 0.2 · lr · sqrt(max(1, d₋₂ / d₋₁)) · X        (the factor is 1 for square kernels)
+```
+then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. Same
+`lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the Newton–Schulz iteration in `f32` (the
+reference: `bfloat16`); matrices are batched by column count with zero-padded rows, which changes no value. On a
+GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, the iteration batched
+matmuls. Tests: `crates/folo-nn/tests/optim.rs` (two steps against an `f64` re-implementation of the reference,
+Newton–Schulz against `f64`), `tests/gpu.rs` (GPU against CPU), `tests/folo_io.rs` (bit-exact resume).
 
 ### 8.3 Batches, accumulation and the step loop
 **Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation

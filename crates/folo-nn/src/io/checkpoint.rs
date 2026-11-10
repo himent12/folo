@@ -378,6 +378,7 @@ fn expected_state(opt: &dyn Optimizer) -> BTreeSet<String> {
     let states: &[&str] = match opt.kind() {
         OptimKind::Sgd => &["momentum_buffer"],
         OptimKind::AdamW => &["exp_avg", "exp_avg_sq"],
+        OptimKind::MuSgd => &["momentum_buffer", "muon_buffer"],
     };
     opt.groups()
         .iter()

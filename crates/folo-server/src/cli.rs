@@ -61,6 +61,7 @@ pub fn train_command(
             Optimizer::Auto => "auto",
             Optimizer::Sgd => "sgd",
             Optimizer::Adamw => "adamw",
+            Optimizer::Musgd => "musgd",
         };
         arg("optimizer", o.to_string());
     }

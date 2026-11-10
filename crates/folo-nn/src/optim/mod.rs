@@ -26,6 +26,7 @@
 
 mod adamw;
 mod grads;
+mod musgd;
 mod sgd;
 
 use std::collections::HashMap;
@@ -35,6 +36,10 @@ use serde::{Deserialize, Serialize};
 
 pub use adamw::AdamW;
 pub use grads::{GradAccumulator, global_grad_norm};
+pub use musgd::{
+    MUON_SCALE, MuSgd, NS_COEFFS, NS_EPS, NS_STEPS, is_muon_group, muon_scale, orthogonalize,
+    orthogonalize_many,
+};
 pub use sgd::Sgd;
 
 use crate::module::Module;
@@ -48,6 +53,8 @@ pub enum OptimKind {
     Sgd,
     /// Adam with decoupled weight decay.
     AdamW,
+    /// SGD plus a Muon (orthogonalised momentum) update on matrix-shaped weights ([`MuSgd`]).
+    MuSgd,
 }
 
 impl OptimKind {
@@ -56,12 +63,19 @@ impl OptimKind {
         match self {
             OptimKind::Sgd => "sgd",
             OptimKind::AdamW => "adamw",
+            OptimKind::MuSgd => "musgd",
         }
     }
 }
 
 /// The name of the bias group, which docs/MODEL.md §8.4 warms up from `warmup_bias_lr`.
 pub const BIAS_GROUP: &str = "bias";
+
+/// Whether a group warms up from `warmup_bias_lr`: [`BIAS_GROUP`] and its `bias.<suffix>` splits (MuSGD's
+/// `bias.cls`).
+pub fn is_bias_group(name: &str) -> bool {
+    name == BIAS_GROUP || name.strip_prefix(BIAS_GROUP).is_some_and(|r| r.starts_with('.'))
+}
 
 /// A named set of parameters sharing hyperparameters.
 ///
@@ -287,7 +301,7 @@ pub struct GroupContract {
 
 impl GroupContract {
     fn from_group(g: &ParamGroup, kind: OptimKind) -> Self {
-        let sgd = kind == OptimKind::Sgd;
+        let sgd = kind != OptimKind::AdamW;
         GroupContract {
             name: g.name.clone(),
             params: g.params.iter().map(|(n, _)| n.clone()).collect(),
@@ -305,7 +319,7 @@ impl GroupContract {
         g.base_lr = self.lr;
         g.weight_decay = self.weight_decay;
         match kind {
-            OptimKind::Sgd => {
+            OptimKind::Sgd | OptimKind::MuSgd => {
                 g.base_momentum = self.momentum.ok_or_else(|| missing("momentum"))?;
                 g.nesterov = self.nesterov.ok_or_else(|| missing("nesterov"))?;
             }
@@ -453,6 +467,32 @@ impl StandardGroups {
             ParamGroup::new("bn", self.bn).lr(lr).momentum(momentum),
             ParamGroup::new(BIAS_GROUP, self.bias).lr(lr).momentum(momentum),
         ]
+    }
+
+    /// MuSGD's groups (docs/MODEL.md §8.2): [`StandardGroups::into_groups`], with the parameters `boost` selects
+    /// moved from each group into a `<group>.cls` group at `boost_factor · lr` (the reference trains the class
+    /// branch of the head at 3x the LR). Order: `decay`, `decay.cls`, `bn`, `bn.cls`, `bias`, `bias.cls`; empty
+    /// `.cls` groups are left out.
+    pub fn into_boosted_groups(
+        self,
+        lr: f64,
+        momentum: f64,
+        weight_decay: f64,
+        boost: impl Fn(&str) -> bool,
+        boost_factor: f64,
+    ) -> Vec<ParamGroup> {
+        let mut out = Vec::new();
+        for (name, params, wd) in
+            [("decay", self.decay, weight_decay), ("bn", self.bn, 0.0), (BIAS_GROUP, self.bias, 0.0)]
+        {
+            let (b, rest): (Vec<_>, Vec<_>) = params.into_iter().partition(|(n, _)| boost(n));
+            out.push(ParamGroup::new(name, rest).lr(lr).momentum(momentum).weight_decay(wd));
+            if !b.is_empty() {
+                let g = ParamGroup::new(format!("{name}.cls"), b);
+                out.push(g.lr(lr * boost_factor).momentum(momentum).weight_decay(wd));
+            }
+        }
+        out
     }
 }
 

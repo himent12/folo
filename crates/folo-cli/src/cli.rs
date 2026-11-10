@@ -134,6 +134,8 @@ pub enum OptimizerArg {
     Sgd,
     /// AdamW.
     Adamw,
+    /// MuSGD: SGD plus a Muon (orthogonalised momentum) update on conv weights (docs/MODEL.md §8.2).
+    Musgd,
 }
 
 /// `folo train`. Mirrors `TrainConfig` in docs/API.md (plus the docs/MODEL.md §8.1 recipe keys).

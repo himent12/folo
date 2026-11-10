@@ -1806,6 +1806,7 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
     let (optimizer, lr0) = match config.optimizer {
         Optimizer::Sgd => (ResolvedOptimizer::Sgd, config.lr0 as f64),
         Optimizer::Adamw => (ResolvedOptimizer::Adamw, config.lr0 as f64),
+        Optimizer::Musgd => (ResolvedOptimizer::Musgd, config.lr0 as f64),
         Optimizer::Auto if steps > 10_000. => (ResolvedOptimizer::Sgd, 0.01),
         Optimizer::Auto => {
             let lr = 0.01 / (4.0 + classes as f64);

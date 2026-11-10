@@ -393,7 +393,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // TrainConfig (only dataset_id is required; the rest shows the defaults)
 { "name": "", "dataset_id": "ds_8f2c", "arch": "folo-n", "epochs": 100, "batch": 16, "imgsz": 640,
   "device": "auto",            // auto | cpu | gpu:<n>
-  "optimizer": "auto",         // auto | sgd | adamw
+  "optimizer": "auto",         // auto | sgd | adamw | musgd (docs/MODEL.md §8.2)
   "lr0": 0.01, "weights": null, // or a model id to fine-tune from (a published name such as "folo-n-coco" too);
                                // the run then trains the weights' architecture, whatever `arch` says
   "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5, "scale": 0.5, "translate": 0.1,
@@ -428,7 +428,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "resolved": null | ResolvedTrain }  // what the trainer resolved `config` to (below); null until it is built
 // ResolvedTrain: the settings the run trains with. `config` stays what was requested ("optimizer": "auto",
 // "lr0": 0.01); these are what that became (docs/MODEL.md §8.2, §8.4), as in the run folder's config.json.
-{ "optimizer": "sgd|adamw",     // never auto
+{ "optimizer": "sgd|adamw|musgd", // never auto
   "lr0": 0.001429,              // base LR of every parameter group: auto's pick, else config.lr0
   "lrf": 0.01, "cos_lr": false, // the last step runs at lr0 · lrf; linear or cosine decay
   "momentum": 0.9,              // SGD momentum, or AdamW β1, after warmup

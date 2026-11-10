@@ -211,6 +211,7 @@ fn config_of(
             OptimizerArg::Auto => OptimizerChoice::Auto,
             OptimizerArg::Sgd => OptimizerChoice::Sgd,
             OptimizerArg::Adamw => OptimizerChoice::Adamw,
+            OptimizerArg::Musgd => OptimizerChoice::Musgd,
         },
         lr0: folo_vision::train::f32_decimal(args.lr0),
         lrf: args.lrf,
