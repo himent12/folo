@@ -16,14 +16,33 @@
 // connection, a finished cloud run): `cloud-none` (no connection, the server's `FOLO_MOCK_CLOUD=none`), `cloud-off` (no
 // `cloud` feature: `FOLO_MOCK_CLOUD=off`), `cloud-trouble` (the connection's key was revoked, so its check fails and the
 // termination of a finished run's instance cannot be confirmed), `cloud-training` (a cloud run trains on a rented RTX
-// 4090) and `cloud-upload` (a cloud run uploads its dataset), for screenshots of those states.
+// 4090) and `cloud-upload` (a cloud run uploads its dataset), for screenshots of those states. Vision benchmarks
+// (./bench, ./benchSeed): `no-bench` (no `vision_bench` feature; the endpoints answer `501 not_implemented`, as
+// `folo serve --mock` does, which `no-labeling` stands for too) and `bench-agent-fails` (a design request's answer is not
+// a plan: `502 agent_failed`).
 
-import { ApiError, type Api, type LabelEventHandlers, type RunEventHandlers } from '../client';
+import { ApiError, type Api, type BenchEventHandlers, type LabelEventHandlers, type RunEventHandlers } from '../client';
 import type {
   Arch,
+  Bench,
+  BenchCatalog,
+  BenchDesign,
+  BenchEntry,
+  BenchEntryImagePage,
+  BenchEntryImagesQuery,
+  BenchImageOptions,
+  BenchImagePage,
+  BenchImagesQuery,
+  BenchLoop,
   BenchmarkReport,
   BenchmarkRequest,
+  BenchResult,
   Box,
+  CreateBench,
+  DesignBench,
+  StartBenchEntry,
+  StartBenchLoop,
+  UpdateBench,
   Capabilities,
   ClassMetrics,
   CliCommand,
@@ -80,6 +99,9 @@ import { imageSize, inventBoxes, predictBoxes, round, withDuplicates, type Score
 import { image, imageIndex, indices, issues, specs, stats, toDataset, total, type MockDatasetSpec } from './datasets';
 import { synthEvaluation, toModelEval } from './evaluation';
 import { MockLabeling, mockAgents } from './label';
+import { MockBench } from './bench';
+import { seedBenches } from './benchSeed';
+import { BENCH_FEATURE } from '../../bench/rules';
 import { renderImage } from './render';
 import { hash, rng, smoothNoise, range } from './rng';
 import {
@@ -148,6 +170,9 @@ export type Scenario =
   | 'no-labeling'
   // Both labeling agents installed (Codex is not, elsewhere).
   | 'all-agents'
+  // Vision benchmarks: a server without them (501 not_implemented, no `vision_bench`); a design whose answer is no plan.
+  | 'no-bench'
+  | 'bench-agent-fails'
   // Cloud compute: no connection; no `cloud` feature; a revoked key and an unconfirmed termination; a cloud run
   // training; one uploading its dataset.
   | 'cloud-none'
@@ -576,6 +601,8 @@ export class MockApi implements Api {
   #probing = false;
   /** Agent labeling: its jobs, runs and streams (./label). */
   #label: MockLabeling;
+  /** Vision benchmarks: benchmarks, entries, loops and their streams (./bench). */
+  #bench: MockBench;
   /** Cloud connections. A secret is never kept: only its hint (`••••a1b2`), as the API answers it. */
   #connections: CloudConnection[];
   /** Whether the server has the `cloud` feature (`/api/cloud`, `TrainConfig.compute`); older servers do not. */
@@ -590,6 +617,13 @@ export class MockApi implements Api {
     this.#datasets = scenario === 'empty' ? [] : [...specs];
     this.#throughput = new MockThroughput(this.#t0);
     this.#label = new MockLabeling(this.#t0, scenario !== 'empty', scenario === 'all-agents');
+    this.#bench = new MockBench(this.#t0, {
+      models: () => this.#models(),
+      datasets: () => this.#datasets,
+      labeling: this.#label,
+      agents: () => mockAgents(this.scenario === 'all-agents'),
+    });
+    this.#bench.designFails = scenario === 'bench-agent-fails';
     this.#cloudOn = !['cloud-off', 'no-throughput'].includes(scenario);
     this.#connections = this.#cloudOn && !['empty', 'cloud-none'].includes(scenario) ? [seedConnection(this.#t0, scenario === 'cloud-trouble')] : [];
     this.#queue = this.#runs
@@ -716,6 +750,7 @@ export class MockApi implements Api {
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
           ...(this.#labeling() ? [LABEL_FEATURE] : []),
+          ...(this.#benching() ? [BENCH_FEATURE] : []),
           ...(this.#cloudOn ? ['cloud'] : []),
         ],
         capabilities: this.#capabilities(),
@@ -1826,6 +1861,157 @@ export class MockApi implements Api {
         return;
       }
       this.#label.tick(jobId, Date.now());
+    }, 250);
+    return () => {
+      clearTimeout(t0);
+      clearInterval(timer);
+      unsub();
+    };
+  }
+
+  // ---------- vision benchmarks ----------
+
+  /** Whether this server has them: not `folo serve --mock` (`no-bench`, `no-labeling`), nor a server from before them. */
+  #benching() {
+    return this.scenario !== 'no-bench' && this.scenario !== 'no-labeling' && this.scenario !== 'no-throughput';
+  }
+
+  /** The demo's benchmarks, made on the first call (they read the models, which read the runs). */
+  #benchSeeded = false;
+  #benchState(): MockBench {
+    if (!this.#benchSeeded) {
+      this.#benchSeeded = true;
+      if (this.scenario !== 'empty') seedBenches(this.#bench, this.#t0);
+    }
+    return this.#bench;
+  }
+
+  /** A benchmark call: `folo serve --mock` answers 501, an older server has no such route. */
+  async #benchCall<T>(path: string, fn: (b: MockBench) => T | Promise<T>, latency?: number): Promise<T> {
+    return this.#call(() => {
+      if (this.scenario === 'no-throughput') throw this.#noRoute(path);
+      if (!this.#benching()) throw new ApiError(501, 'not_implemented', 'Vision benchmarks need a real server.', 'Start folo serve without --mock to make benchmarks.');
+      return fn(this.#benchState());
+    }, latency);
+  }
+
+  benchCatalog(): Promise<BenchCatalog> {
+    return this.#benchCall('GET /api/bench/catalog', (b) => b.catalog(), 60);
+  }
+
+  benches(): Promise<Bench[]> {
+    return this.#benchCall('GET /api/bench/benchmarks', (b) => b.list(Date.now()));
+  }
+
+  bench(id: string): Promise<Bench> {
+    return this.#benchCall(`GET /api/bench/benchmarks/${id}`, (b) => b.get(id, Date.now()));
+  }
+
+  createBench(body: CreateBench): Promise<Bench> {
+    return this.#benchCall('POST /api/bench/benchmarks', (b) => b.create(body, Date.now()), 600);
+  }
+
+  updateBench(id: string, body: UpdateBench): Promise<Bench> {
+    return this.#benchCall(`PUT /api/bench/benchmarks/${id}`, (b) => b.update(id, body, Date.now()));
+  }
+
+  deleteBench(id: string): Promise<void> {
+    return this.#benchCall(`DELETE /api/bench/benchmarks/${id}`, (b) => b.delete(id, Date.now()));
+  }
+
+  /** One agent call: answered a few seconds later (a real one takes up to two minutes). */
+  designBench(id: string, body: DesignBench): Promise<BenchDesign> {
+    return this.#benchCall(
+      `POST /api/bench/benchmarks/${id}/design`,
+      async (b) => {
+        // Checked at once (an unknown benchmark, an agent that is not installed), then the call's time.
+        b.design(id, body, Date.now());
+        if (this.latency > 0) await sleep(this.scenario === 'bench-agent-fails' ? 2200 : 3800);
+        return b.design(id, body, Date.now());
+      },
+      80,
+    );
+  }
+
+  benchImages(id: string, q: BenchImagesQuery = {}): Promise<BenchImagePage> {
+    return this.#benchCall(`GET /api/bench/benchmarks/${id}/images`, (b) => b.images(id, q, Date.now()), 90);
+  }
+
+  async benchImageUrl(id: string, imageId: string, opts: BenchImageOptions = {}): Promise<string> {
+    return this.#benchState().imageUrl(id, imageId, opts);
+  }
+
+  benchEntries(id: string): Promise<BenchEntry[]> {
+    return this.#benchCall(`GET /api/bench/benchmarks/${id}/entries`, (b) => b.entries(id, Date.now()));
+  }
+
+  startBenchEntry(id: string, body: StartBenchEntry): Promise<BenchEntry> {
+    return this.#benchCall(`POST /api/bench/benchmarks/${id}/entries`, (b) => b.start(id, body, Date.now()), body.contestant.kind === 'external' ? 900 : 250);
+  }
+
+  benchEntry(id: string, entryId: string): Promise<BenchEntry> {
+    return this.#benchCall(`GET /api/bench/benchmarks/${id}/entries/${entryId}`, (b) => b.entry(id, entryId, Date.now()));
+  }
+
+  benchResult(id: string, entryId: string): Promise<BenchResult> {
+    return this.#benchCall(`GET /api/bench/benchmarks/${id}/entries/${entryId}/result`, (b) => b.result(id, entryId, Date.now()), 160);
+  }
+
+  benchEntryImages(id: string, entryId: string, q: BenchEntryImagesQuery = {}): Promise<BenchEntryImagePage> {
+    return this.#benchCall(`GET /api/bench/benchmarks/${id}/entries/${entryId}/images`, (b) => b.entryImages(id, entryId, q, Date.now()), 160);
+  }
+
+  stopBenchEntry(id: string, entryId: string): Promise<BenchEntry> {
+    return this.#benchCall(`POST /api/bench/benchmarks/${id}/entries/${entryId}/stop`, (b) => b.stopEntry(id, entryId, Date.now()));
+  }
+
+  deleteBenchEntry(id: string, entryId: string): Promise<void> {
+    return this.#benchCall(`DELETE /api/bench/benchmarks/${id}/entries/${entryId}`, (b) => b.deleteEntry(id, entryId, Date.now()));
+  }
+
+  benchLoops(id: string): Promise<BenchLoop[]> {
+    return this.#benchCall(`GET /api/bench/benchmarks/${id}/loops`, (b) => b.loops(id, Date.now()));
+  }
+
+  startBenchLoop(id: string, body: StartBenchLoop): Promise<BenchLoop> {
+    return this.#benchCall(`POST /api/bench/benchmarks/${id}/loops`, (b) => b.startLoop(id, body, Date.now()), 300);
+  }
+
+  benchLoop(id: string, loopId: string): Promise<BenchLoop> {
+    return this.#benchCall(`GET /api/bench/benchmarks/${id}/loops/${loopId}`, (b) => b.loop(id, loopId, Date.now()));
+  }
+
+  stopBenchLoop(id: string, loopId: string): Promise<BenchLoop> {
+    return this.#benchCall(`POST /api/bench/benchmarks/${id}/loops/${loopId}/stop`, (b) => b.stopLoop(id, loopId, Date.now()));
+  }
+
+  deleteBenchLoop(id: string, loopId: string): Promise<void> {
+    return this.#benchCall(`DELETE /api/bench/benchmarks/${id}/loops/${loopId}`, (b) => b.deleteLoop(id, loopId, Date.now()));
+  }
+
+  benchEvents(id: string, h: BenchEventHandlers): () => void {
+    if (this.scenario === 'loading' || this.scenario === 'error' || !this.#benching() || this.scenario === 'no-throughput') {
+      if (this.scenario === 'error') setTimeout(() => h.connection?.('reconnecting'), 500);
+      return () => {};
+    }
+    const state = this.#benchState();
+    const unsub = state.subscribe(id, h);
+    const t0 = setTimeout(() => {
+      h.connection?.('open');
+      try {
+        h.bench?.(state.get(id, Date.now()));
+      } catch {
+        // A benchmark deleted meanwhile: its stream has nothing to say.
+      }
+    }, 30);
+    let dropped = false;
+    const timer = setInterval(() => {
+      if (this.scenario === 'stale' && Date.now() - this.#t0 > STALE_AFTER) {
+        if (!dropped) h.connection?.('reconnecting');
+        dropped = true;
+        return;
+      }
+      state.tick(id, Date.now());
     }, 250);
     return () => {
       clearTimeout(t0);

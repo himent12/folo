@@ -26,7 +26,8 @@ export interface MockDatasetSpec {
   sizeRange: [number, number];
   brokenLabels: number;
   createdAgoS: number;
-  style: 'shapes' | 'fasteners';
+  /** How ./render draws it: coloured shapes, fasteners on a conveyor, or fish and frogs in a pond (a benchmark's). */
+  style: 'shapes' | 'fasteners' | 'pond';
   /** Generation seed for synthetic datasets; built-in datasets derive theirs from the id. */
   seed?: number;
 }

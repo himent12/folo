@@ -2075,4 +2075,166 @@ export const scenes = [
   },
   // `folo serve --mock` (or an older server): one calm state in the page frame.
   { name: 'label-unavailable', path: '/datasets/label', search: 'scenario=no-labeling', viewports: ['desktop', 'mobile'] },
+
+  // ---------- vision benchmarks ----------
+  // The list: four benchmarks, one fresh, one running an entry.
+  { name: 'bench-list', path: '/benchmarks', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: async (page, { vp }) => until(page, vp === 'mobile' ? '.rows li a' : 'table.benches tbody tr[data-row]') },
+  { name: 'bench-list-empty', path: '/benchmarks', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
+  // Loading (the skeletons have the loaded page's geometry) and a server that stopped answering.
+  { name: 'bench-list-loading', path: '/benchmarks', search: 'scenario=loading', viewports: ['desktop', 'mobile'] },
+  { name: 'bench-list-error', path: '/benchmarks', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  { name: 'bench-board-loading', path: '/benchmarks/bn_3c90', search: 'scenario=loading', viewports: ['desktop', 'mobile'] },
+  { name: 'bench-board-error', path: '/benchmarks/bn_3c90', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
+  {
+    // New benchmark, filled in: a name, what the camera sees, a dataset's validation split.
+    name: 'bench-new-dialog',
+    path: '/benchmarks?new=1',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'dialog[open] input[id$="-name"]');
+      await page.locator('dialog[open] input[id$="-name"]').fill('Warehouse bins');
+      await page.locator('dialog[open] textarea').fill('A camera over the parts bins at the end of the line: fluorescent light, parts in piles that hide each other.');
+      await page.clock.runFor(500);
+      await page.mouse.move(0, 0);
+    },
+  },
+  // A leaderboard with an entry of every kind and state: ranked scores, partial agents, a failure, one running.
+  { name: 'bench-board', path: '/benchmarks/bn_3c90', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: async (page, { vp }) => until(page, vp === 'mobile' ? 'ul.rows li a' : 'table.board tbody tr') },
+  {
+    // Two entries picked: Compare is the one primary.
+    name: 'bench-board-compare',
+    path: '/benchmarks/bn_3c90',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'table.board tbody tr .check input');
+      const boxes = page.locator('table.board tbody tr .check input');
+      await boxes.nth(1).check({ force: true });
+      await boxes.nth(2).check({ force: true });
+      await page.mouse.move(0, 0);
+    },
+  },
+  // A fresh benchmark: no entries yet, its plan still open.
+  { name: 'bench-board-empty', path: '/benchmarks/bn_9f03', viewports: ['desktop', 'mobile'] },
+  {
+    // Add entry › Model: a model that knows two of the eight classes.
+    name: 'bench-add-model',
+    path: '/benchmarks/bn_3c90?add=model',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'dialog[open] select[id$="-model"] option[value="m_mini_n"]').catch(() => {});
+      for (let t = 0; t < 8000 && !(await page.locator('dialog[open] select[id$="-model"] option[value="m_mini_n"]').count()); t += 250) await page.clock.runFor(250);
+      await page.selectOption('dialog[open] select[id$="-model"]', 'm_mini_n');
+      await page.clock.runFor(300);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Add entry › Agent: Claude Code with the defaults (48 images, unchanged only) and what they mean.
+    name: 'bench-add-agent',
+    path: '/benchmarks/bn_3c90?add=agent',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'dialog[open] [role=radiogroup][aria-label="Effort"]');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Add entry › External: the file, the confidences switch and how to make the file, open.
+    name: 'bench-add-external',
+    path: '/benchmarks/bn_3c90?add=external',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'dialog[open] details.how > summary');
+      await page.locator('dialog[open] details.how > summary').click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The conditions of a fresh benchmark: the default plan, editable, and the preview of haze on its images.
+    name: 'bench-conditions',
+    path: '/benchmarks/bn_9f03?tab=conditions',
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '.stage img');
+      await page.clock.runFor(800);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The preview under distance: the scene and its boxes shrink towards the centre.
+    name: 'bench-preview-distance',
+    path: '/benchmarks/bn_3c90?tab=conditions',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'select[id$="-cond"]');
+      await page.selectOption('select[id$="-cond"]', 'distance');
+      await page.locator('[role=radiogroup][aria-label="Severity"] [role=radio]').nth(4).click();
+      await until(page, '.stage img');
+      await page.clock.runFor(1200);
+      await page.mouse.move(0, 0);
+    },
+  },
+  // A plan Claude Code designed, frozen by its entries: read-only, with the one-line reason.
+  { name: 'bench-conditions-frozen', path: '/benchmarks/bn_7a41?tab=conditions', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.stage img') },
+  {
+    // Design with an agent: the request, then the proposal against the default plan.
+    name: 'bench-design',
+    path: '/benchmarks/bn_9f03?tab=conditions',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("Design with an agent")');
+      await page.locator('button:has-text("Design with an agent")').click();
+      await until(page, 'dialog[open] button:has-text("Ask Claude Code")');
+      await page.locator('dialog[open] button:has-text("Ask Claude Code")').click();
+      await until(page, 'dialog[open] button:has-text("Use this plan")', 12000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The proposal used: the editor holds it, unsaved.
+    name: 'bench-design-used',
+    path: '/benchmarks/bn_9f03?tab=conditions',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("Design with an agent")');
+      await page.locator('button:has-text("Design with an agent")').click();
+      await until(page, 'dialog[open] button:has-text("Ask Claude Code")');
+      await page.locator('dialog[open] button:has-text("Ask Claude Code")').click();
+      await until(page, 'dialog[open] button:has-text("Use this plan")', 12000);
+      await page.locator('dialog[open] button:has-text("Use this plan")').click();
+      await page.clock.runFor(400);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The agent's answer is not a plan: the server's message and its fix.
+    name: 'bench-design-failed',
+    path: '/benchmarks/bn_9f03?tab=conditions',
+    search: 'scenario=bench-agent-fails',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("Design with an agent")');
+      await page.locator('button:has-text("Design with an agent")').click();
+      await until(page, 'dialog[open] button:has-text("Ask Claude Code")');
+      await page.locator('dialog[open] button:has-text("Ask Claude Code")').click();
+      await until(page, 'dialog[open] button:has-text("Try again")', 12000);
+      await page.mouse.move(0, 0);
+    },
+  },
+  // Loops: one improved over three generations (opened), one held.
+  { name: 'bench-loops', path: '/benchmarks/bn_5e12?tab=loops&loop=bl_07d1', viewports: ['desktop', 'mobile'], setup: async (page, { vp }) => until(page, vp === 'mobile' ? 'ul.rows .detail' : 'table.loops .detail') },
+  // An entry's page (the seam the result view replaces), and Compare's.
+  { name: 'bench-entry', path: '/benchmarks/bn_3c90/entries/be_f104', viewports: ['desktop', 'mobile'] },
+  { name: 'bench-compare', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f102,be_f103', viewports: ['desktop'] },
+  // `folo serve --mock` (or an older server): the section says what it needs.
+  { name: 'bench-unavailable', path: '/benchmarks', search: 'scenario=no-bench', viewports: ['desktop', 'mobile'] },
 ];

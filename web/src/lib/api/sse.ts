@@ -1,7 +1,7 @@
 // Server-Sent Events with reconnect. EventSource retries by itself after a dropped connection, but gives up for
 // good when the server answers with an error status; then we reopen it ourselves with exponential backoff.
 
-import type { LabelEventMap, RunEventMap } from './types';
+import type { BenchEventMap, LabelEventMap, RunEventMap } from './types';
 
 /** Handlers for a stream whose payloads are `M`, keyed by the SSE `event:` name, plus the connection's own. */
 export type EventHandlers<M> = {
@@ -20,6 +20,8 @@ export type EventHandlers<M> = {
 export const RUN_EVENTS: readonly (keyof RunEventMap)[] = ['status', 'step', 'epoch', 'log', 'queue', 'cloud'];
 /** The events of a labeling job's stream (`GET /api/label/jobs/{id}/events`). */
 export const LABEL_EVENTS: readonly (keyof LabelEventMap)[] = ['job', 'image', 'removed', 'reload', 'log'];
+/** The events of a benchmark's stream (`GET /api/bench/benchmarks/{id}/events`). */
+export const BENCH_EVENTS: readonly (keyof BenchEventMap)[] = ['bench', 'entry', 'loop', 'removed'];
 
 export interface Backoff {
   /** Delay before the given (0-based) retry attempt, in ms. */

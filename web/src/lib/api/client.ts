@@ -2,9 +2,26 @@
 // same interface, so screens never know which one they talk to.
 
 import type {
+  Bench,
+  BenchCatalog,
+  BenchDesign,
+  BenchEntry,
+  BenchEntryImagePage,
+  BenchEntryImagesQuery,
+  BenchEventMap,
+  BenchImageOptions,
+  BenchImagePage,
+  BenchImagesQuery,
+  BenchLoop,
   BenchmarkReport,
   BenchmarkRequest,
+  BenchResult,
   Box,
+  CreateBench,
+  DesignBench,
+  StartBenchEntry,
+  StartBenchLoop,
+  UpdateBench,
   CliCommand,
   CloudConnection,
   CloudInstance,
@@ -50,7 +67,7 @@ import type {
   TrainConfig,
   UpdateLabelJob,
 } from './types';
-import { LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
+import { BENCH_EVENTS, LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHandlers } from './sse';
 import { uploadInChunks, type UploadProgress } from './upload';
 
 export class ApiError extends Error {
@@ -67,6 +84,7 @@ export class ApiError extends Error {
 
 export type RunEventHandlers = EventHandlers<RunEventMap>;
 export type LabelEventHandlers = EventHandlers<LabelEventMap>;
+export type BenchEventHandlers = EventHandlers<BenchEventMap>;
 
 export interface Api {
   readonly mock: boolean;
@@ -195,6 +213,66 @@ export interface Api {
   createLabelDataset(jobId: string, body: LabelDatasetRequest): Promise<Dataset>;
   /** URL of a job's image (thumbnail when `thumb` is set), as `imageUrl`. */
   labelImageUrl(jobId: string, imageId: string, thumb?: number): Promise<string>;
+
+  // Vision benchmarks (docs/API.md; servers list `vision_bench`, $lib/bench/rules BENCH_FEATURE). docs/BENCH.md
+  // defines every number. `folo serve --mock` answers these `501 not_implemented`.
+  /** `GET /api/bench/catalog`: the conditions a plan can name, the default plan and the axes of the score. */
+  benchCatalog(signal?: AbortSignal): Promise<BenchCatalog>;
+  /** Newest first. */
+  benches(signal?: AbortSignal): Promise<Bench[]>;
+  bench(id: string, signal?: AbortSignal): Promise<Bench>;
+  /**
+   * Copies the source's labeled images and true boxes in (a seeded sample past `max_images`); the plan is the
+   * catalog's default when it names none. `400 invalid_dataset` when the source has no labeled image.
+   */
+  createBench(body: CreateBench): Promise<Bench>;
+  /** Absent fields stay. `409 bench_frozen` for a `plan` once the benchmark has entries. */
+  updateBench(id: string, body: UpdateBench): Promise<Bench>;
+  /** The benchmark, its images, entries and loops (never a model, run or dataset a loop made). `409 bench_active` while one is active. */
+  deleteBench(id: string): Promise<void>;
+  /**
+   * One request to Claude Code or Codex (no tools; up to two minutes) for a plan drawn from the catalog: a proposal,
+   * not saved (`updateBench` adopts it). `501 not_supported` without the agent's CLI, `502 agent_failed` (message, hint).
+   */
+  designBench(id: string, body: DesignBench, signal?: AbortSignal): Promise<BenchDesign>;
+  /** In the benchmark's order (`limit` at most 1000); with `condition` and `severity`, the truth under it (geometry moves boxes). */
+  benchImages(id: string, q?: BenchImagesQuery, signal?: AbortSignal): Promise<BenchImagePage>;
+  /**
+   * URL of a benchmark image: the original, or with `condition` and `severity` the JPEG every contestant is graded on
+   * (any condition of the catalog, in the plan or not); `thumb` as for dataset images. The mock renders on demand.
+   */
+  benchImageUrl(id: string, imageId: string, opts?: BenchImageOptions): Promise<string>;
+  /** The leaderboard: finished entries by score (highest first), then the others (newest first). */
+  benchEntries(id: string, signal?: AbortSignal): Promise<BenchEntry[]>;
+  /**
+   * Runs a contestant: a model (`400 bench_class_mismatch` when no class matches; queued behind other model entries),
+   * an agent (`501 not_supported` without its CLI), or external predictions, scored in the request (`400
+   * invalid_body` names the first wrong record).
+   */
+  startBenchEntry(id: string, body: StartBenchEntry): Promise<BenchEntry>;
+  benchEntry(id: string, entryId: string, signal?: AbortSignal): Promise<BenchEntry>;
+  /** Everything measured. `409 bench_entry_not_done` until the entry is `done`. */
+  benchResult(id: string, entryId: string, signal?: AbortSignal): Promise<BenchResult>;
+  /** Per image the truth and the detections at or above best-F1 confidence; `worst` sorts by missed + wrong. `409 bench_entry_not_done` before. */
+  benchEntryImages(id: string, entryId: string, q?: BenchEntryImagesQuery, signal?: AbortSignal): Promise<BenchEntryImagePage>;
+  /** `409 bench_entry_not_active` when it is not queued or running. */
+  stopBenchEntry(id: string, entryId: string): Promise<BenchEntry>;
+  /** `409 bench_entry_active` while it is active, `409 bench_entry_in_loop` while a running loop uses it. */
+  deleteBenchEntry(id: string, entryId: string): Promise<void>;
+  /** Newest first. */
+  benchLoops(id: string, signal?: AbortSignal): Promise<BenchLoop[]>;
+  /**
+   * Starts a self-improvement loop. `400 invalid_body` when the teacher's classes are not the benchmark's (same names,
+   * same order), `400 invalid_dataset` when the pool has no image outside the benchmark.
+   */
+  startBenchLoop(id: string, body: StartBenchLoop): Promise<BenchLoop>;
+  benchLoop(id: string, loopId: string, signal?: AbortSignal): Promise<BenchLoop>;
+  /** Stops its entry or run. `409 bench_loop_not_active` once it has ended. */
+  stopBenchLoop(id: string, loopId: string): Promise<BenchLoop>;
+  /** Its datasets, runs, models and entries stay. `409 bench_loop_active` while it runs. */
+  deleteBenchLoop(id: string, loopId: string): Promise<void>;
+  /** Subscribes to a benchmark's SSE stream (`bench` first; it replays nothing else: load the lists, then apply events). */
+  benchEvents(id: string, handlers: BenchEventHandlers): () => void;
 }
 
 /** The file name of a `Content-Disposition: attachment; filename="…"` header, or null. */
@@ -417,6 +495,83 @@ export class HttpApi implements Api {
   }
   async labelImageUrl(jobId: string, imageId: string, thumb?: number) {
     return `${this.base}/api/label/jobs/${encodeURIComponent(jobId)}/images/${encodeURIComponent(imageId)}${qs({ thumb })}`;
+  }
+
+  benchCatalog(signal?: AbortSignal) {
+    return this.#req<BenchCatalog>('GET', '/bench/catalog', undefined, signal);
+  }
+  async benches(signal?: AbortSignal) {
+    return (await this.#req<{ benchmarks: Bench[] }>('GET', '/bench/benchmarks', undefined, signal)).benchmarks;
+  }
+  bench(id: string, signal?: AbortSignal) {
+    return this.#req<Bench>('GET', `/bench/benchmarks/${encodeURIComponent(id)}`, undefined, signal);
+  }
+  createBench(body: CreateBench) {
+    return this.#req<Bench>('POST', '/bench/benchmarks', body);
+  }
+  updateBench(id: string, body: UpdateBench) {
+    return this.#req<Bench>('PUT', `/bench/benchmarks/${encodeURIComponent(id)}`, body);
+  }
+  deleteBench(id: string) {
+    return this.#req<void>('DELETE', `/bench/benchmarks/${encodeURIComponent(id)}`);
+  }
+  designBench(id: string, body: DesignBench, signal?: AbortSignal) {
+    return this.#req<BenchDesign>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/design`, body, signal);
+  }
+  benchImages(id: string, q: BenchImagesQuery = {}, signal?: AbortSignal) {
+    return this.#req<BenchImagePage>(
+      'GET',
+      `/bench/benchmarks/${encodeURIComponent(id)}/images${qs({ offset: q.offset, limit: q.limit, condition: q.condition, severity: q.severity })}`,
+      undefined,
+      signal,
+    );
+  }
+  async benchImageUrl(id: string, imageId: string, opts: BenchImageOptions = {}) {
+    return `${this.base}/api/bench/benchmarks/${encodeURIComponent(id)}/images/${encodeURIComponent(imageId)}${qs({ condition: opts.condition, severity: opts.severity, thumb: opts.thumb })}`;
+  }
+  async benchEntries(id: string, signal?: AbortSignal) {
+    return (await this.#req<{ entries: BenchEntry[] }>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/entries`, undefined, signal)).entries;
+  }
+  startBenchEntry(id: string, body: StartBenchEntry) {
+    return this.#req<BenchEntry>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/entries`, body);
+  }
+  benchEntry(id: string, entryId: string, signal?: AbortSignal) {
+    return this.#req<BenchEntry>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}`, undefined, signal);
+  }
+  benchResult(id: string, entryId: string, signal?: AbortSignal) {
+    return this.#req<BenchResult>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/result`, undefined, signal);
+  }
+  benchEntryImages(id: string, entryId: string, q: BenchEntryImagesQuery = {}, signal?: AbortSignal) {
+    return this.#req<BenchEntryImagePage>(
+      'GET',
+      `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/images${qs({ sort: q.sort, offset: q.offset, limit: q.limit })}`,
+      undefined,
+      signal,
+    );
+  }
+  stopBenchEntry(id: string, entryId: string) {
+    return this.#req<BenchEntry>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/stop`);
+  }
+  deleteBenchEntry(id: string, entryId: string) {
+    return this.#req<void>('DELETE', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}`);
+  }
+  async benchLoops(id: string, signal?: AbortSignal) {
+    return (await this.#req<{ loops: BenchLoop[] }>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/loops`, undefined, signal)).loops;
+  }
+  startBenchLoop(id: string, body: StartBenchLoop) {
+    return this.#req<BenchLoop>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/loops`, body);
+  }
+  benchLoop(id: string, loopId: string, signal?: AbortSignal) {
+    return this.#req<BenchLoop>('GET', `/bench/benchmarks/${encodeURIComponent(id)}/loops/${encodeURIComponent(loopId)}`, undefined, signal);
+  }
+  stopBenchLoop(id: string, loopId: string) {
+    return this.#req<BenchLoop>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/loops/${encodeURIComponent(loopId)}/stop`);
+  }
+  deleteBenchLoop(id: string, loopId: string) {
+    return this.#req<void>('DELETE', `/bench/benchmarks/${encodeURIComponent(id)}/loops/${encodeURIComponent(loopId)}`);
+  }
+  benchEvents(id: string, handlers: BenchEventHandlers) {
+    return openEventStream(`${this.base}/api/bench/benchmarks/${encodeURIComponent(id)}/events`, BENCH_EVENTS, handlers);
   }
 
   async modelWeights(id: string, signal?: AbortSignal) {
