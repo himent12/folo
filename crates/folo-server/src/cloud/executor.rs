@@ -871,16 +871,16 @@ impl Exec {
             Some((id, false)) => fields.insert("weights".into(), id.into()),
             None => None,
         };
+        // A `remote` server keeps the runs of the run's earlier attempts under the same name: those are not this
+        // attempt's. After a request whose answer was lost, a run of the name that is not one of them is the one it
+        // created, however it went since (it may have ended already).
+        let earlier: Vec<String> = self.named(client, &name)?.into_iter().map(|r| r.id).collect();
         let mut attempt = 1;
         let created = loop {
             match client.post::<_, Run>("/runs", &body) {
                 Ok(r) => break r,
                 Err(e) if e.is_transient() && attempt < ATTEMPTS => {
-                    // Only an active one: a `remote` server keeps the ended runs of the run's earlier attempts,
-                    // under the same name.
-                    if let Ok(list) = client.get::<RunList>("/runs")
-                        && let Some(r) =
-                            list.runs.into_iter().find(|r| r.name == name && r.status.is_active())
+                    if let Some(r) = self.named(client, &name)?.into_iter().find(|r| !earlier.contains(&r.id))
                     {
                         break r;
                     }
@@ -898,6 +898,25 @@ impl Exec {
         self.save();
         self.phase(CloudPhase::Training, format!("the worker took the run as {}", created.id));
         Ok(())
+    }
+
+    /// The worker's runs named `name`, asked for again while it fails for a reason of the moment. When it does not
+    /// answer, the run fails: without the list, a run started now could be one the worker already trains.
+    fn named(&self, client: &Client, name: &str) -> std::result::Result<Vec<Run>, Halt> {
+        let mut attempt = 1;
+        loop {
+            match client.get::<RunList>("/runs") {
+                Ok(list) => return Ok(list.runs.into_iter().filter(|r| r.name == name).collect()),
+                Err(e) if e.is_transient() && attempt < ATTEMPTS => {
+                    attempt += 1;
+                    self.wait(self.core.tuning.poll)?;
+                }
+                Err(e) => {
+                    let code = if e.is_transient() { "cloud_sync_failed" } else { e.code() };
+                    return Err(failed(code, format!("listing the worker's runs: {e}")));
+                }
+            }
+        }
     }
 
     /// Mirrors the worker's run until it ends (stopping it when asked to or at the time limit), then collects.

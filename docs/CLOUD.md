@@ -99,8 +99,9 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
   gone (for `remote`: while it does not answer at all) fails the run with `cloud_instance_lost`, and so does an
   instance terminated by hand; the checkpoints copied so far stay, so it can be resumed. A launch request that
   fails as `cloud_unavailable` may have gone through: the instance is looked up by its name, and one that exists is
-  used. One that is not listed may only be listed later: the run fails, and its instance stays `terminating` while
-  the reaper keeps looking for it by its name, for 5 minutes after the launch. A failure code is in `Run.error_code`: `cloud_auth_failed`, `cloud_refused` (no capacity, no balance),
+  used. One that is not listed may only be listed later: the run fails, and the reaper keeps looking for its
+  instance by its name (*Instances are never left behind*). A failure code is in `Run.error_code`:
+  `cloud_auth_failed`, `cloud_refused` (no capacity, no balance),
   `cloud_unavailable`, `cloud_boot_failed` (the worker check, an instance whose setup failed, or a worker that
   cannot be downloaded: nothing is rented then), `cloud_sync_failed`, `cloud_instance_lost`.
 - **Resuming.** `POST /api/runs` with `resume_run_id` resumes a stopped or failed cloud run on a new instance of
@@ -120,9 +121,18 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
 Rented GPUs cost money by the hour, so the ledger is written before the provider is called and survives crashes:
 - `cloud/instances/<id>.json` is created (`launching`, with the unique instance name `folo-<run id>-<nonce>`)
   *before* the launch request. A server that dies in between finds the record on start, asks the provider for
-  instances of that name and terminates them (and drops the record when there are none 5 minutes after the
-  launch: a provider may list a new instance late). The reaper leaves alone
-  the instances of runs a process follows (it holds their `cloud.lock`), so a launch in flight is never touched.
+  instances of that name and terminates them. The reaper leaves alone the instances of runs a process follows (it
+  holds their `cloud.lock`), so a launch in flight is never touched.
+- An instance whose launch was never confirmed (the answer was lost, or a crash came first) has no provider id, and
+  a provider may list a new instance late, so not finding it by its name proves little. For 5 minutes after its
+  record was written it stays `terminating` and is looked for at every pass of the reaper. After that it ends:
+  `terminated`, with `ended` at its `created` and so no cost (nobody saw it), and its connection can be removed.
+  The reaper still looks for it, every 10 minutes, until its own watchdog would have stopped it (the later of the
+  run's `deadline` and its time limit from the launch, plus 15 minutes for its setup to start, the 10 minutes and
+  the few it keeps trying). One that shows up then is terminated like any other (`terminating`, then `terminated`
+  with the time it ran from its launch, a warning in the server's log naming it). A look that cannot be made (the
+  connection was removed, the provider does not answer) is the record's `error`. A record whose `created` cannot
+  be read, or lies in the future (a clock that went back), skips the 5 minutes.
 - Terminating is idempotent and retried: a request that fails leaves the instance `terminating`, and a reaper
   thread retries every 30 s (and on every start) until the provider confirms. Studio and Desktop show such an
   instance with its error, and a run does not wait for more than a minute of that: it finishes with a warning in
@@ -137,7 +147,7 @@ An instance that was gone when FOLO looked again (this machine was off, the serv
 saw. When its provider arms it to terminate itself (`self_terminates`) and its worker had answered, its cost is
 counted to when it should have done so: its time limit, the 10 minutes and the few it keeps trying, after that
 answer (the ledger keeps when). An instance that was still there, or whose worker never answered, is counted to
-the moment its end is confirmed. `Run.cloud.cost_usd` follows the estimate at every phase and once a minute while
+the moment its end is confirmed; one that was never found costs nothing until it is. `Run.cloud.cost_usd` follows the estimate at every phase and once a minute while
 the run trains. The provider's bill is the truth.
 
 ## Providers

@@ -1297,7 +1297,7 @@ mostly shown) for the others.
 - `cloud/connections.json`: the cloud connections with their credentials (created readable by the owner only; never
   served). `cloud/instances/<id>.json`: the ledger of launched instances, one file each, written before the
   provider is asked (docs/CLOUD.md, *Instances are never left behind*); records of instances that ended more than
-  7 days ago are removed. A cloud run's folder also has `cloud.json` (its worker's address and token, the ids it
+  7 days ago are removed (not while the reaper still looks for an instance that was never found). A cloud run's folder also has `cloud.json` (its worker's address and token, the ids it
   has there and its cursors) and `cloud.lock`, which the process that follows the run holds locked (the file
   stays). `cloud/.lock` is held across every change of `connections.json` and of a ledger record, so a server and
   `folo cloud` on one data dir never lose each other's changes.

@@ -1,9 +1,9 @@
 //! Terminating instances, and the reaper: one thread that, at start and then every [`super::Tuning::reaper_every`],
 //! looks at the instances of runs no process follows: it retries the terminations the provider has not confirmed,
-//! terminates the instances that are still alive (also a `launching` record a crash left: looked up by its name,
-//! dropped when the launch created nothing) and prunes old records. A process follows a run while it holds the run's
-//! `cloud.lock` and releases the run's instance itself, so an instance whose launch is in flight (in this process or
-//! another) is never touched.
+//! terminates the instances that are still alive (also a `launching` record a crash left: looked up by its name),
+//! keeps looking for the instances that were never found ([`LISTED_WITHIN`]) and prunes old records. A process
+//! follows a run while it holds the run's `cloud.lock` and releases the run's instance itself, so an instance whose
+//! launch is in flight (in this process or another) is never touched.
 
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -16,20 +16,27 @@ use crate::error::Result;
 use crate::util::{parse_rfc3339, unix_now};
 
 /// A provider may list an instance only a while after the launch request that created it (one whose answer was
-/// lost may still have been in the works): until this long after its record was written, finding no instance by
-/// its name is not taken to mean that the launch created none.
+/// lost may still have been in the works). An instance without a provider id is looked for by its name in two
+/// stages:
+/// - until this long after its record was written, finding none leaves it `terminating`, looked for at every
+///   sweep;
+/// - after that it ends (`terminated`, at no cost: nobody saw it) and stays marked, and the reaper keeps looking
+///   for it every [`super::Tuning::unseen_every`] until its own watchdog would have stopped it. One that shows up
+///   is terminated as any other, and costs what it ran from its launch ([`super::ledger::Ledger::unseen`]).
 pub(crate) const LISTED_WITHIN: Duration = Duration::from_secs(5 * 60);
 
-/// Whether `record` was written less than [`LISTED_WITHIN`] ago.
-fn recent(record: &CloudInstance) -> bool {
-    parse_rfc3339(&record.created).is_none_or(|t| unix_now() - t < LISTED_WITHIN.as_secs_f64())
+/// Whether a record written at `created` was written less than [`LISTED_WITHIN`] before `now`. A time that does not
+/// parse, or lies in the future (a clock that went back), cannot say how long ago that was: not recent, so the
+/// record moves on to the slower watch, which ends.
+fn recent(created: &str, now: f64) -> bool {
+    parse_rfc3339(created).is_some_and(|t| t <= now && now - t < LISTED_WITHIN.as_secs_f64())
 }
 
 impl Core {
     /// Asks the provider once to terminate instance `id`: `terminated` when it confirms (also when the instance was
     /// gone already), else `terminating` with the error, for the reaper to retry. An instance without a provider id
-    /// (its launch is in flight, or a crash interrupted it) is looked up by its name; when there is none (and the
-    /// launch is not [`recent`]), there is nothing to terminate.
+    /// (its launch is in flight, or a crash interrupted it) is looked up by its name; when there is none, see
+    /// [`LISTED_WITHIN`].
     pub(crate) fn terminate_once(&self, id: &str) -> Result<CloudInstance> {
         let record = self.ledger.get(id)?;
         if !record.status.is_alive() {
@@ -40,30 +47,39 @@ impl Core {
                 i.status = CloudInstanceStatus::Terminating;
             }
         })?;
+        let now = unix_now();
+        // `None`: never found.
         let terminated = self.connected(&record.connection_id).map_err(|e| e.body.message).and_then(|c| {
             let values = c.connection.values();
             let refs = match &record.provider_ref {
                 Some(r) => vec![r.clone()],
                 None => c.provider.find(&values, &record.name).map_err(|e| e.message)?,
             };
-            if refs.is_empty() && recent(&record) {
-                return Err(format!(
-                    "{} lists no instance named {} yet; looking again",
-                    c.provider.info().name,
-                    record.name
-                ));
+            if refs.is_empty() && record.provider_ref.is_none() {
+                if recent(&record.created, now) {
+                    return Err(format!(
+                        "{} lists no instance named {} yet; looking again",
+                        c.provider.info().name,
+                        record.name
+                    ));
+                }
+                return Ok(None);
             }
             // Whether the provider still had it: an instance that was gone before this ended at a time nobody
             // saw, one that is terminated here ends now (the ledger tells them apart for its cost).
             let was_gone =
                 refs.iter().all(|r| matches!(c.provider.state(&values, r), Ok(InstanceState::Gone)));
             refs.iter().try_for_each(|r| c.provider.terminate(&values, r)).map_err(|e| e.message)?;
-            Ok(was_gone)
+            Ok(Some(was_gone))
         });
         match terminated {
-            Ok(was_gone) => {
+            Ok(Some(was_gone)) => {
                 tracing::info!(instance = %id, "terminated the cloud instance");
                 self.ledger.terminated(id, was_gone)
+            }
+            Ok(None) => {
+                tracing::info!(instance = %id, name = %record.name, "the provider never listed the instance");
+                self.ledger.unseen(id, now)
             }
             Err(message) => {
                 tracing::warn!(instance = %id, "terminating the cloud instance failed (retried): {message}");
@@ -90,6 +106,7 @@ impl Core {
     pub(crate) fn sweep(&self) {
         for record in self.ledger.list() {
             if !record.status.is_alive() {
+                self.look_for_unseen(&record);
                 continue;
             }
             // Followed: its run's process releases it. (A run folder that is gone is followed by nobody.)
@@ -103,28 +120,53 @@ impl Core {
                 }
                 Ok(_) => {}
             }
-            if record.status != CloudInstanceStatus::Terminating
-                && record.provider_ref.is_none()
-                && !self.launched(&record)
-            {
-                tracing::info!(instance = %record.id, "dropped the record of a launch that created nothing");
-                self.ledger.remove(&record.id);
-                continue;
-            }
             if let Err(e) = self.terminate_once(&record.id) {
                 tracing::warn!(instance = %record.id, "terminating it: {}", e.body.message);
             }
         }
     }
 
-    /// Whether the interrupted launch of `record` created an instance (true when the provider cannot say yet, so the
-    /// record stays and is looked at again).
-    fn launched(&self, record: &CloudInstance) -> bool {
-        if recent(record) {
-            return true;
+    /// The second stage of [`LISTED_WITHIN`] for `record`, when it is one whose instance was never found and it is
+    /// time to look again: an instance that shows up is terminated through the normal path; a look that fails
+    /// (the connection is gone, the provider does not answer) is the record's error.
+    fn look_for_unseen(&self, record: &CloudInstance) {
+        let id = &record.id;
+        match self.ledger.due(id, unix_now(), self.tuning.unseen_every) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(e) => {
+                tracing::warn!(instance = %id, "looking for it: {}", e.body.message);
+                return;
+            }
         }
-        let Ok(c) = self.connected(&record.connection_id) else { return true };
-        !matches!(c.provider.find(&c.connection.values(), &record.name), Ok(refs) if refs.is_empty())
+        let found = self
+            .connected(&record.connection_id)
+            .map_err(|e| e.body.message)
+            .and_then(|c| c.provider.find(&c.connection.values(), &record.name).map_err(|e| e.message));
+        let looked = match found {
+            Ok(refs) if refs.is_empty() => self.ledger.update(id, |i| i.error = None),
+            Ok(refs) => {
+                tracing::warn!(
+                    instance = %id,
+                    "the provider lists the instance {} ({}) after all, though it never confirmed its launch: \
+                     terminating it",
+                    record.name,
+                    refs.join(", ")
+                );
+                // One is its provider id from now on; several (a provider's retries) are found by the name again.
+                let one = (refs.len() == 1).then(|| refs[0].clone());
+                self.ledger.reopen(id, one).and_then(|_| self.terminate_once(id))
+            }
+            Err(message) => self.ledger.update(id, |i| {
+                i.error = Some(format!(
+                    "looking for the instance, which its provider never listed: {message}; check the provider's \
+                     console"
+                ))
+            }),
+        };
+        if let Err(e) = looked {
+            tracing::warn!(instance = %id, "looking for it: {}", e.body.message);
+        }
     }
 }
 
@@ -138,4 +180,20 @@ pub(crate) fn spawn(core: std::sync::Arc<Core>) -> std::io::Result<JoinHandle<()
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::util::rfc3339;
+
+    #[test]
+    fn recent_is_bounded_whatever_the_record_says() {
+        let now = 1_800_000_000.0;
+        assert!(recent(&rfc3339(now - 240.0), now), "4 minutes");
+        assert!(!recent(&rfc3339(now - 360.0), now), "6 minutes");
+        assert!(!recent("yesterday", now), "a time that does not parse is not recent for ever");
+        assert!(!recent(&rfc3339(now + 60.0), now), "nor is one in the future");
+        assert!(recent(&rfc3339(now), now));
+    }
 }

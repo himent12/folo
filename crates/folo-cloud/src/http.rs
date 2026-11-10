@@ -3,7 +3,9 @@
 //! answer, whatever its status, is a [`Reply`] for the provider to map.
 //!
 //! Keys travel only in the `Authorization` header, never in a URL, so a transport error (which may quote the URL)
-//! cannot carry one, and a key a provider echoes in a body is blanked out before anything reads the body.
+//! cannot carry one, and a key a provider echoes in a body is blanked out before anything reads the body, and out
+//! of every message made from an answer however the body spells it ([`Reply::scrub`]; so is any other credential
+//! the request carried, [`Reply::without`]).
 
 use std::time::Duration;
 
@@ -40,11 +42,26 @@ pub(crate) struct Api {
 }
 
 /// An answer: its status and its body (with the key blanked out).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
     service: &'static str,
+    /// The credentials the request carried: the key, and what [`Reply::without`] adds. A body can spell them in
+    /// ways the blanking of its bytes does not see (JSON escapes), so text read out of it goes through
+    /// [`Reply::scrub`] before it becomes a message.
+    secrets: Vec<String>,
+}
+
+// Not derived: the secrets must not reach a log through `{:?}`, and the body may spell them.
+impl std::fmt::Debug for Reply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reply")
+            .field("status", &self.status)
+            .field("body_bytes", &self.body.len())
+            .field("service", &self.service)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Reply {
@@ -53,17 +70,31 @@ impl Reply {
         (200..300).contains(&self.status)
     }
 
-    /// The answer with `secret` (another credential the request carried, e.g. a worker's token) blanked out of its
-    /// body as the key is.
+    /// The answer of a request that also carried `secret` (another credential, e.g. a worker's token): no message
+    /// made from the answer repeats it ([`Reply::scrub`]). The body itself is left as it came, so an answer that
+    /// is not an error is read unchanged.
     pub fn without(mut self, secret: &str) -> Reply {
-        self.body = redact(self.body, secret);
+        self.secrets.push(secret.to_string());
         self
+    }
+
+    /// `text`, read out of the body (decoded), with every credential the request carried blanked out.
+    pub fn scrub(&self, text: &str) -> String {
+        let blank = std::str::from_utf8(REDACTED).expect("ASCII");
+        self.secrets
+            .iter()
+            .filter(|s| !s.is_empty())
+            .fold(text.to_string(), |t, s| t.replace(s.as_str(), blank))
     }
 
     /// The body, parsed; [`ErrorKind::Unavailable`] when it is not what the provider documents.
     pub fn json<T: DeserializeOwned>(&self) -> Result<T> {
         serde_json::from_slice(&self.body).map_err(|e| {
-            Error::new(ErrorKind::Unavailable, format!("{} answered something unexpected: {e}", self.service))
+            let what = self.scrub(&e.to_string());
+            Error::new(
+                ErrorKind::Unavailable,
+                format!("{} answered something unexpected: {what}", self.service),
+            )
         })
     }
 }
@@ -118,7 +149,8 @@ impl Api {
                 .limit(MAX_BODY)
                 .read_to_vec()
                 .map_err(|e| self.unavailable(e))?;
-            return Ok(Reply { status, body: redact(body, key), service: self.service });
+            let secrets = vec![key.to_string()];
+            return Ok(Reply { status, body: redact(body, key), service: self.service, secrets });
         }
     }
 
