@@ -21,6 +21,8 @@ produces plain buffers that the trainer wraps in tensors.
   Roboflow-style `../train/images` paths are resolved against the root too. `names` is a list or an `{id: name}` map;
   `nc` must agree with it when both are given.
 - Image list lines: absolute, `./x` (relative to the list file), or relative to the root.
+- Text files (`data.yaml`, image lists, `classes.txt`, label files) may start with a UTF-8 byte order mark, which
+  is ignored, and may use CRLF line ends.
 - Label path: the last `images` folder becomes `labels`, the extension `.txt` (`ds/images/train/a.jpg` →
   `ds/labels/train/a.txt`). A missing label file means a background image.
 - Label lines: `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding

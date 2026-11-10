@@ -434,6 +434,7 @@ type LineIssue = (CheckKind, usize, String, String);
 
 /// Line-level issues of YOLO label text, and the number of distinct usable boxes.
 fn lint_labels(text: &str, nc: Option<usize>) -> (Vec<LineIssue>, usize) {
+    let text = crate::dataset::labels::strip_bom(text);
     let mut out = Vec::new();
     let mut vals = Vec::with_capacity(16);
     let mut kept: Vec<(crate::BBox, usize)> = Vec::new();
