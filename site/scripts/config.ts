@@ -42,6 +42,7 @@ export const NAV: NavGroup[] = [
     pages: [
       { src: 'docs/LABELING.md', label: 'Labeling with agents' },
       { src: 'docs/CLOUD.md', label: 'Cloud compute' },
+      { src: 'docs/BENCH.md', label: 'Vision benchmarks' },
       { src: 'examples/shapes/README.md', label: 'Shapes: the convergence gate' },
       { src: 'examples/r6/README.md', label: 'R6: a real dataset' },
       { src: 'examples/coco/README.md', label: 'COCO: pretraining' },
@@ -65,7 +66,7 @@ export const NAV: NavGroup[] = [
     title: 'Project',
     pages: [
       { src: 'docs/ARCHITECTURE.md', label: 'Architecture' },
-      { src: 'docs/BENCHMARKS.md', label: 'Benchmarks' },
+      { src: 'docs/BENCHMARKS.md', label: 'Speed benchmarks' },
       { src: 'docs/ROADMAP.md', label: 'Roadmap' },
       { src: 'docs/PROCESS.md', label: 'Process' },
       { src: 'docs/RELEASE.md', label: 'Releasing' },
