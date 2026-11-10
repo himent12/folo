@@ -347,6 +347,22 @@ async fn models_upload_into_the_models_folder() {
     assert!(staging(&home).is_empty());
 }
 
+/// An upload's name is any text, a long one too: the stream still becomes a file in the models folder.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_with_a_long_name_uploads() {
+    let t = TestDir::new("uploads-model-long");
+    let home = t.join("home");
+    let bytes = model_bytes(&t);
+    let app = app(open(&home));
+    let u = start(&app, json!({ "kind": "model", "name": "pets".repeat(80) })).await;
+    send_parts(&app, &u.id, &bytes, 32 << 20, 0).await;
+    let done: Uploaded =
+        ok(&app, bare("POST", &format!("/api/uploads/{}/complete", u.id)), StatusCode::CREATED).await;
+    let m = done.model.unwrap();
+    assert!(m.name.starts_with("petspets") && m.name.len() < 255, "{}", m.name);
+    assert!(staging(&home).is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn bad_requests_expiry_and_leftovers() {
     let t = TestDir::new("uploads-misc");

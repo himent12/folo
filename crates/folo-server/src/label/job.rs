@@ -392,7 +392,7 @@ impl Drop for Exporting {
 }
 
 /// A file name for an image called `name` that no image of the job has yet: `name` without folders, reduced to
-/// letters, digits, `.`, `_` and `-`, with `-2`, `-3`, ... on its stem while that stem is in `taken` (lower-cased
+/// letters, digits, `.`, `_` and `-` (a stem of at most 100 bytes), with `-2`, `-3`, ... on its stem while that stem is in `taken` (lower-cased
 /// stems; the new one is added). Stems are unique, not just names, because a dataset's label files are named by
 /// stem (`a.jpg` and `a.png` would share `a.txt`), and without case, because Windows folders are.
 pub fn unique_file_name(name: &str, taken: &mut HashSet<String>) -> String {
@@ -405,7 +405,11 @@ pub fn unique_file_name(name: &str, taken: &mut HashSet<String>) -> String {
         .unwrap_or_default()
         .chars()
         .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
-        .take(100)
+        // At most 100 bytes: Linux and macOS file names hold 255 bytes, not characters.
+        .scan(0, |bytes, c| {
+            *bytes += c.len_utf8();
+            (*bytes <= 100).then_some(c)
+        })
         .collect();
     let stem = match stem.trim_matches('.') {
         "" => "image",
@@ -440,6 +444,20 @@ mod tests {
         assert_eq!(unique_file_name("päron.webp", &mut taken), "päron.webp");
         assert_eq!(stem_key("Cat_1-2.png"), "cat_1-2");
         assert!(taken.contains("cat_1") && taken.contains("cat_1-2") && taken.contains("cat_1-3"));
+    }
+
+    /// File names hold 255 bytes on Linux and macOS: a long name in a script of 3-byte characters still fits.
+    #[test]
+    fn long_names_stay_file_names() {
+        let mut taken = HashSet::new();
+        let name = unique_file_name(&format!("{}.jpg", "猫".repeat(300)), &mut taken);
+        assert!(
+            name.starts_with('猫') && name.ends_with(".jpg") && name.len() <= 255,
+            "{} bytes",
+            name.len()
+        );
+        let again = unique_file_name(&format!("{}.jpg", "猫".repeat(300)), &mut taken);
+        assert!(again.ends_with("-2.jpg") && again.len() <= 255, "{again}");
     }
 
     fn state_of(file: JobFile) -> State {
