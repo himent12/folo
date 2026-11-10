@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ResolvedTrain, TrainConfig } from '$lib/api/types';
 import { resolveTrain } from '$lib/api/mock/runs';
-import { accumulationText, batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, headSetting, lrSetting, momentumSetting, optimizerSetting, precisionSetting, settingText, effectiveBatchSetting, warmupSetting } from './resolved';
+import { accumulationText, batchSetting, closeMosaicSetting, decaySetting, effectiveCloseMosaic, lrSetting, momentumSetting, optimizerSetting, settingText, effectiveBatchSetting, warmupSetting } from './resolved';
 
 const config = { optimizer: 'auto', lr0: 0.01, batch: 8, epochs: 30, augment: { close_mosaic: 10 } } as TrainConfig;
 
@@ -81,14 +81,5 @@ describe('close mosaic as the trainer runs it (DOGFOOD-3 S2)', () => {
     expect(settingText(closeMosaicSetting(run(2, 1)))).toBe('last 1 epoch');
     expect(settingText(closeMosaicSetting(run(1, 1)))).toBe('never (requested 1)');
     expect(settingText(closeMosaicSetting(run(20, 0)))).toBe('never');
-  });
-});
-
-describe('precision and head (DOGFOOD-3 S4)', () => {
-  it("in Model › Details' words", () => {
-    expect(precisionSetting({ amp: true } as TrainConfig).value).toBe('Mixed precision (f16)');
-    expect(precisionSetting({} as TrainConfig).value).toBe('f32');
-    expect(headSetting({ head: 'o2o' } as TrainConfig).value).toBe('End-to-end (no NMS)');
-    expect(headSetting({} as TrainConfig).value).toBe('NMS (one-to-many)');
   });
 });

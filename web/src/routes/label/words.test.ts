@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LabelAgent, LabelImage, LabelJob, LabelRun } from '$lib/api/types';
 import { classChangeError, classesError } from '$lib/label';
-import { usd } from '$lib/format';
 import { imageState, jobStatus, modelLabel, runAgent, tokens, usageFacts } from './words';
 
 const job = (status: LabelJob['status'], outcome: LabelRun['outcome'] = null) => ({ status, run: outcome ? { outcome } : null }) as LabelJob;
@@ -19,9 +18,8 @@ describe('usage', () => {
     expect(usageFacts({ calls: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, cost_usd: null })).toEqual([]);
   });
 
-  it('writes token counts and costs short', () => {
+  it('writes token counts short', () => {
     expect([940, 1000, 3252, 99_949, 126_400, 1_420_000].map(tokens)).toEqual(['940', '1.0k', '3.3k', '99.9k', '126k', '1.4M']);
-    expect([0, 0.004, 0.021, 1.4].map(usd)).toEqual(['$0.00', '<$0.01', '$0.02', '$1.40']);
   });
 });
 

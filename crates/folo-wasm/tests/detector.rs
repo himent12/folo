@@ -13,8 +13,13 @@ use folo_wasm::detector::rgba_to_image;
 use folo_wasm::{Backend, BackendChoice, DetectOptions, Detector, LoadOptions};
 
 /// A random folo-n with its class-output biases zeroed: the trained priors (MODEL.md §6.5) put every score near
-/// 1e-4, and the tests need detections.
+/// 1e-4, and the tests need detections. Made once.
 fn model_bytes() -> Vec<u8> {
+    static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    BYTES.get_or_init(make_model).clone()
+}
+
+fn make_model() -> Vec<u8> {
     let mut m = FoloModel::with_rng(ModelConfig::new("n", 3).unwrap(), &mut Rng::seed(7)).unwrap();
     m.set_classes(vec!["circle".into(), "square".into(), "triangle".into()]).unwrap();
     {

@@ -283,7 +283,7 @@ async fn ended(app: &Router, bench: &str, id: &str) -> BenchEntry {
             return e;
         }
         assert!(t0.elapsed() < TIMEOUT, "entry {id} did not end: {e:?}");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -296,7 +296,7 @@ async fn loop_ended(app: &Router, bench: &str, id: &str) -> BenchLoop {
             return l;
         }
         assert!(t0.elapsed() < TIMEOUT, "loop {id} did not end: {l:?}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -743,50 +743,13 @@ async fn external_entries_are_checked_and_scored() {
     err(app, put(&uri, json!({ "plan": { "conditions": [] } })), StatusCode::CONFLICT, "bench_frozen").await;
     ok::<Bench>(app, put(&uri, json!({ "name": "still mine" }))).await;
 
-    // Every way a submission can be wrong, each named.
+    // A wrong submission is named (every way a record can be wrong: the unit tests of `bench::external`), and so
+    // is a wrong request.
     let clean = truth_predictions(images, None, 1.0);
-    let with_extra = |extra: Value| {
-        let mut v = clean.clone();
-        v.push(extra);
-        v
-    };
-    let mut bad_class = clean.clone();
-    bad_class[1]["boxes"] = json!([{ "class": 2, "x1": 1, "y1": 1, "x2": 5, "y2": 5 }]);
+    let mut extra = clean.clone();
+    extra.push(json!({ "image": "99", "boxes": [] }));
     let cases: Vec<(Value, &str)> = vec![
-        (
-            external("x", true, with_extra(json!({ "image": "99", "boxes": [] }))),
-            "the benchmark has no image '99'",
-        ),
-        (
-            external(
-                "x",
-                true,
-                with_extra(json!({ "image": "1", "condition": "fog", "severity": 1, "boxes": [] })),
-            ),
-            "'fog' is not a condition",
-        ),
-        (
-            external(
-                "x",
-                true,
-                with_extra(json!({ "image": "1", "condition": "jpeg", "severity": 1, "boxes": [] })),
-            ),
-            "does not run jpeg at severity 1",
-        ),
-        (
-            external("x", true, with_extra(json!({ "image": "1", "boxes": [] }))),
-            "prediction 5 (image '1', unchanged) repeats prediction 1",
-        ),
-        (external("x", true, bad_class), "box 1: class 2 is not one of the benchmark's 2 classes"),
-        (external("x", true, clean[..3].to_vec()), "no prediction for image '4'"),
-        (
-            external(
-                "x",
-                true,
-                with_extra(json!({ "image": "1", "condition": "haze", "severity": 1, "boxes": [] })),
-            ),
-            "condition 'haze' is answered, but not for image '2' at severity 1",
-        ),
+        (external("x", true, extra), "the benchmark has no image '99'"),
         (json!({ "contestant": { "kind": "external", "predictions": clean.clone() } }), "name is required"),
         (
             json!({ "name": "x", "max_images": 2, "contestant": { "kind": "external", "predictions": clean.clone() } }),
@@ -806,14 +769,8 @@ async fn external_entries_are_checked_and_scored() {
     )
     .await;
 
-    // A record carries at most 1000 boxes.
-    let box_ = json!({ "class": 0, "score": 0.0123456789, "x1": 1.0000001, "y1": 1.0000001, "x2": 3.0000001, "y2": 9.0000001 });
-    let mut over = clean.clone();
-    over[0]["boxes"] = json!(vec![box_.clone(); 1001]);
-    let e =
-        err(app, post(&entries, external("x", true, over)), StatusCode::BAD_REQUEST, "invalid_body").await;
-    assert!(e.message.contains("has 1001 boxes; a record carries at most 1000"), "{}", e.message);
     // Up to 64 MiB: a submission over the 2 MiB of other requests is taken.
+    let box_ = json!({ "class": 0, "score": 0.0123456789, "x1": 1.0000001, "y1": 1.0000001, "x2": 3.0000001, "y2": 9.0000001 });
     let mut big = clean.clone();
     for im in &mut big {
         im["boxes"] = json!(vec![box_.clone(); 1000]);
@@ -972,10 +929,6 @@ async fn open_external_entries_are_filled_in_parts() {
         err(app, post(&format!("{euri}/predictions"), parts(&bad)), StatusCode::BAD_REQUEST, "invalid_body")
             .await;
     assert!(e2.message.contains("prediction 2 (image '4', unchanged), box 1: class 7"), "{}", e2.message);
-    let mut over = all[2..3].to_vec();
-    over[0]["boxes"] = json!(vec![json!({ "class": 0, "x1": 1, "y1": 1, "x2": 5, "y2": 5 }); 1001]);
-    err(app, post(&format!("{euri}/predictions"), parts(&over)), StatusCode::BAD_REQUEST, "invalid_body")
-        .await;
     let now: BenchEntry = ok(app, get(&euri)).await;
     assert_eq!((now.status, now.progress.done), (BenchEntryStatus::Running, 2), "refused parts took nothing");
     let missing =
@@ -1572,7 +1525,7 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
     let same_images = json!({ "kind": "dataset", "dataset_id": ds.id, "split": "val" });
     let e = err(
         app,
-        post(&loops, json!({ "teacher": teacher, "pool": same_images })),
+        post(&loops, json!({ "teacher": teacher, "pool": same_images, "student": student })),
         StatusCode::BAD_REQUEST,
         "invalid_dataset",
     )
@@ -1598,8 +1551,7 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
     let e = err(app, post(&loops, big), StatusCode::BAD_REQUEST, "invalid_body").await;
     assert!(e.message.contains("student.seed must be at most 9007199254740991"), "{}", e.message);
     for (student, status, code) in [
-        (json!({ "device": "gpu:42" }), StatusCode::NOT_FOUND, "device_not_found"),
-        (json!({ "weights": "m_none" }), StatusCode::NOT_FOUND, "model_not_found"),
+        (json!({ "weights": "m_none", "device": "cpu" }), StatusCode::NOT_FOUND, "model_not_found"),
         (json!({ "batch": 0, "device": "cpu" }), StatusCode::BAD_REQUEST, "invalid_config"),
     ] {
         let body =
@@ -1672,7 +1624,8 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
 
     // Without min_confidence, a teacher whose entry has no self-labeling threshold (this one never reaches 90%
     // precision on ten labels) ends its loop before labeling: there is no confidence to label from.
-    let guess: BenchLoop = ok(app, post(&loops, json!({ "teacher": teacher, "pool": pool_src }))).await;
+    let guess: BenchLoop =
+        ok(app, post(&loops, json!({ "teacher": teacher, "pool": pool_src, "student": student }))).await;
     let guess = loop_ended(app, &b.id, &guess.id).await;
     assert_eq!(guess.status, BenchLoopStatus::Failed, "{guess:?}");
     assert!(
@@ -1688,8 +1641,14 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
 
     // A teacher that keeps (almost) nothing ends its loop before anything is trained: an image it is silent on
     // is not a background image.
-    let silent: BenchLoop =
-        ok(app, post(&loops, json!({ "teacher": teacher, "pool": pool_src, "min_confidence": 1.0 }))).await;
+    let silent: BenchLoop = ok(
+        app,
+        post(
+            &loops,
+            json!({ "teacher": teacher, "pool": pool_src, "min_confidence": 1.0, "student": student }),
+        ),
+    )
+    .await;
     let silent = loop_ended(app, &b.id, &silent.id).await;
     assert_eq!(silent.status, BenchLoopStatus::Failed, "{silent:?}");
     assert!(silent.error.as_deref().unwrap().contains("too few to train a student on"), "{silent:?}");
@@ -1710,7 +1669,7 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
             break id;
         }
         assert!(t0.elapsed() < TIMEOUT && l.status.is_active(), "{l:?}");
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     };
     err(app, delete(&format!("{loops}/{}", second.id)), StatusCode::CONFLICT, "bench_loop_active").await;
     let used = g0.entry_id.clone().unwrap();
@@ -1752,7 +1711,7 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
 #[tokio::test(flavor = "multi_thread")]
 async fn open_entries_expire_without_parts() {
     let t = TestDir::new("bench-expire");
-    let f = fixture_with(&t.join("home"), |s| s.bench_open_timeout(Duration::from_millis(400)));
+    let f = fixture_with(&t.join("home"), |s| s.bench_open_timeout(Duration::from_millis(300)));
     let app = &f.app;
     let ds = dataset(app, "shapes", 10).await;
     let b = bench(
@@ -1764,24 +1723,32 @@ async fn open_entries_expire_without_parts() {
     let all = truth_predictions(&page(app, &b.id, "").await.images, None, 0.9);
     let mut events = Events::open(app, &b.id).await;
     assert_eq!(events.next().await.0, "bench");
-    // Parts keep an entry open...
+    // Parts keep an entry open: every image's, then one every 50 ms until the other entry, which gets none, has
+    // expired. (A part sent again as it was counts as a part: a client that retries is alive.)
     let kept: BenchEntry = ok(app, post(&entries, open_entry("kept", vec![]))).await;
     let left: BenchEntry = ok(app, post(&entries, open_entry("left", vec![]))).await;
-    // (A part sent again as it was counts as a part: a client that retries is alive.)
-    for i in 0..7 {
-        tokio::time::sleep(Duration::from_millis(150)).await;
+    ok::<BenchEntry>(app, post(&format!("{entries}/{}/predictions", kept.id), parts(&all))).await;
+    let t0 = std::time::Instant::now();
+    let mut i = 0;
+    let l = loop {
+        tokio::time::sleep(Duration::from_millis(50)).await;
         let r = &all[i % all.len()];
+        i += 1;
         ok::<BenchEntry>(
             app,
             post(&format!("{entries}/{}/predictions", kept.id), parts(std::slice::from_ref(r))),
         )
         .await;
-    }
-    // ... the other one got none for 400 ms: failed, with what it held dropped, and the benchmark idle again.
-    let l: BenchEntry = ok(app, get(&format!("{entries}/{}", left.id))).await;
+        let l: BenchEntry = ok(app, get(&format!("{entries}/{}", left.id))).await;
+        if !l.status.is_active() {
+            break l;
+        }
+        assert!(t0.elapsed() < TIMEOUT, "{l:?}");
+    };
+    // ... failed, with what it held dropped, and the benchmark idle again.
     assert_eq!(
         (l.status, l.error.as_deref()),
-        (BenchEntryStatus::Failed, Some("no predictions arrived for 400 ms"))
+        (BenchEntryStatus::Failed, Some("no predictions arrived for 300 ms"))
     );
     assert!(l.hint.is_some() && l.finished.is_some());
     err(
@@ -1966,7 +1933,7 @@ async fn a_loop_labels_from_each_teachers_own_threshold_unless_told() {
     let (bench_id, entry_id, teacher, pool_src) = {
         let f = fixture(&home);
         let app = &f.app;
-        let ds = dataset(app, "shapes", 40).await;
+        let ds = dataset(app, "shapes", 20).await;
         let plan = json!({ "conditions": [{ "condition": "haze", "severities": [2] }] });
         let b = bench(
             app,

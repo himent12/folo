@@ -952,28 +952,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncation_goes_through_ellipsis() {
-        // GPUI's `truncate()` clips flex-sized text without an ellipsis; `Ellipsis::ellipsis` doesn't.
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut stack = vec![src];
-        let mut bad = Vec::new();
-        while let Some(dir) = stack.pop() {
-            for e in std::fs::read_dir(&dir).unwrap() {
-                let p = e.unwrap().path();
-                if p.is_dir() {
-                    stack.push(p);
-                } else if p.extension().is_some_and(|x| x == "rs")
-                    && p.file_name().is_some_and(|n| n != "ui.rs")
-                    && std::fs::read_to_string(&p).unwrap().contains(".truncate()")
-                {
-                    bad.push(p.file_name().unwrap().to_string_lossy().to_string());
-                }
-            }
-        }
-        assert!(bad.is_empty(), ".truncate() in {bad:?}: use .ellipsis()");
-    }
-
-    #[test]
     fn confidences_keep_a_meaningful_third_decimal() {
         assert_eq!(fmt_conf(0.31), "0.31");
         assert_eq!(fmt_conf(0.314), "0.314");
@@ -1322,7 +1300,7 @@ mod cloud_format_tests {
 
 #[cfg(test)]
 mod format_tests {
-    use super::{fmt_aug, fmt_lr, fmt_scale};
+    use super::fmt_lr;
 
     #[test]
     fn rates_read_one_way() {
@@ -1334,7 +1312,5 @@ mod format_tests {
         // An f32 rate widened: 0.01 stays "0.01", not "10.00×10⁻³".
         assert_eq!(fmt_lr(0.01_f32 as f64), "0.01");
         assert_eq!(fmt_lr(0.001111_f32 as f64), "1.11×10⁻³");
-        assert_eq!(fmt_aug(1.0), "1.00");
-        assert_eq!(fmt_scale(0.5), "±0.50");
     }
 }

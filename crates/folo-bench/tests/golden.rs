@@ -67,14 +67,10 @@ const JPEGS: [u64; 2] = [0x3d58ec8c7fc715a4, 0x3efdde2aef8dabec];
 const SCORE_BITS: u32 = 0x4240ace5; // 48.168842
 
 #[test]
-fn engine_version_is_one() {
-    // Bumped together with the golden values below: a bump without new values (or the other way round) is a
-    // mistake this test points at.
-    assert_eq!(ENGINE_VERSION, 1, "{RE_BLESS}");
-}
-
-#[test]
 fn every_condition_has_its_golden_pixels() {
+    // The version is bumped together with the golden values: a bump without new values (or the other way round)
+    // is a mistake this points at.
+    assert_eq!(ENGINE_VERSION, 1, "{RE_BLESS}");
     let img = scene();
     let got: Vec<u64> = Condition::ALL
         .iter()

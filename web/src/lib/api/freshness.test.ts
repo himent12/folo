@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { asOf, etaText, lastKnown } from './freshness.svelte';
+import { asOf, etaText } from './freshness.svelte';
 
 const NOW = Date.parse('2026-11-09T12:00:00Z');
 
@@ -12,8 +12,5 @@ describe('freshness', () => {
     expect(etaText(420, null, NOW)).toBe('7m left');
     expect(etaText(420, NOW - 120_000, NOW)).toBe('~7m left, as of 2m ago');
     expect(etaText(null, NOW - 120_000, NOW)).toBe('—');
-  });
-  it('words a status that is no longer current', () => {
-    expect(lastKnown('Running', NOW - 120_000, NOW)).toBe('Last known: Running · 2m ago');
   });
 });

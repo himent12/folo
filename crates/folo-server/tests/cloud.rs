@@ -100,6 +100,13 @@ struct Gates {
     down: AtomicBool,
 }
 
+async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
+    if gone.load(Ordering::SeqCst) {
+        return (StatusCode::BAD_GATEWAY, "proxy: the instance is gone").into_response();
+    }
+    next.run(req).await
+}
+
 async fn gate(State(g): State<Arc<Gates>>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if g.down.load(Ordering::SeqCst) {
@@ -123,6 +130,9 @@ struct Instance {
     store: Arc<RealStore>,
     url: String,
     live: Option<Live>,
+    /// Set when the instance stops: its server answers `502`, as a provider's proxy does for an instance that is
+    /// gone. (A closed port would do too, but Windows takes 2 s to refuse each connection to one.)
+    gone: Arc<AtomicBool>,
     /// `state` answers `starting` this many more times.
     starting: u32,
 }
@@ -134,6 +144,8 @@ struct Script {
     held: HashSet<Call>,
     instances: BTreeMap<String, Instance>,
     launched: u32,
+    /// The servers of stopped instances, until the test cloud goes.
+    stopped: Vec<Live>,
 }
 
 /// The test provider (see the module docs).
@@ -236,14 +248,17 @@ impl TestCloud {
         }
     }
 
-    /// Shuts instance `r`'s worker down (its server, then its store): terminated, or died.
+    /// Shuts instance `r`'s worker down (its server answers `502` from now on, its store stops): terminated, or
+    /// died.
     fn stop_instance(&self, r: &str) {
-        let (live, store) = {
+        let store = {
             let mut s = self.script.lock().unwrap();
             let Some(i) = s.instances.get_mut(r) else { return };
-            (i.live.take(), i.store.clone())
+            i.gone.store(true, Ordering::SeqCst);
+            let (live, store) = (i.live.take(), i.store.clone());
+            s.stopped.extend(live);
+            store
         };
-        drop(live);
         store.shutdown();
     }
 
@@ -307,15 +322,18 @@ impl Provider for TestCloud {
         let store = Arc::new(RealStore::open(self.root.join(&r)).recheck_every(Duration::ZERO).device("cpu"));
         store.hold_runs_after_epochs(self.hold_epochs.load(Ordering::SeqCst));
         let options = Options { token: Token::new(spec.token.clone()), ..Options::default() };
+        let gone_flag = Arc::new(AtomicBool::new(false));
         let router = Server::new(store.clone(), options)
             .router()
-            .layer(axum::middleware::from_fn_with_state(self.gates.clone(), gate));
+            .layer(axum::middleware::from_fn_with_state(self.gates.clone(), gate))
+            .layer(axum::middleware::from_fn_with_state(gone_flag.clone(), gone));
         let live = Live::start(router);
         let instance = Instance {
             name: spec.name.clone(),
             store,
             url: live.url.clone(),
             live: Some(live),
+            gone: gone_flag,
             starting: self.starting.load(Ordering::SeqCst),
         };
         s.instances.insert(r.clone(), instance);
@@ -379,11 +397,11 @@ fn plane(home: &Path, cloud: &Arc<TestCloud>, tuning: Tuning) -> Arc<RealStore> 
     Arc::new(RealStore::open_with_cloud(home.to_path_buf(), providers, tuning).recheck_every(Duration::ZERO))
 }
 
-/// A 12-image synthetic dataset (64 px, two classes).
+/// A 5-image synthetic dataset (64 px, two classes): 4 training images, 1 to validate on.
 fn dataset(store: &RealStore) -> Dataset {
     let req = SyntheticDataset {
         name: "tiny".into(),
-        images: 12,
+        images: 5,
         classes: vec!["circle".into(), "square".into()],
         imgsz: 64,
         seed: 5,
@@ -397,10 +415,10 @@ fn connect(store: &RealStore) -> CloudConnection {
     store.connect_cloud(ConnectCloud { provider: "test".into(), name: String::new(), values }).unwrap()
 }
 
-/// A tiny run of `epochs` on `connection`'s CPU offer.
+/// A tiny run of `epochs` on `connection`'s CPU offer (2 steps of 2 images an epoch).
 fn cloud_run(ds: &Dataset, connection: &str, epochs: u32) -> TrainConfig {
     serde_json::from_value(json!({
-        "dataset_id": ds.id, "epochs": epochs, "batch": 4, "imgsz": 64, "augment": { "close_mosaic": 1 },
+        "dataset_id": ds.id, "epochs": epochs, "batch": 2, "imgsz": 64, "augment": { "close_mosaic": 1 },
         "compute": { "connection_id": connection, "offer_id": "cpu@test" }
     }))
     .unwrap()
@@ -414,7 +432,7 @@ fn until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
             return v;
         }
         assert!(t0.elapsed() < TIMEOUT, "timed out waiting for {what}");
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -520,7 +538,7 @@ fn a_cloud_run_trains_on_an_instance_mirrors_it_and_releases_it() {
     let all = MetricsQuery::default();
     let (local, remote) =
         (store.run_metrics(&run.id, &all).unwrap(), worker.run_metrics(&w.id, &all).unwrap());
-    assert_eq!((steps(&local), epochs(&local)), ((1..=6).collect::<Vec<_>>(), vec![1, 2]));
+    assert_eq!((steps(&local), epochs(&local)), ((1..=4).collect::<Vec<_>>(), vec![1, 2]));
     assert_eq!(local, remote);
     let here = log_of(&store, &run.id);
     let mut rest = here.iter();
@@ -577,7 +595,7 @@ fn a_cloud_run_trains_on_an_instance_mirrors_it_and_releases_it() {
 }
 
 #[test]
-fn a_stopped_run_resumes_on_a_new_instance_and_then_here() {
+fn a_lost_or_stopped_run_resumes_on_a_new_instance_and_then_here() {
     no_gpu();
     let t = TestDir::new("cloud-resume");
     let cloud = TestCloud::new(&t.join("workers"));
@@ -586,18 +604,17 @@ fn a_stopped_run_resumes_on_a_new_instance_and_then_here() {
     let conn = connect(&store);
     cloud.hold_epochs(true);
     let run = store.create_run(cloud_run(&ds, &conn.id, 3)).unwrap();
-    until("epoch 1 here", || run_of(&store, &run.id).best);
-    store.stop_run(&run.id).unwrap();
-    let stopped = finished(&store, &run.id);
-    assert_eq!(
-        (stopped.status, stopped.epoch, phase(&stopped)),
-        (RunStatus::Stopped, 1, CloudPhase::Released)
-    );
+
+    // The worker dies after its first checkpoint was copied: the run is lost, not the checkpoint.
+    until("the first checkpoint copied", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
+    cloud.kill(0);
+    let lost = finished(&store, &run.id);
+    assert_eq!((lost.status, lost.error_code.as_deref()), (RunStatus::Failed, Some("cloud_instance_lost")));
     let dir = t.join("home").join("runs").join(&run.id);
     assert!(dir.join("weights").join("last.folo").is_file(), "the checkpoint was collected");
     assert_eq!(cloud.live(), 0);
 
-    // On a new instance, from the checkpoint: the step numbers go on.
+    // On a new instance, from the checkpoint: the step numbers go on. Stopped there, it is collected and released.
     let resumed = resume(&store, &run.id, json!({}));
     assert_eq!((resumed.status, phase(&resumed)), (RunStatus::Queued, CloudPhase::Provisioning));
     until("epoch 2 here", || {
@@ -608,7 +625,7 @@ fn a_stopped_run_resumes_on_a_new_instance_and_then_here() {
     });
     store.stop_run(&run.id).unwrap();
     let again = finished(&store, &run.id);
-    assert_eq!((again.status, again.epoch), (RunStatus::Stopped, 2));
+    assert_eq!((again.status, again.epoch, phase(&again)), (RunStatus::Stopped, 2, CloudPhase::Released));
     assert_eq!(store.cloud_instances().unwrap().len(), 2);
     assert!(logged(&store, &run.id, "uploading the checkpoint weights/last.folo"));
 
@@ -619,7 +636,7 @@ fn a_stopped_run_resumes_on_a_new_instance_and_then_here() {
     let done = finished(&store, &run.id);
     assert_eq!((done.status, done.epoch), (RunStatus::Completed, 3));
     let m = store.run_metrics(&run.id, &MetricsQuery::default()).unwrap();
-    assert_eq!((steps(&m), epochs(&m)), ((1..=9).collect::<Vec<_>>(), vec![1, 2, 3]));
+    assert_eq!((steps(&m), epochs(&m)), ((1..=6).collect::<Vec<_>>(), vec![1, 2, 3]));
     assert_eq!(cloud.live(), 0);
 }
 
@@ -746,27 +763,6 @@ fn an_instance_that_gives_up_before_its_worker_answers_fails_the_boot_at_once() 
 }
 
 #[test]
-fn a_worker_that_dies_loses_the_run_but_not_its_checkpoint() {
-    no_gpu();
-    let t = TestDir::new("cloud-lost");
-    let cloud = TestCloud::new(&t.join("workers"));
-    let store = plane(&t.join("home"), &cloud, fast());
-    let ds = dataset(&store);
-    let conn = connect(&store);
-    cloud.hold_epochs(true);
-    let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
-    until("the first checkpoint copied", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
-    cloud.kill(0);
-    let lost = finished(&store, &run.id);
-    assert_eq!((lost.status, lost.error_code.as_deref()), (RunStatus::Failed, Some("cloud_instance_lost")));
-    assert!(t.join("home").join("runs").join(&run.id).join("weights").join("last.folo").is_file());
-    cloud.hold_epochs(false);
-    resume(&store, &run.id, json!({}));
-    let done = finished(&store, &run.id);
-    assert_eq!((done.status, done.epoch), (RunStatus::Completed, 2));
-}
-
-#[test]
 fn a_stop_that_finds_the_worker_gone_loses_the_run_instead_of_collecting() {
     no_gpu();
     let t = TestDir::new("cloud-stop-lost");
@@ -847,7 +843,7 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
 
     // A run that trains when this server goes away: the next one follows it to the end.
     cloud.hold_epochs(true);
-    let run = store.create_run(cloud_run(&ds, &conn.id, 3)).unwrap();
+    let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
     until("epoch 1 here", || run_of(&store, &run.id).best);
     drop(store);
     // Meanwhile a crash left two `launching` records: one whose launch created an instance, one whose did not.
@@ -886,7 +882,7 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
     let done = finished(&store, &run.id);
     assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
     let m = store.run_metrics(&run.id, &MetricsQuery::default()).unwrap();
-    assert_eq!((steps(&m), epochs(&m)), ((1..=9).collect::<Vec<_>>(), vec![1, 2, 3]));
+    assert_eq!((steps(&m), epochs(&m)), ((1..=4).collect::<Vec<_>>(), vec![1, 2]));
     let worker = cloud.worker(0);
     let w = worker.list_runs().unwrap().remove(0);
     assert_eq!(m, worker.run_metrics(&w.id, &MetricsQuery::default()).unwrap(), "a complete history");
@@ -922,14 +918,14 @@ fn the_deadline_stops_the_run_and_releases_its_instance() {
     no_gpu();
     let t = TestDir::new("cloud-deadline");
     let cloud = TestCloud::new(&t.join("workers"));
-    let store = plane(&t.join("home"), &cloud, Tuning { max_run: Some(Duration::from_secs(3)), ..fast() });
+    let store = plane(&t.join("home"), &cloud, Tuning { max_run: Some(Duration::from_secs(2)), ..fast() });
     let ds = dataset(&store);
     let conn = connect(&store);
     cloud.hold_epochs(true);
     let run = store.create_run(cloud_run(&ds, &conn.id, 3)).unwrap();
     let done = finished(&store, &run.id);
     assert_eq!(done.status, RunStatus::Stopped, "{:?}", log_of(&store, &run.id));
-    assert!(logged(&store, &run.id, "the time limit of 3.0 s"), "{:?}", log_of(&store, &run.id));
+    assert!(logged(&store, &run.id, "the time limit of 2.0 s"), "{:?}", log_of(&store, &run.id));
     assert_eq!(cloud.live(), 0);
 }
 

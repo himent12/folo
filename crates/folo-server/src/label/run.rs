@@ -29,7 +29,7 @@ const JPEG_QUALITY: u8 = 85;
 pub const MAX_SOFT_FAILURES: u32 = 3;
 /// How often a run writes `job.json` at most. The file holds every image of the job, so a large job is not
 /// rewritten after each of its thousands of calls; what a crash can lose is the labels of the last few seconds.
-const SAVE_EVERY: Duration = Duration::from_secs(5);
+pub const SAVE_EVERY: Duration = Duration::from_secs(5);
 /// How often the run's thread looks whether its workers are done or a save is due.
 const WATCH: Duration = Duration::from_millis(50);
 
@@ -46,6 +46,8 @@ pub struct Plan {
     pub parallel: usize,
     /// The run's stop switch ([`super::job::Active::cancel`]).
     pub cancel: Arc<AtomicBool>,
+    /// How often the run writes `job.json` at most: [`SAVE_EVERY`] (tests shorten it).
+    pub save_every: Duration,
 }
 
 /// What a call did to one image.
@@ -102,12 +104,12 @@ pub fn run(job: &Job, plan: &Plan) {
     let workers = plan.parallel.clamp(1, plan.batches.len().max(1));
     std::thread::scope(|scope| {
         let workers: Vec<_> = (0..workers).map(|_| scope.spawn(|| run.work())).collect();
-        // Meanwhile this thread keeps `job.json` no more than `SAVE_EVERY` behind, also while every worker waits
+        // Meanwhile this thread keeps `job.json` no more than `plan.save_every` behind, also while every worker waits
         // on a long call.
         let mut saved = Instant::now();
         while workers.iter().any(|w| !w.is_finished()) {
             std::thread::sleep(WATCH);
-            if saved.elapsed() >= SAVE_EVERY && run.unsaved.swap(false, Ordering::AcqRel) {
+            if saved.elapsed() >= plan.save_every && run.unsaved.swap(false, Ordering::AcqRel) {
                 saved = Instant::now();
                 // A write that failed is tried again at the next interval, not forgotten.
                 if !run.save(&job.lock()) {
@@ -450,13 +452,5 @@ mod tests {
         assert_eq!(size(&big), (1024, 512));
         assert_eq!(size(&small), (320, 200));
         assert!(agent_jpeg(&dir.join("missing.png")).is_err());
-    }
-
-    #[test]
-    fn plurals() {
-        assert_eq!(plural(1, "box"), "box");
-        assert_eq!(plural(2, "box"), "boxes");
-        assert_eq!(plural(0, "image"), "images");
-        assert_eq!(plural(1, "call"), "call");
     }
 }

@@ -25,7 +25,9 @@ vi.mock('./endLabels', async (load) => {
 const { default: LineChart } = await import('./LineChart.svelte');
 
 describe('LineChart end labels', () => {
-  it('places them once per change of domain, not on every frame of its ease, each label riding with its line', async () => {
+  it('places them once per change of domain, not on every frame of its ease, each label riding with its line', () => {
+    // The ease runs on animation frames: fake ones, stepped by hand.
+    vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame', 'performance'] });
     const pts = (f: (x: number) => number) => Array.from({ length: 30 }, (_, x) => ({ x, y: f(x) }));
     const series = [
       { id: 'a', label: 'fasteners-s', color: 'red', points: pts((x) => 0.1 + x / 60) },
@@ -48,7 +50,7 @@ describe('LineChart end labels', () => {
     flushSync();
     const seen = new Set<number>();
     for (let t = 0; t < 400; t += 16) {
-      await new Promise((r) => setTimeout(r, 16));
+      vi.advanceTimersByTime(16);
       flushSync();
       seen.add(yOf('fasteners-s'));
     }
@@ -62,5 +64,6 @@ describe('LineChart end labels', () => {
     flushSync();
     expect(placed.n - before).toBe(1);
     unmount(c);
+    vi.useRealTimers();
   });
 });

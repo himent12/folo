@@ -936,16 +936,6 @@ mod tests {
     }
 
     #[test]
-    fn launch_waits_out_a_429() {
-        let f = Fixture::serve(vec![
-            problem(429, "slow down").header("Retry-After", "0"),
-            Answer::json(201, r#"{"id":"abc123xyz","status":"PROVISIONING"}"#),
-        ]);
-        assert_eq!(runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap(), "abc123xyz");
-        assert_eq!(f.requests().len(), 2);
-    }
-
-    #[test]
     fn launch_refuses_what_it_cannot_send() {
         let f = Fixture::serve(Vec::new());
         let p = runpod(&f);

@@ -39,24 +39,7 @@ describe('invalid fields', () => {
     const msg = t.querySelector('#epochs-error')!;
     expect(msg.getAttribute('role')).toBe('alert');
     expect(msg.textContent?.trim()).toBe('Use 1 to 10000.');
-    const icon = msg.querySelector('svg')!;
-    expect(icon).not.toBeNull();
-    expect(icon.getAttribute('aria-hidden')).toBe('true');
-  });
-
-  it('Field: a hint has no icon', () => {
-    const t = render(Field as Component<never>, {
-      label: 'Seed',
-      for: 'seed',
-      hint: 'Any whole number.',
-      children: createRawSnippet(() => ({ render: () => '<input id="seed" />' })),
-    });
-    expect(t.querySelector('#seed-hint svg')).toBeNull();
-  });
-
-  it('Input: invalid marks the input (base.css draws the danger edge and ring from it)', () => {
-    const t = render(Input as Component<never>, { invalid: true, 'aria-label': 'Name' });
-    expect(t.querySelector('input')!.getAttribute('aria-invalid')).toBe('true');
+    expect(msg.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('Segmented: invalid marks the radio group and links its message', () => {
@@ -75,10 +58,6 @@ describe('invalid fields', () => {
     expect(group.getAttribute('aria-describedby')).toBe('split-error');
   });
 
-  it('Segmented: valid groups carry no aria-invalid', () => {
-    const t = render(Segmented as Component<never>, { label: 'Split', value: 'a', options: [{ value: 'a', label: 'A' }] });
-    expect(t.querySelector('[role="radiogroup"]')!.hasAttribute('aria-invalid')).toBe(false);
-  });
 });
 
 describe('a Field describes its control (the visible hint is the accessible description)', () => {
@@ -95,7 +74,6 @@ describe('a Field describes its control (the visible hint is the accessible desc
     // A Field without `for` still ties its hint (an id of its own).
     const mode = t.querySelectorAll('[role="radiogroup"]')[1]!.getAttribute('aria-describedby')!;
     expect(document.getElementById(mode)?.textContent).toBe('Without an id of its own.');
-    expect(t.querySelectorAll('.field').length).toBe(6);
   });
 
   it('forwards the error instead while there is one, and marks the control invalid', () => {

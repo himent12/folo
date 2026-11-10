@@ -617,7 +617,7 @@ mod tests {
                 let _ = sock.write_all(&frame);
             }
             loop {
-                std::thread::sleep(Duration::from_millis(30));
+                std::thread::sleep(Duration::from_millis(10));
                 let chunk = b": keep-alive\n\n";
                 let frame = [format!("{:x}\r\n", chunk.len()).as_bytes(), chunk, b"\r\n"].concat();
                 if sock.write_all(&frame).and_then(|_| sock.flush()).is_err() {
@@ -634,8 +634,8 @@ mod tests {
         let (tx, failed) = std::sync::mpsc::channel();
         let base = keepalive_server(b"", tx);
         let sub = HttpBackend::new(&base).events("run_x").expect("stream opens");
-        // Still open while subscribed.
-        assert!(failed.recv_timeout(Duration::from_millis(300)).is_err());
+        // Still open while subscribed, through several keep-alives.
+        assert!(failed.recv_timeout(Duration::from_millis(60)).is_err());
         drop(sub);
         // The reader sees the next keep-alive, stops, and closes the socket: the server's writes fail.
         assert!(
@@ -817,24 +817,27 @@ FOLO"
             std::thread::sleep(Duration::from_secs(10));
         });
         let t0 = std::time::Instant::now();
-        let r = HttpBackend::with_handshake(&format!("http://{addr}"), Duration::from_millis(300))
-            .events("run_x");
+        let r =
+            HttpBackend::with_handshake(&format!("http://{addr}"), Duration::from_millis(50)).events("run_x");
         assert!(r.is_err());
         assert!(t0.elapsed() < Duration::from_secs(3), "handshake took {:?}", t0.elapsed());
     }
 
     #[test]
     fn sse_frames_split_into_events() {
-        let stream = "event: status\ndata: {\"status\":\"running\",\"error\":null}\n\n: keep-alive\n\nevent: log\ndata: {\"t\":\"2026-11-08T07:00:00Z\",\"level\":\"info\",\"message\":\"hi\"}\n\nevent: future\ndata: {}\n\n";
+        let stream = "event: status\ndata: {\"status\":\"running\",\"error\":null}\n\n: keep-alive\n\nevent: log\ndata: {\"t\":\"2026-11-08T07:00:00Z\",\"level\":\"info\",\"message\":\"hi\"}\n\nevent: step\ndata: {\"epoch\":12,\"step\":340,\"lr\":0.0098,\"loss\":{\"box\":1.21,\"cls\":0.83,\"dfl\":1.02,\"total\":3.06},\"imgs_per_s\":412.5,\"eta_s\":1840}\n\nevent: future\ndata: {}\n\n";
         let mut seen = Vec::new();
         parse_sse(std::io::Cursor::new(stream), |name, data| {
-            seen.push((name.to_string(), RunEvent::from_sse(name, data).map(|r| r.is_ok())));
+            seen.push((name.to_string(), RunEvent::from_sse(name, data)));
             true
         });
-        assert_eq!(seen.len(), 3);
-        assert_eq!(seen[0], ("status".into(), Some(true)));
-        assert_eq!(seen[1], ("log".into(), Some(true)));
-        assert_eq!(seen[2], ("future".into(), None));
+        let names: Vec<&str> = seen.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["status", "log", "step", "future"]);
+        assert!(matches!(seen[0].1, Some(Ok(RunEvent::Status(_)))));
+        assert!(matches!(seen[1].1, Some(Ok(RunEvent::Log(_)))));
+        // The loss's `box` field (a Rust keyword) decodes.
+        assert!(matches!(&seen[2].1, Some(Ok(RunEvent::Step(s))) if s.loss.box_ == 1.21));
+        assert!(seen[3].1.is_none(), "an unknown event is skipped");
     }
 
     #[test]
@@ -845,7 +848,10 @@ FOLO"
 
     #[test]
     fn unreachable_server_is_a_clean_error() {
-        let api = HttpBackend::new("http://127.0.0.1:9");
+        // A server that hangs up without answering (a refused connection takes Windows about
+        // 2 s of retries to report, and goes the same way).
+        let (url, _requests) = canned_server(vec![Vec::new()]);
+        let api = HttpBackend::new(&url);
         let e = api.health().unwrap_err();
         assert_eq!(e.code, "server_unreachable");
         assert!(e.hint.is_some());

@@ -159,7 +159,7 @@
     right: 6px;
   }
   /* Touch: 44 px controls, and the select's text at 16 px (type.lg), under which iOS zooms the page into it on focus
-     (touchText.test.ts). */
+     (sourceRules.test.ts). */
   @media (pointer: coarse) {
     select,
     .sm select {

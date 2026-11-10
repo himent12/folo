@@ -44,7 +44,7 @@ const PROVENANCE: &str =
 /// Fewest pool images a teacher must keep a box on for a student to train on them.
 pub const MIN_LABELED_IMAGES: usize = 10;
 /// How often a loop looks at the entry or the run it waits for.
-const POLL: Duration = Duration::from_millis(100);
+const POLL: Duration = Duration::from_millis(20);
 
 /// A loop to run, everything checked.
 pub struct LoopJob {

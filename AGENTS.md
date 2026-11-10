@@ -21,8 +21,10 @@ easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes)
   contiguous `&[f32]` loops the compiler can vectorise, parallelise with rayon above a size threshold. Benchmarks live
   in `crates/<crate>/benches` (plain `harness = false` binaries are fine) and PRs that touch hot paths report numbers.
 - **Correct first.** Every op has tests; every differentiable op has a finite-difference gradient check; GPU kernels are
-  tested against the CPU reference within a stated tolerance. Tests must be deterministic (seeded RNG) and quick
-  (whole workspace `cargo test` under ~2 min on a desktop; mark longer ones `#[ignore]`).
+  tested against the CPU reference within a stated tolerance. Tests must be deterministic (seeded RNG) and quick:
+  about a second each at most (the smallest model, a few small images, a few steps, no fixed sleeps), and each one
+  there because it protects something that matters (docs/CI.md, Keeping CI fast). `#[ignore]` is for a test that
+  needs what CI does not have, or a documented manual acceptance run, not for a slow one.
 - **Docs as you go.** Public items get a doc comment. When you change behaviour or an interface, update the matching file
   in `docs/` in the same PR.
 - **No secrets in the repo, ever.** Keys live outside the repo (for example `~/.folo/boat.key`). Never print them.

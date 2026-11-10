@@ -1,6 +1,7 @@
 name: desktop
 # FOLO Desktop (GPUI) is its own cargo workspace and a slow build, so it only runs when the app, the design
-# tokens it is generated from, the wire types it shares, or the engine crates it runs locally change.
+# tokens it is generated from, the wire types it shares, or the engine crates it runs locally change, and on every
+# push to main.
 on:
   pull_request:
     paths:
@@ -13,22 +14,14 @@ on:
       - crates/folo-data/**
       - crates/folo-gpu/**
       - crates/folo-nn/**
+      - crates/folo-test-support/**
       - crates/folo-vision/**
+      - Cargo.toml
+      - .cargo/**
+      - tools/ci-retry.sh
       - .github/workflows/desktop.yml
   push:
     branches: [main]
-    paths:
-      - apps/desktop/**
-      - design/**
-      - crates/folo-api/**
-      - crates/folo-client/**
-      - crates/folo-cloud/**
-      - crates/folo-core/**
-      - crates/folo-data/**
-      - crates/folo-gpu/**
-      - crates/folo-nn/**
-      - crates/folo-vision/**
-      - .github/workflows/desktop.yml
 concurrency:
   group: desktop-${{ github.ref }}
   cancel-in-progress: true
@@ -39,7 +32,7 @@ jobs:
   desktop:
     # Builds on Windows, where it ships first.
     runs-on: ${{ fromJSON(vars.RUNS_ON_WINDOWS || '"windows-latest"') }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: apps/desktop
@@ -67,11 +60,7 @@ jobs:
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
         run: bash ../../tools/ci-retry.sh cargo clippy --all-targets -- -D warnings
-      - name: build
-        shell: bash
-        env:
-          ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
-        run: bash ../../tools/ci-retry.sh cargo build
+      # No separate `cargo build`: clippy type-checks every target and the tests compile and link the same code.
       - name: test
         shell: bash
         env:
@@ -84,3 +73,10 @@ jobs:
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
         run: bash ../../tools/ci-retry.sh cargo test --manifest-path vendor/gpui/Cargo.toml --lib folo_truncation
+      # The workspace's temp-dir hygiene test (docs/CI.md, Test temp dirs) also scans apps/desktop/src, and ci.yml
+      # does not run for a change to the app alone.
+      - name: temp-dir hygiene
+        shell: bash
+        env:
+          ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
+        run: bash ../../tools/ci-retry.sh cargo test --manifest-path ../../Cargo.toml -p folo-test-support --test hygiene

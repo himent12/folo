@@ -245,8 +245,8 @@ mod tests {
 
     #[test]
     fn no_answer_is_unavailable_and_names_the_service() {
-        let url = Fixture::closed_url();
-        let e = Api::new("Test").get(&format!("{url}/x"), "rpa_SECRET").unwrap_err();
+        let fixture = Fixture::hang_up();
+        let e = Api::new("Test").get(&fixture.url("/x"), "rpa_SECRET").unwrap_err();
         assert_eq!(e.kind, ErrorKind::Unavailable);
         assert!(e.message.starts_with("Test does not answer"), "{}", e.message);
         assert!(!format!("{e:?}").contains("rpa_SECRET"));
@@ -261,7 +261,7 @@ mod tests {
             assert_eq!((r.method.as_str(), r.path.as_str()), ("GET", "/install.sh"));
             assert_eq!(r.header("authorization"), None);
         }
-        assert!(status_of(&format!("{}/x", Fixture::closed_url())).is_err());
+        assert!(status_of(&Fixture::hang_up().url("/x")).is_err());
     }
 
     #[test]

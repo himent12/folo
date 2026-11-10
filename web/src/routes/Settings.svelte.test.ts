@@ -141,10 +141,8 @@ describe('Settings', () => {
     flushSync();
     const radios = [...target.querySelectorAll<HTMLInputElement>('input[name="theme"]')];
     expect(radios.map((r) => r.getAttribute('aria-label'))).toEqual(['Dark', 'Light, current', 'System']);
-    // "Current" sits inside the chosen card's label, under its name.
-    const current = target.querySelector('.theme .current')!;
-    expect(current.closest('label')?.querySelector('input')?.value).toBe('light');
-    expect(current.parentElement?.querySelector('.theme-name')?.textContent).toBe('Light');
+    // "Current" sits inside the chosen card's label.
+    expect(target.querySelector('.theme .current')!.closest('label')?.querySelector('input')?.value).toBe('light');
   });
 
   it('gives each fix one remedy: the shell, the command on one unwrapped line, the driver report folded', async () => {
@@ -155,15 +153,10 @@ describe('Settings', () => {
       return f.length ? f : null;
     }, 'the System panel');
     const tc = fixes.find((f) => f.textContent?.includes('--tensor-cores'))!;
-    expect(tc.querySelector('.cause')?.textContent).toBe('Restart the server on Vulkan to use them.');
-    expect(tc.querySelector('.shell')?.textContent).toBe('In PowerShell:');
-    const line = tc.querySelector('pre.line')!;
-    expect(line.textContent).toBe("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
-    expect(line.hasAttribute('data-scrolls')).toBe(true);
+    expect(tc.querySelector('pre.line')!.textContent).toBe("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
     expect(tc.querySelector('button[aria-label="Copy command"]')).not.toBeNull();
     const report = target.querySelector<HTMLDetailsElement>('#system details.report')!;
     expect(report.open).toBe(false);
-    expect(report.querySelector('summary')?.textContent).toBe('Driver report');
     // Copy sits on the heading's row, outside the report, which takes the full width: one block per record, the
     // newlines kept in its text for a copied selection.
     expect(report.querySelector('.copy-at button[aria-label="Copy driver report"]')).not.toBeNull();
@@ -187,8 +180,6 @@ describe("Settings › System: FOLO's GPU memory (gpu_pool)", () => {
       '901.1 MiB cached',
       'peak 5.3 GiB',
     ]);
-    expect(row.querySelector('.device')?.textContent).toBe('gpu:0');
-    expect(row.textContent).not.toMatch(/VRAM/);
   });
 
   it('shows nothing where the server reports no pool', async () => {

@@ -242,13 +242,20 @@ mod tests {
     /// The cache is process-wide: tests that touch it run one at a time.
     static SERIAL: Mutex<()> = Mutex::new(());
 
-    /// A fresh, untrained folo-n with two classes as f16 `.folo` bytes (what the server sends).
+    /// A fresh, untrained folo-n with two classes as f16 `.folo` bytes (what the server sends),
+    /// trained at 64 px so a prediction is quick. Built once for every test.
     fn weights() -> Vec<u8> {
-        let mut m = FoloModel::new(folo_vision::ModelConfig::new("n", 2).unwrap()).unwrap();
-        m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
-        let path = folo_test_support::TestFile::new("desktop-local", "m.folo");
-        m.export(&path, folo_nn::io::FloatDType::F16).unwrap();
-        std::fs::read(&path).unwrap()
+        static BYTES: OnceLock<Vec<u8>> = OnceLock::new();
+        BYTES
+            .get_or_init(|| {
+                let mut m = FoloModel::new(folo_vision::ModelConfig::new("n", 2).unwrap()).unwrap();
+                m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+                m.set_imgsz(64);
+                let path = folo_test_support::TestFile::new("desktop-local", "m.folo");
+                m.export(&path, folo_nn::io::FloatDType::F16).unwrap();
+                std::fs::read(&path).unwrap()
+            })
+            .clone()
     }
 
     fn png(w: u32, h: u32) -> Vec<u8> {
@@ -311,8 +318,6 @@ mod tests {
         assert_eq!(bad.err().map(|e| e.code), Some("image_decode_failed".into()));
     }
 
-    /// Against a real `folo serve` with a trained model: `FOLO_SERVER=http://127.0.0.1:7879 cargo
-    /// test real_server -- --ignored --nocapture`. Local CPU and GPU find what the server finds.
     #[test]
     fn concurrent_requests_build_the_model_once() {
         let _serial = lock(&SERIAL);
@@ -327,7 +332,7 @@ mod tests {
                     None => {
                         fresh_loads.fetch_add(1, Ordering::SeqCst);
                         // A slow download: the other request must wait for it, then revalidate.
-                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        std::thread::sleep(std::time::Duration::from_millis(10));
                         Ok(Some(Weights { bytes: bytes.clone(), etag: "\"r\"".into() }))
                     }
                     Some(e) => {
@@ -367,6 +372,8 @@ mod tests {
         assert!(!lock(&CACHE).iter().any(|l| l.server == srv), "a late request can't publish either");
     }
 
+    /// Against a real `folo serve` with a trained model: `FOLO_SERVER=http://127.0.0.1:7879 cargo
+    /// test real_server -- --ignored --nocapture`. Local CPU and GPU find what the server finds.
     #[test]
     #[ignore]
     fn real_server_local_matches_the_server() {

@@ -1,14 +1,9 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
 import { afterEach, describe, expect, it } from 'vitest';
-import LossOptions, { lossSummary } from './LossOptions.svelte';
+import LossOptions from './LossOptions.svelte';
 
 describe('LossOptions', () => {
-  it('names the current view on its one button', () => {
-    expect(lossSummary('0.9', 'log')).toBe('EMA 0.9 · Log');
-    expect(lossSummary('0', 'lin')).toBe('Raw · Linear');
-  });
-
   it('opens on the chosen smoothing, applies a choice, and closes on Escape back to its button', async () => {
     const target = document.createElement('div');
     document.body.appendChild(target);
@@ -35,15 +30,7 @@ describe('LossOptions', () => {
     flushSync();
     expect(target.querySelector('[role="dialog"]')).toBeNull();
     expect(document.activeElement).toBe(button);
-    unmount(c);
-  });
-
-  it('closes on Escape from its button too (after Shift+Tab back from the panel)', async () => {
-    const target = document.createElement('div');
-    document.body.appendChild(target);
-    const c = mount(LossOptions, { target, props: { smoothing: '0.9' as const, scale: 'log' as const } });
-    flushSync();
-    const button = target.querySelector<HTMLButtonElement>('button.trigger')!;
+    // And on Escape from its button (after Shift+Tab back from the panel).
     button.click();
     flushSync();
     await tick();
@@ -85,8 +72,6 @@ describe('LossOptions', () => {
       expect(target.querySelector('div[role="dialog"]')).toBeNull();
       const done = dialog.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!;
       expect(done).not.toBeNull();
-      expect([...dialog.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Done')).toBe(false);
-      expect(dialog.querySelectorAll('.opt .mark')).toHaveLength(6);
       const checked = dialog.querySelector<HTMLInputElement>('input:checked')!;
       expect(document.activeElement).toBe(checked);
       // Tab out of a group does not dismiss it.

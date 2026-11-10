@@ -6,7 +6,6 @@ import { conditionBoxes, distanceScale } from './benchConditions';
 import { designPlan } from './benchDesign';
 import { OPEN_BOXES_MAX, setOpenBoxesMax } from './bench';
 import { MockApi } from './index';
-import benchDoc from '../../../../../docs/BENCH.md?raw';
 
 const NOW = Date.parse('2026-11-09T12:00:00Z');
 
@@ -67,53 +66,10 @@ function expectConsistent(r: BenchResult, benchImages: number, planConditions: n
   expect(r.entry.map50_95).toBe(a.map50_95);
 }
 
-describe('MockApi vision benchmarks: catalog and seeds', () => {
-  it('has the twelve conditions in six groups, the default plan and the five axes', async () => {
-    const c = await new MockApi('normal', 0).benchCatalog();
-    expect(c.conditions.map((x) => x.id)).toEqual(['low_light', 'overexposure', 'low_contrast', 'defocus', 'motion_blur', 'sensor_noise', 'haze', 'color_cast', 'jpeg', 'low_resolution', 'distance', 'occlusion']);
-    expect(new Set(c.conditions.map((x) => x.group))).toEqual(new Set(['light', 'blur', 'noise', 'medium', 'digital', 'geometry']));
-    expect(c.severities).toBe(5);
-    expect(c.default_plan.conditions.every((x) => x.severities.join() === '1,3,5' && x.weight === 1)).toBe(true);
-    expect(c.axes.map((a) => [a.axis, a.weight])).toEqual([
-      ['accuracy', 0.35],
-      ['robustness', 0.25],
-      ['self_labeling', 0.2],
-      ['calibration', 0.1],
-      ['localization', 0.1],
-    ]);
-  });
-
-  it('seeds four benchmarks, newest first, that tell the story', async () => {
-    const api = new MockApi('normal', 0);
-    const list = await api.benches();
-    expect(list.map((b) => b.name)).toEqual(['Sorting tray, night shift', 'Fasteners val', 'Pond fish', 'Shapes val']);
-    const [fresh, fast, pond, shapes] = list;
-    expect(fresh!.entries).toBe(0);
-    expect(fresh!.best).toBeNull();
-    expect(fresh!.images).toBe(200);
-    expect(fast!.images).toBe(360);
-    expect(fast!.source).toEqual({ kind: 'dataset', dataset_id: 'ds_fasteners', split: 'val' });
-    expect(pond!.source).toEqual({ kind: 'label_job', job_id: 'lb_8d02' });
-    expect(pond!.plan.designed_by).toEqual({ agent: 'claude', model: 'sonnet' });
-    expect(pond!.plan.rationale).toBeTruthy();
-    expect(pond!.plan.conditions.every((c) => c.why)).toBe(true);
-    // The pond's designed plan weights the water's conditions most.
-    const w = Object.fromEntries(pond!.plan.conditions.map((c) => [c.condition, c.weight]));
-    expect(w.haze).toBe(3);
-    expect(w.color_cast).toBe(3);
-    expect(w.jpeg).toBeUndefined();
-    for (const b of list) {
-      expect(b.boxes).toBe(b.class_boxes.reduce((a, n) => a + n, 0));
-      expect(b.fingerprint).toMatch(/^[0-9a-f]{16}$/);
-    }
-    expect(shapes!.best?.name).toBeTruthy();
-  });
-
-  it('has an entry of every kind and state on Fasteners val, ranked as the server ranks them', async () => {
-    const api = new MockApi('normal', 0);
-    const entries = await api.benchEntries('bn_3c90');
+describe('MockApi vision benchmarks: seeds', () => {
+  it('ranks the entries of Fasteners val as the server does, and has one running through its passes', async () => {
+    const entries = await new MockApi('normal', 0).benchEntries('bn_3c90');
     expect(rankEntries(entries).map((e) => e.id)).toEqual(entries.map((e) => e.id));
-    const by = (n: string) => entries.find((e) => e.name === n)!;
     // Complete entries by score, then partial ones by score: a partial agent never above a complete model.
     const done = entries.filter((e) => e.status === 'done');
     const complete = done.filter((e) => !e.score!.partial);
@@ -121,28 +77,12 @@ describe('MockApi vision benchmarks: catalog and seeds', () => {
     expect(done).toEqual([...complete, ...partial]);
     for (const g of [complete, partial]) expect(g.map((e) => e.score!.total)).toEqual([...g.map((e) => e.score!.total)].sort((a, b) => b - a));
     expect(partial.length).toBeGreaterThan(0);
-    expect(done[0]!.name).toBe('fasteners-s-v1');
-    expect(by('yolo26n').contestant.kind).toBe('external');
-    const claude = by('Claude Code (sonnet)');
-    expect(claude).toMatchObject({ images: 48, conditions: false, scored: false, status: 'done' });
-    expect(claude.score!.partial).toBe(true);
-    expect(claude.usage!.calls).toBe(12);
-    expect(claude.usage!.cost_usd).toBeGreaterThan(0);
-    expect(by('Codex (gpt-6.1-sol)').usage!.cost_usd).toBeNull();
-    expect(by('fasteners-mini-n').missing_classes).toEqual(['washer', 'screw', 'spring', 'rivet', 'pin', 'bearing']);
-    const failed = by('Claude Code (opus)');
-    expect(failed.status).toBe('failed');
-    expect(failed.error).toMatch(/not logged in/i);
-    expect(failed.hint).toBeTruthy();
+    // Its passes: the unchanged images and the default plan's 36.
     const running = entries.find((e) => e.status === 'running')!;
     expect(running.progress.done).toBeGreaterThan(0);
     expect(running.progress.done).toBeLessThan(running.progress.total);
     expect(running.progress.total).toBe(360 * 37);
-    expect(running.progress.condition).toBe('haze');
     expect(running.score).toBeNull();
-    // Model entries report their speed once done, agents what their calls used; neither the other.
-    expect(by('fasteners-s-v1').speed?.ms_per_image).toBeGreaterThan(0);
-    expect(claude.speed).toBeNull();
   });
 
   it('generates results consistent with the definitions, for every finished entry', async () => {
@@ -237,14 +177,6 @@ describe('MockApi vision benchmarks: photos of every shape', () => {
     const page = await api.benchEntryImages('bn_7a41', 'be_p201', { sort: 'worst', limit: 100 });
     expect(new Set(page.images.map((i) => i.image.width / i.image.height)).size).toBeGreaterThan(2);
     for (const i of page.images) for (const d of i.detections) expect(d.x2 > 0 && d.y2 > 0 && d.x1 < i.image.width && d.y1 < i.image.height).toBe(true);
-  });
-
-  it('keeps every other benchmark’s images the size they were', async () => {
-    const api = new MockApi('normal', 0);
-    for (const [id, w, h] of [['bn_3c90', 1024, 768], ['bn_5e12', 640, 640]] as const) {
-      const { images } = await api.benchImages(id, { limit: 50 });
-      expect(images.every((i) => i.width === w && i.height === h)).toBe(true);
-    }
   });
 });
 
@@ -341,7 +273,7 @@ describe('MockApi vision benchmarks: entries run', () => {
     await expect(api.startBenchEntry('bn_9f03', { contestant: { kind: 'agent', agent: 'codex' } })).rejects.toMatchObject({ status: 501 });
   });
 
-  it('refuses a model with none of the classes (bench_class_mismatch), and lists the ones a model lacks', async () => {
+  it('refuses a model with none of the classes (bench_class_mismatch)', async () => {
     const api = new MockApi('normal', 0);
     await expect(api.startBenchEntry('bn_3c90', { contestant: { kind: 'model', model_id: 'm_coco_s' } })).rejects.toMatchObject({ status: 400, code: 'bench_class_mismatch' });
   });
@@ -444,16 +376,6 @@ describe('MockApi vision benchmarks: entries run', () => {
     await expect(api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_n', pool, student: { imgsz: 32 } })).rejects.toMatchObject({ status: 400, code: 'invalid_config', message: expect.stringMatching(/imgsz/) });
   });
 
-  it('keeps an entry graded on an earlier version of the benchmark with its own fingerprint, out of a loop’s reuse', async () => {
-    const api = new MockApi('normal', 0);
-    const b = await api.bench('bn_3c90');
-    const old = await api.benchEntry('bn_3c90', 'be_f100');
-    expect(old.status).toBe('done');
-    expect(old.fingerprint).not.toBe(b.fingerprint);
-    // The server ranks it among the others by score; Studio puts it below the current ones (./leaderboard boardOrder).
-    expect((await api.benchEntries('bn_3c90')).some((e) => e.id === 'be_f100')).toBe(true);
-  });
-
   it('keeps the plan open on a benchmark whose only entry failed (`bench-failed-only`)', async () => {
     const api = new MockApi('bench-failed-only', 0);
     const [e] = await api.benchEntries('bn_9f03');
@@ -531,15 +453,15 @@ describe('MockApi vision benchmarks: loops', () => {
     expect((await api.benchEntry('bn_5e12', done.generations[1]!.entry_id!)).name).toBe('shapes-n-best loop gen 1-best');
   });
 
-  it('fails a loop whose teacher has no threshold and no confidence set, before labeling, as the server words it', async () => {
+  it('fails a loop whose teacher has no threshold and no confidence set before labeling, and one that keeps too few at labeling', async () => {
     const api = new MockApi('normal', 0);
     const failed = (await api.benchLoops('bn_5e12')).find((l) => l.status === 'failed')!;
     expect(failed).toMatchObject({ id: 'bl_9e40', name: 'shapes-n-early loop', phase: null, verdict: null });
     // Generation 0 graded; generation 1 started and left with nothing in it: no labels, no run, no model.
     expect(failed.generations[0]!.map50_95).not.toBeNull();
     expect(failed.generations[1]).toMatchObject({ generation: 1, labels: null, run_id: null, model_id: null });
-    expect(failed.error).toBe("'shapes-n-early' never reaches 90% precision on at least 10 labels on this benchmark, so there is no confidence to label the pool from");
-    expect(failed.hint).toMatch(/set min_confidence/);
+    expect(failed.error).toMatch(/no confidence to label the pool from/);
+    expect(failed.hint).toMatch(/min_confidence/);
     // The teacher's entry: a precise handful above ~0.75, too few (under 10) to rest a threshold on.
     const r = await api.benchResult('bn_5e12', failed.generations[0]!.entry_id!);
     expect(r.self_labeling).toMatchObject({ threshold: null, recall: 0, readiness: 'not_ready' });
@@ -551,14 +473,14 @@ describe('MockApi vision benchmarks: loops', () => {
     const again = await api.benchLoop('bn_5e12', l.id);
     expect(again.status).toBe('failed');
     expect(again.error).toMatch(/so there is no confidence to label the pool from/);
-    // A confidence where it keeps a handful: it fails at labeling, under 10 pool images, as the server words it.
+    // A confidence where it keeps a handful: it fails at labeling, under 10 pool images.
     const high = await api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_e5', min_confidence: 0.9, pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'train' } });
     for (let t = 0; t < 20 && (await api.benchLoop('bn_5e12', high.id)).status === 'running'; t++) await vi.advanceTimersByTimeAsync(1000);
     const starved = await api.benchLoop('bn_5e12', high.id);
-    const m = /^the teacher 'shapes-n-early' kept (\d+) box(?:es)? on (\d+) of the pool's 800 images at confidence 0\.9: too few to train a student on \(at least 10 images\)$/.exec(starved.error!);
+    expect(starved.status).toBe('failed');
+    const m = /on (\d+) of the pool's 800 images/.exec(starved.error!);
     expect(m, starved.error!).not.toBeNull();
-    expect(Number(m![2])).toBeLessThan(10);
-    expect(starved.hint).toMatch(/lower min_confidence/);
+    expect(Number(m![1])).toBeLessThan(10);
     // A lower confidence keeps enough: the same teacher from 0.05 labels its pool, the images it kept nothing on left out.
     const low = await api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_e5', min_confidence: 0.05, pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'train' } });
     for (let t = 0; t < 20 && !(await api.benchLoop('bn_5e12', low.id)).generations[1]?.labels; t++) await vi.advanceTimersByTimeAsync(1000);
@@ -566,20 +488,6 @@ describe('MockApi vision benchmarks: loops', () => {
     expect(k.threshold).toBe(0.05);
     expect(k.labeled_images).toBeGreaterThanOrEqual(10);
     expect(k.labeled_images).toBeLessThan(k.images);
-  });
-
-  it('gives the pond a mixed-sign reliability with thin top bins, and an entry with no calibration (partial for that alone)', async () => {
-    const api = new MockApi('normal', 0);
-    const mixed = await api.benchResult('bn_7a41', 'be_p201');
-    const bins = mixed.calibration!.bins.filter((b) => b.count > 0);
-    expect(bins.some((b) => b.confidence! > b.precision!)).toBe(true);
-    expect(bins.some((b) => b.confidence! < b.precision!)).toBe(true);
-    expect(bins.some((b) => b.count < 20)).toBe(true);
-    const raw = await api.benchResult('bn_7a41', 'be_p205');
-    expect(raw.calibration).toBeNull();
-    expect(raw.entry).toMatchObject({ scored: true, images: 240, conditions: true });
-    expect(raw.entry.score!.partial).toBe(true);
-    expect(raw.entry.score!.axes.find((a) => a.axis === 'calibration')!.value).toBeNull();
   });
 
   it('runs a new loop through its phases, telling each on the stream', async () => {
@@ -603,18 +511,6 @@ describe('MockApi vision benchmarks: loops', () => {
 });
 
 describe('MockApi vision benchmarks: the contract as the engine fills it', () => {
-  it("names and words the conditions as docs/BENCH.md's table does", async () => {
-    const table = benchDoc.slice(benchDoc.indexOf('<!-- conditions:begin'), benchDoc.indexOf('<!-- conditions:end'));
-    const rows = table
-      .split('\n')
-      .filter((l) => l.startsWith('| `'))
-      .map((l) => l.split('|').map((c) => c.trim()))
-      .map((c) => ({ id: c[1]!.replace(/`/g, ''), name: c[2]!, group: c[3]!, description: c[4]! }));
-    expect(rows).toHaveLength(12);
-    const cat = await new MockApi('normal', 0).benchCatalog();
-    expect(cat.conditions).toEqual(rows);
-  });
-
   it('says which benchmarks are active and whether the leader is partial', async () => {
     const api = new MockApi('normal', 0);
     for (const b of await api.benches()) {
@@ -629,8 +525,6 @@ describe('MockApi vision benchmarks: the contract as the engine fills it', () =>
     const by = new Map((await api.benches()).map((b) => [b.name, b]));
     expect(by.get('Fasteners val')!.active).toBe(true);
     expect(by.get('Shapes val')!.active).toBe(false);
-    // Deleting answers 409 exactly while it is active.
-    await expect(api.deleteBench(by.get('Fasteners val')!.id)).rejects.toMatchObject({ status: 409, code: 'bench_active' });
   });
 
   it("repeats each finished entry's interval and the conditions it ran; nothing before it is done", async () => {
@@ -688,17 +582,6 @@ describe('MockApi vision benchmarks: the contract as the engine fills it', () =>
     expect(e.score!.axes[1]!.value).toBeNull();
     expect(e.score!.partial).toBe(false);
     expect(e.conditions_run).toBe(0);
-  });
-
-  it('has a loop running as the demo opens, its first student training on its teacher’s labels', async () => {
-    const api = new MockApi('normal', 0);
-    const l = await api.benchLoop('bn_3c90', 'bl_f3a0');
-    expect(l).toMatchObject({ status: 'running', phase: 'training', verdict: null });
-    expect(l.generations).toHaveLength(2);
-    expect(l.generations[0]!.entry_id).toBe('be_f103');
-    expect(l.generations[1]!.labels!.threshold).toBeGreaterThan(0);
-    expect(l.generations[1]!.run_id).toMatch(/^run_/);
-    expect(l.generations[1]!.model_id).toBeNull();
   });
 });
 

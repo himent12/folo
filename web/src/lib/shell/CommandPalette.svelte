@@ -422,7 +422,7 @@
   input:focus-visible {
     outline: none;
   }
-  /* Touch: the query at 16 px (type.lg), under which iOS zooms the page into the field (touchText.test.ts). */
+  /* Touch: the query at 16 px (type.lg), under which iOS zooms the page into the field (sourceRules.test.ts). */
   @media (pointer: coarse) {
     input {
       font-size: var(--type-lg-size);

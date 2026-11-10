@@ -153,8 +153,8 @@ async fn train_evaluate_predict_and_reload() {
     let home = t.join("home");
     let s = store(&home);
     let app = app(&s);
-    let ds = dataset(&app, "tiny", 12).await;
-    assert_eq!(ds.splits, Splits { train: 10, val: 2, test: 0 });
+    let ds = dataset(&app, "tiny", 6).await;
+    assert_eq!(ds.splits, Splits { train: 5, val: 1, test: 0 });
 
     // Validation against the dataset and the engine's limits.
     err(
@@ -219,16 +219,16 @@ async fn train_evaluate_predict_and_reload() {
     for (_, v) in events.iter().filter(|(n, _)| n == "epoch") {
         assert!(conf_ok(&v["val"]["best_f1_conf"]), "SSE epoch {v}");
     }
-    // Steps and the trainer's statuses carry the run's length (3 batches of 4 out of 10 images, 2 epochs).
+    // Steps and the trainer's statuses carry the run's length (2 batches of up to 4 out of 5 images, 2 epochs).
     for (name, v) in events.iter().filter(|(n, v)| n == "step" || (n == "status" && v["status"] != "queued"))
     {
-        assert_eq!((v["steps_per_epoch"].as_u64(), v["epochs"].as_u64()), (Some(3), Some(2)), "{name} {v}");
+        assert_eq!((v["steps_per_epoch"].as_u64(), v["epochs"].as_u64()), (Some(2), Some(2)), "{name} {v}");
     }
 
     let done: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
     assert_eq!(done.status, RunStatus::Completed);
-    assert_eq!((done.epoch, done.steps_per_epoch), (2, 3));
-    assert_eq!(done.step, 6);
+    assert_eq!((done.epoch, done.steps_per_epoch), (2, 2));
+    assert_eq!(done.step, 4);
     assert!(done.started.is_some() && done.finished.is_some() && done.eta_s.is_none());
     let best = done.best.unwrap();
     let model_id = done.model_id.clone().unwrap();
@@ -241,7 +241,7 @@ async fn train_evaluate_predict_and_reload() {
 
     // History: every step, both epochs, the log.
     let m: RunMetrics = ok(&app, get(&format!("/api/runs/{}/metrics", run.id))).await;
-    assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 3, 4, 5, 6]);
+    assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [1, 2, 3, 4]);
     assert_eq!(m.epochs.iter().map(|e| e.epoch).collect::<Vec<_>>(), [1, 2]);
     assert!(m.epochs.iter().all(|e| e.val.best_f1_conf.is_some()), "/metrics {:?}", m.epochs);
     let jsonl = std::fs::read_to_string(home.join("runs").join(&run.id).join("metrics.jsonl")).unwrap();
@@ -254,8 +254,8 @@ async fn train_evaluate_predict_and_reload() {
     }
     let best_epoch = &m.epochs[best.epoch as usize - 1];
     assert_eq!(best_epoch.val.map50_95, best.map50_95);
-    let thin: RunMetrics = ok(&app, get(&format!("/api/runs/{}/metrics?every=4", run.id))).await;
-    assert_eq!(thin.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [4, 6]);
+    let thin: RunMetrics = ok(&app, get(&format!("/api/runs/{}/metrics?every=3", run.id))).await;
+    assert_eq!(thin.steps.iter().map(|s| s.step).collect::<Vec<_>>(), [3, 4]);
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", run.id))).await;
     assert_eq!(logs.lines[0].message, "queued");
     assert!(logs.lines.iter().any(|l| l.message.contains("finished 2 epochs")), "{:?}", logs.lines);
@@ -266,7 +266,7 @@ async fn train_evaluate_predict_and_reload() {
     // Validation samples: the validation images, with dataset image ids.
     let samples: RunSamples = ok(&app, get(&format!("/api/runs/{}/samples", run.id))).await;
     assert_eq!(samples.epoch, 2);
-    assert_eq!(samples.samples.len(), 2);
+    assert_eq!(samples.samples.len(), 1);
     let val: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images?split=val", ds.id))).await;
     for (s, im) in samples.samples.iter().zip(&val.images) {
         assert_eq!((s.image_id.as_str(), s.dataset_id.as_str()), (im.id.as_str(), ds.id.as_str()));
@@ -386,7 +386,7 @@ async fn train_evaluate_predict_and_reload() {
 
     // Eval on the validation split (cached), export.
     let eval: ModelEval = ok(&app, get(&format!("/api/models/{model_id}/eval"))).await;
-    assert_eq!(eval.images, 2);
+    assert_eq!(eval.images, 1);
     // What was evaluated: the run's dataset, its validation split, and the confusion matrix's thresholds.
     assert_eq!(
         (eval.dataset_id.as_deref(), eval.dataset_name.as_deref()),
@@ -406,7 +406,7 @@ async fn train_evaluate_predict_and_reload() {
     // POST /api/val: the same split and thresholds as /eval give the same numbers; other splits and errors.
     let v: ValReport =
         ok(&app, post_json("/api/val", json!({ "model_id": model_id, "dataset_id": ds.id }))).await;
-    assert_eq!((v.split, v.images, v.imgsz), (Split::Val, 2, 64));
+    assert_eq!((v.split, v.images, v.imgsz), (Split::Val, 1, 64));
     assert_eq!((v.dataset_id.as_str(), v.dataset_name.as_deref()), (ds.id.as_str(), Some("tiny")));
     assert_eq!(v.val.per_class, eval.per_class);
     // Precision and recall come with their confidence threshold, the same in both.
@@ -416,7 +416,7 @@ async fn train_evaluate_predict_and_reload() {
     let body =
         json!({ "model_id": model_id, "dataset_id": ds.id, "split": "train", "imgsz": 96, "conf": 0.25 });
     let t: ValReport = ok(&app, post_json("/api/val", body)).await;
-    assert_eq!((t.split, t.images, t.imgsz), (Split::Train, 10, 96));
+    assert_eq!((t.split, t.images, t.imgsz), (Split::Train, 5, 96));
     for (body, status, code) in [
         (
             json!({ "model_id": model_id, "dataset_id": ds.id, "split": "test" }),
@@ -545,7 +545,7 @@ async fn train_evaluate_predict_and_reload() {
     std::fs::create_dir_all(home.join("datasets/tiny/images/none")).unwrap();
     std::fs::write(&yaml, text.replace("val: images/val", "val: images/none")).unwrap();
     let fell: ModelEval = ok(&app, get(&format!("/api/models/{model_id}/eval"))).await;
-    assert_eq!((fell.split, fell.images), (Some(Split::Train), 10));
+    assert_eq!((fell.split, fell.images), (Some(Split::Train), 5));
     let fb = fell.split_fallback.expect("a fallback is reported");
     assert_eq!((fb.requested, fb.reason.as_str()), (Split::Val, "empty_split"));
     assert!(fb.message.contains("'tiny' has no val images") && fb.message.contains("training-set"), "{fb:?}");
@@ -605,14 +605,14 @@ async fn queue_stop_resume_and_restart() {
     let home = t.join("home");
     let s = store(&home);
     let app = app(&s);
-    let ds = dataset(&app, "stoppy", 12).await;
+    let ds = dataset(&app, "stoppy", 6).await;
     // Runs wait after each epoch until stopped (or the hold is lifted), so the stops below always land before a
     // run could finish on its own.
     s.hold_runs_after_epochs(true);
 
     // One run at a time: the second waits in the queue, and stopping it there is immediate.
-    let a: Run = ok(&app, post_json("/api/runs", tiny(&ds, 3))).await;
-    let b: Run = ok(&app, post_json("/api/runs", tiny(&ds, 3))).await;
+    let a: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
+    let b: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
     let mut sse = Events::open(&app, &a.id).await;
     sse.until_epoch().await;
     assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", b.id))).await.status, RunStatus::Queued);
@@ -636,7 +636,7 @@ async fn queue_stop_resume_and_restart() {
     assert_eq!(events.last().unwrap().1["status"], "stopped", "{events:?}");
     let a1: Run = ok(&app, get(&format!("/api/runs/{}", a.id))).await;
     assert_eq!(a1.status, RunStatus::Stopped);
-    assert!((1..3).contains(&a1.epoch), "{}", a1.epoch);
+    assert_eq!(a1.epoch, 1);
     assert!(a1.model_id.is_some(), "stopped after a validated epoch");
     err(&app, post(&format!("/api/runs/{}/stop", a.id)), StatusCode::CONFLICT, "run_not_active").await;
     s.hold_runs_after_epochs(false);
@@ -660,10 +660,10 @@ async fn queue_stop_resume_and_restart() {
     let events = sse.until_status(&["completed", "failed", "stopped"]).await;
     assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
     let a2: Run = ok(&app, get(&format!("/api/runs/{}", a.id))).await;
-    assert_eq!((a2.status, a2.epoch, a2.step), (RunStatus::Completed, 3, 9));
+    assert_eq!((a2.status, a2.epoch, a2.step), (RunStatus::Completed, 2, 4));
     let m: RunMetrics = ok(&app, get(&format!("/api/runs/{}/metrics", a.id))).await;
-    assert_eq!(m.epochs.iter().map(|e| e.epoch).collect::<Vec<_>>(), [1, 2, 3]);
-    assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), (1..=9).collect::<Vec<_>>());
+    assert_eq!(m.epochs.iter().map(|e| e.epoch).collect::<Vec<_>>(), [1, 2]);
+    assert_eq!(m.steps.iter().map(|s| s.step).collect::<Vec<_>>(), (1..=4).collect::<Vec<_>>());
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", a.id))).await;
     assert!(logs.lines.iter().any(|l| l.message == "resuming from weights/last.folo"));
     assert!(logs.lines.iter().any(|l| l.message.starts_with("resumed from")));
@@ -723,7 +723,7 @@ async fn queue_stop_resume_and_restart() {
     let events = sse.until_status(&["completed", "failed"]).await;
     assert_eq!(events.last().unwrap().1["status"], "completed", "{events:?}");
     let done: Run = ok(&app, get(&format!("/api/runs/{}", b.id))).await;
-    assert_eq!(done.epoch, 3);
+    assert_eq!(done.epoch, 2);
     let last: Model = ok(&app, get(&format!("/api/models/{b_last}"))).await;
     assert!(last.metrics.is_some(), "known again once an epoch was validated");
 }
@@ -873,7 +873,7 @@ async fn auto_trains_and_predicts_on_the_gpu() {
             .gpu_idle_release(Duration::from_millis(300), Duration::from_millis(600)),
     );
     let app = app(&s);
-    let ds = dataset(&app, "gpu", 12).await;
+    let ds = dataset(&app, "gpu", 6).await;
     // A run stopped after its first epoch (so it has a model): held there until the stop.
     s.hold_runs_after_epochs(true);
     let mut cfg = tiny(&ds, 3);
@@ -930,7 +930,7 @@ async fn auto_trains_and_predicts_on_the_gpu() {
             break now;
         }
         assert!(std::time::Instant::now() < deadline, "never released: {now:?} (busy {busy:?})");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     };
     eprintln!("idle after a prediction: {idle:?} (busy {busy:?})");
     let system: SystemInfo = ok(&app, get("/api/system")).await;
@@ -1063,7 +1063,7 @@ async fn published_weights_list_as_models_and_fine_tune_by_name() {
     assert!(e.hint.unwrap().contains("folo weights pull folo-n-coco-f16"));
 
     // A fine-tune by name, with a mismatching `arch`: the run trains folo-n.
-    let ds = dataset(&app, "pub", 8).await;
+    let ds = dataset(&app, "pub", 5).await;
     let mut cfg = tiny(&ds, 1);
     cfg["weights"] = json!("folo-n-coco");
     cfg["arch"] = json!("folo-s");
@@ -1117,7 +1117,7 @@ async fn throughput_from_runs_predictions_and_a_probe() {
     let home = t.join("home");
     let s = store(&home);
     let app = app(&s);
-    let ds = dataset(&app, "speedy", 12).await;
+    let ds = dataset(&app, "speedy", 6).await;
 
     // Before any run: the reference, labelled.
     let e: RunEstimate = ok(&app, post_json("/api/runs/estimate", tiny(&ds, 3))).await;
@@ -1125,7 +1125,7 @@ async fn throughput_from_runs_predictions_and_a_probe() {
         (e.source, e.confidence, e.device.as_str()),
         (ThroughputSource::Reference, Confidence::Low, "cpu")
     );
-    assert_eq!((e.train_images, e.val_images, e.batches_per_epoch), (10, 2, 3));
+    assert_eq!((e.train_images, e.val_images, e.batches_per_epoch), (5, 1, 2));
     assert_eq!(
         e.phases.iter().map(|p| (p.phase, p.epochs)).collect::<Vec<_>>(),
         [(PhaseKind::Mosaic, 2), (PhaseKind::CloseMosaic, 1)]

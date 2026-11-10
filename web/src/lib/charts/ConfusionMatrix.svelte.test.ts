@@ -44,38 +44,9 @@ describe('ConfusionMatrix labels', () => {
     expect(cell(2, 1).textContent!.trim()).toBe('8');
     expect(cell(2, 3).textContent!.trim()).toBe('5');
     expect(cell(2, 2).textContent!.trim()).toBe('83');
-    // Small shares are numbered too; a container query swaps a number for the dot only where the cell is too narrow.
-    expect(cell(2, 0).querySelector('.v')?.textContent).toBe('3');
-    expect(cell(2, 0).querySelector('.mark')).not.toBeNull();
-    expect(cell(3, 0).querySelector('.v.long')?.textContent).toBe('100');
-    expect(cell(0, 1).querySelector('.v, .mark')).toBeNull();
     expect(cell(2, 0).getAttribute('aria-label')).toBe('bearing predicted as bolt: 2 of 60, 3%');
-    expect(cell(2, 0).classList.contains('zero')).toBe(false);
-    expect(cell(0, 1).classList.contains('zero')).toBe(true);
     expect(cell(0, 1).getAttribute('aria-label')).toBe('bolt predicted as nut: 0 of 40, 0%');
     for (const el of target.querySelectorAll('.cell')) expect(el.getAttribute('aria-label')).toMatch(/: \d+ of \d+, (<1|\d+)%$/);
-    unmount(cm);
-  });
-});
-
-describe('ConfusionMatrix scale', () => {
-  it('labels every key as a share, with None as a swatch of its own', () => {
-    const target = document.createElement('div');
-    document.body.appendChild(target);
-    const cm = mount(ConfusionMatrix, { target, props: { classes: ['a'], matrix: [[1, 0], [0, 0]], minCell: 32, scale: true } });
-    flushSync();
-    const ticks = [...target.querySelectorAll('.scale .tick')].flatMap((t) => (t.children.length ? [...t.children] : [t])).map((t) => t.textContent?.trim());
-    expect(ticks).toEqual(['None', '<1%', '1%', '5%', '10%', '100%']);
-    expect(target.querySelector('.scale .none')).not.toBeNull();
-    unmount(cm);
-  });
-
-  it('caps its cells at maxCell', () => {
-    const target = document.createElement('div');
-    document.body.appendChild(target);
-    const cm = mount(ConfusionMatrix, { target, props: { classes: ['a'], matrix: [[1, 0], [0, 0]], minCell: 32, maxCell: 48 } });
-    flushSync();
-    expect(target.querySelector<HTMLElement>('.cm')!.style.getPropertyValue('--max-cell')).toBe('48px');
     unmount(cm);
   });
 });

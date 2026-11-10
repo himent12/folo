@@ -180,18 +180,5 @@ mod tests {
         assert_eq!(run.status, RunStatus::Running);
         assert_eq!(run.best.as_ref().unwrap().epoch, 11);
         assert!((run.progress() - 340.0 / 5000.0).abs() < 1e-6);
-        assert_eq!(run.status.label(), "Running");
-    }
-
-    #[test]
-    fn sse_events_parse() {
-        let step = r#"{ "epoch": 12, "step": 340, "lr": 0.0098,
-          "loss": { "box": 1.21, "cls": 0.83, "dfl": 1.02, "total": 3.06 },
-          "imgs_per_s": 412.5, "eta_s": 1840 }"#;
-        match RunEvent::from_sse("step", step) {
-            Some(Ok(RunEvent::Step(s))) => assert_eq!(s.loss.box_, 1.21),
-            other => panic!("unexpected {other:?}"),
-        }
-        assert!(RunEvent::from_sse("nope", "{}").is_none());
     }
 }

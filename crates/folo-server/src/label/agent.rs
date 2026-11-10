@@ -237,7 +237,7 @@ pub fn run(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> Result<Output, AgentError> {
-    let ended = run_to_end(cmd, stdin, timeout, cancel)?;
+    let ended = run_to_end(cmd, stdin, timeout, cancel, PIPE_GRACE)?;
     Ok(Output { success: ended.outcome?, stdout: ended.stdout.text(), stderr: ended.stderr.text() })
 }
 
@@ -248,12 +248,14 @@ struct Ended {
     stderr: Arc<Piped>,
 }
 
-/// [`run`], up to the point where the child (and what it started, if that had to be killed) is gone.
+/// [`run`], up to the point where the child (and what it started, if that had to be killed) is gone. `grace` is
+/// [`PIPE_GRACE`] (tests shorten it).
 fn run_to_end(
     mut cmd: Command,
     stdin: Option<Vec<u8>>,
     timeout: Duration,
     cancel: &AtomicBool,
+    grace: Duration,
 ) -> Result<Ended, AgentError> {
     cmd.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -289,7 +291,7 @@ fn run_to_end(
             }
         }
         match exited {
-            Some((success, at)) if (stdout.ended() && stderr.ended()) || at.elapsed() >= PIPE_GRACE => {
+            Some((success, at)) if (stdout.ended() && stderr.ended()) || at.elapsed() >= grace => {
                 break Ok(success);
             }
             _ if cancel.load(Ordering::Relaxed) => break Err(AgentError::Cancelled),
@@ -384,8 +386,9 @@ mod tests {
             format!("sleep {LEFT_BEHIND_S} & echo done")
         };
         let t0 = Instant::now();
-        let ended =
-            run_to_end(shell(&script), None, Duration::from_secs(60), &AtomicBool::new(false)).unwrap();
+        let grace = Duration::from_millis(500);
+        let ended = run_to_end(shell(&script), None, Duration::from_secs(60), &AtomicBool::new(false), grace)
+            .unwrap();
         // The call is back long before that process would have ended, with what the shell printed...
         assert_eq!(ended.outcome, Ok(true));
         assert_eq!(ended.stdout.text().trim(), "done");

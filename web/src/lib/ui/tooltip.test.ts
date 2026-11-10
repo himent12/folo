@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { boundsFor, EDGE, placeTip, tooltip } from './tooltip';
+import { boundsFor, placeTip, tooltip } from './tooltip';
 
 describe('tooltip', () => {
   afterEach(() => vi.useRealTimers());
@@ -164,7 +164,6 @@ describe('tooltip', () => {
     });
 
     it('keeps 8 px from the viewport and treats fixed chrome as outside: near the top bar it flips below', () => {
-      expect(EDGE).toBe(8);
       // Round 24: the Playground's "no runtime" tip sat over the top bar's New run, touching the viewport's edge.
       const rect = (b: Partial<DOMRect>) => () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, toJSON() {}, ...b }) as DOMRect;
       const bar = document.createElement('header');

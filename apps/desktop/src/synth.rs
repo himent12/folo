@@ -290,6 +290,7 @@ mod tests {
         let a = Scene::generate(42, 3, 6, false);
         let b = Scene::generate(42, 3, 6, false);
         assert_eq!(a.render(32, 24), b.render(32, 24));
+        assert_eq!(a.render(17, 9).len(), 17 * 9 * 4);
         assert_eq!(a.boxes(640, 480), b.boxes(640, 480));
     }
 
@@ -302,11 +303,5 @@ mod tests {
                 assert!(b.x2 > b.x1 && b.y2 > b.y1);
             }
         }
-    }
-
-    #[test]
-    fn render_has_expected_size() {
-        let s = Scene::generate(7, 3, 4, false);
-        assert_eq!(s.render(17, 9).len(), 17 * 9 * 4);
     }
 }

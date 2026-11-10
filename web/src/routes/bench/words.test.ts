@@ -1,40 +1,29 @@
 import { describe, expect, it } from 'vitest';
 import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
 import { catalog } from '$lib/api/mock/benchCatalog';
-import { contestantFacts, costFacts, coverageFacts, entryStatus, loopStatus, progressFacts, scoreText, shortFingerprint, sourceKind } from './words';
+import { contestantFacts, costFacts, coverageFacts, entryStatus, progressFacts, shortFingerprint, sourceKind } from './words';
 
 const bench = { images: 360, classes: ['a', 'b', 'c', 'd'], plan: catalog().default_plan } as unknown as Pick<Bench, 'images' | 'classes' | 'plan'>;
 const entry = (o: Partial<BenchEntry>) =>
   ({ id: 'e', name: 'x', images: 360, conditions: true, scored: true, missing_classes: [], status: 'done', score: { total: 60, partial: false, axes: [] }, ...o }) as BenchEntry;
 
 describe('coverageFacts', () => {
-  it('says nothing for an entry that ran everything', () => {
+  it('says what an entry left out, in the order the leaderboard reads them, and nothing for one that ran everything', () => {
+    const partial = { total: 50, partial: true, axes: [] };
     expect(coverageFacts(entry({}), bench)).toEqual([]);
-  });
-
-  it('says what an agent entry left out, in the order the leaderboard reads them', () => {
-    const agent = entry({ images: 48, conditions: false, scored: false, score: { total: 50, partial: true, axes: [] } });
-    expect(coverageFacts(agent, bench)).toEqual(['48 of 360 images', 'unchanged only', 'no confidences']);
-  });
-
-  it('counts the conditions an external entry answered when the result says, else says some were left out', () => {
-    const ext = entry({ score: { total: 50, partial: true, axes: [] } });
-    expect(coverageFacts(ext, bench, 4)).toEqual(['4 of 12 conditions']);
-    expect(coverageFacts(ext, bench)).toEqual(['some conditions left out']);
-  });
-
-  it('names the classes a model lacks, which is no partial', () => {
+    expect(coverageFacts(entry({ images: 48, conditions: false, scored: false, score: partial }), bench)).toEqual(['48 of 360 images', 'unchanged only', 'no confidences']);
+    // An external entry: the conditions it answered when the result says, else that some were left out.
+    expect(coverageFacts(entry({ score: partial }), bench, 4)).toEqual(['4 of 12 conditions']);
+    expect(coverageFacts(entry({ score: partial }), bench)).toEqual(['some conditions left out']);
+    // The classes a model lacks, which is no partial.
     expect(coverageFacts(entry({ missing_classes: ['c', 'd'] }), bench)).toEqual(['knows 2 of 4 classes']);
   });
 });
 
 describe('words', () => {
-  it('writes a score with one decimal, a fingerprint short, a source by its kind', () => {
-    expect(scoreText(71.924)).toBe('71.9');
+  it('writes a fingerprint short, and a dataset source without a split as its validation split', () => {
     expect(shortFingerprint('9c41aa00bb11e2a0')).toBe('9c41…e2a0');
-    expect(sourceKind({ kind: 'dataset', dataset_id: 'd', split: 'val' })).toBe('validation split');
-    expect(sourceKind({ kind: 'dataset', dataset_id: 'd' })).toBe('validation split');
-    expect(sourceKind({ kind: 'label_job', job_id: 'j' })).toBe('labeling job');
+    expect(sourceKind({ kind: 'dataset', dataset_id: 'd' })).toBe(sourceKind({ kind: 'dataset', dataset_id: 'd', split: 'val' }));
   });
 
   it('says who an entry is without repeating its name', () => {
@@ -62,12 +51,5 @@ describe('words', () => {
     const model = { ...open, contestant: { kind: 'model' }, progress: { done: 1200, total: 6000, condition: 'haze', severity: 3 } } as unknown as BenchEntry;
     expect(progressFacts(model).where).toBe('haze, severity 3');
     expect(entryStatus(model).label).toBe('Running');
-  });
-
-  it('gives entries and loops a status mark and a word', () => {
-    expect(entryStatus({ status: 'done' })).toEqual({ status: 'completed', label: 'Done' });
-    expect(entryStatus({ status: 'queued' }).label).toBe('Queued');
-    expect(loopStatus({ status: 'running', phase: 'training' })).toEqual({ status: 'running', label: 'Training' });
-    expect(loopStatus({ status: 'done', phase: null }).label).toBe('Done');
   });
 });

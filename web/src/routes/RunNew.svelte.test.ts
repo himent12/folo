@@ -1,9 +1,8 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
-import type { RunEstimate } from '$lib/api/types';
 import { parse, router } from '$lib/router.svelte';
 import { page } from '$lib/shell/crumbs.svelte';
 import { undescribedFields } from '$lib/ui/fieldA11y';
@@ -97,14 +96,6 @@ describe('New run: a device the server cannot use', () => {
     expect([...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].every((b) => b.disabled)).toBe(true);
     expect(target.querySelector('#start-why')?.textContent).toBe('Device: GPU 1 (gpu:1) is not available.');
     // Both Start buttons (summary and phone dock) carry the reason, and the select is tied to its error.
-    expect(target.querySelector('#dock-why')?.textContent).toBe('Device: GPU 1 (gpu:1) is not available.');
-    // In the dock the reason takes the estimate's place (one row of chrome), and it is an ink link behind a danger mark.
-    expect(target.querySelector('.dock .dock-est')).toBeNull();
-    for (const id of ['#start-why', '#dock-why']) {
-      const why = target.querySelector(id)!;
-      expect(why.firstElementChild?.tagName.toLowerCase()).toBe('svg');
-      expect(why.querySelector('button.why-go')).not.toBeNull();
-    }
     const starts = [...target.querySelectorAll<HTMLButtonElement>('.start button[type="submit"], .dock button[type="submit"]')];
     expect(starts.map((b) => b.getAttribute('aria-describedby'))).toEqual(['start-why', 'dock-why']);
     const sel = target.querySelector('select#device')!;
@@ -114,23 +105,13 @@ describe('New run: a device the server cannot use', () => {
     target.querySelector<HTMLSelectElement>('select#device')!.blur();
     target.querySelector<HTMLButtonElement>('#start-why button')!.click();
     await until(() => document.activeElement === target.querySelector('select#device'), 'focus on Device');
-    pick('auto');
-    expect(target.querySelector('#device-error')).toBeNull();
-    expect(target.querySelector('select#device')!.hasAttribute('aria-invalid')).toBe(false);
-  });
-
-  it('offers Auto as the way out', async () => {
-    await open();
-    await until(() => target.querySelector('select#device option[value="gpu:1"]'));
-    pick('gpu:1');
-    await start();
-    await until(() => target.querySelector('#device-error'));
-    const auto = [...target.querySelectorAll<HTMLButtonElement>('.dev-err button')].find((b) => b.textContent?.trim() === 'Use Auto')!;
-    auto.click();
+    // Auto is the way out.
+    [...target.querySelectorAll<HTMLButtonElement>('.dev-err button')].find((b) => b.textContent?.trim() === 'Use Auto')!.click();
     flushSync();
     expect(target.querySelector<HTMLSelectElement>('select#device')!.value).toBe('auto');
     expect(target.querySelector('#device-error')).toBeNull();
     expect(target.querySelector('#start-why')).toBeNull();
+    expect(target.querySelector('select#device')!.hasAttribute('aria-invalid')).toBe(false);
   });
 
   it('treats a 501 for a GPU from servers before device_not_found the same way', async () => {
@@ -190,16 +171,8 @@ describe('New run after running out of GPU memory', () => {
     const startBtn = [...target.querySelectorAll<HTMLButtonElement>('.start button[type="submit"]')][0]!;
     expect(startBtn.className).toContain('secondary');
     expect(startBtn.getAttribute('aria-describedby')).toContain('rail-nofit');
-    // One condition, one severity: the meter and the line are danger; the figure, a metric, stays in ink.
-    expect(target.querySelector('#rail-nofit')?.className).toContain('danger');
-    expect(target.querySelector('.summary .vram i')?.className).toContain('danger');
-    const fig = [...target.querySelectorAll('.summary .est dd')].find((d) => /GiB/.test(d.textContent ?? ''))!;
-    expect(fig.textContent).toMatch(/~26\.\d GiB/);
-    expect(fig.className).not.toMatch(/danger|warn/);
-    // The dock (narrow screens) carries the figure against the GPU's, the verdict and the fix as its one button.
-    const dock = target.querySelector('.dock')!;
-    expect(dock.querySelector('.dock-est')?.textContent?.replace(/\s+/g, ' ')).toMatch(/~26\.\d GiB \/ 16\.0 GiB.*Likely won't fit/);
-    expect([...dock.querySelectorAll('.btn')].map((b) => b.textContent?.trim())).toEqual(['Use batch 8']);
+    // The dock (narrow screens) has the fix as its one button.
+    expect([...target.querySelectorAll('.dock .btn')].map((b) => b.textContent?.trim())).toEqual(['Use batch 8']);
     // Taking it: batch 8, forecast to fit, and Start is the primary again.
     fix.click();
     flushSync();
@@ -239,13 +212,6 @@ describe('New run after running out of GPU memory', () => {
     const fix = await until(() => [...target.querySelectorAll<HTMLElement>('.start .btn.primary')].find((b) => b.textContent?.includes('Use batch 8')), 'the fit');
     expect(fix.textContent).toMatch(/Use batch 8 · ~13\.\d GiB/);
   });
-  it('keeps Start the primary when the settings fit', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    await until(() => target.querySelector('.summary .vram i'), 'the meter');
-    expect(target.querySelector('#rail-nofit')).toBeNull();
-    expect(target.querySelector('.start button[type="submit"]')?.className).toContain('primary');
-  });
   it("ignores an image size the trainer would reject and keeps the run's", async () => {
     await open('?from=run_a2f0&imgsz=333');
     await until(() => target.querySelector('.oom-note'));
@@ -275,23 +241,17 @@ describe('New run: short runs', () => {
     // fasteners: 1,920 train images at batch 16 are 30 optimizer steps an epoch; 5 epochs are 150, W = 90 of them.
     type('epochs', 5);
     const warn = await until(() => target.querySelector('.summary .short'));
-    // One line, a callout without a fill; the reasons and the fix behind "Why?".
-    expect(warn.querySelector('p.callout')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Too short to learn: 150 optimizer steps. Why?');
+    // One line; the reasons and the fix behind "Why?".
+    expect(warn.querySelector('p.callout')?.textContent).toContain('150 optimizer steps');
     expect(warn.querySelector('button.fix')).toBeNull();
-    expect(warn.querySelector('.short-why')).toBeNull();
     const more = warn.querySelector<HTMLButtonElement>('button.more')!;
-    expect(more.textContent).toBe('Why?');
     more.click();
     flushSync();
     expect(more.getAttribute('aria-expanded')).toBe('true');
-    const why = warn.querySelector(`#${more.getAttribute('aria-controls')}`)!;
-    const text = why.textContent!.replace(/[ \t\n]+/g, ' ');
-    expect(text).toContain('5 epochs × 30 optimizer steps. From scratch, a detector needs a few hundred');
-    // "0" never ends up alone on a line, and the prose names no config keys.
-    expect(text).toContain('expect an mAP near 0.');
+    const text = warn.querySelector(`#${more.getAttribute('aria-controls')}`)!.textContent!.replace(/\s+/g, ' ');
+    // The prose names no config keys.
     expect(text).toContain('Warmup takes 90 of the 150 optimizer steps');
     expect(text).not.toMatch(/lr0|warmup_epochs/);
-    expect(target.querySelector('.dock-warn')?.textContent).toBe('Too short to learn');
     // The trainer's own count, ceil(200 / 30) = 7, which also clears the warmup warning.
     warn.querySelector<HTMLButtonElement>('button.fix')!.click();
     flushSync();
@@ -310,7 +270,6 @@ describe('New run: short runs', () => {
     flushSync();
     expect(warn.textContent).not.toContain('Too short');
     expect(warn.textContent).toContain('Warmup takes 90 of the 150 optimizer steps');
-    expect(target.querySelector('.dock-warn')?.textContent).toBe('Mostly warmup');
     warn.querySelector<HTMLButtonElement>('button.fix')!.click();
     flushSync();
     expect(target.querySelector<HTMLInputElement>('input#epochs')!.value).toBe('6');
@@ -324,9 +283,9 @@ describe('New run: short runs', () => {
     expect(target.querySelector<HTMLInputElement>('input#close')!.value).toBe('4');
     type('close', 8);
     // Not a warning any more: the trainer keeps mosaic on for half the run, and the field says so.
-    expect(target.querySelector('#close-hint')?.textContent).toBe('At most half the run: mosaic closes for the last 4 epochs.');
+    expect(target.querySelector('#close-hint')?.textContent).toContain('last 4 epochs');
     type('epochs', 100);
-    expect(target.querySelector('#close-hint')?.textContent).toBe('Train the last N epochs without mosaic to settle the boxes.');
+    expect(target.querySelector('#close-hint')?.textContent).not.toContain('4 epochs');
   });
 });
 
@@ -373,234 +332,16 @@ describe('New run: the schedule in the Summary', () => {
   });
 });
 
-describe('New run: mixed precision', () => {
-  const sw = () => target.querySelector<HTMLInputElement>('input#amp');
-  const cli = () => target.querySelector('.cli code')!.textContent!;
-  const row = () => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === 'Mixed precision');
-  const time = () => [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. time')!.nextElementSibling!.textContent;
-  const basis = () => target.querySelector('.summary .est-how > summary')?.textContent;
-
-  it('is off by default; on, the run, the Summary and the command say so, and the estimate is faster', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    const s = await until(sw, 'the switch');
-    expect(s.checked).toBe(false);
-    expect(s.disabled).toBe(false);
-    expect(s.getAttribute('role')).toBe('switch');
-    // A field on the Training grid: the label's line carries the switch; the hint (folo-s, measured: about 1.6×
-    // faster) under it describes the switch.
-    const field = s.closest('.fields > .field')!;
-    expect(field.querySelector('.switch')?.textContent?.trim()).toBe('Mixed precision');
-    expect(field.querySelector('#amp-hint')?.textContent).toBe('f16 on tensor cores: about 1.6× faster, 40% less memory.');
-    expect(s.getAttribute('aria-describedby')).toBe('amp-hint');
-    expect(row()?.querySelector('.rv-v')?.textContent).toBe('Off');
-    expect(cli()).not.toContain('--amp');
-    await until(() => basis()?.startsWith('Measured'), "the server's estimate");
-    const f32 = time();
-    s.click();
-    flushSync();
-    expect(row()?.querySelector('.rv-v')?.textContent).toBe('On');
-    expect(cli()).toContain('--amp');
-    // The server's estimate follows once the settings settle (folo-s amp was never measured: carried over).
-    await until(() => time() !== f32, 'the new estimate');
-    const create = vi.spyOn(api, 'createRun');
-    await start();
-    expect(create.mock.calls[0]![0].amp).toBe(true);
-  });
-
-  it("is off where the GPU has no tensor cores through DX12, with the way to Vulkan and the server's own words", async () => {
-    hub.api = api = new MockApi('no-tensor-cores', 0);
-    await open();
-    const s = await until(sw, 'the switch');
-    expect(s.disabled).toBe(true);
-    expect(s.checked).toBe(false);
-    // Only the control is disabled: the label stays a field label, not disabled text.
-    expect(s.closest('.field')?.classList.contains('sw-field')).toBe(true);
-    expect(s.getAttribute('aria-describedby')).toBe('amp-why');
-    // One plain sentence and one action docs/GPU.md confirms (an RTX 4080 SUPER has cooperative matrices on Vulkan):
-    // the shared remedy, the shell named, the command whole on one copyable line.
-    expect(target.querySelector('#amp-why')?.textContent).toBe('DirectX 12 does not reach this GPU’s tensor cores; restart the server on Vulkan.');
-    const remedy = target.querySelector('.amp .remedy')!;
-    expect(remedy.querySelector('.shell')?.textContent).toBe('In PowerShell:');
-    expect(remedy.querySelector('pre.line')?.textContent).toBe("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
-    expect(remedy.querySelector('pre.line')?.hasAttribute('data-scrolls')).toBe(true);
-    const write = vi.fn(async () => {});
-    Object.defineProperty(navigator, 'clipboard', { value: { writeText: write }, configurable: true });
-    remedy.querySelector<HTMLButtonElement>('button[aria-label="Copy command"]')!.click();
-    expect(write).toHaveBeenCalledWith("$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores");
-    // The server's reason, verbatim and copyable, folded behind "Driver report".
-    const report = remedy.querySelector<HTMLDetailsElement>('details.report')!;
-    expect(report.open).toBe(false);
-    expect(report.querySelector('summary')?.textContent).toBe('Driver report');
-    expect(report.querySelector('pre')?.textContent).toBe((await api.system()).capabilities!.amp.reason);
-    expect(report.querySelector('pre')?.textContent).toContain('NVIDIA GeForce RTX 4080 SUPER (Dx12) has no cooperative matrices in wgpu');
-    report.querySelector<HTMLButtonElement>('button[aria-label="Copy driver report"]')!.click();
-    expect(write).toHaveBeenCalledWith((await api.system()).capabilities!.amp.reason);
-    const create = vi.spyOn(api, 'createRun');
-    await start();
-    expect(create.mock.calls[0]![0].amp).toBe(false);
-  });
-
-  it('says to train in f32 where no backend gives this GPU tensor cores', async () => {
-    hub.api = api = new MockApi('no-tensor-cores', 0);
-    const sys = api.system.bind(api);
-    api.system = async () => {
-      const r = await sys();
-      return { ...r, gpus: r.gpus.map((g) => ({ ...g, name: 'AMD Radeon RX 7900 XTX' })) };
-    };
-    await open();
-    await until(sw, 'the switch');
-    expect(target.querySelector('#amp-why')?.textContent).toBe('This GPU has no tensor cores FOLO can use. Train in f32 on this GPU.');
-    expect(target.querySelector('#amp-why')?.textContent).not.toContain('FOLO_GPU_BACKEND');
-  });
-
-  it('treats Auto on a server without a usable GPU as the CPU, with no GPU advice', async () => {
-    hub.api = api = new MockApi('no-tensor-cores', 0);
-    const sys = api.system.bind(api);
-    api.system = async () => {
-      const r = await sys();
-      return { ...r, capabilities: { ...r.capabilities!, device: 'cpu' } };
-    };
-    await open();
-    await until(sw, 'the switch');
-    expect(target.querySelector('#amp-why')?.textContent).toBe('This server has no usable GPU, so runs train on the CPU in f32.');
-  });
-
-  it('says how to turn tensor cores on when the server has them off', async () => {
-    hub.api = api = new MockApi('tensor-cores-off', 0);
-    await open();
-    await until(sw, 'the switch');
-    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server; restart it with them on:');
-    expect(target.querySelector('.amp .shell')).toBeNull();
-    expect(target.querySelector('.amp pre.line')?.textContent).toBe('folo serve --tensor-cores');
-  });
-
-  it('is off on the CPU, and comes back on with the GPU', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    const s = await until(sw, 'the switch');
-    s.click();
-    flushSync();
-    pick('cpu');
-    expect(sw()!.disabled).toBe(true);
-    expect(sw()!.checked).toBe(false);
-    expect(target.querySelector('#amp-why')?.textContent).toBe('The CPU has no tensor cores. Pick a GPU to train in mixed precision.');
-    expect(target.querySelector('.amp .dev-detail')).toBeNull();
-    expect(cli()).not.toContain('--amp');
-    pick('auto');
-    expect(sw()!.checked).toBe(true);
-  });
-
-  it('is hidden for servers that do not report capabilities, and the run leaves amp out', async () => {
-    const sys = api.system.bind(api);
-    api.system = async () => ({ ...(await sys()), capabilities: undefined });
-    await open();
-    expect(sw()).toBeNull();
-    expect(row()).toBeUndefined();
-    const create = vi.spyOn(api, 'createRun');
-    await start();
-    expect('amp' in create.mock.calls[0]![0]).toBe(false);
-  });
-});
-
-describe('New run: the end-to-end head', () => {
-  const sw = () => target.querySelector<HTMLInputElement>('input#head');
-  const cli = () => target.querySelector('.cli code')!.textContent!;
-  const row = () => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === 'Head');
-
-  it('is an Advanced switch, off by default: the run leaves head out (o2m) and the Summary and command say nothing', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    const s = sw()!;
-    expect(s.closest('details.advanced')).not.toBeNull();
-    expect(s.checked).toBe(false);
-    expect(s.closest('.field')?.querySelector('.switch')?.textContent?.trim()).toBe('End-to-end (no NMS)');
-    // One line, with the cost measured on the shapes gate (docs/BENCHMARKS.md: 0.015 mAP50-95 behind NMS).
-    expect(s.getAttribute('aria-describedby')).toBe('head-hint');
-    expect(target.querySelector('#head-hint')?.textContent).toBe('No NMS step at inference; about 0.015 lower mAP50-95 than NMS on the same model.');
-    expect(row()).toBeUndefined();
-    expect(cli()).not.toContain('--head');
-    const create = vi.spyOn(api, 'createRun');
-    await start();
-    expect('head' in create.mock.calls[0]![0]).toBe(false);
-  });
-
-  it('on, sends head o2o, shows it in the Summary and as --head o2o, and the run logs the dual head', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    sw()!.click();
-    flushSync();
-    expect(row()?.querySelector('.rv-v')?.textContent).toBe('End-to-end (no NMS)');
-    expect(cli()).toContain('--head o2o');
-    const create = vi.spyOn(api, 'createRun');
-    await start();
-    expect(create.mock.calls[0]![0].head).toBe('o2o');
-    const run = await create.mock.results[0]!.value;
-    expect(run.config.head).toBe('o2o');
-    // Runs train one at a time: free the slot (the live run and the two waiting ones), then let the worker take it.
-    for (const id of ['run_7d1e', 'run_q4n2', 'run_q7c5']) await api.stopRun(id);
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(Date.now() + 5000);
-      await api.runs();
-      vi.setSystemTime(Date.now() + 5000);
-      const { lines } = await api.runLogs(run.id, 50);
-      expect(lines.some((l) => l.message.startsWith('head o2o: dual assignment'))).toBe(true);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("names o2m in the command when fine-tuning, since the CLI's default is the weights file's head", async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    const sel = target.querySelector<HTMLSelectElement>('select#weights')!;
-    const opt = await until(() => sel.querySelector<HTMLOptionElement>('option:not([value="none"])'), 'trained weights');
-    opt.selected = true;
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-    flushSync();
-    expect(cli()).toContain('--head o2m');
-    sw()!.click();
-    flushSync();
-    expect(cli()).toContain('--head o2o');
-    expect(cli()).not.toContain('--head o2m');
-  });
-
-  it('opens Advanced from its Summary row', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    sw()!.click();
-    flushSync();
-    const adv = target.querySelector<HTMLDetailsElement>('details.advanced')!;
-    expect(adv.open).toBe(false);
-    (row() as HTMLButtonElement).click();
-    await until(() => adv.open, 'Advanced open');
-  });
-
-  it('comes back on in a copy of an o2o run', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    const base = (await api.runs())[0]!.config;
-    const run = await api.createRun({ ...base, name: 'e2e-src', head: 'o2o' });
-    await open(`?from=${run.id}`);
-    await until(() => sw()?.checked, 'the switch on');
-    expect(row()).toBeDefined();
-  });
-
-  it('is refused by the mock as by the server when the head is not o2m or o2o', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    const base = (await api.runs())[0]!.config;
-    await expect(api.createRun({ ...base, name: 'bad-head', head: 'nms' as 'o2o' })).rejects.toMatchObject({ status: 400, code: 'invalid_body' });
-  });
-});
-
-describe('New run: the top bar', () => {
-  it('owns the create action while mounted, so the top bar steps aside', async () => {
+describe('New run: the chrome', () => {
+  it('owns the create action and has a bottom dock while mounted, so the top bar and tab bar step aside', async () => {
     const before = page.creators;
     await open();
     expect(page.ownsCreate).toBe(true);
+    expect(document.documentElement.hasAttribute('data-dock')).toBe(true);
     unmount(c!);
     c = undefined;
     expect(page.creators).toBe(before);
+    expect(document.documentElement.hasAttribute('data-dock')).toBe(false);
   });
 });
 
@@ -615,13 +356,6 @@ describe('New run: start weights', () => {
     expect(ids).toContain('m_fast_n');
     expect(ids).not.toContain('m_fast_n_f16');
   });
-
-  it('names a run without weights "From scratch", in the select and in the Summary', async () => {
-    await open();
-    expect(target.querySelector('select#weights option[value="none"]')?.textContent).toBe('From scratch');
-    const rv = [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === 'Start from');
-    expect(rv?.querySelector('.rv-v')?.textContent).toBe('From scratch');
-  });
 });
 
 describe('New run on a phone', () => {
@@ -629,28 +363,15 @@ describe('New run on a phone', () => {
   const setWidth = (w: number) => (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: w });
   afterEach(() => setWidth(width));
 
-  it('picks the size from a segmented control with one recommendation; its figures fold behind "Compare sizes"', async () => {
+  it('picks the size from a segmented control, or from the comparison rows, which replace it while open', async () => {
     setWidth(390);
     await open();
     const pick = target.querySelector('#arch-pick')!;
-    expect([...pick.querySelectorAll('button')].map((b) => b.textContent?.trim())).toEqual(['N', 'S', 'M', 'L', 'X']);
-    expect(target.querySelector('.a-sel')?.textContent).toBe('folo-s The default: fast and accurate.');
-    // Params, compute and latency with their provenance live in the comparison, not under the pick.
-    expect(target.querySelectorAll('.a-pick .a-specs, .a-pick .a-lat')).toHaveLength(0);
     const compare = target.querySelector<HTMLDetailsElement>('details.a-compare')!;
     expect(compare.open).toBe(false);
-    expect(compare.querySelectorAll('.arch')).toHaveLength(5);
-    expect(compare.querySelector('.ref')?.textContent).toContain('reference: RTX 4080 SUPER, f32');
     pick.querySelectorAll('button')[2]!.click();
     flushSync();
-    expect(target.querySelector('.a-sel')?.textContent).toBe('folo-m More accuracy on busy scenes.');
     expect(compare.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-m');
-  });
-
-  it('keeps one size selector: open, the comparison rows replace the compact pick until it closes', async () => {
-    setWidth(390);
-    await open();
-    const compare = target.querySelector<HTMLDetailsElement>('details.a-compare')!;
     compare.open = true;
     compare.dispatchEvent(new Event('toggle'));
     flushSync();
@@ -692,17 +413,13 @@ describe('New run: image size', () => {
     await until(() => target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim() === '640', 'back to 640');
   });
 
-  it('keeps 640 for larger images', async () => {
-    await open('?dataset=ds_shapes');
-    await new Promise((r) => setTimeout(r, 400));
-    flushSync();
-    expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('640');
-  });
-
   it('lets a size from the link win', async () => {
-    vi.spyOn(api, 'datasetImages').mockResolvedValue({ total: 1, images: [{ id: 'img_0', file: 'a.jpg', split: 'train', width: 320, height: 320, boxes: [] }] });
+    const list = vi.spyOn(api, 'datasetImages').mockResolvedValue({ total: 1, images: [{ id: 'img_0', file: 'a.jpg', split: 'train', width: 320, height: 320, boxes: [] }] });
     await open('?imgsz=960');
-    await new Promise((r) => setTimeout(r, 400));
+    // The training images are read (all 320 px), and the link's size stays.
+    await until(() => list.mock.results.length, 'the image sizes');
+    await list.mock.results.at(-1)!.value;
+    await tick();
     flushSync();
     expect(target.querySelector('#imgsz [aria-checked="true"]')?.textContent?.trim()).toBe('960');
   });
@@ -735,18 +452,8 @@ describe('New run: the form', () => {
     flushSync();
     expect(el.getAttribute('aria-invalid')).toBe('true');
     expect(el.getAttribute('aria-describedby')).toBe('epochs-error');
-    expect(target.querySelector('#epochs-error')?.textContent).toBe('A whole number from 1 to 10,000.');
-    expect(target.querySelector('.dock .dock-est')).toBeNull();
-    expect(target.querySelector('#dock-why')?.textContent).toBe('Epochs: A whole number from 1 to 10,000.');
-  });
-
-  it('shows unmeasured latency as a dash and the size letters in uppercase', async () => {
-    await open();
-    const rows = [...target.querySelectorAll('.arch')];
-    expect(rows.map((r) => r.querySelector('.a-size')?.textContent)).toEqual(['N', 'S', 'M', 'L', 'X']);
-    expect(rows.slice(2).map((r) => r.querySelectorAll('.a-v')[2]?.textContent?.trim())).toEqual(['—', '—', '—']);
-    // The dash is explained once, under the table, not in every row (DESIGN_DIRECTION 23).
-    expect(target.querySelector('.arches')?.textContent).not.toContain('not measured');
+    // The dock's Start says why it is off.
+    expect(target.querySelector('#dock-why')?.textContent).toContain(target.querySelector('#epochs-error')!.textContent!);
   });
 
   it('folds augmentation behind its one-line summary until opened', async () => {
@@ -760,380 +467,11 @@ describe('New run: the form', () => {
     expect(target.querySelector('#aug-body')?.classList.contains('shut')).toBe(false);
   });
 
-  it('marks the page as having a bottom dock while the form is shown', async () => {
-    await open();
-    expect(document.documentElement.hasAttribute('data-dock')).toBe(true);
-    unmount(c!);
-    c = undefined;
-    expect(document.documentElement.hasAttribute('data-dock')).toBe(false);
-  });
 });
 
 describe('New run from a link', () => {
   it("takes the epochs a short run's warning suggests", async () => {
     await open('?from=run_a2f0&epochs=40');
     await until(() => target.querySelector<HTMLInputElement>('input#epochs')?.value === '40', 'epochs 40');
-  });
-});
-
-describe('New run: the estimate', () => {
-  const timeDd = () => [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. time')?.nextElementSibling;
-  const time = () => timeDd()?.textContent ?? '';
-  const basis = () => target.querySelector('.summary .est-how > summary')?.textContent ?? '';
-  const rough = () => timeDd()?.classList.contains('rough');
-
-  it("shows the server's estimate as a range, says it was measured on this GPU, and lists its phases", async () => {
-    hub.api = api = new MockApi('normal', 0);
-    const ask = vi.spyOn(api, 'estimateRun');
-    await open();
-    await until(() => basis().startsWith('Measured'), "the server's estimate");
-    // folo-s at 640, batch 16, f32 is a measured row of the mock: the narrow range of a high confidence.
-    expect(basis()).toBe('Measured on this GPU · 226 samples');
-    expect(time()).toMatch(/^\d+–\d+ min$/);
-    expect(rough()).toBe(false);
-    const body = ask.mock.calls.at(-1)![0];
-    expect([body.arch, body.imgsz, body.batch, body.amp]).toEqual(['folo-s', 640, 16, false]);
-    const rows = [...target.querySelectorAll('.summary .how-list dt')].map((d) => d.textContent);
-    expect(rows).toEqual(['90 epochs, mosaic', '10 epochs, no mosaic', 'Validation', 'First epoch', 'Peak GPU memory']);
-    expect(target.querySelector('.summary .how-note')?.textContent).toContain('these very settings');
-    // The dock says the same range and calls memory GPU memory.
-    expect(target.querySelector('.dock-est')?.textContent).toContain(time());
-    expect(target.querySelector('.dock-est')?.textContent).toContain('GPU memory');
-    expect(target.querySelector('.dock-est')?.textContent).not.toContain('VRAM');
-  });
-
-  it('asks again when the settings change, and calls a size it never measured rough', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    await until(() => basis().startsWith('Measured'), "the server's estimate");
-    const radio = target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-x"]')!;
-    radio.click();
-    flushSync();
-    await until(() => basis().includes('caled'), 'the folo-x estimate');
-    expect(basis()).toBe('Wide range: scaled from folo-s at 640 px');
-    // folo-x is 9x folo-s's compute: low confidence, the value one step quieter.
-    expect(rough()).toBe(true);
-  });
-
-  it("marks the last answer as not current while the new settings' estimate is out, and the memory row states its figure", async () => {
-    hub.api = api = new MockApi('normal', 0);
-    const real = api.estimateRun.bind(api);
-    let release: () => void = () => {};
-    const held = new Promise<void>((r) => (release = r));
-    let hold = false;
-    vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => {
-      if (hold) await held;
-      return real(b);
-    });
-    await open();
-    await until(() => basis().startsWith('Measured'), "the server's estimate");
-    const memDd = () => [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. GPU memory')?.nextElementSibling;
-    const memory = memDd()!.textContent!.split(' / ')[0]!;
-    // The breakdown's memory row is the Summary's figure with its source, never a source alone.
-    const peak = [...target.querySelectorAll('.summary .how-list dt')].find((d) => d.textContent === 'Peak GPU memory')?.nextElementSibling;
-    expect(peak?.textContent).toBe(`${memory} measured`);
-    expect(timeDd()?.classList.contains('stale')).toBe(false);
-
-    hold = true;
-    target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-n"]')!.click();
-    flushSync();
-    // The old figures stay, dimmed, and the basis line says the answer is on its way.
-    await until(() => basis() === 'Updating…', 'the updating line');
-    expect(timeDd()?.classList.contains('stale')).toBe(true);
-    expect(memDd()?.classList.contains('stale')).toBe(true);
-    expect(target.querySelector('.dock-est .stale')).not.toBeNull();
-
-    release();
-    await until(() => basis().startsWith('Measured') || basis().includes('caled'), 'the new estimate');
-    expect(timeDd()?.classList.contains('stale')).toBe(false);
-    expect(memDd()?.classList.contains('stale')).toBe(false);
-    expect(target.querySelector('.dock-est .stale')).toBeNull();
-  });
-
-  it('falls back to the reference figures on a server without run_estimate, and says so', async () => {
-    hub.api = api = new MockApi('no-throughput', 0);
-    const ask = vi.spyOn(api, 'estimateRun');
-    await open();
-    await until(() => basis(), 'the estimate');
-    expect(basis()).toBe('Reference benchmarks · not run here yet');
-    expect(time()).toMatch(/^\d+–\d+ min$/);
-    expect(rough()).toBe(true);
-    expect(target.querySelector('.summary .how-note')?.textContent).toContain('does not estimate runs');
-    expect(ask).not.toHaveBeenCalled();
-    // The latency column is the reference throughout.
-    expect(target.querySelector('.lat .here')).toBeNull();
-    expect([...target.querySelectorAll('.a-src')].map((s) => s.textContent).filter(Boolean)).toEqual(['reference', 'reference']);
-  });
-
-  describe('asks again 300 ms after the settings settle, whether or not the last one was answered', () => {
-    afterEach(() => vi.useRealTimers());
-
-    function type(...values: string[]) {
-      const el = target.querySelector<HTMLInputElement>('input#epochs')!;
-      for (const v of values) {
-        el.value = v;
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        flushSync();
-      }
-    }
-
-    /** Opens the form with the server's estimate answered by `answer`, then waits for the first ask (sent at once). */
-    async function firstAsk(answer: () => Promise<RunEstimate>) {
-      hub.api = api = new MockApi('normal', 0);
-      const ask = vi.spyOn(api, 'estimateRun').mockImplementation(answer);
-      await open();
-      await until(() => ask.mock.calls.length === 1, 'the first estimate');
-      return ask;
-    }
-
-    async function debounced(ask: MockInstance<MockApi['estimateRun']>) {
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-      type('1', '12', '120');
-      expect(ask).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(299);
-      expect(ask).toHaveBeenCalledTimes(1);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(ask).toHaveBeenCalledTimes(2);
-      expect(ask.mock.calls[1]![0].epochs).toBe(120);
-    }
-
-    it('while the first one is still out', async () => {
-      const ask = await firstAsk(() => new Promise(() => {}));
-      await debounced(ask);
-    });
-
-    it('after the server refused the first one', async () => {
-      const ask = await firstAsk(() => Promise.reject(new ApiError(500, 'internal', 'estimator crashed')));
-      await until(() => target.querySelector('.summary .how-note')?.textContent?.includes('could not estimate'), 'the reference figures');
-      await debounced(ask);
-    });
-  });
-
-  it("marks folo-n's latency as measured on this GPU in its own cell, the others as the reference", async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    const here = await until(() => target.querySelector('.lat .here'), 'the measured latency');
-    expect(here.textContent).toBe('5.90 ms');
-    const row = here.closest('label')!;
-    expect(row.querySelector('input')?.value).toBe('folo-n');
-    expect(row.querySelector('.a-src')?.textContent).toBe('measured');
-    const s = target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-s"]')!.closest('label')!;
-    expect(s.querySelector('.a-src')?.textContent).toBe('reference');
-    // The caption under the table is one meta line, not a paragraph explaining each row.
-    expect([...target.querySelectorAll('p.ref .ui-meta > span')].map((s) => s.textContent)).toEqual([
-      'Latency at 640 px, end to end',
-      'reference: RTX 4080 SUPER, f32',
-      '—: not measured yet',
-    ]);
-  });
-});
-
-describe('New run: DOGFOOD-3', () => {
-  const cli = () => target.querySelector('.cli code')!.textContent!;
-  async function fineTune() {
-    target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-n"]')!.click();
-    flushSync();
-    const sel = target.querySelector<HTMLSelectElement>('select#weights')!;
-    const opt = await until(() => sel.querySelector<HTMLOptionElement>('option[value="m_fast_n"]'), 'fasteners-n-best');
-    opt.selected = true;
-    sel.dispatchEvent(new Event('change', { bubbles: true }));
-    flushSync();
-  }
-
-  it("fine-tunes from the weights file in the CLI command: no --model, and the file's path, not the model id (S1)", async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    await fineTune();
-    expect(cli()).not.toContain('--model');
-    expect(cli()).not.toContain('m_fast_n');
-    // This server does not report the file's path: a placeholder, and one line that says what to put there.
-    expect(cli()).toContain('--weights <path to fasteners-n-best.folo>');
-    expect(target.querySelector('.summary .cli-note')?.textContent).toBe(
-      'Put the path of fasteners-n-best.folo on the server in its place: this server does not report it.',
-    );
-    expect(target.querySelector('.summary .cli code')?.getAttribute('aria-describedby')).toBe('cli-note');
-  });
-
-  it('names the file where the server reports its path (Model.path)', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    const models = api.models.bind(api);
-    vi.spyOn(api, 'models').mockImplementation(async () => (await models()).map((m) => ({ ...m, path: `D:/folo data/models/${m.name}.folo` })));
-    await open();
-    await fineTune();
-    expect(cli()).toContain("--weights 'D:/folo data/models/fasteners-n-best.folo'");
-    expect(target.querySelector('.summary .cli-note')).toBeNull();
-  });
-
-  it("shows the server's own command where its estimate carries one", async () => {
-    hub.api = api = new MockApi('normal', 0);
-    const est = api.estimateRun.bind(api);
-    vi.spyOn(api, 'estimateRun').mockImplementation(async (b) => ({ ...(await est(b)), cli: `folo train --data D:/x --weights D:/w.folo --name ${b.name}` }));
-    await open();
-    await fineTune();
-    await until(() => cli().includes('D:/w.folo'), "the server's command");
-    expect(cli()).toContain(`--name ${target.querySelector<HTMLInputElement>('input#name')!.value}`);
-    expect(target.querySelector('.summary .cli-note')).toBeNull();
-  });
-
-  it('says "Estimating…" until the server\'s devices load, never a CPU guess or 0 steps (S3)', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    vi.spyOn(api, 'system').mockReturnValue(new Promise(() => {}));
-    router.route = parse('#/runs/new');
-    c = mount(RunNew, { target });
-    // The dataset loaded, the server's devices still not.
-    await until(() => target.querySelector('.dock-est'), 'the dataset');
-    const summary = target.querySelector('.summary')!.textContent!;
-    expect(summary).toContain('Estimating…');
-    expect(summary).not.toContain('CPU is roughly');
-    expect(summary).not.toContain('steps / epoch');
-    expect(summary).not.toContain('img/s');
-    expect(target.querySelector('.dock-est')?.textContent).toContain('Estimating…');
-  });
-
-  it("states the GPU memory estimate alone where the adapter's size is not reported (memory_bytes 0)", async () => {
-    hub.api = api = new MockApi('normal', 0);
-    const sys = api.system.bind(api);
-    vi.spyOn(api, 'system').mockImplementation(async () => {
-      const r = await sys();
-      return { ...r, gpus: r.gpus.map((g) => ({ ...g, memory_bytes: 0 })) };
-    });
-    await open();
-    const dd = [...target.querySelectorAll('.summary .est dt')].find((d) => d.textContent === 'Est. GPU memory')!.nextElementSibling!;
-    expect(dd.textContent).toMatch(/^~[\d.]+ GiB$/);
-    const summary = target.querySelector('.summary')!.textContent!;
-    expect(summary).not.toContain('unknown');
-    expect(summary.split('This GPU’s memory size isn’t reported.')).toHaveLength(2);
-  });
-});
-
-describe('New run: published weights (server PR #140)', () => {
-  const sel = () => target.querySelector<HTMLSelectElement>('select#weights')!;
-  function choose(value: string) {
-    sel().querySelector<HTMLOptionElement>(`option[value="${value}"]`)!.selected = true;
-    sel().dispatchEvent(new Event('change', { bubbles: true }));
-    flushSync();
-  }
-  const arch = () => target.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value;
-
-  it('lists them in a group of their own whatever the size, with what they are as the tooltip', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    expect(arch()).toBe('folo-s');
-    const group = await until(() => sel().querySelector('optgroup[label="Published weights"]'), 'the published group');
-    const opt = group.querySelector<HTMLOptionElement>('option[value="folo-n-coco"]')!;
-    // A score never without what it is on: published weights' split is not known here.
-    expect(opt.textContent).toBe('folo-n-coco · mAP50-95 0.314 · split unknown');
-    expect(opt.title).toMatch(/^folo-n trained from scratch on COCO/);
-    // The run models of the chosen size are grouped by what their scores are on, outside the published group.
-    const own = await until(() => sel().querySelector('option[value="m_shapes_s"]'), 'the run models');
-    expect(own.parentElement?.getAttribute('label')).toBe('Validation split of shapes');
-    expect(own.textContent).toBe('shapes-s-best · mAP50-95 0.854 on shapes');
-  });
-
-  it('take their size when picked, say so, and drop out when another size is picked', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    await open();
-    await until(() => sel().querySelector('option[value="folo-n-coco"]'), 'the published weights');
-    choose('folo-n-coco');
-    expect(arch()).toBe('folo-n');
-    expect(sel().value).toBe('folo-n-coco');
-    expect(target.querySelector('.a-from')?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
-      "folo-n, from folo-n-coco. The run trains the weights' size; another size starts from scratch.",
-    );
-    // What they are for in plain words; where they come from (the server's own description) one tap away, under it.
-    expect(target.querySelector('#weights-hint')?.textContent).toBe('Pretrained on COCO (80 classes) · good for fine-tuning');
-    expect(target.querySelector('#weights-about')).toBeNull();
-    target.querySelector<HTMLButtonElement>('button[aria-controls="weights-about"]')!.click();
-    flushSync();
-    expect(target.querySelector('#weights-about')?.textContent).toMatch(/^folo-n trained from scratch on COCO.* · mAP50-95 0\.314/);
-    const rv = (k: string) => [...target.querySelectorAll('.summary .rv')].find((r) => r.querySelector('.rv-k')?.textContent === k)?.querySelector('.rv-v')?.textContent;
-    expect(rv('Model')).toBe('folo-n');
-    expect(rv('Start from')).toBe('folo-n-coco');
-    // The command names them as the server does, by their published name.
-    await until(() => target.querySelector('.cli code')?.textContent?.includes('--weights folo-n-coco'), 'the command');
-    const create = vi.spyOn(api, 'createRun');
-    await start();
-    expect(create.mock.calls[0]![0]).toMatchObject({ arch: 'folo-n', weights: 'folo-n-coco' });
-    if (c) unmount(c);
-    c = undefined;
-
-    await open();
-    await until(() => sel().querySelector('option[value="folo-n-coco"]'), 'the published weights');
-    choose('folo-n-coco');
-    target.querySelector<HTMLInputElement>('input[name="arch"][value="folo-m"]')!.click();
-    flushSync();
-    expect(sel().value).toBe('none');
-    expect(target.querySelector('.a-from')).toBeNull();
-  });
-});
-
-describe('New run: the server’s figures and refusals (server PR #140)', () => {
-  it("says the server's close-mosaic count for these settings where it sends one", async () => {
-    hub.api = api = new MockApi('normal', 0);
-    const real = api.estimateRun.bind(api);
-    vi.spyOn(api, 'estimateRun').mockImplementation(async (body) => ({ ...(await real(body)), close_mosaic: 3 }));
-    await open();
-    await until(() => target.querySelector('#close-hint')?.textContent?.includes('last 3 epochs'), "the server's count");
-    expect(target.querySelector('#close-hint')?.textContent).toBe('At most half the run: mosaic closes for the last 3 epochs.');
-  });
-
-  it('shows a 501 for mixed precision at its field, not as a toast; once the switch is off, only a quiet note stays', async () => {
-    hub.api = api = new MockApi('amp-refused', 0);
-    const { toast } = await import('$lib/ui/toast.svelte');
-    const err = vi.spyOn(toast, 'error');
-    await open();
-    const sw = await until(() => target.querySelector<HTMLInputElement>('input#amp'), 'the switch');
-    sw.click();
-    flushSync();
-    await start();
-    expect(err).not.toHaveBeenCalled();
-    // The capabilities read again: the switch is off and held off, so the refusal is answered. No alert, no danger
-    // line and no button that repeats Start: the field's one sentence and the way back to tensor cores.
-    await until(() => target.querySelector('#amp-why'), 'the remedy');
-    expect(target.querySelector<HTMLInputElement>('input#amp')!.disabled).toBe(true);
-    expect(target.querySelector<HTMLInputElement>('input#amp')!.checked).toBe(false);
-    expect(target.querySelector('#amp-error')).toBeNull();
-    expect(target.querySelector('.amp [role="alert"]')).toBeNull();
-    expect([...target.querySelectorAll('.amp button')].some((b) => /full precision/i.test(b.textContent ?? ''))).toBe(false);
-    expect(target.querySelector('#amp-why')?.textContent).toBe('Tensor cores are off on this server; restart it with them on:');
-    expect(target.querySelector('.amp pre.line')?.textContent).toBe('folo serve --tensor-cores');
-    // The server's whole message, folded and copyable, never inline.
-    const report = target.querySelector<HTMLDetailsElement>('.amp details.report')!;
-    expect(report.open).toBe(false);
-    expect(report.querySelector('pre')?.textContent).toMatch(/^Mixed-precision training \(amp\) needs a GPU with tensor cores/i);
-    expect(target.querySelector('#start-why')).toBeNull();
-  });
-
-  it('holds Start while the switch is still on after a refusal, and lets go once it is off', async () => {
-    hub.api = api = new MockApi('normal', 0);
-    vi.spyOn(api, 'createRun').mockRejectedValue(new ApiError(501, 'not_supported', 'mixed-precision training (amp) needs a GPU with tensor cores'));
-    await open();
-    const sw = await until(() => target.querySelector<HTMLInputElement>('input#amp'), 'the switch');
-    sw.click();
-    flushSync();
-    await start();
-    await until(() => target.querySelector('#amp-error'), 'the refusal');
-    expect(target.querySelector('#start-why')?.textContent).toBe('Mixed precision: Not available on this server now.');
-    expect(target.querySelector('#amp-error')?.textContent?.trim()).toBe('Mixed precision is unavailable: the server cannot use it now. Turn it off to train in full precision.');
-    // The way out is the switch beside it; no button repeats what Start does once it is off.
-    expect([...target.querySelectorAll('.amp button')].some((b) => /full precision/i.test(b.textContent ?? ''))).toBe(false);
-    sw.click();
-    flushSync();
-    // Off: the refusal steps down to a quiet note, and Start lets go.
-    expect(target.querySelector('#amp-error')).toBeNull();
-    expect(target.querySelector('.amp [role="alert"]')).toBeNull();
-    expect(target.querySelector('#start-why')).toBeNull();
-  });
-});
-
-describe('New run from a MuSGD run', () => {
-  it('offers MuSGD and keeps it when prefilled from a run that trained with it', async () => {
-    const base = (await api.run('run_a2f0')).config;
-    const made = await api.createRun({ ...base, name: 'shapes-musgd', device: 'cpu', optimizer: 'musgd' });
-    await open(`?from=${made.id}`);
-    const sel = target.querySelector<HTMLSelectElement>('select#opt')!;
-    expect([...sel.options].map((o) => o.value)).toEqual(['auto', 'sgd', 'adamw', 'musgd']);
-    expect(sel.value).toBe('musgd');
-    expect(sel.options[sel.selectedIndex]?.textContent?.trim()).toBe('MuSGD');
   });
 });

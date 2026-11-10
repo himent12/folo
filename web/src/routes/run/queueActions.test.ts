@@ -5,8 +5,9 @@ const labels = (...a: Parameters<typeof queueItems>) => queueItems(...a).map((i)
 const noop = () => {};
 
 describe('queueItems: one queue action set, one order, wherever it appears', () => {
-  it('lists Start next, Move up, Move down, then Remove from queue', () => {
+  it('lists Start next, Move up, Move down, then Remove from queue, the last destructive', () => {
     expect(labels(2, 3, { name: 'live' }, noop, noop)).toEqual(['Start next', 'Move up', 'Move down', REMOVE_LABEL]);
+    expect(queueItems(1, 1, null, noop, noop).at(-1)?.danger).toBe(true);
   });
 
   it('leaves out only the moves that do not apply, never one the page also shows as a button', () => {
@@ -15,10 +16,6 @@ describe('queueItems: one queue action set, one order, wherever it appears', () 
     expect(labels(2, 2, { name: 'live' }, noop, noop)).toEqual(['Start next', 'Move up', REMOVE_LABEL]);
     // Nothing trains: the first can start now.
     expect(labels(1, 1, null, noop, noop)).toEqual(['Start now', REMOVE_LABEL]);
-  });
-
-  it('marks Remove from queue destructive', () => {
-    expect(queueItems(1, 1, null, noop, noop).at(-1)?.danger).toBe(true);
   });
 });
 

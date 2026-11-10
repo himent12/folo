@@ -411,7 +411,7 @@ mod tests {
                 matches!(worker_download(&f.url("/x")), WorkerDownload::Missing { status: s, .. } if s == status)
             );
         }
-        let unknown = worker_download(&Fixture::closed_url());
+        let unknown = worker_download(&Fixture::hang_up().url("/x"));
         assert!(
             matches!(&unknown, WorkerDownload::Unknown(m) if m.contains("does not answer")),
             "{unknown:?}"

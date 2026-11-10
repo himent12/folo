@@ -64,7 +64,7 @@
     outline: var(--size-focus-ring) solid var(--focus);
     outline-offset: var(--size-focus-offset);
   }
-  /* Touch: the typed text at 16 px (type.lg), under which iOS zooms the page into the field (touchText.test.ts). */
+  /* Touch: the typed text at 16 px (type.lg), under which iOS zooms the page into the field (sourceRules.test.ts). */
   @media (pointer: coarse) {
     .ta {
       font-size: var(--type-lg-size);

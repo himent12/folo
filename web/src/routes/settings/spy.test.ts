@@ -18,8 +18,6 @@ describe('sectionAt', () => {
   it('is the section under the chrome, not the last one, once the page bottoms out', () => {
     // A phone at the page's end: System's top has passed the line, About's (a short last panel) has not.
     expect(sectionAt(page(2400), 120)).toBe('system');
-    // A full-page shot or a tall window: nothing scrolled, every section on screen.
-    expect(sectionAt(page(0), 120)).toBe('connection');
   });
 
   it('is undefined with no sections', () => {

@@ -91,6 +91,10 @@ pub fn build(backend: Backend, opts: Options) -> Result<FoloMcp, String> {
             if let Some(dir) = &opts.published_weights {
                 store = store.published_weights(dir);
             }
+            // Test support: how long a dataset's index is trusted before its files are looked at again (5 s).
+            if let Some(ms) = std::env::var("FOLO_DATASET_RECHECK_MS").ok().and_then(|v| v.parse().ok()) {
+                store = store.recheck_every(std::time::Duration::from_millis(ms));
+            }
             FoloMcp::new(Arc::new(store), None, opts)
         }
         Backend::Mock => FoloMcp::new(Arc::new(MockStore::new()), None, opts),

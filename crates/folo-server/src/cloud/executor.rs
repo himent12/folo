@@ -838,7 +838,7 @@ impl Exec {
             }
         };
         let stop = || self.interrupted().is_err();
-        let mut ctl = Control { progress: &mut progress, stop: &stop };
+        let mut ctl = Control { progress: &mut progress, stop: &stop, backoff: transfer::FIRST_BACKOFF };
         let up = transfer::upload(client, req, write, &mut ctl);
         match up {
             Ok(u) => Ok((u, sent)),
@@ -1134,7 +1134,7 @@ impl Exec {
         let copy = move || {
             std::fs::create_dir_all(&weights).map_err(TransferError::Io)?;
             let stop = || cancelled.load(Ordering::SeqCst) || core.halt.is_on() || entry.stop_requested();
-            let mut ctl = Control { progress: &mut |_| {}, stop: &stop };
+            let mut ctl = Control { progress: &mut |_| {}, stop: &stop, backoff: transfer::FIRST_BACKOFF };
             let fetched = transfer::download(&client, &path, &dest, &mut ctl).map(drop);
             // Nobody takes the file any more (see `Copying`'s drop for the order).
             if cancelled.load(Ordering::SeqCst) {
@@ -1263,7 +1263,7 @@ impl Exec {
             }
         };
         let stop = || self.core.halt.is_on();
-        let mut ctl = Control { progress: &mut progress, stop: &stop };
+        let mut ctl = Control { progress: &mut progress, stop: &stop, backoff: transfer::FIRST_BACKOFF };
         match transfer::download(client, &path, &weights.join(file), &mut ctl) {
             Ok(_) => {}
             Err(TransferError::Failed(e)) if e.code() == "model_not_found" => return Ok(false),

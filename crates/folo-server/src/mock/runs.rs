@@ -327,6 +327,17 @@ impl LiveClock {
         self.origin + Duration::from_secs_f64(end.max(0.0))
     }
 
+    /// The clock as if `d` had passed: its origin and the planned starts it knows move back by `d`.
+    fn pass(&mut self, d: Duration) {
+        self.origin -= d;
+        self.origin_wall -= d.as_secs_f64();
+        if let Some((ahead, all)) = &mut self.queue {
+            for start in ahead.iter_mut().chain(all.iter_mut()) {
+                *start -= d;
+            }
+        }
+    }
+
     fn advance(&mut self, by: f64) {
         self.origin += Duration::from_secs_f64(by);
         self.origin_wall += by;
@@ -681,6 +692,13 @@ impl SimRun {
         }
     }
 
+    /// Lets `d` pass for a live run at once (test support, [`super::MockStore::pass_time`]).
+    pub fn pass_time(&self, d: Duration) {
+        if let Timeline::Live(c) = &self.timeline {
+            c.lock().unwrap().pass(d);
+        }
+    }
+
     /// Marks the run deleted: the ticker exits and open streams end.
     pub fn delete(&self) {
         self.deleted.store(true, Ordering::SeqCst);
@@ -1024,7 +1042,8 @@ mod tests {
         // Stopped mid-epoch 1: nothing validated, no model.
         let early = user_run(0.5);
         assert!(early.stop());
-        std::thread::sleep(Duration::from_millis(1600));
+        assert_eq!(early.snap().status, RunStatus::Stopping);
+        early.pass_time(Duration::from_secs_f64(STOP_S + 0.1));
         let snap = early.snap();
         assert_eq!(snap.status, RunStatus::Stopped);
         assert_eq!(early.current_model(&snap), None);
@@ -1032,7 +1051,7 @@ mod tests {
         let later = user_run(2.5);
         assert_eq!(later.current_model(&later.snap()), None, "running runs expose no model yet");
         assert!(later.stop());
-        std::thread::sleep(Duration::from_millis(1600));
+        later.pass_time(Duration::from_secs_f64(STOP_S + 0.1));
         let snap = later.snap();
         assert_eq!(snap.status, RunStatus::Stopped);
         assert_eq!(later.to_api().model_id.as_deref(), Some("m_x"));

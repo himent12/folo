@@ -1,6 +1,9 @@
 //! Mixed-precision training (`amp`, docs/MODEL.md §8.8) on tensor cores: the gradients of a training step against
-//! f32, the device unscale / clip / overflow check, a stopped run resuming bit-exactly with its loss scaler, and
-//! the `not_supported` refusal without tensor cores.
+//! f32, the device unscale / clip / overflow check, a stopped run resuming bit-exactly with its loss scaler (and
+//! overflows across a resume), runs that learn as f32 does, and the `not_supported` refusal without tensor cores.
+//!
+//! The runs write a checkpoint only where a test reads one (`Trainer::save_checkpoint`, which also writes a run
+//! directory's `last.folo`): on the GPU an epoch of these runs costs about as much as one checkpoint.
 //!
 //! This test binary asks for tensor cores before the shared GPU context exists (`request_tensor_cores`) and skips
 //! the GPU tests (with a note) when the adapter has none.
@@ -15,7 +18,7 @@ use folo_data::{AugmentConfig, Split};
 use folo_nn::io::ModelFile;
 use folo_nn::optim::GradAccumulator;
 use folo_nn::{GradScaler, Module};
-use folo_test_support::TestDir;
+use folo_test_support::{TestDir, TestFile};
 use folo_vision::model::{FoloModel, ModelConfig};
 use folo_vision::train::{AMP_KEY, OptimizerChoice, ResumeOverrides};
 use folo_vision::{TrainConfig, TrainData, TrainOptions, Trainer};
@@ -316,7 +319,7 @@ fn data() -> TrainData {
 
 fn amp_config() -> TrainConfig {
     TrainConfig {
-        epochs: 4,
+        epochs: 2,
         batch: 4,
         nbs: 8,
         imgsz: 128,
@@ -350,27 +353,55 @@ fn tensors(path: &std::path::Path) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
+/// The options of a run without a run directory that stops after epoch `stop_after` (`None`: runs to the end),
+/// recording its events in `log`.
+fn stopping_opts(stop_after: Option<u32>, log: Option<Arc<Mutex<Vec<RunEvent>>>>) -> TrainOptions {
+    let o = TrainOptions { step_interval: std::time::Duration::ZERO, ..TrainOptions::default() };
+    let stop = o.stop.clone();
+    TrainOptions {
+        events: Some(Box::new(move |e| {
+            if let RunEvent::Epoch(x) = e
+                && Some(x.epoch) == stop_after
+            {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(log) = &log {
+                log.lock().unwrap().push(e.clone());
+            }
+        })),
+        ..o
+    }
+}
+
+/// Resumes the checkpoint at `ckpt` on the GPU and runs it to the end of `amp_config`'s epochs.
+fn resume(ckpt: &std::path::Path) -> folo_vision::Result<Trainer> {
+    let over = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
+    let mut r = Trainer::resume(ckpt, data(), stopping_opts(None, None), over)?;
+    r.run()?;
+    Ok(r)
+}
+
 /// A mixed-precision run stopped at an epoch boundary and resumed ends in the same state as an uninterrupted one,
 /// bit for bit, loss scaler included: `folo.amp` holds the scale, the growth count and the skipped steps, and the
 /// resumed run continues from them. Master weights, optimizer state and EMA in the checkpoint are f32.
+///
+/// The same mid-run checkpoint, edited, also resumes into:
+/// - an injected overflow (the loss scale set to 2^120, so every f16 gradient is infinite): every window of the
+///   next epoch skips its step and backs the scale off, and the parameters, the optimizer state, the EMA and the
+///   schedule are exactly as they were (only the BatchNorm running statistics, which the forward updates, move);
+/// - an overflow streak: the skip streak is part of `folo.amp`, so a checkpoint written with 49 overflowing steps
+///   in a row resumes into a run that fails at the 50th (`MAX_AMP_SKIPS`), as an uninterrupted run would, instead
+///   of counting from zero.
 #[test]
 fn amp_run_resumes_bit_exactly_with_its_loss_scaler() {
     let (dev, _g) = gpu_tc!();
     let root = TestDir::new("amp-resume");
-    let (dir_a, dir_b) = (root.join("a"), root.join("b"));
     let log: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
-    let sink = log.clone();
-    let opts_a = TrainOptions {
-        run_dir: Some(dir_a.clone()),
-        events: Some(Box::new(move |e| sink.lock().unwrap().push(e.clone()))),
-        step_interval: std::time::Duration::ZERO,
-        ..TrainOptions::default()
-    };
-    let mut a = Trainer::new(amp_config(), data(), opts_a).unwrap();
+    let mut a = Trainer::new(amp_config(), data(), stopping_opts(None, Some(log.clone()))).unwrap();
     assert_eq!(a.device(), dev);
     assert_eq!(a.loss_scaler().map(GradScaler::scale), Some(65536.0));
     let sa = a.run().unwrap();
-    assert_eq!((sa.status, sa.epochs_completed), (RunStatus::Completed, 4));
+    assert_eq!((sa.status, sa.epochs_completed), (RunStatus::Completed, 2));
     assert!(sa.epochs.iter().all(|e| e.train_loss.total.is_finite() && e.val.map50.is_finite()));
     let logs: Vec<String> = log
         .lock()
@@ -381,32 +412,34 @@ fn amp_run_resumes_bit_exactly_with_its_loss_scaler() {
     assert!(logs.iter().any(|m| m.starts_with("mixed precision:")), "{logs:?}");
     assert_eq!(
         logs.iter().filter(|m| m.contains("optimizer steps skipped for gradient overflow")).count(),
-        4
+        2
     );
     let scaler_a = a.loss_scaler().unwrap().clone();
+    let last_a = root.join("a.folo");
+    a.save_checkpoint(&last_a).unwrap();
 
-    let opts =
-        |dir: &std::path::Path| TrainOptions { run_dir: Some(dir.to_path_buf()), ..TrainOptions::default() };
-    let mut ob = opts(&dir_b);
-    let stop = ob.stop.clone();
-    ob.events = Some(Box::new(move |e| {
-        if matches!(e, RunEvent::Epoch(x) if x.epoch == 2) {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }));
-    let sb = Trainer::new(amp_config(), data(), ob).unwrap().run().unwrap();
-    assert_eq!((sb.status, sb.epochs_completed), (RunStatus::Stopped, 2));
-    let last_b = dir_b.join("weights/last.folo");
-    let file = ModelFile::open(&last_b).unwrap();
+    // B: stopped after epoch 1, its checkpoint written, then resumed onto the GPU.
+    let mut b = Trainer::new(amp_config(), data(), stopping_opts(Some(1), None)).unwrap();
+    let sb = b.run().unwrap();
+    assert_eq!((sb.status, sb.epochs_completed), (RunStatus::Stopped, 1));
+    let ckpt = root.join("b1.folo");
+    b.save_checkpoint(&ckpt).unwrap();
+    let file = ModelFile::open(&ckpt).unwrap();
     let stored = GradScaler::from_json(file.metadata().extra.get(AMP_KEY).expect("folo.amp")).unwrap();
     assert_eq!(file.checkpoint().unwrap().train["amp"], serde_json::json!(true));
+    drop(file);
+    let (overflow, streak) = (root.join("overflow.folo"), root.join("streak.folo"));
+    std::fs::copy(&ckpt, &overflow).unwrap();
+    std::fs::copy(&ckpt, &streak).unwrap();
     let over = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
-    let mut r = Trainer::resume(&last_b, data(), opts(&dir_b), over).unwrap();
+    let mut r = Trainer::resume(&ckpt, data(), stopping_opts(None, None), over).unwrap();
     assert_eq!(r.loss_scaler(), Some(&stored));
-    assert_eq!(r.run().unwrap().epochs_completed, 4);
+    assert_eq!(r.run().unwrap().epochs_completed, 2);
     assert_eq!(r.loss_scaler(), Some(&scaler_a));
+    let last_b = root.join("b2.folo");
+    r.save_checkpoint(&last_b).unwrap();
 
-    let (ta, tb) = (tensors(&dir_a.join("weights/last.folo")), tensors(&last_b));
+    let (ta, tb) = (tensors(&last_a), tensors(&last_b));
     assert_eq!(ta.len(), tb.len());
     for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
         assert_eq!(na, nb);
@@ -417,6 +450,47 @@ fn amp_run_resumes_bit_exactly_with_its_loss_scaler() {
         assert!(matches!(f.tensor(&info.name).unwrap().dtype(), DType::F32 | DType::I64), "{}", info.name);
     }
     assert_eq!(GradScaler::from_json(f.metadata().extra.get(AMP_KEY).unwrap()).unwrap(), scaler_a);
+    drop(f);
+
+    // An overflowing epoch leaves the optimizer, the EMA and the schedule unchanged.
+    let mut skips = 0;
+    edit_amp(&overflow, |c| {
+        c.scale = 2f64.powi(120);
+        skips = c.skip_streak;
+    });
+    let before = tensors(&overflow);
+    let after_path = root.join("overflow-after.folo");
+    let s = resume(&overflow).unwrap();
+    assert_eq!(s.epochs_completed(), 2);
+    s.save_checkpoint(&after_path).unwrap();
+    let after = tensors(&after_path);
+    assert_eq!(before.len(), after.len());
+    let mut compared = 0;
+    for ((n, a), (m, b)) in before.iter().zip(&after) {
+        assert_eq!(n, m);
+        if n.contains("running_") && !n.starts_with("ema.") {
+            continue;
+        }
+        assert!(a == b, "{n} changed although every step overflowed");
+        compared += 1;
+    }
+    assert!(compared > 300 && before.iter().any(|(n, _)| n == "sched.__step"), "{compared} tensors compared");
+    // 16 images, batch 4, nbs 8: two windows, both skipped, extending the checkpoint's streak.
+    let f = ModelFile::open(&after_path).unwrap();
+    let c = GradScaler::from_json(f.metadata().extra.get(AMP_KEY).unwrap()).unwrap().contract();
+    assert_eq!((c.scale, c.skip_streak), (2f64.powi(118), skips + 2), "{c:?}");
+    drop(f);
+
+    // An overflow streak continues across a resume.
+    let max = folo_vision::train::MAX_AMP_SKIPS as u64;
+    edit_amp(&streak, |c| {
+        c.scale = 2f64.powi(120);
+        c.skip_streak = max - 1;
+        c.skipped_steps = c.skipped_steps.max(max - 1);
+    });
+    let e = resume(&streak).err().expect("the 50th skip in a row fails the run");
+    assert_eq!(e.code(), "training_failed", "{e}");
+    assert!(e.to_string().contains(&format!("{max} consecutive optimizer steps")), "{e}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -484,90 +558,6 @@ fn edit_amp(path: &std::path::Path, edit: impl FnOnce(&mut folo_nn::AmpContract)
     std::fs::write(path, out).unwrap();
 }
 
-/// A run stopped after its first epoch: `(root dir, its last.folo)`.
-fn one_epoch_checkpoint(tag: &str) -> (TestDir, std::path::PathBuf) {
-    let root = TestDir::new(&format!("amp-{tag}"));
-    let mut o = TrainOptions { run_dir: Some(root.to_path_buf()), ..TrainOptions::default() };
-    let stop = o.stop.clone();
-    o.events = Some(Box::new(move |e| {
-        if matches!(e, RunEvent::Epoch(_)) {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }));
-    let s = Trainer::new(amp_config(), data(), o).unwrap().run().unwrap();
-    assert_eq!((s.status, s.epochs_completed), (RunStatus::Stopped, 1));
-    let last = root.join("weights/last.folo");
-    (root, last)
-}
-
-/// Resumes `ckpt` for one more epoch (stopped at its end); the run's result.
-fn resume_one_epoch(
-    root: &std::path::Path,
-    ckpt: &std::path::Path,
-) -> folo_vision::Result<folo_vision::train::TrainSummary> {
-    let mut o = TrainOptions { run_dir: Some(root.to_path_buf()), ..TrainOptions::default() };
-    let stop = o.stop.clone();
-    o.events = Some(Box::new(move |e| {
-        if matches!(e, RunEvent::Epoch(_)) {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }));
-    let over = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
-    Trainer::resume(ckpt, data(), o, over)?.run()
-}
-
-/// An injected overflow (the checkpoint's loss scale set to 2^120, so every f16 gradient is infinite): every window
-/// of the next epoch skips its step and backs the scale off, and the parameters, the optimizer state, the EMA and
-/// the schedule are exactly as they were (only the BatchNorm running statistics, which the forward updates, move).
-#[test]
-fn an_overflowing_epoch_leaves_optimizer_ema_and_schedule_unchanged() {
-    let (_dev, _g) = gpu_tc!();
-    let (root, last) = one_epoch_checkpoint("overflow");
-    let mut streak = 0;
-    edit_amp(&last, |c| {
-        c.scale = 2f64.powi(120);
-        streak = c.skip_streak;
-    });
-    let before = tensors(&last);
-    let s = resume_one_epoch(&root, &last).unwrap();
-    assert_eq!((s.status, s.epochs_completed), (RunStatus::Stopped, 2));
-    let after = tensors(&last);
-    assert_eq!(before.len(), after.len());
-    let mut compared = 0;
-    for ((n, a), (m, b)) in before.iter().zip(&after) {
-        assert_eq!(n, m);
-        if n.contains("running_") && !n.starts_with("ema.") {
-            continue;
-        }
-        assert!(a == b, "{n} changed although every step overflowed");
-        compared += 1;
-    }
-    assert!(compared > 300 && before.iter().any(|(n, _)| n == "sched.__step"), "{compared} tensors compared");
-    // 16 images, batch 4, nbs 8: two windows, both skipped, extending the checkpoint's streak.
-    let f = ModelFile::open(&last).unwrap();
-    let c = GradScaler::from_json(f.metadata().extra.get(AMP_KEY).unwrap()).unwrap().contract();
-    assert_eq!((c.scale, c.skip_streak), (2f64.powi(118), streak + 2), "{c:?}");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-/// The skip streak is part of `folo.amp`: a checkpoint written with 49 overflowing steps in a row resumes into a
-/// run that fails at the 50th (`MAX_AMP_SKIPS`), as an uninterrupted run would, instead of counting from zero.
-#[test]
-fn an_overflow_streak_continues_across_a_resume() {
-    let (_dev, _g) = gpu_tc!();
-    let (root, last) = one_epoch_checkpoint("streak");
-    let max = folo_vision::train::MAX_AMP_SKIPS as u64;
-    edit_amp(&last, |c| {
-        c.scale = 2f64.powi(120);
-        c.skip_streak = max - 1;
-        c.skipped_steps = c.skipped_steps.max(max - 1);
-    });
-    let e = resume_one_epoch(&root, &last).expect_err("the 50th skip in a row fails the run");
-    assert_eq!(e.code(), "training_failed", "{e}");
-    assert!(e.to_string().contains(&format!("{max} consecutive optimizer steps")), "{e}");
-    let _ = std::fs::remove_dir_all(&root);
-}
-
 /// Dual-head training (`head: o2o`, docs/MODEL.md §6.6) under mixed precision: both branches run under autocast and
 /// their losses in f32. The losses stay finite and track the same run in f32 (the reported total is a weighted sum
 /// whose weights move to the one-to-one loss, so it need not fall every epoch), the loss scaler keeps working, and
@@ -576,7 +566,6 @@ fn an_overflow_streak_continues_across_a_resume() {
 fn amp_trains_the_dual_head() {
     use folo_vision::model::{FoloModel, HeadMode};
     let (_, _g) = gpu_tc!();
-    let dir = TestDir::new("amp-o2o");
     let cfg = TrainConfig {
         epochs: 6,
         nbs: 4,
@@ -594,8 +583,7 @@ fn amp_trains_the_dual_head() {
             .iter()
             .map(|e| e.train_loss.total)
             .collect();
-    let opts = TrainOptions { run_dir: Some(dir.to_path_buf()), ..TrainOptions::default() };
-    let mut t = Trainer::new(cfg, data(), opts).unwrap();
+    let mut t = Trainer::new(cfg, data(), TrainOptions::default()).unwrap();
     assert!(t.model().has_o2o());
     let s = t.run().unwrap();
     let losses: Vec<f32> = s.epochs.iter().map(|e| e.train_loss.total).collect();
@@ -605,7 +593,8 @@ fn amp_trains_the_dual_head() {
     assert!(tail(&losses) <= 1.15 * tail(&f32_losses), "amp {losses:?} vs f32 {f32_losses:?}");
     let scaler = t.loss_scaler().unwrap();
     assert!(scaler.skipped_steps() < 20 && scaler.scale() >= 1.0, "{scaler:?}");
-    let m = FoloModel::open(dir.join("weights/last.folo")).unwrap();
+    let last = TestFile::new("amp-o2o", "last.folo");
+    t.save_checkpoint(&last).unwrap();
+    let m = FoloModel::open(&last).unwrap();
     assert!(m.has_o2o() && m.head_mode() == HeadMode::O2o);
-    let _ = std::fs::remove_dir_all(&dir);
 }

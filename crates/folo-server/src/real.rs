@@ -439,6 +439,14 @@ impl RealStore {
         self
     }
 
+    /// Test support: how often a labeling run writes its job's file at most (default 5 s), so a test of that save
+    /// need not wait for it.
+    #[doc(hidden)]
+    pub fn label_save_every(mut self, every: Duration) -> RealStore {
+        self.labeler.set_save_every(every);
+        self
+    }
+
     /// Changes how often dataset files are re-checked for changes (default [`RECHECK_EVERY`]; zero checks on
     /// every request).
     pub fn recheck_every(mut self, every: Duration) -> RealStore {

@@ -10,11 +10,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread::JoinHandle;
 
 use folo_core::rng::Rng;
 use folo_core::{Tensor, no_grad};
 use folo_nn::{Module, init};
 use folo_test_support::TestDir;
+use folo_vision::HeadOutput;
 use folo_vision::model::{FoloModel, HeadMode, ModelConfig};
 use folo_vision::nms::{NmsConfig, topk_detections};
 use serde_json::{Value, json};
@@ -95,17 +97,11 @@ fn dump(dir: &Path, name: &str, t: &Tensor) -> Value {
     json!({ "file": name, "shape": t.dims() })
 }
 
-/// FOLO's outputs for `x`: the raw head, or the `[B, A, 4 + nc]` decode; for a model predicting with its `o2o`
-/// head, the decode is the end-to-end `[B, K, 6]` of docs/MODEL.md §6.6 (`K = min(max_det, A)`, no `conf`),
-/// compared row by row (`"match": "rows"`).
-fn reference(m: &FoloModel, x: &Tensor, decode: bool, dir: &Path, tag: &str) -> Value {
-    reference_k(m, x, decode, dir, tag, 300)
-}
-
-fn reference_k(m: &FoloModel, x: &Tensor, decode: bool, dir: &Path, tag: &str, max_det: usize) -> Value {
+/// FOLO's forward pass of `x`, checked to depend on the image: otherwise the comparison proves little (see
+/// [`calibrated`]). Computed once per model and input, for every case that runs that input.
+fn forward(m: &FoloModel, x: &Tensor, tag: &str) -> HeadOutput {
     let _g = no_grad();
     let out = m.forward(x).unwrap();
-    // The outputs must depend on the image, or the comparison proves little (see `calibrated`).
     let other = m.forward(&x.rsub_scalar(1.0).unwrap()).unwrap();
     let delta = |p: &Tensor, q: &Tensor| {
         let (p, q) = (p.to_vec::<f32>().unwrap(), q.to_vec::<f32>().unwrap());
@@ -113,7 +109,26 @@ fn reference_k(m: &FoloModel, x: &Tensor, decode: bool, dir: &Path, tag: &str, m
     };
     let (db, dc) = (delta(&out.box_raw, &other.box_raw), delta(&out.cls_raw, &other.cls_raw));
     assert!(db > 0.1 && dc > 0.1, "{tag}: the outputs barely depend on the image ({db}, {dc})");
-    if decode && m.head_mode() == HeadMode::O2o {
+    out
+}
+
+/// The expected outputs from FOLO's forward `out` (of a model predicting with `head`): the raw head, or the
+/// `[B, A, 4 + nc]` decode; for the `o2o` head, the decode is the end-to-end `[B, K, 6]` of docs/MODEL.md §6.6
+/// (`K = min(max_det, A)`, no `conf`), compared row by row (`"match": "rows"`).
+fn reference(out: &HeadOutput, head: HeadMode, decode: bool, dir: &Path, tag: &str) -> Value {
+    reference_k(out, head, decode, dir, tag, 300)
+}
+
+fn reference_k(
+    out: &HeadOutput,
+    head: HeadMode,
+    decode: bool,
+    dir: &Path,
+    tag: &str,
+    max_det: usize,
+) -> Value {
+    let _g = no_grad();
+    if decode && head == HeadMode::O2o {
         let nc = out.num_classes;
         let k = max_det.min(out.num_anchors());
         // The top K, and a longer pool (the selection with K + 16) that rows swapped across the cutoff come from.
@@ -145,13 +160,56 @@ fn reference_k(m: &FoloModel, x: &Tensor, decode: bool, dir: &Path, tag: &str, m
     }
 }
 
-fn export(model: &Path, out: &Path, flags: &[&str]) -> Value {
+/// Starts `folo export --format onnx` of `model` to `out` on its own thread; the handle gives the export record.
+/// The exports run while the next models and references are computed.
+fn export(model: &Path, out: &Path, flags: &[&str]) -> JoinHandle<Value> {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_folo"));
     cmd.args(["export", "--json", "--format", "onnx", "--model", s(model), "--output", s(out)]).args(flags);
-    let o = cmd.output().unwrap();
-    let stderr = String::from_utf8_lossy(&o.stderr);
-    assert!(o.status.success(), "export {flags:?}: {stderr}");
-    serde_json::from_slice(&o.stdout).unwrap()
+    let flags: Vec<String> = flags.iter().map(|f| f.to_string()).collect();
+    std::thread::spawn(move || {
+        let o = cmd.output().unwrap();
+        let stderr = String::from_utf8_lossy(&o.stderr);
+        assert!(o.status.success(), "export {flags:?}: {stderr}");
+        serde_json::from_slice(&o.stdout).unwrap()
+    })
+}
+
+/// The result of a thread, or its panic.
+fn joined<T>(handle: JoinHandle<T>) -> T {
+    handle.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
+/// Runs bench/parity/onnx_check.py with `py` on `cases` on its own thread, once their `exports` are written (each
+/// with the fields its record must have), with the manifest `dir/manifest-{part}.json`. The handle gives the
+/// number of cases checked; the checkers of the first cases run while the later ones are prepared.
+fn check(
+    py: &Path,
+    dir: &Path,
+    part: &str,
+    cases: Vec<Value>,
+    exports: Vec<(JoinHandle<Value>, Value)>,
+) -> JoinHandle<usize> {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/parity/onnx_check.py");
+    let manifest = dir.join(format!("manifest-{part}.json"));
+    let mut cmd = Command::new(py);
+    cmd.arg(&script).arg(&manifest);
+    std::thread::spawn(move || {
+        for (handle, want) in exports {
+            let rec = joined(handle);
+            for (k, v) in want.as_object().unwrap() {
+                assert_eq!(&rec[k], v, "{k} of {rec}");
+            }
+        }
+        std::fs::write(&manifest, serde_json::to_vec_pretty(&json!({ "cases": cases })).unwrap()).unwrap();
+        let o = cmd.output().unwrap();
+        let stdout = String::from_utf8_lossy(&o.stdout);
+        let report: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+            panic!("onnx_check.py printed no report ({e}): {stdout}\n{}", String::from_utf8_lossy(&o.stderr))
+        });
+        eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
+        assert!(o.status.success() && report["ok"] == true, "ONNX parity failed: {report}");
+        report["cases"].as_array().unwrap().len()
+    })
 }
 
 #[test]
@@ -164,7 +222,14 @@ fn onnx_matches_folo_in_onnxruntime() {
     };
     let dir = TestDir::new("cli-onnx");
     let classes: Vec<String> = ["circle", "square", "triangle", "star", "ring"].map(String::from).into();
+    // The cases of the next checker, their running exports with the fields each record must have, and the
+    // running checkers.
     let mut cases = vec![];
+    let mut exports: Vec<(JoinHandle<Value>, Value)> = vec![];
+    let mut checkers = vec![];
+    let mut checker = |part: &str, cases: &mut Vec<Value>, exports: &mut Vec<_>| {
+        checkers.push(check(&py, &dir, part, std::mem::take(cases), std::mem::take(exports)));
+    };
     for (k, scale) in ["n", "s"].into_iter().enumerate() {
         let mut m = calibrated(scale, classes.len(), 7 + k as u64);
         m.set_classes(classes.clone()).unwrap();
@@ -176,6 +241,7 @@ fn onnx_matches_folo_in_onnxruntime() {
         r.fuse().unwrap();
         let x = Tensor::rand_uniform([1, 3, 128, 128], 0.0, 1.0, &mut Rng::seed(100 + k as u64));
         let input = dump(&dir, &format!("in-{scale}.f32"), &x);
+        let fwd = forward(&r, &x, &format!("folo-{scale}"));
         for (half, decode) in [(false, false), (false, true), (true, false), (true, true)] {
             let name = format!(
                 "folo-{scale}-{}-{}",
@@ -190,8 +256,9 @@ fn onnx_matches_folo_in_onnxruntime() {
                 flags.push("--decode");
             }
             let tol = if half { TOL_F16 } else { TOL_F32 };
-            let rec = export(&weights, &dir.join(format!("{name}.onnx")), &flags);
-            assert_eq!(rec["imgsz"], 128, "the model's imgsz is the default");
+            // The model's imgsz is the default.
+            exports
+                .push((export(&weights, &dir.join(format!("{name}.onnx")), &flags), json!({ "imgsz": 128 })));
             cases.push(json!({
                 "name": name,
                 "model": format!("{name}.onnx"),
@@ -199,15 +266,18 @@ fn onnx_matches_folo_in_onnxruntime() {
                 "tolerance": tol.0,
                 "mean_tolerance": tol.1,
                 "inputs": [input],
-                "expected": [reference(&r, &x, decode, &dir, &name)],
+                "expected": [reference(&fwd, r.head_mode(), decode, &dir, &name)],
             }));
         }
+        checker(scale, &mut cases, &mut exports);
         if scale == "n" {
             // A dynamic graph at sizes it was not exported at: another batch, rectangular inputs.
             let xs = [
                 Tensor::rand_uniform([2, 3, 96, 160], 0.0, 1.0, &mut Rng::seed(200)),
                 Tensor::rand_uniform([1, 3, 64, 32], 0.0, 1.0, &mut Rng::seed(201)),
             ];
+            let fwds: Vec<HeadOutput> =
+                xs.iter().enumerate().map(|(i, x)| forward(&r, x, &format!("folo-n-dynamic-{i}"))).collect();
             // f16 + decode also covers the anchor grid's cast to f16.
             for (half, decode) in [(false, false), (false, true), (true, true)] {
                 let dtype = if half { "f16" } else { "f32" };
@@ -215,13 +285,13 @@ fn onnx_matches_folo_in_onnxruntime() {
                 let mut flags = vec!["--dynamic"];
                 flags.extend(half.then_some("--half"));
                 flags.extend(decode.then_some("--decode"));
-                export(&weights, &dir.join(format!("{name}.onnx")), &flags);
+                exports.push((export(&weights, &dir.join(format!("{name}.onnx")), &flags), json!({})));
                 let inputs: Vec<Value> =
                     xs.iter().enumerate().map(|(i, x)| dump(&dir, &format!("{name}-in{i}.f32"), x)).collect();
-                let expected: Vec<Value> = xs
+                let expected: Vec<Value> = fwds
                     .iter()
                     .enumerate()
-                    .map(|(i, x)| reference(&r, x, decode, &dir, &format!("{name}-{i}")))
+                    .map(|(i, f)| reference(f, r.head_mode(), decode, &dir, &format!("{name}-{i}")))
                     .collect();
                 let tol = if half { TOL_F16 } else { TOL_F32 };
                 cases.push(json!({
@@ -231,6 +301,7 @@ fn onnx_matches_folo_in_onnxruntime() {
                     "inputs": inputs, "expected": expected,
                 }));
             }
+            checker("n-dynamic", &mut cases, &mut exports);
         }
     }
     // An `o2o` model (docs/MODEL.md §6.6): its one-to-one branch raw and end to end (f32, f16, dynamic, a small
@@ -245,6 +316,8 @@ fn onnx_matches_folo_in_onnxruntime() {
     assert_eq!(r.head_mode(), HeadMode::O2o);
     let x = Tensor::rand_uniform([2, 3, 128, 128], 0.0, 1.0, &mut Rng::seed(300));
     let xs = [x.clone(), Tensor::rand_uniform([1, 3, 96, 160], 0.0, 1.0, &mut Rng::seed(301))];
+    let fwds: Vec<HeadOutput> =
+        xs.iter().enumerate().map(|(i, x)| forward(&r, x, &format!("folo-n-o2o-{i}"))).collect();
     for (name, flags, max_det, inputs) in [
         ("folo-n-o2o-f32-raw", vec!["--batch", "2"], 300, &xs[..1]),
         ("folo-n-o2o-f32-e2e", vec!["--batch", "2", "--decode"], 300, &xs[..1]),
@@ -254,14 +327,13 @@ fn onnx_matches_folo_in_onnxruntime() {
     ] {
         let half = flags.contains(&"--half");
         let decode = flags.contains(&"--decode");
-        let rec = export(&weights, &dir.join(format!("{name}.onnx")), &flags);
-        assert_eq!(rec["head"], "o2o");
+        exports.push((export(&weights, &dir.join(format!("{name}.onnx")), &flags), json!({ "head": "o2o" })));
         let ins: Vec<Value> =
             inputs.iter().enumerate().map(|(i, x)| dump(&dir, &format!("{name}-in{i}.f32"), x)).collect();
-        let expected: Vec<Value> = inputs
+        let expected: Vec<Value> = fwds[..inputs.len()]
             .iter()
             .enumerate()
-            .map(|(i, x)| reference_k(&r, x, decode, &dir, &format!("{name}-{i}"), max_det))
+            .map(|(i, f)| reference_k(f, HeadMode::O2o, decode, &dir, &format!("{name}-{i}"), max_det))
             .collect();
         let tol = if half { TOL_F16 } else { TOL_F32 };
         cases.push(json!({
@@ -271,26 +343,19 @@ fn onnx_matches_folo_in_onnxruntime() {
             "inputs": ins, "expected": expected,
         }));
     }
-    let rec = export(&weights, &dir.join("folo-n-o2o-as-o2m.onnx"), &["--batch", "2", "--head", "o2m"]);
-    assert_eq!(rec["head"], "o2m");
+    let as_o2m = export(&weights, &dir.join("folo-n-o2o-as-o2m.onnx"), &["--batch", "2", "--head", "o2m"]);
+    exports.push((as_o2m, json!({ "head": "o2m" })));
     r.set_head_mode(HeadMode::O2m).unwrap();
+    let o2m = forward(&r, &x, "folo-n-o2o-as-o2m");
     cases.push(json!({
         "name": "folo-n-o2o-as-o2m-raw", "model": "folo-n-o2o-as-o2m.onnx", "dtype": "float32",
         "tolerance": TOL_F32.0, "mean_tolerance": TOL_F32.1,
         "inputs": [dump(&dir, "o2m-in.f32", &x)],
-        "expected": [reference(&r, &x, false, &dir, "folo-n-o2o-as-o2m")],
+        "expected": [reference(&o2m, HeadMode::O2m, false, &dir, "folo-n-o2o-as-o2m")],
     }));
 
-    let manifest = dir.join("manifest.json");
-    std::fs::write(&manifest, serde_json::to_vec_pretty(&json!({ "cases": cases })).unwrap()).unwrap();
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bench/parity/onnx_check.py");
-    let o = Command::new(&py).arg(&script).arg(&manifest).output().unwrap();
-    let stdout = String::from_utf8_lossy(&o.stdout);
-    let report: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
-        panic!("onnx_check.py printed no report ({e}): {stdout}\n{}", String::from_utf8_lossy(&o.stderr))
-    });
-    eprintln!("{}", serde_json::to_string_pretty(&report).unwrap());
-    assert!(o.status.success() && report["ok"] == true, "ONNX parity failed: {report}");
-    assert_eq!(report["cases"].as_array().unwrap().len(), 17);
+    checker("o2o", &mut cases, &mut exports);
+    let checked: usize = checkers.into_iter().map(joined).sum();
+    assert_eq!(checked, 17);
     let _ = std::fs::remove_dir_all(&dir);
 }

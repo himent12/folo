@@ -85,8 +85,25 @@ all = { level = "warn", priority = -1 }
 
 [profile.dev]
 opt-level = 1
+# File and line in backtraces, nothing for a debugger: full debug info costs build time, link time (a PDB per test
+# binary on Windows) and most of a target dir's size.
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
+opt-level = 3
+
+# The engine crates as well: tests train and predict with them, and at opt-level 1 (no inlining across the kernels,
+# no vectorised loops) those tests take several times longer than the crates take to build at 3.
+[profile.dev.package.folo-core]
+opt-level = 3
+
+[profile.dev.package.folo-nn]
+opt-level = 3
+
+[profile.dev.package.folo-data]
+opt-level = 3
+
+[profile.dev.package.folo-vision]
 opt-level = 3
 
 [profile.release]

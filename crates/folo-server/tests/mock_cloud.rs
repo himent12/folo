@@ -10,7 +10,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use folo_server::api::*;
-use folo_server::mock::MockCloud;
+use folo_server::mock::{MockCloud, PHASE_S};
 use folo_server::{MockStore, Options, Server, Store};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -43,7 +43,7 @@ async fn wait_run(app: &Router, id: &str, done: impl Fn(&Value) -> bool) -> Valu
             return run;
         }
         assert!(t0.elapsed() < Duration::from_secs(30), "run {id} stuck: {run}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -123,22 +123,28 @@ async fn a_mock_cloud_run_hands_over_and_fails_when_its_instance_is_terminated()
         (Some("queued"), Some("provisioning"))
     );
     assert!(run["queue_position"].is_null(), "outside the training queue");
+    // Each phase before the training takes `PHASE_S`: they pass one at a time, and the run's stream reports each
+    // (its ticker runs every 100 ms, so an event follows the run's state a little).
     let mut sub = store.subscribe(&id).unwrap();
-    let syncing = wait_run(&app, &id, |r| r["cloud"]["phase"] == "syncing").await;
-    assert_eq!(syncing["status"], "queued");
-    assert_eq!(syncing["cloud"]["progress"]["total_bytes"], 48_000_000);
-    let training = wait_run(&app, &id, |r| r["status"] == "running").await;
-    assert_eq!(training["cloud"]["phase"], "training");
-    // The stream's ticker runs every 100 ms, so its `training` event may follow the run's state a little.
     let mut phases = Vec::new();
-    while phases.last() != Some(&CloudPhase::Training) {
-        let ev = tokio::time::timeout(Duration::from_secs(5), sub.events.recv()).await.unwrap().unwrap();
-        if let RunEvent::Cloud(c) = ev
-            && phases.last() != Some(&c.phase)
-        {
-            phases.push(c.phase);
+    let mut next_phase = async |want: CloudPhase| {
+        store.pass_time(Duration::from_secs_f64(PHASE_S));
+        while phases.last() != Some(&want) {
+            let ev = tokio::time::timeout(Duration::from_secs(5), sub.events.recv()).await.unwrap().unwrap();
+            if let RunEvent::Cloud(c) = ev
+                && phases.last() != Some(&c.phase)
+            {
+                phases.push(c.phase);
+            }
         }
-    }
+        send(&app, "GET", &format!("/api/runs/{id}"), None).await.1
+    };
+    next_phase(CloudPhase::Booting).await;
+    let syncing = next_phase(CloudPhase::Syncing).await;
+    assert_eq!((&syncing["status"], &syncing["cloud"]["phase"]), (&json!("queued"), &json!("syncing")));
+    assert_eq!(syncing["cloud"]["progress"]["total_bytes"], 48_000_000);
+    let training = next_phase(CloudPhase::Training).await;
+    assert_eq!((&training["status"], &training["cloud"]["phase"]), (&json!("running"), &json!("training")));
     assert!(
         phases.ends_with(&[CloudPhase::Booting, CloudPhase::Syncing, CloudPhase::Training]),
         "{phases:?}"

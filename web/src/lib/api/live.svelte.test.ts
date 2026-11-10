@@ -27,13 +27,9 @@ describe('mergeBy', () => {
 
 describe('keepStepsPerEpoch', () => {
   const run = (id: string, spe: number) => ({ id, steps_per_epoch: spe }) as Run;
-  it('keeps a learned figure over a snapshot that still says 0', () => {
+  it("keeps a learned figure over a snapshot that still says 0, takes the snapshot's own, never another run's", () => {
     expect(keepStepsPerEpoch(run('a', 0), run('a', 12)).steps_per_epoch).toBe(12);
-  });
-  it("takes the snapshot's own figure when it has one", () => {
     expect(keepStepsPerEpoch(run('a', 10), run('a', 12)).steps_per_epoch).toBe(10);
-  });
-  it("never carries one run's figure to another", () => {
     expect(keepStepsPerEpoch(run('b', 0), run('a', 12)).steps_per_epoch).toBe(0);
     expect(keepStepsPerEpoch(run('b', 0), null).steps_per_epoch).toBe(0);
   });

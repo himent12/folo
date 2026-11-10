@@ -1,0 +1,59 @@
+name: wasm
+# folo-wasm (FOLO in the browser, docs/WASM.md) for wasm32: clippy, then the release build and its JS bindings
+# through scripts/build-wasm.sh, exactly as Studio would build it. It runs when folo-wasm, a crate it depends on, the
+# lock file or the build script changes, and on every push to main.
+on:
+  pull_request:
+    paths:
+      - crates/folo-wasm/**
+      - crates/folo-api/**
+      - crates/folo-core/**
+      - crates/folo-data/**
+      - crates/folo-gpu/**
+      - crates/folo-nn/**
+      - crates/folo-vision/**
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/**
+      - rust-toolchain.toml
+      - scripts/build-wasm.sh
+      - .github/workflows/wasm.yml
+  push:
+    branches: [main]
+concurrency:
+  group: wasm-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  # RUSTFLAGS replaces .cargo/config.toml's target flags, so SIMD128 (docs/WASM.md) is repeated here.
+  RUSTFLAGS: -D warnings -C target-feature=+simd128
+# Runners: see ci.yml. RUNS_ON_LINUX holds a JSON runs-on value; unset falls back to GitHub-hosted Linux.
+jobs:
+  wasm:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - name: persistent target dir (self-hosted)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=$HOME/gha/folo-target-wasm" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+      - name: wasm-bindgen CLI matching Cargo.lock
+        shell: bash
+        run: echo "WASM_BINDGEN_VERSION=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)" >> "$GITHUB_ENV"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen@${{ env.WASM_BINDGEN_VERSION }}
+      - run: cargo clippy --target wasm32-unknown-unknown -p folo-wasm -- -D warnings
+      - run: sh scripts/build-wasm.sh
+      # The documented JS API type-checks against the generated declarations.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npx --yes -p typescript@6.0 tsc -p crates/folo-wasm/demo/tsconfig.json

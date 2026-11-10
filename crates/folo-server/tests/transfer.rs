@@ -22,6 +22,8 @@ use folo_test_support::TestDir;
 use folo_vision::FoloModel;
 
 const TOKEN: &str = "worker-token";
+/// The wait before a retry (500 ms by default, doubling).
+const BACKOFF: Duration = Duration::from_millis(10);
 
 /// A router served on a loopback port by its own runtime, until dropped.
 struct Live {
@@ -115,7 +117,7 @@ fn uploads_survive_a_lost_request_and_a_lost_answer() {
 
     let mut seen = Vec::new();
     let mut progress = |p: TransferProgress| seen.push(p);
-    let mut ctl = Control { progress: &mut progress, stop: &never };
+    let mut ctl = Control { progress: &mut progress, stop: &never, backoff: BACKOFF };
     let req = CreateUpload {
         kind: UploadKind::Model,
         name: "pets".into(),
@@ -138,12 +140,12 @@ fn uploads_survive_a_lost_request_and_a_lost_answer() {
     assert_eq!(staging(&home), 0);
 
     // The same fingerprint: the server already has it, and nothing is produced or sent.
-    let mut ctl = Control { progress: &mut |_| panic!("nothing is sent"), stop: &never };
+    let mut ctl = Control { progress: &mut |_| panic!("nothing is sent"), stop: &never, backoff: BACKOFF };
     let again = upload(&client, &req, |_| panic!("not produced"), &mut ctl).unwrap();
     assert_eq!(again.model.unwrap().id, model.id);
 
     // Without the token: refused before anything is sent.
-    let mut ctl = Control { progress: &mut |_| {}, stop: &never };
+    let mut ctl = Control { progress: &mut |_| {}, stop: &never, backoff: BACKOFF };
     let anonymous = Client::new(&live.url);
     match upload(&anonymous, &req, |_| panic!("not produced"), &mut ctl) {
         Err(TransferError::Failed(e)) => assert_eq!(e.code(), "unauthorized"),
@@ -168,7 +170,7 @@ fn a_dataset_stream_uploads_and_a_stopped_upload_leaves_nothing() {
         fingerprint: None,
         bytes: Some(folo_data::pack::packed_len(&ds).unwrap()),
     };
-    let mut ctl = Control { progress: &mut |_| {}, stop: &never };
+    let mut ctl = Control { progress: &mut |_| {}, stop: &never, backoff: BACKOFF };
     let pack = |w: &mut dyn Write| folo_data::pack::pack(&ds, w).map(|_| ()).map_err(std::io::Error::other);
     let done = upload(&client, &req, pack, &mut ctl).unwrap().dataset.unwrap();
     assert_eq!((done.format, done.classes.clone()), (DatasetFormat::Yolo, ds.classes.clone()));
@@ -180,7 +182,7 @@ fn a_dataset_stream_uploads_and_a_stopped_upload_leaves_nothing() {
     let sent = parts.clone();
     let mut progress = move |_: TransferProgress| sent.store(true, Ordering::SeqCst);
     let stop = move || parts.load(Ordering::SeqCst);
-    let mut ctl = Control { progress: &mut progress, stop: &stop };
+    let mut ctl = Control { progress: &mut progress, stop: &stop, backoff: BACKOFF };
     let big = vec![7u8; (8 << 20) + 10];
     let model = CreateUpload {
         kind: UploadKind::Model,
@@ -209,7 +211,7 @@ fn downloads_in_parts_start_over_when_the_file_is_replaced() {
     let leftovers = || std::fs::read_dir(dest.parent().unwrap()).unwrap().count();
 
     let mut parts = 0;
-    let mut ctl = Control { progress: &mut |_| parts += 1, stop: &never };
+    let mut ctl = Control { progress: &mut |_| parts += 1, stop: &never, backoff: BACKOFF };
     let first = download(&client, &uri, &dest, &mut ctl).unwrap();
     let on_disk = std::fs::read(&path).unwrap();
     assert!(std::fs::read(&dest).unwrap() == on_disk);
@@ -225,7 +227,7 @@ fn downloads_in_parts_start_over_when_the_file_is_replaced() {
             write_model(&path, 2);
         }
     };
-    let mut ctl = Control { progress: &mut progress, stop: &never };
+    let mut ctl = Control { progress: &mut progress, stop: &never, backoff: BACKOFF };
     let second = download(&client, &uri, &dest, &mut ctl).unwrap();
     let new = std::fs::read(&path).unwrap();
     assert!(new != on_disk && std::fs::read(&dest).unwrap() == new, "the new version, not a mix");
@@ -244,7 +246,7 @@ fn downloads_in_parts_start_over_when_the_file_is_replaced() {
             write_model(&path, seed);
         }
     };
-    let mut ctl = Control { progress: &mut progress, stop: &never };
+    let mut ctl = Control { progress: &mut progress, stop: &never, backoff: BACKOFF };
     let racing = download(&client, &uri, &dest, &mut ctl).unwrap();
     let last = std::fs::read(&path).unwrap();
     assert!(
@@ -265,7 +267,7 @@ fn downloads_in_parts_start_over_when_the_file_is_replaced() {
     assert!(large.len() as u64 > 3 * folo_client::transfer::PART_BYTES, "{} bytes", large.len());
     let mut seen = Vec::new();
     let mut progress = |p: TransferProgress| seen.push((p.done_bytes, p.total_bytes));
-    let mut ctl = Control { progress: &mut progress, stop: &never };
+    let mut ctl = Control { progress: &mut progress, stop: &never, backoff: BACKOFF };
     let third = download(&client, &uri, &dest, &mut ctl).unwrap();
     let len = large.len() as u64;
     assert_eq!(seen, [(folo_client::transfer::PART_BYTES, len), (len, len)]);
@@ -284,9 +286,9 @@ fn downloads_in_parts_start_over_when_the_file_is_replaced() {
 
     // Stopped, or a model that is not there: no file, no leftovers.
     let other = t.join("out").join("other.folo");
-    let mut ctl = Control { progress: &mut |_| {}, stop: &|| true };
+    let mut ctl = Control { progress: &mut |_| {}, stop: &|| true, backoff: BACKOFF };
     assert!(matches!(download(&client, &uri, &other, &mut ctl), Err(TransferError::Stopped)));
-    let mut ctl = Control { progress: &mut |_| {}, stop: &never };
+    let mut ctl = Control { progress: &mut |_| {}, stop: &never, backoff: BACKOFF };
     match download(&client, "/models/m_none/weights", &other, &mut ctl) {
         Err(TransferError::Failed(e)) => assert_eq!(e.code(), "model_not_found"),
         r => panic!("{r:?}"),

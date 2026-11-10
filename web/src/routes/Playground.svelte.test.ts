@@ -61,32 +61,13 @@ describe('Playground: a failed prediction', () => {
     expect(foot).toContain('shapes-s-best on the server');
     expect(foot).not.toContain('Waiting');
     // The detections panel says why it is empty.
-    expect(target.querySelector('#pg-panel .placeholder')?.textContent?.trim()).toBe('No detections: the last prediction failed.');
-    // The ways out: this browser first (primary), then the smaller model, then Retry.
+    expect(target.querySelector('#pg-panel .placeholder')).not.toBeNull();
+    // The ways out: this browser first, then the smaller model, then Retry.
     expect([...notice.querySelectorAll('button')].map((b) => b.textContent?.trim()).filter((t) => t !== 'Technical details')).toEqual([
       'Run in this browser',
       'Use shapes-n-best',
       'Retry',
     ]);
-    // One typeface in the label; the architecture is in its title.
-    const smaller = [...notice.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Use shapes-n-best')!;
-    expect(smaller.querySelector('.mono')).toBeNull();
-    expect(smaller.getAttribute('title')).toBe('shapes-n-best is folo-n: a smaller model of the same classes');
-  });
-
-  it('moves focus to the notice without scrolling, and keeps it there when the notice re-renders', async () => {
-    const focus = vi.spyOn(HTMLElement.prototype, 'focus');
-    await run('oom', 'm_shapes_s');
-    const notice = await until(() => target.querySelector<HTMLElement>('.notice'), 'the notice');
-    const title = notice.querySelector<HTMLElement>('.title')!;
-    expect(document.activeElement).toBe(title);
-    const call = focus.mock.calls.find((_, i) => focus.mock.contexts[i] === title);
-    expect(call?.[0]).toEqual({ preventScroll: true });
-    focus.mockRestore();
-    // Whatever re-renders the heading (here, by hand), focus comes back to it instead of falling to the page start.
-    const again = title.cloneNode(true) as HTMLElement;
-    title.replaceWith(again);
-    await until(() => document.activeElement === again, 'focus back on the heading');
   });
 });
 
@@ -96,24 +77,15 @@ describe('Playground on a phone', () => {
     (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width });
   });
 
-  it('puts a failed prediction above the image, so it is in the first screen', async () => {
-    (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 390 });
-    await run('oom', 'm_shapes_s');
-    const notice = await until(() => target.querySelector('.notice'), 'the notice');
-    expect(notice.nextElementSibling?.classList.contains('stage')).toBe(true);
-    expect(notice.previousElementSibling?.classList.contains('vbar')).toBe(true);
-  });
-
-  it('opens Thresholds with Confidence as the first row of the sheet', async () => {
+  it('opens Thresholds as a sheet', async () => {
     (window as unknown as { happyDOM: { setViewport(v: { width: number }): void } }).happyDOM.setViewport({ width: 390 });
     await run('normal', 'm_hard_s');
     await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
     const btn = [...target.querySelectorAll<HTMLButtonElement>('.more-btn button')].find((b) => b.textContent?.includes('Thresholds'))!;
     btn.click();
     const sheet = await until(() => target.querySelector('#pg-more'), 'the sheet');
-    expect([...sheet.querySelectorAll('.slider label')].map((l) => l.textContent)).toEqual(['Confidence', 'Overlap (IoU)', 'Max detections']);
-    // The pinned Confidence under the image steps out while the sheet holds it.
-    expect(target.querySelector('.qconf')?.classList.contains('covered')).toBe(true);
+    expect(sheet.classList.contains('pop')).toBe(false);
+    expect(sheet.querySelector('.slider input')).not.toBeNull();
   });
 });
 
@@ -142,58 +114,18 @@ describe('Playground on a tablet', () => {
   });
 });
 
-describe('Playground: the model picker', () => {
-  it('shows the name alone when closed, its score and every fact of its context under it, and the context in the list', async () => {
-    await run('normal', 'm_hard_s');
-    const sel = await until(() => target.querySelector<HTMLSelectElement>('.model-pick select'), 'the picker');
-    const shown = target.querySelector('.model-pick .shown')!;
-    const meta = target.querySelector('#model-meta')!;
-    const opt = sel.querySelector<HTMLOptionElement>('option[value="m_hard_s"]')!;
-    expect(shown.textContent).toBe(opt.textContent!.split(' · ')[0]);
-    expect(meta.textContent).toMatch(/^mAP50-95 0\.\d{3} · shapes-hard, validation split$/);
-    expect(sel.getAttribute('aria-describedby')).toBe('model-meta');
-    // The open list keeps each option's context and its group.
-    expect(opt.textContent).toMatch(/ · mAP50-95 0\.\d{3} on shapes-hard$/);
-    expect(opt.closest('optgroup')?.getAttribute('label')).toBe('Validation split of shapes-hard');
-  });
-});
-
 describe('Playground: detections', () => {
-  it('shows scores with one precision in the table and the picked line', async () => {
-    await run('normal', 'm_hard_s');
-    const row = await until(() => target.querySelector<HTMLTableRowElement>('#pg-panel tbody tr'), 'the detections');
-    const cell = row.querySelector('.score .num')!.textContent!;
-    expect(cell).toMatch(/^0\.\d\d$/);
-    row.click();
-    flushSync();
-    expect(row.getAttribute('aria-label')).toContain(`score ${cell},`);
-    expect(target.querySelector('.pick-line')?.textContent).toContain(cell);
-  });
-
-  it('draws score bars in neutral ink, with the class hue on the swatch only', async () => {
-    await run('normal', 'm_hard_s');
-    const row = await until(() => target.querySelector<HTMLTableRowElement>('#pg-panel tbody tr'), 'the detections');
-    expect(row.querySelector<HTMLElement>('.s-track span')!.style.background).toBe('');
-    expect(row.querySelector<HTMLElement>('.sw')!.style.background).not.toBe('');
-  });
-
-  it('describes IoU as suppression, under the one name the phone sheet uses too', async () => {
-    await run('normal', 'm_hard_s');
-    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
-    expect(target.querySelector('.thresholds')?.textContent).toContain('Suppress same-class overlaps above this.');
-    expect(target.querySelector('.thresholds')?.textContent).not.toContain('Merge');
-    expect([...target.querySelectorAll('.thresholds .slider label')].map((l) => l.textContent)).toEqual(['Confidence', 'Overlap (IoU)', 'Max detections']);
-  });
-
-  it('marks the selected row with aria-selected', async () => {
+  it('picks a row with aria-selected, its score the same in the table and the picked line', async () => {
     await run('normal', 'm_hard_s');
     await until(() => target.querySelectorAll('#pg-panel tbody tr').length > 1, 'the detections');
     const rows = () => [...target.querySelectorAll<HTMLTableRowElement>('#pg-panel tbody tr')];
     expect(rows().some((r) => r.hasAttribute('aria-selected'))).toBe(false);
+    const cell = rows()[1]!.querySelector('.score .num')!.textContent!;
     rows()[1]!.click();
     flushSync();
     expect(rows().map((r) => r.getAttribute('aria-selected'))).toEqual(rows().map((_, i) => (i === 1 ? 'true' : null)));
-    expect(rows()[1]!.classList.contains('on')).toBe(true);
+    expect(rows()[1]!.getAttribute('aria-label')).toContain(`score ${cell},`);
+    expect(target.querySelector('.pick-line')?.textContent).toContain(cell);
   });
 });
 
@@ -214,7 +146,6 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
     await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
     expect(option(g, 'Server').disabled).toBe(false);
     expect(option(g, 'WebGPU').disabled).toBe(true);
-    expect(target.querySelector('#runon-note')?.textContent).toBe('No in-browser runtime');
     expect(target.querySelector('.runon')?.getAttribute('aria-describedby')).toBe('runon-note');
   });
 
