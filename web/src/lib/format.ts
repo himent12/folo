@@ -50,7 +50,8 @@ export function bytes(x: number | null | undefined, units: 'binary' | 'metric' =
   const names = units === 'binary' ? ['B', 'KiB', 'MiB', 'GiB', 'TiB'] : ['B', 'kB', 'MB', 'GB', 'TB'];
   let i = 0;
   let v = x;
-  while (Math.abs(v) >= k && i < names.length - 1) {
+  // From k - 0.05 the one decimal reads k ("1,024.0 KiB"): that is one of the next unit.
+  while (Math.abs(v) >= k - 0.05 && i < names.length - 1) {
     v /= k;
     i++;
   }

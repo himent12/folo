@@ -25,6 +25,12 @@ describe('format', () => {
     expect(bytes(5_400_000, 'metric')).toBe('5.4 MB');
     expect(bytes(512)).toBe('512 B');
   });
+  it('moves a size that rounds up to 1024 of a unit to the next unit', () => {
+    expect(bytes(2 ** 20 - 1)).toBe('1.0 MiB');
+    expect(bytes(2 ** 30 - 1)).toBe('1.0 GiB');
+    expect(bytes(999_999, 'metric')).toBe('1.0 MB');
+    expect(bytes(1023)).toBe('1,023 B');
+  });
   it('formats durations', () => {
     expect(duration(42)).toBe('42s');
     expect(duration(750)).toBe('12m 30s');
