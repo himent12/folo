@@ -301,6 +301,31 @@ fn casts_round_like_the_cpu() {
 }
 
 #[test]
+fn casts_i64_to_float_round_once() {
+    let dev = dev!();
+    // 2^k + 2^(k - 24) + 1 sits just above an f32 midpoint; rounding to f64's 53 bits first drops the low 1 and
+    // leaves an exact tie that rounds down, so only a single rounding gets these right.
+    let mut ints: Vec<i64> = (54..63).map(|k| (1i64 << k) + (1 << (k - 24)) + 1).collect();
+    ints.extend([
+        (1 << 62) + (1 << 38) - 1,
+        (1 << 62) + (1 << 38),
+        (1 << 62) + (3 << 38),
+        i64::MAX,
+        i64::MAX - 1,
+    ]);
+    ints.extend([0, 1, 7, 2049, 65519, 65520, (1 << 24) - 1, 1 << 24, (1 << 24) + 1, (1 << 24) + 3, 1 << 53]);
+    ints.extend([(1 << 53) + 1, i64::MIN + (1 << 39) + 1, i64::MIN + (1 << 39) - 1]);
+    let neg: Vec<i64> = ints.iter().map(|v| v.wrapping_neg()).collect();
+    ints.extend(neg);
+    ints.push(i64::MIN);
+    let i = Tensor::from_slice(&ints, [ints.len()]).unwrap();
+    let g = i.to_device(dev).unwrap();
+    for to in [DType::F32, DType::F16] {
+        assert_same(&g.to_dtype(to).unwrap(), &i.to_dtype(to).unwrap(), &format!("i64 -> {to} of {ints:?}"));
+    }
+}
+
+#[test]
 fn unary_ops_and_gradients() {
     let dev = dev!();
     let ops = [
