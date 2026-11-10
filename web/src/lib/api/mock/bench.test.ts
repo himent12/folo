@@ -622,7 +622,8 @@ describe('MockApi vision benchmarks: the contract as the engine fills it', () =>
       const loops = await api.benchLoops(b.id);
       const busy = entries.some((e) => ['queued', 'running', 'stopping'].includes(e.status)) || loops.some((l) => l.status === 'running' || l.status === 'stopping');
       expect(b.active).toBe(busy);
-      const lead = entries.find((e) => e.status === 'done');
+      // docs/API.md: `best` is the leader when it is done and has the benchmark's fingerprint.
+      const lead = entries.find((e) => e.status === 'done' && e.fingerprint === b.fingerprint);
       if (lead) expect(b.best).toEqual({ entry_id: lead.id, name: lead.name, score: lead.score!.total, partial: lead.score!.partial });
       else expect(b.best).toBeNull();
     }
