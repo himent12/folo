@@ -441,6 +441,14 @@ fn check_resume_flags(args: &TrainArgs, stored: &TrainConfig) -> Result<(), CliE
             "translate" => (aug("translate"), json!(args.translate)),
             "close_mosaic" => (aug("close_mosaic"), json!(args.close_mosaic)),
             "hsv" => (aug("hsv"), json!(args.hsv)),
+            "weights" => {
+                return Err(CliError::new(
+                    ExitCode::Usage,
+                    "invalid_config",
+                    "--weights cannot change a resumed run (it continues from its checkpoint)",
+                )
+                .hint("leave --weights out to resume the run, or start a new run from those weights without --resume"));
+            }
             _ => continue,
         };
         // `--lrf` and `--warmup-epochs` are f64 settings: compared exactly; the rest are integers or f32s.
@@ -805,6 +813,27 @@ mod tests {
             assert!(e.code == "invalid_config" && matches!(e.exit, super::ExitCode::Usage), "{key}");
             assert!(e.message.contains(flag), "{key}: {}", e.message);
         }
+    }
+
+    /// `--weights` with `--resume` is refused: the run continues from its checkpoint, so the weights were silently
+    /// ignored (the flag is not one a resume may change, and the stored config has nothing to compare it with).
+    #[test]
+    fn resume_refuses_weights() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "folo",
+            "train",
+            "--resume",
+            "r/weights/last.folo",
+            "--weights",
+            "other.folo",
+        ])
+        .unwrap();
+        let crate::cli::Command::Train(mut args) = cli.command else { panic!("not train") };
+        args.explicit = vec!["resume".into(), "weights".into()];
+        let e = super::check_resume_flags(&args, &TrainConfig::default()).unwrap_err();
+        assert_eq!((e.code.as_str(), e.exit), ("invalid_config", super::ExitCode::Usage));
+        assert!(e.message.contains("--weights"), "{}", e.message);
     }
 
     #[test]
