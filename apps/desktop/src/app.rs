@@ -320,7 +320,7 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
 pub const PLAY_CONF_FLOOR: f32 = 0.05;
 pub const IMGSZ: [u32; 5] = [320, 480, 640, 800, 1024];
 pub const DEVICES: [&str; 3] = ["auto", "gpu:0", "cpu"];
-pub const OPTIMIZERS: [Optimizer; 3] = [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw];
+pub const OPTIMIZERS: [Optimizer; 4] = [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw, Optimizer::Musgd];
 
 pub struct PlayImage {
     pub name: SharedString,
@@ -3872,6 +3872,16 @@ mod form_tests {
 #[cfg(test)]
 mod tests {
     use super::parse_close;
+
+    /// The New run optimizer picker offers every value a client can send, so a run prefilled from one that
+    /// trained with MuSGD keeps it (an absent value fell back to Auto).
+    #[test]
+    fn optimizer_picker_offers_every_optimizer() {
+        use crate::api::Optimizer;
+        for o in [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw, Optimizer::Musgd] {
+            assert!(super::OPTIMIZERS.contains(&o), "{o:?}");
+        }
+    }
 
     #[test]
     fn close_mosaic_capped_as_the_engine_runs_it() {

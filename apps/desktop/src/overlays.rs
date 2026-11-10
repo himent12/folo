@@ -16,7 +16,7 @@ use crate::api::RunStatus;
 use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, Route, act};
 
 /// The optimizer segments' labels (the helper under them repeats the chosen one).
-const OPT_LABELS: [&str; 3] = ["Auto", "SGD", "AdamW"];
+const OPT_LABELS: [&str; 4] = ["Auto", "SGD", "AdamW", "MuSGD"];
 use crate::controls::Btn;
 use crate::store::{ImgKind, Load};
 use crate::theme::{Theme, radius, theme, ty};
