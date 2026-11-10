@@ -782,6 +782,39 @@ fn conv2d_input_gradient_stride_beyond_kernel() {
 }
 
 #[test]
+fn conv2d_batches_beyond_one_dispatch() {
+    // The conv kernels put (image, group) on the grid's z axis, at most 65535 workgroups: larger N · groups run
+    // in pieces of the batch. A 3×3 conv, a strided one (stride-phase input gradient), a grouped 1×1 (80000
+    // layers) and a depthwise one, forward and both gradients; the bias gradient sums 70000 images.
+    let dev = dev!();
+    for (i, (xs, ws, s, p, g)) in [
+        ([70000, 1, 3, 3], [2, 1, 3, 3], 1, 1, 1),
+        ([70000, 2, 4, 4], [2, 2, 3, 3], 2, 1, 1),
+        ([40000, 4, 2, 2], [4, 2, 1, 1], 1, 0, 2),
+        ([70000, 2, 3, 3], [2, 1, 3, 3], 1, 1, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = randn(&xs, 110 + i as u64);
+        let w = randn(&ws, 120 + i as u64).mul_scalar(0.3).unwrap();
+        let b = randn(&[ws[0]], 130 + i as u64);
+        check(dev, &[x, w, b], 2e-3, 1e-4, &format!("conv {xs:?} {ws:?} s{s} g{g}"), move |v| {
+            v[0].conv2d(&v[1], Some(&v[2]), s, p, 1, g)
+        });
+    }
+    // f16 with an odd image size (9 halves) and an odd last piece: the piece copies stay 4-byte aligned.
+    if folo_core::backend::backend(dev).is_ok_and(|b| b.computes_f16()) {
+        let x = randn(&[70001, 1, 3, 3], 140).to_dtype(DType::F16).unwrap();
+        let w = randn(&[2, 1, 3, 3], 141).mul_scalar(0.3).unwrap().to_dtype(DType::F16).unwrap();
+        let y = x.to_device(dev).unwrap().conv2d(&w.to_device(dev).unwrap(), None, 1, 1, 1, 1).unwrap();
+        let (xf, wf) = (x.to_dtype(DType::F32).unwrap(), w.to_dtype(DType::F32).unwrap());
+        let want = xf.conv2d(&wf, None, 1, 1, 1, 1).unwrap();
+        assert_close_t(&y.to_dtype(DType::F32).unwrap(), &want, 2e-3, 2e-3, "f16 conv batch 70001");
+    }
+}
+
+#[test]
 fn pooling_and_upsampling() {
     let dev = dev!();
     let x = randn(&[2, 3, 11, 13], 70);
