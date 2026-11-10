@@ -1273,10 +1273,20 @@ impl Trainer {
     }
 }
 
-/// Replaces the device tensors of a checkpoint by host copies, downloaded with one readback per dtype: the
-/// tensors are concatenated on the device first. Read one by one, every tensor would wait for the GPU (about a
-/// thousand waits for the weights, EMA and optimizer state of folo-n). The bytes are the same.
+/// Bytes [`download_all`] concatenates into one device buffer at most (also never above the device's buffer limits).
+const DOWNLOAD_CHUNK: u64 = 128 << 20;
+
+/// Replaces the device tensors of a checkpoint by host copies, downloaded with one readback per dtype and chunk of
+/// at most [`DOWNLOAD_CHUNK`] bytes: the tensors of a chunk are concatenated on the device first. Read one by one,
+/// every tensor would wait for the GPU (about a thousand waits for the weights, EMA and optimizer state of
+/// folo-n); in one piece, folo-x's state (up to ~900 MB) would exceed many adapters' buffer limits and add a full
+/// copy of the training state to VRAM. The bytes are the same.
 pub(crate) fn download_all(tensors: &mut [(String, folo_core::Tensor)]) -> Result<()> {
+    download_all_chunked(tensors, DOWNLOAD_CHUNK)
+}
+
+/// [`download_all`] with chunks of at most `chunk` bytes (a tensor larger than that is a chunk of its own).
+fn download_all_chunked(tensors: &mut [(String, folo_core::Tensor)], chunk: u64) -> Result<()> {
     let _g = folo_core::no_grad();
     let mut groups: Vec<((Device, folo_core::DType), Vec<usize>)> = Vec::new();
     for (i, (_, t)) in tensors.iter_mut().enumerate() {
@@ -1293,19 +1303,39 @@ pub(crate) fn download_all(tensors: &mut [(String, folo_core::Tensor)]) -> Resul
             None => groups.push((key, vec![i])),
         }
     }
-    for (_, idx) in groups {
-        let flat = idx
-            .iter()
-            .map(|&i| tensors[i].1.reshape([tensors[i].1.numel()]))
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let host = folo_core::Tensor::cat(&flat, 0)?.to_device(Device::Cpu)?;
-        let mut start = 0;
-        for &i in &idx {
-            let t = &tensors[i].1;
-            let n = t.numel();
-            let part = host.narrow(0, start, n)?.reshape(t.shape().clone())?;
-            start += n;
-            tensors[i].1 = part;
+    for ((dev, dtype), idx) in groups {
+        let limit = folo_gpu::context_for(dev)
+            .map_or(u64::MAX, |c| c.caps().max_buffer_size.min(c.caps().max_storage_buffer_binding_size));
+        let max = chunk.min(limit).max(1);
+        let elem = dtype.size_in_bytes() as u64;
+        let mut rest = &idx[..];
+        while !rest.is_empty() {
+            // As many tensors as fit in `max` bytes, at least one.
+            let mut bytes = 0;
+            let take = rest
+                .iter()
+                .take_while(|&&i| {
+                    bytes += tensors[i].1.numel() as u64 * elem;
+                    bytes <= max
+                })
+                .count()
+                .max(1);
+            let (part, tail) = rest.split_at(take);
+            rest = tail;
+            let flat = part
+                .iter()
+                .map(|&i| tensors[i].1.reshape([tensors[i].1.numel()]))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let host = folo_core::Tensor::cat(&flat, 0)?.to_device(Device::Cpu)?;
+            drop(flat);
+            let mut start = 0;
+            for &i in part {
+                let t = &tensors[i].1;
+                let n = t.numel();
+                let piece = host.narrow(0, start, n)?.reshape(t.shape().clone())?;
+                start += n;
+                tensors[i].1 = piece;
+            }
         }
     }
     Ok(())
@@ -1387,7 +1417,8 @@ mod tests {
     use super::*;
 
     /// The batched checkpoint download gives every tensor's exact bytes and shape: several dtypes, a view that is
-    /// not contiguous, an empty tensor and one already on the host.
+    /// not contiguous, an empty tensor and one already on the host; in one chunk per dtype, and in chunks so small
+    /// that some hold one tensor, some several, and one tensor is larger than a chunk.
     #[test]
     fn download_all_keeps_every_byte() {
         let ctx = match folo_gpu::GpuContext::shared() {
@@ -1415,13 +1446,17 @@ mod tests {
             .collect();
         // A transposed (strided) view on the device.
         tensors[2].1 = tensors[1].1.transpose(0, 1).unwrap();
-        download_all(&mut tensors).unwrap();
-        for ((n, got), (_, want)) in tensors.iter().zip(&host) {
-            assert!(got.device().is_cpu(), "{n}");
-            assert_eq!(got.dims(), want.dims(), "{n}");
-            assert_eq!(got.dtype(), want.dtype(), "{n}");
-            let (g, w) = (got.to_cpu_storage().unwrap(), want.to_cpu_storage().unwrap());
-            assert_eq!(g.as_bytes(), w.as_bytes(), "{n}");
+        // 400 bytes: `a` (420) alone and over the limit, `b` + `bt` (96 + 96) together, `n` (44).
+        for chunk in [DOWNLOAD_CHUNK, 400, 1] {
+            let mut tensors = tensors.clone();
+            download_all_chunked(&mut tensors, chunk).unwrap();
+            for ((n, got), (_, want)) in tensors.iter().zip(&host) {
+                assert!(got.device().is_cpu(), "{n}, chunk {chunk}");
+                assert_eq!(got.dims(), want.dims(), "{n}, chunk {chunk}");
+                assert_eq!(got.dtype(), want.dtype(), "{n}, chunk {chunk}");
+                let (g, w) = (got.to_cpu_storage().unwrap(), want.to_cpu_storage().unwrap());
+                assert_eq!(g.as_bytes(), w.as_bytes(), "{n}, chunk {chunk}");
+            }
         }
     }
 
