@@ -319,6 +319,20 @@ describe('the benchmark page', () => {
     expect(document.querySelector('.pv .file')?.textContent).toBe((await hub.api.benchImages('bn_9f03', { offset: 1, limit: 1 })).images[0]!.file);
   });
 
+  it('opens Compare with the entries in the board’s order, one graded on an earlier version last', async () => {
+    await page('/benchmarks/bn_3c90');
+    const box = (id: string) => document.querySelector<HTMLInputElement>(`table.board tbody tr[data-id="${id}"] input[type="checkbox"]`)!;
+    // fasteners-s-v1 now (be_f101) and as graded before the engine changed (be_f100, a higher score, shown below).
+    box('be_f100').click();
+    flushSync();
+    box('be_f101').click();
+    flushSync();
+    const order = [...document.querySelectorAll<HTMLElement>('table.board tbody tr[data-id]')].map((r) => r.dataset.id).filter((x) => x === 'be_f100' || x === 'be_f101');
+    expect(order).toEqual(['be_f101', 'be_f100']);
+    const compare = [...document.querySelectorAll<HTMLElement>('header a')].find((b) => /^Compare/.test(b.textContent?.trim() ?? ''))!;
+    expect(compare.getAttribute('href')).toBe('#/benchmarks/bn_3c90/compare?entries=be_f101,be_f100');
+  });
+
   it('picks finished entries for Compare, at most four, and makes Compare the one primary from two', async () => {
     await page('/benchmarks/bn_3c90');
     const boxes = [...document.querySelectorAll<HTMLInputElement>('table.board tbody input[type="checkbox"]')];
