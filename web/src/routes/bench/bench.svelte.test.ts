@@ -4,6 +4,7 @@
 import { flushSync, mount, unmount, type Component } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index.svelte';
+import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import type { Bench } from '$lib/api/types';
 import { parse, router } from '$lib/router.svelte';
@@ -176,6 +177,77 @@ describe('Add entry', () => {
     submit().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
     await settle();
     expect(onstarted).toHaveBeenCalledWith(expect.objectContaining({ status: 'done', name: 'det' }));
+  });
+
+  /** A file whose request would be large: every image under every pass, enough boxes to be over 8 MiB as JSON. */
+  async function largeFile() {
+    const b = await hub.api.bench('bn_9f03');
+    const images = (await hub.api.benchImages('bn_9f03', { limit: 1000 })).images;
+    const pass = [{ c: null as string | null, s: null as number | null }, ...b.plan.conditions.flatMap((c) => c.severities.map((s) => ({ c: c.condition as string | null, s: s as number | null })))];
+    const box = { class: 0, score: 0.5, x1: 1, y1: 2, x2: 30, y2: 40 };
+    const records = pass.flatMap((p) => images.map((i) => ({ image: i.id, ...(p.c ? { condition: p.c, severity: p.s } : {}), boxes: Array.from({ length: 12 }, () => box) })));
+    return { records, passes: pass.length };
+  }
+  async function pickLarge() {
+    const { records, passes } = await largeFile();
+    const input = document.querySelector<HTMLInputElement>('input[type="file"]')!;
+    Object.defineProperty(input, 'files', { configurable: true, value: [new File([JSON.stringify(records)], 'big.json', { type: 'application/json' })] });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle(40);
+    return { records, passes };
+  }
+
+  it('sends a large file as an open entry, a pass at a time, then finishes it', async () => {
+    const { onstarted } = await dialog('external', 'bn_9f03');
+    const { records, passes } = await pickLarge();
+    expect(document.querySelector('.f-state.ok')?.textContent).toMatch(new RegExp(`Sent in ${passes} parts, a pass at a time\\.`));
+    const send = vi.spyOn(hub.api, 'sendBenchPredictions');
+    submit().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await settle(60);
+    expect(send).toHaveBeenCalledTimes(passes);
+    expect(send.mock.calls.reduce((n, c) => n + c[2].length, 0)).toBe(records.length);
+    expect(onstarted).toHaveBeenCalledWith(expect.objectContaining({ status: 'done', name: 'big', conditions: true }));
+  });
+
+  it('leaves nothing on the leaderboard when a part fails, and shows the server’s message', async () => {
+    const { onstarted } = await dialog('external', 'bn_9f03');
+    await pickLarge();
+    let n = 0;
+    const real = hub.api.sendBenchPredictions.bind(hub.api);
+    vi.spyOn(hub.api, 'sendBenchPredictions').mockImplementation(async (...a) => {
+      if (++n === 3) throw new ApiError(400, 'invalid_body', 'Record 7: box 1: "class" must be a class index from 0 to 5.');
+      return real(...a);
+    });
+    const stop = vi.spyOn(hub.api, 'stopBenchEntry');
+    submit().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await settle(60);
+    expect(onstarted).not.toHaveBeenCalled();
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(text()).toMatch(/Could not add the entry: nothing was kept/);
+    expect(text()).toMatch(/Record 7: box 1/);
+    expect((await hub.api.benchEntries('bn_9f03')).length).toBe(0);
+    expect((await hub.api.bench('bn_9f03')).active).toBe(false);
+  });
+
+  it('asks before closing mid-send, then stops the entry', async () => {
+    await dialog('external', 'bn_9f03');
+    await pickLarge();
+    // The second part never answers: the send is in flight when the person closes the dialog.
+    let n = 0;
+    const real = hub.api.sendBenchPredictions.bind(hub.api);
+    vi.spyOn(hub.api, 'sendBenchPredictions').mockImplementation((...a) => (++n === 2 ? new Promise(() => {}) : real(...a)));
+    const stop = vi.spyOn(hub.api, 'stopBenchEntry');
+    submit().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await settle(30);
+    expect(document.querySelector('dialog[open] .f-send')?.textContent).toMatch(/Sending predictions · [\d,]+ of [\d,]+ records/);
+    [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Cancel')!.click();
+    flushSync();
+    expect(text()).toMatch(/Stop sending\? The entry is discarded\./);
+    expect(document.querySelector('dialog[open]')).not.toBeNull();
+    [...document.querySelectorAll<HTMLButtonElement>('dialog[open] button')].find((b) => b.textContent?.trim() === 'Stop and discard')!.click();
+    await settle(30);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect((await hub.api.benchEntries('bn_9f03')).length).toBe(0);
   });
 });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { BenchPlan } from '../api/types';
-import { checkPredictions, parsePredictions, type PredictionContext } from './external';
+import type { BenchEntry, BenchPlan, BenchPrediction } from '../api/types';
+import { checkPredictions, estimateBytes, PART_BYTES, parsePredictions, partsOf, recordBytes, sendExternal, type ExternalSender, type PredictionContext } from './external';
 
 const plan: BenchPlan = { conditions: [{ condition: 'haze', severities: [1, 3], weight: 1 }, { condition: 'jpeg', severities: [5], weight: 1 }] };
 const ctx: PredictionContext = {
@@ -62,5 +62,118 @@ describe('checkPredictions', () => {
   it('without the image list, checks the rest and counts what it got', () => {
     const r = checkPredictions(clean, { ...ctx, imageIds: null });
     expect(r.ok && r.summary.images).toBe(2);
+  });
+});
+
+describe('a large file, sent in parts', () => {
+  const rec = (image: string, condition: string | null, severity: number | null, n: number): BenchPrediction => ({
+    image,
+    ...(condition ? { condition, severity } : {}),
+    boxes: Array.from({ length: n }, () => ({ ...box })),
+  });
+  // Every image under every pass of the plan, in a shuffled order (a file need not be in pass order).
+  const all = [
+    ...['2', '1'].map((i) => rec(i, 'jpeg', 5, 3)),
+    ...['1', '2'].map((i) => rec(i, null, null, 3)),
+    ...['1', '2'].flatMap((i) => [3, 1].map((s) => rec(i, 'haze', s, 3))),
+  ];
+
+  it('groups the parts by pass, the unchanged images first, then the plan’s order; every record in exactly one', () => {
+    const parts = partsOf(all, plan, 10_000_000);
+    expect(parts.map((p) => p.map((r) => `${r.condition ?? '-'}${r.severity ?? ''}:${r.image}`))).toEqual([
+      ['-:1', '-:2'],
+      ['haze1:1', 'haze1:2'],
+      ['haze3:1', 'haze3:2'],
+      ['jpeg5:2', 'jpeg5:1'],
+    ]);
+    expect(parts.flat()).toHaveLength(all.length);
+    expect(new Set(parts.flat())).toEqual(new Set(all));
+  });
+
+  it('splits a pass further by size, never a part over the limit unless one record is, never an empty one', () => {
+    const big = Array.from({ length: 50 }, (_, k) => rec(String(k + 1), null, null, 40));
+    const one = recordBytes(big[0]!);
+    const limit = 32 + one * 7 + 10;
+    const parts = partsOf(big, plan, limit);
+    expect(parts.map((p) => p.length)).toEqual([7, 7, 7, 7, 7, 7, 7, 1]);
+    for (const p of parts) expect(estimateBytes(p)).toBeLessThanOrEqual(limit);
+    // A record over the limit on its own is a part of its own.
+    expect(partsOf([rec('1', null, null, 1000)], plan, 100).map((p) => p.length)).toEqual([1]);
+    expect(partsOf([], plan)).toEqual([]);
+    // The estimate is on the high side of the JSON as sent.
+    for (const r of all) expect(recordBytes(r)).toBeGreaterThan(JSON.stringify(r).length);
+    // At the real limit, the real case (300 images × 20 passes, 300 boxes an image) is many parts each under 8 MiB.
+    const real = Array.from({ length: 300 }, (_, k) => rec(String(k), null, null, 300));
+    const rp = partsOf(real, plan);
+    expect(rp.length).toBeGreaterThan(1);
+    for (const p of rp) expect(estimateBytes(p)).toBeLessThanOrEqual(PART_BYTES);
+  });
+
+  it('refuses a record with more than 1000 boxes, and a part that repeats a record received before', () => {
+    const r = checkPredictions([rec('1', null, null, 1001), clean[1]], ctx);
+    expect(!r.ok && r.error).toBe('Record 1: 1,001 boxes: one record carries at most 1,000.');
+    const seen = new Set<string>();
+    expect(checkPredictions([clean[0]], ctx, { part: true, seen }).ok).toBe(true);
+    const again = checkPredictions([clean[1], clean[0]], ctx, { part: true, seen: new Set(seen) });
+    expect(!again.ok && again.error).toMatch(/^Record 2: image "1" is answered twice/);
+    // A part need not be complete: the finish says what is missing.
+    expect(checkPredictions([{ image: '1', condition: 'haze', severity: 1, boxes: [] }], ctx, { part: true, seen: new Set() }).ok).toBe(true);
+  });
+
+  /** A server that records the calls; `fail` makes the n-th part (1-based) or the finish fail. */
+  function fake(o: { failPart?: number; failFinish?: boolean; hangPart?: number } = {}) {
+    const calls: string[] = [];
+    const entry = (status: BenchEntry['status']) => ({ id: 'be_x', status }) as BenchEntry;
+    let n = 0;
+    const api: ExternalSender = {
+      start: async (b) => (calls.push(`start open=${(b.contestant as { open?: boolean }).open ?? false} records=${(b.contestant as { predictions?: unknown[] }).predictions?.length}`), entry(b.contestant.kind === 'external' && (b.contestant as { open?: boolean }).open ? 'running' : 'done')),
+      send: async (_, ps) => {
+        n++;
+        calls.push(`send ${ps.length}`);
+        if (n === o.hangPart) return new Promise<BenchEntry>(() => {});
+        if (n === o.failPart) throw new Error('Record 1: the benchmark has no image "9".');
+        return entry('running');
+      },
+      finish: async () => {
+        calls.push('finish');
+        if (o.failFinish) throw new Error('Image "2" has no record without a condition.');
+        return entry('done');
+      },
+      stop: async () => (calls.push('stop'), entry('stopped')),
+    };
+    return { api, calls };
+  }
+  const body = { name: 'big', scored: true, predictions: all, plan };
+
+  it('sends a small file in one request, a large one open, in parts, then finishes, telling the records sent', async () => {
+    const small = fake();
+    expect((await sendExternal(small.api, body)).status).toBe('done');
+    expect(small.calls).toEqual([`start open=false records=${all.length}`]);
+    const large = fake();
+    const seen: number[] = [];
+    const e = await sendExternal(large.api, body, (p) => seen.push(p.sent), undefined, 200);
+    expect(e.status).toBe('done');
+    expect(large.calls[0]).toBe('start open=true records=0');
+    expect(large.calls.at(-1)).toBe('finish');
+    expect(large.calls.filter((c) => c.startsWith('send')).length).toBeGreaterThanOrEqual(4);
+    expect(seen[0]).toBe(0);
+    expect(seen.at(-1)).toBe(all.length);
+    expect(seen).toEqual([...seen].sort((a, b) => a - b));
+  });
+
+  it('leaves nothing behind when a part or the finish fails, or the person stops it: the entry is stopped', async () => {
+    const part = fake({ failPart: 2 });
+    await expect(sendExternal(part.api, body, () => {}, undefined, 200)).rejects.toThrow(/no image "9"/);
+    expect(part.calls.at(-1)).toBe('stop');
+    expect(part.calls).not.toContain('finish');
+    const fin = fake({ failFinish: true });
+    await expect(sendExternal(fin.api, body, () => {}, undefined, 200)).rejects.toThrow(/has no record/);
+    expect(fin.calls.slice(-2)).toEqual(['finish', 'stop']);
+    // Stopped by the person while a part is in flight: not waited for, the entry stopped.
+    const hang = fake({ hangPart: 2 });
+    const ctl = new AbortController();
+    const p = sendExternal(hang.api, body, (s) => s.sent > 0 && ctl.abort(), ctl.signal, 200);
+    await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+    expect(hang.calls.at(-1)).toBe('stop');
   });
 });

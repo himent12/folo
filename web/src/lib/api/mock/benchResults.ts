@@ -52,6 +52,12 @@ export interface Skill {
   iou: number;
   /** The share of all objects it finds at 90% precision; 0 when it never gets there. */
   selfRecall: number;
+  /**
+   * How steeply the objects it labels fall off as the confidence rises (the exponent of its recall curve; 1.6 when
+   * absent). A steep one with a tiny `selfRecall` reaches 90% right only at a high confidence where it keeps almost
+   * nothing: a teacher that starves a loop of labels.
+   */
+  labelCurve?: number;
   /** Without confidences: its one operating point. */
   point?: { precision: number; recall: number };
 }
@@ -127,9 +133,12 @@ export function generateResult(input: ResultInput): GeneratedResult {
   const share = present.length ? known.length / present.length : 0;
   const precision = r4(clamp((0.46 + map50_95 * 0.72) * (0.5 + 0.5 * share)));
   const recall = r4(clamp((0.34 + map50_95 * 0.82) * share));
-  // A 95% interval of a bootstrap over images: about as wide as the binomial error of the images it ran.
+  // A 95% interval of a bootstrap over images: about as wide as the binomial error of the images it ran, its
+  // resamples centred on the value (docs/BENCH.md, Accuracy). Their percentiles still fall unevenly about it, more so
+  // with few images or rare classes, so some intervals are lopsided and some symmetric as printed (the ± rule).
   const hw = 1.2 * Math.sqrt((map50_95 * (1 - map50_95)) / Math.max(1, input.images.length)) + 0.004;
-  const ci95: [number, number] = [r4(clamp(map50_95 - hw * (0.9 + 0.2 * r()))), r4(clamp(map50_95 + hw * (0.9 + 0.2 * r())))];
+  const skew = r() < 0.4 ? 1 : 0.75 + 0.5 * r();
+  const ci95: [number, number] = [r4(clamp(map50_95 - hw * skew)), r4(clamp(map50_95 + hw / skew))];
   const accuracy: BenchAccuracy = {
     map50_95,
     ci95,
@@ -202,7 +211,7 @@ export function generateResult(input: ResultInput): GeneratedResult {
     curve = [{ confidence: 0, precision: r4(p.precision), recall: rec, labels: Math.round((T * rec) / Math.max(0.01, p.precision)) }];
   } else {
     const rmax = clamp(0.52 + map50_95 * 0.72, 0, 0.97) * share;
-    const b = 1.6;
+    const b = s.labelCurve ?? 1.6;
     const target = s.selfRecall * share;
     const pmin = 0.3;
     const pmax = target > 0 ? 0.985 : 0.86;

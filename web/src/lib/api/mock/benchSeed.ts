@@ -4,13 +4,34 @@
 //   models with full results, an external yolo26n, Claude Code and Codex on 48 unchanged images (partial, with what
 //   their calls used), a model that knows two of the eight classes, an agent that failed (not signed in), and the f16
 //   export running now; and a self-improvement loop of fasteners-n-best, its first student training.
-// - "Pond fish": made from a labeling job that has been deleted since (the benchmark keeps its own copy), with a plan
-//   Claude Code designed for murky water, and four entries (one whose confidences never reach 90% precision).
-// - "Shapes val": two self-improvement loops, one that improved over three generations and one that held.
+// - "Pond fish": made from a labeling job that has been deleted since (the benchmark keeps its own copy): photos people
+//   took with their phones, so of every shape (landscape, portrait, wide, a panorama), with a plan Claude Code designed
+//   for murky water, and four entries (one whose confidences never reach 90% precision).
+// - "Shapes val": three self-improvement loops, one that improved over three generations, one that held, and one that
+//   failed at its first labeling: an early checkpoint whose labels are 90% right only where it keeps almost nothing.
+// Names are the server's: an agent entry `Claude Code (sonnet)`, a loop `<teacher> loop`, a student `<loop> gen <n>-best`.
+// Scenario `bench-loop-gen0` adds a loop on Fasteners val that has just started: generation 0, its teacher's entry
+// waiting for the GPU.
 
-import type { BenchContestant, Model } from '../types';
-import { AGENT_NAME } from '../../label';
-import { agentSkill, agentUsage, fingerprintOf, missingClasses, sampleImages, specImages, type MBench, type MEntry, type MLoop, type MockBench } from './bench';
+import type { BenchContestant, BenchGeneration, Model } from '../types';
+import {
+  agentEntryName,
+  agentSkill,
+  agentUsage,
+  fingerprintOf,
+  labelsPerImage,
+  loopName,
+  missingClasses,
+  poolLabels,
+  sampleImages,
+  specImages,
+  starvedError,
+  studentName,
+  type MBench,
+  type MEntry,
+  type MLoop,
+  type MockBench,
+} from './bench';
 import { catalog } from './benchCatalog';
 import { designPlan } from './benchDesign';
 import type { Skill } from './benchResults';
@@ -33,6 +54,15 @@ export const POND: MockDatasetSpec = {
   splits: { train: 240, val: 0, test: 0 },
   width: 960,
   height: 720,
+  // Phone photos: most 4:3, some held upright, some wide, the odd panorama.
+  frames: [
+    { width: 960, height: 720, weight: 6 },
+    { width: 720, height: 960, weight: 3 },
+    { width: 1280, height: 720, weight: 2 },
+    { width: 960, height: 640, weight: 2 },
+    { width: 720, height: 1280, weight: 1 },
+    { width: 1600, height: 520, weight: 1 },
+  ],
   meanBoxes: 4.2,
   emptyRate: 0.03,
   sizeRange: [0.1, 0.3],
@@ -54,7 +84,7 @@ function splitImages(spec: MockDatasetSpec, split: 'train' | 'val' | 'test') {
   });
 }
 
-export function seedBenches(mb: MockBench, t0: number) {
+export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean } = {}) {
   const spec = (id: string) => specs.find((s) => s.id === id) as MockDatasetSpec;
   const models = new Map(mb.host.models().map((m) => [m.id, m]));
   const cat = catalog();
@@ -137,12 +167,25 @@ export function seedBenches(mb: MockBench, t0: number) {
   const loopGen = (b: MBench, id: string, name: string, arch: Model['arch'], at: number, skill: Skill) =>
     entry(b, { id, name, contestant: { kind: 'model', model_id: `m_${id.slice(3)}`, arch, params: arch === 'folo-s' ? 9_100_000 : 2_630_000, imgsz: 640 }, at, skill, runs: 2 * MIN, speed: { device: 'gpu:0', ms_per_image: arch === 'folo-s' ? 4.1 : 2.35 } });
   const base = { fragility: 0.95, ece: 0.04, iou: 0.8 };
+  const nLoop = loopName('shapes-n-best');
+  const sLoop = loopName('shapes-s-best');
   const n0 = entry(shapesVal, { id: 'be_5a10', name: 'shapes-n-best', contestant: model('m_shapes_n', { arch: 'folo-n' }), at: t0 - 8 * DAY, skill: { ...base, map: nBest, selfRecall: 0.68 }, runs: 2 * MIN, speed: { device: 'gpu:0', ms_per_image: 2.35 } });
-  const n1 = loopGen(shapesVal, 'be_5a11', 'shapes-n-g1', 'folo-s', t0 - 8 * DAY + 40 * MIN, { ...base, map: nBest + 0.022, selfRecall: 0.7 });
-  const n2 = loopGen(shapesVal, 'be_5a12', 'shapes-n-g2', 'folo-s', t0 - 8 * DAY + 80 * MIN, { ...base, map: nBest + 0.041, selfRecall: 0.72 });
-  const n3 = loopGen(shapesVal, 'be_5a13', 'shapes-n-g3', 'folo-s', t0 - 8 * DAY + 120 * MIN, { ...base, map: nBest + 0.063, selfRecall: 0.74 });
+  const n1 = loopGen(shapesVal, 'be_5a11', studentName(nLoop, 1), 'folo-s', t0 - 8 * DAY + 40 * MIN, { ...base, map: nBest + 0.022, selfRecall: 0.7 });
+  const n2 = loopGen(shapesVal, 'be_5a12', studentName(nLoop, 2), 'folo-s', t0 - 8 * DAY + 80 * MIN, { ...base, map: nBest + 0.041, selfRecall: 0.72 });
+  const n3 = loopGen(shapesVal, 'be_5a13', studentName(nLoop, 3), 'folo-s', t0 - 8 * DAY + 120 * MIN, { ...base, map: nBest + 0.063, selfRecall: 0.74 });
   const s0 = entry(shapesVal, { id: 'be_5a20', name: 'shapes-s-best', contestant: model('m_shapes_s', { arch: 'folo-s' }), at: t0 - 6 * DAY, skill: { ...base, fragility: 0.85, map: sBest, selfRecall: 0.76 }, runs: 2 * MIN, speed: { device: 'gpu:0', ms_per_image: 4.1 } });
-  const s1 = loopGen(shapesVal, 'be_5a21', 'shapes-s-g1', 'folo-s', t0 - 6 * DAY + 45 * MIN, { ...base, fragility: 0.85, map: sBest + 0.006, selfRecall: 0.75 });
+  const s1 = loopGen(shapesVal, 'be_5a21', studentName(sLoop, 1), 'folo-s', t0 - 6 * DAY + 45 * MIN, { ...base, fragility: 0.85, map: sBest + 0.006, selfRecall: 0.75 });
+  // An early checkpoint (5 epochs): it is 90% right only from confidence ~0.75 up, where it keeps almost nothing (its
+  // self-labeling is not ready). As a loop's teacher it labels a handful of the pool, and the loop fails there.
+  const e0 = entry(shapesVal, {
+    id: 'be_5a30',
+    name: models.get('m_shapes_e5')?.name ?? 'shapes-n-early',
+    contestant: model('m_shapes_e5', { arch: 'folo-n' }),
+    at: t0 - 3 * DAY,
+    skill: { fragility: 1.15, ece: 0.12, iou: 0.72, map: metric('m_shapes_e5', 0.198), selfRecall: 0.0015, labelCurve: 4.4 },
+    runs: 2 * MIN,
+    speed: { device: 'gpu:0', ms_per_image: 2.35 },
+  });
 
   // ---------- Fasteners val: every kind and state ----------
   const fast = spec('ds_fasteners');
@@ -187,7 +230,7 @@ export function seedBenches(mb: MockBench, t0: number) {
   const claude = agentSkill('claude', 'sonnet', 'medium', 'bn_3c90:f104');
   entry(fastVal, {
     id: 'be_f104',
-    name: `${AGENT_NAME.claude} · Sonnet`,
+    name: agentEntryName('claude', 'sonnet'),
     contestant: { kind: 'agent', agent: 'claude', model: 'sonnet', effort: 'medium' },
     at: at(3.2),
     images: 48,
@@ -199,7 +242,7 @@ export function seedBenches(mb: MockBench, t0: number) {
   });
   entry(fastVal, {
     id: 'be_f105',
-    name: `${AGENT_NAME.codex} · GPT-6.1-Sol`,
+    name: agentEntryName('codex', 'gpt-6.1-sol'),
     contestant: { kind: 'agent', agent: 'codex', model: 'gpt-6.1-sol', effort: 'low' },
     at: at(2.9),
     images: 48,
@@ -222,7 +265,7 @@ export function seedBenches(mb: MockBench, t0: number) {
   });
   entry(fastVal, {
     id: 'be_f107',
-    name: `${AGENT_NAME.claude} · Opus`,
+    name: agentEntryName('claude', 'opus'),
     contestant: { kind: 'agent', agent: 'claude', model: 'opus', effort: 'medium' },
     at: at(1.2),
     images: 48,
@@ -233,13 +276,14 @@ export function seedBenches(mb: MockBench, t0: number) {
     fail: { ms: 300, error: 'Not logged in · Please run /login', hint: 'Sign in to Claude Code on the server’s machine (run `claude` and follow /login), then add the entry again.' },
     usage: agentUsage('claude', 'opus', 'medium', 48, fastVal.description, 'f107'),
   });
-  // Running now: started 81 s before the page loaded, at haze by then, done about a minute after.
+  // Running now: started 83 s before the page loaded, in the middle of haze at severity 3 by then (so a test that reads
+  // it a few hundred ms late still finds it there), done about a minute after.
   const f16 = models.get('m_fast_n_f16');
   entry(fastVal, {
     id: 'be_f108',
     name: f16?.name ?? 'fasteners-n-f16',
     contestant: model('m_fast_n_f16', { arch: 'folo-n' }),
-    at: t0 - 81 * SEC - 400,
+    at: t0 - 83 * SEC - 400,
     skill: { map: metric('m_fast_n', 0.6) - 0.011, fragility: 1.02, ece: 0.05, iou: 0.78, selfRecall: 0.54 },
     runs: 150 * SEC,
     speed: { device: 'gpu:0', ms_per_image: 1.62 },
@@ -268,7 +312,7 @@ export function seedBenches(mb: MockBench, t0: number) {
   });
   entry(pond, {
     id: 'be_p202',
-    name: `${AGENT_NAME.claude} · Sonnet`,
+    name: agentEntryName('claude', 'sonnet'),
     contestant: { kind: 'agent', agent: 'claude', model: 'sonnet', effort: 'medium' },
     at: t0 - 2 * DAY + 4 * HOUR,
     images: 48,
@@ -315,9 +359,27 @@ export function seedBenches(mb: MockBench, t0: number) {
 
   // Every seeded entry ends (or runs on) as its timeline says; the loops are made of the finished ones.
   mb.advance(t0);
-  const loop = (o: { id: string; name: string; teacher: MEntry; teacherModel: string; student: Model['arch']; pool: { dataset: MockDatasetSpec; split: 'train' }; gens: MEntry[]; at: number }): MLoop => {
+  const loop = (o: {
+    id: string;
+    name: string;
+    teacher: MEntry;
+    teacherModel: string;
+    student: Model['arch'];
+    pool: { dataset: MockDatasetSpec; split: 'train' };
+    gens: MEntry[];
+    at: number;
+    /** Generations planned, when more than it ran (a loop that failed). */
+    planned?: number;
+  }): MLoop => {
     const r = (x: MEntry) => x.result!;
     const poolImages = o.pool.dataset.splits[o.pool.split];
+    /** A student generation's labels: its teacher's, from its entry's threshold, as the server keeps them. */
+    const labels = (g: number) => {
+      const t = o.gens[g - 1]!;
+      const threshold = r(t).self_labeling.threshold ?? 0.5;
+      const kept = poolLabels(poolImages, labelsPerImage(r(t), t.images, threshold), `${o.id}:${g}`);
+      return { threshold, kept };
+    };
     const l: MLoop = {
       id: o.id,
       benchId: shapesVal.id,
@@ -327,19 +389,18 @@ export function seedBenches(mb: MockBench, t0: number) {
         name: o.name,
         teacher: o.teacherModel,
         pool: { kind: 'dataset', dataset_id: o.pool.dataset.id, split: o.pool.split },
-        generations: o.gens.length - 1,
+        generations: o.planned ?? o.gens.length - 1,
         min_confidence: null,
         student: { arch: o.student, epochs: 30, imgsz: 640, batch: null, device: 'auto', weights: null, seed: 0 },
       },
       teacher: { id: o.teacherModel, name: o.teacher.name, arch: (o.teacher.contestant as { arch: string }).arch, imgsz: 640, skill: o.teacher.skill },
       student: o.student,
       pool: { images: poolImages, excluded: 0 },
-      generations: o.gens.map((e, g) => {
-        const prev = g > 0 ? r(o.gens[g - 1]!) : null;
-        const labeled = Math.round(poolImages * (0.93 + g * 0.01));
+      generations: o.gens.map((e, g): BenchGeneration => {
+        const l = g > 0 ? labels(g) : null;
         return {
           generation: g,
-          labels: prev ? { threshold: prev.self_labeling.threshold ?? 0.5, images: poolImages, labeled_images: labeled, boxes: Math.round(labeled * 3.9), excluded: 0, dataset_id: `ds_${o.id.slice(3)}${g}` } : null,
+          labels: l ? { threshold: l.threshold, images: poolImages, labeled_images: l.kept.labeled, boxes: l.kept.boxes, excluded: 0, dataset_id: `ds_${o.id.slice(3)}${g}` } : null,
           run_id: g ? `run_${o.id.slice(3)}${g}` : null,
           model_id: g ? (e.contestant as { model_id: string }).model_id : o.teacherModel,
           model_name: e.name,
@@ -355,6 +416,17 @@ export function seedBenches(mb: MockBench, t0: number) {
       end: { status: 'done', at: (o.gens.at(-1)!.end?.at ?? o.at) + 1000, error: null, hint: null },
       lastEmit: 0,
     };
+    // Planned further than it got: it failed at the next generation's labeling (the only way a seeded loop fails), its
+    // generation pushed with nothing in it, as the server leaves it.
+    if (o.planned && o.planned > o.gens.length - 1) {
+      const g = o.gens.length;
+      const t = o.gens.at(-1)!;
+      const threshold = r(t).self_labeling.threshold ?? 0.5;
+      const kept = poolLabels(poolImages, labelsPerImage(r(t), t.images, threshold), `${o.id}:${g}`);
+      const why = starvedError(t.name, kept.boxes, kept.labeled, poolImages, threshold);
+      l.generations.push({ generation: g, labels: null, run_id: null, model_id: null, model_name: null, entry_id: null, score: null, map50_95: null, ci95: null });
+      l.end = { status: 'failed', at: (t.end?.at ?? o.at) + 4 * SEC, error: why.error, hint: why.hint };
+    }
     mb.addLoop(l);
     return l;
   };
@@ -364,6 +436,14 @@ export function seedBenches(mb: MockBench, t0: number) {
     mb.startLoop(fastVal.id, { teacher: 'm_fast_n', pool: { kind: 'dataset', dataset_id: fast.id, split: 'train' }, generations: 2, student: { arch: 'folo-s' } }, t0 - 8 * SEC, 'bl_f3a0');
     mb.advance(t0);
   }
-  loop({ id: 'bl_5h02', name: 'shapes-s-best', teacher: s0, teacherModel: 'm_shapes_s', student: 'folo-s', pool: { dataset: spec('ds_shapes_hard'), split: 'train' }, gens: [s0, s1], at: t0 - 6 * DAY + 10 * MIN });
-  loop({ id: 'bl_07d1', name: 'shapes-n-best', teacher: n0, teacherModel: 'm_shapes_n', student: 'folo-s', pool: { dataset: shapes, split: 'train' }, gens: [n0, n1, n2, n3], at: t0 - 8 * DAY + 5 * MIN });
+  // Scenario `bench-loop-gen0`: started 20 s ago from the f16 export, which has no finished entry here: its generation
+  // 0 is an entry of its own, waiting for the GPU behind the f16 entry that runs now.
+  if (o.loopAtGen0 && models.has('m_fast_n_f16')) {
+    mb.startLoop(fastVal.id, { teacher: 'm_fast_n_f16', pool: { kind: 'dataset', dataset_id: fast.id, split: 'train' }, generations: 2 }, t0 - 20 * SEC, 'bl_g0a1');
+    mb.advance(t0);
+  }
+  loop({ id: 'bl_5h02', name: sLoop, teacher: s0, teacherModel: 'm_shapes_s', student: 'folo-s', pool: { dataset: spec('ds_shapes_hard'), split: 'train' }, gens: [s0, s1], at: t0 - 6 * DAY + 10 * MIN });
+  loop({ id: 'bl_07d1', name: nLoop, teacher: n0, teacherModel: 'm_shapes_n', student: 'folo-s', pool: { dataset: shapes, split: 'train' }, gens: [n0, n1, n2, n3], at: t0 - 8 * DAY + 5 * MIN });
+  if (models.has('m_shapes_e5'))
+    loop({ id: 'bl_9e40', name: loopName(e0.name), teacher: e0, teacherModel: 'm_shapes_e5', student: 'folo-n', pool: { dataset: shapes, split: 'train' }, gens: [e0], planned: 2, at: t0 - 3 * DAY + 10 * MIN });
 }

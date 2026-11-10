@@ -13,6 +13,7 @@
    * <class>"); a thumbnail keeps 1 px lines and the cross. `active` brings one box forward (the viewer's list).
    */
   import type { Box, BenchDetection } from '$lib/api/types';
+  import { containFit, placeBox } from '$lib/bench/frame';
   import { matchImage } from '$lib/bench/match';
   import { placeChips } from '$lib/detect/chips';
 
@@ -46,11 +47,9 @@
     void src;
     loaded = false;
   });
-  const geo = $derived.by(() => {
-    if (!cw || !ch || !width || !height) return null;
-    const s = Math.min(cw / width, ch / height);
-    return { s, ox: (cw - width * s) / 2, oy: (ch - height * s) / 2 };
-  });
+  // The whole image in the frame, whatever either's shape (a portrait photo in a landscape tile sits between two bands
+  // of the well); every box goes through the same fit, so it stays on its object ($lib/bench/frame).
+  const geo = $derived(containFit(cw, ch, width, height));
   const m = $derived(matchImage(truth, detections));
   /** What is drawn: every detection, right or wrong, then every true box nothing found. */
   const marks = $derived([
@@ -89,14 +88,15 @@
   {#if geo}
     <div class="layer" aria-hidden="true">
       {#each marks as k, n (k.key)}
+        {@const at = placeBox(geo, k.box)}
         <div
           class="box {k.outcome}"
           class:on={active === k.key}
           class:dim={active !== null && active !== k.key}
-          style:left="{geo.ox + k.box.x1 * geo.s}px"
-          style:top="{geo.oy + k.box.y1 * geo.s}px"
-          style:width="{Math.max(1, (k.box.x2 - k.box.x1) * geo.s)}px"
-          style:height="{Math.max(1, (k.box.y2 - k.box.y1) * geo.s)}px"
+          style:left="{at.left}px"
+          style:top="{at.top}px"
+          style:width="{Math.max(1, at.width)}px"
+          style:height="{Math.max(1, at.height)}px"
         >
           {#if k.outcome === 'wrong'}<span class="x"></span>{/if}
           {#if full && chips[n] && (!chips[n]!.hidden || active === k.key)}

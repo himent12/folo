@@ -117,14 +117,14 @@ describe('MockApi vision benchmarks: catalog and seeds', () => {
     expect(done.map((e) => e.score!.total)).toEqual([...done.map((e) => e.score!.total)].sort((a, b) => b - a));
     expect(done[0]!.name).toBe('fasteners-s-v1');
     expect(by('yolo26n').contestant.kind).toBe('external');
-    const claude = by('Claude Code · Sonnet');
+    const claude = by('Claude Code (sonnet)');
     expect(claude).toMatchObject({ images: 48, conditions: false, scored: false, status: 'done' });
     expect(claude.score!.partial).toBe(true);
     expect(claude.usage!.calls).toBe(12);
     expect(claude.usage!.cost_usd).toBeGreaterThan(0);
-    expect(by('Codex · GPT-6.1-Sol').usage!.cost_usd).toBeNull();
+    expect(by('Codex (gpt-6.1-sol)').usage!.cost_usd).toBeNull();
     expect(by('fasteners-mini-n').missing_classes).toEqual(['washer', 'screw', 'spring', 'rivet', 'pin', 'bearing']);
-    const failed = by('Claude Code · Opus');
+    const failed = by('Claude Code (opus)');
     expect(failed.status).toBe('failed');
     expect(failed.error).toMatch(/not logged in/i);
     expect(failed.hint).toBeTruthy();
@@ -196,6 +196,49 @@ describe('MockApi vision benchmarks: images and conditions', () => {
     expect(conditionBoxes(im.boxes, im.width, im.height, 'distance', 1)[0]!.x2 - conditionBoxes(im.boxes, im.width, im.height, 'distance', 1)[0]!.x1).toBeGreaterThan(moved.x2 - moved.x1);
     await expect(api.benchImages('bn_3c90', { condition: 'haze' })).rejects.toMatchObject({ status: 400, code: 'invalid_query' });
     await expect(api.benchImages('bn_3c90', { condition: 'rain', severity: 2 })).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('MockApi vision benchmarks: photos of every shape', () => {
+  const inside = (b: { x1: number; y1: number; x2: number; y2: number }, w: number, h: number) => b.x1 >= 0 && b.y1 >= 0 && b.x2 <= w && b.y2 <= h && b.x2 > b.x1 && b.y2 > b.y1;
+
+  it("serves Pond fish's phone photos in several shapes, truth and detections inside each, also under distance", async () => {
+    const api = new MockApi('normal', 0);
+    const { images } = await api.benchImages('bn_7a41', { limit: 1000 });
+    const shapes = new Map<string, number>();
+    for (const im of images) shapes.set(`${im.width}x${im.height}`, (shapes.get(`${im.width}x${im.height}`) ?? 0) + 1);
+    // Landscape and portrait, wide and a panorama; 4:3 the commonest.
+    expect([...shapes.keys()]).toEqual(expect.arrayContaining(['960x720', '720x960', '1280x720', '1600x520']));
+    expect([...shapes.entries()].sort((a, b) => b[1] - a[1])[0]![0]).toBe('960x720');
+    expect(images.some((i) => i.height > i.width)).toBe(true);
+    for (const im of images) for (const b of im.boxes) expect(inside(b, im.width, im.height), `${im.file} ${im.width}x${im.height}`).toBe(true);
+    // Under distance the scene shrinks about its own centre: every box stays inside its own image, whatever its shape.
+    const far = (await api.benchImages('bn_7a41', { limit: 1000, condition: 'distance', severity: 5 })).images;
+    for (const im of far) {
+      const plain = images.find((i) => i.id === im.id)!;
+      expect([im.width, im.height]).toEqual([plain.width, plain.height]);
+      for (const b of im.boxes) expect(inside(b, im.width, im.height)).toBe(true);
+      const c = (x: { x1: number; x2: number; y1: number; y2: number }) => [(x.x1 + x.x2) / 2, (x.y1 + x.y2) / 2];
+      if (plain.boxes[0]) {
+        // Towards the image's centre, in both directions alike.
+        const [px, py] = c(plain.boxes[0]);
+        const [fx, fy] = c(im.boxes[0]!);
+        expect(Math.abs(fx! - im.width / 2)).toBeLessThanOrEqual(Math.abs(px! - im.width / 2) + 0.1);
+        expect(Math.abs(fy! - im.height / 2)).toBeLessThanOrEqual(Math.abs(py! - im.height / 2) + 0.1);
+      }
+    }
+    // An entry's images carry their own sizes; its detections fall on them.
+    const page = await api.benchEntryImages('bn_7a41', 'be_p201', { sort: 'worst', limit: 100 });
+    expect(new Set(page.images.map((i) => i.image.width / i.image.height)).size).toBeGreaterThan(2);
+    for (const i of page.images) for (const d of i.detections) expect(d.x2 > 0 && d.y2 > 0 && d.x1 < i.image.width && d.y1 < i.image.height).toBe(true);
+  });
+
+  it('keeps every other benchmark’s images the size they were', async () => {
+    const api = new MockApi('normal', 0);
+    for (const [id, w, h] of [['bn_3c90', 1024, 768], ['bn_5e12', 640, 640]] as const) {
+      const { images } = await api.benchImages(id, { limit: 50 });
+      expect(images.every((i) => i.width === w && i.height === h)).toBe(true);
+    }
   });
 });
 
@@ -283,7 +326,8 @@ describe('MockApi vision benchmarks: entries run', () => {
   it('starts an agent entry with the agent defaults: 48 images, unchanged only, no confidences', async () => {
     const api = new MockApi('normal', 0);
     const e = await api.startBenchEntry('bn_9f03', { contestant: { kind: 'agent', agent: 'claude' } });
-    expect(e).toMatchObject({ images: 48, conditions: false, scored: false, name: 'Claude Code · Haiku' });
+    // Named as the server names it: the agent, its model in parentheses.
+    expect(e).toMatchObject({ images: 48, conditions: false, scored: false, name: 'Claude Code (haiku)' });
     await vi.advanceTimersByTimeAsync(20_000);
     const done = await api.benchEntry('bn_9f03', e.id);
     expect(done.status).toBe('done');
@@ -311,6 +355,44 @@ describe('MockApi vision benchmarks: entries run', () => {
     await expect(api.startBenchEntry('bn_9f03', { contestant: { kind: 'external', predictions } })).rejects.toMatchObject({ code: 'invalid_body' });
   });
 
+  it('takes an external entry in parts: open, parts all or nothing, finish, the errors of the API', async () => {
+    const api = new MockApi('normal', 0);
+    const b = await api.bench('bn_9f03');
+    const images = (await api.benchImages('bn_9f03', { limit: 1000 })).images;
+    const rec = (condition: string | null, severity: number | null) =>
+      images.map((i) => ({ image: i.id, ...(condition ? { condition, severity } : {}), boxes: i.boxes.map((x) => ({ ...x, score: 0.8 })) }));
+    const passes = b.plan.conditions.reduce((n, c) => n + c.severities.length, 0);
+    // Open, with its first part: running, progress the records received of images × (1 + the plan's severities).
+    const e = await api.startBenchEntry('bn_9f03', { name: 'parts', contestant: { kind: 'external', open: true, predictions: rec(null, null).slice(0, 50) } });
+    expect(e).toMatchObject({ status: 'running', progress: { done: 50, total: 200 * (1 + passes), condition: null } });
+    expect((await api.bench('bn_9f03')).active).toBe(true);
+    // A part: all or nothing. One that repeats a record received is refused and adds nothing.
+    await expect(api.sendBenchPredictions('bn_9f03', e.id, rec(null, null).slice(40, 60))).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/answered twice/) });
+    expect((await api.benchEntry('bn_9f03', e.id)).progress.done).toBe(50);
+    expect((await api.sendBenchPredictions('bn_9f03', e.id, rec(null, null).slice(50))).progress.done).toBe(200);
+    const haze = b.plan.conditions.find((c) => c.condition === 'haze')!;
+    // A condition in part: the finish names what is missing and leaves it open.
+    await api.sendBenchPredictions('bn_9f03', e.id, rec('haze', haze.severities[0]!));
+    await expect(api.finishBenchEntry('bn_9f03', e.id)).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/Haze is answered in part/) });
+    expect((await api.benchEntry('bn_9f03', e.id)).status).toBe('running');
+    for (const s of haze.severities.slice(1)) await api.sendBenchPredictions('bn_9f03', e.id, rec('haze', s));
+    const done = await api.finishBenchEntry('bn_9f03', e.id);
+    expect(done).toMatchObject({ status: 'done', conditions: true, conditions_run: 1 });
+    expect(done.score!.partial).toBe(true);
+    // Only an open external entry takes parts.
+    await expect(api.sendBenchPredictions('bn_9f03', e.id, [])).rejects.toMatchObject({ status: 409, code: 'bench_entry_not_open' });
+    await expect(api.finishBenchEntry('bn_3c90', 'be_f101')).rejects.toMatchObject({ status: 409, code: 'bench_entry_not_open' });
+    // Stopping an open entry discards it.
+    const gone = await api.startBenchEntry('bn_9f03', { name: 'gone', contestant: { kind: 'external', open: true } });
+    const removed: string[] = [];
+    const close = api.benchEvents('bn_9f03', { removed: ({ id }) => removed.push(id) });
+    await api.stopBenchEntry('bn_9f03', gone.id);
+    expect(removed).toEqual([gone.id]);
+    expect((await api.benchEntries('bn_9f03')).some((x) => x.id === gone.id)).toBe(false);
+    expect((await api.bench('bn_9f03')).active).toBe(false);
+    close();
+  });
+
   it('stops and deletes, with the conflicts of the API', async () => {
     const api = new MockApi('normal', 0);
     await expect(api.deleteBenchEntry('bn_3c90', 'be_f108')).rejects.toMatchObject({ status: 409, code: 'bench_entry_active' });
@@ -330,23 +412,80 @@ describe('MockApi vision benchmarks: entries run', () => {
 });
 
 describe('MockApi vision benchmarks: loops', () => {
-  it('has an improved loop of three generations and a held one, their numbers the entries\' own', async () => {
+  it('has an improved loop of three generations, a held one and one that starved, their numbers the entries\' own', async () => {
     const api = new MockApi('normal', 0);
     const loops = await api.benchLoops('bn_5e12');
     expect(loops.map((l) => [l.status, l.verdict, l.generations.length])).toEqual([
+      ['failed', null, 2],
       ['done', 'held', 2],
       ['done', 'improved', 4],
     ]);
     const entries = new Map((await api.benchEntries('bn_5e12')).map((e) => [e.id, e]));
-    for (const l of loops) {
+    for (const l of loops.filter((x) => x.status === 'done')) {
       const first = l.generations[0]!;
       const last = l.generations.at(-1)!;
       expect(first.labels).toBeNull();
-      for (const g of l.generations.slice(1)) expect(g.labels!.threshold).toBeGreaterThan(0);
+      for (const g of l.generations.slice(1)) {
+        const k = g.labels!;
+        expect(k.threshold).toBeGreaterThan(0);
+        // The student's dataset is the pool images the teacher kept a box on: fewer than it looked at, never more
+        // than its boxes.
+        expect(k.labeled_images).toBeLessThan(k.images);
+        expect(k.labeled_images).toBeLessThanOrEqual(k.boxes);
+        expect(k.labeled_images).toBeGreaterThanOrEqual(10);
+      }
       for (const g of l.generations) expect(entries.get(g.entry_id!)!.map50_95).toBe(g.map50_95);
       const verdict = last.map50_95! > first.ci95![1] ? 'improved' : last.map50_95! < first.ci95![0] ? 'regressed' : 'held';
       expect(l.verdict).toBe(verdict);
     }
+  });
+
+  it('names loops and students as the server does', async () => {
+    const api = new MockApi('normal', 0);
+    const loops = await api.benchLoops('bn_5e12');
+    const improved = loops.find((l) => l.verdict === 'improved')!;
+    expect(improved.name).toBe('shapes-n-best loop');
+    expect(improved.generations.map((g) => g.model_name)).toEqual(['shapes-n-best', 'shapes-n-best loop gen 1-best', 'shapes-n-best loop gen 2-best', 'shapes-n-best loop gen 3-best']);
+    // A new loop without a name: `<teacher> loop`; its student `<loop> gen 1-best`, and so its entry.
+    const l = await api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_n', pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'train' } });
+    expect(l.name).toBe('shapes-n-best loop');
+    for (let t = 0; t < 120 && (await api.benchLoop('bn_5e12', l.id)).status === 'running'; t++) await vi.advanceTimersByTimeAsync(1000);
+    const done = await api.benchLoop('bn_5e12', l.id);
+    expect(done.generations[1]!.model_name).toBe('shapes-n-best loop gen 1-best');
+    expect((await api.benchEntry('bn_5e12', done.generations[1]!.entry_id!)).name).toBe('shapes-n-best loop gen 1-best');
+  });
+
+  it('fails a loop whose teacher keeps boxes on fewer than 10 pool images, as the server words it', async () => {
+    const api = new MockApi('normal', 0);
+    const starved = (await api.benchLoops('bn_5e12')).find((l) => l.status === 'failed')!;
+    expect(starved).toMatchObject({ id: 'bl_9e40', name: 'shapes-n-early loop', phase: null, verdict: null });
+    // Generation 0 graded; generation 1 started and left with nothing in it: no labels, no run, no model.
+    expect(starved.generations[0]!.map50_95).not.toBeNull();
+    expect(starved.generations[1]).toMatchObject({ generation: 1, labels: null, run_id: null, model_id: null });
+    const m = /^the teacher 'shapes-n-early' kept (\d+) box(?:es)? on (\d+) of the pool's 800 images at confidence (0\.\d+): too few to train a student on \(at least 10 images\)$/.exec(starved.error!);
+    expect(m, starved.error!).not.toBeNull();
+    expect(Number(m![2])).toBeLessThan(10);
+    expect(Number(m![2])).toBeLessThanOrEqual(Number(m![1]));
+    expect(starved.hint).toMatch(/lower min_confidence/);
+    // The teacher's entry: not ready, its threshold the one the loop kept labels from.
+    const r = await api.benchResult('bn_5e12', starved.generations[0]!.entry_id!);
+    expect(r.self_labeling.readiness).toBe('not_ready');
+    expect(r.self_labeling.recall).toBeLessThan(0.01);
+    expect(Number(m![3])).toBeCloseTo(r.self_labeling.threshold!, 2);
+    // Starting a loop from that teacher again fails the same way, at labeling.
+    const l = await api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_e5', pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'train' } });
+    for (let t = 0; t < 60 && (await api.benchLoop('bn_5e12', l.id)).status === 'running'; t++) await vi.advanceTimersByTimeAsync(1000);
+    const again = await api.benchLoop('bn_5e12', l.id);
+    expect(again.status).toBe('failed');
+    expect(again.error).toMatch(/too few to train a student on/);
+    expect(again.generations.at(-1)!.labels).toBeNull();
+    // A lower confidence keeps enough: the same teacher from 0.05 labels its pool, the images it kept nothing on left out.
+    const low = await api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_e5', min_confidence: 0.05, pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'train' } });
+    for (let t = 0; t < 20 && !(await api.benchLoop('bn_5e12', low.id)).generations[1]?.labels; t++) await vi.advanceTimersByTimeAsync(1000);
+    const k = (await api.benchLoop('bn_5e12', low.id)).generations[1]!.labels!;
+    expect(k.threshold).toBe(0.05);
+    expect(k.labeled_images).toBeGreaterThanOrEqual(10);
+    expect(k.labeled_images).toBeLessThan(k.images);
   });
 
   it('runs a new loop through its phases, telling each on the stream', async () => {
@@ -466,6 +605,26 @@ describe('MockApi vision benchmarks: the contract as the engine fills it', () =>
     expect(l.generations[1]!.labels!.threshold).toBeGreaterThan(0);
     expect(l.generations[1]!.run_id).toMatch(/^run_/);
     expect(l.generations[1]!.model_id).toBeNull();
+  });
+});
+
+describe('MockApi vision benchmarks: a loop at generation 0 (`bench-loop-gen0`)', () => {
+  it('benchmarks its first teacher, its entry waiting for the GPU, then labels for generation 1', async () => {
+    const api = new MockApi('bench-loop-gen0', 0);
+    const l = await api.benchLoop('bn_3c90', 'bl_g0a1');
+    expect(l).toMatchObject({ name: 'fasteners-n-f16 loop', status: 'running', phase: 'benchmarking' });
+    expect(l.generations).toHaveLength(1);
+    expect(l.generations[0]).toMatchObject({ generation: 0, labels: null, run_id: null, model_id: 'm_fast_n_f16', score: null });
+    const e = await api.benchEntry('bn_3c90', l.generations[0]!.entry_id!);
+    expect(e).toMatchObject({ name: 'fasteners-n-f16', status: 'queued' });
+    // Not in the normal demo.
+    await expect(new MockApi('normal', 0).benchLoop('bn_3c90', 'bl_g0a1')).rejects.toMatchObject({ status: 404 });
+    // Once its entry is graded, generation 1 starts with the teacher labeling the pool.
+    for (let t = 0; t < 200 && (await api.benchLoop('bn_3c90', 'bl_g0a1')).generations.length < 2; t++) await vi.advanceTimersByTimeAsync(1000);
+    const next = await api.benchLoop('bn_3c90', 'bl_g0a1');
+    expect(next.generations[0]!.map50_95).not.toBeNull();
+    expect(next.phase).toBe('labeling');
+    expect(next.generations[1]).toMatchObject({ generation: 1, labels: null, run_id: null });
   });
 });
 

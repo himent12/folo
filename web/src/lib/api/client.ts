@@ -13,6 +13,7 @@ import type {
   BenchImagePage,
   BenchImagesQuery,
   BenchLoop,
+  BenchPrediction,
   BenchmarkReport,
   BenchmarkRequest,
   BenchResult,
@@ -255,8 +256,16 @@ export interface Api {
   benchResult(id: string, entryId: string, signal?: AbortSignal): Promise<BenchResult>;
   /** Per image the truth and the detections at or above best-F1 confidence; `worst` sorts by missed + wrong. `409 bench_entry_not_done` before. */
   benchEntryImages(id: string, entryId: string, q?: BenchEntryImagesQuery, signal?: AbortSignal): Promise<BenchEntryImagePage>;
-  /** `409 bench_entry_not_active` when it is not queued or running. */
+  /** `409 bench_entry_not_active` when it is not queued or running. Stopping an open external entry discards it. */
   stopBenchEntry(id: string, entryId: string): Promise<BenchEntry>;
+  /**
+   * A part of an open external entry (`contestant.open: true`), up to 64 MiB, all or nothing: `400 invalid_body` names
+   * the first bad record and adds nothing; `409 bench_entry_not_open` for an entry that is not an open external one.
+   * Answers the entry with its new `progress.done`.
+   */
+  sendBenchPredictions(id: string, entryId: string, predictions: BenchPrediction[]): Promise<BenchEntry>;
+  /** Scores an open external entry: `done`; `400 invalid_body` (naming what is missing) leaves it open. */
+  finishBenchEntry(id: string, entryId: string): Promise<BenchEntry>;
   /** `409 bench_entry_active` while it is active, `409 bench_entry_in_loop` while a running loop uses it. */
   deleteBenchEntry(id: string, entryId: string): Promise<void>;
   /** Newest first. */
@@ -551,6 +560,12 @@ export class HttpApi implements Api {
   }
   stopBenchEntry(id: string, entryId: string) {
     return this.#req<BenchEntry>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/stop`);
+  }
+  sendBenchPredictions(id: string, entryId: string, predictions: BenchPrediction[]) {
+    return this.#req<BenchEntry>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/predictions`, { predictions });
+  }
+  finishBenchEntry(id: string, entryId: string) {
+    return this.#req<BenchEntry>('POST', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}/finish`);
   }
   deleteBenchEntry(id: string, entryId: string) {
     return this.#req<void>('DELETE', `/bench/benchmarks/${encodeURIComponent(id)}/entries/${encodeURIComponent(entryId)}`);

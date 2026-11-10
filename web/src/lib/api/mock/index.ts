@@ -18,8 +18,9 @@
 // termination of a finished run's instance cannot be confirmed), `cloud-training` (a cloud run trains on a rented RTX
 // 4090) and `cloud-upload` (a cloud run uploads its dataset), for screenshots of those states. Vision benchmarks
 // (./bench, ./benchSeed): `no-bench` (no `vision_bench` feature; the endpoints answer `501 not_implemented`, as
-// `folo serve --mock` does, which `no-labeling` stands for too) and `bench-agent-fails` (a design request's answer is not
-// a plan: `502 agent_failed`).
+// `folo serve --mock` does, which `no-labeling` stands for too), `bench-agent-fails` (a design request's answer is not
+// a plan: `502 agent_failed`) and `bench-loop-gen0` (a loop on Fasteners val that has just started: generation 0, its
+// teacher's entry waiting for the GPU).
 
 import { ApiError, type Api, type BenchEventHandlers, type LabelEventHandlers, type RunEventHandlers } from '../client';
 import type {
@@ -34,6 +35,7 @@ import type {
   BenchImagePage,
   BenchImagesQuery,
   BenchLoop,
+  BenchPrediction,
   BenchmarkReport,
   BenchmarkRequest,
   BenchResult,
@@ -173,6 +175,8 @@ export type Scenario =
   // Vision benchmarks: a server without them (501 not_implemented, no `vision_bench`); a design whose answer is no plan.
   | 'no-bench'
   | 'bench-agent-fails'
+  // A loop at generation 0: its first teacher is being benchmarked (its entry queued behind the running one).
+  | 'bench-loop-gen0'
   // Cloud compute: no connection; no `cloud` feature; a revoked key and an unconfirmed termination; a cloud run
   // training; one uploading its dataset.
   | 'cloud-none'
@@ -988,6 +992,27 @@ export class MockApi implements Api {
         fused: false,
         source: 'published',
         about: COCO_ABOUT,
+      });
+      // An early checkpoint of shapes-n (5 epochs), imported as a file: on Shapes val its confidences are 90% right only
+      // where it keeps almost nothing, so as a loop's first teacher it labels too little (the bench mock's failed loop,
+      // and New loop's warning).
+      out.push({
+        id: 'm_shapes_e5',
+        name: 'shapes-n-early',
+        arch: 'folo-n',
+        imgsz: 640,
+        classes: ['circle', 'square', 'triangle'],
+        params: archInfo['folo-n'].params,
+        flops_g: archInfo['folo-n'].flops,
+        bytes: Math.round(archInfo['folo-n'].params * 2.06),
+        created: new Date(this.#t0 - 10 * DAY).toISOString(),
+        run_id: null,
+        metrics: { map50: 0.341, map50_95: 0.198, precision: 0.412, recall: 0.377, best_f1_conf: 0.12 },
+        head: 'o2m',
+        trained_with: { amp: false, imgsz: 640, epochs: 5 },
+        precision: 'f32',
+        fused: false,
+        source: 'file',
       });
       // An imported file with fasteners-mini's classes: /eval runs on that dataset (the first with its classes, as a
       // real server picks one), which has no validation images, so on its training split.
@@ -1881,7 +1906,7 @@ export class MockApi implements Api {
   #benchState(): MockBench {
     if (!this.#benchSeeded) {
       this.#benchSeeded = true;
-      if (this.scenario !== 'empty') seedBenches(this.#bench, this.#t0);
+      if (this.scenario !== 'empty') seedBenches(this.#bench, this.#t0, { loopAtGen0: this.scenario === 'bench-loop-gen0' });
     }
     return this.#bench;
   }
@@ -1963,6 +1988,14 @@ export class MockApi implements Api {
 
   stopBenchEntry(id: string, entryId: string): Promise<BenchEntry> {
     return this.#benchCall(`POST /api/bench/benchmarks/${id}/entries/${entryId}/stop`, (b) => b.stopEntry(id, entryId, Date.now()));
+  }
+
+  sendBenchPredictions(id: string, entryId: string, predictions: BenchPrediction[]): Promise<BenchEntry> {
+    return this.#benchCall(`POST /api/bench/benchmarks/${id}/entries/${entryId}/predictions`, (b) => b.sendPredictions(id, entryId, predictions, Date.now()), 300);
+  }
+
+  finishBenchEntry(id: string, entryId: string): Promise<BenchEntry> {
+    return this.#benchCall(`POST /api/bench/benchmarks/${id}/entries/${entryId}/finish`, (b) => b.finishEntry(id, entryId, Date.now()), 600);
   }
 
   deleteBenchEntry(id: string, entryId: string): Promise<void> {

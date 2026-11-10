@@ -433,7 +433,10 @@
             tickFormat={(v) => v.toFixed(2)}
             label="AP50-95 per class, one dot per entry"
             {highlight}
-            sub={(k) => `${num(clsRows.find((r) => r.key === k)?.truths ?? 0)} true boxes`}
+            sub={(k) => {
+              const n = clsRows.find((r) => r.key === k)?.truths ?? 0;
+              return `${num(n)} true ${n === 1 ? 'box' : 'boxes'}`;
+            }}
           />
           {#if clsRows.length > CLS_SHOWN}
             <Button size="sm" variant="ghost" onclick={() => (allClasses = !allClasses)}>{allClasses ? `Show the ${CLS_SHOWN} hardest` : `Show all ${clsRows.length} classes`}</Button>
@@ -446,16 +449,18 @@
 
 <style>
   /* The legend: one card per entry (RunCompare's chips), side by side, a 2 × 2 grid from 768 to 1279 px. */
+  /* Chips as wide as what they hold (at least 240 px), so a name like "Claude Code (haiku)" stays on one line beside
+     its score instead of breaking inside its parentheses in a cell a quarter of the row wide. */
   .chips {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    display: flex;
+    flex-wrap: wrap;
     gap: var(--space-2);
     margin-top: calc(-1 * var(--space-2));
   }
-  @media (min-width: 768px) and (max-width: 1279px) {
-    .chips {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
+  .chips > :global(*) {
+    flex: 0 1 auto;
+    min-width: 240px;
+    max-width: 100%;
   }
   .chip {
     position: relative;
@@ -761,8 +766,8 @@
     .sk-page {
       padding: var(--space-4);
     }
-    .chips {
-      grid-template-columns: minmax(0, 1fr);
+    .chips > :global(*) {
+      flex-basis: 100%;
     }
     .scroll:has(.cmp) {
       display: none;

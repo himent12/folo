@@ -133,6 +133,8 @@ export interface MEntry {
   usage: LabelUsage | null;
   speed: { device: string; ms_per_image: number } | null;
   lastEmit: number;
+  /** An open external entry: the records received so far, and their (image, condition, severity) keys. */
+  open?: { records: BenchPrediction[]; keys: Set<string> } | null;
 }
 
 export interface MLoop {
@@ -174,10 +176,48 @@ export function fingerprintOf(b: Pick<MBench, 'images' | 'plan' | 'seed'>): stri
   return hex(hash(`${imgs}#${plan}#${b.seed}`), 8) + hex(hash(`${b.seed}#${plan}#${imgs.length}`), 8);
 }
 
-/** The display name of an agent's model, as agent labeling words it ("Sonnet"), or the CLI's default. */
-function agentModelLabel(agents: LabelAgent[], agent: 'claude' | 'codex', model: string | null): string {
-  if (!model) return 'Default model';
-  return agents.find((a) => a.id === agent)?.models.find((m) => m.id === model)?.label ?? model;
+/**
+ * An agent entry's default name, as the server makes it (crates/folo-server/src/bench/mod.rs): the agent's name with its
+ * model in parentheses, `Claude Code (haiku)`, `Codex (gpt-6.1-sol)`; the agent's name alone without a model.
+ */
+export const agentEntryName = (agent: 'claude' | 'codex', model: string | null) => (model ? `${AGENT_NAME[agent]} (${model})` : AGENT_NAME[agent]);
+
+/** A loop's default name, as the server makes it: `<teacher's name> loop`. */
+export const loopName = (teacher: string) => `${teacher} loop`;
+
+/** A loop's student of generation `g`: its run is `<loop> gen <g>`, so its model (the run's best) `<loop> gen <g>-best`. */
+export const studentName = (loop: string, g: number) => `${loop} gen ${g}-best`;
+
+/** The fewest pool images a teacher must keep a box on (the server's MIN_LABELED_IMAGES). */
+export const MIN_LABELED_IMAGES = 10;
+
+/**
+ * What a teacher keeps of a pool of `images` at a confidence where it gives `perImage` labels an image on the
+ * benchmark (its curve's labels there over its entry's images): about that many boxes an image, each image's count a
+ * Poisson draw, so `labeled` images get at least one and the rest are left out (a teacher's silence is not a label).
+ */
+export function poolLabels(images: number, perImage: number, seed: string): { boxes: number; labeled: number } {
+  const r = rng(hash(`pool:${seed}`));
+  const boxes = Math.round(images * perImage * (0.96 + r() * 0.08));
+  // A few pool images hold nothing to label at all (backgrounds): at most 98% get a box, however many it keeps.
+  const labeled = Math.round(images * (1 - Math.exp(-perImage)) * (0.95 + r() * 0.03));
+  return { boxes, labeled: Math.min(images, boxes, labeled) };
+}
+
+/** The server's message when a teacher keeps boxes on too few pool images (crates/folo-server/src/bench/loops.rs). */
+export function starvedError(teacher: string, boxes: number, labeled: number, images: number, threshold: number): { error: string; hint: string } {
+  return {
+    error: `the teacher '${teacher}' kept ${boxes} ${boxes === 1 ? 'box' : 'boxes'} on ${labeled} of the pool's ${images} images at confidence ${Math.round(threshold * 100) / 100}: too few to train a student on (at least ${MIN_LABELED_IMAGES} images)`,
+    hint: 'a lower min_confidence keeps more of its detections (the self-labeling chart of its benchmark entry shows what each confidence costs in precision); a better teacher finds more',
+  };
+}
+
+/** A teacher's labels per benchmark image at a confidence, read off its result's self-labeling curve. */
+export function labelsPerImage(r: Pick<GeneratedResult, 'self_labeling'>, images: number, threshold: number): number {
+  const curve = r.self_labeling.curve;
+  if (!curve.length || images <= 0) return 0;
+  const p = curve.reduce((a, x) => (Math.abs(x.confidence - threshold) < Math.abs(a.confidence - threshold) ? x : a));
+  return p.labels / images;
 }
 
 /** The classes of `model` matched to the benchmark's by name, without case: the benchmark's indices it lacks. */
@@ -291,15 +331,17 @@ export class MockBench {
   toEntry(e: MEntry, now = Date.now()): BenchEntry {
     const b = this.#bench(e.benchId);
     const passes = this.#passes(e, b);
-    const total = e.images * passes.length;
+    // An open external entry: the plan's every pass is what it may receive, the records received so far its progress.
+    const total = e.open ? e.images * (1 + b.plan.conditions.reduce((n, c) => n + c.severities.length, 0)) : e.images * passes.length;
     const status = this.#status(e, now);
     let done = 0;
-    if (e.end?.status === 'done') done = total;
+    if (e.open) done = e.open.records.length;
+    else if (e.end?.status === 'done') done = total;
     else if (e.startedAt !== null && now > e.startedAt) {
       const until = Math.min(now, e.end?.at ?? now, e.stopAt ?? now);
       done = Math.min(total, Math.floor(((until - e.startedAt) / e.duration) * total));
     }
-    const pass = status === 'done' ? null : passes[Math.min(passes.length - 1, Math.floor(done / Math.max(1, e.images)))];
+    const pass = status === 'done' || e.open ? null : passes[Math.min(passes.length - 1, Math.floor(done / Math.max(1, e.images)))];
     const r = e.end?.status === 'done' ? e.result : null;
     return {
       id: e.id,
@@ -625,7 +667,7 @@ export class MockBench {
       e = {
         ...base,
         id: this.id('be', c.agent + now),
-        name: body.name?.trim() || `${AGENT_NAME[c.agent]} · ${agentModelLabel(this.host.agents(), c.agent, model)}`,
+        name: body.name?.trim() || agentEntryName(c.agent, model),
         contestant: { kind: 'agent', agent: c.agent, model, effort },
         images,
         conditions,
@@ -641,14 +683,31 @@ export class MockBench {
       const passes = this.#passes(e, b).length;
       e.duration = Math.ceil((images * passes) / PER_CALL[c.agent]!) * CALL_MS;
       e.usage = agentUsage(c.agent, model, effort, images * passes, b.description, `${b.id}:${e.id}`);
+    } else if (c.open) {
+      // Open: created running, filled in parts, scored by its finish; the predictions here are its first part.
+      const keys = new Set<string>();
+      const first = c.predictions ?? [];
+      const check = checkPredictions(first, this.#ctx(b), { part: true, seen: keys });
+      if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
+      e = {
+        ...base,
+        id: this.id('be', (body.name ?? '') + now),
+        name: (body.name ?? '').trim(),
+        contestant: { kind: 'external' },
+        images: b.images.length,
+        conditions: false,
+        scored: c.scored ?? true,
+        missing: [],
+        skill: { map: 0, fragility: 1, ece: 0, iou: 0.6, selfRecall: 0 },
+        slot: false,
+        startedAt: now,
+        duration: Infinity,
+        usage: null,
+        speed: null,
+        open: { records: [...first], keys },
+      };
     } else {
-      const check = checkPredictions(c.predictions ?? [], {
-        imageIds: b.images.map((i) => i.id),
-        classes: b.classes.length,
-        plan: b.plan,
-        catalog: CONDITIONS.map((x) => x.id),
-        names: Object.fromEntries(CONDITIONS.map((x) => [x.id, x.name])),
-      });
+      const check = checkPredictions(c.predictions ?? [], this.#ctx(b));
       if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
       const scored = c.scored ?? true;
       e = {
@@ -678,6 +737,51 @@ export class MockBench {
     }
     this.addEntry(e);
     this.advance(now);
+    const out = this.toEntry(e, now);
+    this.#emit(b.id, (h) => h.entry?.(out));
+    const bench = this.toBench(b);
+    this.#emit(b.id, (h) => h.bench?.(bench));
+    return out;
+  }
+
+  /** What an external contestant's records are checked against. */
+  #ctx(b: MBench) {
+    return { imageIds: b.images.map((i) => i.id), classes: b.classes.length, plan: b.plan, catalog: CONDITIONS.map((x) => x.id), names: Object.fromEntries(CONDITIONS.map((x) => [x.id, x.name])) };
+  }
+
+  #open(b: MBench, entryId: string, now: number): MEntry & { open: NonNullable<MEntry['open']> } {
+    const e = this.#entry(b, entryId);
+    if (!e.open) throw new ApiError(409, 'bench_entry_not_open', `${e.name} is not an open external entry (it is ${this.#status(e, now)}).`, 'Create one with `contestant.open: true`.');
+    return e as MEntry & { open: NonNullable<MEntry['open']> };
+  }
+
+  /** A part of an open external entry: all of it or nothing (a repeated record is refused like any wrong one). */
+  sendPredictions(id: string, entryId: string, predictions: BenchPrediction[], now: number): BenchEntry {
+    const b = this.#bench(id);
+    this.advance(now);
+    const e = this.#open(b, entryId, now);
+    const keys = new Set(e.open.keys);
+    const check = checkPredictions(predictions ?? [], this.#ctx(b), { part: true, seen: keys });
+    if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
+    e.open.records.push(...predictions);
+    e.open.keys = keys;
+    const out = this.toEntry(e, now);
+    this.#emit(b.id, (h) => h.entry?.(out));
+    return out;
+  }
+
+  /** Scores an open external entry; what is missing is named and it stays open. */
+  finishEntry(id: string, entryId: string, now: number): BenchEntry {
+    const b = this.#bench(id);
+    this.advance(now);
+    const e = this.#open(b, entryId, now);
+    const check = checkPredictions(e.open.records, this.#ctx(b));
+    if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
+    e.conditions = check.summary.conditions.length > 0;
+    e.conditionsRun = check.summary.conditions.length < b.plan.conditions.length ? check.summary.conditions : null;
+    e.skill = externalSkill(b, e.open.records, e.scored);
+    (e as MEntry).open = null;
+    this.#finish(e, now);
     const out = this.toEntry(e, now);
     this.#emit(b.id, (h) => h.entry?.(out));
     const bench = this.toBench(b);
@@ -735,6 +839,17 @@ export class MockBench {
     const e = this.#entry(b, entryId);
     const status = this.#status(e, now);
     if (!isEntryActive({ status })) throw new ApiError(409, 'bench_entry_not_active', `${e.name} is ${status}: nothing to stop.`);
+    if (e.open) {
+      // An open external entry is discarded: nothing half-filled stays on the leaderboard.
+      e.end = { status: 'stopped', at: now, error: null, hint: null };
+      e.open = null;
+      const out = this.toEntry(e, now);
+      this.#entries = this.#entries.filter((x) => x !== e);
+      this.#emit(b.id, (h) => h.removed?.({ id: e.id }));
+      const bench = this.toBench(b);
+      this.#emit(b.id, (h) => h.bench?.(bench));
+      return out;
+    }
     if (status === 'queued') {
       // Never started: it ends at once.
       e.end = { status: 'stopped', at: now, error: null, hint: null };
@@ -787,7 +902,7 @@ export class MockBench {
     const excluded = pool.images.filter((i) => inBench.has('spec' in i.from ? `${i.from.spec.id}/${i.from.index}` : i.from.key)).length;
     if (pool.images.length - excluded <= 0) throw new ApiError(400, 'invalid_dataset', `Every image of the pool is in ${b.name}.`, 'Pick a pool the benchmark was not made from (another split, another job).');
     const config: StartBenchLoop = {
-      name: body.name?.trim() || m.name,
+      name: body.name?.trim() || loopName(m.name),
       teacher: m.id,
       pool: body.pool.kind === 'dataset' ? { kind: 'dataset', dataset_id: body.pool.dataset_id, split: body.pool.split ?? 'train' } : { ...body.pool },
       generations: gens,
@@ -976,19 +1091,27 @@ export class MockBench {
       this.#fillGeneration(l, s.gen, e);
       this.#afterBenchmark(l, at);
     } else if (s.phase === 'labeling') {
+      // The teacher's labels of the pool, from its entry's curve at the confidence (as the server keeps them): the
+      // images it kept nothing on are left out, and with fewer than MIN_LABELED_IMAGES the loop fails here.
       const teacher = l.generations[s.gen - 1]!;
       const te = this.#entries.find((x) => x.id === teacher.entry_id);
       const threshold = l.config.min_confidence ?? te?.result?.self_labeling.threshold ?? 0.5;
       const imgs = l.pool.images - l.pool.excluded;
-      const r = rng(hash(`labels:${l.id}:${s.gen}`));
-      const labeled = Math.round(imgs * (0.9 + r() * 0.08));
-      l.generations[s.gen]!.labels = { threshold, images: imgs, labeled_images: labeled, boxes: Math.round(labeled * (3.2 + r() * 2)), excluded: l.pool.excluded, dataset_id: `ds_${hex(hash(`${l.id}:${s.gen}:ds`))}` };
+      const per = te?.result ? labelsPerImage(te.result, te.images, threshold) : 0;
+      const kept = poolLabels(imgs, per, `${l.id}:${s.gen}`);
+      if (kept.labeled < MIN_LABELED_IMAGES) {
+        const why = starvedError(teacher.model_name ?? l.teacher.name, kept.boxes, kept.labeled, imgs, threshold);
+        l.end = { status: 'failed', at, error: why.error, hint: why.hint };
+        l.step = null;
+        return tell();
+      }
+      l.generations[s.gen]!.labels = { threshold, images: imgs, labeled_images: kept.labeled, boxes: kept.boxes, excluded: l.pool.excluded, dataset_id: `ds_${hex(hash(`${l.id}:${s.gen}:ds`))}` };
       l.generations[s.gen]!.run_id = `run_${hex(hash(`${l.id}:${s.gen}:run`))}`;
       l.step = { gen: s.gen, phase: 'training', at, entryId: null };
     } else {
       const g = l.generations[s.gen]!;
       g.model_id = `m_${hex(hash(`${l.id}:${s.gen}:model`))}`;
-      g.model_name = `${l.teacher.name.replace(/-best$/, '')}-g${s.gen}`;
+      g.model_name = studentName(l.name, s.gen);
       const prev = l.generations[s.gen - 1]!;
       const prevEntry = this.#entries.find((x) => x.id === prev.entry_id);
       const skill: Skill = { ...(prevEntry?.skill ?? l.teacher.skill), map: (prev.map50_95 ?? l.teacher.skill.map) + (l.gains[s.gen - 1] ?? 0.01) };

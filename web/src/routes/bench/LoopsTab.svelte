@@ -1,7 +1,8 @@
 <script lang="ts">
   /**
    * A benchmark's self-improvement loops (docs/BENCH.md, Self-improvement loops): each with its teacher and student,
-   * where it stands (its phase while it runs), its generations' scores as a small line from the first teacher to the
+   * where it stands (what it does for which generation while it runs; a failed one's cause under its name, so a loop
+   * that starved for labels says so in the list), its generations' scores as a small line from the first teacher to the
    * last student, and its verdict. A row opens the loop's own page (`#/benchmarks/{id}/loops/{loopId}`, ../BenchLoop);
    * "New loop" starts one.
    */
@@ -10,7 +11,8 @@
   import Repeat from '@lucide/svelte/icons/repeat';
   import type { Bench, BenchEntry, BenchLoop, Dataset, LabelJob } from '$lib/api/types';
   import Sparkline from '$lib/charts/Sparkline.svelte';
-  import { ago, date } from '$lib/format';
+  import { ago, date, sentence } from '$lib/format';
+  import CodeText from '$lib/ui/CodeText.svelte';
   import { href, router } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
@@ -82,9 +84,9 @@
         <thead>
           <tr>
             <th class="lead">Loop</th>
-            <th style:width="136px">Status</th>
-            <th style:width="232px">Score by generation</th>
-            <th style:width="120px">Verdict</th>
+            <th class="w-st">Status</th>
+            <th class="w-sc">Score by generation</th>
+            <th class="w-v">Verdict</th>
             <th class="r hide-md" style:width="104px">Started</th>
             <th style:width="40px"><span class="sr-only">Open</span></th>
           </tr>
@@ -97,12 +99,13 @@
               <td class="lead">
                 <a class="name" href={href(path(l))} onclick={(e) => e.stopPropagation()}>{l.name}</a>
                 <span class="sub"
-                  ><Meta line>
+                  ><Meta>
                     {#if arch}<span>teacher <Ident value={arch} /></span>{/if}
                     {#if l.config.student?.arch}<span>student <Ident value={l.config.student.arch} /></span>{/if}
                     <span>pool {pool(l)}</span>
                   </Meta></span
                 >
+                {#if l.status === 'failed'}<span class="cause" data-fact><CodeText text={sentence(l.error ?? 'The loop failed.')} /></span>{/if}
               </td>
               <td><StatusBadge plain state={loopStatus(l)} /></td>
               <td>
@@ -130,6 +133,7 @@
             <span class="m-main">
               <span class="name truncate">{l.name}</span>
               <span class="m-meta num"><Meta><span>{loopStatus(l).label}</span>{#if s.length}<span>{scoreText(s[0]!)} → {scoreText(s.at(-1)!)}</span>{/if}<span>{(l.config.generations ?? 1)} {(l.config.generations ?? 1) === 1 ? 'generation' : 'generations'}</span></Meta></span>
+              {#if l.status === 'failed'}<span class="m-cause" data-fact><CodeText text={sentence(l.error ?? 'The loop failed.')} /></span>{/if}
             </span>
             <span class="m-side">{#if l.verdict}<span class="verdict">{VERDICT[l.verdict].word}</span>{:else}<StatusBadge plain dotOnly state={loopStatus(l)} />{/if}</span>
           </a>
@@ -146,6 +150,41 @@
   .name {
     display: block;
     color: var(--text-primary);
+  }
+  /* The loop's cell takes what the fixed columns leave, so a failed loop's cause wraps there instead of widening it. */
+  .loops td.lead {
+    max-width: 0;
+    white-space: normal;
+  }
+  .cause {
+    display: block;
+    margin-top: 2px;
+    white-space: normal;
+    max-inline-size: var(--measure-dialog);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .w-st {
+    width: 176px;
+  }
+  .w-sc {
+    width: 232px;
+  }
+  .w-v {
+    width: 120px;
+  }
+  /* Tablets: the fixed columns give the loop's own cell the room its facts need. */
+  @media (max-width: 1023px) {
+    .w-st {
+      width: 160px;
+    }
+    .w-sc {
+      width: 200px;
+    }
+    .w-v {
+      width: 96px;
+    }
   }
   .gens {
     display: flex;
@@ -195,6 +234,11 @@
     }
     .rows .name {
       font-weight: var(--weight-medium);
+    }
+    .m-cause {
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+      color: var(--text-secondary);
     }
     .m-meta {
       font-size: var(--type-sm-size);

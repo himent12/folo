@@ -20,6 +20,33 @@ async function until(page, selector, ms = 8000) {
   throw new Error(`timed out waiting for ${selector}`);
 }
 
+/** Advances the page's clock until `select` holds an option of `value` (options are never "visible"). */
+async function optionIn(/** @type {import('playwright-core').Page} */ page, select, value, ms = 8000) {
+  for (let t = 0; t < ms; t += 250) {
+    if (await page.locator(`${select} option[value="${value}"]`).count()) return;
+    await page.clock.runFor(250);
+  }
+  throw new Error(`timed out waiting for ${value} in ${select}`);
+}
+
+/** As `until`, also letting real time pass (an image under a condition is drawn on a canvas, in real time). */
+async function untilDrawn(/** @type {import('playwright-core').Page} */ page, selector, rounds = 80) {
+  for (let i = 0; i < rounds; i++) {
+    if (await page.locator(selector).first().isVisible().catch(() => false)) return;
+    await page.clock.runFor(250);
+    await page.waitForTimeout(100);
+  }
+  throw new Error(`timed out waiting for ${selector}`);
+}
+
+/** Waits in real time for the page's images to decode (their natural sizes are read). */
+async function imagesDecoded(/** @type {import('playwright-core').Page} */ page) {
+  for (let i = 0; i < 50; i++) {
+    if (!(await page.evaluate(() => [...document.images].some((im) => !im.complete)))) return;
+    await page.waitForTimeout(100);
+  }
+}
+
 /** Runs the Playground on the first sample image and waits for the detections table. */
 async function playgroundResult(/** @type {import('playwright-core').Page} */ page) {
   await until(page, 'button.sample');
@@ -2253,6 +2280,46 @@ export const scenes = [
   { name: 'bench-loop-held', path: '/benchmarks/bn_5e12/loops/bl_5h02', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.top svg[aria-roledescription=chart]') },
   { name: 'bench-loop-running', path: '/benchmarks/bn_3c90/loops/bl_f3a0', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.steps li') },
   { name: 'bench-loop-mobile-full', path: '/benchmarks/bn_5e12/loops/bl_07d1', fullPage: true, viewports: ['mobile'], setup: async (page) => until(page, '.top svg[aria-roledescription=chart]') },
+  // A loop that has just started: generation 0, one step (the benchmark grades the first teacher), its entry waiting
+  // for the GPU, nothing graded on the chart yet.
+  { name: 'bench-loop-gen0', path: '/benchmarks/bn_3c90/loops/bl_g0a1', search: 'scenario=bench-loop-gen0', viewports: ['desktop', 'tablet', 'mobile'], setup: async (page) => until(page, '.steps li') },
+  // A loop that starved: its teacher kept boxes on a handful of pool images at its threshold, and the loop says so.
+  { name: 'bench-loop-starved', path: '/benchmarks/bn_5e12/loops/bl_9e40', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, 'table.gens tbody tr') },
+  {
+    // New loop with a teacher that is not ready: the warning before it starts, the lower confidence as the way out.
+    name: 'bench-loop-new-weak',
+    path: '/benchmarks/bn_5e12?tab=loops',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("New loop")');
+      await page.locator('button:has-text("New loop")').first().click();
+      await optionIn(page, 'dialog[open] select[id$="-teacher"]', 'm_shapes_e5');
+      await page.selectOption('dialog[open] select[id$="-teacher"]', 'm_shapes_e5');
+      await until(page, 'dialog[open] .fc.warn');
+      await page.evaluate(() => document.querySelector('dialog[open] .fc')?.scrollIntoView({ block: 'center' }));
+      await page.clock.runFor(300);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The same, its way out taken: a lower confidence, and what it costs in precision.
+    name: 'bench-loop-new-lower',
+    path: '/benchmarks/bn_5e12?tab=loops',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'button:has-text("New loop")');
+      await page.locator('button:has-text("New loop")').first().click();
+      await optionIn(page, 'dialog[open] select[id$="-teacher"]', 'm_shapes_e5');
+      await page.selectOption('dialog[open] select[id$="-teacher"]', 'm_shapes_e5');
+      await until(page, 'dialog[open] .fc.warn');
+      await page.locator('dialog[open] button:has-text("Keep labels from a lower confidence")').click();
+      await page.clock.runFor(300);
+      await page.evaluate(() => document.querySelector('dialog[open] .fc')?.scrollIntoView({ block: 'center' }));
+      await page.mouse.move(0, 0);
+    },
+  },
 
   // An entry's result: a complete scored model, its whole page (desktop to phone), and the phone's first screen.
   { name: 'bench-entry', path: '/benchmarks/bn_3c90/entries/be_f101', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: async (page) => until(page, '#images .tile img') },
@@ -2295,6 +2362,99 @@ export const scenes = [
       await page.locator('#images .tile').first().click();
       await until(page, 'dialog[open] .v-img img');
       await page.clock.runFor(600);
+      await page.mouse.move(0, 0);
+    },
+  },
+  // Photos of every shape (Pond fish was made from people's phone photos): the gallery's tiles in one shape, each photo
+  // whole on its well with its boxes; the large view of a portrait one and of a panorama.
+  {
+    name: 'bench-entry-mixed',
+    path: '/benchmarks/bn_7a41/entries/be_p201',
+    fullPage: false,
+    keepScroll: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#images .tile img');
+      await page.evaluate(() => document.getElementById('images')?.scrollIntoView({ block: 'start' }));
+      await page.clock.runFor(800);
+      await page.mouse.move(0, 0);
+    },
+  },
+  .../** @type {[string, number, number][]} */ ([
+    ['portrait', 0, 0.9],
+    ['wide', 2.5, 99],
+  ]).map(([which, lo, hi]) => /** @type {Scene} */ ({
+    name: `bench-entry-viewer-${which}`,
+    path: '/benchmarks/bn_7a41/entries/be_p201',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (/** @type {import('playwright-core').Page} */ page) => {
+      await until(page, '#images .tile img');
+      await page.clock.runFor(800);
+      // The first tile whose photo has that shape (its own pixels say it), once the thumbnails have drawn.
+      let k = -1;
+      for (let i = 0; i < 60 && k < 0; i++) {
+        await imagesDecoded(page);
+        k = await page.evaluate(
+          ([a, b]) => [...document.querySelectorAll('#images .tile img')].findIndex((im) => im instanceof HTMLImageElement && im.naturalHeight > 0 && im.naturalWidth / im.naturalHeight > a && im.naturalWidth / im.naturalHeight < b),
+          [lo, hi],
+        );
+        if (k < 0) {
+          await page.clock.runFor(250);
+          await page.waitForTimeout(100);
+        }
+      }
+      if (k < 0) throw new Error(`no ${which} photo in the first page`);
+      await page.locator('#images .tile').nth(k).click();
+      await untilDrawn(page, 'dialog[open] .v-img img');
+      await page.clock.runFor(600);
+      await page.mouse.move(0, 0);
+    },
+  })),
+  {
+    // The preview on photos of every shape: a portrait one in the benchmark's 4:3 stage, under distance (its boxes
+    // shrink about its own centre).
+    name: 'bench-preview-mixed',
+    path: '/benchmarks/bn_7a41?tab=conditions',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'select[id$="-cond"]');
+      await page.selectOption('select[id$="-cond"]', 'distance');
+      await page.locator('.stage').scrollIntoViewIfNeeded();
+      await page.locator('[role=radiogroup][aria-label="Severity"] [role=radio]').nth(3).click({ force: true });
+      await untilDrawn(page, '.stage img');
+      // Step to the first portrait photo.
+      for (let i = 0; i < 24; i++) {
+        await page.clock.runFor(400);
+        await imagesDecoded(page);
+        const tall = await page.evaluate(() => [...document.querySelectorAll('.stage img')].some((im) => im instanceof HTMLImageElement && im.naturalHeight > im.naturalWidth));
+        if (tall) break;
+        await page.locator('button[aria-label="Next image"]').click({ force: true });
+        await untilDrawn(page, '.stage img');
+      }
+      await page.clock.runFor(800);
+      await page.evaluate(() => document.querySelector('.stage')?.scrollIntoView({ block: 'center' }));
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A large predictions file on its way: an open entry filled a pass at a time, the records sent as a bar.
+    name: 'bench-add-external-sending',
+    path: '/benchmarks/bn_9f03?add=external',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'dialog[open] .file button');
+      // Every image of the benchmark under every pass of its default plan, 12 boxes each: over 8 MiB as JSON.
+      const passes = [[null, null], ...['low_light', 'overexposure', 'low_contrast', 'defocus', 'motion_blur', 'sensor_noise', 'haze', 'color_cast', 'jpeg', 'low_resolution', 'distance', 'occlusion'].flatMap((c) => [1, 3, 5].map((s) => [c, s]))];
+      const box = { class: 0, score: 0.62, x1: 120.5, y1: 88.25, x2: 210.75, y2: 160.5 };
+      const records = passes.flatMap(([c, s]) => Array.from({ length: 200 }, (_, i) => ({ image: String(i + 1), ...(c ? { condition: c, severity: s } : {}), boxes: Array.from({ length: 12 }, () => box) })));
+      await page.locator('dialog[open] input[type="file"]').setInputFiles({ name: 'rtdetr-l-predictions.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify({ predictions: records })) });
+      await until(page, 'dialog[open] .f-state.ok', 20000);
+      await page.locator('dialog[open] button[type="submit"]').click();
+      await until(page, 'dialog[open] .f-send');
+      for (let i = 0; i < 12; i++) await page.clock.runFor(300);
       await page.mouse.move(0, 0);
     },
   },

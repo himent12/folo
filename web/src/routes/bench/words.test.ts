@@ -55,6 +55,15 @@ describe('words', () => {
     expect(codex).toEqual({ value: '116k tokens', sub: '6 calls' });
   });
 
+  it('words an open external entry as receiving predictions, never as a model running a condition', () => {
+    const open = { status: 'running', contestant: { kind: 'external' }, progress: { done: 1200, total: 6000, condition: null, severity: null } } as unknown as BenchEntry;
+    expect(progressFacts(open)).toEqual({ where: 'Receiving predictions', pct: '1,200 of 6,000 records' });
+    expect(entryStatus(open)).toEqual({ status: 'running', label: 'Receiving' });
+    const model = { ...open, contestant: { kind: 'model' }, progress: { done: 1200, total: 6000, condition: 'haze', severity: 3 } } as unknown as BenchEntry;
+    expect(progressFacts(model).where).toBe('haze, severity 3');
+    expect(entryStatus(model).label).toBe('Running');
+  });
+
   it('gives entries and loops a status mark and a word', () => {
     expect(entryStatus({ status: 'done' })).toEqual({ status: 'completed', label: 'Done' });
     expect(entryStatus({ status: 'queued' }).label).toBe('Queued');

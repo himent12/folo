@@ -99,14 +99,37 @@ export function intervalScale(rows: readonly { id: string; ci: readonly [number,
   return domain ? { domain, below } : null;
 }
 
-/** Ticks of a leaderboard scale: its ends and the 0.05 steps between them, at most five (every other one past that). */
-export function scaleTicks(domain: readonly [number, number]): number[] {
-  const n = Math.round((domain[1] - domain[0]) / 0.05);
-  const step = n > 4 ? Math.ceil(n / 4) : 1;
-  const out: number[] = [];
-  for (let k = 0; k <= n; k += step) out.push(+(domain[0] + k * 0.05).toFixed(2));
-  if (out.at(-1) !== domain[1]) out.push(domain[1]);
-  return out;
+/**
+ * The least distance between two tick labels' centres, in px: a two-decimal label at the chart's 11 px tick size is
+ * about 24 px wide, and 12 px between two keeps them apart as two numbers ("0.45 0.50" touching read as one).
+ */
+export const TICK_GAP = 36;
+
+/** The steps a scale's ticks may take, the finest first: every one a round number. */
+const STEPS = [0.05, 0.1, 0.2, 0.25, 0.5, 1];
+
+/**
+ * Ticks of a leaderboard scale: the multiples of one round step inside it (0.05, else 0.1, 0.2, ...), the finest
+ * step whose labels sit at least `gap` px apart on a plot `width` px wide (at most five ticks when the width is not
+ * known yet). Evenly spaced, never an end squeezed in beside its neighbour: an end that is not on the step is left
+ * unlabelled. At least two ticks while two fit; a plot too narrow for two labels gets its lower end only.
+ */
+export function scaleTicks(domain: readonly [number, number], width = 0, gap = TICK_GAP): number[] {
+  const [a, b] = domain;
+  if (!(b > a)) return [a];
+  const known = width > 0;
+  const on = (step: number) => {
+    const out: number[] = [];
+    for (let k = Math.ceil(a / step - 1e-9); k * step <= b + 1e-9; k++) out.push(+(k * step).toFixed(2));
+    return out;
+  };
+  for (const step of STEPS) {
+    if (known && (step / (b - a)) * width < gap) continue;
+    const ticks = on(step);
+    if (!known && ticks.length > 5) continue;
+    if (ticks.length >= 2) return ticks;
+  }
+  return known && width >= gap ? [a, b] : [a];
 }
 
 /** Where a value falls on a domain, 0..1 (clamped). */

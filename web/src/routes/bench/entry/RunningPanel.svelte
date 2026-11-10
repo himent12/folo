@@ -3,14 +3,16 @@
    * An entry that has not finished: where it is, live (the benchmark's stream). Queued: its place behind the model
    * entries that run first. Running: the share done, the pass it is on (the unchanged images, or a condition at a
    * severity), and the plan's passes as a checklist (done, now, to come), so "haze 3 of 12 conditions" is something
-   * seen. Stopping: that it is ending what is in flight. The score lands here when it is done.
+   * seen. Stopping: that it is ending what is in flight. An open external entry is receiving its predictions in parts
+   * from its sender (any order, so no checklist): the records received of all the plan could take, and that it is
+   * scored when its sender finishes it. The score lands here when it is done.
    */
   import Check from '@lucide/svelte/icons/check';
   import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
   import { num } from '$lib/format';
   import Panel from '$lib/ui/Panel.svelte';
   import Progress from '$lib/ui/Progress.svelte';
-  import { progressFacts, progressShare } from '../words';
+  import { progressFacts, progressShare, receiving } from '../words';
 
   let { entry, bench, catalog, lost, ahead }: { entry: BenchEntry; bench: Bench; catalog: BenchCatalog | undefined; lost: boolean; ahead: BenchEntry[] } = $props();
 
@@ -44,11 +46,16 @@
     return i < passesDone ? 'done' : i === passesDone ? 'now' : 'todo';
   };
   const p = $derived(progressFacts(entry, catalog));
+  const recv = $derived(receiving(entry));
 </script>
 
-<Panel title={entry.status === 'queued' ? 'Waiting to run' : entry.status === 'stopping' ? 'Stopping' : 'Running'} meta={p.pct ?? undefined} id="progress">
+<Panel title={entry.status === 'queued' ? 'Waiting to run' : entry.status === 'stopping' ? 'Stopping' : recv ? 'Receiving predictions' : 'Running'} meta={recv ? undefined : (p.pct ?? undefined)} id="progress">
   <div class="run">
-    {#if entry.status === 'queued'}
+    {#if recv}
+      <Progress value={progressShare(entry)} size="md" tone={lost ? 'neutral' : 'accent'} label="{entry.name}: records received" />
+      <p class="lead num">{p.pct}, sent in parts by whatever runs the model (a script, or Add entry here).</p>
+      <p class="cap">It is scored when its sender finishes it: every unchanged image answered, each condition whole or left out. Stopping it discards what was received.</p>
+    {:else if entry.status === 'queued'}
       <p class="lead">
         Model entries run one at a time on the server’s GPU.
         {#if ahead.length}{ahead.length === 1 ? 'One entry runs' : `${ahead.length} entries run`} before it: {ahead.map((e) => e.name).join(', ')}.{/if}
@@ -59,6 +66,7 @@
         {p.where}{#if entry.status === 'running'}{' '}· {num(entry.progress.done)} of {num(entry.progress.total)} image passes{/if}
       </p>
     {/if}
+    {#if !recv}
     <ol class="passes" aria-label="Passes it runs">
       {#each passes as ps (ps.key)}
         <li>
@@ -78,6 +86,7 @@
       {/each}
     </ol>
     <p class="cap">The score and the full result appear here when it is done{entry.conditions || !bench.plan.conditions.length ? '' : '; it runs the unchanged images only, so it will have no robustness'}.</p>
+    {/if}
   </div>
 </Panel>
 

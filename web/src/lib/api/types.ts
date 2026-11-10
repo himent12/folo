@@ -1290,14 +1290,31 @@ export type BenchContestantSpec =
   /**
    * Any other vision model: its predictions, made wherever it runs. `scored: false` when it gives no confidences
    * (default true). Every unchanged image must be answered for; a condition of the plan is answered for every image at
-   * every planned severity, or left out.
+   * every planned severity, or left out. One record carries at most 1000 boxes.
+   * `open: false` (the default): `predictions` is the whole entry, scored in the request (up to 64 MiB). `open: true`:
+   * the entry is created `running`, to be filled in parts (`POST …/entries/{entry_id}/predictions`, `BenchPredictions`)
+   * and scored by `POST …/entries/{entry_id}/finish`; `predictions` here, if any, is its first part. An open entry is
+   * active; stopping it discards it.
    */
-  | { kind: 'external'; scored?: boolean; predictions: BenchPrediction[] };
+  | { kind: 'external'; scored?: boolean; open?: boolean; predictions?: BenchPrediction[] };
+
+/**
+ * `POST /api/bench/benchmarks/{id}/entries/{entry_id}/predictions`: a part of an open external entry (up to 64 MiB),
+ * all or nothing: `400 invalid_body` names the first bad record (a record for an image, condition and severity already
+ * received is one) and adds nothing. `409 bench_entry_not_open` on any entry that is not an open external one.
+ */
+export interface BenchPredictions {
+  predictions: BenchPrediction[];
+}
 
 /** `POST /api/bench/benchmarks/{id}/entries`: run a contestant on the benchmark. */
 export interface StartBenchEntry {
   contestant: BenchContestantSpec;
-  /** The name on the leaderboard; absent uses the model's name, or the agent's and its model's. Required for an external contestant. */
+  /**
+   * The name on the leaderboard (one line, at most 100 characters); absent uses the model's name, or the agent's with
+   * its model in parentheses, `Claude Code (haiku)`, `Codex (<model>)` (the agent's name alone when it has no default
+   * model). Required for an external contestant.
+   */
   name?: string | null;
   /** Only the first this many images (a seeded shuffle, so a prefix is a fair sample). Absent: all for a model, 48 for an agent. Not for external. */
   max_images?: number | null;
@@ -1319,9 +1336,9 @@ export type BenchEntryStatus = 'queued' | 'running' | 'stopping' | 'done' | 'fai
 
 /** How far a running entry is. */
 export interface BenchProgress {
-  /** Images answered so far, over all conditions. */
+  /** Images answered so far, over all conditions; for an open external entry, the records received so far. */
   done: number;
-  /** The entry's images times one plus its conditions' severities. */
+  /** The entry's images times one plus its conditions' severities (for an open external entry, the plan's). */
   total: number;
   /** The condition being run; null for the unchanged images. */
   condition: string | null;
@@ -1332,7 +1349,11 @@ export interface BenchProgress {
 export interface BenchSpeed {
   /** e.g. `gpu:0`. */
   device: string;
-  /** Mean time per image on the unchanged images, decode to boxes. */
+  /**
+   * Wall time per image on the unchanged images, decode to boxes, in milliseconds: run in batches (images prepared on
+   * several threads while the previous batch runs) and counted from the end of the first batch, so loading the model
+   * and warming up the device are left out. A throughput, not the latency of a single image.
+   */
   ms_per_image: number;
 }
 
@@ -1586,7 +1607,10 @@ export interface BenchStudent {
  * trains on those labels alone, and the benchmark grades the student, the next generation's teacher.
  */
 export interface StartBenchLoop {
-  /** Absent: named after the teacher. */
+  /**
+   * Absent: `<teacher's name> loop`. Its generations' datasets and training runs are named `<name> gen <n>`, so each
+   * student model is `<name> gen <n>-best` (a run's best checkpoint), and so is its benchmark entry.
+   */
   name?: string | null;
   /** The first teacher: a model of this server whose classes are the benchmark's (same names, same order). */
   teacher: string;
@@ -1594,7 +1618,10 @@ export interface StartBenchLoop {
   pool: BenchSource;
   /** 1 to 5 (default 1). */
   generations?: number | null;
-  /** Keep a teacher's detections from this confidence up; absent: the threshold its benchmark entry found (0.5 without one). */
+  /**
+   * Keep a teacher's detections from this confidence up; absent: the threshold its benchmark entry found (0.5 without
+   * one). A teacher that keeps a box on fewer than 10 pool images at it fails the loop at labeling.
+   */
   min_confidence?: number | null;
   student?: BenchStudent;
 }
@@ -1608,15 +1635,20 @@ export type BenchLoopPhase = 'benchmarking' | 'labeling' | 'training';
 /** The last generation against the first teacher on mAP@0.5:0.95: above its 95% interval, inside it, below it. */
 export type BenchLoopVerdict = 'improved' | 'held' | 'regressed';
 
-/** The labels a teacher made of a loop's pool. */
+/**
+ * The labels a teacher made of a loop's pool. A teacher's silence is not a label: a pool image it kept no box on is left
+ * out of the student's dataset (never written as a background image), so the dataset is `labeled_images` images. With
+ * fewer than 10 the loop fails at labeling instead (its `error` says how many boxes on how many images, at which
+ * confidence; its `hint` points at a lower `min_confidence`), and the generation has no labels.
+ */
 export interface BenchLabels {
   /** The confidence from which detections were kept. */
   threshold: number;
-  /** Images of the pool that were labeled. */
+  /** Images of the pool the teacher looked at (the pool less the benchmark's own images). */
   images: number;
-  /** Of those, images with at least one box. */
+  /** Of those, the images it kept at least one box on: the student's dataset (train and val). */
   labeled_images: number;
-  /** Boxes kept. */
+  /** Boxes kept, on those images. */
   boxes: number;
   /** Pool images left out because the benchmark has them. */
   excluded: number;

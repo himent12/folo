@@ -71,7 +71,8 @@ describe("an entry's page", () => {
     expect(pts.reduce((a, b) => a + b, 0)).toBeCloseTo(total, 6);
     expect(document.querySelector('#score .big')?.textContent).toBe(String(total));
     // The numbers behind the axes, in their units.
-    expect(text()).toMatch(/mAP50-95 0\.\d{3} ± 0\.\d{3}/);
+    // mAP with its interval: "± h" when symmetric as printed, else the interval itself.
+    expect(text()).toMatch(/mAP50-95 0\.\d{3} (± 0\.\d{3}|\(0\.\d{3}–0\.\d{3}\))/);
     expect(text()).toMatch(/keeps \d+% of its accuracy/);
     // Where it breaks: one row per condition of the plan, worst kept first, its cells at the planned severities.
     const rows = document.querySelectorAll('#robustness .heat tbody tr');
@@ -140,7 +141,7 @@ describe('the compare page', () => {
     await settle(40);
     expect(document.querySelectorAll('.chips .chip')).toHaveLength(2);
     expect(text()).toMatch(/Not like for like/);
-    expect(text()).toMatch(/Claude Code · Sonnet ran 48 of 360 images/);
+    expect(text()).toMatch(/Claude Code \(sonnet\) ran 48 of 360 images/);
     expect(text()).toMatch(/fasteners-s-v1 is clearly ahead on mAP50-95/);
     // The first is the baseline; the other's values say how far they are from it.
     expect(document.querySelector('.cmp thead th.e-col .role')?.textContent).toBe('Baseline');
@@ -169,9 +170,9 @@ describe('the compare page', () => {
 });
 
 describe('New loop', () => {
-  async function dialog(teacher: string | null = null) {
-    const bench = await hub.api.bench('bn_3c90');
-    const [models, datasets, jobs, entries] = await Promise.all([hub.api.models(), hub.api.datasets(), hub.api.labelJobs(), hub.api.benchEntries('bn_3c90')]);
+  async function dialog(teacher: string | null = null, benchId = 'bn_3c90') {
+    const bench = await hub.api.bench(benchId);
+    const [models, datasets, jobs, entries] = await Promise.all([hub.api.models(), hub.api.datasets(), hub.api.labelJobs(), hub.api.benchEntries(benchId)]);
     const onstarted = vi.fn();
     c = mount(NewLoopDialog as Component<Record<string, unknown>>, { target, props: { open: true, bench, models, datasets, jobs, entries, teacher, onstarted } });
     flushSync();
@@ -218,6 +219,67 @@ describe('New loop', () => {
     await send();
     expect(onstarted).toHaveBeenCalledWith(expect.objectContaining({ status: 'running', config: expect.objectContaining({ teacher: 'm_fast_n', student: expect.objectContaining({ epochs: 20 }) }) }));
   });
+
+  it('has the students follow the teacher picked, until a person picks their size', async () => {
+    await dialog(null, 'bn_5e12');
+    const teacherSel = document.querySelector<HTMLSelectElement>('select[id$="-teacher"]')!;
+    const arch = () => document.querySelector<HTMLSelectElement>('select[id$="-arch"]')!.value;
+    const pickTeacher = async (id: string) => {
+      teacherSel.querySelector<HTMLOptionElement>(`option[value="${id}"]`)!.selected = true;
+      teacherSel.dispatchEvent(new Event('change', { bubbles: true }));
+      await settle();
+    };
+    await pickTeacher('m_shapes_s');
+    expect(arch()).toBe('folo-s');
+    await pickTeacher('m_shapes_e5');
+    expect(arch()).toBe('folo-n');
+    // A size a person picked stays.
+    const a = document.querySelector<HTMLSelectElement>('select[id$="-arch"]')!;
+    a.querySelector<HTMLOptionElement>('option[value="folo-m"]')!.selected = true;
+    a.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+    await pickTeacher('m_shapes_s');
+    expect(arch()).toBe('folo-m');
+  });
+
+  it('reads a good teacher’s labels off its entry, quietly', async () => {
+    await dialog('m_fast_n');
+    const fc = document.querySelector('dialog[open] .fc')!;
+    expect(fc.getAttribute('data-forecast')).toBe('ok');
+    expect(fc.textContent).toMatch(/^\s*At its own threshold, 0\.\d\d, 9\d% of its labels are right and they cover \d+% of all objects \((partly ready|ready)\): about [\d,]+ of the pool’s 1,920 images would get a box\./);
+    expect(submit().textContent).toMatch(/Start loop/);
+  });
+
+  it('tells, before it starts, that a not-ready teacher would label too little, with the lower confidence as the way out', async () => {
+    // shapes-n-early on Shapes val: 90% right only from ~0.75, where it keeps almost nothing.
+    await dialog('m_shapes_e5', 'bn_5e12');
+    const fc = () => document.querySelector('dialog[open] .fc')!;
+    expect(fc().getAttribute('data-forecast')).toBe('stops');
+    expect(fc().getAttribute('role')).toBe('alert');
+    expect(fc().textContent).toMatch(/Too few labels: the loop would stop at labeling/);
+    expect(fc().textContent).toMatch(/\(not ready\): about \d of the pool’s 800 images would get a box\. A loop stops when fewer than 10 pool images get a box\./);
+    // Told at the button too, which says what pressing it means; it is not taken away.
+    expect(document.querySelector('dialog[open] .why')?.textContent).toBe('Its labels would be too few: the loop would stop at labeling');
+    expect(submit().textContent).toMatch(/Start anyway/);
+    expect(submit().disabled).toBe(false);
+    // The way out: the confidence field, set lower, with what that costs read off the curve.
+    button(/^Keep labels from a lower confidence/)!.click();
+    await settle();
+    const conf = document.querySelector<HTMLInputElement>('input[id$="-conf"]')!;
+    expect(conf).not.toBeNull();
+    expect(Number(conf.value)).toBeLessThan(0.75);
+    expect(fc().getAttribute('data-forecast')).toBe('ok');
+    expect(fc().textContent).toMatch(/^\s*From 0\.\d+, \d+% of its labels are right and they cover \d+% of all objects: about [\d,]+ of the pool’s 800 images would get a box\./);
+    expect(submit().textContent).toMatch(/Start loop/);
+    // Live: a lower confidence still, fewer right.
+    const right = (t: string) => Number(/(\d+)% of its labels are right/.exec(t)![1]);
+    const before = right(fc().textContent!);
+    conf.value = '0.05';
+    conf.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle();
+    expect(fc().textContent).toMatch(/^\s*From 0\.050, /);
+    expect(right(fc().textContent!)).toBeLessThan(before);
+  });
 });
 
 describe("a loop's page", () => {
@@ -229,10 +291,41 @@ describe("a loop's page", () => {
     expect(document.querySelectorAll('table.gens tbody tr')).toHaveLength(4);
   });
 
+  it('at generation 0 shows one step, the benchmark grading the teacher, and nothing done', async () => {
+    hub.api = new MockApi('bench-loop-gen0', 0);
+    await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_g0a1');
+    const steps = [...document.querySelectorAll('.steps li')].map((li) => `${li.querySelector('.s-name')!.textContent}: ${li.className.replace(/\s*svelte-\S+/g, '').trim()}`);
+    expect(steps).toEqual(['Benchmark grades the teacher: now']);
+    expect(text()).toMatch(/Benchmarking the teacher/);
+    expect(text()).toMatch(/Its entry: fasteners-n-f16, waiting for the GPU\./);
+    expect(text()).toMatch(/No generation graded yet/);
+    // Gen 1 and 2 are to come.
+    expect(document.querySelectorAll('table.gens tbody tr.future')).toHaveLength(2);
+  });
+
+  it('says why a loop starved: the server’s message, and its generation with no labels', async () => {
+    await page(BenchLoop, '/benchmarks/bn_5e12/loops/bl_9e40');
+    expect(document.querySelector('[role=alert]')?.textContent).toMatch(/It failed at generation 1/);
+    expect(text()).toMatch(/The teacher 'shapes-n-early' kept \d+ box(es)? on \d of the pool's 800 images at confidence 0\.\d+: too few to train a student on \(at least 10 images\)\./);
+    expect(text()).toMatch(/A lower min_confidence keeps more of its detections/);
+    const row = document.querySelectorAll('table.gens tbody tr')[1]!;
+    expect(row.textContent).toMatch(/Not trained/);
+    expect(row.textContent).toMatch(/None: the loop failed here/);
+    expect(document.querySelectorAll('table.gens tbody tr')[2]!.textContent).toMatch(/Not run/);
+    expect(document.querySelector('.steps')).toBeNull();
+  });
+
+  it('writes each generation’s labels as one line', async () => {
+    await page(BenchLoop, '/benchmarks/bn_5e12/loops/bl_07d1');
+    const lines = [...document.querySelectorAll('table.gens tbody .ln')].map((x) => x.textContent);
+    expect(lines).toHaveLength(3);
+    for (const l of lines) expect(l).toMatch(/^kept [\d,]+ boxes on [\d,]+ of 800 pool images from confidence 0\.\d\d$/);
+  });
+
   it('shows the step a running loop is on, and offers Stop', async () => {
     await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_f3a0');
     const steps = [...document.querySelectorAll('.steps li')].map((li) => li.className.replace(/\s*svelte-\S+/g, '').trim());
-    expect(steps).toEqual(['done', 'now', 'todo']);
+    expect(steps).toEqual(['done', 'now', 'next']);
     expect(button(/^Stop loop/)).toBeTruthy();
   });
 
@@ -240,6 +333,46 @@ describe("a loop's page", () => {
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     await page(BenchmarkPage, '/benchmarks/bn_5e12?tab=loops&loop=bl_07d1');
     expect(go).toHaveBeenCalledWith('/benchmarks/bn_5e12/loops/bl_07d1', { replace: true });
+  });
+});
+
+describe('the loops tab', () => {
+  it('says why a loop failed under its name, and what a running one does for which generation', async () => {
+    await page(BenchmarkPage, '/benchmarks/bn_5e12?tab=loops');
+    const row = [...document.querySelectorAll('table.loops tbody tr')].find((r) => /shapes-n-early loop/.test(r.textContent ?? ''))!;
+    expect(row.querySelector('.cause')?.textContent).toMatch(/^The teacher 'shapes-n-early' kept .* too few to train a student on/);
+    unmount(c!);
+    c = undefined;
+    await page(BenchmarkPage, '/benchmarks/bn_3c90?tab=loops');
+    expect(text()).toMatch(/Training gen 1/);
+  });
+});
+
+describe('the failure gallery', () => {
+  it('gives its tiles the commonest shape of its photos, each photo whole on its well', async () => {
+    await page(BenchEntry, '/benchmarks/bn_7a41/entries/be_p201');
+    await settle(40);
+    const tiles = [...document.querySelectorAll<HTMLElement>('#images .tile:not(.sk) .img')];
+    expect(tiles.length).toBeGreaterThan(0);
+    // One shape for every tile (4:3, the pond's commonest), never the first photo's.
+    expect(new Set(tiles.map((t) => Number(/aspect-ratio:\s*([\d.]+)/.exec(t.getAttribute('style') ?? '')?.[1]).toFixed(2)))).toEqual(new Set(['1.33']));
+  });
+});
+
+describe('an open external entry', () => {
+  it('reads on the leaderboard and its page as receiving predictions, with the records received', async () => {
+    const images = (await hub.api.benchImages('bn_3c90', { limit: 1000 })).images;
+    const e = await hub.api.startBenchEntry('bn_3c90', { name: 'yolo-big', contestant: { kind: 'external', open: true, predictions: images.slice(0, 120).map((i) => ({ image: i.id, boxes: [] })) } });
+    await page(BenchmarkPage, '/benchmarks/bn_3c90');
+    const row = [...document.querySelectorAll('table.board tbody tr')].find((r) => /yolo-big/.test(r.textContent ?? ''))!;
+    expect(row.textContent).toMatch(/Receiving/);
+    expect(row.querySelector('.prog-text')?.textContent).toMatch(/^Receiving predictions\s*·?\s*120 of 13,320 records$/);
+    unmount(c!);
+    c = undefined;
+    await page(BenchEntry, `/benchmarks/bn_3c90/entries/${e.id}`);
+    expect(text()).toMatch(/Receiving predictions/);
+    expect(text()).toMatch(/120 of 13,320 records, sent in parts/);
+    expect(document.querySelector('.passes')).toBeNull();
   });
 });
 

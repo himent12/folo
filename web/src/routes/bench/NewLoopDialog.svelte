@@ -6,13 +6,20 @@
    * a labeling job's images; its own labels are never read and images also in the benchmark are left out), how many
    * generations, how the students train (architecture, the teacher's by default; epochs; image size; starting
    * weights), and the confidence from which the teacher's labels are kept (by default the threshold its benchmark entry
-   * found). Before starting, what will happen and what it costs, in a sentence. Opened from the Loops tab and from an
-   * entry's "start a loop" (`teacher` preset).
+   * found). When the teacher has a finished entry, what its labels would be is read off that entry's self-labeling
+   * curve beside the confidence: its threshold, the share of objects it labels there and its verdict, and about how many
+   * pool images would get a box; at the confidence a person sets, the precision that costs, live. A teacher whose labels
+   * would be too few to learn from (not ready, or under a tenth of the objects) is said so plainly before the loop
+   * starts, with the lower confidence as the way out, and Start reads "Start anyway" (docs/BENCH.md: a teacher that
+   * keeps boxes on fewer than 10 pool images ends the loop at labeling). Before starting, what will happen and what it
+   * costs, in a sentence. Opened from the Loops tab and from an entry's "start a loop" (`teacher` preset).
    */
+  import Info from '@lucide/svelte/icons/info';
   import Repeat from '@lucide/svelte/icons/repeat';
-  import { untrack } from 'svelte';
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
+  import { tick, untrack } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
-  import type { Arch, Bench, BenchEntry, BenchLoop, Dataset, LabelJob, Model, Split, StartBenchLoop } from '$lib/api/types';
+  import type { Arch, Bench, BenchEntry, BenchLoop, BenchSelfLabeling, Dataset, LabelJob, Model, Split, StartBenchLoop } from '$lib/api/types';
   import { GENERATIONS_MAX } from '$lib/bench/rules';
   import { conf, num } from '$lib/format';
   import { FROM_SCRATCH } from '$lib/lineage';
@@ -25,7 +32,7 @@
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Switch from '$lib/ui/Switch.svelte';
-  import { loopPlanText, teacherEligibility } from './words';
+  import { forecastText, labelForecast, loopPlanText, lowerConfidence, teacherEligibility } from './words';
 
   let {
     open = $bindable(false),
@@ -97,6 +104,8 @@
       name = '';
       arch = '';
       imgsz = '';
+      autoArch = '';
+      autoSize = '';
       poolKind = 'dataset';
       split = 'train';
       datasetId = '';
@@ -108,13 +117,16 @@
     const first = ranked.find(eligible);
     if (first) untrack(() => (teacherId = first.id));
   });
-  // The student follows the teacher until someone picks its size.
+  // The student follows the teacher (its architecture and image size) until someone picks its own: what was set
+  // automatically follows the next teacher picked, what a person typed or chose stays.
+  let autoArch = '';
+  let autoSize = '';
   $effect(() => {
     const t = teacher;
     if (!t) return;
     untrack(() => {
-      if (!arch) arch = t.arch;
-      if (!imgsz) imgsz = String(t.imgsz);
+      if (!arch || arch === autoArch) arch = autoArch = t.arch;
+      if (!imgsz || imgsz === autoSize) imgsz = autoSize = String(t.imgsz);
     });
   });
   const sameClasses = (classes: readonly string[]) => classes.length === bench.classes.length && classes.every((c, i) => c.toLowerCase() === bench.classes[i]!.toLowerCase());
@@ -142,17 +154,18 @@
   );
 
   // The teacher's own complete entry on this benchmark (reused by the loop) and the threshold it found.
-  const teacherEntry = $derived(
-    entries.find((e) => e.contestant.kind === 'model' && e.contestant.model_id === teacherId && e.status === 'done' && e.fingerprint === bench.fingerprint && !e.score?.partial),
-  );
-  let found = $state<{ entry: string; threshold: number | null } | null>(null);
+  const ofTeacher = (e: BenchEntry) => e.contestant.kind === 'model' && e.contestant.model_id === teacherId && e.status === 'done' && e.fingerprint === bench.fingerprint;
+  const teacherEntry = $derived(entries.find((e) => ofTeacher(e) && !e.score?.partial));
+  /** What the forecast reads: the complete entry, else a finished one on part of the benchmark (an estimate). */
+  const readEntry = $derived(teacherEntry ?? entries.find(ofTeacher));
+  let found = $state.raw<{ entry: string; images: number; self: BenchSelfLabeling; bestConf: number } | null>(null);
   $effect(() => {
-    const e = teacherEntry;
+    const e = readEntry;
     found = null;
     if (!e) return;
     let gone = false;
     hub.api.benchResult(bench.id, e.id).then(
-      (r) => !gone && (found = { entry: e.id, threshold: r.self_labeling.threshold }),
+      (r) => !gone && (found = { entry: e.id, images: r.entry.images, self: r.self_labeling, bestConf: r.accuracy.best_conf }),
       () => {},
     );
     return () => (gone = true);
@@ -160,12 +173,25 @@
   const thresholdText = $derived(
     !teacherEntry
       ? 'decided when its entry is done (it runs first)'
-      : !found
+      : !found || found.entry !== teacherEntry.id
         ? 'reading its entry…'
-        : found.threshold !== null
-          ? `${conf(found.threshold)}, where its entry’s labels are 90% right`
+        : found.self.threshold !== null
+          ? `${conf(found.self.threshold)}, where its entry’s labels are 90% right`
           : '0.50: its entry never gets 90% of its labels right',
   );
+  /** The confidence a person set, once it is a valid one; null while the teacher's own threshold is used. */
+  const chosen = $derived(!ownThreshold && minConf.trim() !== '' && Number(minConf) >= 0 && Number(minConf) <= 1 ? Number(minConf) : null);
+  /** What its labels would be (./words labelForecast): read off the entry's curve, live as the confidence changes. */
+  const forecast = $derived(found && (ownThreshold || chosen !== null) ? labelForecast(found.self, found.images, poolImages, chosen) : null);
+  const forecastWords = $derived(forecast ? forecastText(forecast, poolImages) : null);
+  /** "Keep labels from a lower confidence": the switch off, a lower confidence proposed, its field focused. */
+  async function lower() {
+    if (!forecast || !found) return;
+    minConf = lowerConfidence(forecast.threshold, found.bestConf).toFixed(2);
+    ownThreshold = false;
+    await tick();
+    document.getElementById(`${uid}-conf`)?.focus();
+  }
 
   const bigger = $derived(teacher ? ARCHS[ARCHS.indexOf(teacher.arch) + 1] : undefined);
   const archOptions = $derived(
@@ -318,6 +344,17 @@
           <div class="narrow"><Input id="{uid}-conf" bind:value={minConf} inputmode="decimal" invalid={!!show(errs.conf)} /></div>
         </Field>
       {/if}
+      {#if forecast && forecastWords}
+        <!-- What the first teacher's labels would be, from its entry's curve: said plainly when they are too few. -->
+        <div class="fc" class:warn={forecast.starved} role={forecast.starved ? 'alert' : 'status'} data-forecast={forecast.starved ? (forecast.stops ? 'stops' : 'starved') : 'ok'}>
+          <span class="fc-icon" aria-hidden="true">{#if forecast.starved}<TriangleAlert size={16} strokeWidth={1.75} />{:else}<Info size={16} strokeWidth={1.75} />{/if}</span>
+          <div class="fc-body">
+            {#if forecastWords.title}<p class="fc-title">{forecastWords.title}</p>{/if}
+            <p class="fc-text">{forecastWords.text}{#if forecastWords.remedy}{' '}{forecastWords.remedy}{/if}{#if !teacherEntry}{' '}Read from its entry on part of the benchmark; the loop runs a complete one first.{/if}</p>
+            {#if forecast.starved && ownThreshold}<div class="fc-act"><Button size="sm" onclick={lower}>Keep labels from a lower confidence</Button></div>{/if}
+          </div>
+        </div>
+      {/if}
     </div>
 
     <Field label="Name" for="{uid}-name" error={show(errs.name)} hint="Its datasets and runs are named after it: “<name> gen 1”.">
@@ -329,11 +366,11 @@
   </form>
   {#snippet footer()}
     <!-- What starting it does and costs, beside the button that does it. -->
-    {#if missingWhy}<p class="why" data-gate-why>{missingWhy}</p>{:else}<p class="why s-text num" role="status">{summary}</p>{/if}
+    {#if missingWhy}<p class="why" data-gate-why>{missingWhy}</p>{:else if forecast?.starved}<p class="why warn-text num" role="status"><TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />{forecast.stops ? 'Its labels would be too few: the loop would stop at labeling' : 'Its labels would be too few to train a student on'}</p>{:else}<p class="why s-text num" role="status">{summary}</p>{/if}
     <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
     <Gate {reason}>
       {#snippet children(why)}
-        <Button variant="primary" type="submit" form="{uid}-form" icon={Repeat} loading={busy} disabled={!!why} aria-describedby={why}>Start loop</Button>
+        <Button variant="primary" type="submit" form="{uid}-form" icon={Repeat} loading={busy} disabled={!!why} aria-describedby={why}>{forecast?.starved ? 'Start anyway' : 'Start loop'}</Button>
       {/snippet}
     </Gate>
   {/snippet}
@@ -379,6 +416,54 @@
   }
   .s-text {
     color: var(--text-primary);
+  }
+  .why.warn-text {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-primary);
+  }
+  .why.warn-text :global(svg) {
+    flex-shrink: 0;
+    color: var(--warning-solid);
+  }
+  /* The forecast: a quiet line of facts; too few labels, the panel surface with a 2 px warning edge (the callout's). */
+  .fc {
+    display: grid;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .fc-icon {
+    display: grid;
+    padding-top: 1px;
+    color: var(--text-tertiary);
+  }
+  .fc.warn {
+    padding: var(--space-3) var(--space-3) var(--space-3) calc(var(--space-3) - 2px);
+    border: 1px solid var(--line-panel);
+    border-left: 2px solid var(--warning-solid);
+    border-radius: var(--radius-md);
+    background: var(--bg-panel);
+  }
+  .fc.warn .fc-icon {
+    color: var(--warning-solid);
+  }
+  .fc-body {
+    display: grid;
+    gap: var(--space-1);
+    min-width: 0;
+  }
+  .fc-title {
+    font-size: var(--type-md-size);
+    line-height: var(--type-md-line);
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+  }
+  .fc-act {
+    margin-top: var(--space-2);
   }
   .why {
     margin-right: auto;

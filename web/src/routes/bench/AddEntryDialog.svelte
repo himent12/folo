@@ -11,16 +11,21 @@
    *   unchanged only) and what they mean: the score is partial (agents give no confidences; without the conditions
    *   there is no robustness), and each image is a request.
    * - Any other model: its predictions as a JSON file, checked here with the server's rules ($lib/bench/external)
-   *   before anything is sent, whether it gives confidences, and how to make the file (the API's three requests for
-   *   this benchmark, copyable).
+   *   before anything is sent, whether it gives confidences, and how to make the file (the example script for anything
+   *   but a small benchmark; the API's requests for this benchmark, copyable). The file is read and parsed once, after
+   *   "Reading the file…" has painted (a 200 MB file takes seconds), and its records are held once. A file whose
+   *   request would be large (over PART_BYTES of JSON; the server takes 64 MiB a request) goes as an open entry
+   *   filled in parts, a pass at a time, with the records sent of all of them as a bar, then finished; any failure once
+   *   the entry exists stops it (which discards it) and shows the server's message, and closing the dialog mid-send
+   *   asks first, then stops it too. A small file is one request, scored in it.
    * On success the dialog closes and the page shows the new entry.
    */
   import FileJson from '@lucide/svelte/icons/file-json';
   import Plus from '@lucide/svelte/icons/plus';
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
   import type { Bench, BenchCatalog, BenchEntry, BenchPrediction, LabelAgent, Model, StartBenchEntry } from '$lib/api/types';
-  import { checkPredictions, parsePredictions, type PredictionSummary } from '$lib/bench/external';
+  import { checkPredictions, estimateBytes, PART_BYTES, parsePredictions, partsOf, sendExternal, type PredictionSummary } from '$lib/bench/external';
   import { planPasses } from '$lib/bench/plan';
   import { AGENT_IMAGES, IMAGES_PAGE_MAX, isEntryActive, BENCH_NAME_MAX } from '$lib/bench/rules';
   import { classColor } from '$lib/design/tokens';
@@ -32,6 +37,7 @@
   import Field from '$lib/ui/Field.svelte';
   import Gate from '$lib/ui/Gate.svelte';
   import Input from '$lib/ui/Input.svelte';
+  import Progress from '$lib/ui/Progress.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Spinner from '$lib/ui/Spinner.svelte';
@@ -93,6 +99,10 @@
   let fileInput = $state<HTMLInputElement>();
   /** The benchmark's image ids, for the predictions' check (loaded once the external kind is shown). */
   let imageIds = $state.raw<string[] | null>(null);
+  /** A large file on its way in parts: the records sent of all of them; `confirm` while closing asks first. */
+  let sending = $state<{ sent: number; total: number } | null>(null);
+  let confirmStop = $state(false);
+  let abort: AbortController | null = null;
 
   // Every opening starts fresh on the kind it was opened with; the first model that shares classes is picked.
   $effect(() => {
@@ -110,6 +120,8 @@
       file = null;
       check = null;
       modelId = '';
+      sending = null;
+      confirmStop = false;
     });
   });
 
@@ -176,6 +188,10 @@
     reading = true;
     check = null;
     try {
+      // "Reading the file…" paints before the parse holds the page (seconds for a 200 MB file); the text is let go
+      // as soon as it is parsed, and the records are checked where they are, never copied.
+      await tick();
+      await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
       const parsed = parsePredictions(await f.text());
       if ('error' in parsed) check = { ok: false, error: parsed.error };
       else {
@@ -197,6 +213,8 @@
     }
   }
   const condName = (id: string) => catalog?.conditions.find((c) => c.id === id)?.name ?? id;
+  /** How a checked file goes: in one request, or (over PART_BYTES of JSON) as an open entry in this many parts. */
+  const parts = $derived(check?.ok && estimateBytes(check.predictions) > PART_BYTES ? partsOf(check.predictions, bench.plan).length : 0);
   const api = $derived(`${hub.serverUrl.replace(/\/$/, '')}/api/bench/benchmarks/${bench.id}`);
 
   // ---------- validation, the request ----------
@@ -242,6 +260,43 @@
   const shownErr = $derived(touched ? Object.values(errs).find((e) => e) : undefined);
   const reason = $derived(missingWhy ?? (shownErr ? 'Fix the fields first' : null));
 
+  /** Sends the file: one request, or an open entry in parts with its bar; nothing is left behind if it fails. */
+  async function sendFile() {
+    if (!check?.ok) return;
+    abort = new AbortController();
+    sending = { sent: 0, total: check.predictions.length };
+    try {
+      const entry = await sendExternal(
+        {
+          start: (b) => hub.api.startBenchEntry(bench.id, b),
+          send: (id, ps) => hub.api.sendBenchPredictions(bench.id, id, ps),
+          finish: (id) => hub.api.finishBenchEntry(bench.id, id),
+          stop: (id) => hub.api.stopBenchEntry(bench.id, id),
+        },
+        { name: extName.trim(), scored, predictions: check.predictions, plan: bench.plan },
+        (p) => (sending = { sent: p.sent, total: p.total }),
+        abort.signal,
+      );
+      open = false;
+      onstarted(entry);
+    } catch (err) {
+      // Stopped by the person: the entry is discarded and the dialog closes; anything else is said in it.
+      if (abort?.signal.aborted) open = false;
+      else error = err;
+    } finally {
+      sending = null;
+      confirmStop = false;
+      abort = null;
+    }
+  }
+  /** Closing while a large file is being sent asks first (it would discard the entry). */
+  const beforeClose = () => {
+    if (!sending) return true;
+    confirmStop = true;
+    return false;
+  };
+  const stopSending = () => abort?.abort(new DOMException('Stopped', 'AbortError'));
+
   function body(): StartBenchEntry | null {
     if (kind === 'model') {
       if (!model) return null;
@@ -252,8 +307,8 @@
       if (!a) return null;
       return { contestant: { kind: 'agent', agent: a.agent, model: a.model, effort: a.effort }, max_images: Number(agentImages), conditions: agentConditions };
     }
-    if (!check?.ok) return null;
-    return { name: extName.trim(), contestant: { kind: 'external', scored, predictions: check.predictions } };
+    // An external file goes by sendFile.
+    return null;
   }
 
   async function submit(e: SubmitEvent) {
@@ -261,6 +316,15 @@
     touched = true;
     error = undefined;
     if (Object.values(errs).some((x) => x) || reason || busy) return;
+    if (kind === 'external') {
+      busy = true;
+      try {
+        await sendFile();
+      } finally {
+        busy = false;
+      }
+      return;
+    }
     const b = body();
     if (!b) return;
     busy = true;
@@ -276,7 +340,7 @@
   }
 </script>
 
-<Dialog bind:open title="Add entry" description="Run a contestant on {bench.name}: a model of this server, a coding agent looking at the images, or the predictions of any other model.">
+<Dialog bind:open onbeforeclose={beforeClose} title="Add entry" description="Run a contestant on {bench.name}: a model of this server, a coding agent looking at the images, or the predictions of any other model.">
   <form id="{uid}-form" class="form" onsubmit={submit} novalidate>
     <Segmented
       label="Contestant"
@@ -343,7 +407,7 @@
         />
       {/if}
     {:else}
-      <p class="note lead-note">Any model that runs elsewhere: fetch the images, run it, and send its boxes as a file. It is scored as it is sent.</p>
+      <p class="note lead-note">Any model that runs elsewhere: fetch the images, run it, and send its boxes as a file. It is scored once all of it has arrived.</p>
       <div class="file">
         <input bind:this={fileInput} type="file" accept="application/json,.json" hidden onchange={pick} />
         <div class="f-row">
@@ -351,10 +415,16 @@
           {#if file}<span class="f-name"><span class="truncate" title={file.name}>{file.name}</span><span class="faint num">{bytes(file.size)}</span></span>{/if}
         </div>
         {#if reading}
-          <p class="f-state busy" role="status"><Spinner size={12} /> Checking the predictions</p>
+          <p class="f-state busy" role="status"><Spinner size={12} /> Reading the file{file && file.size > 8 * 2 ** 20 ? ` (${bytes(file.size)})` : ''}…</p>
+        {:else if sending}
+          <!-- The records sent of all of them, part by part: a real bar, not a spinner. -->
+          <div class="f-send" role="status">
+            <Progress value={sending.total ? sending.sent / sending.total : 0} size="sm" tone="accent" label="Predictions sent" />
+            <p class="f-state num">Sending predictions · {num(sending.sent)} of {num(sending.total)} records</p>
+          </div>
         {:else if check?.ok}
           <p class="f-state ok num" role="status">
-            {imagesText(check.summary.images)} answered · {check.summary.conditions.length ? `${check.summary.conditions.length} of ${bench.plan.conditions.length} conditions` : 'unchanged only'} · {num(check.summary.boxes)} boxes{check.summary.scores ? ' with confidences' : ', no confidences'}{#if check.summary.missing.length && check.summary.conditions.length}. Left out: {check.summary.missing.map(condName).join(', ')}; the entry is partial.{/if}
+            {imagesText(check.summary.images)} answered · {check.summary.conditions.length ? `${check.summary.conditions.length} of ${bench.plan.conditions.length} conditions` : 'unchanged only'} · {num(check.summary.boxes)} boxes{check.summary.scores ? ' with confidences' : ', no confidences'}{#if check.summary.missing.length && check.summary.conditions.length}. Left out: {check.summary.missing.map(condName).join(', ')}; the entry is partial.{/if}{#if parts}{' '}Sent in {num(parts)} parts, a pass at a time.{/if}
           </p>
         {:else if check}
           <p class="f-state bad" role="alert">{check.error}</p>
@@ -369,27 +439,35 @@
       <details class="how">
         <summary><span class="chev" aria-hidden="true"></span>How to make the file</summary>
         <div class="how-body">
-          <p>List the images and fetch each one, unchanged and under the plan's conditions; run your model on them and save its boxes, in pixels, to choose above. In a shell:</p>
+          <p>For anything but a small benchmark, use the example script <span class="mono">examples/bench_external.py</span> from the FOLO repository: put your model behind its one Python function, and it fetches every image under every condition, runs the model and sends the predictions in parts.</p>
+          <CommandLine command={`python examples/bench_external.py --server ${hub.serverUrl.replace(/\/$/, '')} --bench ${bench.id} --name my-detector`} label="Run the example script" />
+          <p>By hand: list the images and fetch each one, unchanged and under the plan's conditions; run your model on them and save its boxes, in pixels, to choose above. In a shell:</p>
           <CommandLine command={`api=${api}`} label="This benchmark's address" />
           <CommandLine command={`curl -s "$api/images?limit=1000"`} label="List the images" />
           <CommandLine command={`curl -s "$api/images/1?condition=haze&severity=3" -o haze3.jpg`} label="Fetch an image under a condition" />
-          <p>Or send the entry yourself, its name and predictions in <span class="mono">entry.json</span>:</p>
-          <CommandLine command={`curl -s "$api/entries" -H 'Content-Type: application/json' -d @entry.json`} label="Send the entry" />
-          <p class="faint">The example script <span class="mono">examples/bench_external.py</span> in the FOLO repository does all of this for a model behind one Python function.</p>
+          <p>A small entry goes in one request (up to 64 MiB), its name and predictions in <span class="mono">entry.json</span>; a larger one is opened with <span class="mono">"open": true</span>, sent in parts to its <span class="mono">predictions</span>, and finished. This dialog does that for you.</p>
+          <CommandLine command={`curl -s "$api/entries" -H 'Content-Type: application/json' -d @entry.json`} label="Send a small entry" />
         </div>
       </details>
     {/if}
     {#if bench.entries === 0 && bench.plan.conditions.length}<p class="note first">The first entry fixes the plan ({bench.plan.conditions.length} conditions) so that every entry is graded on the same test.</p>{/if}
-    {#if error}<ErrorState {error} title="Could not add the entry" compact />{/if}
+    {#if error}<ErrorState {error} title={kind === 'external' && parts ? 'Could not add the entry: nothing was kept' : 'Could not add the entry'} compact />{/if}
   </form>
   {#snippet footer()}
-    {#if missingWhy}<p class="why" data-gate-why>{missingWhy}</p>{/if}
-    <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
-    <Gate {reason}>
-      {#snippet children(why)}
-        <Button variant="primary" type="submit" form="{uid}-form" icon={Plus} loading={busy} disabled={!!why} aria-describedby={why}>{kind === 'external' ? 'Score and add' : 'Add entry'}</Button>
-      {/snippet}
-    </Gate>
+    {#if confirmStop}
+      <!-- Closing while a large file is on its way: the entry would be discarded, so it asks first. -->
+      <p class="why" role="alert">Stop sending? The entry is discarded.</p>
+      <Button variant="ghost" onclick={() => (confirmStop = false)}>Keep sending</Button>
+      <Button variant="destructive" onclick={stopSending}>Stop and discard</Button>
+    {:else}
+      {#if missingWhy}<p class="why" data-gate-why>{missingWhy}</p>{/if}
+      <Button variant="ghost" onclick={() => (beforeClose() ? (open = false) : undefined)}>Cancel</Button>
+      <Gate {reason}>
+        {#snippet children(why)}
+          <Button variant="primary" type="submit" form="{uid}-form" icon={Plus} loading={busy} disabled={!!why} aria-describedby={why}>{kind === 'external' ? 'Score and add' : 'Add entry'}</Button>
+        {/snippet}
+      </Gate>
+    {/if}
   {/snippet}
 </Dialog>
 
@@ -463,6 +541,10 @@
     align-items: baseline;
     gap: var(--space-2);
     min-width: 0;
+  }
+  .f-send {
+    display: grid;
+    gap: var(--space-2);
   }
   .f-state.busy {
     display: flex;

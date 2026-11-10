@@ -33,7 +33,7 @@
   import IntervalPlot from './IntervalPlot.svelte';
   import { along, compareHint, COMPARE_MIN, finished, intervalScale, overlaps, ranks, scaleTicks, toggleSelection } from './leaderboard';
   import ScoreAxes from './ScoreAxes.svelte';
-  import { contestantFacts, costFacts, coverageFacts, entryStatus, partialWhy, progressFacts, progressShare, scoreText } from './words';
+  import { contestantFacts, costFacts, coverageFacts, entryStatus, partialWhy, progressFacts, progressShare, scoreText, SPEED_HELP } from './words';
 
   let {
     bench,
@@ -66,7 +66,9 @@
   const ci = (e: BenchEntry) => e.ci95 ?? undefined;
   const scale = $derived(intervalScale(entries.filter(finished).map((e) => ({ id: e.id, ci: e.ci95 }))));
   const domain = $derived(scale?.domain ?? null);
-  const ticks = $derived(domain ? scaleTicks(domain) : []);
+  // The ticks for the plot's width as drawn (it narrows with its column): labels never closer than TICK_GAP.
+  let plotWidth = $state(0);
+  const ticks = $derived(domain ? scaleTicks(domain, plotWidth) : []);
   const leader = $derived(entries.find(finished));
   const band = $derived(leader ? (ci(leader) ?? null) : null);
   // Phones: picking entries to compare is a mode of the list (its header's Select), as on Runs.
@@ -140,7 +142,7 @@
               </span>
             </th>
             <th class="hide-md ran">Graded on</th>
-            <th class="r hide-lg cost">Speed · cost</th>
+            <th class="r hide-lg cost"><span use:tooltip={`Speed: ms per image for a model. ${SPEED_HELP} Cost: what an agent's calls used.`}>Speed · cost</span></th>
             <th class="act"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
@@ -201,7 +203,7 @@
               {/if}
               <td class="hide-md ran">{@render coverage(e)}</td>
               <td class="r hide-lg cost">
-                {#if cost && done}<span class="num">{cost.value}</span><span class="sub">{cost.sub}</span>{:else if e.contestant.kind === 'external' && done}<NoValue label="not measured for an external model" />{:else}<NoValue label="not yet" />{/if}
+                {#if cost && done}<span class="num" use:tooltip={e.speed ? SPEED_HELP : null}>{cost.value}</span><span class="sub">{cost.sub}</span>{:else if e.contestant.kind === 'external' && done}<NoValue label="not measured for an external model" />{:else}<NoValue label="not yet" />{/if}
               </td>
               <td class="act" onclick={(ev) => ev.stopPropagation()}>
                 <Menu label="Actions for {e.name}" items={items(e)} variant="ghost" fixed />
@@ -217,7 +219,7 @@
               <td class="map">
                 <span class="map-cell">
                   <span></span>
-                  <span class="ticks">{#each ticks as t (t)}<span class="tk num" style:left="{(along(domain, t) * 100).toFixed(2)}%">{t.toFixed(2)}</span>{/each}</span>
+                  <span class="ticks" bind:clientWidth={plotWidth}>{#each ticks as t (t)}<span class="tk num" style:left="{(along(domain, t) * 100).toFixed(2)}%">{t.toFixed(2)}</span>{/each}</span>
                 </span>
               </td>
               <td class="hide-md ran"></td><td class="hide-lg cost"></td><td class="act"></td>

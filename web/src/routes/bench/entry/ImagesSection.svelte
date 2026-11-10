@@ -23,6 +23,7 @@
   import Panel from '$lib/ui/Panel.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
+  import { dominantAspect } from '$lib/ui/TileGrid.svelte';
   import MatchView, { type Outcome } from './MatchView.svelte';
   import { imagesText } from '../words';
 
@@ -75,7 +76,12 @@
     const found = im.image.boxes.length - im.missed;
     return { found, missed: im.missed, wrong: im.wrong, boxes: im.image.boxes.length };
   }
-  const ratio = $derived(images[0] ? `${images[0].image.width} / ${images[0].image.height}` : '4 / 3');
+  /**
+   * The tiles' shape: the commonest among the images loaded (within 3:4 to 16:9), as a dataset's gallery has it, so a
+   * row of tiles lines up whatever each photo is; an image of another shape is shown whole on the tile's well, its
+   * boxes on it (./MatchView). Never the first image's: a portrait photo first made every tile a tall box.
+   */
+  const ratio = $derived(images.length ? dominantAspect(images.map((im) => im.image)) : 4 / 3);
 
   // ---- the large view ----
   let open = $state<number | null>(null);
@@ -196,7 +202,9 @@
   {#if shown}
     {@const c = counts(shown)}
     <div class="v-body">
-      <div class="v-img" style:aspect-ratio="{shown.image.width} / {shown.image.height}">
+      <!-- The image at its own shape, as large as the column and 64% of the viewport's height allow: a portrait photo
+           takes the width that height gives it, centred, never between bands of the well. -->
+      <div class="v-img" style:aspect-ratio="{shown.image.width} / {shown.image.height}" style:--ar={shown.image.width / shown.image.height}>
         <MatchView src={fullUrl} width={shown.image.width} height={shown.image.height} truth={shown.image.boxes} detections={shown.detections} classes={bench.classes} full {active} alt={shown.image.file} />
       </div>
       <div class="v-side">
@@ -337,8 +345,7 @@
     align-items: start;
   }
   .v-img {
-    width: 100%;
-    max-height: 64dvh;
+    width: min(100%, calc(64dvh * var(--ar)));
     margin: 0 auto;
     border-radius: var(--radius-md);
     overflow: hidden;

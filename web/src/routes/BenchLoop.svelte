@@ -48,7 +48,7 @@
   import { generationDomain, generationPoints } from './bench/charts';
   import { cannotBench } from './bench/support';
   import Unsupported from './bench/Unsupported.svelte';
-  import { intervalText, LOOP_CAVEAT, LOOP_STEPS, loopQuestion, loopStatus, loopVerdictText, scoreText, VERDICT } from './bench/words';
+  import { intervalText, labelsLine, LOOP_CAVEAT, loopQuestion, loopStatus, loopSteps, loopVerdictText, progressFacts, scoreText, VERDICT } from './bench/words';
 
   const id = $derived(router.route.params.id ?? '');
   const loopId = $derived(router.route.params.loopId ?? '');
@@ -58,6 +58,7 @@
   const datasets = new Resource((s) => hub.api.datasets(s));
   const jobs = new Resource((s) => hub.api.labelJobs(s));
   const runs = new Resource((s) => hub.api.runs(s));
+  const catalog = new Resource((s) => hub.api.benchCatalog(s));
   const live = new LiveBench(() => id || null);
   const bench = $derived(live.bench);
   const loop = $derived(live.loops.find((l) => l.id === loopId));
@@ -90,15 +91,12 @@
   const genWord = (g: number) => (g === 0 ? 'Teacher' : `Gen ${g}`);
   const genAt = (g: number) => loop?.generations.find((x) => x.generation === g);
 
-  // ---- running: the step the current generation is on ----
+  // ---- running: the steps of the generation it is on, each done only once what it makes is there (./bench/words) ----
   const current = $derived(loop && isLoopActive(loop) ? loop.generations.at(-1) : undefined);
-  const stepState = (phase: string) => {
-    if (!loop?.phase) return 'todo';
-    const order = LOOP_STEPS.map((s) => s.phase);
-    const at = order.indexOf(loop.phase);
-    const i = order.indexOf(phase as (typeof order)[number]);
-    return i < at ? 'done' : i === at ? 'now' : 'todo';
-  };
+  const now = $derived(loop ? loopSteps(loop) : null);
+  const nowPhase = $derived(now?.steps.find((s) => s.state === 'now')?.phase ?? null);
+  /** Nothing graded yet (generation 0 still benchmarking): the chart says so instead of standing empty. */
+  const graded = $derived(!!loop?.generations.some((g) => g.map50_95 !== null));
 
   // ---- stop, delete ----
   let stopping = $state(false);
@@ -145,13 +143,18 @@
     if (isLoopActive(l) && l.status !== 'stopping') out.push({ id: 'bench-loop-stop', label: `Stop loop ${l.name}`, icon: Square, run: () => (stopping = true) });
     return out;
   });
-  const STEP_DONE = 'done';
+  /** The entry of the generation being graded, for where it is ("Waiting for the GPU", "Haze, severity 3 · 54%"). */
+  const nowEntry = $derived(current?.entry_id ? live.entries.find((e) => e.id === current.entry_id) : undefined);
+  /** Why a generation has no labels or model while the loop no longer runs. */
+  const ended = $derived(loop ? (loop.status === 'failed' ? 'failed' : loop.status === 'stopped' ? 'stopped' : null) : null);
 </script>
 
 {#snippet caveatWord()}What it does not show{/snippet}
 
 {#snippet readout(c: number | null, hint: string | null)}
   {#if hint}<span class="hint">{hint}</span>
+  {:else if c === null && !graded}
+    <span class="hint">No generation graded yet: the first point is the teacher’s, once its benchmark entry is done.</span>
   {:else if c === null}
     <span class="key"><i class="dot" aria-hidden="true"></i>mAP50-95 per generation, with its 95% interval</span>
     {#if first?.ci95}<span class="key gap"><i class="bandk" aria-hidden="true"></i>the first teacher’s interval</span>{/if}
@@ -161,7 +164,7 @@
     {#if g?.map50_95 != null}
       <span class="v">mAP50-95 {metric(g.map50_95)}</span>{#if g.ci95}<span class="sep">·</span><span>{intervalText(g.ci95)}</span>{/if}{#if g.score !== null}<span class="sep">·</span><span>score {scoreText(g.score)}</span>{/if}
     {:else}
-      <span>{g ? 'not benchmarked yet' : 'to come'}</span>
+      <span>{g ? 'not benchmarked yet' : ended ? 'not run' : 'to come'}</span>
     {/if}
   {/if}
 {/snippet}
@@ -170,11 +173,13 @@
   {#if g.generation === 0}
     <span class="faint">Its own training labels</span>
   {:else if g.labels}
-    <Meta>
-      <span>{num(g.labels.boxes)} boxes on {num(g.labels.labeled_images)} of {num(g.labels.images)} images</span>
-      <span>from confidence {conf(g.labels.threshold)}</span>
-      {#if g.labels.excluded}<span>{num(g.labels.excluded)} left out: in the benchmark</span>{/if}
-    </Meta>
+    <!-- One plain line, so a generation that kept little is seen at a glance; a thin one says so in the warning ink. -->
+    {@const ln = labelsLine(g.labels)}
+    <span class="ln" class:thin={ln.thin}>{#if ln.thin}<TriangleAlert size={13} strokeWidth={1.75} aria-hidden="true" />{/if}<span><span class="cap-first">{ln.text}</span>{#if ln.thin}<span class="sr-only">: a thin dataset</span>{/if}</span></span>
+  {:else if ended && g === loop?.generations.at(-1)}
+    <span class="faint">None: the loop {ended} here</span>
+  {:else if current === g && nowPhase === 'labeling'}
+    <NoValue label="being labeled now" />
   {:else}
     <NoValue label="not labeled yet" />
   {/if}
@@ -230,7 +235,7 @@
 
     {#if loop.status === 'failed'}
       <Callout tone="danger" icon={TriangleAlert} title="It failed at generation {loop.generations.at(-1)?.generation ?? 0}" role="alert">
-        <CodeText text={sentence(loop.error ?? 'The loop failed.')} />{#if loop.hint}{' '}<CodeText text={loop.hint} />{/if}
+        <CodeText text={sentence(loop.error ?? 'The loop failed.')} />{#if loop.hint}{' '}<CodeText text={sentence(loop.hint)} />{/if}
       </Callout>
     {:else if loop.status === 'stopped'}
       <Callout tone="neutral" icon={CircleSlash} title="Stopped at generation {loop.generations.at(-1)?.generation ?? 0}" role="note">
@@ -268,22 +273,26 @@
       </Panel>
 
       <div class="side">
-        {#if current}
+        {#if current && now}
+          <!-- Generation 0 is one step (the benchmark grades the first teacher); a student's generation three. A step
+               reads done only once what it makes is in the generation (./bench/words loopSteps). -->
           <Panel title="Now" meta="generation {current.generation} of {planned}">
             <ol class="steps" aria-label="The steps of generation {current.generation}">
-              {#each LOOP_STEPS as s (s.phase)}
-                {@const st = current.generation === 0 ? (s.phase === 'benchmarking' ? 'now' : STEP_DONE) : stepState(s.phase)}
-                <li class={st}>
-                  <span class="mark" aria-hidden="true">{#if st === 'done'}<Check size={12} strokeWidth={2} />{/if}</span>
-                  <span class="s-name">{current.generation === 0 && s.phase === 'benchmarking' ? 'Benchmark grades the teacher' : s.name}</span>
-                  <span class="s-state">{st === 'done' ? 'done' : st === 'now' ? (loop.status === 'stopping' ? 'stopping' : 'now') : 'next'}</span>
+              {#each now.steps as s (s.phase)}
+                <li class={s.state}>
+                  <span class="mark" aria-hidden="true">{#if s.state === 'done'}<Check size={12} strokeWidth={2} />{/if}</span>
+                  <span class="s-name">{s.name}</span>
+                  <span class="s-state">{s.state === 'done' ? 'done' : s.state === 'now' ? (loop.status === 'stopping' ? 'stopping' : 'now') : 'next'}</span>
                 </li>
               {/each}
             </ol>
             <p class="now-links">
-              {#if loop.phase === 'training' && current.run_id}Training run: {#if known(runs.data, current.run_id)}<a class="link" href={href(`/runs/${current.run_id}`)}>{loop.name} gen {current.generation}</a>{:else}<Ident value={current.run_id} />{/if}.{/if}
-              {#if loop.phase === 'benchmarking' && current.entry_id && entryKnown(current.entry_id)}Its entry: <a class="link" href={href(`/benchmarks/${bench.id}/entries/${current.entry_id}`)}>{current.model_name ?? 'open'}</a>.{/if}
-              {#if loop.phase === 'labeling'}The teacher labels the pool by itself; nothing it labels is checked against truth.{/if}
+              {#if nowPhase === 'training'}{#if current.run_id}Training run: {#if known(runs.data, current.run_id)}<a class="link" href={href(`/runs/${current.run_id}`)}>{loop.name} gen {current.generation}</a>{:else}<Ident value={current.run_id} />{/if}.{:else}Its training run is being made.{/if}{/if}
+              {#if nowPhase === 'benchmarking' && current.entry_id && nowEntry}
+                {@const p = progressFacts(nowEntry, catalog.data)}
+                Its entry: <a class="link" href={href(`/benchmarks/${bench.id}/entries/${current.entry_id}`)}>{nowEntry.name}</a>, {(p.where[0] ?? '').toLowerCase() + p.where.slice(1)}{#if p.pct && nowEntry.status === 'running'}{' '}· <span class="num">{p.pct}</span>{/if}.
+              {/if}
+              {#if nowPhase === 'labeling'}The teacher labels the pool by itself; nothing it labels is checked against truth.{/if}
             </p>
           </Panel>
         {/if}
@@ -313,7 +322,7 @@
               <th class="hide-sm">Labels it trained on</th>
               <th class="hide-md w-ds">Dataset · run</th>
               <th class="r hide-sm w-score">Score</th>
-              <th class="r w-map">mAP50-95<span class="ci-h"> · interval</span></th>
+              <th class="r w-map">mAP50-95<span class="ci-h">{' · interval'}</span></th>
             </tr>
           </thead>
           <tbody>
@@ -321,14 +330,21 @@
               {@const g = genAt(k)}
               <tr class:future={!g}>
                 <td class="lead num">{k === 0 ? 'Teacher' : `Gen ${k}`}</td>
-                <td>
+                <td class="mdl">
                   {#if g?.model_name}
                     {#if g.entry_id && entryKnown(g.entry_id)}<a class="link" href={href(`/benchmarks/${bench.id}/entries/${g.entry_id}`)}>{g.model_name}</a>{:else}{g.model_name}{/if}
                     {#if g.model_id && known(models.data, g.model_id)}<span class="sub"><a class="quiet" href={href(`/models/${g.model_id}`)}>model</a></span>{/if}
+                  {:else if g && ended}
+                    <span class="faint">Not trained</span>
                   {:else if g}
-                    <NoValue label="training" />
+                    <NoValue label={current === g && nowPhase === 'training' ? 'training now' : 'trains once labeled'} />
                   {:else}
-                    <span class="faint">to come</span>
+                    <span class="faint">{ended ? 'Not run' : 'to come'}</span>
+                  {/if}
+                  {#if g?.labels}
+                    <!-- Phones, where the labels column steps out: the same one line under the model. -->
+                    {@const ln = labelsLine(g.labels)}
+                    <span class="sub ph-lbl" class:thin={ln.thin}><span class="cap-first">{ln.text}</span></span>
                   {/if}
                 </td>
                 <td class="hide-sm lbl">{#if g}{@render labelsCell(g)}{:else}<span class="faint">—</span>{/if}</td>
@@ -505,6 +521,30 @@
     font-size: var(--type-sm-size);
     color: var(--text-secondary);
   }
+  .ln {
+    display: inline-flex;
+    gap: 6px;
+    align-items: baseline;
+  }
+  .ln :global(svg) {
+    flex-shrink: 0;
+    align-self: center;
+    color: var(--warning-solid);
+  }
+  .ln.thin {
+    color: var(--text-primary);
+  }
+  .cap-first {
+    display: inline-block;
+  }
+  .cap-first::first-letter {
+    text-transform: uppercase;
+  }
+  /* A student's name is long ("shapes-n-best loop gen 1-best"): it wraps, at its spaces and hyphens, never cut. */
+  .gens .mdl {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
   .gens tr.future td {
     color: var(--text-tertiary);
   }
@@ -548,6 +588,19 @@
     .top,
     .sk-grid {
       grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .ph-lbl {
+    display: none;
+  }
+  @media (max-width: 767px) {
+    .ph-lbl {
+      display: block;
+      white-space: normal;
+      color: var(--text-secondary);
+    }
+    .ph-lbl.thin {
+      color: var(--warning-text);
     }
   }
   @media (max-width: 767px) {

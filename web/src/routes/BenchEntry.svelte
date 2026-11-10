@@ -57,7 +57,8 @@
   import { modelLabel } from './label/words';
   import { cannotBench } from './bench/support';
   import Unsupported from './bench/Unsupported.svelte';
-  import { axisWhyNot, costFacts, coverageFacts, entryStatus, scoreText, teacherEligibility } from './bench/words';
+  import { tooltip } from '$lib/ui/tooltip';
+  import { axisWhyNot, costFacts, coverageFacts, entryStatus, scoreText, SPEED_HELP, teacherEligibility } from './bench/words';
 
   const id = $derived(router.route.params.id ?? '');
   const entryId = $derived(router.route.params.entryId ?? '');
@@ -198,7 +199,7 @@
     <dl class="facts">
       <div><dt>Images</dt><dd class="num">{num(e.images)} of {num(bench?.images ?? e.images)}</dd></div>
       <div><dt>Conditions</dt><dd>{!bench?.plan.conditions.length ? 'None in the plan' : e.conditions ? `All ${bench.plan.conditions.length} of the plan` : 'Unchanged images only'}</dd></div>
-      <div><dt>Got through</dt><dd class="num">{num(e.progress.done)} of {num(e.progress.total)} image passes</dd></div>
+      <div><dt>Got through</dt><dd class="num">{num(e.progress.done)} of {num(e.progress.total)} {e.contestant.kind === 'external' ? 'records' : 'image passes'}</dd></div>
       {#if e.usage}<div><dt>Calls</dt><dd class="num">{num(e.usage.calls)}{#if e.usage.cost_usd !== null}{' '}· {usd(e.usage.cost_usd)}{/if}</dd></div>{/if}
       <div><dt>Added</dt><dd title={date(e.created)}>{ago(e.created)}</dd></div>
       {#if e.finished}<div><dt>Ended</dt><dd title={date(e.finished)}>{ago(e.finished)}</dd></div>{/if}
@@ -244,7 +245,10 @@
         <span><StatusBadge plain state={entryStatus(entry)} /></span>
         {@render who(entry)}
         {#each f as x (x)}<span>{x}</span>{/each}
-        {#if cost && done}<span class="num" title={cost.sub}>{cost.value}{entry.speed ? ' per image' : ''}</span>{/if}
+        {#if cost && done}
+          <!-- A model's speed is a throughput ("ms per image", in batches), never called latency; its tooltip says so. -->
+          {#if entry.speed}<span class="num" use:tooltip={`${entry.speed.device}: ${SPEED_HELP}`}>{cost.value} per image</span>{:else}<span class="num" title={cost.sub}>{cost.value}</span>{/if}
+        {/if}
         <span class="faint" title={date(entry.created)}>added {ago(entry.created)}</span>
       </Meta>
     {/snippet}
