@@ -872,8 +872,10 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   One part at a time per upload.
 - `GET /api/uploads/{id}` → `Upload` (where to continue after a failure).
 - `POST /api/uploads/{id}/complete` → `201 { "dataset": Dataset }` (with `stats`) or `201 { "model": Model }`.
-  `409 upload_conflict` when the stream ends inside a file; `422 invalid_upload` / `invalid_weights` /
-  `unknown_format` / `invalid_dataset` when the content is not usable (the session is dropped, with its files).
+  A dataset's archive is whole once its end-of-archive marker has arrived: completing it earlier (inside a file,
+  or between files) is `409 upload_conflict`, and the session stays open for the rest. Content that is not usable
+  drops the session with its files: `422 invalid_upload` / `invalid_weights`, or what registering the dataset
+  answers (`400 unknown_format` / `invalid_dataset`).
 - `DELETE /api/uploads/{id}` → `204` (drops the session and what it received).
 
 ```jsonc
@@ -885,10 +887,12 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
 ```
 - **Datasets** (`kind: dataset`): the stream is a tar archive (ustar; GNU and pax long names are read) of the
   dataset's folder, as `POST /api/datasets` would read it from disk: a `data.yaml` with `images/` and `labels/`,
-  or `annotations/instances_*.json` with the images. It is unpacked as it arrives into `<data dir>/datasets/<name>`
-  (the name lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registered on `complete`, with `format`
-  (default `auto`). Only regular files and directories with relative paths inside the folder are accepted:
-  absolute paths, `..`, links and devices are `422 invalid_upload`, and so is a stream that is not a tar archive.
+  or `annotations/instances_*.json` with the images. It is unpacked as it arrives (a part is answered once its
+  bytes are on disk, so memory stays at about one part) and, on `complete`, moved to `<data dir>/datasets/<name>`
+  (the name lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registered with `format` (default
+  `auto`). Only regular files and directories with relative paths inside the folder are accepted: absolute paths,
+  `..`, links and devices are `422 invalid_upload` on the part that carries them, and so is a stream that is not a
+  tar archive; the session is then dropped.
   FOLO itself sends datasets in a canonical YOLO layout (docs/CLOUD.md, *Dataset*).
 - **Models** (`kind: model`): the stream is one `.folo` file, stored as `<data dir>/models/<name>.folo` (the name
   reduced as for exports, `-2`, ... when taken) and listed like any file there. `422 invalid_weights` when its
@@ -1006,8 +1010,10 @@ mostly shown) for the others.
   has there and its cursors) and `cloud.lock`, which the process that follows the run holds locked (the file
   stays). `cloud/.lock` is held across every change of `connections.json` and of a ledger record, so a server and
   `folo cloud` on one data dir never lose each other's changes.
-- `uploads/<id>/`: the files of upload sessions in progress, removed when a session completes, is deleted or
-  expires, and on start.
+- `uploads/<id>/`: the files of upload sessions in progress (a dataset is unpacked here and moved to
+  `datasets/<name>/` when it completes, so a crash never leaves half a dataset there), removed when a session
+  completes, is deleted or expires, and on start. `uploads.json`: the fingerprints of finished uploads with the
+  dataset or model each became, so the same content is not sent twice.
 
 ## Validation
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →

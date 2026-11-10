@@ -75,16 +75,22 @@ pub enum ComputeField {
 }
 
 /// The offer New run preselects: the cheapest one that can start now with at least `need` bytes of
-/// GPU memory; without an estimate, or when none is that large, the cheapest one that can start.
+/// GPU memory, or, without an estimate, the cheapest that can start. When none is that large, the
+/// one with the most memory (the cheapest of those), so the "won't fit" warning stands against the
+/// nearest miss.
 pub fn pick_offer(offers: &[CloudOffer], need: Option<u64>) -> Option<&CloudOffer> {
+    let open = || offers.iter().filter(|o| o.availability != CloudAvailability::None);
     // Compute that isn't billed (a server of yours) is the cheapest there is.
     let cheapest = |fits: &dyn Fn(&CloudOffer) -> bool| {
-        offers
-            .iter()
-            .filter(|o| o.availability != CloudAvailability::None && fits(o))
+        open()
+            .filter(|o| fits(o))
             .min_by(|a, b| a.price_per_hour.unwrap_or(0.).total_cmp(&b.price_per_hour.unwrap_or(0.)))
     };
-    need.and_then(|n| cheapest(&|o| o.vram_bytes >= n)).or_else(|| cheapest(&|_| true))
+    let Some(need) = need else { return cheapest(&|_| true) };
+    cheapest(&|o| o.vram_bytes >= need).or_else(|| {
+        let most = open().map(|o| o.vram_bytes).max()?;
+        cheapest(&|o| o.vram_bytes == most)
+    })
 }
 
 /// Stop after's default: the high end of the time estimate × 1.5 plus half an hour, rounded up to
@@ -627,8 +633,8 @@ mod tests {
         // 20 GiB needed: the 16 GiB card is out, the cheaper 4090 has none in stock.
         assert_eq!(pick(Some(20 << 30)), Some("3090"));
         assert_eq!(pick(Some(40 << 30)), Some("a100"));
-        // More than any offer has: still the cheapest that can start (the form warns).
-        assert_eq!(pick(Some(200 << 30)), Some("a4000"));
+        // More than any offer has: the largest that can start, the nearest miss (the form warns).
+        assert_eq!(pick(Some(200 << 30)), Some("a100"));
         // A server's own GPU has no price: it is the cheapest.
         let own = vec![offer("own", 16, None, A::Unknown), offer("4090", 24, Some(0.69), A::High)];
         assert_eq!(pick_offer(&own, None).map(|o| o.id.as_str()), Some("own"));
