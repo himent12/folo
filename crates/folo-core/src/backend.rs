@@ -576,6 +576,22 @@ pub trait Backend: Send + Sync + 'static {
         unsupported!(self, "unscale_check_many")
     }
 
+    /// Global-norm clipping's reductions over many `F32` tensors (each dense from element 0): one partial per 256
+    /// elements of each tensor, in order (`sum of ceil(numel / 256)` of them, `F32`), each the largest `|x|`
+    /// (NaN propagating) or the sum of `((x * h) * h)^2` over those elements, reduced in a fixed order. `h` is a
+    /// one-element `F32` view, required for [`NormReduce::ScaledSquares`]. The caller reduces the partials.
+    /// Reached through `Tensor::norm_partials_many`.
+    fn norm_partials_many(&self, xs: &[View<'_>], op: NormReduce, h: Option<View<'_>>) -> Result<Storage> {
+        unsupported!(self, "norm_partials_many")
+    }
+
+    /// `x = (x * f1) * f2` in place over the first `ns[i]` `F32` elements of each `xs[i]`, with one-element `F32`
+    /// factors on the device: the roundings of `x *= f1` then `x *= f2`, in as few kernels as the backend can.
+    /// Reached through `Tensor::scale_many_`.
+    fn scale_many(&self, xs: &mut [&mut Storage], ns: &[usize], f1: View<'_>, f2: View<'_>) -> Result<()> {
+        unsupported!(self, "scale_many")
+    }
+
     // ----- Detector pre- and post-processing (optional; callers fall back to host code) -----
 
     /// Letterbox `U8` RGB images (`images[i]` is `[H_i, W_i, 3]`) onto one `[B, 3, OH, OW]` canvas of `dtype`
@@ -690,6 +706,16 @@ pub enum OptimStep {
         /// Weight of the new value.
         b: f32,
     },
+}
+
+/// What [`Backend::norm_partials_many`] reduces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum NormReduce {
+    /// The largest `|x|`, NaN propagating.
+    AbsMax,
+    /// The sum of `((x * h) * h)^2`.
+    ScaledSquares,
 }
 
 /// One parameter of [`Backend::optimizer_step_many`]: the arguments of one [`Backend::optimizer_step`] call.

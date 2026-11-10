@@ -679,6 +679,136 @@ fn running_stats_all_finite_on_gpu() {
 
 /// Finite gradients whose squares (1e20) or norm (near f32::MAX) overflow `f32` still get the CPU's (`f64`) clip on
 /// the device: clipped to the norm, not zeroed or left alone.
+/// Global-norm clipping's multi-tensor kernels (`Tensor::norm_partials_many`, `scale_many_`) against the tensor ops
+/// they replace in `GradAccumulator::clip_grad_norm_device`, over more tensors than one dispatch takes and sizes
+/// around the workgroup: the largest magnitude (NaN propagating) and the two-factor scaling bit for bit; the sum of
+/// squares in another order, so both it and the per-tensor `sum_all`s are checked against an f64 sum of the same
+/// f32 terms `((x * h) * h)^2`. The terms are non-negative, so a sum whose every term passes through at most `d`
+/// additions has a relative error of at most `d * 2^-24`; the new path's `d` is 8 (the tree over 256 elements)
+/// plus the final `sum_all` over its partials (at most `p / 256 + 8` for `p` partials).
+#[test]
+fn clip_reductions_match_tensor_ops() {
+    use folo_core::backend::NormReduce;
+    let dev = gpu!();
+    let _g = no_grad();
+    let rng = &mut Rng::seed(43);
+    let sizes: Vec<usize> = (0..37).map(|i| [1, 255, 256, 257, 1000, 3, 40_000][i % 7] + i).collect();
+    let xs: Vec<Tensor> = sizes
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| Tensor::randn([n], 0.0, [1e-3, 1.0, 50.0][i % 3], rng).to_device(dev).unwrap())
+        .collect();
+    let refs: Vec<&Tensor> = xs.iter().collect();
+    let cat = |v: Vec<Tensor>| Tensor::cat(&v.iter().collect::<Vec<_>>(), 0).unwrap();
+    // The largest magnitude, bit for bit.
+    let peak =
+        Tensor::norm_partials_many(&refs, NormReduce::AbsMax, None).unwrap().unwrap().max_all().unwrap();
+    let old = cat(xs.iter().map(|b| b.abs().unwrap().max_all().unwrap().reshape([1]).unwrap()).collect())
+        .max_all()
+        .unwrap();
+    assert_eq!(peak.to_vec::<f32>().unwrap(), old.to_vec::<f32>().unwrap(), "peak");
+    // The sum of the scaled squares, against f64 sums of the same f32 terms.
+    let h = peak.sqrt().unwrap().recip().unwrap();
+    let parts = Tensor::norm_partials_many(&refs, NormReduce::ScaledSquares, Some(&h)).unwrap().unwrap();
+    let p = parts.numel();
+    assert_eq!(p, sizes.iter().map(|n| n.div_ceil(256)).sum::<usize>());
+    let new = parts.sum_all().unwrap().item::<f32>().unwrap() as f64;
+    let old = cat(xs
+        .iter()
+        .map(|b| {
+            b.mul(&h).unwrap().mul(&h).unwrap().square().unwrap().sum_all().unwrap().reshape([1]).unwrap()
+        })
+        .collect())
+    .sum_all()
+    .unwrap()
+    .item::<f32>()
+    .unwrap() as f64;
+    let hv = h.item::<f32>().unwrap();
+    let exact: f64 = xs
+        .iter()
+        .flat_map(|x| x.to_vec::<f32>().unwrap())
+        .map(|x| {
+            let t = (x * hv) * hv;
+            (t * t) as f64
+        })
+        .sum();
+    let bound = (16 + p.div_ceil(256)) as f64 * f64::powi(2.0, -24) * exact;
+    assert!((new - exact).abs() <= bound, "new sum {new} vs {exact} (bound {bound})");
+    assert!((old - exact).abs() <= 4.0 * bound, "old sum {old} vs {exact}");
+    // A NaN propagates through the maximum, as through `max_all`.
+    let nan = Tensor::from_vec(vec![1.0f32, f32::NAN, -3.0], [3]).unwrap().to_device(dev).unwrap();
+    let parts = Tensor::norm_partials_many(&[&nan, &xs[0]], NormReduce::AbsMax, None).unwrap().unwrap();
+    let want = cat(vec![nan.abs().unwrap().max_all().unwrap().reshape([1]).unwrap(), xs[0].abs().unwrap()])
+        .max_all()
+        .unwrap();
+    let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&parts.max_all().unwrap()), bits(&want), "NaN peak");
+    // The two-factor scale, bit for bit with `x *= f1; x *= f2`.
+    let f1 = Tensor::from_vec(vec![0.37f32], [1]).unwrap().to_device(dev).unwrap();
+    let f2 = Tensor::from_vec(vec![1.9f32], [1]).unwrap().to_device(dev).unwrap();
+    let (a, b): (Vec<Tensor>, Vec<Tensor>) =
+        xs.iter().map(|x| (x.mul_scalar(1.0).unwrap(), x.mul_scalar(1.0).unwrap())).unzip();
+    for x in &a {
+        x.mul_assign(&f1).unwrap();
+        x.mul_assign(&f2).unwrap();
+    }
+    assert!(Tensor::scale_many_(&b.iter().collect::<Vec<_>>(), &f1, &f2).unwrap());
+    for (i, (x, y)) in a.iter().zip(&b).enumerate() {
+        assert_eq!(x.to_vec::<f32>().unwrap(), y.to_vec::<f32>().unwrap(), "scaled tensor {i}");
+    }
+    // A factor that is also one of the tensors is refused (the caller then uses tensor ops).
+    assert!(!Tensor::scale_many_(&[&b[0], &f1], &f1, &f2).unwrap());
+}
+
+/// Device clipping below the threshold leaves every gradient bit for bit as it was (both factors are 1), and
+/// above it brings the global norm to `max_norm`, over more buffers than one multi-tensor dispatch takes.
+#[test]
+fn device_clip_over_many_buffers() {
+    let dev = gpu!();
+    let rng = &mut Rng::seed(44);
+    let params: Vec<Tensor> = (0..40)
+        .map(|i| Tensor::zeros([[3, 300, 1, 257][i % 4] + i]).to_device(dev).unwrap().requires_grad_())
+        .collect();
+    let gs: Vec<Tensor> = params
+        .iter()
+        .map(|p| Tensor::randn(p.shape().clone(), 0.0, 1.0, rng).to_device(dev).unwrap())
+        .collect();
+    let loss = |scale: f32| {
+        let terms: Vec<Tensor> = params
+            .iter()
+            .zip(&gs)
+            .map(|(p, g)| {
+                p.mul(&g.mul_scalar(scale).unwrap()).unwrap().sum_all().unwrap().reshape([1]).unwrap()
+            })
+            .collect();
+        Tensor::cat(&terms.iter().collect::<Vec<_>>(), 0).unwrap().sum_all().unwrap()
+    };
+    let norm = |acc: &GradAccumulator| {
+        params
+            .iter()
+            .map(|p| {
+                acc.grad(p).unwrap().to_vec::<f32>().unwrap().iter().map(|&x| (x as f64).powi(2)).sum::<f64>()
+            })
+            .sum::<f64>()
+            .sqrt()
+    };
+    for scale in [1e-3f32, 1.0] {
+        let mut acc = GradAccumulator::new(&params);
+        acc.add(&loss(scale).backward().unwrap()).unwrap();
+        let before: Vec<Vec<f32>> = params.iter().map(|p| acc.grad(p).unwrap().to_vec().unwrap()).collect();
+        let n0 = norm(&acc);
+        acc.clip_grad_norm(10.0).unwrap();
+        if n0 <= 10.0 {
+            for (p, b) in params.iter().zip(&before) {
+                assert_eq!(&acc.grad(p).unwrap().to_vec::<f32>().unwrap(), b, "unclipped gradient changed");
+            }
+        } else {
+            let n = norm(&acc);
+            assert!((n - 10.0).abs() < 1e-4, "clipped norm {n} (was {n0})");
+        }
+    }
+}
+
 #[test]
 fn device_clip_survives_huge_finite_gradients() {
     let dev = gpu!();
