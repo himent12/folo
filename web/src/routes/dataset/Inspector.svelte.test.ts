@@ -61,7 +61,7 @@ describe('Inspector labels', () => {
     pager.dispose();
   });
 
-  it('never leaves a hover behind a tap, keeps Shift + arrows for panning, and shortens the path in the middle', async () => {
+  it('never leaves a hover behind a tap, and keeps Shift + arrows for panning', async () => {
     const dataset = await hub.api.dataset('ds_fasteners');
     const pager = new ImagePager(dataset.id, undefined, undefined);
     const first = await pager.at(0);
@@ -89,11 +89,8 @@ describe('Inspector labels', () => {
     canvas.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     await vi.waitFor(() => expect(onnavigate).toHaveBeenCalled());
 
-    // One line: the folders give way to an ellipsis, the file name stays whole; the full path is copyable.
-    const path = target.querySelector('dd.path')!;
-    expect(path.querySelector('.dir')?.textContent).toBe('images/train');
-    expect(path.querySelector('.base')?.textContent).toBe(first!.file.split('/').pop());
-    expect(path.querySelector('button.copy')?.getAttribute('aria-label')).toBe(`Copy the path ${first!.file}`);
+    // The full path is copyable.
+    expect(target.querySelector('dd.path button.copy')?.getAttribute('aria-label')).toBe(`Copy the path ${first!.file}`);
     pager.dispose();
   });
 

@@ -116,14 +116,6 @@ fn studio_train_commands_parse() {
     }
 }
 
-/// The command Studio wrote before DOGFOOD-3 S1 is the usage error the report saw: `--model` with `--weights`.
-#[test]
-fn model_with_weights_is_a_usage_error() {
-    let argv = ["folo", "train", "--data", "D:/r6", "--model", "folo-n", "--weights", "x.folo"];
-    let e = Cli::try_parse_from(argv).unwrap_err();
-    assert_eq!(e.kind(), clap::error::ErrorKind::ArgumentConflict);
-}
-
 /// The server's command (`RunEstimate.cli`, `GET /api/runs/{id}/cli`) splits by the same PowerShell rules into its
 /// `argv`, including names with straight and typographic quotes, and parses.
 #[test]

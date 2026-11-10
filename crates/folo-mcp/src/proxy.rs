@@ -351,8 +351,16 @@ mod tests {
 
     #[test]
     fn unreachable_server_is_a_tool_error() {
-        // Port 9 (discard) is essentially never served on loopback.
-        let s = HttpStore::new("http://127.0.0.1:9", Some("s3cret"));
+        // A server that hangs up without an answer. (A closed port would do too, but on Windows a refused
+        // loopback connection takes 2 s.)
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                drop(conn);
+            }
+        });
+        let s = HttpStore::new(&url, Some("s3cret"));
         let e = s.list_datasets().unwrap_err();
         assert_eq!((e.status, e.body.code.as_str()), (StatusCode::BAD_GATEWAY, "server_unreachable"));
         assert!(e.body.hint.unwrap().contains("folo serve"));

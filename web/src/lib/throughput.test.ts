@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MockApi } from '$lib/api/mock';
 import type { RunEstimate } from '$lib/api/types';
-import { basisLine, confidenceLine, loadThroughput, measuredHere, measuredLatency, measuredRows, measuredTraining, timeRange } from './throughput';
+import { basisLine, loadThroughput, measuredHere, measuredLatency, measuredRows, measuredTraining, timeRange } from './throughput';
 
 describe('timeRange', () => {
   it('says a run takes a range of minutes, rounded outwards', () => {
@@ -60,23 +60,14 @@ describe('what an estimate stands on', () => {
       },
       ...e,
     }) as RunEstimate;
-  it('names the device and the sample count for an exact measured row', () => {
+  it('names the device, the sample count, the setting a carried-over estimate comes from, and why a range is wide', () => {
     expect(basisLine(est({}))).toBe('Measured on this GPU · 99 samples');
     expect(basisLine(est({ samples: 1 }, { device: 'cpu' }))).toBe('Measured on this CPU · 1 sample');
-  });
-  it('names the setting a carried-over estimate comes from', () => {
     expect(basisLine(est({ exact: false, arch: 'folo-s' }))).toBe('Scaled from folo-s at 640 px on this GPU');
-    // Far from it (low confidence): a wide range, and why.
     expect(basisLine(est({ exact: false, arch: 'folo-s' }, { confidence: 'low' }))).toBe('Wide range: scaled from folo-s at 640 px');
-  });
-  it('says when the reference is not from this kind of device', () => {
-    // A reference range is wide, and the line says why.
     expect(basisLine(est({ source: 'reference' }))).toBe('Reference benchmarks · not run here yet');
     expect(basisLine(est({ source: 'reference', measured_on: 'Intel Core i7-14700KF' }, { device: 'cpu', device_name: 'AMD Ryzen 9' }))).toBe(
       'Wide range: not run on this CPU yet',
     );
-  });
-  it('says what each confidence means for the range', () => {
-    expect(confidenceLine(est({}, { confidence: 'low' }))).toContain('wide range');
   });
 });

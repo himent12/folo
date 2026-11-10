@@ -241,12 +241,14 @@
       <Panel title="Connection" id="connection" divided>
         <div class="stack">
           <div class="status" data-mode={hub.mode}>
-            <!-- Demo data is a mode, not a degraded state: the sidebar's neutral flask, never the warning hue. -->
-            {#if hub.mode === 'mock'}<FlaskConical class="led-glyph" size={16} strokeWidth={1.75} aria-hidden="true" />{:else}<span class="led" aria-hidden="true"></span>{/if}
+            <!-- Demo data is a mode, not a degraded state: the sidebar's neutral flask, never the warning hue. A server
+                 that answers gets the mark and the word Settings > Cloud gives a working connection (a check in a
+                 circle, "Connected"), not a ringed dot and "Live". -->
+            {#if hub.mode === 'mock'}<FlaskConical class="led-glyph" size={16} strokeWidth={1.75} aria-hidden="true" />{:else if hub.mode === 'live'}<CircleCheck class="led-glyph ok" size={16} strokeWidth={1.75} aria-hidden="true" />{:else}<span class="led" aria-hidden="true"></span>{/if}
             <div class="status-text">
               {#if hub.mode === 'live'}
-                <p class="s-title">Live <span class="mono faint">folo serve {hub.version}</span></p>
-                <p class="s-desc">Connected to <span class="mono">{hub.serverUrl}</span>.</p>
+                <p class="s-title">Connected <span class="mono faint">folo serve {hub.version}</span></p>
+                <p class="s-desc"><span class="mono">{hub.serverUrl}</span></p>
               {:else if hub.mode === 'mock'}
                 <!-- What it means for the user, in one line; why (the address, the endpoint) is in Technical details. -->
                 <p class="s-title">Using demo data</p>
@@ -575,14 +577,13 @@
     border-radius: 50%;
     background: var(--text-tertiary);
   }
-  [data-mode='live'] .led {
-    background: var(--success-solid);
-    box-shadow: 0 0 0 3px var(--success-muted);
-  }
   .status :global(.led-glyph) {
     flex-shrink: 0;
     margin-top: 2px;
     color: var(--text-tertiary);
+  }
+  .status :global(.led-glyph.ok) {
+    color: var(--success-text);
   }
   .status-text {
     display: grid;

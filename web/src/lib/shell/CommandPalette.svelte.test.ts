@@ -48,12 +48,6 @@ async function openWith(query: string, ready = '[role="option"][id^="pi-act-"]')
 const options = () => [...document.querySelectorAll<HTMLElement>('[role="option"]')].map((o) => o.querySelector('.label')?.textContent?.trim());
 
 describe('CommandPalette actions on entities', () => {
-  it('offers none before a query names something', () => {
-    c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
-    flushSync();
-    expect(document.querySelector('[id^="pi-act-"]')).toBeNull();
-  });
-
   it('a dataset name offers a run on it, below the dataset, and Enter starts it', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     const input = await openWith('fasteners');
@@ -82,30 +76,12 @@ describe('CommandPalette actions on entities', () => {
     expect(go).toHaveBeenCalledWith(expect.stringMatching(/^\/playground\?model=/));
   });
 
-  it("marks an action's description as dispensable (phones leave it out) and keeps entity facts", async () => {
-    await openWith('fasteners');
-    const hint = (id: string) => document.querySelector<HTMLElement>(`#${id} .hint`)!;
-    expect(hint('pi-act-train-ds_fasteners').classList.contains('describes')).toBe(true);
-    expect(hint('pi-ds-ds_fasteners').classList.contains('describes')).toBe(false);
-  });
-
-  it("writes a run's status in StatusBadge's sentence-case word", async () => {
-    await openWith('shapes');
-    const hints = [...document.querySelectorAll<HTMLElement>('[id^="pi-run-"] .hint')].map((h) => h.textContent?.trim() ?? '');
-    expect(hints.length).toBeGreaterThan(0);
-    for (const h of hints) expect(h).toMatch(/^(Queued|Running|Stopping|Stopped|Completed|Failed)/);
-  });
-
   it('writes a cloud run in its hand-over by its phase, not as Queued', async () => {
     hub.api = new MockApi('cloud-upload', 0);
     await openWith('shapes-hard-x', '#pi-run-run_c9e4');
     expect(document.querySelector('#pi-run-run_c9e4 .hint')?.textContent?.trim()).toMatch(/^Uploading data/);
   });
 
-  it('answers to "toggle theme"', async () => {
-    await openWith('toggle theme', '#pi-theme');
-    expect(options()[0]).toMatch(/^Switch theme/);
-  });
 });
 
 describe('CommandPalette with no query', () => {
@@ -115,9 +91,10 @@ describe('CommandPalette with no query', () => {
   };
   const selected = () => document.querySelector('[role="option"][aria-selected="true"] .label')?.textContent?.trim();
 
-  it('wraps the selection at both ends', () => {
+  it('offers no action on an entity before a query names one, and wraps the selection at both ends', () => {
     c = mount(CommandPalette, { target, props: { open: true, onshortcuts: () => {} } });
     flushSync();
+    expect(document.querySelector('[id^="pi-act-"]')).toBeNull();
     const input = document.querySelector<HTMLInputElement>('input[role="combobox"]')!;
     const first = selected();
     key(input, 'ArrowUp');

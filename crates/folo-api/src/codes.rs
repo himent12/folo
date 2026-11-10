@@ -190,7 +190,8 @@ pub const CODES: &[Code] = &[
         "cloud_boot_failed",
         502,
         1,
-        "a cloud instance never served a usable worker (timed out, too old, no GPU adapter); Run.error_code",
+        "a cloud instance never served a usable worker (its setup failed or timed out, too old, no GPU adapter), or \
+         the worker cannot be downloaded (nothing is rented then); Run.error_code",
     ),
     c("cloud_sync_failed", 502, 1, "copying data to or from a cloud worker failed; Run.error_code"),
     c("cloud_instance_lost", 502, 1, "a cloud run's instance is gone before the run ended; Run.error_code"),

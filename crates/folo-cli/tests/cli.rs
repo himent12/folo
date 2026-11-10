@@ -56,6 +56,19 @@ fn doctor_json() {
     assert!(stderr.contains("amp "), "{stderr}");
     assert!(stderr.contains("cpu"), "human text goes to stderr in --json mode");
     assert!(stderr.contains("gpu"), "{stderr}");
+
+    // `--version` names the same build: folo 0.1.0 (1a2b3c4d5e6f 2026-11-07).
+    let (code, stdout, _) = folo(&["--version"]);
+    assert_eq!(code, 0);
+    let line = stdout.trim();
+    let rest = line.strip_prefix(&format!("folo {} (", env!("CARGO_PKG_VERSION"))).expect(line);
+    let (sha, date) = rest.strip_suffix(')').and_then(|r| r.split_once(' ')).expect(line);
+    assert!(sha == "unknown" || (sha.len() == 12 && sha.chars().all(|c| c.is_ascii_hexdigit())), "{line}");
+    let d: Vec<&str> = date.split('-').collect();
+    assert_eq!(d.iter().map(|p| p.len()).collect::<Vec<_>>(), [4, 2, 2], "{line}");
+    assert!(d.iter().all(|p| p.parse::<u32>().is_ok()), "{line}");
+    assert_eq!(v["git_sha"], sha);
+    assert_eq!(v["build_date"], date);
 }
 
 #[test]
@@ -63,8 +76,15 @@ fn doctor_reports_folo_wasm_in_the_web_dir() {
     let dir = TestDir::new("doctor-wasm");
     std::fs::create_dir_all(dir.join("folo-wasm")).unwrap();
     let report = || {
-        let (code, stdout, stderr) = folo(&["doctor", "--json", "--web-dir", dir.to_str().unwrap()]);
-        assert_eq!(code, 0, "{stderr}");
+        // No GPU probe (`webgpu` is the browser's backend): only the web folder matters here.
+        let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+            .args(["doctor", "--json", "--web-dir", dir.to_str().unwrap()])
+            .env("FOLO_GPU_BACKEND", "webgpu")
+            .output()
+            .unwrap();
+        let (stdout, stderr) =
+            (String::from_utf8(out.stdout).unwrap(), String::from_utf8(out.stderr).unwrap());
+        assert_eq!(out.status.code(), Some(0), "{stderr}");
         (json_lines(&stdout).remove(0), stderr)
     };
     let (v, stderr) = report();
@@ -104,14 +124,16 @@ fn stubs_exit_4_with_error_envelope() {
 
 #[test]
 fn missing_files_exit_3() {
-    for (args, code) in [
+    for (args, code, run) in [
         (&["train", "--data", "no/such/dataset", "--json"][..], "dataset_not_found"),
         (&["val", "--model", "no/such.folo", "--data", "d", "--json"], "model_not_found"),
         (&["predict", "--model", "no/such.folo", "a.jpg", "--json"], "model_not_found"),
         (&["export", "--model", "no/such.folo", "--json"], "model_not_found"),
         (&["train", "--resume", "no/such/last.folo", "--json"], "path_not_found"),
-    ] {
-        let (exit, stdout, stderr) = folo(args);
+    ]
+    .map(|(args, code)| (args, code, std::thread::spawn(move || folo(args))))
+    {
+        let (exit, stdout, stderr) = run.join().unwrap();
         assert_eq!(exit, 3, "{args:?}: {stderr}");
         assert_eq!(json_lines(&stdout).last().unwrap()["error"]["code"], code, "{args:?}");
     }
@@ -210,24 +232,6 @@ fn mcp_errors_stay_off_stdout_with_json() {
     assert_eq!(out.status.code(), Some(2), "{stderr}");
     assert!(out.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
     assert!(stderr.contains("--server"), "{stderr}");
-}
-
-#[test]
-fn version_has_sha_and_build_date() {
-    let (code, stdout, _) = folo(&["--version"]);
-    assert_eq!(code, 0);
-    // folo 0.1.0 (1a2b3c4d5e6f 2026-11-07)
-    let line = stdout.trim();
-    let rest = line.strip_prefix(&format!("folo {} (", env!("CARGO_PKG_VERSION"))).expect(line);
-    let (sha, date) = rest.strip_suffix(')').and_then(|r| r.split_once(' ')).expect(line);
-    assert!(sha == "unknown" || (sha.len() == 12 && sha.chars().all(|c| c.is_ascii_hexdigit())), "{line}");
-    let d: Vec<&str> = date.split('-').collect();
-    assert_eq!(d.iter().map(|p| p.len()).collect::<Vec<_>>(), [4, 2, 2], "{line}");
-    assert!(d.iter().all(|p| p.parse::<u32>().is_ok()), "{line}");
-    let (_, stdout, _) = folo(&["doctor", "--json"]);
-    let v = &json_lines(&stdout)[0];
-    assert_eq!(v["git_sha"], sha);
-    assert_eq!(v["build_date"], date);
 }
 
 #[test]

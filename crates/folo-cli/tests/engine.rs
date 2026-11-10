@@ -1,7 +1,9 @@
-//! `folo train / val / predict / export` end to end with `--json` on a tiny synthetic dataset.
+//! `folo train / val / predict / export` end to end with `--json` on a tiny synthetic dataset, and the pretrained
+//! weights plumbing (`export --format weights`, `weights list`, names in `--weights` / `--model`, `val --coco`).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use folo_data::ImageFormat;
 use folo_data::synthetic::{SyntheticConfig, write_yolo};
@@ -10,8 +12,16 @@ use serde_json::Value;
 
 /// Runs `folo` with `args`; engine commands get `--device cpu` (their `auto` would pick a GPU when there is one).
 fn folo(args: &[&str]) -> (i32, Vec<Value>, String) {
+    folo_with(args, None)
+}
+
+/// [`folo`] with `FOLO_WEIGHTS_DIR` (the `folo weights` cache) set to `cache`.
+fn folo_with(args: &[&str], cache: Option<&Path>) -> (i32, Vec<Value>, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_folo"));
     cmd.args(args);
+    if let Some(cache) = cache {
+        cmd.env("FOLO_WEIGHTS_DIR", cache);
+    }
     if matches!(args.first(), Some(&"train" | &"val" | &"predict")) && !args.contains(&"--device") {
         cmd.args(["--device", "cpu"]);
     }
@@ -28,8 +38,24 @@ fn s(p: &Path) -> &str {
     p.to_str().unwrap()
 }
 
-#[test]
-fn train_val_predict_export_with_json() {
+/// A 1-epoch run of `folo train --json` on a 12-image synthetic dataset (4 val images), trained once for the tests
+/// that run at the same time; its folder goes when the last of them lets go.
+struct TinyRun {
+    root: TestDir,
+    /// The dataset (YOLO, classes circle and square).
+    data: PathBuf,
+    /// The run folder.
+    run: PathBuf,
+    /// `folo train`'s exit code, records and stderr.
+    train: (i32, Vec<Value>, String),
+}
+
+fn tiny_run() -> Arc<TinyRun> {
+    static RUN: Mutex<Weak<TinyRun>> = Mutex::new(Weak::new());
+    let mut shared = RUN.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(run) = shared.upgrade() {
+        return run;
+    }
     let root = TestDir::new("cli-engine");
     let data = root.join("shapes");
     let cfg = SyntheticConfig {
@@ -43,9 +69,7 @@ fn train_val_predict_export_with_json() {
     };
     write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
     let project = root.join("runs");
-
-    // train: JSON lines, one record per event, a final `done` record.
-    let (code, lines, stderr) = folo(&[
+    let train = folo(&[
         "train",
         "--json",
         "--data",
@@ -55,7 +79,7 @@ fn train_val_predict_export_with_json() {
         "--batch",
         "4",
         "--epochs",
-        "2",
+        "1",
         "--workers",
         "2",
         "--close-mosaic",
@@ -65,20 +89,41 @@ fn train_val_predict_export_with_json() {
         "--name",
         "tiny",
     ]);
-    assert_eq!(code, 0, "{stderr}");
-    assert!(stderr.contains("epoch 2/2"), "epoch summaries go to stderr: {stderr}");
+    let run = Arc::new(TinyRun { run: project.join("tiny"), data, root, train });
+    *shared = Arc::downgrade(&run);
+    run
+}
+
+#[test]
+fn train_val_predict_export_with_json() {
+    let tiny = tiny_run();
+    let (root, data, run) = (&tiny.root, &tiny.data, &tiny.run);
+    let project = root.join("runs");
+    // A GPU this machine does not have, checked at the end: `folo train` looks at the GPUs first, which takes a
+    // while, so it runs alongside the rest.
+    let nogpu = {
+        let args = [s(data), s(&project)].map(String::from);
+        std::thread::spawn(move || {
+            let [data, project] = &args;
+            let args = ["--imgsz", "64", "--device", "gpu:7", "--project", project, "--name", "nogpu"];
+            folo(&[&["train", "--json", "--data", data][..], &args].concat())
+        })
+    };
+    // train: JSON lines, one record per event, a final `done` record.
+    let (code, lines, stderr) = &tiny.train;
+    assert_eq!(*code, 0, "{stderr}");
+    assert!(stderr.contains("epoch 1/1"), "epoch summaries go to stderr: {stderr}");
     let events: Vec<&str> = lines.iter().map(|l| l["event"].as_str().unwrap()).collect();
     assert_eq!(events.first(), Some(&"status"));
     assert_eq!(lines[0]["status"], "running");
-    assert_eq!(events.iter().filter(|e| **e == "epoch").count(), 2);
+    assert_eq!(events.iter().filter(|e| **e == "epoch").count(), 1);
     assert!(events.contains(&"step") && events.contains(&"log"));
     let done = lines.last().unwrap();
     assert_eq!(done["event"], "done");
     assert_eq!(done["status"], "completed");
-    assert_eq!(done["epochs_completed"], 2);
-    let run = project.join("tiny");
+    assert_eq!(done["epochs_completed"], 1);
     for f in
-        ["config.json", "metrics.jsonl", "weights/last.folo", "weights/best.folo", "samples/epoch_002.json"]
+        ["config.json", "metrics.jsonl", "weights/last.folo", "weights/best.folo", "samples/epoch_001.json"]
     {
         assert!(run.join(f).is_file(), "{f} missing");
     }
@@ -87,7 +132,7 @@ fn train_val_predict_export_with_json() {
     // JSON paths use `/` and floats carry no f32 -> f64 noise.
     assert!(!done["run_dir"].as_str().unwrap().contains('\\'), "{done}");
     assert!(!done["weights"]["best"].as_str().unwrap().contains('\\'), "{done}");
-    for l in &lines {
+    for l in lines {
         assert_no_f32_noise(l);
     }
 
@@ -102,7 +147,7 @@ fn train_val_predict_export_with_json() {
 
     // val: one object with the metrics.
     let (code, lines, stderr) =
-        folo(&["val", "--json", "--model", s(&best), "--data", s(&data), "--workers", "1"]);
+        folo(&["val", "--json", "--model", s(&best), "--data", s(data), "--workers", "1"]);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(lines.len(), 1);
     let v = &lines[0];
@@ -166,7 +211,7 @@ fn train_val_predict_export_with_json() {
     ]);
     assert_eq!(code, 0, "{stderr}");
     assert!(both.join("000008.png").is_file() && both.join("000008_2.png").is_file());
-    let (code, lines, _) = folo(&["val", "--json", "--model", s(&best), "--data", s(&data), "--conf", "2"]);
+    let (code, lines, _) = folo(&["val", "--json", "--model", s(&best), "--data", s(data), "--conf", "2"]);
     assert_eq!(code, 2);
     assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_config");
 
@@ -302,14 +347,14 @@ fn train_val_predict_export_with_json() {
 
     // a negative number reaches the range check (not a clap parse error).
     let (code, lines, _) =
-        folo(&["train", "--json", "--data", s(&data), "--lr0", "-1", "--project", s(&project)]);
+        folo(&["train", "--json", "--data", s(data), "--lr0", "-1", "--project", s(&project)]);
     assert_eq!((code, lines.last().unwrap()["error"]["code"].as_str()), (2, Some("invalid_config")));
     // a bad config is a usage error and leaves no run folder behind.
     let (code, lines, _) = folo(&[
         "train",
         "--json",
         "--data",
-        s(&data),
+        s(data),
         "--imgsz",
         "100",
         "--project",
@@ -321,26 +366,12 @@ fn train_val_predict_export_with_json() {
     assert_eq!(lines.last().unwrap()["error"]["code"], "invalid_config");
     assert!(!project.join("bad").exists());
     // a GPU this machine does not have: device_not_found naming what it has, and no run folder either.
-    let (code, lines, _) = folo(&[
-        "train",
-        "--json",
-        "--data",
-        s(&data),
-        "--imgsz",
-        "64",
-        "--device",
-        "gpu:7",
-        "--project",
-        s(&project),
-        "--name",
-        "nogpu",
-    ]);
+    let (code, lines, _) = nogpu.join().unwrap();
     assert_eq!(code, 3);
     let e = &lines.last().unwrap()["error"];
     assert_eq!(e["code"], "device_not_found");
     assert!(e["hint"].as_str().unwrap().contains("cpu"), "{e}");
     assert!(!project.join("nogpu").exists());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Every float that is exactly an f32 prints as the f32 does (no `0.009999999776482582`).
@@ -511,9 +542,8 @@ fn format_picks_the_labels_and_resume_keeps_it() {
     let last = train_one_epoch(&["--resume", s(&ckpt), "--format", "coco"]);
     assert_eq!(last["status"], "stopped", "{last}");
     // Resumed without --format: still COCO (as auto, the folder reads as YOLO, with another class list).
-    let (code, lines, stderr) = folo(&["train", "--json", "--resume", s(&ckpt), "--json-events", "epoch"]);
-    assert_eq!(code, 0, "{stderr}");
-    assert_eq!(lines.last().unwrap()["status"], "completed", "{:?}", lines.last());
+    let last = train_one_epoch(&["--resume", s(&ckpt)]);
+    assert_eq!(last["status"], "stopped", "{last}");
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -615,5 +645,186 @@ fn invalid_config_hints_name_the_command() {
         assert_eq!((code, e["code"].as_str()), (2, Some("invalid_config")), "{command}: {e}");
         let hint = e["hint"].as_str().unwrap_or_default();
         assert!(hint.contains(&format!("folo describe {command} --json")), "{command}: {hint}");
+    }
+}
+
+/// A 1-epoch `folo train` of `data` into `project/name`, with the weights cache `cache`.
+fn tiny_train(
+    cache: &Path,
+    data: &Path,
+    project: &Path,
+    name: &str,
+    extra: &[&str],
+) -> (i32, Vec<Value>, String) {
+    let mut args = vec![
+        "train",
+        "--json",
+        "--data",
+        s(data),
+        "--imgsz",
+        "64",
+        "--batch",
+        "4",
+        "--epochs",
+        "1",
+        "--workers",
+        "2",
+        "--close-mosaic",
+        "0",
+        "--project",
+        s(project),
+        "--name",
+        name,
+    ];
+    args.extend_from_slice(extra);
+    folo_with(&args, Some(cache))
+}
+
+/// Pretrained-weights plumbing with `--json`: `export --format weights`, `weights list`, name resolution in
+/// `train --weights` / `val --model`, and `val --coco` / `--save-json` on a COCO dataset.
+#[test]
+fn weights_names_export_and_coco_val() {
+    let tiny = tiny_run();
+    let data = &tiny.data;
+    let root = TestDir::new("cli-pretrained");
+    let cache = root.join("cache");
+    let project = root.join("runs");
+
+    // `weights list`: every published name, none downloaded into an empty cache.
+    let (code, lines, stderr) = folo_with(&["weights", "list", "--json"], Some(&cache));
+    assert_eq!(code, 0, "{stderr}");
+    let names: Vec<&str> = lines.iter().map(|l| l["name"].as_str().unwrap()).collect();
+    for name in ["folo-n-coco", "folo-n-coco-f16", "folo-n-coco-v2", "folo-n-coco-v2-f16"] {
+        assert!(names.contains(&name), "{name} missing from {names:?}");
+    }
+    assert!(lines.iter().all(|l| l["cached"] == false));
+    // JSON paths use `/` on every OS (the cache dir from the environment has `\` on Windows).
+    for l in &lines {
+        let asset = l["asset"].as_str().unwrap();
+        assert_eq!(l["path"].as_str().unwrap(), folo_api::json::path(cache.join(asset)), "{l}");
+        assert!(!l["path"].as_str().unwrap().contains('\\'), "{l}");
+    }
+
+    // A published name that is not downloaded: not found, with the pull hint.
+    let (code, lines, _) = tiny_train(&cache, data, &project, "nope", &["--weights", "folo-n-coco"]);
+    assert_eq!(code, 3);
+    let err = &lines.last().unwrap()["error"];
+    assert_eq!(err["code"], "weights_not_found");
+    assert!(err["hint"].as_str().unwrap().contains("folo weights pull folo-n-coco"));
+    let (code, lines, _) = folo_with(&["weights", "pull", "no-such-weights", "--json"], Some(&cache));
+    assert_eq!(code, 3);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "weights_not_found");
+    // --weights decides the architecture: an explicit --model alongside it is a usage error.
+    let (code, _, _) =
+        tiny_train(&cache, data, &project, "both", &["--model", "folo-s", "--weights", "x.folo"]);
+    assert_eq!(code, 2);
+
+    // Export the tiny run's EMA as a plain (unfused, f32) weights file.
+    let best = tiny.run.join("weights/best.folo");
+    let exported = root.join("base-weights.folo");
+    let (code, lines, stderr) = folo_with(
+        &["export", "--json", "--model", s(&best), "--format", "weights", "--output", s(&exported)],
+        Some(&cache),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(
+        (lines[0]["format"].as_str(), lines[0]["fused"].as_bool(), lines[0]["dtype"].as_str()),
+        (Some("weights"), Some(false), Some("f32"))
+    );
+    assert!(std::fs::metadata(&exported).unwrap().len() < std::fs::metadata(&best).unwrap().len());
+
+    // A fused file cannot be exported back to (trainable) weights.
+    let fused = root.join("base-f16.folo");
+    let (code, _, stderr) =
+        folo_with(&["export", "--json", "--model", s(&best), "--output", s(&fused)], Some(&cache));
+    assert_eq!(code, 0, "{stderr}");
+    let (code, lines, _) = folo_with(
+        &[
+            "export",
+            "--json",
+            "--model",
+            s(&fused),
+            "--format",
+            "weights",
+            "--output",
+            s(&root.join("x.folo")),
+        ],
+        Some(&cache),
+    );
+    assert_eq!(code, 2);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "usage");
+
+    // Put it in the cache under a published name: list sees it, train / val resolve the name.
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::copy(&exported, cache.join("folo-n-coco.folo")).unwrap();
+    let (_, lines, _) = folo_with(&["weights", "list", "--json"], Some(&cache));
+    assert!(lines.iter().any(|l| l["name"] == "folo-n-coco" && l["cached"] == true));
+    // `pull` of a cached name downloads nothing and reports the file like a download would.
+    let (code, lines, stderr) = folo_with(&["weights", "pull", "folo-n-coco", "--json"], Some(&cache));
+    assert_eq!(code, 0, "{stderr}");
+    let done = lines.last().unwrap();
+    assert_eq!((done["event"].as_str(), done["downloaded"].as_bool()), (Some("done"), Some(false)));
+    assert_eq!(done["path"].as_str().unwrap(), folo_api::json::path(cache.join("folo-n-coco.folo")));
+    assert_eq!(done["bytes"].as_u64(), Some(std::fs::metadata(&exported).unwrap().len()));
+    assert_eq!(done["sha256"].as_str().map(str::len), Some(64));
+    let (code, lines, stderr) = tiny_train(&cache, data, &project, "tuned", &["--weights", "folo-n-coco"]);
+    assert_eq!(code, 0, "{stderr}");
+    let transferred = lines.iter().any(|l| {
+        l["event"] == "log"
+            && l["message"].as_str().is_some_and(|m| m.starts_with("transferred 417 of 417 tensors"))
+    });
+    assert!(transferred, "every tensor loads from same-class weights: {lines:?}");
+    let (code, lines, stderr) = folo_with(
+        &["val", "--json", "--model", "folo-n-coco", "--data", s(data), "--workers", "1"],
+        Some(&cache),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(lines[0]["coco"], Value::Null, "no COCO block without --coco");
+
+    // `val --coco` needs a COCO dataset.
+    let (code, lines, _) =
+        folo_with(&["val", "--json", "--model", s(&exported), "--data", s(data), "--coco"], Some(&cache));
+    assert_eq!(code, 2);
+    assert_eq!(lines.last().unwrap()["error"]["code"], "usage");
+    // On the same images as COCO: the exact COCOeval block and a results file pycocotools can load.
+    let coco = root.join("shapes-coco");
+    let (code, _, stderr) =
+        folo_with(&["dataset", "convert", s(data), s(&coco), "--to", "coco", "--json"], Some(&cache));
+    assert_eq!(code, 0, "{stderr}");
+    let results = root.join("dets.json");
+    let (code, lines, stderr) = folo_with(
+        &[
+            "val",
+            "--json",
+            "--model",
+            s(&exported),
+            "--data",
+            s(&coco),
+            "--workers",
+            "1",
+            "--coco",
+            "--save-json",
+            s(&results),
+        ],
+        Some(&cache),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    let c = &lines[0]["coco"];
+    assert_eq!(
+        (c["images"].as_u64(), c["missing_images"].as_u64(), c["crowd"].as_u64()),
+        (Some(4), Some(0), Some(0))
+    );
+    assert_eq!(c["truths"], lines[0]["boxes"]);
+    for k in ["ap", "ap50", "ap75", "ap_small", "ap_medium", "ap_large", "ar1", "ar10", "ar100"] {
+        let v = c[k].as_f64().unwrap();
+        assert!(v == -1.0 || (0.0..=1.0).contains(&v), "{k} = {v}");
+    }
+    let dets: Value = serde_json::from_str(&std::fs::read_to_string(&results).unwrap()).unwrap();
+    let dets = dets.as_array().unwrap();
+    assert_eq!(dets.len() as u64, c["detections"].as_u64().unwrap().max(dets.len() as u64));
+    for d in dets {
+        assert!(d["image_id"].is_u64() && d["category_id"].is_u64() && d["score"].is_f64());
+        let b = d["bbox"].as_array().unwrap();
+        assert!(b.len() == 4 && b[2].as_f64().unwrap() >= 0.0 && b[3].as_f64().unwrap() >= 0.0);
     }
 }

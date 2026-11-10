@@ -1,9 +1,13 @@
 //! The trainer on the GPU: a tiny run whose loss falls, with the model, optimizer state, EMA and gradient
 //! buffers on the device, checkpoints that reload on the CPU, and a resume that continues on the device.
 //!
+//! The runs have no run directory and write a checkpoint only where a test reads one (`Trainer::save_checkpoint`,
+//! which also writes a run directory's `last.folo`): on the GPU an epoch of these runs costs about as much as one
+//! checkpoint.
+//!
 //! Skips (with a note) without a hardware adapter; set `FOLO_GPU_TEST_SOFTWARE=1` to run on WARP / llvmpipe.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use folo_api::{RunEvent, RunStatus};
 use folo_core::Device;
@@ -11,7 +15,7 @@ use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
 use folo_data::{AugmentConfig, Split};
 use folo_nn::Module;
 use folo_nn::io::ModelFile;
-use folo_test_support::TestDir;
+use folo_test_support::{TestDir, TestFile};
 use folo_vision::train::{OptimizerChoice, ResumeOverrides};
 use folo_vision::{TrainConfig, TrainData, TrainOptions, Trainer};
 
@@ -49,20 +53,11 @@ fn data() -> TrainData {
     TrainData { train: Arc::new(train), val: Arc::new(val), classes: cfg.classes }
 }
 
-fn epochs_of(log: &Mutex<Vec<RunEvent>>) -> Vec<folo_api::Epoch> {
-    log.lock()
-        .unwrap()
-        .iter()
-        .filter_map(|e| if let RunEvent::Epoch(x) = e { Some(x.clone()) } else { None })
-        .collect()
-}
-
 /// 16 train images at 128 px, batch 4 (no accumulation), AdamW without warmup or augmentation, on `gpu:0`: the
 /// whole run stays on the device and the epoch loss falls (as `train.rs`'s CPU micro run).
 #[test]
 fn tiny_gpu_run_learns() {
     let Some(dev) = gpu() else { return };
-    let dir = TestDir::new("gpu-train");
     let cfg = TrainConfig {
         epochs: 10,
         batch: 4,
@@ -77,15 +72,7 @@ fn tiny_gpu_run_learns() {
         device: "gpu:0".into(),
         ..TrainConfig::default()
     };
-    let log: Arc<Mutex<Vec<RunEvent>>> = Arc::default();
-    let sink = log.clone();
-    let opts = TrainOptions {
-        run_dir: Some(dir.to_path_buf()),
-        events: Some(Box::new(move |e| sink.lock().unwrap().push(e.clone()))),
-        step_interval: std::time::Duration::ZERO,
-        ..TrainOptions::default()
-    };
-    let mut t = Trainer::new(cfg, data(), opts).unwrap();
+    let mut t = Trainer::new(cfg, data(), TrainOptions::default()).unwrap();
     assert_eq!(t.device(), dev);
     assert!(t.model().named_tensors().iter().all(|n| n.tensor.device() == dev), "model on the device");
     assert!(
@@ -94,20 +81,19 @@ fn tiny_gpu_run_learns() {
     );
     let s = t.run().unwrap();
     assert_eq!((s.status, s.epochs_completed), (RunStatus::Completed, 10));
-    let epochs = epochs_of(&log);
-    let losses: Vec<f32> = epochs.iter().map(|e| e.train_loss.total).collect();
+    let losses: Vec<f32> = s.epochs.iter().map(|e| e.train_loss.total).collect();
     assert!(losses.iter().all(|l| l.is_finite()), "{losses:?}");
     let tail = losses[losses.len() - 3..].iter().sum::<f32>() / 3.0;
     assert!(tail < 0.6 * losses[0], "the loss falls: {losses:?}");
-    assert!(epochs.iter().all(|e| e.val.map50.is_finite()));
+    assert!(s.epochs.iter().all(|e| e.val.map50.is_finite()));
     assert!(t.nonfinite_streak() == 0);
 
     // The checkpoint reloads on the CPU.
-    let last = dir.join("weights/last.folo");
+    let last = TestFile::new("gpu-train", "last.folo");
+    t.save_checkpoint(&last).unwrap();
     assert_eq!(ModelFile::open(&last).unwrap().checkpoint().unwrap().epoch, 10);
     let cpu = folo_vision::model::FoloModel::open(&last).unwrap();
     assert!(cpu.named_tensors().iter().all(|n| n.tensor.device().is_cpu()));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Every tensor of a `.folo` file (weights, EMA, optimizer state) as raw `f32` / `i64` bytes, by name.
@@ -138,7 +124,7 @@ fn stopped_gpu_run_resumes_bit_exactly() {
     let Some(dev) = gpu() else { return };
     let root = TestDir::new("gpu-resume");
     let cfg = TrainConfig {
-        epochs: 4,
+        epochs: 2,
         batch: 4,
         nbs: 8,
         imgsz: 128,
@@ -151,29 +137,35 @@ fn stopped_gpu_run_resumes_bit_exactly() {
         device: "gpu:0".into(),
         ..TrainConfig::default()
     };
-    let opts =
-        |dir: &std::path::Path| TrainOptions { run_dir: Some(dir.to_path_buf()), ..TrainOptions::default() };
-    let (dir_a, dir_b) = (root.join("a"), root.join("b"));
-    let sa = Trainer::new(cfg.clone(), data(), opts(&dir_a)).unwrap().run().unwrap();
-    assert_eq!(sa.epochs_completed, 4);
+    let mut a = Trainer::new(cfg.clone(), data(), TrainOptions::default()).unwrap();
+    assert_eq!(a.run().unwrap().epochs_completed, 2);
+    let last_a = root.join("a.folo");
+    a.save_checkpoint(&last_a).unwrap();
 
-    // B: stopped after epoch 2 (the stop flag set on its epoch event), then resumed onto the GPU.
-    let mut ob = opts(&dir_b);
+    // B: stopped after epoch 1 (the stop flag set on its epoch event), then resumed onto the GPU.
+    let ob = TrainOptions::default();
     let stop = ob.stop.clone();
-    ob.events = Some(Box::new(move |e| {
-        if matches!(e, RunEvent::Epoch(x) if x.epoch == 2) {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-    }));
-    let sb = Trainer::new(cfg, data(), ob).unwrap().run().unwrap();
-    assert_eq!((sb.status, sb.epochs_completed), (RunStatus::Stopped, 2));
-    let last_b = dir_b.join("weights/last.folo");
+    let ob = TrainOptions {
+        events: Some(Box::new(move |e| {
+            if matches!(e, RunEvent::Epoch(x) if x.epoch == 1) {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        })),
+        ..ob
+    };
+    let mut b = Trainer::new(cfg, data(), ob).unwrap();
+    let sb = b.run().unwrap();
+    assert_eq!((sb.status, sb.epochs_completed), (RunStatus::Stopped, 1));
+    let ckpt = root.join("b1.folo");
+    b.save_checkpoint(&ckpt).unwrap();
     let over = ResumeOverrides { device: Some("gpu:0".into()), ..Default::default() };
-    let mut r = Trainer::resume(&last_b, data(), opts(&dir_b), over).unwrap();
-    assert_eq!((r.device(), r.epochs_completed()), (dev, 2));
-    assert_eq!(r.run().unwrap().epochs_completed, 4);
+    let mut r = Trainer::resume(&ckpt, data(), TrainOptions::default(), over).unwrap();
+    assert_eq!((r.device(), r.epochs_completed()), (dev, 1));
+    assert_eq!(r.run().unwrap().epochs_completed, 2);
+    let last_b = root.join("b2.folo");
+    r.save_checkpoint(&last_b).unwrap();
 
-    let (ta, tb) = (tensors(&dir_a.join("weights/last.folo")), tensors(&last_b));
+    let (ta, tb) = (tensors(&last_a), tensors(&last_b));
     assert_eq!(ta.len(), tb.len());
     for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
         assert_eq!(na, nb);

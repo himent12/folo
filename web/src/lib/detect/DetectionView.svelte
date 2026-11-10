@@ -17,8 +17,7 @@
    *   top-left corner, or elsewhere next to their own box (see ./chips).
    * - Compact thumbnails: a 1 px stroke in a 1 px halo and no chips, so a small object is not buried under its frame.
    *   Only a hovered or selected box gets the full-size weight. A thumbnail that draws boxes shows the whole image
-   *   (`fit="contain"`, letterboxed on bg.inset): a cropped one would cut boxes in half at its edge
-   *   (./thumbFit.test.ts).
+   *   (`fit="contain"`, letterboxed on bg.inset): a cropped one would cut boxes in half at its edge.
    * - The edges: a contained image clips only itself, never the overlay, so a box on the image's edge keeps its outer
    *   stroke and halo (up to 4 px outside it); a frame that shows the image edge to edge (the phone Playground) insets
    *   it by 4 px so that halo stays on screen. A cropped (`cover`) view clips everything at its edge.

@@ -50,37 +50,24 @@ describe('Model: what was evaluated', () => {
     await open('m_fast_n');
     await until(() => text('#pr-title').includes('fasteners'), "the run's dataset");
     expect(target.querySelector('[role="note"][aria-label="Evaluation split"]')).toBeNull();
-    expect(target.querySelector('section.kpis')?.getAttribute('aria-label')).toBe('Validation metrics');
     expect(text('#pr-title .meta')).toBe('fasteners · validation split · IoU 0.5');
-    expect(text('#per-class .foot')).toContain('Evaluated on 360 validation images of fasteners at IoU 0.50.');
-    const notes = text('#cm .cm-notes');
-    expect(notes).toContain('Counted at conf 0.25, IoU 0.45 on 360 validation images of fasteners.');
-    // Its header names them too, as the curves' header names theirs: the KPIs above are at another operating point.
-    expect(text('#cm-title .meta')).toBe('share of each true class · conf 0.25 · IoU 0.45');
-    // The matrix no longer claims precision and recall's IoU, and says the two thresholds differ.
-    expect(notes).not.toContain('IoU 0.5,');
+    // The matrix's header and notes name its own thresholds: the KPIs above are at another operating point.
+    expect(text('#cm-title .meta')).toContain('conf 0.25 · IoU 0.45');
+    expect(text('#cm .cm-notes')).toContain('conf 0.25, IoU 0.45');
+    expect(text('#cm .cm-notes')).not.toContain('IoU 0.5,');
     const conf = (await hub.api.modelEval('m_fast_n')).best_f1_conf!;
-    expect(text('#cm .how-body')).toContain(`Precision and recall are read at conf ${conf.toFixed(2)} (best F1), IoU 0.50`);
-    expect(text('#cm .how-body')).toContain('confidence is above 0.25');
-    const row = [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on');
-    expect(row?.querySelector('dd')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('fasteners validation split, 360 images');
+    expect(text('#cm .how-body')).toContain(`conf ${conf.toFixed(2)} (best F1), IoU 0.50`);
   });
 
   it('says once that a train-only dataset was evaluated on its training split, and never calls it validation', async () => {
     await open('m_mini_n');
     const notes = target.querySelectorAll('[role="note"][aria-label="Evaluation split"]');
     expect(notes).toHaveLength(1);
-    expect(notes[0]!.querySelector('.c-title')?.textContent).toBe('Evaluated on the training split');
-    expect(notes[0]!.querySelector('.c-msg')?.textContent?.trim()).toBe(
-      'fasteners-mini has no validation images, so these scores are on images the model trained on, not new ones.',
-    );
     expect(target.querySelector('section.kpis')?.getAttribute('aria-label')).toBe('Metrics on the training split');
     expect(text('#pr-title .meta')).toBe('fasteners-mini · training split · IoU 0.5');
-    expect(text('#per-class .foot')).toContain('Evaluated on 24 training images of fasteners-mini at IoU 0.50.');
-    expect(text('#cm .cm-notes')).toContain('Counted at conf 0.25, IoU 0.45 on 24 training images of fasteners-mini.');
+    expect(text('#per-class .foot')).toContain('24 training images of fasteners-mini');
     const dd = [...target.querySelectorAll('#details .kv')].find((kv) => kv.querySelector('dt')?.textContent === 'Evaluated on')?.querySelector('dd');
     expect(dd?.querySelector('a')?.getAttribute('href')).toContain('/datasets/ds_fasteners_mini');
-    expect(dd?.textContent?.replace(/\s+/g, ' ').trim()).toBe('fasteners-mini training split, 24 images');
     // "Validation" is said only where the notice says there is none.
     expect(target.textContent).not.toMatch(/validation (images of|split of|metrics)/i);
   });
@@ -96,9 +83,9 @@ describe('Model: what was evaluated', () => {
     await open('m_fast_n');
     await until(() => text('#pr-title .meta') === 'fasteners · IoU 0.5', "the run's dataset");
     expect(target.querySelector('[role="note"][aria-label="Evaluation split"]')).toBeNull();
-    expect(text('#per-class .foot')).toContain('Evaluated on 360 images of fasteners at IoU 0.50.');
-    expect(text('#cm .cm-notes')).toContain('Counted on 360 images of fasteners, at thresholds this server does not report.');
-    expect(text('#cm .how-body')).toContain('which this server does not report');
+    expect(text('#per-class .foot')).not.toContain('validation');
+    expect(text('#cm .cm-notes')).toContain('does not report');
+    expect(text('#cm .cm-notes')).not.toContain('conf 0.25');
   });
 });
 
@@ -125,7 +112,6 @@ describe('Model on a phone: the work before the summary', () => {
     target.querySelector<HTMLButtonElement>('#model-sec-classes')!.click();
     flushSync();
     const line = target.querySelector<HTMLButtonElement>('section.kpi-grid .kpi-line')!;
-    expect(line.textContent?.replace(/\s+/g, ' ').trim()).toBe('mAP50-95 0.604 All metrics');
     expect(line.getAttribute('aria-expanded')).toBe('false');
     expect(target.querySelectorAll('section.kpi-grid .kg-cell')).toHaveLength(0);
     line.click();

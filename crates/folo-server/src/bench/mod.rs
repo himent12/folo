@@ -992,6 +992,8 @@ impl Benches {
         }
         let engine_threads = std::mem::take(&mut *self.worker.lock().unwrap());
         for t in engine_threads.into_iter().filter(|t| t.thread().id() != me) {
+            // The sweeper parks between looks: woken, it sees `closing` at once.
+            t.thread().unpark();
             let _ = t.join();
         }
     }
@@ -1027,11 +1029,15 @@ fn bench_image(im: &ImageRecord, variant: Option<(Condition, u8)>) -> Result<Ben
 }
 
 /// The sweeper's thread: every so often, open external entries that got no part for the engine's timeout are
-/// failed ([`external::expire`]). Ends when the server shuts down (it looks every 50 ms).
+/// failed ([`external::expire`]). Ends when the server shuts down (it looks every 50 ms, and [`Benches::shutdown`]
+/// unparks it).
 fn sweep(engine: &Engine, benches: &RwLock<Vec<Arc<Slot>>>) {
     let mut last = Instant::now();
     while !engine.closing.load(Ordering::SeqCst) {
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::park_timeout(Duration::from_millis(50));
+        if engine.closing.load(Ordering::SeqCst) {
+            break;
+        }
         let timeout = Duration::from_millis(engine.open_timeout_ms.load(Ordering::SeqCst));
         // A tenth of the timeout between looks: an entry expires at most 10% late.
         if last.elapsed() < (timeout / 10).clamp(Duration::from_millis(50), Duration::from_secs(60)) {

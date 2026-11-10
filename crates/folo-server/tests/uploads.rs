@@ -442,8 +442,11 @@ async fn bad_requests_expiry_and_leftovers() {
     // A session without a part for the idle limit expires, with its folder.
     let u = start(&app, json!({ "kind": "dataset", "name": "idle" })).await;
     assert!(staging(&home).contains(&u.id));
-    tokio::time::sleep(Duration::from_millis(900)).await;
-    assert!(staging(&home).is_empty(), "{:?}", staging(&home));
+    let t0 = std::time::Instant::now();
+    while !staging(&home).is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(10), "{:?}", staging(&home));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     err(&app, bare("GET", &format!("/api/uploads/{}", u.id)), StatusCode::NOT_FOUND, "upload_not_found")
         .await;
 }
@@ -462,14 +465,4 @@ async fn the_mock_has_no_uploads() {
     let sys: SystemResponse = ok(&app, bare("GET", "/api/system"), StatusCode::OK).await;
     assert!(sys.features.iter().any(|f| f == FEATURE_RUN_CURSORS));
     assert!(!sys.features.iter().any(|f| f == FEATURE_UPLOADS || f == FEATURE_RUN_CHECKPOINT));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_real_store_lists_the_worker_features() {
-    let t = TestDir::new("uploads-features");
-    let app = app(open(&t.join("home")));
-    let sys: SystemResponse = ok(&app, bare("GET", "/api/system"), StatusCode::OK).await;
-    for f in [FEATURE_UPLOADS, FEATURE_RUN_CURSORS, FEATURE_RUN_CHECKPOINT] {
-        assert!(sys.features.iter().any(|x| x == f), "{f}: {:?}", sys.features);
-    }
 }

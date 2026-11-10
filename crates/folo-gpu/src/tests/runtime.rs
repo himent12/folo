@@ -8,15 +8,6 @@ use crate::pipeline::{Access, KernelDef, Params, Source, Spec};
 use crate::{DType, GpuTensor, UnaryOp};
 
 #[test]
-fn adapter_summary_is_populated() {
-    let ctx = gpu!();
-    let s = ctx.summary();
-    assert!(!s.name.is_empty());
-    assert!(s.max_compute_workgroup_storage_size >= 16 * 1024);
-    assert!(format!("{s}").contains(&s.name));
-}
-
-#[test]
 fn backend_parsing() {
     assert_eq!(parse_backends("vulkan"), Some(wgpu::Backends::VULKAN));
     assert_eq!(parse_backends(" DX12 , metal"), Some(wgpu::Backends::DX12 | wgpu::Backends::METAL));

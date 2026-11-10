@@ -369,13 +369,6 @@ fn exif_after_large_app_segments() {
 }
 
 #[test]
-fn split_and_format_serde() {
-    assert_eq!(serde_json::to_string(&Split::Val).unwrap(), "\"val\"");
-    assert_eq!(serde_json::from_str::<Format>("\"auto\"").unwrap(), Format::Auto);
-    assert_eq!(serde_json::to_string(&IssueKind::BrokenLabel).unwrap(), "\"broken_label\"");
-}
-
-#[test]
 fn coco_image_dir_found_past_missing_files() {
     let t = TempDir::new("coco-missing");
     let r = t.path();

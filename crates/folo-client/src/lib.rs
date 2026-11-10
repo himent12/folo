@@ -24,6 +24,8 @@ pub const MAX_BODY: u64 = 256 * 1024 * 1024;
 
 /// The code of an [`Error`] that never reached the server (refused, timed out, TLS failure, a cut connection).
 pub const UNREACHABLE: &str = "server_unreachable";
+/// The code of an answer that is not FOLO's (no error envelope): a proxy's page, or another server.
+pub const NOT_FOLO: &str = "bad_gateway";
 
 /// A failed request: the server's error envelope with its status, or a transport failure.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,11 +43,14 @@ impl Error {
     }
 
     /// True for a failure that may pass when the same request is sent again: no answer, or an answer that blames
-    /// the moment rather than the request (`429`, `502`, `503`, `504`, and the `408` / `524` of proxies).
+    /// the moment rather than the request (`429`, `502`, `503`, `504`, and the `408` / `520`–`524` of proxies).
+    /// So does a `404` that is not FOLO's own (no error envelope): a proxy in front of the server saying it cannot
+    /// reach it right now. RunPod's answers so for a pod's port, also for a moment after the port has answered.
     pub fn is_transient(&self) -> bool {
         match self.status {
             None => true,
-            Some(s) => matches!(s.as_u16(), 408 | 429 | 502 | 503 | 504 | 524),
+            Some(s) if s.as_u16() == 404 => self.error.code == NOT_FOLO,
+            Some(s) => matches!(s.as_u16(), 408 | 429 | 502 | 503 | 504 | 520..=524),
         }
     }
 
@@ -181,7 +186,7 @@ impl Client {
                 let text = folo_api::codes::cap(text.trim(), 200);
                 let what = if text.is_empty() { String::new() } else { format!(": {text}") };
                 ApiError {
-                    code: "bad_gateway".into(),
+                    code: NOT_FOLO.into(),
                     message: format!("{} answered {status} without a FOLO error{what}", self.base),
                     hint: None,
                 }
@@ -303,9 +308,14 @@ mod tests {
 
     #[test]
     fn an_unreachable_server_is_transient_and_keeps_the_token_out_of_debug() {
-        // Port 9 (discard) is essentially never served on loopback.
-        let c = Client::with_timeouts("http://127.0.0.1:9/", Duration::from_secs(2), Duration::from_secs(2))
-            .token("s3cret");
+        // Port 9 (discard) is essentially never served on loopback. Windows retries a refused loopback connection
+        // for about 2 s, so the connection times out first: refused and timed out are both unreachable.
+        let c = Client::with_timeouts(
+            "http://127.0.0.1:9/",
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        )
+        .token("s3cret");
         assert_eq!(c.base(), "http://127.0.0.1:9");
         assert!(!format!("{c:?}").contains("s3cret"));
         let e = c.get::<serde_json::Value>("/health").unwrap_err();
@@ -324,5 +334,15 @@ mod tests {
         let e = c.failure(StatusCode::BAD_GATEWAY, b"<html>502 Bad Gateway</html>");
         assert_eq!((e.code(), e.is_transient()), ("bad_gateway", true));
         assert!(e.error.message.contains("502 Bad Gateway"), "{}", e.error.message);
+        // A proxy's 404 for a server it cannot reach at the moment (RunPod's, for a pod's port) passes; so do
+        // Cloudflare's 52x. FOLO's own 404 and a plain 400 or 500 do not.
+        let e = c.failure(StatusCode::NOT_FOUND, b"404 page not found");
+        assert_eq!((e.code(), e.is_transient()), ("bad_gateway", true));
+        for (status, transient) in
+            [(400, false), (500, false), (520, true), (522, true), (524, true), (525, false)]
+        {
+            let e = c.failure(StatusCode::from_u16(status).unwrap(), b"");
+            assert_eq!(e.is_transient(), transient, "{status}");
+        }
     }
 }

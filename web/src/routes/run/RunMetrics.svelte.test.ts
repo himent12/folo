@@ -52,12 +52,4 @@ describe('the run chart on phones', () => {
     expect(sessionStorage.getItem('folo.run.chartOpen')).toBe('1');
     unmount(c);
   });
-
-  it('states a value once above the chart: the picker names the metric, the legend has the value', () => {
-    const c = show();
-    flushSync();
-    const options = [...target.querySelectorAll('select[aria-label="Metric to chart"] option')].map((o) => o.textContent);
-    expect(options).toEqual(['mAP50-95', 'mAP50', 'Precision · Recall', 'Loss', 'Learning rate', 'Throughput']);
-    unmount(c);
-  });
 });

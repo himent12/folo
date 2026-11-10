@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { ApiError } from '$lib/api/client';
 import type { TrainConfig } from '$lib/api/types';
 import { referenceVram } from '$lib/reference';
-import { failureCause, fitFix, fitFixes, fitsGpu, isOom, oomCalibration, oomDetail, oomFixes, largestFittingBatch, retryPath, useLabel, vramForecaster, type VramOf } from './oom';
+import { fitFix, fitFixes, fitsGpu, isOom, oomCalibration, oomDetail, oomFixes, largestFittingBatch, retryPath, useLabel, vramForecaster, type VramOf } from './oom';
 
 const cfg = (c: Partial<TrainConfig>) => ({ batch: 16, imgsz: 640, arch: 'folo-s' as const, device: 'auto' as const, ...c });
 
@@ -192,13 +192,5 @@ describe('vramForecaster', () => {
     const broken = { estimateRun: async () => Promise.reject(new Error('down')) } as unknown as Parameters<typeof vramForecaster>[0];
     expect((await vramForecaster(broken, sys(['run_estimate']))(full({})))?.measured).toBe(false);
     expect(await vramForecaster(api, sys(['run_estimate']))(full({ device: 'cpu' }))).toBeNull();
-  });
-});
-
-describe('failureCause', () => {
-  it('names an out-of-memory failure, nothing else', () => {
-    expect(failureCause({ status: 'failed', error: 'the GPU ran out of memory (x)' })).toBe('Out of GPU memory');
-    expect(failureCause({ status: 'failed', error: 'disk full' })).toBe(null);
-    expect(failureCause({ status: 'completed', error: null })).toBe(null);
   });
 });

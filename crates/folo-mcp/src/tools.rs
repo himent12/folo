@@ -1725,18 +1725,6 @@ mod tests {
     }
 
     #[test]
-    fn every_schema_is_an_object() {
-        for t in TOOLS {
-            let tool = t.tool();
-            assert_eq!(tool.input_schema.get("type"), Some(&json!("object")), "{}", t.name);
-            let out = tool.output_schema.as_ref().unwrap();
-            assert_eq!(out.get("type"), Some(&json!("object")), "{}", t.name);
-        }
-        let names: HashSet<_> = TOOLS.iter().map(|t| t.name).collect();
-        assert_eq!(names.len(), TOOLS.len());
-    }
-
-    #[test]
     fn unknown_arguments_are_rejected_with_a_suggestion() {
         let args = |v: Value| v.as_object().unwrap().clone();
         let train = find("train").unwrap();

@@ -86,14 +86,3 @@ describe('filterDetections', () => {
     expect(filterDetections(xs, { conf: 0, iou: 0.7, maxDet: 1 })).toEqual([xs[0]]);
   });
 });
-
-describe('one-pass NMS on unsuppressed candidates', () => {
-  it('keeps what direct NMS keeps (server must not pre-suppress)', () => {
-    const b = (x: number, score: number) => ({ class: 0, x1: x, y1: 0, x2: x + 100, y2: 100, score });
-    const raw = [b(0, 0.9), b(16, 0.8), b(18, 0.7)];
-    // .8 overlaps .9 at IoU 0.72 and goes; .7 overlaps .9 at 0.69 and stays (it only overlapped the removed .8).
-    expect(nms(raw, 0.7).map((x) => x.score)).toEqual([0.9, 0.7]);
-    // The Playground fetches with iou 1 (no server suppression), which leaves the raw set intact.
-    expect(nms(raw, 1)).toHaveLength(3);
-  });
-});

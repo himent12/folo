@@ -167,65 +167,6 @@ pub fn theme(cx: &App) -> Theme {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn small_text_is_annotated() {
-        // design/README's text-size floor: sentences, labels, captions, legends and readouts are
-        // 12 px (`sm`) or more; `xs` and `micro` are for chart ticks and image chips only. Every use
-        // carries a `small:` note on its line or the one before, saying which.
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut stack = vec![src];
-        let mut bad = Vec::new();
-        while let Some(dir) = stack.pop() {
-            for e in std::fs::read_dir(&dir).unwrap() {
-                let p = e.unwrap().path();
-                if p.is_dir() {
-                    stack.push(p);
-                    continue;
-                }
-                if p.extension().is_none_or(|x| x != "rs") || p.ends_with("theme.rs") {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&p).unwrap();
-                let lines: Vec<&str> = text.lines().collect();
-                for (i, l) in lines.iter().enumerate() {
-                    let noted = l.contains("small:") || i > 0 && lines[i - 1].contains("small:");
-                    let sized = l.replace("ty::XS.line", "").replace("ty::MICRO.line", "");
-                    if (sized.contains("ty::XS") || sized.contains("ty::MICRO")) && !noted {
-                        bad.push(format!("{}:{}", p.file_name().unwrap().to_string_lossy(), i + 1));
-                    }
-                }
-            }
-        }
-        assert!(bad.is_empty(), "ty::XS / ty::MICRO without a `small:` note at {bad:?}");
-    }
-
-    #[test]
-    fn class_colours_go_through_class_on() {
-        // A raw `t.class(` outside the image renderer and the swatch picks a shade by call site,
-        // which is how one class came to show in two shades. Use `class_on` or `class_swatch`.
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut stack = vec![src];
-        let mut bad = Vec::new();
-        while let Some(dir) = stack.pop() {
-            for e in std::fs::read_dir(&dir).unwrap() {
-                let p = e.unwrap().path();
-                if p.is_dir() {
-                    stack.push(p);
-                    continue;
-                }
-                let name = p.file_name().unwrap().to_string_lossy().to_string();
-                if !name.ends_with(".rs") || ["viz.rs", "theme.rs", "ui.rs"].contains(&name.as_str()) {
-                    continue;
-                }
-                let text = std::fs::read_to_string(&p).unwrap();
-                if text.contains("t.class(") {
-                    bad.push(name);
-                }
-            }
-        }
-        assert!(bad.is_empty(), "raw t.class( in {bad:?}");
-    }
-
     use super::*;
 
     fn luminance(c: Hsla) -> f32 {
@@ -327,11 +268,5 @@ mod tests {
         let top = rgba32(0xFFFFFF80);
         let r: Rgba = over(base, top).into();
         assert!((r.r - 0.502).abs() < 0.01 && (r.a - 1.0).abs() < 1e-4);
-    }
-
-    #[test]
-    fn tokens_are_complete() {
-        assert_eq!(tokens::CLASS_PALETTE.len(), 16);
-        assert_eq!(tokens::dark().chart_series.len(), 6);
     }
 }

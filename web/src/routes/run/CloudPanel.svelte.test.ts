@@ -61,6 +61,13 @@ const state = (extra: Partial<RunCloud> = {}): RunCloud => ({
 });
 
 describe('CloudPanel', () => {
+  // Noon in the machine's own time zone: the deadline an hour later is today, so the limit says a clock time alone.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 9, 12, 0));
+  });
+  afterEach(() => vi.useRealTimers());
+
   it('shows the phases done, current and to come, the transfer, and the facts while the run is alive', () => {
     // At noon, so the deadline an hour on is today (from 23:00 it is tomorrow, and the limit names the date too).
     vi.useFakeTimers({ toFake: ['Date'] });
@@ -81,8 +88,7 @@ describe('CloudPanel', () => {
     expect(fact('Instance')).toBe('RTX 4090 · 24.0 GiB · Secure Cloud');
     expect(target.querySelector('#cloud .facts a')?.getAttribute('href')).toBe('#/settings?section=cloud');
     expect(fact('Cost')).toBe('$0.42 so far');
-    // The stop time is an hour from now: with its date when that is past midnight.
-    expect(fact('Limit')).toMatch(/^12 h · stops by (\w{3} \d{1,2}, )?\d\d:\d\d$/);
+    expect(fact('Limit')).toBe('12 h · stops by 13:00');
     expect(fact('Last checkpoint copy')).toBe('none yet');
   });
 

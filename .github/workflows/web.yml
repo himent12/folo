@@ -1,0 +1,79 @@
+name: web
+# FOLO Studio (web/): type and design checks, the unit tests, and the layout QA on the production build. It runs when
+# Studio or the design tokens and fonts it is built from (design/) change, and on every push to main.
+on:
+  pull_request:
+    paths:
+      - web/**
+      - design/**
+      - .github/workflows/web.yml
+  push:
+    branches: [main]
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+# Runners: see ci.yml. RUNS_ON_LINUX holds a JSON runs-on value; unset falls back to GitHub-hosted Linux.
+jobs:
+  check:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+  qa:
+    # npm run qa (web/DESIGN_DIRECTION.md §6): builds the production bundle and checks every scene at tablet and
+    # phone sizes, failing on a blank section, horizontal overflow, a covered control or a cut select. A state costs
+    # a few CPU seconds of browser work, so the states are split over three runners (FOLO_QA_SHARD).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    name: qa (${{ matrix.shard }}/3)
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # The QA uses the runner's Chrome (ubuntu-latest and the boat.dev runners have one); without one, Playwright's
+      # headless Chromium, downloaded once per playwright-core version (cached on GitHub-hosted runners, kept in
+      # ~/.cache/ms-playwright on self-hosted ones), with its system libraries where sudo needs no password.
+      - name: browser for the QA
+        id: browser
+        shell: bash
+        run: |
+          if command -v google-chrome >/dev/null; then echo "chrome=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo "chrome=false" >> "$GITHUB_OUTPUT"
+          echo "playwright=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        if: steps.browser.outputs.chrome == 'false' && runner.environment == 'github-hosted'
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-shell-${{ runner.os }}-${{ steps.browser.outputs.playwright }}
+      - if: steps.browser.outputs.chrome == 'false'
+        shell: bash
+        run: |
+          deps=""
+          if sudo -n true 2>/dev/null; then deps="--with-deps"; fi
+          npx playwright-core install $deps --only-shell chromium
+      - name: QA (production build; blank sections, overflow, covered controls)
+        env:
+          FOLO_QA_SHARD: ${{ matrix.shard }}/3
+        run: npm run qa

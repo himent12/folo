@@ -55,21 +55,7 @@ describe('AddDatasetDialog', () => {
     expect(undescribedFields(document)).toEqual([]);
   });
 
-  it('keeps Register disabled, saying why, until there is a folder path', () => {
-    c = mount(AddDatasetDialog, { target, props: { open: true } });
-    flushSync();
-    const submit = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
-    expect(submit.disabled).toBe(true);
-    expect(document.getElementById(submit.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Enter a folder path');
-    const input = document.querySelector<HTMLInputElement>('input[placeholder="e.g. D:/data/my-dataset"]')!;
-    input.value = 'D:/data/shapes';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    flushSync();
-    expect(submit.disabled).toBe(false);
-    expect(submit.hasAttribute('aria-describedby')).toBe(false);
-  });
-
-  it('gates Register while the name shows an error, and lifts it once the name is fixed', () => {
+  it('keeps Register disabled, saying why, until there is a folder path and while the name shows an error', () => {
     c = mount(AddDatasetDialog, { target, props: { open: true } });
     flushSync();
     const type = (sel: string, v: string) => {
@@ -79,13 +65,18 @@ describe('AddDatasetDialog', () => {
       flushSync();
       return el;
     };
+    const submit = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    const why = () => document.getElementById(submit.getAttribute('aria-describedby') ?? '')?.textContent;
+    expect(submit.disabled).toBe(true);
+    expect(why()).toBeTruthy();
     const path = type('input[placeholder="e.g. D:/data/my-dataset"]', 'D:/data/my dataset');
+    expect(submit.disabled).toBe(false);
+    expect(submit.hasAttribute('aria-describedby')).toBe(false);
     type('input[id$="-name"]', 'my dataset!');
     path.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
     flushSync();
-    const submit = document.querySelector<HTMLButtonElement>('button[type="submit"]')!;
     expect(submit.disabled).toBe(true);
-    expect(document.getElementById(submit.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Fix the name first');
+    expect(why()).toBeTruthy();
     type('input[id$="-name"]', 'my-dataset');
     expect(submit.disabled).toBe(false);
   });

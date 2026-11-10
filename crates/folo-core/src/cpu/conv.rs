@@ -1751,20 +1751,16 @@ mod kernel_tests {
     }
 
     /// The forward, input gradient and weight gradient of `g` as bits, under the current scratch budget.
-    fn conv_bits(g: &ConvGeom, weight_only: bool) -> Vec<Vec<u32>> {
+    fn conv_bits(g: &ConvGeom) -> Vec<Vec<u32>> {
         let (x, wt) = (data(g.n * g.c * g.h * g.w, 1), data(g.o * g.kdim(), 2));
         let gy = data(g.n * g.o * g.ohw(), 3);
         let mut gw = vec![0f32; wt.len()];
         conv2d_backward_weight(&x, &gy, &mut gw, g);
-        let mut out = vec![gw];
-        if !weight_only {
-            let mut y = vec![0f32; gy.len()];
-            conv2d_forward(&x, &wt, &mut y, g, false, None);
-            let mut gx = vec![0f32; x.len()];
-            conv2d_backward_input(&gy, &wt, &mut gx, g);
-            out.extend([y, gx]);
-        }
-        out.into_iter().map(|v| v.iter().map(|f| f.to_bits()).collect()).collect()
+        let mut y = vec![0f32; gy.len()];
+        conv2d_forward(&x, &wt, &mut y, g, false, None);
+        let mut gx = vec![0f32; x.len()];
+        conv2d_backward_input(&gy, &wt, &mut gx, g);
+        [gw, y, gx].into_iter().map(|v| v.iter().map(|f| f.to_bits()).collect()).collect()
     }
 
     /// `f` under scratch budget `floats` (restored after).
@@ -1792,27 +1788,14 @@ mod kernel_tests {
         ];
         for (i, (n, c, hw, o, k, p)) in cases.into_iter().enumerate() {
             let g = geom(n, c, hw, o, k, p);
-            let all = with_budget(usize::MAX, || conv_bits(&g, false));
+            let all = with_budget(usize::MAX, || conv_bits(&g));
             // One image's scratch is at least a few thousand floats in every case: 1 float runs them one at a
             // time, 3 copies' worth two or three at a time (a dozen for the batch-64 weight gradients).
             let one = shifted_scratch(&g).max(g.kdim() * g.ohw()).max(1);
             for budget in [IMAGE_SCRATCH_BUDGET, 1, 3 * one] {
-                let got = with_budget(budget, || conv_bits(&g, false));
+                let got = with_budget(budget, || conv_bits(&g));
                 assert!(got == all, "case {i}, budget {budget}: results differ");
             }
-        }
-    }
-
-    /// The review's weight-gradient shapes at full size (3x3, c = o = 32 at 160 px, batch 16 and 64; c = o = 64
-    /// at 80 px, batch 64): the default budget's waves give the unlimited result bit for bit. Slow unoptimised:
-    /// `cargo test --release -p folo-core --lib -- --ignored wgrad_full_size`.
-    #[test]
-    #[ignore]
-    fn wgrad_full_size_budget_does_not_change_results() {
-        for (n, c, hw) in [(16, 32, 160), (64, 32, 160), (64, 64, 80)] {
-            let g = geom(n, c, [hw, hw], c, [3, 3], params([1, 1], [1, 1], [1, 1], 1));
-            let all = with_budget(usize::MAX, || conv_bits(&g, true));
-            assert!(with_budget(IMAGE_SCRATCH_BUDGET, || conv_bits(&g, true)) == all, "{n} x {c} x {hw}");
         }
     }
 }

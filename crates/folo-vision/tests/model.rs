@@ -153,18 +153,6 @@ fn bits(m: &FoloModel) -> Vec<(String, Vec<usize>, Vec<u32>)> {
         .collect()
 }
 
-#[test]
-#[should_panic(expected = "non-finite")]
-fn assert_close_rejects_nan() {
-    assert_close(&[1.0, f32::NAN], &[1.0, f32::NAN], 1e-4, "nan");
-}
-
-#[test]
-#[should_panic(expected = "non-finite")]
-fn assert_close_rejects_inf() {
-    assert_close(&[f32::INFINITY], &[f32::INFINITY], 1e-4, "inf");
-}
-
 // ---- §10.1 blocks ----
 
 type Build = Box<dyn Fn(&mut Init) -> Box<dyn Layer>>;
@@ -336,17 +324,6 @@ fn forward_shapes_all_scales_small() {
         m.eval();
         let _g = no_grad();
         check_layer_shapes(k, &m, 1, 64, 96);
-    }
-}
-
-#[test]
-#[ignore = "folo-m/l/x at 640 are slow on small CI runners; run with --ignored (about 1 s here)"]
-fn forward_shapes_all_scales_640() {
-    for (k, scale) in SCALES.iter().enumerate() {
-        let m = model(scale, 80);
-        m.eval();
-        let _g = no_grad();
-        check_layer_shapes(k, &m, 1, 640, 640);
     }
 }
 

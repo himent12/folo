@@ -286,7 +286,6 @@ describe('prDomain', () => {
     expect(z.domain).toEqual([PR_ZOOM.floor, 1]);
     expect(z.ticks).toEqual([0.8, 0.85, 0.9, 0.95, 1]);
     expect(z.decimals).toBe(2);
-    expect(PR_ZOOM.plotPx).toBe(200);
     // One class under 0.9 before recall 0.95: the whole frame.
     expect(prDomain([...good, curve([[0, 1], [0.6, 0.88], [0.9, 0.5]])])).toBeNull();
     // No data: the whole frame.

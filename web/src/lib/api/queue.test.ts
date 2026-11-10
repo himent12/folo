@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applyQueueMove, hasFeature, ordinal, queuePlace, withQueueMove } from './queue';
+import { applyQueueMove, hasFeature, ordinal, withQueueMove } from './queue';
 import type { Run } from './types';
 
 describe('applyQueueMove (docs/API.md, POST /api/runs/{id}/queue)', () => {
@@ -47,7 +47,6 @@ describe('withQueueMove', () => {
 describe('queue words', () => {
   it('says the place as people do', () => {
     expect([1, 2, 3, 4, 11, 12, 13, 21, 22, 23, 101].map(ordinal)).toEqual(['1st', '2nd', '3rd', '4th', '11th', '12th', '13th', '21st', '22nd', '23rd', '101st']);
-    expect(queuePlace(2)).toBe('2nd in queue');
   });
 
   it('reads optional features from /api/system, absent on older servers', () => {

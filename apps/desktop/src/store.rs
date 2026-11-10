@@ -707,6 +707,17 @@ mod tests {
 
     #[test]
     fn the_run_length_comes_from_the_stream() {
+        let loss = || crate::api::Loss { box_: 1., cls: 1., dfl: 1., total: 3. };
+        let step = |n: u64| Step {
+            epoch: 1,
+            step: n,
+            lr: 0.01,
+            loss: loss(),
+            imgs_per_s: 1.,
+            eta_s: 1.,
+            steps_per_epoch: 0,
+            epochs: 0,
+        };
         let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
         let mut runs = store.api.runs().unwrap();
         // A real run's snapshot before its trainer is built: the length isn't known yet.
@@ -714,8 +725,14 @@ mod tests {
         let id = runs[0].id.clone();
         store.runs = Load::Ready(runs);
         let empty = || RunMetrics { steps: vec![], epochs: vec![] };
-        store.install_run_data(&id, Ok(RunData::new(empty(), 0)));
+        store.install_run_data(
+            &id,
+            Ok(RunData::new(RunMetrics { steps: (1..=10).map(step).collect(), epochs: vec![] }, 0)),
+        );
         assert_eq!(store.run_data[&id].ready().unwrap().spe, 1);
+        // Drawn with the fallback length: raw step numbers.
+        let last_x = |store: &Store| store.run_data[&id].ready().unwrap().derived().lr.last().map(|p| p.0);
+        assert_eq!(last_x(&store), Some(10.));
         // Older servers send zeros: nothing changes.
         store.apply(&id, RunEvent::Status(StatusEvent::new(RunStatus::Running, None)));
         assert_eq!(store.run(&id).unwrap().steps_per_epoch, 0);
@@ -723,6 +740,8 @@ mod tests {
         assert_eq!(store.run(&id).unwrap().steps_per_epoch, 25);
         assert_eq!(store.run(&id).unwrap().epochs, 7);
         assert_eq!(store.run_data[&id].ready().unwrap().spe, 25);
+        // The learned length moves the points already drawn.
+        assert_eq!(last_x(&store), Some(10. / 25.));
         // A history fetched with the old length is corrected when it lands.
         store.install_run_data(&id, Ok(RunData::new(empty(), 0)));
         assert_eq!(store.run_data[&id].ready().unwrap().spe, 25);
@@ -761,34 +780,6 @@ mod tests {
         assert_eq!(d.spe, 25);
         // Steps sit at step / steps-per-epoch on the epoch axis.
         assert_eq!(d.derived().loss[3].last().map(|p| p.0), Some(5. / 25.));
-    }
-
-    #[test]
-    fn a_learned_length_moves_points_already_drawn() {
-        let loss = || crate::api::Loss { box_: 1., cls: 1., dfl: 1., total: 3. };
-        let step = |n: u64| Step {
-            epoch: 1,
-            step: n,
-            lr: 0.01,
-            loss: loss(),
-            imgs_per_s: 1.,
-            eta_s: 1.,
-            steps_per_epoch: 0,
-            epochs: 0,
-        };
-        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
-        let mut runs = store.api.runs().unwrap();
-        runs[0].steps_per_epoch = 0;
-        let id = runs[0].id.clone();
-        store.runs = Load::Ready(runs);
-        store.install_run_data(
-            &id,
-            Ok(RunData::new(RunMetrics { steps: (1..=10).map(step).collect(), epochs: vec![] }, 0)),
-        );
-        // Drawn once with the fallback length: raw step numbers.
-        assert_eq!(store.run_data[&id].ready().unwrap().derived().lr.last().map(|p| p.0), Some(10.));
-        store.apply(&id, RunEvent::Status(StatusEvent::new(RunStatus::Running, None).with_length(4, 5)));
-        assert_eq!(store.run_data[&id].ready().unwrap().derived().lr.last().map(|p| p.0), Some(2.));
     }
 
     #[test]
@@ -914,7 +905,7 @@ mod tests {
     }
 
     #[test]
-    fn late_completion_of_evicted_request_is_dropped() {
+    fn cache_evicts_oldest_and_drops_late_completions() {
         let mut c = ImageCache::default();
         let key = |i: usize| ImgKey { dataset: "d".into(), image: i.to_string(), kind: ImgKind::Thumb };
         for i in 0..=ImageCache::BUDGET {
@@ -926,20 +917,12 @@ mod tests {
         // Its late completion must not reappear outside the eviction order.
         c.finish(key(0), None);
         assert!(c.get(&key(0)).is_none());
-        assert!(c.slots.len() <= ImageCache::BUDGET);
-    }
-
-    #[test]
-    fn cache_evicts_oldest() {
-        let mut c = ImageCache::default();
-        for i in 0..ImageCache::BUDGET + 5 {
-            let k = ImgKey { dataset: "d".into(), image: i.to_string(), kind: ImgKind::Thumb };
-            assert!(c.begin(&k));
-            c.finish(k, None);
-        }
         assert_eq!(c.slots.len(), ImageCache::BUDGET);
-        let first = ImgKey { dataset: "d".into(), image: "0".into(), kind: ImgKind::Thumb };
-        assert!(c.get(&first).is_none());
+        // The next one in goes the same way: the oldest left out.
+        assert!(c.begin(&key(ImageCache::BUDGET + 1)));
+        c.finish(key(ImageCache::BUDGET + 1), None);
+        assert!(c.get(&key(1)).is_none() && c.get(&key(2)).is_some());
+        assert_eq!(c.slots.len(), ImageCache::BUDGET);
     }
 
     #[test]

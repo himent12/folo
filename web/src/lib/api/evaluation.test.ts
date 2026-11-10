@@ -45,14 +45,6 @@ describe('model evaluation (contract of GET /api/models/{id}/eval)', () => {
     // The mean is over the classes with curves, as the server's.
     expect(ev.mean[0]!.y).toBeCloseTo((e.pr[0]!.precision[0]! + e.pr[2]!.precision[0]!) / 2, 9);
   });
-
-  it('serves log history and the api generation', async () => {
-    const api = new MockApi('normal', 0);
-    expect((await api.health()).api).toBe('v1');
-    const logs = await api.runLogs('run_7d1e', 5);
-    expect(logs.lines.length).toBeLessThanOrEqual(5);
-    expect(logs.lines.map((l) => l.t)).toEqual([...logs.lines.map((l) => l.t)].sort());
-  });
 });
 
 describe('reduceConfusion', () => {

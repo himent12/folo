@@ -9,7 +9,7 @@
   /* The measure of helper and explanatory text (DESIGN_DIRECTION §2.3, "Measure"): about 60 characters a line. A `ch`
      is the width of Geist's 0, a tabular digit about 1.5 average characters wide, so 40ch is ~60 characters (60ch ran
      ~90). Every paragraph that explains (hints, notes, findings, a Why? fold, an empty state's sentence) caps its
-     `max-inline-size` here, through `.measure` or its own rule; `copy.test.ts` rejects a measure of its own. */
+     `max-inline-size` here, through `.measure` or its own rule, never a measure of its own. */
   --measure: 40ch;
   /* Inside a dialog the measure is the dialog's text column: ui/Dialog sets `--measure` to this on its <dialog>, so a
      note, a hint or a body paragraph runs to the 480 px dialog's padding (its 440 px column holds about 60ch of 12 px
@@ -391,7 +391,7 @@ a.ident:hover {
 /* The selection rule, for every list and option (tables, New run's sizes, the inspector's labels, Runs' phone rows,
    Compare's pinned run, Model's traced classes): bg.active and a 2 px ink bar on the leading edge, `--select-bar`.
    Lime is "now" or the one action, never a selection state: only a selected detection on an image is lime
-   (DESIGN_DIRECTION §2.7; design/statusHue.test.ts fails on an accent in a selection rule). */
+   (DESIGN_DIRECTION §2.7). */
 :root {
   --select-bar: inset 2px 0 0 var(--text-primary);
 }

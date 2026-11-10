@@ -1318,7 +1318,7 @@
     .add {
       min-height: 44px;
     }
-    /* The native picker lies unseen over the button, but iOS still zooms into a select under 16 px (touchText.test.ts). */
+    /* The native picker lies unseen over the button, but iOS still zooms into a select under 16 px (sourceRules.test.ts). */
     .add select {
       font-size: var(--type-lg-size);
     }

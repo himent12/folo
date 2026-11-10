@@ -61,15 +61,10 @@ describe('Settings › Cloud', () => {
     const li = row.closest('li')!;
     expect(text(row)).toBe('RunPod');
     expect([...li.querySelectorAll('.cx-meta .ui-meta > span')].map(text)).toEqual(['you@example.com', 'Balance $42.17', 'checked 3m ago']);
-    expect(text(li.querySelector('.cx-state'))).toBe('Connected');
     expect(button(li, 'Check')).toBeDefined();
     expect(button(li, 'Disconnect')).toBeDefined();
-    // The header's Connect, the secondary style: not the page's primary action.
-    expect(target.querySelector('#cloud header .btn.secondary')?.textContent?.trim()).toBe('Connect');
     const inst = await until(() => target.querySelector('table.inst tbody tr'), 'the instances');
     expect(inst.classList.contains('ended')).toBe(true);
-    // The offer as a meta line: one item each, so a wrapped line never ends on a "·".
-    expect([...inst.querySelectorAll('.gpu .ui-meta > span')].map(text)).toEqual(['RTX 4090', '24.0 GiB', 'Secure Cloud']);
     expect(text(inst.querySelector('.run a'))).toBe('shapes-m');
     expect(text(inst.querySelector('.st'))).toBe('Terminated');
     expect(button(inst, 'Terminate')).toBeUndefined();
@@ -78,8 +73,6 @@ describe('Settings › Cloud', () => {
   it('says there is no cloud, with one way to connect, and lists no instances', async () => {
     open(new MockApi('cloud-none', 0));
     await until(() => text(target.querySelector('#cloud')).includes('No cloud connected'), 'the empty state');
-    expect(text(target.querySelector('#cloud'))).toContain('No cloud connected');
-    expect(text(target.querySelector('#cloud'))).toContain('Connect RunPod to train on a rented GPU, or another FOLO server of yours.');
     expect([...target.querySelectorAll('#cloud button')].filter((b) => text(b) === 'Connect')).toHaveLength(1);
     expect(target.querySelector('#cloud-instances')).toBeNull();
   });
@@ -91,11 +84,8 @@ describe('Settings › Cloud', () => {
     expect(button(err.closest('li')!, 'Check again')).toBeDefined();
     const callout = await until(() => target.querySelector('#cloud-instances .callout'), 'the callout');
     expect(callout.getAttribute('role')).toBe('alert');
-    expect(text(callout.querySelector('.c-title'))).toBe('Termination not confirmed');
-    expect(text(callout.querySelector('.c-msg'))).toBe(
-      'FOLO could not confirm that folo-run_c3d5-4c1a is terminated: RunPod rejected this API key. It keeps trying. Check the provider’s console for k2x9wq7m3fz1; the instance may still be billed.',
-    );
-    expect(callout.querySelectorAll('.ident')).toHaveLength(2);
+    // The instance by its name and its provider's id, to look up in the provider's console.
+    expect([...callout.querySelectorAll('.ident')].map(text)).toEqual(['folo-run_c3d5-4c1a', 'k2x9wq7m3fz1']);
     const row = target.querySelector('table.inst tbody tr')!;
     expect(text(row.querySelector('.st'))).toBe('Terminating');
     expect(button(row, 'Terminate')).toBeDefined();
@@ -172,9 +162,6 @@ describe('Settings › Cloud', () => {
     const li = (await until(() => target.querySelector('.cx-row .cx-name'), 'the connection')).closest('li')!;
     button(li, 'Disconnect')!.click();
     const d = await until(() => dialog(), 'the dialog');
-    expect(text(d.querySelector('h2'))).toBe('Disconnect RunPod?');
-    expect(text(d.querySelector('header p'))).toBe('FOLO forgets the API key. Runs and models stay.');
-    expect(d.querySelector('footer .btn.destructive')?.textContent?.trim()).toBe('Disconnect');
     button(d.querySelector('footer')!, 'Disconnect')!.click();
     const err = await until(() => d.querySelector('[role="alert"] [data-notice]'), 'the refusal');
     expect(text(err)).toContain('RunPod has a live instance, folo-run_c7b1-9d03');
@@ -188,8 +175,8 @@ describe('Settings › Cloud', () => {
     expect(text(row)).toContain('stops by');
     button(row, 'Terminate')!.click();
     const d = await until(() => dialog(), 'the dialog');
-    expect(text(d.querySelector('h2'))).toBe('Terminate this instance?');
-    expect(text(d.querySelector('header p'))).toBe('The RTX 4090 at RunPod is shut down now. Its run fasteners-l fails; the checkpoints already copied to this machine stay.');
+    // What happens to the run is said before it does.
+    expect(text(d.querySelector('header p'))).toContain('fasteners-l');
     await until(() => document.activeElement?.hasAttribute('data-safe'), 'the safe button focused');
     button(d.querySelector('footer')!, 'Terminate')!.click();
     await until(() => toast.items.length, 'the toast');

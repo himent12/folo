@@ -269,7 +269,7 @@ async fn models() {
 
 #[tokio::test]
 async fn runs_lifecycle() {
-    let (server, _) = mock();
+    let (server, store) = mock();
     let app = server.router();
     let list: RunList = ok(&app, get("/api/runs")).await;
     let statuses: Vec<_> = list.runs.iter().map(|r| r.status).collect();
@@ -337,7 +337,8 @@ async fn runs_lifecycle() {
         "run_not_active",
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(2000)).await;
+    // A mock run takes 1.5 s to stop.
+    store.pass_time(Duration::from_secs(2));
     let r: Run = ok(&app, get(&format!("/api/runs/{}", run.id))).await;
     assert_eq!(r.status, RunStatus::Stopped);
     let (status, _, _) =
@@ -522,8 +523,15 @@ async fn sse_live_run_streams_and_cleans_up() {
 
     // Disconnect the last one: the ticker exits on its next tick.
     drop(body_b);
-    tokio::time::sleep(folo_server::mock::TICK * 4).await;
-    assert_eq!(store.hub_state(&live), (0, false));
+    let t0 = tokio::time::Instant::now();
+    while store.hub_state(&live) != (0, false) {
+        assert!(
+            t0.elapsed() < folo_server::mock::TICK * 20,
+            "the ticker still runs: {:?}",
+            store.hub_state(&live)
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 
     // A new subscriber restarts it; shutting the server down ends the stream.
     let res = app.clone().oneshot(get(&uri)).await.unwrap();
@@ -985,7 +993,7 @@ async fn predictions_stay_within_the_model_classes() {
 
 #[tokio::test]
 async fn sse_first_subscriber_sees_queued_to_running() {
-    let (server, _) = mock();
+    let (server, store) = mock();
     let app = server.router();
     let ds: DatasetList = ok(&app, get("/api/datasets")).await;
     let run: Run =
@@ -993,12 +1001,14 @@ async fn sse_first_subscriber_sees_queued_to_running() {
     assert_eq!(run.status, RunStatus::Queued);
     let res = app.clone().oneshot(get(&format!("/api/runs/{}/events", run.id))).await.unwrap();
     let mut body = res.into_body();
+    // A new mock run waits 2 s in the queue.
+    store.pass_time(Duration::from_secs(2));
     let mut statuses = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     'outer: loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         let evs = read_events(&mut body, 1, left).await;
-        assert!(!evs.is_empty(), "no step within 8 s; statuses {statuses:?}");
+        assert!(!evs.is_empty(), "no step within 5 s; statuses {statuses:?}");
         for (name, data) in evs {
             match name.as_str() {
                 "status" => statuses.push(serde_json::from_str::<StatusEvent>(&data).unwrap().status),
@@ -1130,7 +1140,7 @@ async fn run_logs_history() {
 
 #[tokio::test]
 async fn logs_of_a_run_stopped_while_queued_match_sse() {
-    let (server, _) = mock();
+    let (server, store) = mock();
     let app = server.router();
     let ds: DatasetList = ok(&app, get("/api/datasets")).await;
     let run: Run = ok(&app, post_json("/api/runs", json!({ "dataset_id": ds.datasets[0].id }))).await;
@@ -1139,9 +1149,10 @@ async fn logs_of_a_run_stopped_while_queued_match_sse() {
     let stop = Request::post(format!("/api/runs/{}/stop", run.id)).body(Body::empty()).unwrap();
     let r: Run = ok(&app, stop).await;
     assert_eq!(r.status, RunStatus::Stopping);
-    // Collect SSE log lines until the final `stopped` status.
+    // Collect SSE log lines until the final `stopped` status. A mock run takes 1.5 s to stop: they pass once the
+    // stream said `stopping`.
     let mut sse_logs = Vec::new();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     'outer: loop {
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
         let evs = read_events(&mut body, 1, left).await;
@@ -1149,11 +1160,11 @@ async fn logs_of_a_run_stopped_while_queued_match_sse() {
         for (name, data) in evs {
             match name.as_str() {
                 "log" => sse_logs.push(serde_json::from_str::<LogLine>(&data).unwrap().message),
-                "status"
-                    if serde_json::from_str::<StatusEvent>(&data).unwrap().status == RunStatus::Stopped =>
-                {
-                    break 'outer;
-                }
+                "status" => match serde_json::from_str::<StatusEvent>(&data).unwrap().status {
+                    RunStatus::Stopping => store.pass_time(Duration::from_secs(2)),
+                    RunStatus::Stopped => break 'outer,
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -1242,7 +1253,7 @@ async fn mock_metrics_carry_the_operating_point() {
 /// moves, `start`, the `queue` events, `Run.resolved` once a run starts, and the errors.
 #[tokio::test]
 async fn mock_queue_control() {
-    let (server, _) = mock();
+    let (server, store) = mock();
     let app = server.router();
     let ds: DatasetList = ok(&app, get("/api/datasets")).await;
     let ds = ds.datasets[0].id.clone();
@@ -1289,7 +1300,7 @@ async fn mock_queue_control() {
     assert_ne!(serde_json::to_value(resolved.optimizer).unwrap(), "auto");
     assert!(resolved.lr0 > 0.0 && resolved.accumulate >= 1 && resolved.warmup_iters > 0);
     assert_eq!((pos(&b).await, pos(&a).await), (Some(1), Some(2)));
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    store.pass_time(Duration::from_millis(2500));
     let r: Run = ok(&app, get(&format!("/api/runs/{b}"))).await;
     assert_eq!((r.status, r.queue_position), (RunStatus::Queued, Some(1)), "the slot is taken");
     // `start` with a run training only moves to the front.
@@ -1338,7 +1349,7 @@ async fn mock_queue_control() {
 
     // Stopping the running run lets the front run start.
     let _: Run = ok(&app, Request::post(format!("/api/runs/{c}/stop")).body(Body::empty()).unwrap()).await;
-    tokio::time::sleep(Duration::from_millis(1800)).await;
+    store.pass_time(Duration::from_millis(1800));
     let r: Run = ok(&app, get(&format!("/api/runs/{a}"))).await;
     assert_eq!((r.status, r.queue_position), (RunStatus::Running, None));
     assert_eq!(pos(&b).await, Some(1));

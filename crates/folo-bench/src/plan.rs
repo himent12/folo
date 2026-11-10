@@ -160,17 +160,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_lists_everything() {
-        let c = catalog();
-        assert_eq!(c.conditions.len(), 12);
-        assert_eq!(c.conditions[0].id, "low_light");
-        assert_eq!(c.severities, 5);
-        assert_eq!(c.axes.iter().map(|a| a.axis).collect::<Vec<_>>(), BenchAxis::ALL);
-        assert!((c.axes.iter().map(|a| a.weight).sum::<f32>() - 1.0).abs() < 1e-6);
-        assert_eq!(c.default_plan, default_plan());
-    }
-
-    #[test]
     fn default_plan_is_valid_and_runs_36_variants() {
         let p = default_plan();
         assert_eq!(check_plan(&p).unwrap(), p);

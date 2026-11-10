@@ -10,7 +10,7 @@ npm run check     # generated tokens are fresh + svelte-check + tsc
 npm test          # vitest (logic)
 npm run build     # -> dist/, served by `folo serve`
 npm run shoot r1  # screenshots of every screen/state -> shots/r1/ (uses the installed Chrome)
-npm run qa        # the shoot's blank-section and overflow checks at tablet/phone sizes, no shots; fails on any (CI)
+npm run qa        # the shoot's layout checks on the production build at tablet/phone sizes, no shots; fails on any (CI)
 FOLO_API=http://127.0.0.1:7979 npm run smoke   # every route against a running `folo serve`, reports errors
 ```
 

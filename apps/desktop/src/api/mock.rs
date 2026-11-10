@@ -3260,9 +3260,14 @@ mod tests {
     fn stopping_flushes_the_stream() {
         let m = MockBackend::new(500, false);
         let rx = m.events(LIVE_ID).unwrap();
-        std::thread::sleep(Duration::from_millis(150));
-        let stopped = m.stop_run(LIVE_ID).unwrap();
+        // Stop once the worker is streaming live steps.
         let mut last_step = 0;
+        while last_step == 0 {
+            if let RunEvent::Step(s) = rx.recv_timeout(Duration::from_secs(5)).expect("a live step") {
+                last_step = s.step;
+            }
+        }
+        let stopped = m.stop_run(LIVE_ID).unwrap();
         let mut saw_log = false;
         loop {
             match rx.recv_timeout(Duration::from_secs(5)).expect("stream ends with a status") {
@@ -3477,14 +3482,19 @@ mod tests {
         let mut config = cloud_config(RTX4090_OFFER, 12.);
         config.epochs = 1;
         let run = m.create_run(config).unwrap();
-        // The demo's 2 s phases and training, shortened.
-        if let Some(sim) =
-            m.runs.lock().unwrap().iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut())
-        {
-            (sim.pre, sim.step_dt) = ([0.05, 0.05, 0.3], 0.01);
-            sim.anchor = (sim.train_at(), 0);
-        }
+        // The demo's phases take seconds. Here each lasts until the stream has shown it, then the
+        // test moves the simulation on: no wait on the clock, however slow the machine.
+        let sim = |edit: &dyn Fn(&mut CloudSim)| {
+            let mut runs = m.runs.lock().unwrap();
+            edit(runs.iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut()).unwrap());
+        };
+        // Provisioning when the stream starts, then uploading: the stream sends a new phase at once.
+        sim(&|s| s.pre = [1e6, 0., 1e6]);
         let rx = m.events(&run.id).unwrap();
+        sim(&|s| {
+            s.pre = [0., 0., 1e6];
+            s.anchor = (s.train_at(), 0);
+        });
         let (mut phases, mut statuses, mut uploads) = (Vec::new(), Vec::new(), 0);
         while let Ok(ev) = rx.recv_timeout(Duration::from_secs(5)) {
             match ev {
@@ -3492,6 +3502,21 @@ mod tests {
                     uploads += usize::from(c.phase == CloudPhase::Syncing && c.progress.is_some());
                     if phases.last() != Some(&c.phase) {
                         phases.push(c.phase);
+                        match c.phase {
+                            // Uploading: finish it now, and train until told otherwise.
+                            CloudPhase::Syncing => sim(&|s| {
+                                s.pre[2] = s.elapsed();
+                                s.step_dt = 1e6;
+                                s.anchor = (s.train_at(), 0);
+                            }),
+                            // Training: finish every step now, and skip collecting and releasing.
+                            CloudPhase::Training => sim(&|s| {
+                                s.step_dt = 1e-6;
+                                s.anchor = (s.elapsed(), 0);
+                                s.t0 -= COLLECT_S + RELEASE_S + 1.;
+                            }),
+                            _ => {}
+                        }
                     }
                 }
                 RunEvent::Status(s) => statuses.push(s.status),

@@ -16,6 +16,7 @@ describe('router guards', () => {
     router.go(`${JOB}?image=3`);
   });
   afterEach(() => {
+    vi.useRealTimers();
     remove?.();
     vi.restoreAllMocks();
   });
@@ -144,9 +145,11 @@ describe('router guards', () => {
     router.go(`${JOB}?image=3`, { replace: true });
     tab = tabHistory(['#/datasets']);
     const held = hold();
+    vi.useFakeTimers();
     tab.back();
-    // The router takes the entry for a new one and travels the wrong way; nothing is there.
-    await new Promise((done) => setTimeout(done, 1200));
+    // The router takes the entry for a new one and travels the wrong way; nothing is there, and it stops waiting.
+    await vi.advanceTimersByTimeAsync(1200);
+    vi.useRealTimers();
     expect(held.map((h) => h.to)).toEqual(['/datasets']);
     // The navigation was not gone through with: the page and its URL stay.
     expect(router.route.path).toBe(JOB);

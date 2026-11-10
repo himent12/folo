@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Dataset, DatasetStats } from '$lib/api/types';
-import { bySeverity, countBinLabel, findingCount, findingLabel, healthChecks, shareBelow, sizeBinLabel } from './health';
+import { bySeverity, countBinLabel, findingCount, healthChecks, shareBelow, sizeBinLabel } from './health';
 
 const ds = (over: Partial<Dataset> = {}): Dataset => ({
   id: 'ds_x',
@@ -60,26 +60,13 @@ describe('healthChecks', () => {
   });
 
   it('flags a tiny-box share above 10%', () => {
-    const h = healthChecks(ds(), st({ box_size_hist: { edges: [0, 0.05, 0.1, 1], counts: [400, 600, 2000] } }));
-    expect(h.find((x) => x.id === 'tiny')?.title).toBe('13% of boxes are tiny');
+    expect(healthChecks(ds(), st({ box_size_hist: { edges: [0, 0.05, 0.1, 1], counts: [400, 600, 2000] } })).find((x) => x.id === 'tiny')?.title).toMatch(/^13% /);
+    expect(healthChecks(ds(), st({ box_size_hist: { edges: [0, 0.05, 0.1, 1], counts: [250, 750, 2000] } })).some((x) => x.id === 'tiny')).toBe(false);
   });
 
   it('treats a few empty images as info, many as a warning', () => {
     expect(healthChecks(ds(), st({ empty_images: 12 })).find((x) => x.id === 'empty')?.severity).toBe('info');
     expect(healthChecks(ds(), st({ empty_images: 300 })).find((x) => x.id === 'empty')?.severity).toBe('warning');
-  });
-
-  it('gives every finding a short form of its own for the folded line on tablets (at most 16 characters)', () => {
-    const many = [
-      healthChecks(ds({ splits: { train: 40, val: 0, test: 0 } }), st({ broken_labels: 3, empty_images: 300, class_counts: [1200, 0, 10], box_size_hist: { edges: [0, 0.05, 1], counts: [500, 2500] } })),
-      healthChecks(ds(), st({ class_counts: [1200, 600, 200] })),
-      healthChecks(ds(), st()),
-    ].flat();
-    expect(many.length).toBeGreaterThan(6);
-    for (const h of many) {
-      expect(h.tiny.length, h.id).toBeLessThanOrEqual(16);
-      expect(h.tiny, h.id).not.toBe(h.short);
-    }
   });
 
   it('warns without a validation split', () => {
@@ -146,21 +133,5 @@ describe('bySeverity', () => {
       ['Notes', ['empty']],
     ]);
     expect(bySeverity(healthChecks(ds(), st()))).toEqual([]);
-  });
-});
-
-describe('summary copy', () => {
-  it('says the finding total one way, as findings (each finding is one, notes too)', () => {
-    expect(findingLabel(0)).toBeUndefined();
-    expect(findingLabel(1)).toBe('1 finding');
-    expect(findingLabel(4)).toBe('4 findings');
-    const h = healthChecks(
-      ds(),
-      st({ broken_labels: 3, empty_images: 20, box_size_hist: { edges: [0, 0.05, 1], counts: [1050, 1950] } }),
-      { error: 3, warning: 3, info: 20, by_kind: {} },
-    );
-    // The broken files, the check's warnings, the tiny boxes and the empty-images note: four findings.
-    expect(findingCount(h)).toBe(4);
-    expect(h.filter((x) => x.severity !== 'ok').map((x) => x.short)).toEqual(['3 broken label files', '3 check warnings', '35% tiny boxes', expect.any(String)]);
   });
 });

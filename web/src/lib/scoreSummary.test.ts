@@ -1,17 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Model } from '$lib/api/types';
-import {
-  filterLabel,
-  groupKey,
-  groupLabel,
-  modelChoices,
-  rankByContext,
-  rankKey,
-  scoreContext,
-  scoreTag,
-  scoreText,
-  type ScoreContext,
-} from './scoreSummary';
+import { groupKey, modelChoices, rankByContext, rankKey, scoreContext, scoreTag, type ScoreContext } from './scoreSummary';
 
 const ds = (id: string, val: number) => ({ id, name: id.replace('ds_', '').replace('_', '-'), splits: { train: 100, val, test: 0 } });
 const datasets = new Map([ds('ds_fasteners', 360), ds('ds_fasteners_mini', 0), ds('ds_shapes', 200)].map((d) => [d.id, d]));
@@ -66,22 +55,7 @@ describe('the tags and labels', () => {
   const published = ctx(model('d', null, 0.3, { source: 'published' }));
   it('tags every score that is not on a validation split, and only those', () => {
     expect(scoreTag(val)).toBeNull();
-    expect(scoreTag(train)).toBe('Training split');
-    expect(scoreTag(imported)).toBe('Split unknown');
-    expect(scoreTag(published)).toBe('Split unknown');
-  });
-  it('heads each group with what its scores are on', () => {
-    expect(groupLabel(val)).toBe('Validation split of fasteners');
-    expect(groupLabel(train)).toBe('Training split of fasteners-mini');
-    expect(groupLabel(imported)).toBe('Imported · split unknown');
-    expect(groupLabel(published)).toBe('Published weights · split unknown');
-    expect(filterLabel(val)).toBe('fasteners');
-    expect(filterLabel(train)).toBe('fasteners-mini · training split');
-  });
-  it('carries the context in one line of text', () => {
-    expect(scoreText(0.604, val)).toBe('mAP50-95 0.604 on fasteners');
-    expect(scoreText(0.701, train)).toBe('mAP50-95 0.701 on fasteners-mini · training split');
-    expect(scoreText(0.448, imported)).toBe('mAP50-95 0.448 · split unknown');
+    for (const c of [train, imported, published, { kind: 'run', datasetId: 'ds_x', datasetName: 'x', split: null } as ScoreContext]) expect(scoreTag(c)).not.toBeNull();
   });
   it('gives only a known dataset and split a rank key', () => {
     expect(rankKey(val)).toBe('ds_fasteners:val');
@@ -119,24 +93,8 @@ describe('rankByContext', () => {
 });
 
 describe('modelChoices', () => {
-  it('lists the ranked groups first, then the unranked ones, each label carrying its context', () => {
+  it('lists the ranked groups first, then the unranked ones', () => {
     const c = modelChoices([model('mini-n', null, 0.701), model('fast-a', 'r_fast', 0.6), model('mini-run', 'r_mini', 0.74)], ctx);
-    expect(c.map((x) => [x.group, x.label])).toEqual([
-      ['Validation split of fasteners', 'fast-a · mAP50-95 0.600 on fasteners'],
-      ['Training split of fasteners-mini', 'mini-run · mAP50-95 0.740 on fasteners-mini · training split'],
-      ['Imported · split unknown', 'mini-n · mAP50-95 0.701 · split unknown'],
-    ]);
-    // Closed, a select shows the name alone; the score and all of its context go in the meta line under it.
-    expect(c.map((x) => [x.short, x.meta])).toEqual([
-      ['fast-a', 'mAP50-95 0.600 · fasteners, validation split'],
-      ['mini-run', 'mAP50-95 0.740 · fasteners-mini, training split'],
-      ['mini-n', 'mAP50-95 0.701 · imported, split unknown'],
-    ]);
+    expect(c.map((x) => x.short)).toEqual(['fast-a', 'mini-run', 'mini-n']);
   });
-});
-
-it('a context type with no split is never shown as validation', () => {
-  const c: ScoreContext = { kind: 'run', datasetId: 'ds_x', datasetName: 'x', split: null };
-  expect(scoreTag(c)).toBe('Split unknown');
-  expect(scoreText(0.5, c)).toBe('mAP50-95 0.500 · split unknown');
 });

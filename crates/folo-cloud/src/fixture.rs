@@ -75,6 +75,16 @@ pub struct Fixture {
 impl Fixture {
     /// Serves `answers`, one per request, in order.
     pub fn serve(answers: Vec<Answer>) -> Fixture {
+        Fixture::start(Some(answers))
+    }
+
+    /// Reads each request and closes the connection without an answer. (A loopback port nothing listens on would
+    /// do too, but Windows takes 2 s to refuse a connection to one.)
+    pub fn hang_up() -> Fixture {
+        Fixture::start(None)
+    }
+
+    fn start(answers: Option<Vec<Answer>>) -> Fixture {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -82,7 +92,8 @@ impl Fixture {
         let thread = {
             let (requests, stop) = (requests.clone(), stop.clone());
             std::thread::spawn(move || {
-                let mut answers = answers.into_iter();
+                let hang_up = answers.is_none();
+                let mut answers = answers.into_iter().flatten();
                 for stream in listener.incoming() {
                     if stop.load(Ordering::SeqCst) {
                         break;
@@ -90,6 +101,9 @@ impl Fixture {
                     let Ok(mut stream) = stream else { continue };
                     let Some(request) = read_request(&stream) else { continue };
                     requests.lock().unwrap().push(request);
+                    if hang_up {
+                        continue;
+                    }
                     let answer = answers
                         .next()
                         .unwrap_or_else(|| Answer::json(599, r#"{"detail":"no answer scripted"}"#));
@@ -113,14 +127,6 @@ impl Fixture {
     /// The requests so far, in order.
     pub fn requests(&self) -> Vec<Request> {
         self.requests.lock().unwrap().clone()
-    }
-
-    /// A loopback URL nothing listens on.
-    pub fn closed_url() -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        format!("http://{addr}")
     }
 }
 

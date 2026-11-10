@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use axum::http::StatusCode;
 use folo_api::{
@@ -118,6 +119,8 @@ pub struct Labeler {
     /// In creation order.
     jobs: RwLock<Vec<Arc<Job>>>,
     agents: Vec<Arc<dyn Agent>>,
+    /// How often a run writes `job.json` at most ([`run::SAVE_EVERY`]).
+    save_every: Duration,
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -261,12 +264,18 @@ impl Labeler {
             datasets: data_dir.join("datasets"),
             jobs: RwLock::new(jobs),
             agents: vec![Arc::new(ClaudeCode::new()), Arc::new(Codex::new())],
+            save_every: run::SAVE_EVERY,
         }
     }
 
     /// Replaces the agents (tests script their own).
     pub fn set_agents(&mut self, agents: Vec<Arc<dyn Agent>>) {
         self.agents = agents;
+    }
+
+    /// Changes how often a run writes `job.json` at most (tests shorten it).
+    pub fn set_save_every(&mut self, every: Duration) {
+        self.save_every = every;
     }
 
     fn job(&self, id: &str) -> Result<Arc<Job>> {
@@ -696,6 +705,7 @@ impl Labeler {
             batches: ids.chunks(batch).map(<[String]>::to_vec).collect(),
             parallel: req.parallel.unwrap_or(DEFAULT_PARALLEL) as usize,
             cancel: Arc::new(AtomicBool::new(false)),
+            save_every: self.save_every,
         };
         let previous = state.file.run.replace(LabelRun {
             agent: req.agent,

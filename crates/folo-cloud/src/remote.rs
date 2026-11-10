@@ -346,7 +346,8 @@ mod tests {
             let e = Remote.check(&values(&f.base(), TOKEN)).unwrap_err();
             assert_error(&e, ErrorKind::Unavailable, "does not look like a FOLO server");
         }
-        let e = Remote.check(&values(&Fixture::closed_url(), TOKEN)).unwrap_err();
+        let silent = Fixture::hang_up();
+        let e = Remote.check(&values(&silent.base(), TOKEN)).unwrap_err();
         assert_error(&e, ErrorKind::Unavailable, "does not answer");
     }
 

@@ -1,8 +1,9 @@
 """Parity check of `folo export --format onnx` against FOLO's own forward pass (docs/CLI.md, export).
 
 Runs an exported model in onnxruntime (CPU) on fixed inputs and compares every output with tensors FOLO dumped
-for the same inputs. The Rust integration test `crates/folo-cli/tests/onnx.rs` writes the manifest, the inputs
-and the expected outputs, then runs this script; it can also be run by hand on such a directory.
+for the same inputs. The Rust integration test `crates/folo-cli/tests/onnx.rs` writes the inputs, the expected
+outputs and a manifest per group of cases, then runs this script once per manifest, side by side; it can also be
+run by hand on such a directory.
 
 Usage:
     python bench/parity/onnx_check.py MANIFEST.json [--bench N]

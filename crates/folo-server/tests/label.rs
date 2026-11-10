@@ -165,6 +165,11 @@ struct Fixture {
 
 /// A server on `home` whose Claude Code agent follows `steps`.
 fn fixture(home: &Path, steps: Vec<Step>) -> Fixture {
+    fixture_with(home, steps, |store| store)
+}
+
+/// [`fixture`] with the store changed by `tune` before it serves.
+fn fixture_with(home: &Path, steps: Vec<Step>, tune: impl FnOnce(RealStore) -> RealStore) -> Fixture {
     let agent = Scripted::new(LabelAgentId::Claude, steps);
     let missing = Arc::new(Scripted {
         id: LabelAgentId::Codex,
@@ -174,11 +179,11 @@ fn fixture(home: &Path, steps: Vec<Step>) -> Fixture {
         calls: AtomicUsize::new(0),
         slow_probe: Mutex::default(),
     });
-    let store = Arc::new(
+    let store = Arc::new(tune(
         RealStore::open(home.to_path_buf())
             .recheck_every(Duration::ZERO)
             .label_agents(vec![agent.clone(), missing]),
-    );
+    ));
     Fixture { app: Server::new(store.clone(), Options::default()).router(), store, agent }
 }
 
@@ -728,13 +733,15 @@ async fn a_run_saves_its_labels_while_later_calls_are_still_out() {
     let t = TestDir::new("label-save-during-run");
     let home = t.join("home");
     let gate = Arc::new(AtomicBool::new(false));
-    let f = fixture(&home, vec![Step::Reply(boxes_reply(1, "car")), Step::Until(gate.clone())]);
+    // A run writes `job.json` at most every 5 s; here every 50 ms.
+    let steps = vec![Step::Reply(boxes_reply(1, "car")), Step::Until(gate.clone())];
+    let f = fixture_with(&home, steps, |store| store.label_save_every(Duration::from_millis(50)));
     let job = job_with_images(&f.app, 2).await;
     let body = json!({ "agent": "claude", "batch": 1, "parallel": 1 });
     ok::<LabelJob>(&f.app, post(&format!("/api/label/jobs/{}/start", job.id), body)).await;
 
-    // The first image is labeled; the second call does not come back. Within a few seconds the job's file has
-    // the first image's labels, so a crash during the long call would not lose them.
+    // The first image is labeled; the second call does not come back. Soon the job's file has the first image's
+    // labels, so a crash during the long call would not lose them.
     let file = home.join("label").join(&job.id).join("job.json");
     let saved = || {
         let on_disk: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -742,8 +749,8 @@ async fn a_run_saves_its_labels_while_later_calls_are_still_out() {
     };
     let mut waited = Duration::ZERO;
     while !saved() && waited < Duration::from_secs(20) {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        waited += Duration::from_millis(100);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        waited += Duration::from_millis(10);
     }
     assert!(saved(), "job.json was not written while the run waited on a call");
     assert_eq!(f.agent.calls(), 2);

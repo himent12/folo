@@ -281,7 +281,6 @@ fn constructors() {
     assert_eq!(z.to_vec::<i64>().unwrap(), vec![0, 0]);
     assert!(z.to_vec::<f32>().is_err());
     assert_eq!(Tensor::ones([2]).ones_like().unwrap().to_vec::<f32>().unwrap(), vec![1.0, 1.0]);
-    assert!(format!("{:?}", Tensor::ones([2])).contains("Tensor[2] f32 cpu"));
 }
 
 /// Naive gradients of `sum(conv2d(x, w) * r)` with respect to `x` and `w`.

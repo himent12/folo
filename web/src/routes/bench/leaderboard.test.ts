@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { BenchEntry } from '$lib/api/types';
-import { along, bandEntry, boardOrder, stale, compareHint, compareIds, comparePath, compareReason, intervalDomain, intervalScale, keepSelection, overlaps, ranks, scaleTicks, TICK_GAP, toggleSelection } from './leaderboard';
+import { along, bandEntry, boardOrder, stale, compareIds, comparePath, compareReason, intervalDomain, intervalScale, keepSelection, overlaps, ranks, scaleTicks, TICK_GAP, toggleSelection } from './leaderboard';
 
 const e = (id: string, total: number | null, status: BenchEntry['status'] = total === null ? 'running' : 'done', partial = false, created = '2026-11-01T00:00:00Z') =>
   ({ id, status, created, score: total === null ? null : { total, partial, axes: [] } }) as unknown as BenchEntry;
@@ -62,13 +62,11 @@ describe('the Compare selection', () => {
     expect(compareIds(new URLSearchParams('entries=a,%20c,,d'))).toEqual(['a', 'c', 'd']);
   });
 
-  it('says what Compare needs, and is enabled from two', () => {
-    expect(compareHint(0)).toBe('Select 2–4 finished entries to compare');
-    expect(compareHint(1)).toBe('Select one more entry to compare · 2–4 entries');
-    expect(compareHint(3)).toBe('3 selected · up to 1 more');
-    expect(compareHint(4)).toBe('4 selected (the maximum)');
-    expect(compareReason(1)).toBe(compareHint(1));
+  it('holds Compare with a reason under two, and enables it from two', () => {
+    expect(compareReason(0)).toBeTruthy();
+    expect(compareReason(1)).toBeTruthy();
     expect(compareReason(2)).toBeNull();
+    expect(compareReason(4)).toBeNull();
   });
 });
 

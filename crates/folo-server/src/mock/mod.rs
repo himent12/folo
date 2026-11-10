@@ -32,11 +32,11 @@ use crate::store::{
     Store, Subscription, Weights, WeightsFormat,
 };
 use crate::util::{Rng, fnv1a, mix64, noise, parse_rfc3339, rfc3339, unique_id, unix_now};
-use cloud::{CONNECTION, PHASE_S, SEEDED_OFFER, SimCloud};
+use cloud::{CONNECTION, SEEDED_OFFER, SimCloud};
 use runs::{Curve, LiveClock, SimRun, Timeline, arch_spec};
 use scene::{Scene, Theme};
 
-pub use cloud::{ENV_MOCK_CLOUD, MockCloud};
+pub use cloud::{ENV_MOCK_CLOUD, MockCloud, PHASE_S};
 pub use runs::TICK;
 
 const DEVICE: &str = "NVIDIA GeForce RTX 4080 SUPER (vulkan)";
@@ -1751,6 +1751,15 @@ impl MockStore {
     pub fn hub_state(&self, id: &str) -> (usize, bool) {
         let (run, _) = self.run(id).unwrap();
         (run.subscribers(), run.ticking())
+    }
+
+    /// Lets `d` pass at once for every live run, as if the tests waited for it: their clocks move ahead (queue
+    /// waits, stops, cloud phases and epochs), and streams report the change on their next tick.
+    #[doc(hidden)]
+    pub fn pass_time(&self, d: std::time::Duration) {
+        for (run, _) in self.runs.read().unwrap().iter() {
+            run.pass_time(d);
+        }
     }
 }
 

@@ -4,15 +4,12 @@ import { AMP_SPEEDUP, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate
 const GiB = 2 ** 30;
 
 describe('oomScale', () => {
-  it('leaves the estimate alone when it already said the failed settings would not fit', () => {
-    expect(oomScale(27 * GiB, 16 * GiB)).toBe(1);
-  });
-  it('scales a low estimate until the failed settings exceed the memory by 5%', () => {
+  it('scales a low estimate until the failed settings exceed the memory by 5%, and leaves any other alone', () => {
     const k = oomScale(8 * GiB, 16 * GiB);
     expect(k).toBeCloseTo(2.1);
     expect(8 * GiB * k).toBeGreaterThan(16 * GiB);
-  });
-  it('does nothing without an estimate', () => {
+    // It already said the failed settings would not fit, or there is no estimate.
+    expect(oomScale(27 * GiB, 16 * GiB)).toBe(1);
     expect(oomScale(0, 16 * GiB)).toBe(1);
   });
 });
@@ -87,18 +84,15 @@ describe('close mosaic', () => {
     // close_mosaic = 10 closes mosaic for 10 epochs of 20 or 30, 6 of 12, 4 of 8 and none of 1.
     expect([20, 30, 12, 8, 1].map((e) => closeMosaicEpochs(10, e))).toEqual([10, 10, 6, 4, 0]);
     expect(closeMosaicEpochs(3, 100)).toBe(3);
-  });
-  it('defaults to 10 epochs under the same cap', () => {
+    // The default is 10 epochs under the same cap.
     expect([1, 2, 5, 20, 100].map(autoCloseMosaic)).toEqual([0, 1, 2, 10, 10]);
   });
 });
 
 describe('defaultImgsz', () => {
-  it("trains at a smaller dataset's own size", () => {
+  it("trains at a smaller dataset's own size, and stays at 640 for larger, mixed or unknown sizes", () => {
     expect(defaultImgsz([[320, 320], [320, 320]])).toBe(320);
     expect(defaultImgsz([[300, 200]])).toBe(320);
-  });
-  it('stays at 640 for larger, mixed or unknown sizes', () => {
     expect(defaultImgsz([[1024, 768]])).toBe(640);
     expect(defaultImgsz([[320, 320], [480, 480]])).toBe(640);
     expect(defaultImgsz([])).toBe(640);

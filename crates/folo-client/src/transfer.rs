@@ -19,8 +19,14 @@ pub const PART_BYTES: u64 = 8 * 1024 * 1024;
 pub const ATTEMPTS: u32 = 6;
 /// Times a download starts over because the file was replaced while it was fetched.
 pub const RESTARTS: u32 = 3;
-/// The wait before the first retry; it doubles with every retry, up to [`MAX_BACKOFF`].
-const FIRST_BACKOFF: Duration = Duration::from_millis(500);
+/// After a download's first part, the rest of the file is asked for in one request when it is at most this large
+/// (it is held in memory, and [`crate::MAX_BODY`] bounds an answer) and, at the first part's rate, arrives within
+/// [`REST_WITHIN`].
+pub const REST_MAX_BYTES: u64 = 192 * 1024 * 1024;
+/// See [`REST_MAX_BYTES`]: well inside the 100 seconds after which provider proxies cut a connection.
+pub const REST_WITHIN: Duration = Duration::from_secs(30);
+/// The wait before the first retry ([`Control::backoff`]); it doubles with every retry, up to [`MAX_BACKOFF`].
+pub const FIRST_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(8);
 
 /// Why a transfer did not finish.
@@ -57,6 +63,8 @@ pub struct Control<'a> {
     pub progress: &'a mut dyn FnMut(TransferProgress),
     /// Asked before every part and retry: `true` ends the transfer with [`TransferError::Stopped`].
     pub stop: &'a dyn Fn() -> bool,
+    /// The wait before the first retry of a request: [`FIRST_BACKOFF`] (tests shorten it).
+    pub backoff: Duration,
 }
 
 /// What [`download`] fetched.
@@ -194,7 +202,7 @@ impl Parts<'_, '_> {
     /// (the part arrived, its answer did not), the same part (send it again), or elsewhere (the upload is broken).
     fn put(&mut self, n: u32) -> Result<(), TransferError> {
         let path = format!("/uploads/{}/parts/{n}", self.id);
-        let mut wait = FIRST_BACKOFF;
+        let mut wait = self.ctl.backoff;
         let mut attempt = 1;
         loop {
             let e = match self.client.put::<Upload>(&path, &self.buf) {
@@ -253,10 +261,19 @@ impl Write for Parts<'_, '_> {
     }
 }
 
-/// Fetches `GET /api{path}` (a weights file) into `dest` in [`PART_BYTES`] `Range` parts, each after the first
-/// with `If-Match` on the first one's ETag: a file replaced meanwhile (`412`) is fetched again from the start, at
-/// most [`RESTARTS`] times. The bytes go to a temporary file next to `dest`, which is renamed into place at the end,
-/// so `dest` is never a partial file.
+/// Fetches `GET /api{path}` (a weights file) into `dest` with `Range` requests, each after the first with
+/// `If-Match` on the first one's ETag: a file replaced meanwhile (`412`) is fetched again from the start, at most
+/// [`RESTARTS`] times. The bytes go to a temporary file next to `dest`, which is renamed into place at the end, so
+/// `dest` is never a partial file.
+///
+/// The first request asks for [`PART_BYTES`] and tells the file's length and how fast the link is. When the rest
+/// would arrive within [`REST_WITHIN`] (and is at most [`REST_MAX_BYTES`]), it is asked for in one request: the
+/// server streams one request from one open file, so a file that is replaced often (a run's `last.folo`, every
+/// epoch) can only get in the way between the first answer and the second request, not once per part. Otherwise,
+/// and when that one request fails for a reason of the moment, the rest comes in parts of [`PART_BYTES`].
+///
+/// A file that was replaced in that moment too (epochs of half a second) is then asked for whole in one request,
+/// when the whole of it fits the same bounds: one request is one version, whatever happens to the file meanwhile.
 pub fn download(
     client: &Client,
     path: &str,
@@ -270,6 +287,18 @@ pub fn download(
         let _ = std::fs::remove_file(&tmp);
     }
     fetched
+}
+
+/// Removes the temporary files of downloads into `dir` that did not finish (a process killed mid-download leaves
+/// its `.<name>.<pid>.<n>.download`). For a directory nothing else downloads into at the moment.
+pub fn remove_partial(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name.starts_with('.') && name.ends_with(".download") {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// `.<name>.<pid>.<n>.download` next to `dest`.
@@ -291,16 +320,29 @@ fn fetch(
     tmp: &Path,
     ctl: &mut Control<'_>,
 ) -> Result<Downloaded, TransferError> {
+    // The file's length, once a first part showed that all of it fits one request: what the next version is
+    // asked for at once after this one was replaced (tried once).
+    let mut whole: Option<u64> = None;
     'version: for _ in 0..=RESTARTS {
         let mut file = std::fs::File::create(tmp).map_err(TransferError::Io)?;
         let mut etag: Option<String> = None;
         let mut done = 0u64;
+        // The end of the next request when it is the whole rest (decided after the first part, tried once).
+        let mut rest: Option<u64> = whole.take();
         loop {
             if (ctl.stop)() {
                 return Err(TransferError::Stopped);
             }
-            let range = done..done + PART_BYTES;
-            let part = match retry(ctl, || client.get_range(path, range.clone(), etag.as_deref())) {
+            let asked = std::time::Instant::now();
+            let answer = match rest.take() {
+                Some(end) => match client.get_range(path, done..end, etag.as_deref()) {
+                    // Too much for one request on this link after all: on in parts.
+                    Err(e) if e.is_transient() => continue,
+                    answer => answer.map_err(TransferError::Failed),
+                },
+                None => retry(ctl, || client.get_range(path, done..done + PART_BYTES, etag.as_deref())),
+            };
+            let part = match answer {
                 Ok(p) => p,
                 Err(TransferError::Failed(e)) if e.status == Some(StatusCode::PRECONDITION_FAILED) => {
                     continue 'version;
@@ -324,6 +366,7 @@ fn fetch(
                 )));
             }
             file.write_all(&part.bytes).map_err(TransferError::Io)?;
+            let first = done == 0;
             done += part.bytes.len() as u64;
             (ctl.progress)(TransferProgress { done_bytes: done, total_bytes: part.total });
             let version = etag.get_or_insert(part.etag);
@@ -331,15 +374,27 @@ fn fetch(
                 file.sync_all().map_err(TransferError::Io)?;
                 return Ok(Downloaded { bytes: done, etag: version.clone() });
             }
+            let (got, took) = (part.bytes.len() as u64, asked.elapsed());
+            if first && rest_fits(part.total - done, got, took) {
+                rest = Some(part.total);
+                whole = rest_fits(part.total, got, took).then_some(part.total);
+            }
         }
     }
     Err(TransferError::Replaced)
 }
 
+/// Whether the `rest` bytes of a download are asked for in one request, after a first part of `got` bytes that
+/// took `took`: at most [`REST_MAX_BYTES`], and within [`REST_WITHIN`] at that rate.
+fn rest_fits(rest: u64, got: u64, took: Duration) -> bool {
+    let rate = got as f64 / took.as_secs_f64().max(1e-3);
+    rest <= REST_MAX_BYTES && rest as f64 <= rate * REST_WITHIN.as_secs_f64()
+}
+
 /// Calls `call` until it succeeds, fails for good, or has failed transiently [`ATTEMPTS`] times, waiting longer
 /// before each retry.
 fn retry<T>(ctl: &Control<'_>, mut call: impl FnMut() -> crate::Result<T>) -> Result<T, TransferError> {
-    let mut wait = FIRST_BACKOFF;
+    let mut wait = ctl.backoff;
     let mut attempt = 1;
     loop {
         match call() {
@@ -372,5 +427,25 @@ fn bad_gateway(client: &Client, message: &str) -> Error {
             message: format!("{}: {message}", client.base()),
             hint: Some("the server may be a different FOLO version".into()),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_rest_is_one_request_when_it_arrives_in_time_and_fits_in_memory() {
+        let mib = 1024 * 1024;
+        let secs = Duration::from_secs_f64;
+        // 8 MiB in a second: 30 s carry 240 MiB, more than the cap of 192.
+        assert!(rest_fits(34 * mib, PART_BYTES, secs(1.0)));
+        assert!(rest_fits(REST_MAX_BYTES, PART_BYTES, secs(1.0)));
+        assert!(!rest_fits(REST_MAX_BYTES + 1, PART_BYTES, secs(0.01)), "more than is held in memory");
+        // 8 MiB in 16 s is half a MiB a second: 15 MiB arrive within 30 s, 16 do not.
+        assert!(rest_fits(15 * mib, PART_BYTES, secs(16.0)));
+        assert!(!rest_fits(16 * mib, PART_BYTES, secs(16.0)));
+        // A part timed at zero does not divide by it.
+        assert!(rest_fits(mib, PART_BYTES, Duration::ZERO));
     }
 }

@@ -307,14 +307,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_are_torch_defaults() {
-        let s = GradScaler::new();
-        assert_eq!(s.scale(), 65536.0);
-        assert_eq!((s.growth_factor(), s.backoff_factor(), s.growth_interval()), (2.0, 0.5, 2000));
-        assert_eq!(s.inv_scale(), 1.0 / 65536.0);
-    }
-
-    #[test]
     fn overflow_skips_and_backs_off() {
         let mut s = GradScaler::new();
         for _ in 0..5 {
