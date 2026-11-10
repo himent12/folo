@@ -8,6 +8,7 @@ mod draw;
 mod engine;
 mod infer;
 mod output;
+mod serve_lock;
 mod train;
 mod weights;
 
@@ -176,6 +177,32 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
     } else {
         data_dir(args.data_dir.clone())?
     };
+    // One server per data dir (the mock writes nothing): a second would stop the first one's active runs.
+    let serve_lock = if args.mock {
+        None
+    } else {
+        match serve_lock::acquire(&data_dir) {
+            Ok(serve_lock::Acquire::Held(lock)) => Some(lock),
+            Ok(serve_lock::Acquire::InUse { url }) => {
+                let dir = folo_api::json::path(&data_dir);
+                out.record(&json!({ "event": "data_dir_in_use", "data_dir": dir, "url": url }));
+                let hint = match &url {
+                    Some(url) => format!("it listens on {url}; use that one, or pass another --data-dir"),
+                    None => "stop it first, or pass another --data-dir".into(),
+                };
+                return Err(CliError::new(
+                    ExitCode::Runtime,
+                    "data_dir_in_use",
+                    format!("another folo serve is using {dir}"),
+                )
+                .hint(hint));
+            }
+            Err(e) => {
+                tracing::warn!("could not lock {}: {e}", folo_api::json::path(data_dir.join("serve.lock")));
+                None
+            }
+        }
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -221,6 +248,11 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             },
         );
         let url = format!("http://{addr}");
+        if let Some(lock) = &serve_lock
+            && let Err(e) = lock.publish(&url)
+        {
+            tracing::warn!("could not record the address in the data dir: {e}");
+        }
         out.human(format!(
             "FOLO {VERSION} serving {} on {url}",
             if args.mock { "mock data" } else { "the real store" }

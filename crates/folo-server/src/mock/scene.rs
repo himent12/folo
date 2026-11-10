@@ -27,14 +27,34 @@ enum ShapeKind {
 
 #[derive(Clone, Debug)]
 enum Draw {
-    Ellipse { color: Rgb },
-    Rect { color: Rgb },
-    Poly { pts: Vec<(f32, f32)>, color: Rgb },
-    Vehicle { color: Rgb, wheels: u32 },
-    Person { color: Rgb },
-    Bicycle { color: Rgb },
-    Bolt { color: Rgb },
-    Nut { color: Rgb },
+    Ellipse {
+        color: Rgb,
+    },
+    Rect {
+        color: Rgb,
+    },
+    Poly {
+        pts: Vec<(f32, f32)>,
+        color: Rgb,
+    },
+    Vehicle {
+        color: Rgb,
+        wheels: u32,
+    },
+    Person {
+        color: Rgb,
+    },
+    Bicycle {
+        color: Rgb,
+    },
+    Bolt {
+        color: Rgb,
+    },
+    /// A hex nut: its outline, and a hole in the middle.
+    Nut {
+        pts: Vec<(f32, f32)>,
+        color: Rgb,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -197,8 +217,14 @@ impl Scene {
                         let rad = r.range(36.0, 78.0);
                         let cx = r.range(rad * 1.2, wf - rad * 1.2);
                         let cy = r.range(rad * 1.2, hf - rad * 1.2);
-                        let geo = [cx - rad, cy - rad, cx + rad, cy + rad];
-                        scene.objs.push(Obj { class, geo, draw: Draw::Nut { color } });
+                        // The box is the hexagon's own (flat top and bottom: 0.87 of its width tall).
+                        let pts: Vec<_> = (0..6)
+                            .map(|i| {
+                                let a = i as f32 * std::f32::consts::TAU / 6.0;
+                                (cx + rad * a.cos(), cy + rad * a.sin())
+                            })
+                            .collect();
+                        scene.objs.push(Obj { class, geo: poly_box(&pts), draw: Draw::Nut { pts, color } });
                     }
                 }
             }
@@ -325,20 +351,13 @@ impl Scene {
                     c.rect(x1, y1, x1 + head_w, y2, shade(*color, 1.08));
                     c.rect(x1 + head_w, cy - shaft_h * 0.5, x2, cy + shaft_h * 0.5, *color);
                 }
-                Draw::Nut { color } => {
+                Draw::Nut { pts, color } => {
                     let cy = (y1 + y2) * 0.5;
-                    let rx = bw * 0.5;
-                    let ry = bh * 0.5;
-                    let hex: Vec<_> = (0..6)
-                        .map(|i| {
-                            let a = i as f32 * std::f32::consts::TAU / 6.0;
-                            (cx + rx * a.cos(), cy + ry * a.sin())
-                        })
-                        .collect();
-                    let sh: Vec<_> = hex.iter().map(|&(x, y)| (x + shadow_off, y + shadow_off)).collect();
+                    let hole = bw * 0.5 * 0.42;
+                    let sh: Vec<_> = pts.iter().map(|&(x, y)| (x + shadow_off, y + shadow_off)).collect();
                     c.polygon(&sh, [18, 20, 24]);
-                    c.polygon(&hex, *color);
-                    c.ellipse(cx, cy, rx * 0.42, ry * 0.42, [34, 38, 44]);
+                    c.polygon(pts, *color);
+                    c.ellipse(cx, cy, hole, hole, [34, 38, 44]);
                 }
             }
         }
@@ -372,6 +391,32 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fastener_boxes_are_what_is_drawn() {
+        let classes = names(&["bolt", "nut"]);
+        let (mut bolts, mut nuts) = (0, 0);
+        for i in 0..40 {
+            for o in Scene::generate(Theme::Fasteners, &classes, 1920, 1080, 5, i).objs {
+                match &o.draw {
+                    // The head spans the box's full height from its left edge; the shaft ends at its right edge.
+                    Draw::Bolt { .. } => bolts += 1,
+                    // Every side of the box touches the hexagon.
+                    Draw::Nut { pts, .. } => {
+                        nuts += 1;
+                        let b = poly_box(pts);
+                        for k in 0..4 {
+                            assert!((b[k] - o.geo[k]).abs() < 1e-3, "{:?} vs {:?}", b, o.geo);
+                        }
+                        let (w, h) = (o.geo[2] - o.geo[0], o.geo[3] - o.geo[1]);
+                        assert!((h / w - 3f32.sqrt() / 2.0).abs() < 1e-3, "a regular hexagon: {w} x {h}");
+                    }
+                    _ => panic!("only bolts and nuts"),
+                }
+            }
+        }
+        assert!(bolts > 20 && nuts > 20, "{bolts} bolts, {nuts} nuts");
     }
 
     #[test]

@@ -568,14 +568,41 @@ fn bind_to_app(child: &Child) {
 #[cfg(not(windows))]
 fn bind_to_app(_child: &Child) {}
 
+/// What starting a local `folo serve` gave.
+pub enum Spawned {
+    /// A server this app started (and stops when the [`ServerProcess`] drops).
+    Started(ServerProcess),
+    /// The data dir already has a `folo serve` (another app's, or one started by hand), listening here: use it,
+    /// don't start a second one on the same data.
+    Running(String),
+}
+
+/// What the starting server's JSON Lines told us.
+enum Startup {
+    Listening(String),
+    InUse(Option<String>),
+    Failed(String),
+}
+
+/// Reads one JSON Lines record of `folo --json serve`.
+fn startup_record(line: &str) -> Option<Startup> {
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let url = v["url"].as_str().map(str::to_string);
+    match v["event"].as_str() {
+        Some("listening") => url.map(Startup::Listening),
+        Some("data_dir_in_use") => Some(Startup::InUse(url)),
+        _ => v["error"]["message"].as_str().map(|m| Startup::Failed(m.to_string())),
+    }
+}
+
 /// Start `folo serve` (the real engine, bare until datasets/runs exist) on a free port and wait
 /// (up to `timeout`) for its address.
-pub fn spawn_server(timeout: Duration) -> Result<ServerProcess, String> {
+pub fn spawn_server(timeout: Duration) -> Result<Spawned, String> {
     let bin = find_folo().ok_or("folo was not found (set FOLO_BIN or put folo on PATH)")?;
     spawn_server_bin(&bin, timeout)
 }
 
-fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<ServerProcess, String> {
+fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Spawned, String> {
     let mut cmd = Command::new(bin);
     cmd.args(SERVE_ARGS).stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null());
     #[cfg(windows)]
@@ -589,20 +616,29 @@ fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<ServerPr
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
-                && v["event"] == "listening"
-                && let Some(url) = v["url"].as_str()
+            if let Some(rec) = startup_record(&line)
+                && tx.send(rec).is_err()
             {
-                let _ = tx.send(url.to_string());
+                break;
             }
         }
     });
     bind_to_app(&child);
-    match rx.recv_timeout(timeout) {
-        Ok(url) => Ok(ServerProcess { child, url }),
-        Err(_) => {
-            let _ = child.kill();
-            Err("folo serve did not start in time".into())
+    let outcome = rx.recv_timeout(timeout);
+    if !matches!(outcome, Ok(Startup::Listening(_))) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    match outcome {
+        Ok(Startup::Listening(url)) => Ok(Spawned::Started(ServerProcess { child, url })),
+        Ok(Startup::InUse(Some(url))) => Ok(Spawned::Running(url)),
+        Ok(Startup::InUse(None)) => {
+            Err("another folo serve is using the data dir and has not said where".into())
+        }
+        Ok(Startup::Failed(message)) => Err(message),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("folo serve did not start in time".into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("folo serve exited before it was listening".into())
         }
     }
 }
@@ -880,6 +916,32 @@ FOLO"
         let e = api.health().unwrap_err();
         assert_eq!(e.code, "server_unreachable");
         assert!(e.hint.is_some());
+    }
+
+    #[test]
+    fn startup_records_are_read() {
+        let url = |r: Option<Startup>| match r {
+            Some(Startup::Listening(u)) => format!("listening {u}"),
+            Some(Startup::InUse(u)) => format!("in use {u:?}"),
+            Some(Startup::Failed(m)) => format!("failed {m}"),
+            None => "none".into(),
+        };
+        assert_eq!(
+            url(startup_record(r#"{"event":"listening","url":"http://127.0.0.1:5000","mock":false}"#)),
+            "listening http://127.0.0.1:5000"
+        );
+        assert_eq!(
+            url(startup_record(
+                r#"{"event":"data_dir_in_use","data_dir":"C:/x","url":"http://127.0.0.1:7"}"#
+            )),
+            r#"in use Some("http://127.0.0.1:7")"#
+        );
+        assert_eq!(url(startup_record(r#"{"event":"data_dir_in_use","url":null}"#)), "in use None");
+        assert_eq!(
+            url(startup_record(r#"{"error":{"code":"bind_failed","message":"could not bind","hint":null}}"#)),
+            "failed could not bind"
+        );
+        assert_eq!(url(startup_record("FOLO serving")), "none");
     }
 
     #[test]

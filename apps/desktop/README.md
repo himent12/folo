@@ -102,7 +102,8 @@ Everything comes through `api::Backend`, typed with the shared `crates/folo-api`
   reloads; an unreachable server still runs the loaded copy). The demo data has no weights, so there it is Server only.
   `FOLO_SERVER=… cargo test real_server -- --ignored` checks local results against the server's.
 - **`MockBackend`** is built-in demo data (procedural shapes datasets, models and runs with a live simulator) used
-  for screenshots, tests and when no server is available. It also has cloud compute (docs/CLOUD.md), as
+  for screenshots and tests, and when picked (`--mock`, `--scenario`, Settings › Connection); an unreachable server
+  shows as unreachable, never as demo data. It also has cloud compute (docs/CLOUD.md), as
   `folo serve --mock` does: the real providers' fields, one RunPod connection with a fixed offer list, one cloud
   run released long ago (with its final cost and terminated instance), and runs created with a GPU under Run on
   going through every phase. `MockBackend::with_cloud_runs` adds one uploading its data and one training (the
@@ -119,7 +120,8 @@ cost and time limit. `src/cloud.rs` holds the state and the rules those surfaces
 
 By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts a
 local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
-bare against the real data dir (`$FOLO_HOME` or `~/.folo`). `--server URL` and `--mock` pick a source explicitly;
+bare against the real data dir (`$FOLO_HOME` or `~/.folo`). When that data dir already has a `folo serve` (another
+window's), it connects to that one instead (`data_dir_in_use`, docs/CLI.md). `--server URL` and `--mock` pick a source explicitly;
 Settings › Connection switches at runtime. `--open run:<id>` (or `dataset:`, `model:`, `runs`, …) starts on a screen.
 
 ## Design tokens
