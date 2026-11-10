@@ -53,6 +53,10 @@ struct Record {
     /// RFC 3339 time a sweep took the next look ([`Ledger::due`]): another one does not look meanwhile.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     looking: Option<String>,
+    /// The record ended as never found ([`Ledger::unseen`]) and nothing has found its instance since; it stays set
+    /// after the watch ends ([`Ledger::reopen`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    never_found: bool,
 }
 
 /// How long a look a sweep took holds off the others (longer than a look takes; a sweep that died meanwhile only
@@ -229,6 +233,7 @@ impl Ledger {
             unseen_until: None,
             looked: None,
             looking: None,
+            never_found: false,
         };
         self.write(&record)?;
         Ok(record.instance)
@@ -287,6 +292,7 @@ impl Ledger {
             let kept = parse_rfc3339(&r.instance.created).unwrap_or(now) + KEEP_ENDED.as_secs_f64();
             r.unseen_until = Some(rfc3339(watch_until(r).map_or(kept, |w| w.max(kept))));
             (r.looked, r.looking) = (None, None);
+            r.never_found = true;
         })
     }
 
@@ -302,7 +308,8 @@ impl Ledger {
         let _lock = self.lock()?;
         let mut r = self.read(id)?;
         let Some(until) = r.unseen_until.as_deref().and_then(parse_rfc3339) else { return Ok(false) };
-        if r.looking.as_deref().and_then(parse_rfc3339).is_some_and(|t| t <= now && now - t < LOOK_HELD_S) {
+        // Within its time of `now` either way: a clock that stepped back does not free it early.
+        if r.looking.as_deref().and_then(parse_rfc3339).is_some_and(|t| (now - t).abs() < LOOK_HELD_S) {
             return Ok(false);
         }
         let looked = r.looked.as_deref().and_then(parse_rfc3339);
@@ -342,13 +349,24 @@ impl Ledger {
 
     /// The provider lists the never found instance of record `id` after all (as `provider_ref` when it lists one):
     /// `terminating` again, without an end, for the normal termination, which ends it when the provider confirms
-    /// (so its cost covers what it ran).
+    /// (so its cost covers what it ran). Whatever ended the watch meanwhile (another look's empty answer): a look
+    /// that found the instance wins.
+    ///
+    /// It acts exactly on a record that is `terminated`, has no provider id, and ended as never found
+    /// ([`Ledger::unseen`], or a watch mark of a record of before that flag): such a record's instance was never
+    /// confirmed terminated, so one its name lists is alive. A record whose termination the provider confirmed
+    /// ([`Ledger::terminated`]: never marked so, or found and reopened first, which clears the mark) or that has a
+    /// provider id is left as it is.
     pub fn reopen(&self, id: &str, provider_ref: Option<String>) -> Result<CloudInstance> {
         self.change(id, |r| {
-            if r.unseen_until.is_some() {
+            let unseen = r.never_found || r.unseen_until.is_some();
+            if r.instance.status == CloudInstanceStatus::Terminated
+                && r.instance.provider_ref.is_none()
+                && unseen
+            {
                 r.instance.status = CloudInstanceStatus::Terminating;
                 r.instance.ended = None;
-                r.instance.provider_ref = provider_ref.or(r.instance.provider_ref.take());
+                r.instance.provider_ref = provider_ref;
             }
         })
     }
@@ -361,7 +379,7 @@ impl Ledger {
         let now = unix_now();
         // A record whose instance is alive again (found after all) is not watched any more.
         if r.instance.status.is_alive() {
-            (r.unseen_until, r.looked, r.looking) = (None, None, None);
+            (r.unseen_until, r.looked, r.looking, r.never_found) = (None, None, None, false);
         }
         if !r.instance.status.is_alive() && r.instance.ended.is_none() {
             r.instance.ended = Some(rfc3339(now));
@@ -650,6 +668,46 @@ mod tests {
         assert!(ledger.due(&k.id, now, paces).unwrap());
         ledger.looked(&k.id, now, Ok(())).unwrap();
         assert!(!ledger.list().iter().any(|i| i.id == k.id), "pruned after it");
+    }
+
+    #[test]
+    fn a_clock_that_steps_back_neither_lets_two_looks_overlap_nor_loses_a_found_instance() {
+        let paces = Paces { fast: Duration::from_secs(600), slow: Duration::from_secs(3600) };
+        let dir = TestDir::new("cloud-ledger-step-back");
+        let cloud = dir.join("cloud");
+        let ledger = Ledger::new(&cloud, cloud.join(".lock"), Vec::new());
+        let now = unix_now().floor();
+        let i = ledger.create("cc_1", "p", "run_1", &offer(Some(3.6)), None, None).unwrap();
+        ledger.unseen(&i.id, now).unwrap();
+        // A sweep claims the look; another, a second later by a clock that stepped back, does not take it too.
+        assert!(ledger.due(&i.id, now, paces).unwrap());
+        assert!(!ledger.due(&i.id, now - 1.0, paces).unwrap(), "held in either direction");
+        ledger.looked(&i.id, now, Ok(())).unwrap();
+
+        // At the end: the empty answer of one look made the record final; a look that found the instance still
+        // reopens it (terminated, never found, without a provider id: its instance lives).
+        let end = parse_rfc3339(ledger.read(&i.id).unwrap().unseen_until.as_deref().unwrap()).unwrap();
+        assert!(ledger.due(&i.id, end, paces).unwrap());
+        ledger.looked(&i.id, end, Ok(())).unwrap();
+        assert_eq!(ledger.read(&i.id).unwrap().unseen_until, None, "final");
+        let found = ledger.reopen(&i.id, Some("pod-1".into())).unwrap();
+        assert_eq!(
+            (found.status, found.ended, found.provider_ref.as_deref()),
+            (CloudInstanceStatus::Terminating, None, Some("pod-1"))
+        );
+
+        // Never one whose instance was confirmed terminated: through `terminated`, or with a provider id.
+        let j = ledger.create("cc_1", "p", "run_2", &offer(Some(3.6)), None, None).unwrap();
+        ledger.terminated(&j.id, false).unwrap();
+        assert_eq!(
+            ledger.reopen(&j.id, Some("pod-2".into())).unwrap().status,
+            CloudInstanceStatus::Terminated
+        );
+        let k = ledger.create("cc_1", "p", "run_3", &offer(Some(3.6)), None, None).unwrap();
+        ledger.unseen(&k.id, now).unwrap();
+        ledger.reopen(&k.id, Some("pod-3".into())).unwrap();
+        ledger.terminated(&k.id, false).unwrap();
+        assert_eq!(ledger.reopen(&k.id, None).unwrap().status, CloudInstanceStatus::Terminated);
     }
 
     #[test]

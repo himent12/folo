@@ -148,6 +148,14 @@ impl Core {
             .connected(&record.connection_id)
             .map_err(|e| e.body.message)
             .and_then(|c| c.provider.find(&c.connection.values(), &record.name).map_err(|e| e.message));
+        self.answered(record, at, found);
+    }
+
+    /// What the look for the never found instance of `record` taken at `at` ([`super::ledger::Ledger::due`])
+    /// answered: the provider ids of the instances its name lists, or why there was no answer. An instance that was
+    /// found is terminated, whatever another look's answer did to the record meanwhile: a look that found it wins.
+    fn answered(&self, record: &CloudInstance, at: f64, found: std::result::Result<Vec<String>, String>) {
+        let id = &record.id;
         let looked = match found {
             Ok(refs) if refs.is_empty() => self.ledger.looked(id, at, Ok(())),
             Ok(refs) => {
@@ -160,7 +168,15 @@ impl Core {
                 );
                 // One is its provider id from now on; several (a provider's retries) are found by the name again.
                 let one = (refs.len() == 1).then(|| refs[0].clone());
-                self.ledger.reopen(id, one).and_then(|_| self.terminate_once(id))
+                match self.ledger.reopen(id, one) {
+                    // The record went (the watch ended with another look's empty answer, and it was pruned):
+                    // nothing would terminate them, so this does.
+                    Err(e) if e.body.code == "instance_not_found" => {
+                        self.terminate_unrecorded(record, &refs);
+                        return;
+                    }
+                    reopened => reopened.and_then(|_| self.terminate_once(id)),
+                }
             }
             // Does not count: looked for again at the next sweep.
             Err(message) => self.ledger.looked(
@@ -174,6 +190,28 @@ impl Core {
         };
         if let Err(e) = looked {
             tracing::warn!(instance = %id, "looking for it: {}", e.body.message);
+        }
+    }
+}
+
+impl Core {
+    /// Terminates the instances `refs` of `record`, whose ledger record is gone: once, with the outcome in the
+    /// server's log (there is no record left to keep retrying from).
+    fn terminate_unrecorded(&self, record: &CloudInstance, refs: &[String]) {
+        let terminated = self.connected(&record.connection_id).map_err(|e| e.body.message).and_then(|c| {
+            let values = c.connection.values();
+            refs.iter().try_for_each(|r| c.provider.terminate(&values, r)).map_err(|e| e.message)
+        });
+        match terminated {
+            Ok(()) => {
+                tracing::warn!(instance = %record.id, "terminated {} ({}) after its record went", record.name, refs.join(", "))
+            }
+            Err(e) => tracing::error!(
+                instance = %record.id,
+                "could not terminate {} ({}), whose record went: {e}; terminate it in the provider's console",
+                record.name,
+                refs.join(", ")
+            ),
         }
     }
 }
@@ -193,7 +231,98 @@ pub(crate) fn spawn(core: std::sync::Arc<Core>) -> std::io::Result<JoinHandle<()
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cloud::KEEP_ENDED;
     use crate::util::rfc3339;
+    use folo_api::{CloudAvailability, CloudField, CloudOffer, CloudProvider, ConnectCloud};
+    use folo_cloud::{Account, Provider, Values};
+    use std::sync::{Arc, Mutex};
+
+    /// A provider whose instances are always running, recording what it is asked to terminate.
+    #[derive(Default)]
+    struct Recording(Mutex<Vec<String>>);
+
+    impl Provider for Recording {
+        fn info(&self) -> CloudProvider {
+            let key = CloudField {
+                key: "api_key".into(),
+                label: "Key".into(),
+                secret: true,
+                required: true,
+                placeholder: None,
+                help: None,
+            };
+            CloudProvider {
+                id: "rec".into(),
+                name: "Recording".into(),
+                about: String::new(),
+                docs_url: None,
+                fields: vec![key],
+                provisions: true,
+                self_terminates: false,
+            }
+        }
+        fn check(&self, _: &Values) -> folo_cloud::Result<Account> {
+            Ok(Account::default())
+        }
+        fn offers(&self, _: &Values) -> folo_cloud::Result<Vec<CloudOffer>> {
+            Ok(Vec::new())
+        }
+        fn state(&self, _: &Values, _: &str) -> folo_cloud::Result<InstanceState> {
+            Ok(InstanceState::Running { url: "http://w".into() })
+        }
+        fn find(&self, _: &Values, _: &str) -> folo_cloud::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+        fn terminate(&self, _: &Values, r: &str) -> folo_cloud::Result<()> {
+            self.0.lock().unwrap().push(r.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_look_that_found_the_instance_wins_over_an_empty_answer_that_ended_the_watch() {
+        let dir = folo_test_support::TestDir::new("cloud-reaper-found-late");
+        let provider = Arc::new(Recording::default());
+        let cloud = super::super::Cloud::with(&dir, vec![provider.clone()], super::super::Tuning::default());
+        let values = [("api_key".to_string(), "key-0123456789".to_string())].into_iter().collect();
+        let conn =
+            cloud.connect(ConnectCloud { provider: "rec".into(), name: String::new(), values }).unwrap();
+        let core = &cloud.core;
+        let offer = CloudOffer {
+            id: "o".into(),
+            gpu: "G".into(),
+            gpu_count: 1,
+            vram_bytes: 0,
+            price_per_hour: Some(3.6),
+            region: None,
+            detail: None,
+            availability: CloudAvailability::High,
+        };
+        let paces = Paces { fast: Duration::from_secs(600), slow: Duration::from_secs(3600) };
+        // Never found, launched `age` ago; two looks at its end overlap (a look that outlasted its hold): one
+        // answers empty and ends the watch, then the other answers that the provider lists it.
+        let overlapping = |run: &str, age: f64, pod: &str| {
+            let now = unix_now().floor();
+            let i = core.ledger.create(&conn.id, "rec", run, &offer, None, None).unwrap();
+            core.ledger.update(&i.id, |i| i.created = rfc3339(now - age)).unwrap();
+            let i = core.ledger.unseen(&i.id, now).unwrap();
+            let end = now.max(now - age + KEEP_ENDED.as_secs_f64());
+            assert!(core.ledger.due(&i.id, end, paces).unwrap());
+            core.answered(&i, end, Ok(Vec::new()));
+            core.ledger.list();
+            core.answered(&i, end - 1.0, Ok(vec![pod.to_string()]));
+            i.id
+        };
+        // An hour old: the record is reopened and the instance terminated, with what it ran.
+        let id = overlapping("run_1", 3600.0, "pod-1");
+        assert_eq!(*provider.0.lock().unwrap(), ["pod-1"]);
+        let i = core.ledger.get(&id).unwrap();
+        assert_eq!((i.status, i.provider_ref.as_deref()), (CloudInstanceStatus::Terminated, Some("pod-1")));
+        assert!(i.cost_usd.unwrap() >= 3.6 - 1e-3, "{i:?}");
+        // Eight days old: the empty answer let the record go, and the instance found is terminated all the same.
+        overlapping("run_2", 8.0 * 86_400.0, "pod-2");
+        assert_eq!(*provider.0.lock().unwrap(), ["pod-1", "pod-2"]);
+    }
 
     #[test]
     fn recent_is_bounded_whatever_the_record_says() {

@@ -99,6 +99,20 @@ pub fn worker_download(base_url: &str) -> WorkerDownload {
     WorkerDownload::Found
 }
 
+/// Credentials shorter than this are not blanked out of text ([`scrub`]): it would shred ordinary words, and real
+/// keys and tokens are far longer.
+pub(crate) const MIN_SECRET_CHARS: usize = 8;
+
+/// `text`, made for a person (an error message, a log line, a name shown) from what a provider or a server
+/// answered, with every one of `secrets` of at least [`MIN_SECRET_CHARS`] characters replaced by `[redacted]`.
+/// Never applied to a value that is used again (an id, a reference): those are kept as they came.
+pub(crate) fn scrub<'a>(text: &str, secrets: impl IntoIterator<Item = &'a str>) -> String {
+    secrets
+        .into_iter()
+        .filter(|s| s.chars().count() >= MIN_SECRET_CHARS)
+        .fold(text.to_string(), |t, s| t.replace(s, "[redacted]"))
+}
+
 /// What went wrong with a provider request, by who has to act.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {

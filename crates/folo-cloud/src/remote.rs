@@ -208,8 +208,7 @@ impl Server {
 
     /// `text`, made of what the server answered (decoded), with its token blanked out: a server may say anything.
     fn scrub(&self, text: impl std::fmt::Display) -> String {
-        let text = text.to_string();
-        if self.token.is_empty() { text } else { text.replace(&self.token, "[redacted]") }
+        crate::scrub(&text.to_string(), [self.token.as_str()])
     }
 }
 
