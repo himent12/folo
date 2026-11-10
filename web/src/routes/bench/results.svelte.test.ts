@@ -413,6 +413,26 @@ describe('the failure gallery', () => {
     // One shape for every tile (4:3, the pond's commonest), never the first photo's.
     expect(new Set(tiles.map((t) => Number(/aspect-ratio:\s*([\d.]+)/.exec(t.getAttribute('style') ?? '')?.[1]).toFixed(2)))).toEqual(new Set(['1.33']));
   });
+
+  it('keeps its pages and the image open when the benchmark changes under it (a `bench` event)', async () => {
+    await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f101');
+    await settle(40);
+    const tiles = () => document.querySelectorAll('#images .tile:not(.sk)');
+    button(/^Show 24 more/)!.click();
+    await settle(40);
+    expect(tiles()).toHaveLength(2 * GALLERY_PAGE);
+    (tiles()[30] as HTMLButtonElement).click();
+    await settle();
+    expect(document.querySelector('dialog[open] .v-pos')?.textContent).toBe('31 of 360');
+    const pages = vi.spyOn(hub.api, 'benchEntryImages');
+    // A rename elsewhere: the stream sends the benchmark again, and the lists load again.
+    await hub.api.updateBench('bn_3c90', { name: 'Fasteners, renamed' });
+    await settle(40);
+    expect(pages).not.toHaveBeenCalled();
+    expect(tiles()).toHaveLength(2 * GALLERY_PAGE);
+    expect(document.querySelector('dialog[open] .v-pos')?.textContent).toBe('31 of 360');
+    expect(document.querySelectorAll('dialog[open] .v-list li').length).toBeGreaterThan(0);
+  });
 });
 
 describe('an open external entry', () => {
