@@ -1,4 +1,4 @@
-// The mock server (./index): its state and the request gate every endpoint answers through (`#call`: latency, the
+// The mock server (./index): its state and the request gate every endpoint answers through (`call`: latency, the
 // scenarios that fail or stall, the training queue's worker), with the System, Datasets and Models endpoints. Runs and
 // cloud compute are in ./trainingApi; agent labeling, benchmarks and inference in ./index.
 
@@ -49,129 +49,99 @@ const COCO_ABOUT = 'folo-n trained from scratch on COCO train2017 at 640 px (EMA
 
 export const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-export class MockServer {
-  readonly mock = true;
-  readonly #t0: number;
-  #runs: RunProfile[];
-  #datasets: MockDatasetSpec[];
-  #extraModels: Model[] = [];
-  #images = new Map<string, Promise<string>>();
-  #nextId = 1;
+/**
+ * The mock server's state that more than one of its classes reads or changes: MockServer, MockTrainingApi
+ * (./trainingApi) and MockApi (./index). The fields without a value here are set by MockServer's constructor, in
+ * this order.
+ */
+export class MockState {
+  t0!: number;
+  runs!: RunProfile[];
+  datasets!: MockDatasetSpec[];
+  nextId = 1;
   /**
    * The training queue: ids of the runs waiting for the one training slot, front first (docs/API.md, POST
    * /api/runs/{id}/queue). Runs train one at a time; the worker takes the front run once the slot is free.
    */
-  #queue: string[];
-  #throughput: MockThroughput;
+  queue!: string[];
+  throughput!: MockThroughput;
   /** Runs created through the API: while one is queued or running, a benchmark probe answers `409 run_active`. */
-  #created = new Set<string>();
-  #probing = false;
+  created = new Set<string>();
   /** Agent labeling: its jobs, runs and streams (./label). */
-  #label: MockLabeling;
+  label!: MockLabeling;
   /** Vision benchmarks: benchmarks, entries, loops and their streams (./bench). */
-  #bench: MockBench;
+  bench!: MockBench;
   /** Cloud connections. A secret is never kept: only its hint (`••••a1b2`), as the API answers it. */
-  #connections: CloudConnection[];
+  connections!: CloudConnection[];
   /** Whether the server has the `cloud` feature (`/api/cloud`, `TrainConfig.compute`); older servers do not. */
-  readonly #cloudOn: boolean;
+  cloudOn!: boolean;
+  /** `gpu-unplugged`: the second adapter is gone once a run asked for it. */
+  unplugged = false;
+  /** `amp-refused`: set by the refused run; `/api/system` then says what the restarted server can do. */
+  ampRefused = false;
+}
+
+export class MockServer {
+  readonly mock = true;
+  /** The state the endpoint classes extending this one share with it (see MockState). */
+  protected readonly state = new MockState();
+  #extraModels: Model[] = [];
+  #images = new Map<string, Promise<string>>();
+  #probing = false;
 
   constructor(
     readonly scenario: Scenario = 'normal',
     readonly latency = 140,
   ) {
-    this.#t0 = Date.now();
-    this.#runs = scenario === 'empty' ? [] : profiles(this.#t0, scenario);
-    this.#datasets = scenario === 'empty' ? [] : [...specs];
-    this.#throughput = new MockThroughput(this.#t0);
-    this.#label = new MockLabeling(this.#t0, scenario !== 'empty', scenario === 'all-agents');
-    this.#bench = new MockBench(this.#t0, {
-      models: () => this.#models(),
-      datasets: () => this.#datasets,
-      labeling: this.#label,
+    this.state.t0 = Date.now();
+    this.state.runs = scenario === 'empty' ? [] : profiles(this.state.t0, scenario);
+    this.state.datasets = scenario === 'empty' ? [] : [...specs];
+    this.state.throughput = new MockThroughput(this.state.t0);
+    this.state.label = new MockLabeling(this.state.t0, scenario !== 'empty', scenario === 'all-agents');
+    this.state.bench = new MockBench(this.state.t0, {
+      models: () => this.allModels(),
+      datasets: () => this.state.datasets,
+      labeling: this.state.label,
       agents: () => mockAgents(this.scenario === 'all-agents'),
     });
-    this.#bench.designFails = scenario === 'bench-agent-fails';
-    this.#cloudOn = !['cloud-off', 'no-throughput'].includes(scenario);
-    this.#connections = this.#cloudOn && !['empty', 'cloud-none'].includes(scenario) ? [seedConnection(this.#t0, scenario === 'cloud-trouble')] : [];
-    this.#queue = this.#runs
+    this.state.bench.designFails = scenario === 'bench-agent-fails';
+    this.state.cloudOn = !['cloud-off', 'no-throughput'].includes(scenario);
+    this.state.connections = this.state.cloudOn && !['empty', 'cloud-none'].includes(scenario) ? [seedConnection(this.state.t0, scenario === 'cloud-trouble')] : [];
+    this.state.queue = this.state.runs
       .filter((p) => p.startedAt === null && !p.terminal)
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((p) => p.id);
   }
 
-  /**
-   * The private members of this class that the endpoint classes extending it use (./trainingApi, ./index). Each of
-   * them forwards the ones it needs under the same private names, so their methods read as in this class.
-   */
-  protected readonly shared = {
-    t0: () => this.#t0,
-    runs: () => this.#runs,
-    setRuns: (runs: RunProfile[]) => {
-      this.#runs = runs;
-    },
-    datasets: () => this.#datasets,
-    nextId: () => this.#nextId,
-    setNextId: (id: number) => {
-      this.#nextId = id;
-    },
-    queue: () => this.#queue,
-    setQueue: (queue: string[]) => {
-      this.#queue = queue;
-    },
-    throughput: () => this.#throughput,
-    created: () => this.#created,
-    label: () => this.#label,
-    bench: () => this.#bench,
-    connections: () => this.#connections,
-    setConnections: (connections: CloudConnection[]) => {
-      this.#connections = connections;
-    },
-    cloudOn: () => this.#cloudOn,
-    setUnplugged: (unplugged: boolean) => {
-      this.#unplugged = unplugged;
-    },
-    setAmpRefused: (refused: boolean) => {
-      this.#ampRefused = refused;
-    },
-    call: <T>(fn: () => T, latency?: number) => this.#call(fn, latency),
-    schedule: (now: number) => this.#schedule(now),
-    spec: (id: string) => this.#spec(id),
-    noRoute: (path: string) => this.#noRoute(path),
-    gpus: () => this.#gpus(),
-    capabilities: () => this.#capabilities(),
-    models: () => this.#models(),
-    labeling: () => this.#labeling(),
-    benching: () => this.#benching(),
-  };
 
   /**
    * The worker: once no run holds the training slot (running, stopping, or taken and still being built), it takes
    * the front of the queue, which starts 1.5 s later (at the earliest 1.5 s after it was created).
    */
-  #schedule(now: number) {
-    if (!this.#queue.length) return;
+  protected schedule(now: number) {
+    if (!this.state.queue.length) return;
     // Cloud runs train elsewhere: they never hold the slot.
-    const busy = this.#runs.some(
-      (p) => !p.cloud && !this.#queue.includes(p.id) && ((p.startedAt !== null && p.startedAt > now) || ['running', 'stopping'].includes(progressAt(p, now).status)),
+    const busy = this.state.runs.some(
+      (p) => !p.cloud && !this.state.queue.includes(p.id) && ((p.startedAt !== null && p.startedAt > now) || ['running', 'stopping'].includes(progressAt(p, now).status)),
     );
     if (busy) return;
-    const p = this.#runs.find((r) => r.id === this.#queue[0]);
-    this.#queue.shift();
+    const p = this.state.runs.find((r) => r.id === this.state.queue[0]);
+    this.state.queue.shift();
     if (p) p.startedAt = Math.max(now + 1500, p.createdAt + 1500);
   }
 
   /** Runs `fn` after a simulated network delay (`latency` overrides the default; a mock built with 0 never waits). */
-  async #call<T>(fn: () => T, latency?: number): Promise<T> {
+  protected async call<T>(fn: () => T, latency?: number): Promise<T> {
     if (this.scenario === 'loading') return new Promise<T>(() => {});
     if (this.latency > 0 && (latency ?? this.latency) > 0) await sleep((latency ?? this.latency) * (0.7 + 0.6 * Math.random()));
-    if (this.scenario === 'error' || ((this.scenario === 'stale' || this.scenario === 'stale-lists') && Date.now() - this.#t0 > STALE_AFTER))
+    if (this.scenario === 'error' || ((this.scenario === 'stale' || this.scenario === 'stale-lists') && Date.now() - this.state.t0 > STALE_AFTER))
       throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
-    this.#schedule(Date.now());
+    this.schedule(Date.now());
     return fn();
   }
 
-  #spec(id: string): MockDatasetSpec {
-    const s = this.#datasets.find((d) => d.id === id);
+  protected spec(id: string): MockDatasetSpec {
+    const s = this.state.datasets.find((d) => d.id === id);
     if (!s) throw new ApiError(404, 'dataset_not_found', `No dataset with id ${id}.`, 'List datasets with GET /api/datasets.');
     return s;
   }
@@ -179,18 +149,15 @@ export class MockServer {
   // ---------- system ----------
 
   health(): Promise<Health> {
-    return this.#call(() => ({ status: 'ok' as const, version: '0.1.0', api: 'v1', mock: true }), 20);
+    return this.call(() => ({ status: 'ok' as const, version: '0.1.0', api: 'v1', mock: true }), 20);
   }
-
-  /** `gpu-unplugged`: the second adapter is gone once a run asked for it. */
-  #unplugged = false;
 
   /** Whether a run trains on this machine now (cloud runs use another's GPU). */
   #trainingHere(): boolean {
-    return this.#runs.some((p) => !p.cloud && progressAt(p, Date.now()).status === 'running');
+    return this.state.runs.some((p) => !p.cloud && progressAt(p, Date.now()).status === 'running');
   }
 
-  #gpus(): SystemInfo['gpus'] {
+  protected gpus(): SystemInfo['gpus'] {
     const t = Date.now() / 1000;
     const training = this.#trainingHere();
     const gpus: SystemInfo['gpus'] = [
@@ -202,7 +169,7 @@ export class MockServer {
         util: training ? round(0.91 + 0.04 * smoothNoise(5, t / 2), 3) : 0.02,
       },
     ];
-    if (this.scenario === 'gpu-unplugged' && !this.#unplugged)
+    if (this.scenario === 'gpu-unplugged' && !this.state.unplugged)
       gpus.push({ ordinal: 1, name: 'NVIDIA GeForce RTX 3060', backend: 'vulkan' as const, memory_bytes: 12 * 2 ** 30, util: 0 });
     return gpus;
   }
@@ -221,78 +188,75 @@ export class MockServer {
       : { device: 'gpu:0', live_bytes: 0, cached_bytes: 0, peak_live_bytes: peak };
   }
 
-  /** `amp-refused`: set by the refused run; `/api/system` then says what the restarted server can do. */
-  #ampRefused = false;
-
-  #capabilities(): Capabilities {
-    return capabilities(this.#ampRefused ? 'tensor-cores-off' : this.scenario);
+  protected capabilities(): Capabilities {
+    return capabilities(this.state.ampRefused ? 'tensor-cores-off' : this.scenario);
   }
 
   /** Whether this server labels: not `folo serve --mock` (`no-labeling`), nor a server from before it (`no-throughput`). */
-  #labeling() {
+  protected labeling() {
     return this.scenario !== 'no-labeling' && this.scenario !== 'no-throughput';
   }
 
   /** Whether this server has them: not `folo serve --mock` (`no-bench`, `no-labeling`), nor a server from before them. */
-  #benching() {
+  protected benching() {
     return this.scenario !== 'no-bench' && this.scenario !== 'no-labeling' && this.scenario !== 'no-throughput';
   }
 
   system(): Promise<SystemInfo> {
-    return this.#call(() => {
+    return this.call(() => {
       const t = Date.now() / 1000;
       const pool = this.#gpuPool();
       return {
         cpu: { name: CPU_NAME, threads: 32, util: round(0.27 + 0.08 * smoothNoise(3, t / 4), 3) },
         memory: { used_bytes: Math.round((21.4 + 0.3 * smoothNoise(4, t / 9)) * 2 ** 30), total_bytes: 64 * 2 ** 30 },
-        gpus: this.#gpus(),
+        gpus: this.gpus(),
         features: [
           ...(this.scenario === 'no-throughput'
             ? ['export_onnx_switches', 'queue_control', 'weights_onnx']
             : ['export_onnx_switches', 'queue_control', 'weights_onnx', 'throughput', 'run_estimate', 'benchmark', 'run_cli']),
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
-          ...(this.#labeling() ? [LABEL_FEATURE] : []),
-          ...(this.#benching() ? [BENCH_FEATURE] : []),
-          ...(this.#cloudOn ? ['cloud'] : []),
+          ...(this.labeling() ? [LABEL_FEATURE] : []),
+          ...(this.benching() ? [BENCH_FEATURE] : []),
+          ...(this.state.cloudOn ? ['cloud'] : []),
         ],
-        capabilities: this.#capabilities(),
+        capabilities: this.capabilities(),
         ...(pool ? { gpu_pool: pool } : {}),
       };
     }, 60);
   }
 
   /** A server from before these endpoints: an unknown route. */
-  #noRoute(path: string): ApiError {
+  protected noRoute(path: string): ApiError {
     return new ApiError(404, 'not_found', `No route for ${path}.`);
   }
 
   throughput(): Promise<ThroughputTable> {
-    return this.#call(() => {
-      if (this.scenario === 'no-throughput') throw this.#noRoute('GET /api/system/throughput');
-      return this.#throughput.table();
+    return this.call(() => {
+      if (this.scenario === 'no-throughput') throw this.noRoute('GET /api/system/throughput');
+      return this.state.throughput.table();
     }, 80);
   }
 
   /** About 1.5 s, the shortest a real probe takes (docs/API.md: the budget, 1–10 s, plus setup). */
   async benchmark(body: BenchmarkRequest = {}): Promise<BenchmarkReport> {
-    if (this.scenario === 'no-throughput') return this.#call(() => Promise.reject(this.#noRoute('POST /api/system/benchmark')));
+    if (this.scenario === 'no-throughput') return this.call(() => Promise.reject(this.noRoute('POST /api/system/benchmark')));
     const busy = () => {
       const now = Date.now();
-      const active = this.#runs.find((p) => this.#created.has(p.id) && !p.cloud && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
+      const active = this.state.runs.find((p) => this.state.created.has(p.id) && !p.cloud && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
       if (this.#probing) return new ApiError(409, 'run_active', 'A benchmark probe is already running.', 'Wait for it to finish.');
       if (active) return new ApiError(409, 'run_active', `Run ${active.name} is ${progressAt(active, now).status}.`, 'Measure when it has finished, or stop it first.');
       return null;
     };
     const err = busy();
-    if (err) return this.#call(() => Promise.reject(err), 60);
+    if (err) return this.call(() => Promise.reject(err), 60);
     this.#probing = true;
     const t = Date.now();
     try {
       if (this.scenario === 'loading') return await new Promise<BenchmarkReport>(() => {});
       if (this.latency > 0) await sleep(1500);
       if (this.scenario === 'error') throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
-      return this.#throughput.probe(body, Date.now(), (Date.now() - t) / 1000);
+      return this.state.throughput.probe(body, Date.now(), (Date.now() - t) / 1000);
     } finally {
       this.#probing = false;
     }
@@ -301,32 +265,32 @@ export class MockServer {
   // ---------- datasets ----------
 
   datasets(): Promise<Dataset[]> {
-    return this.#call(() => this.#datasets.map((s) => toDataset(s, this.#t0, false)));
+    return this.call(() => this.state.datasets.map((s) => toDataset(s, this.state.t0, false)));
   }
 
   dataset(id: string): Promise<Dataset> {
-    return this.#call(() => toDataset(this.#spec(id), this.#t0, true));
+    return this.call(() => toDataset(this.spec(id), this.state.t0, true));
   }
 
   createDataset(body: CreateDataset): Promise<Dataset> {
-    return this.#call(() => {
+    return this.call(() => {
       // As on the server: a folder that is already registered (by its path, whatever the spelling) answers with the
       // existing dataset, its name kept.
       const key = (p: string) => p.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-      const known = this.#datasets.find((d) => key(d.path) === key(body.path));
-      if (known) return toDataset(known, this.#t0, true);
+      const known = this.state.datasets.find((d) => key(d.path) === key(body.path));
+      if (known) return toDataset(known, this.state.t0, true);
       throw new ApiError(400, 'dataset_not_found_on_disk', `No YOLO or COCO dataset found at ${body.path}.`, 'The mock server cannot read your disk; connect to folo serve to register folders.');
     }, 400);
   }
 
   createSyntheticDataset(body: CreateSyntheticDataset): Promise<Dataset> {
-    return this.#call(() => {
+    return this.call(() => {
       const n = Math.max(10, Math.min(20000, Math.round(body.images)));
       const train = Math.round(n * 0.8);
       const classes = (body.classes.length ? body.classes : ['circle', 'square', 'triangle']).slice(0, 6);
       const spec: MockDatasetSpec = {
         ...(specs.find((s) => s.id === 'ds_shapes') as MockDatasetSpec),
-        id: `ds_${(hash(body.name + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`,
+        id: `ds_${(hash(body.name + this.state.nextId++) & 0xffff).toString(16).padStart(4, '0')}`,
         name: body.name,
         path: `D:/data/${body.name}`,
         classes,
@@ -336,16 +300,16 @@ export class MockServer {
         width: body.imgsz,
         height: body.imgsz,
         seed: body.seed,
-        createdAgoS: (this.#t0 - Date.now()) / 1000,
+        createdAgoS: (this.state.t0 - Date.now()) / 1000,
       };
-      this.#datasets.unshift(spec);
-      return toDataset(spec, this.#t0, true);
+      this.state.datasets.unshift(spec);
+      return toDataset(spec, this.state.t0, true);
     }, 900);
   }
 
   datasetImages(id: string, q: DatasetImagesQuery): Promise<DatasetImages> {
-    return this.#call(() => {
-      const s = this.#spec(id);
+    return this.call(() => {
+      const s = this.spec(id);
       const idx = indices(s, q.split, q.class);
       const count = idx ? idx.length : total(s);
       const offset = Math.max(0, q.offset ?? 0);
@@ -357,8 +321,8 @@ export class MockServer {
   }
 
   datasetIssues(id: string, q: DatasetIssuesQuery): Promise<DatasetIssues> {
-    return this.#call(() => {
-      const all = issues(this.#spec(id));
+    return this.call(() => {
+      const all = issues(this.spec(id));
       const matching = all.filter((i) => (!q.kind || i.kind === q.kind) && (!q.severity || i.severity === q.severity));
       const offset = Math.max(0, q.offset ?? 0);
       const limit = Math.max(0, Math.min(1000, q.limit ?? 100));
@@ -381,7 +345,7 @@ export class MockServer {
       return hit;
     }
     const p = (async () => {
-      const s = this.#spec(datasetId);
+      const s = this.spec(datasetId);
       const index = imageIndex(imageId);
       const blob = await renderImage(s, image(s, index), index, thumb);
       return URL.createObjectURL(blob);
@@ -396,18 +360,18 @@ export class MockServer {
   }
 
   deleteDataset(id: string): Promise<void> {
-    return this.#call(() => {
-      this.#spec(id);
-      this.#datasets = this.#datasets.filter((d) => d.id !== id);
+    return this.call(() => {
+      this.spec(id);
+      this.state.datasets = this.state.datasets.filter((d) => d.id !== id);
     });
   }
 
   // ---------- models ----------
 
-  #models(): Model[] {
+  protected allModels(): Model[] {
     const now = Date.now();
     const out: Model[] = [...this.#extraModels];
-    for (const p of this.#runs) {
+    for (const p of this.state.runs) {
       const run = toRun(p, now);
       if (!run.model_id) continue;
       const best = bestOf(p, Math.floor(progressAt(p, now).done));
@@ -460,7 +424,7 @@ export class MockServer {
         params: archInfo['folo-s'].params,
         flops_g: archInfo['folo-s'].flops,
         bytes: 18_870_000,
-        created: new Date(this.#t0 - 20 * DAY).toISOString(),
+        created: new Date(this.state.t0 - 20 * DAY).toISOString(),
         run_id: null,
         // Imported weights from before `best_f1_conf` (docs/FORMAT.md): no training record, and no word on the
         // threshold precision and recall were read at.
@@ -482,7 +446,7 @@ export class MockServer {
         params: archInfo['folo-n'].params,
         flops_g: archInfo['folo-n'].flops,
         bytes: Math.round(archInfo['folo-n'].params * 4.03),
-        created: new Date(this.#t0 - 9 * DAY).toISOString(),
+        created: new Date(this.state.t0 - 9 * DAY).toISOString(),
         run_id: null,
         metrics: { map50: 0.455, map50_95: 0.314, precision: 0.583, recall: 0.427, best_f1_conf: null },
         head: 'o2m',
@@ -504,7 +468,7 @@ export class MockServer {
         params: archInfo['folo-n'].params,
         flops_g: archInfo['folo-n'].flops,
         bytes: Math.round(archInfo['folo-n'].params * 2.06),
-        created: new Date(this.#t0 - 10 * DAY).toISOString(),
+        created: new Date(this.state.t0 - 10 * DAY).toISOString(),
         run_id: null,
         metrics: { map50: 0.341, map50_95: 0.198, precision: 0.412, recall: 0.377, best_f1_conf: 0.12 },
         head: 'o2m',
@@ -524,7 +488,7 @@ export class MockServer {
         params: archInfo['folo-n'].params,
         flops_g: archInfo['folo-n'].flops,
         bytes: Math.round(archInfo['folo-n'].params * 2.06),
-        created: new Date(this.#t0 - 4 * DAY).toISOString(),
+        created: new Date(this.state.t0 - 4 * DAY).toISOString(),
         run_id: null,
         metrics: { map50: 0.912, map50_95: 0.701, precision: 0.884, recall: 0.861, best_f1_conf: 0.402 },
         head: 'o2m',
@@ -538,22 +502,22 @@ export class MockServer {
   }
 
   models(): Promise<Model[]> {
-    return this.#call(() => this.#models());
+    return this.call(() => this.allModels());
   }
 
   model(id: string): Promise<Model> {
-    return this.#call(() => {
-      const m = this.#models().find((x) => x.id === id);
+    return this.call(() => {
+      const m = this.allModels().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
       return m;
     });
   }
 
   modelEval(id: string): Promise<ModelEval> {
-    return this.#call(() => {
-      const m = this.#models().find((x) => x.id === id);
+    return this.call(() => {
+      const m = this.allModels().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
-      const p = m.run_id ? this.#runs.find((r) => r.id === m.run_id) : undefined;
+      const p = m.run_id ? this.state.runs.find((r) => r.id === m.run_id) : undefined;
       let perClass: ClassMetrics[] | null = null;
       let instances: number[] | null = null;
       let images = 500;
@@ -563,7 +527,7 @@ export class MockServer {
       }
       // The run's dataset; an imported model's, the first with its classes (as a real server picks it).
       const same = (a: readonly string[]) => a.length === m.classes.length && a.every((c, i) => c === m.classes[i]);
-      const ds = p ? this.#datasets.find((d) => d.id === p.config.dataset_id) : this.#datasets.find((d) => same(d.classes));
+      const ds = p ? this.state.datasets.find((d) => d.id === p.config.dataset_id) : this.state.datasets.find((d) => same(d.classes));
       // Its val split, its train split when val is empty (docs/API.md, Split fallback).
       const split: Split = ds && ds.splits.val === 0 ? 'train' : 'val';
       if (ds) {
@@ -603,16 +567,16 @@ export class MockServer {
    * empty: Studio says so instead of saving it.
    */
   onnxFile(id: string, switches: OnnxSwitches): Promise<File> {
-    return this.#call(() => {
-      const m = this.#models().find((x) => x.id === id);
+    return this.call(() => {
+      const m = this.allModels().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
       return new File([], onnxFileName(m.name, !!switches.half), { type: 'application/octet-stream' });
     }, 1200);
   }
 
   exportModel(id: string, format: ExportFormat, switches?: OnnxSwitches): Promise<ExportResult> {
-    return this.#call(() => {
-      const m = this.#models().find((x) => x.id === id);
+    return this.call(() => {
+      const m = this.allModels().find((x) => x.id === id);
       if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${id}.`);
       const on = { decode: !!switches?.decode, dynamic: !!switches?.dynamic, half: !!switches?.half };
       if (format !== 'onnx' && (on.decode || on.dynamic || on.half))
