@@ -196,6 +196,22 @@ describe('LineChart end labels and marks', () => {
     unmount(narrow.c);
   });
 
+  it("never hides a failed run's cross: a best on its last epoch is the ink ring around the danger cross", () => {
+    const points = Array.from({ length: 23 }, (_, i) => ({ x: i + 1, y: 0.1 + i / 100 }));
+    const series = [{ id: 'm', label: 'mAP50-95', color: 'ink', end: 'failed' as const, points }];
+    const markers = [{ x: 23, y: 0.1 + 22 / 100, label: 'best', quiet: true }];
+    const { target, c } = mountAt({ series, label: 'failed', endDots: true, markers, xDomain: [0, 100] });
+    const cross = target.querySelector('path.end-x') as SVGElement | null;
+    expect(cross).toBeTruthy();
+    expect(cross!.style.stroke).toBe('var(--danger-text)');
+    expect(target.querySelectorAll('.marker .ring')).toHaveLength(1);
+    expect(target.querySelector('circle.end-live')).toBeNull();
+    // The cross comes after the ring in the markup, so it is drawn over it.
+    const marks = [...target.querySelectorAll('.marker, path.end-x')];
+    expect(marks.map((m) => m.tagName.toLowerCase())).toEqual(['g', 'path']);
+    unmount(c);
+  });
+
   it('pulses the best ring and focuses it when their counts go up, never for the counts it mounted with', () => {
     const series = [{ id: 'd', label: 'd', color: 'ink', points: pts((x) => x / 30) }];
     const marker = { x: 20, y: 0.66, label: 'best', quiet: true };

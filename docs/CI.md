@@ -9,7 +9,7 @@ Five workflows check the code, one per part of the repo. A pull request runs onl
 | `web.yml` | `web/`, `design/` | `check`: `npm ci`, `npm run check`, `npm test`. `qa (1/3)` to `qa (3/3)`: `npm run qa`, the layout checks on the production build (blank sections, overflow, covered controls and cut selects at tablet and phone sizes, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium), a third of the states each (`FOLO_QA_SHARD`) |
 | `site.yml` | every pull request (the Markdown links to files all over the repo; about 20 s) | the docs site: `npm ci && npm run check && npm run build` in `site/`, which fails on a broken link, anchor or image in the Markdown (site/README.md) |
 | `wasm.yml` | `crates/folo-wasm/` and the crates it depends on, `Cargo.toml`, `Cargo.lock`, `scripts/build-wasm.sh` | the browser build: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and `scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock` (docs/WASM.md) |
-| `desktop.yml` | `apps/desktop/`, `design/` and the crates the app builds | FOLO Desktop on Windows: fmt, clippy, its tests, the vendored GPUI patch test and the temp-dir hygiene test |
+| `desktop.yml` | `apps/desktop/`, `design/`, the crates the app builds and the root `Cargo.toml` they inherit from | FOLO Desktop on Windows: fmt, clippy, its tests, the vendored GPUI patch test and the temp-dir hygiene test |
 
 ONNX export parity (docs/CLI.md, ONNX export) is part of `cargo test --workspace`: `crates/folo-cli/tests/onnx.rs`
 runs the exported graphs in onnxruntime and skips without a Python. `rust (linux)` gives it one (a Python 3.12 venv

@@ -16,6 +16,9 @@ on:
       - crates/folo-nn/**
       - crates/folo-test-support/**
       - crates/folo-vision/**
+      - Cargo.toml
+      - .cargo/**
+      - tools/ci-retry.sh
       - .github/workflows/desktop.yml
   push:
     branches: [main]

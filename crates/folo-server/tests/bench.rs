@@ -1723,14 +1723,15 @@ async fn open_entries_expire_without_parts() {
     let all = truth_predictions(&page(app, &b.id, "").await.images, None, 0.9);
     let mut events = Events::open(app, &b.id).await;
     assert_eq!(events.next().await.0, "bench");
-    // Parts keep an entry open: one every 50 ms until the other entry, which gets none, has expired...
+    // Parts keep an entry open: every image's, then one every 50 ms until the other entry, which gets none, has
+    // expired. (A part sent again as it was counts as a part: a client that retries is alive.)
     let kept: BenchEntry = ok(app, post(&entries, open_entry("kept", vec![]))).await;
     let left: BenchEntry = ok(app, post(&entries, open_entry("left", vec![]))).await;
+    ok::<BenchEntry>(app, post(&format!("{entries}/{}/predictions", kept.id), parts(&all))).await;
     let t0 = std::time::Instant::now();
     let mut i = 0;
     let l = loop {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        // (A part sent again as it was counts as a part: a client that retries is alive.)
         let r = &all[i % all.len()];
         i += 1;
         ok::<BenchEntry>(
@@ -1745,7 +1746,6 @@ async fn open_entries_expire_without_parts() {
         assert!(t0.elapsed() < TIMEOUT, "{l:?}");
     };
     // ... failed, with what it held dropped, and the benchmark idle again.
-    assert!(i > all.len(), "parts sent again kept it open: {i}");
     assert_eq!(
         (l.status, l.error.as_deref()),
         (BenchEntryStatus::Failed, Some("no predictions arrived for 300 ms"))

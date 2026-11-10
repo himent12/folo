@@ -53,11 +53,11 @@ function open<P extends Record<string, unknown>>(comp: Component<P>, props: P) {
   flushSync();
 }
 
-/** Lets the mock's answers (latency 0) and the effects they start land. `setImmediate`, not `setTimeout(0)`, which
- *  waits a timer tick (about 15 ms on Windows) each round. */
+/** Lets the mock's answers (latency 0), the timers they start and the effects after those land: a timer tick a round
+ *  (`setImmediate` rounds can all pass before a 1 ms timer is due, which failed in CI). */
 async function settle(rounds = 12) {
   for (let i = 0; i < rounds; i++) {
-    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setTimeout(r, 0));
     flushSync();
   }
 }

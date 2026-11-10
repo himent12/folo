@@ -630,28 +630,30 @@ fn resume_preserves_unknown_metadata() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// MuSGD (docs/MODEL.md §8.2) on a dual-assignment model (`head: o2o`, docs/MODEL.md §6.6). With either head, the
-/// head's class branches (`head.cls.`, and `head.o2o.cls.` with the one-to-one head) and nothing else are in the
-/// `.cls` groups, at `MUSGD_CLS_LR_FACTOR` times the LR. The o2o run's losses are finite, its checkpoint holds an
-/// `o2o` model (both branches) with a `muon_buffer` for every 2-D / 4-D parameter of the `decay` groups, its o2o
-/// branch trained, it predicts end to end with the one-to-one head (no NMS), and a resume at an epoch boundary
-/// continues bit for bit (the dual-loss weight depends only on the completed epochs).
+/// MuSGD in the trainer (docs/MODEL.md §8.2), with either head: the head's class branches (`head.cls.`, and
+/// `head.o2o.cls.` with the one-to-one head) and nothing else are in the `.cls` groups, at `MUSGD_CLS_LR_FACTOR`
+/// times the LR; the losses are finite; the checkpoint holds a `muon_buffer` for every 2-D / 4-D parameter of the
+/// `decay` groups; and a resume at an epoch boundary continues bit for bit. The dual-assignment run (`head: o2o`,
+/// docs/MODEL.md §6.6) also leaves an `o2o` model (both branches) whose o2o branch trained and which predicts end
+/// to end with the one-to-one head, no NMS (its dual-loss weight depends only on the completed epochs).
 #[test]
-fn o2o_musgd_run_trains_checkpoints_and_resumes() {
+fn musgd_runs_train_checkpoint_and_resume_with_either_head() {
     use folo_vision::model::{FoloModel, HeadMode};
     use folo_vision::train::MUSGD_CLS_LR_FACTOR;
     // 4 train images in batches of 2 with accumulation 2: one optimizer step an epoch (MuSGD's are the slow ones).
     let ds = shapes(4, 2, 64);
-    let cfg = |head| TrainConfig { optimizer: OptimizerChoice::Musgd, lr0: 0.01, head, ..resume_config() };
     let cls = |n: &str| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls.");
-    let mut muon = 0;
+    let root = run_dir("musgd");
     for head in [HeadMode::O2m, HeadMode::O2o] {
-        let t = Trainer::new(cfg(head), data(&ds), TrainOptions::default()).unwrap();
-        let lr0 = t.optimizer().lr0;
-        let groups: Vec<&str> = t.param_groups().iter().map(|g| g.name.as_str()).collect();
+        let cfg = TrainConfig { optimizer: OptimizerChoice::Musgd, lr0: 0.01, head, ..resume_config() };
+        // A: two uninterrupted epochs.
+        let (opts, log_a) = options(None);
+        let mut a = Trainer::new(cfg.clone(), data(&ds), opts).unwrap();
+        let lr0 = a.optimizer().lr0;
+        let groups: Vec<&str> = a.param_groups().iter().map(|g| g.name.as_str()).collect();
         assert_eq!(groups, ["decay", "decay.cls", "bn", "bn.cls", "bias", "bias.cls"], "{head:?}");
-        muon = 0;
-        for g in t.param_groups() {
+        let mut muon = 0;
+        for g in a.param_groups() {
             let boosted = g.name.ends_with(".cls");
             let want = if boosted { lr0 * MUSGD_CLS_LR_FACTOR } else { lr0 };
             assert!((g.base_lr - want).abs() < 1e-12, "{head:?} {}: lr {} vs {want}", g.name, g.base_lr);
@@ -661,70 +663,71 @@ fn o2o_musgd_run_trains_checkpoints_and_resumes() {
             }
         }
         let o2o_cls =
-            t.param_groups().iter().flat_map(|g| &g.params).any(|(n, _)| n.starts_with("head.o2o.cls."));
+            a.param_groups().iter().flat_map(|g| &g.params).any(|(n, _)| n.starts_with("head.o2o.cls."));
         assert_eq!(o2o_cls, head == HeadMode::O2o);
+        let sum = a.run().unwrap();
+        assert_eq!((sum.status, sum.epochs_completed), (RunStatus::Completed, 2));
+        let epochs = epochs_of(&log_a);
+        assert!(
+            epochs.iter().all(|e| e.train_loss.total.is_finite() && e.train_loss.total > 0.0),
+            "{head:?}"
+        );
+        let last = root.join("a.folo");
+        a.save_checkpoint(&last).unwrap();
+        let ta = tensors(&last);
+        assert!(muon > 0);
+        assert_eq!(ta.iter().filter(|(n, _)| n.ends_with(".muon_buffer")).count(), muon, "{head:?}");
+
+        // B: stopped after epoch 1, resumed from its checkpoint: the same epoch 2 and the same final tensors.
+        let (opts, _) = options(None);
+        let stop = opts.stop.clone();
+        let opts = TrainOptions {
+            events: Some(Box::new(move |e| {
+                if matches!(e, RunEvent::Epoch(_)) {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            })),
+            ..opts
+        };
+        let mut b = Trainer::new(cfg.clone(), data(&ds), opts).unwrap();
+        let s1 = b.run().unwrap();
+        assert_eq!((s1.status, s1.epochs_completed), (RunStatus::Stopped, 1));
+        let ckpt = root.join("b1.folo");
+        b.save_checkpoint(&ckpt).unwrap();
+        let (opts, log_b) = options(None);
+        let mut r = Trainer::resume(&ckpt, data(&ds), opts, ResumeOverrides::default()).unwrap();
+        assert_eq!(r.model().has_o2o(), head == HeadMode::O2o);
+        assert_eq!(r.optimizer().kind, folo_nn::optim::OptimKind::MuSgd);
+        r.run().unwrap();
+        let (ea, eb) = (&epochs[1], &epochs_of(&log_b)[0]);
+        assert_eq!((ea.epoch, ea.train_loss, &ea.val), (eb.epoch, eb.train_loss, &eb.val), "{head:?}");
+        let resumed = root.join("b2.folo");
+        r.save_checkpoint(&resumed).unwrap();
+        let tb = tensors(&resumed);
+        assert_eq!(ta.len(), tb.len());
+        for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
+            assert!(na == nb && va == vb, "{head:?}: tensor {na} differs after resume");
+        }
+        if head != HeadMode::O2o {
+            continue;
+        }
+
+        // The dual-assignment run: an `o2o` model whose o2o branch no longer equals its initialisation...
+        assert_eq!(ModelFile::open(&last).unwrap().metadata().config.head, "o2o");
+        let m = FoloModel::open(&last).unwrap();
+        assert!(m.has_o2o() && m.head_mode() == HeadMode::O2o);
+        let init = FoloModel::with_rng(m.config().clone(), &mut folo_core::rng::Rng::seed(cfg.seed)).unwrap();
+        let get = |m: &FoloModel, n: &str| {
+            m.state().into_iter().find(|(k, _)| k == n).unwrap().1.to_vec::<f32>().unwrap()
+        };
+        assert_ne!(get(&m, "head.o2o.cls.p3.out.weight"), get(&init, "head.o2o.cls.p3.out.weight"));
+        // ... and whose weights predict end to end (no NMS).
+        let p =
+            Predictor::open(&last, PredictConfig { imgsz: 64, conf: 0.001, ..Default::default() }).unwrap();
+        assert_eq!(p.model().head_mode(), HeadMode::O2o);
+        let sample = folo_data::synthetic::generate(&ds, 0).unwrap().image;
+        let pred = p.predict(&sample).unwrap();
+        assert!(pred.detections.windows(2).all(|w| w[0].score >= w[1].score));
     }
-
-    // A: two uninterrupted epochs of the o2o model (`muon` counts its parameters).
-    let root = run_dir("o2o-musgd");
-    let (opts, log_a) = options(None);
-    let mut a = Trainer::new(cfg(HeadMode::O2o), data(&ds), opts).unwrap();
-    let sum = a.run().unwrap();
-    assert_eq!((sum.status, sum.epochs_completed), (RunStatus::Completed, 2));
-    let epochs = epochs_of(&log_a);
-    assert!(epochs.iter().all(|e| e.train_loss.total.is_finite() && e.train_loss.total > 0.0));
-    let last = root.join("a.folo");
-    a.save_checkpoint(&last).unwrap();
-    let ta = tensors(&last);
-    assert!(muon > 0);
-    assert_eq!(ta.iter().filter(|(n, _)| n.ends_with(".muon_buffer")).count(), muon);
-    assert_eq!(ModelFile::open(&last).unwrap().metadata().config.head, "o2o");
-    let m = FoloModel::open(&last).unwrap();
-    assert!(m.has_o2o() && m.head_mode() == HeadMode::O2o);
-    // The o2o branch trained: it no longer equals its initialisation.
-    let seed = cfg(HeadMode::O2o).seed;
-    let init = FoloModel::with_rng(m.config().clone(), &mut folo_core::rng::Rng::seed(seed)).unwrap();
-    let get = |m: &FoloModel, n: &str| {
-        m.state().into_iter().find(|(k, _)| k == n).unwrap().1.to_vec::<f32>().unwrap()
-    };
-    assert_ne!(get(&m, "head.o2o.cls.p3.out.weight"), get(&init, "head.o2o.cls.p3.out.weight"));
-
-    // B: stopped after epoch 1, resumed from its checkpoint: the same epoch 2 and the same final tensors.
-    let (opts, _) = options(None);
-    let stop = opts.stop.clone();
-    let opts = TrainOptions {
-        events: Some(Box::new(move |e| {
-            if matches!(e, RunEvent::Epoch(_)) {
-                stop.store(true, Ordering::Relaxed);
-            }
-        })),
-        ..opts
-    };
-    let mut b = Trainer::new(cfg(HeadMode::O2o), data(&ds), opts).unwrap();
-    let s1 = b.run().unwrap();
-    assert_eq!((s1.status, s1.epochs_completed), (RunStatus::Stopped, 1));
-    let ckpt = root.join("b1.folo");
-    b.save_checkpoint(&ckpt).unwrap();
-    let (opts, log_b) = options(None);
-    let mut r = Trainer::resume(&ckpt, data(&ds), opts, ResumeOverrides::default()).unwrap();
-    assert!(r.model().has_o2o());
-    assert_eq!(r.optimizer().kind, folo_nn::optim::OptimKind::MuSgd);
-    r.run().unwrap();
-    let (ea, eb) = (&epochs[1], &epochs_of(&log_b)[0]);
-    assert_eq!((ea.epoch, ea.train_loss, &ea.val), (eb.epoch, eb.train_loss, &eb.val));
-    let resumed = root.join("b2.folo");
-    r.save_checkpoint(&resumed).unwrap();
-    let tb = tensors(&resumed);
-    assert_eq!(ta.len(), tb.len());
-    for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
-        assert!(na == nb && va == vb, "tensor {na} differs after resume");
-    }
-
-    // The run's weights predict end to end (no NMS).
-    let p = Predictor::open(&last, PredictConfig { imgsz: 64, conf: 0.001, ..Default::default() }).unwrap();
-    assert_eq!(p.model().head_mode(), HeadMode::O2o);
-    let sample = folo_data::synthetic::generate(&ds, 0).unwrap().image;
-    let pred = p.predict(&sample).unwrap();
-    assert!(pred.detections.windows(2).all(|w| w[0].score >= w[1].score));
     let _ = std::fs::remove_dir_all(&root);
 }
