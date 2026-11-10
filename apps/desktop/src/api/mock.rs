@@ -19,13 +19,14 @@ pub const MOCK_NOW: i64 = 1_794_123_000;
 /// Seconds per training step of a live mock run.
 const STEP_DT: f64 = 0.12;
 
-struct DatasetFixture {
-    ds: Dataset,
-    seed: u64,
-    max_objects: u32,
-    small: bool,
+#[derive(Clone)]
+pub(super) struct DatasetFixture {
+    pub(super) ds: Dataset,
+    pub(super) seed: u64,
+    pub(super) max_objects: u32,
+    pub(super) small: bool,
     /// Per-image boxes, computed once from the scenes.
-    images: Vec<ImageInfo>,
+    pub(super) images: Vec<ImageInfo>,
 }
 
 impl DatasetFixture {
@@ -719,6 +720,8 @@ pub struct MockBackend {
     measured: Mutex<(Vec<TrainThroughput>, Vec<InferThroughput>)>,
     /// Cloud connections (one RunPod connection unless a variant says otherwise).
     connections: Mutex<Vec<CloudConnection>>,
+    /// Vision benchmarks and coding-agent fixtures (lazily seeded on first use).
+    benches: Arc<super::mock_bench::MockBench>,
     clock: Clock,
 }
 
@@ -1262,8 +1265,15 @@ impl MockBackend {
             fail: false,
             empty: false,
             connections: Mutex::new(vec![runpod_connection()]),
+            benches: Arc::new(super::mock_bench::MockBench::new(frozen, now)),
             clock,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn without_bench(mut self) -> Self {
+        self.benches = Arc::new(super::mock_bench::MockBench::disabled(self.frozen, self.started));
+        self
     }
 
     pub fn failing(mut self) -> Self {
@@ -1534,18 +1544,23 @@ impl Backend for MockBackend {
             tensor_cores: TensorCoreSupport { available: true, enabled: true, reason: None },
             amp: AmpSupport { available: true, reason: None },
         };
+        let mut features = vec![
+            "queue_control".into(),
+            "weights_onnx".into(),
+            "run_estimate".into(),
+            "run_cli".into(),
+            "throughput".into(),
+            "benchmark".into(),
+            folo_api::FEATURE_CLOUD.into(),
+        ];
+        if self.benches.enabled {
+            features.push(folo_api::FEATURE_VISION_BENCH.into());
+            features.push(folo_api::FEATURE_AGENT_LABELING.into());
+        }
         Ok(SystemResponse {
             system,
             data_dir: None,
-            features: vec![
-                "queue_control".into(),
-                "weights_onnx".into(),
-                "run_estimate".into(),
-                "run_cli".into(),
-                "throughput".into(),
-                "benchmark".into(),
-                folo_api::FEATURE_CLOUD.into(),
-            ],
+            features,
             capabilities: Some(capabilities),
             gpu_pool: None,
         })
@@ -2661,6 +2676,140 @@ impl Backend for MockBackend {
             },
             device: "gpu:0".into(),
         })
+    }
+
+    // ---------- vision benchmarks (deterministic fixtures, `mock_bench`) ----------
+
+    fn bench_catalog(&self) -> ApiResult<BenchCatalog> {
+        self.check()?;
+        self.benches.catalog()
+    }
+
+    fn benches(&self) -> ApiResult<Vec<Bench>> {
+        self.check()?;
+        if self.empty && self.benches.enabled {
+            return Ok(Vec::new());
+        }
+        self.benches.list(&self.datasets, &self.models)
+    }
+
+    fn create_bench(&self, req: &CreateBench) -> ApiResult<Bench> {
+        self.check()?;
+        self.benches.create(req, &self.datasets, &self.models)
+    }
+
+    fn update_bench(&self, id: &str, req: &UpdateBench) -> ApiResult<Bench> {
+        self.check()?;
+        self.benches.update(id, req, &self.datasets, &self.models)
+    }
+
+    fn delete_bench(&self, id: &str) -> ApiResult<()> {
+        self.check()?;
+        self.benches.delete(id, &self.datasets, &self.models)
+    }
+
+    fn design_bench(&self, id: &str, req: &DesignBench) -> ApiResult<BenchDesign> {
+        self.check()?;
+        self.benches.design(id, req, &self.datasets, &self.models)
+    }
+
+    fn bench_images(
+        &self,
+        id: &str,
+        offset: u32,
+        limit: u32,
+        condition: Option<(&str, u8)>,
+    ) -> ApiResult<BenchImagePage> {
+        self.check()?;
+        self.benches.images(id, offset, limit, condition, &self.datasets, &self.models)
+    }
+
+    fn bench_image(
+        &self,
+        id: &str,
+        image_id: &str,
+        condition: Option<(&str, u8)>,
+        thumb: Option<u32>,
+    ) -> ApiResult<ImageData> {
+        self.check()?;
+        self.benches.image_pixels(id, image_id, condition, thumb, &self.datasets, &self.models)
+    }
+
+    fn bench_entries(&self, id: &str) -> ApiResult<Vec<BenchEntry>> {
+        self.check()?;
+        self.benches.entries(id, &self.datasets, &self.models)
+    }
+
+    fn start_bench_entry(&self, id: &str, req: &StartBenchEntry) -> ApiResult<BenchEntry> {
+        self.check()?;
+        self.benches.start_entry(id, req, &self.datasets, &self.models)
+    }
+
+    fn bench_result(&self, id: &str, entry_id: &str) -> ApiResult<BenchResult> {
+        self.check()?;
+        self.benches.result(id, entry_id, &self.datasets, &self.models)
+    }
+
+    fn bench_entry_images(
+        &self,
+        id: &str,
+        entry_id: &str,
+        sort: &str,
+        offset: u32,
+        limit: u32,
+    ) -> ApiResult<BenchEntryImagePage> {
+        self.check()?;
+        self.benches.entry_images(id, entry_id, sort, offset, limit, &self.datasets, &self.models)
+    }
+
+    fn stop_bench_entry(&self, id: &str, entry_id: &str) -> ApiResult<BenchEntry> {
+        self.check()?;
+        self.benches.stop_entry(id, entry_id, &self.datasets, &self.models)
+    }
+
+    fn delete_bench_entry(&self, id: &str, entry_id: &str) -> ApiResult<()> {
+        self.check()?;
+        self.benches.delete_entry(id, entry_id, &self.datasets, &self.models)
+    }
+
+    fn bench_loops(&self, id: &str) -> ApiResult<Vec<BenchLoop>> {
+        self.check()?;
+        self.benches.loops(id, &self.datasets, &self.models)
+    }
+
+    fn start_bench_loop(&self, id: &str, req: &StartBenchLoop) -> ApiResult<BenchLoop> {
+        self.check()?;
+        self.benches.start_loop(id, req, &self.datasets, &self.models)
+    }
+
+    fn stop_bench_loop(&self, id: &str, loop_id: &str) -> ApiResult<BenchLoop> {
+        self.check()?;
+        self.benches.stop_loop(id, loop_id, &self.datasets, &self.models)
+    }
+
+    fn delete_bench_loop(&self, id: &str, loop_id: &str) -> ApiResult<()> {
+        self.check()?;
+        self.benches.delete_loop(id, loop_id, &self.datasets, &self.models)
+    }
+
+    fn bench_events(&self, id: &str) -> ApiResult<BenchSubscription> {
+        self.check()?;
+        super::mock_bench::MockBench::events(
+            self.benches.clone(),
+            id,
+            self.datasets.clone(),
+            self.models.clone(),
+        )
+    }
+
+    fn label_agents(&self) -> ApiResult<Vec<LabelAgent>> {
+        self.check()?;
+        self.benches.agents(&self.datasets, &self.models)
+    }
+
+    fn label_jobs(&self) -> ApiResult<Vec<LabelJob>> {
+        self.check()?;
+        self.benches.jobs(&self.datasets, &self.models)
     }
 }
 

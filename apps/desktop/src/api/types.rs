@@ -17,6 +17,19 @@ pub use folo_api::{
     Split, Splits, StatusEvent, Step, SyntheticDataset, SystemInfo, Timing, TrainConfig, ValMetrics,
 };
 pub use folo_api::{
+    BENCH_SEVERITIES, Bench, BenchAccuracy, BenchAxis, BenchBest, BenchCalibration, BenchCalibrationBin,
+    BenchCatalog, BenchClassAccuracy, BenchConditionGroup, BenchConditionResult, BenchContestant,
+    BenchContestantSpec, BenchDesign, BenchDesigner, BenchDetection, BenchEntry, BenchEntryImage,
+    BenchEntryImagePage, BenchEntryList, BenchEntryStatus, BenchEvent, BenchGeneration, BenchImage,
+    BenchImagePage, BenchLabelPoint, BenchLabels, BenchList, BenchLocalization, BenchLoop, BenchLoopList,
+    BenchLoopPhase, BenchLoopStatus, BenchLoopVerdict, BenchPlan, BenchPlanCondition, BenchPrediction,
+    BenchProgress, BenchReadiness, BenchRemoved, BenchResult, BenchRobustness, BenchSelfLabeling,
+    BenchSeverityPoint, BenchSource, BenchSpeed, BenchStudent, CreateBench, DesignBench,
+    FEATURE_AGENT_LABELING, FEATURE_VISION_BENCH, LabelAgent, LabelAgentId, LabelAgentList, LabelCounts,
+    LabelEffort, LabelJob, LabelJobList, LabelJobStatus, LabelModel, LabelUsage, StartBenchEntry,
+    StartBenchLoop, UpdateBench,
+};
+pub use folo_api::{
     CloudAvailability, CloudConnection, CloudConnectionStatus, CloudField, CloudInstance,
     CloudInstanceStatus, CloudOffer, CloudOfferList, CloudPhase, CloudProvider, Compute, ConnectCloud,
     CostEstimate, RunCloud, TransferProgress,
@@ -105,6 +118,84 @@ impl Label for Optimizer {
             Optimizer::Adamw => "adamw",
             Optimizer::Musgd => "musgd",
             Optimizer::Unknown => "unknown",
+        }
+    }
+}
+
+impl Label for BenchEntryStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            BenchEntryStatus::Queued => "Queued",
+            BenchEntryStatus::Running => "Running",
+            BenchEntryStatus::Stopping => "Stopping",
+            BenchEntryStatus::Done => "Done",
+            BenchEntryStatus::Failed => "Failed",
+            BenchEntryStatus::Stopped => "Stopped",
+        }
+    }
+}
+
+impl Label for BenchLoopStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            BenchLoopStatus::Running => "Running",
+            BenchLoopStatus::Stopping => "Stopping",
+            BenchLoopStatus::Done => "Done",
+            BenchLoopStatus::Failed => "Failed",
+            BenchLoopStatus::Stopped => "Stopped",
+        }
+    }
+}
+
+impl Label for BenchLoopPhase {
+    fn label(&self) -> &'static str {
+        match self {
+            BenchLoopPhase::Benchmarking => "Benchmarking",
+            BenchLoopPhase::Labeling => "Labeling",
+            BenchLoopPhase::Training => "Training",
+        }
+    }
+}
+
+impl Label for BenchLoopVerdict {
+    fn label(&self) -> &'static str {
+        match self {
+            BenchLoopVerdict::Improved => "Improved",
+            BenchLoopVerdict::Held => "Held",
+            BenchLoopVerdict::Regressed => "Regressed",
+        }
+    }
+}
+
+impl Label for BenchConditionGroup {
+    fn label(&self) -> &'static str {
+        match self {
+            BenchConditionGroup::Light => "Light",
+            BenchConditionGroup::Blur => "Blur",
+            BenchConditionGroup::Noise => "Noise",
+            BenchConditionGroup::Medium => "Medium",
+            BenchConditionGroup::Digital => "Digital",
+            BenchConditionGroup::Geometry => "Geometry",
+        }
+    }
+}
+
+impl Label for BenchReadiness {
+    fn label(&self) -> &'static str {
+        match self {
+            BenchReadiness::Ready => "Ready to self-label",
+            BenchReadiness::Partial => "Partly ready",
+            BenchReadiness::NotReady => "Not ready",
+        }
+    }
+}
+
+impl Label for LabelEffort {
+    fn label(&self) -> &'static str {
+        match self {
+            LabelEffort::Low => "Low",
+            LabelEffort::Medium => "Medium",
+            LabelEffort::High => "High",
         }
     }
 }

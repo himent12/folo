@@ -190,11 +190,12 @@ impl FoloApp {
 
     fn palette_items(&self) -> Vec<PaletteItem> {
         let mut items = Vec::new();
-        let nav: [(&str, &'static str, Route, &'static [&'static str]); 6] = [
+        let nav: [(&str, &'static str, Route, &'static [&'static str]); 7] = [
             ("Overview", "icons/layout-dashboard.svg", Route::Overview, &["Ctrl", "1"]),
             ("Datasets", "icons/images.svg", Route::Datasets, &["Ctrl", "2"]),
             ("Runs", "icons/activity.svg", Route::Runs, &["Ctrl", "3"]),
             ("Models", "icons/box.svg", Route::Models, &["Ctrl", "4"]),
+            ("Benchmarks", "icons/target.svg", Route::Benches, &["Ctrl", "6"]),
             ("Playground", "icons/scan-eye.svg", Route::Playground, &["Ctrl", "5"]),
             ("Settings", "icons/settings.svg", Route::Settings, &["Ctrl", ","]),
         ];

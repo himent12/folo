@@ -32,6 +32,7 @@ actions!(
         GoDatasets,
         GoRuns,
         GoModels,
+        GoBenchmarks,
         GoPlayground,
         GoSettings,
         ToggleTheme,
@@ -57,6 +58,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-3", GoRuns, None),
         KeyBinding::new("ctrl-4", GoModels, None),
         KeyBinding::new("ctrl-5", GoPlayground, None),
+        KeyBinding::new("ctrl-6", GoBenchmarks, None),
         KeyBinding::new("ctrl-,", GoSettings, None),
         KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
         KeyBinding::new("f11", ToggleFullscreen, None),
@@ -81,6 +83,11 @@ pub enum Route {
     Run(String),
     Models,
     Model(String),
+    /// Vision benchmarks (servers with `vision_bench`).
+    Benches,
+    Bench(String),
+    /// An entry of a benchmark: (benchmark, entry).
+    BenchEntry(String, String),
     Playground,
     Settings,
 }
@@ -91,12 +98,14 @@ pub enum Section {
     Datasets,
     Runs,
     Models,
+    Benchmarks,
     Playground,
     Settings,
 }
 
 impl Route {
-    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `playground`, `settings`.
+    /// `overview`, `datasets`, `dataset:ID`, `runs`, `run:ID`, `models`, `model:ID`, `benchmarks`, `bench:ID`,
+    /// `bench-entry:ID/ENTRY`, `playground`, `settings`.
     pub fn parse(s: &str) -> Option<Route> {
         let (kind, id) = s.split_once(':').map_or((s, None), |(k, i)| (k, Some(i.to_string())));
         Some(match (kind, id) {
@@ -107,6 +116,12 @@ impl Route {
             ("run", Some(id)) => Route::Run(id),
             ("models", None) => Route::Models,
             ("model", Some(id)) => Route::Model(id),
+            ("benchmarks" | "benches", None) => Route::Benches,
+            ("bench", Some(id)) => Route::Bench(id),
+            ("bench-entry", Some(id)) => {
+                let (b, e) = id.split_once('/')?;
+                Route::BenchEntry(b.to_string(), e.to_string())
+            }
             ("playground", None) => Route::Playground,
             ("settings", None) => Route::Settings,
             _ => return None,
@@ -119,6 +134,7 @@ impl Route {
             Route::Datasets | Route::Dataset(_) => Section::Datasets,
             Route::Runs | Route::Run(_) => Section::Runs,
             Route::Models | Route::Model(_) => Section::Models,
+            Route::Benches | Route::Bench(_) | Route::BenchEntry(..) => Section::Benchmarks,
             Route::Playground => Section::Playground,
             Route::Settings => Section::Settings,
         }
@@ -546,6 +562,10 @@ pub struct FoloApp {
     pub throughput: Load<crate::api::ThroughputTable>,
     /// Cloud connections, instances and offers, and their dialogs (servers with `cloud`).
     pub cloud: crate::cloud::CloudState,
+    /// Vision benchmarks: lists, leaderboards, results, the open benchmark's stream (`vision_bench`).
+    pub bench: crate::bench::BenchState,
+    /// A page to open on the next render (set where no window is at hand, e.g. after a request).
+    pub route_pending: Option<Route>,
     /// Which half of it shows: training (0) or inference (1); reference rows too or measured only.
     pub tp_view: usize,
     pub tp_all: bool,
@@ -718,6 +738,8 @@ impl FoloApp {
             nr_estimate_last: None,
             throughput: Load::Idle,
             cloud: Default::default(),
+            bench: Default::default(),
+            route_pending: None,
             tp_view: 0,
             tp_all: false,
             bench_busy: false,
@@ -815,10 +837,12 @@ impl FoloApp {
     }
 
     pub fn parent_route(&self) -> Option<Route> {
-        match self.route {
+        match &self.route {
             Route::Dataset(_) => Some(Route::Datasets),
             Route::Run(_) => Some(Route::Runs),
             Route::Model(_) => Some(Route::Models),
+            Route::Bench(_) => Some(Route::Benches),
+            Route::BenchEntry(b, _) => Some(Route::Bench(b.clone())),
             _ => None,
         }
     }
@@ -832,6 +856,7 @@ impl FoloApp {
         if self.route == Route::Settings {
             self.reload_cloud();
         }
+        self.after_bench_navigate();
         self.page_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.chart_hover = None;
         self.export_open = false;
@@ -1097,14 +1122,26 @@ impl FoloApp {
         if self.hold_loading || !self.store.images_px.begin(&key) {
             return None;
         }
+        let thumb = (kind == ImgKind::Thumb).then_some(320);
+        let (ds, im) = (key.dataset.clone(), key.image.clone());
+        self.load_cached_image(key, move |api| api.image(&ds, &im, thumb), cx);
+        None
+    }
+
+    /// Fetches and decodes an image off the UI thread into the slot `key` (already marked loading),
+    /// dropping it if the data source changed meanwhile.
+    pub fn load_cached_image(
+        &mut self,
+        key: ImgKey,
+        call: impl FnOnce(&dyn Backend) -> ApiResult<ImageData> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let api = self.store.api.clone();
         let generation = self.backend_gen;
-        let thumb = (kind == ImgKind::Thumb).then_some(320);
         cx.spawn(async move |this, cx| {
-            let k2 = key.clone();
             let img = cx
                 .background_executor()
-                .spawn(async move { api.image(&k2.dataset, &k2.image, thumb).ok().and_then(to_render_image) })
+                .spawn(async move { call(&*api).ok().and_then(to_render_image) })
                 .await;
             this.update(cx, |this, cx| {
                 if this.backend_gen != generation {
@@ -1122,7 +1159,6 @@ impl FoloApp {
             .ok();
         })
         .detach();
-        None
     }
 
     /// Subscribe to live events of every active run.
@@ -1257,6 +1293,9 @@ impl FoloApp {
                             } else {
                                 this.toast(Tone::Danger, format!("{name} failed"), None, cx);
                             }
+                        }
+                        if this.bench_pump(tick, cx) {
+                            changed = true;
                         }
                         if tick.is_multiple_of(20) {
                             this.store.system = Load::Idle;
@@ -2828,6 +2867,7 @@ impl FoloApp {
             | Route::Datasets
             | Route::Runs
             | Route::Models
+            | Route::Benches
             | Route::Playground
             | Route::Settings => {
                 vec![]
@@ -2843,6 +2883,14 @@ impl FoloApp {
             Route::Model(id) => vec![
                 ("Models".into(), Some(Route::Models)),
                 (self.store.model(id).map_or(id.clone(), |m| m.name.clone()).into(), None),
+            ],
+            Route::Bench(id) => {
+                vec![("Benchmarks".into(), Some(Route::Benches)), (self.bench_name(id).into(), None)]
+            }
+            Route::BenchEntry(b, e) => vec![
+                ("Benchmarks".into(), Some(Route::Benches)),
+                (self.bench_name(b).into(), Some(Route::Bench(b.clone()))),
+                (self.bench_entry_name(b, e).into(), None),
             ],
         }
     }
@@ -2863,6 +2911,7 @@ impl FoloApp {
             (Section::Datasets, "Datasets", "icons/images.svg", Route::Datasets, "2"),
             (Section::Runs, "Runs", "icons/activity.svg", Route::Runs, "3"),
             (Section::Models, "Models", "icons/box.svg", Route::Models, "4"),
+            (Section::Benchmarks, "Benchmarks", "icons/target.svg", Route::Benches, "6"),
             (Section::Playground, "Playground", "icons/scan-eye.svg", Route::Playground, "5"),
         ];
         let items: Vec<AnyElement> = nav
@@ -3176,6 +3225,9 @@ impl FoloApp {
             Route::Run(id) => self.run_view(&id, window, cx),
             Route::Models => self.models(window, cx),
             Route::Model(id) => self.model_view(&id, window, cx),
+            Route::Benches => self.benches(window, cx),
+            Route::Bench(id) => self.bench_view(&id, window, cx),
+            Route::BenchEntry(b, e) => self.bench_entry_view(&b, &e, window, cx),
             Route::Playground => self.playground(window, cx),
             Route::Settings => self.settings(window, cx),
         }
@@ -3189,6 +3241,7 @@ fn shortcut_label(key: &str) -> &'static str {
         "3" => "Ctrl 3",
         "4" => "Ctrl 4",
         "5" => "Ctrl 5",
+        "6" => "Ctrl 6",
         _ => "Ctrl ,",
     }
 }
@@ -3306,6 +3359,9 @@ pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
 
 impl Render for FoloApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(r) = self.route_pending.take() {
+            self.navigate(r, window, cx);
+        }
         if std::mem::take(&mut self.restore_pending) {
             self.restore_focus(window);
         }
@@ -3364,6 +3420,7 @@ impl Render for FoloApp {
             .on_action(cx.listener(|this, _: &GoDatasets, w, cx| this.nav_shortcut(Route::Datasets, w, cx)))
             .on_action(cx.listener(|this, _: &GoRuns, w, cx| this.nav_shortcut(Route::Runs, w, cx)))
             .on_action(cx.listener(|this, _: &GoModels, w, cx| this.nav_shortcut(Route::Models, w, cx)))
+            .on_action(cx.listener(|this, _: &GoBenchmarks, w, cx| this.nav_shortcut(Route::Benches, w, cx)))
             .on_action(
                 cx.listener(|this, _: &GoPlayground, w, cx| this.nav_shortcut(Route::Playground, w, cx)),
             )
@@ -3645,6 +3702,7 @@ impl FoloApp {
                 Section::Datasets => "Datasets",
                 Section::Runs => "Runs",
                 Section::Models => "Models",
+                Section::Benchmarks => "Benchmarks",
                 Section::Playground => "Playground",
                 Section::Settings => "Settings",
             }
@@ -3780,6 +3838,7 @@ impl FoloApp {
         }
         self.store.api = api;
         self.server_mode = mode;
+        self.clear_bench();
         self.subscriptions.clear();
         self.subscribing.clear();
         self.store.clear_pending();

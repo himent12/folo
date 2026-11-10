@@ -8,6 +8,7 @@
 
 mod api;
 mod app;
+mod bench;
 mod charts;
 mod cloud;
 mod controls;

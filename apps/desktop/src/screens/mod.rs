@@ -1,5 +1,6 @@
 //! One module per screen, each an `impl FoloApp` block returning the page element.
 
+pub mod bench;
 pub mod datasets;
 pub mod models;
 pub mod overview;
@@ -164,6 +165,7 @@ impl FoloApp {
         // The throughput table reloads too (a probe in flight keeps its own state), and the cloud.
         self.throughput = Load::Idle;
         self.clear_cloud();
+        self.clear_bench();
         cx.notify();
     }
 }

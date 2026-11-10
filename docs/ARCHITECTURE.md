@@ -327,7 +327,8 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   design language as Studio. It talks to a local `folo serve` over the same API (it can spawn one), so the engine and
   the UI stay decoupled. Its Playground can also run a model in process ("Run on: Local GPU / Local CPU"): it fetches
   the f16 weights from `GET /api/models/{id}/weights` (revalidated by ETag) and runs folo-vision's `Predictor` on
-  folo-gpu or the CPU. It is a separate cargo workspace so the main workspace and its CI stay GPUI-free.
+  folo-gpu or the CPU. Its Benchmarks screens use `folo-bench` only in the built-in demo, to grade its fixtures as the
+  server would. It is a separate cargo workspace so the main workspace and its CI stay GPUI-free.
 
 ## Agent-first design
 - Machine-readable everything: `--json`, JSON Schemas for configs, `folo describe` prints the CLI surface as JSON.

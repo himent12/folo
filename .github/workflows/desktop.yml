@@ -8,6 +8,7 @@ on:
       - apps/desktop/**
       - design/**
       - crates/folo-api/**
+      - crates/folo-bench/**
       - crates/folo-client/**
       - crates/folo-cloud/**
       - crates/folo-core/**
