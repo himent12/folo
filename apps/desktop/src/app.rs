@@ -2639,7 +2639,7 @@ impl FoloApp {
             div()
                 .id(id)
                 .group(id)
-                .w(px(46.))
+                .w(px(crate::theme::layout::DESKTOP_CAPTION_BUTTON))
                 .h_full()
                 .flex()
                 .items_center()
@@ -2647,7 +2647,7 @@ impl FoloApp {
                 .window_control_area(area)
                 // See `titlebar-drag`: the press must reach Windows, not focus the root.
                 .occlude()
-                .hover(move |s| if close { s.bg(gpui::rgb(0xC42B1C)) } else { s.bg(t.bg_hover) })
+                .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
                 .active(|s| s.opacity(0.8))
                 .child(
                     gpui::svg()
@@ -2656,7 +2656,7 @@ impl FoloApp {
                         .flex_none()
                         .text_color(t.text_secondary)
                         .group_hover(id, move |s| {
-                            s.text_color(if close { gpui::white() } else { t.text_primary })
+                            s.text_color(if close { t.window_close_text } else { t.text_primary })
                         }),
                 )
         };
