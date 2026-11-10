@@ -297,7 +297,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   - `Content-Type: application/octet-stream` (also for ONNX, which has no registered media type), `Content-Length`,
     `Content-Disposition: attachment; filename="<model name>.folo"` (`<model name>-f16.folo`; ONNX as the export
     names it: `<model name>.onnx`, `<model name>-f16.onnx` with `half`; characters outside `A-Z a-z 0-9 . _ -`
-    become `_`).
+    become `_`, and the name is cut to 200 characters).
     Real files are streamed from disk (never read into memory whole), and never gzip-compressed.
   - Validators: a strong `ETag` (real mode: the file's size and modification time in nanoseconds, cheap and exact
     for FOLO's writers, which replace files whole; a replacement keeping both the size and the exact modification
@@ -896,7 +896,7 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   tar archive; the session is then dropped.
   FOLO itself sends datasets in a canonical YOLO layout (docs/CLOUD.md, *Dataset*).
 - **Models** (`kind: model`): the stream is one `.folo` file, stored as `<data dir>/models/<name>.folo` (the name
-  reduced as for exports, `-2`, ... when taken) and listed like any file there. `422 invalid_weights` when its
+  reduced as for the `Content-Disposition` of `/weights`, `-2`, ... when taken) and listed like any file there. `422 invalid_weights` when its
   header does not parse.
 - Sessions live in memory: a restart drops them (and removes what they received), and a session without a part
   for an hour expires. A real server only; the mock answers `501 not_implemented`.
