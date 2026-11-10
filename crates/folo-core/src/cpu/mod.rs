@@ -264,6 +264,10 @@ impl Backend for CpuBackend {
             CpuStorage::F16(v) if dtype == DType::F32 => {
                 CpuStorage::F32(elementwise::copy_strided(v, src.layout).iter().map(|x| x.to_f32()).collect())
             }
+            // Directly, not through f64: above 2^53 that would round twice.
+            CpuStorage::I64(v) if dtype == DType::F32 => {
+                CpuStorage::F32(elementwise::copy_strided(v, src.layout).iter().map(|&x| x as f32).collect())
+            }
             s => with_cpu_storage!(s, v => cast_storage(&elementwise::copy_strided(v, src.layout), dtype)),
         };
         Ok(Storage::Cpu(out))
