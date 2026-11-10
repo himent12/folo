@@ -537,21 +537,64 @@ fn wgrad_split(m: usize, n: usize, k: usize) -> (usize, usize) {
 /// (conv2d fuses bias + activation here).
 pub(crate) type ChannelEpilogue<'a> = BiasAct<'a>;
 
+/// Floats of per-image scratch (shifted-rows copies, unfolded gradients) the images of one conv keep live at
+/// once, 16 MiB: images run side by side only as far as their scratch fits (a 640 px batch of 16 would otherwise
+/// hold sixteen 15 MB unfolded gradients at once, and the buffer cache keep them). Measured on the folo-n train
+/// step (batch 16): 16 MiB holds peak memory at `main`'s (one large image at a time) and is faster than no limit at
+/// 320 and 640 px (less scratch to fault in and keep in cache); 64 MiB keeps most of the extra memory.
+const IMAGE_SCRATCH_BUDGET: usize = 1 << 22;
+
+static SCRATCH_BUDGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(IMAGE_SCRATCH_BUDGET);
+
+/// Overrides [`IMAGE_SCRATCH_BUDGET`] (tests: results must not depend on it).
+#[cfg(test)]
+pub(crate) fn set_image_scratch_budget(floats: usize) {
+    SCRATCH_BUDGET.store(floats, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// How many of `n` images whose scratch is `scratch` floats each may run at once (at least one).
+fn image_lanes(n: usize, scratch: usize) -> usize {
+    let budget = SCRATCH_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    (budget / scratch.max(1)).clamp(1, n.max(1))
+}
+
 /// Run `f(img, out_img, threads)` for every image: one image with the whole pool, several side by side with
-/// the pool split between them (`threads / n` each, at least one; work stealing spreads the GEMM tiles of a
-/// batch smaller than the pool). Images side by side keep each GEMM nearer one core's efficiency than one
-/// image at a time across every thread; results do not depend on the split.
-fn for_each_image(out: &mut [f32], per_image: usize, n: usize, f: impl Fn(usize, &mut [f32], usize) + Sync) {
+/// the pool split between them (`threads / lanes` each, at least one; work stealing spreads the GEMM tiles of
+/// a batch smaller than the pool). Images side by side keep each GEMM nearer one core's efficiency than one
+/// image at a time across every thread. At most [`image_lanes`] images (by the `scratch` floats `f` allocates
+/// per image) run at once, each lane taking its images one after another. Results do not depend on the split.
+fn for_each_image(
+    out: &mut [f32],
+    per_image: usize,
+    n: usize,
+    scratch: usize,
+    f: impl Fn(usize, &mut [f32], usize) + Sync,
+) {
     let threads = rayon::current_num_threads();
     if per_image == 0 {
         return;
     }
+    let lanes = image_lanes(n, scratch);
     if n == 1 {
         f(0, out, threads);
-    } else {
+    } else if lanes == n {
         let share = threads.div_ceil(n).max(1);
         out.par_chunks_mut(per_image).enumerate().for_each(|(img, o)| f(img, o, share));
+    } else {
+        let share = threads.div_ceil(lanes).max(1);
+        let mut work: Vec<Vec<(usize, &mut [f32])>> = (0..lanes).map(|_| Vec::new()).collect();
+        for (img, o) in out.chunks_mut(per_image).enumerate() {
+            work[img % lanes].push((img, o));
+        }
+        work.into_par_iter().for_each(|lane| lane.into_iter().for_each(|(img, o)| f(img, o, share)));
     }
+}
+
+/// About the floats of one image's (one group's) [`ShiftedRows`] copy: its padded input planes.
+fn shifted_scratch(g: &ConvGeom) -> usize {
+    let [sy, sx] = g.p.stride;
+    g.cg() * (g.h + 2 * g.p.padding[0] + sy) * (g.w + 2 * g.p.padding[1] + sx)
 }
 
 /// Forward conv2d into `out` (`[N, O, OH, OW]`): overwritten, or accumulated into if `accumulate`. `epi`, if
@@ -586,7 +629,8 @@ pub(crate) fn conv2d_forward_parts(
         return small_c_forward(x, wt, out, g, epi);
     }
     let (cg, og, kdim, ohw, hw) = (g.cg(), g.og(), g.kdim(), g.ohw(), g.h * g.w);
-    for_each_image(out, g.o * ohw, g.n, |img, out_img, threads| {
+    let scratch = if !accumulate && !g.is_pointwise() { shifted_scratch(g) } else { 0 };
+    for_each_image(out, g.o * ohw, g.n, scratch, |img, out_img, threads| {
         let planes = x.planes(img, hw);
         for grp in 0..g.p.groups {
             let a = Strided::lhs(wt, grp * og * kdim, kdim, 1);
@@ -803,7 +847,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
     let hw = g.h * g.w;
     if g.is_pointwise() {
         // gx[img, grp] = W_g^T [cg x og] * gy[img, grp] [og x hw], reading W transposed in place.
-        for_each_image(gx, g.c * hw, g.n, |img, gx_img, threads| {
+        for_each_image(gx, g.c * hw, g.n, 0, |img, gx_img, threads| {
             for grp in 0..groups {
                 let a = Strided::lhs(wt, grp * og * cg, 1, cg);
                 let b = Strided::rhs(gy, (img * g.o + grp * og) * hw, hw, 1);
@@ -864,7 +908,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
 /// [`conv2d_backward_input`] through an unfolded gradient (`W^T gy`) and col2im.
 fn backward_input_col2im(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
     let (cg, og, kdim, ohw, hw) = (g.cg(), g.og(), g.kdim(), g.ohw(), g.h * g.w);
-    for_each_image(gx, g.c * hw, g.n, |img, gx_img, threads| {
+    for_each_image(gx, g.c * hw, g.n, kdim * ohw, |img, gx_img, threads| {
         // Every element of `col` is overwritten, so a recycled buffer needs no clearing.
         let mut col = super::alloc_uninit(kdim * ohw);
         for grp in 0..g.p.groups {
@@ -961,6 +1005,9 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
         (g.oh * wq, ColumnMap { wp: wq, ow: g.ow })
     };
     let b_stride = cols * NR;
+    // The images' operands are made a wave at a time, as many images as fit the scratch budget.
+    let per_image = og.div_ceil(NR) * b_stride + if g.is_pointwise() { 0 } else { shifted_scratch(g) };
+    let wave = image_lanes(g.n, per_image);
     let image = |img: usize| -> ImageRows {
         // Every element is written by `pack_grad_cols`.
         let mut grad = super::alloc_uninit(og.div_ceil(NR) * b_stride);
@@ -968,14 +1015,11 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
         if g.is_pointwise() {
             ImageRows { sr: None, rows: planes(img).iter().map(|p| p.as_ptr()).collect(), grad }
         } else {
-            let sr = ShiftedRows::new(&planes(img), g, g.n == 1);
+            let sr = ShiftedRows::new(&planes(img), g, wave == 1);
             let rows = sr.rows.clone();
             ImageRows { sr: Some(sr), rows, grad }
         }
     };
-    let images: Vec<ImageRows> =
-        if g.n > 1 { (0..g.n).into_par_iter().map(image).collect() } else { vec![image(0)] };
-    debug_assert!(images.iter().all(|im| im.sr.as_ref().is_none_or(|s| s.n == cols && s.map.wp == map.wp)));
     let (m, n, k) = (kdim, og, g.n * cols);
     let (parts, tiles) = wgrad_split(m, n, k);
     let step = k.div_ceil(parts).div_ceil(KC) * KC;
@@ -985,26 +1029,57 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
     // Every element of every partial is written by the first segment of its task.
     let mut partial = super::alloc_uninit(parts * m * n);
     let pptr = SendPtr(partial.as_mut_ptr());
-    let task = |t: usize| {
-        let pptr = &pptr;
-        let (ti, p) = (t / parts, t % parts);
-        let (i0, i1) = (ti * rpt, ((ti + 1) * rpt).min(m));
-        let (k0, k1) = (p * step, ((p + 1) * step).min(k));
-        // SAFETY: rows i0..i1 of partial p belong to this task alone.
-        let c = unsafe { std::slice::from_raw_parts_mut(pptr.0.add(p * m * n + i0 * n), (i1 - i0) * n) };
-        let mut kk = k0;
-        while kk < k1 {
-            let (img, t0) = (kk / cols, kk % cols);
-            let len = (cols - t0).min(k1 - kk);
-            let im = &images[img];
-            gemm_arows(i1 - i0, n, len, &im.rows[i0..i1], t0, &im.grad[t0 * NR..], b_stride, c, n, kk != k0);
-            kk += len;
+    for w0 in (0..g.n).step_by(wave) {
+        let w1 = (w0 + wave).min(g.n);
+        let images: Vec<ImageRows> =
+            if w1 - w0 > 1 { (w0..w1).into_par_iter().map(image).collect() } else { vec![image(w0)] };
+        debug_assert!(
+            images.iter().all(|im| im.sr.as_ref().is_none_or(|s| s.n == cols && s.map.wp == map.wp))
+        );
+        // Each task sums the segments of its K range that fall in this wave's images, in K order, continuing
+        // the previous wave's sum: the same calls in the same order as with every image at once.
+        let task = |t: usize| {
+            let pptr = &pptr;
+            let (ti, p) = (t / parts, t % parts);
+            let (i0, i1) = (ti * rpt, ((ti + 1) * rpt).min(m));
+            let (k0, k1) = (p * step, ((p + 1) * step).min(k));
+            let (lo, hi) = (k0.max(w0 * cols), k1.min(w1 * cols));
+            if lo >= hi {
+                return;
+            }
+            // SAFETY: rows i0..i1 of partial p belong to this task alone.
+            let c = unsafe { std::slice::from_raw_parts_mut(pptr.0.add(p * m * n + i0 * n), (i1 - i0) * n) };
+            let mut kk = lo;
+            while kk < hi {
+                let (img, t0) = (kk / cols, kk % cols);
+                let len = (cols - t0).min(hi - kk);
+                let im = &images[img - w0];
+                gemm_arows(
+                    i1 - i0,
+                    n,
+                    len,
+                    &im.rows[i0..i1],
+                    t0,
+                    &im.grad[t0 * NR..],
+                    b_stride,
+                    c,
+                    n,
+                    kk != k0,
+                );
+                kk += len;
+            }
+        };
+        if 2 * m * n * k >= super::gemm::PAR_FLOPS && tiles * parts > 1 {
+            (0..tiles * parts).into_par_iter().for_each(task);
+        } else {
+            (0..tiles * parts).for_each(task);
         }
-    };
-    if 2 * m * n * k >= super::gemm::PAR_FLOPS && tiles * parts > 1 {
-        (0..tiles * parts).into_par_iter().for_each(task);
-    } else {
-        (0..tiles * parts).for_each(task);
+        for im in images {
+            super::recycle(im.grad);
+            if let Some(sr) = im.sr {
+                super::recycle(sr.buf);
+            }
+        }
     }
     // The partials, added in order into the first (row by row), then transposed: gw[j][i] = dWᵀ[i][j].
     let (sum, rest) = partial.split_at_mut(m * n);
@@ -1032,12 +1107,6 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
         gw.chunks_mut(m).enumerate().for_each(transpose);
     }
     super::recycle(partial);
-    for im in images {
-        super::recycle(im.grad);
-        if let Some(sr) = im.sr {
-            super::recycle(sr.buf);
-        }
-    }
 }
 
 /// Dot product with independent accumulators so it vectorises.
@@ -1661,6 +1730,44 @@ mod kernel_tests {
                     let same = got.iter().zip(&want).all(|(p, q)| p.to_bits() == q.to_bits());
                     assert!(same, "case {i} ({g:?}) act {act:?} bias {with_bias}: not bit-identical");
                 }
+            }
+        }
+    }
+
+    /// The image scratch budget only changes how many images run at once, never a bit of the result: forward,
+    /// input gradient (shifted rows and col2im) and weight gradient (waves of images whose K parts cross wave
+    /// boundaries) with every image at once, one at a time and a few at a time.
+    #[test]
+    fn image_scratch_budget_does_not_change_results() {
+        let cases: [Case; 5] = [
+            (5, 16, [21, 19], 24, [3, 3], params([1, 1], [1, 1], [1, 1], 1)),
+            (5, 16, [21, 19], 24, [3, 3], params([2, 2], [1, 1], [1, 1], 1)),
+            (4, 12, [17, 15], 8, [5, 5], params([1, 1], [4, 4], [2, 2], 2)),
+            (3, 64, [9, 11], 24, [1, 1], params([1, 1], [0, 0], [1, 1], 1)),
+            (6, 8, [30, 26], 16, [3, 3], params([3, 3], [2, 2], [1, 1], 1)),
+        ];
+        let run = |g: &ConvGeom| {
+            let (x, wt) = (data(g.n * g.c * g.h * g.w, 1), data(g.o * g.kdim(), 2));
+            let gy = data(g.n * g.o * g.ohw(), 3);
+            let mut y = vec![0f32; gy.len()];
+            conv2d_forward(&x, &wt, &mut y, g, false, None);
+            let mut gx = vec![0f32; x.len()];
+            conv2d_backward_input(&gy, &wt, &mut gx, g);
+            let mut gw = vec![0f32; wt.len()];
+            conv2d_backward_weight(&x, &gy, &mut gw, g);
+            [y, gx, gw].map(|v| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>())
+        };
+        for (i, (n, c, hw, o, k, p)) in cases.into_iter().enumerate() {
+            let g = geom(n, c, hw, o, k, p);
+            let all = run(&g);
+            // One image's scratch is at least a few thousand floats in every case: 1 float runs them one at a
+            // time, 3 copies' worth two or three at a time.
+            let one = shifted_scratch(&g).max(g.kdim() * g.ohw()).max(1);
+            for budget in [1, 3 * one] {
+                set_image_scratch_budget(budget);
+                let got = run(&g);
+                set_image_scratch_budget(IMAGE_SCRATCH_BUDGET);
+                assert!(got == all, "case {i}, budget {budget}: results differ");
             }
         }
     }

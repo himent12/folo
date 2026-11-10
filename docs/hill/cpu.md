@@ -102,6 +102,23 @@ Predictions are those of each image alone (test `cpu_predict_batch_matches_singl
 - BLIS loop order in `gemm_arows` (each B panel held in L1 while the A rows sweep past it, instead of each A
   micro-panel against every B panel): no difference measured; kept as the standard order.
 - Images side by side in convs alone did not change the train step (285 vs 281–286 ms).
+- Review fix (live scratch): with every image of a batch side by side, a 640 px batch of 16 held sixteen
+  shifted-rows copies / unfolded gradients at once (15 MB each for the 16→32 stride-2 conv), and the buffer cache
+  kept them. Convs now run only as many images at once as fit a 16 MiB scratch budget (the weight gradient in
+  waves, its K parts continuing across them, bit for bit the same sums). Train step, 28 threads, 3–6 cores busy
+  elsewhere, `tools/bench-ab.ps1` alternating, peak working set sampled every 100 ms:
+
+  | folo-n train step, b16 | `main` | before the fix | 64 MiB | **16 MiB (kept)** | 8 MiB |
+  |---|---|---|---|---|---|
+  | 320 px, ms (5 runs) | 338–348 | 259–265 | | **248–254** | 247–254 |
+  | 320 px, peak MB | 1394–1398 | 1371–1393 | 1377–1386 | **1291–1305** | 1247–1248 |
+  | 640 px, ms (3 runs) | 1466–1511 | 1140–1148 | 1099–1132 | **1046–1064** | 1060–1097 |
+  | 640 px, peak MB | 1662–1695 | 1936–1992 | 1791–1906 | **1623–1706** | 1625–1691 |
+
+  (64 MiB at 320 px ran in a separate session, where it tied the binary before the fix: 64.9 vs 66.1 img/s.)
+  One image at a time everywhere (a budget of one float) gave `main`'s peak (1598–1741 MB) at 9.7–10.1 img/s,
+  slower than `main`: the extra memory was all scratch of concurrent images. Less scratch is also faster here
+  (fewer page faults and cache misses), so the 320 px gain stands.
 
 ## Not done / leftovers
 
