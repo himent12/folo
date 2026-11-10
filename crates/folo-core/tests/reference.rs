@@ -544,3 +544,51 @@ fn conv2d_weight_grad_ignores_recycled_buffer_contents() {
         );
     }
 }
+
+#[test]
+fn conv2d_output_size_overflow_is_an_error() {
+    // Padding whose double overflows, and an output whose element count overflows: errors, not panics (or, in
+    // release builds, a wrapped size).
+    let x = Tensor::ones([1, 1, 1, 1]);
+    let w = Tensor::ones([1, 1, 1, 1]);
+    for pad in [usize::MAX / 2 + 1, 1 << 33] {
+        assert!(x.conv2d(&w, None, 1, pad, 1, 1).is_err(), "padding {pad}");
+        let _g = folo_core::no_grad();
+        assert!(x.conv2d_act(&w, None, &Conv2dParams { padding: [pad; 2], ..p1() }, None).is_err());
+        assert!(
+            Tensor::conv2d_act_cat(
+                &[&x, &x],
+                &Tensor::ones([1, 2, 1, 1]),
+                None,
+                &Conv2dParams { padding: [pad; 2], ..p1() },
+                None
+            )
+            .is_err()
+        );
+    }
+}
+
+fn p1() -> Conv2dParams {
+    Conv2dParams { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 }
+}
+
+#[test]
+fn upsample_output_size_overflow_is_an_error() {
+    let x = Tensor::ones([1, 1, 2, 2]);
+    assert!(x.upsample_nearest2d(usize::MAX / 2 + 1).is_err());
+    assert!(x.upsample_nearest2d(1 << 33).is_err()); // each side fits, the element count does not
+}
+
+#[test]
+fn pooling_size_overflow_is_an_error() {
+    let x = Tensor::ones([1, 1, 2, 2]);
+    // 2 · padding overflows; h + 2 · padding overflows; the window's element count overflows.
+    assert!(x.max_pool2d(usize::MAX, 1, usize::MAX / 2 + 1).is_err());
+    assert!(x.max_pool2d(usize::MAX, 1, usize::MAX / 2).is_err());
+    assert!(x.avg_pool2d(usize::MAX, 1, usize::MAX / 2).is_err());
+    let r = x.avg_pool2d(1 << 33, 1, 1 << 32);
+    if let Ok(y) = r {
+        assert_eq!(y.dims(), &[1, 1, 3, 3]);
+        assert!(y.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    }
+}

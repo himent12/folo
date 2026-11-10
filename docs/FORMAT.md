@@ -30,7 +30,8 @@ Reader acceptance rules (identical to safetensors):
 - `data_offsets` are `[begin, end)` relative to the start of the data section, and `end - begin == numel × dtype size`.
   Taken together, the tensors must cover the data section exactly, with no overlaps and no holes (sorted by `(begin, end)`,
   each tensor starts where the previous one ended; the first starts at 0, and the last ends at the end of the file).
-- Zero-sized tensors have `begin == end`. Scalars have `shape: []`.
+- Zero-sized tensors have `begin == end`. Scalars have `shape: []`. FOLO's reader also refuses a shape whose
+  non-zero dimensions multiply past the address space, even when another dimension is 0 (no tensor can have it).
 - Readers do not require any particular order of keys or any element alignment.
 
 Writer conventions (always valid under the rules above):

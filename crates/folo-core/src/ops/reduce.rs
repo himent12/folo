@@ -299,4 +299,14 @@ mod tests {
         assert_eq!(i.to_vec2::<i64>().unwrap()[0], vec![0, 2, 1]);
         assert!(x.topk(5, true).is_err());
     }
+
+    #[test]
+    fn topk_signed_zeros_tie_by_index() {
+        // -0.0 == 0.0, so the lower index wins, as in argmax / argmin.
+        let x = Tensor::from_slice(&[-0.0f32, 0.0, 0.0, -0.0], [4]).unwrap();
+        assert_eq!(x.topk(1, true).unwrap().1.to_vec::<i64>().unwrap(), vec![0]);
+        assert_eq!(x.topk(1, false).unwrap().1.to_vec::<i64>().unwrap(), vec![0]);
+        assert_eq!(x.topk(4, true).unwrap().1.to_vec::<i64>().unwrap(), vec![0, 1, 2, 3]);
+        assert_eq!(x.argmax(0, false).unwrap().item::<i64>().unwrap(), 0);
+    }
 }

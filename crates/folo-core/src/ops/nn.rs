@@ -111,6 +111,9 @@ impl Tensor {
         let [oh, ow] = p.output_hw(h, w, kh, kw).ok_or_else(|| {
             Error::invalid_arg(OP, format!("kernel {kh}x{kw} with {p:?} does not fit input {}", self.shape()))
         })?;
+        if [o, oh, ow].iter().try_fold(n, |a, &b| a.checked_mul(b)).is_none() {
+            return Err(Error::invalid_arg(OP, format!("output [{n}, {o}, {oh}, {ow}] is too large")));
+        }
         Ok(Shape::new(&[n, o, oh, ow]))
     }
 
@@ -229,8 +232,11 @@ impl Tensor {
         if p.kernel.contains(&0) || p.stride.contains(&0) {
             return Err(Error::invalid_arg(op, format!("kernel and stride must be positive: {p:?}")));
         }
-        if 2 * p.padding[0] > p.kernel[0] || 2 * p.padding[1] > p.kernel[1] {
+        if p.padding[0] > p.kernel[0] / 2 || p.padding[1] > p.kernel[1] / 2 {
             return Err(Error::invalid_arg(op, format!("padding must be at most half the kernel: {p:?}")));
+        }
+        if p.kernel[0].checked_mul(p.kernel[1]).is_none() {
+            return Err(Error::invalid_arg(op, format!("window {p:?} is too large")));
         }
         p.output_hw(h, w).ok_or_else(|| {
             Error::invalid_arg(op, format!("window {p:?} does not fit input {}", self.shape()))
@@ -322,9 +328,15 @@ impl Tensor {
         if scale.contains(&0) {
             return Err(Error::invalid_arg(OP, "scale must be positive"));
         }
+        let (oh, ow) = (h.checked_mul(scale[0]), w.checked_mul(scale[1]));
+        let Some((oh, ow)) =
+            oh.zip(ow).filter(|&(oh, ow)| [c, oh, ow].iter().try_fold(n, |a, &b| a.checked_mul(b)).is_some())
+        else {
+            return Err(Error::invalid_arg(OP, format!("scale {scale:?} of {} is too large", self.shape())));
+        };
         let b = self.backend()?;
         let s = self.with_view(|v| b.upsample_nearest2d(v, scale))?;
-        let out = Tensor::wrap(s, Shape::new(&[n, c, h * scale[0], w * scale[1]]), OP)?;
+        let out = Tensor::wrap(s, Shape::new(&[n, c, oh, ow]), OP)?;
         let in_shape = self.shape().clone();
         Ok(out.track(OP, &[self], move |g| {
             let b = g.backend()?;

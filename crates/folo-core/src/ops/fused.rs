@@ -44,6 +44,7 @@ fn conv_out_shape_dims(
         && kw > 0
         && bias.is_none_or(|b| b.dims() == [o]);
     let [oh, ow] = if ok { p.output_hw(h, wi, kh, kw)? } else { return None };
+    [o, oh, ow].iter().try_fold(n, |a, &b| a.checked_mul(b))?;
     Some(Shape::new(&[n, o, oh, ow]))
 }
 
