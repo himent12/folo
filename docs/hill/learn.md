@@ -189,6 +189,18 @@ fine-tune is unchanged by construction.
 
 ## Follow-ups
 
+(Round 2; the round-1 list below is kept for the record: items 2 and 4 are done.)
+1. **Merge-check spread.** Merged SGD seeds 0.0845 / 0.0814 against pre-merge 0.0860 / 0.0855: run a third merged
+   SGD seed (6–8 min now) or bisect the four speed branches one seed each, to tell a ~0.003 regression from noise.
+2. **MuSGD step cost (17 %)**: fuse the Newton–Schulz iteration into one kernel per column bucket (today about 15
+   matmul / elementwise dispatches per conv weight per step), and measure on an idle GPU.
+3. **AdamW floor 0.002** (round 1: proxy 0.0844 vs 0.0747 at 0.001): not run this round (time); needs the shapes
+   gate and an R6 fine-tune at 0.002 against the current rule.
+4. **Long COCO with MuSGD**: the 300-epoch folo-n run (examples/coco) resumed from its SGD checkpoint keeps SGD
+   (rule 1). A new long run under rule 3 is the full-scale check of the +35 % seen on the proxy.
+
+### Round 1 follow-ups
+
 1. **Rerun the COCO equal-budget check at 640 px** with the published recipe on both trainers (folo-n vs YOLO11n,
    SGD, the 50-epoch schedule of examples/coco) to confirm that the per-epoch parity seen here holds at full scale;
    on this proxy there is nothing left to fix in the trainer.
