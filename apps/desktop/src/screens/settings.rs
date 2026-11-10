@@ -881,7 +881,9 @@ impl FoloApp {
                                 )
                             }),
                     )
-                    .child(div().flex().flex_none().items_center().gap(px(8.)).child(check).child(disconnect)),
+                    .child(
+                        div().flex().flex_none().items_center().gap(px(8.)).child(check).child(disconnect),
+                    ),
             )
             .when_some(c.error.clone().filter(|_| failed), |d, e| {
                 d.child(line("icons/circle-alert.svg", t.danger_solid, t.danger_text, &e))

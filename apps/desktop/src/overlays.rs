@@ -792,7 +792,8 @@ impl FoloApp {
                             .then(|| "None available now: launching would be refused".into())
                     })
                     .collect();
-                let picked = offer.as_ref().and_then(|o| shown.iter().position(|x| x.id == o.id)).unwrap_or(0);
+                let picked =
+                    offer.as_ref().and_then(|o| shown.iter().position(|x| x.id == o.id)).unwrap_or(0);
                 let ids: Vec<String> = shown.iter().map(|o| o.id.clone()).collect();
                 self.select_with(
                     "nr-gpu",

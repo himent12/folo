@@ -888,9 +888,10 @@ impl Exec {
                 stop_sent = Some(Instant::now());
             }
             if stop_sent.is_some_and(|s| s.elapsed() >= t.lost_grace) {
-                // A worker that has not answered since has nothing to collect from: the run is lost with its
-                // instance (a time limit that ended while nothing followed the run, and the instance with it).
-                if unreachable.is_some_and(|u| u.elapsed() >= t.lost_grace) {
+                // A worker that has not answered for most of that time has nothing to collect from: the run is lost
+                // with its instance (a time limit that ended while nothing followed the run, and the instance
+                // with it). Half the grace, not all of it: the silence is noticed a poll after the stop was sent.
+                if unreachable.is_some_and(|u| u.elapsed() >= t.lost_grace / 2) {
                     return Err(failed(
                         "cloud_instance_lost",
                         "the worker stopped answering before the run could be stopped and collected; the weights \
@@ -1197,7 +1198,12 @@ impl Exec {
 
     /// Copies the worker's `last.folo` (or `best.folo`) into the run folder at the run's end, with
     /// `Run.cloud.progress` following it; false when the worker has none.
-    fn copy(&mut self, client: &Client, run_id: &str, last: bool) -> std::result::Result<bool, TransferError> {
+    fn copy(
+        &mut self,
+        client: &Client,
+        run_id: &str,
+        last: bool,
+    ) -> std::result::Result<bool, TransferError> {
         let file = if last { "last.folo" } else { "best.folo" };
         let weights = self.dir.join("weights");
         std::fs::create_dir_all(&weights).map_err(TransferError::Io)?;

@@ -226,10 +226,17 @@ The provider's tests run against a fixture of its API. Two things check it again
   `scripts/install.sh` at a URL the pod can reach, connect with that as the worker download URL, and start a run
   with `compute`.
 
-RunPod was checked this way on 2026-11-10 (REST v2; A40 pods on Secure Cloud, NVIDIA driver 595.91, a 600-image
-dataset, folo-n at 320 px): a pod trains about 90 seconds after the launch request (the image, the install, the
-upload), `folo doctor` on it finds the GPU with tensor cores, and metrics, logs, samples and both weights files
-arrive in the local run folder. Also seen: a run stopped by hand and resumed on a new pod, an offer without
-capacity refused as `cloud_refused` at once (RunPod's `low` stock often means none), a pod whose setup fails
-terminating itself within a minute, and a pod whose control plane was killed mid-run terminating itself 10
-minutes after its time limit.
+RunPod was checked this way on 2026-11-10 (REST v2; A40 pods on Secure Cloud, NVIDIA driver 595.91; folo-n on
+600 images at 320 px and on 3,000 at 640 px, in f32 and with `amp`):
+- A pod trains 40 to 90 seconds after the launch request when its host has the image (the install, the upload),
+  about four minutes when it has to pull it. `folo doctor` on it finds the GPU with tensor cores, mixed precision
+  trains on them, and metrics, logs, samples and both weights files arrive in the local run folder.
+- A 174 MB dataset goes up in 8 MiB parts in two minutes from a home line; `weights/last.folo` (42 MB) comes back
+  in two to four seconds, also while the worker rewrites it every second.
+- A run stopped by hand is collected and released within 20 seconds, and resumes on a new pod. An instance
+  terminated by hand fails its run with `cloud_instance_lost` within seconds; resumed, the run finishes on a new
+  pod from the checkpoint copied here.
+- A server killed while a run trained follows it again at its next start and fetches what it missed. A pod whose
+  server never came back terminated itself 10 minutes after its time limit.
+- An offer without capacity is refused as `cloud_refused` at once (RunPod's `low` stock often means none), and a
+  pod whose setup fails terminates itself within a minute.
