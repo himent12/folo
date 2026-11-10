@@ -403,6 +403,8 @@ fn graded(job: &LoopJob, g: u32, m: &Model) -> Result<Option<Graded>> {
     };
     let entry_id = match reuse {
         Some(id) => id,
+        // A stopped loop starts no new work (its last run may have finished while it was stopping).
+        None if job.cancelled() => return Ok(None),
         None => {
             let file_classes = job.slot.lock().file.classes.clone();
             let resolved = model::resolve(m, &file_classes)?;
@@ -551,6 +553,10 @@ fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
 /// Generation `g`'s student: an ordinary training run on `dataset`, followed to its end; its best model. `None`
 /// when the loop was stopped.
 fn train(job: &LoopJob, g: u32, dataset: &str) -> Result<Option<Model>> {
+    // Stopped while its dataset was written: no run.
+    if job.cancelled() {
+        return Ok(None);
+    }
     job.phase(BenchLoopPhase::Training);
     let config =
         student_config(&job.config.student, &job.teacher, dataset, format!("{} gen {g}", job.name()));
