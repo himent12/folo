@@ -166,13 +166,13 @@ fn now() -> String {
 }
 
 /// Appends `line` to the file at `path` (a run's `log.jsonl`, or the `metrics.jsonl` a cloud run mirrors); a failure
-/// is logged.
+/// is logged. The line and its newline go in one write, so lines appended by several threads at once never mix.
 pub(crate) fn append_line(path: &Path, line: &str) {
     let r = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
-        .and_then(|mut f| writeln!(f, "{line}"));
+        .and_then(|mut f| f.write_all(format!("{line}\n").as_bytes()));
     if let Err(e) = r {
         tracing::warn!("writing {}: {e}", path.display());
     }
@@ -1521,6 +1521,31 @@ mod tests {
         let logs = runs.logs("run_late", &LogsQuery::last(10)).unwrap();
         assert!(logs.lines.iter().any(|l| l.message.contains("not queued")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A run's log has writers on several threads (the trainer on the worker, a stop or a queue move from a
+    /// request): every line they append reads back whole.
+    #[test]
+    fn lines_appended_at_once_stay_whole() {
+        let dir = TestDir::new("runs-append");
+        let path = dir.join("log.jsonl");
+        let threads: Vec<_> = (0..4)
+            .map(|t| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    for i in 0..500 {
+                        append_line(
+                            &path,
+                            &format!(r#"{{"thread":{t},"line":{i},"pad":"{}"}}"#, "x".repeat(64)),
+                        );
+                    }
+                })
+            })
+            .collect();
+        threads.into_iter().for_each(|t| t.join().unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        let whole = text.lines().filter(|l| serde_json::from_str::<serde_json::Value>(l).is_ok()).count();
+        assert_eq!((whole, text.lines().count()), (2000, 2000));
     }
 
     /// A stop that lands between a resume's restart and its enqueue (the run is `queued` but not in the queue yet,
