@@ -1155,7 +1155,9 @@ impl Store for RealStore {
             _ => None,
         };
         let ds = e.dataset();
-        Ok(crate::cli::train_command(&config, &ds.path, ds.format, weights.as_deref()))
+        let cmd = crate::cli::train_command(&config, &ds.path, ds.format, weights.as_deref());
+        // An `auto` run repeats with the rule it trained with (made before rule 3: SGD, not MuSGD, for long runs).
+        Ok(crate::cli::with_auto_rule(cmd, &config, crate::cli::recorded_auto_rule(e.dir())))
     }
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {

@@ -618,7 +618,9 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   one (so a folder holding both reads the same); `--weights` is the published name for published weights,
   else the `.folo` file the run started from (so no `--model`: the CLI takes the architecture from the weights,
   and `--head` is always given, since the CLI's default is the weights file's head); settings equal to the
-  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). `cli` is quoted for PowerShell,
+  defaults are left out, and a value starting with `-` is attached (`--name=--amp`). An `auto` run that trained under
+  an older `auto` rule than a new run takes (its `config.json` `train.auto_rule`, rule 1 when absent) ends with
+  `--set auto_rule=N`, so a long run made before rule 3 repeats with SGD, not MuSGD. `cli` is quoted for PowerShell,
   as Studio shows commands: arguments with spaces or shell characters are single-quoted, a quote inside doubled
   (`'O''Brien'`, also for the typographic quotes PowerShell reads as quotes); POSIX shells read the same words
   unless an argument holds a quote. `argv` is the same command unquoted, for spawning without a shell (the
