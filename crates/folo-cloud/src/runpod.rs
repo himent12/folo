@@ -559,11 +559,25 @@ struct Problem {
 }
 
 impl Problem {
+    /// The problem of `reply`, every text in it scrubbed of the request's credentials ([`Reply::scrub`]): they are
+    /// decoded here, so an escaped one is spelled out.
     fn of(reply: &Reply) -> Problem {
-        serde_json::from_slice(&reply.body).unwrap_or_else(|_| Problem {
+        let p: Problem = serde_json::from_slice(&reply.body).unwrap_or_else(|_| Problem {
             raw: Some(String::from_utf8_lossy(&reply.body).into_owned()),
             ..Problem::default()
-        })
+        });
+        let scrub = |t: Option<String>| t.map(|t| reply.scrub(&t));
+        // Whole, before anything shortens it: a credential cut in two would not be found.
+        let whole = |v: &serde_json::Value| match v {
+            serde_json::Value::String(s) => reply.scrub(s),
+            other => reply.scrub(&other.to_string()),
+        };
+        Problem {
+            title: scrub(p.title),
+            detail: scrub(p.detail),
+            errors: p.errors.map(|e| e.iter().map(|v| serde_json::Value::String(whole(v))).collect()),
+            raw: scrub(p.raw),
+        }
     }
 
     /// What RunPod said, shortened: the detail, else the title, else the start of the body.
@@ -1066,5 +1080,39 @@ mod tests {
         let f = Fixture::serve(vec![problem(400, &format!("bad env FOLO_TOKEN={TOKEN}"))]);
         let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
         assert_error(&e, ErrorKind::Refused, "bad env FOLO_TOKEN=[redacted]");
+    }
+
+    /// `s` with every character as a JSON `\uXXXX` escape: the same string to a JSON reader, other bytes.
+    fn escaped(s: &str) -> String {
+        s.chars().map(|c| format!("\\u{:04x}", c as u32)).collect()
+    }
+
+    #[test]
+    fn secrets_echoed_in_any_spelling_are_not_repeated() {
+        for (key, token) in [(KEY.to_string(), TOKEN.to_string()), (escaped(KEY), escaped(TOKEN))] {
+            let refused = format!(
+                r#"{{"title":"Bad Request","status":400,"detail":"bad key {key} and token {token}"}}"#
+            );
+            let invalid = format!(
+                r#"{{"title":"Unprocessable Entity","status":422,"detail":"validation failed for {key}","errors":[
+                    {{"message":"unexpected {token}","location":"body.env","value":{{"FOLO_TOKEN":"{token}"}}}}]}}"#
+            );
+            let f = Fixture::serve(vec![Answer::json(400, refused), Answer::json(422, invalid)]);
+            let p = runpod(&f);
+            let e = p.launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+            assert_error(&e, ErrorKind::Refused, "bad key [redacted] and token [redacted]");
+            let e = p.launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+            assert_error(&e, ErrorKind::Unavailable, "validation failed for [redacted]");
+            assert!(e.message.contains(r#""FOLO_TOKEN":"[redacted]""#), "{}", e.message);
+        }
+        // A long entry is shortened after the scrub: a token across the cut leaves no part of itself behind.
+        let long = format!(r#"{{"status":422,"detail":"x","errors":["{}{TOKEN}"]}}"#, "a".repeat(290));
+        let f = Fixture::serve(vec![Answer::json(422, long)]);
+        let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+        assert!(!e.message.contains(&TOKEN[..8]), "{}", e.message);
+        // An answer that is not an error is read as it came, also where the token's text happens to be.
+        let created = format!(r#"{{"id":"abc123xyz","name":"{TOKEN}","status":"PROVISIONING"}}"#);
+        let f = Fixture::serve(vec![Answer::json(201, created)]);
+        assert_eq!(runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap(), "abc123xyz");
     }
 }
