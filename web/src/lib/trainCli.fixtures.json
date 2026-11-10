@@ -717,6 +717,50 @@
     }
   },
   {
+    "name": "a name that starts with a dash",
+    "command": "folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --name=--amp",
+    "argv": [
+      "train",
+      "--data",
+      "D:/r6",
+      "--model",
+      "folo-s",
+      "--epochs",
+      "100",
+      "--batch",
+      "16",
+      "--imgsz",
+      "640",
+      "--name=--amp"
+    ],
+    "expect": {
+      "data": "D:/r6",
+      "model": "folo-s",
+      "weights": null,
+      "epochs": 100,
+      "batch": 16,
+      "imgsz": 640,
+      "device": "auto",
+      "optimizer": "auto",
+      "lr0": 0.01,
+      "amp": false,
+      "head": null,
+      "mosaic": 1,
+      "mixup": 0,
+      "hsv": [
+        0.015,
+        0.7,
+        0.4
+      ],
+      "fliplr": 0.5,
+      "scale": 0.5,
+      "translate": 0.1,
+      "close_mosaic": 10,
+      "seed": 0,
+      "name": "--amp"
+    }
+  },
+  {
     "name": "an apostrophe in the weights path",
     "command": "folo train --data D:/r6 --weights 'C:/Users/O''Brien/FOLO models/fasteners-n-best.folo' --epochs 15 --batch 16 --imgsz 640 --head o2m --name r6-n-2",
     "argv": [

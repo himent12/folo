@@ -103,6 +103,16 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
     expect(c.argv).toContain("D:/O'Brien/data");
   });
 
+  it('attaches a value that starts with a dash, so the CLI never reads it as a flag (as the server does)', () => {
+    const c = trainCommand({ ...base, name: '--amp' }, 'D:/r6');
+    expect(c.argv).toContain('--name=--amp');
+    expect(c.argv).not.toContain('--amp');
+    expect(c.line).toBe('folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --name=--amp');
+    const spaced = trainCommand({ ...base, name: '-my run' }, 'D:/r6');
+    expect(spaced.argv.at(-1)).toBe('--name=-my run');
+    expect(split(spaced.line).slice(1)).toEqual(spaced.argv);
+  });
+
   it("prefers the server's own command where it sends one", () => {
     expect(serverCommand({ cli: 'folo train --data x' })).toBe('folo train --data x');
     expect(serverCommand({})).toBeNull();
@@ -134,6 +144,7 @@ const cases: { name: string; config: TrainConfig; data: string; model?: Model }[
   { name: 'a dataset path with spaces', config: { ...base, arch: 'folo-n' }, data: 'C:/Users/me/My Datasets/r6' },
   { name: 'a Windows path', config: { ...base, arch: 'folo-l' }, data: 'D:\\data\\shapes' },
   { name: 'an apostrophe in the dataset path and the name', config: { ...base, name: "Bob's r6" }, data: "D:/O'Brien/data" },
+  { name: 'a name that starts with a dash', config: { ...base, name: '--amp' }, data: 'D:/r6' },
   { name: 'an apostrophe in the weights path', config: ft(), data: 'D:/r6', model: model({ path: "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo" }) },
   {
     name: 'fine-tune from published weights',
