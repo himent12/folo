@@ -11,10 +11,10 @@
 // renders nothing, a page with almost nothing under its header, every control another element paints over, and every
 // select too narrow for its current value. The list prints at the end and goes to qa.txt.
 // --qa runs only those checks, where phone layouts break: every scene at the tablet and mobile sizes it lists, in dark
-// (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model);
-// phone states once more under a coarse pointer (touch: 44 px targets, 16 px field text), where controls grow and
-// rows that fit with a mouse can collide. Each state gets its scene's setup; nothing is captured or saved.
-import { createServer } from 'vite';
+// (or the one theme a scene is made for), and in light too where the page shows a phone section picker (Run, Model).
+// Phone states run under a coarse pointer (touch: 44 px targets, 16 px field text), where controls grow and rows that
+// fit with a mouse can collide. Each state gets its scene's setup; nothing is captured or saved.
+import { build, createServer, preview } from 'vite';
 import { chromium } from 'playwright-core';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { availableParallelism, EOL } from 'node:os';
@@ -43,8 +43,22 @@ const VIEWPORTS = {
 // Fixed wall clock so relative times ("3 min ago") and the mock's live run are identical every round.
 const FIXED_NOW = new Date('2026-11-08T14:30:00Z');
 
-const server = await createServer({ root, logLevel: 'error', server: { host: '127.0.0.1', port: 5199, strictPort: false } });
-await server.listen();
+// The shoot loads pages from the dev server. --qa checks the production build instead (what ships): it is built here
+// into node_modules/.qa-dist, never web/dist, and served as static files. Each state opens a fresh browser context
+// with an empty cache, and the build is one script where the dev server answers a request per module, so the same
+// states take about a quarter of the time.
+const listen = { host: '127.0.0.1', port: 5199, strictPort: false };
+/** @type {{ resolvedUrls: import('vite').ResolvedServerUrls | null, close(): Promise<void> }} */
+let server;
+if (qa) {
+  const outDir = resolve(root, 'node_modules/.qa-dist');
+  await build({ root, logLevel: 'error', build: { outDir, emptyOutDir: true, sourcemap: false, reportCompressedSize: false } });
+  server = await preview({ root, logLevel: 'error', build: { outDir }, preview: listen });
+} else {
+  const dev = await createServer({ root, logLevel: 'error', server: listen });
+  await dev.listen();
+  server = dev;
+}
 const base = (server.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5199/').replace(/\/$/, '');
 
 if (!qa) {
@@ -464,7 +478,7 @@ const overflows = [];
  * @param {import('./scenes.mjs').Scene} scene
  * @param {'dark' | 'light'} theme
  * @param {'desktop' | 'laptop' | 'tablet' | 'mobile' | 'small'} vp
- * @param {boolean} [touch] a touch screen (`pointer: coarse`, `hover: none`): --qa's second pass over phone states
+ * @param {boolean} [touch] a touch screen (`pointer: coarse`, `hover: none`): --qa's phone states
  * @returns {Promise<boolean>} whether the page showed a phone section picker
  */
 async function shoot(scene, theme, vp, touch = false) {
@@ -572,11 +586,13 @@ try {
     const first = themes.includes('dark') ? 'dark' : themes[0];
     for (const vp of viewports.filter((v) => qaSizes.includes(v))) {
       if (only && !`${scene.name}--${first}--${vp}`.includes(only)) continue;
+      // A phone is a touch screen, and touch is the stricter case, so a phone state is checked once, under a coarse
+      // pointer. A scene about a fine or a coarse pointer in particular (keyboard shortcuts, the touch hint) sets
+      // `touch: false` and keeps the mouse.
+      const touch = (vp === 'mobile' || vp === 'small') && scene.touch !== false;
       qaJobs.push(async () => {
-        if ((await shoot(scene, first, vp)) && first === 'dark' && themes.includes('light')) await shoot(scene, 'light', vp);
+        if ((await shoot(scene, first, vp, touch)) && first === 'dark' && themes.includes('light')) await shoot(scene, 'light', vp, touch);
       });
-      // A scene about a fine or a coarse pointer in particular (keyboard shortcuts, the touch hint) sets `touch: false`.
-      if ((vp === 'mobile' || vp === 'small') && scene.touch !== false) qaJobs.push(async () => void (await shoot(scene, first, vp, true)));
     }
   }
   // Each state has its own context and paused clock, so --qa runs several at once: FOLO_QA_JOBS, default up to 8 (most

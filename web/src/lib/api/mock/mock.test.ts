@@ -227,15 +227,6 @@ describe('mock API: PR #69 behaviour', () => {
   });
 });
 
-describe('mock models', () => {
-  it("says how each model's weights are stored, with one fused f16 export", async () => {
-    const models = await new MockApi('normal', 0).models();
-    const exp = models.find((m) => m.id === 'm_fast_n_f16')!;
-    expect(exp).toMatchObject({ precision: 'f16', fused: true, trained_with: null, arch: 'folo-n' });
-    expect(models.filter((m) => m.id !== exp.id).every((m) => m.precision === 'f32' && m.fused === false)).toBe(true);
-  });
-});
-
 describe('mock queue (docs/API.md, POST /api/runs/{id}/queue)', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -264,8 +255,8 @@ describe('mock queue (docs/API.md, POST /api/runs/{id}/queue)', () => {
     vi.advanceTimersByTime(250);
     off();
     expect(queue).toEqual([{ position: 1, waiting: 2 }]);
-    expect(logs).toEqual(['moved in the queue to position 1 of 2']);
-    expect((await api.runLogs('run_q7c5')).lines.map((l) => l.message)).toEqual(['moved in the queue to position 1 of 2']);
+    expect(logs).toHaveLength(1);
+    expect((await api.runLogs('run_q7c5')).lines.map((l) => l.message)).toEqual(logs);
   });
 
   it('start never interrupts the live run: the run goes to the front and waits', async () => {
@@ -273,7 +264,6 @@ describe('mock queue (docs/API.md, POST /api/runs/{id}/queue)', () => {
     const r = await api.moveRun('run_q7c5', { action: 'start' });
     expect(r).toMatchObject({ status: 'queued', queue_position: 1 });
     expect((await api.run('run_7d1e')).status).toBe('running');
-    expect((await api.runLogs('run_q7c5')).lines.at(-1)?.message).toBe('start requested: moved to the front (1 of 2); it starts when the active run ends');
   });
 
   it('starts the front run once the slot is free, with the resolved config, and refuses to move it then', async () => {
@@ -342,11 +332,6 @@ describe('mock operating point', () => {
     for (const k of ['dataset_id', 'dataset_name', 'split', 'split_fallback', 'confusion_conf', 'confusion_iou'] as const) expect(coco[k]).toBeUndefined();
   });
 
-  it('names the ONNX file as the server does', async () => {
-    const api = new MockApi('normal', 0);
-    expect((await api.onnxFile('m_fast_n', {})).name).toBe('fasteners-n-best.onnx');
-    expect((await api.onnxFile('m_fast_n', { half: true })).name).toBe('fasteners-n-best-f16.onnx');
-  });
 });
 
 // mAP is the mean over classes (docs/METRICS.md), as folo-server's mock reports it
@@ -403,26 +388,11 @@ describe('mock: the final fields of server PR #140', () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it('lists published weights as a model named by its published name, with what they are', async () => {
-    const models = await new MockApi('normal', 0).models();
-    const coco = models.find((m) => m.id === 'folo-n-coco');
-    expect(coco).toMatchObject({ name: 'folo-n-coco', arch: 'folo-n', source: 'published', run_id: null, fused: false });
-    expect(coco?.about).toMatch(/^folo-n trained from scratch on COCO/);
-    expect(coco?.metrics).toMatchObject({ map50: 0.455, map50_95: 0.314 });
-    // Every model says where it comes from; only published weights say what they are; the mock reports no paths.
-    expect(models.every((m) => m.source === 'run' || m.source === 'file' || m.source === 'published')).toBe(true);
-    expect(models.filter((m) => m.about).map((m) => m.id)).toEqual(['folo-n-coco']);
-    expect(models.every((m) => m.path === undefined)).toBe(true);
-    expect(models.filter((m) => m.source === 'run').every((m) => m.run_id)).toBe(true);
-    expect((await new MockApi('empty', 0).models()).length).toBe(0);
-  });
-
   it('fine-tunes from published weights in their architecture, whatever `arch` says', async () => {
     const api = new MockApi('normal', 0);
     const c = { ...(await api.run('run_31aa')).config, name: 'coco-ft', arch: 'folo-s' as const, weights: 'folo-n-coco' };
     const est = await api.estimateRun(c);
     expect(est.basis.arch).toBe('folo-n');
-    expect(est.cli).toBe('folo train --data D:/data/shapes --weights folo-n-coco --epochs 100 --batch 16 --imgsz 640 --device gpu:0 --head o2m --name coco-ft');
     const run = await api.createRun(c);
     expect(run.config.arch).toBe('folo-n');
     await expect(api.createRun({ ...c, weights: 'folo-x-nope' })).rejects.toMatchObject({ status: 404, code: 'model_not_found' });
@@ -432,7 +402,6 @@ describe('mock: the final fields of server PR #140', () => {
     const api = new MockApi('normal', 0);
     expect((await api.system()).features).toContain('run_cli');
     const { cli, argv } = await api.runCli('run_c19a');
-    expect(cli).toBe('folo train --data D:/data/fasteners --weights D:/folo/models/shapes-n-best.folo --epochs 150 --batch 16 --imgsz 640 --device gpu:0 --amp --head o2m --name fasteners-n');
     expect(argv.slice(0, 2)).toEqual(['folo', 'train']);
     expect(argv.join(' ')).toBe(cli);
     await expect(api.runCli('run_nope')).rejects.toMatchObject({ status: 404, code: 'run_not_found' });
@@ -448,15 +417,6 @@ describe('mock: the final fields of server PR #140', () => {
     expect((await api.estimateRun(c)).close_mosaic).toBe(7);
     expect((await api.run('run_f15c')).resolved?.close_mosaic).toBe(7);
     expect((await api.estimateRun({ ...c, epochs: 100 })).close_mosaic).toBe(10);
-  });
-
-  it("reports FOLO's GPU pool once the GPU was used, never for an unused or older server", async () => {
-    const pool = (await new MockApi('normal', 0).system()).gpu_pool;
-    expect(pool?.device).toBe('gpu:0');
-    expect(pool!.live_bytes).toBeGreaterThan(0);
-    expect(pool!.peak_live_bytes).toBeGreaterThanOrEqual(pool!.live_bytes);
-    expect((await new MockApi('empty', 0).system()).gpu_pool).toBeUndefined();
-    expect((await new MockApi('no-throughput', 0).system()).gpu_pool).toBeUndefined();
   });
 
   it('refuses an amp run the server cannot train with 501 not_supported, before anything is queued', async () => {

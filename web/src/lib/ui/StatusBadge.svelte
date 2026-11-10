@@ -35,8 +35,8 @@
   /**
    * A run's status as its mark and word. Two forms, one rule (DESIGN_DIRECTION 6): the tinted pill is the title form,
    * beside the name of the one run a screen is about (the run page's header, Overview's live card), at most one per
-   * screen; everywhere else (tables, lists, Compare, meta lines) it is `plain`, dot + word. `statusPill.test.ts` holds
-   * the pill to those two places. It takes the run itself (`run`), not its bare status, so a cloud run in its hand-over
+   * screen; everywhere else (tables, lists, Compare, meta lines) it is `plain`, dot + word.
+   * It takes the run itself (`run`), not its bare status, so a cloud run in its hand-over
    * says its phase in the neutral look of a waiting run wherever a status is shown; anything else with a run's states
    * (a labeling job) passes its `state`, the status with its own word.
    */

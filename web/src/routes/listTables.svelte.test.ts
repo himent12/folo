@@ -3,8 +3,8 @@
 // The list tables (Runs, Models, Datasets) at every width: a header cell and the cells under it hide together, so each
 // value sits under its own heading. The responsive column rule is base.css's (loaded here as the app loads it); the
 // sort headers are ui/SortHeader components, which a page-scoped rule could not reach (round 16's Models at 1024).
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { flushSync, mount, unmount, type Component } from 'svelte';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index.svelte';
@@ -15,7 +15,8 @@ import Datasets from './Datasets.svelte';
 import Models from './Models.svelte';
 import Runs from './Runs.svelte';
 
-const WIDTHS = [1440, 1280, 1279, 1024, 1023, 820];
+// Each side of the .hide-lg (< 1280) and .hide-md (< 1024) boundaries, and a tablet (820).
+const WIDTHS = [1280, 1279, 1024, 1023, 820];
 
 let target: HTMLElement;
 let c: ReturnType<typeof mount> | undefined;
@@ -34,6 +35,8 @@ afterEach(() => {
 });
 
 async function open(page: Component, path: string, api: MockApi) {
+  if (c) unmount(c);
+  target?.remove();
   hub.api = api;
   hub.mode = 'mock';
   router.route = parse(`#${path}`);
@@ -41,6 +44,16 @@ async function open(page: Component, path: string, api: MockApi) {
   document.body.appendChild(target);
   c = mount(page, { target });
   flushSync();
+}
+
+/** The table at `sel` once `ready` holds for it. */
+function table(sel: string, ready: (t: HTMLTableElement) => boolean, what: string) {
+  return vi.waitFor(() => {
+    flushSync();
+    const t = target.querySelector<HTMLTableElement>(sel);
+    if (!t || !ready(t)) throw new Error(`still waiting for ${what}`);
+    return t;
+  });
 }
 
 /** Resizes the window. happy-dom keeps computed styles until the DOM changes, so a mutation drops them. */
@@ -75,275 +88,126 @@ function expectAligned(table: HTMLTableElement) {
   expect(heads.at(-1)).toBeLessThan(heads[0]!);
 }
 
+/** The headers without a fixed width (the check column and the empty last one aside). */
+const loose = (table: HTMLTableElement) =>
+  [...table.querySelectorAll<HTMLElement>('thead th')]
+    .filter((th) => !th.classList.contains('check') && !th.classList.contains('rest') && !th.style.width)
+    .map((th) => th.textContent?.trim());
+
 const LISTS: [string, Component, string, string][] = [
   ['Models', Models as Component, '/models', 'table.models'],
   ['Runs', Runs as Component, '/runs', 'table.runs'],
   ['Datasets', Datasets as Component, '/datasets', 'table.ds'],
 ];
-
-describe('list tables: headers and columns hide together', () => {
-  for (const [name, page, path, sel] of LISTS) {
-    it(`${name}: loaded rows have one visible cell per visible header at every width`, async () => {
-      await open(page, path, new MockApi('normal', 0));
-      const table = await vi.waitFor(() => {
-        flushSync();
-        const t = target.querySelector<HTMLTableElement>(sel);
-        if (!t?.querySelector('tbody tr[data-row]')) throw new Error('rows not loaded');
-        return t;
-      });
-      expectAligned(table);
-    });
-
-    it(`${name}: the loading skeleton keeps the same columns`, async () => {
-      await open(page, path, new MockApi('loading'));
-      expectAligned(target.querySelector<HTMLTableElement>(sel)!);
-    });
-  }
-
-  it('Models at 1024 hides Classes, GFLOPs and Started from in the header too', async () => {
-    await open(Models as Component, '/models', new MockApi('normal', 0));
-    await vi.waitFor(() => {
-      flushSync();
-      if (!target.querySelector('table.models tbody tr[data-row]')) throw new Error('rows not loaded');
-    });
-    resize(1024);
-    const heads = [...target.querySelectorAll('table.models thead th')].filter(shown).map((th) => th.textContent?.trim());
-    expect(heads).not.toContain('Classes');
-    expect(heads).not.toContain('GFLOPs');
-    expect(heads).not.toContain('Started from');
-    expect(heads).toContain('Params');
-  });
-});
+// Every column but the flexible ones carries its width on the header row, which loading and loaded share, so a column
+// sits at the same x in each (round 21: runs-empty and models-empty set their columns apart).
+const FLEX: Record<string, string[]> = { Runs: ['Run'], Models: ['Model'], Datasets: ['Class balance'] };
+/** The page's own create action; Models has none, so the top bar keeps its New run. */
+const CREATE: Record<string, string | undefined> = { Runs: 'New run', Datasets: 'Add dataset' };
 
 describe('list tables: one geometry in every state', () => {
-  // Every column but the flexible ones carries its width on the header row, which loading and loaded share, so a
-  // column sits at the same x in each (round 21: runs-empty and models-empty set their columns apart).
-  const FLEX: Record<string, string[]> = { Runs: ['Run'], Models: ['Model'], Datasets: ['Class balance'] };
   for (const [name, page, path, sel] of LISTS) {
-    for (const scenario of ['normal', 'loading'] as const) {
-      it(`${name} (${scenario}): every header but ${FLEX[name]!.join(' and ')} has a fixed width`, async () => {
-        await open(page, path, new MockApi(scenario, 0));
-        const table = await vi.waitFor(() => {
-          flushSync();
-          const t = target.querySelector<HTMLTableElement>(sel);
-          if (!t?.querySelector('thead')) throw new Error('no table');
-          return t;
-        });
-        const loose = [...table.querySelectorAll<HTMLElement>('thead th')]
-          .filter((th) => !th.classList.contains('check') && !th.classList.contains('rest') && !th.style.width)
-          .map((th) => th.textContent?.trim());
-        expect(loose).toEqual(FLEX[name]);
-      });
-    }
+    it(`${name}: loaded and loading, one visible cell per visible header at every width, and the same fixed widths`, async () => {
+      await open(page, path, new MockApi('normal', 0));
+      const loaded = await table(sel, (t) => !!t.querySelector('tbody tr[data-row]'), 'the rows');
+      expectAligned(loaded);
+      expect(loose(loaded)).toEqual(FLEX[name]);
+
+      await open(page, path, new MockApi('loading'));
+      const skeleton = target.querySelector<HTMLTableElement>(sel)!;
+      expectAligned(skeleton);
+      expect(loose(skeleton)).toEqual(FLEX[name]);
+      // The toolbar is the same one, live.
+      expect(target.querySelector<HTMLInputElement>('.list-toolbar .lt-search input')!.disabled).toBe(false);
+    });
 
     // Round 24: an empty or failed list lost its toolbar (the table jumped ~48 px against loading) and kept a 9–11
     // column header row over a one-line message. The toolbar stays, disabled with no counts; the column heads go.
-    for (const scenario of ['empty', 'error'] as const) {
-      it(`${name} (${scenario}): the toolbar stays in place, disabled, and the frame holds the state with no column heads`, async () => {
+    it(`${name}: empty or failed, the toolbar stays, disabled, the frame holds the state alone, and offline the create action says why it is off`, async () => {
+      for (const scenario of ['empty', 'error'] as const) {
         await open(page, path, new MockApi(scenario, 0));
-        const table = await vi.waitFor(() => {
-          flushSync();
-          const t = target.querySelector<HTMLTableElement>(sel);
-          if (!t?.querySelector('tr.state')) throw new Error('no state yet');
-          return t;
-        });
-        expect(table.querySelector('thead'), 'column heads').toBeNull();
-        expect(table.querySelectorAll('[aria-sort]').length).toBe(0);
-        const bar = target.querySelector('.list-toolbar');
-        expect(bar, 'toolbar').not.toBeNull();
-        const search = bar!.querySelector<HTMLInputElement>('.lt-search input')!;
-        expect(search.disabled).toBe(true);
-        const radios = [...bar!.querySelectorAll<HTMLButtonElement>('.lt-filter [role=radio]')];
+        const frame = await table(sel, (t) => !!t.querySelector('tr.state'), `the ${scenario} state`);
+        expect(frame.querySelector('thead'), 'column heads').toBeNull();
+        expect(frame.querySelectorAll('[aria-sort]').length).toBe(0);
+        const bar = target.querySelector('.list-toolbar')!;
+        expect(bar.querySelector<HTMLInputElement>('.lt-search input')!.disabled).toBe(true);
+        const radios = [...bar.querySelectorAll<HTMLButtonElement>('.lt-filter [role=radio]')];
         expect(radios.length).toBeGreaterThan(0);
         expect(radios.every((r) => r.disabled)).toBe(true);
         // No counts over a list that has nothing to count.
-        expect(bar!.querySelectorAll('.lt-filter .meta').length).toBe(0);
-      });
-    }
-
-    it(`${name} (loading): the toolbar is the same one, live`, async () => {
-      await open(page, path, new MockApi('loading'));
-      expect(target.querySelector('.list-toolbar .lt-search input')).not.toBeNull();
-      expect(target.querySelector<HTMLInputElement>('.list-toolbar .lt-search input')!.disabled).toBe(false);
-    });
-  }
-});
-
-describe('responsive columns are one shared rule', () => {
-
-  it('no component styles its own .hide-* columns (a scoped rule misses headers drawn by SortHeader)', () => {
-    const src = resolve(process.cwd(), 'src');
-    const files: string[] = [];
-    const walk = (dir: string) => {
-      for (const name of readdirSync(dir)) {
-        const p = join(dir, name);
-        if (statSync(p).isDirectory()) walk(p);
-        else if (name.endsWith('.svelte')) files.push(p);
+        expect(bar.querySelectorAll('.lt-filter .meta').length).toBe(0);
       }
-    };
-    walk(src);
-    const offenders = files.filter((f) => {
-      const styles = [...readFileSync(f, 'utf8').matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('\n');
-      return /\.hide-(?:xl|lg|md|sm)\b/.test(styles.replace(/\/\*[\s\S]*?\*\//g, ''));
-    });
-    expect(offenders.map((f) => relative(src, f))).toEqual([]);
-  });
-});
-
-describe('create actions while the server is offline', () => {
-  it('Datasets: Add dataset is disabled and says why', async () => {
-    await open(Datasets as Component, '/datasets', new MockApi('error', 0));
-    const add = await vi.waitFor(() => {
-      flushSync();
-      const b = [...target.querySelectorAll<HTMLButtonElement>('header button')].find((x) => x.textContent?.includes('Add dataset'));
-      if (!b?.disabled) throw new Error('not disabled yet');
-      return b;
-    });
-    const why = document.getElementById(add.getAttribute('aria-describedby') ?? '');
-    expect(why?.textContent).toBe('Server offline');
-  });
-
-  it('Runs: New run is disabled and says why', async () => {
-    await open(Runs as Component, '/runs', new MockApi('error', 0));
-    const run = await vi.waitFor(() => {
-      flushSync();
-      const b = [...target.querySelectorAll<HTMLButtonElement>('header button')].find((x) => x.textContent?.includes('New run'));
-      if (!b?.disabled) throw new Error('not disabled yet');
-      return b;
-    });
-    expect(document.getElementById(run.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Server offline');
-  });
-});
-
-describe('one create action per corner', () => {
-  for (const [name, page, path] of [
-    ['Runs', Runs, '/runs'],
-    ['Datasets', Datasets, '/datasets'],
-  ] as [string, Component, string][]) {
-    it(`${name} owns the create action while mounted, so the top bar's New run steps aside`, async () => {
-      expect(pageMeta.ownsCreate).toBe(false);
-      await open(page, path, new MockApi('error', 0));
-      flushSync();
-      expect(pageMeta.ownsCreate).toBe(true);
+      // The page owns the create action while mounted, so the top bar's New run steps aside.
+      const label = CREATE[name];
+      expect(pageMeta.ownsCreate).toBe(!!label);
+      if (label) {
+        const add = await vi.waitFor(() => {
+          flushSync();
+          const b = [...target.querySelectorAll<HTMLButtonElement>('header button')].find((x) => x.textContent?.includes(label));
+          if (!b?.disabled) throw new Error('not disabled yet');
+          return b;
+        });
+        expect(document.getElementById(add.getAttribute('aria-describedby') ?? '')?.textContent).toBeTruthy();
+      }
       unmount(c!);
       c = undefined;
       flushSync();
       expect(pageMeta.ownsCreate).toBe(false);
     });
   }
-
-  it('Models has no create action: the top bar keeps its New run', async () => {
-    await open(Models as Component, '/models', new MockApi('normal', 0));
-    flushSync();
-    expect(pageMeta.ownsCreate).toBe(false);
-  });
 });
 
 describe('Runs: row checkboxes', () => {
-  async function loaded() {
+  it('select from anywhere in their cell without opening the run, and show every box then, with the same columns', async () => {
     await open(Runs as Component, '/runs', new MockApi('normal', 0));
-    return vi.waitFor(() => {
-      flushSync();
-      const t = target.querySelector<HTMLTableElement>('table.runs');
-      if (!t?.querySelector('tbody tr[data-row]')) throw new Error('rows not loaded');
-      return t;
-    });
-  }
-
-  it('the table is "picking" (every checkbox shown) once a run is selected, and not before', async () => {
-    const table = await loaded();
-    expect(table.classList.contains('picking')).toBe(false);
-    const box = table.querySelector<HTMLInputElement>('tbody tr[data-row] .check input')!;
-    box.click();
-    flushSync();
-    expect(table.classList.contains('picking')).toBe(true);
-    expect(box.closest('tr')!.classList.contains('on')).toBe(true);
-  });
-
-  it('at 820 with a run selected: the same columns as before, the checkbox column reserved and Created hidden', async () => {
-    const table = await loaded();
+    const runs = await table('table.runs', (t) => !!t.querySelector('tbody tr[data-row]'), 'the rows');
     resize(820);
-    const heads = () => [...table.querySelectorAll('thead th')].filter(shown).map((th) => th.textContent?.trim());
+    const heads = () => [...runs.querySelectorAll('thead th')].filter(shown).map((th) => th.textContent?.trim());
     const before = heads();
-    table.querySelector<HTMLInputElement>('tbody tr[data-row] .check input')!.click();
-    flushSync();
-    resize(820);
-    expect(table.classList.contains('picking')).toBe(true);
-    // Selecting never adds a column (the checkbox column's width is always there), so nothing is pushed off the edge.
-    expect(heads()).toEqual(before);
+    // The checkbox column's width is always there.
     expect(before[0]).toBe('Select for comparison');
-    expect(before).not.toContain('Created');
-    // The last column holds a waiting run's queue menu (empty on the other rows).
-    expect(before).toEqual(['Select for comparison', 'Run', 'Status', 'Progress', 'Best mAP50-95', 'Actions']);
-    for (const n of columns(table).rows) expect(n).toBe(before.length);
-  });
-
-  it('a click anywhere in the checkbox cell selects without opening the run', async () => {
-    const table = await loaded();
+    expect(runs.classList.contains('picking')).toBe(false);
     const go = vi.spyOn(router, 'go');
-    const label = table.querySelector<HTMLLabelElement>('tbody tr[data-row] .check label')!;
+    const label = runs.querySelector<HTMLLabelElement>('tbody tr[data-row] .check label')!;
     label.click();
     flushSync();
     expect(go).not.toHaveBeenCalled();
     expect(label.closest('tr')!.classList.contains('on')).toBe(true);
+    expect(runs.classList.contains('picking')).toBe(true);
+    // Selecting never adds a column, so nothing is pushed off the edge.
+    resize(820);
+    expect(heads()).toEqual(before);
+    for (const n of columns(runs).rows) expect(n).toBe(before.length);
     go.mockRestore();
   });
 });
 
 describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', () => {
-  async function groupHeads(scenario: 'normal' | 'train-split') {
-    await open(Models as Component, '/models', new MockApi(scenario, 0));
-    await vi.waitFor(() => {
-      flushSync();
-      if (!target.querySelector('table.models tr.group th')?.textContent?.includes('split of')) throw new Error('groups not loaded');
-    });
-    return [...target.querySelectorAll('table.models tr.group th')].map((th) => th.firstElementChild?.textContent);
-  }
-  it('heads each ranked group with what its scores are on, then the unranked groups, saying so', async () => {
-    expect(await groupHeads('normal')).toEqual([
+  const groups = () => [...target.querySelectorAll('table.models tr.group th')];
+  const loaded = (scenario: 'normal' | 'train-split') =>
+    open(Models as Component, '/models', new MockApi(scenario, 0)).then(() => table('table.models', () => !!groups()[0]?.textContent?.includes('split of'), 'the groups'));
+
+  it('ranks each group apart, the unranked ones last and never marked best, and marks an exact tie "joint best" on both', async () => {
+    await loaded('normal');
+    expect(groups().map((th) => th.firstElementChild?.textContent)).toEqual([
       'Validation split of fasteners',
       'Validation split of shapes',
       'Validation split of shapes-hard',
       'Published weights · split unknown',
       'Imported · split unknown',
     ]);
-    const tails = [...target.querySelectorAll('table.models tr.group th')].map((th) => th.textContent!.includes('not ranked'));
-    expect(tails).toEqual([false, false, false, true, true]);
-  });
-  it('ranks a training-split model apart from the validation ones, under its own heading', async () => {
-    expect(await groupHeads('train-split')).toContain('Training split of fasteners-mini');
-  });
-});
-
-describe('Models: joint best (lib/bestMark)', () => {
-  it('marks both models of an exact tie "joint best", never one of them by list order', async () => {
+    expect(groups().map((th) => th.textContent!.includes('not ranked'))).toEqual([false, false, false, true, true]);
+    const published = [...target.querySelectorAll('table.models tbody')].find((b) => b.querySelector('tr.group')?.textContent?.includes('Published weights'))!;
+    expect(published.querySelector('a.name')?.textContent).toBe('folo-n-coco');
+    expect(published.querySelector('.best')).toBeNull();
     // Round 25: fasteners-n-best and fasteners-n-f16 have identical scores, and only one was marked "best".
-    await open(Models as Component, '/models', new MockApi('normal', 0));
-    await vi.waitFor(() => {
-      flushSync();
-      if (!target.querySelector('table.models tr.group th')?.textContent?.includes('split of')) throw new Error('rows not loaded');
-    });
-    const row = (name: string) => [...target.querySelectorAll('table.models tbody tr')].find((tr) => tr.querySelector('a.name')?.textContent === name)!;
-    const mark = (name: string) => row(name).querySelector('.best')?.textContent ?? null;
+    const mark = (name: string) => [...target.querySelectorAll('table.models tbody tr')].find((tr) => tr.querySelector('a.name')?.textContent === name)!.querySelector('.best')?.textContent ?? null;
     expect(mark('fasteners-n-best')).toBe('joint best');
     expect(mark('fasteners-n-f16')).toBe('joint best');
   });
-});
 
-describe('Models: published weights (server PR #140)', () => {
-  it('are a group of their own after the datasets, never ranked, what they are in the name tooltip', async () => {
-    await open(Models as Component, '/models', new MockApi('normal', 0));
-    await vi.waitFor(() => {
-      flushSync();
-      if (!target.querySelector('table.models tr.group th')?.textContent?.includes('split of')) throw new Error('rows not loaded');
-    });
-    const groups = [...target.querySelectorAll('table.models tr.group th')].map((th) => th.firstElementChild?.textContent);
-    expect(groups.slice(-2)).toEqual(['Published weights · split unknown', 'Imported · split unknown']);
-    const body = [...target.querySelectorAll('table.models tbody')].find((b) => b.querySelector('tr.group')?.textContent?.includes('Published weights'))!;
-    expect(body.querySelector('tr.group a')).toBeNull();
-    const name = body.querySelector<HTMLAnchorElement>('a.name')!;
-    expect(name.textContent).toBe('folo-n-coco');
-    expect(name.title).toMatch(/^folo-n trained from scratch on COCO/);
-    expect(body.querySelector('.best')).toBeNull();
+  it('ranks a training-split model apart from the validation ones, under its own heading', async () => {
+    await loaded('train-split');
+    expect(groups().map((th) => th.firstElementChild?.textContent)).toContain('Training split of fasteners-mini');
   });
 });

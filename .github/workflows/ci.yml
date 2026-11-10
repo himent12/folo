@@ -1,6 +1,31 @@
 name: ci
+# The Rust workspace: fmt, clippy and the tests, on Linux and on Windows (the runner with a GPU, so the GPU tests run
+# there). Each other part of the repo has its own workflow that runs only when its files change: web.yml (FOLO
+# Studio), site.yml (the docs site), wasm.yml (the browser build), desktop.yml (FOLO Desktop). A pull request that
+# touches only those parts skips this one; every push to main runs it.
 on:
   pull_request:
+    # Everything, minus the parts with their own workflow, plus the few files in them that a Rust test reads:
+    # crates/folo-cli/tests/version.rs (the package versions) and studio_cli.rs (Studio's command-line fixtures).
+    paths:
+      - "**"
+      - "!web/**"
+      - "!site/**"
+      - "!design/**"
+      - "!apps/desktop/**"
+      - "!docs/img/**"
+      - "!.github/workflows/web.yml"
+      - "!.github/workflows/site.yml"
+      - "!.github/workflows/wasm.yml"
+      - "!.github/workflows/desktop.yml"
+      - "!.github/workflows/release.yml"
+      - "!.github/workflows/runners.yml"
+      - web/package.json
+      - web/package-lock.json
+      - web/src/lib/trainCli.fixtures.json
+      - site/package.json
+      - site/package-lock.json
+      - apps/desktop/Cargo.toml
   push:
     branches: [main]
 concurrency:
@@ -23,7 +48,7 @@ jobs:
             runs-on: ${{ vars.RUNS_ON_WINDOWS || '"windows-latest"' }}
     name: rust (${{ matrix.os }})
     runs-on: ${{ fromJSON(matrix.runs-on) }}
-    timeout-minutes: 60
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -42,6 +67,31 @@ jobs:
         if: runner.environment == 'github-hosted'
       - run: cargo fmt --all -- --check
         if: matrix.os == 'linux'
+      # ONNX export parity (docs/CLI.md, ONNX export): crates/folo-cli/tests/onnx.rs runs the exported graphs in
+      # onnxruntime through bench/parity/onnx_check.py. The test skips without a Python; on Linux this step gives it
+      # one (pinned onnx / onnxruntime / numpy) and FOLO_ONNX_REQUIRED turns a missing or broken one into a failure.
+      # A self-hosted runner keeps the venv next to its target dir, one per set of pins.
+      - uses: actions/setup-python@v5
+        if: matrix.os == 'linux'
+        with:
+          python-version: "3.12"
+      - name: onnx / onnxruntime / numpy (pinned)
+        if: matrix.os == 'linux'
+        shell: bash
+        env:
+          PINS: onnx==1.23.2 onnxruntime==1.31.1 numpy==2.5.4
+        run: |
+          venv="$RUNNER_TEMP/onnx-venv"
+          if [ "${{ runner.environment }}" = self-hosted ]; then
+            venv="$HOME/gha/onnx-venv-$(printf %s "$PINS" | sha256sum | cut -c1-12)"
+          fi
+          if ! "$venv/bin/python" -c "import onnx, onnxruntime, numpy" 2>/dev/null; then
+            rm -rf "$venv"
+            python -m venv "$venv"
+            "$venv/bin/python" -m pip install --disable-pip-version-check $PINS
+          fi
+          echo "FOLO_ONNX_PYTHON=$venv/bin/python" >> "$GITHUB_ENV"
+          echo "FOLO_ONNX_REQUIRED=1" >> "$GITHUB_ENV"
       # The self-hosted Windows host (the dev PC) has an unstable CPU that occasionally crashes rustc
       # (0xc0000005 / 0xc000001d / 0xc0000409); docs/CI.md. tools/ci-retry.sh retries a step once there, and only when
       # its output shows one of those crash codes: compile errors and failing or flaky tests are never retried.
@@ -57,129 +107,3 @@ jobs:
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && runner.os == 'Windows' && '2' || '1' }}
         run: bash tools/ci-retry.sh bash tools/test-tmp.sh cargo test --workspace
-  onnx:
-    # ONNX export parity (docs/CLI.md, ONNX export): crates/folo-cli/tests/onnx.rs runs the exported graphs in
-    # onnxruntime through bench/parity/onnx_check.py. The test skips without a Python; FOLO_ONNX_REQUIRED makes a
-    # missing or broken one a failure here.
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      # The same target dir and flags as the rust job, so a runner that ran it builds incrementally.
-      - name: persistent target dir (self-hosted)
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: echo "CARGO_TARGET_DIR=$HOME/gha/folo-target" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        if: runner.environment == 'github-hosted'
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: onnx / onnxruntime / numpy (pinned)
-        shell: bash
-        run: |
-          python -m venv "$RUNNER_TEMP/onnx-venv"
-          "$RUNNER_TEMP/onnx-venv/bin/python" -m pip install --disable-pip-version-check \
-            onnx==1.23.2 onnxruntime==1.31.1 numpy==2.5.4
-          echo "FOLO_ONNX_PYTHON=$RUNNER_TEMP/onnx-venv/bin/python" >> "$GITHUB_ENV"
-      - run: bash tools/test-tmp.sh cargo test -p folo-cli --test onnx -- --nocapture
-        shell: bash
-        env:
-          FOLO_ONNX_REQUIRED: "1"
-  web:
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - name: check for web app
-        id: web
-        shell: bash
-        run: test -f web/package.json && echo "present=true" >> "$GITHUB_OUTPUT" || echo "present=false" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v4
-        if: steps.web.outputs.present == 'true'
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - if: steps.web.outputs.present == 'true'
-        working-directory: web
-        run: npm ci && npm run check && npm test && npm run build
-      # npm run qa (web/DESIGN_DIRECTION.md §6): every scene at tablet and phone sizes, failing on a blank section or
-      # horizontal overflow. It uses the runner's Chrome (ubuntu-latest and the boat.dev runners have one); without one,
-      # Playwright's headless Chromium, downloaded once per playwright-core version (cached on GitHub-hosted runners,
-      # kept in ~/.cache/ms-playwright on self-hosted ones), with its system libraries where sudo needs no password.
-      - name: browser for the QA
-        id: browser
-        if: steps.web.outputs.present == 'true'
-        working-directory: web
-        shell: bash
-        run: |
-          if command -v google-chrome >/dev/null; then echo "chrome=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          echo "chrome=false" >> "$GITHUB_OUTPUT"
-          echo "playwright=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
-        if: steps.browser.outputs.chrome == 'false' && runner.environment == 'github-hosted'
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-shell-${{ runner.os }}-${{ steps.browser.outputs.playwright }}
-      - if: steps.browser.outputs.chrome == 'false'
-        working-directory: web
-        shell: bash
-        run: |
-          deps=""
-          if sudo -n true 2>/dev/null; then deps="--with-deps"; fi
-          npx playwright-core install $deps --only-shell chromium
-      - name: QA (blank sections, overflow)
-        if: steps.web.outputs.present == 'true'
-        working-directory: web
-        run: npm run qa
-
-  site:
-    # The docs site (site/README.md), generated from docs/, README.md and examples/*/README.md: `npm run check`
-    # type-checks it and fails on a broken link, anchor or image; `npm run build` builds it (the same checks again).
-    # Node 24 runs the TypeScript build scripts directly (type stripping).
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: site/package-lock.json
-      - working-directory: site
-        run: npm ci && npm run check && npm run build
-  wasm:
-    # folo-wasm (FOLO in the browser, docs/WASM.md) for wasm32: clippy, then the release build and its JS bindings
-    # through scripts/build-wasm.sh, exactly as Studio would build it.
-    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
-    timeout-minutes: 30
-    env:
-      # RUSTFLAGS replaces .cargo/config.toml's target flags, so SIMD128 (docs/WASM.md) is repeated here.
-      RUSTFLAGS: -D warnings -C target-feature=+simd128
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-          components: clippy
-      - name: persistent target dir (self-hosted)
-        if: runner.environment == 'self-hosted'
-        shell: bash
-        run: echo "CARGO_TARGET_DIR=$HOME/gha/folo-target-wasm" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
-        if: runner.environment == 'github-hosted'
-      - name: wasm-bindgen CLI matching Cargo.lock
-        shell: bash
-        run: echo "WASM_BINDGEN_VERSION=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"$/\1/p;}' Cargo.lock)" >> "$GITHUB_ENV"
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-bindgen@${{ env.WASM_BINDGEN_VERSION }}
-      - run: cargo clippy --target wasm32-unknown-unknown -p folo-wasm -- -D warnings
-      - run: sh scripts/build-wasm.sh
-      # The documented JS API type-checks against the generated declarations.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: npx --yes -p typescript@6.0 tsc -p crates/folo-wasm/demo/tsconfig.json

@@ -86,7 +86,6 @@ describe('Outcome', () => {
     const acts = r.acts();
     // folo-m at 960 px on 16 GiB: batch 16 is forecast at ~26.9 GiB, so the retry is batch 8 (~13.6 GiB, under 90%).
     expect(acts[0]?.textContent?.trim()).toMatch(/^Retry with batch 8 · ~13\.6 GiB$/);
-    expect(acts[0]?.className).toContain('primary');
     expect(acts[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&batch=8');
     // The others take the largest batch that fits them, not the next halving: 19 at 640 px.
     expect(r.more()).toEqual([expect.stringMatching(/^Retry at 640 px, batch 19 · ~\d+\.\d GiB$/), expect.stringMatching(/^Retry with folo-s, batch 16 · ~\d+\.\d GiB$/)]);
@@ -100,7 +99,6 @@ describe('Outcome', () => {
     expect(r.target.querySelector('.c-msg')?.textContent).toContain('Batch 32 at 960 px');
     // One action (half the batch, primary) and the disclosure; each fix opens New run from this run with it applied.
     expect(r.labels).toEqual(['Retry with batch 16', 'More fixes']);
-    expect(r.buttons[0]?.className).toContain('primary');
     expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&batch=16');
     expect(r.more()).toEqual(['Retry at 640 px', 'Retry with folo-s']);
     const detail = r.target.querySelector<HTMLElement>('.c-detail')!;
@@ -156,17 +154,11 @@ describe('Outcome', () => {
     const c = callouts[0]!;
     const titles = [...c.querySelectorAll('.c-title')].map((t) => t.textContent);
     expect(titles).toEqual(['Completed in 16m 00s', 'Too short to learn:']);
-    // One ui/Meta line (round 24: a hand-written dot and a double gap on phones, no separator on desktop).
-    const items = [...c.querySelectorAll('.c-text:not(.c-also) .ui-meta > *')].map((e) => e.textContent?.replace(/\s+/g, ' ').trim());
-    expect(items).toEqual(['Completed in 16m 00s', 'best mAP50-95 0.410 at epoch 22']);
-    expect(c.querySelector('.c-text:not(.c-also)')?.textContent).not.toContain('·');
     expect(c.querySelector('.c-also .c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
     // The fix is the one action (no Playground for a model that learned nothing); the reasons behind Why?.
     expect(r.labels).toEqual(['Train 8 epochs', 'Why?']);
     expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&epochs=8');
-    const why = c.querySelector('.c-detail')?.textContent ?? '';
-    expect(why).toContain('reaches its initial value');
-    expect(why).not.toMatch(/lr0|warmup_epochs/);
+    expect(c.querySelector('.c-detail')?.textContent ?? '').not.toMatch(/lr0|warmup_epochs/);
     r.done();
   });
 

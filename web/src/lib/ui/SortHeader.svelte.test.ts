@@ -17,23 +17,16 @@ function render(props: { label: string; dir?: 'asc' | 'desc' | null; onsort: () 
 }
 
 describe('SortHeader', () => {
-  it('marks the sorted column with aria-sort and sorts from its button', () => {
+  it('marks the sorted column with aria-sort, leaves it off the others, and sorts from its button', () => {
     const onsort = vi.fn();
-    const { th, done } = render({ label: 'mAP50-95', dir: 'desc', onsort, align: 'right' });
-    expect(th.getAttribute('aria-sort')).toBe('descending');
-    expect(th.getAttribute('scope')).toBe('col');
-    expect(th.classList.contains('r')).toBe(true);
-    const button = th.querySelector('button')!;
-    expect(button.textContent?.trim()).toBe('mAP50-95');
-    button.click();
+    const sorted = render({ label: 'mAP50-95', dir: 'desc', onsort, align: 'right' });
+    expect(sorted.th.getAttribute('aria-sort')).toBe('descending');
+    sorted.th.querySelector('button')!.click();
     flushSync();
     expect(onsort).toHaveBeenCalledOnce();
-    done();
-  });
-
-  it('leaves aria-sort off unsorted columns', () => {
-    const { th, done } = render({ label: 'Model', dir: null, onsort: () => {} });
-    expect(th.hasAttribute('aria-sort')).toBe(false);
-    done();
+    sorted.done();
+    const unsorted = render({ label: 'Model', dir: null, onsort: () => {} });
+    expect(unsorted.th.hasAttribute('aria-sort')).toBe(false);
+    unsorted.done();
   });
 });

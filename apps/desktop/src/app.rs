@@ -3825,13 +3825,6 @@ mod retry_tests {
     use crate::api::{Augment, TrainConfig};
 
     #[test]
-    fn small_learning_rates_keep_their_digits() {
-        assert_eq!(crate::app::format_lr(0.01), "0.010");
-        assert_eq!(crate::app::format_lr(0.0001), "0.0001");
-        assert!(crate::app::parse_lr(&crate::app::format_lr(0.0001)).is_some());
-    }
-
-    #[test]
     fn oom_retries_halve_to_offered_sizes() {
         assert_eq!(retry_batch(16), Some(8));
         assert_eq!(retry_batch(8), Some(4));
@@ -3893,7 +3886,7 @@ mod retry_tests {
 
 #[cfg(test)]
 mod form_tests {
-    use super::{parse_epochs, parse_lr};
+    use super::{format_lr, parse_epochs, parse_lr};
 
     #[test]
     fn typed_numbers_validate() {
@@ -3906,6 +3899,10 @@ mod form_tests {
         assert_eq!(parse_lr("0"), None);
         assert_eq!(parse_lr("abc"), None);
         assert_eq!(parse_lr("NaN"), None);
+        // Small rates keep their digits, so what the field shows reads back.
+        assert_eq!(format_lr(0.01), "0.010");
+        assert_eq!(format_lr(0.0001), "0.0001");
+        assert_eq!(parse_lr(&format_lr(0.0001)), Some(0.0001));
     }
 }
 

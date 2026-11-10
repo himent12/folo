@@ -5,20 +5,11 @@ import { dock, holdDock } from './dock';
 const docked = () => document.documentElement.hasAttribute('data-dock');
 
 describe('dock', () => {
-  it('marks the root while a dock is held, and holds nest', () => {
+  it('marks the root while a dock is held; holds nest, and each releases once however often it is called', () => {
     expect(docked()).toBe(false);
     const a = holdDock();
     const b = holdDock();
     expect(docked()).toBe(true);
-    a();
-    expect(docked()).toBe(true);
-    b();
-    expect(docked()).toBe(false);
-  });
-
-  it('releases once, however often the release is called', () => {
-    const a = holdDock();
-    const b = holdDock();
     a();
     a();
     expect(docked()).toBe(true);

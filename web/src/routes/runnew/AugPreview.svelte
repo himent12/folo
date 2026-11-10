@@ -64,7 +64,7 @@
 </script>
 
 {#snippet tile(img: Img)}
-  <!-- crop-ok: a training crop, so the boxes cut at its edge are the ones the trainer clips too (lib/detect/thumbFit). -->
+  <!-- crop-ok: a training crop, so the boxes cut at its edge are the ones the trainer clips too (DESIGN_DIRECTION §2.20). -->
   <DatasetImage
     datasetId={datasetId}
     imageId={img.id}

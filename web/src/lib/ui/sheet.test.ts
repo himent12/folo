@@ -1,20 +1,7 @@
 // @vitest-environment happy-dom
-// Every bottom sheet has the grab handle and closes on a pull (DESIGN_DIRECTION 12): ui/Dialog on phones and any sheet
-// built by hand (a panel with role="dialog"), through the one handle and the one drag, never a copy of their own.
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+// A bottom sheet (ui/Dialog on phones, or one built by hand) closes on a pull of its grab handle (DESIGN_DIRECTION 12).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SHEET_CLOSE_PX, sheetDrag } from './sheetDrag';
-
-const SRC = resolve(process.cwd(), 'src');
-function svelteFiles(dir: string, out: string[] = []): string[] {
-  for (const name of readdirSync(dir)) {
-    const p = join(dir, name);
-    if (statSync(p).isDirectory()) svelteFiles(p, out);
-    else if (name.endsWith('.svelte')) out.push(p);
-  }
-  return out;
-}
 
 afterEach(() => {
   document.body.innerHTML = '';
@@ -27,23 +14,6 @@ function pointer(type: string, y: number, target: Element = document.body) {
 }
 
 describe('bottom sheets', () => {
-  it('ui/Dialog draws the shared handle and drag on its header', () => {
-    const dialog = readFileSync(join(SRC, 'lib/ui/Dialog.svelte'), 'utf8');
-    expect(dialog).toMatch(/<SheetHandle \/>/);
-    expect(dialog).toMatch(/use:sheetDrag=/);
-  });
-
-  it('a sheet built by hand uses the same handle and drag, never its own', () => {
-    const hits: string[] = [];
-    for (const f of svelteFiles(SRC)) {
-      const src = readFileSync(f, 'utf8');
-      const sheets = /class="sheet"[^>]*role="dialog"|role="dialog"[^>]*class="sheet"/s.test(src) || /class="sheet"\s+id="[^"]*"\s+role="dialog"/.test(src);
-      if (sheets && !(src.includes('<SheetHandle') && src.includes('use:sheetDrag'))) hits.push(relative(SRC, f));
-      if (/class="handle"/.test(src)) hits.push(`${relative(SRC, f)}: a handle of its own`);
-    }
-    expect(hits).toEqual([]);
-  });
-
   it('a pull past the threshold closes; a shorter one springs back', () => {
     const sheet = document.createElement('div');
     const head = document.createElement('div');

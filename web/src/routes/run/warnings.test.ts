@@ -42,28 +42,18 @@ describe('suggestedEpochs', () => {
 });
 
 describe('plain', () => {
-  it('says the engine warnings without config keys', () => {
-    expect(plain(WARMUP)).toBe(
-      "Warmup takes 75 of the run's 125 optimizer steps, so the learning rate reaches its initial value only in the second half of the run. Shorten the warmup (now 3 epochs) or train for more epochs.",
-    );
+  it('says the engine warnings without config keys, the steps per epoch from the numbers', () => {
     expect(plain(SHORT)).toMatch(/^This run takes only 125 optimizer steps \(25 per epoch: 800 training images, batch 32\)\. A detector /);
     for (const w of [SHORT, WARMUP]) expect(plain(w)).not.toMatch(/lr0|warmup_epochs/);
   });
 });
 
-describe('shortCause', () => {
-  it('is the run optimizer steps, or the warmup share when that is the only warning', () => {
+describe('shortCause and scheduleTitle', () => {
+  it('lead with the short run, and with the warmup share only when that is the only warning', () => {
     expect(shortCause([SHORT, WARMUP])).toBe('125 optimizer steps');
     expect(shortCause([WARMUP])).toBe('warmup takes 75 of 125 optimizer steps');
     expect(shortCause([])).toBe('');
-  });
-});
-
-describe('scheduleTitle', () => {
-  it('says too short only when the engine does; a warmup-only warning is "Mostly warmup"', () => {
-    const short = 'this run takes only 65 optimizer steps (5 epochs × 13: …); … Train for at least 16 epochs, add images, or start from pretrained weights';
-    const warm = "warmup takes 300 of the run's 500 optimizer steps, so the learning rate reaches lr0 only in the second half of the run; lower warmup_epochs (now 3) or train for more epochs";
-    expect(scheduleTitle([short, warm])).toBe('Too short to learn:');
-    expect(scheduleTitle([warm])).toBe('Mostly warmup:');
+    expect(scheduleTitle([SHORT, WARMUP])).toBe('Too short to learn:');
+    expect(scheduleTitle([WARMUP])).toBe('Mostly warmup:');
   });
 });

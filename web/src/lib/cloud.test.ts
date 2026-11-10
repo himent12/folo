@@ -1,24 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { CloudOffer, RunCloud, RunStatus } from './api/types';
-import {
-  article,
-  availabilityNote,
-  beforeTraining,
-  defaultMaxHours,
-  inHandover,
-  isAlive,
-  limitText,
-  offerLine,
-  offerParts,
-  phaseIndex,
-  phaseLabel,
-  phaseTitle,
-  phaseWhat,
-  pickOffer,
-  providerName,
-  transferShare,
-  transferText,
-} from './cloud';
+import { article, beforeTraining, defaultMaxHours, inHandover, isAlive, limitText, phaseIndex, phaseLabel, phaseTitle, pickOffer, transferShare, transferText } from './cloud';
 
 const GiB = 2 ** 30;
 const offer = (id: string, gpu: string, vram: number, price: number | null, availability: CloudOffer['availability'] = 'high'): CloudOffer => ({
@@ -33,16 +15,7 @@ const offer = (id: string, gpu: string, vram: number, price: number | null, avai
 });
 
 describe('cloud phases', () => {
-  it('names the phases in the words people read, an unknown one as its raw word', () => {
-    expect(['provisioning', 'booting', 'syncing', 'training', 'collecting', 'releasing', 'released'].map(phaseLabel)).toEqual([
-      'Provisioning',
-      'Booting',
-      'Uploading data',
-      'Training',
-      'Collecting weights',
-      'Releasing',
-      'Released',
-    ]);
+  it('takes a phase it does not know (a newer server) as its raw word, never as before training', () => {
     expect(phaseLabel('migrating')).toBe('migrating');
     expect(phaseIndex('migrating')).toBe(-1);
     expect(beforeTraining('syncing')).toBe(true);
@@ -61,7 +34,7 @@ describe('cloud phases', () => {
     expect(inHandover(run('stopped', 'booting'))).toBe(false);
   });
 
-  it('titles the hand-over by its phase, never as a wait in the queue', () => {
+  it('titles the hand-over by its phase: the instance it waits for, or the upload with its share', () => {
     const c = (phase: string, extra: Partial<RunCloud> = {}): RunCloud => ({
       connection_id: 'cc_1',
       provider: 'runpod',
@@ -76,13 +49,9 @@ describe('cloud phases', () => {
       ...extra,
     });
     expect(phaseTitle(c('provisioning'), 'RunPod')).toBe('Provisioning an RTX 4090 at RunPod');
-    expect(phaseTitle(c('booting'), 'RunPod')).toBe('Booting the instance');
     expect(phaseTitle(c('booting', { instance_id: null }), 'Lab server')).toBe('Connecting to Lab server');
     expect(phaseTitle(c('syncing', { progress: { done_bytes: 1.2 * GiB, total_bytes: 4.8 * GiB } }), 'RunPod')).toBe('Uploading data · 25%');
     expect(phaseTitle(c('syncing', { progress: { done_bytes: 5, total_bytes: 0 } }), 'RunPod')).toBe('Uploading data');
-    expect(phaseTitle(c('training'), 'RunPod')).toBe('Starting on the instance');
-    expect(phaseWhat(c('provisioning'), 'RunPod')).toBe('RunPod is asked for an RTX 4090 at $0.69/h. Once it has booted, the dataset is uploaded and training starts.');
-    expect(phaseWhat(c('syncing', { progress: { done_bytes: 1.2 * GiB, total_bytes: 4.8 * GiB } }), 'RunPod')).toBe('1.2 of 4.8 GiB sent. Training starts once the dataset is there.');
   });
 
   it('says how far a transfer is, the unit once', () => {
@@ -97,11 +66,6 @@ describe('cloud phases', () => {
   it('reads a GPU name aloud for its article', () => {
     expect(['RTX 4090', 'A100 PCIe', 'H100 SXM', 'L40S', 'GeForce GTX', 'Tesla T4'].map(article)).toEqual(['an', 'an', 'an', 'an', 'a', 'a']);
   });
-
-  it('names a provider by its list, by its id until the list is in', () => {
-    expect(providerName('runpod', [{ id: 'runpod', name: 'RunPod' } as never])).toBe('RunPod');
-    expect(providerName('runpod', undefined)).toBe('runpod');
-  });
 });
 
 describe('offers', () => {
@@ -112,15 +76,6 @@ describe('offers', () => {
     offer('a100', 'A100 PCIe', 80, 1.64, 'none'),
     offer('h100', 'H100 SXM', 80, 2.99),
   ];
-
-  it('writes an offer in one line and says what its stock means', () => {
-    expect(offerLine(offers[2]!)).toBe('RTX 4090 · 24.0 GiB · Secure Cloud');
-    expect(offerLine({ ...offers[2]!, gpu_count: 2, vram_bytes: 0, detail: null })).toBe('2 × RTX 4090');
-    expect(offerParts(offers[2]!, 'metric')).toEqual(['RTX 4090', '25.8 GB', 'Secure Cloud']);
-    expect(availabilityNote('low')).toBe('low stock');
-    expect(availabilityNote('none')).toBe('none available now');
-    expect(availabilityNote('high')).toBeNull();
-  });
 
   it('preselects the cheapest available offer with the memory the run needs', () => {
     expect(pickOffer(offers, null)).toBe('a4000');

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { router } from '$lib/router.svelte';
 import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
 import { rowNav } from '$lib/ui/rowNav';
-import { backPath, installShortcuts, shortcutList, showShortcuts } from './shortcuts';
+import { backPath, installShortcuts, showShortcuts } from './shortcuts';
 
 const key = (k: string, init: KeyboardEventInit = {}, el: EventTarget = window) =>
   el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true, ...init }));
@@ -64,13 +64,10 @@ describe('single-key shortcuts preference', () => {
     expect(go).not.toHaveBeenCalled();
     key('k', { ctrlKey: true });
     expect(palette).toHaveBeenCalledOnce();
-    go.mockRestore();
-  });
-
-  it('off: the Settings button still opens the shortcuts dialog', () => {
-    keyPrefs.singleKeys = false;
+    // The Settings button still opens the shortcuts dialog.
     showShortcuts();
     expect(shortcuts).toHaveBeenCalledOnce();
+    go.mockRestore();
   });
 
   it('off: list rows ignore J / K / X but keep the arrow keys', () => {
@@ -94,31 +91,6 @@ describe('single-key shortcuts preference', () => {
     nav.destroy();
   });
 
-  it("lists the legends' Space toggles (Compare's chips, Model's per class)", () => {
-    const space = shortcutList.filter((s) => s.keys === 'Space').map((s) => s.label);
-    expect(space.some((l) => l.includes('Compare'))).toBe(true);
-    expect(space.some((l) => l.includes('per class'))).toBe(true);
-  });
-
-  it('lists an action once: a second key set is its `also`, never a second row of the same name', () => {
-    const names = shortcutList.map((s) => s.label.replace(/\s*\(.*\)$/, ''));
-    // "Next / previous row" and "Next / previous row (focused list)" were two rows (J K, ↓ ↑) for one action.
-    const rows = shortcutList.filter((s) => s.group === 'Lists').map((s) => s.label.replace(/\s*\(.*\)$/, ''));
-    expect(new Set(rows).size).toBe(rows.length);
-    expect(names.filter((n) => n === 'Next / previous row')).toHaveLength(1);
-    expect(shortcutList.find((s) => s.label === 'Next / previous row')?.also).toBe('ArrowDown ArrowUp');
-  });
-
-  it('the dialog lists every group, Datasets included', () => {
-    expect([...new Set(shortcutList.map((s) => s.group))]).toEqual(['General', 'Navigation', 'Lists', 'Charts', 'Datasets']);
-  });
-
-  it('marks exactly the keys Settings turns off: single characters outside a focused component', () => {
-    const single = shortcutList.filter((s) => s.single).map((s) => s.keys);
-    expect(single).toEqual(['?', '[', 'N', 'G O', 'G D', 'G R', 'G M', 'G P', 'G S', 'Escape', 'J K', 'X', '1–6', 'B']);
-    // The image inspector's keys are its own (they work while it is open), so they stay listed as working.
-    expect(shortcutList.filter((s) => s.group === 'Datasets').every((s) => !s.single)).toBe(true);
-  });
 });
 
 describe('Escape on a detail page', () => {

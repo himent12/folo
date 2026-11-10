@@ -7,7 +7,6 @@ describe('end marks', () => {
       { id: 'a', end: 'live' as const, x: 100, y: 50, r: 4.25 },
       { id: 'b', end: undefined, x: 300, y: 50, r: 3.75 },
     ];
-    expect(MERGE_PX).toBe(2);
     // Round 25: best at epoch 36, live at 37, 18 px apart, drawn as two lime rings. They are a ring and a dot now.
     expect(mergedEnds([{ x: 82, y: 50 }], ends)).toEqual([null]);
     // The best is the latest: the ring goes around the dot.

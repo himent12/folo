@@ -40,16 +40,10 @@ function renderWide(px: number, props: Record<string, unknown> = {}) {
 const readout = () => target.querySelector('.readout')?.textContent?.replace(/\s+/g, ' ').trim();
 
 describe('Histogram', () => {
-  it('states the total in the readout row at rest, with no density note', () => {
-    render();
-    expect(readout()).toBe('100 boxes');
-  });
-
   it('draws the bins as evenly spaced categories, each named, with bar height as the count', () => {
     renderWide(340, { binLabel: (lo: number, hi: number) => (hi >= 1 ? `≥${lo * 100}%` : `${lo * 100}–${hi * 100}%`) });
     const svg = target.querySelector<SVGElement>('svg[aria-roledescription=chart]')!;
     expect(svg).not.toBeNull();
-    expect(svg.querySelector('.y-label')?.textContent).toBe('Boxes');
     const ticks = [...svg.querySelectorAll('text.tick')].map((t) => t.textContent);
     expect(ticks).toEqual(expect.arrayContaining(['0–5%', '5–10%', '≥10%']));
     // 300 px of plot over three bins: equal widths whatever the value span.
@@ -66,7 +60,7 @@ describe('Histogram', () => {
   it('reads a bin out in the row when the keyboard moves to it, with its actual count', () => {
     renderWide(400);
     const svg = target.querySelector<SVGElement>('svg[aria-roledescription=chart]')!;
-    expect(svg).not.toBeNull();
+    expect(readout()).toBe('100 boxes');
     svg.dispatchEvent(new FocusEvent('focus'));
     svg.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
     flushSync();

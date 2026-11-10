@@ -62,7 +62,8 @@ vite.config.ts        runs the generator; .gen/ is Vite's root, dist/ the output
 ```
 `.gen/`, `dist/` and `shots/` are generated and ignored by git.
 
-CI's `site` job (`.github/workflows/ci.yml`, docs/CI.md) runs `npm ci && npm run check && npm run build`.
+CI's `site` workflow (`.github/workflows/site.yml`, docs/CI.md) runs `npm ci && npm run check && npm run build`
+when the site, a Markdown file or an example changes.
 
 ## Adding a page
 Add the Markdown file under `docs/` (or an `examples/<name>/README.md`), then add it to `NAV` in `scripts/config.ts`

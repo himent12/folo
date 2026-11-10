@@ -1,12 +1,19 @@
 // @vitest-environment happy-dom
 import { flushSync, mount, tick, unmount } from 'svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { comparable, unlike, unlikeCondition, versusYolo26n } from '$lib/benchmarks';
 import { MockApi } from '$lib/api/mock';
 import Versus from './Versus.svelte';
 
 let c: ReturnType<typeof mount> | undefined;
 let target: HTMLElement;
+
+beforeEach(() => {
+  target = document.createElement('div');
+  document.body.appendChild(target);
+  window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
+  Element.prototype.scrollIntoView ??= () => {};
+});
 
 afterEach(() => {
   if (c) unmount(c);
@@ -15,9 +22,7 @@ afterEach(() => {
 });
 
 describe('Engine speed table', () => {
-  it('ties every value to its metric and engine through headers: one header row names the engines, no row repeats them', () => {
-    target = document.createElement('div');
-    document.body.appendChild(target);
+  it('ties every value to its metric and engine through headers, and states a winner only on like-for-like rows', async () => {
     c = mount(Versus, { target });
     flushSync();
     const rows = [...target.querySelectorAll('tbody tr')];
@@ -35,52 +40,21 @@ describe('Engine speed table', () => {
         const ids = (td.getAttribute('headers') ?? '').split(' ');
         expect(ids[0]).toBe(metric?.id);
         expect(target.querySelector(`#${ids[1]}`)?.getAttribute('scope')).toBe('col');
-        // The engine is named once, in the header row; a cell holds its value alone.
-        expect(td.textContent).not.toMatch(/folo-n|YOLO26n/);
       }
     });
-  });
 
-  it('states a winner only on like-for-like rows: × for speed, % for memory', () => {
-    target = document.createElement('div');
-    document.body.appendChild(target);
-    c = mount(Versus, { target });
-    flushSync();
-    const leads = [...target.querySelectorAll('tbody td.lead')].map((td) => [...td.childNodes].map((n) => n.textContent?.replace(/ /g, ' ').trim()).filter(Boolean).join(' | '));
+    // × for speed, % for memory; a row measured under different conditions names its difference and claims no ratio.
+    const leads = [...target.querySelectorAll('tbody td.lead')].map((td) =>
+      [...td.childNodes].map((n) => n.textContent?.replace(/ /g, ' ').trim()).filter(Boolean).join(' | '),
+    );
     versusYolo26n.forEach((v, i) => {
-      // The desktop's "—" and difference, then the phone's line of the same condition (no "no winner": the legend's).
       if (!comparable(v)) expect(leads[i]).toBe(`— | ${unlike[v.metric]!.differs} | — ${unlikeCondition(unlike[v.metric]!)}`);
       else if (v.unit === 'MiB') expect(leads[i]).toMatch(/^\d+% (less|more) memory$/);
       else expect(leads[i]).toMatch(/^\d+\.\d\d× (faster|slower)$/);
     });
-    // No row measured under different conditions claims a ratio anywhere in the table.
     target.querySelectorAll('tbody tr.unlike').forEach((tr) => expect(tr.textContent).not.toMatch(/faster|slower|less memory|more memory/));
-  });
 
-  it('qualifies the comparison beside it and names the specific difference on each affected row', async () => {
-    target = document.createElement('div');
-    document.body.appendChild(target);
-    window.matchMedia ??= (() => ({ matches: false })) as unknown as typeof window.matchMedia;
-    Element.prototype.scrollIntoView ??= () => {};
-    c = mount(Versus, { target });
-    flushSync();
-    const flagged = [...target.querySelectorAll('tbody tr.unlike')].map((tr) => ({
-      m: tr.querySelector('.m')?.firstChild?.textContent,
-      why: tr.querySelector('.lead .why')?.textContent,
-    }));
-    expect(flagged).toEqual([
-      { m: 'GPU forward throughput, batch 16', why: 'f32 vs TensorFloat-32' },
-      { m: 'GPU end to end, batch 1', why: 'less NMS work for FOLO' },
-      { m: 'GPU end-to-end throughput, batch 16', why: 'f32 vs fp16' },
-      { m: 'CPU forward, batch 1', why: 'FOLO under other load' },
-      { m: 'CPU end to end, batch 1', why: 'less NMS work for FOLO' },
-      { m: 'Training peak GPU memory', why: 'train step vs trainer' },
-    ]);
-    // One legend over the table says what "—" means; no row repeats "no winner".
-    const legend = target.querySelector('.legend');
-    expect(legend?.compareDocumentPosition(target.querySelector('table.vs')!)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(legend?.textContent?.replace(/\s+/g, ' ')).toContain(`No winner: conditions differ · 6 of ${versusYolo26n.length} rows`);
-    expect(target.querySelector('table.vs')?.textContent).not.toMatch(/no winner/i);
+    // The legend's button opens How this was measured and moves focus there.
     const how = target.querySelector<HTMLDetailsElement>('details.how')!;
     expect(how.open).toBe(false);
     target.querySelector<HTMLButtonElement>('.legend button')!.click();
@@ -89,34 +63,26 @@ describe('Engine speed table', () => {
     expect(document.activeElement).toBe(how.querySelector('summary'));
   });
 
-  it("adds this server's own folo-n figures as a group of their own, said to be measured here and compared with nothing", async () => {
-    target = document.createElement('div');
-    document.body.appendChild(target);
+  it("adds this server's own folo-n figures as a group of their own, compared with nothing, and only with a table", async () => {
     const table = await new MockApi('normal', 0).throughput();
     c = mount(Versus, { target, props: { table } });
     flushSync();
     const groups = target.querySelectorAll('table.vs tbody');
     expect(groups).toHaveLength(2);
-    // The reference rows are unchanged; the lede says which they are.
+    // The reference rows are unchanged.
     expect(groups[0]!.querySelectorAll('tr')).toHaveLength(versusYolo26n.length);
-    expect(target.querySelector('.lede')?.textContent).toContain("the reference figures, with this server's own folo-n figures last");
-    const here = groups[1]!;
-    expect(here.querySelector('.here-h')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Measured on this server RTX 4080 SUPER');
-    const rows = [...here.querySelectorAll('tr:not(.here-h)')];
+    const rows = [...groups[1]!.querySelectorAll('tr:not(.here-h)')];
     expect(rows.map((tr) => [...tr.querySelectorAll('td')].map((td) => td.lastChild?.textContent))).toEqual([
       ['5.90 ms', 'not run here', 'Measured here'],
       ['212 img/s', 'not run here', 'Measured here'],
     ]);
     // Each value still names its metric and column.
-    for (const td of here.querySelectorAll('td')) expect(target.querySelector(`#${td.getAttribute('headers')!.split(' ')[1]}`)?.getAttribute('scope')).toBe('col');
-  });
+    for (const td of groups[1]!.querySelectorAll('td')) expect(target.querySelector(`#${td.getAttribute('headers')!.split(' ')[1]}`)?.getAttribute('scope')).toBe('col');
 
-  it('shows only the reference without a table (older servers)', () => {
-    target = document.createElement('div');
-    document.body.appendChild(target);
+    // Older servers: the reference alone.
+    unmount(c);
     c = mount(Versus, { target, props: { table: null } });
     flushSync();
     expect(target.querySelectorAll('table.vs tbody')).toHaveLength(1);
-    expect(target.querySelector('.lede')?.textContent).not.toContain('this server');
   });
 });

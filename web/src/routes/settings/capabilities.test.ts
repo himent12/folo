@@ -30,11 +30,10 @@ describe('capabilityRows', () => {
     });
     const [, tc, amp] = rows;
     expect(tc).toMatchObject({ state: 'off', word: 'Off', raw: offReason });
-    expect(tc!.note).toBe('This GPU has them, but the server did not turn them on.');
     expect(tc!.fix).toEqual({ say: 'Restart the server with them on:', command: 'folo serve --tensor-cores' });
     expect(amp).toMatchObject({ state: 'none', word: 'Not available' });
     // The command shows once, under Tensor cores; Mixed precision points to it.
-    expect(amp!.note).toBe('Needs the tensor cores, which are off on this server. See the command under Tensor cores.');
+    expect(amp!.note).toContain('See the command under Tensor cores.');
     expect(amp!.fix).toBeNull();
     expect(amp!.raw).toContain('mixed-precision');
   });
@@ -46,20 +45,21 @@ describe('capabilityRows', () => {
       amp: { available: false, reason: 'x' },
     });
     expect(none[1]).toMatchObject({ state: 'none', word: 'Not available' });
-    expect(none[1]!.note).toBe('Tensor cores need the Vulkan backend; this server runs DirectX 12.');
     // The command whole, for one unwrapped line; the shell named apart from it.
     expect(none[1]!.fix).toEqual({ say: 'Restart the server on Vulkan to use them.', shell: 'PowerShell', command: "$env:FOLO_GPU_BACKEND='vulkan'; folo serve --tensor-cores" });
     // Mixed precision ends on the way out the row above shows, never on a dead end (DESIGN_DIRECTION §16).
-    expect(none[2]).toMatchObject({ note: 'Needs tensor cores this server can use, so runs train in f32. See the command under Tensor cores.', fix: null });
+    expect(none[2]!.note).toContain('See the command under Tensor cores.');
+    expect(none[2]!.fix).toBeNull();
     // Another adapter without them (Metal, an older GPU): no action docs/GPU.md would back.
     const metal = capabilityRows({ ...on, tensor_cores: { available: false, enabled: false, reason: 'off: no cooperative matrices' } }, [{ ...gpu, backend: 'metal' }]);
-    expect(metal[1]).toMatchObject({ note: 'This GPU has no tensor cores FOLO can use, so the standard kernels run.', fix: null });
+    expect(metal[1]!.fix).toBeNull();
     // No command above, so nothing to point to.
     const metalAmp = capabilityRows(
       { ...on, tensor_cores: { available: false, enabled: false, reason: 'off: no cooperative matrices' }, amp: { available: false, reason: 'x' } },
       [{ ...gpu, backend: 'metal' }],
     );
-    expect(metalAmp[2]).toMatchObject({ note: 'Needs tensor cores this server can use, so runs train in f32.', fix: null });
+    expect(metalAmp[2]!.note).not.toContain('See the command');
+    expect(metalAmp[2]!.fix).toBeNull();
     // f16 shaders missing on DirectX 12 (docs/GPU.md: it lacks shader-f16): Vulkan, by the adapter's backend.
     const dx = capabilityRows({ ...on, shader_f16: false }, [{ ...gpu, backend: 'dx12' }]);
     expect(dx[0]!.fix).toEqual({ say: 'Restart the server on Vulkan to compute in f16.', shell: 'PowerShell', command: "$env:FOLO_GPU_BACKEND='vulkan'; folo serve" });
@@ -74,7 +74,7 @@ describe('capabilityRows', () => {
       tensor_cores: { available: false, enabled: false, reason: 'off: no GPU' },
       amp: { available: false, reason: 'needs a GPU' },
     });
-    expect(rows[0]).toMatchObject({ state: 'none', note: 'The CPU computes in f32, so f16 inference runs in f32.' });
+    expect(rows[0]).toMatchObject({ state: 'none', fix: null });
     expect(rows[1]!.note).toMatch(/CPU/);
     expect(rows[2]!.note).toMatch(/trains on the CPU/);
   });

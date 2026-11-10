@@ -1,0 +1,33 @@
+name: site
+# The docs site (site/README.md), generated from docs/, README.md and examples/*/README.md: `npm run check`
+# type-checks it and fails on a broken link, anchor or image; `npm run build` builds it (the same checks again).
+# It runs when the site, a Markdown file, an example or the design tokens change, and on every push to main.
+on:
+  pull_request:
+    paths:
+      - site/**
+      - docs/**
+      - examples/**
+      - design/**
+      - "**.md"
+      - .github/workflows/site.yml
+  push:
+    branches: [main]
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: true
+# Runners: see ci.yml. RUNS_ON_LINUX holds a JSON runs-on value; unset falls back to GitHub-hosted Linux.
+jobs:
+  site:
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # Node 24 runs the TypeScript build scripts directly (type stripping).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - working-directory: site
+        run: npm ci && npm run check && npm run build

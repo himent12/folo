@@ -201,26 +201,17 @@ describe('is the in-browser runtime in this build (DOGFOOD-3 S5)', () => {
     resetWasmProbe();
   });
 
-  it("takes the server's word where it gives one", () => {
+  it("takes the word of the server that served this page; another server's, an older one's or a dev server's is left to the probe", () => {
     expect(wasmFromSystem({ features: ['web_wasm'] } as SystemInfo, true)).toBe(true);
-    expect(wasmFromSystem({ features: ['queue_control'] } as SystemInfo, true)).toBeNull();
     expect(wasmFromSystem(undefined, true)).toBeNull();
-  });
-
-  // Review of round 25: Studio without its own runtime files, connected to another server that has them, offered the
-  // browser path and failed when it loaded. Another server's `web_wasm` says nothing of this page: the probe asks.
-  it("leaves a remote server's web_wasm to the probe", () => {
+    // Review of round 25: Studio without its own runtime files, connected to another server that has them, offered the
+    // browser path and failed when it loaded. Another server's `web_wasm` says nothing of this page.
     expect(wasmFromSystem({ features: ['run_cli', 'web_wasm'] } as SystemInfo, false)).toBeNull();
     expect(wasmFromSystem({ features: ['web_wasm'] } as SystemInfo)).toBeNull();
-  });
-
-  it('reads a missing web_wasm as no runtime only from a server with the final list that served this page', () => {
+    // A missing web_wasm means no runtime only from a server with the final list (`run_cli`) that served this page.
     const final = { features: ['queue_control', 'run_cli'] } as SystemInfo;
     expect(wasmFromSystem(final, true)).toBe(false);
-    expect(wasmFromSystem({ features: ['run_cli', 'web_wasm'] } as SystemInfo, true)).toBe(true);
-    // Another origin, or Vite's dev server: the server cannot speak for this page's files.
     expect(wasmFromSystem(final, false)).toBeNull();
-    // An older server (no `run_cli`) never says.
     expect(wasmFromSystem({ features: ['queue_control'] } as SystemInfo, true)).toBeNull();
   });
 

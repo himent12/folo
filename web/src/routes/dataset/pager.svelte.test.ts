@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Api } from '$lib/api/client';
 import { hub } from '$lib/api/index.svelte';

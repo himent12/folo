@@ -1,14 +1,34 @@
 # CI
 
-`.github/workflows/ci.yml` runs on every PR and on pushes to `main`: `cargo fmt --check` (Linux), `cargo clippy -D
-warnings` and `cargo test --workspace` on Linux and Windows, the web app's `npm ci && npm run check && npm run build` and `npm run qa` (blank sections and overflow at tablet and
-phone sizes, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium), the
-docs site (`site`, Linux: `npm ci && npm run check && npm run build` in `site/`, which fails on a broken link, anchor
-or image in the Markdown; site/README.md), the browser build (`wasm`, Linux: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and
-`scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock`, docs/WASM.md), and ONNX export parity
-(`onnx`, Linux: a Python 3.12 venv with pinned `onnx`, `onnxruntime` and `numpy`, then `cargo test -p folo-cli --test
-onnx` with `FOLO_ONNX_REQUIRED=1`, so the test fails instead of skipping when the venv is broken; docs/CLI.md, ONNX
-export).
+Five workflows check the code, one per part of the repo. A pull request runs only the ones whose files it touches
+(`paths` filters); every push to `main` runs all of them, so a filter that misses a dependency shows up there.
+
+| workflow | runs for | what it does |
+|---|---|---|
+| `ci.yml` | everything except `web/`, `site/`, `design/`, `apps/desktop/`, `docs/img/` and the other workflows (plus the few files in those folders that a Rust test reads: the package versions and Studio's command-line fixtures) | `rust (linux)`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace` with the ONNX parity test required. `rust (windows)`: clippy and the tests on the runner with a GPU, so the GPU tests run there |
+| `web.yml` | `web/`, `design/` | `npm ci`, `npm run check`, `npm test`, then `npm run qa`: the layout checks on the production build (blank sections, overflow, covered controls and cut selects at tablet and phone sizes, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium) |
+| `site.yml` | `site/`, `docs/`, `examples/`, `design/`, any `*.md` | the docs site: `npm ci && npm run check && npm run build` in `site/`, which fails on a broken link, anchor or image in the Markdown (site/README.md) |
+| `wasm.yml` | `crates/folo-wasm/` and the crates it depends on, `Cargo.toml`, `Cargo.lock`, `scripts/build-wasm.sh` | the browser build: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and `scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock` (docs/WASM.md) |
+| `desktop.yml` | `apps/desktop/`, `design/` and the crates the app builds | FOLO Desktop on Windows: fmt, clippy, its tests, the vendored GPUI patch test and the temp-dir hygiene test |
+
+ONNX export parity (docs/CLI.md, ONNX export) is part of `cargo test --workspace`: `crates/folo-cli/tests/onnx.rs`
+runs the exported graphs in onnxruntime and skips without a Python. `rust (linux)` gives it one (a Python 3.12 venv
+with pinned `onnx`, `onnxruntime` and `numpy`, kept between runs on a self-hosted runner) and sets
+`FOLO_ONNX_REQUIRED=1`, so there the test fails instead of skipping when the venv is broken.
+
+## Keeping CI fast
+- **Tests are quick or they are not in the suite.** A test trains the smallest model on a handful of small images
+  for a few steps; several tests that need the same run or server share it. Aim for under a second per test.
+  `#[ignore]` is for tests that need what CI does not have (network, credentials, a download), not for slow ones.
+- **The dev profile** (root `Cargo.toml`) builds folo-core, folo-nn, folo-data and folo-vision at `opt-level = 3`
+  like the dependencies, because tests train and predict with them, and keeps only line tables as debug info
+  (file and line in backtraces): less to generate and to link into each of the test binaries.
+- **A new job needs a reason to run on every pull request.** Give a new part of the repo its own workflow with a
+  `paths` filter, as above. If a Rust test starts reading a file under `web/`, `site/`, `design/` or
+  `apps/desktop/`, add that file to `ci.yml`'s `paths`.
+- **The layout QA runs on the production build**, served as static files: every state opens a fresh browser context
+  with an empty cache, and the build is one script where the dev server answers a request per module. Phone states
+  are checked once, under a coarse pointer (the stricter case).
 
 ## Test temp dirs
 Tests make their scratch folders with `folo_test_support::TestDir` (`crates/folo-test-support`): a fresh
@@ -19,7 +39,7 @@ fails on any `std::env::temp_dir()` in a crate's `src/` or `tests/` (and in `app
 bypass the guard by accident. (Before this, `cargo test --workspace` runs left `folo-*` folders behind; 3,209 of them,
 about 20 GB, once filled the dev PC's C: drive.)
 
-CI runs `cargo test` (the `rust` and `onnx` jobs) through `tools/test-tmp.sh`. The script points `FOLO_TEST_TMP` and
+CI runs `cargo test` (the `rust` jobs) through `tools/test-tmp.sh`. The script points `FOLO_TEST_TMP` and
 the temp dir itself (`TMPDIR`, `TMP`, `TEMP`) at a new `$RUNNER_TEMP/test-tmp.XXXXXX`, one per run, so concurrent runs
 never share it. Test files therefore land on the runner's work drive (D: on the dev PC), not in the user's %TEMP%.
 After the run it fails the step, listing the entries, if any `folo-*` entry is left there. Because the temp dir is
@@ -43,8 +63,8 @@ To fall back to GitHub-hosted runners, delete the variable (`gh variable delete 
 uses `ubuntu-latest` / `windows-latest`. Self-hosted jobs keep a persistent `CARGO_TARGET_DIR` outside the checkout,
 so incremental builds stay warm.
 
-The same variables drive `desktop.yml` and `release.yml` (its Linux and Windows jobs, including the CLI build
-matrix that its `plan` job writes). Release builds are the exception to the persistent target dir: they always start
+The same variables drive every workflow, `release.yml` included (its Linux and Windows jobs, including the CLI
+build matrix that its `plan` job writes). Release builds are the exception to the persistent target dir: they always start
 from an empty one in `$RUNNER_TEMP` so no stale artifact reaches a shipped binary, and they need no tools
 preinstalled beyond the basics listed in docs/RELEASE.md, Runners. macOS release builds have no self-hosted runner
 and use GitHub-hosted `macos-latest`; set `FOLO_RELEASE_MACOS=false` while hosted runners are unavailable (hosted
@@ -55,8 +75,12 @@ billing must be fixed before macOS release builds can run).
 - Windows (dev PC): start with `Start-Process D:\gha\win\run.cmd -WindowStyle Hidden`. After a reboot, start it again.
   Prerequisite: Git for Windows' `bin` and `usr\bin` on the runner's PATH (actions such as `dtolnay/rust-toolchain`
   run bash). It is set in `D:\gha\win\.env` (`PATH=...`), which the runner reads at start.
-- Linux (boat.dev): each sandbox has a 24 h TTL. Renew with `python tools/gha_boat_runner.py renew <n>` (it extends
-  the TTL and restarts the listener if needed), replace with `down <n>` then `up <n>`. Runner `n = 1` is the original
+- Linux (boat.dev): each sandbox has a 24 h TTL, and an expired one takes its runner offline: jobs then queue for
+  the runners that are left (with one of four online, a pull request waited over 20 minutes). The `runners`
+  workflow (`.github/workflows/runners.yml`) renews them all every 6 hours from the dev PC's runner, so they stay
+  up while that PC is on; run it by hand (`gh workflow run runners`) after the PC was off for a day. By hand:
+  `python tools/gha_boat_runner.py renew <n>` (it extends the TTL and restarts the listener if needed), replace
+  with `down <n>` then `up <n>`. Runner `n = 1` is the original
   `folo-linux-boat`; `n >= 2` are `folo-linux-boat-<n>`. Sandbox ids are in `~/.folo/gha_linux<n>_sid` on the dev PC.
   The script fetches registration tokens from `gh` at runtime and never prints them. Never print or commit tokens or
   the boat key (docs/BOAT.md).

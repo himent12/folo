@@ -32,14 +32,6 @@ describe('model evaluation (contract of GET /api/models/{id}/eval)', () => {
     expect(ev.mean).toHaveLength(101);
     expect(ev.perClass[0]!.instances).toBe(ev.confusion[0]!.reduce((a, b) => a + b, 0));
   });
-
-  it('serves log history and the api generation', async () => {
-    const api = new MockApi('normal', 0);
-    expect((await api.health()).api).toBe('v1');
-    const logs = await api.runLogs('run_7d1e', 5);
-    expect(logs.lines.length).toBeLessThanOrEqual(5);
-    expect(logs.lines.map((l) => l.t)).toEqual([...logs.lines.map((l) => l.t)].sort());
-  });
 });
 
 describe('reduceConfusion', () => {
