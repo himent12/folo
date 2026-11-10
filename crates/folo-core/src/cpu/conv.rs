@@ -1037,10 +1037,21 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
             images.iter().all(|im| im.sr.as_ref().is_none_or(|s| s.n == cols && s.map.wp == map.wp))
         );
         // Each task sums the segments of its K range that fall in this wave's images, in K order, continuing
-        // the previous wave's sum: the same calls in the same order as with every image at once.
+        // the previous wave's sum: the same calls in the same order as with every image at once. Only the K parts
+        // that overlap the wave have work, so a wave of a few images cuts the rows into more tiles to keep the
+        // pool busy (which rows share a call changes no element's sum).
+        let (p0, p1) = (w0 * cols / step, (w1 * cols).div_ceil(step).min(parts));
+        let active = p1 - p0;
+        let (rpt, tiles) = if wave >= g.n {
+            (rpt, tiles)
+        } else {
+            let t = m.div_ceil(2 * MR).min(WGRAD_TASKS.div_ceil(active)).max(1);
+            let r = m.div_ceil(t).div_ceil(MR) * MR;
+            (r, m.div_ceil(r))
+        };
         let task = |t: usize| {
             let pptr = &pptr;
-            let (ti, p) = (t / parts, t % parts);
+            let (ti, p) = (t / active, p0 + t % active);
             let (i0, i1) = (ti * rpt, ((ti + 1) * rpt).min(m));
             let (k0, k1) = (p * step, ((p + 1) * step).min(k));
             let (lo, hi) = (k0.max(w0 * cols), k1.min(w1 * cols));
@@ -1069,10 +1080,10 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
                 kk += len;
             }
         };
-        if 2 * m * n * k >= super::gemm::PAR_FLOPS && tiles * parts > 1 {
-            (0..tiles * parts).into_par_iter().for_each(task);
+        if 2 * m * n * k >= super::gemm::PAR_FLOPS && tiles * active > 1 {
+            (0..tiles * active).into_par_iter().for_each(task);
         } else {
-            (0..tiles * parts).for_each(task);
+            (0..tiles * active).for_each(task);
         }
         for im in images {
             super::recycle(im.grad);
@@ -1734,41 +1745,69 @@ mod kernel_tests {
         }
     }
 
+    /// The forward, input gradient and weight gradient of `g` as bits, under the current scratch budget.
+    fn conv_bits(g: &ConvGeom, weight_only: bool) -> Vec<Vec<u32>> {
+        let (x, wt) = (data(g.n * g.c * g.h * g.w, 1), data(g.o * g.kdim(), 2));
+        let gy = data(g.n * g.o * g.ohw(), 3);
+        let mut gw = vec![0f32; wt.len()];
+        conv2d_backward_weight(&x, &gy, &mut gw, g);
+        let mut out = vec![gw];
+        if !weight_only {
+            let mut y = vec![0f32; gy.len()];
+            conv2d_forward(&x, &wt, &mut y, g, false, None);
+            let mut gx = vec![0f32; x.len()];
+            conv2d_backward_input(&gy, &wt, &mut gx, g);
+            out.extend([y, gx]);
+        }
+        out.into_iter().map(|v| v.iter().map(|f| f.to_bits()).collect()).collect()
+    }
+
+    /// `f` under scratch budget `floats` (restored after).
+    fn with_budget<T>(floats: usize, f: impl FnOnce() -> T) -> T {
+        set_image_scratch_budget(floats);
+        let r = f();
+        set_image_scratch_budget(IMAGE_SCRATCH_BUDGET);
+        r
+    }
+
     /// The image scratch budget only changes how many images run at once, never a bit of the result: forward,
     /// input gradient (shifted rows and col2im) and weight gradient (waves of images whose K parts cross wave
-    /// boundaries) with every image at once, one at a time and a few at a time.
+    /// boundaries, each wave tiling its rows on its own) with no limit, the default, one image at a time and a
+    /// few at a time. The batch-64 cases have 128 K parts spread over many waves.
     #[test]
     fn image_scratch_budget_does_not_change_results() {
-        let cases: [Case; 5] = [
+        let cases: [Case; 7] = [
             (5, 16, [21, 19], 24, [3, 3], params([1, 1], [1, 1], [1, 1], 1)),
             (5, 16, [21, 19], 24, [3, 3], params([2, 2], [1, 1], [1, 1], 1)),
             (4, 12, [17, 15], 8, [5, 5], params([1, 1], [4, 4], [2, 2], 2)),
             (3, 64, [9, 11], 24, [1, 1], params([1, 1], [0, 0], [1, 1], 1)),
             (6, 8, [30, 26], 16, [3, 3], params([3, 3], [2, 2], [1, 1], 1)),
+            (64, 32, [40, 40], 32, [3, 3], params([1, 1], [1, 1], [1, 1], 1)),
+            (64, 64, [20, 20], 64, [3, 3], params([1, 1], [1, 1], [1, 1], 1)),
         ];
-        let run = |g: &ConvGeom| {
-            let (x, wt) = (data(g.n * g.c * g.h * g.w, 1), data(g.o * g.kdim(), 2));
-            let gy = data(g.n * g.o * g.ohw(), 3);
-            let mut y = vec![0f32; gy.len()];
-            conv2d_forward(&x, &wt, &mut y, g, false, None);
-            let mut gx = vec![0f32; x.len()];
-            conv2d_backward_input(&gy, &wt, &mut gx, g);
-            let mut gw = vec![0f32; wt.len()];
-            conv2d_backward_weight(&x, &gy, &mut gw, g);
-            [y, gx, gw].map(|v| v.iter().map(|f| f.to_bits()).collect::<Vec<_>>())
-        };
         for (i, (n, c, hw, o, k, p)) in cases.into_iter().enumerate() {
             let g = geom(n, c, hw, o, k, p);
-            let all = run(&g);
+            let all = with_budget(usize::MAX, || conv_bits(&g, false));
             // One image's scratch is at least a few thousand floats in every case: 1 float runs them one at a
-            // time, 3 copies' worth two or three at a time.
+            // time, 3 copies' worth two or three at a time (a dozen for the batch-64 weight gradients).
             let one = shifted_scratch(&g).max(g.kdim() * g.ohw()).max(1);
-            for budget in [1, 3 * one] {
-                set_image_scratch_budget(budget);
-                let got = run(&g);
-                set_image_scratch_budget(IMAGE_SCRATCH_BUDGET);
+            for budget in [IMAGE_SCRATCH_BUDGET, 1, 3 * one] {
+                let got = with_budget(budget, || conv_bits(&g, false));
                 assert!(got == all, "case {i}, budget {budget}: results differ");
             }
+        }
+    }
+
+    /// The review's weight-gradient shapes at full size (3x3, c = o = 32 at 160 px, batch 16 and 64; c = o = 64
+    /// at 80 px, batch 64): the default budget's waves give the unlimited result bit for bit. Slow unoptimised:
+    /// `cargo test --release -p folo-core --lib -- --ignored wgrad_full_size`.
+    #[test]
+    #[ignore]
+    fn wgrad_full_size_budget_does_not_change_results() {
+        for (n, c, hw) in [(16, 32, 160), (64, 32, 160), (64, 64, 80)] {
+            let g = geom(n, c, [hw, hw], c, [3, 3], params([1, 1], [1, 1], [1, 1], 1));
+            let all = with_budget(usize::MAX, || conv_bits(&g, true));
+            assert!(with_budget(IMAGE_SCRATCH_BUDGET, || conv_bits(&g, true)) == all, "{n} x {c} x {hw}");
         }
     }
 }

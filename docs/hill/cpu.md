@@ -115,6 +115,20 @@ Predictions are those of each image alone (test `cpu_predict_batch_matches_singl
   | 640 px, ms (3 runs) | 1466–1511 | 1140–1148 | 1099–1132 | **1046–1064** | 1060–1097 |
   | 640 px, peak MB | 1662–1695 | 1936–1992 | 1791–1906 | **1623–1706** | 1625–1691 |
 
+  Second review fix (per-wave tiling): with many waves, each wave launched every `tiles × parts` task of the
+  weight gradient but only the K parts overlapping the wave had work (4–5 busy tasks per wave for a 3x3 c32 conv
+  at 160 px, batch 64), so each wave now cuts the rows into up to `WGRAD_TASKS / active parts` tiles (rows that
+  share a call change no element's sum: bit for bit the same). `cargo bench -p folo-core --bench conv_wgrad`
+  (weight gradient alone, medians of 10, 3 alternated rounds, 2–8 cores busy elsewhere) and the train step at 320 px:
+
+  | | `main` | no budget | 16 MiB, before | **16 MiB, per-wave tiles** |
+  |---|---|---|---|---|
+  | wgrad 3x3 c32 160 px b16, ms | 16.0–17.1 | 11.1–11.8 | 18.3–20.4 | **12.0–12.4** |
+  | wgrad 3x3 c32 160 px b64, ms | 64.9–66.6 | 45.5–47.2 | 105.8–113.3 | **50.6–52.4** |
+  | wgrad 3x3 c64 80 px b64, ms | 45.2–52.2 | 43.3–44.6 | 59.4–62.5 | **34.5–36.1** |
+  | train step 320 px b16, ms / peak MB | 332–357 / 1380–1402 | 252–269 / 1380–1387 | 248–257 / 1293–1311 | **257–260 / 1303–1311** |
+  | train step 320 px b64, ms / peak MB | 1374–1464 / 1671–1907 | 1034–1098 / 1728–1918 | 986–1026 / 1612–1705 | **989–1026 / 1671–1752** |
+
   (64 MiB at 320 px ran in a separate session, where it tied the binary before the fix: 64.9 vs 66.1 img/s.)
   One image at a time everywhere (a budget of one float) gave `main`'s peak (1598–1741 MB) at 9.7–10.1 img/s,
   slower than `main`: the extra memory was all scratch of concurrent images. Less scratch is also faster here

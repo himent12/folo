@@ -36,3 +36,7 @@ harness = false
 [[bench]]
 name = "index"
 harness = false
+
+[[bench]]
+name = "conv_wgrad"
+harness = false

@@ -1,6 +1,7 @@
 //! Training-step benchmark: folo-n (4 classes) at 320×320, batch 16, on the CPU — the MODEL.md §10.6 smoke-test
 //! configuration. One step is a train-mode forward, the detection loss, backward, and an AdamW update.
-//! Run with `cargo bench -p folo-vision --bench train_step` (`FOLO_BENCH_SIZE`, default 320, sets the image size).
+//! Run with `cargo bench -p folo-vision --bench train_step` (`FOLO_BENCH_SIZE`, default 320, sets the image size;
+//! `FOLO_BENCH_BATCH`, default 16, the batch).
 
 #[path = "../tests/common/mod.rs"]
 mod common;
@@ -21,7 +22,8 @@ fn ms(d: Duration) -> f64 {
 fn main() {
     let threads = rayon::current_num_threads();
     let s: usize = std::env::var("FOLO_BENCH_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(320);
-    let (b, nc) = (16usize, 4usize);
+    let b: usize = std::env::var("FOLO_BENCH_BATCH").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    let nc = 4usize;
     println!("folo-vision train-step bench, {threads} rayon threads, folo-n nc {nc}, {s}x{s}, batch {b}");
     let model = FoloModel::new(ModelConfig::new("n", nc).expect("config")).expect("model");
     let mut opt =
