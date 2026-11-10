@@ -557,6 +557,11 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   - `postprocess_ms`: decoding the head outputs into candidates (on a GPU, a small kernel), reading them back, NMS
     and mapping the boxes to image pixels;
   - `total_ms`: their sum.
+  `/api/predict` (and MCP's `predict_batch`, which calls it per image) times one image per call, so these are that
+  call's stages. A batch through the library (`Predictor::predict_batch`) gives each image its pass's stage times
+  divided by the images in it; on the CPU the batch runs as chunks of two images side by side, each image getting
+  half its chunk's times, so the images' `total_ms` add up to more than the batch's wall time (by about the number
+  of chunks running at once): per image they are a share of the work, not the time a caller waited.
   The browser runtime (docs/WASM.md) cannot wait for WebGPU mid-pipeline, so there `inference_ms` also holds the
   on-device head decode and its readback. FOLO Desktop's Local GPU uses the same predictor as the server.
 - `GET /api/predict/stream?model_id=..&conf=..` — WebSocket: the client sends JPEG frames (binary), the server

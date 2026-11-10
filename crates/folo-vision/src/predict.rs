@@ -328,7 +328,8 @@ impl Predictor {
 
     /// A batch: every image is letterboxed to the square `imgsz × imgsz` canvas. On a GPU it is one forward
     /// pass; on the CPU, chunks of two images run side by side (the same predictions as one pass). Each
-    /// prediction's timing is its pass's (or chunk's) divided by its size.
+    /// prediction's timing is its pass's (or chunk's) divided by its size; with chunks side by side the images'
+    /// totals add up to more than the call's wall time (docs/API.md, `timing`).
     pub fn predict_batch(&self, imgs: &[Image]) -> Result<Vec<Prediction>> {
         if imgs.is_empty() {
             return Ok(Vec::new());
