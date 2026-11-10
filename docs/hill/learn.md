@@ -68,8 +68,29 @@ binary; `merged-sgd-s1`: 0.0814 with either). Per epoch (internal mAP50-95), mer
 base-s1 from epoch 9 on; merged-s0 tracks base-s0 to epoch 13, dips (0.065 vs 0.069 at 15) and ends at 0.084.
 The merged kernels sum in other orders, so merged and pre-merge runs of one seed are different random trajectories,
 and the four FOLO SGD results span 0.0814–0.0860: the pre-merge two-seed spread (0.0005) understated the noise,
-which looks closer to ±0.002–0.003. A real regression of about 0.003 is possible but not established with two seeds
-per side; a third merged seed (or bisecting the four branches with one seed each) would settle it.
+which looks closer to ±0.002–0.003. A real regression of about 0.003 was possible but not established with two seeds
+per side; five seeds per side (below) settled it as noise.
+
+### Merge check settled: noise (5 seeds per side)
+
+SGD on P1 (`--optimizer sgd`), the round-1 protocol, alternated pre / merged per seed on an otherwise idle GPU.
+Pre-merge: `folo-base.exe` (main `c50211ba`, the binary of seeds 0 and 1). Merged: seeds 0–1 `folo-merged.exe`
+(`8e630a7d`), seeds 2–4 `folo-head.exe` (`c24a7dd0`, after the clipping-kernel merge).
+
+| seed | pre-merge AP | merged AP | merged − pre |
+|---:|---:|---:|---:|
+| 0 | 0.0860 | 0.0845 | −0.0015 |
+| 1 | 0.0855 | 0.0814 | −0.0041 |
+| 2 | 0.0862 | 0.0861 | −0.0001 |
+| 3 | 0.0856 | 0.0857 | +0.0001 |
+| 4 | 0.0854 | 0.0865 | +0.0011 |
+| **mean** | **0.0857** | **0.0848** | **−0.0009** |
+
+**Verdict: noise.** The rule (a regression needs the merged mean lower by more than 0.002 *and* at least 4 of 5
+seeds lower) fails on both counts: −0.0009, and 3 of 5 lower. No bisect was run. One observation for the record:
+the merged runs spread wider (0.0814–0.0865) than the pre-merge ones (0.0854–0.0862), driven by seed 1 alone; with
+five seeds that is not evidence of anything. On the idle GPU the merged binary trains the 20 epochs in 252–259 s
+against 484–491 s pre-merge.
 
 ### MuSGD (`--optimizer musgd`, then `auto` rule 3)
 
@@ -190,8 +211,7 @@ fine-tune is unchanged by construction.
 ## Follow-ups
 
 (Round 2; the round-1 list below is kept for the record: items 2 and 4 are done.)
-1. **Merge-check spread.** Merged SGD seeds 0.0845 / 0.0814 against pre-merge 0.0860 / 0.0855: run a third merged
-   SGD seed (6–8 min now) or bisect the four speed branches one seed each, to tell a ~0.003 regression from noise.
+1. ~~Merge-check spread~~: settled as noise with 5 seeds per side (above).
 2. **MuSGD step cost (17 %)**: fuse the Newton–Schulz iteration into one kernel per column bucket (today about 15
    matmul / elementwise dispatches per conv weight per step), and measure on an idle GPU.
 3. **AdamW floor 0.002** (round 1: proxy 0.0844 vs 0.0747 at 0.001): not run this round (time); needs the shapes
