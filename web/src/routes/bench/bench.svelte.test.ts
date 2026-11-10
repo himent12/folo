@@ -286,6 +286,20 @@ describe('the benchmark page', () => {
     expect(go).not.toHaveBeenCalled();
   });
 
+  it('shows the weight the plan has again once its edits are discarded', async () => {
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    const weight = () => document.querySelector<HTMLInputElement>('input[aria-label="Weight of Haze"]')!;
+    expect(weight().value).toBe('1');
+    weight().value = '3';
+    weight().dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(text()).toMatch(/Unsaved changes/);
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Discard')!.click();
+    flushSync();
+    expect(text()).not.toMatch(/Unsaved changes/);
+    expect(weight().value).toBe('1');
+  });
+
   it('picks finished entries for Compare, at most four, and makes Compare the one primary from two', async () => {
     await page('/benchmarks/bn_3c90');
     const boxes = [...document.querySelectorAll<HTMLInputElement>('table.board tbody input[type="checkbox"]')];
