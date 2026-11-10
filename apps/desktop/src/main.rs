@@ -21,6 +21,7 @@ mod synth;
 mod theme;
 mod ui;
 mod viz;
+mod window_state;
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -66,15 +67,17 @@ Usage: folo-desktop [OPTIONS]
 
 By default it connects to a running `folo serve` ($FOLO_SERVER, else http://127.0.0.1:7878);
 when none answers it starts `folo serve --mock`, and without `folo` it uses built-in demo data.
+The window and theme open as they were last closed ($FOLO_HOME or ~/.folo, desktop.json), except
+with --scenario, --width or --height.
 
 Options:
   --server URL          Connect to the folo serve at URL
   --mock                Use the built-in demo data
   --open SCREEN         Start on a screen: overview, datasets, dataset:ID, runs, run:ID, models,
                         model:ID, playground, settings, or new-run (the dialog)
-  --theme dark|light    Colour theme [default: dark]
-  --width W             Window width in px [default: 1280]
-  --height H            Window height in px [default: 800]
+  --theme dark|light    Colour theme [default: the last one, else dark]
+  --width W             Window width in px [default: the last size, else 1280]
+  --height H            Window height in px [default: the last size, else 800]
   --scenario NAME       A fixed, deterministic state for screenshots (implies demo data)
   --list-scenarios      Print the scenario names and exit
   -h, --help            Print this help and exit
@@ -118,7 +121,12 @@ fn main() {
     let scenario = arg("--scenario");
     let width: f32 = arg("--width").and_then(|w| w.parse().ok()).unwrap_or(1280.0);
     let height: f32 = arg("--height").and_then(|h| h.parse().ok()).unwrap_or(800.0);
-    let mode = match arg("--theme").as_deref() {
+    // The window and theme from the last launch, unless this one is for a screenshot.
+    let remember =
+        window_state::remembers(scenario.is_some(), arg("--width").is_some() || arg("--height").is_some());
+    let state_path = remember.then(window_state::path);
+    let saved = state_path.as_deref().map(window_state::load).unwrap_or_default();
+    let mode = match arg("--theme").as_deref().or(saved.theme.as_deref()) {
         Some("light") => Mode::Light,
         _ => Mode::Dark,
     };
@@ -164,11 +172,15 @@ fn main() {
         let server_mode = if server.is_some() { app::ServerMode::Local } else { app::ServerMode::Mock };
         let connect_url = server.clone().unwrap_or(default_url.clone());
 
-        let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
+        let (window_bounds, display_id) = match saved.window {
+            Some(p) => restored_bounds(p, cx),
+            None => (WindowBounds::Windowed(Bounds::centered(None, size(px(width), px(height)), cx)), None),
+        };
         let window = cx
             .open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(window_bounds),
+                    display_id,
                     titlebar: Some(TitlebarOptions {
                         title: Some("FOLO Desktop".into()),
                         appears_transparent: true,
@@ -181,6 +193,7 @@ fn main() {
                 |window, cx| {
                     cx.new(|cx| {
                         let mut app = app::FoloApp::new(api, frozen, window, cx);
+                        app.state_path = state_path.clone();
                         app.server_mode = server_mode;
                         app.server_url.update(cx, |i, cx| i.set_text(connect_url.clone(), cx));
                         if let Some(s) = &spec {
@@ -194,6 +207,11 @@ fn main() {
                         } else if let Some(route) = open.as_deref().and_then(app::Route::parse) {
                             app.route = route;
                         }
+                        let this = cx.weak_entity();
+                        window.on_window_should_close(cx, move |window, cx| {
+                            this.update(cx, |app, cx| app.save_window_state(window, cx)).ok();
+                            true
+                        });
                         app
                     })
                 },
@@ -203,6 +221,31 @@ fn main() {
         cx.on_window_closed(|cx| cx.quit()).detach();
         cx.activate(true);
     });
+}
+
+/// Where a remembered window opens: its saved bounds on the display that still shows its title bar,
+/// else centred on the primary display (`window_state::place`), maximized or full screen as it was.
+fn restored_bounds(p: window_state::Placement, cx: &App) -> (WindowBounds, Option<gpui::DisplayId>) {
+    use window_state::{Rect, WindowMode};
+    let rect = |b: Bounds<gpui::Pixels>| Rect {
+        x: b.origin.x.into(),
+        y: b.origin.y.into(),
+        width: b.size.width.into(),
+        height: b.size.height.into(),
+    };
+    let displays = cx.displays();
+    let primary = cx.primary_display().map(|p| p.id());
+    let primary = displays.iter().position(|d| Some(d.id()) == primary).unwrap_or(0);
+    let rects: Vec<Rect> = displays.iter().map(|d| rect(d.bounds())).collect();
+    let saved = Rect { x: p.x, y: p.y, width: p.width, height: p.height };
+    let (i, r) = window_state::place(saved, &rects, primary, theme::size::TOPBAR);
+    let bounds = Bounds::new(point(px(r.x), px(r.y)), size(px(r.width), px(r.height)));
+    let window_bounds = match p.mode {
+        WindowMode::Windowed => WindowBounds::Windowed(bounds),
+        WindowMode::Maximized => WindowBounds::Maximized(bounds),
+        WindowMode::Fullscreen => WindowBounds::Fullscreen(bounds),
+    };
+    (window_bounds, displays.get(i).map(|d| d.id()))
 }
 
 #[cfg(test)]

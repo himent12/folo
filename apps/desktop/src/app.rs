@@ -360,6 +360,8 @@ pub struct FoloApp {
     pub frozen: bool,
     /// Keep every fetch pending (loading-state screenshots).
     pub hold_loading: bool,
+    /// Where the window and theme are remembered on close (`window_state`); `None` for screenshots.
+    pub state_path: Option<std::path::PathBuf>,
 
     pub root_focus: FocusHandle,
     pub focus: RefCell<HashMap<SharedString, FocusHandle>>,
@@ -590,6 +592,7 @@ impl FoloApp {
             mode: theme(cx).mode,
             frozen,
             hold_loading: false,
+            state_path: None,
             root_focus,
             focus: RefCell::new(HashMap::new()),
             switch_seen: RefCell::new(HashMap::new()),
@@ -1316,6 +1319,33 @@ impl FoloApp {
     pub fn toggle_theme(&mut self, cx: &mut Context<Self>) {
         let next = if self.mode == Mode::Dark { Mode::Light } else { Mode::Dark };
         self.set_mode(next, cx);
+    }
+
+    /// Remember the window (restored bounds, maximized or full screen) and the theme for the next
+    /// launch, when this one remembers (`window_state`).
+    pub fn save_window_state(&self, window: &Window, _cx: &App) {
+        use crate::window_state::{Placement, State, WindowMode};
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let (b, mode) = match window.window_bounds() {
+            gpui::WindowBounds::Windowed(b) => (b, WindowMode::Windowed),
+            gpui::WindowBounds::Maximized(b) => (b, WindowMode::Maximized),
+            gpui::WindowBounds::Fullscreen(b) => (b, WindowMode::Fullscreen),
+        };
+        let state = State {
+            window: Some(Placement {
+                x: b.origin.x.into(),
+                y: b.origin.y.into(),
+                width: b.size.width.into(),
+                height: b.size.height.into(),
+                mode,
+            }),
+            theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
+        };
+        if let Err(e) = crate::window_state::save(path, &state) {
+            eprintln!("folo-desktop: couldn't remember the window in {}: {e}", path.display());
+        }
     }
 
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
