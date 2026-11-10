@@ -1096,10 +1096,9 @@ impl Runs {
         let r = &mut st.file.run;
         r.config.device = wanted.device;
         r.config.compute = wanted.compute;
-        // A cloud run resumed here keeps its last cloud state (`released`); `config.compute` says where it runs.
-        if cloud.is_some() {
-            r.cloud = cloud;
-        }
+        // `cloud` is there exactly for a cloud run: one resumed here is a run of this machine from now on (what its
+        // instances cost is in its log and in the ledger).
+        r.cloud = cloud;
         r.status = RunStatus::Queued;
         r.finished = None;
         r.error = None;

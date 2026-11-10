@@ -62,13 +62,15 @@ crates/folo-data     image IO, YOLO/COCO dataset formats, augmentation, batching
 crates/folo-vision   FOLO detector (n/s/m/l), loss, task-aligned assigner, box ops, NMS, mAP, trainer, predictor
 crates/folo-api      serde types of docs/API.md, shared by the server, the CLI and FOLO Desktop
 crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves the built web app
+crates/folo-client   blocking HTTP client of docs/API.md: `folo mcp --server`, cloud workers; transfers in parts
+crates/folo-cloud    cloud compute providers behind one trait (RunPod, a remote FOLO server), docs/CLOUD.md
 crates/folo-mcp      `folo mcp`: the MCP server (rmcp, stdio) over the server's Store, embedded or proxying folo serve
-crates/folo-cli      the `folo` binary (train / val / predict / export / serve / mcp / doctor)
+crates/folo-cli      the `folo` binary (train / val / predict / export / serve / cloud / mcp / doctor)
 crates/folo-wasm     FOLO detectors in the browser (wasm-bindgen; WebGPU or the wasm CPU), docs/WASM.md
 crates/folo-test-support  test-only helpers (a dev-dependency): TestDir / TestFile / ChildGuard, FOLO_TEST_TMP
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust + GPUI, its own cargo workspace; talks to folo-server over docs/API.md)
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md
 docs/                QUICKSTART, ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, MCP, FORMAT (.folo), ROADMAP, BOAT,
-                     BENCHMARKS, WASM, ...; docs/img holds the README screenshots
+                     BENCHMARKS, WASM, CLOUD (training on rented or remote GPUs), ...; docs/img holds the README screenshots
 ```

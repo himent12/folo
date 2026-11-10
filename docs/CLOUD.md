@@ -92,14 +92,15 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
 - **Resuming.** `POST /api/runs` with `resume_run_id` resumes a stopped or failed cloud run on a new instance of
   its `compute` (which may change, like `device`), with a new `Run.cloud`: the copied `weights/last.folo` is
   uploaded and the worker continues it (`checkpoint`, docs/API.md), so the step numbers go on. With `"compute":
-  null` the run resumes on this machine instead; it keeps its last `Run.cloud` (`released`), and `config.compute`
-  says where it trains now.
-- **Restarts.** A cloud run does not need this server: close the laptop and it keeps training. On start the
-  server picks up every cloud run that was `training` (its history is fetched from the worker's cursors) and
-  releases the instances of runs that had not got that far (they become `stopped`). On shutdown cloud runs are
-  left alone, with a log line saying so (`folo mcp` does not stop the cloud runs of its session either). One
-  process follows a run at a time: the one that holds `runs/<id>/cloud.lock`; another shows the run as it was last
-  persisted and refuses to stop it (`409 run_active`).
+  null` the run resumes on this machine instead and is a local run from then on (no `Run.cloud`; what its
+  instances cost stays in its log).
+- **Restarts.** Once it trains, a cloud run does not need this server: close the laptop and it keeps training. A
+  server that shuts down lets go of the runs that train, with a log line saying so (`folo mcp` does the same at the
+  end of its session), and the next start picks each one up again and fetches the history it missed from the
+  worker's cursors. A run that does not train yet has nothing to lose: a shutdown stops it and releases its
+  instance, and a start does the same for one a crash left in that state. One process follows a run at a time: the
+  one that holds `runs/<id>/cloud.lock`; another shows the run as it was last persisted and refuses to stop it
+  (`409 run_active`).
 
 ## Instances are never left behind
 Rented GPUs cost money by the hour, so the ledger is written before the provider is called and survives crashes:
@@ -128,15 +129,20 @@ transit. The proxy cuts connections after 100 seconds, which is why uploads, dow
 short requests.
 - **Credentials**: an API key (`api_key`; RunPod console → Settings → API Keys, with write access to pods).
   Checking it reads the account's email and balance (GraphQL `myself`).
-- **Offers**: every GPU type of the catalog once per cloud it is available in (`<gpu type id>@secure`,
+- **Offers**: every NVIDIA GPU type of the catalog once per cloud it is available in (`<gpu type id>@secure`,
   `<gpu type id>@community`), with the on-demand price and RunPod's stock level as availability. Spot
-  (interruptible) pods are not offered.
+  (interruptible) pods are not offered, and neither are other vendors' GPUs (the worker finds its GPU through the
+  NVIDIA container runtime).
 - **Instance**: an on-demand pod of the offer's GPU type with one GPU, a container disk sized for the dataset
   (`compute.disk_gb`, default: twice the dataset plus 20 GB), port `7878/http`, and the bootstrap script as its
-  command. It terminates itself after the deadline with its pod-scoped key (`self_terminates`).
+  command. The script arms a watchdog before anything else: 10 minutes after the run's time limit, counted from
+  boot, the pod terminates itself with its pod-scoped key (`self_terminates`), and it does the same whenever the
+  script ends (an install that fails, a worker that exits), so a broken pod does not idle at GPU prices. One gap
+  remains: a pod whose package install fails has no `curl` to call RunPod with; it exits, and this server
+  terminates it when the boot times out.
 - **Worker**: the pod starts from a stock Ubuntu image, installs `folo` for Linux from the release of this
-  server's version with `install.sh` (checksum verified) and runs `folo serve --host 0.0.0.0 --token …
-  --tensor-cores`. `worker_base_url` (a connection field, or `FOLO_CLOUD_WORKER_BASE_URL`) names another place to
+  server's version with `install.sh` (checksum verified) and runs `folo serve --host 0.0.0.0 --tensor-cores`
+  with its token in `FOLO_TOKEN` (set on the pod, never written into the script). `worker_base_url` (a connection field, or `FOLO_CLOUD_WORKER_BASE_URL`) names another place to
   download `install.sh` and the release archive from: a mirror, or your own build
   (`<url>/install.sh`, `<url>/folo-x86_64-unknown-linux-gnu.tar.gz` and its `.sha256`). FOLO's GPU backend is
   wgpu on Vulkan: the script installs the Vulkan loader and asks the NVIDIA runtime for its graphics libraries
@@ -149,8 +155,10 @@ A FOLO server you run yourself: `folo serve --host 0.0.0.0 --token <secret>` on 
   host is loopback or a private address.
 - **Offers**: one, the device the server trains on (`/api/system`: its GPU, or its CPU when it has none), with no
   price.
-- No instance is launched or terminated; runs wait in that server's own queue; uploaded datasets stay there and
-  are reused by later runs.
+- No instance is launched or terminated; runs wait in that server's own queue. What a run leaves there stays
+  there: the uploaded dataset (reused by later runs of the same files) and the worker's own copy of the run, named
+  `<name> (<run id>)`. A server that is too old to be a worker is refused when the connection is made
+  (`cloud_refused`, naming its version).
 
 ### Adding a provider
 A provider is one type implementing `folo_cloud::Provider` (check credentials, list offers, launch, look up, find

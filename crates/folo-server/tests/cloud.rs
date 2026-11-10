@@ -597,10 +597,10 @@ fn a_stopped_run_resumes_on_a_new_instance_and_then_here() {
     assert_eq!(store.cloud_instances().unwrap().len(), 2);
     assert!(logged(&store, &run.id, "uploading the checkpoint weights/last.folo"));
 
-    // Here: `compute: null` resumes on this machine; the run keeps its last cloud state.
+    // Here: `compute: null` resumes on this machine, as a run of this machine.
     cloud.hold_epochs(false);
     let here = resume(&store, &run.id, json!({ "compute": null }));
-    assert!(here.config.compute.is_none() && phase(&here) == CloudPhase::Released);
+    assert!(here.config.compute.is_none() && here.cloud.is_none());
     let done = finished(&store, &run.id);
     assert_eq!((done.status, done.epoch), (RunStatus::Completed, 3));
     let m = store.run_metrics(&run.id, &MetricsQuery::default()).unwrap();

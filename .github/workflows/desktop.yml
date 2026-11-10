@@ -7,6 +7,8 @@ on:
       - apps/desktop/**
       - design/**
       - crates/folo-api/**
+      - crates/folo-client/**
+      - crates/folo-cloud/**
       - crates/folo-core/**
       - crates/folo-data/**
       - crates/folo-gpu/**
@@ -19,6 +21,8 @@ on:
       - apps/desktop/**
       - design/**
       - crates/folo-api/**
+      - crates/folo-client/**
+      - crates/folo-cloud/**
       - crates/folo-core/**
       - crates/folo-data/**
       - crates/folo-gpu/**

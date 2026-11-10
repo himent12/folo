@@ -359,8 +359,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   worker, not here. The run does not enter the training queue (`queue_position` stays `null`); `Run.cloud` and
   the `cloud` event say where it is. Resuming one (`resume_run_id`) launches a new instance and continues from the
   checkpoint copied to this machine, with a new `Run.cloud` (its `cost_usd` is the new instance's); `compute` may
-  change like `device`, and `"compute": null` resumes it here: the run then keeps its last `cloud` (`released`), and
-  `config.compute` (now `null`) says where it trains. A cloud run another FOLO process on the data dir follows (it
+  change like `device`, and `"compute": null` resumes it here, as a run of this machine from then on (in the
+  training queue, without `cloud`; what its instances cost stays in its log). A cloud run another FOLO process on the data dir follows (it
   holds the run's `cloud.lock`) is shown as that process last persisted it, and stopping it here is `409
   run_active`.
 - `GET /api/runs/{id}` → `Run`

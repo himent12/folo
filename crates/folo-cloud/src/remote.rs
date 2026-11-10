@@ -13,6 +13,10 @@ use crate::{Account, Endpoint, Error, ErrorKind, Provider, Result, Values};
 pub const REQUIRED_FEATURES: [&str; 3] =
     [folo_api::FEATURE_UPLOADS, folo_api::FEATURE_RUN_CURSORS, folo_api::FEATURE_RUN_CHECKPOINT];
 
+/// The id of the offer of a server that trains on its GPU, and of one that has none and trains on its CPU.
+pub const GPU_OFFER: &str = "gpu";
+pub const CPU_OFFER: &str = "cpu";
+
 const URL_FIELD: &str = "url";
 const TOKEN_FIELD: &str = "token";
 /// Time to reach the server, and to get an answer: these calls answer someone waiting in a form.
@@ -203,10 +207,10 @@ fn offer(system: &SystemResponse) -> CloudOffer {
     };
     let (id, gpu, vram_bytes, detail) = match ordinal {
         Some(n) => match gpus.iter().find(|g| g.ordinal == n) {
-            Some(g) => ("gpu", g.name.clone(), g.memory_bytes, None),
-            None => ("gpu", format!("gpu:{n}"), 0, None),
+            Some(g) => (GPU_OFFER, g.name.clone(), g.memory_bytes, None),
+            None => (GPU_OFFER, format!("gpu:{n}"), 0, None),
         },
-        None => ("cpu", "CPU".to_string(), 0, Some(system.system.cpu.name.clone())),
+        None => (CPU_OFFER, "CPU".to_string(), 0, Some(system.system.cpu.name.clone())),
     };
     CloudOffer {
         id: id.into(),

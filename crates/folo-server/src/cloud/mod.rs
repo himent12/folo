@@ -423,10 +423,12 @@ impl Drop for Cloud {
     }
 }
 
-/// The device a cloud run's time is estimated for: a GPU no measured row of this server is keyed by, so the estimate
-/// is the reference's ([`cloud_estimate`] names it).
+/// The device a cloud run's time is estimated for: one no measured row of this server is keyed by, so the estimate
+/// is the reference's ([`cloud_estimate`] names it): the GPU reference, or the CPU's for a `remote` server that
+/// offers its CPU.
 pub(crate) fn estimate_device(offer: &CloudOffer) -> crate::throughput::DeviceId {
-    crate::throughput::DeviceId { device: "gpu:cloud".into(), device_name: offer.gpu.clone() }
+    let device = if offer.id == folo_cloud::remote::CPU_OFFER { "cpu:cloud" } else { "gpu:cloud" };
+    crate::throughput::DeviceId { device: device.into(), device_name: offer.gpu.clone() }
 }
 
 /// `POST /api/runs/estimate` with `compute`: the reference estimate (for [`estimate_device`]) as the cloud's, with
