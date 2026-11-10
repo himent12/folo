@@ -285,6 +285,10 @@ impl TrainConfig {
                 return bad(format!("{name} must be a finite number >= 0, got {v}"));
             }
         }
+        // The soft targets divide by `m_max + eps`, and `m_max` can be 0.
+        if !(l.tal.eps.is_finite() && l.tal.eps > 0.0) {
+            return bad(format!("loss.tal.eps must be a finite number > 0, got {}", l.tal.eps));
+        }
         if l.tal.topk == 0 || l.tal.topk2 == Some(0) {
             return bad("loss.tal.topk and loss.tal.topk2 must be at least 1".into());
         }
@@ -472,6 +476,25 @@ mod tests {
         }
         assert!(TrainConfig { auto_rule: 0, ..cfg.clone() }.validate().is_err());
         assert!(TrainConfig { auto_rule: AUTO_RULE + 1, ..cfg }.validate().is_err());
+    }
+
+    /// `loss.tal.eps` divides the soft targets (`m · u_max / (m_max + eps)`): at 0 an anchor whose prediction
+    /// misses its box gets a NaN target score, so validation takes only a finite, strictly positive value.
+    #[test]
+    fn tal_eps_must_be_finite_and_positive() {
+        use crate::boxes::Xyxy;
+        let zero = crate::assign::TalConfig { eps: 0.0, ..Default::default() };
+        let gt = Xyxy::new(0.0, 0.0, 32.0, 32.0);
+        let miss = Xyxy::new(100.0, 100.0, 110.0, 110.0);
+        let a = crate::assign::assign(&[0.5], 1, &[miss], &[[16.0, 16.0]], &[gt], &[0], &zero);
+        assert!(a.target_scores[0].is_nan(), "eps 0 divides 0 by 0");
+        let cfg = TrainConfig::default();
+        assert!(cfg.validate().is_ok());
+        for eps in [0.0, -1e-9, f32::NAN, f32::INFINITY] {
+            let mut c = cfg.clone();
+            c.loss.tal.eps = eps;
+            assert!(c.validate().is_err(), "loss.tal.eps = {eps} passed");
+        }
     }
 
     /// `Run.resolved`: `auto` resolved for a short run, and the same numbers back from a `config.json` with the
