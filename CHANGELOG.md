@@ -108,7 +108,7 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 ### Desktop
 - The window works on Windows: Minimize, Maximize and Close in the title bar, dragging and double-clicking the
   title bar (and the sidebar's FOLO row) did nothing, so the window could not be maximized. They work now, and so
-  does resizing from the top edge.
+  does resizing from the top edge; also with the command palette or a dialog open, which stays open.
 - Full screen: `F11`, or Toggle full screen in the command palette; the title bar's buttons work in full screen
   too (Restore leaves it).
 - The window opens where it was closed: its size, place and maximized or full-screen state, and the theme, are

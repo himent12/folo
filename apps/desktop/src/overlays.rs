@@ -162,20 +162,30 @@ impl FoloApp {
         out
     }
 
+    /// The dimmed backdrop under an overlay's panel: a press on it calls `on_click` (dismisses).
+    /// The window's caption areas go over it (`caption_controls`), since it hides the title bar's.
     fn scrim(
         &self,
         t: &Theme,
         id: &'static str,
+        window: &Window,
         cx: &mut Context<Self>,
         on_click: Action,
     ) -> gpui::Stateful<Div> {
-        div().id(id).absolute().top_0().left_0().size_full().bg(t.bg_scrim).occlude().on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _, w, cx| {
-                on_click(this, w, cx);
-                cx.notify();
-            }),
-        )
+        div()
+            .id(id)
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full()
+            .child(div().id("fill").size_full().bg(t.bg_scrim).occlude().on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, w, cx| {
+                    on_click(this, w, cx);
+                    cx.notify();
+                }),
+            ))
+            .child(self.caption_controls(window, cx))
     }
 
     fn palette_items(&self) -> Vec<PaletteItem> {
@@ -308,7 +318,7 @@ impl FoloApp {
         scored.into_iter().map(|(_, _, it)| it).take(40).collect()
     }
 
-    fn palette_view(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn palette_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let items = self.filtered_palette();
         let n = items.len();
@@ -527,7 +537,7 @@ impl FoloApp {
             .top_0()
             .left_0()
             .size_full()
-            .child(self.scrim(&t, "palette-scrim", cx, act(|this, w, cx| this.close_palette(w, cx))))
+            .child(self.scrim(&t, "palette-scrim", window, cx, act(|this, w, cx| this.close_palette(w, cx))))
             .child(crate::ui::appear(panel_el, "palette-in"))
             .into_any_element()
     }
@@ -557,7 +567,7 @@ impl FoloApp {
                 .top_0()
                 .left_0()
                 .size_full()
-                .child(self.scrim(t, "dialog-scrim", cx, on_close))
+                .child(self.scrim(t, "dialog-scrim", window, cx, on_close))
                 .child(
                     div()
                         .absolute()
@@ -3524,7 +3534,13 @@ impl FoloApp {
                 .top_0()
                 .left_0()
                 .size_full()
-                .child(self.scrim(&t, "insp-scrim", cx, act(|this, w, cx| this.close_inspector(w, cx))))
+                .child(self.scrim(
+                    &t,
+                    "insp-scrim",
+                    window,
+                    cx,
+                    act(|this, w, cx| this.close_inspector(w, cx)),
+                ))
                 .child(
                     div()
                         .id("inspector")

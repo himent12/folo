@@ -1,7 +1,8 @@
 # Drives FOLO Desktop's window chrome with real mouse and keyboard input (Windows) and checks what
 # the window did: the caption buttons, double-click and drag on both drag areas, the top resize edge,
 # F11 full screen and its caption buttons, the breadcrumbs and search field inside the title bar,
-# and restoring the size, position and maximized / full-screen state on the next launch.
+# the same with the palette and a dialog open (over their scrim), and restoring the size, position and
+# maximized / full-screen state on the next launch.
 #
 #   tools\window-check.ps1                       # $CARGO_TARGET_DIR\debug\folo-desktop.exe
 #   tools\window-check.ps1 -Exe D:\b\release\folo-desktop.exe
@@ -198,6 +199,51 @@ function Exited([int]$seconds = 6) {
     $script:p.HasExited
 }
 function F11 { [W]::SetForegroundWindow($script:h) | Out-Null; Start-Sleep -Milliseconds 150; [W]::Key(0x7A, 0); Settle 1200 }
+# The sidebar's (static) brand row, which an overlay's scrim dims: whether one is open.
+function BrandFp {
+    $c = [W]::Client($script:h)
+    [W]::Fingerprint([int]($c.Left + 8 * $script:s), [int]($c.Top + 6 * $script:s), [int](200 * $script:s), [int](28 * $script:s))
+}
+function Moved($r, [int]$dx, [int]$dy) {
+    New-Object W+RECT -Property @{ Left = $r.Left + $dx; Top = $r.Top + $dy; Right = $r.Right + $dx; Bottom = $r.Bottom + $dy }
+}
+
+# Launches, opens an overlay with Ctrl + $key, and drives the caption areas over its scrim.
+function OverlayChecks([string]$what, [byte]$key) {
+    Launch "launch with the $what"
+    $r0 = Rect
+    $plain = BrandFp
+    [W]::Key($key, 0x11); Settle
+    $dim = BrandFp
+    Check "${what}: opens and dims the title bar" ($dim -ne $plain) ""
+    $c = [W]::Client($script:h)
+    # The dimmed search field is part of the drag band: a click neither reaches it nor dismisses.
+    [W]::Click([int]($c.Right - (138 + 12 + 140) * $script:s), (Bar)); Settle
+    Check "${what}: a click on the dimmed search field does nothing" (((BrandFp) -eq $dim) -and (Same (Rect) $r0)) (State)
+    [W]::Click((BtnX 1), (Bar)); Settle
+    Check "${what}: Maximize maximizes, it stays open" ((Zoomed) -and ((BrandFp) -eq $dim)) (State)
+    [W]::Click((BtnX 1), (Bar)); Settle
+    Check "${what}: Restore restores, it stays open" ((-not (Zoomed)) -and (Same (Rect) $r0) -and ((BrandFp) -eq $dim)) (State)
+    [W]::Drag((DragX), (Bar), 120, 40); Settle 600
+    Check "${what}: drag title bar moves the window, it stays open" ((Same (Rect) (Moved $r0 120 40) 3) -and ((BrandFp) -eq $dim)) (State)
+    $r1 = Rect
+    [W]::Drag((BrandX), (Bar), -60, -20); Settle 600
+    Check "${what}: drag sidebar brand moves the window, it stays open" ((Same (Rect) (Moved $r1 -60 -20) 3) -and ((BrandFp) -eq $dim)) (State)
+    $rw = Rect
+    [W]::Click((BtnX 2), (Bar)); Settle
+    Check "${what}: Minimize minimizes" (Iconic) (State)
+    [W]::ShowWindow($script:h, 9) | Out-Null; Settle 900
+    [W]::SetForegroundWindow($script:h) | Out-Null; Settle 300
+    Check "${what}: back from the taskbar, still open" ((-not (Iconic)) -and (Same (Rect) $rw) -and ((BrandFp) -eq $dim)) (State)
+    # The dimmed page still dismisses it (left of the 720 px New run dialog in a 1280 px window).
+    $c = [W]::Client($script:h)
+    [W]::Click([int]($c.Left + 256 * $script:s), [int]($c.Top + ($c.Bottom - $c.Top) * 0.6)); Settle
+    Check "${what}: a click on the dimmed page dismisses it" ((BrandFp) -eq $plain) ""
+    [W]::Key($key, 0x11); Settle
+    Check "${what}: opens again" ((BrandFp) -eq $dim) ""
+    [W]::Click((BtnX 0), (Bar))
+    Check "${what}: Close closes the app" (Exited) ""
+}
 
 try {
     # ---- First launch: nothing remembered.
@@ -384,6 +430,11 @@ try {
     [W]::Click((BtnX 0), (Bar))
     Check "Close closes the app" (Exited) ""
     Check "corrupt state: replaced on close" ((Get-Content -Raw $stateFile) -match '"window"') ""
+
+    # ---- With an overlay open (the palette, a dialog), its scrim dims the title bar but the window
+    # still moves, maximizes, minimizes and closes, and none of that dismisses the overlay.
+    OverlayChecks "palette" 0x4B   # Ctrl K
+    OverlayChecks "New run dialog" 0x4E   # Ctrl N
 }
 catch {
     Check "script ran to the end" $false "$_"
