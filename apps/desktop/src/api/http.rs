@@ -607,7 +607,11 @@ pub fn spawn_server(timeout: Duration) -> Result<Spawned, String> {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         let busy = match spawn_server_bin(&bin, left)? {
             Attempt::Started(proc_) => return Ok(Spawned::Started(proc_)),
-            Attempt::InUse(Some(url), Some(dir)) if serves(&url, &dir) => return Ok(Spawned::Running(url)),
+            Attempt::InUse(Some(url), Some(dir))
+                if serves(&url, &dir, deadline.saturating_duration_since(std::time::Instant::now())) =>
+            {
+                return Ok(Spawned::Running(url));
+            }
             Attempt::InUse(..) => "another FOLO process (folo serve or folo mcp) is using the data dir",
         };
         if std::time::Instant::now() + Duration::from_millis(500) >= deadline {
@@ -617,13 +621,23 @@ pub fn spawn_server(timeout: Duration) -> Result<Spawned, String> {
     }
 }
 
-/// Whether the server at `url` serves the data dir `dir` (`serve.json` can be stale, and its port reused).
-fn serves(url: &str, dir: &str) -> bool {
+/// Whether the server at `url` serves the data dir `dir` (`serve.json` can be stale, and its port reused), asked
+/// within `budget` (the start deadline's remainder).
+fn serves(url: &str, dir: &str, budget: Duration) -> bool {
     let same = |a: &str, b: &str| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
     };
-    HttpBackend::new(url).system().ok().and_then(|s| s.data_dir).is_some_and(|d| same(&d, dir))
+    if budget.is_zero() {
+        return false;
+    }
+    let system = agent(Some(budget.min(Duration::from_secs(5))))
+        .get(&format!("{}/api/system", url.trim_end_matches('/')))
+        .call()
+        .ok()
+        .filter(|r| r.status().is_success())
+        .and_then(|mut r| r.body_mut().read_json::<SystemResponse>().ok());
+    system.and_then(|s| s.data_dir).is_some_and(|d| same(&d, dir))
 }
 
 /// One start of `folo serve`.

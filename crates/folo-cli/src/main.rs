@@ -147,7 +147,8 @@ pub(crate) fn data_dir(given: Option<PathBuf>) -> Result<PathBuf, CliError> {
         )
         .hint("pass a folder (it is created when it does not exist)"));
     }
-    Ok(dir)
+    // Absolute, so what a server reports (`/api/system`, `serve.json`) means the same from any working directory.
+    Ok(std::path::absolute(&dir).unwrap_or(dir))
 }
 
 fn init_tracing() {
