@@ -233,7 +233,12 @@ impl ShiftedRows {
             let src = planes[ci];
             // The `pstride - plane` floats after each plane are zeros: the dropped columns of the last output
             // row read into them, and the weight gradient multiplies those by its zero columns (a recycled
-            // buffer's NaN there would make 0 · NaN).
+            // buffer's NaN there would make 0 · NaN). The gap is not the only place dropped columns read: they
+            // wrap into the next row of the plane and, when the gap is shorter than `(kw - 1) · dx`, into the next
+            // plane. Those floats are the input itself, so with a non-finite input (an inf or NaN in `x`) the
+            // weight gradient can be NaN at neighbouring taps of the same or the previous channel where the
+            // naive sum stays finite. That is accepted: the naive path's gradient of the same weight tensor is
+            // already non-finite then, and the trainer reacts to non-finite values per tensor, never per element.
             for s in 0..phases.len() {
                 dst[s * pstride + plane..(s + 1) * pstride].iter_mut().for_each(|v| *v = 0.0);
             }
