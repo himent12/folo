@@ -207,9 +207,11 @@ impl State {
     pub fn bench(&self) -> Bench {
         let f = &self.file;
         let entries: Vec<&BenchEntry> = self.entries.iter().map(|e| &e.entry).collect();
-        // The leaderboard's first entry, when it is finished.
-        let best =
-            ranked(&entries).first().filter(|e| e.status == BenchEntryStatus::Done).map(|e| BenchBest {
+        // The leaderboard's first entry, when it is finished and was graded on the benchmark as it is.
+        let best = ranked(&entries, &self.fingerprint)
+            .first()
+            .filter(|e| e.status == BenchEntryStatus::Done && e.fingerprint == self.fingerprint)
+            .map(|e| BenchBest {
                 entry_id: e.id.clone(),
                 name: e.name.clone(),
                 score: e.score.as_ref().map_or(0.0, |s| s.total),
@@ -258,7 +260,7 @@ impl State {
     /// The leaderboard ([`ranked`]).
     pub fn leaderboard(&self) -> Vec<BenchEntry> {
         let entries: Vec<&BenchEntry> = self.entries.iter().map(|e| &e.entry).collect();
-        ranked(&entries).into_iter().cloned().collect()
+        ranked(&entries, &self.fingerprint).into_iter().cloned().collect()
     }
 
     /// Whether an entry or a loop of the benchmark is active.
@@ -277,21 +279,24 @@ impl State {
     }
 }
 
-/// The leaderboard's order of `entries` (given in creation order): finished entries that are complete
-/// (`score.partial` false) by score, highest first; then finished partial entries by score; equal scores keep the
-/// older entry first; then the unfinished ones, newest first. A benchmark's `best` is the first of this order when
-/// it is finished.
-pub fn ranked<'a>(entries: &[&'a BenchEntry]) -> Vec<&'a BenchEntry> {
+/// The leaderboard's order of `entries` (given in creation order) of a benchmark whose fingerprint is
+/// `fingerprint`: finished entries with that fingerprint that are complete (`score.partial` false) by score,
+/// highest first; then finished partial ones by score; then finished entries with another fingerprint (graded
+/// before the engine changed: they do not compare with the others) by score; equal scores keep the older entry
+/// first; then the unfinished ones, newest first. A benchmark's `best` is the first of this order when it is
+/// finished and has the benchmark's fingerprint.
+pub fn ranked<'a>(entries: &[&'a BenchEntry], fingerprint: &str) -> Vec<&'a BenchEntry> {
     let group = |e: &BenchEntry| match (&e.score, e.status) {
+        (_, BenchEntryStatus::Done) if e.fingerprint != fingerprint => 2,
         (Some(s), BenchEntryStatus::Done) if !s.partial => 0,
         (_, BenchEntryStatus::Done) => 1,
-        _ => 2,
+        _ => 3,
     };
     let total = |e: &BenchEntry| e.score.as_ref().map_or(0.0, |s| s.total);
     let mut order: Vec<(usize, &BenchEntry)> = entries.iter().copied().enumerate().collect();
     order.sort_by(|(i, a), (j, b)| {
         group(a).cmp(&group(b)).then_with(|| {
-            if group(a) == 2 { j.cmp(i) } else { total(b).total_cmp(&total(a)).then_with(|| i.cmp(j)) }
+            if group(a) == 3 { j.cmp(i) } else { total(b).total_cmp(&total(a)).then_with(|| i.cmp(j)) }
         })
     });
     order.into_iter().map(|(_, e)| e).collect()
@@ -659,9 +664,10 @@ mod tests {
             entry("failed", S::Failed, None),
             entry("partial-low", S::Done, Some((10.0, true))),
             entry("queued-new", S::Queued, None),
+            BenchEntry { fingerprint: "older".into(), ..entry("older-engine", S::Done, Some((99.0, false))) },
         ];
         let refs: Vec<&BenchEntry> = entries.iter().collect();
-        let order: Vec<&str> = ranked(&refs).iter().map(|e| e.id.as_str()).collect();
+        let order: Vec<&str> = ranked(&refs, "").iter().map(|e| e.id.as_str()).collect();
         assert_eq!(
             order,
             [
@@ -670,6 +676,7 @@ mod tests {
                 "complete-tie",
                 "partial-high",
                 "partial-low",
+                "older-engine",
                 "queued-new",
                 "failed",
                 "running-old"
@@ -691,6 +698,8 @@ mod tests {
         let best = state(vec![entries[0].clone(), entries[2].clone()]).bench().best.unwrap();
         assert_eq!((best.entry_id.as_str(), best.partial), ("partial-high", true));
         assert!(state(vec![entries[2].clone(), entries[5].clone()]).bench().best.is_none());
+        // An entry graded on another fingerprint never leads, whatever its score.
+        assert!(state(vec![entries[8].clone(), entries[2].clone()]).bench().best.is_none());
         // The plan is frozen by a done or an active entry, not by a failed or stopped one.
         assert!(state(vec![entries[5].clone(), entry("s", S::Stopped, None)]).frozen_by().is_none());
         assert_eq!(

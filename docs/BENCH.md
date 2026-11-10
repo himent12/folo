@@ -32,6 +32,8 @@ grades what a model sees.
   one on the benchmark is a fixed test (failed and stopped entries do not count: they compare with nothing).
 - **A fingerprint.** A hash of the images, the truth, the plan, the seed and the version of the engine that
   grades (the conditions' pixels and the score's definitions). Two entries compare when their fingerprints agree.
+  An entry graded before an upgrade changed the engine keeps its old fingerprint: it stays on the leaderboard
+  below the current ones, marked, until it is run again.
 
 Keep benchmark images out of training. A benchmark made from a dataset's `val` or `test` split is held out from a
 run that trains on its `train` split; one made from the split a model trained on measures memory, not sight.
@@ -242,8 +244,10 @@ labels were never read. The students are folo-s, 40 epochs each.
 
 Verdict: **improved**. The first generation is clearly above the teacher's interval; the second holds it. The
 teacher's own entry had said it would label 94% of all objects at 90% precision (`ready`). A weaker teacher,
-trained on 128 images (mAP 0.20), reached 90% precision only where it kept 14 boxes on the whole pool: its loop
-ends at the labeling step, which is what `not_ready` predicts.
+trained on 128 images (mAP 0.198), never reaches 90% precision on ten or more labels: its entry is `not_ready`
+with no threshold, and its loop ends right after that entry, before anything is labeled or trained ("never
+reaches 90% precision on at least 10 labels on this benchmark, so there is no confidence to label the pool
+from"). It can still be run with a confidence set by hand; the entry's label chart shows what that would cost.
 
 ## In Studio
 **Benchmarks** in the sidebar (on a phone: under Models).

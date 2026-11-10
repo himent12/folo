@@ -940,9 +940,12 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
 
 **Entries**
 - `GET /api/bench/benchmarks/{id}/entries` → `{ "entries": [BenchEntry] }`: the leaderboard. First the `done`
-  entries that are complete (`score.partial` false) by `score.total`, highest first; then the `done` partial
-  entries by `score.total`; equal scores keep the older entry first; then every other entry (queued, running,
-  stopping, failed, stopped), newest first. `Bench.best` is the first of this order when it is `done`.
+  entries with the benchmark's `fingerprint` that are complete (`score.partial` false) by `score.total`, highest
+  first; then the `done` partial ones by `score.total`; then `done` entries with another `fingerprint` (graded
+  before an upgrade changed the engine: they do not compare with the others until they are run again) by
+  `score.total`; equal scores keep the older entry first; then every other entry (queued, running, stopping,
+  failed, stopped), newest first. `Bench.best` is the first of this order when it is `done` and has the
+  benchmark's fingerprint.
 - `POST /api/bench/benchmarks/{id}/entries` body `StartBenchEntry` → `201 BenchEntry`:
   `{ "contestant": { "kind": "model", "model_id" } | { "kind": "agent", "agent", "model"?, "effort"? } |
   { "kind": "external", "scored"?: true, "open"?: false, "predictions"?: [BenchPrediction] }, "name"?,

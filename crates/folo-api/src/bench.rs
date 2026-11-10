@@ -244,8 +244,8 @@ pub struct Bench {
     pub fingerprint: String,
     /// Entries, whatever their status.
     pub entries: u64,
-    /// The leaderboard's first entry when it is finished: the complete entry with the highest score (the older
-    /// one of equal scores), else the partial one; `null` before the first.
+    /// The leaderboard's first entry when it is finished and has this fingerprint: the complete entry with the
+    /// highest score (the older one of equal scores), else the partial one; `null` before the first.
     pub best: Option<BenchBest>,
     /// True while an entry of the benchmark is queued, running or stopping, or a loop of it is running or
     /// stopping (deleting it is then `409 bench_active`). A `bench` event is sent when it changes.
@@ -634,8 +634,9 @@ pub struct BenchAxisScore {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BenchEntryList {
-    /// The leaderboard: finished complete entries by score, highest first; then finished partial entries by score;
-    /// equal scores keep the older entry first; then the unfinished ones (and failed and stopped), newest first.
+    /// The leaderboard: finished complete entries with the benchmark's fingerprint by score, highest first; then
+    /// finished partial ones by score; then finished entries with another fingerprint by score; equal scores keep
+    /// the older entry first; then the unfinished ones (and failed and stopped), newest first.
     pub entries: Vec<BenchEntry>,
 }
 
