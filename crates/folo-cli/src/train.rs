@@ -248,8 +248,8 @@ const FLAG_ONLY_KEYS: [(&str, &str); 6] = [
 ];
 
 /// `--set KEY=VALUE`: `cfg` with each dotted key of its JSON form replaced by the value (JSON when it parses as
-/// JSON, else a string). A key the config does not have, a key of [`FLAG_ONLY_KEYS`], or a value its field cannot
-/// take, is `invalid_config`.
+/// JSON, else a string; an object is merged into the key's object). A key the config does not have (at any depth), a
+/// key of [`FLAG_ONLY_KEYS`], or a value its field cannot take, is `invalid_config`.
 fn apply_sets(cfg: TrainConfig, sets: &[String]) -> Result<TrainConfig, CliError> {
     if sets.is_empty() {
         return Ok(cfg);
@@ -284,9 +284,29 @@ fn apply_sets(cfg: TrainConfig, sets: &[String]) -> Result<TrainConfig, CliError
                 }
             };
         }
-        *slot = serde_json::from_str(raw.trim()).unwrap_or_else(|_| json!(raw.trim()));
+        let value = serde_json::from_str(raw.trim()).unwrap_or_else(|_| json!(raw.trim()));
+        merge(slot, value).map_err(|path| bad(format!("--set {key}: no training key `{path}`")))?;
     }
     serde_json::from_value(v).map_err(|e| bad(format!("--set: {e}")))
+}
+
+/// `value` written into `slot`: an object into an object key by key (keys it leaves out keep their values), anything
+/// else replacing it. A key the slot's object does not have is `Err` with its dotted path (the config's structs would
+/// drop it silently).
+fn merge(slot: &mut serde_json::Value, value: serde_json::Value) -> Result<(), String> {
+    match (slot, value) {
+        (serde_json::Value::Object(have), serde_json::Value::Object(given)) => {
+            for (k, v) in given {
+                let next = have.get_mut(&k).ok_or_else(|| k.clone())?;
+                merge(next, v).map_err(|path| format!("{k}.{path}"))?;
+            }
+            Ok(())
+        }
+        (slot, value) => {
+            *slot = value;
+            Ok(())
+        }
+    }
 }
 
 fn resume(
@@ -743,6 +763,29 @@ mod tests {
             let e = apply_sets(TrainConfig::default(), &sets(&[bad])).unwrap_err();
             assert_eq!(e.code, "invalid_config", "{bad}");
         }
+    }
+
+    /// An object value is merged into the key's object: a misspelt key at any depth is `invalid_config` (it was
+    /// dropped by the structs' `serde(default)`, keeping the default), and keys it leaves out keep their values
+    /// (`--mosaic 0` survived only until `--set augment={...}` reset the whole object to its defaults).
+    #[test]
+    fn set_object_values_reject_unknown_keys_and_merge() {
+        let set = |cfg, s: &str| apply_sets(cfg, &[s.to_string()]);
+        for bad in [
+            r#"loss={"cls_gian":1.0}"#,
+            r#"loss={"tal":{"topk":13,"nope":1}}"#,
+            r#"augment={"degres":5}"#,
+            r#"loss.tal={"top_k":13}"#,
+        ] {
+            let e = set(TrainConfig::default(), bad).unwrap_err();
+            assert_eq!(e.code, "invalid_config", "{bad}");
+        }
+        let mut cfg = TrainConfig::default();
+        cfg.augment.mosaic = 0.0;
+        let c = set(cfg, r#"augment={"degrees":5}"#).unwrap();
+        assert_eq!((c.augment.mosaic, c.augment.degrees), (0.0, 5.0));
+        let c = set(TrainConfig::default(), r#"loss={"cls_gain":1.0,"tal":{"topk":13}}"#).unwrap();
+        assert_eq!((c.loss.cls_gain, c.loss.tal.topk, c.loss.box_gain), (1.0, 13, 7.5));
     }
 
     /// Keys whose flags have side effects are refused with the flag to use: `--set name=X` was ignored, `dataset`
