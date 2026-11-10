@@ -464,11 +464,31 @@ fn multi_tensor_updates_match_single() {
             }
         }
     }
-    // A storage used twice is refused (the caller then updates one by one).
-    let gs: Vec<&Tensor> = vec![&g[0], &g[0]];
-    let ps: Vec<&Tensor> = vec![&p0[0], &p0[1]];
+    // A written storage used twice, or a gradient on a written storage, is refused (the caller then updates one by
+    // one); gradients that view one storage are fine.
     let none = vec![Vec::new(), Vec::new()];
-    assert!(!Tensor::optimizer_step_many_(&ps, &gs, &none, &OptimStep::Axpby { a: 1.0, b: 1.0 }).unwrap());
+    let axpby = OptimStep::Axpby { a: 1.0, b: 1.0 };
+    assert!(!Tensor::optimizer_step_many_(&[&p0[0], &p0[0]], &[&g[0], &g[1]], &none, &axpby).unwrap());
+    assert!(!Tensor::optimizer_step_many_(&[&p0[0], &p0[1]], &[&g[0], &p0[0]], &none, &axpby).unwrap());
+    // MuSGD's parameter update: the gradients are views at nonzero offsets into one stacked result (its
+    // orthogonalised bucket). The multi-tensor path takes them, bit for bit the per-tensor fallback's
+    // `add_scaled_assign`.
+    let stacked = Tensor::randn([5, 4, 33], 0.0, 1.0, rng).to_device(dev).unwrap();
+    let views: Vec<Tensor> =
+        (0..5).map(|i| stacked.narrow(0, i, 1).unwrap().reshape([4, 3, 11]).unwrap()).collect();
+    let base: Vec<Tensor> =
+        (0..5).map(|_| Tensor::randn([4, 3, 11], 0.0, 1.0, rng).to_device(dev).unwrap()).collect();
+    let (pa, pb) = (copy(&base), copy(&base));
+    let step = OptimStep::Axpby { a: 1.0, b: -0.002 };
+    let none = vec![Vec::new(); 5];
+    let (ps, vs): (Vec<&Tensor>, Vec<&Tensor>) = (pb.iter().collect(), views.iter().collect());
+    assert!(Tensor::optimizer_step_many_(&ps, &vs, &none, &step).unwrap(), "views of one storage");
+    for (p, v) in pa.iter().zip(&views) {
+        p.add_scaled_assign(v, -0.002).unwrap();
+    }
+    for (i, (a, b)) in pa.iter().zip(&pb).enumerate() {
+        assert_eq!(a.to_vec::<f32>().unwrap(), b.to_vec::<f32>().unwrap(), "view {i}");
+    }
     // Unscale and check, finite and with an overflow in one tensor.
     for overflow in [false, true] {
         let (xa, xb) = (copy(&p0), copy(&p0));

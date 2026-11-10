@@ -551,8 +551,9 @@ pub trait Backend: Send + Sync + 'static {
     }
 
     /// [`Backend::optimizer_step`] for many parameters with the same update, in as few kernels as the backend
-    /// can (the GPU: one per 16 tensors). Every item holds what one `optimizer_step` call takes; no storage
-    /// appears twice. Reached through `Tensor::optimizer_step_many_`.
+    /// can (the GPU: one per 16 tensors). Every item holds what one `optimizer_step` call takes; no written
+    /// storage appears twice and no gradient views a written one (gradients may view one storage). Reached through
+    /// `Tensor::optimizer_step_many_`.
     fn optimizer_step_many(&self, items: &mut [OptimItem<'_>], step: &OptimStep) -> Result<()> {
         unsupported!(self, "optimizer_step_many")
     }

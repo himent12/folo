@@ -400,7 +400,8 @@ impl Tensor {
     /// ([`crate::backend::Backend::optimizer_step_many`]; the GPU updates 16 tensors per dispatch). The arithmetic
     /// per element is that of `optimizer_step_`. Returns `Ok(false)`, touching nothing, when the backend has no
     /// such kernel or any tensor does not fit one (as for `optimizer_step_`, and every tensor on one device, no
-    /// storage used twice in the whole call); the caller then updates them one by one.
+    /// written storage used twice and no gradient on a written storage; gradients, only read, may share one, as the
+    /// views of one batched result do); the caller then updates them one by one.
     pub fn optimizer_step_many_(
         params: &[&Tensor],
         grads: &[&Tensor],
@@ -448,27 +449,36 @@ impl Tensor {
             }
         }
         let mut seen = std::collections::HashSet::new();
-        if !mutated
-            .clone()
-            .chain(grads.iter().copied())
-            .all(|t| seen.insert(std::sync::Arc::as_ptr(t.cell())))
+        if !mutated.clone().all(|t| seen.insert(std::sync::Arc::as_ptr(t.cell())))
+            || grads.iter().any(|g| seen.contains(&std::sync::Arc::as_ptr(g.cell())))
         {
             return Ok(false);
         }
         let b = first.backend()?;
         let r = {
-            let gr: Vec<_> = grads.iter().map(|g| g.cell().read()).collect();
+            // One read guard per gradient storage (taking a lock twice on one thread can deadlock).
+            let mut slot = std::collections::HashMap::new();
+            let mut gr = Vec::new();
+            let gi: Vec<usize> = grads
+                .iter()
+                .map(|g| {
+                    *slot.entry(std::sync::Arc::as_ptr(g.cell())).or_insert_with(|| {
+                        gr.push(g.cell().read());
+                        gr.len() - 1
+                    })
+                })
+                .collect();
             let mut pw: Vec<_> = params.iter().map(|p| p.cell().write_unversioned()).collect();
             let mut sw: Vec<Vec<_>> =
                 states.iter().map(|s| s.iter().map(|t| t.cell().write_unversioned()).collect()).collect();
             let mut items: Vec<crate::backend::OptimItem<'_>> = pw
                 .iter_mut()
-                .zip(&gr)
+                .zip(&gi)
                 .zip(grads)
                 .zip(sw.iter_mut())
-                .map(|(((p, gs), g), s)| crate::backend::OptimItem {
+                .map(|(((p, &k), g), s)| crate::backend::OptimItem {
                     param: p,
-                    grad: crate::backend::View::new(gs, g.layout()),
+                    grad: crate::backend::View::new(&gr[k], g.layout()),
                     state: s.iter_mut().map(|t| &mut **t).collect(),
                 })
                 .collect();

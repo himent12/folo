@@ -5,7 +5,8 @@
 //! `FOLO_BENCH_SECTIONS=forward,predict,train` the sections, default all; `FOLO_BENCH_TRAIN=f32,amp` the
 //! training precisions, default both, `amp` only on a context with tensor cores; `FOLO_BENCH_CLIP=1` adds the
 //! trainer's global-norm gradient clipping (`clip_grad_norm` 10, through a `GradAccumulator` as in training) to
-//! the training step, default off so the documented rows stay comparable).
+//! the training step, default off so the documented rows stay comparable; `FOLO_BENCH_OPTIM=musgd` trains with
+//! MuSGD instead of SGD).
 //!
 //! Per scale, 80 classes, 640×640, untrained (seed-0) weights, inference in f32 and f16 (half precision: f16
 //! weights and activations, f32 accumulation; the input is f16 too, and the predictor letterboxes into f16):
@@ -39,7 +40,7 @@ use folo_core::rng::Rng;
 use folo_core::{DType, Device, Tensor, no_grad};
 use folo_data::{Image, Letterbox, LetterboxOptions};
 use folo_gpu::GpuContext;
-use folo_nn::optim::{GradAccumulator, Optimizer, Sgd, StandardGroups};
+use folo_nn::optim::{GradAccumulator, MuSgd, Optimizer, Sgd, StandardGroups};
 use folo_nn::{GradScaler, Module};
 use folo_vision::boxes::Xyxy;
 use folo_vision::loss::{ImageTargets, LossConfig, detection_loss, detection_loss_host};
@@ -240,7 +241,13 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     let mut model = FoloModel::new(cfg).expect("model");
     model.to_device(dev).expect("to_device");
     let groups = StandardGroups::from_module(&model).into_groups(0.01, 0.937, 5e-4);
-    let mut opt = Sgd::new(groups).expect("sgd");
+    let musgd = std::env::var("FOLO_BENCH_OPTIM").is_ok_and(|v| v == "musgd");
+    let optim = if musgd { "MuSGD" } else { "SGD" };
+    let mut opt: Box<dyn Optimizer> = if musgd {
+        Box::new(MuSgd::new(groups).expect("musgd"))
+    } else {
+        Box::new(Sgd::new(groups).expect("sgd"))
+    };
     let mut acc = GradAccumulator::new(&model.parameters());
     let mut scaler = GradScaler::new();
     let mut skipped = 0;
@@ -341,7 +348,7 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     ctx.reset_peak_memory();
     let s = stats((0..10).map(|_| step(false, false).0).collect());
     let peak = ctx.pool_stats().peak_live_bytes;
-    row(&format!("train step b16 ({label}, SGD)"), &s, 16);
+    row(&format!("train step b16 ({label}, {optim})"), &s, 16);
     let mut split = |host: bool| {
         step(true, host);
         let runs: Vec<([Duration; 4], [Duration; 4])> =
@@ -354,7 +361,7 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     println!(
         "    split (medians, each phase synchronised): forward {f:.1} ms, loss {l:.1} ms, backward {b:.1} ms, \
          {} {o:.1} ms; {} dispatches and {} submissions per step; peak {:.0} MiB",
-        if amp { "unscale + check + SGD" } else { "SGD" },
+        if amp { format!("unscale + check + {optim}") } else { optim.to_string() },
         (w1.dispatches - w0.dispatches) / 3,
         (w1.submissions - w0.submissions) / 3,
         mib(peak)

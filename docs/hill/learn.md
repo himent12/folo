@@ -121,6 +121,11 @@ has the update. P1, 20 epochs, `--optimizer musgd` / `optimizer=MuSGD` (lr0 0.01
   SGD's 20-epoch AP (0.083) at about epoch 13 (internal mAP50-95 0.084 / 0.087), i.e. 13 × 1.17 ≈ 15 SGD-epochs of
   time instead of 20, and ends 0.03 AP higher. Fusing the Newton–Schulz iteration (one kernel per bucket) is the
   follow-up that would take most of the 17 % back.
+- Review fix: the Muon parameter update (`p −= 0.2 · lr · O`, O views into its bucket's stacked result) fell back
+  to one `add_scaled_assign` per tensor, because the multi-tensor call refused gradients sharing a storage; it now
+  takes them (one read guard per storage), bit for bit the fallback. `cargo bench --bench gpu` train step, folo-n
+  640 px b16 f32, 3 alternated rounds: MuSGD 51.4–51.7 → 50.7–51.1 ms (2265 → 2097 dispatches per step), SGD
+  47.7–48.9 ms on both builds, so MuSGD costs about 6% of this step (the 17 % above is the 320 px proxy's).
 
 **Shipped: `auto` rule 3** (`AUTO_RULE = 3`): long runs (> 10,000 iterations, e.g. full COCO) pick MuSGD at lr0
 0.01, momentum 0.9, as the reference does since 8.4; short runs are rule 2's AdamW. **Not validated by a run:**
