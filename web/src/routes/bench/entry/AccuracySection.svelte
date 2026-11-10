@@ -69,7 +69,8 @@
           <li>
             <span class="s-name">{s.name}<span class="s-range">{s.range}</span></span>
             {#if s.v === null}
-              <span class="s-none">None in this benchmark</span>
+              <!-- Measured on the images it ran: an entry on a part of them may miss a size the others have. -->
+              <span class="s-none">{entry.images < bench.images ? `None in the ${num(entry.images)} images it ran` : 'None in this benchmark'}</span>
             {:else}
               <span class="bar" aria-hidden="true"><span class="fill" style:width={at(s.v)}></span></span>
               <span class="s-v num">{metric(s.v)}</span>

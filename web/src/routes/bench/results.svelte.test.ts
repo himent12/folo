@@ -14,6 +14,7 @@ import BenchEntry from '../BenchEntry.svelte';
 import BenchLoop from '../BenchLoop.svelte';
 import BenchmarkPage from '../Benchmark.svelte';
 import type { Bench, BenchEntry as BenchEntryT, BenchResult as BenchResultT } from '$lib/api/types';
+import AccuracySection from './entry/AccuracySection.svelte';
 import CalibrationSection from './entry/CalibrationSection.svelte';
 import { GALLERY_PAGE } from './entry/ImagesSection.svelte';
 import SelfLabelSection from './entry/SelfLabelSection.svelte';
@@ -496,6 +497,19 @@ describe('the calibration panel', () => {
     flushSync();
     expect(document.querySelector('#calibration .tone')?.textContent).toBe('Well calibrated');
     expect(document.querySelector('#calibration .sentence')?.textContent).toBe('Close to the diagonal on average (ECE 0.02). Some of its scores are off by more: read the bins.');
+  });
+});
+
+describe('the accuracy panel', () => {
+  it('says a size is missing from the images an entry ran, not from a benchmark it ran a part of', async () => {
+    // An agent's 48 of 360 images hold no small object; the others may (the server measures the images it ran).
+    const accuracy = { map50_95: 0.4, ci95: [0.35, 0.45], map50: 0.6, map75: 0.4, precision: 0.8, recall: 0.5, f1: 0.6, best_conf: 1, map_small: null, map_medium: 0.4, map_large: 0.45, per_class: [] };
+    const bench = { classes: [], images: 360 } as unknown as Bench;
+    c = mount(AccuracySection, { target, props: { result: { accuracy } as unknown as BenchResultT, entry: { images: 48, scored: false, missing_classes: [] } as unknown as BenchEntryT, bench } });
+    flushSync();
+    const small = [...document.querySelectorAll('#accuracy .sizes li')].find((li) => /Small/.test(li.textContent ?? ''))!;
+    expect(small.textContent).not.toMatch(/in this benchmark/);
+    expect(small.textContent).toMatch(/None in the 48 images it ran/);
   });
 });
 
