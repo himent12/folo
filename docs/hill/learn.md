@@ -138,8 +138,19 @@ fine-tune is unchanged by construction.
    on this proxy there is nothing left to fix in the trainer.
 2. **MuSGD** (Ultralytics 8.4's `auto` choice for runs over 10,000 iterations, so its long COCO runs no longer use
    plain SGD). FOLO's long-run `auto` is still SGD, which on the proxy is level with the reference's SGD; whether
-   MuSGD gains anything is the probe below. If it does, implement it in folo-nn as an opt-in optimizer (Newton–Schulz
-   on every conv weight per step: about 15 small matmuls per tensor on the GPU), then make it the long-run choice.
+   MuSGD gains anything was probed on the reference only (`ultra-musgd-s0`: `optimizer=MuSGD`, otherwise exactly
+   `ultra-sgd-s0`; stopped after epoch 7 to keep the GPU hold under 25 min). Ultralytics' own val mAP50-95 per epoch:
+
+   | epoch | 3 | 4 | 5 | 6 | 7 |
+   |---|---:|---:|---:|---:|---:|
+   | SGD | 0.0038 | 0.0094 | 0.0178 | 0.0253 | 0.0270 |
+   | MuSGD | 0.0094 | 0.0173 | 0.0312 | 0.0378 | 0.0424 |
+
+   MuSGD is about 1.5x ahead of SGD at epoch 7, a large early-training gain (the end-of-run gap is not measured).
+   This is the most promising lever left: implement MuSGD in folo-nn as an opt-in optimizer (Newton–Schulz on every
+   conv weight per step: about 15 small matmuls per tensor on the GPU; a second momentum buffer in the checkpoint's
+   `folo.optim`), confirm on P1 to epoch 20 against both SGD runs, then make it `auto`'s long-run choice under a
+   rule 3.
 3. **AdamW floor 0.002** with shapes + R6 gates (proxy +0.010 AP over 0.001).
 4. The web mock's copy of the `auto` rule (`web/src/lib/api/mock/runs.ts`) still has rule 1; only its offline
    estimates are affected (the real server resolves with folo-vision).
