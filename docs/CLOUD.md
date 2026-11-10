@@ -201,6 +201,10 @@ A FOLO server you run yourself: `folo serve --host 0.0.0.0 --token <secret>` on 
   there: the uploaded dataset (reused by later runs of the same files) and the worker's own copy of the run, named
   `<name> (<run id>)`. A server that is too old to be a worker is refused when the connection is made
   (`cloud_refused`, naming its version).
+- A start request whose answer was lost is found again as the new run of that name on the server, so two FOLO
+  servers that share one `remote` worker and have a run of the same name and id (ids are short) can take each
+  other's run for their own in that moment. Give each control plane its own worker, or distinct run names, until
+  the worker keeps an identity of each attempt.
 
 ### Adding a provider
 A provider is one type implementing `folo_cloud::Provider` (check credentials, list offers, launch, look up, find
