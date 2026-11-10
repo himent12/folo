@@ -17,8 +17,9 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
   the old 0.000119), rule 3 picks MuSGD for runs over 10,000 iterations (its +0.031 AP over SGD on the COCO proxy was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run; a long COCO run under rule 3 is the follow-up). Checkpoints resume with the rule they were
   started with (`TrainConfig.auto_rule`; a missing field is rule 1), so resumed runs keep their optimizer;
   `--set auto_rule=2` keeps SGD for a new long run. `--set KEY=VALUE` sets any `train` config key.
-- The data loader defaults to up to 16 workers (was 8); the next epoch's loader starts while the last batches of the
-  previous one train, and checkpoints download in one transfer per dtype.
+- The data loader defaults to up to 16 workers (was 8); the next epoch's loader starts once the previous epoch has taken
+  its last batch (it works during validation and the checkpoint writes), and checkpoints download in one transfer
+  per dtype and 128 MiB chunk.
 - The GPU submits its command batch every 64 dispatches (was 1024), starting at 16 after an idle wait so the GPU
   starts early (`FOLO_GPU_FLUSH_EVERY` overrides it); `FOLO_GPU_PROFILE=1` turns on the per-kernel GPU timer
   (docs/GPU.md, Profiling).

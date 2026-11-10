@@ -341,10 +341,10 @@ indistinguishable from `main` (mean AP 0.0848 vs 0.0857, 3 of 5 seeds lower; [hi
 
 ### Against the agents' own claims
 
-No merged number is more than 10% worse than the claim in its notebook. Every GPU inference row is at or better than
-the gpu-infer table (the closest, folo-n f32 forward b16, 1648 vs 1660 img/s), the training step is above gpu-train's
+No merged number is more than 10% worse than the claim in its notebook. Every GPU inference row beats or ties
+the gpu-infer table (the closest, folo-n f32 forward b16, 1648 vs 1660 img/s, is a tie at −0.7%), the training step is above gpu-train's
 alternated medians (folo-n 327 / 537 vs 307 / 502 img/s, folo-s 151 / 273 vs 140 / 246; its quiet-window single run
-gave 327 / 533 and 153 / 269), `folo val` takes 8.9 vs 10.8 s, the CPU train step 269 vs 280–295 ms and folo-n
+gave 327 / 533 and 153 / 269), `folo val` takes 8.9 vs 10.8 s (quiet here, under load in the notebook), the CPU train step 269 vs 280–295 ms and folo-n
 `predict_batch` 151 vs 159–163 ms. `main` measured faster here than in the agents' tables too (the folo-n f32 step
 242 vs 226 img/s, folo-n f32 e2e b16 759 vs 683 img/s): this machine was quiet, theirs was not. The one claim that
 changed is row 10 in f32: a tie on the trainer-data branch alone, a clear win merged.
