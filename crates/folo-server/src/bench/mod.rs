@@ -28,7 +28,7 @@ mod state;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -130,7 +130,7 @@ fn enqueue_model(
         resolved.missing,
     );
     let cancel = Arc::new(AtomicBool::new(false));
-    add_entry(slot, &mut state, entry.clone(), cancel.clone(), None)?;
+    add_entry(slot, &mut state, entry.clone(), cancel.clone(), None, None)?;
     drop(state);
     engine.push(Job {
         slot: slot.clone(),
@@ -149,6 +149,17 @@ fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<BenchEntry> {
     let mut state = slot.live()?;
     let bench = state.file.id.clone();
     let e = state.entry_mut(id).ok_or_else(|| state::entry_not_found(&bench, id))?;
+    // An open external entry is discarded: what it received is dropped, nothing is scored.
+    if let Some(fill) = e.open.take() {
+        fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner).closed = true;
+        e.entry.status = BenchEntryStatus::Stopped;
+        e.entry.finished = Some(rfc3339(unix_now()));
+        let entry = e.entry.clone();
+        slot.save_entry(&state, &entry, None)?;
+        slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
+        slot.emit_bench(&state);
+        return Ok(entry);
+    }
     match e.entry.status {
         BenchEntryStatus::Queued if engine.unqueue(&bench, id) => {
             e.entry.status = BenchEntryStatus::Stopped;
@@ -239,16 +250,17 @@ fn new_entry(
 }
 
 /// Adds `entry` to the benchmark (written, sent, the benchmark's count sent too). `parts` for an entry that is
-/// done already (an external one).
+/// done already (an external one); `open` for an open external entry.
 fn add_entry(
     slot: &Slot,
     state: &mut State,
     entry: BenchEntry,
     cancel: Arc<AtomicBool>,
     parts: Option<(&state::ResultParts, &[state::ImageOutcome])>,
+    open: Option<Arc<Mutex<external::Filling>>>,
 ) -> Result<()> {
     slot.save_entry(state, &entry, parts)?;
-    state.entries.push(EntryState { entry: entry.clone(), cancel });
+    state.entries.push(EntryState { entry: entry.clone(), cancel, open });
     slot.emit(BenchEvent::Entry(Box::new(entry)));
     slot.emit_bench(state);
     Ok(())
@@ -701,7 +713,7 @@ impl Benches {
         let name =
             req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(check_name).transpose()?;
         match req.contestant {
-            BenchContestantSpec::External { scored, predictions } => {
+            BenchContestantSpec::External { scored, open, predictions } => {
                 if req.max_images.is_some() || req.conditions.is_some() {
                     return Err(invalid(
                         "max_images and conditions are not for an external contestant: its predictions say what \
@@ -709,7 +721,7 @@ impl Benches {
                     ));
                 }
                 let name = name.ok_or_else(|| invalid("name is required for an external contestant"))?;
-                self.external(&slot, name, scored, &predictions)
+                self.external(&slot, name, scored, open, predictions)
             }
             BenchContestantSpec::Model { model_id } => {
                 let classes = slot.live()?.file.classes.clone();
@@ -751,7 +763,7 @@ impl Benches {
                 );
                 entry.usage = Some(LabelUsage::default());
                 let cancel = Arc::new(AtomicBool::new(false));
-                add_entry(&slot, &mut state, entry.clone(), cancel.clone(), None)?;
+                add_entry(&slot, &mut state, entry.clone(), cancel.clone(), None, None)?;
                 drop(state);
                 let job = agent::AgentJob {
                     slot: slot.clone(),
@@ -780,58 +792,149 @@ impl Benches {
         }
     }
 
-    /// An external entry: checked, scored and added `done`.
+    /// An external entry: in one request, checked, scored and added `done`; `open`, added `running` with the
+    /// predictions so far (checked), to be filled by [`Benches::add_predictions`] and scored by
+    /// [`Benches::finish_open`].
     fn external(
         &self,
         slot: &Arc<Slot>,
         name: String,
         scored: bool,
-        predictions: &[folo_api::BenchPrediction],
+        open: bool,
+        predictions: Vec<folo_api::BenchPrediction>,
     ) -> Result<BenchEntry> {
-        // Scored outside the lock; added only if the plan did not change meanwhile (else scored again).
-        for _ in 0..3 {
-            let (file, fingerprint) = {
-                let state = slot.live()?;
-                (state.file.clone(), state.fingerprint.clone())
-            };
-            let checked = external::check(&file, scored, predictions)?;
-            let ids: Vec<String> = file.images.iter().map(|i| i.id.clone()).collect();
-            let spec = results::Spec {
-                classes: file.classes.len(),
-                scored,
-                plan: &file.plan,
-                seed: file.seed,
-                complete: checked.complete,
-            };
-            let graded = results::grade(&checked.clean, &ids, &checked.variants, &spec);
+        let (file, fingerprint) = {
+            let state = slot.live()?;
+            (state.file.clone(), state.fingerprint.clone())
+        };
+        let mut fill = external::Filling::new(file.clone(), scored);
+        fill.add(predictions)?;
+        // The plan is fixed from the first entry on; before it, it may have changed under the check.
+        let changed = || {
+            Error::conflict("bench_frozen", "the benchmark's plan changed while the entry was checked")
+                .hint("send the request again")
+        };
+        if open {
             let mut state = slot.live()?;
             if state.fingerprint != fingerprint {
-                continue;
+                return Err(changed());
             }
-            let total = model::total(file.images.len(), 1 + checked.variants.len());
             let mut entry = new_entry(
                 &state,
-                name.clone(),
+                name,
                 BenchContestant::External,
-                BenchEntryStatus::Done,
+                BenchEntryStatus::Running,
                 file.images.len(),
-                !checked.variants.is_empty(),
+                false,
                 scored,
-                total,
+                fill.capacity(),
                 Vec::new(),
             );
-            entry.progress.done = total;
-            entry.finished = Some(entry.created.clone());
-            entry.ci95 = Some(graded.parts.accuracy.ci95);
-            entry.conditions_run = graded.conditions_run();
-            entry.score = Some(graded.score);
-            entry.map50_95 = Some(graded.map50_95);
+            entry.progress.done = fill.received;
+            fill.last_event = Some(std::time::Instant::now());
             let cancel = Arc::new(AtomicBool::new(false));
-            add_entry(slot, &mut state, entry.clone(), cancel, Some((&graded.parts, &graded.images)))?;
+            let fill = Arc::new(Mutex::new(fill));
+            add_entry(slot, &mut state, entry.clone(), cancel, None, Some(fill))?;
             return Ok(entry);
         }
-        Err(Error::conflict("bench_frozen", "the benchmark's plan changed while the entry was scored")
-            .hint("send the predictions again"))
+        let finished = fill.finish()?;
+        let graded = grade_external(&file, scored, &finished);
+        let mut state = slot.live()?;
+        if state.fingerprint != fingerprint {
+            return Err(changed());
+        }
+        let mut entry = new_entry(
+            &state,
+            name,
+            BenchContestant::External,
+            BenchEntryStatus::Done,
+            file.images.len(),
+            false,
+            scored,
+            0,
+            Vec::new(),
+        );
+        entry.finished = Some(entry.created.clone());
+        done_external(&mut entry, &finished, &graded, fill.received);
+        let cancel = Arc::new(AtomicBool::new(false));
+        add_entry(slot, &mut state, entry.clone(), cancel, Some((&graded.parts, &graded.images)), None)?;
+        Ok(entry)
+    }
+
+    /// The open external entry `entry_id` of benchmark `id` and what it has received, or `409
+    /// bench_entry_not_open`.
+    fn open_entry(&self, id: &str, entry_id: &str) -> Result<(Arc<Slot>, Arc<Mutex<external::Filling>>)> {
+        let slot = self.slot(id)?;
+        let fill = {
+            let state = slot.live()?;
+            let e = state.entry(entry_id)?;
+            e.open.clone().ok_or_else(|| not_open(entry_id, &e.entry))?
+        };
+        Ok((slot, fill))
+    }
+
+    /// `POST …/entries/{entry_id}/predictions`: a part of an open external entry, checked whole (a refused part
+    /// takes none of its records) and taken.
+    pub fn add_predictions(
+        &self,
+        id: &str,
+        entry_id: &str,
+        predictions: Vec<folo_api::BenchPrediction>,
+    ) -> Result<BenchEntry> {
+        let (slot, fill) = self.open_entry(id, entry_id)?;
+        // One part at a time per entry; never under the benchmark's lock (a variant may be graded here).
+        let (received, emit) = {
+            let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if f.closed {
+                let state = slot.live()?;
+                return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
+            }
+            f.add(predictions)?;
+            let emit = f.last_event.is_none_or(|t| t.elapsed() >= model::PROGRESS_EVERY);
+            if emit {
+                f.last_event = Some(std::time::Instant::now());
+            }
+            (f.received, emit)
+        };
+        let mut state = slot.live()?;
+        let e = state.entry_mut(entry_id).ok_or_else(|| state::entry_not_found(id, entry_id))?;
+        e.entry.progress.done = e.entry.progress.done.max(received);
+        let entry = e.entry.clone();
+        if emit {
+            slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
+        }
+        Ok(entry)
+    }
+
+    /// `POST …/entries/{entry_id}/finish`: checks that the open entry is whole and scores it (`done`); a `400`
+    /// saying what is missing leaves it open.
+    pub fn finish_open(&self, id: &str, entry_id: &str) -> Result<BenchEntry> {
+        let (slot, fill) = self.open_entry(id, entry_id)?;
+        let (finished, scored, received, file) = {
+            let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if f.closed {
+                let state = slot.live()?;
+                return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
+            }
+            let finished = f.finish()?;
+            (finished, f.scored(), f.received, f.file().clone())
+        };
+        let graded = grade_external(&file, scored, &finished);
+        let mut state = slot.live()?;
+        let e = state.entry_mut(entry_id).ok_or_else(|| state::entry_not_found(id, entry_id))?;
+        if e.open.as_ref().is_none_or(|o| !Arc::ptr_eq(o, &fill)) {
+            // Stopped (or the server shut down) while it was scored.
+            return Err(not_open(entry_id, &e.entry));
+        }
+        e.open = None;
+        e.entry.status = BenchEntryStatus::Done;
+        e.entry.finished = Some(rfc3339(unix_now()));
+        done_external(&mut e.entry, &finished, &graded, received);
+        let entry = e.entry.clone();
+        slot.save_entry(&state, &entry, Some((&graded.parts, &graded.images)))?;
+        slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
+        slot.emit_bench(&state);
+        Ok(entry)
     }
 
     /// `GET …/entries/{entry_id}/result`.
@@ -1148,6 +1251,21 @@ impl Benches {
         self.engine.wake();
         let slots = self.benches.read().unwrap().clone();
         for slot in &slots {
+            // Open external entries had their predictions in memory: they fail as the others do.
+            let open: Vec<String> = {
+                let mut state = slot.lock();
+                let mut ids = Vec::new();
+                for e in state.entries.iter_mut() {
+                    if let Some(fill) = e.open.take() {
+                        fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner).closed = true;
+                        ids.push(e.entry.id.clone());
+                    }
+                }
+                ids
+            };
+            for id in open {
+                model::finish_entry(slot, &id, true, Ok(None));
+            }
             let state = slot.lock();
             state
                 .entries
@@ -1202,4 +1320,48 @@ fn bench_image(im: &ImageRecord, variant: Option<(Condition, u8)>) -> Result<Ben
             .map_err(|e| Error::new(StatusCode::BAD_REQUEST, "invalid_query", e.to_string()))?,
     };
     Ok(BenchImage { id: im.id.clone(), file: im.file.clone(), width: im.width, height: im.height, boxes })
+}
+
+/// `409 bench_entry_not_open` for `entry`, saying what it is instead.
+fn not_open(id: &str, entry: &BenchEntry) -> Error {
+    let what = match (&entry.contestant, entry.status) {
+        (BenchContestant::External, BenchEntryStatus::Running) => "being finished".to_string(),
+        (BenchContestant::External, s) => format!("an external entry that is {}", status_name(s)),
+        (BenchContestant::Model { .. }, _) => "a model entry".to_string(),
+        (BenchContestant::Agent { .. }, _) => "an agent entry".to_string(),
+    };
+    Error::conflict(
+        "bench_entry_not_open",
+        format!("entry '{id}' is not an open external entry: it is {what}"),
+    )
+    .hint("POST /api/bench/benchmarks/{id}/entries with contestant.open: true starts one to fill in parts")
+}
+
+/// The grade of a finished external entry.
+fn grade_external(file: &BenchFile, scored: bool, finished: &external::Finished) -> results::Graded {
+    let ids: Vec<String> = file.images.iter().map(|i| i.id.clone()).collect();
+    let spec = results::Spec {
+        classes: file.classes.len(),
+        scored,
+        plan: &file.plan,
+        seed: file.seed,
+        complete: finished.complete,
+    };
+    results::grade_maps(&finished.clean, &ids, &finished.runs, &spec)
+}
+
+/// Fills in a finished external entry: its score and what it ran (`received` records).
+fn done_external(
+    entry: &mut BenchEntry,
+    finished: &external::Finished,
+    graded: &results::Graded,
+    received: u64,
+) {
+    entry.conditions = !finished.runs.is_empty();
+    entry.progress = model::progress(received);
+    entry.progress.done = received;
+    entry.ci95 = Some(graded.parts.accuracy.ci95);
+    entry.conditions_run = graded.conditions_run();
+    entry.score = Some(graded.score.clone());
+    entry.map50_95 = Some(graded.map50_95);
 }

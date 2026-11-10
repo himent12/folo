@@ -178,6 +178,8 @@ pub struct EntryState {
     pub entry: BenchEntry,
     /// Ends the entry's work (stop, shutdown).
     pub cancel: Arc<AtomicBool>,
+    /// An open external entry: what has arrived so far (in memory only).
+    pub open: Option<Arc<Mutex<super::external::Filling>>>,
 }
 
 /// A loop in memory.
@@ -354,7 +356,7 @@ impl Slot {
                 entry.hint = Some("start the entry again: POST /api/bench/benchmarks/{id}/entries".into());
                 closed_entries.push(entry.id.clone());
             }
-            entries.push(EntryState { entry, cancel: Arc::new(AtomicBool::new(false)) });
+            entries.push(EntryState { entry, cancel: Arc::new(AtomicBool::new(false)), open: None });
         }
         entries.sort_by(|a, b| (&a.entry.created, &a.entry.id).cmp(&(&b.entry.created, &b.entry.id)));
         let mut loops = Vec::new();

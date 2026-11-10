@@ -395,6 +395,14 @@ pub struct BenchPrediction {
     pub boxes: Vec<BenchDetection>,
 }
 
+/// `POST /api/bench/benchmarks/{id}/entries/{entry_id}/predictions`: a part of an open external entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct BenchPredictions {
+    /// Records not sent before, in any order (see [`BenchContestantSpec::External`]).
+    pub predictions: Vec<BenchPrediction>,
+}
+
 /// Who a new entry is ([`StartBenchEntry::contestant`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -422,9 +430,15 @@ pub enum BenchContestantSpec {
         /// confidences are not measured). Default true.
         #[serde(default = "yes")]
         scored: bool,
-        /// One record per image and condition it ran. Every unchanged image must be answered for (an image
-        /// with nothing found has an empty `boxes`); a condition of the plan is either answered for every image
-        /// at every planned severity or left out entirely.
+        /// False (the default): `predictions` is the whole entry, scored in the request. True: the entry is
+        /// created `running` to be filled in parts (`POST …/entries/{entry_id}/predictions`) and scored by
+        /// `POST …/entries/{entry_id}/finish`; `predictions` here, if any, is its first part.
+        #[serde(default)]
+        open: bool,
+        /// One record per image and condition it ran (at most 1000 boxes each). Every unchanged image must be
+        /// answered for (an image with nothing found has an empty `boxes`); a condition of the plan is either
+        /// answered for every image at every planned severity or left out entirely.
+        #[serde(default)]
         predictions: Vec<BenchPrediction>,
     },
 }
@@ -1121,8 +1135,17 @@ mod tests {
             r#"{"contestant":{"kind":"external","predictions":[{"image":"1","boxes":[{"class":0,"x1":1,"y1":2,"x2":3,"y2":4}]}]},"name":"yolo"}"#,
         )
         .unwrap();
-        let BenchContestantSpec::External { scored, predictions } = s.contestant else { panic!("external") };
-        assert!(scored && predictions[0].condition.is_none() && predictions[0].boxes[0].score == 1.0);
+        let BenchContestantSpec::External { scored, open, predictions } = s.contestant else {
+            panic!("external")
+        };
+        assert!(
+            scored && !open && predictions[0].condition.is_none() && predictions[0].boxes[0].score == 1.0
+        );
+        let s: StartBenchEntry =
+            serde_json::from_str(r#"{"contestant":{"kind":"external","open":true},"name":"yolo"}"#).unwrap();
+        assert!(
+            matches!(s.contestant, BenchContestantSpec::External { open: true, ref predictions, .. } if predictions.is_empty())
+        );
         let s: StartBenchEntry =
             serde_json::from_str(r#"{"contestant":{"kind":"agent","agent":"codex"}}"#).unwrap();
         assert!(matches!(s.contestant, BenchContestantSpec::Agent { agent: LabelAgentId::Codex, .. }));

@@ -111,6 +111,12 @@ pub const CODES: &[Code] = &[
     c("bench_entry_active", 409, 1, "deleting a benchmark entry that is still queued or running"),
     c("bench_entry_not_active", 409, 1, "stopping a benchmark entry that has ended"),
     c("bench_entry_not_done", 409, 1, "the result or images of a benchmark entry that has not finished"),
+    c(
+        "bench_entry_not_open",
+        409,
+        1,
+        "sending predictions to, or finishing, a benchmark entry that is not an open external entry",
+    ),
     c("bench_entry_in_loop", 409, 1, "deleting a benchmark entry that a running self-improvement loop uses"),
     c("bench_loop_active", 409, 1, "deleting a self-improvement loop that is still running"),
     c("bench_loop_not_active", 409, 1, "stopping a self-improvement loop that has ended"),

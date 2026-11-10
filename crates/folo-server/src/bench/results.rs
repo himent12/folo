@@ -48,13 +48,24 @@ pub struct Spec<'a> {
 /// Grades an entry: `clean` are the unchanged images (`ids` their image ids, in step), `variants` the passes of
 /// the plan's conditions that ran.
 pub fn grade(clean: &[Sample], ids: &[String], variants: &[Pass], spec: &Spec<'_>) -> Graded {
-    let Spec { classes, scored, plan, seed, complete } = *spec;
-    let evaluation = score::evaluate(clean, classes, scored, seed);
     let runs: Vec<(Condition, u8, score::Map)> = variants
         .iter()
-        .filter_map(|p| p.variant.map(|(c, s)| (c, s, score::map(&p.samples, classes, scored))))
+        .filter_map(|p| p.variant.map(|(c, s)| (c, s, score::map(&p.samples, spec.classes, spec.scored))))
         .collect();
-    let robustness = score::robustness(evaluation.accuracy.map50_95, plan, &runs);
+    grade_maps(clean, ids, &runs, spec)
+}
+
+/// [`grade`] with the variants already reduced to their mAP pairs (`(condition, severity, map)`), which is all
+/// the result needs of them: an external entry grades each variant as soon as it is whole.
+pub fn grade_maps(
+    clean: &[Sample],
+    ids: &[String],
+    runs: &[(Condition, u8, score::Map)],
+    spec: &Spec<'_>,
+) -> Graded {
+    let Spec { classes, scored, plan, seed, complete } = *spec;
+    let evaluation = score::evaluate(clean, classes, scored, seed);
+    let robustness = score::robustness(evaluation.accuracy.map50_95, plan, runs);
     let total = score::score(&evaluation, robustness.as_ref(), complete);
     let conf = evaluation.accuracy.best_conf;
     let images = clean

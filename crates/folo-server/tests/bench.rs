@@ -801,16 +801,261 @@ async fn external_entries_are_checked_and_scored() {
     )
     .await;
 
+    // A record carries at most 1000 boxes.
+    let box_ = json!({ "class": 0, "score": 0.0123456789, "x1": 1.0000001, "y1": 1.0000001, "x2": 3.0000001, "y2": 9.0000001 });
+    let mut over = clean.clone();
+    over[0]["boxes"] = json!(vec![box_.clone(); 1001]);
+    let e =
+        err(app, post(&entries, external("x", true, over)), StatusCode::BAD_REQUEST, "invalid_body").await;
+    assert!(e.message.contains("has 1001 boxes; a record carries at most 1000"), "{}", e.message);
     // Up to 64 MiB: a submission over the 2 MiB of other requests is taken.
     let mut big = clean.clone();
-    let many: Vec<Value> = (0..60_000)
-        .map(|i| json!({ "class": 0, "score": 0.01, "x1": i % 50, "y1": 1, "x2": i % 50 + 3, "y2": 9 }))
-        .collect();
-    big[0]["boxes"] = json!(many);
-    let body = external("big", true, big);
+    for im in &mut big {
+        im["boxes"] = json!(vec![box_.clone(); 1000]);
+    }
+    let mut body = external("big", true, big);
+    body["comment"] = json!("x".repeat(2 << 20));
     assert!(body.to_string().len() > 2 << 20);
     let e: BenchEntry = ok(app, post(&entries, body)).await;
     assert_eq!(e.status, BenchEntryStatus::Done);
+}
+
+/// Every record of a benchmark with [`small_plan`] whose boxes are the truth moved by `shift` px and scored
+/// `score`, plus a wrong box per image (so precision, calibration and the curves have something to say).
+async fn records(app: &Router, bench: &str, shift: f32) -> Vec<Value> {
+    let mut out = Vec::new();
+    for v in [None, Some(("haze", 1)), Some(("haze", 3)), Some(("distance", 2))] {
+        let q = v.map_or(String::new(), |(c, s)| format!("&condition={c}&severity={s}"));
+        for (k, im) in page(app, bench, &q).await.images.iter().enumerate() {
+            let mut boxes: Vec<Value> = im
+                .boxes
+                .iter()
+                .enumerate()
+                .map(|(j, b)| {
+                    let score = 0.3 + 0.07 * ((k + j) % 9) as f32;
+                    json!({ "class": b.class, "score": score, "x1": b.x1 + shift, "y1": b.y1, "x2": b.x2 + shift, "y2": b.y2 })
+                })
+                .collect();
+            boxes.push(json!({ "class": 0, "score": 0.2, "x1": 1, "y1": 1, "x2": 9, "y2": 9 }));
+            let mut r = json!({ "image": im.id, "boxes": boxes });
+            if let Some((c, s)) = v {
+                r["condition"] = json!(c);
+                r["severity"] = json!(s);
+            }
+            out.push(r);
+        }
+    }
+    out
+}
+
+fn open_entry(name: &str, predictions: Vec<Value>) -> Value {
+    json!({ "name": name, "contestant": { "kind": "external", "open": true, "predictions": predictions } })
+}
+
+fn parts(predictions: &[Value]) -> Value {
+    json!({ "predictions": predictions })
+}
+
+/// A result as JSON without what differs between two entries of the same predictions (ids, names and times).
+fn comparable(mut r: Value) -> Value {
+    for k in ["id", "name", "created", "finished"] {
+        r["entry"].as_object_mut().unwrap().remove(k);
+    }
+    r
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_external_entries_are_filled_in_parts() {
+    let t = TestDir::new("bench-open");
+    let home = t.join("home");
+    let f = fixture(&home);
+    let app = &f.app;
+    let ds = dataset(app, "shapes", 20).await;
+    let b = bench(
+        app,
+        json!({ "name": "b", "source": { "kind": "dataset", "dataset_id": ds.id }, "plan": small_plan() }),
+    )
+    .await;
+    let entries = format!("/api/bench/benchmarks/{}/entries", b.id);
+    let all = records(app, &b.id, 2.0).await;
+    assert_eq!(all.len(), 16);
+
+    // The same predictions in one request, and in parts in another order (variants first, so each is graded as
+    // its last image arrives, the unchanged images last): the same entry, bit for bit.
+    let whole: BenchEntry = ok(app, post(&entries, external("whole", true, all.clone()))).await;
+    let mut events = Events::open(app, &b.id).await;
+    assert_eq!(events.next().await.0, "bench");
+    let mut order = all.clone();
+    order.reverse();
+    assert!(order[12..].iter().all(|r| r.get("condition").is_none()), "the unchanged images last");
+    let o: BenchEntry = ok(app, post(&entries, open_entry("parts", order[..3].to_vec()))).await;
+    assert_eq!(
+        (o.status, o.progress.done, o.progress.total, o.score.clone()),
+        (BenchEntryStatus::Running, 3, 16, None)
+    );
+    // Open counts as active, and the benchmark says so.
+    let (name, data) = events.next().await;
+    assert_eq!((name.as_str(), data["status"].as_str()), ("entry", Some("running")));
+    let (name, data) = events.next().await;
+    assert_eq!((name.as_str(), data["active"].as_bool()), ("bench", Some(true)));
+    let uri = format!("{entries}/{}", o.id);
+    for chunk in order[3..].chunks(5) {
+        let e: BenchEntry = ok(app, post(&format!("{uri}/predictions"), parts(chunk))).await;
+        assert_eq!(e.status, BenchEntryStatus::Running);
+    }
+    let done: BenchEntry = ok(app, post(&format!("{uri}/finish"), json!({}))).await;
+    assert_eq!((done.status, done.progress.done, done.progress.total), (BenchEntryStatus::Done, 16, 16));
+    let a: Value = ok(app, get(&format!("{entries}/{}/result", whole.id))).await;
+    let c: Value = ok(app, get(&format!("{uri}/result"))).await;
+    assert_eq!(comparable(a), comparable(c), "parts score exactly as one request does");
+    let ga: Value = ok(app, get(&format!("{entries}/{}/images?sort=worst", whole.id))).await;
+    let gc: Value = ok(app, get(&format!("{uri}/images?sort=worst"))).await;
+    assert_eq!(ga, gc);
+    let mut seen = Vec::new();
+    loop {
+        let (name, data) = events.next().await;
+        seen.push((name.clone(), data["status"].as_str().map(str::to_string), data["active"].as_bool()));
+        if name == "bench" {
+            break;
+        }
+    }
+    assert_eq!(seen.last().unwrap(), &("bench".to_string(), None, Some(false)), "{seen:?}");
+    assert!(seen.iter().any(|s| s.1.as_deref() == Some("done")), "{seen:?}");
+
+    // The truth through the open path scores 100.
+    let mut perfect = truth_predictions(&page(app, &b.id, "").await.images, None, 1.0);
+    for (c, s) in [("haze", 1), ("haze", 3), ("distance", 2)] {
+        let moved = page(app, &b.id, &format!("&condition={c}&severity={s}")).await;
+        perfect.extend(truth_predictions(&moved.images, Some((c, s)), 1.0));
+    }
+    let p: BenchEntry = ok(app, post(&entries, open_entry("perfect", vec![]))).await;
+    let puri = format!("{entries}/{}", p.id);
+    assert_eq!((p.progress.done, p.progress.total), (0, 16));
+    for pass in perfect.chunks(4).rev() {
+        ok::<BenchEntry>(app, post(&format!("{puri}/predictions"), parts(pass))).await;
+    }
+    let p: BenchEntry = ok(app, post(&format!("{puri}/finish"), json!({}))).await;
+    let score = p.score.unwrap();
+    assert!((score.total - 100.0).abs() < 1e-3 && !score.partial, "{score:?}");
+    assert_eq!((p.conditions, p.conditions_run), (true, 2));
+
+    // Refused parts take nothing; a repeat is named also across parts; an unfinished entry stays open.
+    let e: BenchEntry = ok(app, post(&entries, open_entry("fixable", all[..2].to_vec()))).await;
+    let euri = format!("{entries}/{}", e.id);
+    let again = err(
+        app,
+        post(&format!("{euri}/predictions"), parts(&all[1..3])),
+        StatusCode::BAD_REQUEST,
+        "invalid_body",
+    )
+    .await;
+    assert!(
+        again.message.contains("prediction 1 (image '2', unchanged) was received in an earlier part"),
+        "{}",
+        again.message
+    );
+    let mut bad = all[2..4].to_vec();
+    bad[1]["boxes"][0]["class"] = json!(7);
+    let e2 =
+        err(app, post(&format!("{euri}/predictions"), parts(&bad)), StatusCode::BAD_REQUEST, "invalid_body")
+            .await;
+    assert!(e2.message.contains("prediction 2 (image '4', unchanged), box 1: class 7"), "{}", e2.message);
+    let mut over = all[2..3].to_vec();
+    over[0]["boxes"] = json!(vec![json!({ "class": 0, "x1": 1, "y1": 1, "x2": 5, "y2": 5 }); 1001]);
+    err(app, post(&format!("{euri}/predictions"), parts(&over)), StatusCode::BAD_REQUEST, "invalid_body")
+        .await;
+    let now: BenchEntry = ok(app, get(&euri)).await;
+    assert_eq!((now.status, now.progress.done), (BenchEntryStatus::Running, 2), "refused parts took nothing");
+    let missing =
+        err(app, post(&format!("{euri}/finish"), json!({})), StatusCode::BAD_REQUEST, "invalid_body").await;
+    assert!(missing.message.contains("no prediction for image '3' (unchanged)"), "{}", missing.message);
+    // Half a condition is the "answered in part" error, also at finish.
+    ok::<BenchEntry>(app, post(&format!("{euri}/predictions"), parts(&all[2..5]))).await;
+    let half =
+        err(app, post(&format!("{euri}/finish"), json!({})), StatusCode::BAD_REQUEST, "invalid_body").await;
+    assert!(
+        half.message.contains("condition 'haze' is answered, but not for image '2' at severity 1"),
+        "{}",
+        half.message
+    );
+    assert_eq!(ok::<BenchEntry>(app, get(&euri)).await.status, BenchEntryStatus::Running);
+    ok::<BenchEntry>(app, post(&format!("{euri}/predictions"), parts(&all[5..]))).await;
+    let fixed: BenchEntry = ok(app, post(&format!("{euri}/finish"), json!({}))).await;
+    assert_eq!(fixed.status, BenchEntryStatus::Done);
+    assert_eq!(fixed.score, done.score, "the same predictions, the same score");
+
+    // Not open: a finished external entry, a stopped one, another kind of contestant.
+    for target in [&euri, &format!("{entries}/{}", whole.id)] {
+        err(
+            app,
+            post(&format!("{target}/predictions"), parts(&all[..1])),
+            StatusCode::CONFLICT,
+            "bench_entry_not_open",
+        )
+        .await;
+        err(app, post(&format!("{target}/finish"), json!({})), StatusCode::CONFLICT, "bench_entry_not_open")
+            .await;
+    }
+    f.agent.script(vec![Step::Hold, Step::Hold]);
+    let agent: BenchEntry =
+        ok(app, post(&entries, json!({ "contestant": { "kind": "agent", "agent": "claude" } }))).await;
+    let auri = format!("{entries}/{}", agent.id);
+    let e3 = err(
+        app,
+        post(&format!("{auri}/predictions"), parts(&all[..1])),
+        StatusCode::CONFLICT,
+        "bench_entry_not_open",
+    )
+    .await;
+    assert!(e3.message.contains("an agent entry"), "{}", e3.message);
+    err(app, post(&format!("{auri}/finish"), json!({})), StatusCode::CONFLICT, "bench_entry_not_open").await;
+    ok::<BenchEntry>(app, post(&format!("{auri}/stop"), json!({}))).await;
+    assert_eq!(ended(app, &b.id, &agent.id).await.status, BenchEntryStatus::Stopped);
+    err(
+        app,
+        post(&format!("{entries}/be_none/finish"), json!({})),
+        StatusCode::NOT_FOUND,
+        "bench_entry_not_found",
+    )
+    .await;
+
+    // Stop discards an open entry; it is active until then (no delete, no deleting the benchmark).
+    let s: BenchEntry = ok(app, post(&entries, open_entry("stopped", all[..4].to_vec()))).await;
+    let suri = format!("{entries}/{}", s.id);
+    assert!(ok::<Bench>(app, get(&format!("/api/bench/benchmarks/{}", b.id))).await.active);
+    err(app, delete(&suri), StatusCode::CONFLICT, "bench_entry_active").await;
+    err(app, delete(&format!("/api/bench/benchmarks/{}", b.id)), StatusCode::CONFLICT, "bench_active").await;
+    let stopped: BenchEntry = ok(app, post(&format!("{suri}/stop"), json!({}))).await;
+    assert_eq!((stopped.status, stopped.score.clone()), (BenchEntryStatus::Stopped, None));
+    err(
+        app,
+        post(&format!("{suri}/predictions"), parts(&all[4..5])),
+        StatusCode::CONFLICT,
+        "bench_entry_not_open",
+    )
+    .await;
+    err(app, post(&format!("{suri}/stop"), json!({})), StatusCode::CONFLICT, "bench_entry_not_active").await;
+    assert!(!ok::<Bench>(app, get(&format!("/api/bench/benchmarks/{}", b.id))).await.active);
+    let (status, _, _) = send(app, delete(&suri)).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // One left open when the server stops is failed at the next start (its predictions were in memory).
+    let left: BenchEntry = ok(app, post(&entries, open_entry("left", all[..4].to_vec()))).await;
+    drop(events);
+    drop(f);
+    let f = fixture(&home);
+    let l: BenchEntry = ok(&f.app, get(&format!("{entries}/{}", left.id))).await;
+    assert_eq!(
+        (l.status, l.error.as_deref()),
+        (BenchEntryStatus::Failed, Some("the server stopped before the entry finished"))
+    );
+    err(
+        &f.app,
+        post(&format!("{entries}/{}/finish", left.id), json!({})),
+        StatusCode::CONFLICT,
+        "bench_entry_not_open",
+    )
+    .await;
 }
 
 // ---------------------------------------------------------------------------------------------------------------

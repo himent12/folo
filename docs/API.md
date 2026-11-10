@@ -41,8 +41,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done |
-| 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job and new benchmark entries, 2 MiB elsewhere) |
+| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
+| 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job, new benchmark entries and parts of an open one, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
 | 500 | `internal` | a bug or an IO failure |
@@ -967,18 +967,44 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
     2% of the entry's image answers (at least one) are missing they count as images where the agent found
     nothing; with more the entry is `failed` ("N of M images got no usable answer from the agent"), because that
     score would not be honest.
-  - `external`: `name` is required; `max_images` and `conditions` are `400 invalid_body` (the predictions say
-    what ran). Each prediction is `{ "image": "<image id>", "condition"?, "severity"?, "boxes": [{ "class",
-    "score"?: 1, "x1", "y1", "x2", "y2" }] }`, boxes in pixels of the image as served. Every image of the
-    benchmark must have a record without `condition`; a condition of the plan is either answered for every image
-    at every planned severity or absent (then robustness is over the conditions present, and the entry is
+  - `external`: `{ "kind": "external", "scored"?: true, "open"?: false, "predictions"?: [] }`. `name` is
+    required; `max_images` and `conditions` are `400 invalid_body` (the predictions say what ran). Each
+    prediction is `{ "image": "<image id>", "condition"?, "severity"?, "boxes": [{ "class", "score"?: 1, "x1",
+    "y1", "x2", "y2" }] }`, boxes in pixels of the image as served, at most 1000 boxes per record. Every image of
+    the benchmark must have a record without `condition`; a condition of the plan is either answered for every
+    image at every planned severity or absent (then robustness is over the conditions present, and the entry is
     partial unless all are). `400 invalid_body` names the first record that is wrong, in order: an image the
     benchmark does not have, a condition that is not in the catalog or a (condition, severity) the plan does not
-    run, a severity without its condition or the other way round, a record that repeats another, a class outside
-    the benchmark's, a score outside `0..=1` (when `scored`); then an image without its unchanged record, and a
-    condition answered for some images or severities but not all. With `scored: false` every score is taken as
-    1. The entry is scored in the request and answered `done` (`conditions` true when a condition was answered).
-    Up to 64 MiB.
+    run, a severity without its condition or the other way round, a record that repeats another (of the same
+    request, or received before), more than 1000 boxes, a class outside the benchmark's, a score outside `0..=1`
+    (when `scored`); then, when the entry is finished, an image without its unchanged record, and a condition
+    answered for some images or severities but not all. With `scored: false` every score is taken as 1.
+    - `open: false` (the default): `predictions` is the whole entry, scored in the request and answered `done`
+      (`conditions` true when a condition was answered). Up to 64 MiB.
+    - `open: true`: the entry is created to be filled in parts, which is what a benchmark of any size needs (a
+      model at validation's settings gives up to 300 boxes per image, and a 300-image benchmark with 19 planned
+      severities is then far over 64 MiB in one body). The answer is `201 BenchEntry` with `status: "running"`;
+      `predictions`, if any, is its first part. `progress.total` is the most records it can have (images times
+      one plus the plan's (condition, severity) pairs), `progress.done` the records received. An open entry is
+      active (`Bench.active`, `409 bench_active`, `409 bench_entry_active`); `stop` discards it (`stopped`,
+      nothing scored), and one the server stops with (or a crash leaves) is `failed` at the next start, as other
+      active entries are (its records were in memory).
+  `progress.total` and `progress.done` of a finished external entry are the records it got.
+- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/predictions` body `BenchPredictions` `{ "predictions":
+  [BenchPrediction] }` → `BenchEntry` (with the new `progress.done`): a part of an open external entry. Up to 64
+  MiB per request, any number of requests, records in any order. A part is checked whole as above before any of
+  it is taken: a `400 invalid_body` adds none of its records, so it can be fixed and sent again (a record that
+  was already received is named: "… was received in an earlier part"). **Send pass by pass** (the unchanged
+  images, then each condition and severity): a (condition, severity) is graded as soon as its last image has
+  arrived (its mAP pair is all the result needs) and its boxes are dropped, so the server holds about one pass
+  at a time; the unchanged images' detections are kept until `finish` (the evaluation and the per-image outcomes
+  need them).
+- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/finish` → `BenchEntry` `done`: checks that the entry is
+  whole (every unchanged image answered; a condition answered for every image at every planned severity, or not
+  at all) and scores it, exactly as the same records in one request would be. A `400 invalid_body` naming what is
+  missing leaves the entry open, to be completed and finished again.
+- `409 bench_entry_not_open` for `…/predictions` and `…/finish` on an entry that is not an open external entry
+  (a model or agent entry, or an external entry that is done, stopped, failed or being finished).
   A finished entry has `score` (`total`, `partial`, the five `axes`), `map50_95` with its 95% interval `ci95`
   (as in the result's `accuracy`), `conditions_run` (how many of the plan's conditions it ran completely, every
   planned severity and every image it runs; for an external entry, the conditions it answered; 0 until `done`),
@@ -995,8 +1021,8 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   above the entry's best-F1 confidence, and how many true boxes were `missed` and detections `wrong`. `worst`
   puts the images with the most `missed + wrong` first (ties in the benchmark's order); any other `sort` is `400
   invalid_query`. `409 bench_entry_not_done` as above.
-- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop` → `BenchEntry`: a `queued` entry is `stopped` at once;
-  a `running` one is `stopping` until its work ends (checked between batches; agent calls in flight are killed),
+- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop` → `BenchEntry`: a `queued` entry, and an open external
+  one (what it received is dropped), is `stopped` at once; a `running` one is `stopping` until its work ends (checked between batches; agent calls in flight are killed),
   then `stopped`. `409 bench_entry_not_active` when it has ended.
 - `DELETE /api/bench/benchmarks/{id}/entries/{entry_id}` → `204`. `409 bench_entry_active` while it is active,
   `409 bench_entry_in_loop` while a loop that is still running uses it.

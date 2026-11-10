@@ -13,8 +13,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use folo_api::{
     Bench, BenchCatalog, BenchDesign, BenchEntry, BenchEntryImagePage, BenchEntryList, BenchEvent,
-    BenchImagePage, BenchList, BenchLoop, BenchLoopList, BenchResult, CreateBench, DesignBench,
-    StartBenchEntry, StartBenchLoop, UpdateBench,
+    BenchImagePage, BenchList, BenchLoop, BenchLoopList, BenchPredictions, BenchResult, CreateBench,
+    DesignBench, StartBenchEntry, StartBenchLoop, UpdateBench,
 };
 use folo_bench::Condition;
 use futures_util::{Stream, StreamExt, stream};
@@ -43,6 +43,11 @@ pub fn routes() -> Router<AppState> {
         .route("/bench/benchmarks/{id}/entries/{entry_id}/result", get(result))
         .route("/bench/benchmarks/{id}/entries/{entry_id}/images", get(entry_images))
         .route("/bench/benchmarks/{id}/entries/{entry_id}/stop", post(stop_entry))
+        .route(
+            "/bench/benchmarks/{id}/entries/{entry_id}/predictions",
+            post(add_predictions).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        .route("/bench/benchmarks/{id}/entries/{entry_id}/finish", post(finish_entry))
         .route("/bench/benchmarks/{id}/loops", get(loops).post(start_loop))
         .route("/bench/benchmarks/{id}/loops/{loop_id}", get(get_loop).delete(delete_loop))
         .route("/bench/benchmarks/{id}/loops/{loop_id}/stop", post(stop_loop))
@@ -218,6 +223,23 @@ async fn stop_entry(
     ApiPath((id, entry_id)): ApiPath<(String, String)>,
 ) -> Result<Json<BenchEntry>> {
     Ok(Json(blocking(&st, move |s| s.benches()?.stop_entry(&id, &entry_id)).await?))
+}
+
+/// `POST …/entries/{entry_id}/predictions`: a part of an open external entry (up to 64 MiB).
+async fn add_predictions(
+    State(st): State<AppState>,
+    ApiPath((id, entry_id)): ApiPath<(String, String)>,
+    ApiJson(req): ApiJson<BenchPredictions>,
+) -> Result<Json<BenchEntry>> {
+    Ok(Json(blocking(&st, move |s| s.benches()?.add_predictions(&id, &entry_id, req.predictions)).await?))
+}
+
+/// `POST …/entries/{entry_id}/finish`: scores an open external entry.
+async fn finish_entry(
+    State(st): State<AppState>,
+    ApiPath((id, entry_id)): ApiPath<(String, String)>,
+) -> Result<Json<BenchEntry>> {
+    Ok(Json(blocking(&st, move |s| s.benches()?.finish_open(&id, &entry_id)).await?))
 }
 
 async fn loops(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<Json<BenchLoopList>> {

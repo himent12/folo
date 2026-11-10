@@ -145,16 +145,23 @@ api=http://127.0.0.1:7878/api/bench/benchmarks/$bench
 curl -s "$api/images?limit=1000"                       # ids, sizes (and the truth, which your model must not see)
 curl -s "$api/images/$image" -o clean.jpg              # the unchanged image
 curl -s "$api/images/$image?condition=haze&severity=3" -o haze3.jpg
-curl -s "$api/entries" -H 'Content-Type: application/json' -d '{
-  "name": "my-detector",
-  "contestant": { "kind": "external", "predictions": [
-    { "image": "1", "boxes": [ { "class": 0, "score": 0.91, "x1": 12, "y1": 40, "x2": 208, "y2": 331 } ] },
-    { "image": "1", "condition": "haze", "severity": 3, "boxes": [] } ] } }'
+entry=$(curl -s "$api/entries" -H 'Content-Type: application/json' \
+  -d '{ "name": "my-detector", "contestant": { "kind": "external", "open": true } }' | jq -r .id)
+curl -s "$api/entries/$entry/predictions" -H 'Content-Type: application/json' -d '{ "predictions": [
+  { "image": "1", "boxes": [ { "class": 0, "score": 0.91, "x1": 12, "y1": 40, "x2": 208, "y2": 331 } ] } ] }'
+curl -s "$api/entries/$entry/predictions" -H 'Content-Type: application/json' -d '{ "predictions": [
+  { "image": "1", "condition": "haze", "severity": 3, "boxes": [] } ] }'
+curl -s -X POST "$api/entries/$entry/finish"           # checks that it is whole, scores it: done
 ```
 
-Boxes are in pixels of the image as it was served. Every unchanged image must be answered for; a condition is
-either answered for every image at every planned severity or left out. `examples/bench_external.py` does all of
-this for a model behind one Python function.
+Boxes are in pixels of the image as it was served, at most 1000 per image. Every unchanged image must be
+answered for; a condition is either answered for every image at every planned severity or left out. An entry is
+sent in as many parts as it takes (up to 64 MiB each, in any order); send it pass by pass (the unchanged images,
+then each condition and severity), because the server grades a condition's severity as soon as all its images are
+in and keeps only the unchanged images' boxes until the end. A part with a wrong record is refused whole and can
+be sent again; `finish` says what is missing, and the entry stays open until it is whole. A small entry can also
+be sent in one request (without `open`). `examples/bench_external.py` does all of this for a model behind one
+Python function.
 
 ## Designing a plan with an agent
 The default plan runs every condition at severities 1, 3 and 5 with equal weight. A benchmark for a camera in a
