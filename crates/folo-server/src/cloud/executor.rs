@@ -560,6 +560,12 @@ impl Exec {
             .ledger
             .create(&self.c.connection.id, &info.id, self.entry.id(), &offer, deadline, Some(self.limit()))
             .map_err(|e| failed(&e.body.code, e.body.message))?;
+        // Nothing could terminate an instance launched on a connection removed since the run started. Removing one
+        // looks for live records under the cloud lock this one was written under, so from here on it is refused.
+        if let Err(e) = self.core.connected(&self.c.connection.id) {
+            self.core.ledger.remove(&record.id);
+            return Err(failed(&e.body.code, e.body.message));
+        }
         release.arm(&record.id);
         self.private.instance_id = Some(record.id.clone());
         self.private.token = Some(token.clone());

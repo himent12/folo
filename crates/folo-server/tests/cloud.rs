@@ -750,6 +750,32 @@ fn a_lost_launch_that_the_provider_lists_late_is_still_terminated() {
 }
 
 #[test]
+fn a_connection_removed_while_a_run_starts_has_nothing_launched_on_it() {
+    no_gpu();
+    let t = TestDir::new("cloud-disconnect-race");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    // The run is asked for, and while its offer is looked up the connection is removed: nothing uses it yet.
+    cloud.hold(Call::Offers);
+    let creating = {
+        let (store, config) = (store.clone(), cloud_run(&ds, &conn.id, 1));
+        std::thread::spawn(move || store.create_run(config))
+    };
+    until("the offers asked for", || (cloud.calls(Call::Offers) == 1).then_some(()));
+    store.disconnect_cloud(&conn.id).unwrap();
+    cloud.release(Call::Offers);
+    let run = creating.join().unwrap().unwrap();
+    let done = finished(&store, &run.id);
+    // An instance launched now could not be terminated: without its connection, nothing can reach the provider.
+    assert_eq!(done.status, RunStatus::Failed, "{:?}", log_of(&store, &run.id));
+    assert_eq!(done.error_code.as_deref(), Some("connection_not_found"));
+    assert_eq!((cloud.calls(Call::Launch), cloud.live()), (0, 0));
+    assert!(store.cloud_instances().unwrap().is_empty());
+}
+
+#[test]
 fn boot_failures_name_the_check_and_release() {
     no_gpu();
     let t = TestDir::new("cloud-boot");
