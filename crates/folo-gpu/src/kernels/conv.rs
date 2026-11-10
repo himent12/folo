@@ -461,10 +461,11 @@ pub(crate) const PHASE_PIXEL: &str = "struct PPix { a: u32, b: u32 }\n\
     \x20 if ((*p).b == pu(33u)) { (*p).b = 0u; (*p).a += 1u; }\n}\n";
 
 /// Packs a conv weight `[C_out, C_in/groups, KH, KW]` for the stride-phase input gradient: phase
-/// `ph = (rh, rw)` gets the block `[groups, C_in/groups, C_out/groups, th, tw]` of the taps `kh = rh + SH·th`,
-/// `kw = rw + SW·tw` at offset `ph · BMAX` (a row-major `A` with `K = C_out/groups · th · tw` per group).
+/// `ph = (rh, rw)` with taps (`rh < min(SH, KH)`, `rw < min(SW, KW)`, row-major) gets the block
+/// `[groups, C_in/groups, C_out/groups, th, tw]` of the taps `kh = rh + SH·th`, `kw = rw + SW·tw` at offset
+/// `ph · BMAX` (a row-major `A` with `K = C_out/groups · th · tw` per group).
 /// Params: 0 = threads (`phases · C_in · C_out/groups · TMAX`), 1 = groups, 2 = `C_in/groups`, 3 = `C_out/groups`,
-/// 4 = `BMAX`.
+/// 4 = `BMAX`, 5 = phase columns (`min(SW, KW)`).
 fn gen_phase_pack(_: &Spec) -> String {
     "@group(0) @binding(1) var<storage, read> W: array<T>;\n\
      @group(0) @binding(2) var<storage, read_write> PK: array<T>;\n\
@@ -478,7 +479,7 @@ fn gen_phase_pack(_: &Spec) -> String {
      \x20 let co = q % cout_g; q = q / cout_g;\n\
      \x20 let ci = q % cin_g; q = q / cin_g;\n\
      \x20 let g = q % pu(1u); let ph = q / pu(1u);\n\
-     \x20 let rh = ph / SW; let rw = ph % SW;\n\
+     \x20 let rh = ph / pu(5u); let rw = ph % pu(5u);\n\
      \x20 if (rh >= KH || rw >= KW) { return; }\n\
      \x20 let nh = (KH - rh + SH - 1u) / SH; let nw = (KW - rw + SW - 1u) / SW;\n\
      \x20 if (t >= nh * nw) { return; }\n\
@@ -510,8 +511,9 @@ pub(crate) struct Phase {
 }
 
 impl Phase {
-    /// The `SH · SW` phases of `d` (dilation 1), row-major in `(rh, rw)`.
-    fn all(d: &Conv2dDesc) -> Vec<Phase> {
+    /// The phases of `d` (dilation 1) that have taps, `rh < min(SH, KH)` and `rw < min(SW, KW)`, row-major in
+    /// `(rh, rw)`. The other phases' pixels get no gradient at all.
+    fn with_taps(d: &Conv2dDesc) -> Vec<Phase> {
         let axis = |r: usize, s: usize, p: usize, k: usize, len: usize| {
             let taps = if r < k { (k - r).div_ceil(s) } else { 0 };
             // The smallest i >= 0 with (i + p) % s == r.
@@ -520,9 +522,10 @@ impl Phase {
             (taps, first, (first + p - r) / s, size)
         };
         let (sh, sw) = d.win.stride;
-        let mut out = Vec::with_capacity(sh * sw);
-        for rh in 0..sh {
-            for rw in 0..sw {
+        let (nh, nw) = (sh.min(d.win.kernel.0), sw.min(d.win.kernel.1));
+        let mut out = Vec::with_capacity(nh * nw);
+        for rh in 0..nh {
+            for rw in 0..nw {
                 let h = axis(rh, sh, d.win.padding.0, d.win.kernel.0, d.h);
                 let w = axis(rw, sw, d.win.padding.1, d.win.kernel.1, d.w);
                 out.push(Phase { taps: (h.0, w.0), first: (h.1, w.1), base: (h.2, w.2), size: (h.3, w.3) });
@@ -531,7 +534,7 @@ impl Phase {
         out
     }
 
-    /// The phase's spec constants (the tap counts; at least 1, a phase without taps runs with `K = 0`).
+    /// The phase's spec constants (the tap counts).
     pub(crate) fn spec(&self, spec: Spec) -> Spec {
         spec.bool("PHASE", true).u32("PTH", self.taps.0.max(1) as u32).u32("PTW", self.taps.1.max(1) as u32)
     }
@@ -575,12 +578,18 @@ fn conv2d_backward_input_phased(
     let (hw_in, hw_out) = (d.h * d.w, oh * ow);
     let tmax = kh.div_ceil(sh) * kw.div_ceil(sw);
     let bmax = prod(&[d.c_in, cout_g, tmax])?;
-    let packed = ctx.alloc(dt.bytes(prod(&[sh * sw, bmax])?))?;
-    let threads = prod(&[sh * sw, bmax])?;
+    // Only the phases with taps are packed and run (at most KH·KW of them, whatever the stride); a kernel smaller
+    // than the stride leaves the other phases' pixels zero.
+    let phases = Phase::with_taps(d);
+    if kh < sh || kw < sw {
+        ctx.clear(gx, dt.bytes(prod(&[d.n, d.c_in, d.h, d.w])?));
+    }
+    let threads = prod(&[phases.len(), bmax])?;
+    let packed = ctx.alloc(dt.bytes(threads))?;
     let k = ctx.kernel(&PHASE_PACK, d.win.spec().u32("TMAX", tmax as u32).f16(dt == DType::F16))?;
-    let p = Params::new().uz(threads)?.uz(d.groups)?.uz(cin_g)?.uz(cout_g)?.uz(bmax)?;
+    let p = Params::new().uz(threads)?.uz(d.groups)?.uz(cin_g)?.uz(cout_g)?.uz(bmax)?.uz(sw.min(kw))?;
     ctx.dispatch(&k, &[weight, packed.raw()], &p, ctx.grid_1d(threads as u64, 256)?)?;
-    for (i, ph) in Phase::all(d).iter().enumerate() {
+    for (i, ph) in phases.iter().enumerate() {
         let n_ph = ph.size.0 * ph.size.1;
         if n_ph == 0 {
             continue;

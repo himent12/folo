@@ -241,8 +241,9 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   u)` for phase pixel `(a, b)` and tap `(t, u)` with no divisibility test, and its epilogue writing column `j` to
   plane offset `(IH0 + SH·(j / WR))·W + IW0 + SW·(j mod WR)` (`ppix`). `conv2d_phase_pack` packs the weight per
   phase once (`[phase][g][C_in/g][C_out/g][th·tw]`, the `A` of each phase), replacing the permute. One dispatch
-  per phase; a phase without taps (kernel smaller than the stride) runs with `K = 0` and writes its zeros. Both
-  the regular and the tensor-core generator have it.
+  per phase with taps: only the `min(SH, KH) · min(SW, KW)` such phases are packed and run, so scratch and host
+  work do not grow with the stride; when the kernel is smaller than the stride, the input gradient is cleared
+  first and the other phases' pixels stay zero. Both the regular and the tensor-core generator have it.
 - `CONV_MODE = 3` is the weight gradient: `K = N·OH·OW` folds the batch into the reduction, `A` rows are output-
   gradient planes read across images, and `B` is the image gathered as a transposed im2col (each thread owns one
   `(c_in, kh, kw)` column). `SPLIT = true` splits `K` into chunks, one per extra workgroup layer, each writing a

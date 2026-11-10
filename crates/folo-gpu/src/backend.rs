@@ -505,6 +505,34 @@ impl GpuBackend {
         }
     }
 
+    /// Runs the conv kernel call `f(d, x, out)` in pieces of the batch when `N · groups` exceeds one dispatch's
+    /// 65535 workgroup layers (the conv kernels put `(image, group)` on the grid's z axis): each piece's images
+    /// are copied to a temporary and its result copied back. `x_per` / `out_per`: elements per image.
+    fn conv_by_batch(
+        &self,
+        d: &Conv2dDesc,
+        (x, x_per): (&wgpu::Buffer, usize),
+        (out, out_per): (&wgpu::Buffer, usize),
+        f: impl Fn(&Conv2dDesc, &wgpu::Buffer, &wgpu::Buffer) -> std::result::Result<(), GpuError>,
+    ) -> Result<()> {
+        // An even piece keeps every piece's f16 offset 4-byte aligned for the copies.
+        let piece = (65535 / d.groups.max(1)) & !1;
+        if d.n * d.groups <= 65535 || piece == 0 {
+            return f(d, x, out).core();
+        }
+        let eb = d.dtype.size() as u64;
+        for n0 in (0..d.n).step_by(piece) {
+            let pd = Conv2dDesc { n: piece.min(d.n - n0), ..d.clone() };
+            let xb = ((pd.n * x_per) as u64 * eb).next_multiple_of(4);
+            let ob = ((pd.n * out_per) as u64 * eb).next_multiple_of(4);
+            let (tx, to) = (self.ctx.alloc(xb).core()?, self.ctx.alloc(ob).core()?);
+            self.ctx.copy(x, (n0 * x_per) as u64 * eb, tx.raw(), 0, xb);
+            f(&pd, tx.raw(), to.raw()).core()?;
+            self.ctx.copy(to.raw(), 0, out, (n0 * out_per) as u64 * eb, ob);
+        }
+        Ok(())
+    }
+
     /// Encodes `a @ b` for strided views, or returns `None` when an operand's layout is not addressable
     /// (the caller densifies and retries).
     fn try_matmul(&self, a: &View<'_>, b: &View<'_>, out: &wgpu::Buffer) -> Result<Option<()>> {
@@ -548,10 +576,20 @@ impl GpuBackend {
             g.a.outer = 0;
             g.c.outer = 0;
         }
-        if g.batch.0 * g.batch.1 > 65535 {
-            return Ok(None);
+        // One dispatch takes at most 65535 batch matrices (workgroup layers): larger batches go in pieces.
+        let (outer, inner) = g.batch;
+        let (step_i, step_o) = (inner.min(65535), (65535 / inner).max(1));
+        let (ba, bb) = (self.buf(a)?, self.buf(b)?);
+        for o in (0..outer).step_by(step_o) {
+            for i in (0..inner).step_by(step_i) {
+                let mut p = g.clone();
+                p.batch = (step_o.min(outer - o), step_i.min(inner - i));
+                for (s, base) in [(&mut p.a, &g.a), (&mut p.b, &g.b), (&mut p.c, &g.c)] {
+                    s.offset = base.offset + o * base.outer + i * base.inner;
+                }
+                gemm::gemm(&self.ctx, &p, ba, bb, None, out).core()?;
+            }
         }
-        gemm::gemm(&self.ctx, &g, self.buf(a)?, self.buf(b)?, None, out).core()?;
         Ok(Some(()))
     }
 }
@@ -805,7 +843,10 @@ impl Backend for GpuBackend {
         let len = input_shape.numel();
         let out = self.alloc(dtype, len)?;
         let (gd, wd) = (self.dense(&grad)?, self.dense(&w)?);
-        conv::conv2d_backward_input(&self.ctx, &d, gd.raw(), wd.raw(), out.raw()).core()?;
+        let per = (grad.shape().numel().checked_div(d.n).unwrap_or(0), d.c_in * d.h * d.w);
+        self.conv_by_batch(&d, (gd.raw(), per.0), (out.raw(), per.1), |d, g, gx| {
+            conv::conv2d_backward_input(&self.ctx, d, g, wd.raw(), gx)
+        })?;
         Ok(self.wrap(dtype, len, out))
     }
 
@@ -1050,7 +1091,10 @@ impl Backend for GpuBackend {
         let out = self.alloc(dtype, len)?;
         let (xd, wd) = (self.dense(&x)?, self.dense(&w)?);
         let bd = bias.as_ref().map(|b| self.dense(b)).transpose()?;
-        conv::conv2d(&self.ctx, &d, xd.raw(), wd.raw(), bd.as_ref().map(|b| b.raw()), out.raw()).core()?;
+        let per = (d.c_in * d.h * d.w, d.c_out * oh * ow);
+        self.conv_by_batch(&d, (xd.raw(), per.0), (out.raw(), per.1), |d, x, y| {
+            conv::conv2d(&self.ctx, d, x, wd.raw(), bd.as_ref().map(|b| b.raw()), y).map(drop)
+        })?;
         Ok(self.wrap(dtype, len, out))
     }
 
