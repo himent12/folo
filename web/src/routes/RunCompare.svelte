@@ -18,41 +18,31 @@
   import ChartSkeleton from '$lib/charts/ChartSkeleton.svelte';
   import { untrack } from 'svelte';
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
-  import X from '@lucide/svelte/icons/x';
-  import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
-  import Plus from '@lucide/svelte/icons/plus';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
-  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
-  import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
   import { ApiError, hub } from '$lib/api/index.svelte';
-  import { bestMark, bestWord } from '$lib/bestMark';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
   import LineChart, { type Series } from '$lib/charts/LineChart.svelte';
   import { fitFloor, fitFloorNote, niceDomain, unitDomain, unitFitDomain, unitTop, UNIT_ZOOM_BELOW, UNIT_ZOOM_NOTE, withLabelRow } from '$lib/charts/domain';
   import { nearest } from '$lib/charts/downsample';
   import { axisReason, AXIS_REASON, runEnd, runX } from '$lib/charts/runAxis';
-  import { conf, deviceName, duration, metric } from '$lib/format';
-  import { batchSetting, effectiveBatchSetting, closeMosaicSetting, headSetting, lrSetting, optimizerSetting, precisionSetting, settingText, warmupSetting, type Setting } from './run/resolved';
+  import { metric } from '$lib/format';
   import { href, router } from '$lib/router.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
-  import { pageKeys } from '$lib/shell/pageCommands.svelte';
   import Page from '$lib/shell/Page.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
-  import Panel from '$lib/ui/Panel.svelte';
-  import Note from '$lib/ui/Note.svelte';
   import InfoButton from '$lib/ui/InfoButton.svelte';
   import InfoRegion from '$lib/ui/InfoRegion.svelte';
   import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
-  import StatusBadge, { statusWord } from '$lib/ui/StatusBadge.svelte';
   import { media } from '$lib/design/tokens';
-  import Ident from '$lib/ui/Ident.svelte';
-  import Meta from '$lib/ui/Meta.svelte';
-  import Dialog from '$lib/ui/Dialog.svelte';
+  import AddRun from './compare/AddRun.svelte';
+  import RunChips from './compare/RunChips.svelte';
+  import ManageSheet from './compare/ManageSheet.svelte';
+  import CompareTable from './compare/CompareTable.svelte';
 
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
 
@@ -242,149 +232,11 @@
 
   // mAP is only comparable on the same data: no winner across datasets.
   const sameData = $derived(new Set(chosen.map((r) => r.config.dataset_id)).size <= 1);
-  const dsName = (id: string) => datasets.data?.find((d) => d.id === id)?.name ?? id;
-  /**
-   * The best mAP50-95 of each dataset the runs share (lib/bestMark, as the Models list ranks within a group): "best", or
-   * "joint best" on every run of an exact tie, and "on <dataset>" when the comparison spans datasets, since scores
-   * compare only on the same data. A dataset with one run here has no best. Values that differ only past three
-   * decimals are shown with as many as tell them apart.
-   */
-  const bestOf = $derived.by(() => {
-    const marks = new Map<string, { word: string; decimals: number }>();
-    for (const id of new Set(chosen.map((r) => r.config.dataset_id))) {
-      const group = chosen.filter((r) => r.config.dataset_id === id);
-      const m = bestMark(group.map((r) => r.best?.map50_95));
-      for (const r of group) if (m.decimals > 3) marks.set(r.id, { word: '', decimals: m.decimals });
-      for (const i of m.best) marks.set(group[i]!.id, { word: sameData ? bestWord(m) : `${bestWord(m)} on ${dsName(id)}`, decimals: m.decimals });
-    }
-    return marks;
-  });
-  const bestScore = (r: Run) => (r.best && bestOf.get(r.id) ? r.best.map50_95.toFixed(bestOf.get(r.id)!.decimals) : metric(r.best?.map50_95));
 
   const startOf = (r: Run) => startFrom(r.config.weights, models.data);
-  const startLine = (r: Run) => {
-    const from = startOf(r);
-    return from ? `Fine-tuned from ${from}` : FROM_SCRATCH;
-  };
   const setX = (v: Axis) => (xChoice = v);
 
-  // A cell is a Setting (./run/resolved): identifiers (an architecture, a checkpoint) in mono like the chips and every
-  // other screen (ui/Ident), prose ("From scratch") and named optimizers ("AdamW") in sans. Where the server resolved a
-  // run's config (`Run.resolved`), the optimizer, LR and batch are what it trains with, the request a note beside them.
-  const plain = (value: string): Setting => ({ value });
-  const ident = (value: string): Setting => ({ value, ident: true });
-  const rows = $derived<[string, (r: Run) => Setting][]>([
-    ['Dataset', (r) => plain(datasets.data?.find((d) => d.id === r.config.dataset_id)?.name ?? r.config.dataset_id)],
-    ['Model', (r) => ident(r.config.arch)],
-    ['Start from', (r) => (startOf(r) ? ident(startOf(r) ?? '') : plain(FROM_SCRATCH))],
-    ['Epochs', (r) => plain(`${r.epoch}/${r.epochs}`)],
-    ['Batch', (r) => batchSetting(r.config, r.resolved)],
-    ['Effective batch', (r) => (r.resolved ? effectiveBatchSetting(r.resolved) : plain('—'))],
-    ['Image size', (r) => plain(`${r.config.imgsz} px`)],
-    ['Optimizer', (r) => optimizerSetting(r.config, r.resolved)],
-    ['LR', (r) => lrSetting(r.config, r.resolved)],
-    ['Warmup', (r) => (r.resolved ? warmupSetting(r.resolved) : plain('—'))],
-    ['Mosaic / mixup', (r) => plain(`${r.config.augment.mosaic} / ${r.config.augment.mixup}`)],
-    ['Close mosaic', (r) => closeMosaicSetting(r)],
-    ['Precision', (r) => precisionSetting(r.config)],
-    ['Head', (r) => headSetting(r.config)],
-    ['Device', (r) => plain(deviceName(r.device))],
-    ['Duration', (r) => plain(r.started ? duration(((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000) : '—')],
-  ]);
-  const differs = (f: (r: Run) => Setting) => new Set(chosen.map((r) => settingText(f(r)))).size > 1;
-  /** Precision and recall of the epoch Best names (the run's model), with the threshold they were read at. */
-  const bestVal = (r: Run) => (r.best ? metrics.data?.get(r.id)?.epochs.find((e) => e.epoch === r.best?.epoch)?.val : undefined);
-  // What differs is the comparison; identical settings fold into one row that can be opened.
-  const diffRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => differs(f)) : rows);
-  const sameRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => !differs(f)) : []);
-  let showSame = $state(false);
   let managing = $state(false);
-  let tableEl = $state<HTMLElement>();
-  let tableMore = $state(false);
-  /** Run columns (1-based) fully in view while the table scrolls sideways; null when every run fits. */
-  let tableRange = $state<{ first: number; last: number } | null>(null);
-  function measureTable() {
-    const el = tableEl;
-    tableMore = !!el && el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
-    if (!el || el.scrollWidth <= el.clientWidth + 1) {
-      tableRange = null;
-      return;
-    }
-    // In view = at least 80 % of the column between the pinned setting column and the right edge.
-    const ths = [...el.querySelectorAll<HTMLElement>('thead th')];
-    const left = el.scrollLeft + (ths[0]?.offsetWidth ?? 0);
-    const right = el.scrollLeft + el.clientWidth;
-    let first = 0;
-    let last = 0;
-    ths.slice(1).forEach((th, i) => {
-      if (th.offsetLeft + th.offsetWidth * 0.2 >= left - 1 && th.offsetLeft + th.offsetWidth * 0.8 <= right) {
-        first ||= i + 1;
-        last = i + 1;
-      }
-    });
-    tableRange = first ? { first, last } : null;
-  }
-  const scrollTableEnd = () =>
-    tableEl?.scrollTo({ left: tableEl.scrollWidth, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
-  $effect(() => {
-    const el = tableEl;
-    if (!el) return;
-    void chosen.length;
-    measureTable();
-    const ro = new ResizeObserver(measureTable);
-    ro.observe(el);
-    return () => ro.disconnect();
-  });
-
-  /** The side-by-side table's setting column (104 px two at a time on phones), and the narrowest a run column gets before
-   *  the table scrolls. Set on the header row, the one row a fixed table takes its widths from, so the columns hold the
-   *  same widths from the first render whatever the pager does (DESIGN_DIRECTION §2.7). */
-  const SETTING_COL = 152;
-  const PAIR_SETTING_COL = 104;
-  const RUN_COL_MIN = 136;
-  /** A few runs across a wide panel (two or three, from 1024 px): the setting column and the run columns share the width
-   *  equally, so the table uses its panel (DESIGN_DIRECTION §2.2) and two runs' values sit a third of the panel apart,
-   *  never packed at the left over an empty right half, nor 500 px apart beside a 152 px setting column. */
-  const laptopUp = new MediaQuery(media.laptopUp, true);
-
-  // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›; values that differ
-  // from the baseline's are marked. "All runs" opens the whole table (it scrolls). The baseline is its own choice (the
-  // first run until Swap in the table's header), never the legend's emphasis: keeping a line in front to
-  // read it must not change what the table measures against.
-  let allRuns = $state(false);
-  let otherAt = $state(0);
-  let baselineId = $state<string | null>(null);
-  // A baseline removed from the comparison is forgotten, not latent: the table falls back to the first run, and adding
-  // that run again later must not quietly make it the baseline once more.
-  $effect(() => {
-    const cur = ids;
-    untrack(() => {
-      if (baselineId !== null && !cur.includes(baselineId)) baselineId = null;
-    });
-  });
-  const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
-  const shared = $derived(!pairMode && laptopUp.current && chosen.length <= 3);
-  const base = $derived(chosen.find((r) => r.id === baselineId) ?? chosen[0]);
-  const others = $derived(chosen.filter((r) => r !== base));
-  /** Makes `r` the baseline; the run it replaces takes the other column, so the pair on screen stays the same two. */
-  function setBaseline(r: Run) {
-    const prev = base;
-    baselineId = r.id;
-    otherAt = Math.max(0, chosen.filter((x) => x !== r).indexOf(prev!));
-  }
-  const other = $derived(others[Math.min(otherAt, others.length - 1)]);
-  // B: the next run becomes the baseline (in the chips' order, wrapping), the keyboard's Swap (shell/shortcuts lists it).
-  pageKeys((k) => {
-    if (k.toLowerCase() !== 'b' || chosen.length < 2 || !base) return false;
-    setBaseline(chosen[(chosen.indexOf(base) + 1) % chosen.length]!);
-    return true;
-  });
-  const shown = $derived(pairMode && base && other ? [base, other] : chosen);
-  /** The phone pager's height: the pair's sticky head row holds just under it. */
-  let pairH = $state(0);
-  const stepOther = (d: number) => (otherAt = (Math.min(otherAt, others.length - 1) + d + others.length) % others.length);
-  /** Whether a run's value differs from the baseline's: marked (a dot and the weight); an equal one is tertiary. */
-  const offBase = (r: Run, f: (r: Run) => Setting) => r !== base && !!base && settingText(f(r)) !== settingText(f(base));
 
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
@@ -455,7 +307,7 @@
             <p>Tap or drag across the chart to read every run at one point; tap it again or anywhere else to let go.</p>
           </div>
         </details>
-        {@render manageSheet()}
+        <ManageSheet bind:managing {chosen} {startOf} {fill} {SLOT_PATTERN} {slotOf} {ids} {setIds} {MAX} {candidates} {adder} />
       {:else}
         {@render chips()}
         <!-- One line, and only when it changes how to read the plot; the axis names itself (and why it was chosen). -->
@@ -477,205 +329,34 @@
     </section>
 
     {#if chosen.length}
-      <Panel title="Side by side" meta={sameRows.length ? `${diffRows.length} settings differ` : undefined} pad="none" id="cmp-table">
-        {#if pairMode && other}
-          <!-- Phones: the baseline and one run beside it; the pager steps through the others. The pager and the pair's
-               head row (both names, Baseline, Swap) hold under the top bar while the table is in view, so the names
-               never scroll away from the settings being read. -->
-          <div class="pair num" bind:offsetHeight={pairH}>
-            <button type="button" class="pg" aria-label="Previous run" onclick={() => stepOther(-1)}><ChevronLeft size={16} aria-hidden="true" /></button>
-            <span class="pair-what" aria-live="polite">Run {chosen.indexOf(other) + 1} of {chosen.length}<span class="faint">{' '}vs baseline</span></span>
-            <button type="button" class="pg" aria-label="Next run" onclick={() => stepOther(1)}><ChevronRight size={16} aria-hidden="true" /></button>
-            <button type="button" class="more" onclick={() => (allRuns = true)}>All {chosen.length} runs</button>
-          </div>
-        {:else if narrow && allRuns && chosen.length > 2}
-          <p class="t-range num">
-            {#if tableRange}{tableRange.first === tableRange.last ? `Run ${tableRange.first}` : `Runs ${tableRange.first}–${tableRange.last}`} of {chosen.length}<span
-                class="sep"
-                aria-hidden="true">·</span
-              >{/if}<button type="button" class="more" onclick={() => (allRuns = false)}>Two at a time</button>
-          </p>
-        {:else if tableRange}
-          <!-- What the sideways scroll hides: the runs in view, and a way to the others. -->
-          <p class="t-range num">
-            {tableRange.first === tableRange.last ? `Run ${tableRange.first}` : `Runs ${tableRange.first}–${tableRange.last}`} of {chosen.length}{#if tableRange.last < chosen.length}<span class="sep" aria-hidden="true">·</span><button
-                type="button"
-                class="more"
-                onclick={scrollTableEnd}>Scroll for {chosen.length - tableRange.last} more →</button
-              >{/if}
-          </p>
-        {/if}
-        <div class="scroll" class:more={tableMore} class:pairing={pairMode && !!other} style:--pair-h="{pairH}px" bind:this={tableEl} onscroll={measureTable}>
-          <!-- Fixed layout: every run column the same width, so each header's key sits over its own values. The widths
-               live on the header row (no colgroup, whose keyed columns could outlive a page of runs), so the setting
-               column is fixed and the run columns share the rest equally from the first render (two or three runs
-               from 1024 px: the setting column takes an equal share too, `shared`). -->
-          <table class="table fixed" class:two={pairMode} style:min-width={pairMode ? undefined : `${SETTING_COL + chosen.length * RUN_COL_MIN}px`}>
-            <thead>
-              <tr>
-                <th style:width={shared ? undefined : `${pairMode ? PAIR_SETTING_COL : SETTING_COL}px`}></th>
-                {#each shown as r (r.id)}
-                  <!-- The key in a column of its own beside the name, so a name that wraps (at its hyphens) keeps its
-                       left edge and never squeezes the key. -->
-                  <th>
-                    <!-- The run's name over its role: the baseline every other column is read against, or Swap to make
-                         it the baseline. No key here: the chips above are the legend, and a swatch at the column's
-                         edge could not line up with its chip's. -->
-                    <span class="th"
-                      ><span class="th-name" class:truncate={!pairMode} title={pairMode ? undefined : r.name}>{r.name}</span
-                      >{#if chosen.length > 1}{#if r === base}<span class="base-tag">Baseline</span>{:else}<button
-                            type="button"
-                            class="set-base"
-                            aria-label="Make {r.name} the baseline"
-                            title="Make this run the baseline"
-                            onclick={() => setBaseline(r)}><ArrowLeftRight size={12} aria-hidden="true" />Swap</button
-                          >{/if}{/if}</span
-                    >
-                  </th>
-                {/each}
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td class="k">Status</td>
-                {#each shown as r (r.id)}<td><StatusBadge run={r} plain /></td>{/each}
-              </tr>
-              <tr>
-                <!-- The best epoch's score, which the chips' latest value need not be (a stopped run's 0.595 · stopped
-                     against its best 0.606): the row says so. -->
-                <td class="k">Best mAP50-95<span class="k-sub">any epoch</span></td>
-                {#each shown as r (r.id)}
-                  {@const win = bestOf.get(r.id)?.word}
-                  <td class="num" class:winner={!!win}>{bestScore(r)}{#if win}{' '}<span class="tag" data-fact>{win}</span>{/if}</td>
-                {/each}
-              </tr>
-              <tr>
-                <td class="k">Precision · recall</td>
-                {#each shown as r (r.id)}
-                  {@const v = bestVal(r)}
-                  <td class="num">
-                    {#if v}{metric(v.precision)} · {metric(v.recall)}<span class="pr-at"
-                        ><Meta><span>{v.best_f1_conf != null ? `conf ${conf(v.best_f1_conf)}` : 'best-F1 conf'}</span><span>ep {r.best?.epoch}</span></Meta></span
-                      >{:else}—{/if}
-                  </td>
-                {/each}
-              </tr>
-              {#each diffRows as [k, f] (k)}
-                <tr>
-                  <td class="k">{k}</td>
-                  {#each shown as r (r.id)}
-                    <!-- Read against the baseline: a value that differs is marked (a dot and the weight), an equal one
-                         recedes to tertiary, so "11 settings differ" shows where they differ. -->
-                    {@const off = offBase(r, f)}
-                    <td class="num cfg" class:diff={off} class:same={r !== base && !off}
-                      class:base={r === base}
-                      >{#if off}<span class="chg-row"><span class="chg" aria-hidden="true"></span><span
-                            >{@render cell(f(r))}<span class="sr-only">, differs from the baseline</span></span
-                          ></span
-                        >{:else}{@render cell(f(r))}{/if}</td
-                    >
-                  {/each}
-                  </tr>
-              {/each}
-              {#if sameRows.length}
-                <tr class="fold">
-                  <td colspan={shown.length + 1}>
-                    <button aria-expanded={showSame} onclick={() => (showSame = !showSame)}>
-                      {showSame ? 'Hide' : 'Show'} {sameRows.length} identical {sameRows.length === 1 ? 'setting' : 'settings'}
-                    </button>
-                  </td>
-                </tr>
-                {#if showSame}
-                  {#each sameRows as [k, f] (k)}
-                    <tr>
-                      <td class="k">{k}</td>
-                      {#each shown as r (r.id)}<td class="num cfg">{@render cell(f(r))}</td>{/each}
-                          </tr>
-                  {/each}
-                {/if}
-              {/if}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
+      <CompareTable {chosen} {ids} {narrow} {datasets} {metrics} {sameData} {startOf} />
     {/if}
   {/if}
 </Page>
 
 
-{#snippet cell(v: Setting)}{#if v.ident}<Ident value={v.value} />{:else}<span class="val" class:whole={v.value.length <= 14 && !/\s/.test(v.value)} data-fact>{v.value}</span>{/if}{#if v.note}<Note text={v.note} fact />{/if}{#if v.about}<span class="k-sub v-about">{v.about}</span>{/if}{/snippet}
-
 {#snippet chips()}
-  <!-- The run chips are the legend: colour key, value under the cursor, link and remove. -->
-  <div class="chips" role="group" aria-label="Runs being compared">
-    <div class="chips-head">
-      <!-- The readout row: where the values are read, or how to read them while the plot has keyboard focus or on a
-           first touch. -->
-      <span class="at num" class:hint={!!hint} aria-hidden="true">{hint ?? readoutAt}</span>
-      <!-- Phones: opening, removing and adding runs sit in a sheet, so the legend stays two rows of keys. -->
-      <button type="button" class="manage" aria-haspopup="dialog" aria-expanded={managing} onclick={() => (managing = true)}>Edit</button>
-    </div>
-    {#each chosen as r (r.id)}
-      {@const v = valueOf(r.id)}
-      {@const from = startOf(r)}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <span
-        class="chip"
-        class:pinned={pinned === r.id}
-        style:--c={fill(r.id)}
-        onpointerenter={() => (hovered = r.id)}
-        onpointerleave={() => (hovered = null)}
-        onfocusin={() => (hovered = r.id)}
-        onfocusout={() => (hovered = null)}
-      >
-        <!-- The legend entry (key and name) is the toggle: it keeps the run's line in front. -->
-        <button
-          type="button"
-          class="key"
-          aria-pressed={pinned === r.id}
-          title={pinned === r.id ? 'Let the line fall back' : 'Keep this line in front'}
-          onclick={() => (pinned = pinned === r.id ? null : r.id)}
-        ><i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i><span class="nm">{r.name}</span></button>
-        <!-- How the line ended (live, stopped, failed) in words beside its value: the end label's fallback, and on phones,
-             which have no end labels, the only word for the end marker's shape (beside the value, or under the name on phones). -->
-        <span class="v num">{v === null ? '—' : metric(v)}{#if runEnd(r.status)}<span class="st"><span class="sep">{' · '}</span>{runEnd(r.status)}</span>{/if}</span>
-        <!-- How the run started: fine-tuned vs from scratch often explains a gap between two curves. It lies over the
-             toggle's lower half (clicks pass through to it) and runs on under the value. Phones show it in the Edit
-             sheet, on a full-width line of its own. "From <checkpoint>" (the tooltip says "Fine-tuned from"): the checkpoint
-             is an identifier, a fact, so it is never cut; a narrow chip breaks it after a hyphen onto a second line. -->
-        <span class="from" class:tuned={!!from} title={startLine(r)} data-fact>{#if from}From <Ident value={from} class="src" />{:else}{FROM_SCRATCH}{/if}</span>
-        <span class="acts">
-          <a class="open" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={12} /></a>
-          <button class="rm" aria-label="Remove {r.name}" onclick={() => setIds(ids.filter((id) => id !== r.id))}><X size={12} /></button>
-        </span>
-      </span>
-    {/each}
-    {#if !narrow && ids.length < MAX && candidates.length}{@render adder()}{/if}
-  </div>
+  <RunChips
+    {hint}
+    {readoutAt}
+    bind:managing
+    {chosen}
+    {valueOf}
+    {startOf}
+    bind:pinned
+    bind:hovered
+    {fill}
+    {SLOT_PATTERN}
+    {slotOf}
+    {ids}
+    {setIds}
+    {narrow}
+    {MAX}
+    {candidates}
+    {adder}
+  />
 {/snippet}
 
-{#snippet manageSheet()}
-  <!-- Phones: the legend's management in a bottom sheet: each run with how it started, open and remove, then Add. -->
-  <Dialog bind:open={managing} title="Runs in this comparison" description="Open a run, take it out, or add another (up to {MAX}).">
-    <ul class="m-list">
-      {#each chosen as r (r.id)}
-        {@const from = startOf(r)}
-        <li class="m-row" style:--c={fill(r.id)}>
-          <i aria-hidden="true" data-pattern={SLOT_PATTERN[slotOf(r.id)]}></i>
-          <span class="m-what">
-            <span class="m-name">{r.name}</span>
-            <span class="m-from" class:tuned={!!from}>{#if from}Fine-tuned from <Ident value={from} />{:else}{FROM_SCRATCH}{/if}</span>
-          </span>
-          <a class="m-act" href={href(`/runs/${r.id}`)} aria-label="Open {r.name}" title="Open run"><ArrowUpRight size={16} aria-hidden="true" /></a>
-          <button type="button" class="m-act" aria-label="Remove {r.name}" title="Remove from the comparison" onclick={() => setIds(ids.filter((id) => id !== r.id))}
-            ><X size={16} aria-hidden="true" /></button
-          >
-        </li>
-      {/each}
-    </ul>
-    {#if ids.length < MAX && candidates.length}<div class="m-add">{@render adder()}</div>{/if}
-  </Dialog>
-{/snippet}
 
 {#snippet plot()}
   {#if metrics.error}
@@ -714,21 +395,7 @@
 {/snippet}
 
 {#snippet adder()}
-  <!-- The face is a secondary Button's; the native picker lies over all of it, so any point of it opens the list. -->
-  <label class="add">
-    <Plus size={14} strokeWidth={1.75} aria-hidden="true" />
-    <span aria-hidden="true">Add run…</span>
-    <select
-      aria-label="Add a run to the comparison"
-      onchange={(e) => {
-        const v = (e.currentTarget as HTMLSelectElement).value;
-        if (v) setIds([...ids, v]);
-      }}
-    >
-      <option value="">Add run…</option>
-      {#each candidates as c (c.id)}<option value={c.id}>{c.name} · {statusWord(c)}</option>{/each}
-    </select>
-  </label>
+  <AddRun {candidates} {ids} {setIds} />
 {/snippet}
 
 <style>
@@ -747,286 +414,6 @@
     place-content: center;
     justify-items: center;
   }
-  /* The legend: one card per run (key, name, value under the cursor; how it started below), side by side. */
-  .chips {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
-    gap: var(--space-2);
-    align-items: stretch;
-  }
-  /* Laptops and tablets: a 2 × 2 grid, so four runs never leave one card orphaned on a row of its own. */
-  @media (min-width: 768px) and (max-width: 1279px) {
-    .chips {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-  .chips-head {
-    grid-column: 1 / -1;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-  }
-  .at {
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-  }
-  .chip {
-    position: relative;
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto;
-    grid-template-rows: auto auto;
-    column-gap: var(--space-1);
-    min-width: 0;
-    padding: var(--space-1) var(--space-1) var(--space-1) var(--space-3);
-    border-radius: var(--radius-md);
-    background: var(--bg-panel);
-    border: 1px solid var(--line-default);
-    transition:
-      border-color var(--dur-fast) var(--ease-standard),
-      background-color var(--dur-fast) var(--ease-standard);
-  }
-  .chip:hover {
-    border-color: var(--line-strong);
-  }
-  /* The run kept in front: the one selection rule (bg.active and the 2 px ink bar). */
-  .chip.pinned {
-    background: var(--bg-active);
-  }
-  .chip.pinned::before {
-    content: '';
-    position: absolute;
-    left: -1px;
-    top: -1px;
-    bottom: -1px;
-    width: 2px;
-    border-radius: var(--radius-md) 0 0 var(--radius-md);
-    background: var(--text-primary);
-  }
-  /* The legend entry is the toggle: key and name, over both lines of the card. */
-  .key {
-    grid-column: 1;
-    grid-row: 1 / 3;
-    position: relative;
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-2);
-    padding: var(--space-1);
-    margin-left: calc(-1 * var(--space-1));
-    border-radius: var(--radius-sm);
-    min-width: 0;
-    text-align: left;
-  }
-  .key:hover {
-    background: var(--bg-hover);
-  }
-  /* On the name's centre line (20 px line). */
-  .key i {
-    margin-top: 8px;
-  }
-  .nm {
-    font-weight: var(--weight-medium);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .chip .v {
-    grid-column: 2;
-    grid-row: 1;
-    align-self: start;
-    padding: var(--space-1) var(--space-1) 0 0;
-    min-width: 3.2em;
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-    font-variant-numeric: tabular-nums;
-    text-align: right;
-    white-space: nowrap;
-  }
-  .chip .st {
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-  }
-  /* Indented under the name, past the key (16 px swatch + 8 px gap); clicks fall through to the toggle. */
-  .from {
-    grid-column: 1 / 3;
-    grid-row: 2;
-    align-self: end;
-    position: relative;
-    min-width: 0;
-    padding: 0 var(--space-1) var(--space-1) var(--space-6);
-    pointer-events: none;
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-  }
-  .from.tuned {
-    color: var(--text-secondary);
-  }
-  /* Breaks only after a hyphen (fasteners-n-/best), never mid-word and never with an ellipsis. */
-  .from :global(.ident) {
-    font-size: var(--type-sm-size);
-    overflow-wrap: normal;
-    word-break: normal;
-  }
-  .acts {
-    grid-column: 3;
-    grid-row: 1 / 3;
-    display: grid;
-    align-content: center;
-  }
-  .open,
-  .chip .rm {
-    display: grid;
-    place-items: center;
-    width: 24px;
-    height: 24px;
-    border-radius: var(--radius-sm);
-    color: var(--text-tertiary);
-  }
-  .open:hover,
-  .chip .rm:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-  @media (pointer: coarse) {
-    .chip .rm {
-      position: relative;
-    }
-    .chip .rm::after {
-      content: '';
-      position: absolute;
-      inset: -8px;
-    }
-  }
-  .manage {
-    display: none;
-  }
-  .t-range {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    min-height: 24px;
-    padding: var(--space-2) var(--space-4) 0;
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-  }
-  .t-range .sep {
-    margin-inline: var(--space-2);
-  }
-  .t-range .more {
-    color: var(--text-secondary);
-    text-decoration: underline;
-    text-decoration-color: var(--line-strong);
-    text-underline-offset: 3px;
-  }
-  .t-range .more:hover {
-    color: var(--text-primary);
-  }
-  .at.hint {
-    color: var(--text-secondary);
-  }
-  /* Phones, two at a time: what is shown, the pager (44 px targets), and the way to the whole table. */
-  .pair {
-    display: flex;
-    align-items: center;
-    /* The ‹ chevron's glyph on the content edge; its 44 px target reaches into the padding. */
-    padding: 0 var(--space-4) 0 calc(var(--space-4) - 14px);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-secondary);
-  }
-  .pair-what {
-    text-align: center;
-  }
-  /* Two at a time, the pair fits the width: no sideways scroller (which would also trap the sticky head), and the
-     pager and the head row stick under the top bar while the table is in view. */
-  .pair {
-    position: sticky;
-    top: var(--size-topbar);
-    z-index: var(--z-sticky);
-    background: var(--bg-panel);
-  }
-  .scroll.pairing {
-    overflow: visible;
-  }
-  .scroll.pairing :global(thead th) {
-    position: sticky;
-    top: calc(var(--size-topbar) + var(--pair-h, 0px));
-    z-index: var(--z-sticky);
-    background: var(--bg-panel);
-    box-shadow: inset 0 -1px 0 var(--line-subtle);
-  }
-  .pair .more {
-    margin-left: auto;
-  }
-  .pair .pg {
-    flex-shrink: 0;
-    display: grid;
-    place-items: center;
-    width: 44px;
-    height: 44px;
-    border-radius: var(--radius-md);
-    color: var(--text-secondary);
-  }
-  .pair .pg:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-  .pair .more,
-  .t-range .more {
-    min-height: 44px;
-  }
-  .pair .more {
-    color: var(--text-secondary);
-    text-decoration: underline;
-    text-decoration-color: var(--line-strong);
-    text-underline-offset: 3px;
-  }
-  .pair .more:hover {
-    color: var(--text-primary);
-  }
-  /* Nothing truncates: labels and run names wrap (a name at its hyphens, a word only when it is longer than the
-     column), and the two headers start on one line. */
-  table.two th,
-  table.two td {
-    white-space: normal;
-    overflow-wrap: break-word;
-    vertical-align: top;
-  }
-  table.two th {
-    height: auto;
-    padding-block: var(--space-2);
-  }
-  .base-tag {
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-  }
-  /* A changed value: the dot hangs in the cell's padding, on the value's first line, so changed and unchanged values
-     share one left edge and the dot never wraps away from its value. */
-  .chg-row {
-    display: block;
-    position: relative;
-  }
-  .chg {
-    position: absolute;
-    left: -10px; /* grid-ok: a 6 px dot 4 px before the text */
-    top: 8px;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--text-primary);
-  }
-  td.same {
-    color: var(--text-tertiary);
-  }
-  /* The baseline is the reference the other column is read against: plain body text. */
-  td.cfg.base {
-    color: var(--text-primary);
-  }
   /* The one caveat that changes how to read the plot, always in view, on one line above it. */
   .caveat {
     font-size: var(--type-sm-size);
@@ -1034,127 +421,10 @@
     color: var(--text-secondary);
   }
   @media (max-width: 767px) {
-    /* Phones: the legend is two columns of compact keys above the plot, each one line of text that wraps only where it
-       must: the swatch, the run's whole name (wrapping at its hyphens, never cut: "shapes-hard-s" beside
-       "shapes-hard-m"), its value right after it, and how the line ended ("failed") under the name, so name and value
-       read together and four runs take two short rows. The whole key is the toggle that keeps a line in front; its hit
-       area is the card. Opening, removing and adding runs live in the Edit sheet. */
-    .chips {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0 var(--space-2);
-    }
-    /* The legend's caption ("Latest · ep 37", or how to read it on a first touch) and Edit: the first line of the
-       legend, not a row of its own. Edit is a real 32 px target (44 on touch), never a hit area over the controls above. */
-    .chips-head {
-      min-height: 32px;
-    }
-    .manage {
-      display: inline-flex;
-      align-items: center;
-      height: 32px;
-      padding: 0 var(--space-2);
-      margin-right: calc(-1 * var(--space-2));
-      border-radius: var(--radius-sm);
-      font-size: var(--type-sm-size);
-      color: var(--text-secondary);
-    }
-    .manage:hover {
-      color: var(--text-primary);
-    }
-    /* A hanging indent: a wrapped line starts under the name, past the swatch (12 px and its 6 px gap). */
-    .chips .chip {
-      display: block;
-      min-height: 32px;
-      padding: var(--space-1-5) var(--space-2) var(--space-1-5) calc(var(--space-2) + 18px);
-      text-indent: -18px;
-      border: 0;
-      background: none;
-      font-size: var(--type-sm-size);
-      line-height: var(--type-sm-line);
-    }
-    .chips .chip.pinned {
-      background: var(--bg-active);
-    }
-    .chips .chip.pinned::before {
-      top: 0;
-      bottom: 0;
-      left: 0;
-    }
-    /* The space before the value is the name's margin, so a value wrapped under the name starts on its left edge. */
-    .chips .chip .key {
-      display: inline;
-      position: static;
-      margin: 0 var(--space-1) 0 0;
-      padding: 0;
-      font: inherit;
-    }
-    .chips .chip .key:hover {
-      background: none;
-    }
-    .chips .chip .key::after {
-      content: '';
-      position: absolute;
-      inset: 0;
-      border-radius: var(--radius-md);
-    }
-    .chips .chip .key:focus-visible {
-      outline: none;
-    }
-    .chips .chip .key:focus-visible::after {
-      outline: 2px solid var(--focus);
-      outline-offset: -2px;
-    }
-    /* On the text's centre line (16 px line). */
-    .chips .chip .key i {
-      display: inline-block;
-      width: 12px;
-      margin: 0 6px 0 0;
-      vertical-align: middle;
-    }
-    .chips .nm {
-      white-space: normal;
-      overflow: visible;
-      overflow-wrap: break-word;
-    }
-    /* The value and how the line ended ("0.494 · failed") are one unit that never breaks: beside the name when they
-       fit, else together on the line under it, never the status alone under the name with its value above. */
-    .chips .chip .v {
-      display: inline-block;
-      min-width: 0;
-      margin: 0;
-      padding: 0;
-      text-align: left;
-      text-indent: 0;
-      white-space: nowrap;
-      pointer-events: none;
-    }
-    .chips .chip .from,
-    .chips .chip .acts {
-      display: none;
-    }
-    /* The side-by-side table scrolls sideways on phones: setting names stay pinned, and the right edge fades only
-       while more runs lie beyond it. */
-    .scroll.more {
-      mask-image: linear-gradient(90deg, #000 calc(100% - 32px), transparent);
-    }
-    .scroll :global(th:first-child),
-    .scroll :global(td.k) {
-      position: sticky;
-      left: 0;
-      z-index: 1;
-      background: var(--bg-panel);
-    }
     /* Compact groups 8 px apart (controls, legend, caveat, plot), so the plot starts within ~200 px of the controls. */
     .compare {
       gap: var(--space-2);
       padding: var(--space-3);
-    }
-  }
-  /* Touch: Edit is a real 44 px target (no invisible hit area over the controls above or the keys below). */
-  @media (max-width: 767px) and (pointer: coarse) {
-    .chips-head,
-    .manage {
-      min-height: 44px;
     }
   }
   /* The axis ⓘ's region sits on the frame's own edges; the section's gap spaces it. */
@@ -1269,261 +539,6 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-  }
-  .fold td {
-    padding-top: 0;
-    padding-bottom: 0;
-  }
-  .fold button {
-    height: 32px;
-    font-size: var(--type-sm-size);
-    color: var(--text-secondary);
-  }
-  .fold button:hover {
-    color: var(--text-primary);
-  }
-  /* Adding a run: a native picker (the platform list is the most accessible) dressed as the standard secondary Button
-     (ui/Button): raised fill, default edge, 28 px, the icon and a medium label. */
-  .add {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    align-self: center;
-    justify-self: start;
-    gap: var(--space-1-5);
-    height: var(--control-md);
-    padding: 0 var(--space-3);
-    border-radius: var(--radius-md);
-    border: 1px solid var(--line-default);
-    background: var(--bg-raised);
-    box-shadow: var(--shadow-sm);
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-    transition:
-      background-color var(--dur-fast) var(--ease-standard),
-      border-color var(--dur-fast) var(--ease-standard);
-  }
-  .add:hover {
-    border-color: var(--line-strong);
-    background: color-mix(in srgb, var(--bg-raised), var(--text-primary) 4%);
-  }
-  .add select {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    opacity: 0;
-    cursor: pointer;
-  }
-  @media (pointer: coarse) {
-    .add {
-      min-height: 44px;
-    }
-    /* The native picker lies unseen over the button, but iOS still zooms into a select under 16 px (sourceRules.test.ts). */
-    .add select {
-      font-size: var(--type-lg-size);
-    }
-  }
-  .add:has(select:focus-visible) {
-    outline: 2px solid var(--focus);
-    outline-offset: 2px;
-  }
-  .add select:focus-visible {
-    outline: none;
-  }
-  .add option {
-    background: var(--bg-overlay);
-  }
-  .scroll {
-    overflow-x: auto;
-  }
-  table.fixed {
-    table-layout: fixed;
-    width: 100%;
-  }
-  .fixed th,
-  .fixed td {
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  /* A setting is a fact: the request beside its value moves, whole, to a line of its own rather than lose its end;
-     the value itself ("360 steps") stays whole. */
-  .fixed td.cfg {
-    white-space: normal;
-    overflow-wrap: break-word;
-  }
-  /* A short value of one word ("0.000833", "AdamW") stays whole; a value in words ("360 steps", "last 10 epochs",
-     "Mixed precision (f16)") wraps at its spaces in a narrow column (a 320 px phone), never cut. So does the request
-     beside a value ("(requested 0.01)"), which elsewhere keeps to one line. */
-  .val.whole {
-    white-space: nowrap;
-  }
-  .fixed td.cfg :global(.ui-note) {
-    white-space: normal;
-  }
-  /* A run's head: its name over its role (Baseline, or Swap), each on a line of its own. */
-  .th {
-    display: grid;
-    justify-items: start;
-    color: var(--text-primary);
-    font-size: var(--type-sm-size);
-  }
-  .th-name {
-    max-width: 100%;
-  }
-  .fixed thead th {
-    height: auto;
-    padding-block: var(--space-2);
-    vertical-align: top;
-  }
-  /* The row's label over what it measures ("any epoch"): 12 px tertiary. */
-  .k-sub {
-    display: block;
-    font-size: var(--type-sm-size);
-  }
-  /* What a short value means ("Auto": AdamW for short runs, else SGD), under the value it explains. */
-  .v-about {
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-  }
-  /* Same patterns as the lines, so a run's key matches its curve without relying on colour. A key is a fill: the
-     palette hue (--c is chart.fill) with the swatch hairline, which the pattern's mask cuts along with the dashes. */
-  .chip i {
-    flex-shrink: 0;
-    width: 16px;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--c);
-    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
-  }
-  i[data-pattern='dash'] {
-    mask-image: repeating-linear-gradient(90deg, #000 0 5px, transparent 5px 7px);
-    border-radius: 0;
-  }
-  i[data-pattern='dot'] {
-    mask-image: repeating-linear-gradient(90deg, #000 0 3px, transparent 3px 5px);
-    border-radius: 0;
-  }
-  .k {
-    color: var(--text-tertiary);
-  }
-  td.diff {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  /* The best run's value: ink at 600 and a tertiary "best", never a lime value or chip (DESIGN_DIRECTION §2.6: status
-     hue on the mark, not the metric; the Models list marks its best rows the same way). */
-  .winner {
-    color: var(--text-primary);
-    font-weight: var(--weight-semibold);
-  }
-  /* A fact: in a narrow column the word moves, whole, under its value, never cut ("best on fast…" at 820). */
-  .fixed td.winner {
-    white-space: normal;
-  }
-  /* A phone's pair columns are narrower than "best on shapes-hard": there it wraps at its spaces. */
-  .two .tag {
-    white-space: normal;
-  }
-  .tag {
-    display: inline-block;
-    white-space: nowrap;
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
-  }
-  /* Where P · R were read. A setting's request beside its value is ui/Note. */
-  .pr-at {
-    display: block;
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
-  /* The pair's other column: "Swap" makes it the baseline, the old baseline taking its place (the baseline never
-     follows the legend's emphasis). One short word, so it stays on one line in the narrow column. */
-  .set-base {
-    justify-self: start;
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-1);
-    white-space: nowrap;
-    position: relative;
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-secondary);
-    text-decoration: underline;
-    text-decoration-color: var(--line-strong);
-    text-underline-offset: 3px;
-  }
-  .set-base:hover {
-    color: var(--text-primary);
-  }
-  /* A 44 px target around the 16 px line. */
-  .set-base::after {
-    content: '';
-    position: absolute;
-    inset: -14px -8px; /* grid-ok: a 44 px target around the 16 px line */
-  }
-  /* The Edit sheet: one 56 px row per run (key, name over how it started, open, remove), then Add run. */
-  .m-list {
-    display: grid;
-    margin: 0 calc(-1 * var(--space-2));
-  }
-  .m-row {
-    display: grid;
-    grid-template-columns: 16px minmax(0, 1fr) 44px 44px;
-    align-items: center;
-    column-gap: var(--space-2);
-    min-height: 56px;
-    padding: var(--space-1) var(--space-2);
-  }
-  .m-row + .m-row {
-    border-top: 1px solid var(--line-subtle);
-  }
-  .m-row i {
-    align-self: start;
-    margin-top: 14px; /* grid-ok: on the name line, centred in the 56 px row */
-  }
-  .m-what {
-    display: grid;
-    min-width: 0;
-  }
-  .m-name {
-    font-weight: var(--weight-medium);
-    overflow-wrap: break-word;
-  }
-  .m-from {
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-    overflow-wrap: anywhere;
-  }
-  .m-from.tuned {
-    color: var(--text-secondary);
-  }
-  .m-from :global(.ident) {
-    font-size: var(--type-sm-size);
-  }
-  .m-act {
-    display: grid;
-    place-items: center;
-    width: 44px;
-    height: 44px;
-    border-radius: var(--radius-md);
-    color: var(--text-secondary);
-  }
-  .m-act:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-  .m-add {
-    padding-top: var(--space-3);
-  }
-  .m-row i {
-    flex-shrink: 0;
-    width: 16px;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--c);
-    box-shadow: inset 0 0 0 1px var(--chart-swatch-edge);
   }
   /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
   .swap {
