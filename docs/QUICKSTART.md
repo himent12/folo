@@ -78,7 +78,8 @@ runs `val` and `predict` in f16 on the GPU (`--tensor-cores` puts it on the tens
 ## 4. Train on your own data
 
 FOLO reads YOLO and COCO datasets as they are, including Roboflow exports. You can pass a folder, a `data.yaml` or a
-COCO instances `.json` ([DATA.md](DATA.md) has the detection rules).
+COCO instances `.json` ([DATA.md](DATA.md) has the detection rules). Images but no labels yet? Studio can have
+Claude Code or Codex draw the boxes for you to review ([LABELING.md](LABELING.md)).
 
 **YOLO**: images, plus one `.txt` per image holding `class cx cy w h` lines (normalised to 0–1):
 

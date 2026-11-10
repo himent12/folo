@@ -792,6 +792,7 @@ name = "folo-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "folo-api",
  "folo-client",
  "folo-cloud",
@@ -818,6 +819,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize};
 mod cloud;
 pub mod codes;
 pub mod json;
+mod label;
 mod throughput;
 pub mod weights;
 
 pub use cloud::*;
+pub use label::*;
 pub use throughput::*;
 
 /// API version string reported in [`Health::api`].
@@ -1415,10 +1417,14 @@ pub struct Sample {
 pub struct RunLogs {
     /// The most recent log lines, oldest first (with `after`: the lines after that many).
     pub lines: Vec<LogLine>,
-    /// Lines in the run's whole log, so `after: total` asks for what comes next; 0 from servers that predate the
-    /// field.
-    #[serde(default)]
+    /// Lines in the run's whole log, so `after: total` asks for what comes next. 0 (an empty log, a log without a
+    /// cursor, a server that predates the field) is left out.
+    #[serde(default, skip_serializing_if = "is_zero")]
     pub total: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 /// SSE `status` payload.

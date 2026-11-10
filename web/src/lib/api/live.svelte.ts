@@ -73,7 +73,8 @@ function replaceFrom(steps: Step[], epochs: Epoch[], s: Step): [Step[], Epoch[]]
   return [[...steps.filter((x) => x.step < s.step), s], epochs.filter((e) => e.epoch < s.epoch)];
 }
 
-function mergeLogs(a: LogLine[], b: LogLine[]): LogLine[] {
+/** Two log histories as one, oldest first, each line once (by time and text), the latest 2000. */
+export function mergeLogs(a: LogLine[], b: LogLine[]): LogLine[] {
   const seen = new Set(a.map((l) => `${l.t}|${l.message}`));
   const out = [...a, ...b.filter((l) => !seen.has(`${l.t}|${l.message}`))];
   out.sort((x, y) => x.t.localeCompare(y.t));

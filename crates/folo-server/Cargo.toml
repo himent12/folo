@@ -39,6 +39,10 @@ image.workspace = true
 sysinfo.workspace = true
 tar.workspace = true
 getrandom.workspace = true
+base64.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
 
 [dev-dependencies]
 folo-test-support.workspace = true

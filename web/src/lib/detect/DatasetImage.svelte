@@ -1,6 +1,7 @@
 <script lang="ts">
   /**
-   * A dataset image (resolved through the API, so it works with the mock too) with optional boxes on top. The tile
+   * A dataset image, or a labeling job's (`jobId`), resolved through the API so it works with the mock too, with
+   * optional boxes on top. The tile
    * keeps its geometry throughout: a skeleton until the image has loaded, the boxes only over a loaded image (never
    * floating on an empty frame), and a failed URL or image says so, with Retry.
    */
@@ -10,7 +11,9 @@
   import DetectionView, { type ViewBox } from './DetectionView.svelte';
 
   interface Props {
-    datasetId: string;
+    /** The dataset the image is in; or `jobId`, the labeling job's. */
+    datasetId?: string;
+    jobId?: string;
     imageId: string;
     width: number;
     height: number;
@@ -31,7 +34,7 @@
     alt?: string;
   }
 
-  let { datasetId, imageId, thumb, boxes = [], truth = [], ...rest }: Props = $props();
+  let { datasetId, jobId, imageId, thumb, boxes = [], truth = [], ...rest }: Props = $props();
 
   let src = $state<string | null>(null);
   let phase = $state<'loading' | 'ready' | 'error'>('loading');
@@ -60,7 +63,7 @@
     let live = true;
     src = null;
     phase = 'loading';
-    hub.api.imageUrl(datasetId, imageId, thumb).then(
+    (jobId ? hub.api.labelImageUrl(jobId, imageId, thumb) : hub.api.imageUrl(datasetId ?? '', imageId, thumb)).then(
       (u) => {
         if (live) src = u;
       },

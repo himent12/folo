@@ -9,10 +9,10 @@ use std::path::Path;
 use axum::body::Bytes;
 use folo_api::{
     BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, CloudConnection, CloudInstance,
-    CloudOfferList, CloudProvider, ConnectCloud, CreateUpload, Dataset, ExportResult, ExportSpec, GpuInfo,
-    GpuPool, LogLine, Model, ModelEval, PredictResponse, RegisterDataset, Run, RunEstimate, RunEvent,
-    RunLogs, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset, ThroughputTable, TrainConfig,
-    Upload, UploadCreated, Uploaded, ValReport, ValRequest,
+    CloudOfferList, CloudProvider, ConnectCloud, CreateUpload, Dataset, DatasetFormat, ExportResult,
+    ExportSpec, GpuInfo, GpuPool, LabelDatasetRequest, LogLine, Model, ModelEval, PredictResponse,
+    RegisterDataset, Run, RunEstimate, RunEvent, RunLogs, RunMetrics, RunSamples, Split, StatusEvent,
+    SyntheticDataset, ThroughputTable, TrainConfig, Upload, UploadCreated, Uploaded, ValReport, ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -549,6 +549,28 @@ pub trait Store: Send + Sync + 'static {
     fn terminate_instance(&self, id: &str) -> Result<CloudInstance> {
         let _ = id;
         Err(not_cloud())
+    }
+
+    /// The agent-labeling service behind `/api/label` (docs/API.md, Agent labeling). Stores without one answer
+    /// `501 not_implemented` (the default).
+    fn labeler(&self) -> Result<&crate::label::Labeler> {
+        Err(crate::error::Error::not_implemented("agent labeling"))
+    }
+    /// `POST /api/label/jobs/{id}/dataset`: writes the job's labeled images as a YOLO dataset under the data dir
+    /// and registers it. A folder that cannot be registered is removed again.
+    fn label_dataset(&self, id: &str, req: LabelDatasetRequest) -> Result<Dataset> {
+        let labeler = self.labeler()?;
+        let written = labeler.write_dataset(id, &req)?;
+        let registered = self.register_dataset(RegisterDataset {
+            name: Some(written.name.clone()),
+            path: written.path.to_string_lossy().into_owned(),
+            format: DatasetFormat::Yolo,
+        });
+        let dataset = registered.inspect_err(|_| {
+            let _ = std::fs::remove_dir_all(&written.path);
+        })?;
+        labeler.set_dataset(written, &dataset);
+        Ok(dataset)
     }
 
     /// Called once when the server shuts down: stop background work (the real store stops the active run at a

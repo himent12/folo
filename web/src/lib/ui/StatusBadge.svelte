@@ -20,6 +20,15 @@
    * hand-over is its phase ("Provisioning", "Uploading data"), since it waits in no queue.
    */
   export const statusWord = (run: RunState): string => (inHandover(run) ? phaseLabel(run.cloud.phase) : STATUS_LABEL[run.status]);
+
+  /**
+   * Something that is not a run but has a run's states (a labeling job): the run status whose mark it shares and its
+   * own word ("Labeling", "Idle"). The word is required, so a run's bare status never gets here: a run passes `run`.
+   */
+  export interface OwnStatus {
+    status: RunStatus;
+    label: string;
+  }
 </script>
 
 <script lang="ts">
@@ -27,17 +36,18 @@
    * A run's status as its mark and word. Two forms, one rule (DESIGN_DIRECTION 6): the tinted pill is the title form,
    * beside the name of the one run a screen is about (the run page's header, Overview's live card), at most one per
    * screen; everywhere else (tables, lists, Compare, meta lines) it is `plain`, dot + word. `statusPill.test.ts` holds
-   * the pill to those two places. It takes the run itself, not its bare status, so a cloud run in its hand-over says
-   * its phase in the neutral look of a waiting run wherever a status is shown.
+   * the pill to those two places. It takes the run itself (`run`), not its bare status, so a cloud run in its hand-over
+   * says its phase in the neutral look of a waiting run wherever a status is shown; anything else with a run's states
+   * (a labeling job) passes its `state`, the status with its own word.
    */
   let {
     run,
+    state,
     size = 'md',
     plain = false,
     dotOnly = false,
     lastKnown,
-  }: {
-    run: RunState;
+  }: ({ run: RunState; state?: never } | { state: OwnStatus; run?: never }) & {
     size?: 'sm' | 'md';
     /** Dot and word without the pill, for table cells. */
     plain?: boolean;
@@ -50,8 +60,8 @@
     lastKnown?: string;
   } = $props();
 
-  const status = $derived(run.status);
-  const word = $derived(lastKnown ?? statusWord(run));
+  const status = $derived(run ? run.status : state!.status);
+  const word = $derived(lastKnown ?? (run ? statusWord(run) : state!.label));
 </script>
 
 <span class="badge {status} {size}" class:plain class:alone={dotOnly} class:held={!!lastKnown}>

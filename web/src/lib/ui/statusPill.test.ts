@@ -1,6 +1,7 @@
 // The status pill is the title form (DESIGN_DIRECTION 6): only beside the name of the one run a screen is about. Every
 // other status (tables, lists, Compare) is dot + word (`plain`), so one job never has two looks. Either form, and every
 // status word written as text, is read from the run itself, so a cloud run in its hand-over says its phase everywhere.
+// What is not a run (a labeling job) passes its `state`: a status with its own word, never a run's bare status.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { parse } from 'svelte/compiler';
@@ -62,17 +63,28 @@ function badges(source: string): Node[] {
 /** Every `<StatusBadge>` in a component's markup that renders as a pill, as its source text. */
 const pills = (source: string): string[] => badges(source).filter((b) => !isPlain(b)).map((b) => source.slice(b.start, b.end));
 
+/** A badge attribute's value as one expression tag (`run={r}`, `{run}`), else undefined (a string, a bare attribute). */
+function expressionOf(badge: Node, name: string): Node | undefined {
+  const attr = (badge.attributes ?? []).find((a) => a.type === 'Attribute' && a.name === name);
+  const v = attr?.value as Node | Node[] | true | undefined;
+  const tag = Array.isArray(v) ? (v.length === 1 ? v[0] : undefined) : v === true ? undefined : v;
+  return tag?.type === 'ExpressionTag' ? tag : undefined;
+}
+
 /**
- * Every `<StatusBadge>` not certainly given a run as it came from the API: no `run`, or one rebuilt in place
- * (`run={{ status: r.status }}`), which drops the cloud hand-over and says "Queued" where it should say the phase.
+ * Every `<StatusBadge>` not certainly given a run as it came from the API or another thing's own status: neither `run`
+ * nor `state`, both, one rebuilt in place (`run={{ status: r.status }}`, `state={{ status: r.status, label: … }}`),
+ * which drops the cloud hand-over and says "Queued" where it should say the phase, or a bare `status` (the props of
+ * before, which took a run's). `state` itself is typed to need its own word, so a run cannot be passed as one.
  */
 function rebuilt(source: string): string[] {
   return badges(source)
     .filter((b) => {
-      const run = (b.attributes ?? []).find((a) => a.type === 'Attribute' && a.name === 'run');
-      const v = run?.value as Node | Node[] | true | undefined;
-      const tag = Array.isArray(v) ? (v.length === 1 ? v[0] : undefined) : v === true ? undefined : v;
-      return tag?.type !== 'ExpressionTag' || tag.expression?.type === 'ObjectExpression';
+      const attrs = b.attributes ?? [];
+      if (attrs.some((a) => a.type === 'SpreadAttribute' || (a.type === 'Attribute' && (a.name === 'status' || a.name === 'label')))) return true;
+      const given = ['run', 'state'].map((name) => expressionOf(b, name)).filter((t) => t !== undefined);
+      const named = attrs.filter((a) => a.type === 'Attribute' && (a.name === 'run' || a.name === 'state'));
+      return named.length !== 1 || given.length !== 1 || given[0]!.expression?.type === 'ObjectExpression';
     })
     .map((b) => source.slice(b.start, b.end));
 }
@@ -108,7 +120,7 @@ describe('status pills', () => {
       expect(pills(bad), bad).toHaveLength(1);
   });
 
-  it('reads every status from the run itself, so a cloud run in its hand-over says its phase', () => {
+  it("reads every status from the run itself, so a cloud run in its hand-over says its phase (other things: their own word)", () => {
     const hits: string[] = [];
     for (const f of files(SRC, /\.(?:svelte|ts)$/)) {
       if (/\.test\.ts$/.test(f)) continue;
@@ -121,8 +133,25 @@ describe('status pills', () => {
   });
 
   it('tells a run passed whole from one rebuilt without its cloud state', () => {
-    for (const ok of ['<StatusBadge {run} />', '<StatusBadge run={r} plain />', '<StatusBadge run={live.run ?? r} plain />']) expect(rebuilt(ok), ok).toEqual([]);
-    for (const bad of ['<StatusBadge run={{ status: r.status }} plain />', '<StatusBadge plain />', '<StatusBadge run="queued" plain />', '<StatusBadge {...r} plain />'])
+    for (const ok of [
+      '<StatusBadge {run} />',
+      '<StatusBadge run={r} plain />',
+      '<StatusBadge run={live.run ?? r} plain />',
+      '<StatusBadge plain state={st} />',
+      '<StatusBadge plain state={jobStatus(j)} lastKnown={x} />',
+    ])
+      expect(rebuilt(ok), ok).toEqual([]);
+    for (const bad of [
+      '<StatusBadge run={{ status: r.status }} plain />',
+      '<StatusBadge plain />',
+      '<StatusBadge run="queued" plain />',
+      '<StatusBadge {...r} plain />',
+      '<StatusBadge plain status={r.status} />',
+      '<StatusBadge plain status={r.status} label={statusWord(r)} />',
+      '<StatusBadge plain state={{ status: r.status, label: "Queued" }} />',
+      '<StatusBadge plain state="queued" />',
+      '<StatusBadge run={r} state={st} plain />',
+    ])
       expect(rebuilt(bad), bad).toHaveLength(1);
     expect(rebuiltWords('statusWord(x); statusWord({ status: x.status })')).toEqual(['statusWord({ status: x.status })']);
   });

@@ -26,6 +26,8 @@ const ENDLESS = new Set([
   // A live run's end dot: its heartbeat is drawn only while the run trains (r26-t).
   'lib/charts/LineChart.svelte',
   'routes/Playground.svelte',
+  // A labeling tile's live dot: drawn only while the agent has that image.
+  'routes/label/LabelTile.svelte',
 ]);
 
 describe('event handlers', () => {

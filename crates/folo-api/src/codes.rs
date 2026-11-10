@@ -58,6 +58,7 @@ pub const CODES: &[Code] = &[
     c("image_not_found", 404, 3, "no such image"),
     c("model_not_found", 404, 3, "no such model or weights file"),
     c("run_not_found", 404, 3, "no such run"),
+    c("label_job_not_found", 404, 3, "no such labeling job"),
     c("path_not_found", 404, 3, "no such file or folder"),
     c(
         "device_not_found",
@@ -89,6 +90,13 @@ pub const CODES: &[Code] = &[
         1,
         "moving a run that is not waiting in the queue (it is starting, running or finished)",
     ),
+    c(
+        "label_job_active",
+        409,
+        1,
+        "changing a labeling job, or an image an agent call holds, while its agent run is active",
+    ),
+    c("label_job_not_active", 409, 1, "stopping a labeling job that has no agent run"),
     c("output_exists", 409, 1, "the output folder exists and is not empty (CLI)"),
     c("upload_conflict", 409, 1, "an upload part out of order, or completing an upload that is not whole"),
     c(
@@ -127,7 +135,8 @@ pub const CODES: &[Code] = &[
         "not_supported",
         501,
         4,
-        "valid, but this machine cannot run it (mixed-precision training without GPU tensor cores)",
+        "valid, but this machine cannot run it (mixed-precision training without GPU tensor cores, a labeling \
+         agent whose CLI is not installed)",
     ),
     c(
         "server_unreachable",

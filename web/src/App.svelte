@@ -16,6 +16,8 @@
   import Toaster from '$lib/ui/Toaster.svelte';
   import Dataset from './routes/Dataset.svelte';
   import Datasets from './routes/Datasets.svelte';
+  import LabelJob from './routes/LabelJob.svelte';
+  import LabelJobs from './routes/LabelJobs.svelte';
   import Model from './routes/Model.svelte';
   import Models from './routes/Models.svelte';
   import NotFound from './routes/NotFound.svelte';
@@ -35,6 +37,8 @@
     'run-compare': RunCompare,
     datasets: Datasets,
     dataset: Dataset,
+    'label-jobs': LabelJobs,
+    'label-job': LabelJob,
     models: Models,
     model: Model,
     playground: Playground,

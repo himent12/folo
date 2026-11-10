@@ -249,6 +249,16 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
   the `embed-web` feature (release builds, see `docs/RELEASE.md`). `folo serve --mock` serves realistic
   synthetic data for UI work before or without a trained model.
+- **Agent labeling** (`folo_server::label`, docs/LABELING.md): labeling jobs under `<data dir>/label/<id>/`
+  (unlabeled images, classes, instructions, boxes so far), labeled by a coding-agent CLI on the server's machine
+  and exported as a YOLO dataset that the store registers. `Labeler` is the service behind `/api/label` (the
+  store hands it out through `Store::labeler`; the mock has none). Agents sit behind the `Agent` trait:
+  `ClaudeCode` runs `claude -p` and `Codex` runs `codex exec` as child processes, one model request per batch of
+  images with every tool, config file and session switched off, so a call costs little more than its images; a
+  run thread feeds batches to a few workers, checks each reply (JSON shape, class names, boxes clipped to the
+  image) before storing it, and ends the run at once on a failure that another call would repeat. Events (`job`,
+  `image`, `log`) fan out to SSE subscribers through a per-job broadcast channel, as for runs. Tests script
+  the agents; `tests/label_live.rs` (ignored by default) runs the real CLIs against synthetic shapes.
 - `folo` CLI (`docs/CLI.md`): `train`, `val`, `predict`, `export`, `bench`, `dataset check|stats|synth|convert`, `serve`,
   `mcp` (Model Context Protocol server over stdio so agents can train and run models), `doctor`. Every command takes
   `--json` (one JSON object per line on stdout, human text on stderr) and uses stable exit codes.

@@ -13,6 +13,7 @@
   import GitCompare from '@lucide/svelte/icons/git-compare-arrows';
   import Keyboard from '@lucide/svelte/icons/keyboard';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
+  import Tags from '@lucide/svelte/icons/tags';
   import { hub } from '$lib/api/index.svelte';
   import { failureCause } from '$lib/oom';
   import type { Dataset, Model, Run, RunStatus } from '$lib/api/types';
@@ -112,6 +113,9 @@
     const actions: Item[] = [
       { id: 'new-run', group: 'Actions', label: 'New training run', keys: 'N', icon: Plus, run: go('/runs/new') },
       { id: 'compare', group: 'Actions', label: 'Compare runs', icon: GitCompare, run: go('/runs/compare') },
+      // Agent labeling, under Datasets (no nav item of its own).
+      { id: 'label', group: 'Actions', label: 'Label images', match: ['Labeling jobs', 'Claude Code', 'Codex'], icon: Tags, run: go('/datasets/label') },
+      { id: 'label-new', group: 'Actions', label: 'New labeling job', icon: Plus, run: go('/datasets/label?new=1') },
       {
         id: 'theme',
         group: 'Actions',
