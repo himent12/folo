@@ -13,6 +13,12 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
 - Creating endpoints answer `201 Created` with the new object; deletes answer `204 No Content`; everything else `200`.
 - Request bodies are JSON (`Content-Type: application/json`) except multipart uploads (`/api/predict`,
   `/api/label/jobs/{id}/images`). Unknown fields are ignored; missing optional fields take the defaults listed here.
+- Enum values grow: a client reads a value it does not know as unknown rather than failing the whole record (the Rust
+  types decode `TrainConfig.optimizer` and `ResolvedTrain.optimizer` into an `Unknown` variant, which a server refuses
+  with `invalid_config` where a run would train with it). Version skew: clients built before `musgd` (FOLO Desktop,
+  `folo-client`, a `folo serve` polling a remote server or a RunPod worker, before the release that added it) decode
+  `Run` strictly and fail on a run whose `config.optimizer` or `resolved.optimizer` is `musgd` (`unknown variant
+  'musgd'`), which fails their whole runs list: update those clients together with a server that can train MuSGD.
 - Responses are gzip-compressed when the client sends `Accept-Encoding: gzip` (never images, SSE or weights
   files: `application/octet-stream`).
 - CORS: by default only browser origins on `localhost`, `127.0.0.1` or `[::1]` (any port, e.g. the Vite dev server

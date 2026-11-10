@@ -2676,8 +2676,8 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
         Optimizer::Sgd => (ResolvedOptimizer::Sgd, config.lr0 as f64),
         Optimizer::Adamw => (ResolvedOptimizer::Adamw, config.lr0 as f64),
         Optimizer::Musgd => (ResolvedOptimizer::Musgd, config.lr0 as f64),
-        // The engine's own rule (docs/MODEL.md §8.2).
-        Optimizer::Auto => {
+        // The engine's own rule (docs/MODEL.md §8.2); the real server refuses an unknown optimizer.
+        Optimizer::Auto | Optimizer::Unknown => {
             let a = folo_nn::optim::auto_optimizer(
                 train_images as usize,
                 batch as usize,

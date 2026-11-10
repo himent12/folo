@@ -172,6 +172,14 @@ async fn train_evaluate_predict_and_reload() {
     )
     .await;
     assert!(e.message.contains("imgsz"), "{}", e.message);
+    let e = err(
+        &app,
+        post_json("/api/runs", json!({ "dataset_id": ds.id, "optimizer": "lion" })),
+        StatusCode::BAD_REQUEST,
+        "invalid_config",
+    )
+    .await;
+    assert!(e.message.contains("optimizer"), "{}", e.message);
     err(
         &app,
         post_json("/api/runs", json!({ "dataset_id": ds.id, "epochs": 0 })),

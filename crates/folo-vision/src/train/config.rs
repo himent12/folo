@@ -169,10 +169,11 @@ pub struct ResolvedOptim {
 
 impl TrainConfig {
     /// The API.md `TrainConfig` mapped onto the trainer's: the shared fields are copied, the augmentation fields
-    /// it names override [`AugmentConfig::default`], and every recipe key keeps its MODEL.md default.
-    pub fn from_api(c: &folo_api::TrainConfig) -> Self {
+    /// it names override [`AugmentConfig::default`], and every recipe key keeps its MODEL.md default. An
+    /// optimizer this build does not know ([`folo_api::Optimizer::Unknown`]) is [`Error::Config`].
+    pub fn from_api(c: &folo_api::TrainConfig) -> Result<Self> {
         let a = &c.augment;
-        TrainConfig {
+        Ok(TrainConfig {
             name: c.name.clone(),
             dataset: c.dataset_id.clone(),
             arch: c.arch.as_str().to_string(),
@@ -185,6 +186,11 @@ impl TrainConfig {
                 folo_api::Optimizer::Sgd => OptimizerChoice::Sgd,
                 folo_api::Optimizer::Adamw => OptimizerChoice::Adamw,
                 folo_api::Optimizer::Musgd => OptimizerChoice::Musgd,
+                folo_api::Optimizer::Unknown => {
+                    return Err(Error::Config(
+                        "optimizer: unknown value (this build knows auto, sgd, adamw and musgd)".into(),
+                    ));
+                }
             },
             lr0: f32_decimal(c.lr0),
             amp: c.amp,
@@ -204,7 +210,7 @@ impl TrainConfig {
                 ..AugmentConfig::default()
             },
             ..TrainConfig::default()
-        }
+        })
     }
 
     /// The scale letter of `arch` (`folo-n` → `n`).

@@ -858,7 +858,7 @@ mod tests {
             // With --weights the CLI takes the architecture from the file; the server already set it to the weights'.
             let arch = if weights.is_some() { api.arch.as_str().to_string() } else { args.model.clone() };
             let got = super::config_of(&args, args.name.clone().unwrap(), data.into(), arch, file_head);
-            let mut want = folo_vision::TrainConfig::from_api(&api);
+            let mut want = folo_vision::TrainConfig::from_api(&api).unwrap();
             (want.dataset, want.data_format, want.workers) = (data.into(), want_format, got.workers);
             assert_eq!(got, want, "{}", cmd.cli);
         }

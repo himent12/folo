@@ -58,12 +58,16 @@ pub fn train_command(
     }
     if config.optimizer != d.optimizer {
         let o = match config.optimizer {
-            Optimizer::Auto => "auto",
-            Optimizer::Sgd => "sgd",
-            Optimizer::Adamw => "adamw",
-            Optimizer::Musgd => "musgd",
+            Optimizer::Auto => Some("auto"),
+            Optimizer::Sgd => Some("sgd"),
+            Optimizer::Adamw => Some("adamw"),
+            Optimizer::Musgd => Some("musgd"),
+            // A run of a newer build: no flag value here says what it trained with.
+            Optimizer::Unknown => None,
         };
-        arg("optimizer", o.to_string());
+        if let Some(o) = o {
+            arg("optimizer", o.to_string());
+        }
     }
     if config.lr0 != d.lr0 {
         arg("lr0", config.lr0.to_string());

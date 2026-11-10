@@ -349,6 +349,10 @@ async fn runs_lifecycle() {
     let bad = json!({ "dataset_id": ds.datasets[0].id, "imgsz": 100 });
     let e = err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
     assert!(e.message.contains("imgsz"));
+    // An optimizer this build does not know decodes (Optimizer::Unknown) but is refused, not trained with.
+    let bad = json!({ "dataset_id": ds.datasets[0].id, "optimizer": "lion" });
+    let e = err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
+    assert!(e.message.contains("optimizer"), "{}", e.message);
     err(
         &app,
         post_json("/api/runs", json!({ "dataset_id": "ds_none" })),

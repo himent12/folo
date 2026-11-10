@@ -738,7 +738,7 @@ impl RealStore {
             None => None,
         };
         // The settings first (on the CPU), so a rejected config never initialises a GPU.
-        let mut check = folo_vision::TrainConfig::from_api(&config);
+        let mut check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
         let ds = self.dataset_ref(&e);
@@ -1104,7 +1104,7 @@ impl Store for RealStore {
             None => None,
         };
         // The same checks as POST /api/runs, the settings first (on the CPU).
-        let mut check = folo_vision::TrainConfig::from_api(&config);
+        let mut check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
         // A cloud run's time is the reference's: nothing measured here says how fast the offer's GPU is.

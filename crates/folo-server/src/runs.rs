@@ -1393,7 +1393,8 @@ fn build(
             ResumeOverrides { workers: None, device: Some(device.to_string()), data_format: Some(format) };
         Trainer::resume(&last, data, opts, overrides)
     } else {
-        let mut cfg = folo_vision::TrainConfig::from_api(config);
+        let mut cfg = folo_vision::TrainConfig::from_api(config)
+            .map_err(|err| (err.code().to_string(), err.summary()))?;
         cfg.device = device.to_string();
         cfg.dataset = dataset.id.clone();
         cfg.data_format = format;
