@@ -25,18 +25,26 @@ import json
 import os
 import platform
 import re
-import statistics
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
-os.environ["YOLO_AUTOINSTALL"] = "false"  # never pip-install into the user's env, even if the caller enabled it
+# percentile and summarize are not used here: test_ultralytics_bench.py reaches them as ub.percentile and ub.summarize.
+from bench_timing import (
+    cpu_cores_busy,
+    cpu_snapshot,
+    percentile,
+    summarize,
+    summarize_training,
+    time_cuda,
+    time_host,
+    wait_for_quiet_cpu,
+)
+from bench_workloads import IMGSZ, MODELS, TRAIN_MODELS, load_detection_model, make_dataset, predict_e2e, sample_images
 
-MODELS = ["yolo26n", "yolo26s", "yolo26m"]
-TRAIN_MODELS = ["yolo26n", "yolo26s"]
-IMGSZ = 640
+os.environ["YOLO_AUTOINSTALL"] = "false"  # never pip-install into the user's env, even if the caller enabled it
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -275,85 +283,7 @@ def environment() -> dict:
 
 
 # --------------------------------------------------------------------------------------------------------------------
-# timing helpers
-
-
-def percentile(values: list[float], q: float) -> float:
-    """The sorted value at index round(q * (n - 1)), q in [0, 1]."""
-    v = sorted(values)
-    return v[min(len(v) - 1, int(round(q * (len(v) - 1))))]
-
-
-def summarize(ms: list[float], batch: int) -> dict:
-    med = statistics.median(ms)
-    return {
-        "iters": len(ms),
-        "median_ms": round(med, 4),
-        "p90_ms": round(percentile(ms, 0.9), 4),
-        "min_ms": round(min(ms), 4),
-        "mean_ms": round(statistics.fmean(ms), 4),
-        "images_per_s_at_median": round(batch * 1000.0 / med, 2),
-    }
-
-
-def time_cuda(fn, batch: int, warmup: int, iters: int, tp_iters: int) -> dict:
-    """Latency: each call synchronised on both sides. Throughput: tp_iters calls back to back, one final sync."""
-    import torch
-
-    for _ in range(warmup):
-        fn()
-    torch.cuda.synchronize()
-    ms = []
-    for _ in range(iters):
-        torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        fn()
-        torch.cuda.synchronize()
-        ms.append((time.perf_counter() - t0) * 1e3)
-    res = summarize(ms, batch)
-    torch.cuda.synchronize()
-    t0 = time.perf_counter()
-    for _ in range(tp_iters):
-        fn()
-    torch.cuda.synchronize()
-    res["throughput_images_per_s"] = round(batch * tp_iters / (time.perf_counter() - t0), 2)
-    res["throughput_iters"] = tp_iters
-    return res
-
-
-def time_host(fn, batch: int, warmup: int, iters: int) -> dict:
-    """For calls that end on the host (fn must block until its result is on the CPU)."""
-    for _ in range(warmup):
-        fn()
-    ms = []
-    t_all = time.perf_counter()
-    for _ in range(iters):
-        t0 = time.perf_counter()
-        fn()
-        ms.append((time.perf_counter() - t0) * 1e3)
-    total = time.perf_counter() - t_all
-    res = summarize(ms, batch)
-    res["throughput_images_per_s"] = round(batch * iters / total, 2)
-    return res
-
-
-# --------------------------------------------------------------------------------------------------------------------
 # models
-
-
-def load_detection_model(weights: Path, device: str, half: bool):
-    """The raw nn.Module Ultralytics runs at inference: fused (Conv+BN folded), eval mode, and, like AutoBackend does
-    on x86 CPUs with oneDNN, channels_last weights on the CPU (inputs stay NCHW-contiguous, as the predictor sends)."""
-    import torch
-    from ultralytics import YOLO
-
-    m = YOLO(str(weights)).model
-    m = m.fuse(verbose=False).eval().to(device)
-    if device == "cpu" and torch.backends.mkldnn.is_available():
-        m = m.to(memory_format=torch.channels_last)
-    for p in m.parameters():
-        p.requires_grad_(False)
-    return m.half() if half else m.float()
 
 
 def section_params(weights_dir: Path) -> dict:
@@ -414,51 +344,6 @@ def section_gpu_fwd(weights_dir: Path, quick: bool) -> list[dict]:
     return rows
 
 
-def sample_images(data_dir: Path, n: int):
-    """Decoded 640x640 BGR uint8 images from the synthetic val set (decode cost is not part of e2e timing)."""
-    import cv2
-
-    files = sorted((data_dir / "images" / "val").glob("*.jpg"))
-    return [cv2.imread(str(files[i % len(files)])) for i in range(n)]
-
-
-def predict_e2e(
-    weights: Path, device: str, half: bool, batch: int, images, warmup: int, iters: int, threads: int | None = None
-) -> dict:
-    """Ultralytics predictor: letterbox + to-tensor + forward + postprocess + Results, boxes copied to the host.
-
-    threads: torch intra-op threads to force before every call. The predictor's first call runs select_device(), which
-    on the CPU resets torch to min(8, cores - 1) threads; None keeps whatever Ultralytics chooses.
-    """
-    import torch
-    from ultralytics import YOLO
-
-    model = YOLO(str(weights))
-    imgs = images[:batch]
-    speeds = []
-    used_threads = set()
-
-    def fn():
-        if threads:
-            torch.set_num_threads(threads)
-        res = model.predict(
-            imgs, imgsz=IMGSZ, device=device, quantize=16 if half else None, verbose=False, batch=batch
-        )
-        for r in res:
-            r.boxes.data.cpu()  # results on the host: forces the device sync
-        speeds.append(res[0].speed)
-        used_threads.add(torch.get_num_threads())
-
-    r = time_host(fn, batch, warmup=warmup, iters=iters)
-    speeds = speeds[warmup:]
-    r["torch_threads_seen"] = sorted(used_threads)
-    # Ultralytics' own per-image breakdown (ms per image, averaged over the batch)
-    r["ultralytics_speed_ms_per_image"] = {
-        k: round(statistics.median(s[k] for s in speeds), 4) for k in ("preprocess", "inference", "postprocess")
-    }
-    return r
-
-
 def section_gpu_e2e(weights_dir: Path, data_dir: Path, quick: bool) -> list[dict]:
     import torch
 
@@ -482,18 +367,6 @@ def section_gpu_e2e(weights_dir: Path, data_dir: Path, quick: bool) -> list[dict
                 )
                 torch.cuda.empty_cache()
     return rows
-
-
-def wait_for_quiet_cpu(max_wait_s: float, below_pct: float = 15.0) -> float:
-    """Block until system CPU load (1 s sample) is below below_pct, or max_wait_s passes. Returns the last sample."""
-    import psutil
-
-    t0 = time.perf_counter()
-    while (load := psutil.cpu_percent(interval=1.0)) >= below_pct and time.perf_counter() - t0 < max_wait_s:
-        if 10 <= int(time.perf_counter() - t0) % 60 < 13:  # about once a minute, and only for real waits
-            print(f"[wait] CPU busy: {load}%; waited {time.perf_counter() - t0:.0f} s", flush=True)
-        time.sleep(2)
-    return load
 
 
 def section_cpu(weights_dir: Path, data_dir: Path, threads: list[int], quick: bool, max_wait_s: float) -> list[dict]:
@@ -612,123 +485,6 @@ def section_train_step(weights_dir: Path, quick: bool) -> list[dict]:
 
 # --------------------------------------------------------------------------------------------------------------------
 # synthetic dataset + trainer
-
-
-def make_dataset(data_dir: Path, n_train: int, n_val: int, seed: int = 0) -> Path:
-    """Shapes (rectangle / ellipse / triangle) on coloured noise, YOLO format, in a directory used for this
-    (size, seed) only. Reuses a complete dataset; regenerates an interrupted one from scratch."""
-    import cv2
-    import numpy as np
-
-    yaml_path = data_dir / "data.yaml"
-    marker = data_dir / ".complete"
-    if marker.exists():
-        return yaml_path
-    if data_dir.exists():  # an interrupted generation: start over, including Ultralytics' label caches
-        import shutil
-
-        shutil.rmtree(data_dir)
-    rng = np.random.default_rng(seed)
-    for split, count in [("train", n_train), ("val", n_val)]:
-        (data_dir / "images" / split).mkdir(parents=True, exist_ok=True)
-        (data_dir / "labels" / split).mkdir(parents=True, exist_ok=True)
-        for i in range(count):
-            img = rng.integers(0, 256, (IMGSZ, IMGSZ, 3), dtype=np.uint8)
-            img = cv2.GaussianBlur(img, (0, 0), float(rng.uniform(0.5, 3.0)))
-            lines = []
-            for _ in range(int(rng.integers(1, 9))):
-                cls = int(rng.integers(0, 3))
-                w, h = rng.uniform(0.05, 0.35, 2) * IMGSZ
-                cx, cy = rng.uniform(w / 2, IMGSZ - w / 2), rng.uniform(h / 2, IMGSZ - h / 2)
-                x0, y0, x1, y1 = cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
-                color = tuple(int(c) for c in rng.integers(0, 256, 3))
-                if cls == 0:
-                    cv2.rectangle(img, (int(x0), int(y0)), (int(x1), int(y1)), color, -1)
-                elif cls == 1:
-                    cv2.ellipse(img, (int(cx), int(cy)), (int(w / 2), int(h / 2)), 0, 0, 360, color, -1)
-                else:
-                    pts = np.array([[cx, y0], [x0, y1], [x1, y1]], dtype=np.int32)
-                    cv2.fillPoly(img, [pts], color)
-                lines.append(f"{cls} {cx / IMGSZ:.6f} {cy / IMGSZ:.6f} {w / IMGSZ:.6f} {h / IMGSZ:.6f}")
-            cv2.imwrite(str(data_dir / "images" / split / f"{i:05d}.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 90])
-            (data_dir / "labels" / split / f"{i:05d}.txt").write_text("\n".join(lines) + "\n")
-    yaml_path.write_text(
-        f"path: {data_dir.as_posix()}\ntrain: images/train\nval: images/val\nnames:\n"
-        "  0: rectangle\n  1: ellipse\n  2: triangle\n"
-    )
-    marker.write_text("ok\n")
-    return yaml_path
-
-
-def cpu_snapshot() -> tuple[float, float, float]:
-    """(wall s, CPU-seconds used by the whole system, CPU-seconds used by this process and its data loader workers)."""
-    import psutil
-
-    t = psutil.cpu_times()
-    ours = 0.0
-    me = psutil.Process()
-    for p in [me, *me.children(recursive=True)]:
-        try:
-            c = p.cpu_times()
-            ours += c.user + c.system
-        except psutil.Error:
-            pass
-    return time.perf_counter(), t.user + t.system, ours
-
-
-def cpu_cores_busy(a: tuple[float, float, float], b: tuple[float, float, float]) -> dict:
-    wall = b[0] - a[0]
-    return {
-        "ours": round((b[2] - a[2]) / wall, 2),
-        "others": round(max(0.0, (b[1] - a[1]) - (b[2] - a[2])) / wall, 2),
-    }
-
-
-def summarize_training(
-    stamps: dict[int, list[float]],
-    counts: dict[int, list[int]],
-    epoch_wall: dict[int, list[float]],
-    epoch_cpu: dict[int, list[tuple[float, float, float]]],
-) -> dict:
-    """Per-epoch and steady-state statistics from batch-end timestamps (s) and per-batch image counts.
-
-    stamps[e] is [epoch start, end of batch 1, ..., end of batch n]; counts[e] has the n batch sizes.
-    images_per_s (per epoch) is images actually processed / epoch wall time: sustained throughput, stalls included.
-    The *_at_median_batch / steady_* figures are the median of per-batch images/s, a diagnostic that ignores stalls.
-    """
-    epochs_out = []
-    all_rates: list[float] = []
-    all_dts: list[float] = []
-    for e in sorted(stamps):
-        s, n = stamps[e], counts[e]
-        if len(n) != len(s) - 1:
-            raise ValueError(f"epoch {e}: {len(s) - 1} batch timestamps but {len(n)} batch sizes")
-        dts = [(b - a) * 1e3 for a, b in zip(s, s[1:])]
-        rates = [k * 1000 / dt for k, dt in zip(n, dts)]
-        wall = epoch_wall[e][1] - epoch_wall[e][0]
-        steady = slice(2, None)  # the first batches of an epoch wait on the data loader's first prefetch
-        first = slice(5, None) if e == min(stamps) else slice(None)  # run start: worker spawn, cudnn/allocator warm-up
-        all_rates += rates[first]
-        all_dts += dts[first]
-        epochs_out.append(
-            {
-                "epoch": e,
-                "batches": len(dts),
-                "images": sum(n),
-                "wall_s": round(wall, 3),
-                "images_per_s": round(sum(n) / wall, 2),
-                "median_batch_ms": round(statistics.median(dts[steady]), 3),
-                "p90_batch_ms": round(percentile(dts[steady], 0.9), 3),
-                "images_per_s_at_median_batch": round(statistics.median(rates[steady]), 2),
-                "cpu_cores_busy": cpu_cores_busy(*epoch_cpu[e]),
-            }
-        )
-    return {
-        "epochs": epochs_out,
-        "steady_batches": len(all_dts),
-        "steady_median_batch_ms": round(statistics.median(all_dts), 3),
-        "steady_images_per_s": round(statistics.median(all_rates), 2),  # median-batch equivalent
-    }
 
 
 def train_one(weights: Path, data_yaml: Path, work_dir: Path, amp: bool, epochs: int, out_json: Path) -> None:
