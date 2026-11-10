@@ -840,6 +840,36 @@ fn index_ops() {
 }
 
 #[test]
+fn topk_orders_nan_and_infinities_by_total_cmp() {
+    // `f32::total_cmp`: -NaN < -inf < .. < -0 < +0 < .. < inf < NaN, NaN payloads kept.
+    let dev = dev!();
+    let nan2 = f32::from_bits(0x7fc0_0123);
+    let v = [
+        0.0f32,
+        f32::NAN,
+        -1.0,
+        f32::NEG_INFINITY,
+        1.0,
+        f32::INFINITY,
+        -f32::NAN,
+        2.0,
+        nan2,
+        -0.0,
+        0.0,
+        -nan2,
+    ];
+    let t = Tensor::from_slice(&v, [3, 4]).unwrap();
+    for k in 1..=4 {
+        for largest in [true, false] {
+            let (cv, ci) = t.topk(k, largest).unwrap();
+            let (gv, gi) = t.to_device(dev).unwrap().topk(k, largest).unwrap();
+            assert_same(&gv, &cv, &format!("topk values k={k} {largest}"));
+            assert_same(&gi, &ci, &format!("topk indices k={k} {largest}"));
+        }
+    }
+}
+
+#[test]
 fn errors_name_the_backend() {
     let dev = dev!();
     let g = Tensor::ones([2]).to_device(dev).unwrap();
