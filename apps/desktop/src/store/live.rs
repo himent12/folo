@@ -1,64 +1,12 @@
-//! Client-side state: what has been fetched from the backend, live run data, and decoded images.
+//! Live run data: a run's metric history and the chart series derived from it, and how the store
+//! installs histories and logs and applies the run's SSE events to them.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-
-#[allow(unused_imports)]
-use crate::api::{Label, RunExt, SplitsExt};
-use gpui::RenderImage;
 
 use crate::api::*;
 
-/// A value fetched from the backend.
-#[derive(Clone, Debug, Default)]
-pub enum Load<T> {
-    #[default]
-    Idle,
-    Loading,
-    Ready(T),
-    Failed(ApiError),
-}
-
-impl<T> Load<T> {
-    pub fn ready(&self) -> Option<&T> {
-        match self {
-            Load::Ready(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    pub fn ready_mut(&mut self) -> Option<&mut T> {
-        match self {
-            Load::Ready(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    pub fn is_loading(&self) -> bool {
-        matches!(self, Load::Idle | Load::Loading)
-    }
-
-    pub fn error(&self) -> Option<&ApiError> {
-        match self {
-            Load::Failed(e) => Some(e),
-            _ => None,
-        }
-    }
-
-    pub fn needs_fetch(&self) -> bool {
-        matches!(self, Load::Idle)
-    }
-}
-
-impl<T> From<ApiResult<T>> for Load<T> {
-    fn from(r: ApiResult<T>) -> Self {
-        match r {
-            Ok(v) => Load::Ready(v),
-            Err(e) => Load::Failed(e),
-        }
-    }
-}
+use super::{Load, Store};
 
 pub type Pts = Arc<Vec<(f32, f32)>>;
 
@@ -178,188 +126,7 @@ impl RunData {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum ImgKind {
-    Thumb,
-    Full,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct ImgKey {
-    pub dataset: String,
-    pub image: String,
-    pub kind: ImgKind,
-}
-
-pub enum ImgSlot {
-    Loading,
-    Ready(Arc<RenderImage>),
-    Failed,
-}
-
-/// Decoded images keyed by dataset/image/size, evicted oldest-first past a budget.
-#[derive(Default)]
-pub struct ImageCache {
-    pub slots: HashMap<ImgKey, ImgSlot>,
-    order: VecDeque<ImgKey>,
-}
-
-impl ImageCache {
-    pub const BUDGET: usize = 600;
-
-    pub fn get(&self, k: &ImgKey) -> Option<&ImgSlot> {
-        self.slots.get(k)
-    }
-
-    /// Mark `k` as loading; returns false if it is already known.
-    pub fn begin(&mut self, k: &ImgKey) -> bool {
-        if self.slots.contains_key(k) {
-            return false;
-        }
-        self.slots.insert(k.clone(), ImgSlot::Loading);
-        self.order.push_back(k.clone());
-        true
-    }
-
-    /// Forget everything (a new data source); returns the decoded images to free on the GPU.
-    pub fn clear(&mut self) -> Vec<Arc<RenderImage>> {
-        self.order.clear();
-        self.slots
-            .drain()
-            .filter_map(|(_, s)| match s {
-                ImgSlot::Ready(img) => Some(img),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Store a result; returns images evicted to stay within budget (free them on the GPU).
-    pub fn finish(&mut self, k: ImgKey, img: Option<Arc<RenderImage>>) -> Vec<Arc<RenderImage>> {
-        // A request evicted while it was still loading has no slot (and no place in `order`) any
-        // more: drop its result instead of resurrecting an untracked entry.
-        if !matches!(self.slots.get(&k), Some(ImgSlot::Loading)) {
-            return img.into_iter().collect();
-        }
-        self.slots.insert(k, img.map_or(ImgSlot::Failed, ImgSlot::Ready));
-        let mut evicted = Vec::new();
-        while self.order.len() > Self::BUDGET {
-            if let Some(old) = self.order.pop_front()
-                && let Some(ImgSlot::Ready(img)) = self.slots.remove(&old)
-            {
-                evicted.push(img);
-            }
-        }
-        evicted
-    }
-}
-
-/// Turn backend pixels into a GPUI image (BGRA frames).
-pub fn to_render_image(data: ImageData) -> Option<Arc<RenderImage>> {
-    let (w, h, mut px) = match data {
-        ImageData::Rgba { width, height, pixels } => (width, height, pixels),
-        ImageData::Encoded(bytes) => {
-            let img = image::load_from_memory(&bytes).ok()?.to_rgba8();
-            let (w, h) = img.dimensions();
-            (w, h, img.into_raw())
-        }
-    };
-    for p in px.as_chunks_mut::<4>().0 {
-        p.swap(0, 2);
-    }
-    let buf = image::RgbaImage::from_raw(w, h, px)?;
-    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buf)])))
-}
-
-pub struct Store {
-    pub api: Arc<dyn Backend>,
-    pub health: Load<Health>,
-    pub system: Load<SystemInfo>,
-    /// What runs can use on the server (from the same `/system` answer; absent from older servers).
-    pub capabilities: Option<crate::api::Capabilities>,
-    /// Optional API features the server reports (`/system` `features`, e.g. `queue_control`).
-    pub features: Vec<String>,
-    pub datasets: Load<Vec<Dataset>>,
-    pub dataset: HashMap<String, Load<Dataset>>,
-    /// All image metadata of a dataset (cheap: boxes only), for filtering and the grid.
-    pub images: HashMap<String, Load<Vec<ImageInfo>>>,
-    pub models: Load<Vec<Model>>,
-    pub evals: HashMap<String, Load<ModelEval>>,
-    /// Per dataset, its issue counts by severity (fetched when it has broken labels).
-    pub issues: HashMap<String, Load<IssueCounts>>,
-    pub runs: Load<Vec<Run>>,
-    pub run_data: HashMap<String, Load<RunData>>,
-    pub samples: HashMap<String, Load<RunSamples>>,
-    pub logs: HashMap<String, Load<Vec<LogLine>>>,
-    /// Bumped on every log change; the length stops changing once the 2,000-line cap is hit.
-    pub log_rev: u64,
-    /// Live events that arrived while a run's history was loading, merged in when it lands.
-    pending: HashMap<String, Vec<RunEvent>>,
-    /// Runs resumed and still active: every history load is cut back to the last finished epoch.
-    resumed: std::collections::HashSet<String>,
-    /// Each run's length as its live events last reported it (steps per epoch, epochs; 0 where
-    /// unknown). Kept apart from the replaceable run list, so an older snapshot that still says
-    /// 0 can't undo it.
-    lengths: HashMap<String, (u64, u32)>,
-    pub images_px: ImageCache,
-    /// Throughput history for the system card (GPU util samples), newest last.
-    pub gpu_util: VecDeque<f32>,
-}
-
 impl Store {
-    pub fn new(api: Arc<dyn Backend>) -> Self {
-        Self {
-            api,
-            health: Load::Idle,
-            system: Load::Idle,
-            capabilities: None,
-            features: Vec::new(),
-            datasets: Load::Idle,
-            dataset: HashMap::new(),
-            images: HashMap::new(),
-            models: Load::Idle,
-            evals: HashMap::new(),
-            issues: HashMap::new(),
-            runs: Load::Idle,
-            run_data: HashMap::new(),
-            samples: HashMap::new(),
-            logs: HashMap::new(),
-            log_rev: 0,
-            pending: HashMap::new(),
-            resumed: Default::default(),
-            lengths: HashMap::new(),
-            images_px: ImageCache::default(),
-            gpu_util: VecDeque::new(),
-        }
-    }
-
-    pub fn run(&self, id: &str) -> Option<&Run> {
-        self.runs.ready()?.iter().find(|r| r.id == id)
-    }
-
-    pub fn live_run(&self) -> Option<&Run> {
-        self.runs.ready()?.iter().find(|r| r.status == RunStatus::Running)
-    }
-
-    pub fn model(&self, id: &str) -> Option<&Model> {
-        self.models.ready()?.iter().find(|m| m.id == id)
-    }
-
-    pub fn dataset_summary(&self, id: &str) -> Option<&Dataset> {
-        self.datasets.ready()?.iter().find(|d| d.id == id)
-    }
-
-    /// What the periodic `/system` refresh says about the connection (`err`: its error, if any).
-    /// `health`, which the status line shows, is fetched once per connection; without this a server
-    /// that went away mid-session still read "Connected". Unreachable marks it down; the first answer
-    /// after that has health checked again.
-    pub fn note_reachability(&mut self, err: Option<&ApiError>) {
-        match err {
-            Some(e) if e.code == "server_unreachable" => self.health = Load::Failed(e.clone()),
-            None if matches!(self.health, Load::Failed(_)) => self.health = Load::Idle,
-            _ => {}
-        }
-    }
-
     /// Install a run's metric history, merging live events that arrived while it loaded.
     pub fn install_run_data(&mut self, run_id: &str, data: ApiResult<RunData>) {
         let mut load: Load<RunData> = data.into();
@@ -592,46 +359,6 @@ impl Store {
 mod tests {
     use super::*;
     use crate::api::mock::MockBackend;
-
-    #[test]
-    fn image_cache_clear_forgets_slots_and_returns_images() {
-        let mut c = ImageCache::default();
-        let k = |i: &str| ImgKey { dataset: "ds".into(), image: i.into(), kind: ImgKind::Thumb };
-        let img = Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
-        assert!(c.begin(&k("a")));
-        c.finish(k("a"), Some(img));
-        assert!(c.begin(&k("b")));
-        c.finish(k("b"), None); // a failure
-        assert!(c.begin(&k("c"))); // still loading
-        let freed = c.clear();
-        assert_eq!(freed.len(), 1);
-        // Nothing is remembered: every key can be fetched again, failures included.
-        assert!(c.get(&k("a")).is_none() && c.get(&k("b")).is_none());
-        assert!(c.begin(&k("b")));
-        // A request that was in flight across the clear lands nowhere.
-        let late = Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
-        assert_eq!(c.finish(k("c"), Some(late)).len(), 1);
-    }
-
-    #[test]
-    fn a_server_that_goes_away_mid_session_shows_as_unreachable_until_it_is_back() {
-        let api = MockBackend::new(4200, true);
-        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
-        store.health = api.health().into();
-        let down = ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7911");
-        // The 2 s refresh fails to connect: the status line must stop saying "Connected".
-        store.note_reachability(Some(&down));
-        assert!(matches!(store.health, Load::Failed(ref e) if e.code == "server_unreachable"));
-        // It answers again: health is checked again (Idle is fetched by the next ensure_core).
-        store.note_reachability(None);
-        assert!(store.health.needs_fetch());
-        // A connected server's answers and its other errors (a 500) leave a good status alone.
-        store.health = api.health().into();
-        store.note_reachability(None);
-        store.note_reachability(Some(&ApiError::new("http_error", "folo serve answered HTTP 500")));
-        assert!(store.health.ready().is_some());
-    }
-
     #[test]
     fn live_events_extend_history() {
         let api = MockBackend::new(4200, true);
@@ -902,33 +629,5 @@ mod tests {
         let got = store.logs[id].ready().unwrap();
         assert_eq!(got.len(), 120);
         assert!(got.windows(2).all(|w| w[0].t <= w[1].t));
-    }
-
-    #[test]
-    fn cache_evicts_oldest_and_drops_late_completions() {
-        let mut c = ImageCache::default();
-        let key = |i: usize| ImgKey { dataset: "d".into(), image: i.to_string(), kind: ImgKind::Thumb };
-        for i in 0..=ImageCache::BUDGET {
-            assert!(c.begin(&key(i)));
-        }
-        // A newer request finishes first and evicts the oldest, still-loading one.
-        c.finish(key(ImageCache::BUDGET), None);
-        assert!(c.get(&key(0)).is_none());
-        // Its late completion must not reappear outside the eviction order.
-        c.finish(key(0), None);
-        assert!(c.get(&key(0)).is_none());
-        assert_eq!(c.slots.len(), ImageCache::BUDGET);
-        // The next one in goes the same way: the oldest left out.
-        assert!(c.begin(&key(ImageCache::BUDGET + 1)));
-        c.finish(key(ImageCache::BUDGET + 1), None);
-        assert!(c.get(&key(1)).is_none() && c.get(&key(2)).is_some());
-        assert_eq!(c.slots.len(), ImageCache::BUDGET);
-    }
-
-    #[test]
-    fn rgba_converts_to_bgra() {
-        let img =
-            to_render_image(ImageData::Rgba { width: 1, height: 1, pixels: vec![10, 20, 30, 255] }).unwrap();
-        assert_eq!(img.as_bytes(0).unwrap(), &[30, 20, 10, 255]);
     }
 }
