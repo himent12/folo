@@ -131,6 +131,11 @@ impl HttpBackend {
         self.decode(resp)
     }
 
+    fn put<B: Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> ApiResult<T> {
+        let resp = self.agent.put(&self.url(path)).send_json(body).map_err(|e| self.unreachable(&e))?;
+        self.decode(resp)
+    }
+
     /// A DELETE: `204` decodes as `()`, a body as `T`.
     fn delete<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
         let resp = self.agent.delete(&self.url(path)).call().map_err(|e| self.unreachable(&e))?;
@@ -353,6 +358,170 @@ impl Backend for HttpBackend {
 
     fn terminate_instance(&self, id: &str) -> ApiResult<CloudInstance> {
         self.delete(&format!("/cloud/instances/{}", seg(id)))
+    }
+
+    fn bench_catalog(&self) -> ApiResult<BenchCatalog> {
+        self.get("/bench/catalog")
+    }
+
+    fn benches(&self) -> ApiResult<Vec<Bench>> {
+        self.get::<BenchList>("/bench/benchmarks").map(|l| l.benchmarks)
+    }
+
+    fn create_bench(&self, req: &CreateBench) -> ApiResult<Bench> {
+        self.post_slow("/bench/benchmarks", req)
+    }
+
+    fn update_bench(&self, id: &str, req: &UpdateBench) -> ApiResult<Bench> {
+        self.put(&format!("/bench/benchmarks/{}", seg(id)), req)
+    }
+
+    fn delete_bench(&self, id: &str) -> ApiResult<()> {
+        self.delete(&format!("/bench/benchmarks/{}", seg(id)))
+    }
+
+    fn design_bench(&self, id: &str, req: &DesignBench) -> ApiResult<BenchDesign> {
+        self.post_slow(&format!("/bench/benchmarks/{}/design", seg(id)), req)
+    }
+
+    fn bench_images(
+        &self,
+        id: &str,
+        offset: u32,
+        limit: u32,
+        condition: Option<(&str, u8)>,
+    ) -> ApiResult<BenchImagePage> {
+        let mut path = format!("/bench/benchmarks/{}/images?offset={offset}&limit={limit}", seg(id));
+        if let Some((c, s)) = condition {
+            path.push_str(&format!("&condition={}&severity={s}", seg(c)));
+        }
+        self.get(&path)
+    }
+
+    fn bench_image(
+        &self,
+        id: &str,
+        image_id: &str,
+        condition: Option<(&str, u8)>,
+        thumb: Option<u32>,
+    ) -> ApiResult<ImageData> {
+        let mut path = format!("/bench/benchmarks/{}/images/{}", seg(id), seg(image_id));
+        let mut q = Vec::new();
+        if let Some((c, s)) = condition {
+            q.push(format!("condition={}", seg(c)));
+            q.push(format!("severity={s}"));
+        }
+        if let Some(t) = thumb {
+            q.push(format!("thumb={t}"));
+        }
+        if !q.is_empty() {
+            path.push('?');
+            path.push_str(&q.join("&"));
+        }
+        let mut resp = self.agent.get(&self.url(&path)).call().map_err(|e| self.unreachable(&e))?;
+        if resp.status().as_u16() >= 400 {
+            return Err(self
+                .decode::<serde_json::Value>(resp)
+                .err()
+                .unwrap_or_else(|| ApiError::new("http_error", "benchmark image request failed")));
+        }
+        let bytes = resp
+            .body_mut()
+            .with_config()
+            .limit(64 << 20)
+            .read_to_vec()
+            .map_err(|e| ApiError::new("bad_response", e.to_string()))?;
+        Ok(ImageData::Encoded(bytes))
+    }
+
+    fn bench_entries(&self, id: &str) -> ApiResult<Vec<BenchEntry>> {
+        self.get::<BenchEntryList>(&format!("/bench/benchmarks/{}/entries", seg(id))).map(|l| l.entries)
+    }
+
+    fn start_bench_entry(&self, id: &str, req: &StartBenchEntry) -> ApiResult<BenchEntry> {
+        self.post_slow(&format!("/bench/benchmarks/{}/entries", seg(id)), req)
+    }
+
+    fn bench_result(&self, id: &str, entry_id: &str) -> ApiResult<BenchResult> {
+        self.get(&format!("/bench/benchmarks/{}/entries/{}/result", seg(id), seg(entry_id)))
+    }
+
+    fn bench_entry_images(
+        &self,
+        id: &str,
+        entry_id: &str,
+        sort: &str,
+        offset: u32,
+        limit: u32,
+    ) -> ApiResult<BenchEntryImagePage> {
+        self.get(&format!(
+            "/bench/benchmarks/{}/entries/{}/images?sort={}&offset={offset}&limit={limit}",
+            seg(id),
+            seg(entry_id),
+            seg(sort)
+        ))
+    }
+
+    fn stop_bench_entry(&self, id: &str, entry_id: &str) -> ApiResult<BenchEntry> {
+        self.post_empty(&format!("/bench/benchmarks/{}/entries/{}/stop", seg(id), seg(entry_id)))
+    }
+
+    fn delete_bench_entry(&self, id: &str, entry_id: &str) -> ApiResult<()> {
+        self.delete(&format!("/bench/benchmarks/{}/entries/{}", seg(id), seg(entry_id)))
+    }
+
+    fn bench_loops(&self, id: &str) -> ApiResult<Vec<BenchLoop>> {
+        self.get::<BenchLoopList>(&format!("/bench/benchmarks/{}/loops", seg(id))).map(|l| l.loops)
+    }
+
+    fn start_bench_loop(&self, id: &str, req: &StartBenchLoop) -> ApiResult<BenchLoop> {
+        self.post(&format!("/bench/benchmarks/{}/loops", seg(id)), req)
+    }
+
+    fn stop_bench_loop(&self, id: &str, loop_id: &str) -> ApiResult<BenchLoop> {
+        self.post_empty(&format!("/bench/benchmarks/{}/loops/{}/stop", seg(id), seg(loop_id)))
+    }
+
+    fn delete_bench_loop(&self, id: &str, loop_id: &str) -> ApiResult<()> {
+        self.delete(&format!("/bench/benchmarks/{}/loops/{}", seg(id), seg(loop_id)))
+    }
+
+    fn bench_events(&self, id: &str) -> ApiResult<BenchSubscription> {
+        let url = self.url(&format!("/bench/benchmarks/{}/events", seg(id)));
+        let resp = self
+            .stream_agent
+            .get(&url)
+            .header("Accept", "text/event-stream")
+            .call()
+            .map_err(|e| self.unreachable(&e))?;
+        if resp.status().as_u16() >= 400 {
+            return Err(self
+                .decode::<serde_json::Value>(resp)
+                .err()
+                .unwrap_or_else(|| ApiError::new("http_error", "benchmark event stream failed")));
+        }
+        let (tx, rx) = channel();
+        let (sub, cancel) = BenchSubscription::new(rx);
+        let reader = BufReader::new(resp.into_body().into_reader());
+        std::thread::spawn(move || {
+            parse_sse_while(
+                reader,
+                || !cancel.load(std::sync::atomic::Ordering::Relaxed),
+                |name, data| match BenchEvent::from_sse(name, data) {
+                    Some(Ok(ev)) => tx.send(ev).is_ok(),
+                    _ => true,
+                },
+            );
+        });
+        Ok(sub)
+    }
+
+    fn label_agents(&self) -> ApiResult<Vec<LabelAgent>> {
+        self.get::<LabelAgentList>("/label/agents").map(|l| l.agents)
+    }
+
+    fn label_jobs(&self) -> ApiResult<Vec<LabelJob>> {
+        self.get::<LabelJobList>("/label/jobs").map(|l| l.jobs)
     }
 
     fn local_inference(&self) -> bool {
@@ -990,5 +1159,100 @@ FOLO"
     fn spawned_server_uses_the_real_store_not_mock() {
         assert_eq!(SERVE_ARGS, ["--json", "serve", "--port", "0"]);
         assert!(!SERVE_ARGS.contains(&"--mock"));
+    }
+
+    /// Every benchmark call the app makes, against a real `folo serve` with a benchmark that has a
+    /// finished entry and a model: `FOLO_SERVER=… cargo test real_server_bench -- --ignored
+    /// --nocapture`. It makes a benchmark, starts and stops an entry and deletes both again.
+    #[test]
+    #[ignore]
+    fn real_server_bench_calls() {
+        let api = HttpBackend::new(&std::env::var("FOLO_SERVER").unwrap_or("http://127.0.0.1:7878".into()));
+        let features = api.system().unwrap().features;
+        assert!(features.iter().any(|f| f == FEATURE_VISION_BENCH), "{features:?}");
+        let catalog = api.bench_catalog().unwrap();
+        assert_eq!(catalog.conditions.len(), 12);
+        let benches = api.benches().unwrap();
+        let (b, done) = benches
+            .iter()
+            .find_map(|b| {
+                let entries = api.bench_entries(&b.id).unwrap();
+                entries.into_iter().find(|e| e.status == BenchEntryStatus::Done).map(|e| (b.clone(), e))
+            })
+            .expect("a benchmark with a finished entry");
+        let result = api.bench_result(&b.id, &done.id).unwrap();
+        println!("{} / {}: score {:?}", b.name, done.name, result.entry.score.map(|s| s.total));
+        let page = api.bench_entry_images(&b.id, &done.id, "worst", 0, 24).unwrap();
+        assert!(!page.images.is_empty() && page.total >= page.images.len() as u64);
+        let bad: Vec<u32> = page.images.iter().map(|i| i.missed + i.wrong).collect();
+        assert!(bad.windows(2).all(|w| w[0] >= w[1]), "{bad:?}");
+        let first = api.bench_images(&b.id, 0, 1, None).unwrap().images.remove(0);
+        let decode = |d: ImageData| match d {
+            ImageData::Encoded(bytes) => image::load_from_memory(&bytes).unwrap().to_rgb8(),
+            ImageData::Rgba { .. } => panic!("the server sends files"),
+        };
+        let plain = decode(api.bench_image(&b.id, &first.id, None, Some(320)).unwrap());
+        let cond = b.plan.conditions.first().map(|c| (c.condition.clone(), c.severities[0]));
+        if let Some((c, s)) = &cond {
+            let changed = decode(api.bench_image(&b.id, &first.id, Some((c, *s)), Some(320)).unwrap());
+            assert_eq!(plain.dimensions(), changed.dimensions());
+            assert_ne!(plain.as_raw(), changed.as_raw(), "{c} {s} changes the pixels");
+        }
+        assert!(plain.width().max(plain.height()) <= 320);
+        let _ = api.bench_loops(&b.id).unwrap();
+        let _ = api.label_agents().unwrap();
+        let _ = api.label_jobs().unwrap();
+        drop(api.bench_events(&b.id).unwrap());
+        // The write path, on a benchmark of its own.
+        let ds = api
+            .datasets()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.splits.val > 0)
+            .expect("a dataset with val images");
+        let created = api
+            .create_bench(&CreateBench {
+                name: "desktop real-server check".into(),
+                description: String::new(),
+                source: BenchSource::Dataset { dataset_id: ds.id.clone(), split: Some(Split::Val) },
+                max_images: Some(8),
+                seed: 0,
+                plan: None,
+            })
+            .unwrap();
+        // Whatever happens next, the benchmark goes again.
+        let run = || -> ApiResult<()> {
+            let model = api
+                .models()?
+                .into_iter()
+                .find(|m| crate::bench::model_fits(&m.classes, &created.classes))
+                .expect("a model that knows the dataset's classes");
+            let req = StartBenchEntry {
+                contestant: BenchContestantSpec::Model { model_id: model.id },
+                name: None,
+                max_images: None,
+                conditions: Some(false),
+            };
+            let events = api.bench_events(&created.id)?;
+            let e = api.start_bench_entry(&created.id, &req)?;
+            // The entry comes over the stream too (its progress, or its end).
+            let streamed = std::iter::from_fn(|| events.recv_timeout(Duration::from_secs(20)).ok())
+                .any(|ev| matches!(ev, BenchEvent::Entry(x) if x.id == e.id));
+            assert!(streamed, "the entry is streamed");
+            if e.status.is_active() {
+                let _ = api.stop_bench_entry(&created.id, &e.id);
+            }
+            for _ in 0..100 {
+                if api.bench_entries(&created.id)?.iter().all(|x| !x.status.is_active()) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            api.delete_bench_entry(&created.id, &e.id)
+        };
+        let ran = run();
+        api.delete_bench(&created.id).unwrap();
+        ran.unwrap();
+        assert!(!api.benches().unwrap().iter().any(|x| x.id == created.id));
     }
 }

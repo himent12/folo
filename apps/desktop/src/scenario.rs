@@ -63,6 +63,20 @@ pub const ALL: &[&str] = &[
     "playground+canvas-focus",
     "settings",
     "settings+reference",
+    "benchmarks",
+    "benchmarks+light",
+    "benchmarks+empty",
+    "bench-new",
+    "bench",
+    "bench+light",
+    "bench-plan",
+    "bench-design",
+    "bench-design+proposal",
+    "bench-loops",
+    "bench-loop-new",
+    "bench-entry",
+    "bench-entry+light",
+    "bench-entry+bottom",
     "overview+cloud",
     "runs+cloud",
     "settings+cloud",
@@ -194,6 +208,28 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             app.run_filter = RunFilter::All;
         }
         "models" => app.route = Route::Models,
+        // Vision benchmarks (the built-in demo's): the list, a leaderboard, its plan and loops, an entry's result.
+        "benchmarks" | "bench-new" => app.route = Route::Benches,
+        "bench" => app.route = Route::Bench("bn_3c90".into()),
+        "bench-plan" => {
+            app.route = Route::Bench("bn_3c90".into());
+            app.bench.tab = crate::bench::BenchTab::Plan;
+        }
+        // A fresh benchmark, whose plan can still change.
+        "bench-design" => {
+            app.route = Route::Bench("bn_7a04".into());
+            app.bench.tab = crate::bench::BenchTab::Plan;
+        }
+        "bench-loops" | "bench-loop-new" => {
+            app.route = Route::Bench("bn_5e12".into());
+            app.bench.tab = crate::bench::BenchTab::Loops;
+        }
+        "bench-entry" => {
+            app.route = Route::BenchEntry("bn_3c90".into(), "be_3c01".into());
+            if s.has("bottom") {
+                app.scroll_end_pending = 60;
+            }
+        }
         "model" => app.route = Route::Model("m_44c0".into()),
         "playground" => app.route = Route::Playground,
         "settings" => {
@@ -273,6 +309,30 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         }
         _ => {}
     }
+    if (screen.starts_with("bench") || screen == "benchmarks") && !s.fail && !app.hold_loading {
+        preload_bench(app, &app.route.clone());
+    }
+    match screen {
+        "bench-new" => app.open_new_bench(window, cx),
+        "bench-loop-new" => app.open_new_loop(cx),
+        "bench-design" => {
+            app.open_design("bn_7a04", window, cx);
+            if s.has("proposal") {
+                // The agent's answer, as Ask gets it.
+                let req = crate::api::DesignBench {
+                    agent: crate::api::LabelAgentId::Claude,
+                    model: None,
+                    effort: None,
+                    note: String::new(),
+                };
+                let proposal = app.store.api.design_bench("bn_7a04", &req).ok();
+                if let Some(f) = app.bench.design.as_mut() {
+                    f.proposal = proposal;
+                }
+            }
+        }
+        _ => {}
+    }
     if screen == "palette" {
         app.open_palette(window, cx);
     }
@@ -344,6 +404,47 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.reveal_pending = 90;
     }
     let _ = Load::<()>::Idle;
+}
+
+/// What the Benchmarks screens show, read at once: the system answer (its `vision_bench` feature), the
+/// models, the benchmark list, the catalog, the agents and jobs, and the open benchmark's entries,
+/// loops, first image and (on an entry page) the entry's result and images.
+fn preload_bench(app: &mut FoloApp, route: &Route) {
+    let api = app.store.api.clone();
+    if let Ok(s) = api.system() {
+        app.store.features = s.features;
+        app.store.capabilities = s.capabilities;
+        app.store.system = Load::Ready(s.system);
+    }
+    app.store.models = api
+        .models()
+        .map(|mut m| {
+            m.sort_by(|a, b| b.created.cmp(&a.created));
+            m
+        })
+        .into();
+    app.store.runs = api.runs().into();
+    app.bench.list = api.benches().into();
+    app.bench.catalog = api.bench_catalog().into();
+    app.bench.agents = api.label_agents().into();
+    app.bench.jobs = api.label_jobs().into();
+    let (bench, entry) = match route {
+        Route::Bench(b) => (b.clone(), None),
+        Route::BenchEntry(b, e) => (b.clone(), Some(e.clone())),
+        _ => return,
+    };
+    app.bench.entries.insert(bench.clone(), api.bench_entries(&bench).into());
+    app.bench.loops.insert(bench.clone(), api.bench_loops(&bench).into());
+    app.bench.previews.insert(bench.clone(), api.bench_images(&bench, 0, 1, None).into());
+    if let Some(e) = entry {
+        let key = (bench.clone(), e.clone());
+        app.bench.results.insert(key.clone(), api.bench_result(&bench, &e).into());
+        let sort = app.bench.image_sort;
+        let page = api.bench_entry_images(&bench, &e, sort.as_str(), 0, crate::bench::ENTRY_IMAGES_PAGE);
+        let images =
+            crate::bench::EntryImages { sort, page: page.into(), more: false, more_error: None, seq: 0 };
+        app.bench.entry_images.insert(key, images);
+    }
 }
 
 /// The system answer (its `cloud` feature), the runs and the server's cloud lists, read at once.
