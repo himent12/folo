@@ -597,9 +597,9 @@ impl Exec {
                     }
                     refs[0].clone()
                 }
-                Ok(_) => return Err(nothing(release, e)),
-                // Unknown: the release looks for it by its name again, and the reaper after that.
-                Err(_) => return Err(failed(e.code(), e.message)),
+                // Not listed (yet) or unknown: the release looks for it by its name again, and the reaper after
+                // that (super::reaper::LISTED_WITHIN).
+                Ok(_) | Err(_) => return Err(failed(e.code(), e.message)),
             },
             Err(e) => return Err(nothing(release, e)),
         };

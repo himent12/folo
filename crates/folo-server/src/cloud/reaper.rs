@@ -13,12 +13,23 @@ use folo_cloud::InstanceState;
 
 use super::{Core, files};
 use crate::error::Result;
+use crate::util::{parse_rfc3339, unix_now};
+
+/// A provider may list an instance only a while after the launch request that created it (one whose answer was
+/// lost may still have been in the works): until this long after its record was written, finding no instance by
+/// its name is not taken to mean that the launch created none.
+pub(crate) const LISTED_WITHIN: Duration = Duration::from_secs(5 * 60);
+
+/// Whether `record` was written less than [`LISTED_WITHIN`] ago.
+fn recent(record: &CloudInstance) -> bool {
+    parse_rfc3339(&record.created).is_none_or(|t| unix_now() - t < LISTED_WITHIN.as_secs_f64())
+}
 
 impl Core {
     /// Asks the provider once to terminate instance `id`: `terminated` when it confirms (also when the instance was
     /// gone already), else `terminating` with the error, for the reaper to retry. An instance without a provider id
-    /// (its launch is in flight, or a crash interrupted it) is looked up by its name; when there is none, there is
-    /// nothing to terminate.
+    /// (its launch is in flight, or a crash interrupted it) is looked up by its name; when there is none (and the
+    /// launch is not [`recent`]), there is nothing to terminate.
     pub(crate) fn terminate_once(&self, id: &str) -> Result<CloudInstance> {
         let record = self.ledger.get(id)?;
         if !record.status.is_alive() {
@@ -35,6 +46,13 @@ impl Core {
                 Some(r) => vec![r.clone()],
                 None => c.provider.find(&values, &record.name).map_err(|e| e.message)?,
             };
+            if refs.is_empty() && recent(&record) {
+                return Err(format!(
+                    "{} lists no instance named {} yet; looking again",
+                    c.provider.info().name,
+                    record.name
+                ));
+            }
             // Whether the provider still had it: an instance that was gone before this ended at a time nobody
             // saw, one that is terminated here ends now (the ledger tells them apart for its cost).
             let was_gone =
@@ -99,9 +117,12 @@ impl Core {
         }
     }
 
-    /// Whether the interrupted launch of `record` created an instance (true when the provider cannot say, so the
+    /// Whether the interrupted launch of `record` created an instance (true when the provider cannot say yet, so the
     /// record stays and is looked at again).
     fn launched(&self, record: &CloudInstance) -> bool {
+        if recent(record) {
+            return true;
+        }
         let Ok(c) = self.connected(&record.connection_id) else { return true };
         !matches!(c.provider.find(&c.connection.values(), &record.name), Ok(refs) if refs.is_empty())
     }

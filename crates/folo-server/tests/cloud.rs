@@ -61,6 +61,8 @@ enum Fault {
     Fail(ErrorKind),
     /// `launch` only: creates the instance, then fails as if its answer was lost (`Unavailable`).
     LostAnswer,
+    /// `find` only: answers that there is no such instance, as a provider that does not list a new one yet.
+    Hidden,
     /// Panics, like a provider with a bug.
     Panic,
 }
@@ -225,7 +227,8 @@ impl TestCloud {
         self.script.lock().unwrap().instances.values().nth(n).expect("launched").store.clone()
     }
 
-    /// Records `call` with `arg`, waits while it is held, and plays its next fault: `Ok(true)` for a lost answer.
+    /// Records `call` with `arg`, waits while it is held, and plays its next fault: `Ok(true)` for a lost answer
+    /// (or a hidden instance).
     fn call(&self, call: Call, arg: &str) -> folo_cloud::Result<bool> {
         let mut s = self.script.lock().unwrap();
         s.calls.push((call, arg.to_string()));
@@ -243,7 +246,7 @@ impl TestCloud {
             Fault::Fail(kind) => {
                 Err(folo_cloud::Error::new(kind, format!("the test cloud refuses {call:?}")))
             }
-            Fault::LostAnswer => Ok(true),
+            Fault::LostAnswer | Fault::Hidden => Ok(true),
             Fault::Panic => panic!("the test cloud panics in {call:?}"),
         }
     }
@@ -357,7 +360,9 @@ impl Provider for TestCloud {
     }
 
     fn find(&self, _: &Values, name: &str) -> folo_cloud::Result<Vec<String>> {
-        self.call(Call::Find, name)?;
+        if self.call(Call::Find, name)? {
+            return Ok(Vec::new());
+        }
         let s = self.script.lock().unwrap();
         Ok(s.instances
             .iter()
@@ -704,6 +709,32 @@ fn refused_and_lost_launches() {
     let done = finished(&store, &run.id);
     assert_eq!(done.error_code.as_deref(), Some("cloud_unavailable"));
     until("the lost launch released", || (cloud.live() == 0).then_some(()));
+}
+
+#[test]
+fn a_lost_launch_that_the_provider_lists_late_is_still_terminated() {
+    no_gpu();
+    let t = TestDir::new("cloud-late-listing");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    // The launch created an instance and its answer was lost, and the provider does not list the instance yet.
+    cloud.fail(Call::Launch, Fault::LostAnswer, 1);
+    cloud.fail(Call::Find, Fault::Hidden, usize::MAX);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 1)).unwrap();
+    let done = finished(&store, &run.id);
+    assert_eq!(done.error_code.as_deref(), Some("cloud_unavailable"));
+    assert_eq!(cloud.live(), 1);
+    // Not finding it is no proof that there is none: its record stays, so it goes once it is listed.
+    let all = store.cloud_instances().unwrap();
+    assert_eq!(all.len(), 1, "the record of the launch is kept");
+    assert_eq!(all[0].status, CloudInstanceStatus::Terminating);
+    cloud.clear(Call::Find);
+    let i = until("the instance terminated", || {
+        store.cloud_instances().unwrap().into_iter().find(|i| i.status == CloudInstanceStatus::Terminated)
+    });
+    assert_eq!((cloud.live(), i.error), (0, None));
 }
 
 #[test]

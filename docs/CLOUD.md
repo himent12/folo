@@ -99,7 +99,8 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
   gone (for `remote`: while it does not answer at all) fails the run with `cloud_instance_lost`, and so does an
   instance terminated by hand; the checkpoints copied so far stay, so it can be resumed. A launch request that
   fails as `cloud_unavailable` may have gone through: the instance is looked up by its name, and one that exists is
-  used. A failure code is in `Run.error_code`: `cloud_auth_failed`, `cloud_refused` (no capacity, no balance),
+  used. One that is not listed may only be listed later: the run fails, and its instance stays `terminating` while
+  the reaper keeps looking for it by its name, for 5 minutes after the launch. A failure code is in `Run.error_code`: `cloud_auth_failed`, `cloud_refused` (no capacity, no balance),
   `cloud_unavailable`, `cloud_boot_failed` (the worker check, an instance whose setup failed, or a worker that
   cannot be downloaded: nothing is rented then), `cloud_sync_failed`, `cloud_instance_lost`.
 - **Resuming.** `POST /api/runs` with `resume_run_id` resumes a stopped or failed cloud run on a new instance of
@@ -119,7 +120,8 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
 Rented GPUs cost money by the hour, so the ledger is written before the provider is called and survives crashes:
 - `cloud/instances/<id>.json` is created (`launching`, with the unique instance name `folo-<run id>-<nonce>`)
   *before* the launch request. A server that dies in between finds the record on start, asks the provider for
-  instances of that name and terminates them (and drops the record when there are none). The reaper leaves alone
+  instances of that name and terminates them (and drops the record when there are none 5 minutes after the
+  launch: a provider may list a new instance late). The reaper leaves alone
   the instances of runs a process follows (it holds their `cloud.lock`), so a launch in flight is never touched.
 - Terminating is idempotent and retried: a request that fails leaves the instance `terminating`, and a reaper
   thread retries every 30 s (and on every start) until the provider confirms. Studio and Desktop show such an
