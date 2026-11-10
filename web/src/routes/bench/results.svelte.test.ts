@@ -16,6 +16,7 @@ import BenchmarkPage from '../Benchmark.svelte';
 import type { Bench, BenchEntry as BenchEntryT, BenchResult as BenchResultT } from '$lib/api/types';
 import CalibrationSection from './entry/CalibrationSection.svelte';
 import { GALLERY_PAGE } from './entry/ImagesSection.svelte';
+import SelfLabelSection from './entry/SelfLabelSection.svelte';
 import NewLoopDialog from './NewLoopDialog.svelte';
 
 let target: HTMLElement;
@@ -448,6 +449,20 @@ describe('the calibration panel', () => {
     flushSync();
     expect(document.querySelector('#calibration .tone')?.textContent).toBe('Well calibrated');
     expect(document.querySelector('#calibration .sentence')?.textContent).toBe('Close to the diagonal on average (ECE 0.02). Some of its scores are off by more: read the bins.');
+  });
+});
+
+describe('the self-labeling panel', () => {
+  it('calls the labels of a contestant without confidences that reaches 90% its labels, not detections none of which are kept', async () => {
+    // An agent: one operating point, 40 boxes, 95% right, covering 62% of all objects: its axis is 0.62.
+    const point = { confidence: 0, precision: 0.95, recall: 0.62, labels: 40 };
+    const self_labeling = { target_precision: 0.9, threshold: null, precision: 0.95, recall: 0.62, mean_iou: 0.8, labels_per_image: 0.83, labels: 40, readiness: 'ready', curve: [point] };
+    const result = { self_labeling } as unknown as BenchResultT;
+    c = mount(SelfLabelSection, { target, props: { result, entry: { scored: false, images: 48 } as BenchEntryT, loop: null } });
+    flushSync();
+    const kv = Object.fromEntries([...document.querySelectorAll('#self-labeling .kv > div')].map((d) => [d.querySelector('dt')!.textContent, d.querySelector('dd')!.textContent]));
+    expect(kv['Axis (objects at 90%)']).toBe('62%');
+    expect(Object.keys(kv).some((k) => /none kept/.test(k))).toBe(false);
   });
 });
 
