@@ -469,7 +469,8 @@ pub fn finish_entry(
             }
             parts = Some((graded.parts, graded.images));
         }
-        Ok(None) if closing => {
+        // A stop that was accepted ends `stopped` also when the server stops before the entry's work has ended.
+        Ok(None) if closing && entry.status != BenchEntryStatus::Stopping => {
             entry.status = BenchEntryStatus::Failed;
             entry.error = Some(SERVER_STOPPED_ENTRY.into());
             entry.hint = Some("start the entry again once the server runs".into());

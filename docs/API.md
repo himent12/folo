@@ -1079,7 +1079,8 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   `409 bench_entry_in_loop` while a loop that is still running uses it.
 
 Entries do not survive the server: one that is queued or running when the server stops (or that a crashed
-process left so) is `failed` ("the server stopped before the entry finished") with a hint to start it again.
+process left so) is `failed` ("the server stopped before the entry finished") with a hint to start it again; one
+that was `stopping` is `stopped`.
 
 **Self-improvement loops**
 - `GET /api/bench/benchmarks/{id}/loops` → `{ "loops": [BenchLoop] }` (newest first)
@@ -1123,7 +1124,7 @@ process left so) is `failed` ("the server stopped before the entry finished") wi
   `409 bench_loop_active` while it runs.
 
 A loop does not survive the server: one that was running when the server stopped is `failed` at the next start
-("the server stopped"), with its finished generations kept.
+("the server stopped"), with its finished generations kept; one that was `stopping` is `stopped`.
 
 **Events**
 - `GET /api/bench/benchmarks/{id}/events` (SSE; a `: keep-alive` comment every 15 s): a `bench` event (`Bench`),

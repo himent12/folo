@@ -299,7 +299,8 @@ impl Benches {
                 }
             })
             .collect();
-        benches.sort_by_cached_key(|b| (b.lock().file.created.clone(), b.id.clone()));
+        // By time, not by text: one made before `created` had milliseconds has none.
+        benches.sort_by_cached_key(|b| (parse_rfc3339_millis(&b.lock().file.created), b.id.clone()));
         let engine = Arc::new(Engine::new("auto".into(), guard));
         let benches = Arc::new(RwLock::new(benches));
         let worker = {
@@ -509,7 +510,14 @@ impl Benches {
             name,
             description,
             classes: gathered.classes.clone(),
-            created: rfc3339(unix_now()),
+            // To the millisecond and later than every other benchmark's: the list is in the order they were made
+            // in, also after a restart.
+            created: {
+                let list = self.benches.read().unwrap();
+                let last = list.iter().filter_map(|b| parse_rfc3339_millis(&b.lock().file.created)).max();
+                let now = (unix_now() * 1000.0) as i64;
+                rfc3339_millis(last.map_or(now, |l| now.max(l + 1)))
+            },
             source,
             source_name: gathered.name.clone(),
             seed,
