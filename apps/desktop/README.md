@@ -20,13 +20,39 @@ cargo run -- --help                                # every option (`--version`: 
 ```
 
 Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl ,` settings ·
-`Ctrl Shift L` theme · `Alt ←` back · `Esc` close or go up · `Tab` / arrows move focus.
+`Ctrl Shift L` theme · `F11` full screen · `Alt ←` back · `Esc` close or go up · `Tab` / arrows move focus ·
+`F6` next region.
+
+## Window
+
+The app draws its own title bar (`titlebar()` in `src/app.rs`) and tells Windows which parts of it are caption
+areas: Minimize, Maximize / Restore and Close, and two drag areas, the title bar's empty space and the sidebar's
+FOLO row (drag to move, double-click to maximize or restore, hover Maximize for the snap layouts). The breadcrumbs
+and the search field in the title bar take their own clicks. The top few pixels (`layout.desktop_resize_edge`)
+resize the window, as the other edges do, except when it is maximized or full screen.
+
+Two GPUI details keep this working; `tools/window-check.ps1` catches a regression in either:
+
+- **Caption areas are `.occlude()`d.** GPUI sends a caption press to the app first and passes it to Windows only
+  if nothing prevented its default. A focus-tracked element under the pointer does (it focuses itself), and the
+  root view is one, so without the occlusion no button, drag or double-click ever reached Windows.
+- **The top edge is a strip over the title bar** (`resize-top`, on top and occluding). Windows resizes only where
+  GPUI's hit test finds no caption area, and the title bar's drag area reaches the top of the window.
+
+`F11` (or Toggle full screen in the palette) toggles full screen. There the window has no caption areas, so the
+three buttons are plain buttons: Minimize, Restore (leaves full screen) and Close.
+
+The window opens as it was closed: its restored size and place, maximized or full screen, and the theme
+(`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
+A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
+(`--scenario`, `--width`, `--height`) neither read nor write it, and `--theme` beats the remembered theme.
 
 ## Layout
 
 ```
 build.rs          generates the theme tables from design/tokens.json and embeds assets/icons/*.svg
 src/main.rs       args, fonts (design/fonts), window, keymap
+src/window_state.rs  the remembered window and theme (desktop.json), where a saved window reopens
 src/theme.rs      the active theme (Colors from tokens, dark/light), class palette, shadows
 src/api/          Backend trait (the client seam), wire types for docs/API.md, the in-app mock
 src/synth.rs      procedural "shapes" scenes behind the mock's images
@@ -40,7 +66,7 @@ src/viz.rs        images with detection boxes and label chips (design/README.md 
 src/screens/      one module per screen
 src/overlays.rs   palette, dialogs, image inspector, toasts
 src/scenario.rs   `--scenario` states for screenshots
-tools/            shoot.ps1 / shoot-all.ps1 (screenshots)
+tools/            shoot.ps1 / shoot-all.ps1 (screenshots), window-check.ps1 (the window chrome, real input)
 ```
 
 ## Data
@@ -93,6 +119,21 @@ tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://12
 ```
 
 The scripts run `$CARGO_TARGET_DIR/debug/folo-desktop.exe` unless `-Exe` names another build (a release one, say).
+
+### Window check
+
+```powershell
+tools\window-check.ps1                     # about a minute; leave the mouse alone
+tools\window-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe
+```
+
+It drives the window chrome with real mouse and keyboard input (Windows only) and prints PASS or FAIL per step:
+the breadcrumbs and search field in the title bar, Maximize / Restore, double-click and drag on both drag areas,
+the top resize edge, Minimize, `F11` on and off, the three buttons in full screen, Close, and the next launches
+(maximized, windowed and full screen again at the last size and place; a saved place off every display; a
+corrupt state file). It exits 1 if any step fails. The remembered state goes to `$FOLO_DESKTOP_STATE`, a fresh file
+under `$FOLO_TEST_TMP\window-check` (or `-StateDir`), never the real profile, and the last check proves that. It
+also saves a screenshot of the snap layouts over Maximize there, to look at.
 
 `shots/` is gitignored. Design reviews score the shots against `REVIEW_RUBRIC.md`; `HILLCLIMB.md` logs each round.
 

@@ -35,6 +35,7 @@ actions!(
         GoPlayground,
         GoSettings,
         ToggleTheme,
+        ToggleFullscreen,
         Back,
         Dismiss,
         OpenImage,
@@ -58,6 +59,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-5", GoPlayground, None),
         KeyBinding::new("ctrl-,", GoSettings, None),
         KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
+        KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("alt-left", Back, None),
         KeyBinding::new("escape", Dismiss, None),
         KeyBinding::new("ctrl-o", OpenImage, None),
@@ -392,6 +394,8 @@ pub struct FoloApp {
     pub frozen: bool,
     /// Keep every fetch pending (loading-state screenshots).
     pub hold_loading: bool,
+    /// Where the window and theme are remembered on close (`window_state`); `None` for screenshots.
+    pub state_path: Option<std::path::PathBuf>,
 
     pub root_focus: FocusHandle,
     pub focus: RefCell<HashMap<SharedString, FocusHandle>>,
@@ -622,6 +626,7 @@ impl FoloApp {
             mode: theme(cx).mode,
             frozen,
             hold_loading: false,
+            state_path: None,
             root_focus,
             focus: RefCell::new(HashMap::new()),
             switch_seen: RefCell::new(HashMap::new()),
@@ -1348,6 +1353,33 @@ impl FoloApp {
     pub fn toggle_theme(&mut self, cx: &mut Context<Self>) {
         let next = if self.mode == Mode::Dark { Mode::Light } else { Mode::Dark };
         self.set_mode(next, cx);
+    }
+
+    /// Remember the window (restored bounds, maximized or full screen) and the theme for the next
+    /// launch, when this one remembers (`window_state`).
+    pub fn save_window_state(&self, window: &Window, _cx: &App) {
+        use crate::window_state::{Placement, State, WindowMode};
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let (b, mode) = match window.window_bounds() {
+            gpui::WindowBounds::Windowed(b) => (b, WindowMode::Windowed),
+            gpui::WindowBounds::Maximized(b) => (b, WindowMode::Maximized),
+            gpui::WindowBounds::Fullscreen(b) => (b, WindowMode::Fullscreen),
+        };
+        let state = State {
+            window: Some(Placement {
+                x: b.origin.x.into(),
+                y: b.origin.y.into(),
+                width: b.size.width.into(),
+                height: b.size.height.into(),
+                mode,
+            }),
+            theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
+        };
+        if let Err(e) = crate::window_state::save(path, &state) {
+            eprintln!("folo-desktop: couldn't remember the window in {}: {e}", path.display());
+        }
     }
 
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2595,6 +2627,10 @@ impl FoloApp {
         let t = theme(cx);
         let crumbs = self.breadcrumbs();
         let maximized = window.is_maximized();
+        // In full screen GPUI reports no caption areas, so Windows doesn't act on the buttons: they
+        // take their own clicks then. Only then, since otherwise the caption press already acts
+        // (on mouse up) and a click handler would act a second time.
+        let fullscreen = window.is_fullscreen();
         let win_btn = |id: &'static str, icon_path: &'static str, area: WindowControlArea, close: bool| {
             div()
                 .id(id)
@@ -2605,6 +2641,8 @@ impl FoloApp {
                 .items_center()
                 .justify_center()
                 .window_control_area(area)
+                // See `titlebar-drag`: the press must reach Windows, not focus the root.
+                .occlude()
                 .hover(move |s| if close { s.bg(gpui::rgb(0xC42B1C)) } else { s.bg(t.bg_hover) })
                 .active(|s| s.opacity(0.8))
                 .child(
@@ -2640,6 +2678,11 @@ impl FoloApp {
                     // The crumbs' 4 px pads put their text on the page gutter.
                     .pl(px(self.gutter() - 4.))
                     .window_control_area(WindowControlArea::Drag)
+                    // A caption press goes to GPUI first and only reaches Windows (drag, double-click
+                    // maximize, the caption buttons) if nothing prevents its default. The focus-tracked
+                    // root would (focusing itself does), so the chrome hides the root from the hit
+                    // test. The crumbs above it still take their own clicks.
+                    .occlude()
                     .children(crumbs.into_iter().enumerate().map(|(i, (label, route))| {
                         let last = route.is_none();
                         let crumb = div().id(("crumb", i)).px(px(4.)).py(px(2.)).rounded(px(4.)).child(
@@ -2703,14 +2746,30 @@ impl FoloApp {
                     .child(text(ty::SM, t.text_tertiary).flex_1().child("Search or jump to…"))
                     .child(shortcut(&t, &["Ctrl", "K"])),
             )
-            .child(win_btn("win-min", "icons/win-min.svg", WindowControlArea::Min, false))
-            .child(win_btn(
-                "win-max",
-                if maximized { "icons/win-restore.svg" } else { "icons/win-max.svg" },
-                WindowControlArea::Max,
-                false,
+            .child(
+                win_btn("win-min", "icons/win-min.svg", WindowControlArea::Min, false)
+                    .when(fullscreen, |d| d.on_click(|_, w, _| w.minimize_window())),
+            )
+            .child(
+                win_btn(
+                    "win-max",
+                    if maximized || fullscreen { "icons/win-restore.svg" } else { "icons/win-max.svg" },
+                    WindowControlArea::Max,
+                    false,
+                )
+                // Full screen's "restore" leaves full screen.
+                .when(fullscreen, |d| d.on_click(|_, w, _| w.toggle_fullscreen())),
+            )
+            .child(win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true).when(
+                fullscreen,
+                |d| {
+                    // Closing this way skips the window's should-close hook: remember here.
+                    d.on_click(cx.listener(|this, _, w, cx| {
+                        this.save_window_state(w, cx);
+                        w.remove_window();
+                    }))
+                },
             ))
-            .child(win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true))
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, Option<Route>)> {
@@ -2804,6 +2863,8 @@ impl FoloApp {
                     .gap(px(10.))
                     .px(px(if compact { 18. } else { 16. }))
                     .window_control_area(WindowControlArea::Drag)
+                    // See `titlebar-drag`.
+                    .occlude()
                     .child(logo(&t, 20.))
                     .when(!compact, |d| {
                         d.child(
@@ -3235,6 +3296,7 @@ impl Render for FoloApp {
             )
             .on_action(cx.listener(|this, _: &GoSettings, w, cx| this.nav_shortcut(Route::Settings, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
+            .on_action(cx.listener(|_, _: &ToggleFullscreen, w, _| w.toggle_fullscreen()))
             .on_action(cx.listener(|this, _: &Back, w, cx| {
                 if !this.modal_open() {
                     this.back(w, cx)
@@ -3387,6 +3449,22 @@ impl Render for FoloApp {
                     ),
             )
             .children(overlays)
+            // The top edge resizes the window, as the other three do. Windows only resizes where no
+            // caption area is hit, and the title bar is one up to the top: this strip, on top of
+            // it and hiding it from the hit test, is not. Maximized or full screen there is no edge,
+            // and the top pixels are the title bar's.
+            .when(!window.is_maximized() && !window.is_fullscreen(), |d| {
+                d.child(
+                    div()
+                        .id("resize-top")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(crate::theme::layout::DESKTOP_RESIZE_EDGE))
+                        .occlude(),
+                )
+            })
     }
 }
 
