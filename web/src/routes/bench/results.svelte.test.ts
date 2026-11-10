@@ -172,6 +172,14 @@ describe('the compare page', () => {
     expect(document.querySelectorAll('.cmp thead th.e-col')).toHaveLength(2);
   });
 
+  it('says why calibration was not measured for an entry with confidences that never reach 0.1', async () => {
+    await page(BenchCompare, '/benchmarks/bn_7a41/compare?entries=be_p201,be_p205');
+    await settle(40);
+    const note = [...document.querySelectorAll('.pair p.note')].map((p) => p.textContent ?? '').find((t) => /yolo26n-pond-raw/.test(t)) ?? '';
+    expect(note).toMatch(/yolo26n-pond-raw: no detection reached confidence 0\.1/);
+    expect(note).not.toMatch(/no confidences/);
+  });
+
   it('explains a link with fewer than two finished entries, with the way back', async () => {
     await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_gone');
     expect(text()).toMatch(/Add one more entry to compare/);
