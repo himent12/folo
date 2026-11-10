@@ -1,76 +1,8 @@
 <script lang="ts" module>
   import type { Pt } from './downsample';
+  import type { Marker, Series, XMark } from './lineSeries';
 
-  export interface Series {
-    id: string;
-    label: string;
-    /** Any CSS colour, usually a token: `var(--chart-1)`. */
-    color: string;
-    points: Pt[];
-    dashed?: boolean;
-    /** Line pattern for secondary series of the same hue: dashed, dotted or dash-dot. */
-    pattern?: 'dash' | 'dot' | 'dashdot';
-    /** Fill the area under the line. */
-    area?: boolean;
-    /** A 1 px line: a secondary series in ink beside the focal one. */
-    thin?: boolean;
-    /** Thin, recessive line (e.g. raw values under a smoothed line); hidden from legend and tooltip. */
-    ghost?: boolean;
-    /**
-     * Context line (e.g. each class under their mean): 1 px in `--chart-context`, which holds >= 3:1 on the plot
-     * without opacity, so it stays traceable while the emphasised series carry weight and ink. Like a ghost it is
-     * hidden from the legend, the readout and end labels; `color` is ignored.
-     */
-    context?: boolean;
-    /** Thicker line drawn above the others (e.g. a mean over many thin per-class lines). */
-    emphasis?: boolean;
-    /** Painted over the other ordinary lines, patterned ones included (./layers), but under emphasised ones. */
-    front?: boolean;
-    /** The direct label at the line's end (with `endLabels`): a short name instead of `label`, or false for none. */
-    endLabel?: string | false;
-    /**
-     * How the line ends, drawn at its last point with `endDots` (./endMarks): a filled lime dot with the heartbeat while
-     * live, a square when stopped, a cross when failed (a plain dot otherwise). The end label then names it too.
-     */
-    end?: 'live' | 'stopped' | 'failed';
-    /**
-     * A band instead of a line: `points` is the upper edge, `lower` the lower edge at the same x positions (e.g. the
-     * spread of many curves). Drawn as a soft fill under the lines; not in the legend or the readout.
-     */
-    lower?: Pt[];
-  }
-
-  /**
-   * The best epoch: a hollow ring in `text.primary`, 1.5 px, the "○ best" glyph of the chart's header (./endMarks). It
-   * has one ink on every run, so it never reads as the live mark (a filled lime dot).
-   */
-  export interface Marker {
-    x: number;
-    y: number;
-    label: string;
-    /** Ring only: the label is stated elsewhere (e.g. the panel header), not floated over the data. */
-    quiet?: boolean;
-    /**
-     * Bump to pulse the ring once (e.g. a live run just set a new best): a ring grows out of it and fades over the
-     * chart duration. Nothing moves under reduced motion. 0 or unset: no pulse.
-     */
-    pulse?: number;
-    /**
-     * Bump to focus the marker once (the run just completed): lime viewfinder brackets close in on it over 200 ms, hold
-     * and fade, the one moment the brand's mark is drawn on a chart. Skipped under reduced motion. 0 or unset: none.
-     */
-    focus?: number;
-  }
-
-  /**
-   * A phase change on the x axis (e.g. "mosaic off" for a run's last epochs): a thin vertical line at `x` with its 12 px
-   * label above the plot, and the span from `x` to the end of the domain hatched along the axis, in the hatch the run's
-   * progress bar marks that span with.
-   */
-  export interface XMark {
-    x: number;
-    label: string;
-  }
+  export type { Marker, Series, XMark };
 </script>
 
 <script lang="ts">
@@ -79,8 +11,8 @@
   import { area as d3area, curveLinear, curveMonotoneX, line as d3line } from 'd3-shape';
   import { downsample, nearest, ticks as niceTicks } from './downsample';
   import { capTicks, logMinors, logTicks, MAX_TICKS, stepDecimals } from './domain';
-  import { END_LABELS_MIN, KEY_W, LABEL_GAP, labelWidth, leaderOf, memoPlaceEndLabels, MORE_ID } from './endLabels';
-  import { endMarkInk, LIVE_GROW, mergedEnds } from './endMarks';
+  import { END_LABELS_MIN, KEY_W, LABEL_GAP, labelWidth, leaderOf, memoPlaceEndLabels } from './endLabels';
+  import { LIVE_GROW, mergedEnds } from './endMarks';
   import { seriesText } from './ink';
   import { prefs } from '$lib/prefs.svelte';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
@@ -91,6 +23,10 @@
   import { cubicOut } from 'svelte/easing';
   import { motion } from '$lib/ui/motion';
   import { media } from '$lib/design/tokens';
+  import { dashOf, endShown, endText, inkOf, latest, patternOf } from './lineSeries';
+  import ChartLegend from './ChartLegend.svelte';
+  import ChartTooltip from './ChartTooltip.svelte';
+  import LineEnds from './LineEnds.svelte';
 
   interface Props {
     series: Series[];
@@ -259,15 +195,6 @@
   });
   const fmtValue = $derived(valueFormat ?? yFormatProp ?? ((v: number) => String(+v.toFixed(3))));
 
-  /** A line's direct label: its short `endLabel`, else its legend label; null for none. */
-  const endText = (s: Series) => (s.ghost || s.context || s.endLabel === false ? null : (s.endLabel ?? s.label));
-  /** The end label as drawn: the name cut at 18 characters, then how the line ends ("· failed"), never cut. */
-  const endShown = (s: Series) => {
-    const t = endText(s);
-    if (t === null) return null;
-    const name = t.length > 18 ? `${t.slice(0, 17)}…` : t;
-    return s.end ? `${name} · ${s.end}` : name;
-  };
   /**
    * An end label's width as drawn (12 px medium Geist, from the type tokens), so a label beside its marker really sits
    * beside it; `labelWidth`'s estimate where there is no canvas (tests).
@@ -676,28 +603,7 @@
     });
   }
 
-  // Dots are 0-length dashes drawn with round caps (stroke width), so they read as dots, not a faint hairline.
-  // Dots sit 4.5 px apart, so a line they run along (box under dfl in the loss chart) still shows between them.
-  const PATTERNS = { dash: [6, 3], dot: [0.01, 4.5], dashdot: [7, 3, 0.01, 3] } as const;
-  // The legend swatch (12 px, 2 px stroke, round caps) shows the same rhythm as its line: two dashes, three dots.
-  const SWATCH = { dash: [3, 4], dot: [0.01, 4.5], dashdot: [4, 3.5, 0.01, 3.5] } as const;
-  const patternOf = (s: Series) => s.pattern ?? (s.dashed ? 'dash' : null);
   const light = $derived(prefs.resolvedTheme === 'light');
-  /**
-   * A line's ink. A dash or a dot carries less ink than a line, so a patterned series takes its hue's text ink
-   * (./ink: 4.5:1 per dash, the same hue in dark, darker in light) and, in light, a 2 px dash (widthOf), so a dotted
-   * fourth run clears 3:1 in practice, not only per pixel (DESIGN_DIRECTION §2.5).
-   */
-  const inkOf = (s: Series) => (patternOf(s) ? seriesText(s.color) : s.color);
-  /** stroke-dasharray for a series; `k` scales it with a heavier stroke (a highlighted line keeps its rhythm). */
-  function dashOf(s: Series, k = 1): string | undefined {
-    const p = patternOf(s);
-    return p ? PATTERNS[p].map((v) => +(v * k).toFixed(3)).join(' ') : undefined;
-  }
-  const swatchDash = (s: Series) => {
-    const p = patternOf(s);
-    return p ? SWATCH[p].join(' ') : undefined;
-  };
   /** Stroke width of a series' line in px, as the `.line` classes below draw it. */
   function widthOf(s: Series): number {
     if (s.ghost || s.context || s.thin) return 1;
@@ -718,13 +624,6 @@
     return [...items.filter((t) => id(t) !== highlight), ...items.filter((t) => id(t) === highlight)];
   }
 
-  const latest = (s: Series) => {
-    for (let i = s.points.length - 1; i >= 0; i--) {
-      const p = s.points[i]!;
-      if (Number.isFinite(p.y)) return p.y;
-    }
-    return null;
-  };
 
   // A best ring on its line's end (or so close that the two would overlap) is drawn around the end mark, as one mark
   // (./endMarks); apart, each keeps its own shape. Only markers in the x domain, and only where end marks are drawn.
@@ -751,35 +650,9 @@
   const tipLeft = $derived(hover ? hover.px + 12 + tipWidth > width - 4 : false);
 </script>
 
-<!-- The run just completed: lime viewfinder corners (the product's mark) close in on the best ring and fade. -->
-{#snippet brackets(h: number)}
-  {@const k = 3.5}
-  <path class="focus" d="M{-h} {-h + k}V{-h}H{-h + k}M{h - k} {-h}H{h}V{-h + k}M{h} {h - k}V{h}H{h - k}M{-h + k} {h}H{-h}V{h - k}" />
-{/snippet}
-
-{#snippet swatch(s: Series)}
-  <svg class="swatch" width="14" height="6" viewBox="0 0 14 6" aria-hidden="true">
-    <line x1="1" x2="13" y1="3" y2="3" style:stroke={inkOf(s)} style:stroke-dasharray={swatchDash(s)} />
-  </svg>
-{/snippet}
-
 <div class="chart">
   {#if legend && keyed.length > 0}
-    <ul class="legend" aria-hidden="true">
-      <!-- The note says which value the legend shows: the cursor's x, or at rest `legendNote` (narrow plots too, where
-           the cursor's x reads out on the axis instead). -->
-      {#if hintText}<li class="note hint">{hintText}</li>
-      {:else if hover && !compact}<li class="note at">{hover.title}</li>
-      {:else if legendNote && !hover}<li class="note">{legendNote}</li>{/if}
-      {#each keyed as s (s.id)}
-        {@const v = hover ? hover.rows.find((r) => r.s.id === s.id)?.p.y : latest(s)}
-        <li>
-          {@render swatch(s)}
-          <span class="name">{s.label}</span>
-          <span class="val">{v === null || v === undefined ? '—' : fmtValue(v)}</span>
-        </li>
-      {/each}
-    </ul>
+    <ChartLegend {hintText} {hover} {compact} {legendNote} {keyed} {fmtValue} />
   {/if}
 
   <p class="sr-only" aria-live="polite">{spoken}</p>
@@ -893,74 +766,26 @@
             />
           {/each}
           </g>
-          {#if endDots}
-            {#each lifted(paintOrder(keyed, (s) => s), (s) => s.id) as s (s.id)}
-              {@const p = s.points[s.points.length - 1]}
-              {#if p && Number.isFinite(p.y)}
-                {@const r = receding && s.id === highlight ? 4 : 3}
-                {@const ink = contextual(s) ? 'var(--chart-context)' : inkOf(s)}
-                {@const best = mergedInto(s.id)}
-                {#if best}
-                  <!-- The best is the line's end: its ink ring around the end mark, one mark (./endMarks). -->
-                  {@const rr = (s.end === 'live' ? r + LIVE_GROW : r) + 3}
-                  <g class="marker" data-merged={s.id} transform="translate({x(p.x)},{y(p.y)})">
-                    {#if best.pulse && best.pulse > pulseBase}
-                      {#key best.pulse}<circle class="pulse" r={rr} />{/key}
-                    {/if}
-                    <circle class="ring" r={rr} />
-                    {#if best.focus && best.focus > focusBase}
-                      {#key best.focus}{@render brackets(rr + 4)}{/key}
-                    {/if}
-                  </g>
-                {/if}
-                {#if s.end === 'failed'}
-                  <path class="end-x" d="M{x(p.x) - r} {y(p.y) - r}l{2 * r} {2 * r}m0 {-2 * r}l{-2 * r} {2 * r}" style:stroke={endMarkInk(s.end, ink)} />
-                {:else if s.end === 'stopped'}
-                  <rect class="end-dot" x={x(p.x) - r} y={y(p.y) - r} width={2 * r} height={2 * r} style:fill={ink} />
-                {:else if s.end === 'live'}
-                  <!-- Still training: a filled lime dot with the heartbeat, StatusBadge's running mark. -->
-                  <circle class="end-beat" cx={x(p.x)} cy={y(p.y)} r={r + LIVE_GROW} />
-                  <circle class="end-dot end-live" cx={x(p.x)} cy={y(p.y)} r={r + LIVE_GROW} style:fill={endMarkInk(s.end, ink)} />
-                {:else}
-                  <circle class="end-dot" cx={x(p.x)} cy={y(p.y)} {r} style:fill={ink} />
-                {/if}
-              {/if}
-            {/each}
-          {/if}
-
-          {#if showEnds}
-            {#each ends as e (e.id)}
-              <!-- A label moved off its line's end (to keep clear of lines and labels) is tied to its marker by a leader. -->
-              {#if e.lead}<line class="leader" x1={e.lead.x1} y1={e.lead.y1} x2={e.lead.x2} y2={e.lead.y2} style:stroke={e.color} />{/if}
-            {/each}
-            {#each ends as e (e.id)}
-              {#if e.key}
-                <!-- Keyed: the label could not sit beside its line's end, so it starts with the line's own swatch. -->
-                <line class="end-key" x1={e.x + 1} x2={e.x + 13} y1={e.y} y2={e.y} style:stroke={receding && e.id !== highlight ? 'var(--chart-context)' : inkOf(e.key)} style:stroke-dasharray={swatchDash(e.key)} />
-              {/if}
-              <text class="end-label" class:hl={e.id === highlight} class:more={e.id === MORE_ID} x={e.tx} y={e.y} dy="0.32em" style:fill={e.text}>{e.label}</text>
-            {/each}
-          {/if}
-          {#each markers as m, i (m.label + m.x)}
-            {#if m.x >= xExtent[0] && m.x <= xExtent[1] && merges[i] == null}
-              <g class="marker" transform="translate({x(m.x)},{y(m.y)})">
-                {#if m.pulse && m.pulse > pulseBase}
-                  {#key m.pulse}<circle class="pulse" r="4.5" />{/key}
-                {/if}
-                <circle class="ring" r="4.5" />
-                {#if m.focus && m.focus > focusBase}
-                  {#key m.focus}{@render brackets(8.5)}{/key}
-                {/if}
-                {#if !m.quiet}
-                  <text
-                    y="-10"
-                    text-anchor={x(m.x) > width - margin.right - 40 ? 'end' : x(m.x) < margin.left + 40 ? 'start' : 'middle'}
-                    dx={x(m.x) > width - margin.right - 40 ? 6 : x(m.x) < margin.left + 40 ? -6 : 0}>{m.label}</text
-                  >
-                {/if}
-              </g>
-            {/if}
-          {/each}
+          <LineEnds
+            {endDots}
+            {keyed}
+            {receding}
+            {highlight}
+            {contextual}
+            {mergedInto}
+            {lifted}
+            {x}
+            {y}
+            {pulseBase}
+            {focusBase}
+            {showEnds}
+            {ends}
+            {markers}
+            {merges}
+            {xExtent}
+            {width}
+            {margin}
+          />
 
           {#if hover}
             <line class="cursor" class:pinned x1={hover.px} x2={hover.px} y1={margin.top} y2={height - margin.bottom} />
@@ -986,16 +811,7 @@
       {/if}
 
       {#if hover && tooltip}
-        <div class="tip" class:left={tipLeft} style:--x="{hover.px}px" role="presentation" bind:clientWidth={tipWidth}>
-          <p class="tip-title">{hover.title}</p>
-          {#each hover.rows as r (r.s.id)}
-            <p class="tip-row">
-              {@render swatch(r.s)}
-              <span class="name">{r.s.label}{#if r.at}<span class="at">{r.at}</span>{/if}</span>
-              <span class="val">{fmtValue(r.p.y)}</span>
-            </p>
-          {/each}
-        </div>
+          <ChartTooltip {hover} {tipLeft} bind:tipWidth {fmtValue} />
       {/if}
     {/if}
   </div>
@@ -1008,53 +824,10 @@
     gap: var(--space-2);
     min-width: 0;
   }
-  .legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-1) var(--space-4);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-  }
-  /* Items wrap whole: a value never ends up on a line of its own. */
-  .legend li {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-  }
-  .legend .note {
-    /* Fixed width so the readout does not shift the legend as the cursor moves (phones wrap instead). */
-    min-width: min(6.5em, 100%);
-    color: var(--text-tertiary);
-    font-variant-numeric: tabular-nums;
-  }
-  .legend .note.at {
-    color: var(--text-secondary);
-  }
-  /* A reading hint takes the note's place for as long as it applies, on narrow plots too. */
-  .legend .note.hint {
-    min-width: 0;
-    color: var(--text-secondary);
-  }
   /* Axis names are labels, not ticks: 12 px. */
   .ticks .x-label {
     fill: var(--text-tertiary);
     font-size: var(--type-sm-size);
-  }
-  .swatch {
-    flex-shrink: 0;
-    overflow: visible;
-  }
-  .swatch line {
-    stroke-width: 2;
-    stroke-linecap: round;
-  }
-  .name {
-    color: var(--text-secondary);
-  }
-  .val {
-    color: var(--text-primary);
-    font-variant-numeric: tabular-nums;
   }
   .plot {
     position: relative;
@@ -1131,44 +904,6 @@
   .line {
     transition: stroke-width var(--dur-fast) var(--ease-standard);
   }
-  .end-dot {
-    stroke: var(--bg-panel);
-    stroke-width: 1.5;
-  }
-  /* A failed run's line ends in a cross, over a halo in the panel colour like the dots. */
-  .end-x {
-    fill: none;
-    stroke-width: 2;
-    stroke-linecap: round;
-    filter: drop-shadow(0 0 1px var(--bg-panel));
-  }
-  /* Still training: a filled lime dot (style:fill) whose heartbeat, a ring every 2.4 s, is StatusBadge's `live-pulse`
-     drawn in SVG; off under reduced motion, where the dot still says "now". */
-  .end-beat {
-    fill: none;
-    stroke: var(--accent-line);
-    stroke-width: 1.5;
-    opacity: 0;
-    transform-box: fill-box;
-    transform-origin: center;
-    animation: end-beat 2.4s var(--ease-out) infinite;
-  }
-  @keyframes end-beat {
-    0% {
-      opacity: 0.55;
-      transform: scale(1);
-    }
-    33%,
-    100% {
-      opacity: 0;
-      transform: scale(2.2);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .end-beat {
-      display: none;
-    }
-  }
   .halo {
     fill: none;
     stroke: var(--bg-panel);
@@ -1213,100 +948,6 @@
     font-size: var(--type-sm-size);
     font-variant-numeric: tabular-nums;
   }
-  .end-label {
-    font-size: var(--type-sm-size);
-    font-weight: var(--weight-medium);
-    paint-order: stroke;
-    stroke: var(--bg-panel);
-    stroke-width: 3px;
-  }
-  .end-label.hl {
-    font-weight: var(--weight-semibold);
-  }
-  /* The column's "+N more": not a line's name, so the quiet ink and the regular weight. */
-  .end-label.more {
-    fill: var(--text-tertiary);
-    font-weight: var(--weight-regular);
-  }
-  /* A keyed label's swatch: the legend's (2 px, round caps). */
-  .end-key {
-    stroke-width: 2;
-    stroke-linecap: round;
-  }
-  .leader {
-    stroke-width: 1;
-    stroke-linecap: round;
-  }
-  /* The best epoch: a hollow ink ring, 1.5 px, the header's "○ best" glyph (./endMarks). On its own it is filled with
-     the panel, so the line does not run through it; around an end mark it is only the ring. */
-  .marker .ring {
-    fill: none;
-    stroke: var(--text-primary);
-    stroke-width: 1.5;
-  }
-  .marker:not([data-merged]) .ring {
-    fill: var(--bg-panel);
-  }
-  /* A new best: a ring grows out of the marker and fades, once, over the chart duration. */
-  .marker .pulse {
-    fill: none;
-    stroke: var(--text-primary);
-    stroke-width: 1.5;
-    opacity: 0;
-    transform-box: fill-box;
-    transform-origin: center;
-    animation: best-pulse var(--dur-chart) var(--ease-out);
-  }
-  @keyframes best-pulse {
-    from {
-      opacity: 0.9;
-      transform: scale(1);
-    }
-    to {
-      opacity: 0;
-      transform: scale(2.4);
-    }
-  }
-  /* The run completed: four lime corners close in on the best ring over 200 ms, hold, then fade (1 s in all). */
-  .marker .focus {
-    fill: none;
-    stroke: var(--accent-line);
-    stroke-width: 1.5;
-    stroke-linecap: square;
-    opacity: 0;
-    transform-box: fill-box;
-    transform-origin: center;
-    animation: best-focus 1s var(--ease-out);
-  }
-  @keyframes best-focus {
-    0% {
-      opacity: 0;
-      transform: scale(1.8);
-    }
-    20%,
-    70% {
-      opacity: 1;
-      transform: scale(1);
-    }
-    100% {
-      opacity: 0;
-      transform: scale(1);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .marker .pulse,
-    .marker .focus {
-      display: none;
-    }
-  }
-  .marker text {
-    fill: var(--text-secondary);
-    font-size: var(--type-sm-size);
-    font-variant-numeric: tabular-nums;
-    paint-order: stroke;
-    stroke: var(--bg-panel);
-    stroke-width: 3px;
-  }
   .empty {
     position: absolute;
     /* Clear of the y labels, so a message that wraps on a phone never runs into them. */
@@ -1321,46 +962,5 @@
   .empty span {
     padding: 0 var(--space-2);
     background: var(--bg-panel);
-  }
-  .tip {
-    position: absolute;
-    top: 0;
-    left: var(--x);
-    transform: translateX(12px);
-    min-width: 140px;
-    padding: 6px 8px;
-    border-radius: var(--radius-md);
-    background: var(--bg-overlay);
-    box-shadow: var(--shadow-md);
-    pointer-events: none;
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    z-index: 2;
-    white-space: nowrap;
-  }
-  .tip.left {
-    transform: translateX(calc(-100% - 12px));
-  }
-  .tip-title {
-    color: var(--text-tertiary);
-    margin-bottom: 2px;
-    font-variant-numeric: tabular-nums;
-  }
-  .tip-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .tip-row .at {
-    margin-left: 6px;
-    color: var(--text-tertiary);
-    font-variant-numeric: tabular-nums;
-    font-size: var(--type-sm-size);
-  }
-  .tip-row .name {
-    flex: 1;
-  }
-  .tip-row .val {
-    padding-left: var(--space-3);
   }
 </style>
