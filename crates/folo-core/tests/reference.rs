@@ -571,3 +571,10 @@ fn conv2d_output_size_overflow_is_an_error() {
 fn p1() -> Conv2dParams {
     Conv2dParams { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 }
 }
+
+#[test]
+fn upsample_output_size_overflow_is_an_error() {
+    let x = Tensor::ones([1, 1, 2, 2]);
+    assert!(x.upsample_nearest2d(usize::MAX / 2 + 1).is_err());
+    assert!(x.upsample_nearest2d(1 << 33).is_err()); // each side fits, the element count does not
+}
