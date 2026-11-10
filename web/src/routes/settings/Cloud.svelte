@@ -7,7 +7,6 @@
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
   import Cloud from '@lucide/svelte/icons/cloud';
-  import Info from '@lucide/svelte/icons/info';
   import Plus from '@lucide/svelte/icons/plus';
   import Power from '@lucide/svelte/icons/power';
   import RefreshCw from '@lucide/svelte/icons/refresh-cw';
@@ -185,7 +184,7 @@
             {#if bad}
               <p class="cx-error"><CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>{c.error ?? 'The last check failed.'}</span></p>
             {:else if c.note}
-              <p class="cx-note"><Info size={14} strokeWidth={1.75} aria-hidden="true" /><span>{c.note}</span></p>
+              <p class="cx-note"><TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" /><span>{c.note}</span></p>
             {/if}
           </div>
           <div class="cx-end">
@@ -359,8 +358,14 @@
   .cx-error {
     color: var(--danger-text);
   }
+  /* What a working connection still has against it (an unencrypted URL, a worker that cannot be installed): the
+     warning mark, the words in secondary ink (it is not a failure, and never coloured text alone). */
   .cx-note {
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
+    overflow-wrap: anywhere;
+  }
+  .cx-note :global(svg) {
+    color: var(--warning-text);
   }
   .cx-error :global(svg),
   .cx-note :global(svg) {

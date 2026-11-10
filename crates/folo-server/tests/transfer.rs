@@ -84,8 +84,13 @@ fn lossy(router: Router, lost: usize, unanswered: usize) -> Router {
 
 /// Writes a folo-n weights file (about 10 MB: two 8 MiB parts) initialised from `seed`.
 fn write_model(path: &Path, seed: u64) {
-    let mut m =
-        FoloModel::with_rng(ModelConfig::new("n", 2).unwrap(), &mut folo_core::rng::Rng::seed(seed)).unwrap();
+    write_sized(path, "n", seed);
+}
+
+/// A model of architecture `size` (`n` is about 10 MB, `s` about 38).
+fn write_sized(path: &Path, size: &str, seed: u64) {
+    let mut m = FoloModel::with_rng(ModelConfig::new(size, 2).unwrap(), &mut folo_core::rng::Rng::seed(seed))
+        .unwrap();
     m.set_classes(vec!["cat".into(), "dog".into()]).unwrap();
     m.save(path).unwrap();
 }
@@ -228,6 +233,56 @@ fn downloads_in_parts_start_over_when_the_file_is_replaced() {
     assert!(new != on_disk && std::fs::read(&dest).unwrap() == new, "the new version, not a mix");
     assert_ne!(second.etag, first.etag);
     assert_eq!(leftovers(), 1);
+
+    // Replaced after every first part (a checkpoint rewritten faster than two requests follow each other): the
+    // version after the first replacement is asked for whole, in one request, so the download still ends, with
+    // one version of the file.
+    let mut seed = 10;
+    let mut seen = Vec::new();
+    let mut progress = |p: TransferProgress| {
+        seen.push(p.done_bytes);
+        if p.done_bytes < p.total_bytes {
+            seed += 1;
+            write_model(&path, seed);
+        }
+    };
+    let mut ctl = Control { progress: &mut progress, stop: &never, backoff: BACKOFF };
+    let racing = download(&client, &uri, &dest, &mut ctl).unwrap();
+    let last = std::fs::read(&path).unwrap();
+    assert!(
+        std::fs::read(&dest).unwrap() == last,
+        "one version, the one that was there for the whole request"
+    );
+    assert_eq!(
+        seen,
+        [folo_client::transfer::PART_BYTES, racing.bytes],
+        "a first part, then the next version whole"
+    );
+    assert_eq!(leftovers(), 1);
+
+    // A file of several parts comes in two requests on a link this fast: the first part, then the rest at once, so
+    // a file replaced every few seconds (a run's last.folo) has one moment to get in the way, not one per part.
+    write_sized(&path, "s", 3);
+    let large = std::fs::read(&path).unwrap();
+    assert!(large.len() as u64 > 3 * folo_client::transfer::PART_BYTES, "{} bytes", large.len());
+    let mut seen = Vec::new();
+    let mut progress = |p: TransferProgress| seen.push((p.done_bytes, p.total_bytes));
+    let mut ctl = Control { progress: &mut progress, stop: &never, backoff: BACKOFF };
+    let third = download(&client, &uri, &dest, &mut ctl).unwrap();
+    let len = large.len() as u64;
+    assert_eq!(seen, [(folo_client::transfer::PART_BYTES, len), (len, len)]);
+    assert!(third.bytes == len && std::fs::read(&dest).unwrap() == large);
+    assert_eq!(leftovers(), 1);
+
+    // What a process killed mid-download left is removed, and nothing else.
+    let out = dest.parent().unwrap();
+    std::fs::write(out.join(".pets.folo.4242.0.download"), b"half").unwrap();
+    std::fs::write(out.join(".keep"), b"").unwrap();
+    folo_client::transfer::remove_partial(out);
+    assert!(out.join(".keep").exists() && dest.exists());
+    assert_eq!(leftovers(), 2, "the file and .keep");
+    std::fs::remove_file(out.join(".keep")).unwrap();
+    folo_client::transfer::remove_partial(&t.join("no-such-dir"));
 
     // Stopped, or a model that is not there: no file, no leftovers.
     let other = t.join("out").join("other.folo");

@@ -819,10 +819,23 @@ impl FoloApp {
             cx,
             act(move |this, w, cx| this.ask_disconnect(id.clone(), w, cx)),
         );
+        // A line about the connection under its row, at the row's full width: the last check's error, or what a
+        // working connection still has against it (an unencrypted URL, a worker that cannot be installed). Not
+        // beside the buttons: a wrapped line in the column that shrinks for them paints at the width it was first
+        // measured at, under the buttons.
+        let line = |mark: &'static str, mark_c: gpui::Hsla, ink: gpui::Hsla, words: &str| {
+            div()
+                .flex()
+                .items_start()
+                .gap(px(6.))
+                .pt(px(4.))
+                .child(div().pt(px(2.)).flex_none().child(icon(mark, 12., mark_c)))
+                .child(rich(&t, ty::SM, ink, words).text_left().flex_1().min_w_0())
+        };
         div()
             .flex()
-            .items_center()
-            .gap(px(24.))
+            .flex_col()
+            .justify_center()
             .px(px(16.))
             .min_h(px(56.))
             .py(px(10.))
@@ -830,52 +843,54 @@ impl FoloApp {
             .border_color(t.line_subtle)
             .child(
                 div()
-                    .flex_1()
-                    .min_w_0()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.))
+                    .items_center()
+                    .gap(px(24.))
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                text(ty::BASE, t.text_primary)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(c.name.clone()),
-                            )
-                            .when(c.name != provider, |d| {
-                                d.child(text(ty::SM, t.text_tertiary).child(provider))
-                            })
+                            .flex_col()
+                            .gap(px(2.))
                             .child(
                                 div()
                                     .flex()
                                     .items_center()
-                                    .gap(px(6.))
-                                    .child(div().size(px(6.)).flex_none().rounded_full().bg(dot_c))
-                                    .child(text(ty::SM, status_c).child(status)),
-                            ),
+                                    .gap(px(8.))
+                                    .child(
+                                        text(ty::BASE, t.text_primary)
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(c.name.clone()),
+                                    )
+                                    .when(c.name != provider, |d| {
+                                        d.child(text(ty::SM, t.text_tertiary).child(provider))
+                                    })
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .child(div().size(px(6.)).flex_none().rounded_full().bg(dot_c))
+                                            .child(text(ty::SM, status_c).child(status)),
+                                    ),
+                            )
+                            .when(!facts.is_empty(), |d| {
+                                d.child(
+                                    text(ty::SM, t.text_tertiary).tnum().ellipsis().child(facts.join(" · ")),
+                                )
+                            }),
                     )
-                    .when(!facts.is_empty(), |d| {
-                        d.child(text(ty::SM, t.text_tertiary).tnum().ellipsis().child(facts.join(" · ")))
-                    })
-                    .when_some(c.error.clone().filter(|_| failed), |d, e| {
-                        d.child(text(ty::SM, t.danger_text).whitespace_normal().child(e))
-                    })
-                    .when_some(c.note.clone(), |d, n| {
-                        d.child(
-                            div()
-                                .flex()
-                                .items_start()
-                                .gap(px(6.))
-                                .pt(px(2.))
-                                .child(div().pt(px(2.)).child(icon("icons/info.svg", 12., t.text_tertiary)))
-                                .child(text(ty::SM, t.text_tertiary).whitespace_normal().child(n)),
-                        )
-                    }),
+                    .child(
+                        div().flex().flex_none().items_center().gap(px(8.)).child(check).child(disconnect),
+                    ),
             )
-            .child(div().flex().flex_none().items_center().gap(px(8.)).child(check).child(disconnect))
+            .when_some(c.error.clone().filter(|_| failed), |d, e| {
+                d.child(line("icons/circle-alert.svg", t.danger_solid, t.danger_text, &e))
+            })
+            .when_some(c.note.clone().filter(|_| !failed), |d, n| {
+                d.child(line("icons/triangle-alert.svg", t.warning_solid, t.text_secondary, &n))
+            })
             .into_any_element()
     }
 

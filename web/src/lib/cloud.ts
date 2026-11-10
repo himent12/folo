@@ -125,6 +125,15 @@ export function offerParts(o: CloudOffer, units: 'binary' | 'metric' = 'binary')
 }
 
 /**
+ * The offers in the order New run's GPU menu lists them: those that can start now, then those with none in stock,
+ * each group as the server sent it (cheapest first). A provider's catalogue is mostly out of stock at its cheap end
+ * (RunPod: a dozen of the first twenty), and a menu that opens on rows that can't be picked reads as broken.
+ */
+export function menuOrder(offers: readonly CloudOffer[]): CloudOffer[] {
+  return [...offers.filter((o) => o.availability !== 'none'), ...offers.filter((o) => o.availability === 'none')];
+}
+
+/**
  * The offer New run preselects: the cheapest available one with at least `needBytes` of GPU memory, or, without an
  * estimate, the cheapest available. When none has the memory, the one with the most (the cheapest of those), so the
  * "won't fit" warning stands against the nearest miss. Null when nothing is available.

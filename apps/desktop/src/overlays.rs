@@ -772,8 +772,8 @@ impl FoloApp {
             offers.ready().and_then(|l| l.offers.iter().find(|o| Some(&o.id) == offer_id.as_ref()).cloned());
         let gpu: AnyElement = match &offers {
             Load::Ready(list) => {
-                let opts = list
-                    .offers
+                let shown = crate::cloud::menu_order(&list.offers);
+                let opts = shown
                     .iter()
                     .map(|o| {
                         let price = fmt_price(o.price_per_hour);
@@ -785,8 +785,7 @@ impl FoloApp {
                         (SharedString::from(offer_line(o)), Some(SharedString::from(detail)))
                     })
                     .collect();
-                let off: Vec<Option<SharedString>> = list
-                    .offers
+                let off: Vec<Option<SharedString>> = shown
                     .iter()
                     .map(|o| {
                         (o.availability == crate::api::CloudAvailability::None)
@@ -794,8 +793,8 @@ impl FoloApp {
                     })
                     .collect();
                 let picked =
-                    offer.as_ref().and_then(|o| list.offers.iter().position(|x| x.id == o.id)).unwrap_or(0);
-                let ids: Vec<String> = list.offers.iter().map(|o| o.id.clone()).collect();
+                    offer.as_ref().and_then(|o| shown.iter().position(|x| x.id == o.id)).unwrap_or(0);
+                let ids: Vec<String> = shown.iter().map(|o| o.id.clone()).collect();
                 self.select_with(
                     "nr-gpu",
                     offer.as_ref().map_or("Choose a GPU".into(), |o| {

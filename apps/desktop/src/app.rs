@@ -2871,14 +2871,20 @@ impl FoloApp {
                 d.child(crate::controls::focus_tip(&t, format!("{label} · {}", shortcut_label(key)), 34.))
             })
             .when(compact, |d| {
-                d.justify_center().px(px(0.)).tooltip(crate::controls::tip(label, Some(shortcut_label(key))))
+                d.justify_center().px(px(0.)).tooltip(crate::controls::tip(
+                    match badge {
+                        Some(n) => format!("{label} · {n} training"),
+                        None => label.to_string(),
+                    },
+                    Some(shortcut_label(key)),
+                ))
             })
             .child(icon(icon_path, 16., if active { t.text_primary } else { t.text_tertiary }))
             .when(compact && badge.is_some(), |d| {
                 d.child(div().absolute().top(px(6.)).right(px(8.)).child(dot(
                     t.accent_fill(),
                     6.,
-                    true,
+                    false,
                     "nav-live-c",
                 )))
             })
@@ -2889,22 +2895,32 @@ impl FoloApp {
                         .flex_1()
                         .child(label),
                 )
+                // How many runs train right now, as a count chip in the accent: the number alone, since the
+                // sidebar's own card names the run and the tooltip says what is counted.
                 .when_some(badge, |d, n| {
                     d.child(
-                        div()
+                        text(ty::SM, t.accent_text)
+                            .tnum()
+                            .font_weight(FontWeight::MEDIUM)
+                            .h(px(18.))
+                            .min_w(px(18.))
+                            .px(px(5.))
                             .flex()
+                            .flex_none()
                             .items_center()
-                            .gap(px(5.))
-                            .child(dot(t.accent_fill(), 6., true, "nav-live"))
-                            .child(
-                                text(ty::SM, t.accent_text)
-                                    .tnum()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("{n} live")),
-                            ),
+                            .justify_center()
+                            .rounded(px(9.))
+                            .bg(t.accent_muted)
+                            .child(n.to_string()),
                     )
                 })
-                .tooltip(crate::controls::tip(label, Some(shortcut_label(key))))
+                .tooltip(crate::controls::tip(
+                    match badge {
+                        Some(n) => format!("{label} · {n} training"),
+                        None => label.to_string(),
+                    },
+                    Some(shortcut_label(key)),
+                ))
             })
             .into_any_element()
     }
@@ -2915,7 +2931,8 @@ impl FoloApp {
         let fh = self.fh("live-mini", cx);
         let ring = self.ring(&fh, window);
         let id2 = id.clone();
-        // A single footer row: the nav badge already says a run is live, so this only names it.
+        // A single footer row: the run's name, how far it is, and its progress in the accent (the bar is the live
+        // mark; the nav's count says how many train).
         div()
             .id("live-mini")
             .track_focus(&fh)
@@ -2946,9 +2963,7 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .child(dot(t.accent_fill(), 6., true, "mini"))
-                    .child(text(ty::SM, t.text_primary).w(px(140.)).ellipsis().child(r.name.clone()))
-                    .child(div().flex_1())
+                    .child(text(ty::SM, t.text_primary).flex_1().min_w_0().ellipsis().child(r.name.clone()))
                     .child(
                         text(ty::SM, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.0)),
                     ),
@@ -2957,7 +2972,7 @@ impl FoloApp {
             .into_any_element()
     }
 
-    /// The live run as a rail button: a progress ring around a pulsing dot.
+    /// The live run as a rail button: how far it is, over its progress bar.
     fn live_rail(&mut self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let id = r.id.clone();
@@ -2979,8 +2994,8 @@ impl FoloApp {
             .hover(|s| s.border_color(t.line_default))
             .active(|s| s.bg(t.bg_active))
             .tooltip(crate::controls::tip(format!("{} · epoch {} / {}", r.name, r.epoch, r.epochs), None))
-            .child(dot(t.accent_fill(), 6., true, "rail"))
-            .child(text(ty::SM, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)));
+            .child(text(ty::SM, t.text_secondary).tnum().child(format!("{:.0}%", r.progress() * 100.)))
+            .child(div().w(px(24.)).child(progress(&t, r.progress(), t.accent_fill(), 2.)));
         self.bind(
             el,
             "live-rail",

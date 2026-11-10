@@ -215,24 +215,21 @@ pub fn status_tone(s: RunStatus) -> Tone {
     }
 }
 
-/// A small status dot; `live` pulses a halo around it.
-pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> impl IntoElement {
+/// A small status dot. `live` breathes: the dot itself eases dimmer and back, with nothing drawn around it (a ring
+/// growing out of every live dot read as a row of little O's).
+pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> gpui::AnyElement {
+    let dot = div().size(px(size)).flex_none().rounded_full().bg(color);
+    if !live || reduce_motion() {
+        return dot.into_any_element();
+    }
     let id: SharedString = id.into();
-    div()
-        .relative()
-        .size(px(size))
-        .flex_none()
-        .child(div().absolute().size_full().rounded_full().bg(color))
-        .when(live && !reduce_motion(), |d| {
-            d.child(div().absolute().size_full().rounded_full().bg(color).with_animation(
-                gpui::ElementId::Name(format!("pulse-{id}").into()),
-                Animation::new(Duration::from_millis(1600)).repeat(),
-                move |d, p| {
-                    let grow = size * 1.6 * p;
-                    d.top(px(-grow / 2.)).left(px(-grow / 2.)).size(px(size + grow)).opacity(0.45 * (1.0 - p))
-                },
-            ))
-        })
+    dot.with_animation(
+        gpui::ElementId::Name(format!("breathe-{id}").into()),
+        Animation::new(Duration::from_millis(2400)).repeat(),
+        // One cosine period per loop, so the loop has no seam: full, down to 40 %, full.
+        |d, p| d.opacity(0.7 + 0.3 * (p * std::f32::consts::TAU).cos()),
+    )
+    .into_any_element()
 }
 
 /// Tinted label chip, 20 px tall.
