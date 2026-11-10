@@ -24,7 +24,7 @@
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
-  import { hub } from '$lib/api/index.svelte';
+  import { ApiError, hub } from '$lib/api/index.svelte';
   import { bestMark, bestWord } from '$lib/bestMark';
   import { Resource } from '$lib/api/resource.svelte';
   import type { Epoch, Run, RunMetrics } from '$lib/api/types';
@@ -65,8 +65,13 @@
   const models = new Resource((s) => hub.api.models(s));
   const metrics = new Resource(async (s) => {
     const list = ids;
-    const out = await Promise.all(list.map((id) => hub.api.runMetrics(id, s).then((m) => [id, m] as const)));
-    return new Map<string, RunMetrics>(out);
+    // A run deleted since the link was made has no metrics (and no chip): it leaves the others' alone.
+    const gone = (e: unknown) => {
+      if (e instanceof ApiError && e.code === 'run_not_found') return null;
+      throw e;
+    };
+    const out = await Promise.all(list.map((id) => hub.api.runMetrics(id, s).then((m) => [id, m] as const, gone)));
+    return new Map<string, RunMetrics>(out.filter((x) => x !== null));
   });
 
   const phoneQuery = new MediaQuery(media.phone, false);

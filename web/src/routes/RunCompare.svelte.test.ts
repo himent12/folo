@@ -248,3 +248,16 @@ describe('Compare runs from a deep link', () => {
     expect(heads).toEqual([a!.name, b!.name]);
   });
 });
+
+describe('Compare runs from a link that names a deleted run', () => {
+  it('draws the runs that exist (a run deleted since the link was made fails no one else)', async () => {
+    // `?ids=a,run_gone,b`: the deleted run has no chip to remove, and its `404 run_not_found` failed the metrics of
+    // every run, so the chart was an error whose Retry could never succeed.
+    const [a, b] = (await hub.api.runs()).filter((r) => r.status !== 'queued');
+    router.route = parse(`#/runs/compare?ids=${a!.id},run_gone,${b!.id}`);
+    c = mount(RunCompare, { target });
+    await until(() => target.querySelector('#cmp-table table'), 'the table');
+    await until(() => target.querySelector('.swap') || target.textContent?.includes("Could not load these runs' metrics"), 'the chart or its error');
+    expect(target.textContent).not.toContain("Could not load these runs' metrics");
+  });
+});
