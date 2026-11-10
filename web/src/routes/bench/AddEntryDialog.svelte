@@ -275,6 +275,7 @@
           start: (b) => hub.api.startBenchEntry(bench.id, b),
           send: (id, ps) => hub.api.sendBenchPredictions(bench.id, id, ps),
           finish: (id) => hub.api.finishBenchEntry(bench.id, id),
+          get: (id) => hub.api.benchEntry(bench.id, id),
           stop: (id) => hub.api.stopBenchEntry(bench.id, id),
           remove: (id) => hub.api.deleteBenchEntry(bench.id, id),
         },

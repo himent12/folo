@@ -210,6 +210,8 @@ export interface ExternalSender {
   start: (body: StartBenchEntry) => Promise<BenchEntry>;
   send: (entryId: string, predictions: BenchPrediction[]) => Promise<BenchEntry>;
   finish: (entryId: string) => Promise<BenchEntry>;
+  /** The entry as it is now (a finish whose answer was lost may have scored it). */
+  get: (entryId: string) => Promise<BenchEntry>;
   stop: (entryId: string) => Promise<unknown>;
   remove: (entryId: string) => Promise<unknown>;
 }
@@ -241,7 +243,8 @@ const retryable = (e: unknown) => !(e instanceof ApiError) || e.status === 0 || 
 /**
  * Sends an external entry: in one request when it is small (`maxBytes` of JSON or less), else as an open entry filled
  * in parts (./partsOf) and finished, telling `progress` after each part. A part whose answer was lost (the network, a
- * 5xx) is sent once more: the server takes a record it already has with the same boxes again (an idempotent retry).
+ * 5xx) is sent once more: the server takes a record it already has with the same boxes again (an idempotent retry); so
+ * is the finish, and when the first one scored the entry, the entry is read and kept.
  * Any failure once the entry exists (a part refused, the finish refused, the network twice, `signal` aborted by the
  * person) stops the entry and deletes it, so nothing is left on the leaderboard; it throws an ExternalSendError that
  * says what is left when the stop or the delete failed too.
@@ -277,7 +280,18 @@ export async function sendExternal(
       sent += part.length;
       progress({ sent, total, entry });
     }
-    return await once(() => api.finish(entry.id));
+    let tries = 0;
+    return await once(async () => {
+      try {
+        return await api.finish(entry.id);
+      } catch (err) {
+        // A finish sent again after its answer was lost finds the entry no longer open when the first one scored it.
+        if (tries++ === 0 || !(err instanceof ApiError && err.code === 'bench_entry_not_open')) throw err;
+        const now = await api.get(entry.id);
+        if (now.status !== 'done') throw err;
+        return now;
+      }
+    });
   } catch (e) {
     // Leave nothing behind: stop the open entry, then delete it; say exactly what is left if either fails.
     const name = `an unfinished entry “${o.name}”`;
