@@ -196,6 +196,44 @@ not good enough, or the pool not new enough, and the charts say which.
 What it does not show: a loop is as honest as its benchmark is held out. If the teacher trained on the benchmark's
 images, every generation inherits that.
 
+## Two measured runs
+What the numbers look like, from `folo serve` on the dev machine (an RTX 4080 SUPER), November 2026.
+
+**COCO photos, a plan designed by an agent.** A benchmark of 300 val2017 images (2,163 boxes, 80 classes),
+described as "phone and security-camera photos of streets, kitchens and living rooms ... often cluttered and
+partly hidden, indoors in poor light and outdoors at a distance". Claude Code (Haiku) designed its plan in one
+4.5 s request for $0.0014: eight conditions at 19 severities, weighted toward low light, occlusion (×3) and
+distance (×2.5).
+
+| Entry | Score | mAP@0.5:0.95 (95% interval) | Robustness | Self-labeling | Calibration | Localization |
+|---|---:|---:|---:|---:|---:|---:|
+| folo-n-coco-long (COCO AP 0.317), run by FOLO | 52.9 | 0.354 (0.324–0.390) | 0.74 | 0.29 | 0.95 | 0.68 |
+| the same weights as ONNX in onnxruntime, sent as an external entry | 52.8 | 0.356 (0.325–0.394) | 0.73 | 0.29 | 0.95 | 0.68 |
+| folo-n-coco (COCO AP 0.314), run by FOLO | 52.2 | 0.359 (0.330–0.392) | 0.71 | 0.30 | 0.93 | 0.68 |
+| Claude Code, Haiku, 24 images, unchanged only (partial) | 29.3 | 0.353 (0.264–0.445) | not run | 0 | none | 0.67 |
+
+A model entry ran its 6,000 images (300 under 20 passes) in about 17 s. The two checkpoints' intervals overlap:
+on these 300 images they are not clearly different, as their COCO AP says too. The external entry is the first
+row's model through another runtime, another resize and another NMS: it lands within 0.1 of its score, which is
+what "the same bytes for every contestant" is for. Occlusion at severity 4 left the first model a third of its
+accuracy; overexposure cost it almost nothing. Claude Code's six calls cost $0.011; 69% of its boxes were right,
+under the 90% the self-labeling axis asks for, so that axis is 0.
+
+**A self-improvement loop.** Synthetic shapes (four classes, 320 px). A folo-n teacher trained on 480 labeled
+images; the benchmark is 300 held-out images under the default plan; the pool is 1,920 further images whose
+labels were never read. The students are folo-s, 40 epochs each.
+
+| Generation | Trained on | mAP@0.5:0.95 (95% interval) | Score |
+|---|---|---:|---:|
+| Teacher (folo-n) | 480 images with true labels | 0.857 (0.848–0.866) | 85.8 |
+| 1 (folo-s) | the teacher's 8,306 boxes on 1,810 pool images, kept from confidence 0.32 | 0.912 (0.904–0.921) | 89.4 |
+| 2 (folo-s) | generation 1's 8,699 boxes on 1,814 pool images, kept from confidence 0.20 | 0.911 (0.904–0.918) | 89.9 |
+
+Verdict: **improved**. The first generation is clearly above the teacher's interval; the second holds it. The
+teacher's own entry had said it would label 94% of all objects at 90% precision (`ready`). A weaker teacher,
+trained on 128 images (mAP 0.20), reached 90% precision only where it kept 14 boxes on the whole pool: its loop
+ends at the labeling step, which is what `not_ready` predicts.
+
 ## In Studio
 **Benchmarks** in the sidebar (on a phone: under Models).
 
