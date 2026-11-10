@@ -464,7 +464,8 @@
   const result = $derived.by(() => {
     if (!pred) return null;
     const t0 = performance.now();
-    const boxes = filterDetections(pred.boxes, { conf, iou, maxDet });
+    // An end-to-end (o2o) model predicts without NMS (docs/MODEL.md §6.6): an IoU of 1 suppresses nothing, as the server.
+    const boxes = filterDetections(pred.boxes, { conf, iou: model?.head === 'o2o' ? 1 : iou, maxDet });
     return { boxes, ms: performance.now() - t0 };
   });
   const kept = $derived(result?.boxes ?? []);

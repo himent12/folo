@@ -258,3 +258,39 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
     }
   });
 });
+
+describe('Playground: an end-to-end (o2o) model', () => {
+  // An o2o model predicts without NMS (docs/MODEL.md §6.6; folo-vision's predictor takes its top-k): the server keeps
+  // two overlapping boxes of one class, and so must the Playground's own filtering, which ran class-aware NMS at the
+  // IoU slider's 0.7 for every model.
+  async function detections(model: string) {
+    const api = new MockApi('normal', 0);
+    api.imageUrl = async () => 'data:,';
+    const head = (await api.model(model)).head;
+    const box = (x: number, score: number) => ({ class: 0, name: 'circle', score, x1: x, y1: 0, x2: x + 100, y2: 100 });
+    api.predict = async (_input, opts) => ({
+      model_id: opts.model_id,
+      image: { width: 640, height: 640 },
+      boxes: [box(0, 0.9), box(5, 0.8)], // IoU 0.90
+      timing: { preprocess_ms: 1, inference_ms: 1, postprocess_ms: 1, total_ms: 3 },
+      device: 'gpu:0',
+    });
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse(`#/playground?model=${model}`);
+    c = mount(Playground, { target });
+    (await until(() => target.querySelector<HTMLButtonElement>('button.sample'), 'a sample image')).click();
+    await until(() => target.querySelector('#pg-panel tbody tr'), 'the detections');
+    return { head, rows: target.querySelectorAll('#pg-panel tbody tr').length };
+  }
+
+  it('shows every box the server sent, overlapping ones of one class too', async () => {
+    expect(await detections('m_shapes_s')).toEqual({ head: 'o2o', rows: 2 });
+  });
+
+  it('still suppresses them for an NMS (o2m) model', async () => {
+    expect(await detections('m_shapes_n')).toEqual({ head: 'o2m', rows: 1 });
+  });
+});
