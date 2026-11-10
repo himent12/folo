@@ -261,7 +261,8 @@ shape ([hill/gpu-train.md](hill/gpu-train.md)).
 The incumbent's protocol ([Method](#method), "Trainer"): `folo train --data D:/folo-bench/data --model folo-n
 --epochs 2 --batch 16 --imgsz 640 --workers 8 --close-mosaic 0 --device gpu:0 [--amp]`, a fresh process per run,
 `bench/trainer/ab.py` alternating the binaries; sustained = the epoch-2 images over the epoch's wall time, loader
-included. 7–14 other CPU cores were busy during the f32 runs, 2–11 during AMP.
+stalls included. The loader's start-up is in that time for `main`; the merged build starts epoch 2's loader during
+epoch 1's validation, so most of its start-up is not. 7–14 other CPU cores were busy during the f32 runs, 2–11 during AMP.
 
 | | `main` best (rounds) | merged best (rounds) | bar |
 |---|---|---|---|

@@ -3,8 +3,10 @@
 The trainer protocol of docs/BENCHMARKS.md ("Trainer (`train`)", row 10 of the targets table): the incumbent's
 synthetic set (512 train / 64 val images, 640x640 JPEG), batch 16, 8 workers, 2 epochs with mosaic on in both, a
 fresh process per run; **sustained img/s = 512 / epoch-2 training wall time** (the last `step` record of epoch 2 in
-the run's `metrics.jsonl`: the epoch's images over the time since the epoch started, loader start-up included,
-validation excluded), best of the rounds.
+the run's `metrics.jsonl`: the epoch's images over the time since the epoch started, loader stalls included,
+validation excluded), best of the rounds. The loader's start-up is in that time for builds that start each epoch's
+loader with the epoch (`main` before the hill-climb); builds since start epoch 2's loader once epoch 1 has taken its
+last batch, during epoch 1's validation, so most of its start-up falls outside the epoch-2 time.
 
     python bench/trainer/ab.py train --bin base=D:/.../base/folo.exe --bin new=D:/.../new/folo.exe --rounds 3 \
         --out D:/folo-data/runs-hill/trainer-data/row10 -- \
