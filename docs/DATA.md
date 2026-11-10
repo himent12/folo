@@ -46,6 +46,13 @@ produces plain buffers that the trainer wraps in tensors.
   path. `coco_annotation_files(path)` lists a COCO dataset's annotation files per split. Entries and the top level
   are read as structs only when they are JSON objects (a positional array would otherwise fill one). `folo val --coco` uses them for pycocotools-exact evaluation (docs/METRICS.md).
 
+`open_splits(path, &opts, &[Split::Val])` opens some splits only: those come out exactly as `open_with` builds
+them (same classes, entries and order) and the others empty, without reading or probing their images and labels.
+COCO files of the other splits are still read for their categories (every file counts for the class ids); a YOLO
+dataset without class names (counted from all labels then) is opened whole. `folo val` uses it, so COCO val2017
+opens without checking train2017's 118 287 images (the probe of a file not opened before costs about 6 ms on the dev
+machine, 0.35 ms each at 28 threads: 40-50 s for train2017).
+
 `LoadedDataset::sources` lists every file and folder a dataset was read from (description files, split folders and
 image lists, folders of every candidate image and label, split paths that do not exist yet), so callers such as
 the server can detect changes.
@@ -116,7 +123,7 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 
 ## DataLoader and determinism
 - `LoaderConfig { batch_size, imgsz, workers, shuffle, drop_last, seed, augment, epochs, prefetch_batches,
-  u8_images }`.
+  u8_images }`. `workers` defaults to the logical CPU count, at most 16.
 - Batches: `images` is `n * 3 * s * s` `f32` in `0..1` (`NCHW`, RGB), or, with `u8_images`, `images_u8` holds the same
   pixels as `u8` (`value / 255` is the float; a quarter of the bytes, for a GPU that converts them itself, as the
   trainer and validation do on a GPU) and `images` is empty. `shape = [n, 3, s, s]`, `targets` rows are

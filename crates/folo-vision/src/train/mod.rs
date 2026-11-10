@@ -51,7 +51,7 @@ use folo_api::{LogLevel, RunEvent, RunStatus};
 use folo_core::Device;
 use folo_core::rng::Rng;
 use folo_data::{Batch, DataLoader, Dataset, LoaderConfig};
-use folo_nn::io::{BestState, CheckpointParts, Metrics, ModelConfig, ModelFile, RngState, save_checkpoint};
+use folo_nn::io::{BestState, CheckpointParts, Metrics, ModelConfig, ModelFile, RngState};
 use folo_nn::optim::{
     AdamW, GradAccumulator, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
 };
@@ -326,7 +326,13 @@ pub struct Trainer {
     /// The loss scaler of a mixed-precision run (`amp`). Its skip streak (fails the run at [`MAX_AMP_SKIPS`]) is
     /// part of the checkpointed state.
     scaler: Option<GradScaler>,
+    /// The next epoch's batches, started when the previous epoch took its last batch, so that the loader works
+    /// while validation and the checkpoints run (the epoch it belongs to, and its source).
+    prefetched: Option<(u32, BatchSource)>,
 }
+
+/// A started epoch's batches: the loader's, staged by the feeder thread on a folo-gpu device.
+type BatchSource = Box<dyn Iterator<Item = Result<(Batch, Option<folo_gpu::Staged>)>> + Send>;
 
 impl Trainer {
     /// A new run of `cfg` on `data`.
@@ -601,6 +607,7 @@ impl Trainer {
             extra_meta: BTreeMap::new(),
             last_saved: None,
             scaler,
+            prefetched: None,
         })
     }
 
@@ -930,13 +937,10 @@ impl Trainer {
         let (mut finite_batches, mut window_finite) = (0usize, false);
         let (epoch_start, mut epoch_images) = (Instant::now(), 0usize);
         let skipped_before = self.scaler.as_ref().map_or(0, GradScaler::skipped_steps);
-        // On a folo-gpu device the loader delivers u8 pixels and a feeder thread stages each batch while the
-        // previous step runs; the step then only encodes the copy and the conversion.
         let ctx = folo_gpu::context_for(self.device);
-        let iter = self.loader.epoch(e);
-        let mut source: Box<dyn Iterator<Item = Result<(Batch, Option<folo_gpu::Staged>)>>> = match &ctx {
-            Some(c) => Box::new(feed::Feeder::new(iter, c.clone())?.map(|r| r.map(|(b, s)| (b, Some(s))))),
-            None => Box::new(iter.map(|r| r.map(|b| (b, None)).map_err(Error::from))),
+        let mut source = match self.prefetched.take() {
+            Some((pe, source)) if pe == e => source,
+            _ => self.start_epoch(e)?,
         };
         let mut k = 0usize;
         // A batch's wall time starts when the previous one ends, so the ETA counts the wait for the loader too:
@@ -1052,6 +1056,11 @@ impl Trainer {
             }
         }
         drop(source);
+        // Start the next epoch now: its first batches are ready when validation and the checkpoints are done.
+        // The batches are the same whenever an epoch starts (§8.3: everything is seeded by the epoch).
+        if k == nb && e + 1 < self.cfg.epochs && !self.stopping() {
+            self.prefetched = Some((e + 1, self.start_epoch(e + 1)?));
+        }
         if k != nb {
             return Err(Error::Failed(format!("epoch {} delivered {k} of {nb} batches", e + 1)));
         }
@@ -1073,6 +1082,16 @@ impl Trainer {
         let f = finite_batches as f64;
         let (b, c, d) = ((sum[0] / f) as f32, (sum[1] / f) as f32, (sum[2] / f) as f32);
         Ok(Some(folo_api::Loss { box_: b, cls: c, dfl: d, total: b + c + d }))
+    }
+
+    /// Starts epoch `e` of the loader. On a folo-gpu device the loader delivers u8 pixels and a feeder thread
+    /// stages each batch while the previous step runs; the step then only encodes the copy and the conversion.
+    fn start_epoch(&self, e: u32) -> Result<BatchSource> {
+        let iter = self.loader.epoch(e);
+        Ok(match folo_gpu::context_for(self.device) {
+            Some(c) => Box::new(feed::Feeder::new(iter, c)?.map(|r| r.map(|(b, s)| (b, Some(s))))),
+            None => Box::new(iter.map(|r| r.map(|b| (b, None)).map_err(Error::from))),
+        })
     }
 
     /// §8.3's end-of-window step: schedule, clip, optimizer, EMA, `t += 1`. With mixed precision (§8.8) the
@@ -1233,8 +1252,48 @@ impl Trainer {
             best: self.best,
             train_config: &train,
         };
-        Ok(save_checkpoint(path, &meta, &parts)?)
+        let (map, mut tensors) = folo_nn::io::checkpoint_contents(&meta, &parts)?;
+        download_all(&mut tensors)?;
+        Ok(folo_nn::io::safetensors::write_file(path.as_ref(), Some(&map), &tensors)?)
     }
+}
+
+/// Replaces the device tensors of a checkpoint by host copies, downloaded with one readback per dtype: the
+/// tensors are concatenated on the device first. Read one by one, every tensor would wait for the GPU (about a
+/// thousand waits for the weights, EMA and optimizer state of folo-n). The bytes are the same.
+pub(crate) fn download_all(tensors: &mut [(String, folo_core::Tensor)]) -> Result<()> {
+    let _g = folo_core::no_grad();
+    let mut groups: Vec<((Device, folo_core::DType), Vec<usize>)> = Vec::new();
+    for (i, (_, t)) in tensors.iter_mut().enumerate() {
+        if t.device().is_cpu() {
+            continue;
+        }
+        if t.numel() == 0 {
+            *t = t.to_device(Device::Cpu)?;
+            continue;
+        }
+        let key = (t.device(), t.dtype());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, v)) => v.push(i),
+            None => groups.push((key, vec![i])),
+        }
+    }
+    for (_, idx) in groups {
+        let flat = idx
+            .iter()
+            .map(|&i| tensors[i].1.reshape([tensors[i].1.numel()]))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let host = folo_core::Tensor::cat(&flat, 0)?.to_device(Device::Cpu)?;
+        let mut start = 0;
+        for &i in &idx {
+            let t = &tensors[i].1;
+            let n = t.numel();
+            let part = host.narrow(0, start, n)?.reshape(t.shape().clone())?;
+            start += n;
+            tensors[i].1 = part;
+        }
+    }
+    Ok(())
 }
 
 /// Whether `e` is folo-gpu reporting a lost device, from the trainer's own tensor work, a layer, or the batch
@@ -1311,6 +1370,45 @@ fn eta_s(clock: &Clock, nb: usize, e: u32, k: usize, epochs: u32, phase: impl Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The batched checkpoint download gives every tensor's exact bytes and shape: several dtypes, a view that is
+    /// not contiguous, an empty tensor and one already on the host.
+    #[test]
+    fn download_all_keeps_every_byte() {
+        let ctx = match folo_gpu::GpuContext::shared() {
+            Ok(c) => c,
+            Err(e) => return eprintln!("note: skipping GPU test, no adapter: {e}"),
+        };
+        if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+            return eprintln!("note: skipping GPU test on software adapter {}", ctx.summary().name);
+        }
+        let dev = folo_gpu::init().unwrap();
+        let mut rng = folo_core::rng::Rng::seed(9);
+        let a = folo_core::Tensor::rand_uniform([3, 5, 7], -1.0, 1.0, &mut rng);
+        let b = folo_core::Tensor::rand_uniform([4, 6], 0.0, 9.0, &mut rng);
+        let host = vec![
+            ("a".to_string(), a.clone()),
+            ("b".to_string(), b.clone()),
+            ("bt".to_string(), b.transpose(0, 1).unwrap()),
+            ("n".to_string(), folo_core::Tensor::from_vec((0..11u32).collect::<Vec<_>>(), [11]).unwrap()),
+            ("e".to_string(), folo_core::Tensor::from_vec(Vec::<f32>::new(), [0, 3]).unwrap()),
+            ("c".to_string(), folo_core::Tensor::rand_uniform([2], 0.0, 1.0, &mut rng)),
+        ];
+        let mut tensors: Vec<(String, folo_core::Tensor)> = host
+            .iter()
+            .map(|(n, t)| (n.clone(), if n == "c" { t.clone() } else { t.to_device(dev).unwrap() }))
+            .collect();
+        // A transposed (strided) view on the device.
+        tensors[2].1 = tensors[1].1.transpose(0, 1).unwrap();
+        download_all(&mut tensors).unwrap();
+        for ((n, got), (_, want)) in tensors.iter().zip(&host) {
+            assert!(got.device().is_cpu(), "{n}");
+            assert_eq!(got.dims(), want.dims(), "{n}");
+            assert_eq!(got.dtype(), want.dtype(), "{n}");
+            let (g, w) = (got.to_cpu_storage().unwrap(), want.to_cpu_storage().unwrap());
+            assert_eq!(g.as_bytes(), w.as_bytes(), "{n}");
+        }
+    }
 
     /// The ETA counts the loader's wait, and does not charge the mosaic-free epochs at mosaic speed.
     #[test]

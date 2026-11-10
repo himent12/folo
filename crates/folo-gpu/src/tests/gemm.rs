@@ -86,7 +86,13 @@ fn gemm_all_transposes_odd_sizes() {
     let shapes = [(1, 1, 1), (3, 5, 7), (67, 45, 33), (130, 129, 17), (64, 64, 64), (128, 256, 48)];
     for (seed, (m, n, k)) in shapes.into_iter().enumerate() {
         for (ta, tb) in [(false, false), (true, false), (false, true), (true, true)] {
-            for cfg in [TileConfig::SMALL, TileConfig::MEDIUM, TileConfig::LARGE] {
+            for cfg in [
+                TileConfig::SMALL,
+                TileConfig::MEDIUM,
+                TileConfig::LARGE,
+                TileConfig::ROWS32,
+                TileConfig::ROWS16,
+            ] {
                 run(&GemmDesc::new(m, n, k, ta, tb, 1), Some(cfg), seed as u64);
             }
         }

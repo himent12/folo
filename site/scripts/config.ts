@@ -40,6 +40,7 @@ export const NAV: NavGroup[] = [
   {
     title: 'Guides',
     pages: [
+      { src: 'docs/LABELING.md', label: 'Labeling with agents' },
       { src: 'examples/shapes/README.md', label: 'Shapes: the convergence gate' },
       { src: 'examples/r6/README.md', label: 'R6: a real dataset' },
       { src: 'examples/coco/README.md', label: 'COCO: pretraining' },

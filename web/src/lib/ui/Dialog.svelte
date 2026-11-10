@@ -26,6 +26,7 @@
     footer,
     size = 'md',
     onclose,
+    onbeforeclose,
     status = new DialogStatus(),
     class: klass = '',
   }: {
@@ -36,6 +37,11 @@
     footer?: Snippet;
     size?: 'sm' | 'md' | 'lg';
     onclose?: () => void;
+    /**
+     * Asked before Escape, the backdrop, a pull down or Close closes it: false keeps it open (unsaved work asks first).
+     * Setting `open` to false is the caller's own decision and is not asked.
+     */
+    onbeforeclose?: () => boolean;
     /** Where results of actions in the dialog are said; pass one to report from the component that owns the dialog. */
     status?: DialogStatus;
     /** Extra classes on the <dialog>, e.g. to set a width of its own. */
@@ -69,6 +75,11 @@
     restore = null;
   }
 
+  /** Closes the dialog unless `onbeforeclose` keeps it open. */
+  function dismiss() {
+    if (!onbeforeclose || onbeforeclose()) el.close();
+  }
+
   // A click whose target is the <dialog> itself landed on the backdrop. It must also have started there: a text
   // selection or slider drag that begins inside and is released outside is not a request to close.
   let downOnBackdrop = false;
@@ -76,7 +87,7 @@
     downOnBackdrop = e.target === el;
   }
   function onclick(e: MouseEvent) {
-    if (e.target === el && downOnBackdrop) el.close();
+    if (e.target === el && downOnBackdrop) dismiss();
     downOnBackdrop = false;
   }
 </script>
@@ -88,17 +99,20 @@
   aria-labelledby="{uid}-title"
   aria-describedby={description ? `${uid}-desc` : undefined}
   onclose={onDialogClose}
+  oncancel={(e) => {
+    if (onbeforeclose && !onbeforeclose()) e.preventDefault();
+  }}
   {onpointerdown}
   {onclick}
 >
   <div class="frame">
-    <header use:sheetDrag={{ sheet: () => el, close: () => el.close(), enabled: () => sheet.current }}>
+    <header use:sheetDrag={{ sheet: () => el, close: dismiss, enabled: () => sheet.current }}>
       {#if sheet.current}<SheetHandle />{/if}
       <div class="titles">
         <h2 id="{uid}-title">{title}</h2>
         {#if description}<p id="{uid}-desc">{description}</p>{/if}
       </div>
-      <Button variant="ghost" size="sm" icon={X} aria-label="Close" onclick={() => el.close()} />
+      <Button variant="ghost" size="sm" icon={X} aria-label="Close" onclick={dismiss} />
     </header>
     {#if children}<div class="body scroll-shade">{@render children()}</div>{/if}
     <DialogStatusRegion {status} class="status" />

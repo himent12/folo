@@ -604,6 +604,82 @@ fn conv2d_forward_and_backward() {
             groups: 1,
             bias: true,
         },
+        // Stride phases (the input gradient's decomposition): groups, no padding on odd sizes, a kernel smaller
+        // than the stride (phases without taps), a kernel of 4 at stride 2, stride 2 with dilation 2 (not phased).
+        ConvCase {
+            x: [2, 8, 11, 9],
+            w: [12, 4, 3, 3],
+            stride: 2,
+            padding: 1,
+            dilation: 1,
+            groups: 2,
+            bias: false,
+        },
+        ConvCase {
+            x: [2, 5, 13, 12],
+            w: [7, 5, 3, 3],
+            stride: 2,
+            padding: 0,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
+        ConvCase {
+            x: [1, 6, 14, 13],
+            w: [9, 6, 2, 2],
+            stride: 3,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
+        ConvCase {
+            x: [2, 4, 12, 15],
+            w: [8, 4, 4, 4],
+            stride: 2,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
+        ConvCase {
+            x: [1, 4, 15, 15],
+            w: [6, 4, 3, 3],
+            stride: 2,
+            padding: 2,
+            dilation: 2,
+            groups: 1,
+            bias: false,
+        },
+        // Weight-gradient tiles picked by shape (`conv::pick_config_weight_grad`): 32×128 for few output
+        // channels, 128×128 and 64×128 for more, each with at least 128 columns (C_in·KH·KW).
+        ConvCase {
+            x: [2, 16, 20, 19],
+            w: [24, 16, 3, 3],
+            stride: 1,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: true,
+        },
+        ConvCase {
+            x: [2, 16, 12, 12],
+            w: [128, 16, 3, 3],
+            stride: 1,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
+        ConvCase {
+            x: [1, 20, 10, 11],
+            w: [70, 20, 3, 3],
+            stride: 2,
+            padding: 1,
+            dilation: 1,
+            groups: 1,
+            bias: false,
+        },
     ];
     for (i, c) in cases.iter().enumerate() {
         let x = randn(&c.x, 30 + i as u64);

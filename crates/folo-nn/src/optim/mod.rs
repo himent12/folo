@@ -539,6 +539,45 @@ where
     if total >= PAR_THRESHOLD { items.par_iter().try_for_each(run) } else { items.iter().try_for_each(run) }
 }
 
+/// The multi-tensor device path of an optimizer step: per group with parameters off the CPU, every parameter that
+/// has a gradient is updated by one [`Tensor::optimizer_step_many_`] call with `step(group)` and the state
+/// tensors `state(group, param)` (the GPU updates 16 parameters per dispatch, against one each). Returns, per
+/// group, whether it was updated; the caller updates the other groups one parameter at a time, as before. `what`
+/// names the optimizer in errors.
+fn step_many<'a>(
+    what: &str,
+    groups: &'a [ParamGroup],
+    grads: &'a dyn GradSource,
+    step: impl Fn(usize) -> folo_core::backend::OptimStep,
+    state: impl Fn(usize, usize) -> Vec<&'a Tensor>,
+) -> Result<Vec<bool>> {
+    let _g = folo_core::no_grad();
+    let mut done = Vec::with_capacity(groups.len());
+    for (gi, grp) in groups.iter().enumerate() {
+        if grp.params.iter().all(|(_, p)| p.device().is_cpu()) {
+            done.push(false);
+            continue;
+        }
+        let (mut ps, mut gs, mut ss) = (Vec::new(), Vec::new(), Vec::new());
+        for (pi, (name, p)) in grp.params.iter().enumerate() {
+            let Some(g) = grads.grad(p) else { continue };
+            if g.shape() != p.shape() {
+                return Err(crate::Error::Invalid(format!(
+                    "{what}: gradient of `{name}` is {:?}, parameter is {:?}",
+                    g.dims(),
+                    p.dims()
+                )));
+            }
+            ps.push(p);
+            gs.push(g.to_dtype(folo_core::DType::F32)?);
+            ss.push(state(gi, pi));
+        }
+        let gr: Vec<&Tensor> = gs.iter().collect();
+        done.push(Tensor::optimizer_step_many_(&ps, &gr, &ss, &step(gi))?);
+    }
+    Ok(done)
+}
+
 /// True if every tensor is a contiguous CPU `F32` tensor (the fused-kernel fast path applies).
 fn cpu_fast(ts: &[&Tensor]) -> bool {
     ts.iter().all(|t| t.device().is_cpu() && t.dtype() == folo_core::DType::F32 && t.is_contiguous())

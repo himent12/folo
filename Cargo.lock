@@ -757,6 +757,7 @@ name = "folo-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "folo-api",
  "folo-core",
  "folo-data",
@@ -778,6 +779,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "walkdir",
+ "windows-sys",
 ]
 
 [[package]]

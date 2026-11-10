@@ -47,7 +47,19 @@ pub fn unscale_(grads: &[&Tensor], inv_scale: f32) -> Result<bool> {
     let mut flags: Vec<Tensor> = Vec::new();
     let mut sums: Vec<Tensor> = Vec::new();
     let mut finite = true;
-    for g in grads {
+    // All on one device: one multi-tensor kernel (16 tensors per dispatch on the GPU).
+    let mut rest = grads;
+    if let Some(dev) = grads.first().map(|g| g.device())
+        && !dev.is_cpu()
+        && grads.iter().all(|g| g.device() == dev)
+    {
+        let flag = Tensor::zeros_with([1], DType::U32, dev)?;
+        if Tensor::unscale_check_many_(grads, inv_scale, &flag)? {
+            rest = &[];
+        }
+        flags.push(flag);
+    }
+    for g in rest {
         let dev = g.device();
         if !dev.is_cpu() {
             if !flags.iter().any(|f| f.device() == dev) {

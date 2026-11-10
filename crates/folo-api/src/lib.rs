@@ -11,9 +11,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod codes;
 pub mod json;
+mod label;
 mod throughput;
 pub mod weights;
 
+pub use label::*;
 pub use throughput::*;
 
 /// API version string reported in [`Health::api`].

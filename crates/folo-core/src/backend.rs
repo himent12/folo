@@ -550,11 +550,30 @@ pub trait Backend: Send + Sync + 'static {
         unsupported!(self, "optimizer_step")
     }
 
+    /// [`Backend::optimizer_step`] for many parameters with the same update, in as few kernels as the backend
+    /// can (the GPU: one per 16 tensors). Every item holds what one `optimizer_step` call takes; no storage
+    /// appears twice. Reached through `Tensor::optimizer_step_many_`.
+    fn optimizer_step_many(&self, items: &mut [OptimItem<'_>], step: &OptimStep) -> Result<()> {
+        unsupported!(self, "optimizer_step_many")
+    }
+
     /// Mixed precision (the loss scaler's unscale and overflow check): `x *= factor` in place over its first `n`
     /// `F32` elements and, if any result is not finite, set the single `U32` element of `flag` to a nonzero value
     /// (it is never cleared here). Reached through `Tensor::unscale_check_`.
     fn unscale_check(&self, x: &mut Storage, n: usize, factor: f32, flag: &mut Storage) -> Result<()> {
         unsupported!(self, "unscale_check")
+    }
+
+    /// [`Backend::unscale_check`] for many tensors (`xs[i]` over its first `ns[i]` elements) into one flag, in as
+    /// few kernels as the backend can. Reached through `Tensor::unscale_check_many_`.
+    fn unscale_check_many(
+        &self,
+        xs: &mut [&mut Storage],
+        ns: &[usize],
+        factor: f32,
+        flag: &mut Storage,
+    ) -> Result<()> {
+        unsupported!(self, "unscale_check_many")
     }
 
     // ----- Detector pre- and post-processing (optional; callers fall back to host code) -----
@@ -671,6 +690,17 @@ pub enum OptimStep {
         /// Weight of the new value.
         b: f32,
     },
+}
+
+/// One parameter of [`Backend::optimizer_step_many`]: the arguments of one [`Backend::optimizer_step`] call.
+#[derive(Debug)]
+pub struct OptimItem<'a> {
+    /// The parameter (`grad.numel()` elements, contiguous from element 0).
+    pub param: &'a mut Storage,
+    /// Its gradient.
+    pub grad: View<'a>,
+    /// Its state buffers, as for [`Backend::optimizer_step`].
+    pub state: Vec<&'a mut Storage>,
 }
 
 /// The running statistics [`Backend::batch_norm_act`] updates in place.

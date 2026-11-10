@@ -72,10 +72,6 @@ pub(crate) struct YoloScan {
     pub sources: Vec<PathBuf>,
 }
 
-pub(crate) fn open_yaml(yaml: &Path, opts: &OpenOptions) -> Result<LoadedDataset> {
-    finish(scan_yaml(yaml)?, opts)
-}
-
 pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
     let text = crate::guard::check(yaml)
         .and_then(|_| std::fs::read_to_string(yaml))
@@ -169,10 +165,6 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
     Ok(YoloScan { root, names, splits, report, sources: deps })
 }
 
-pub(crate) fn open_dir(root: &Path, opts: &OpenOptions) -> Result<LoadedDataset> {
-    finish(scan_dir(root), opts)
-}
-
 pub(crate) fn scan_dir(root: &Path) -> YoloScan {
     let mut report = LoadReport::default();
     let mut splits: BTreeMap<Split, Vec<PathBuf>> = BTreeMap::new();
@@ -206,8 +198,13 @@ pub(crate) fn scan_dir(root: &Path) -> YoloScan {
     YoloScan { root: root.to_path_buf(), names, splits, report, sources: vec![root.to_path_buf()] }
 }
 
-fn finish(scan: YoloScan, opts: &OpenOptions) -> Result<LoadedDataset> {
-    let YoloScan { root, names, splits, mut report, sources } = scan;
+/// Builds the entries of the `wanted` splits of a scan (every split when the scan has no class names, which are
+/// then counted from all labels).
+pub(crate) fn finish(scan: YoloScan, opts: &OpenOptions, wanted: &[Split]) -> Result<LoadedDataset> {
+    let YoloScan { root, names, mut splits, mut report, sources } = scan;
+    if names.is_some() {
+        splits.retain(|s, _| wanted.contains(s));
+    }
     let nc = names.as_ref().map(Vec::len);
     let mut deps: std::collections::BTreeSet<PathBuf> = sources.into_iter().collect();
     for image in splits.values().flatten() {

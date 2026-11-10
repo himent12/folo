@@ -3,6 +3,19 @@
 All notable changes to FOLO. Versions follow [Semantic Versioning](https://semver.org); the release process is in
 [docs/RELEASE.md](docs/RELEASE.md).
 
+## Unreleased
+
+### Agent labeling
+- Unlabeled images to a dataset: `folo serve` hands a set of images to **Claude Code** or **Codex** on the
+  server's machine, Studio shows every box for review and correction, and the labeled images become a
+  registered YOLO dataset ([docs/LABELING.md](docs/LABELING.md); HTTP API under `/api/label`, feature
+  `agent_labeling`).
+- Built to be cheap: one model request per batch of images with the agent's tools, config, MCP servers and
+  session switched off (a Claude Code call's fixed cost is a few hundred tokens; Codex's drops from about
+  20000 to about 8000), images scaled to at most 1024 px, and a run that ends on the first failure another call
+  would only repeat. On 24 COCO photos the default (Claude Code, Haiku) found 79% of the objects with 92% of its
+  boxes right for under a cent.
+
 ## 0.1.0 (2026-11)
 
 The first release: a from-scratch Rust vision framework with a YOLO-style detector, its own tensors, autograd, CPU

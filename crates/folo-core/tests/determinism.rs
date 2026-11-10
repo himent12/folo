@@ -55,8 +55,10 @@ fn training_gradients_are_bitwise_reproducible() {
     // A stem-like conv: tiny C (M = 16, N = 27) and a long K = N·OH·OW, the K-split case of the GEMM.
     let x = Tensor::randn([4, 3, 96, 96], 0.0, 1.0, &mut rng).requires_grad_();
     let w = Tensor::randn([16, 3, 3, 3], 0.0, 0.3, &mut rng).requires_grad_();
-    let w2 = Tensor::randn([32, 16, 3, 3], 0.0, 0.1, &mut rng).requires_grad_();
-    let b2 = Tensor::randn([32], 0.0, 0.1, &mut rng).requires_grad_();
+    let w2 = Tensor::randn([64, 16, 3, 3], 0.0, 0.1, &mut rng).requires_grad_();
+    let b2 = Tensor::randn([64], 0.0, 0.1, &mut rng).requires_grad_();
+    // A pointwise conv wide enough for the weight gradient over input rows read in place.
+    let w3 = Tensor::randn([24, 64, 1, 1], 0.0, 0.1, &mut rng).requires_grad_();
     let table = Tensor::randn([500, 64], 0.0, 1.0, &mut rng).requires_grad_();
     let rows: Vec<i64> = (0..4000).map(|_| rng.below(500) as i64).collect();
     let rows = Tensor::from_vec(rows, [4000]).unwrap();
@@ -65,6 +67,7 @@ fn training_gradients_are_bitwise_reproducible() {
     assert_reproducible("grads", &|| {
         let y = x.conv2d(&w, None, 1, 1, 1, 1).unwrap().silu().unwrap();
         let y = y.conv2d(&w2, Some(&b2), 2, 1, 1, 1).unwrap();
+        let y = y.conv2d(&w3, None, 1, 0, 1, 1).unwrap();
         let picked = table.index_select(0, &rows).unwrap();
         let gathered = picked.gather(1, &cols).unwrap();
         let loss = y.square().unwrap().mean_all().unwrap().add(&gathered.sum_all().unwrap()).unwrap();
@@ -75,6 +78,7 @@ fn training_gradients_are_bitwise_reproducible() {
             g.get(&w).unwrap().clone(),
             g.get(&w2).unwrap().clone(),
             g.get(&b2).unwrap().clone(),
+            g.get(&w3).unwrap().clone(),
             g.get(&table).unwrap().clone(),
         ]
     });

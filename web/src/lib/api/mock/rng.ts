@@ -22,6 +22,17 @@ export function hash(s: string): number {
   return h >>> 0;
 }
 
+/** A file's bytes as a key: their length and two FNV-1a hashes (different offset bases), so collisions are rare. */
+export function hashBytes(b: Uint8Array): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x050c5d1f;
+  for (let i = 0; i < b.length; i++) {
+    h1 = Math.imul(h1 ^ (b[i] as number), 0x01000193);
+    h2 = Math.imul(h2 ^ (b[i] as number), 0x01000193) ^ (h2 >>> 13);
+  }
+  return `${b.length}:${(h1 >>> 0).toString(16)}:${(h2 >>> 0).toString(16)}`;
+}
+
 export const range = (r: () => number, lo: number, hi: number) => lo + (hi - lo) * r();
 export const int = (r: () => number, lo: number, hi: number) => Math.floor(range(r, lo, hi + 1));
 export const pick = <T>(r: () => number, xs: readonly T[]): T => xs[Math.floor(r() * xs.length)] as T;

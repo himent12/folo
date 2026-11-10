@@ -404,6 +404,90 @@ fn fused_optimizer_kernels_match_cpu() {
     close(&eg, &want, 1e-6, 1e-6, "axpby");
 }
 
+/// The multi-tensor updates (`Tensor::optimizer_step_many_`, `unscale_check_many_`: 16 tensors per dispatch) give
+/// exactly the per-tensor kernels' results, bit for bit, over more tensors than one dispatch takes, sizes around
+/// the workgroup (1, 255, 256, 257, ...) and every update kind; one overflowing tensor raises the shared flag.
+#[test]
+fn multi_tensor_updates_match_single() {
+    use folo_core::backend::OptimStep;
+    let dev = gpu!();
+    let rng = &mut Rng::seed(41);
+    let sizes: Vec<usize> = (0..37).map(|i| [1, 255, 256, 257, 1000, 3, 4099][i % 7] + i).collect();
+    let make = |rng: &mut Rng| -> Vec<Tensor> {
+        sizes.iter().map(|&n| Tensor::randn([n], 0.0, 1.0, rng).to_device(dev).unwrap()).collect()
+    };
+    let copy = |ts: &[Tensor]| -> Vec<Tensor> { ts.iter().map(|t| t.mul_scalar(1.0).unwrap()).collect() };
+    let (p0, g, s0, s1) = (make(rng), make(rng), make(rng), make(rng));
+    let s1: Vec<Tensor> = s1.iter().map(|t| t.abs().unwrap()).collect();
+    let steps = [
+        (OptimStep::Sgd { lr: 0.01, momentum: 0.0, weight_decay: 0.0, nesterov: false }, 0),
+        (OptimStep::Sgd { lr: 0.01, momentum: 0.0, weight_decay: 5e-4, nesterov: false }, 0),
+        (OptimStep::Sgd { lr: 0.01, momentum: 0.937, weight_decay: 5e-4, nesterov: true }, 1),
+        (OptimStep::Sgd { lr: 0.02, momentum: 0.9, weight_decay: 0.0, nesterov: false }, 1),
+        (
+            OptimStep::AdamW {
+                decay: Some(0.999),
+                beta1: 0.9,
+                one_minus_beta1: 0.1,
+                beta2: 0.999,
+                one_minus_beta2: 0.001,
+                step_size: 0.01,
+                bc2_sqrt: 0.05,
+                eps: 1e-8,
+            },
+            2,
+        ),
+        (OptimStep::Axpby { a: 0.9, b: 0.1 }, 0),
+    ];
+    for (step, ns) in steps {
+        let state = |t: &[Tensor], u: &[Tensor]| -> Vec<Vec<Tensor>> {
+            (0..sizes.len()).map(|i| [&t[i], &u[i]].into_iter().take(ns).cloned().collect()).collect()
+        };
+        let (pa, sa) = (copy(&p0), state(&copy(&s0), &copy(&s1)));
+        let (pb, sb) = (copy(&p0), state(&copy(&s0), &copy(&s1)));
+        for i in 0..sizes.len() {
+            let st: Vec<&Tensor> = sa[i].iter().collect();
+            assert!(pa[i].optimizer_step_(&g[i], &st, &step).unwrap());
+        }
+        let ps: Vec<&Tensor> = pb.iter().collect();
+        let gs: Vec<&Tensor> = g.iter().collect();
+        let ss: Vec<Vec<&Tensor>> = sb.iter().map(|s| s.iter().collect()).collect();
+        assert!(Tensor::optimizer_step_many_(&ps, &gs, &ss, &step).unwrap(), "{step:?}");
+        for i in 0..sizes.len() {
+            assert_eq!(pa[i].to_vec::<f32>().unwrap(), pb[i].to_vec::<f32>().unwrap(), "{step:?} param {i}");
+            for (a, b) in sa[i].iter().zip(&sb[i]) {
+                assert_eq!(a.to_vec::<f32>().unwrap(), b.to_vec::<f32>().unwrap(), "{step:?} state {i}");
+            }
+        }
+    }
+    // A storage used twice is refused (the caller then updates one by one).
+    let gs: Vec<&Tensor> = vec![&g[0], &g[0]];
+    let ps: Vec<&Tensor> = vec![&p0[0], &p0[1]];
+    let none = vec![Vec::new(), Vec::new()];
+    assert!(!Tensor::optimizer_step_many_(&ps, &gs, &none, &OptimStep::Axpby { a: 1.0, b: 1.0 }).unwrap());
+    // Unscale and check, finite and with an overflow in one tensor.
+    for overflow in [false, true] {
+        let (xa, xb) = (copy(&p0), copy(&p0));
+        if overflow {
+            for x in [&xa[20], &xb[20]] {
+                x.copy_from(&Tensor::full([sizes[20]], 3e38f32).to_device(dev).unwrap()).unwrap();
+            }
+        }
+        let fa = Tensor::zeros_with([1], folo_core::DType::U32, dev).unwrap();
+        let fb = Tensor::zeros_with([1], folo_core::DType::U32, dev).unwrap();
+        for x in &xa {
+            assert!(x.unscale_check_(4.0, &fa).unwrap());
+        }
+        let xs: Vec<&Tensor> = xb.iter().collect();
+        assert!(Tensor::unscale_check_many_(&xs, 4.0, &fb).unwrap());
+        for (a, b) in xa.iter().zip(&xb) {
+            assert_eq!(a.to_vec::<f32>().unwrap(), b.to_vec::<f32>().unwrap());
+        }
+        assert_eq!(fa.to_vec::<u32>().unwrap()[0] != 0, overflow);
+        assert_eq!(fb.to_vec::<u32>().unwrap()[0] != 0, overflow);
+    }
+}
+
 /// The fused BatchNorm forward without a running-statistics update (folo-core's raw entry point).
 #[test]
 fn fused_batch_norm_without_running_stats() {

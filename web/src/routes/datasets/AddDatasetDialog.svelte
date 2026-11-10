@@ -2,12 +2,11 @@
   /** "Add dataset": register a YOLO/COCO folder on the server's disk, or generate a synthetic shapes set. */
   import FolderOpen from '@lucide/svelte/icons/folder-open';
   import Sparkles from '@lucide/svelte/icons/sparkles';
-  import X from '@lucide/svelte/icons/x';
   import { hub } from '$lib/api/index.svelte';
   import type { CreateDataset } from '$lib/api/types';
-  import { classColor } from '$lib/design/tokens';
   import { router } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
+  import ClassChips, { addClasses } from '$lib/ui/ClassChips.svelte';
   import Dialog from '$lib/ui/Dialog.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Field from '$lib/ui/Field.svelte';
@@ -85,25 +84,6 @@
   const reason = $derived(missing ?? (shownError ? (FIX[shownError] ?? null) : null));
 
 
-  function addClasses(raw: string) {
-    const next = raw
-      .split(/[,\n]/)
-      .map((c) => c.trim())
-      .filter((c) => c && !classes.includes(c));
-    if (next.length) classes = [...classes, ...next].slice(0, 16);
-    classDraft = '';
-  }
-
-  function onClassKey(e: KeyboardEvent) {
-    if (e.key === 'Enter' || e.key === ',') {
-      if (!classDraft.trim()) return;
-      e.preventDefault();
-      addClasses(classDraft);
-    } else if (e.key === 'Backspace' && !classDraft && classes.length) {
-      classes = classes.slice(0, -1);
-    }
-  }
-
   function reset() {
     error = undefined;
     touched = false;
@@ -112,7 +92,10 @@
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
-    if (mode === 'synthetic' && classDraft.trim()) addClasses(classDraft);
+    if (mode === 'synthetic' && classDraft.trim()) {
+      classes = addClasses(classes, classDraft, 16);
+      classDraft = '';
+    }
     touched = true;
     error = undefined;
     if (!valid || busy) return;
@@ -185,27 +168,7 @@
           <Input id="{uid}-sname" bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.name)} />
         </Field>
         <Field label="Classes" for="{uid}-classes" error={show(errs.classes)} hint="Press Enter or comma to add. Up to 16.">
-          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div class="chips" class:invalid={!!show(errs.classes)} onclick={(e) => (e.currentTarget.querySelector('input') as HTMLInputElement | null)?.focus()}>
-            {#each classes as c, i (c)}
-              <span class="chip">
-                <span class="sw" style:background={classColor(i)}></span>
-                {c}
-                <button type="button" aria-label="Remove {c}" onclick={() => (classes = classes.filter((x) => x !== c))}><X size={12} /></button>
-              </span>
-            {/each}
-            <input
-              id="{uid}-classes"
-              bind:value={classDraft}
-              onkeydown={onClassKey}
-              onblur={() => classDraft.trim() && addClasses(classDraft)}
-              placeholder={classes.length ? '' : 'circle, square, …'}
-              aria-invalid={!!show(errs.classes) || undefined}
-              aria-describedby={show(errs.classes) ? `${uid}-classes-error` : `${uid}-classes-hint`}
-              autocomplete="off"
-              spellcheck={false}
-            />
-          </div>
+          <ClassChips id="{uid}-classes" bind:classes bind:draft={classDraft} max={16} placeholder="circle, square, …" />
         </Field>
         <div class="row">
           <Field label="Images" for="{uid}-images" error={show(errs.images)}>
@@ -292,98 +255,6 @@
   .panel :global(.mono-input input::placeholder) {
     font-family: var(--font-sans);
     font-size: var(--type-base-size);
-    color: var(--text-tertiary);
-  }
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-1);
-    min-height: var(--control-md);
-    padding: 4px;
-    border-radius: var(--radius-md);
-    background: var(--bg-inset);
-    /* An input's edge (line.control), drawn like ui/Input: an invalid draft turns the edge and the ring danger. */
-    border: 1px solid var(--line-control);
-    cursor: text;
-    transition: border-color var(--dur-fast) var(--ease-standard);
-  }
-  :global([data-theme='light']) .chips {
-    background: var(--bg-panel);
-  }
-  .chips:hover {
-    border-color: var(--line-control-hover);
-  }
-  /* The field's frame takes the global ring while its draft input has keyboard focus, like ui/Input (§2.9); a chip's
-     remove button keeps its own ring, so the frame is not ringed for it. */
-  .chips:has(input:focus-visible) {
-    outline: var(--size-focus-ring) solid var(--focus);
-    outline-offset: var(--size-focus-offset);
-  }
-  .chips.invalid {
-    --line-control: var(--danger-solid);
-    --line-control-hover: var(--danger-solid);
-    --focus: var(--danger-solid);
-  }
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    height: 20px;
-    padding: 0 2px 0 6px;
-    border-radius: var(--radius-xs);
-    background: var(--bg-active);
-    font-size: var(--type-sm-size);
-  }
-  .sw {
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
-  }
-  :global([data-theme='light']) .sw {
-    box-shadow: inset 0 0 0 1px #0a0e1433;
-  }
-  .chip button {
-    display: grid;
-    place-items: center;
-    width: 16px;
-    height: 16px;
-    border-radius: 2px;
-    color: var(--text-tertiary);
-  }
-  .chip button:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-  /* Touch: a 44 px hit area around the small remove glyph. */
-  @media (pointer: coarse) {
-    .chip button {
-      position: relative;
-    }
-    .chip button::after {
-      content: '';
-      position: absolute;
-      inset: -12px;
-    }
-  }
-  .chips input {
-    flex: 1;
-    min-width: 80px;
-    height: 20px;
-    padding: 0 4px;
-    border: 0;
-    background: none;
-    outline: none;
-  }
-  /* Touch: the typed class at 16 px (type.lg), under which iOS zooms into the field (touchText.test.ts); the chips keep
-     their size. */
-  @media (pointer: coarse) {
-    .chips input {
-      height: 24px;
-      font-size: var(--type-lg-size);
-    }
-  }
-  .chips input::placeholder {
     color: var(--text-tertiary);
   }
 </style>

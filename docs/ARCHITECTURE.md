@@ -46,9 +46,17 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
   (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
-  separable (row pass, then column pass; same first-maximum argmax as a direct scan). Batches smaller than the
-  thread pool split the pool between images. The stride-1 input gradient is the forward kernel run on the output gradient with the flipped,
-  channel-swapped kernel (no col2im); strided convs use an unfolded gradient and col2im. `f32` buffers from 16 KiB
+  separable (row pass, then column pass; same first-maximum argmax as a direct scan). A batch of several images
+  splits the pool between them (each image's GEMMs get `threads / n` threads; work stealing spreads the tiles), and
+  `Predictor::predict_batch` on the CPU runs chunks of two images as concurrent forwards, the same predictions as
+  one pass. The stride-1 input gradient is the forward kernel run on the output gradient with the flipped,
+  channel-swapped kernel (no col2im); strided convs use an unfolded gradient and col2im. The weight gradient of a
+  stride-1 conv (or a pointwise one with at least 64 input channels) is `dWᵀ = X_unfolded · gyᵀ` with the input's
+  shifted rows as A, read in place by a 6x16 micro-kernel through six row pointers (`gemm_arows`), and the output
+  gradient transposed once per image into packed B panels (zeros in the dropped columns); K is cut into parts
+  and the rows into tiles by shape alone, partials added in order. Other convs pack the unfolded input as they
+  go. folo-nn's train-mode BatchNorm on the CPU applies SiLU / ReLU in its own passes (forward and backward),
+  bit for bit BatchNorm then `Tensor::silu` / `relu` (`cpu::silu` / `cpu::silu_backward` are the shared formulas). `f32` buffers from 16 KiB
   are recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one
   to custom ops) so training and inference loops do not pay page faults every step. `cpu::in_pool` runs a closure on
   a worker of a dedicated rayon pool (so the per-thread state cannot reach other jobs of the global pool) with the
@@ -249,6 +257,16 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
   the `embed-web` feature (release builds, see `docs/RELEASE.md`). `folo serve --mock` serves realistic
   synthetic data for UI work before or without a trained model.
+- **Agent labeling** (`folo_server::label`, docs/LABELING.md): labeling jobs under `<data dir>/label/<id>/`
+  (unlabeled images, classes, instructions, boxes so far), labeled by a coding-agent CLI on the server's machine
+  and exported as a YOLO dataset that the store registers. `Labeler` is the service behind `/api/label` (the
+  store hands it out through `Store::labeler`; the mock has none). Agents sit behind the `Agent` trait:
+  `ClaudeCode` runs `claude -p` and `Codex` runs `codex exec` as child processes, one model request per batch of
+  images with every tool, config file and session switched off, so a call costs little more than its images; a
+  run thread feeds batches to a few workers, checks each reply (JSON shape, class names, boxes clipped to the
+  image) before storing it, and ends the run at once on a failure that another call would repeat. Events (`job`,
+  `image`, `log`) fan out to SSE subscribers through a per-job broadcast channel, as for runs. Tests script
+  the agents; `tests/label_live.rs` (ignored by default) runs the real CLIs against synthetic shapes.
 - `folo` CLI (`docs/CLI.md`): `train`, `val`, `predict`, `export`, `bench`, `dataset check|stats|synth|convert`, `serve`,
   `mcp` (Model Context Protocol server over stdio so agents can train and run models), `doctor`. Every command takes
   `--json` (one JSON object per line on stdout, human text on stderr) and uses stable exit codes.

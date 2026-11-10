@@ -77,7 +77,7 @@ fn every_error_code_is_in_the_shared_vocabulary() {
     }
     assert!(seen > 50, "the scan found {seen} codes");
     // `Error::not_found(what, id)` builds `<what>_not_found`.
-    for what in ["dataset", "image", "model", "run", "path", "device"] {
+    for what in ["dataset", "image", "model", "run", "label_job", "path", "device"] {
         assert_eq!(folo_api::codes::exit_code(&format!("{what}_not_found")), 3, "{what}");
     }
     // The engine's codes (folo_vision::Error::code) are in the vocabulary too.
