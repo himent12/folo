@@ -84,8 +84,10 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
   most 192 MiB), else in parts of 8 MiB. One request reads one version of the file, so a checkpoint that is
   rewritten every second (a small model's epochs) still copies: a file replaced between those two requests is
   asked for again whole, in one request. In parts it would be replaced before its last part every time. While the
-  run trains the copy has a thread of its own, so the live view and a stop never wait for it (a large checkpoint
-  takes minutes on a slow link); one that fails is tried again a minute later, not at every epoch.
+  run trains the copy has a thread of its own, so the live view, a stop and the collection at the end never wait
+  for it (a large checkpoint takes minutes on a slow link). It fetches into a staging file that only the run's
+  own thread moves into place, so a copy that outlives its run cannot put an old checkpoint over a newer one. One
+  that fails is tried again a minute later, not at every epoch.
 - **Stopping.** `POST /api/runs/{id}/stop` stops the worker's run, collects its checkpoint and releases the
   instance; before `training` it releases at once. `Run.model_id` is set as for a local run.
 - **Deadline.** `compute.max_hours` (default 12) bounds what a run can cost: the instance is asked to stop the run
@@ -129,9 +131,10 @@ Rented GPUs cost money by the hour, so the ledger is written before the provider
 - A connection cannot be removed while it has live instances (`409 connection_in_use`).
 
 Cost is an estimate: `price_per_hour` of the offer times the time from the launch to the confirmed termination.
-An instance of a provider that arms it to terminate itself (`self_terminates`) is counted to 10 minutes after its
-deadline at the latest, also when nobody saw it end (this machine was off). `Run.cloud.cost_usd` follows it at
-every phase and once a minute while the run trains. The provider's bill is the truth.
+An instance whose end nobody saw (this machine was off) is counted to the latest it can have lived when its
+provider arms it to terminate itself (`self_terminates`): 10 minutes after its deadline, plus the 15 minutes it
+may have taken to boot, since the instance counts its time limit from the start of its setup. `Run.cloud.cost_usd`
+follows the estimate at every phase and once a minute while the run trains. The provider's bill is the truth.
 
 ## Providers
 
@@ -163,8 +166,9 @@ again (as Cloudflare's `52x` are).
 - **The download is checked before a pod is rented.** FOLO asks that place for `install.sh` and the archive's
   `.sha256` as a pod would, without credentials. When it answers that they are not there (`404` for a release
   that is not published or a private repository), the run fails with `cloud_boot_failed` before anything is
-  rented, and the connection's check says so in its `note` (Settings → Cloud, `folo cloud connections`). No answer
-  at all is not a refusal: the pod may reach a mirror this machine cannot.
+  rented, and the connection's check says so in its `note` (Settings → Cloud, `folo cloud connections`). No
+  answer, a server error and a refusal of the moment (`408`, `425`, `429`) are not that: the pod may reach what
+  this machine cannot.
 - **The GPU.** FOLO's GPU backend is wgpu on Vulkan. The script installs the Vulkan loader and asks the NVIDIA
   runtime for its graphics libraries (`NVIDIA_DRIVER_CAPABILITIES=all`). The manifest that runtime mounts names
   the driver's GLX library, which gives Vulkan no device in a container without an X server, so the script asks

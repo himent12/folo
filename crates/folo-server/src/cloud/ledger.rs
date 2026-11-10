@@ -24,6 +24,8 @@ pub(crate) struct Ledger {
     /// The providers whose instances terminate themselves after their deadline
     /// (`CloudProvider::self_terminates`), by id: what bounds an instance's life when nobody saw its end.
     self_terminating: Vec<String>,
+    /// The longest an instance takes from its launch request to the start of its own clock (see [`Ledger::last`]).
+    boot: Duration,
 }
 
 /// `404 instance_not_found`.
@@ -48,21 +50,23 @@ pub(crate) fn cost(instance: &CloudInstance, now: f64, last: Option<f64>) -> Opt
 
 impl Ledger {
     /// The ledger in `cloud_dir`, guarded by the cloud lock `lock`; `self_terminating` are the ids of the providers
-    /// whose instances terminate themselves after their deadline.
-    pub fn new(cloud_dir: &Path, lock: PathBuf, self_terminating: Vec<String>) -> Ledger {
-        Ledger { dir: cloud_dir.join("instances"), lock, self_terminating }
+    /// whose instances terminate themselves after their deadline, `boot` the time an instance has to boot
+    /// (`Tuning::boot_timeout`).
+    pub fn new(cloud_dir: &Path, lock: PathBuf, self_terminating: Vec<String>, boot: Duration) -> Ledger {
+        Ledger { dir: cloud_dir.join("instances"), lock, self_terminating, boot }
     }
 
-    /// The latest `i` can have lived: an instance of a provider that arms it to terminate itself is gone
-    /// [`folo_cloud::bootstrap::GRACE_S`] after its deadline, whoever watched. So an instance that ended while
-    /// nothing followed it (this machine was off, the server crashed) is not counted as billed until someone
-    /// looked again.
+    /// The latest `i` can have lived, when nobody saw its end (this machine was off, the server crashed): an
+    /// instance of a provider that arms it to terminate itself is gone [`folo_cloud::bootstrap::GRACE_S`] after
+    /// its time limit, whoever watched. The instance counts that time from the start of its setup, the deadline
+    /// in its record from the launch request, so the time it may take to boot is added: an upper bound, an
+    /// estimate that errs to the side of the bill.
     fn last(&self, i: &CloudInstance) -> Option<f64> {
         if !self.self_terminating.contains(&i.provider) {
             return None;
         }
         let deadline = i.deadline.as_deref().and_then(parse_rfc3339)?;
-        Some(deadline + folo_cloud::bootstrap::GRACE_S as f64)
+        Some(deadline + folo_cloud::bootstrap::GRACE_S as f64 + self.boot.as_secs_f64())
     }
 
     fn path(&self, id: &str) -> PathBuf {
@@ -217,7 +221,8 @@ mod tests {
     #[test]
     fn records_follow_their_instance_and_old_ones_go() {
         let dir = TestDir::new("cloud-ledger");
-        let ledger = Ledger::new(&dir.join("cloud"), dir.join("cloud").join(".lock"), Vec::new());
+        let lock = dir.join("cloud").join(".lock");
+        let ledger = Ledger::new(&dir.join("cloud"), lock, Vec::new(), Duration::ZERO);
         let a = ledger.create("cc_1", "p", "run_1", &offer(Some(3.6)), None).unwrap();
         assert!(a.name.starts_with("folo-run_1-") && a.name.len() == "folo-run_1-".len() + 4, "{}", a.name);
         assert_eq!((a.status, a.provider_ref.as_deref()), (CloudInstanceStatus::Launching, None));
@@ -251,7 +256,9 @@ mod tests {
     fn an_instance_that_terminates_itself_is_not_billed_past_its_deadline() {
         let dir = TestDir::new("cloud-ledger-last");
         let cloud = dir.join("cloud");
-        let grace = folo_cloud::bootstrap::GRACE_S as f64;
+        // The grace after the deadline, and five minutes to boot.
+        let boot = Duration::from_secs(300);
+        let grace = folo_cloud::bootstrap::GRACE_S as f64 + boot.as_secs_f64();
         let now = unix_now();
         // Launched ten hours ago with a deadline nine hours ago, and nobody has looked since.
         let (created, deadline) = (now - 36_000.0, now - 32_400.0);
@@ -268,7 +275,7 @@ mod tests {
         let usd = |seconds: f64| Some((seconds / 3600.0 * 3.6 * 1e4).round() / 1e4);
 
         // A provider that arms its instances: an hour to the deadline and the grace after it, whatever `now` is.
-        let ledger = Ledger::new(&cloud, cloud.join(".lock"), vec!["arming".into()]);
+        let ledger = Ledger::new(&cloud, cloud.join(".lock"), vec!["arming".into()], boot);
         let alive = forgotten(&ledger, "arming");
         assert_eq!(alive.cost_usd, usd(3_600.0 + grace));
         assert_eq!(ledger.list()[0].cost_usd, usd(3_600.0 + grace));
@@ -284,7 +291,7 @@ mod tests {
 
         // A provider that does not: only its confirmed end stops the count.
         let other = TestDir::new("cloud-ledger-unarmed");
-        let ledger = Ledger::new(&other.join("cloud"), other.join("cloud").join(".lock"), Vec::new());
+        let ledger = Ledger::new(&other.join("cloud"), other.join("cloud").join(".lock"), Vec::new(), boot);
         let alive = forgotten(&ledger, "arming");
         assert!(alive.cost_usd.unwrap() >= 35.99, "{:?}", alive.cost_usd);
     }

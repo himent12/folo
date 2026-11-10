@@ -553,6 +553,16 @@ fn a_cloud_run_trains_on_an_instance_mirrors_it_and_releases_it() {
     for id in [model.clone(), format!("{model}-last")] {
         assert_eq!(store.get_model(&id).unwrap().run_id.as_deref(), Some(run.id.as_str()));
     }
+    // And nothing else is next to them: a copy that was under way when the run ended leaves no staged file.
+    let weights = t.join("home").join("runs").join(&run.id).join("weights");
+    until("only the two weights files", || {
+        let mut names: Vec<String> = std::fs::read_dir(&weights)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        (names == ["best.folo", "last.folo"]).then_some(())
+    });
     // Nothing is left at the provider; the ledger says what it cost.
     assert_eq!(cloud.live(), 0);
     let instances = store.cloud_instances().unwrap();

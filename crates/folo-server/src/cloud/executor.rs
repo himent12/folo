@@ -260,17 +260,50 @@ impl Drop for Release {
     }
 }
 
+/// Since when a provider has answered that an instance is gone (or stopped), with no other answer in between.
+#[derive(Default)]
+struct GoneSince(Option<Instant>);
+
+impl GoneSince {
+    /// Takes the provider's answer `state`; true once gone has been the only answer for `after`. Any other
+    /// answer (starting, running) starts the count over.
+    fn believed(&mut self, state: &InstanceState, after: Duration) -> bool {
+        match state {
+            InstanceState::Stopped | InstanceState::Gone => {
+                self.0.get_or_insert_with(Instant::now).elapsed() >= after
+            }
+            _ => {
+                self.0 = None;
+                false
+            }
+        }
+    }
+}
+
+/// The name of the file a copy of `weights/last.folo` is fetched into while the run trains
+/// ([`Copying`]): next to it, and one of the names [`transfer::remove_partial`] removes.
+const STAGED_COPY: &str = ".last.folo.copy.download";
+
 /// A copy of the worker's `weights/last.folo` under way while the run trains, on a thread of its own: a checkpoint
-/// of hundreds of megabytes takes minutes on a slow link, and the live view (the next poll of the worker) and a
-/// stop must not wait for it. Dropped, it is told to end.
+/// of hundreds of megabytes takes minutes on a slow link, and the live view (the next poll of the worker), a stop
+/// and the collection at the run's end must not wait for it.
+///
+/// The thread only ever writes [`STAGED_COPY`]. The executor moves that file to `weights/last.folo` when it takes
+/// the result ([`Exec::reap_copy`]), so a copy that outlives its run (a request that was in flight when the run
+/// failed, or when the final file was collected) can never put an old checkpoint over a newer one. Dropped, the
+/// copy is told to end, and its staged file is removed by whichever side comes last.
 struct Copying {
     thread: Option<JoinHandle<std::result::Result<(), TransferError>>>,
     cancel: Arc<AtomicBool>,
+    staged: PathBuf,
 }
 
 impl Drop for Copying {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        // In this order: a thread that finishes after the flag is set removes the file itself, one that finished
+        // before has left it here.
+        self.cancel.store(true, Ordering::SeqCst);
+        let _ = std::fs::remove_file(&self.staged);
     }
 }
 
@@ -598,17 +631,9 @@ impl Exec {
         let t0 = Instant::now();
         let values = self.c.connection.values();
         // A provider may not show an instance it has only just created: gone (or stopped) is believed once it has
-        // been the answer for a while.
-        let mut gone: Option<Instant> = None;
-        let mut believed_gone = |state: &InstanceState, poll: Duration| match state {
-            InstanceState::Stopped | InstanceState::Gone => {
-                gone.get_or_insert_with(Instant::now).elapsed() >= poll * GONE_POLLS
-            }
-            _ => {
-                gone = None;
-                false
-            }
-        };
+        // been the answer for a while, without another answer in between.
+        let mut gone = GoneSince::default();
+        let believe_after = self.core.tuning.poll * GONE_POLLS;
         let (url, token, instance) = match endpoint {
             Endpoint::Fixed(e) => {
                 self.phase(CloudPhase::Booting, format!("connecting to the FOLO server at {}", e.url));
@@ -620,14 +645,13 @@ impl Exec {
                 let url = loop {
                     self.interrupted()?;
                     match self.c.provider.state(&values, &r) {
-                        Ok(InstanceState::Running { url }) => break url,
-                        Ok(state) => {
-                            if believed_gone(&state, self.core.tuning.poll) {
-                                // Terminated by hand meanwhile: lost, not a boot failure.
-                                self.interrupted()?;
-                                return Err(boot_failed("the instance stopped before it started".into()));
-                            }
+                        Ok(state) if gone.believed(&state, believe_after) => {
+                            // Terminated by hand meanwhile: lost, not a boot failure.
+                            self.interrupted()?;
+                            return Err(boot_failed("the instance stopped before it started".into()));
                         }
+                        Ok(InstanceState::Running { url }) => break url,
+                        Ok(_) => {}
                         Err(e) => tracing::debug!(run = %self.entry.id(), "instance state: {e}"),
                     }
                     if t0.elapsed() >= timeout {
@@ -676,7 +700,7 @@ impl Exec {
             {
                 asked = Instant::now();
                 match self.c.provider.state(&values, r) {
-                    Ok(state) if believed_gone(&state, self.core.tuning.poll) => {
+                    Ok(state) if gone.believed(&state, believe_after) => {
                         self.interrupted()?;
                         return Err(boot_failed(self.setup_failed(&values)));
                     }
@@ -1081,24 +1105,30 @@ impl Exec {
         Ok((!run.status.is_active()).then_some(run))
     }
 
-    /// Starts a copy of the worker's `weights/last.folo` into the run folder on a thread of its own
-    /// ([`Copying`]); [`Exec::reap_copy`] takes its result. It ends early when the process shuts down or a stop is
-    /// asked for (the collection at the run's end copies the final file).
+    /// Starts a copy of the worker's `weights/last.folo` on a thread of its own ([`Copying`]): it fetches the file
+    /// into [`STAGED_COPY`], and [`Exec::reap_copy`] takes its result. It ends early when the process shuts down
+    /// or a stop is asked for (the collection at the run's end copies the final file).
     fn start_copy(&mut self, client: &Client, run_id: &str) {
         let weights = self.dir.join("weights");
+        let staged = weights.join(STAGED_COPY);
         let path = format!("/models/{}/weights", encode(&run_model_id(run_id, true)));
         let cancel = Arc::new(AtomicBool::new(false));
-        let (client, core, entry, cancelled) =
-            (client.clone(), self.core.clone(), self.entry.clone(), cancel.clone());
+        let (client, core, entry) = (client.clone(), self.core.clone(), self.entry.clone());
+        let (cancelled, dest) = (cancel.clone(), staged.clone());
         let copy = move || {
             std::fs::create_dir_all(&weights).map_err(TransferError::Io)?;
-            let stop = || cancelled.load(Ordering::Relaxed) || core.halt.is_on() || entry.stop_requested();
+            let stop = || cancelled.load(Ordering::SeqCst) || core.halt.is_on() || entry.stop_requested();
             let mut ctl = Control { progress: &mut |_| {}, stop: &stop };
-            transfer::download(&client, &path, &weights.join("last.folo"), &mut ctl).map(drop)
+            let fetched = transfer::download(&client, &path, &dest, &mut ctl).map(drop);
+            // Nobody takes the file any more (see `Copying`'s drop for the order).
+            if cancelled.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_file(&dest);
+            }
+            fetched
         };
         let name = format!("folo-cloud-copy-{}", self.entry.id());
         match std::thread::Builder::new().name(name).spawn(copy) {
-            Ok(thread) => self.copying = Some(Copying { thread: Some(thread), cancel }),
+            Ok(thread) => self.copying = Some(Copying { thread: Some(thread), cancel, staged }),
             Err(e) => {
                 self.copy_failed = Some(Instant::now());
                 tracing::warn!(run = %self.entry.id(), "could not start the checkpoint copy's thread: {e}");
@@ -1106,38 +1136,38 @@ impl Exec {
         }
     }
 
-    /// Takes the result of the copy under way once it has ended: `Run.cloud.synced` and a log line when
-    /// `weights/last.folo` is here, a warning (and a later retry) when it failed. A worker without the file yet,
-    /// and a copy that was told to end, say nothing.
+    /// Takes the result of the copy under way once it has ended: the staged file becomes `weights/last.folo`, with
+    /// `Run.cloud.synced` and a log line, or a warning (and a later retry) says why not. A worker without the file
+    /// yet, and a copy that was told to end, say nothing.
     fn reap_copy(&mut self) {
         if !self.copying.as_ref().is_some_and(|c| c.thread.as_ref().is_none_or(|t| t.is_finished())) {
             return;
         }
-        let result = self.copying.take().and_then(|mut c| c.thread.take()).map(|t| t.join());
-        match result {
-            Some(Ok(Ok(()))) => {
-                self.copy_failed = None;
-                self.synced_now();
-            }
-            Some(Ok(Err(TransferError::Stopped))) | None => {}
-            Some(Ok(Err(TransferError::Failed(e)))) if e.code() == "model_not_found" => {}
-            Some(Ok(Err(e))) => {
-                self.copy_failed = Some(Instant::now());
-                self.entry.log(LogLevel::Warn, format!("copying weights/last.folo (retried later): {e}"));
-            }
+        let Some(mut copying) = self.copying.take() else { return };
+        let fetched = match copying.thread.take().map(|t| t.join()) {
+            Some(Ok(fetched)) => fetched,
             Some(Err(_)) => {
                 self.copy_failed = Some(Instant::now());
                 tracing::error!(run = %self.entry.id(), "the checkpoint copy's thread panicked");
+                return;
             }
-        }
-    }
-
-    /// Ends the copy under way and waits for its thread, so nothing writes `weights/last.folo` after this.
-    fn stop_copy(&mut self) {
-        if let Some(mut copying) = self.copying.take() {
-            copying.cancel.store(true, Ordering::Relaxed);
-            if let Some(thread) = copying.thread.take() {
-                let _ = thread.join();
+            None => return,
+        };
+        // This thread, which holds the run, is the only one that writes `weights/last.folo`.
+        let placed = fetched.and_then(|()| {
+            std::fs::rename(&copying.staged, self.dir.join("weights").join("last.folo"))
+                .map_err(TransferError::Io)
+        });
+        match placed {
+            Ok(()) => {
+                self.copy_failed = None;
+                self.synced_now();
+            }
+            Err(TransferError::Stopped) => {}
+            Err(TransferError::Failed(e)) if e.code() == "model_not_found" => {}
+            Err(e) => {
+                self.copy_failed = Some(Instant::now());
+                self.entry.log(LogLevel::Warn, format!("copying weights/last.folo (retried later): {e}"));
             }
         }
     }
@@ -1241,8 +1271,8 @@ impl Exec {
         end: Option<Run>,
         time_up: bool,
     ) -> std::result::Result<Outcome, Halt> {
-        // The copy that may still be under way would write an older `last.folo` over the final one.
-        self.stop_copy();
+        // A copy still under way is told to end and not waited for: it only writes its staged file.
+        self.copying = None;
         self.phase(CloudPhase::Collecting, "the run ended on the worker; copying its weights");
         for last in [true, false] {
             match self.copy(client, run_id, last) {
@@ -1277,5 +1307,38 @@ mod tests {
         assert_eq!(disk_for(0), 20);
         assert_eq!(disk_for(4_800_000_000), 30);
         assert_eq!(disk_for(u64::MAX / 4), 4096);
+    }
+
+    #[test]
+    fn gone_is_believed_only_while_it_is_the_only_answer() {
+        let after = Duration::from_millis(60);
+        let running = InstanceState::Running { url: "http://w".into() };
+        let mut gone = GoneSince::default();
+        assert!(!gone.believed(&InstanceState::Gone, after), "the first answer starts the count");
+        std::thread::sleep(after);
+        assert!(gone.believed(&InstanceState::Stopped, after), "gone or stopped, for that long");
+        // A provider that did not show a new instance at first, then did: one later `gone` (a blip of its API)
+        // starts a new count instead of ending the old one.
+        assert!(!gone.believed(&running, after));
+        assert!(!gone.believed(&InstanceState::Gone, after));
+        assert!(!gone.believed(&InstanceState::Starting, after));
+        std::thread::sleep(after);
+        assert!(!gone.believed(&InstanceState::Gone, after), "a count that only starts here");
+        std::thread::sleep(after);
+        assert!(gone.believed(&InstanceState::Gone, after));
+    }
+
+    #[test]
+    fn a_copy_that_is_dropped_leaves_no_staged_file_and_tells_its_thread() {
+        let dir = folo_test_support::TestDir::new("cloud-copying");
+        let staged = dir.join(STAGED_COPY);
+        std::fs::write(&staged, b"an older checkpoint").unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        drop(Copying { thread: None, cancel: cancel.clone(), staged: staged.clone() });
+        assert!(cancel.load(Ordering::SeqCst) && !staged.exists());
+        // The name is one a later run of the executor sweeps away, should both sides miss it.
+        std::fs::write(&staged, b"x").unwrap();
+        transfer::remove_partial(&dir);
+        assert!(!staged.exists());
     }
 }

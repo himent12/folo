@@ -83,7 +83,8 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
   - RunPod's proxy answered an upload with its own `404` a second after the worker had answered; such an answer
     is now tried again instead of failing the run with `cloud_sync_failed`.
   - A run whose pod ended while nothing followed it fails with `cloud_instance_lost` (it can be resumed), not
-    `cloud_sync_failed`, and its instance is counted to 10 minutes after its deadline, not until the next start.
+    `cloud_sync_failed`, and its instance is counted to the latest it can have lived (its deadline, the 10
+    minutes after which it terminates itself and the time it may have taken to boot), not until the next start.
   - `Run.cloud.cost_usd` is there from the first phase (it was empty for the first minute of training), and a
     run's log says when its worker stops answering and when it answers again.
 - New run's GPU menu lists the offers that can start first (a provider's cheapest are mostly out of stock), in

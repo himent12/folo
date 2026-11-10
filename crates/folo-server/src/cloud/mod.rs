@@ -257,12 +257,13 @@ impl Cloud {
         let lock = dir.join(".lock");
         let self_terminating =
             providers.iter().map(|p| p.info()).filter(|p| p.self_terminates).map(|p| p.id).collect();
+        let ledger = Ledger::new(&dir, lock.clone(), self_terminating, tuning.boot_timeout);
         let core = Core {
             data_dir: data_dir.to_path_buf(),
             providers,
             tuning,
-            connections: Connections::new(&dir, lock.clone()),
-            ledger: Ledger::new(&dir, lock, self_terminating),
+            connections: Connections::new(&dir, lock),
+            ledger,
             offers: Mutex::default(),
             halt: Halt::default(),
         };

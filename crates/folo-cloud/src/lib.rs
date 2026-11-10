@@ -53,7 +53,8 @@ pub enum WorkerDownload {
     /// `install.sh` and the archive's checksum are served there.
     Found,
     /// The place answers and says a file is not there (a release that is not published, a private repository, a
-    /// mistyped URL): an instance launched now would fail its setup.
+    /// mistyped URL: any `4xx` but those that blame the moment, `408`, `425` and `429`): an instance launched now
+    /// would fail its setup.
     Missing {
         /// The file asked for.
         url: String,
@@ -85,6 +86,11 @@ pub fn worker_download(base_url: &str) -> WorkerDownload {
         let url = format!("{base}/{file}");
         match http::status_of(&url) {
             Ok(200..=299) => {}
+            // A refusal of the moment (a timeout, a rate limit on this machine's address) says nothing about what
+            // the instance will get.
+            Ok(status @ (408 | 425 | 429)) => {
+                return WorkerDownload::Unknown(format!("{url} answers {status}"));
+            }
             Ok(status @ 400..=499) => return WorkerDownload::Missing { url, status },
             Ok(status) => return WorkerDownload::Unknown(format!("{url} answers {status}")),
             Err(e) => return WorkerDownload::Unknown(format!("{url} does not answer ({e})")),
@@ -389,9 +395,22 @@ mod tests {
             "{problem}"
         );
 
-        // A server error or no answer says nothing about what the instance will find.
-        let f = Fixture::serve(vec![Answer::json(503, "{}")]);
-        assert!(matches!(worker_download(&f.url("/x")), WorkerDownload::Unknown(m) if m.contains("503")));
+        // A server error, a refusal of the moment or no answer says nothing about what the instance will find.
+        for status in [503, 408, 425, 429] {
+            let f = Fixture::serve(vec![Answer::json(status, "{}")]);
+            let unknown = worker_download(&f.url("/x"));
+            assert!(
+                matches!(&unknown, WorkerDownload::Unknown(m) if m.contains(&status.to_string())),
+                "{status}: {unknown:?}"
+            );
+        }
+        // Any other refusal is an answer: the file is not there for the instance either.
+        for status in [401, 403, 410] {
+            let f = Fixture::serve(vec![Answer::json(status, "{}")]);
+            assert!(
+                matches!(worker_download(&f.url("/x")), WorkerDownload::Missing { status: s, .. } if s == status)
+            );
+        }
         let unknown = worker_download(&Fixture::closed_url());
         assert!(
             matches!(&unknown, WorkerDownload::Unknown(m) if m.contains("does not answer")),
