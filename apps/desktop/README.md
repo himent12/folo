@@ -48,7 +48,10 @@ three buttons are plain buttons: Minimize, Restore (leaves full screen) and Clos
 
 The window opens as it was closed: its restored size and place, maximized or full screen, and the theme
 (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
-A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
+It reopens on the display it was on (GPUI's display UUID, kept with the place: each display's bounds are in its
+own logical pixels, so with mixed scale factors their rectangles overlap and the place alone can't say which), if
+that display still shows enough of the title bar to grab; else on the display that shows the most of it (a tie
+goes to the primary display). A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
 (`--scenario`, `--width`, `--height`) neither read nor write it, and `--theme` beats the remembered theme.
 Closed while minimized, it keeps the mode it had before (`window_state::closing_mode`).
 

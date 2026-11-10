@@ -112,8 +112,8 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 - Full screen: `F11`, or Toggle full screen in the command palette; the title bar's buttons work in full screen
   too (Restore leaves it).
 - The window opens where it was closed: its size, place and maximized or full-screen state, and the theme, are
-  kept in `~/.folo/desktop.json` (not for `--scenario`, `--width` or `--height`). A place on a display that is
-  gone opens centred on the main one.
+  kept in `~/.folo/desktop.json` (not for `--scenario`, `--width` or `--height`). It reopens on the display it
+  was on, also with displays at different scales; a place on a display that is gone opens centred on the main one.
 
 ### Server
 - DNS rebinding: a server on loopback (the default `--host 127.0.0.1`, also `--mock`) answers only requests whose

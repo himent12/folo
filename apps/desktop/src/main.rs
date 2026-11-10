@@ -223,8 +223,9 @@ fn main() {
     });
 }
 
-/// Where a remembered window opens: its saved bounds on the display that still shows its title bar,
-/// else centred on the primary display (`window_state::place`), maximized or full screen as it was.
+/// Where a remembered window opens: its saved bounds on the display it was on (matched by UUID) or
+/// another that still shows its title bar, else centred on the primary display
+/// (`window_state::place`), maximized or full screen as it was.
 fn restored_bounds(p: window_state::Placement, cx: &App) -> (WindowBounds, Option<gpui::DisplayId>) {
     use window_state::{Rect, WindowMode};
     let rect = |b: Bounds<gpui::Pixels>| Rect {
@@ -237,8 +238,12 @@ fn restored_bounds(p: window_state::Placement, cx: &App) -> (WindowBounds, Optio
     let primary = cx.primary_display().map(|p| p.id());
     let primary = displays.iter().position(|d| Some(d.id()) == primary).unwrap_or(0);
     let rects: Vec<Rect> = displays.iter().map(|d| rect(d.bounds())).collect();
+    let remembered = p
+        .display
+        .as_deref()
+        .and_then(|uuid| displays.iter().position(|d| d.uuid().is_ok_and(|u| u.to_string() == uuid)));
     let saved = Rect { x: p.x, y: p.y, width: p.width, height: p.height };
-    let (i, r) = window_state::place(saved, &rects, primary, theme::size::TOPBAR);
+    let (i, r) = window_state::place(saved, &rects, primary, remembered, theme::size::TOPBAR);
     let bounds = Bounds::new(point(px(r.x), px(r.y)), size(px(r.width), px(r.height)));
     let window_bounds = match p.mode {
         WindowMode::Windowed => WindowBounds::Windowed(bounds),

@@ -1365,7 +1365,7 @@ impl FoloApp {
 
     /// Remember the window (restored bounds, maximized or full screen) and the theme for the next
     /// launch, when this one remembers (`window_state`).
-    pub fn save_window_state(&self, window: &Window, _cx: &App) {
+    pub fn save_window_state(&self, window: &Window, cx: &App) {
         use crate::window_state::{Placement, State, WindowMode};
         let Some(path) = &self.state_path else {
             return;
@@ -1383,6 +1383,7 @@ impl FoloApp {
                 width: b.size.width.into(),
                 height: b.size.height.into(),
                 mode,
+                display: window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()),
             }),
             theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
         };
