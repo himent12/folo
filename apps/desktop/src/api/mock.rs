@@ -1802,14 +1802,25 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
     let batch = config.batch.max(1);
     let accumulate = ((nbs as f64 / batch as f64).round() as u32).max(1);
     let batches = train_images.div_ceil(batch as u64).max(1);
-    let steps = train_images.div_ceil(batch.max(nbs) as u64) as f64 * config.epochs as f64;
     let (optimizer, lr0) = match config.optimizer {
         Optimizer::Sgd => (ResolvedOptimizer::Sgd, config.lr0 as f64),
         Optimizer::Adamw => (ResolvedOptimizer::Adamw, config.lr0 as f64),
-        Optimizer::Auto if steps > 10_000. => (ResolvedOptimizer::Sgd, 0.01),
+        Optimizer::Musgd => (ResolvedOptimizer::Musgd, config.lr0 as f64),
+        // The engine's own rule (docs/MODEL.md §8.2).
         Optimizer::Auto => {
-            let lr = 0.01 / (4.0 + classes as f64);
-            (ResolvedOptimizer::Adamw, (lr * 1e6).round() / 1e6)
+            let a = folo_nn::optim::auto_optimizer(
+                train_images as usize,
+                batch as usize,
+                nbs as usize,
+                config.epochs as usize,
+                classes,
+            );
+            let kind = match a.kind {
+                folo_nn::optim::OptimKind::Sgd => ResolvedOptimizer::Sgd,
+                folo_nn::optim::OptimKind::AdamW => ResolvedOptimizer::Adamw,
+                folo_nn::optim::OptimKind::MuSgd => ResolvedOptimizer::Musgd,
+            };
+            (kind, a.lr0)
         }
     };
     let auto = config.optimizer == Optimizer::Auto;
@@ -2165,7 +2176,7 @@ mod tests {
         // (the iteration count rounds batches up).
         let short = resolve(&cfg(16, 100, Optimizer::Auto), 3200, 3);
         assert_eq!((short.optimizer, short.lr0, short.momentum), (ResolvedOptimizer::Adamw, 0.001429, 0.9));
-        assert_eq!(resolve(&cfg(32, 527, Optimizer::Auto), 1200, 3).optimizer, ResolvedOptimizer::Sgd);
+        assert_eq!(resolve(&cfg(32, 527, Optimizer::Auto), 1200, 3).optimizer, ResolvedOptimizer::Musgd);
     }
 
     #[test]

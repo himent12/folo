@@ -140,15 +140,19 @@ fn training_steps_on_gpu_match_cpu() {
     let dev = gpu!();
     let x = Tensor::rand_uniform([2, 3, 16, 16], -1.0, 1.0, &mut Rng::seed(4));
     let xg = x.to_device(dev).unwrap();
-    for adam in [false, true] {
+    // MuSGD's Newton–Schulz products run as GPU matmuls (other summation order), so it gets the same bounds
+    // after 5 steps; the head is its boosted `.cls` split.
+    for kind in [OptimKind::Sgd, OptimKind::AdamW, OptimKind::MuSgd] {
         let make = || {
             let net = Net::new(5);
-            let groups =
-                StandardGroups::from_module(&net).into_groups(if adam { 1e-3 } else { 0.05 }, 0.9, 5e-4);
-            let opt: Box<dyn Optimizer> = if adam {
-                Box::new(AdamW::new(groups).unwrap())
-            } else {
-                Box::new(Sgd::new(groups).unwrap())
+            let sg = StandardGroups::from_module(&net);
+            let opt: Box<dyn Optimizer> = match kind {
+                OptimKind::AdamW => Box::new(AdamW::new(sg.into_groups(1e-3, 0.9, 5e-4)).unwrap()),
+                OptimKind::Sgd => Box::new(Sgd::new(sg.into_groups(0.05, 0.9, 5e-4)).unwrap()),
+                OptimKind::MuSgd => Box::new(
+                    MuSgd::new(sg.into_boosted_groups(0.05, 0.9, 5e-4, |n| n.starts_with("head."), 3.0))
+                        .unwrap(),
+                ),
             };
             let ema = ModelEma::with_params(Net::new(6), &net, 0.9, 2.0).unwrap();
             (net, opt, ema)
@@ -176,7 +180,7 @@ fn training_steps_on_gpu_match_cpu() {
             step(&cpu, &mut cpu_opt, &mut cpu_ema, &x);
             step(&gn, &mut g_opt, &mut g_ema, &xg);
         }
-        let what = if adam { "adamw" } else { "sgd" };
+        let what = kind.as_str();
         for (c, g) in cpu.named_tensors().iter().zip(gn.named_tensors()) {
             assert_eq!(g.tensor.device(), dev);
             close(&g.tensor, &c.tensor, 2e-4, 2e-3, &format!("{what} model {}", c.name));

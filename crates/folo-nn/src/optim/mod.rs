@@ -26,6 +26,7 @@
 
 mod adamw;
 mod grads;
+mod musgd;
 mod sgd;
 
 use std::collections::HashMap;
@@ -35,6 +36,10 @@ use serde::{Deserialize, Serialize};
 
 pub use adamw::AdamW;
 pub use grads::{GradAccumulator, global_grad_norm};
+pub use musgd::{
+    MUON_SCALE, MuSgd, NS_COEFFS, NS_EPS, NS_STEPS, is_muon_group, muon_scale, orthogonalize,
+    orthogonalize_many,
+};
 pub use sgd::Sgd;
 
 use crate::module::Module;
@@ -48,6 +53,8 @@ pub enum OptimKind {
     Sgd,
     /// Adam with decoupled weight decay.
     AdamW,
+    /// SGD plus a Muon (orthogonalised momentum) update on matrix-shaped weights ([`MuSgd`]).
+    MuSgd,
 }
 
 impl OptimKind {
@@ -56,12 +63,19 @@ impl OptimKind {
         match self {
             OptimKind::Sgd => "sgd",
             OptimKind::AdamW => "adamw",
+            OptimKind::MuSgd => "musgd",
         }
     }
 }
 
 /// The name of the bias group, which docs/MODEL.md §8.4 warms up from `warmup_bias_lr`.
 pub const BIAS_GROUP: &str = "bias";
+
+/// Whether a group warms up from `warmup_bias_lr`: [`BIAS_GROUP`] and its `bias.<suffix>` splits (MuSGD's
+/// `bias.cls`).
+pub fn is_bias_group(name: &str) -> bool {
+    name == BIAS_GROUP || name.strip_prefix(BIAS_GROUP).is_some_and(|r| r.starts_with('.'))
+}
 
 /// A named set of parameters sharing hyperparameters.
 ///
@@ -287,7 +301,7 @@ pub struct GroupContract {
 
 impl GroupContract {
     fn from_group(g: &ParamGroup, kind: OptimKind) -> Self {
-        let sgd = kind == OptimKind::Sgd;
+        let sgd = kind != OptimKind::AdamW;
         GroupContract {
             name: g.name.clone(),
             params: g.params.iter().map(|(n, _)| n.clone()).collect(),
@@ -305,7 +319,7 @@ impl GroupContract {
         g.base_lr = self.lr;
         g.weight_decay = self.weight_decay;
         match kind {
-            OptimKind::Sgd => {
+            OptimKind::Sgd | OptimKind::MuSgd => {
                 g.base_momentum = self.momentum.ok_or_else(|| missing("momentum"))?;
                 g.nesterov = self.nesterov.ok_or_else(|| missing("nesterov"))?;
             }
@@ -454,6 +468,32 @@ impl StandardGroups {
             ParamGroup::new(BIAS_GROUP, self.bias).lr(lr).momentum(momentum),
         ]
     }
+
+    /// MuSGD's groups (docs/MODEL.md §8.2): [`StandardGroups::into_groups`], with the parameters `boost` selects
+    /// moved from each group into a `<group>.cls` group at `boost_factor · lr` (the reference trains the class
+    /// branch of the head at 3x the LR). Order: `decay`, `decay.cls`, `bn`, `bn.cls`, `bias`, `bias.cls`; empty
+    /// `.cls` groups are left out.
+    pub fn into_boosted_groups(
+        self,
+        lr: f64,
+        momentum: f64,
+        weight_decay: f64,
+        boost: impl Fn(&str) -> bool,
+        boost_factor: f64,
+    ) -> Vec<ParamGroup> {
+        let mut out = Vec::new();
+        for (name, params, wd) in
+            [("decay", self.decay, weight_decay), ("bn", self.bn, 0.0), (BIAS_GROUP, self.bias, 0.0)]
+        {
+            let (b, rest): (Vec<_>, Vec<_>) = params.into_iter().partition(|(n, _)| boost(n));
+            out.push(ParamGroup::new(name, rest).lr(lr).momentum(momentum).weight_decay(wd));
+            if !b.is_empty() {
+                let g = ParamGroup::new(format!("{name}.cls"), b);
+                out.push(g.lr(lr * boost_factor).momentum(momentum).weight_decay(wd));
+            }
+        }
+        out
+    }
 }
 
 /// Gradient accumulation length, docs/MODEL.md §8.1: `max(round(nbs / batch), 1)`.
@@ -469,7 +509,7 @@ pub fn effective_weight_decay(weight_decay: f64, batch: usize, accumulate: usize
 /// What `optimizer: auto` chooses (docs/MODEL.md §8.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoChoice {
-    /// SGD for long runs (> 10000 iterations), AdamW otherwise.
+    /// MuSGD (rule 3; SGD before it) for long runs (> 10000 iterations), AdamW otherwise.
     pub kind: OptimKind,
     /// The base LR.
     pub lr0: f64,
@@ -479,9 +519,31 @@ pub struct AutoChoice {
     pub warmup_bias_lr: f64,
 }
 
-/// docs/MODEL.md §8.2 `auto`: `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above 10000, SGD at
-/// `lr0 = 0.01`, else AdamW at `round(0.002 · 5 / (4 + nc), 6)`; momentum 0.9 and `warmup_bias_lr = 0`.
+/// The current version of the `auto` rule (docs/MODEL.md §8.2). A run's settings record the rule it started with
+/// (`TrainConfig.auto_rule`), so a resume keeps it; settings written before the key existed mean rule 1.
+pub const AUTO_RULE: u32 = 3;
+
+/// Rule 2's floor on the AdamW `lr0`: the reference's fit `0.002 · 5 / (4 + nc)` falls below it from 7 classes on
+/// (0.000119 for 80 classes), where it trains from scratch about 5x slower than SGD (docs/hill/learn.md).
+pub const AUTO_ADAMW_MIN_LR0: f64 = 0.001;
+
+/// docs/MODEL.md §8.2 `auto`, the current rule ([`AUTO_RULE`]); see [`auto_optimizer_rule`].
 pub fn auto_optimizer(
+    n_train: usize,
+    batch: usize,
+    nbs: usize,
+    epochs: usize,
+    num_classes: usize,
+) -> AutoChoice {
+    auto_optimizer_rule(AUTO_RULE, n_train, batch, nbs, epochs, num_classes)
+}
+
+/// docs/MODEL.md §8.2 `auto` by rule version: `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above
+/// 10000, SGD at `lr0 = 0.01` (rules 1 and 2) or MuSGD at `lr0 = 0.01` (rule 3, the reference trainer's choice since
+/// Ultralytics 8.4), else AdamW at `round(0.002 · 5 / (4 + nc), 6)` (rule 1, the reference trainer's), raised to at
+/// least [`AUTO_ADAMW_MIN_LR0`] from rule 2 on; momentum 0.9 and `warmup_bias_lr = 0`.
+pub fn auto_optimizer_rule(
+    rule: u32,
     n_train: usize,
     batch: usize,
     nbs: usize,
@@ -490,9 +552,11 @@ pub fn auto_optimizer(
 ) -> AutoChoice {
     let iterations = n_train.div_ceil(batch.max(nbs).max(1)) * epochs;
     if iterations > 10_000 {
-        AutoChoice { kind: OptimKind::Sgd, lr0: 0.01, momentum: 0.9, warmup_bias_lr: 0.0 }
+        let kind = if rule >= 3 { OptimKind::MuSgd } else { OptimKind::Sgd };
+        AutoChoice { kind, lr0: 0.01, momentum: 0.9, warmup_bias_lr: 0.0 }
     } else {
-        let lr0 = (0.002 * 5.0 / (4.0 + num_classes as f64) * 1e6).round() / 1e6;
+        let fit = (0.002 * 5.0 / (4.0 + num_classes as f64) * 1e6).round() / 1e6;
+        let lr0 = if rule == 1 { fit } else { fit.max(AUTO_ADAMW_MIN_LR0) };
         AutoChoice { kind: OptimKind::AdamW, lr0, momentum: 0.9, warmup_bias_lr: 0.0 }
     }
 }
@@ -573,7 +637,15 @@ mod tests {
         assert_eq!(effective_weight_decay(0.0005, 16, 4, 64), 0.0005);
         let a = auto_optimizer(2000, 16, 64, 30, 4);
         assert_eq!((a.kind, a.lr0, a.momentum, a.warmup_bias_lr), (OptimKind::AdamW, 0.00125, 0.9, 0.0));
-        assert_eq!(auto_optimizer(2000, 16, 64, 30, 80).lr0, 0.000119);
-        assert_eq!(auto_optimizer(118_287, 16, 64, 100, 80).kind, OptimKind::Sgd);
+        // Rule 2 floors the AdamW lr0 at 0.001 (from 7 classes on); rule 1 is the reference fit.
+        assert_eq!(auto_optimizer(2000, 16, 64, 30, 80).lr0, 0.001);
+        assert_eq!(auto_optimizer(2000, 16, 64, 30, 6).lr0, 0.001);
+        assert_eq!(auto_optimizer(2000, 16, 64, 30, 2).lr0, 0.001667);
+        assert_eq!(auto_optimizer_rule(1, 2000, 16, 64, 30, 80).lr0, 0.000119);
+        assert_eq!(auto_optimizer_rule(1, 2000, 16, 64, 30, 4), a);
+        // Long runs: MuSGD from rule 3 on, SGD before.
+        assert_eq!(auto_optimizer(118_287, 16, 64, 100, 80).kind, OptimKind::MuSgd);
+        assert_eq!(auto_optimizer_rule(2, 118_287, 16, 64, 100, 80).kind, OptimKind::Sgd);
+        assert_eq!(auto_optimizer_rule(2, 2000, 16, 64, 30, 80), auto_optimizer(2000, 16, 64, 30, 80));
     }
 }

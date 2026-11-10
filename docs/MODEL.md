@@ -645,10 +645,20 @@ Three groups, assigned by tensor name:
 
 Effective weight decay: `wd = weight_decay · batch · accumulate / nbs`.
 
-`auto`: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: SGD with `lr0 = 0.01`,
-`momentum = 0.9`. Otherwise: AdamW with `lr0 = round(0.002 · 5 / (4 + nc), 6)` and `β1 = 0.9` (e.g. 0.00125 for
-`nc = 4`, 0.000119 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`. An explicit `sgd`/`adamw` uses `lr0`,
-`momentum` and `warmup_bias_lr` as given.
+`auto`: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: MuSGD (below) with
+`lr0 = 0.01`, `momentum = 0.9`, as the reference trainer picks since Ultralytics 8.4. Otherwise: AdamW with `lr0 = max(round(0.002 · 5 / (4 + nc), 6), 0.001)` and `β1 = 0.9` (e.g.
+0.00125 for `nc = 4`, 0.001 from `nc = 6` on, so 0.001 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`. An
+explicit `sgd`/`adamw` uses `lr0`, `momentum` and `warmup_bias_lr` as given.
+
+`TrainConfig.auto_rule` (current: 3) versions this rule: rule 3 is the above; rule 2 picks SGD (`lr0 = 0.01`,
+`momentum = 0.9`) instead of MuSGD for long runs; rule 1 is rule 2 without the AdamW floor. On the COCO proxy of
+docs/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches about 1.35x the AP of SGD, as the reference's own
+MuSGD does. The 0.001 floor is FOLO's (rule 2 on). The reference trainer's fit alone (rule 1)
+gives 80 classes 0.000119, and a from-scratch run on a 20k-image COCO subset (20 epochs, 6,260 iterations) then
+reaches about a fifth of the AP of SGD on the same budget, in Ultralytics as in FOLO (docs/hill/learn.md). Rule 2
+changes nothing below 6 classes. Settings saved before the key existed (a checkpoint's `folo.train`, a run's
+`config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (or `2`, CLI)
+selects an older rule for a new run.
 
 **SGD** (PyTorch semantics, Nesterov, no dampening), per parameter `p` with gradient `g`:
 ```
@@ -662,6 +672,24 @@ p = p · (1 − lr · wd)              (decay group only)
 m = β1·m + (1 − β1)·g;   v = β2·v + (1 − β2)·g²
 p = p − lr · (m / (1 − β1^t)) / (sqrt(v / (1 − β2^t)) + eps)
 ```
+**MuSGD** (`optimizer = musgd`; Ultralytics 8.4's `MuSGD` with its trainer's groups, `folo_nn::optim::MuSgd`). Six
+groups: the three above, each split into the head's class branches (`head.cls.*`, `head.o2o.cls.*`: groups
+`decay.cls`, `bn.cls`, `bias.cls`) at `3 · lr0` and the rest at `lr0`; the schedule (§8.4) treats `bias.cls` as a
+bias group. Every group takes the SGD update above (Nesterov, `momentum_buffer`). Before it, every parameter of
+rank 2 or 4 in a `decay` group (every conv weight) also takes a Muon step with the group's current `lr` and `μ`:
+```
+m = μ · m + (1 − μ) · g                      (muon_buffer, starts at zero)
+u = μ · m + (1 − μ) · g                      (Nesterov)
+X = u as [d0, d1·d2·d3] / (‖u‖_F + 1e-7), transposed if it has more rows than columns
+5 times:  A = X·Xᵀ;  X = 3.4445·X + (−4.7750·A + 2.0315·A·A)·X      (then transposed back)
+p = p − 0.2 · lr · sqrt(max(1, d₋₂ / d₋₁)) · X        (the factor is 1 for square kernels)
+```
+then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. Same
+`lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the Newton–Schulz iteration in `f32` (the
+reference: `bfloat16`); matrices are batched by column count with zero-padded rows, which changes no value. On a
+GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, the iteration batched
+matmuls. Tests: `crates/folo-nn/tests/optim.rs` (two steps against an `f64` re-implementation of the reference,
+Newton–Schulz against `f64`), `tests/gpu.rs` (GPU against CPU), `tests/folo_io.rs` (bit-exact resume).
 
 ### 8.3 Batches, accumulation and the step loop
 **Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation

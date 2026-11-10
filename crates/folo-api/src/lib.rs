@@ -1053,13 +1053,15 @@ fn default_lr0() -> f32 {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Optimizer {
-    /// SGD for long runs, AdamW for short ones.
+    /// MuSGD for long runs, AdamW for short ones (docs/MODEL.md §8.2).
     #[default]
     Auto,
     /// SGD with Nesterov momentum.
     Sgd,
     /// AdamW.
     Adamw,
+    /// SGD plus a Muon (orthogonalised momentum) update on conv weights (docs/MODEL.md §8.2).
+    Musgd,
 }
 
 /// Augmentation settings.
@@ -1222,6 +1224,8 @@ pub enum ResolvedOptimizer {
     Sgd,
     /// AdamW (decoupled weight decay).
     Adamw,
+    /// MuSGD: SGD plus a Muon update on conv weights.
+    Musgd,
 }
 
 /// `POST /api/runs/{id}/queue`: moves a waiting run in the training queue. Exactly one of `action` and `position`.

@@ -128,12 +128,14 @@ pub struct DoctorArgs {
 /// Optimizer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum OptimizerArg {
-    /// SGD for long runs, AdamW for short ones.
+    /// MuSGD for long runs, AdamW for short ones (docs/MODEL.md §8.2).
     Auto,
     /// SGD with Nesterov momentum.
     Sgd,
     /// AdamW.
     Adamw,
+    /// MuSGD: SGD plus a Muon (orthogonalised momentum) update on conv weights (docs/MODEL.md §8.2).
+    Musgd,
 }
 
 /// `folo train`. Mirrors `TrainConfig` in docs/API.md (plus the docs/MODEL.md §8.1 recipe keys).
@@ -222,6 +224,12 @@ pub struct TrainArgs {
     /// Disable mosaic for the last N epochs.
     #[arg(long, default_value_t = 10)]
     pub close_mosaic: u32,
+    /// Set any other training key as KEY=VALUE (repeatable): the keys of a run's `config.json` `train` object
+    /// (docs/MODEL.md §8.1), nested ones dotted, e.g. `--set momentum=0.9 --set weight_decay=0.001
+    /// --set loss.tal.topk=13 --set augment.degrees=5`. Applied after the other flags; an unknown key or a value of
+    /// the wrong type is `invalid_config`.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    pub set: Vec<String>,
     /// Folder that run outputs (weights, metrics) go under.
     #[arg(long, default_value = "runs")]
     pub project: PathBuf,

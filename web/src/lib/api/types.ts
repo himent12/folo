@@ -320,7 +320,7 @@ export interface ExportResult {
 
 export type RunStatus = 'queued' | 'running' | 'stopping' | 'stopped' | 'completed' | 'failed';
 export type Device = 'auto' | 'cpu' | `gpu:${number}`;
-export type Optimizer = 'auto' | 'sgd' | 'adamw';
+export type Optimizer = 'auto' | 'sgd' | 'adamw' | 'musgd';
 
 export interface Augment {
   mosaic: number;
@@ -380,7 +380,7 @@ export interface Run {
 
 /** `Run.resolved` (docs/API.md): the settings a run actually trains with. */
 export interface ResolvedTrain {
-  optimizer: 'sgd' | 'adamw';
+  optimizer: 'sgd' | 'adamw' | 'musgd';
   lr0: number;
   lrf: number;
   cos_lr: boolean;

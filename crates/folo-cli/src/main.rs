@@ -464,6 +464,8 @@ mod tests {
         let train = d["commands"].as_array().unwrap().iter().find(|c| c["name"] == "train").unwrap();
         let opt = train["args"].as_array().unwrap().iter().find(|a| a["name"] == "optimizer").unwrap();
         assert_eq!(opt["type"], "enum");
-        assert_eq!(opt["possible_values"].as_array().unwrap().len(), 3);
+        // auto, sgd, adamw, musgd.
+        assert_eq!(opt["possible_values"].as_array().unwrap().len(), 4);
+        assert!(opt["possible_values"].to_string().contains("musgd"), "{}", opt["possible_values"]);
     }
 }

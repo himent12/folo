@@ -45,12 +45,12 @@ function rows(resolved: ResolvedTrain | null, cfg: TrainConfig = config) {
 
 describe('ConfigPanel', () => {
   it('shows the resolved optimizer, LR, accumulation and warmup as the truth', () => {
-    // fasteners: 1920 images at batch 16 over 100 epochs is 3000 iterations: AdamW at 0.002 · 5 / (4 + 8).
+    // fasteners: 1920 images at batch 16 over 100 epochs is 3000 iterations: AdamW at max(0.002 · 5 / (4 + 8), 0.001).
     const r = rows(resolveTrain(config, 1920, 8, 120));
     expect(r['Optimizer']?.textContent).toBe('AdamW (auto)');
     // A named optimizer is a name, in sans (Geist Mono's struck W reads as "₩").
     expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
-    expect(r['Initial LR']?.textContent).toBe('0.000833 (requested 0.01)');
+    expect(r['Initial LR']?.textContent).toBe('0.001 (requested 0.01)');
     // A batch and an optimizer step are two rows, never "per step" for a batch.
     expect(r['Batch']?.textContent).toBe('16');
     expect(r['Effective batch']?.textContent).toBe('64 (4 × 16)');
@@ -64,7 +64,7 @@ describe('ConfigPanel', () => {
     const r = rows(null);
     // One short value; what Auto picks is a line under the label, never a long value wrapping in the value column.
     expect(r['Optimizer']?.textContent).toBe('Auto');
-    expect(r['Optimizer']?.previousElementSibling?.querySelector('.sub')?.textContent).toBe('AdamW for short runs, else SGD');
+    expect(r['Optimizer']?.previousElementSibling?.querySelector('.sub')?.textContent).toBe('AdamW for short runs, else MuSGD');
     expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
     expect(r['Initial LR']?.textContent).toBe('0.01');
     expect(r['Batch']?.textContent).toBe('16');

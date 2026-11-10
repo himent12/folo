@@ -53,8 +53,11 @@ use folo_core::rng::Rng;
 use folo_data::{Batch, DataLoader, Dataset, LoaderConfig};
 use folo_nn::io::{BestState, CheckpointParts, Metrics, ModelConfig, ModelFile, RngState};
 use folo_nn::optim::{
-    AdamW, GradAccumulator, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
+    AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
 };
+
+/// MuSGD's LR factor for the head's class branches (docs/MODEL.md §8.2, the reference's `lr * 3`).
+pub const MUSGD_CLS_LR_FACTOR: f64 = 3.0;
 use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module, RunningStats, ScaleUpdate};
 
 use crate::error::{Error, Result};
@@ -530,10 +533,22 @@ impl Trainer {
         let accumulate = cfg.accumulate();
         let resolved = cfg.resolve_optimizer(n_train, nc);
         let wd = effective_weight_decay(cfg.weight_decay, cfg.batch, accumulate, cfg.nbs);
-        let groups = StandardGroups::from_module(&model).into_groups(resolved.lr0, resolved.momentum, wd);
+        let std_groups = StandardGroups::from_module(&model);
         let opt: Box<dyn Optimizer> = match resolved.kind {
-            OptimKind::Sgd => Box::new(Sgd::new(groups)?),
-            OptimKind::AdamW => Box::new(AdamW::new(groups)?),
+            OptimKind::Sgd => {
+                Box::new(Sgd::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
+            }
+            OptimKind::AdamW => {
+                Box::new(AdamW::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
+            }
+            // MODEL.md §8.2: the head's class branches (o2m and o2o) train at 3x the LR.
+            OptimKind::MuSgd => Box::new(MuSgd::new(std_groups.into_boosted_groups(
+                resolved.lr0,
+                resolved.momentum,
+                wd,
+                |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
+                MUSGD_CLS_LR_FACTOR,
+            ))?),
         };
         let nb = n_train.div_ceil(cfg.batch);
         let spe = nb.div_ceil(accumulate);
@@ -562,7 +577,7 @@ impl Trainer {
             },
         )?;
         let acc = GradAccumulator::new(&model.parameters());
-        let loss_cfg = LossConfig { reg_max: model.head.reg_max, ..LossConfig::default() };
+        let loss_cfg = LossConfig { reg_max: model.head.reg_max, ..cfg.loss };
 
         let file = match &opts.run_dir {
             Some(dir) => {
