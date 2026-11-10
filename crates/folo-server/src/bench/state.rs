@@ -351,7 +351,8 @@ impl Slot {
     }
 
     /// Reads the benchmark in `dir` with its entries and loops. Entries and loops a previous process left active
-    /// are closed as `failed` (and written back); an entry or loop file that cannot be read is skipped and logged.
+    /// are closed as `failed`, those that were `stopping` as `stopped` (and written back); an entry or loop file
+    /// that cannot be read is skipped and logged.
     pub fn load(dir: PathBuf) -> Result<Slot> {
         let path = dir.join("bench.json");
         let bad = |e: &dyn std::fmt::Display| Error::internal(format!("reading {}: {e}", path.display()));
@@ -373,7 +374,12 @@ impl Slot {
                 continue;
             }
             let mut entry = head.entry;
-            if entry.status.is_active() {
+            // A stop that was accepted stands: only the work nobody stopped failed.
+            if entry.status == BenchEntryStatus::Stopping {
+                entry.status = BenchEntryStatus::Stopped;
+                entry.finished = Some(now.clone());
+                closed_entries.push(entry.id.clone());
+            } else if entry.status.is_active() {
                 entry.status = BenchEntryStatus::Failed;
                 entry.finished = Some(now.clone());
                 entry.error = Some(SERVER_STOPPED_ENTRY.into());
@@ -395,7 +401,12 @@ impl Slot {
                 continue;
             }
             let mut lp = f.lp;
-            if lp.status.is_active() {
+            if lp.status == BenchLoopStatus::Stopping {
+                lp.status = BenchLoopStatus::Stopped;
+                lp.phase = None;
+                lp.finished = Some(now.clone());
+                closed_loops.push(lp.id.clone());
+            } else if lp.status.is_active() {
                 lp.status = BenchLoopStatus::Failed;
                 lp.phase = None;
                 lp.finished = Some(now.clone());

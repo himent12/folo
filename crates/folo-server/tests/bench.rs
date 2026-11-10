@@ -1496,6 +1496,92 @@ async fn entries_and_loops_left_active_fail_at_the_next_start() {
     assert_eq!(saved["loop"]["status"], "failed");
 }
 
+/// Waits until model entry `id` has run every pass and is held before its grade ([`RealStore::hold_bench_entries`]).
+async fn held(app: &Router, bench: &str, id: &str) {
+    let t0 = std::time::Instant::now();
+    loop {
+        let e: BenchEntry = ok(app, get(&format!("/api/bench/benchmarks/{bench}/entries/{id}"))).await;
+        if e.status == BenchEntryStatus::Running && e.progress.done == e.progress.total {
+            return;
+        }
+        assert!(t0.elapsed() < TIMEOUT, "{e:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_that_was_accepted_survives_the_server_stopping() {
+    let t = TestDir::new("bench-stopping");
+    let home = t.join("home");
+    let src = |ds: &Dataset| json!({ "kind": "dataset", "dataset_id": ds.id });
+    // An entry stopped while it runs is `stopping`; the server stops before its work ends: it is `stopped`, not
+    // `failed` ("start it again") as an entry nobody stopped is.
+    let (bench_id, entry_id, teacher, pool) = {
+        let f = fixture(&home);
+        let app = &f.app;
+        let ds = dataset(app, "shapes", 20).await;
+        let b = bench(app, json!({ "name": "b", "source": src(&ds), "plan": small_plan() })).await;
+        let m = model(app, &home, "teacher", &["circle", "square"], 7).await;
+        f.store.hold_bench_entries(true);
+        let entries = format!("/api/bench/benchmarks/{}/entries", b.id);
+        let e: BenchEntry =
+            ok(app, post(&entries, json!({ "contestant": { "kind": "model", "model_id": m } }))).await;
+        held(app, &b.id, &e.id).await;
+        let s: BenchEntry = ok(app, post(&format!("{entries}/{}/stop", e.id), json!({}))).await;
+        assert_eq!(s.status, BenchEntryStatus::Stopping);
+        f.store.shutdown();
+        let s: BenchEntry = ok(app, get(&format!("{entries}/{}", e.id))).await;
+        assert_eq!((s.status, s.error.as_deref()), (BenchEntryStatus::Stopped, None), "{s:?}");
+        (b.id, e.id, m, json!({ "kind": "dataset", "dataset_id": ds.id, "split": "train" }))
+    };
+    // A process that died with it `stopping`: it is `stopped` at the next start.
+    let dir = home.join("bench").join(&bench_id);
+    let path = dir.join("entries").join(format!("{entry_id}.json"));
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    file["entry"]["status"] = json!("stopping");
+    file["entry"]["finished"] = Value::Null;
+    std::fs::write(&path, file.to_string()).unwrap();
+    let loop_id = {
+        let f = fixture(&home);
+        let app = &f.app;
+        let e: BenchEntry =
+            ok(app, get(&format!("/api/bench/benchmarks/{bench_id}/entries/{entry_id}"))).await;
+        assert_eq!((e.status, e.error.as_deref()), (BenchEntryStatus::Stopped, None), "{e:?}");
+        assert!(e.finished.is_some());
+        // The same for a loop: stopped while its teacher's entry is held, then the server stops.
+        f.store.hold_bench_entries(true);
+        let loops = format!("/api/bench/benchmarks/{bench_id}/loops");
+        let student = json!({ "epochs": 1, "imgsz": 64, "batch": 4, "device": "cpu" });
+        let l: BenchLoop =
+            ok(app, post(&loops, json!({ "teacher": teacher, "pool": pool, "student": student }))).await;
+        let t0 = std::time::Instant::now();
+        let gen0 = loop {
+            let now: BenchLoop = ok(app, get(&format!("{loops}/{}", l.id))).await;
+            if let Some(id) = now.generations.first().and_then(|g| g.entry_id.clone()) {
+                break id;
+            }
+            assert!(t0.elapsed() < TIMEOUT, "{now:?}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        held(app, &bench_id, &gen0).await;
+        let s: BenchLoop = ok(app, post(&format!("{loops}/{}/stop", l.id), json!({}))).await;
+        assert_eq!(s.status, BenchLoopStatus::Stopping);
+        f.store.shutdown();
+        let s: BenchLoop = ok(app, get(&format!("{loops}/{}", l.id))).await;
+        assert_eq!((s.status, s.error.as_deref()), (BenchLoopStatus::Stopped, None), "{s:?}");
+        l.id
+    };
+    let path = dir.join("loops").join(format!("{loop_id}.json"));
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    file["loop"]["status"] = json!("stopping");
+    file["loop"]["finished"] = Value::Null;
+    std::fs::write(&path, file.to_string()).unwrap();
+    let f = fixture(&home);
+    let l: BenchLoop = ok(&f.app, get(&format!("/api/bench/benchmarks/{bench_id}/loops/{loop_id}"))).await;
+    assert_eq!((l.status, l.error.as_deref()), (BenchLoopStatus::Stopped, None), "{l:?}");
+    assert!(l.finished.is_some());
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Self-improvement loops
 // ---------------------------------------------------------------------------------------------------------------

@@ -90,6 +90,7 @@ pub fn run(job: LoopJob) {
         // A stop that was accepted wins over a last generation that finished meanwhile, as it does for an entry.
         let stopped = lp.status == BenchLoopStatus::Stopping || job.cancelled();
         match ran {
+            _ if closing && lp.status == BenchLoopStatus::Stopping => lp.status = BenchLoopStatus::Stopped,
             _ if closing => {
                 lp.status = BenchLoopStatus::Failed;
                 lp.error = Some(SERVER_STOPPED_LOOP.into());
