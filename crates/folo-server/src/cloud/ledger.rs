@@ -43,6 +43,53 @@ struct Record {
     /// its setup. Absent when it has none (and in records of before this field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     lifetime_s: Option<f64>,
+    /// RFC 3339 time until which the reaper keeps looking for an instance that was never found ([`Ledger::unseen`]):
+    /// when its own watchdog has stopped it at the latest ([`watch_until`]). Absent for every other record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    unseen_until: Option<String>,
+    /// RFC 3339 time the reaper last looked for such an instance ([`Ledger::due`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    looked: Option<String>,
+}
+
+/// The longest an instance's setup is taken to start after its record was written (the default boot timeout): its
+/// watchdog counts from that start, not from the launch request.
+const STARTS_WITHIN_S: f64 = 15.0 * 60.0;
+
+/// The latest an instance of `r` can live when nobody terminates it: its watchdog stops it its time limit, the
+/// grace and the time it keeps trying ([`folo_cloud::bootstrap`]) after its setup starts, at most
+/// [`STARTS_WITHIN_S`] after the record was written. The limit is on record twice, as the run's `deadline` and as
+/// `lifetime_s` from the record's `created`; the later of the two counts. `None` without either.
+fn watch_until(r: &Record) -> Option<f64> {
+    let by_lifetime = parse_rfc3339(&r.instance.created).zip(r.lifetime_s).map(|(c, l)| c + l.max(0.0));
+    let by_deadline = r.instance.deadline.as_deref().and_then(parse_rfc3339);
+    let latest = by_lifetime.into_iter().chain(by_deadline).reduce(f64::max)?;
+    let own = (folo_cloud::bootstrap::GRACE_S + folo_cloud::bootstrap::TERMINATE_TRIES_S) as f64;
+    Some(latest + STARTS_WITHIN_S + own)
+}
+
+/// What the reaper does now about an instance that was never found, watched until `until`, last looked for at
+/// `looked`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Watch {
+    /// The watch is over: the record is final.
+    Over,
+    /// Looked for less than `every` ago.
+    Wait,
+    /// Look for it now.
+    Look,
+}
+
+/// See [`Watch`]: a look at most every `every` until `until` (a last look in the future, a clock that went back,
+/// does not hold the next one off).
+pub(crate) fn watch(until: f64, looked: Option<f64>, now: f64, every: Duration) -> Watch {
+    if now >= until {
+        Watch::Over
+    } else if looked.is_some_and(|l| l <= now && now - l < every.as_secs_f64()) {
+        Watch::Wait
+    } else {
+        Watch::Look
+    }
 }
 
 /// `404 instance_not_found`.
@@ -157,7 +204,13 @@ impl Ledger {
             cost_usd: None,
             error: None,
         };
-        let record = Record { instance, booted: None, lifetime_s: lifetime.map(|l| l.as_secs_f64()) };
+        let record = Record {
+            instance,
+            booted: None,
+            lifetime_s: lifetime.map(|l| l.as_secs_f64()),
+            unseen_until: None,
+            looked: None,
+        };
         self.write(&record)?;
         Ok(record.instance)
     }
@@ -202,12 +255,64 @@ impl Ledger {
         })
     }
 
+    /// The provider has never listed instance `id` (it has no provider id, and its name finds nothing), and no
+    /// longer can be expected to list it soon: `terminated`, ended when it was created (no cost for an instance
+    /// nobody saw). Until its watchdog would have stopped it ([`watch_until`]), it stays marked, for the reaper to
+    /// keep looking for it by its name ([`Ledger::due`]: at its next sweep, then at its slower pace); without a time
+    /// limit on record, it is final at once.
+    pub fn unseen(&self, id: &str, now: f64) -> Result<CloudInstance> {
+        self.change(id, |r| {
+            r.instance.status = CloudInstanceStatus::Terminated;
+            r.instance.error = None;
+            r.instance.ended = Some(r.instance.created.clone()).filter(|c| parse_rfc3339(c).is_some());
+            r.unseen_until = watch_until(r).filter(|&u| u > now).map(rfc3339);
+            r.looked = None;
+        })
+    }
+
+    /// Whether to look for the never found instance of record `id` now ([`watch`] every `every`): when it is time,
+    /// the record says it was looked at `now`, so of two sweeps at once only one looks. A watch that is over is
+    /// cleared: the record is final. False for every other record.
+    pub fn due(&self, id: &str, now: f64, every: Duration) -> Result<bool> {
+        // Most records were never watched: no lock for those.
+        if self.read(id)?.unseen_until.is_none() {
+            return Ok(false);
+        }
+        let _lock = self.lock()?;
+        let mut r = self.read(id)?;
+        let Some(until) = r.unseen_until.as_deref().and_then(parse_rfc3339) else { return Ok(false) };
+        match watch(until, r.looked.as_deref().and_then(parse_rfc3339), now, every) {
+            Watch::Wait => return Ok(false),
+            Watch::Over => (r.unseen_until, r.looked) = (None, None),
+            Watch::Look => r.looked = Some(rfc3339(now)),
+        }
+        self.write(&r)?;
+        Ok(r.unseen_until.is_some())
+    }
+
+    /// The provider lists the never found instance of record `id` after all (as `provider_ref` when it lists one):
+    /// `terminating` again, without an end, for the normal termination, which ends it when the provider confirms
+    /// (so its cost covers what it ran).
+    pub fn reopen(&self, id: &str, provider_ref: Option<String>) -> Result<CloudInstance> {
+        self.change(id, |r| {
+            if r.unseen_until.is_some() {
+                r.instance.status = CloudInstanceStatus::Terminating;
+                r.instance.ended = None;
+                r.instance.provider_ref = provider_ref.or(r.instance.provider_ref.take());
+            }
+        })
+    }
+
     /// [`Ledger::update`] on the whole record.
     fn change(&self, id: &str, change: impl FnOnce(&mut Record)) -> Result<CloudInstance> {
         let _lock = self.lock()?;
         let mut r = self.read(id)?;
         change(&mut r);
         let now = unix_now();
+        // A record whose instance is alive again (found after all) is not watched any more.
+        if r.instance.status.is_alive() {
+            (r.unseen_until, r.looked) = (None, None);
+        }
         if !r.instance.status.is_alive() && r.instance.ended.is_none() {
             r.instance.ended = Some(rfc3339(now));
         }
@@ -241,12 +346,14 @@ impl Ledger {
                 continue;
             }
             match self.read(id) {
+                // Not while the reaper still looks for its instance (a time limit can be longer than this).
                 Ok(r)
-                    if r.instance
-                        .ended
-                        .as_deref()
-                        .and_then(parse_rfc3339)
-                        .is_some_and(|t| now - t > KEEP_ENDED.as_secs_f64()) =>
+                    if r.unseen_until.is_none()
+                        && r.instance
+                            .ended
+                            .as_deref()
+                            .and_then(parse_rfc3339)
+                            .is_some_and(|t| now - t > KEEP_ENDED.as_secs_f64()) =>
                 {
                     self.remove(id);
                 }
@@ -385,6 +492,81 @@ mod tests {
         let unarmed = Ledger::new(&other.join("cloud"), other.join("cloud").join(".lock"), Vec::new());
         let alive = forgotten(&unarmed, CloudInstanceStatus::Running, hour);
         assert!(ten_hours(&unarmed.booted_at(&alive.id, created + 240.0).unwrap()));
+    }
+
+    #[test]
+    fn an_instance_never_found_is_watched_until_its_watchdog_would_have_stopped_it() {
+        let every = Duration::from_secs(600);
+        // The rule: look at once, then every `every`, until the watch is over.
+        assert_eq!(watch(1000.0, None, 0.0, every), Watch::Look);
+        assert_eq!(watch(1000.0, Some(0.0), 599.0, every), Watch::Wait);
+        assert_eq!(watch(1000.0, Some(0.0), 600.0, every), Watch::Look);
+        assert_eq!(watch(1000.0, Some(900.0), 950.0, every), Watch::Wait, "one sweep before the end");
+        assert_eq!(watch(1000.0, Some(900.0), 1000.0, every), Watch::Over);
+        assert_eq!(
+            watch(1000.0, Some(500.0), 100.0, every),
+            Watch::Look,
+            "a look in the future holds nothing off"
+        );
+
+        let dir = TestDir::new("cloud-ledger-unseen");
+        let cloud = dir.join("cloud");
+        let ledger = Ledger::new(&cloud, cloud.join(".lock"), Vec::new());
+        let now = unix_now().floor();
+        let own = (folo_cloud::bootstrap::GRACE_S + folo_cloud::bootstrap::TERMINATE_TRIES_S) as f64;
+        // The later of the two limits on record counts: the run's deadline, or the time limit from the record.
+        let i =
+            ledger.create("cc_1", "p", "run_1", &offer(Some(3.6)), Some(rfc3339(now + 100.0)), None).unwrap();
+        let record = |id: &str| ledger.read(id).unwrap();
+        assert_eq!(watch_until(&record(&i.id)), Some(now + 100.0 + STARTS_WITHIN_S + own));
+        let j = ledger
+            .create(
+                "cc_1",
+                "p",
+                "run_2",
+                &offer(Some(3.6)),
+                Some(rfc3339(now + 100.0)),
+                Some(Duration::from_secs(500)),
+            )
+            .unwrap();
+        assert_eq!(watch_until(&record(&j.id)), Some(now + 500.0 + STARTS_WITHIN_S + own));
+        let none = ledger.create("cc_1", "p", "run_3", &offer(Some(3.6)), None, None).unwrap();
+        assert_eq!(watch_until(&record(&none.id)), None);
+
+        // Never found: ended when it was written, at no cost, and watched; without a limit on record, final at once.
+        let unseen = ledger.unseen(&i.id, now).unwrap();
+        assert_eq!(
+            (unseen.status, unseen.ended.as_ref(), unseen.cost_usd),
+            (CloudInstanceStatus::Terminated, Some(&unseen.created), Some(0.0))
+        );
+        assert!(record(&i.id).unseen_until.is_some());
+        ledger.unseen(&none.id, now).unwrap();
+        assert_eq!(record(&none.id).unseen_until, None);
+        assert!(!ledger.due(&none.id, now, every).unwrap());
+        // Two sweeps at once: one looks.
+        assert!(ledger.due(&i.id, now, every).unwrap());
+        assert!(!ledger.due(&i.id, now, every).unwrap());
+        assert!(ledger.due(&i.id, now + 600.0, every).unwrap());
+        // The API's instance does not carry the mark.
+        let shown = serde_json::to_string(&ledger.get(&i.id).unwrap()).unwrap();
+        assert!(!shown.contains("unseen_until") && !shown.contains("looked"), "{shown}");
+        // Found after all: `terminating` again without an end, then terminated with what it ran.
+        let reopened = ledger.reopen(&i.id, Some("pod-9".into())).unwrap();
+        assert_eq!(
+            (reopened.status, reopened.ended, reopened.provider_ref.as_deref()),
+            (CloudInstanceStatus::Terminating, None, Some("pod-9"))
+        );
+        assert_eq!(record(&i.id).unseen_until, None, "not watched any more");
+        assert!(!ledger.due(&i.id, now + 1200.0, every).unwrap());
+        // A watch that is over is cleared: the record is final.
+        ledger.unseen(&j.id, now).unwrap();
+        assert!(!ledger.due(&j.id, now + 500.0 + STARTS_WITHIN_S + own, every).unwrap());
+        assert_eq!(record(&j.id).unseen_until, None);
+        // A watched record is kept past the time ended records are pruned after.
+        let k = ledger.create("cc_1", "p", "run_4", &offer(None), Some(rfc3339(now + 600.0)), None).unwrap();
+        ledger.update(&k.id, |i| i.created = rfc3339(now - KEEP_ENDED.as_secs_f64() - 60.0)).unwrap();
+        ledger.unseen(&k.id, now).unwrap();
+        assert!(ledger.list().iter().any(|i| i.id == k.id));
     }
 
     #[test]
