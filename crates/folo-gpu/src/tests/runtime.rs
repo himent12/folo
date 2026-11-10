@@ -290,3 +290,32 @@ fn map_outcome_prefers_a_recorded_loss() {
     assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::DeviceLost(_))));
     assert!(matches!(ctx.map_outcome(Ok(())), Err(crate::GpuError::DeviceLost(_))));
 }
+
+/// A profiling context (`FOLO_GPU_PROFILE=1`) whose device is lost: the timestamp readback at submission waits
+/// through the loss-aware poll, so the wait reports `DeviceLost` instead of panicking inside wgpu with the batch
+/// lock held, and the context stays usable (no poisoned lock).
+#[test]
+fn profiling_context_survives_device_loss() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::with_options(&crate::GpuOptions {
+        profile: true,
+        ..crate::GpuOptions::from_env()
+    })
+    .unwrap();
+    if !ctx.profiling() {
+        eprintln!("adapter has no timestamp queries inside passes; skipping");
+        return;
+    }
+    let a = ctx.upload(&[1u8; 256]).unwrap();
+    let b = ctx.alloc(256).unwrap();
+    ctx.copy(a.raw(), 0, b.raw(), 0, 256);
+    ctx.sync().unwrap();
+    assert!(ctx.profile_take().iter().any(|r| r.label == "copy"));
+    ctx.copy(a.raw(), 0, b.raw(), 0, 256);
+    ctx.destroy_device();
+    let is_lost = |r: crate::Result<()>| matches!(r, Err(crate::GpuError::DeviceLost(_)));
+    assert!(is_lost(ctx.sync()), "first sync");
+    ctx.copy(a.raw(), 0, b.raw(), 0, 256);
+    assert!(is_lost(ctx.sync()), "and a later one, on the same batch lock");
+    let _ = ctx.profile_take();
+}

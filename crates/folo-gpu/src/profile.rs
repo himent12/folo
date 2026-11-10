@@ -1,8 +1,9 @@
 //! Per-kernel GPU timings for profiling (`FOLO_GPU_PROFILE=1`).
 //!
-//! With the variable set (and an adapter that has timestamp queries inside passes and encoders), a context writes
-//! a timestamp before and after every dispatch, buffer copy and clear, resolves them when the batch is submitted
-//! (waiting for the GPU there, so a profiled run is slower end to end) and adds the differences up per label:
+//! With the variable set (or [`crate::GpuOptions::profile`]) and an adapter that has timestamp queries inside passes
+//! and encoders, a context writes a timestamp before and after every dispatch, buffer copy and clear, resolves them
+//! when the batch is submitted (waiting for the GPU there, so a profiled run is slower end to end) and adds the
+//! differences up per label:
 //! the caller's [`scope`] tag, if one is set on the encoding thread, then the kernel name. Read the totals with
 //! [`crate::GpuContext::profile_take`]. Without the variable none of this exists: no feature is requested, no
 //! query is written and [`scope`] does not run its closure.
@@ -79,10 +80,9 @@ impl Profiler {
             | wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES
     }
 
-    /// Whether profiling was asked for and `adapter` can do it.
-    pub fn wanted(adapter: &wgpu::Adapter) -> bool {
-        std::env::var(ENV_PROFILE).is_ok_and(|v| v != "0" && !v.is_empty())
-            && adapter.features().contains(Self::features())
+    /// Whether `adapter` can profile.
+    pub fn supported(adapter: &wgpu::Adapter) -> bool {
+        adapter.features().contains(Self::features())
     }
 
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -138,12 +138,14 @@ impl Profiler {
         Some(bytes)
     }
 
-    /// Reads the resolved timestamps of the batch just submitted (waits for the GPU) and adds them to the totals.
-    pub fn collect(&mut self, device: &wgpu::Device, bytes: u64) {
+    /// Reads the resolved timestamps of the batch just submitted and adds them to the totals. `wait` waits for the
+    /// GPU and says whether it succeeded; when it did not (a lost device), the batch's timings are dropped.
+    pub fn collect(&mut self, bytes: u64, wait: impl FnOnce() -> bool) {
         let slice = self.read.slice(..bytes);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        if let Ok(view) = slice.get_mapped_range() {
+        if wait()
+            && let Ok(view) = slice.get_mapped_range()
+        {
             let ticks: Vec<u64> = view.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
             for (label, t) in self.labels.drain(..).zip(ticks.as_chunks::<2>().0) {
                 let ms = t[1].saturating_sub(t[0]) as f64 * self.period * 1e-6;

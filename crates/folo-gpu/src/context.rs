@@ -83,6 +83,8 @@ pub struct GpuOptions {
     /// matrices and `shader-f16`, and a start-up self-test on the device passes; otherwise the context keeps the
     /// regular kernels and [`GpuContext::tensor_cores_status`] says why.
     pub tensor_cores: bool,
+    /// Time every kernel ([`crate::profile`]), when the adapter has timestamp queries inside passes.
+    pub profile: bool,
 }
 
 impl Default for GpuOptions {
@@ -93,13 +95,14 @@ impl Default for GpuOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             enable_f16: true,
             tensor_cores: false,
+            profile: false,
         }
     }
 }
 
 impl GpuOptions {
-    /// Defaults overridden by [`ENV_ADAPTER`], [`ENV_BACKEND`], [`ENV_NO_F16`] and [`ENV_TENSOR_CORES`] (or
-    /// [`request_tensor_cores`]).
+    /// Defaults overridden by [`ENV_ADAPTER`], [`ENV_BACKEND`], [`ENV_NO_F16`], [`ENV_TENSOR_CORES`] (or
+    /// [`request_tensor_cores`]) and [`crate::profile::ENV_PROFILE`].
     pub fn from_env() -> Self {
         let mut o = Self::default();
         if let Ok(a) = std::env::var(ENV_ADAPTER)
@@ -115,6 +118,7 @@ impl GpuOptions {
         }
         o.tensor_cores = TENSOR_CORES_REQUESTED.load(Ordering::Relaxed)
             || std::env::var(ENV_TENSOR_CORES).is_ok_and(|v| v != "0" && !v.is_empty());
+        o.profile = std::env::var(crate::profile::ENV_PROFILE).is_ok_and(|v| v != "0" && !v.is_empty());
         o
     }
 }
@@ -544,7 +548,7 @@ impl GpuContext {
         if options.enable_f16 && adapter.features().contains(wgpu::Features::SHADER_F16) {
             features |= wgpu::Features::SHADER_F16;
         }
-        let profile = Profiler::wanted(&adapter);
+        let profile = options.profile && Profiler::supported(&adapter);
         if profile {
             features |= Profiler::features();
         }
@@ -1322,7 +1326,8 @@ impl GpuContext {
         self.inner.queue.submit([enc.finish()]);
         self.inner.submissions.fetch_add(1, Ordering::Relaxed);
         if let (Some(p), Some(bytes)) = (prof.as_mut(), timed) {
-            p.collect(&self.inner.device, bytes);
+            // Loss-aware: wgpu panics inside the poll of a lost device, which here would poison the batch lock.
+            p.collect(bytes, || self.poll_checked(wgpu::PollType::wait_indefinitely()).is_ok());
         }
         b.dispatches = 0;
         b.chunk = 0;
