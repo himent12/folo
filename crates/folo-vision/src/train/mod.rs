@@ -51,10 +51,13 @@ use folo_api::{LogLevel, RunEvent, RunStatus};
 use folo_core::Device;
 use folo_core::rng::Rng;
 use folo_data::{Batch, DataLoader, Dataset, LoaderConfig};
-use folo_nn::io::{BestState, CheckpointParts, Metrics, ModelConfig, ModelFile, RngState, save_checkpoint};
+use folo_nn::io::{BestState, CheckpointParts, Metrics, ModelConfig, ModelFile, RngState};
 use folo_nn::optim::{
-    AdamW, GradAccumulator, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
+    AdamW, GradAccumulator, MuSgd, OptimKind, Optimizer, Sgd, StandardGroups, effective_weight_decay,
 };
+
+/// MuSGD's LR factor for the head's class branches (docs/MODEL.md §8.2, the reference's `lr * 3`).
+pub const MUSGD_CLS_LR_FACTOR: f64 = 3.0;
 use folo_nn::{DecayKind, EmaState, GradScaler, LrSchedule, ModelEma, Module, RunningStats, ScaleUpdate};
 
 use crate::error::{Error, Result};
@@ -326,7 +329,13 @@ pub struct Trainer {
     /// The loss scaler of a mixed-precision run (`amp`). Its skip streak (fails the run at [`MAX_AMP_SKIPS`]) is
     /// part of the checkpointed state.
     scaler: Option<GradScaler>,
+    /// The next epoch's batches, started when the previous epoch took its last batch, so that the loader works
+    /// while validation and the checkpoints run (the epoch it belongs to, and its source).
+    prefetched: Option<(u32, BatchSource)>,
 }
+
+/// A started epoch's batches: the loader's, staged by the feeder thread on a folo-gpu device.
+type BatchSource = Box<dyn Iterator<Item = Result<(Batch, Option<folo_gpu::Staged>)>> + Send>;
 
 impl Trainer {
     /// A new run of `cfg` on `data`.
@@ -524,10 +533,22 @@ impl Trainer {
         let accumulate = cfg.accumulate();
         let resolved = cfg.resolve_optimizer(n_train, nc);
         let wd = effective_weight_decay(cfg.weight_decay, cfg.batch, accumulate, cfg.nbs);
-        let groups = StandardGroups::from_module(&model).into_groups(resolved.lr0, resolved.momentum, wd);
+        let std_groups = StandardGroups::from_module(&model);
         let opt: Box<dyn Optimizer> = match resolved.kind {
-            OptimKind::Sgd => Box::new(Sgd::new(groups)?),
-            OptimKind::AdamW => Box::new(AdamW::new(groups)?),
+            OptimKind::Sgd => {
+                Box::new(Sgd::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
+            }
+            OptimKind::AdamW => {
+                Box::new(AdamW::new(std_groups.into_groups(resolved.lr0, resolved.momentum, wd))?)
+            }
+            // MODEL.md §8.2: the head's class branches (o2m and o2o) train at 3x the LR.
+            OptimKind::MuSgd => Box::new(MuSgd::new(std_groups.into_boosted_groups(
+                resolved.lr0,
+                resolved.momentum,
+                wd,
+                |n| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls."),
+                MUSGD_CLS_LR_FACTOR,
+            ))?),
         };
         let nb = n_train.div_ceil(cfg.batch);
         let spe = nb.div_ceil(accumulate);
@@ -556,7 +577,7 @@ impl Trainer {
             },
         )?;
         let acc = GradAccumulator::new(&model.parameters());
-        let loss_cfg = LossConfig { reg_max: model.head.reg_max, ..LossConfig::default() };
+        let loss_cfg = LossConfig { reg_max: model.head.reg_max, ..cfg.loss };
 
         let file = match &opts.run_dir {
             Some(dir) => {
@@ -601,6 +622,7 @@ impl Trainer {
             extra_meta: BTreeMap::new(),
             last_saved: None,
             scaler,
+            prefetched: None,
         })
     }
 
@@ -627,6 +649,11 @@ impl Trainer {
     /// The optimizer the config resolved to.
     pub fn optimizer(&self) -> ResolvedOptim {
         self.resolved
+    }
+
+    /// The optimizer's parameter groups (names, parameters, base and current LR).
+    pub fn param_groups(&self) -> &[folo_nn::optim::ParamGroup] {
+        self.opt.groups()
     }
 
     /// docs/API.md's `Run.resolved`: the optimizer, effective LR and weight decay, accumulation and warmup this run
@@ -727,6 +754,9 @@ impl Trainer {
         }
         self.emitter.status(RunStatus::Running, None);
         let r = self.run_inner().map_err(|e| self.explain_device_loss(e));
+        // A next epoch started before the run ended (finished, stopped, stopped early or failed) is dropped, which
+        // stops and joins its loader workers and feeder: nothing keeps decoding or staging once `run` returns.
+        self.prefetched = None;
         match &r {
             Ok(s) => self.emitter.status(s.status, None),
             Err(e) => {
@@ -930,13 +960,10 @@ impl Trainer {
         let (mut finite_batches, mut window_finite) = (0usize, false);
         let (epoch_start, mut epoch_images) = (Instant::now(), 0usize);
         let skipped_before = self.scaler.as_ref().map_or(0, GradScaler::skipped_steps);
-        // On a folo-gpu device the loader delivers u8 pixels and a feeder thread stages each batch while the
-        // previous step runs; the step then only encodes the copy and the conversion.
         let ctx = folo_gpu::context_for(self.device);
-        let iter = self.loader.epoch(e);
-        let mut source: Box<dyn Iterator<Item = Result<(Batch, Option<folo_gpu::Staged>)>>> = match &ctx {
-            Some(c) => Box::new(feed::Feeder::new(iter, c.clone())?.map(|r| r.map(|(b, s)| (b, Some(s))))),
-            None => Box::new(iter.map(|r| r.map(|b| (b, None)).map_err(Error::from))),
+        let mut source = match self.prefetched.take() {
+            Some((pe, source)) if pe == e => source,
+            _ => self.start_epoch(e)?,
         };
         let mut k = 0usize;
         // A batch's wall time starts when the previous one ends, so the ETA counts the wait for the loader too:
@@ -1052,6 +1079,23 @@ impl Trainer {
             }
         }
         drop(source);
+        // Start the next epoch now: its first batches are ready when validation and the checkpoints are done.
+        // The batches are the same whenever an epoch starts (§8.3: everything is seeded by the epoch). Not after
+        // the last epoch or once a stop is requested; a failure here only costs the head start (the epoch starts
+        // its loader itself), not the trained epoch's validation and checkpoint.
+        if k == nb && e + 1 < self.cfg.epochs && !self.stopping() {
+            match self.start_epoch(e + 1) {
+                Ok(source) => self.prefetched = Some((e + 1, source)),
+                Err(err) => self.emitter.log(
+                    LogLevel::Warn,
+                    format!(
+                        "epoch {}'s loader could not start early ({}); it starts with the epoch",
+                        e + 2,
+                        err.summary()
+                    ),
+                ),
+            }
+        }
         if k != nb {
             return Err(Error::Failed(format!("epoch {} delivered {k} of {nb} batches", e + 1)));
         }
@@ -1073,6 +1117,16 @@ impl Trainer {
         let f = finite_batches as f64;
         let (b, c, d) = ((sum[0] / f) as f32, (sum[1] / f) as f32, (sum[2] / f) as f32);
         Ok(Some(folo_api::Loss { box_: b, cls: c, dfl: d, total: b + c + d }))
+    }
+
+    /// Starts epoch `e` of the loader. On a folo-gpu device the loader delivers u8 pixels and a feeder thread
+    /// stages each batch while the previous step runs; the step then only encodes the copy and the conversion.
+    fn start_epoch(&self, e: u32) -> Result<BatchSource> {
+        let iter = self.loader.epoch(e);
+        Ok(match folo_gpu::context_for(self.device) {
+            Some(c) => Box::new(feed::Feeder::new(iter, c)?.map(|r| r.map(|(b, s)| (b, Some(s))))),
+            None => Box::new(iter.map(|r| r.map(|b| (b, None)).map_err(Error::from))),
+        })
     }
 
     /// §8.3's end-of-window step: schedule, clip, optimizer, EMA, `t += 1`. With mixed precision (§8.8) the
@@ -1233,8 +1287,78 @@ impl Trainer {
             best: self.best,
             train_config: &train,
         };
-        Ok(save_checkpoint(path, &meta, &parts)?)
+        let (map, mut tensors) = folo_nn::io::checkpoint_contents(&meta, &parts)?;
+        download_all(&mut tensors)?;
+        Ok(folo_nn::io::safetensors::write_file(path.as_ref(), Some(&map), &tensors)?)
     }
+}
+
+/// Bytes [`download_all`] concatenates into one device buffer at most (also never above the device's buffer limits).
+const DOWNLOAD_CHUNK: u64 = 128 << 20;
+
+/// Replaces the device tensors of a checkpoint by host copies, downloaded with one readback per dtype and chunk of
+/// at most [`DOWNLOAD_CHUNK`] bytes: the tensors of a chunk are concatenated on the device first. Read one by one,
+/// every tensor would wait for the GPU (about a thousand waits for the weights, EMA and optimizer state of
+/// folo-n); in one piece, folo-x's state (up to ~900 MB) would exceed many adapters' buffer limits and add a full
+/// copy of the training state to VRAM. The bytes are the same.
+pub(crate) fn download_all(tensors: &mut [(String, folo_core::Tensor)]) -> Result<()> {
+    download_all_chunked(tensors, DOWNLOAD_CHUNK)
+}
+
+/// [`download_all`] with chunks of at most `chunk` bytes (a tensor larger than that is a chunk of its own).
+fn download_all_chunked(tensors: &mut [(String, folo_core::Tensor)], chunk: u64) -> Result<()> {
+    let _g = folo_core::no_grad();
+    let mut groups: Vec<((Device, folo_core::DType), Vec<usize>)> = Vec::new();
+    for (i, (_, t)) in tensors.iter_mut().enumerate() {
+        if t.device().is_cpu() {
+            continue;
+        }
+        if t.numel() == 0 {
+            *t = t.to_device(Device::Cpu)?;
+            continue;
+        }
+        let key = (t.device(), t.dtype());
+        match groups.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, v)) => v.push(i),
+            None => groups.push((key, vec![i])),
+        }
+    }
+    for ((dev, dtype), idx) in groups {
+        let limit = folo_gpu::context_for(dev)
+            .map_or(u64::MAX, |c| c.caps().max_buffer_size.min(c.caps().max_storage_buffer_binding_size));
+        let max = chunk.min(limit).max(1);
+        let elem = dtype.size_in_bytes() as u64;
+        let mut rest = &idx[..];
+        while !rest.is_empty() {
+            // As many tensors as fit in `max` bytes, at least one.
+            let mut bytes = 0;
+            let take = rest
+                .iter()
+                .take_while(|&&i| {
+                    bytes += tensors[i].1.numel() as u64 * elem;
+                    bytes <= max
+                })
+                .count()
+                .max(1);
+            let (part, tail) = rest.split_at(take);
+            rest = tail;
+            let flat = part
+                .iter()
+                .map(|&i| tensors[i].1.reshape([tensors[i].1.numel()]))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let host = folo_core::Tensor::cat(&flat, 0)?.to_device(Device::Cpu)?;
+            drop(flat);
+            let mut start = 0;
+            for &i in part {
+                let t = &tensors[i].1;
+                let n = t.numel();
+                let piece = host.narrow(0, start, n)?.reshape(t.shape().clone())?;
+                start += n;
+                tensors[i].1 = piece;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether `e` is folo-gpu reporting a lost device, from the trainer's own tensor work, a layer, or the batch
@@ -1311,6 +1435,116 @@ fn eta_s(clock: &Clock, nb: usize, e: u32, k: usize, epochs: u32, phase: impl Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trainer on 8 synthetic 64 px training images (2 batches of 4), on the CPU.
+    fn micro(epochs: u32, patience: u32, opts: TrainOptions) -> Trainer {
+        use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+        let shapes = SyntheticConfig {
+            images: 10,
+            classes: vec!["circle".into(), "square".into()],
+            imgsz: 64,
+            seed: 3,
+            val_fraction: 0.2,
+            ..SyntheticConfig::default()
+        };
+        let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+        let data = TrainData {
+            train: split(folo_data::Split::Train),
+            val: split(folo_data::Split::Val),
+            classes: shapes.classes.clone(),
+        };
+        let cfg = TrainConfig {
+            epochs,
+            patience,
+            batch: 4,
+            imgsz: 64,
+            device: "cpu".into(),
+            optimizer: OptimizerChoice::Adamw,
+            lr0: 0.002,
+            warmup_epochs: 0.0,
+            workers: 2,
+            augment: folo_data::AugmentConfig::none(),
+            ..TrainConfig::default()
+        };
+        Trainer::new(cfg, data, opts).unwrap()
+    }
+
+    /// The next epoch, started while the previous one validates, does not outlive the run: after a stop requested
+    /// at an epoch's end, an early stop and a completed run, nothing is prefetched, so its loader workers and
+    /// feeder are joined (dropping an epoch joins them).
+    #[test]
+    fn prefetched_epoch_does_not_outlive_the_run() {
+        // Stopped: the stop arrives with epoch 1's event, after epoch 2 was prefetched.
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let opts = TrainOptions {
+            events: Some(Box::new(move |e: &RunEvent| {
+                if matches!(e, RunEvent::Epoch(_)) {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            })),
+            stop,
+            ..TrainOptions::default()
+        };
+        let mut t = micro(3, 100, opts);
+        let s = t.run().unwrap();
+        assert_eq!((s.status, s.epochs_completed), (RunStatus::Stopped, 1));
+        assert!(t.prefetched.is_none(), "stopped run");
+        // Early stop (patience 0: after epoch 1), with epoch 2 prefetched.
+        let mut t = micro(3, 0, TrainOptions::default());
+        let s = t.run().unwrap();
+        assert!(s.early_stopped && s.epochs_completed == 1);
+        assert!(t.prefetched.is_none(), "early-stopped run");
+        // Completed: the last epoch prefetches nothing.
+        let mut t = micro(2, 100, TrainOptions::default());
+        let s = t.run().unwrap();
+        assert_eq!((s.status, s.epochs_completed), (RunStatus::Completed, 2));
+        assert!(t.prefetched.is_none(), "completed run");
+    }
+
+    /// The batched checkpoint download gives every tensor's exact bytes and shape: several dtypes, a view that is
+    /// not contiguous, an empty tensor and one already on the host; in one chunk per dtype, and in chunks so small
+    /// that some hold one tensor, some several, and one tensor is larger than a chunk.
+    #[test]
+    fn download_all_keeps_every_byte() {
+        let ctx = match folo_gpu::GpuContext::shared() {
+            Ok(c) => c,
+            Err(e) => return eprintln!("note: skipping GPU test, no adapter: {e}"),
+        };
+        if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+            return eprintln!("note: skipping GPU test on software adapter {}", ctx.summary().name);
+        }
+        let dev = folo_gpu::init().unwrap();
+        let mut rng = folo_core::rng::Rng::seed(9);
+        let a = folo_core::Tensor::rand_uniform([3, 5, 7], -1.0, 1.0, &mut rng);
+        let b = folo_core::Tensor::rand_uniform([4, 6], 0.0, 9.0, &mut rng);
+        let host = vec![
+            ("a".to_string(), a.clone()),
+            ("b".to_string(), b.clone()),
+            ("bt".to_string(), b.transpose(0, 1).unwrap()),
+            ("n".to_string(), folo_core::Tensor::from_vec((0..11u32).collect::<Vec<_>>(), [11]).unwrap()),
+            ("e".to_string(), folo_core::Tensor::from_vec(Vec::<f32>::new(), [0, 3]).unwrap()),
+            ("c".to_string(), folo_core::Tensor::rand_uniform([2], 0.0, 1.0, &mut rng)),
+        ];
+        let mut tensors: Vec<(String, folo_core::Tensor)> = host
+            .iter()
+            .map(|(n, t)| (n.clone(), if n == "c" { t.clone() } else { t.to_device(dev).unwrap() }))
+            .collect();
+        // A transposed (strided) view on the device.
+        tensors[2].1 = tensors[1].1.transpose(0, 1).unwrap();
+        // 400 bytes: `a` (420) alone and over the limit, `b` + `bt` (96 + 96) together, `n` (44).
+        for chunk in [DOWNLOAD_CHUNK, 400, 1] {
+            let mut tensors = tensors.clone();
+            download_all_chunked(&mut tensors, chunk).unwrap();
+            for ((n, got), (_, want)) in tensors.iter().zip(&host) {
+                assert!(got.device().is_cpu(), "{n}, chunk {chunk}");
+                assert_eq!(got.dims(), want.dims(), "{n}, chunk {chunk}");
+                assert_eq!(got.dtype(), want.dtype(), "{n}, chunk {chunk}");
+                let (g, w) = (got.to_cpu_storage().unwrap(), want.to_cpu_storage().unwrap());
+                assert_eq!(g.as_bytes(), w.as_bytes(), "{n}, chunk {chunk}");
+            }
+        }
+    }
 
     /// The ETA counts the loader's wait, and does not charge the mosaic-free epochs at mosaic speed.
     #[test]

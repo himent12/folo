@@ -305,6 +305,40 @@ pub fn non_max_suppression(
     if num_classes == 0 || boxes.is_empty() {
         return Vec::new();
     }
+    let cands = extract_candidates(scores, boxes.len(), num_classes, num_classes, 0, cfg);
+    finish(cands, cfg, |i| boxes[i as usize])
+}
+
+/// [`non_max_suppression`] of one image's decoded outputs as rows `[A, 4 + num_classes]` (`x1, y1, x2, y2`, then
+/// the class scores: [`crate::model::HeadOutput::decoded_on_device`]'s layout), read in place. Same result.
+///
+/// # Panics
+/// If `rows.len()` is not a multiple of `4 + num_classes`, or there are more than `u32::MAX` anchors.
+pub fn non_max_suppression_rows(rows: &[f32], num_classes: usize, cfg: &NmsConfig) -> Vec<Detection> {
+    let w = 4 + num_classes;
+    assert!(rows.len().is_multiple_of(w), "non_max_suppression_rows: rows must be [A, 4 + num_classes]");
+    let a = rows.len() / w;
+    assert!(a <= u32::MAX as usize, "non_max_suppression_rows: too many anchors");
+    if num_classes == 0 || a == 0 {
+        return Vec::new();
+    }
+    let cands = extract_candidates(rows, a, num_classes, w, 4, cfg);
+    finish(cands, cfg, |i| {
+        let r = &rows[i as usize * w..];
+        Xyxy::new(r[0], r[1], r[2], r[3])
+    })
+}
+
+/// The candidates of `anchors` score rows (row `a` is `data[a * stride + offset..][..num_classes]`), in anchor
+/// order: every class above `conf` with `multi_label`, else the anchor's best class (first on ties) if above.
+fn extract_candidates(
+    data: &[f32],
+    anchors: usize,
+    num_classes: usize,
+    stride: usize,
+    offset: usize,
+    cfg: &NmsConfig,
+) -> Vec<Cand> {
     let extract = |a: usize, row: &[f32], out: &mut Vec<Cand>| {
         if cfg.multi_label {
             for (c, &s) in row.iter().enumerate() {
@@ -325,28 +359,27 @@ pub fn non_max_suppression(
             }
         }
     };
-    let cands: Vec<Cand> = if boxes.len() >= PAR_ROWS {
+    let rows = |lo: usize, hi: usize, out: &mut Vec<Cand>| {
+        for a in lo..hi {
+            extract(a, &data[a * stride + offset..][..num_classes], out);
+        }
+    };
+    if anchors >= PAR_ROWS {
         const ROWS: usize = 1024;
-        let parts: Vec<Vec<Cand>> = scores
-            .par_chunks(ROWS * num_classes)
-            .enumerate()
-            .map(|(ci, block)| {
+        let parts: Vec<Vec<Cand>> = (0..anchors.div_ceil(ROWS))
+            .into_par_iter()
+            .map(|ci| {
                 let mut out = Vec::new();
-                for (r, row) in block.chunks_exact(num_classes).enumerate() {
-                    extract(ci * ROWS + r, row, &mut out);
-                }
+                rows(ci * ROWS, ((ci + 1) * ROWS).min(anchors), &mut out);
                 out
             })
             .collect();
         parts.concat()
     } else {
         let mut out = Vec::new();
-        for (a, row) in scores.chunks_exact(num_classes).enumerate() {
-            extract(a, row, &mut out);
-        }
+        rows(0, anchors, &mut out);
         out
-    };
-    finish(cands, cfg, |i| boxes[i as usize])
+    }
 }
 
 /// An anchor's best class above the confidence threshold, with its decoded box: what a device decode
@@ -527,6 +560,38 @@ mod tests {
         let boxes = [b(0., 0., 10., 10.), b(1., 1., 11., 11.), b(0., 0., 10., 10.)];
         let classes = [u32::MAX, u32::MAX, 7];
         assert_eq!(batched_nms(&boxes, &[0.9, 0.8, 0.7], &classes, 0.5, 300, false), vec![0, 2]);
+    }
+
+    /// NMS from `[A, 4 + nc]` rows is NMS from the split boxes and scores, single- and multi-label, with ties
+    /// and enough anchors for the parallel extraction.
+    #[test]
+    fn rows_match_split_outputs() {
+        let (a, nc) = (5000usize, 3usize);
+        let mut state = 12345u64;
+        let mut next = || {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let mut rows = Vec::with_capacity(a * (4 + nc));
+        let (mut boxes, mut scores) = (Vec::new(), Vec::new());
+        for _ in 0..a {
+            let (x, y) = (next() * 600.0, next() * 600.0);
+            let bx = Xyxy::new(x, y, x + 5.0 + next() * 60.0, y + 5.0 + next() * 60.0);
+            rows.extend_from_slice(&[bx.x1, bx.y1, bx.x2, bx.y2]);
+            boxes.push(bx);
+            for _ in 0..nc {
+                let s = (next() * 16.0).floor() / 16.0; // many ties
+                rows.push(s);
+                scores.push(s);
+            }
+        }
+        for multi_label in [false, true] {
+            let cfg = NmsConfig { conf: 0.05, multi_label, max_candidates: 4000, ..NmsConfig::default() };
+            let want = non_max_suppression(&boxes, &scores, nc, &cfg);
+            assert!(want.len() > 50);
+            assert_eq!(non_max_suppression_rows(&rows, nc, &cfg), want, "multi_label {multi_label}");
+        }
+        assert!(non_max_suppression_rows(&[], nc, &NmsConfig::val()).is_empty());
     }
 
     #[test]

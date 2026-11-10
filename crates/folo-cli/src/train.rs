@@ -160,7 +160,8 @@ fn start(
     };
     let suffix = arch.strip_prefix("folo-").unwrap_or(&arch).to_string();
     let name = args.name.clone().unwrap_or_else(|| format!("{ds_name}-{suffix}"));
-    let mut cfg = config_of(args, name.clone(), absolute(data_arg), arch, weights_head);
+    let mut cfg =
+        apply_sets(config_of(args, name.clone(), absolute(data_arg), arch, weights_head), &args.set)?;
     // Validate before creating the run folder, so a typo leaves nothing behind.
     cfg.validate().map_err(engine_error)?;
     let data = train_data(&ds)?;
@@ -210,6 +211,7 @@ fn config_of(
             OptimizerArg::Auto => OptimizerChoice::Auto,
             OptimizerArg::Sgd => OptimizerChoice::Sgd,
             OptimizerArg::Adamw => OptimizerChoice::Adamw,
+            OptimizerArg::Musgd => OptimizerChoice::Musgd,
         },
         lr0: folo_vision::train::f32_decimal(args.lr0),
         lrf: args.lrf,
@@ -232,6 +234,59 @@ fn config_of(
         },
         ..TrainConfig::default()
     }
+}
+
+/// Keys of the `train` object whose flags do more than set the key (pick the run folder, open the dataset, create
+/// the device, ask for tensor cores), with that flag: `--set` refuses them.
+const FLAG_ONLY_KEYS: [(&str, &str); 6] = [
+    ("name", "--name"),
+    ("dataset", "--data"),
+    ("data_format", "--format"),
+    ("arch", "--model"),
+    ("device", "--device"),
+    ("amp", "--amp"),
+];
+
+/// `--set KEY=VALUE`: `cfg` with each dotted key of its JSON form replaced by the value (JSON when it parses as
+/// JSON, else a string). A key the config does not have, a key of [`FLAG_ONLY_KEYS`], or a value its field cannot
+/// take, is `invalid_config`.
+fn apply_sets(cfg: TrainConfig, sets: &[String]) -> Result<TrainConfig, CliError> {
+    if sets.is_empty() {
+        return Ok(cfg);
+    }
+    let bad = |msg: String| {
+        CliError::new(ExitCode::Usage, "invalid_config", msg)
+            .hint("--set takes KEY=VALUE with a key of the run's config.json `train` object, e.g. --set momentum=0.9")
+    };
+    let mut v = serde_json::to_value(&cfg).expect("configs serialize");
+    for s in sets {
+        let Some((key, raw)) = s.split_once('=') else {
+            return Err(bad(format!("--set {s}: expected KEY=VALUE")));
+        };
+        if let Some((k, flag)) = FLAG_ONLY_KEYS.iter().find(|(k, _)| *k == key.trim()) {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "invalid_config",
+                format!("--set {k}: use {flag} (it does more than set the key: --set cannot change `{k}`)"),
+            )
+            .hint(format!("use {flag} instead of --set {k}=...")));
+        }
+        let mut slot = &mut v;
+        for part in key.trim().split('.') {
+            let keys = slot.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "));
+            slot = match slot.get_mut(part) {
+                Some(next) => next,
+                None => {
+                    return Err(bad(format!(
+                        "--set {key}: no training key `{part}`{}",
+                        keys.map_or(String::new(), |k| format!(" (there are: {k})"))
+                    )));
+                }
+            };
+        }
+        *slot = serde_json::from_str(raw.trim()).unwrap_or_else(|_| json!(raw.trim()));
+    }
+    serde_json::from_value(v).map_err(|e| bad(format!("--set: {e}")))
 }
 
 fn resume(
@@ -281,6 +336,14 @@ fn resume(
             folo_api::json::path(if best.is_file() { &best } else { ckpt }),
             if stored.dataset.is_empty() { "<dataset>" } else { &stored.dataset }
         )));
+    }
+    if !args.set.is_empty() {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "invalid_config",
+            "--set cannot change a resumed run (a resumed run keeps its settings)",
+        )
+        .hint("leave --set out, or start a new run from its weights with --model <run>/weights/best.folo"));
     }
     check_resume_flags(args, &stored)?;
     // weights/last.folo lives in <run>/weights/.
@@ -658,9 +721,48 @@ fn read_classes(run_dir: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::same;
+    use super::{apply_sets, same};
     use folo_test_support::TestDir;
+    use folo_vision::TrainConfig;
     use serde_json::json;
+
+    /// `--set KEY=VALUE`: dotted keys of the `train` object, JSON values (or strings), errors for unknown keys
+    /// and mistyped values.
+    #[test]
+    fn set_overrides_train_keys() {
+        let sets = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let c = apply_sets(
+            TrainConfig::default(),
+            &sets(&["momentum=0.9", "loss.tal.topk = 13", "augment.degrees=5", "auto_rule=1", "head=o2o"]),
+        )
+        .unwrap();
+        assert_eq!((c.momentum, c.loss.tal.topk, c.augment.degrees, c.auto_rule), (0.9, 13, 5.0, 1));
+        assert_eq!(json!(c.head), json!("o2o"));
+        assert_eq!(apply_sets(TrainConfig::default(), &[]).unwrap(), TrainConfig::default());
+        for bad in ["momentum", "nope=1", "loss.tal.nope=1", "momentum=fast", "loss.tal.topk=-1"] {
+            let e = apply_sets(TrainConfig::default(), &sets(&[bad])).unwrap_err();
+            assert_eq!(e.code, "invalid_config", "{bad}");
+        }
+    }
+
+    /// Keys whose flags have side effects are refused with the flag to use: `--set name=X` was ignored, `dataset`
+    /// and `data_format` were written to config.json while training read `--data` (a later resume reopened the
+    /// wrong path), `amp` skipped asking for tensor cores and `device` skipped creating the device.
+    #[test]
+    fn set_refuses_keys_with_their_own_flags() {
+        for (key, flag) in [
+            ("name=x", "--name"),
+            ("dataset=D:/elsewhere", "--data"),
+            ("data_format=coco", "--format"),
+            ("arch=folo-s", "--model"),
+            ("device=gpu:0", "--device"),
+            (" amp =true", "--amp"),
+        ] {
+            let e = apply_sets(TrainConfig::default(), &[key.to_string()]).unwrap_err();
+            assert!(e.code == "invalid_config" && matches!(e.exit, super::ExitCode::Usage), "{key}");
+            assert!(e.message.contains(flag), "{key}: {}", e.message);
+        }
+    }
 
     #[test]
     fn resume_settings_compare_integers_exactly() {
@@ -756,7 +858,7 @@ mod tests {
             // With --weights the CLI takes the architecture from the file; the server already set it to the weights'.
             let arch = if weights.is_some() { api.arch.as_str().to_string() } else { args.model.clone() };
             let got = super::config_of(&args, args.name.clone().unwrap(), data.into(), arch, file_head);
-            let mut want = folo_vision::TrainConfig::from_api(&api);
+            let mut want = folo_vision::TrainConfig::from_api(&api).unwrap();
             (want.dataset, want.data_format, want.workers) = (data.into(), want_format, got.workers);
             assert_eq!(got, want, "{}", cmd.cli);
         }

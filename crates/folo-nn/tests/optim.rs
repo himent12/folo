@@ -108,6 +108,7 @@ fn generic_path_matches_fast_path_bitwise() {
                 Box::new(AdamW::new(vec![mk(&fast)]).unwrap()),
                 Box::new(AdamW::new(vec![mk(&slow)]).unwrap()),
             ),
+            OptimKind::MuSgd => unreachable!("not in the loop"),
         };
         for _ in 0..3 {
             a.step(&grads_for(&fast, &gv)).unwrap();
@@ -240,4 +241,168 @@ fn accumulator_with_duplicate_handles() {
     acc.add(&grads_for(&p, &[3.0])).unwrap();
     assert_eq!(acc.grad(&p).unwrap().to_vec::<f32>().unwrap(), [3.0]);
     assert!(acc.grad(&q).is_none());
+}
+
+/// Newton–Schulz in `f64` on a row-major `rows x cols` matrix: the reference of `orthogonalize`.
+fn ns5_f64(m: &[f64], rows: usize, cols: usize) -> Vec<f64> {
+    let t = rows > cols;
+    let (r, c) = if t { (cols, rows) } else { (rows, cols) };
+    let at = |i: usize, j: usize| if t { m[j * cols + i] } else { m[i * cols + j] };
+    let norm = m.iter().map(|v| v * v).sum::<f64>().sqrt() + 1e-7;
+    let mut x: Vec<f64> = (0..r * c).map(|k| at(k / c, k % c) / norm).collect();
+    let (a, b, cc) = (3.4445, -4.7750, 2.0315);
+    let mul = |p: &[f64], q: &[f64], n: usize, k: usize, m: usize| {
+        let mut o = vec![0.0; n * m];
+        for i in 0..n {
+            for j in 0..m {
+                o[i * m + j] = (0..k).map(|l| p[i * k + l] * q[l * m + j]).sum();
+            }
+        }
+        o
+    };
+    for _ in 0..5 {
+        let xt: Vec<f64> = (0..c * r).map(|k| x[(k % r) * c + k / r]).collect();
+        let am = mul(&x, &xt, r, c, r);
+        let aa = mul(&am, &am, r, r, r);
+        let bm: Vec<f64> = am.iter().zip(&aa).map(|(p, q)| b * p + cc * q).collect();
+        let bx = mul(&bm, &x, r, r, c);
+        x = x.iter().zip(&bx).map(|(p, q)| a * p + q).collect();
+    }
+    if t { (0..rows * cols).map(|k| x[(k % cols) * rows + k / cols]).collect() } else { x }
+}
+
+#[test]
+fn newton_schulz_matches_f64_and_batches_exactly() {
+    let mut rng = Rng::seed(3);
+    // Wide, tall (transposed internally), a conv weight, and one zero-padded in its bucket.
+    let shapes: [&[usize]; 4] = [&[3, 5], &[6, 2], &[4, 2, 1, 3], &[1, 6]];
+    let ts: Vec<Tensor> = shapes.iter().map(|s| Tensor::randn(s.to_vec(), 0.0, 1.0, &mut rng)).collect();
+    let many = orthogonalize_many(&ts).unwrap();
+    for (t, o) in ts.iter().zip(&many) {
+        let d = t.dims().to_vec();
+        let (rows, cols) = (d[0], t.numel() / d[0]);
+        let v: Vec<f64> = t.to_vec::<f32>().unwrap().iter().map(|&x| x as f64).collect();
+        assert_eq!(o.dims(), &d[..]);
+        // Scaled by sqrt(max(1, d[-2] / d[-1])): sqrt(3) for the [6, 2] matrix, 1 for the others.
+        let scale = muon_scale(&d) as f64;
+        let want: Vec<f64> = ns5_f64(&v, rows, cols).iter().map(|x| x * scale).collect();
+        close(&o.to_vec::<f32>().unwrap(), &want, 1e-4);
+        // Alone, without bucket padding: the same numbers.
+        let one = orthogonalize(t).unwrap().to_vec::<f32>().unwrap();
+        close(&one, &o.to_vec::<f32>().unwrap().iter().map(|&x| x as f64).collect::<Vec<_>>(), 1e-5);
+    }
+    // The reference scales by sqrt(max(1, d[-2] / d[-1])): 1 for a square kernel, sqrt(3) for [.., 3, 1].
+    assert_eq!(muon_scale(&[8, 4, 3, 3]), 1.0);
+    assert_eq!(muon_scale(&[2, 3, 1]), 3f32.sqrt());
+    assert_eq!(muon_scale(&[4, 6]), 1.0);
+}
+
+fn sgd_ref(p: &mut [f64], s: &mut [f64], g: &[f64], lr: f64, wd: f64) {
+    let mu = 0.9;
+    for ((p, s), g) in p.iter_mut().zip(s.iter_mut()).zip(g) {
+        let d = g + wd * *p;
+        *s = mu * *s + d;
+        *p -= lr * (d + mu * *s);
+    }
+}
+
+/// Two MuSGD steps against an `f64` re-implementation of Ultralytics 8.4's `MuSGD` (muon 0.2, sgd 1.0, Nesterov):
+/// a Muon conv weight, a boosted `.cls` weight at 3x the LR, and a BatchNorm weight that only takes SGD.
+#[test]
+fn musgd_matches_reference_steps() {
+    let w = Tensor::from_slice(&[0.3f32, -0.2, 0.5, 0.1, 0.4, -0.6], [2, 3, 1, 1]).unwrap().requires_grad_();
+    let h = Tensor::from_slice(&[0.2f32, -0.1, 0.3, 0.7], [2, 2, 1, 1]).unwrap().requires_grad_();
+    let bn = param(&[1.0, 0.9]);
+    let (lr, mu, wd) = (0.05f64, 0.9f64, 0.01f64);
+    let groups = vec![
+        ParamGroup::new("decay", vec![("w".into(), w.clone())]).lr(lr).momentum(mu).weight_decay(wd),
+        ParamGroup::new("decay.cls", vec![("h".into(), h.clone())])
+            .lr(3.0 * lr)
+            .momentum(mu)
+            .weight_decay(wd),
+        ParamGroup::new("bn", vec![("bn".into(), bn.clone())]).lr(lr).momentum(mu),
+    ];
+    let mut opt = MuSgd::new(groups).unwrap();
+    assert_eq!(opt.kind(), OptimKind::MuSgd);
+    let gw = [[0.1f32, -0.3, 0.2, 0.05, 0.4, -0.1], [-0.2, 0.1, 0.3, 0.2, -0.05, 0.15]];
+    let gh = [[0.3f32, 0.1, -0.2, 0.4], [0.1, -0.1, 0.2, 0.05]];
+    let gb = [G1, G2];
+
+    let f = |v: &[f32]| v.iter().map(|&x| x as f64).collect::<Vec<f64>>();
+    let (mut rw, mut rh) = (f(&w.to_vec::<f32>().unwrap()), f(&h.to_vec::<f32>().unwrap()));
+    let mut rb = vec![1.0, 0.9];
+    let (mut mw, mut mh) = (vec![0.0; 6], vec![0.0; 4]);
+    let (mut sw, mut sh, mut sb) = (vec![0.0; 6], vec![0.0; 4], vec![0.0; 2]);
+    let muon = |p: &mut [f64], m: &mut [f64], s: &mut [f64], g: &[f64], lr: f64| {
+        for (m, g) in m.iter_mut().zip(g) {
+            *m = mu * *m + (1.0 - mu) * g;
+        }
+        let u: Vec<f64> = m.iter().zip(g).map(|(m, g)| mu * m + (1.0 - mu) * g).collect();
+        let o = ns5_f64(&u, 2, u.len() / 2);
+        for (p, o) in p.iter_mut().zip(&o) {
+            *p -= 0.2 * lr * o;
+        }
+        sgd_ref(p, s, g, lr, wd);
+    };
+    for k in 0..2 {
+        let dot = |p: &Tensor, g: &[f32]| {
+            p.mul(&Tensor::from_slice(g, p.shape().clone()).unwrap()).unwrap().sum_all().unwrap()
+        };
+        let loss = dot(&w, &gw[k]).add(&dot(&h, &gh[k])).unwrap().add(&dot(&bn, &gb[k])).unwrap();
+        let grads = loss.backward().unwrap();
+        opt.step(&grads).unwrap();
+        muon(&mut rw, &mut mw, &mut sw, &f(&gw[k]), lr);
+        muon(&mut rh, &mut mh, &mut sh, &f(&gh[k]), 3.0 * lr);
+        sgd_ref(&mut rb, &mut sb, &f(&gb[k]), lr, 0.0);
+        close(&w.to_vec::<f32>().unwrap(), &rw, 1e-5);
+        close(&h.to_vec::<f32>().unwrap(), &rh, 1e-5);
+        close(&bn.to_vec::<f32>().unwrap(), &rb, 1e-6);
+    }
+    let names: Vec<String> = opt.state_tensors().unwrap().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        names,
+        ["w.momentum_buffer", "h.momentum_buffer", "bn.momentum_buffer", "w.muon_buffer", "h.muon_buffer"]
+    );
+    close(&opt.muon_buffer(0, 0).unwrap().to_vec::<f32>().unwrap(), &mw, 1e-6);
+    let c = opt.contract();
+    assert_eq!(c.kind, OptimKind::MuSgd);
+    assert_eq!((c.groups[1].lr, c.groups[1].momentum), (3.0 * lr, Some(mu)));
+}
+
+#[test]
+fn boosted_groups_and_bias_warmup() {
+    let mut rng = Rng::seed(0);
+    let model = Sequential::new()
+        .push_named("stem", ConvBnAct::new(3, 4, 3, 1, 1, Activation::Silu, &mut rng))
+        .push_named("out", Conv2d::new(Conv2dConfig::new(4, 2, 1), &mut rng));
+    let gs = StandardGroups::from_module(&model).into_boosted_groups(
+        0.01,
+        0.9,
+        5e-4,
+        |n| n.starts_with("out."),
+        3.0,
+    );
+    let summary: Vec<(&str, usize, f64, f64)> =
+        gs.iter().map(|g| (g.name.as_str(), g.params.len(), g.base_lr, g.weight_decay)).collect();
+    assert_eq!(
+        summary,
+        [
+            ("decay", 1, 0.01, 5e-4),
+            ("decay.cls", 1, 0.03, 5e-4),
+            ("bn", 1, 0.01, 0.0),
+            ("bias", 1, 0.01, 0.0),
+            ("bias.cls", 1, 0.03, 0.0)
+        ]
+    );
+    assert!(
+        is_bias_group("bias")
+            && is_bias_group("bias.cls")
+            && !is_bias_group("biased")
+            && !is_bias_group("bn")
+    );
+    assert!(is_muon_group("decay") && is_muon_group("decay.cls") && !is_muon_group("bn"));
+    // Warmup starts both bias groups at warmup_bias_lr, the others at 0.
+    let sched = LrSchedule::new(DecayKind::Linear, 30, 13, 0.01, 3.0, 0.1, 0.8).unwrap();
+    assert_eq!(sched.lr_at(0, &gs[4]), 0.1);
+    assert_eq!(sched.lr_at(0, &gs[1]), 0.0);
 }

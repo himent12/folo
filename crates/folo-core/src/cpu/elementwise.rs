@@ -320,6 +320,19 @@ fn sigmoid(x: f32) -> f32 {
     if x >= 0.0 { r } else { e * r }
 }
 
+/// `x · sigmoid(x)`: the CPU's SiLU, element by element, exactly as `Tensor::silu` computes it on the CPU.
+#[inline(always)]
+pub fn silu(x: f32) -> f32 {
+    x * sigmoid(x)
+}
+
+/// `g · silu'(x)`, exactly as the CPU backward of `Tensor::silu` computes it.
+#[inline(always)]
+pub fn silu_backward(x: f32, g: f32) -> f32 {
+    let s = sigmoid(x);
+    g * (s + x * s * (1.0 - s))
+}
+
 #[inline(always)]
 fn softplus(x: f32) -> f32 {
     x.max(0.0) + fast_exp(-x.abs()).ln_1p()
@@ -501,7 +514,7 @@ pub(crate) fn unary(op: UnaryOp, x: &[f32], lx: &Layout) -> Vec<f32> {
         Acos => map1(x, lx, f32::acos),
         Erf => map1(x, lx, erf),
         Sigmoid => map1(x, lx, sigmoid),
-        Silu => map1(x, lx, |v| v * sigmoid(v)),
+        Silu => map1(x, lx, silu),
         Relu => map1(x, lx, |v| v.max(0.0)),
         LeakyRelu(a) => map1(x, lx, move |v| if v > 0.0 { v } else { a * v }),
         Hardswish => map1(x, lx, |v| v * (v + 3.0).clamp(0.0, 6.0) * (1.0 / 6.0)),
@@ -565,10 +578,7 @@ pub(crate) fn unary_backward(op: UnaryOp, x: &[f32], lx: &Layout, g: &[f32], lg:
             let s = sigmoid(x);
             g * s * (1.0 - s)
         }),
-        Silu => map2(x, lx, g, lg, |x, g| {
-            let s = sigmoid(x);
-            g * (s + x * s * (1.0 - s))
-        }),
+        Silu => map2(x, lx, g, lg, silu_backward),
         Relu => map2(x, lx, g, lg, |x, g| if x > 0.0 { g } else { 0.0 }),
         LeakyRelu(a) => map2(x, lx, g, lg, move |x, g| if x > 0.0 { g } else { a * g }),
         Hardswish => map2(x, lx, g, lg, |x, g| {

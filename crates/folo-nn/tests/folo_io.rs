@@ -331,10 +331,17 @@ fn new_run(kind: OptimKind, seed: u64) -> Run {
     let mut rng = Rng::seed(seed);
     let model = net(3, &mut rng);
     let ema = ModelEma::new(net(3, &mut Rng::seed(seed + 100)), &model).unwrap();
-    let groups = StandardGroups::from_module(&model).into_groups(0.01, 0.9, 5e-4);
+    let sg = StandardGroups::from_module(&model);
     let opt: Box<dyn Optimizer> = match kind {
-        OptimKind::Sgd => Box::new(Sgd::new(groups).unwrap()),
-        OptimKind::AdamW => Box::new(AdamW::new(groups).unwrap()),
+        OptimKind::Sgd => Box::new(Sgd::new(sg.into_groups(0.01, 0.9, 5e-4)).unwrap()),
+        OptimKind::AdamW => Box::new(AdamW::new(sg.into_groups(0.01, 0.9, 5e-4)).unwrap()),
+        // The last layer stands in for the head's class branch (`.cls` groups at 3x the LR).
+        OptimKind::MuSgd => {
+            let last = sg.decay.last().unwrap().0.rsplit_once('.').unwrap().0.to_string() + ".";
+            Box::new(
+                MuSgd::new(sg.into_boosted_groups(0.01, 0.9, 5e-4, |n| n.starts_with(&last), 3.0)).unwrap(),
+            )
+        }
     };
     let sched = LrSchedule::new(DecayKind::Cosine, 2, 5, 0.01, 0.0, 0.1, 0.8).unwrap();
     // Warmup over a few iterations so resume crosses the warmup interpolation.
@@ -387,7 +394,7 @@ fn snapshot(r: &Run) -> Vec<(String, Vec<u32>)> {
 
 #[test]
 fn checkpoint_resume_is_bit_identical() {
-    for kind in [OptimKind::Sgd, OptimKind::AdamW] {
+    for kind in [OptimKind::Sgd, OptimKind::AdamW, OptimKind::MuSgd] {
         let mut a = new_run(kind, 10);
         train_steps(&mut a, 3);
         let path = tmp(&format!("resume-{}.folo", kind.as_str()));

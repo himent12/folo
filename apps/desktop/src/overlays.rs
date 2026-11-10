@@ -16,7 +16,7 @@ use crate::api::RunStatus;
 use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, Route, act};
 
 /// The optimizer segments' labels (the helper under them repeats the chosen one).
-const OPT_LABELS: [&str; 3] = ["Auto", "SGD", "AdamW"];
+const OPT_LABELS: [&str; 4] = ["Auto", "SGD", "AdamW", "MuSGD"];
 use crate::controls::Btn;
 use crate::store::{ImgKind, Load};
 use crate::theme::{Theme, radius, theme, ty};
@@ -972,6 +972,7 @@ impl FoloApp {
         let name_input = f.name.clone();
         let error = f.error.clone();
         let submitting = f.submitting;
+        let opt_unknown = f.optimizer_unknown;
         let ds = datasets.get(ds_i).cloned();
         // Advanced: what differs from a fresh form's defaults, so a collapsed group still says
         // what it will do. Open while one of its fields needs fixing.
@@ -980,7 +981,9 @@ impl FoloApp {
             if f.e2e {
                 changed.push("end-to-end".into());
             }
-            if opt != 0 {
+            if opt_unknown {
+                changed.push("unknown optimizer".into());
+            } else if opt != 0 {
                 changed.push(format!("{} at {}", OPT_LABELS[opt], crate::ui::fmt_lr(lr0 as f64)));
             }
             if f.amp {
@@ -993,7 +996,7 @@ impl FoloApp {
             if changed.is_empty() { "Defaults".to_string() } else { changed.join(" · ") }
         };
         // An invalid rate (only with a chosen optimizer: Auto ignores the field) keeps it open.
-        let adv_open = f.advanced || (f.lr_invalid && opt != 0);
+        let adv_open = f.advanced || (f.lr_invalid && opt != 0) || opt_unknown;
         // A Mixed precision switch that held focus when it became blocked (the device changed by
         // key, or the server's answer arrived) has no focus stop any more: focus moves to the
         // control before it, so keys keep working. Before the controls are built, so that one
@@ -1090,7 +1093,9 @@ impl FoloApp {
         let size_seg = seg(self, "nr-imgsz", &size_refs, imgsz, window, cx, |f, i| f.imgsz = i);
         let device_seg =
             seg(self, "nr-device", &["Auto", "GPU 0", "CPU"], device, window, cx, |f, i| f.device = i);
-        let opt_seg = seg(self, "nr-opt", &OPT_LABELS, opt, window, cx, |f, i| f.optimizer = i);
+        // An unknown prefilled optimizer selects no segment.
+        let opt_sel = if opt_unknown { OPT_LABELS.len() } else { opt };
+        let opt_seg = seg(self, "nr-opt", &OPT_LABELS, opt_sel, window, cx, |f, i| f.pick_optimizer(i));
         // A typed value outside a slider's preset range widens it (rather than pinning the thumb at
         // an end, where one arrow press would jump to the end value).
         let epochs_slider = self
@@ -1137,19 +1142,23 @@ impl FoloApp {
         // Short windows (the 620 px minimum): tighter rhythm and no restating helpers in the Model
         // rows, so the Schedule's controls are in view without scrolling.
         let short = window.viewport_size().height < px(700.);
-        // What Auto resolves to for this dataset, batch and length (the engine's rule: SGD at 0.01
-        // past 10,000 optimizer steps of a 64-image nominal batch, else AdamW at 0.01 / (4 + classes) to six decimals),
-        // so the form can say which, and that the rate field is then unused.
+        // What Auto resolves to for this dataset, batch and length (the engine's own rule, docs/MODEL.md §8.2:
+        // MuSGD at 0.01 past 10,000 optimizer steps of a 64-image nominal batch, else AdamW at its fitted rate), so
+        // the form can say which, and that the rate field is then unused. Written as every rate is (1.11×10⁻³).
         let auto_pick = ds.as_ref().filter(|_| opt == 0).map(|d| {
-            let steps = (d.splits.train as usize).div_ceil(BATCHES[batch].max(64) as usize)
-                * epochs.round().max(1.) as usize;
-            if steps > 10_000 {
-                ("SGD", crate::ui::fmt_lr(0.01))
-            } else {
-                let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
-                // Written as every rate is (1.11×10⁻³).
-                ("AdamW", crate::ui::fmt_lr(lr))
-            }
+            let a = folo_nn::optim::auto_optimizer(
+                d.splits.train as usize,
+                BATCHES[batch] as usize,
+                64,
+                epochs.round().max(1.) as usize,
+                d.classes.len(),
+            );
+            let kind = match a.kind {
+                folo_nn::optim::OptimKind::Sgd => "SGD",
+                folo_nn::optim::OptimKind::AdamW => "AdamW",
+                folo_nn::optim::OptimKind::MuSgd => "MuSGD",
+            };
+            (kind, crate::ui::fmt_lr(a.lr0))
         });
         // The adapter behind "GPU 0", named as the other screens name it.
         let gpu_name =
@@ -1468,6 +1477,7 @@ impl FoloApp {
                         // A field in the group that needs fixing keeps it open.
                         if let Some(f) = this.new_run.as_mut()
                             && !(f.lr_invalid && f.optimizer != 0)
+                            && !f.optimizer_unknown
                         {
                             f.advanced = !f.advanced;
                             cx.notify();
@@ -1547,12 +1557,14 @@ impl FoloApp {
                             "Optimizer",
                             opt_seg,
                             Some(match (opt, &auto_pick) {
+                                _ if opt_unknown => "Unknown optimizer (from a newer FOLO): pick one".to_string(),
                                 (0, Some((kind, _))) => {
                                     format!("Auto: {kind} for this run, at its own learning rate")
                                 }
-                                (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
+                                (0, None) => "Auto: MuSGD for long runs, else AdamW".to_string(),
                                 (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
-                                _ => "AdamW with weight decay".to_string(),
+                                (2, _) => "AdamW with weight decay".to_string(),
+                                _ => "MuSGD: SGD plus a Muon update on conv weights".to_string(),
                             }),
                         )))
                         .child(
@@ -1932,6 +1944,16 @@ impl FoloApp {
                 Btn::Primary,
                 Some(go_icon),
                 "Fix the highlighted fields first",
+                window,
+                cx,
+            )
+        } else if opt_unknown {
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Pick an optimizer first",
                 window,
                 cx,
             )

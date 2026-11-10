@@ -218,6 +218,59 @@ fn staged_upload_from_another_thread() {
     }
 }
 
+/// `upload_with`: bytes written in pieces into the mapped staging memory arrive, for lengths that are not a
+/// multiple of 4; the second round reuses the staging buffers the first left mapped (one size class has two
+/// lengths), and two uploads in a row without a wait each keep their own bytes.
+#[test]
+fn upload_with_reuses_mapped_staging() {
+    let ctx = gpu!();
+    for round in 0..2 {
+        for len in [1usize, 7, 4096, 4093, 300_001] {
+            let data: Vec<u8> = (0..len).map(|i| ((i + round) * 31 % 251) as u8).collect();
+            let (buf, n) = ctx
+                .upload_with(len as u64, |dst| {
+                    let (mut a, mut b) = dst.split_at(len / 2);
+                    a.copy_from_slice(&data[..len / 2]);
+                    b.copy_from_slice(&data[len / 2..]);
+                    len
+                })
+                .unwrap();
+            assert_eq!(n, len);
+            let back = ctx.read(buf.raw(), 0, len as u64).unwrap();
+            assert_eq!(back, data, "round {round}, length {len}");
+        }
+    }
+    // Two uploads back to back without a wait between them: each lands in its own buffer.
+    let (a, ()) = ctx.upload_with(8, |mut d| d.copy_from_slice(&[1; 8])).unwrap();
+    let (b, ()) = ctx.upload_with(8, |mut d| d.copy_from_slice(&[2; 8])).unwrap();
+    assert_eq!(ctx.read(a.raw(), 0, 8).unwrap(), [1; 8]);
+    assert_eq!(ctx.read(b.raw(), 0, 8).unwrap(), [2; 8]);
+    assert!(ctx.release_memory().is_ok());
+}
+
+/// `release_memory` right after an upload (its staging buffer still being mapped again) keeps that buffer too:
+/// it is dropped when the map completes, not put back on the idle list.
+#[test]
+fn release_memory_drops_staging_still_being_mapped() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::new().unwrap();
+    let (a, ()) = ctx.upload_with(64, |mut d| d.copy_from_slice(&[3; 64])).unwrap();
+    ctx.sync().unwrap();
+    assert_eq!(ctx.idle_staging(), 1, "an upload leaves its staging buffer mapped for reuse");
+    let (b, ()) = ctx.upload_with(64, |mut d| d.copy_from_slice(&[4; 64])).unwrap();
+    let (c, ()) = ctx.upload_with(1 << 20, |mut d| d.slice(..4).copy_from_slice(&[5; 4])).unwrap();
+    ctx.release_memory().unwrap();
+    ctx.sync().unwrap();
+    assert_eq!(ctx.idle_staging(), 0, "no staging buffer survives release_memory");
+    assert_eq!(ctx.read(a.raw(), 0, 64).unwrap(), [3; 64]);
+    assert_eq!(ctx.read(b.raw(), 0, 64).unwrap(), [4; 64]);
+    assert_eq!(ctx.read(c.raw(), 0, 4).unwrap(), [5; 4]);
+    // Uploads after the release keep their staging buffers again.
+    let _ = ctx.upload_with(64, |mut d| d.copy_from_slice(&[6; 64])).unwrap();
+    ctx.sync().unwrap();
+    assert_eq!(ctx.idle_staging(), 1);
+}
+
 /// A lost device (here: destroyed on purpose) makes waits and readbacks return `DeviceLost` instead of panicking
 /// inside wgpu, and stays lost. Uses a private context so the shared one other tests use is untouched.
 #[test]
@@ -259,4 +312,33 @@ fn map_outcome_prefers_a_recorded_loss() {
     assert!(ctx.sync().is_err());
     assert!(matches!(ctx.map_outcome(Err("rejected".into())), Err(crate::GpuError::DeviceLost(_))));
     assert!(matches!(ctx.map_outcome(Ok(())), Err(crate::GpuError::DeviceLost(_))));
+}
+
+/// A profiling context (`FOLO_GPU_PROFILE=1`) whose device is lost: the timestamp readback at submission waits
+/// through the loss-aware poll, so the wait reports `DeviceLost` instead of panicking inside wgpu with the batch
+/// lock held, and the context stays usable (no poisoned lock).
+#[test]
+fn profiling_context_survives_device_loss() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::with_options(&crate::GpuOptions {
+        profile: true,
+        ..crate::GpuOptions::from_env()
+    })
+    .unwrap();
+    if !ctx.profiling() {
+        eprintln!("adapter has no timestamp queries inside passes; skipping");
+        return;
+    }
+    let a = ctx.upload(&[1u8; 256]).unwrap();
+    let b = ctx.alloc(256).unwrap();
+    ctx.copy(a.raw(), 0, b.raw(), 0, 256);
+    ctx.sync().unwrap();
+    assert!(ctx.profile_take().iter().any(|r| r.label == "copy"));
+    ctx.copy(a.raw(), 0, b.raw(), 0, 256);
+    ctx.destroy_device();
+    let is_lost = |r: crate::Result<()>| matches!(r, Err(crate::GpuError::DeviceLost(_)));
+    assert!(is_lost(ctx.sync()), "first sync");
+    ctx.copy(a.raw(), 0, b.raw(), 0, 256);
+    assert!(is_lost(ctx.sync()), "and a later one, on the same batch lock");
+    let _ = ctx.profile_take();
 }

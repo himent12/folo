@@ -196,6 +196,35 @@ impl NewRunForm {
             None => self.close_invalid = true,
         }
     }
+
+    /// Picks optimizer `i` of [`OPTIMIZERS`] (also settles an unknown prefilled one).
+    pub fn pick_optimizer(&mut self, i: usize) {
+        self.optimizer = i;
+        self.optimizer_unknown = false;
+    }
+
+    /// Prefills the optimizer from a run's config: an optimizer this build does not know (a newer server's)
+    /// selects nothing and keeps the form from starting until one is picked, instead of becoming Auto.
+    pub fn prefill_optimizer(&mut self, o: Optimizer) {
+        match optimizer_index(o) {
+            Some(i) => self.pick_optimizer(i),
+            None => {
+                self.optimizer = 0;
+                self.optimizer_unknown = true;
+            }
+        }
+    }
+
+    /// Why the form cannot start for its optimizer, if it cannot.
+    pub fn optimizer_blocks(&self) -> Option<&'static str> {
+        self.optimizer_unknown
+            .then_some("Pick an optimizer first: the run this was made from used an unknown one")
+    }
+}
+
+/// The index of `o` in [`OPTIMIZERS`], `None` for one the picker does not offer (`Optimizer::Unknown`).
+pub fn optimizer_index(o: Optimizer) -> Option<usize> {
+    OPTIMIZERS.iter().position(|x| *x == o)
 }
 
 pub type ModelsOrderKey = (usize, usize, &'static str, bool);
@@ -233,6 +262,9 @@ pub struct NewRunForm {
     pub imgsz: usize,
     pub device: usize,
     pub optimizer: usize,
+    /// Prefilled from a run whose optimizer this build does not know: no optimizer is selected, and the form
+    /// does not start until one is picked ([`NewRunForm::optimizer_blocks`]).
+    pub optimizer_unknown: bool,
     pub lr0: f32,
     pub mosaic: f32,
     pub mixup: f32,
@@ -322,7 +354,7 @@ pub fn carry_over(base: Option<&TrainConfig>, mut c: TrainConfig) -> TrainConfig
 pub const PLAY_CONF_FLOOR: f32 = 0.05;
 pub const IMGSZ: [u32; 5] = [320, 480, 640, 800, 1024];
 pub const DEVICES: [&str; 3] = ["auto", "gpu:0", "cpu"];
-pub const OPTIMIZERS: [Optimizer; 3] = [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw];
+pub const OPTIMIZERS: [Optimizer; 4] = [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw, Optimizer::Musgd];
 
 pub struct PlayImage {
     pub name: SharedString,
@@ -1657,7 +1689,7 @@ impl FoloApp {
             f.batch = batch_index(config.batch);
             f.imgsz = idx(&IMGSZ, config.imgsz).unwrap_or(f.imgsz);
             f.device = DEVICES.iter().position(|d| *d == config.device).unwrap_or(0);
-            f.optimizer = OPTIMIZERS.iter().position(|o| *o == config.optimizer).unwrap_or(0);
+            f.prefill_optimizer(config.optimizer);
             f.lr0 = config.lr0;
             let (ei, li) = (f.epochs_input.clone(), f.lr_input.clone());
             let (ci, cv) = (f.close_input.clone(), config.augment.close_mosaic.to_string());
@@ -1823,6 +1855,7 @@ impl FoloApp {
             imgsz: 2,
             device: 0,
             optimizer: 0,
+            optimizer_unknown: false,
             lr0: 0.01,
             mosaic: 1.0,
             mixup: 0.0,
@@ -1924,11 +1957,12 @@ impl FoloApp {
         }
         // A value being typed that doesn't parse yet: no estimate for the last good one.
         // Nor for a cloud run without its offer yet (the config would be this machine's).
-        if self
-            .new_run
-            .as_ref()
-            .is_some_and(|f| f.epochs_invalid || f.close_invalid || (f.lr_invalid && f.optimizer != 0))
-            || self.compute_blocked().is_some()
+        if self.new_run.as_ref().is_some_and(|f| {
+            f.epochs_invalid
+                || f.close_invalid
+                || (f.lr_invalid && f.optimizer != 0)
+                || f.optimizer_blocks().is_some()
+        }) || self.compute_blocked().is_some()
         {
             // Cancel a pending ask; an unanswered key would otherwise stay "loading" for good.
             self.nr_estimate_gen += 1;
@@ -1990,7 +2024,13 @@ impl FoloApp {
         let Some(form) = self.new_run.as_mut() else { return };
         // Auto sets its own rate, so an unparsed rate entry doesn't block it.
         let lr_invalid = form.lr_invalid && form.optimizer != 0;
-        if form.submitting || form.epochs_invalid || lr_invalid || form.close_invalid || compute_blocked {
+        if form.submitting
+            || form.epochs_invalid
+            || lr_invalid
+            || form.close_invalid
+            || form.optimizer_blocks().is_some()
+            || compute_blocked
+        {
             return;
         }
         let Some(config) = config else { return };
@@ -3950,6 +3990,19 @@ mod form_tests {
 #[cfg(test)]
 mod tests {
     use super::parse_close;
+
+    /// The New run optimizer picker offers every value a client can send, so a run prefilled from one that
+    /// trained with MuSGD keeps it; an optimizer this build does not know has no index (the form then shows it
+    /// as unknown and blocks Start until one is picked, rather than becoming Auto).
+    #[test]
+    fn optimizer_picker_offers_every_optimizer() {
+        use super::{OPTIMIZERS, optimizer_index};
+        use crate::api::Optimizer;
+        for o in [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw, Optimizer::Musgd] {
+            assert_eq!(optimizer_index(o).map(|i| OPTIMIZERS[i]), Some(o), "{o:?}");
+        }
+        assert_eq!(optimizer_index(Optimizer::Unknown), None);
+    }
 
     #[test]
     fn close_mosaic_capped_as_the_engine_runs_it() {

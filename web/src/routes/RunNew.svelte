@@ -1336,7 +1336,7 @@
             <summary><ChevronRight size={14} /> Advanced <span class="faint">optimizer, learning rate, seed, head</span></summary>
             <div class="fields">
             <Field label="Optimizer" for="opt">
-              <Select id="opt" bind:value={optimizer} options={(['auto', 'sgd', 'adamw'] as const).map((value) => ({ value, label: optimizerLabel(value) }))} />
+              <Select id="opt" bind:value={optimizer} options={(['auto', 'sgd', 'adamw', 'musgd'] as const).map((value) => ({ value, label: optimizerLabel(value) }))} />
             </Field>
             <Field label="Initial learning rate" for="lr0" error={errors.lr0} hint="Warmup 3 epochs, then cosine to 1%.">
               <Input id="lr0" type="number" step="0.001" min="0" bind:value={lr0} invalid={!!errors.lr0} />

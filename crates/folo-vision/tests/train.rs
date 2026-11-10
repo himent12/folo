@@ -276,7 +276,10 @@ fn schedule_numbers_match_the_spec() {
     let r = smoke.resolve_optimizer(2000, 4);
     assert_eq!((r.kind, r.lr0), (folo_nn::optim::OptimKind::AdamW, 0.00125));
     let long = TrainConfig { epochs: 300, ..TrainConfig::default() };
-    assert_eq!(long.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::Sgd);
+    // Long runs: MuSGD under `auto` rule 3, SGD under the rules before it.
+    assert_eq!(long.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::MuSgd);
+    let rule2 = TrainConfig { auto_rule: 2, ..long };
+    assert_eq!(rule2.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::Sgd);
 }
 
 /// A model whose forward is NaN: every batch is skipped with a warning and no step event, the BatchNorm
@@ -686,4 +689,71 @@ fn o2o_run_trains_checkpoints_and_resumes() {
     assert!(pred.detections.windows(2).all(|w| w[0].score >= w[1].score));
     let _ = std::fs::remove_dir_all(&dir_a);
     let _ = std::fs::remove_dir_all(&dir_b);
+}
+
+/// MuSGD in the trainer (docs/MODEL.md §8.2), with either head: the head's class branches (`head.cls.`, and
+/// `head.o2o.cls.` with the one-to-one head) and nothing else in the `.cls` groups at `MUSGD_CLS_LR_FACTOR` times
+/// the LR, a `muon_buffer` in the checkpoint for every 2-D / 4-D parameter of the `decay` groups, and a resume at an
+/// epoch boundary that continues bit for bit.
+#[test]
+fn musgd_run_boosts_class_branches_and_resumes() {
+    use folo_vision::model::HeadMode;
+    use folo_vision::train::MUSGD_CLS_LR_FACTOR;
+    let ds = shapes(18, 4, 64);
+    for head in [HeadMode::O2m, HeadMode::O2o] {
+        let cfg = TrainConfig { optimizer: OptimizerChoice::Musgd, lr0: 0.01, head, ..resume_config() };
+        let (dir_a, dir_b) = (run_dir("musgd-a"), run_dir("musgd-b"));
+        let (opts, log_a) = options(Some(&dir_a));
+        let mut a = Trainer::new(cfg.clone(), data(&ds), opts).unwrap();
+        let lr0 = a.optimizer().lr0;
+        let cls = |n: &str| n.starts_with("head.cls.") || n.starts_with("head.o2o.cls.");
+        let groups: Vec<&str> = a.param_groups().iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(groups, ["decay", "decay.cls", "bn", "bn.cls", "bias", "bias.cls"], "{head:?}");
+        let mut muon = 0;
+        for g in a.param_groups() {
+            let boosted = g.name.ends_with(".cls");
+            let want = if boosted { lr0 * MUSGD_CLS_LR_FACTOR } else { lr0 };
+            assert!((g.base_lr - want).abs() < 1e-12, "{head:?} {}: lr {} vs {want}", g.name, g.base_lr);
+            for (n, p) in &g.params {
+                assert_eq!(cls(n), boosted, "{head:?}: {n} in {}", g.name);
+                muon += usize::from(g.name.starts_with("decay") && matches!(p.rank(), 2 | 4));
+            }
+        }
+        let o2o_cls =
+            a.param_groups().iter().flat_map(|g| &g.params).any(|(n, _)| n.starts_with("head.o2o.cls."));
+        assert_eq!(o2o_cls, head == HeadMode::O2o);
+        let sum = a.run().unwrap();
+        assert_eq!((sum.status, sum.epochs_completed), (RunStatus::Completed, 2));
+        let last = dir_a.join("weights/last.folo");
+        let ta = tensors(&last);
+        assert!(muon > 0);
+        assert_eq!(ta.iter().filter(|(n, _)| n.ends_with(".muon_buffer")).count(), muon, "{head:?}");
+
+        // B: stopped after epoch 1, resumed from its last.folo: the same epoch 2 and the same final tensors.
+        let (opts, _) = options(Some(&dir_b));
+        let stop = opts.stop.clone();
+        let opts = TrainOptions {
+            events: Some(Box::new(move |e| {
+                if matches!(e, RunEvent::Epoch(_)) {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            })),
+            ..opts
+        };
+        let s1 = Trainer::new(cfg, data(&ds), opts).unwrap().run().unwrap();
+        assert_eq!((s1.status, s1.epochs_completed), (RunStatus::Stopped, 1));
+        let (opts, log_b) = options(Some(&dir_b));
+        let mut b =
+            Trainer::resume(dir_b.join("weights/last.folo"), data(&ds), opts, ResumeOverrides::default())
+                .unwrap();
+        assert_eq!(b.optimizer().kind, folo_nn::optim::OptimKind::MuSgd);
+        b.run().unwrap();
+        let (ea, eb) = (&epochs_of(&log_a)[1], &epochs_of(&log_b)[0]);
+        assert_eq!((ea.epoch, ea.train_loss, &ea.val), (eb.epoch, eb.train_loss, &eb.val), "{head:?}");
+        let tb = tensors(&dir_b.join("weights/last.folo"));
+        assert_eq!(ta.len(), tb.len());
+        for ((na, va), (nb, vb)) in ta.iter().zip(&tb) {
+            assert!(na == nb && va == vb, "{head:?}: tensor {na} differs after resume");
+        }
+    }
 }

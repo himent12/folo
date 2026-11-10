@@ -74,7 +74,8 @@ pub use bbox::BBox;
 pub use dataset::{
     CocoAnnotation, CocoGroundTruth, CocoImage, Dataset, FileDataset, Format, ImageEntry, InMemoryDataset,
     Issue, IssueKind, LoadReport, LoadedDataset, OpenOptions, Split, UNDETECTED, coco_annotation_files,
-    detect_format, label_path_for, open, open_coco_ground_truth, open_with, read_coco_ground_truth,
+    detect_format, label_path_for, open, open_coco_ground_truth, open_splits, open_with,
+    read_coco_ground_truth,
 };
 pub use error::{DataError, Result};
 pub use image::{

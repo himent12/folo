@@ -645,10 +645,21 @@ Three groups, assigned by tensor name:
 
 Effective weight decay: `wd = weight_decay · batch · accumulate / nbs`.
 
-`auto`: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: SGD with `lr0 = 0.01`,
-`momentum = 0.9`. Otherwise: AdamW with `lr0 = round(0.002 · 5 / (4 + nc), 6)` and `β1 = 0.9` (e.g. 0.00125 for
-`nc = 4`, 0.000119 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`. An explicit `sgd`/`adamw` uses `lr0`,
-`momentum` and `warmup_bias_lr` as given.
+`auto`: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: MuSGD (below) with
+`lr0 = 0.01`, `momentum = 0.9`, as the reference trainer picks since Ultralytics 8.4. Otherwise: AdamW with `lr0 = max(round(0.002 · 5 / (4 + nc), 6), 0.001)` and `β1 = 0.9` (e.g.
+0.00125 for `nc = 4`, 0.001 from `nc = 6` on, so 0.001 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`. An
+explicit `sgd`/`adamw` uses `lr0`, `momentum` and `warmup_bias_lr` as given.
+
+`TrainConfig.auto_rule` (current: 3) versions this rule: rule 3 is the above; rule 2 picks SGD (`lr0 = 0.01`,
+`momentum = 0.9`) instead of MuSGD for long runs; rule 1 is rule 2 without the AdamW floor. On the COCO proxy of
+docs/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches 1.38x the AP of SGD (0.1143 vs 0.0830), as the
+reference's own MuSGD does. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run (the long COCO run under rule 3 is
+the pending check). The 0.001 floor is FOLO's (rule 2 on). The reference trainer's fit alone (rule 1)
+gives 80 classes 0.000119, and a from-scratch run on a 20k-image COCO subset (20 epochs, 6,260 iterations) then
+reaches about a fifth of the AP of SGD on the same budget, in Ultralytics as in FOLO (docs/hill/learn.md). Rule 2
+changes nothing below 6 classes. Settings saved before the key existed (a checkpoint's `folo.train`, a run's
+`config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (or `2`, CLI)
+selects an older rule for a new run.
 
 **SGD** (PyTorch semantics, Nesterov, no dampening), per parameter `p` with gradient `g`:
 ```
@@ -662,6 +673,24 @@ p = p · (1 − lr · wd)              (decay group only)
 m = β1·m + (1 − β1)·g;   v = β2·v + (1 − β2)·g²
 p = p − lr · (m / (1 − β1^t)) / (sqrt(v / (1 − β2^t)) + eps)
 ```
+**MuSGD** (`optimizer = musgd`; Ultralytics 8.4's `MuSGD` with its trainer's groups, `folo_nn::optim::MuSgd`). Six
+groups: the three above, each split into the head's class branches (`head.cls.*`, `head.o2o.cls.*`: groups
+`decay.cls`, `bn.cls`, `bias.cls`) at `3 · lr0` and the rest at `lr0`; the schedule (§8.4) treats `bias.cls` as a
+bias group. Every group takes the SGD update above (Nesterov, `momentum_buffer`). Before it, every parameter of
+rank 2 or 4 in a `decay` group (every conv weight) also takes a Muon step with the group's current `lr` and `μ`:
+```
+m = μ · m + (1 − μ) · g                      (muon_buffer, starts at zero)
+u = μ · m + (1 − μ) · g                      (Nesterov)
+X = u as [d0, d1·d2·d3] / (‖u‖_F + 1e-7), transposed if it has more rows than columns
+5 times:  A = X·Xᵀ;  X = 3.4445·X + (−4.7750·A + 2.0315·A·A)·X      (then transposed back)
+p = p − 0.2 · lr · sqrt(max(1, d₋₂ / d₋₁)) · X        (the factor is 1 for square kernels)
+```
+then the SGD step reads the updated `p` (weight decay included), as the reference's in-place updates do. Same
+`lr0` / `momentum` / `warmup_bias_lr` handling as `sgd`. FOLO runs the Newton–Schulz iteration in `f32` (the
+reference: `bfloat16`); matrices are batched by column count with zero-padded rows, which changes no value. On a
+GPU the momentum and both parameter updates are folo-gpu's multi-tensor optimizer kernels, the iteration batched
+matmuls. Tests: `crates/folo-nn/tests/optim.rs` (two steps against an `f64` re-implementation of the reference,
+Newton–Schulz against `f64`), `tests/gpu.rs` (GPU against CPU), `tests/folo_io.rs` (bit-exact resume).
 
 ### 8.3 Batches, accumulation and the step loop
 **Batches.** At the start of epoch `e` (0-based), the training indices `0 .. N_train` are shuffled with a permutation
@@ -700,13 +729,20 @@ If the loss is not finite, or any running statistic became non-finite, it restor
 update never sees poisoned buffers. Ten consecutive non-finite batches, or an epoch without a single finite batch,
 abort the run with an error (`status: failed`).
 
+**Epoch boundaries.** The loader of epoch `e + 1` starts as soon as epoch `e` has taken its last batch, so it works
+while validation and the checkpoints run and the next epoch's first step does not wait for it (not after the last
+epoch or once a stop is requested; if it cannot start, a warning is logged and the epoch starts its loader itself).
+Its batches are the same whenever it starts (everything is seeded by the epoch and the sample position). When the
+run ends (finished, stopped, stopped early or failed) a loader started for an epoch that will not train is dropped,
+joining its workers and the feeder.
+
 **On a GPU** (`--device gpu:0`, or `auto` with an adapter) the same loop runs with everything on the device: the model,
 the EMA, the optimizer state and the accumulation buffers live there; the loader delivers `u8` pixels and a feeder
 thread stages the next batch in a mapped buffer while the current step runs, so a step starts with one buffer copy
 and a `u8 → f32 / 255` conversion on the device; the loss is folo-gpu's (§7.4); global-norm clipping computes the norm
 and the factor on the device. A step waits for the GPU twice, both after the loss: the reported items and the
 finiteness check of the running statistics (one readback for all of them). Validation uploads `u8` batches too and
-runs the predictor's forward + decode on the device (NMS on the host). The numbers are the same as on the CPU up to
+runs the predictor's forward + decode on the device (NMS on the host); the download, NMS and scoring of a batch run on a second thread while the next batches' forward passes run, with the same result as one after the other. The numbers are the same as on the CPU up to
 float rounding (sums in other orders), so a run is reproducible on one device (a GPU resume is bit-exact) but not
 bit-identical across devices. If the GPU is lost mid-run (a driver reset / TDR), the run fails with `status: failed`
 and a message naming the lost device and the `--resume` command: checkpoints are written only at epoch boundaries, so
@@ -809,7 +845,7 @@ augmentation: resize as above and pad to a square `s × s` (§9.2) only.
   confidence that maximises the class-mean F1), computed in the network input space: ground-truth boxes go through
   the same resize and pad as the image, so predictions need no inverse map. Fitness is mAP@0.5:0.95.
 - Best and early stopping: `best_fitness` starts at −∞ and `best_epoch` at −1. After validating epoch `e`, if
-  `fitness > best_fitness`, set both and write `best`. Write `last` every epoch. Stop after epoch `e` when
+  `fitness > best_fitness`, set both and write `best`. Write `last` every epoch (on a GPU its tensors come back in one download per dtype and 128 MiB chunk, concatenated on the device, not one wait per tensor). Stop after epoch `e` when
   `e − best_epoch >= patience`. Checkpoints persist `{ "epoch": best_epoch, "fitness": best_fitness }` as
   `folo.best` (FORMAT.md; `fitness` is `null` while it is −∞), so a resume continues the same patience count.
 - v1 reports training losses only (API `Epoch.train_loss`). Validation loss is not computed.

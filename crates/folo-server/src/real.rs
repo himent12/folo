@@ -738,7 +738,7 @@ impl RealStore {
             None => None,
         };
         // The settings first (on the CPU), so a rejected config never initialises a GPU.
-        let mut check = folo_vision::TrainConfig::from_api(&config);
+        let mut check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
         let ds = self.dataset_ref(&e);
@@ -1104,7 +1104,7 @@ impl Store for RealStore {
             None => None,
         };
         // The same checks as POST /api/runs, the settings first (on the CPU).
-        let mut check = folo_vision::TrainConfig::from_api(&config);
+        let mut check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
         // A cloud run's time is the reference's: nothing measured here says how fast the offer's GPU is.
@@ -1148,6 +1148,7 @@ impl Store for RealStore {
     fn run_cli(&self, id: &str) -> Result<CliCommand> {
         let e = self.runs.get(id)?;
         let config = e.run().config;
+        crate::cli::check_optimizer(&config)?;
         // A published model by its name; any other by the file the run started from.
         let weights = match (&config.weights, e.weights()) {
             (Some(w), _) if folo_api::weights::find(w).is_some() => Some(w.clone()),
@@ -1155,7 +1156,9 @@ impl Store for RealStore {
             _ => None,
         };
         let ds = e.dataset();
-        Ok(crate::cli::train_command(&config, &ds.path, ds.format, weights.as_deref()))
+        let cmd = crate::cli::train_command(&config, &ds.path, ds.format, weights.as_deref());
+        // An `auto` run repeats with the rule it trained with (made before rule 3: SGD, not MuSGD, for long runs).
+        Ok(crate::cli::with_auto_rule(cmd, &config, crate::cli::recorded_auto_rule(e.dir())))
     }
 
     fn benchmark(&self, req: BenchmarkRequest) -> Result<BenchmarkReport> {

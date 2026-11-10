@@ -603,6 +603,13 @@ fn coop_conv_gradients() {
         cdesc(2, 32, 10, 10, 32, 32, s1),
         // A long weight-gradient reduction (split-K: N·OH·OW = 6400) with a wide M.
         cdesc(4, 16, 40, 40, 128, 1, s1),
+        // Stride phases of the input gradient: groups, no padding, a kernel smaller than the stride (phases
+        // without taps), a kernel of 4 at stride 2, a phase GEMM wide enough for the 128×128 tiles.
+        cdesc(2, 16, 11, 9, 24, 2, s2),
+        cdesc(2, 12, 13, 12, 20, 1, Window2d::square(3, 2, 0)),
+        cdesc(1, 8, 14, 13, 12, 1, Window2d::square(2, 3, 1)),
+        cdesc(2, 8, 12, 15, 16, 1, Window2d::square(4, 2, 1)),
+        cdesc(2, 160, 34, 34, 136, 1, s2),
     ];
     for (i, d) in cases.iter().enumerate() {
         for tc in [true, false] {

@@ -146,7 +146,8 @@ impl BatchNorm2d {
                 return act.forward(&y);
             }
         }
-        act.forward(&self.forward_plain(x)?)
+        let (y, applied) = self.forward_plain(x, act)?;
+        if applied { Ok(y) } else { act.forward(&y) }
     }
 
     /// The fused device kernels, or `None` when the backend lacks them (or this activation).
@@ -166,18 +167,32 @@ impl BatchNorm2d {
         Ok(Some(y))
     }
 
-    fn forward_plain(&self, x: &Tensor) -> Result<Tensor> {
+    /// The BatchNorm forward, and whether `act` has been applied too (by the fused CPU training kernel, for
+    /// the identity, SiLU and ReLU).
+    fn forward_plain(&self, x: &Tensor, act: Activation) -> Result<(Tensor, bool)> {
         let (c, n) = self.check_input(x)?;
         let bshape = [1, c, 1, 1];
         if !self.mode.is_training() {
             let (scale, shift) = self.eval_scale_shift()?;
-            return Ok(x.mul(&scale.reshape(bshape)?)?.add(&shift.reshape(bshape)?)?);
+            return Ok((x.mul(&scale.reshape(bshape)?)?.add(&shift.reshape(bshape)?)?, false));
         }
         check_train_count(n, x)?;
         let fused =
             [x, &self.weight, &self.bias].iter().all(|t| t.device().is_cpu() && t.dtype() == DType::F32);
+        let cpu_act = match act {
+            Activation::Identity => Some(ACT_NONE),
+            Activation::Silu => Some(ACT_SILU),
+            Activation::Relu => Some(ACT_RELU),
+            _ => None,
+        };
+        let applied = fused && cpu_act.is_some();
         let (y, mean, var) = if fused {
-            train_cpu(x, &self.weight, &self.bias, self.eps)?
+            let (w, b) = (&self.weight, &self.bias);
+            match cpu_act.unwrap_or(ACT_NONE) {
+                ACT_SILU => train_cpu::<ACT_SILU>(x, w, b, self.eps)?,
+                ACT_RELU => train_cpu::<ACT_RELU>(x, w, b, self.eps)?,
+                _ => train_cpu::<ACT_NONE>(x, w, b, self.eps)?,
+            }
         } else {
             let mean = x.mean([0, 2, 3], true)?;
             let diff = x.sub(&mean)?;
@@ -195,13 +210,44 @@ impl BatchNorm2d {
         self.running_mean.add_scaled_assign(&mean, m)?;
         self.running_var.mul_scalar_assign(1.0 - m)?;
         self.running_var.add_scaled_assign(&var, m * unbias)?;
-        Ok(y)
+        Ok((y, applied))
     }
 }
 
 impl Forward for BatchNorm2d {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
         self.forward_act(x, Activation::Identity)
+    }
+}
+
+/// The activations [`train_cpu`] applies itself.
+const ACT_NONE: u8 = 0;
+const ACT_SILU: u8 = 1;
+const ACT_RELU: u8 = 2;
+
+/// Activation `ACT` of `z`, exactly as the CPU's `Tensor::silu` / `Tensor::relu` compute it.
+#[inline(always)]
+fn act_fwd<const ACT: u8>(z: f32) -> f32 {
+    match ACT {
+        ACT_SILU => folo_core::cpu::silu(z),
+        ACT_RELU => z.max(0.0),
+        _ => z,
+    }
+}
+
+/// `g · act'(z)`, exactly as the CPU backward of `Tensor::silu` / `Tensor::relu` computes it.
+#[inline(always)]
+fn act_bwd<const ACT: u8>(z: f32, g: f32) -> f32 {
+    match ACT {
+        ACT_SILU => folo_core::cpu::silu_backward(z, g),
+        ACT_RELU => {
+            if z > 0.0 {
+                g
+            } else {
+                0.0
+            }
+        }
+        _ => g,
     }
 }
 
@@ -215,11 +261,19 @@ fn check_train_count(n: usize, x: &Tensor) -> Result<()> {
     Ok(())
 }
 
-/// Train-mode BatchNorm on the CPU: per-channel statistics in `f64` (two passes), then the output, with a
-/// hand-written backward: `dx = γ · inv / n · (n · g − Σg − x̂ · Σ(g · x̂))`, `dγ = Σ(g · x̂)`, `dβ = Σg`,
-/// where `x̂ = (x − mean) · inv` and `inv = 1 / sqrt(var + eps)`. Returns the output and the batch mean and
-/// biased variance, each `[C]`.
-fn train_cpu(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result<(Tensor, Tensor, Tensor)> {
+/// Train-mode BatchNorm followed by activation `ACT` on the CPU: per-channel statistics in `f64` (two
+/// passes), then the output `act(z)`, `z = (x − mean) · inv · γ + β`, with a hand-written backward:
+/// `dx = γ · inv / n · (n · g' − Σg' − x̂ · Σ(g' · x̂))`, `dγ = Σ(g' · x̂)`, `dβ = Σg'`, where
+/// `g' = g · act'(z)` (`z` recomputed from `x`), `x̂ = (x − mean) · inv` and `inv = 1 / sqrt(var + eps)`.
+/// The activation and its gradient run inside the BatchNorm passes, bit for bit the BatchNorm followed by the
+/// separate activation op, without that op's passes over memory or a stored `z`. Returns the output and the
+/// batch mean and biased variance, each `[C]`.
+fn train_cpu<const ACT: u8>(
+    x: &Tensor,
+    gamma: &Tensor,
+    beta: &Tensor,
+    eps: f64,
+) -> Result<(Tensor, Tensor, Tensor)> {
     let (nb, c, h, w) = x.dims4()?;
     let hw = h * w;
     let n = (nb * hw) as f64;
@@ -264,7 +318,7 @@ fn train_cpu(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result<(Ten
                 let ch = p % c;
                 let (m, s, b) = (mean[ch], scale[ch], bv[ch]);
                 for (o, &v) in o.iter_mut().zip(xp) {
-                    *o = (v - m) * s + b;
+                    *o = act_fwd::<ACT>((v - m) * s + b);
                 }
             });
         }
@@ -274,25 +328,42 @@ fn train_cpu(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result<(Ten
     let (mean_t, var_t) = (Tensor::from_slice(&mean, [c])?, Tensor::from_vec(var, [c])?);
     let xd = x.detach();
     let shape = x.shape().clone();
-    let y = Tensor::custom_op("batch_norm2d", &[x, gamma, beta], y, move |gy| {
+    let name = match ACT {
+        ACT_SILU => "batch_norm2d_silu",
+        ACT_RELU => "batch_norm2d_relu",
+        _ => "batch_norm2d",
+    };
+    let y = Tensor::custom_op(name, &[x, gamma, beta], y, move |gy| {
         let gy = gy.contiguous()?;
         let (dx, dg, db) = gy.with_f32_slice(|gs| {
             xd.with_f32_slice(|xs| {
+                // Every element is written below. With an activation, the first pass stores each plane's
+                // `g' = g · act'(z)` here (one vectorised f32 loop) and sums it while it is in cache; the
+                // second pass turns it into dx in place.
+                let mut dx = folo_core::cpu::take_buffer(xs.len());
                 let planes: Vec<(f64, f64)> = if hw == 0 {
                     vec![(0.0, 0.0); nb * c]
                 } else {
-                    gs.par_chunks(hw)
+                    dx.par_chunks_mut(hw)
+                        .zip(gs.par_chunks(hw))
                         .zip(xs.par_chunks(hw))
                         .enumerate()
-                        .map(|(p, (gp, xp))| {
-                            let (m, i) = (mean[p % c], inv[p % c]);
+                        .map(|(p, ((o, gp), xp))| {
+                            let ch = p % c;
+                            let (m, i, s, b) = (mean[ch], inv[ch], scale[ch], bv[ch]);
+                            let gp = if ACT == ACT_NONE {
+                                gp
+                            } else {
+                                for ((o, &gv), &v) in o.iter_mut().zip(gp).zip(xp) {
+                                    *o = act_bwd::<ACT>((v - m) * s + b, gv);
+                                }
+                                &*o
+                            };
                             sum2_f64(gp, xp, |g, v| (g as f64, g as f64 * ((v - m) * i) as f64))
                         })
                         .collect()
                 };
                 let sums = per_channel(&planes);
-                // Every element is written below.
-                let mut dx = folo_core::cpu::take_buffer(xs.len());
                 if hw > 0 {
                     dx.par_chunks_mut(hw).enumerate().for_each(|(p, o)| {
                         let ch = p % c;
@@ -300,8 +371,14 @@ fn train_cpu(x: &Tensor, gamma: &Tensor, beta: &Tensor, eps: f64) -> Result<(Ten
                         let k = g[ch] * i / n as f32;
                         let (sg, sgx) = (sums[ch].0 as f32, sums[ch].1 as f32);
                         let r = p * hw..(p + 1) * hw;
-                        for ((o, &gv), &v) in o.iter_mut().zip(&gs[r.clone()]).zip(&xs[r]) {
-                            *o = k * (n as f32 * gv - sg - (v - m) * i * sgx);
+                        if ACT == ACT_NONE {
+                            for ((o, &gv), &v) in o.iter_mut().zip(&gs[r.clone()]).zip(&xs[r]) {
+                                *o = k * (n as f32 * gv - sg - (v - m) * i * sgx);
+                            }
+                        } else {
+                            for (o, &v) in o.iter_mut().zip(&xs[r]) {
+                                *o = k * (n as f32 * *o - sg - (v - m) * i * sgx);
+                            }
                         }
                     });
                 }
@@ -443,7 +520,7 @@ mod tests {
         let g = Tensor::rand_uniform([4], 0.5, 1.5, &mut rng).requires_grad_();
         let b = Tensor::rand_uniform([4], -0.5, 0.5, &mut rng).requires_grad_();
         let w = Tensor::randn([3, 4, 5, 6], 0.0, 1.0, &mut rng);
-        let (y1, m1, v1) = train_cpu(&x, &g, &b, BN_EPS).unwrap();
+        let (y1, m1, v1) = train_cpu::<ACT_NONE>(&x, &g, &b, BN_EPS).unwrap();
         let mean = x.mean([0, 2, 3], true).unwrap();
         let diff = x.sub(&mean).unwrap();
         let var = diff.square().unwrap().mean([0, 2, 3], true).unwrap();
@@ -462,6 +539,37 @@ mod tests {
         let g2 = y2.mul(&w).unwrap().sum_all().unwrap().backward().unwrap();
         for t in [&x, &g, &b] {
             near(g1.get(t).unwrap(), g2.get(t).unwrap(), 1e-4);
+        }
+    }
+
+    /// With SiLU or ReLU fused in, the CPU kernel is bit for bit the BatchNorm followed by the activation op:
+    /// output, running statistics and the gradients of x, gamma and beta.
+    #[test]
+    fn fused_activation_is_bitwise_bn_then_act() {
+        let bits = |t: &Tensor| t.to_vec::<f32>().unwrap().iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        for act in [Activation::Silu, Activation::Relu] {
+            for dims in [[3, 4, 5, 6], [2, 3, 1, 13], [4, 2, 8, 8]] {
+                let mut rng = Rng::seed(11);
+                let x = Tensor::randn(dims, 0.3, 1.5, &mut rng).requires_grad_();
+                let w = Tensor::randn(dims, 0.0, 1.0, &mut rng);
+                let run = |fused: bool| {
+                    let bn = BatchNorm2d::new(dims[1]);
+                    let mut rng = Rng::seed(5);
+                    let _g = no_grad();
+                    bn.weight.copy_from(&Tensor::rand_uniform([dims[1]], 0.5, 1.5, &mut rng)).unwrap();
+                    bn.bias.copy_from(&Tensor::rand_uniform([dims[1]], -0.5, 0.5, &mut rng)).unwrap();
+                    drop(_g);
+                    let y = if fused {
+                        bn.forward_act(&x, act).unwrap()
+                    } else {
+                        act.forward(&bn.forward(&x).unwrap()).unwrap()
+                    };
+                    let gr = y.mul(&w).unwrap().sum_all().unwrap().backward().unwrap();
+                    let grads = [&x, &bn.weight, &bn.bias].map(|t| bits(gr.get(t).unwrap()));
+                    (bits(&y), grads, bits(&bn.running_mean), bits(&bn.running_var))
+                };
+                assert_eq!(run(true), run(false), "{act:?} {dims:?}");
+            }
         }
     }
 }

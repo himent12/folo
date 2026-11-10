@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::cli::{ExportArgs, ExportFormatArg, PredictArgs, SplitArg, ValArgs};
 use crate::draw::annotate;
-use crate::engine::{engine_error, open_dataset};
+use crate::engine::{engine_error, open_dataset_splits};
 use crate::output::{CliError, ExitCode, Out};
 
 fn nn_error(e: folo_nn::Error) -> CliError {
@@ -76,12 +76,13 @@ fn precision_of(model: &FoloModel) -> Precision {
 
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let model = open_model(&args.model, &args.device, args.half, args.tensor_cores)?;
-    let (ds, _) = open_dataset(&args.data, folo_data::Format::Auto)?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
         SplitArg::Val => Split::Val,
         SplitArg::Test => Split::Test,
     };
+    // Only the evaluated split's images are checked (COCO val: 5 000 images, not the 118 287 of train2017 too).
+    let (ds, _) = open_dataset_splits(&args.data, folo_data::Format::Auto, &[split])?;
     let part = ds.split(split);
     if part.is_empty() {
         return Err(CliError::new(

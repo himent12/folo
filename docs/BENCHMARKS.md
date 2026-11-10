@@ -1,9 +1,10 @@
 # Benchmarks: the incumbent and what FOLO must beat
 
 FOLO is meant to be faster than Ultralytics YOLO on the same hardware. This page records the incumbent's numbers on
-the dev machine, explains how they were measured, and sets the targets FOLO has to hit. The GPU rows of the target
-table have FOLO numbers (measured as described in [FOLO on the GPU](#folo-on-the-gpu)); the generated result tables
-further down keep their FOLO columns empty, because `render_tables.py` only reads the incumbent's JSON.
+the dev machine, explains how they were measured, and sets the targets FOLO has to hit. The target table's FOLO
+columns were re-measured on the hill-climb build ([Hill-climb](#hill-climb-2026-11-09), method as in
+[FOLO on the GPU](#folo-on-the-gpu) and [FOLO on the CPU](#folo-on-the-cpu)); the generated result tables further
+down keep their FOLO columns empty, because `render_tables.py` only reads the incumbent's JSON.
 
 - Script: [`bench/baselines/ultralytics_bench.py`](../bench/baselines/ultralytics_bench.py)
 - Raw results: [`bench/baselines/results-rtx4080s.json`](../bench/baselines/results-rtx4080s.json) (every number below,
@@ -154,19 +155,25 @@ NMS-free. **FOLO's end-to-end numbers must include its NMS.** Compare folo-n aga
 and so on. When FOLO's params/GFLOPs land, list them in the model-size table so the comparison stays honest about
 model size.
 
+**Measured 2026-11-09 on the hill-climb build** (branch `hill/integration` at 8d2cc5fc: the five agents' branches of
+[the hill-climb](#hill-climb-2026-11-09) merged) against `main` before the climb (c50211ba), the two binaries
+alternated run by run, 3 rounds: each cell is the median of the rounds (min–max), then `main`'s median in the same
+session. Load: 0–4% GPU from other processes before every bench section (`nvidia-smi`, the shared GPU lock held), 3–8
+other CPU cores busy during the 28-thread CPU rows. Inside ±10% of the bar is a tie.
+
 | # | metric (640x640) | incumbent bar (yolo26n) | FOLO config to compare | folo-n | folo-s |
 |---|---|---|---|---|---|
-| 1 | GPU forward latency, batch 1, f32 (median) | **4.95 ms** (best of TF32/strict, cudnn.benchmark on/off); 6.04 ms default | f32 | **2.99 ms** (beats) | 5.51 ms (yolo26s 4.87: behind) |
-| 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | no quiet measurement yet: **5.84 ms** on tensor cores under 68–85% load from another job (regular f16 8.13, f32 7.35 in the same session; f32 is 2.99 ms quiet, so beats) | **7.86 ms** on tensor cores under load (regular f16 12.98, f32 10.03 same session; yolo26s 7.47: ties under load) |
-| 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | **1385 img/s** (1461 in the previous run: ties TF32, beats strict) | 617 img/s (yolo26s 627: ties) |
-| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **behind under load, no quiet measurement yet**: 1264 img/s pipelined on tensor cores under 68–85% load, against 790 regular f16 and 744 f32 in the same session (+60% over regular f16, see [Tensor cores](#tensor-cores-f16)) | behind under load: 554 img/s on tensor cores (regular f16 339; yolo26s 1159) |
-| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **5.18 ms** f32 (beats; was 8.69); f16 ties f32 (8.5–9.4 vs 9.1–9.6 ms under load); tensor cores 8.35 ms median, 6.95 ms back to back under load (regular f16 8.67 / 9.38) | **7.87 ms** (yolo26s 8.59: beats; was 10.91); tensor cores 9.37 ms under load (regular f16 13.69) |
-| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **722 img/s** f32 (beats both; was 299); f16 +7–13% over f32 under load (427–456 vs 375–401 img/s back to back); tensor cores 548 img/s back to back under 67–81% load (regular f16 436, f32 367 in the same session) | 394 img/s f32 (yolo26s 446 fp16: behind; beats its 317 fp32; was 226); tensor cores 328 img/s back to back under load (regular f16 249), not measured quietly yet |
-| 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **21.4 ms** (fused, 28 threads, with 44–76% CPU load from other jobs; 35.8 ms for `main` in the same session; `cargo bench -p folo-vision --bench model`). Branch `perf/cpu-e2e`: **18.4–18.7 ms** at High priority with 9–13 cores busy elsewhere (`main` 19.3–19.6 in the same session) | |
-| 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | **18.5–19.0 ms** (beats; `main` 23.1–23.7 ms in the same session, alternated, High priority, 9–13 cores busy elsewhere; High priority takes cores back from the background jobs, while the incumbent bar ran at normal priority with 4.3 cores busy, so the like-for-like reading is the quietest normal-priority round: **21.7 ms** vs `main`'s 25.1, also under the bar; see [End to end at batch 1](#end-to-end-at-batch-1)). Was 26.9 ms (the predictor on a `u8` image, 28 threads, same contended run as row 7). The NMS-free head does not change it: 26.59 vs 26.66 ms with NMS on the same trained model ([NMS-free head](#nms-free-head-o2o)) | |
-| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **219 img/s** f32 (73.0 ms; beats; 143 before the loss moved to the GPU); **307 img/s AMP** (52.2 ms, `--amp` on tensor cores; beats 252; f32 247 in the same quiet session, see [Mixed-precision training](#mixed-precision-training-amp)) | **109 img/s** f32 (146.6 ms; yolo26s 105 fp32: beats; was 68); **183 img/s AMP** (87.5 ms; yolo26s AMP 188: ties) |
-| 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32 | | |
-| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32, and AMP | **3474 MiB** (train step; yolo26n train step 4517: beats); **2022 MiB AMP** (yolo26n AMP train step 2646, trainer 2435: beats) | **6541 MiB** (yolo26s train step 8245: beats); **3713 MiB AMP** (yolo26s AMP 4614: beats) |
+| 1 | GPU forward latency, batch 1, f32 (median) | **4.95 ms** (best of TF32/strict, cudnn.benchmark on/off); 6.04 ms default | f32 | **2.09 ms** (2.08–2.31; `main` 2.88): beats, 2.4x | **3.87 ms** (3.86–4.36; `main` 5.16): yolo26s 4.87, beats (was behind) |
+| 2 | GPU forward latency, batch 1, f16 (median) | **6.25 ms** | f16 | **1.65 ms** on tensor cores (1.62–1.69; `main` 2.39); regular f16 2.07 (`main` 3.21): beats, 3.8x | **2.26 ms** on tensor cores (2.16–3.31; `main` 3.22); regular f16 3.73: yolo26s 7.47, beats |
+| 3 | GPU forward throughput, batch 16, f32 | **1454 img/s** (TF32 convs); 1334 img/s strict fp32 | f32 | **1648 img/s** (1627–1652; `main` 1488): beats TF32 by 13% | 666 img/s (643–667; `main` 630): yolo26s 627, ties (+6%) |
+| 4 | GPU forward throughput, batch 16, f16 | **2370 img/s** | f16 | **3078 img/s** on tensor cores (3069–3082; `main` 2836): beats by 30% | 1237 img/s on tensor cores (1184–1245; `main` 1188): yolo26s 1159, ties (+7%) |
+| 5 | GPU end to end, batch 1 (decoded image in, boxes on host) | **6.92 ms** fp32 / 7.11 ms fp16 | f32 or f16, with NMS | **2.63 ms** f32 (2.62–3.16; `main` 3.76); **2.21 ms** on tensor cores (`main` 3.34): beats, 2.6–3.1x | **4.52 ms** f32 (4.52–5.20; `main` 5.92); **2.84 ms** on tensor cores (`main` 4.12): yolo26s 8.59, beats |
+| 6 | GPU end to end throughput, batch 16 | **615 img/s** fp16 / 536 img/s fp32 | best FOLO precision | **1898 img/s** on tensor cores (1735–1900; `main` 960); f32 1239 (`main` 759): beats, 3.1x | **986 img/s** on tensor cores (943–989; `main` 663); f32 583 (`main` 451): yolo26s 446, beats, 2.2x |
+| 7 | CPU forward latency, batch 1, f32 (best thread count) | **22.8 ms** (8 threads; 25.1 ms at 20) | f32, best thread count | **18.3 ms** at 28 threads (17.4–18.4; `main` 17.7), 18.0 ms on 8 pinned P-cores (`main` 19.2, 11–16 other cores busy): beats; **unchanged by the climb** | folo-s **37.5 ms** (`main` 37.0): yolo26s 42.5, beats; folo-m **82.8 ms** (`main` 81.6): yolo26m 106.6, beats. Both unchanged by the climb (28 threads) |
+| 8 | CPU end to end latency, batch 1 | **24.8 ms** (Ultralytics default, 8 threads) | f32, with NMS | **18.6 ms** at 28 threads (18.6–19.2; `main` 18.6): beats; unchanged by the climb. The NMS-free head does not change it ([NMS-free head](#nms-free-head-o2o)) | folo-s **37.5 ms** (`main` 37.3): yolo26s 51.1, beats; folo-m **82.9 ms** (`main` 81.4): yolo26m 107.8, beats. Unchanged |
+| 9 | Training compute, batch 16 (step only, no data loader) | **202 img/s** fp32 (TF32) / 252 img/s AMP | f32, and AMP | **327 img/s** f32 (327–330; `main` 242), **537 img/s AMP** (535–552; `main` 345): beats, 1.6x / 2.1x. With the trainer's gradient clipping (`FOLO_BENCH_CLIP=1`) 342 / 542 (`main` 237 / 313) | **151 img/s** f32 (147–154; `main` 121), **273 img/s AMP** (262–275; `main` 194): yolo26s 105 / 188, beats. With clipping 150 / 266 (`main` 80 / 123) |
+| 10 | Trainer sustained images/s (epoch-2 wall), batch 16, mosaic, 8 workers, best of 3 | **199 img/s** fp32 / 224 img/s AMP | f32, and AMP | **347 img/s** f32 (303–347; `main` best 216), **500 img/s AMP** (425–500; `main` best 302): beats, 1.7x / 2.2x ([Trainer](#the-trainer-row-10)) | not measured |
+| 11 | Training peak GPU memory, batch 16, f32 | **4353 MiB** allocated (5148 MiB reserved); 2435 MiB AMP | f32, and AMP | **3467 MiB**, **2022 MiB AMP** (train step, as `main`; yolo26n train step 4517 / 2646, trainer 4353 / 2435): beats | **6520 MiB**, **3713 MiB AMP** (as `main`; yolo26s train step 8245 / 4614): beats |
 
 For yolo26s and yolo26m, read the same bars from the tables below. Rows 1, 3, 9 and 10 are the headline targets,
 because FOLO starts in f32. Row 1 is where a native engine should win by the widest margin, since the incumbent is
@@ -174,6 +181,174 @@ launch-bound there.
 
 Note on f32: PyTorch's default fp32 lets cuDNN use TF32 for convolutions. A strict-f32 FOLO kernel should be compared
 against the `fp32-strict` rows. The default-fp32 rows are what users actually get from the incumbent.
+
+## Hill-climb (2026-11-09)
+
+Five agents each optimised one area on its own branch, measured against `main` (c50211ba) under each other's load, and
+wrote a notebook with their method, commands, A/B tables and negative results:
+[GPU inference](hill/gpu-infer.md), [the GPU training step](hill/gpu-train.md),
+[the trainer's data pipeline, host loop and validation](hill/trainer-data.md), [the CPU](hill/cpu.md) and
+[learning](hill/learn.md) (accuracy per epoch, the `auto` optimizer rule, MuSGD). The branches were merged into
+`hill/integration` (8d2cc5fc, current `main` included), and every number below was measured again on that merged
+build against `main` before the climb, on a quiet machine: the binaries alternated run by run, 3 rounds, the shared
+GPU / CPU lock held around each run, the medians of the rounds with their min–max. Load per section is stated with
+each table. Inside ±10% is a tie.
+
+### GPU inference
+
+`FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=forward,predict cargo bench -p folo-vision --bench gpu`, 640×640,
+80 classes. `forward`: the fused model, input on the GPU, batch 1 synchronised latency, batch 16 pipelined throughput;
+`e2e`: the predictor on decoded `u8` images, boxes on the host (batch 16 as 16 / median call); `upload`: the
+predictor's upload + letterbox of a batch of 16. 0–3% GPU from other processes before every section.
+
+| row | folo-n `main` | folo-n merged | folo-s `main` | folo-s merged |
+|---|---|---|---|---|
+| f32 forward b1 | 2.88 ms (2.85–3.29) | **2.09 ms** (2.08–2.31) | 5.16 ms (4.84–5.37) | **3.87 ms** (3.86–4.36) |
+| f32 forward b16 | 1488 img/s (1485–1503) | **1648 img/s** (1627–1652) | 630 img/s (622–635) | 666 img/s (643–667), tie |
+| f32 e2e b1 | 3.76 ms (3.71–3.89) | **2.63 ms** (2.62–3.16) | 5.92 ms (5.81–6.28) | **4.52 ms** (4.52–5.20) |
+| f32 e2e b16 | 759 img/s (746–778) | **1239 img/s** (1237–1246) | 451 img/s (431–452) | **583 img/s** (555–586) |
+| f16 forward b1 | 3.21 ms (2.99–3.61) | **2.07 ms** (2.05–2.39) | 4.73 ms (4.59–5.23) | **3.73 ms** (3.71–4.22) |
+| f16 forward b16 | 1752 img/s (1707–1763) | **1991 img/s** (1926–2001) | 719 img/s (648–731) | 771 img/s (763–788), tie |
+| f16 e2e b1 | 3.89 ms (3.88–4.37) | **2.64 ms** (2.62–2.95) | 5.76 ms (5.62–6.37) | **4.62 ms** (4.55–4.62) |
+| f16 e2e b16 | 814 img/s (749–842) | **1410 img/s** (1297–1427) | 493 img/s (481–505) | **667 img/s** (631–680) |
+| f16 tensor cores forward b1 | 2.39 ms (2.33–2.64) | **1.65 ms** (1.62–1.69) | 3.22 ms (3.09–3.39) | **2.26 ms** (2.16–3.31) |
+| f16 tensor cores forward b16 | 2836 img/s (2834–2870) | 3078 img/s (3069–3082), tie (+9%) | 1188 img/s (1164–1192) | 1237 img/s (1184–1245), tie |
+| f16 tensor cores e2e b1 | 3.34 ms (3.26–3.42) | **2.21 ms** (2.16–2.70) | 4.12 ms (4.09–4.61) | **2.84 ms** (2.77–3.51) |
+| f16 tensor cores e2e b16 | 960 img/s (952–977) | **1898 img/s** (1735–1900) | 663 img/s (636–681) | **986 img/s** (943–989) |
+| upload + letterbox b16 (f32) | 8.41 ms | **2.52 ms** | 8.31 ms | **2.60 ms** |
+
+The folo-s regular-f16 batch-16 forward was bimodal in the first three rounds on *both* binaries (484 or 732 img/s
+for `main`, 456–797 for the merged build); its row is from five further alternated rounds, where neither binary
+dropped. Where it comes from: batch-1 latency from submitting the head of a pass early (the GPU starts while the
+host still encodes the rest, [below](#command-batching-the-merged-flush-policy)), the end-to-end rows from the parallel
+upload through reused mapped staging memory (8.4 → 2.5 ms per batch of 16), the f32 batch-16 forward from narrow
+GEMM tiles for convs with few output channels, the f16 forward from the unrolled depthwise kernel
+([hill/gpu-infer.md](hill/gpu-infer.md)). folo-s f32 forward b1 (3.87 ms) now beats yolo26s's 4.87 ms, which it was
+behind; the batch-16 forwards of folo-s tie with `main` and with the bars.
+
+**Accuracy** is unchanged: `folo val` of `folo-n-coco` on val2017 gives mAP50 0.44945 / mAP50-95 0.30999 on the
+merged build, the digits of `main` ([Validation](#validation)); the gpu-infer notebook has `--half` (0.31008) and
+`--half --tensor-cores` (0.31003), within 0.0001 of f32.
+
+### GPU training step
+
+`FOLO_GPU_TENSOR_CORES=1 FOLO_BENCH_SECTIONS=train cargo bench -p folo-vision --bench gpu`, batch 16 at 640, the fixed
+batch with 8 boxes per image, SGD; `FOLO_BENCH_CLIP=1` adds the trainer's global-norm gradient clipping
+(`clip_grad_norm` 10 through a `GradAccumulator`, the trainer's default; `main`'s bench file got the same 9-line
+option for this A/B). img/s at the median step; 0–3% GPU from other processes before every section.
+
+| row | folo-n `main` | folo-n merged | folo-s `main` | folo-s merged |
+|---|---|---|---|---|
+| f32 | 242 img/s (242–248) | **327 img/s** (327–330), +35% | 121 img/s (119–122) | **151 img/s** (147–154), +25% |
+| AMP | 345 img/s (318–370) | **537 img/s** (535–552), +56% | 194 img/s (193–199) | **273 img/s** (262–275), +41% |
+| f32, clipped | 237 img/s (231–238) | **342 img/s** (334–345), +44% | 80 img/s (56–106) | **150 img/s** (147–152) |
+| AMP, clipped | 313 img/s (264–316) | **542 img/s** (516–543), +73% | 123 img/s (57–171) | **266 img/s** (261–273) |
+| f32 split: forward / backward / SGD | 15.6 / 48.8 / 3.8 ms | 13.1 / 34.4 / 1.3 ms | 34.5 / 96.0 / 3.7 ms | 33.0 / 75.3 / 1.4 ms |
+| AMP split: forward / backward / unscale + SGD | 10.7 / 28.2 / 5.1 ms | 7.7 / 18.7 / 2.0 ms | 19.8 / 56.3 / 5.6 ms | 17.0 / 38.9 / 2.4 ms |
+| clip + SGD phase, f32 / AMP | 20.8 / 22.6 ms | 2.3 / 3.0 ms | 30.3 / 29.9 ms | 2.9 / 3.0 ms |
+| dispatches / submissions per step, f32 | 1328 / 3 | 1109 / 21 | 1328 / 3 | 1109 / 21 |
+| dispatches per step, clipped f32 | 3497 | 1178 | 3533 | 1178 |
+| peak memory f32 / AMP | 3467 / 2022 MiB | 3467 / 2022 MiB | 6520 / 3713 MiB | 6520 / 3713 MiB |
+
+`main`'s clipped folo-s rows swing by 2–3x between rounds (its clipping is about 2200 extra small dispatches per
+step); the merged build's agree within 4%. With clipping on, the merged step is as fast as without it. Where it
+comes from: a submission every 64 dispatches, weight-gradient spatial sizes as specialisation constants, stride-phase
+input gradients, multi-tensor optimizer / unscale / EMA / accumulation / clipping kernels, weight-gradient tiles by
+shape ([hill/gpu-train.md](hill/gpu-train.md)).
+
+### The trainer (row 10)
+
+The incumbent's protocol ([Method](#method), "Trainer"): `folo train --data D:/folo-bench/data --model folo-n
+--epochs 2 --batch 16 --imgsz 640 --workers 8 --close-mosaic 0 --device gpu:0 [--amp]`, a fresh process per run,
+`bench/trainer/ab.py` alternating the binaries; sustained = the epoch-2 images over the epoch's wall time, loader
+stalls included. The loader's start-up is in that time for `main`; the merged build starts epoch 2's loader during
+epoch 1's validation, so most of its start-up is not. 7–14 other CPU cores were busy during the f32 runs, 2–11 during AMP.
+
+| | `main` best (rounds) | merged best (rounds) | bar |
+|---|---|---|---|
+| f32, epoch 2 | 216 img/s (216 / 212 / 199) | **347 img/s** (335 / 303 / 347) | 199 |
+| AMP, epoch 2 | 302 img/s (278 / 302 / 232) | **500 img/s** (425 / 427 / 500) | 224 |
+| f32, epoch 1 (pipeline compilation, buffer pool growth) | 62–72 img/s, 9.8–12.5 s with validation | 39–42 img/s, 13.3–15.5 s | |
+| process wall, f32 / AMP (medians) | 14.6 / 27.1 s | 17.3 / 19.6 s | |
+
+The trainer-data branch alone tied `main` in f32 (201 vs 205 img/s: the epoch is the GPU step); merged with the
+faster step, sustained f32 beats the bar by 1.7x and AMP by 2.2x. One regression: **the first f32 epoch is about
+4 s slower** on the merged build (13.3–15.5 s against 9.8–12.5 s), so this 2-epoch f32 run's process wall is 2.7 s
+longer; the AMP first epoch is not slower (4.7–21.6 s against 18.9–23.1 s, wide in both). Epoch 1 is mostly
+pipeline compilation, and the merged build compiles more pipeline variants (weight-gradient kernels specialised per
+shape, the new tiles); that is the likely cause, not isolated. A persistent pipeline cache
+([next optimisations](#next-optimisations)) would remove it for every run after the first.
+
+### Validation
+
+`folo val --model D:/folo-weights/folo-n-coco.folo --data D:/folo-data/coco --device gpu:0` (val2017, 5000 images),
+`bench/trainer/ab.py val`, 3 rounds: process wall **29.6 s → 8.9 s** (`main` 27.3–68.3, merged 8.8–9.2), the
+evaluation itself 14.4 → 6.7 s. mAP50 0.44944638 and mAP50-95 0.30999148 from both binaries, to the last digit. `val`
+now opens only the evaluated split (`main` probed the 118k train2017 headers too) and downloads, NMS-es and scores a
+batch on a second thread while the next batch's forward runs ([hill/trainer-data.md](hill/trainer-data.md)).
+
+### CPU
+
+`cargo bench -p folo-vision --bench cpu_e2e` (`FOLO_BENCH_SCALE`, `FOLO_BENCH_BATCH=16`, `FOLO_BENCH_ITERS=60`) and
+`--bench train_step` (folo-n, 320 px, batch 16, AdamW), alternated with `tools/bench-ab.ps1` at High priority, 28
+threads; other processes used 3–8 cores during these runs. Batch-1 rows are medians of 60 calls.
+
+| row (28 threads) | folo-n `main` | folo-n merged | folo-s `main` | folo-s merged | folo-m `main` | folo-m merged |
+|---|---|---|---|---|---|---|
+| forward b1 | 17.7 ms (17.2–18.5) | 18.3 ms (17.4–18.4), tie | 37.0 ms | 37.5 ms, tie | 81.6 ms | 82.8 ms, tie |
+| e2e b1, 640×640 | 18.6 ms (17.8–18.7) | 18.6 ms (18.6–19.2), tie | 37.3 ms | 37.5 ms, tie | 81.4 ms | 82.9 ms, tie |
+| e2e b1, 1280×720 | 14.8 ms | 15.0 ms, tie | 26.4 ms | 26.6 ms, tie | 53.3 ms | 53.5 ms, tie |
+| `predict_batch` 16 | 223 ms, 72 img/s | **151 ms, 106 img/s** (+47%) | 609 ms, 26.3 img/s | **443 ms, 36.1 img/s** (+37%) | 1619 ms, 9.9 img/s | **1230 ms, 13.0 img/s** (+32%) |
+| train step (folo-n, 320 px, b16) | 360.6 ms (354.5–361.4), 44.4 img/s | **269.4 ms** (264.0–275.3), **59.4 img/s** (−25%) | | | | |
+
+On 8 pinned P-cores (`-Affinity 5555`) the batch-1 rows tie too, with 2–18 cores busy elsewhere: forward folo-n 19.2
+→ 18.0 ms, folo-s 38.9 → 40.3, folo-m 101.9 → 104.4. **CPU batch-1 latency is unchanged by the climb** (the CPU agent
+could not measure its scheduling questions on a loaded machine); folo-s and folo-m beat the yolo26s / yolo26m bars at
+batch 1 on both builds. The batch and training gains come from running a batch as concurrent two-image forwards, fused
+BatchNorm + SiLU in training and a conv weight gradient over shifted rows read in place ([hill/cpu.md](hill/cpu.md)).
+
+### Command batching (the merged flush policy)
+
+Two branches changed when the open command batch is submitted (`crates/folo-gpu/src/context.rs`, `bump`): gpu-infer
+submitted 16 dispatches after an idle wait and doubled the limit per submission up to 1024; gpu-train submitted every
+64. The merge does both: 16 after a wait, doubling up to the flush interval (default 64, `FOLO_GPU_FLUSH_EVERY`).
+Three settings on the merged build, 3 rounds alternated: the default, a fixed 64 (the ramp disabled in a local build),
+and the ramp up to 1024 (`FOLO_GPU_FLUSH_EVERY=1024`); 0–4% GPU from other processes before every section.
+
+| | default (16 → 64) | fixed 64 | 16 → 1024 |
+|---|---|---|---|
+| folo-n f32 forward b1 | **2.14 ms** (2.11–2.21) | 2.41 ms (2.37–4.81) | 2.18 ms (2.14–3.04) |
+| folo-n f16 tensor cores forward b1 | **1.41 ms** (1.40–1.44) | 1.72 ms (1.61–5.45) | 1.54 ms (1.43–2.02) |
+| folo-s f32 forward b1 | **3.92 ms** | 4.29 ms | 3.95 ms |
+| folo-s f16 tensor cores forward b1 | 2.29 ms | 2.56 ms | 2.20 ms |
+| folo-n f32 / f16 TC forward b16 | 1655 / 3078 img/s | 1610 / 3058 | 1649 / 3114 |
+| folo-s f32 / f16 TC forward b16 | 666 / 1238 img/s | 664 / 1242 | 666 / 1249 |
+| folo-n AMP train step | 518 img/s (514–537), 31 submissions | 542 (526–547), 28 | 528 (494–534), 14 |
+| folo-s AMP train step | 268 img/s (263–274) | 271 (251–272) | 272 (272–274) |
+
+The ramp is worth 10–20% of batch-1 latency over a fixed 64; batch 16 and the training step tie in all three. Ramping
+to 1024 ties the default everywhere (folo-n f16 tensor cores at batch 1 is 9% faster with the default), so the merged
+policy stays as it is.
+
+### Learning gates
+
+The shapes gate (docs/MODEL.md §10.6: folo-n, 320 px, 30 epochs, batch 16, seed 0, `--device gpu:0`) with the
+merged `folo` (`auto` → AdamW lr0 0.00125, unchanged by the new `auto` rules for 4 classes): f32 final mAP50 0.980 /
+mAP50-95 **0.892** (reference 0.898), gate first met at epoch 9, 90 s wall; `--amp` 0.979 / **0.895** (reference
+0.899), first met at epoch 9, 6 steps skipped for overflow in epoch 1, 100 s wall (`main`: 182 / 200 s). Both are
+within 0.01 of the reference, with no non-finite batch. The merged kernels add in other orders, so a run follows a
+different rounding trajectory than `main`'s; the learn agent's five-seed SGD check on the COCO proxy found the merge
+indistinguishable from `main` (mean AP 0.0848 vs 0.0857, 3 of 5 seeds lower; [hill/learn.md](hill/learn.md)).
+
+### Against the agents' own claims
+
+No merged number is more than 10% worse than the claim in its notebook. Every GPU inference row beats or ties
+the gpu-infer table (the closest, folo-n f32 forward b16, 1648 vs 1660 img/s, is a tie at −0.7%), the training step is above gpu-train's
+alternated medians (folo-n 327 / 537 vs 307 / 502 img/s, folo-s 151 / 273 vs 140 / 246; its quiet-window single run
+gave 327 / 533 and 153 / 269), `folo val` takes 8.9 vs 10.8 s (quiet here, under load in the notebook), the CPU train step 269 vs 280–295 ms and folo-n
+`predict_batch` 151 vs 159–163 ms. `main` measured faster here than in the agents' tables too (the folo-n f32 step
+242 vs 226 img/s, folo-n f32 e2e b16 759 vs 683 img/s): this machine was quiet, theirs was not. The one claim that
+changed is row 10 in f32: a tie on the trainer-data branch alone, a clear win merged.
 
 ## Accuracy
 
@@ -200,10 +375,37 @@ into those causes. The FOLO run ended
 at its schedule's floor, not at a plateau: mAP50-95 rose every epoch, by 0.0009 per epoch over the last five. The
 longer v2 schedule passed v1 at epoch 58 and was still gaining about 0.0008 per epoch when it was paused at epoch 62,
 before its learning-rate decay and close-mosaic phases; the remaining 238 epochs (about 29 h) have not been run, so
-what the full schedule reaches is not known. The
-comparison FOLO still owes is an equal-budget one. Until that run exists, FOLO's accuracy
-on COCO is **behind the published nano models by 0.08–0.09 AP** (v2 interim; 0.08–0.10 for v1), and the speed rows above should be read with that
-in mind.
+what the full schedule reaches is not known. Until a long run exists, FOLO's accuracy on full COCO is **behind the
+published nano models by 0.08–0.09 AP** (v2 interim; 0.08–0.10 for v1), and the speed rows above should be read with
+that in mind. **The published 0.314 / 0.317 are unchanged by the hill-climb**: both checkpoints were trained with
+SGD before it, and the trainer changes below (the `auto` rule, MuSGD) only show at full scale once a long COCO run is
+redone with them.
+
+**Equal budget on a COCO proxy** (the hill-climb's learn agent, [hill/learn.md](hill/learn.md)): 20,000 train2017 /
+2,000 val2017 images pre-shrunk to 320 px (all 80 classes), folo-n against Ultralytics 8.4.198 YOLO11n, both from
+scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed for the last 5; COCO AP
+(pycocotools) of each trainer's best checkpoint on the 2,000 proxy val images:
+
+| optimizer (both trainers the same) | FOLO AP | Ultralytics AP |
+|---|---:|---:|
+| `auto` before the climb (AdamW lr0 0.000119 for 80 classes) | 0.0164 | 0.0166 |
+| SGD lr0 0.01 | 0.0860 / 0.0855 (seeds 0 / 1) | 0.0853 |
+| MuSGD lr0 0.01 (`--optimizer musgd`, new) | **0.1131 / 0.1155** | 0.1133 |
+| FOLO's `auto` after the climb (rule 2: AdamW lr0 floored at 0.001) | 0.0747 | |
+
+- **Per epoch, FOLO's trainer learns as well as the reference**: level under every shared setting, training losses
+  equal epoch by epoch, and a step-by-step read of the reference (init, loss, assigner, augmentation, optimizer
+  groups, schedule, EMA, clipping) found no divergence that changes results. The gap to the published nano numbers
+  is schedule and data, not a trainer defect.
+- **The `auto` rule fix** (rule 2): `auto` picks AdamW for runs of at most 10,000 iterations with an LR fit that falls
+  with the class count, 0.000119 for 80 classes; from scratch it barely learns in 20 epochs. FOLO now floors it at
+  0.001: 4.5x the reference's default result on the proxy. The floor binds from 6 classes on, so the shapes gate (4
+  classes) and R6 (2) resolve to the settings they had.
+- **MuSGD** (rule 3): the reference's `auto` choice since 8.4 for runs over 10,000 iterations (full COCO), now
+  implemented in folo-nn (docs/MODEL.md §8.2) and `auto`'s long-run choice. +0.031 AP over SGD on the proxy (ten
+  times the seed noise), level with the reference's own MuSGD, at about 17% more step time; it passes SGD's 20-epoch
+  AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
+  paused 300-epoch COCO run keeps SGD.
 
 **Transfer: R6** ([examples/r6](../examples/r6/README.md#fine-tuning-from-coco), 2 classes, 2030 train frames,
 `folo val` mAP50-95 of `best.folo` at 640 px). Fine-tuning from `folo-n-coco` against the same budget from scratch:
@@ -221,6 +423,9 @@ in mind.
 `FOLO_BENCH_SCALES=n,s` is the default). Same machine, wgpu 30 on Vulkan, release build, 2026-11-08. FOLO computes in
 strict f32 everywhere (no TF32, no tensor cores), so rows 1 and 3 are also comparable with the incumbent's
 `fp32-strict` rows.
+
+This section and its subsections record the rounds that built the GPU path, each with its own branch, date and load;
+the current numbers are the hill-climb build's ([Hill-climb](#hill-climb-2026-11-09), [FOLO targets](#folo-targets)).
 
 **Model size.** folo-n has 2,624,064 parameters and 6.54 GFLOPs at 640 (docs/MODEL.md §4; 2,616,232 parameters
 fused), folo-s 9,458,736 and 21.59 GFLOPs. That is about 19% (n) and 3% (s) more compute than fused yolo26n /
@@ -409,14 +614,20 @@ and tracks f32 within run-to-run noise from epoch 7. **Speed on this run**: at 3
 here (200 vs 182 s wall clock; the per-window overflow wait and the autocast casts cost more than the smaller GEMMs
 save). The 640 px training step above is where AMP pays.
 
-**Verdict.** folo-n beats the incumbent on batch-1 forward latency (2.99 vs 4.95 ms), end to end at batch 1 (5.18
-vs 6.92 ms) and batch 16 (722 vs 615 img/s fp16 / 536 fp32), on the training step (219 vs 202 img/s in strict f32
-against TF32 convolutions; 307 vs 252 img/s with AMP) and on training memory (3.5 vs 4.4 GiB; 2.0 vs 2.6 GiB with AMP). It ties batch-16 forward throughput (1385–1461
-vs 1454 img/s) while doing 19% more FLOPs. folo-s beats yolo26s end to end at batch 1 (7.87 vs 8.59 ms) and on the
-training step (109 vs 105 img/s fp32; ties with AMP, 183 vs 188), ties batch-16 forward, and is behind on batch-1 forward (5.5 vs 4.9 ms) and
-batch-16 end to end against fp16 (394 vs 446 img/s; it beats the fp32 317).
+**Verdict** (the hill-climb build, [Hill-climb](#hill-climb-2026-11-09); the tables above in this section are the
+earlier rounds that got there). folo-n beats yolo26n on every GPU row: batch-1 forward 2.09 vs 4.95 ms (f32) and 1.65
+vs 6.25 ms (f16 on tensor cores), batch-16 forward 1648 vs 1454 img/s (f32 against TF32 convolutions) and 3078 vs
+2370 (f16), end to end 2.63 vs 6.92 ms at batch 1 and 1898 vs 615 img/s at batch 16, the training step 327 vs 202
+img/s (f32) and 537 vs 252 (AMP), the trainer's sustained rate 347 vs 199 / 500 vs 224 img/s, and training memory
+(3.5 vs 4.4 GiB; 2.0 vs 2.6 GiB with AMP), while doing 19% more FLOPs. folo-s beats yolo26s on batch-1 forward (3.87
+vs 4.87 ms; 2.26 vs 7.47 on tensor cores), end to end (4.52 vs 8.59 ms, 986 vs 446 img/s) and on the training step
+(151 vs 105, 273 vs 188 img/s), and ties it on batch-16 forward (666 vs 627 img/s f32, 1237 vs 1159 f16 on tensor
+cores).
 
 ### Trainer throughput (the server's reference numbers)
+
+These rows predate the hill-climb, which made the training step 1.25–1.56x faster ([Hill-climb](#hill-climb-2026-11-09));
+a server that measures its own throughput replaces them.
 
 What a whole training run sustains, data loader and augmentation included, read from the `metrics.jsonl` of runs on
 this machine (2026-11-08): the median over epochs of each epoch's last `step` event (`imgs_per_s`: the epoch's images
@@ -550,7 +761,9 @@ branch of the dual model stays level with the model it came from.
 `cargo bench -p folo-vision --bench model` (folo-n, 80 classes, untrained, fused, `no_grad`, f32, batch 1, 640×640;
 `RAYON_NUM_THREADS` picks the pool). Branch `perf/inference-2`, 2026-11-08. The machine was never quiet during these
 runs: another agent's training job held 44–100% of the CPU, so these are upper bounds; each was alternated with the
-same harness built from `main` in the same session.
+same harness built from `main` in the same session. Like [FOLO on the GPU](#folo-on-the-gpu), this section keeps the
+rounds that built the CPU path; the hill-climb build's numbers, folo-s and folo-m included, are in
+[Hill-climb, CPU](#cpu).
 
 | f32, batch 1 | 8 threads | 20 threads | 28 threads |
 |---|---|---|---|
@@ -713,20 +926,35 @@ ragged tails, taps that only see padding, dilation, channel multipliers, accumul
 GEMM paths (1×1 with ragged tiles and K over one block, stride-1/2/3 and mixed-stride phases, groups, the stem path).
 Results stay bitwise identical from run to run and across thread counts.
 
-**Next optimisations**, by expected gain:
-1. **Backward kernels** (two thirds of the training step now that the loss is on the device): a stride-phase
-   decomposition for strided-conv input gradients (3/4 of the transposed-conv tile is zeros at stride 2, see
-   docs/GPU.md), fewer copies for concat / split / chunk
-   gradients, and fused elementwise gradient chains in C2PSA and the head.
-2. **Host side of predict** (end to end, batch 16): the 16 × 1.2 MB pixel copies into the upload (9 ms of the 22 ms
-   batch) could be written in parallel into a mapped staging buffer, and the next batch's upload overlapped with this
-   batch's forward. Letterbox and candidate filtering already run on the GPU.
-3. **Batch-1 latency of larger models** (folo-s): GEMM tile configs and split-K for the skinny batch-1 problems of the
-   deep layers, where the GPU is under-occupied.
-4. **Tensor cores, part two** (rows 2, 4, 6 and 9): the f16 inference GEMMs and convs run on tensor cores
-   (`--tensor-cores`, [Tensor cores](#tensor-cores-f16)); next are a quiet-GPU measurement, the f16 depthwise and
-   elementwise kernels that now take a larger share of the forward, and mixed-precision training (`--amp`: f16
-   gradient convs on tensor cores, loss scaling) for the AMP training bar.
+## Next optimisations
+
+By expected gain, from the leftovers of the hill-climb notebooks (each has the measurements behind its item):
+1. **Host cost per dispatch at batch 1** (GPU batch-1 forwards are host-bound: the folo-n f16 tensor-core forward is
+   about 0.8 ms of GPU work in a 1.65 ms call). A bind-group cache keyed by pipeline, buffers and uniform slot (3–4 µs
+   of the 8–19 µs per dispatch; the pool hands out the same buffers every forward), residual adds fused into the conv
+   epilogue, and convs that write straight into their concat's channel slice, which also removes the 42–55 copies
+   per forward and the copies of the training forward's concats ([hill/gpu-infer.md](hill/gpu-infer.md),
+   [hill/gpu-train.md](hill/gpu-train.md)).
+2. **Validation readback**: the scoring thread is now validation's limit (90 MB downloaded per batch of 32, NMS at
+   conf 0.001); a device-side multi-label candidate kernel would download only the pairs above `conf`
+   ([hill/trainer-data.md](hill/trainer-data.md)).
+3. **A persistent pipeline cache**: the first epoch on the GPU is mostly pipeline compilation (4–15 s), and the
+   merged build's first f32 epoch is 4 s slower than `main`'s ([The trainer](#the-trainer-row-10)).
+4. **MuSGD step cost** (about 17% of the step): one fused Newton–Schulz kernel per column bucket instead of about 15
+   dispatches per conv weight per step; then the full-scale check, a long COCO run under `auto` rule 3 (the first run of the shipped rule-3 recipe:
+   momentum 0.9, warmup_bias_lr 0), and the AdamW
+   floor at 0.002 behind the shapes and R6 gates ([hill/learn.md](hill/learn.md)).
+5. **f32 GEMMs and weight gradients**: split-K or stream-K for the 40 px-and-below layers of the forward, a
+   transposed formulation for `C_in·9 ≫ C_out` weight gradients, a direct reduction for the tensor-core stem weight
+   gradient (`N = 27` on a 16×256 tile, 1.7 ms per AMP step), and the f16 weight copies written by the optimizer
+   instead of 98 cast dispatches per AMP forward.
+6. **CPU batch-1 latency** (folo-n 18 ms, unchanged by the climb; target 12): fewer threads for the small 20×20 / 40×40
+   layers and the head's branches side by side, measured on a quiet machine; then the CPU strided-conv input
+   gradients as stride phases (about 25 ms of the CPU train step) ([hill/cpu.md](hill/cpu.md)).
+7. **Loader and start-up**: `--cache ram` of resized images for large-image sets (R6: decode and resize are 89% of a
+   mosaic sample), and a header probe cache for COCO's 30–50 s `folo train` start-up.
+8. **Upload pipelining** at batch 16: overlap the PCIe copy of one chunk with the host fill of the next (0.5–1 ms of
+   the remaining 2.5 ms per batch).
 
 ## Results
 
