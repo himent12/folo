@@ -228,7 +228,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     "confusion_conf": 0.25,        // the confusion matrix counts detections with score > confusion_conf
     "confusion_iou": 0.45 }        // ... matched to a ground truth at IoU > confusion_iou (docs/METRICS.md §7)
   ```
-  `pr` has one curve per class, in class order, sampled at 101 recall points (`0.00` to `1.00`, IoU 0.5).
+  `pr` has one curve per class that has ground truth in the split (a class without any has none; each curve names
+  its `class`), in class order, sampled at 101 recall points (`0.00` to `1.00`, IoU 0.5).
   `precision` is the COCO-interpolated envelope (it never rises with recall), and `ap50` is its mean.
   `confusion` is `(classes + 1) × (classes + 1)`: rows are the true class, columns the predicted class, and the
   last row and column are background. `confusion[c][n]` counts missed objects of class `c`, `confusion[n][c]`
