@@ -952,8 +952,9 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
     clipped to the image, as validation scores them), so the unchanged images' mAP is what `POST /api/val` (and
     `folo val`) gives on the same images in the same order. Under a condition the model gets exactly the bytes
     of `GET …/images/{image_id}?condition=…`. `speed.ms_per_image` is the wall time of the unchanged pass (decode
-    to boxes; images are prepared on several threads while the previous batch of 16 runs) divided by its
-    images.
+    to boxes; images are prepared on several threads while the previous batch of 16 runs) per image, counted
+    from the end of the first batch, so loading the model and warming up the device are left out: a throughput,
+    not the latency of one image.
   - `agent`: the agent is asked for boxes as agent labeling asks (the same prompt, with the benchmark's classes
     and its description as the instructions; batches of the agent's default size, three calls in flight, every
     image scaled as labeling scales it; under a condition, the variant's JPEG). Defaults: the first 48 images,
@@ -1014,9 +1015,11 @@ process left so) is `failed` ("the server stopped before the entry finished") wi
   this fingerprint that ran every image and every condition is reused, else a model entry is started: it is
   queued like any other and listed with the others), the teacher's labels of the pool (its detections from
   `min_confidence` up, else from its entry's self-labeling threshold, else from 0.5; clipped to the image),
-  written as a YOLO dataset `<data dir>/datasets/<name>-gen-<n>` named `<name> gen <n>` and registered (train
-  and val both from the pool with the teacher's labels, 10% val rounded, at least one image in train; pool images
-  whose bytes are in the benchmark are left out and counted in `labels.excluded`), a training run of the student
+  written as a YOLO dataset `<data dir>/datasets/<name>-gen-<n>` named `<name> gen <n>` and registered (the
+  pool images the teacher kept at least one box on, `labels.labeled_images` of the `labels.images` it looked
+  at: an image it kept nothing on is left out, since its silence is not a label; train and val both with the
+  teacher's labels, 10% val rounded; pool images whose bytes are in the benchmark are left out and counted in
+  `labels.excluded`), a training run of the student
   on it named `<name> gen <n>` (an ordinary run, through the same path as `POST /api/runs`: it is in
   `GET /api/runs`, queued like any other), and the student's entry; the student is the next generation's
   teacher. The pool's own labels are never read. `400 invalid_body` when the teacher's classes are not the
@@ -1025,7 +1028,7 @@ process left so) is `failed` ("the server stopped before the entry finished") wi
   `student.imgsz` that is not a multiple of 32 in `32..=4096`; `404 model_not_found`, `dataset_not_found`,
   `label_job_not_found`; `400 invalid_dataset` when the pool has no image outside the benchmark (a pool split
   defaults to `train`; a labeling job gives all its images). A loop fails (`error` and `hint` say why) when a
-  teacher keeps no box at all, when its run fails or is stopped by someone else, or when an entry fails; the
+  teacher keeps boxes on fewer than 10 pool images, when its run fails or is stopped by someone else, or when an entry fails; the
   run's settings are checked when it is created, so a bad one fails the loop with `POST /api/runs`' message.
 - `GET /api/bench/benchmarks/{id}/loops/{loop_id}` → `BenchLoop`: `generations[0]` is the first teacher, then one
   per student, each with its `labels`, `run_id`, `model_id`, `entry_id`, `score`, `map50_95` and `ci95` as far

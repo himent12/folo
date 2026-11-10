@@ -497,8 +497,13 @@ fn run_model(
     for (k, &variant) in passes.iter().enumerate() {
         let base = (k * items.len()) as u64;
         let t0 = Instant::now();
-        let Some(pass) =
-            predict_pass(&p, &items, variant, file.seed, cancel, |n| progress.set(base + n as u64, variant))?
+        // When the first batch was done and how many images it had: the pass is timed from there, so loading the
+        // model and warming the device up (shader compilation on a GPU) is not counted as the model's speed.
+        let mut warm: Option<(Instant, usize)> = None;
+        let Some(pass) = predict_pass(&p, &items, variant, file.seed, cancel, |n| {
+            warm.get_or_insert((Instant::now(), n));
+            progress.set(base + n as u64, variant)
+        })?
         else {
             return Ok(None);
         };
@@ -508,7 +513,12 @@ fn run_model(
             .collect();
         match variant {
             None => {
-                ms_per_image = t0.elapsed().as_secs_f64() * 1e3 / items.len().max(1) as f64;
+                ms_per_image = match warm {
+                    Some((at, n)) if n < items.len() => {
+                        at.elapsed().as_secs_f64() * 1e3 / (items.len() - n) as f64
+                    }
+                    _ => t0.elapsed().as_secs_f64() * 1e3 / items.len().max(1) as f64,
+                };
                 clean = samples;
             }
             Some(v) => variants.push(Pass { variant: Some(v), samples }),

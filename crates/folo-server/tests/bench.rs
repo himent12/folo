@@ -1254,7 +1254,8 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
     .await;
     let teacher = model(app, &home, "teacher", &["circle", "square"], 7).await;
     let loops = format!("/api/bench/benchmarks/{}/loops", b.id);
-    let train: ImagePage = ok(app, get(&format!("/api/datasets/{}/images?split=train&limit=4", ds.id))).await;
+    let train: ImagePage =
+        ok(app, get(&format!("/api/datasets/{}/images?split=train&limit=12", ds.id))).await;
     let train_ids: Vec<String> = train.images.iter().map(|i| i.id.clone()).collect();
     let copies = vec![
         bytes(app, &format!("/api/bench/benchmarks/{}/images/1", b.id)).await.1,
@@ -1321,7 +1322,7 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
     assert!(g0.entry_id.is_some() && g0.score.is_some() && g0.map50_95.is_some() && g0.ci95.is_some());
     let g1 = &done.generations[1];
     let labels = g1.labels.clone().unwrap();
-    assert_eq!((labels.images, labels.excluded, labels.threshold), (4, 2, 0.001));
+    assert_eq!((labels.images, labels.excluded, labels.threshold), (12, 2, 0.001));
     assert!(labels.boxes > 0 && labels.labeled_images > 0);
     assert!(g1.model_id.is_some() && g1.entry_id.is_some() && g1.score.is_some() && g1.ci95.is_some());
     // The student's run is an ordinary run.
@@ -1335,8 +1336,9 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
     let student_ds: Dataset = ok(app, get(&format!("/api/datasets/{}", labels.dataset_id))).await;
     assert_eq!(
         (student_ds.classes.clone(), student_ds.splits.train + student_ds.splits.val),
-        (vec!["circle".to_string(), "square".to_string()], 4)
+        (vec!["circle".to_string(), "square".to_string()], labels.labeled_images)
     );
+    assert!(labels.labeled_images >= 10 && labels.labeled_images <= labels.images);
     let mut lines = Vec::new();
     for e in walk(Path::new(&student_ds.path).join("labels")) {
         lines.extend(std::fs::read_to_string(e).unwrap().lines().map(str::to_string));
@@ -1347,6 +1349,15 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
     // The teacher's entry was a fresh one, the student's another; both are on the leaderboard.
     let board: BenchEntryList = ok(app, get(&format!("/api/bench/benchmarks/{}/entries", b.id))).await;
     assert_eq!(board.entries.len(), 2);
+
+    // A teacher that keeps (almost) nothing ends its loop before anything is trained: an image it is silent on
+    // is not a background image.
+    let silent: BenchLoop =
+        ok(app, post(&loops, json!({ "teacher": teacher, "pool": pool_src, "min_confidence": 1.0 }))).await;
+    let silent = loop_ended(app, &b.id, &silent.id).await;
+    assert_eq!(silent.status, BenchLoopStatus::Failed, "{silent:?}");
+    assert!(silent.error.as_deref().unwrap().contains("too few to train a student on"), "{silent:?}");
+    assert!(silent.hint.is_some() && silent.generations[1].run_id.is_none());
 
     // A second loop reuses the teacher's finished entry; stopping it while its student trains stops the run.
     f.store.hold_runs_after_epochs(true);
@@ -1391,7 +1402,7 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
     let list: BenchLoopList = ok(app, get(&loops)).await;
     assert_eq!(
         list.loops.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
-        [second.id.as_str(), started.id.as_str()]
+        [second.id.as_str(), silent.id.as_str(), started.id.as_str()]
     );
     let (status, _, _) = send(app, delete(&format!("{loops}/{}", second.id))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);

@@ -141,6 +141,18 @@ fn bootstrap_interval_is_seeded_and_brackets_the_estimate() {
     assert!(lo > 0.1 && hi < 0.9);
     assert_eq!(evaluate(&s, 1, true, 3).accuracy.ci95, a.ci95);
     assert_ne!(evaluate(&s, 1, true, 4).accuracy.ci95, a.ci95);
+    // A rare, hard class: one missed box of class 1 among twenty images. Resamples without that image score
+    // class 0 alone, so they run higher than the measured class mean; the interval still sits around it.
+    let mut rare = s.clone();
+    rare[19].truths.push(t(1, 20.0, 20.0, 30.0, 30.0));
+    let a = evaluate(&rare, 2, true, 3).accuracy;
+    let [lo, hi] = a.ci95;
+    assert!(
+        lo <= a.map50_95 && a.map50_95 <= hi && hi - a.map50_95 < 2.0 * (a.map50_95 - lo) + 0.05,
+        "{lo} {} {hi}",
+        a.map50_95
+    );
+    assert!((0.0..=1.0).contains(&lo) && (0.0..=1.0).contains(&hi));
     // numpy's linear percentile: 200 values 0..199, q 0.025 → position 4.975.
     let v: Vec<f32> = (0..200).map(|i| i as f32).collect();
     assert!((percentile(&v, 0.025) - 4.975).abs() < 1e-4 && (percentile(&v, 0.975) - 194.025).abs() < 1e-3);

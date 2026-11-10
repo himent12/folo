@@ -226,7 +226,7 @@ fn report<'a>(images: impl IndexedParallelIterator<Item = &'a Prepared>, num_cla
 pub fn evaluate(samples: &[Sample], num_classes: usize, scored: bool, seed: u64) -> Evaluation {
     let images = prepare_all(samples, num_classes, scored);
     let rep = report(images.par_iter(), num_classes);
-    let ci95 = bootstrap(&images, num_classes, seed);
+    let ci95 = bootstrap(&images, num_classes, seed, rep.map50_95);
 
     let mut coco = CocoEval::new(num_classes);
     for (i, p) in images.iter().enumerate() {
@@ -279,9 +279,13 @@ pub fn evaluate(samples: &[Sample], num_classes: usize, scored: bool, seed: u64)
     }
 }
 
-/// mAP@0.5:0.95's 95% interval: [`BOOTSTRAP_RESAMPLES`] resamples of the images with replacement, the 2.5th and
-/// 97.5th percentile (linear interpolation between order statistics, numpy's default). `[0, 0]` without images.
-fn bootstrap(images: &[Prepared], num_classes: usize, seed: u64) -> [f32; 2] {
+/// mAP@0.5:0.95's 95% interval around `measured`: [`BOOTSTRAP_RESAMPLES`] resamples of the images with
+/// replacement, their 2.5th and 97.5th percentile (linear interpolation between order statistics, numpy's
+/// default), shifted by the difference between `measured` and the resamples' mean. The shift matters when classes
+/// are rare: a resample that happens to hold none of a hard class leaves it out of the class mean, so resamples
+/// run higher than the measured value and their plain percentiles would sit beside it instead of around it. The
+/// interval is clamped to `[0, 1]` and always holds `measured`. `[0, 0]` without images.
+fn bootstrap(images: &[Prepared], num_classes: usize, seed: u64, measured: f32) -> [f32; 2] {
     let n = images.len();
     if n == 0 {
         return [0.0; 2];
@@ -299,7 +303,11 @@ fn bootstrap(images: &[Prepared], num_classes: usize, seed: u64) -> [f32; 2] {
         })
         .collect();
     maps.sort_by(f32::total_cmp);
-    [percentile(&maps, 0.025), percentile(&maps, 0.975)]
+    // Summed in sorted order, in f64: the same for every thread count.
+    let mean = maps.iter().map(|&m| m as f64).sum::<f64>() / maps.len() as f64;
+    let shift = measured as f64 - mean;
+    let at = |q: f64| (percentile(&maps, q) as f64 + shift).clamp(0.0, 1.0) as f32;
+    [at(0.025).min(measured), at(0.975).max(measured)]
 }
 
 /// The `q` quantile of sorted values, interpolating linearly between neighbours (numpy's `linear`).

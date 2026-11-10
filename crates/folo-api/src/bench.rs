@@ -583,7 +583,8 @@ pub struct BenchEntry {
 pub struct BenchSpeed {
     /// The device, e.g. `gpu:0`.
     pub device: String,
-    /// Mean time per image on the unchanged images, decode to boxes, in milliseconds.
+    /// Wall time per image on the unchanged images, decode to boxes, in milliseconds, in batches and without the
+    /// first one (which pays for loading the model): a throughput, not the latency of a single image.
     pub ms_per_image: f32,
 }
 
@@ -1009,9 +1010,10 @@ pub struct BenchGeneration {
 pub struct BenchLabels {
     /// The confidence from which detections were kept.
     pub threshold: f32,
-    /// Images of the pool that were labeled.
+    /// Images of the pool the teacher looked at.
     pub images: u64,
-    /// Of those, images with at least one box.
+    /// Of those, images it kept at least one box on: the student's dataset. An image it kept nothing on is left
+    /// out (its silence is not a label).
     pub labeled_images: u64,
     /// Boxes kept.
     pub boxes: u64,

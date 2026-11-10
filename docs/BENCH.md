@@ -90,8 +90,11 @@ if that IoU is at least 0.5 (the matching of AP at IoU 0.5). A matched detection
 
 **Accuracy.** `mAP@0.5:0.95` exactly as [METRICS.md](METRICS.md) defines it (COCO's 101-point AP, class mean
 over the classes that have true boxes). Its 95% interval is a bootstrap over images: 200 resamples of the images
-with replacement (seeded by the benchmark), the 2.5th and 97.5th percentile of their mAP@0.5:0.95. Two entries
-whose intervals overlap are not clearly different on this benchmark; more images make the interval narrower.
+with replacement (seeded by the benchmark), the 2.5th and 97.5th percentile of their mAP@0.5:0.95, shifted so
+that the resamples' mean sits on the measured value (with rare classes a resample can leave a hard class out of
+the class mean, so resamples run a little higher than the measurement; the shift keeps the interval around the
+number it belongs to). Two entries whose intervals overlap are not clearly different on this benchmark; more
+images make the interval narrower.
 Also reported: mAP@0.5, mAP@0.75, mAP for small / medium / large objects (COCO's area ranges), per-class AP, and
 precision / recall / F1 at the confidence with the best F1.
 
@@ -168,10 +171,13 @@ The self-labeling axis says how good a model's own labels are. A loop tests what
 2. The teacher labels a **pool** of images by itself: it keeps its detections from a confidence threshold up (by
    default the threshold `t*` its benchmark entry found). The pool is a dataset split or a labeling job's images;
    the pool's own labels, if it has any, are never read, and pool images that are also in the benchmark are left
-   out.
-3. A student trains on those labels alone: the pool is split into train and val, both with the teacher's labels,
-   so no true label enters training or the choice of the best checkpoint. The student can be a larger
-   architecture than the teacher.
+   out. So are images the teacher kept nothing on: its silence is not a label, and a student shown those images
+   as empty would learn to see nothing in them.
+3. A student trains on those labels alone: the labeled pool images are split into train and val, both with the
+   teacher's labels, so no true label enters training or the choice of the best checkpoint. The student can be
+   a larger architecture than the teacher. A teacher that keeps boxes on fewer than 10 images ends the loop
+   there: its confident labels are too few (its entry's self-labeling chart shows what a lower threshold would
+   cost in precision).
 4. The benchmark grades the student, which becomes the teacher of the next generation.
 
 The verdict compares the last generation with the first teacher on mAP@0.5:0.95 of the unchanged images:
@@ -184,7 +190,24 @@ What it does not show: a loop is as honest as its benchmark is held out. If the 
 images, every generation inherits that.
 
 ## In Studio
-**Benchmarks** in the sidebar.
+**Benchmarks** in the sidebar (on a phone: under Models).
+
+1. **New benchmark.** Name it, say what the camera sees and what makes its job hard, and pick the images: a
+   split of a dataset, or the labeled images of a labeling job. It starts with the default plan.
+2. **Conditions.** Switch conditions on and off, pick their severities and weights, and look at any image of the
+   benchmark under any condition next to the unchanged one. **Design with an agent** proposes a plan from the
+   description. The plan is yours to change until the first entry.
+3. **Add entry.** A model of the server, an agent, or a file of predictions from anywhere else. The
+   **leaderboard** ranks the entries by score, with the five axes and each entry's mAP interval on one scale, so
+   an overlap is visible as an overlap.
+4. **Open an entry** for the whole result: where the score comes from, accuracy per class and object size, the
+   accuracy kept under each condition and severity (and what that condition looks like), the reliability of its
+   confidence, what its own labels would be worth, how tight its boxes are, and the images it gets most wrong
+   with every missed and wrong box drawn.
+5. **Compare** two to four entries side by side: who wins under which condition and on which class, and whether
+   the difference is larger than the intervals.
+6. **Loops → New loop** runs a self-improvement loop from a model of the server and shows each generation
+   against the first teacher's interval.
 
 ## Limits
 - Detection only (boxes): no masks, keypoints or classification benchmarks yet.

@@ -128,6 +128,11 @@ in-browser module.
 - **Runs**: start a training run, follow it live (metrics over SSE, validation samples, per-class mAP, logs), stop
   or resume it, and compare runs. **Run on** trains it on a GPU rented from RunPod for the length of the run, or on
   another FOLO server of yours, with the price before it starts and the cost while it runs
+- **Benchmarks**: freeze a set of your labeled images into a benchmark with a plan of hard conditions (haze, low
+  light, blur, distance, ...), and run any vision model on it: a FOLO model, Claude Code or Codex looking at the
+  images, or predictions from a model that runs anywhere else. Every entry gets a score from five axes (accuracy,
+  robustness, self-labeling, calibration, localization) and the charts behind it, and a self-improvement loop
+  tests whether a model's own labels can train its successor ([docs/BENCH.md](docs/BENCH.md)).
   ([docs/CLOUD.md](docs/CLOUD.md)).
 - **Models**: evaluation results, per-class metrics, and export.
 - **Playground**: run a model on any image, on the server or **in the browser** (WebGPU or the wasm CPU). The
@@ -251,6 +256,7 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 | [QUICKSTART](docs/QUICKSTART.md) | Walkthrough: your own data, fine-tuning, export, in-browser inference |
 | [CLI](docs/CLI.md) | Every `folo` command, `--json`, exit codes, dataset tools |
 | [LABELING](docs/LABELING.md) | Unlabeled images to a dataset with Claude Code or Codex: workflow, cost, accuracy |
+| [BENCH](docs/BENCH.md) | Vision benchmarks from your own images: conditions, the score and its definitions, any model as a contestant, self-improvement loops |
 | [CLOUD](docs/CLOUD.md) | Training on a rented GPU (RunPod) or another FOLO server: lifecycle, safety, providers |
 | [AGENT_COOKBOOK](docs/AGENT_COOKBOOK.md) | Recipes for agents, as MCP tool calls and as `--json` commands |
 | [MCP](docs/MCP.md) | The `folo mcp` contract: tools, resources, prompts, errors |

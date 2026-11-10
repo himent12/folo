@@ -34,6 +34,8 @@ use crate::util::{claim_dir, rfc3339, slug, unix_now};
 pub const VAL_FRACTION: f32 = 0.1;
 /// The confidence a teacher's labels are kept from when nothing else says.
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
+/// Fewest pool images a teacher must keep a box on for a student to train on them.
+pub const MIN_LABELED_IMAGES: usize = 10;
 /// How often a loop looks at the entry or the run it waits for.
 const POLL: Duration = Duration::from_millis(100);
 
@@ -289,30 +291,34 @@ fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
         .map(|(l, im)| super::source::clip_truth(l, classes.len(), (im.width, im.height)))
         .collect();
     let boxes: usize = labels.iter().map(Vec::len).sum();
-    if boxes == 0 {
-        return Err(Error::new(
-            StatusCode::BAD_REQUEST,
-            "invalid_dataset",
-            format!(
-                "the teacher '{}' kept no box on the pool's {} images at confidence {threshold}",
-                teacher.model.name,
-                items.len()
-            ),
-        )
-        .hint("a lower min_confidence keeps more of its detections; a better teacher finds more"));
+    // An image the teacher kept nothing on is left out, not written as a background image: its silence is not a
+    // label, and a student trained on such images would learn to see nothing in them.
+    let kept: Vec<(&SourceImage, &Vec<folo_api::BBox>)> =
+        job.pool.iter().zip(&labels).filter(|(_, boxes)| !boxes.is_empty()).collect();
+    if kept.len() < MIN_LABELED_IMAGES {
+        let message = format!(
+            "the teacher '{}' kept {boxes} {} on {} of the pool's {} images at confidence {threshold}: too few to \
+             train a student on (at least {MIN_LABELED_IMAGES} images)",
+            teacher.model.name,
+            if boxes == 1 { "box" } else { "boxes" },
+            kept.len(),
+            items.len()
+        );
+        return Err(Error::new(StatusCode::BAD_REQUEST, "invalid_dataset", message).hint(
+            "a lower min_confidence keeps more of its detections (the self-labeling chart of its benchmark entry \
+             shows what each confidence costs in precision); a better teacher finds more",
+        ));
     }
     // The teacher's labels and nothing else: the pool's own labels are never read.
     let mut taken = HashSet::new();
-    let written: Vec<dataset::Item> = job
-        .pool
+    let written: Vec<dataset::Item> = kept
         .iter()
-        .zip(&labels)
         .map(|(im, boxes)| dataset::Item {
             source: im.path.clone(),
             file: unique_file_name(&im.file, &mut taken),
             width: im.width,
             height: im.height,
-            boxes: boxes.clone(),
+            boxes: (*boxes).clone(),
         })
         .collect();
     let name = format!("{} gen {g}", job.name());
@@ -334,7 +340,7 @@ fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
     let stats = BenchLabels {
         threshold,
         images: labels.len() as u64,
-        labeled_images: labels.iter().filter(|l| !l.is_empty()).count() as u64,
+        labeled_images: kept.len() as u64,
         boxes: boxes as u64,
         excluded: job.excluded,
         dataset_id: ds.id.clone(),
