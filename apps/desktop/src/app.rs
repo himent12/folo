@@ -396,6 +396,8 @@ pub struct FoloApp {
     pub hold_loading: bool,
     /// Where the window and theme are remembered on close (`window_state`); `None` for screenshots.
     pub state_path: Option<std::path::PathBuf>,
+    /// How the window showed in the last frame drawn (none are drawn while it is minimized).
+    pub shown_mode: crate::window_state::WindowMode,
 
     pub root_focus: FocusHandle,
     pub focus: RefCell<HashMap<SharedString, FocusHandle>>,
@@ -627,6 +629,7 @@ impl FoloApp {
             frozen,
             hold_loading: false,
             state_path: None,
+            shown_mode: crate::window_state::WindowMode::Windowed,
             root_focus,
             focus: RefCell::new(HashMap::new()),
             switch_seen: RefCell::new(HashMap::new()),
@@ -923,11 +926,16 @@ impl FoloApp {
             self.fetch(
                 cx,
                 |api| api.system(),
-                |this, r, _| {
+                |this, r, cx| {
                     if let Ok(s) = &r
                         && let Some(g) = s.system.gpus.first().and_then(|g| g.util)
                     {
                         this.store.gpu_util.push_back(g);
+                    }
+                    this.store.note_reachability(r.as_ref().err());
+                    // Back after being unreachable: check its health now, not in 2 s.
+                    if this.store.health.needs_fetch() {
+                        this.ensure_core(cx);
                     }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
@@ -1367,6 +1375,7 @@ impl FoloApp {
             gpui::WindowBounds::Maximized(b) => (b, WindowMode::Maximized),
             gpui::WindowBounds::Fullscreen(b) => (b, WindowMode::Fullscreen),
         };
+        let mode = crate::window_state::closing_mode(mode, self.shown_mode);
         let state = State {
             window: Some(Placement {
                 x: b.origin.x.into(),
@@ -2635,7 +2644,7 @@ impl FoloApp {
             div()
                 .id(id)
                 .group(id)
-                .w(px(46.))
+                .w(px(crate::theme::layout::DESKTOP_CAPTION_BUTTON))
                 .h_full()
                 .flex()
                 .items_center()
@@ -2643,7 +2652,7 @@ impl FoloApp {
                 .window_control_area(area)
                 // See `titlebar-drag`: the press must reach Windows, not focus the root.
                 .occlude()
-                .hover(move |s| if close { s.bg(gpui::rgb(0xC42B1C)) } else { s.bg(t.bg_hover) })
+                .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
                 .active(|s| s.opacity(0.8))
                 .child(
                     gpui::svg()
@@ -2652,7 +2661,7 @@ impl FoloApp {
                         .flex_none()
                         .text_color(t.text_secondary)
                         .group_hover(id, move |s| {
-                            s.text_color(if close { gpui::white() } else { t.text_primary })
+                            s.text_color(if close { t.window_close_text } else { t.text_primary })
                         }),
                 )
         };
@@ -2681,8 +2690,10 @@ impl FoloApp {
                     // A caption press goes to GPUI first and only reaches Windows (drag, double-click
                     // maximize, the caption buttons) if nothing prevents its default. The focus-tracked
                     // root would (focusing itself does), so the chrome hides the root from the hit
-                    // test. The crumbs above it still take their own clicks.
+                    // test. The crumbs above it still take their own clicks. Hidden from the root, it
+                    // leaves keyboard mode itself, as the root does for any other press.
                     .occlude()
+                    .capture_any_mouse_down(self.leave_kb(cx))
                     .children(crumbs.into_iter().enumerate().map(|(i, (label, route))| {
                         let last = route.is_none();
                         let crumb = div().id(("crumb", i)).px(px(4.)).py(px(2.)).rounded(px(4.)).child(
@@ -2748,6 +2759,7 @@ impl FoloApp {
             )
             .child(
                 win_btn("win-min", "icons/win-min.svg", WindowControlArea::Min, false)
+                    .capture_any_mouse_down(self.leave_kb(cx))
                     .when(fullscreen, |d| d.on_click(|_, w, _| w.minimize_window())),
             )
             .child(
@@ -2757,19 +2769,21 @@ impl FoloApp {
                     WindowControlArea::Max,
                     false,
                 )
+                .capture_any_mouse_down(self.leave_kb(cx))
                 // Full screen's "restore" leaves full screen.
                 .when(fullscreen, |d| d.on_click(|_, w, _| w.toggle_fullscreen())),
             )
-            .child(win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true).when(
-                fullscreen,
-                |d| {
-                    // Closing this way skips the window's should-close hook: remember here.
-                    d.on_click(cx.listener(|this, _, w, cx| {
-                        this.save_window_state(w, cx);
-                        w.remove_window();
-                    }))
-                },
-            ))
+            .child(
+                win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true)
+                    .capture_any_mouse_down(self.leave_kb(cx))
+                    .when(fullscreen, |d| {
+                        // Closing this way skips the window's should-close hook: remember here.
+                        d.on_click(cx.listener(|this, _, w, cx| {
+                            this.save_window_state(w, cx);
+                            w.remove_window();
+                        }))
+                    }),
+            )
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, Option<Route>)> {
@@ -2842,6 +2856,7 @@ impl FoloApp {
             live_card =
                 Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         }
+        let brand_press = self.leave_kb(cx);
         let health = self.connection_line(compact, window, cx);
         div()
             .w(px(if compact { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR }))
@@ -2865,6 +2880,7 @@ impl FoloApp {
                     .window_control_area(WindowControlArea::Drag)
                     // See `titlebar-drag`.
                     .occlude()
+                    .capture_any_mouse_down(brand_press)
                     .child(logo(&t, 20.))
                     .when(!compact, |d| {
                         d.child(
@@ -3259,6 +3275,13 @@ impl Render for FoloApp {
             self.open_new_run(None, window, cx);
         }
         self.narrow = window.viewport_size().width < px(1120.);
+        self.shown_mode = if window.is_fullscreen() {
+            crate::window_state::WindowMode::Fullscreen
+        } else if window.is_maximized() {
+            crate::window_state::WindowMode::Maximized
+        } else {
+            crate::window_state::WindowMode::Windowed
+        };
         let t = theme(cx);
         self.ensure_core(cx);
         self.ensure_cloud(cx);
@@ -3394,12 +3417,7 @@ impl Render for FoloApp {
                     cx.notify();
                 }
             }))
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                if this.kb {
-                    this.kb = false;
-                    cx.notify();
-                }
-            }))
+            .capture_any_mouse_down(self.leave_kb(cx))
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_drag_end))
@@ -3462,13 +3480,25 @@ impl Render for FoloApp {
                         .left_0()
                         .right_0()
                         .h(px(crate::theme::layout::DESKTOP_RESIZE_EDGE))
-                        .occlude(),
+                        .occlude()
+                        .capture_any_mouse_down(self.leave_kb(cx)),
                 )
             })
     }
 }
 
 impl FoloApp {
+    /// A press leaves keyboard mode (focus rings off). The root listens for presses anywhere, but
+    /// the window chrome hides the root from the hit test (`titlebar-drag`), so it listens too.
+    /// Only a capture-phase listener: it never prevents the press's default.
+    fn leave_kb(&self, cx: &mut Context<Self>) -> Box<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App)> {
+        Box::new(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+            if this.kb {
+                this.kb = false;
+                cx.notify();
+            }
+        }))
+    }
     /// A dialog, the stop confirmation or the inspector is up: the page behind is inert.
     pub fn modal_open(&self) -> bool {
         self.new_run.is_some()

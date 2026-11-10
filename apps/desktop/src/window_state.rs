@@ -66,6 +66,17 @@ pub fn remembers(scenario: bool, size_given: bool) -> bool {
     !scenario && !size_given
 }
 
+/// The mode to remember on close. A minimized window reports itself windowed (Windows has no
+/// "minimized from maximized" in what GPUI returns), and GPUI draws no frame while minimized, so the
+/// mode of the last frame drawn (`shown`) is how it will come back: use it when the window says
+/// windowed. Full screen survives minimizing in GPUI's own report.
+pub fn closing_mode(reported: WindowMode, shown: WindowMode) -> WindowMode {
+    match reported {
+        WindowMode::Windowed => shown,
+        other => other,
+    }
+}
+
 /// `$FOLO_DESKTOP_STATE`, else `desktop.json` in FOLO's home folder.
 pub fn path() -> PathBuf {
     match std::env::var_os("FOLO_DESKTOP_STATE") {
@@ -148,6 +159,16 @@ mod tests {
         assert!(!remembers(true, false));
         assert!(!remembers(false, true));
         assert!(!remembers(true, true));
+    }
+
+    #[test]
+    fn a_minimized_window_keeps_the_mode_it_was_shown_in() {
+        use WindowMode::*;
+        // Minimized from maximized: reported windowed, last drawn maximized.
+        assert_eq!(closing_mode(Windowed, Maximized), Maximized);
+        assert_eq!(closing_mode(Windowed, Windowed), Windowed);
+        assert_eq!(closing_mode(Fullscreen, Maximized), Fullscreen);
+        assert_eq!(closing_mode(Maximized, Windowed), Maximized);
     }
 
     #[test]

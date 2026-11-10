@@ -60,6 +60,8 @@ public static class W {
     [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr l);
     [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
     [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll")] public static extern IntPtr GetClassLongPtrW(IntPtr h, int idx);
     public delegate bool EnumProc(IntPtr h, IntPtr l);
     [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
@@ -226,6 +228,19 @@ try {
     $closed = [W]::Fingerprint($brand[0], $brand[1], $brand[2], $brand[3])
     Check "Esc closes it" ($closed -eq $before) ""
 
+    # Keyboard mode: focus went back to the search field. An arrow key turns keyboard mode on (its
+    # focus ring shows); a press on the title bar's drag area turns it off, as any press does.
+    [W]::Hover((DragX), (Bar)); Settle 400
+    $field = @([int]($c.Right - (138 + 12 + 280 + 6) * $s), [int]($c.Top + 2 * $s), [int](292 * $s), [int](36 * $s))
+    $plain = [W]::Fingerprint($field[0], $field[1], $field[2], $field[3])
+    [W]::Key(0x26, 0); Settle 500   # Up
+    $ring = [W]::Fingerprint($field[0], $field[1], $field[2], $field[3])
+    [W]::Click((DragX), (Bar)); Settle 600
+    $off = [W]::Fingerprint($field[0], $field[1], $field[2], $field[3])
+    Check "a key shows the focus ring" ($ring -ne $plain) ""
+    Check "a press on the title bar leaves keyboard mode" (($off -eq $plain) -and (Same (Rect) $r0) -and -not (Zoomed)) (State)
+    Check "the window has FOLO's icon" ([W]::GetClassLongPtrW($h, -14) -ne [IntPtr]::Zero) ""
+
     # Windows 11 shows its snap layouts over Maximize: a screenshot to look at (not checked).
     [W]::Hover((BtnX 1), (Bar)); Start-Sleep -Milliseconds 1800
     $snap = Join-Path $StateDir "snap-flyout.png"
@@ -320,6 +335,29 @@ try {
 
     Launch "fourth launch"
     Check "relaunch: full screen again" (Fullscreen) (State)
+    F11
+    Check "relaunch: leaving full screen gives the last size and place" ((-not (Fullscreen)) -and (Same (Rect) $rw)) ("{0}, wanted {1}" -f (Fmt (Rect)), (Fmt $rw))
+    [W]::Click((BtnX 0), (Bar))
+    Check "Close closes the app" (Exited) ""
+
+    # ---- Closed while minimized (the taskbar's Close): it comes back as it was before minimizing.
+    Launch "launch to minimize maximized"
+    [W]::Click((BtnX 1), (Bar)); Settle
+    [W]::Click((BtnX 2), (Bar)); Settle
+    Check "maximized, then minimized" (Iconic) (State)
+    [W]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null   # WM_CLOSE
+    Check "closes while minimized" (Exited) ""
+    Launch "relaunch after closing minimized from maximized"
+    Check "relaunch: maximized, as before minimizing" (Zoomed) (State)
+    [W]::Click((BtnX 1), (Bar)); Settle
+    Check "relaunch: restores to the last size and place" ((-not (Zoomed)) -and (Same (Rect) $rw)) ("{0}, wanted {1}" -f (Fmt (Rect)), (Fmt $rw))
+    F11
+    [W]::Click((BtnX 2), (Bar)); Settle
+    Check "full screen, then minimized" (Iconic) (State)
+    [W]::PostMessageW($h, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
+    Check "closes while minimized" (Exited) ""
+    Launch "relaunch after closing minimized from full screen"
+    Check "relaunch: full screen, as before minimizing" (Fullscreen) (State)
     F11
     Check "relaunch: leaving full screen gives the last size and place" ((-not (Fullscreen)) -and (Same (Rect) $rw)) ("{0}, wanted {1}" -f (Fmt (Rect)), (Fmt $rw))
     [W]::Click((BtnX 0), (Bar))
