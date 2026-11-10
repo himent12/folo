@@ -20,11 +20,6 @@ mod rows;
 #[cfg(test)]
 mod tests;
 
-// The submodules reach these as `super::alloc_uninit`, `super::recycle` and `super::elementwise::…` (AVX2 code
-// only), the paths they used when the GEMM was one file.
-#[cfg(target_arch = "x86_64")]
-use super::elementwise;
-use super::{alloc_uninit, recycle};
 use crate::backend::UnaryOp;
 
 pub(crate) use arows::gemm_arows;

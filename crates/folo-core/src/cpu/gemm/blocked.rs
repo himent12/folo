@@ -165,7 +165,7 @@ pub(crate) fn gemm_ex<A: Operand, B: Operand>(
         let step = k.div_ceil(parts).div_ceil(KC) * KC;
         let part = |p: usize| {
             let k0 = p * step;
-            let mut buf = super::alloc_uninit(m * n);
+            let mut buf = crate::cpu::alloc_uninit(m * n);
             gemm_blocked(m, n, k0..(k0 + step).min(k), a, b, &mut buf, n, false, 1, None);
             buf
         };
@@ -186,7 +186,7 @@ pub(crate) fn gemm_ex<A: Operand, B: Operand>(
                 }
             }
         }
-        partials.into_iter().for_each(super::recycle);
+        partials.into_iter().for_each(crate::cpu::recycle);
         finish_rows(c);
         return;
     }

@@ -263,7 +263,7 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
     let wave = image_lanes(g.n, per_image);
     let image = |img: usize| -> ImageRows {
         // Every element is written by `pack_grad_cols`.
-        let mut grad = super::alloc_uninit(og.div_ceil(NR) * b_stride);
+        let mut grad = crate::cpu::alloc_uninit(og.div_ceil(NR) * b_stride);
         pack_grad_cols(&gy[(img * g.o + grp * og) * ohw..], og, ohw, map, cols, &mut grad);
         if g.is_pointwise() {
             ImageRows { sr: None, rows: planes(img).iter().map(|p| p.as_ptr()).collect(), grad }
@@ -280,7 +280,7 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
     let rpt = m.div_ceil(tiles).div_ceil(MR) * MR;
     let tiles = m.div_ceil(rpt);
     // Every element of every partial is written by the first segment of its task.
-    let mut partial = super::alloc_uninit(parts * m * n);
+    let mut partial = crate::cpu::alloc_uninit(parts * m * n);
     let pptr = SendPtr(partial.as_mut_ptr());
     for w0 in (0..g.n).step_by(wave) {
         let w1 = (w0 + wave).min(g.n);
@@ -333,15 +333,15 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
                 kk += len;
             }
         };
-        if 2 * m * n * k >= super::gemm::PAR_FLOPS && tiles * active > 1 {
+        if 2 * m * n * k >= crate::cpu::gemm::PAR_FLOPS && tiles * active > 1 {
             (0..tiles * active).into_par_iter().for_each(task);
         } else {
             (0..tiles * active).for_each(task);
         }
         for im in images {
-            super::recycle(im.grad);
+            crate::cpu::recycle(im.grad);
             if let Some(sr) = im.sr {
-                super::recycle(sr.buf);
+                crate::cpu::recycle(sr.buf);
             }
         }
     }
@@ -354,7 +354,7 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
             }
         }
     };
-    if parts * m * n >= super::PAR_MIN {
+    if parts * m * n >= crate::cpu::PAR_MIN {
         sum.par_chunks_mut(n).enumerate().for_each(add);
     } else {
         sum.chunks_mut(n).enumerate().for_each(add);
@@ -365,10 +365,10 @@ fn backward_weight_group(x: &[f32], gy: &[f32], gw: &mut [f32], g: &ConvGeom, gr
             *v = sum[i * n + j];
         }
     };
-    if m * n >= super::PAR_MIN {
+    if m * n >= crate::cpu::PAR_MIN {
         gw.par_chunks_mut(m).enumerate().for_each(transpose);
     } else {
         gw.chunks_mut(m).enumerate().for_each(transpose);
     }
-    super::recycle(partial);
+    crate::cpu::recycle(partial);
 }

@@ -12,12 +12,6 @@ mod small_c;
 use rayon::prelude::*;
 
 use super::gemm::{BiasAct, RowPtrs, Strided, gemm_ex, gemm_rows};
-// The submodules reach these as `super::alloc_uninit`, `super::recycle`, `super::PAR_MIN`,
-// `super::gemm::PAR_FLOPS` and `super::elementwise::…` (AVX2 code only), the paths they used when conv2d was one
-// file.
-#[cfg(target_arch = "x86_64")]
-use super::elementwise;
-use super::{PAR_MIN, alloc_uninit, gemm, recycle};
 use crate::backend::Conv2dParams;
 use depthwise::depthwise_forward;
 use im2col::{Im2Col, PlaneRows};

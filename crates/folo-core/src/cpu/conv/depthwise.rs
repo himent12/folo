@@ -215,7 +215,7 @@ unsafe fn depthwise_s1_avx2(
                 let r = match (reg, silu) {
                     (false, _) => *a,
                     (true, false) => _mm256_add_ps(*a, bv),
-                    (true, true) => super::elementwise::silu8(_mm256_add_ps(*a, bv)),
+                    (true, true) => crate::cpu::elementwise::silu8(_mm256_add_ps(*a, bv)),
                 };
                 if c + 8 <= ow {
                     // SAFETY: columns c..c + 8 are inside `orow`.

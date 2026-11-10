@@ -49,7 +49,7 @@ impl ShiftedRows {
         let per_ci = phases.len() * pstride;
         // Valid outputs read inside their plane; the dropped columns of the last row may run up to `wq`
         // floats past it (into the next plane, or this slack).
-        let mut buf = super::alloc_uninit(planes.len() * per_ci + wq + NR);
+        let mut buf = crate::cpu::alloc_uninit(planes.len() * per_ci + wq + NR);
         let fill = |(ci, dst): (usize, &mut [f32])| {
             let src = planes[ci];
             // The `pstride - plane` floats after each plane are zeros: the dropped columns of the last output

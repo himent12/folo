@@ -213,7 +213,7 @@ pub(crate) fn gemm_rows<A: Operand>(
     // The C tiles of one K super-block live in task-local buffers between super-blocks only when K needs
     // more than one; then they are kept in `cbuf` (one per tile).
     let multi = k > ks;
-    let mut cbuf = if multi { super::alloc_uninit(m * n) } else { Vec::new() };
+    let mut cbuf = if multi { crate::cpu::alloc_uninit(m * n) } else { Vec::new() };
     let cbase = SendPtr(cbuf.as_mut_ptr());
     with_scratch(a_len + 16, |abuf| {
         let pa_all = aligned(abuf, a_len);
@@ -327,5 +327,5 @@ pub(crate) fn gemm_rows<A: Operand>(
             s0 += ksz;
         }
     });
-    super::recycle(cbuf);
+    crate::cpu::recycle(cbuf);
 }

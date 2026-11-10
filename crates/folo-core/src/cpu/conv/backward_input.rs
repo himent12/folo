@@ -53,7 +53,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
     // W'[c, o, ky', kx'] = W[o, c, kh - 1 - ky', kw - 1 - kx'] (within each group). Rows of W' (one per input
     // channel) are built in blocks of 8 so that both the reads of W and the writes stay in L1.
     let khw = g.kh * g.kw;
-    let mut flipped = super::alloc_uninit(g.c * og * khw);
+    let mut flipped = crate::cpu::alloc_uninit(g.c * og * khw);
     let block = |(b, dst): (usize, &mut [f32])| {
         let rows = dst.len() / (og * khw);
         for oi in 0..og {
@@ -68,7 +68,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
             }
         }
     };
-    if flipped.len() >= super::PAR_MIN {
+    if flipped.len() >= crate::cpu::PAR_MIN {
         flipped.par_chunks_mut(8 * og * khw).enumerate().for_each(block);
     } else {
         flipped.chunks_mut(8 * og * khw).enumerate().for_each(block);
@@ -92,7 +92,7 @@ pub(crate) fn conv2d_backward_input(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &
         },
     };
     conv2d_forward(gy, &flipped, gx, &tg, false, None);
-    super::recycle(flipped);
+    crate::cpu::recycle(flipped);
 }
 
 /// [`conv2d_backward_input`] through an unfolded gradient (`W^T gy`) and col2im.
@@ -100,7 +100,7 @@ fn backward_input_col2im(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
     let (cg, og, kdim, ohw, hw) = (g.cg(), g.og(), g.kdim(), g.ohw(), g.h * g.w);
     for_each_image(gx, g.c * hw, g.n, kdim * ohw, |img, gx_img, threads| {
         // Every element of `col` is overwritten, so a recycled buffer needs no clearing.
-        let mut col = super::alloc_uninit(kdim * ohw);
+        let mut col = crate::cpu::alloc_uninit(kdim * ohw);
         for grp in 0..g.p.groups {
             // col = W_g^T [kdim x og] * gy[img, g] [og x ohw]
             let a = Strided::lhs(wt, grp * og * kdim, 1, kdim);
@@ -108,7 +108,7 @@ fn backward_input_col2im(gy: &[f32], wt: &[f32], gx: &mut [f32], g: &ConvGeom) {
             gemm_ex(kdim, ohw, og, &a, &b, &mut col, ohw, false, threads, None);
             col2im(&col, &mut gx_img[grp * cg * hw..(grp + 1) * cg * hw], g, threads > 1);
         }
-        super::recycle(col);
+        crate::cpu::recycle(col);
     });
 }
 

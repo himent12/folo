@@ -186,7 +186,7 @@ unsafe fn kernel_avx2(
 }
 
 /// `epi` on row `i` of a finished block, in registers: `+ bias[i]`, then SiLU through the lanes
-/// [`super::elementwise::silu_bias_inplace`] uses, so the result is bit for bit the row pass's.
+/// [`crate::cpu::elementwise::silu_bias_inplace`] uses, so the result is bit for bit the row pass's.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 #[inline]
@@ -196,7 +196,7 @@ fn finish_avx2(v: std::arch::x86_64::__m256, epi: Option<&RegEpi>, i: usize) -> 
         None => v,
         Some(e) => {
             let x = _mm256_add_ps(v, _mm256_set1_ps(e.bias[i]));
-            if e.silu { super::elementwise::silu8(x) } else { x }
+            if e.silu { crate::cpu::elementwise::silu8(x) } else { x }
         }
     }
 }
