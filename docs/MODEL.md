@@ -730,8 +730,11 @@ update never sees poisoned buffers. Ten consecutive non-finite batches, or an ep
 abort the run with an error (`status: failed`).
 
 **Epoch boundaries.** The loader of epoch `e + 1` starts as soon as epoch `e` has taken its last batch, so it works
-while validation and the checkpoints run and the next epoch's first step does not wait for it. Its batches are the
-same whenever it starts (everything is seeded by the epoch and the sample position).
+while validation and the checkpoints run and the next epoch's first step does not wait for it (not after the last
+epoch or once a stop is requested; if it cannot start, a warning is logged and the epoch starts its loader itself).
+Its batches are the same whenever it starts (everything is seeded by the epoch and the sample position). When the
+run ends (finished, stopped, stopped early or failed) a loader started for an epoch that will not train is dropped,
+joining its workers and the feeder.
 
 **On a GPU** (`--device gpu:0`, or `auto` with an adapter) the same loop runs with everything on the device: the model,
 the EMA, the optimizer state and the accumulation buffers live there; the loader delivers `u8` pixels and a feeder

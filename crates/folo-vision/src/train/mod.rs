@@ -754,6 +754,9 @@ impl Trainer {
         }
         self.emitter.status(RunStatus::Running, None);
         let r = self.run_inner().map_err(|e| self.explain_device_loss(e));
+        // A next epoch started before the run ended (finished, stopped, stopped early or failed) is dropped, which
+        // stops and joins its loader workers and feeder: nothing keeps decoding or staging once `run` returns.
+        self.prefetched = None;
         match &r {
             Ok(s) => self.emitter.status(s.status, None),
             Err(e) => {
@@ -1077,9 +1080,21 @@ impl Trainer {
         }
         drop(source);
         // Start the next epoch now: its first batches are ready when validation and the checkpoints are done.
-        // The batches are the same whenever an epoch starts (§8.3: everything is seeded by the epoch).
+        // The batches are the same whenever an epoch starts (§8.3: everything is seeded by the epoch). Not after
+        // the last epoch or once a stop is requested; a failure here only costs the head start (the epoch starts
+        // its loader itself), not the trained epoch's validation and checkpoint.
         if k == nb && e + 1 < self.cfg.epochs && !self.stopping() {
-            self.prefetched = Some((e + 1, self.start_epoch(e + 1)?));
+            match self.start_epoch(e + 1) {
+                Ok(source) => self.prefetched = Some((e + 1, source)),
+                Err(err) => self.emitter.log(
+                    LogLevel::Warn,
+                    format!(
+                        "epoch {}'s loader could not start early ({}); it starts with the epoch",
+                        e + 2,
+                        err.summary()
+                    ),
+                ),
+            }
         }
         if k != nb {
             return Err(Error::Failed(format!("epoch {} delivered {k} of {nb} batches", e + 1)));
@@ -1420,6 +1435,72 @@ fn eta_s(clock: &Clock, nb: usize, e: u32, k: usize, epochs: u32, phase: impl Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A trainer on 8 synthetic 64 px training images (2 batches of 4), on the CPU.
+    fn micro(epochs: u32, patience: u32, opts: TrainOptions) -> Trainer {
+        use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+        let shapes = SyntheticConfig {
+            images: 10,
+            classes: vec!["circle".into(), "square".into()],
+            imgsz: 64,
+            seed: 3,
+            val_fraction: 0.2,
+            ..SyntheticConfig::default()
+        };
+        let split = |s| Arc::new(SyntheticDataset::new(shapes.clone(), s).unwrap());
+        let data = TrainData {
+            train: split(folo_data::Split::Train),
+            val: split(folo_data::Split::Val),
+            classes: shapes.classes.clone(),
+        };
+        let cfg = TrainConfig {
+            epochs,
+            patience,
+            batch: 4,
+            imgsz: 64,
+            device: "cpu".into(),
+            optimizer: OptimizerChoice::Adamw,
+            lr0: 0.002,
+            warmup_epochs: 0.0,
+            workers: 2,
+            augment: folo_data::AugmentConfig::none(),
+            ..TrainConfig::default()
+        };
+        Trainer::new(cfg, data, opts).unwrap()
+    }
+
+    /// The next epoch, started while the previous one validates, does not outlive the run: after a stop requested
+    /// at an epoch's end, an early stop and a completed run, nothing is prefetched, so its loader workers and
+    /// feeder are joined (dropping an epoch joins them).
+    #[test]
+    fn prefetched_epoch_does_not_outlive_the_run() {
+        // Stopped: the stop arrives with epoch 1's event, after epoch 2 was prefetched.
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = stop.clone();
+        let opts = TrainOptions {
+            events: Some(Box::new(move |e: &RunEvent| {
+                if matches!(e, RunEvent::Epoch(_)) {
+                    flag.store(true, Ordering::Relaxed);
+                }
+            })),
+            stop,
+            ..TrainOptions::default()
+        };
+        let mut t = micro(3, 100, opts);
+        let s = t.run().unwrap();
+        assert_eq!((s.status, s.epochs_completed), (RunStatus::Stopped, 1));
+        assert!(t.prefetched.is_none(), "stopped run");
+        // Early stop (patience 0: after epoch 1), with epoch 2 prefetched.
+        let mut t = micro(3, 0, TrainOptions::default());
+        let s = t.run().unwrap();
+        assert!(s.early_stopped && s.epochs_completed == 1);
+        assert!(t.prefetched.is_none(), "early-stopped run");
+        // Completed: the last epoch prefetches nothing.
+        let mut t = micro(2, 100, TrainOptions::default());
+        let s = t.run().unwrap();
+        assert_eq!((s.status, s.epochs_completed), (RunStatus::Completed, 2));
+        assert!(t.prefetched.is_none(), "completed run");
+    }
 
     /// The batched checkpoint download gives every tensor's exact bytes and shape: several dtypes, a view that is
     /// not contiguous, an empty tensor and one already on the host; in one chunk per dtype, and in chunks so small
