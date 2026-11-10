@@ -121,6 +121,47 @@ Both within 0.01 of the reference final mAP50-95 (−0.005 and −0.002), no non
 `D:/folo-data/runs-hill/gpu-train/gate-f32-1608` and `gate-amp-1610`. The AMP gate now runs faster than f32 (it was
 10 % slower), because the per-window overflow wait and the many small optimizer dispatches are gone.
 
+## Gradient clipping (the trainer's default, `clip_grad_norm` 10)
+
+The bench stepped straight from the backward's gradients, so it never paid for the trainer's global-norm clipping.
+`FOLO_BENCH_CLIP=1` (`13167a52`, default off) runs the step as the trainer's window end: the gradients into the
+`GradAccumulator`, then `clip_grad_norm(10)` and SGD (f32) or `unscale_clip(1 / S, 10)` (AMP). That path,
+`clip_grad_norm_device`, was about ten tensor ops per gradient buffer: abs + max for the peak, mul, mul, square,
+sum for the norm, two `mul_assign`s for the factors, so a folo-n window took about 2100 extra dispatches.
+
+The fix moves the per-buffer work into three multi-tensor kernels (16 buffers per dispatch, as the optimizer
+step): `norm_partials_many` writes one partial per 256 elements (a fixed tree in workgroup memory) of the largest
+`|x|` or of `((x · h) · h)²`, a single `max_all` / `sum_all` reduces the partials, and `scale_many` applies
+`x = (x · f1) · f2` with the device factors. The scalar arithmetic between them is unchanged.
+
+**Same numbers as before?** The peak is a maximum and equals the old one bit for bit (NaN propagates as in
+`max_all`; tested). The scaling equals `x *= f1; x *= f2` bit for bit (tested). The sum of squares adds the same
+f32 terms, each rounded as before, in another fixed order: per 256 elements, then over the partials, instead of a
+`sum_all` per buffer and one over the buffers. The terms are non-negative, so its relative error against the exact
+sum is at most `d · 2^-24` for a longest addition chain `d` (8 levels of tree plus the final `sum_all`, at most
+`p / 256 + 8` for `p` partials: about 2.4e-6 for folo-n's 10 400); `clip_reductions_match_tensor_ops` checks both
+the new and the old sum against an f64 sum of the same terms within that bound. With the norm below `max_norm`
+both factors are exactly 1 and the gradients are untouched, bit for bit (`device_clip_over_many_buffers`); above
+it the clip factor can differ from the old binary's in the last bits. **Resume**: within the new binary a GPU
+resume stays bit-exact (the partial layout and order depend only on the buffer sizes; the workspace's resume tests
+pass); a checkpoint from the old binary loads and continues normally, but not bit-identically to how the old
+binary would have continued, whenever clipping is active.
+
+A/B with `FOLO_BENCH_CLIP=1`, folo-n b16, the binary before (`13167a52`) and after, alternated, 3 rounds, GPU lock
+held, host load 7–50 %:
+
+| | before | after |
+|---|---|---|
+| f32 img/s (rounds) | **267** (262 / 267 / 268) | **307** (307 / 307 / 313), +15 % |
+| AMP img/s (rounds) | **375** (208 / 375 / 376) | **487** (491 / 487 / 476), +30 % |
+| step phase (clip + SGD), f32 / AMP | 16–23 / 22–58 ms | 2.4–3.2 / 2.6–3.3 ms |
+| dispatches per window, f32 / AMP | 3278 / 3423 | 1178 / 1323 |
+| submissions per window, f32 / AMP | 75 / 77 | 26 / 28 |
+
+With clipping on, the step is now within a few percent of the unclipped one (307 / 502 img/s). Shapes gate (f32,
+the trainer clips by default) on the new binary: final mAP50 0.980, mAP50-95 **0.892** (reference 0.898, bound
+0.01), gate first met at epoch 9, no non-finite batch, 105 s (114 s before this change, 182 s on main).
+
 ## Negative results
 
 - **vec4 BatchNorm reductions** (c6, dropped): `bn_stats` and `bn_bwd_reduce` loading four values per thread
@@ -135,11 +176,7 @@ Both within 0.01 of the reference final mAP50-95 (−0.005 and −0.002), no non
 
 ## Leftovers, by expected gain
 
-1. **The trainer's global-norm clipping** (`GradAccumulator::clip_grad_norm_device`, `clip_grad_norm = 10` by
-   default) is about ten tensor ops per gradient buffer, ~2000 tiny dispatches per accumulation window. The bench
-   step does not clip, so it does not show, but real training does. A multi-tensor abs-max (exact with
-   `atomicMax` on the bits) and a two-pass deterministic sum of squares plus a multi-tensor scale would make it
-   ~40 dispatches.
+1. ~~The trainer's global-norm clipping~~: done (above).
 2. **Tensor-core weight gradients of the stem** (3→16 at 640: `N = 27` columns on a 16×256 tile, 1.7 GPU-ms with
    AMP): a direct reduction kernel for tiny `M × N` with huge `K` would take ~0.2 ms.
 3. **f32 weight gradients**: still the largest f32 item; a transposed formulation for `C_in·9 ≫ C_out` layers, or

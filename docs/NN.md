@@ -64,7 +64,11 @@ is reproducible everywhere. Head priors (MODEL.md §6.5): `BOX_BIAS_PRIOR = 2.0`
   implements `GradSource` for the step, and does MODEL.md's global-norm clipping (`clip_grad_norm`). On the GPU a pass
   adds with one multi-tensor `buf = buf + g` call (16 buffers per dispatch), and clipping stays on the device: the norm (in `f32`) and
   the factor `max_norm / (n + 1e-6)` (or 1) are device scalars that scale every buffer, so no value is read back
-  (`clip_grad_norm` then returns NaN instead of the norm).
+  (`clip_grad_norm` then returns NaN instead of the norm). On the GPU the largest magnitude, the sum of squares and
+  the scaling are multi-tensor calls (`Tensor::norm_partials_many`, `Tensor::scale_many_`: 16 buffers per
+  dispatch, one partial per 256 elements, then one reduction), about 60 dispatches per window instead of ten tensor
+  ops per buffer. The maximum and the scaling equal the tensor ops bit for bit; the sum of squares adds the same
+  f32 terms in another (fixed) order.
 - Mixed precision: `GradAccumulator::unscale_clip(inv_scale, max_norm)` unscales the accumulated gradients, clips
   them and returns whether all are finite, with one readback on the GPU: with clipping the unscale is folded into the
   clip factors and the finiteness check is the clipping norm itself (the overflow-safe sum makes it non-finite

@@ -67,6 +67,15 @@ fn many_def(kind: u32, j: usize) -> &'static KernelDef {
     defs.entry((kind, j)).or_insert_with(|| {
         let storage: Vec<Access> = if kind == 3 {
             vec![Access::ReadWrite; j + 1]
+        } else if kind >= 4 {
+            // 4: abs-max partials (X read, PART), 5: scaled-square partials (X read, H, PART), 6: two-factor scale
+            // (X read-write, F1, F2).
+            let (x, tail) = match kind {
+                4 => (Access::Read, vec![Access::ReadWrite]),
+                5 => (Access::Read, vec![Access::Read, Access::ReadWrite]),
+                _ => (Access::ReadWrite, vec![Access::Read, Access::Read]),
+            };
+            std::iter::repeat_n(x, j).chain(tail).collect()
         } else {
             (0..j)
                 .flat_map(|_| {
@@ -76,6 +85,10 @@ fn many_def(kind: u32, j: usize) -> &'static KernelDef {
         };
         let (name, source) = if kind == 3 {
             ("unscale_check_many", Source::Generated(gen_unscale_many))
+        } else if kind == 6 {
+            ("scale_many", Source::Generated(gen_scale_many))
+        } else if kind >= 4 {
+            ("norm_partials_many", Source::Generated(gen_norm_partials_many))
         } else {
             ("optim_many", Source::Generated(gen_optim_many))
         };
@@ -259,6 +272,167 @@ pub fn optimizer_step_many(ctx: &GpuContext, u: &OptimUpdate, items: &[ManyItem<
             bufs.extend(it.s0);
             bufs.extend(it.s1);
         }
+        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
+    }
+    Ok(())
+}
+
+/// What [`norm_partials_many`] reduces, per workgroup of 256 elements.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NormPartial {
+    /// The largest `|x|`; NaN propagates, as in the backend's `max`.
+    AbsMax,
+    /// `Σ t²` with `t = (x · h) · h` (`h` a one-element buffer), each term rounded as the tensor ops
+    /// `x.mul(h).mul(h).square()` round it.
+    ScaledSquares,
+}
+
+/// The multi-tensor reductions' prologue: this workgroup's index `w` (none past the last), its tensor `j` and
+/// element `i` (as [`many_prologue`]). Params: 1 = the first partial of this dispatch, 2 = its workgroups.
+fn norm_prologue(s: &mut String, j: usize) {
+    s.push_str(
+        "var<workgroup> red: array<f32, 256>;\n\
+         @compute @workgroup_size(256)\n\
+         fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>,\n\
+         \x20       @builtin(local_invocation_index) lid: u32) {\n\
+         \x20 let w = linear_id(wid, nwg, 0u, 256u) / 256u;\n\
+         \x20 if (w >= pu(2u)) { return; }\n\
+         \x20 var j = 0u;\n",
+    );
+    for t in 1..j {
+        let _ = writeln!(s, "  if (w >= pu({}u)) {{ j = {t}u; }}", 16 + t);
+    }
+    s.push_str("  let i = (w - pu(16u + j)) * 256u + lid;\n  var v = 0.0;\n  switch j {\n");
+}
+
+fn gen_norm_partials_many(spec: &Spec) -> String {
+    let (j, squares) = (spec.get_u32("J", 1) as usize, spec.get_u32("OP", 0) == 1);
+    let mut s = String::new();
+    for t in 0..j {
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> X{t}: array<f32>;", t + 1);
+    }
+    let mut b = j + 1;
+    if squares {
+        let _ = writeln!(s, "@group(0) @binding({b}) var<storage, read> H: array<f32>;");
+        b += 1;
+    }
+    let _ = writeln!(s, "@group(0) @binding({b}) var<storage, read_write> PART: array<f32>;");
+    // Max propagates NaN explicitly (WGSL's builtin may drop it), as the backend's reductions do.
+    s.push_str(
+        "fn nmax(a: f32, b: f32) -> f32 {\n\
+         \x20 if ((bitcast<u32>(a) & 0x7fffffffu) > 0x7f800000u) { return a; }\n\
+         \x20 if ((bitcast<u32>(b) & 0x7fffffffu) > 0x7f800000u) { return b; }\n\
+         \x20 return max(a, b);\n}\n",
+    );
+    norm_prologue(&mut s, j);
+    let term = if squares { "let t = (x * H[0]) * H[0]; v = t * t;" } else { "v = abs(x);" };
+    for t in 0..j {
+        let _ = writeln!(s, "  case {t}u: {{ if (i < pu({}u)) {{ let x = X{t}[i]; {term} }} }}", 32 + t);
+    }
+    let op = if squares { "red[lid] + red[lid + s]" } else { "nmax(red[lid], red[lid + s])" };
+    let _ = writeln!(
+        s,
+        "  default: {{}}\n  }}\n  red[lid] = v;\n  workgroupBarrier();\n\
+         \x20 for (var s = 128u; s > 0u; s >>= 1u) {{\n\
+         \x20   if (lid < s) {{ red[lid] = {op}; }}\n\
+         \x20   workgroupBarrier();\n  }}\n\
+         \x20 if (lid == 0u) {{ PART[pu(1u) + w] = red[0]; }}\n}}"
+    );
+    s
+}
+
+fn gen_scale_many(spec: &Spec) -> String {
+    let j = spec.get_u32("J", 1) as usize;
+    let mut s = String::new();
+    for t in 0..j {
+        let _ = writeln!(s, "@group(0) @binding({}) var<storage, read_write> X{t}: array<f32>;", t + 1);
+    }
+    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> F1: array<f32>;", j + 1);
+    let _ = writeln!(s, "@group(0) @binding({}) var<storage, read> F2: array<f32>;", j + 2);
+    many_prologue(&mut s, j);
+    for t in 0..j {
+        // Two roundings, as `x *= f1` then `x *= f2`.
+        let _ = writeln!(
+            s,
+            "  case {t}u: {{ if (i < pu({}u)) {{ let y = X{t}[i] * F1[0]; X{t}[i] = y * F2[0]; }} }}",
+            32 + t
+        );
+    }
+    s.push_str("  default: {}\n  }\n}\n");
+    s
+}
+
+/// The partial count [`norm_partials_many`] writes for tensors of `ns` elements: one per 256 elements of each.
+pub fn norm_partials_len(ns: &[usize]) -> usize {
+    ns.iter().map(|n| n.div_ceil(256)).sum()
+}
+
+/// One partial per workgroup of 256 elements of each tensor in `xs` (in order; [`norm_partials_len`] of them)
+/// into `part`, [`MANY`] tensors per dispatch: the largest `|x|` or the sum of `((x · h) · h)²` of the
+/// workgroup's elements, reduced in a fixed tree, so the result is deterministic. `h` (one f32) is required for
+/// [`NormPartial::ScaledSquares`]. The global maximum or sum is a reduction over `part`.
+pub fn norm_partials_many(
+    ctx: &GpuContext,
+    op: NormPartial,
+    xs: &[(&wgpu::Buffer, usize)],
+    h: Option<&wgpu::Buffer>,
+    part: &wgpu::Buffer,
+) -> Result<()> {
+    let squares = op == NormPartial::ScaledSquares;
+    let h = match (squares, h) {
+        (true, Some(h)) => {
+            check_buf(h, 1, DType::F32, "norm partials scale")?;
+            Some(h)
+        }
+        (true, None) => return Err(crate::error::shape_err("norm_partials_many: squares need a scale")),
+        (false, _) => None,
+    };
+    let ns: Vec<usize> = xs.iter().map(|x| x.1).collect();
+    check_buf(part, norm_partials_len(&ns).max(1), DType::F32, "norm partials output")?;
+    for &(x, n) in xs {
+        check_buf(x, n, DType::F32, "norm partials input")?;
+    }
+    let extra = 1 + usize::from(squares);
+    let j_max = MANY.min((ctx.caps().max_storage_buffers as usize).saturating_sub(extra)).max(1);
+    let live: Vec<&(&wgpu::Buffer, usize)> = xs.iter().filter(|x| x.1 > 0).collect();
+    let mut first = 0usize;
+    for chunk in live.chunks(j_max) {
+        let spec = Spec::new().u32("J", chunk.len() as u32).u32("OP", u32::from(squares));
+        let k = ctx.kernel(many_def(if squares { 5 } else { 4 }, chunk.len()), spec)?;
+        let ns: Vec<usize> = chunk.iter().map(|x| x.1).collect();
+        let groups = norm_partials_len(&ns);
+        let (p, _) = many_params(Params::new().u(0).uz(first)?.uz(groups)?, &ns)?;
+        let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
+        bufs.extend(h);
+        bufs.push(part);
+        ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups as u64 * 256, 256)?)?;
+        first += groups;
+    }
+    Ok(())
+}
+
+/// `x = (x · f1) · f2` in place for every tensor in `xs` (`f1`, `f2` one f32 each, on the device), [`MANY`] per
+/// dispatch: the arithmetic and roundings of `x *= f1` followed by `x *= f2`.
+pub fn scale_many(
+    ctx: &GpuContext,
+    xs: &[(&wgpu::Buffer, usize)],
+    f1: &wgpu::Buffer,
+    f2: &wgpu::Buffer,
+) -> Result<()> {
+    check_buf(f1, 1, DType::F32, "scale factor")?;
+    check_buf(f2, 1, DType::F32, "scale factor")?;
+    for &(x, n) in xs {
+        check_buf(x, n, DType::F32, "scale input")?;
+    }
+    let j_max = MANY.min((ctx.caps().max_storage_buffers as usize).saturating_sub(2)).max(1);
+    let live: Vec<&(&wgpu::Buffer, usize)> = xs.iter().filter(|x| x.1 > 0).collect();
+    for chunk in live.chunks(j_max) {
+        let k = ctx.kernel(many_def(6, chunk.len()), Spec::new().u32("J", chunk.len() as u32))?;
+        let ns: Vec<usize> = chunk.iter().map(|x| x.1).collect();
+        let (p, groups) = many_params(Params::new(), &ns)?;
+        let mut bufs: Vec<&wgpu::Buffer> = chunk.iter().map(|x| x.0).collect();
+        bufs.push(f1);
+        bufs.push(f2);
         ctx.dispatch(&k, &bufs, &p, ctx.grid_1d(groups * 256, 256)?)?;
     }
     Ok(())
