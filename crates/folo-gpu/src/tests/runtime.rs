@@ -248,6 +248,29 @@ fn upload_with_reuses_mapped_staging() {
     assert!(ctx.release_memory().is_ok());
 }
 
+/// `release_memory` right after an upload (its staging buffer still being mapped again) keeps that buffer too:
+/// it is dropped when the map completes, not put back on the idle list.
+#[test]
+fn release_memory_drops_staging_still_being_mapped() {
+    let _shared = gpu!();
+    let ctx = crate::GpuContext::new().unwrap();
+    let (a, ()) = ctx.upload_with(64, |mut d| d.copy_from_slice(&[3; 64])).unwrap();
+    ctx.sync().unwrap();
+    assert_eq!(ctx.idle_staging(), 1, "an upload leaves its staging buffer mapped for reuse");
+    let (b, ()) = ctx.upload_with(64, |mut d| d.copy_from_slice(&[4; 64])).unwrap();
+    let (c, ()) = ctx.upload_with(1 << 20, |mut d| d.slice(..4).copy_from_slice(&[5; 4])).unwrap();
+    ctx.release_memory().unwrap();
+    ctx.sync().unwrap();
+    assert_eq!(ctx.idle_staging(), 0, "no staging buffer survives release_memory");
+    assert_eq!(ctx.read(a.raw(), 0, 64).unwrap(), [3; 64]);
+    assert_eq!(ctx.read(b.raw(), 0, 64).unwrap(), [4; 64]);
+    assert_eq!(ctx.read(c.raw(), 0, 4).unwrap(), [5; 4]);
+    // Uploads after the release keep their staging buffers again.
+    let _ = ctx.upload_with(64, |mut d| d.copy_from_slice(&[6; 64])).unwrap();
+    ctx.sync().unwrap();
+    assert_eq!(ctx.idle_staging(), 1);
+}
+
 /// A lost device (here: destroyed on purpose) makes waits and readbacks return `DeviceLost` instead of panicking
 /// inside wgpu, and stays lost. Uses a private context so the shared one other tests use is untouched.
 #[test]

@@ -302,11 +302,20 @@ struct Inner {
     tracing: AtomicBool,
     trace: Mutex<Vec<TracedOp>>,
     /// Mapped, idle staging buffers of [`GpuContext::upload_with`], ready for the next upload.
-    staging: Arc<Mutex<Vec<wgpu::Buffer>>>,
+    staging: Arc<Mutex<StagingFree>>,
     /// Dispatches after which the open batch is submitted on its own ([`GpuContext::set_flush_interval`]).
     flush_every: AtomicU32,
     /// Per-kernel timestamp queries (`FOLO_GPU_PROFILE=1`, see [`crate::profile`]).
     profiler: Option<Mutex<Profiler>>,
+}
+
+/// The idle staging buffers of [`GpuContext::upload_with`].
+#[derive(Default)]
+struct StagingFree {
+    bufs: Vec<wgpu::Buffer>,
+    /// Bumped by [`GpuContext::release_memory`]: a buffer whose re-map was requested before the bump is dropped
+    /// when the map completes instead of joining `bufs`.
+    generation: u64,
 }
 
 /// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
@@ -873,9 +882,13 @@ impl GpuContext {
                 cached
             };
             self.submit(&mut b);
-            // The idle upload staging buffers (host memory the driver pins).
-            let staged: u64 =
-                self.inner.staging.lock().expect("staging lock").drain(..).map(|b| b.size()).sum();
+            // The idle upload staging buffers (host memory the driver pins); those still being mapped again are
+            // dropped when their map completes.
+            let staged: u64 = {
+                let mut free = self.inner.staging.lock().expect("staging lock");
+                free.generation += 1;
+                free.bufs.drain(..).map(|b| b.size()).sum()
+            };
             // The uniform arena too (recreated on the next dispatch): its 64 KiB chunks are allocated mid-job, and a
             // live one keeps the driver allocator's whole memory block (up to 256 MiB) from being freed.
             b.chunks.clear();
@@ -883,6 +896,12 @@ impl GpuContext {
         };
         self.wait_idle()?;
         Ok(released)
+    }
+
+    /// Idle staging buffers of [`GpuContext::upload_with`] (for tests).
+    #[cfg(test)]
+    pub(crate) fn idle_staging(&self) -> usize {
+        self.inner.staging.lock().expect("staging lock").bufs.len()
     }
 
     fn profiler(&self) -> Option<std::sync::MutexGuard<'_, Profiler>> {
@@ -992,7 +1011,7 @@ impl GpuContext {
         let class = size_class(len4);
         let reused = {
             let mut free = self.inner.staging.lock().expect("staging lock");
-            free.iter().position(|b| b.size() == class).map(|i| free.swap_remove(i))
+            free.bufs.iter().position(|b| b.size() == class).map(|i| free.bufs.swap_remove(i))
         };
         let buf = reused.unwrap_or_else(|| {
             self.inner.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1014,15 +1033,16 @@ impl GpuContext {
         // A buffer may only be mapped again once the work that reads it is submitted.
         self.flush();
         let free = self.inner.staging.clone();
+        let generation = free.lock().expect("staging lock").generation;
         let again = buf.clone();
         buf.slice(..).map_async(wgpu::MapMode::Write, move |mapped| {
             let mut free = free.lock().expect("staging lock");
-            if mapped.is_ok() {
+            if mapped.is_ok() && free.generation == generation {
                 // The most recently used sizes stay.
-                if free.len() == STAGING_KEEP {
-                    free.remove(0);
+                if free.bufs.len() == STAGING_KEEP {
+                    free.bufs.remove(0);
                 }
-                free.push(again);
+                free.bufs.push(again);
             }
         });
         Ok((out, r))
