@@ -111,6 +111,9 @@ impl Tensor {
         let [oh, ow] = p.output_hw(h, w, kh, kw).ok_or_else(|| {
             Error::invalid_arg(OP, format!("kernel {kh}x{kw} with {p:?} does not fit input {}", self.shape()))
         })?;
+        if [o, oh, ow].iter().try_fold(n, |a, &b| a.checked_mul(b)).is_none() {
+            return Err(Error::invalid_arg(OP, format!("output [{n}, {o}, {oh}, {ow}] is too large")));
+        }
         Ok(Shape::new(&[n, o, oh, ow]))
     }
 

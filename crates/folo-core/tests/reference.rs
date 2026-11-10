@@ -544,3 +544,30 @@ fn conv2d_weight_grad_ignores_recycled_buffer_contents() {
         );
     }
 }
+
+#[test]
+fn conv2d_output_size_overflow_is_an_error() {
+    // Padding whose double overflows, and an output whose element count overflows: errors, not panics (or, in
+    // release builds, a wrapped size).
+    let x = Tensor::ones([1, 1, 1, 1]);
+    let w = Tensor::ones([1, 1, 1, 1]);
+    for pad in [usize::MAX / 2 + 1, 1 << 33] {
+        assert!(x.conv2d(&w, None, 1, pad, 1, 1).is_err(), "padding {pad}");
+        let _g = folo_core::no_grad();
+        assert!(x.conv2d_act(&w, None, &Conv2dParams { padding: [pad; 2], ..p1() }, None).is_err());
+        assert!(
+            Tensor::conv2d_act_cat(
+                &[&x, &x],
+                &Tensor::ones([1, 2, 1, 1]),
+                None,
+                &Conv2dParams { padding: [pad; 2], ..p1() },
+                None
+            )
+            .is_err()
+        );
+    }
+}
+
+fn p1() -> Conv2dParams {
+    Conv2dParams { stride: [1, 1], padding: [0, 0], dilation: [1, 1], groups: 1 }
+}

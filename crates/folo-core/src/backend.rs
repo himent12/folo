@@ -233,11 +233,12 @@ impl Default for Conv2dParams {
 }
 
 impl Conv2dParams {
-    /// Output spatial size for an input of `[h, w]` and kernel `[kh, kw]`, or `None` if it would be empty.
+    /// Output spatial size for an input of `[h, w]` and kernel `[kh, kw]`, or `None` if it would be empty or
+    /// its arithmetic overflows `usize`.
     pub fn output_hw(&self, h: usize, w: usize, kh: usize, kw: usize) -> Option<[usize; 2]> {
         let f = |i: usize, k: usize, s: usize, p: usize, d: usize| {
-            let eff = d * (k - 1) + 1;
-            (i + 2 * p).checked_sub(eff).map(|v| v / s + 1)
+            let eff = d.checked_mul(k.checked_sub(1)?)?.checked_add(1)?;
+            i.checked_add(p.checked_mul(2)?)?.checked_sub(eff).map(|v| v / s + 1)
         };
         Some([
             f(h, kh, self.stride[0], self.padding[0], self.dilation[0])?,
