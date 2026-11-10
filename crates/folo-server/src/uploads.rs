@@ -703,7 +703,8 @@ fn unpack(pipe: &Arc<Pipe>, root: &Path) -> Result<()> {
                 && other != name
             {
                 return Err(invalid(format!(
-                    "{other} and {name} differ only by letter case or a trailing dot or space, so one would                      overwrite the other on Windows; rename one (and the labels that refer to it) and pack again"
+                    "{other} and {name} differ only by letter case or a trailing dot or space, so one would \
+                     overwrite the other on Windows; rename one (and the labels that refer to it) and pack again"
                 )));
             }
             pipe.reading(&name);
