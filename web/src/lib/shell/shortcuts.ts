@@ -38,7 +38,7 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
   { keys: '[', label: 'Collapse or expand the sidebar', group: 'General', single: true },
   { keys: 'N', label: 'New training run', group: 'General', single: true },
   ...[...mainNav, settingsNav].map((n) => ({ keys: n.keys, label: `Go to ${n.label}`, group: 'Navigation', single: true })),
-  // A run, model or dataset page (and Compare): back to its list, when nothing on the page is using Escape.
+  // A run, model, dataset or benchmark page (and Compare): back to its list, when nothing on the page is using Escape.
   { keys: 'Escape', label: 'Back to the list (detail pages)', group: 'Navigation', single: true },
   // Rows of the Runs, Models and Datasets tables (ui/rowNav.ts). J / K enter the list when nothing has focus; the
   // arrows move within a focused one.
@@ -68,7 +68,8 @@ export const shortcutList: { keys: string; also?: string; label: string; group: 
 ];
 
 /** Where Escape goes back to from a detail page (its list), or null where it does nothing. */
-export function backPath(route: { name: string }): string | null {
+export function backPath(route: { name: string; params?: Record<string, string> }): string | null {
+  const bench = `/benchmarks/${encodeURIComponent(route.params?.id ?? '')}`;
   const back: Record<string, string> = {
     run: '/runs',
     'run-compare': '/runs',
@@ -76,6 +77,11 @@ export function backPath(route: { name: string }): string | null {
     dataset: '/datasets',
     'label-jobs': '/datasets',
     'label-job': '/datasets/label',
+    benchmark: '/benchmarks',
+    // An entry's result and a comparison go back to their benchmark, a loop to its benchmark's loops.
+    'bench-entry': bench,
+    'bench-compare': bench,
+    'bench-loop': `${bench}?tab=loops`,
   };
   return back[route.name] ?? null;
 }

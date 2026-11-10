@@ -9,6 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
+mod bench;
 mod cloud;
 pub mod codes;
 pub mod json;
@@ -16,6 +17,7 @@ mod label;
 mod throughput;
 pub mod weights;
 
+pub use bench::*;
 pub use cloud::*;
 pub use label::*;
 pub use throughput::*;

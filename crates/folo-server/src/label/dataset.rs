@@ -8,6 +8,9 @@ use folo_api::BBox;
 
 use crate::util::Rng;
 
+/// The provenance line of a dataset made from a labeling job.
+pub const PROVENANCE: &str = "# made with FOLO agent labeling";
+
 /// A labeled image to write.
 pub struct Item {
     /// The image file to copy.
@@ -27,13 +30,15 @@ pub fn val_count(n: usize, val_fraction: f32) -> usize {
 
 /// Writes `items` into `dir` (which exists and is empty): a seeded shuffle, the first [`val_count`] images to
 /// `val`, the rest to `train`; the files copied byte for byte, one label file per image (an empty one for an image
-/// without boxes) and a `data.yaml` naming `classes`. Returns `[train, val]` image counts.
+/// without boxes) and a `data.yaml` naming `classes`, whose first line is `provenance` (a `#` comment saying what
+/// made it). Returns `[train, val]` image counts.
 pub fn write(
     dir: &Path,
     classes: &[String],
     items: &[Item],
     val_fraction: f32,
     seed: u64,
+    provenance: &str,
 ) -> std::io::Result<[usize; 2]> {
     let mut order: Vec<usize> = (0..items.len()).collect();
     let mut rng = Rng::new(seed);
@@ -55,7 +60,7 @@ pub fn write(
             std::fs::write(labels.join(format!("{stem}.txt")), label_text(item))?;
         }
     }
-    let mut yaml = String::from("# made with FOLO agent labeling\ntrain: images/train\n");
+    let mut yaml = format!("{provenance}\ntrain: images/train\n");
     if val > 0 {
         yaml.push_str("val: images/val\n");
     }
@@ -149,7 +154,7 @@ mod tests {
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
         let classes = vec!["cat".to_string(), "traffic: \"light\"".to_string()];
-        assert_eq!(write(&out, &classes, &items, 0.2, 7).unwrap(), [8, 2]);
+        assert_eq!(write(&out, &classes, &items, 0.2, 7, PROVENANCE).unwrap(), [8, 2]);
 
         let ds = folo_data::open(&out).unwrap();
         assert_eq!(ds.classes, classes);
@@ -163,7 +168,7 @@ mod tests {
         let split_of = |seed: u64| {
             let again = dir.join(format!("again{seed}"));
             std::fs::create_dir_all(&again).unwrap();
-            write(&again, &classes, &items, 0.2, seed).unwrap();
+            write(&again, &classes, &items, 0.2, seed, PROVENANCE).unwrap();
             let mut val: Vec<String> = std::fs::read_dir(again.join("images/val"))
                 .unwrap()
                 .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -184,7 +189,7 @@ mod tests {
         let out = dir.join("out");
         std::fs::create_dir_all(&out).unwrap();
         let items = [Item { source, file: "only.png".into(), width: 8, height: 8, boxes: vec![] }];
-        assert_eq!(write(&out, &["a".to_string()], &items, 0.5, 0).unwrap(), [1, 0]);
+        assert_eq!(write(&out, &["a".to_string()], &items, 0.5, 0, PROVENANCE).unwrap(), [1, 0]);
         assert!(!out.join("images/val").exists());
         let ds = folo_data::open(&out).unwrap();
         assert_eq!(ds.split_sizes(), [1, 0, 0]);

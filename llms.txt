@@ -37,10 +37,16 @@ Fastest path for an agent:
 ## Reference
 - [HTTP API](docs/API.md): the HTTP + SSE contract of `folo serve`, used by Studio, Desktop and `folo mcp --server`.
   It covers datasets, models (weights download), runs (live events), predict, val, export, agent labeling
-  (`/api/label`), uploads, cloud compute (`/api/cloud`), and real vs mock mode
+  (`/api/label`), vision benchmarks (`/api/bench`), uploads, cloud compute (`/api/cloud`), and real vs mock mode
 - [Agent labeling](docs/LABELING.md): unlabeled images to a dataset. `folo serve` drives Claude Code or Codex
   (one model request per batch of images, no tools), a person reviews the boxes in Studio, and the result is a
   registered YOLO dataset. It has the workflow, the HTTP calls, what a run costs in tokens and measured accuracy
+- [Vision benchmarks](docs/BENCH.md): grade any vision model on your own images. A benchmark is a frozen set of
+  labeled images plus a plan of stress conditions (twelve, at severities 1 to 5); an entry is a FOLO model, a
+  coding agent or externally made predictions, scored 0 to 100 on five axes (accuracy, robustness, self-labeling,
+  calibration, localization), each defined exactly; a self-improvement loop has a model label a pool, trains a
+  student on those labels alone and grades it. HTTP API under `/api/bench` (feature `vision_bench`); the engine is
+  `crates/folo-bench`. Not the speed benchmark (`folo bench`, docs/BENCHMARKS.md)
 - [Cloud compute](docs/CLOUD.md): training runs on a rented GPU (RunPod) or on another FOLO server
   (`TrainConfig.compute`, `folo cloud`, MCP `cloud_*`). It has the lifecycle of a cloud run, how instances are
   never left behind, the providers, and `folo serve --token`
