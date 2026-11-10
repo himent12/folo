@@ -79,9 +79,9 @@ src/synth.rs      procedural "shapes" scenes behind the mock's images
 src/local.rs      local inference: folo-vision's Predictor in process, on folo-gpu or the CPU
 src/store.rs      fetched state, live run data (SSE events), the decoded-image cache
 src/app.rs        root view: chrome, sidebar, routing, fetching, live event pump, actions
-src/controls.rs   focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
-src/ui.rs         stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
-src/charts.rs     canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram
+src/controls/     focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
+src/ui/           stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
+src/charts/       canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram
 src/viz.rs        images with detection boxes and label chips (design/README.md box spec)
 src/screens/      one module per screen
 src/overlays.rs   palette, dialogs, image inspector, toasts
