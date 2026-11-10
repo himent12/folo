@@ -133,6 +133,21 @@ pub(crate) fn default_data_dir() -> PathBuf {
     folo_api::weights::home_dir()
 }
 
+/// `--data-dir` (else [`default_data_dir`]), refused when it is something other than a folder: the commands create
+/// it when it does not exist, but a file there failed every write later, as `internal`.
+pub(crate) fn data_dir(given: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    let dir = given.unwrap_or_else(default_data_dir);
+    if dir.exists() && !dir.is_dir() {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!("--data-dir {} is not a folder", folo_api::json::path(&dir)),
+        )
+        .hint("pass a folder (it is created when it does not exist)"));
+    }
+    Ok(dir)
+}
+
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -155,7 +170,11 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         // Before anything creates the GPU context: the device has to be created with them.
         folo_gpu::context::request_tensor_cores();
     }
-    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
+    let data_dir = if args.mock {
+        args.data_dir.clone().unwrap_or_else(default_data_dir)
+    } else {
+        data_dir(args.data_dir.clone())?
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -243,7 +262,12 @@ fn mcp(args: McpArgs) -> Result<(), CliError> {
         // As `folo serve --tensor-cores`: before anything creates the GPU context.
         folo_gpu::context::request_tensor_cores();
     }
-    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
+    // Embedded mode writes there; a mock or proxying server does not.
+    let data_dir = if args.server.is_none() && !args.mock {
+        data_dir(args.data_dir.clone())?
+    } else {
+        args.data_dir.clone().unwrap_or_else(default_data_dir)
+    };
     let backend = match (&args.server, args.mock) {
         (Some(url), _) => folo_mcp::Backend::Proxy { url: url.clone(), token: args.token.clone() },
         (None, true) => folo_mcp::Backend::Mock,
