@@ -16,7 +16,7 @@ pub mod prompt;
 mod run;
 mod tree;
 
-pub(crate) use run::{agent_jpeg, agent_jpeg_of};
+pub(crate) use run::{MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -818,7 +818,9 @@ impl Labeler {
         }
         let path = claim_dir(&self.datasets, &slug(&name, "labeled"))
             .map_err(|e| io_error("creating a folder in", &self.datasets, e))?;
-        if let Err(e) = dataset::write(&path, &classes, &items, req.val_fraction, req.seed) {
+        if let Err(e) =
+            dataset::write(&path, &classes, &items, req.val_fraction, req.seed, dataset::PROVENANCE)
+        {
             let _ = std::fs::remove_dir_all(&path);
             return Err(io_error("writing the dataset", &path, e));
         }

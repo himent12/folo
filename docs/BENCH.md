@@ -28,9 +28,10 @@ grades what a model sees.
   that, whatever happens to the source. Up to 5000 images; when the source has more, a seeded sample.
 - **A plan of conditions.** Each condition is a deterministic change to every image that keeps its size (the
   catalog is below), at severities 1 to 5. The plan says which conditions run, at which severities, and how much
-  each counts. It can change only while the benchmark has no entries: after that the benchmark is a fixed test.
-- **A fingerprint.** A hash of the images, the truth, the plan and the seed. Two entries compare when their
-  fingerprints agree.
+  each counts. It can change only while the benchmark has no finished (`done`) and no active entry: from the first
+  one on the benchmark is a fixed test (failed and stopped entries do not count: they compare with nothing).
+- **A fingerprint.** A hash of the images, the truth, the plan, the seed and the version of the engine that
+  grades (the conditions' pixels and the score's definitions). Two entries compare when their fingerprints agree.
 
 Keep benchmark images out of training. A benchmark made from a dataset's `val` or `test` split is held out from a
 run that trains on its `train` split; one made from the split a model trained on measures memory, not sight.
@@ -58,8 +59,11 @@ is severe, and a person can still do the job.
 <!-- conditions:end -->
 
 The image a contestant gets under a condition is a JPEG at quality 95 of the changed pixels, the same bytes for
-every contestant: `GET /api/bench/benchmarks/{id}/images/{image_id}?condition=haze&severity=3`. Unchanged images
-are served as their original files.
+every contestant of a server: `GET /api/bench/benchmarks/{id}/images/{image_id}?condition=haze&severity=3`.
+Unchanged images are served as their original files. The conditions' pixels and the JPEG are pinned by golden
+tests (`crates/folo-bench/tests/golden.rs`, a digest of every condition and of two canonical JPEGs) that CI runs
+on Linux and Windows, so they are the same bytes on both and for every thread count; a change to them is a new
+version of the engine and a new fingerprint.
 
 ## The score
 An entry gets one number from 0 to 100, the weighted mean of five axes, each between 0 and 1:
@@ -106,11 +110,13 @@ condition moves the true boxes with the image.
 **Self-labeling.** Keep the detections with confidence at least `t`. Their *precision* is the share that is
 right, their *recall* the share of all true boxes they match (over all classes together, not a class mean: this
 is about a pile of labels, not about each class). The threshold `t*` is the lowest `t` on the grid
-`0.00, 0.01, ..., 1.00` with precision at least **0.9** (and at least one detection kept); the axis is the
-recall at `t*`, or 0 when no threshold reaches 0.9. A contestant without confidences has one operating point:
-the axis is its recall if its precision is at least 0.9, else 0. The verdict is `ready` from 0.5 (it labels at
-least half of all objects by itself at that precision), `partial` from 0.25, else `not_ready`. Also reported at
-`t*`: the mean IoU of the right labels, labels per image, and the whole precision / recall curve.
+`0.00, 0.01, ..., 1.00` with precision at least **0.9** on at least **10** kept detections (a precision measured
+on fewer is no support: a weak model can be right on its one most confident detection); the axis is the recall
+at `t*`, or 0 when no threshold qualifies. A contestant without confidences has one operating point: the axis is
+its recall if it has at least 10 detections and their precision is at least 0.9, else 0. The verdict is `ready`
+from 0.5 (it labels at least half of all objects by itself at that precision), `partial` from 0.25, else
+`not_ready`. Also reported at `t*` (over all detections when there is no `t*`): the precision, the number of
+labels kept, the mean IoU of the right ones, labels per image, and the whole precision / recall curve.
 
 This is a measurement on images whose truth is known. Whether training on such labels helps is what a
 [self-improvement loop](#self-improvement-loops) measures.
@@ -159,8 +165,10 @@ answered for; a condition is either answered for every image at every planned se
 sent in as many parts as it takes (up to 64 MiB each, in any order); send it pass by pass (the unchanged images,
 then each condition and severity), because the server grades a condition's severity as soon as all its images are
 in and keeps only the unchanged images' boxes until the end. A part with a wrong record is refused whole and can
-be sent again; `finish` says what is missing, and the entry stays open until it is whole. A small entry can also
-be sent in one request (without `open`). `examples/bench_external.py` does all of this for a model behind one
+be sent again, and a part sent again as it was (after a lost answer) is simply taken again, nothing added;
+`finish` says what is missing, and the entry stays open until it is whole. An open entry that gets no part for
+30 minutes expires (`failed`), and one holds at most 20 million boxes at once (sending pass by pass never comes
+near). A small entry can also be sent in one request (without `open`). `examples/bench_external.py` does all of this for a model behind one
 Python function.
 
 ## Designing a plan with an agent
@@ -176,7 +184,9 @@ The self-labeling axis says how good a model's own labels are. A loop tests what
 
 1. The benchmark grades the teacher (generation 0).
 2. The teacher labels a **pool** of images by itself: it keeps its detections from a confidence threshold up (by
-   default the threshold `t*` its benchmark entry found). The pool is a dataset split or a labeling job's images;
+   default the threshold `t*` its own benchmark entry found: the first teacher's for generation 1, the first
+   student's for generation 2, and so on). A teacher without a `t*` (it never reaches 90% precision on ten labels)
+   ends the loop there, before labeling, unless you set the confidence yourself: a loop never guesses one. The pool is a dataset split or a labeling job's images;
    the pool's own labels, if it has any, are never read, and pool images that are also in the benchmark are left
    out. So are images the teacher kept nothing on: its silence is not a label, and a student shown those images
    as empty would learn to see nothing in them.
@@ -188,7 +198,8 @@ The self-labeling axis says how good a model's own labels are. A loop tests what
 4. The benchmark grades the student, which becomes the teacher of the next generation.
 
 The verdict compares the last generation with the first teacher on mAP@0.5:0.95 of the unchanged images:
-**improved** when it is above the teacher's 95% interval, **regressed** when below, **held** otherwise. A loop
+**improved** when it is above the teacher's 95% interval, **regressed** when below, **held** otherwise (its
+bounds included). A loop
 that improves over several generations is a model that makes its own training data for a better model: recursive
 self-improvement, at the size of your pool and your benchmark. One that holds or regresses says the labels were
 not good enough, or the pool not new enough, and the charts say which.

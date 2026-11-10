@@ -20,6 +20,12 @@ pub mod plan;
 pub mod score;
 
 pub use conditions::{Condition, Rendered};
+
+/// The version of what this crate computes: the pixels of every condition and every definition of the score.
+/// Bump it when a condition's pixels or a definition of the score changes: it goes into every benchmark's
+/// fingerprint, so entries graded by different engines never compare as equals. `tests/golden.rs` pins the
+/// pixels, the canonical JPEG and a score, and fails on any change that is not marked by a bump here.
+pub const ENGINE_VERSION: u32 = 1;
 pub use plan::{catalog, check_plan, default_plan, variants};
 pub use score::{Evaluation, Map, Outcome, Sample};
 

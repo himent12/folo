@@ -39,13 +39,13 @@ pub struct Gathered {
 }
 
 /// The images of `source`: a dataset's `split` (`default_split` when it names none), or a labeling job's images
-/// (only the labeled ones when `labeled_only`, with their boxes). `404 dataset_not_found` /
-/// `label_job_not_found` for a source that does not exist.
+/// (with `truth`, only the labeled ones). With `truth` the images carry their boxes; without, they carry none
+/// (a loop's pool: [`pool`]). `404 dataset_not_found` / `label_job_not_found` for a source that does not exist.
 pub fn gather(
     store: &dyn Store,
     source: &BenchSource,
     default_split: Split,
-    labeled_only: bool,
+    truth: bool,
 ) -> Result<Gathered> {
     match source {
         BenchSource::Dataset { dataset_id, split } => {
@@ -59,13 +59,14 @@ pub fn gather(
                 .map(|im| {
                     let path = store.dataset_image_path(dataset_id, &im.id)?;
                     let file = im.file.rsplit(['/', '\\']).next().unwrap_or(&im.file).to_string();
-                    Ok(SourceImage { file, path, width: im.width, height: im.height, boxes: im.boxes })
+                    let boxes = if truth { im.boxes } else { Vec::new() };
+                    Ok(SourceImage { file, path, width: im.width, height: im.height, boxes })
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok(Gathered { name: ds.name, classes: ds.classes, images, split: Some(split) })
         }
         BenchSource::LabelJob { job_id } => {
-            let job = store.labeler()?.job_images(job_id, labeled_only)?;
+            let job = store.labeler()?.job_images(job_id, truth)?;
             let images = job
                 .images
                 .into_iter()
@@ -74,12 +75,48 @@ pub fn gather(
                     path: im.path,
                     width: im.width,
                     height: im.height,
-                    boxes: im.boxes,
+                    boxes: if truth { im.boxes } else { Vec::new() },
                 })
                 .collect();
             Ok(Gathered { name: job.name, classes: job.classes, images, split: None })
         }
     }
+}
+
+/// An image of a self-improvement loop's pool: a file and its size, never its labels (a pool's own labels are
+/// never read, so they are not even carried).
+#[derive(Clone, Debug)]
+pub struct PoolImage {
+    /// Its file name.
+    pub file: String,
+    /// Where the file is.
+    pub path: PathBuf,
+    /// Width after EXIF orientation.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
+}
+
+/// A loop's pool.
+pub struct Pool {
+    /// The dataset's or the job's name.
+    pub name: String,
+    /// Its images, in the source's order.
+    pub images: Vec<PoolImage>,
+    /// The split read (datasets; default `train`).
+    pub split: Option<Split>,
+}
+
+/// The images of a loop's pool: a dataset's split (`train` by default) or every image of a labeling job, without
+/// their labels.
+pub fn pool(store: &dyn Store, source: &BenchSource) -> Result<Pool> {
+    let g = gather(store, source, Split::Train, false)?;
+    let images = g
+        .images
+        .into_iter()
+        .map(|im| PoolImage { file: im.file, path: im.path, width: im.width, height: im.height })
+        .collect();
+    Ok(Pool { name: g.name, images, split: g.split })
 }
 
 /// `400 invalid_dataset`: a source with nothing to use.

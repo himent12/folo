@@ -876,7 +876,8 @@ The types are `folo_api::bench` (`crates/folo-api/src/bench.rs`), field for fiel
 - `GET /api/bench/benchmarks` → `{ "benchmarks": [Bench] }` (newest first)
 - `POST /api/bench/benchmarks` body `CreateBench` → `201 Bench`:
   `{ "name", "description"?: "", "source": { "kind": "dataset", "dataset_id", "split"?: "val" } | { "kind":
-  "label_job", "job_id" }, "max_images"?: 500, "seed"?: 0, "plan"?: BenchPlan }`. Copies the source's images
+  "label_job", "job_id" }, "max_images"?: 500, "seed"?: 0, "plan"?: BenchPlan }`. The new benchmark's `id` is
+  `bn_` and 12 random hex digits, never reused (its image URLs are served as immutable). Copies the source's images
   (byte for byte) and true boxes into the benchmark: a dataset split's images (every image of the split; one
   without boxes is a background image), or a labeling job's `labeled` images with their boxes. The classes are
   the source's (1 to 80). A source with more than `max_images` (1 to 5000) is sampled with `seed`: the
@@ -885,18 +886,23 @@ The types are `folo_api::bench` (`crates/folo-api/src/bench.rs`), field for fiel
   are `1`, `2`, ... in that order; file names are the source's (made unique by stem). True boxes are clipped to
   the image and a box with less than a pixel of width or height left is dropped, so `boxes` counts exactly what
   is scored. `source` comes back with the split filled in. `name` as a labeling job's; `description` at most
-  4000 characters. `400 invalid_body` for a plan that is not valid (below) and for a bad `name`, `description`
-  or `max_images`, `404 dataset_not_found` / `label_job_not_found`, `400 invalid_dataset` when no labeled image
+  4000 characters; `seed` at most 2^53 − 1 (9007199254740991, the largest integer a browser holds exactly). `400
+  invalid_body` for a plan that is not valid (below) and for a bad `name`, `description`, `max_images` or `seed`, `404 dataset_not_found` / `label_job_not_found`, `400 invalid_dataset` when no labeled image
   comes out of the source (an empty split, a job with nothing labeled) or it has no classes or more than 80.
-- `fingerprint`: SHA-256 (hex) over the seed, the classes, every image's content hash, size and true boxes in
-  order, and the plan's conditions, severities and weights (not `rationale`, `why` or `designed_by`).
+- `fingerprint`: SHA-256 (hex) over the engine's version (`folo_bench::ENGINE_VERSION`, bumped whenever a
+  condition's pixels or a definition of the score changes), the seed, the classes, every image's content hash,
+  size and true boxes in order, and the plan's conditions, severities and weights (not `rationale`, `why` or
+  `designed_by`). A benchmark's fingerprint changes when the server's engine does: entries graded by different
+  engines never compare as equals.
 - `GET /api/bench/benchmarks/{id}` → `Bench`; `404 bench_not_found`. `entries` counts every entry, `best` is the
-  `done` entry with the highest score (`{ "entry_id", "name", "score", "partial" }`, `partial` its
-  `score.partial`), and `active` is true while an entry of the benchmark is queued, running or stopping or a loop
-  of it is running or stopping (exactly when `DELETE` is `409 bench_active`).
+  first entry of the leaderboard when it is `done` (`{ "entry_id", "name", "score", "partial" }`, `partial` its
+  `score.partial`; a partial entry leads only when no complete one is done), and `active` is true while an entry
+  of the benchmark is queued, running or stopping (an open external entry is running) or a loop of it is running
+  or stopping (exactly when `DELETE` is `409 bench_active`).
 - `PUT /api/bench/benchmarks/{id}` body `{ "name"?, "description"?, "plan"? }` → `Bench`. Absent fields stay; the
-  fingerprint follows a new plan. `409 bench_frozen` for a `plan` once the benchmark has entries (delete them, or
-  make a new benchmark); the name and description can change any time.
+  fingerprint follows a new plan. `409 bench_frozen` for a `plan` while the benchmark has a `done` or an active
+  entry (failed and stopped entries do not freeze it: they compare with nothing; delete the done ones and stop the
+  active ones, or make a new benchmark); the name and description can change any time.
 - `DELETE /api/bench/benchmarks/{id}` → `204`: the benchmark, its images, thumbnails, entries and loops (never a
   model, a run or a dataset a loop made). `409 bench_active` while an entry or a loop of it is active.
 
@@ -933,15 +939,18 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   Any condition of the catalog is served, in the plan or not.
 
 **Entries**
-- `GET /api/bench/benchmarks/{id}/entries` → `{ "entries": [BenchEntry] }`: the leaderboard, `done` entries by
-  `score.total` (highest first), then the others (newest first).
+- `GET /api/bench/benchmarks/{id}/entries` → `{ "entries": [BenchEntry] }`: the leaderboard. First the `done`
+  entries that are complete (`score.partial` false) by `score.total`, highest first; then the `done` partial
+  entries by `score.total`; equal scores keep the older entry first; then every other entry (queued, running,
+  stopping, failed, stopped), newest first. `Bench.best` is the first of this order when it is `done`.
 - `POST /api/bench/benchmarks/{id}/entries` body `StartBenchEntry` → `201 BenchEntry`:
   `{ "contestant": { "kind": "model", "model_id" } | { "kind": "agent", "agent", "model"?, "effort"? } |
-  { "kind": "external", "scored"?: true, "predictions": [BenchPrediction] }, "name"?, "max_images"?,
-  "conditions"? }`. `name` (one line of at most 100 characters) defaults to the model's name, or the agent's and
+  { "kind": "external", "scored"?: true, "open"?: false, "predictions"?: [BenchPrediction] }, "name"?,
+  "max_images"?, "conditions"? }`. `name` (one line of at most 100 characters) defaults to the model's name, or the agent's and
   its model's (`Claude Code (haiku)`). `max_images` runs the first so many images (at least 1, `400
   invalid_body` for 0; more than the benchmark has runs them all). `progress.total` is the entry's images times
-  one plus the plan's (condition, severity) pairs it runs.
+  one plus the plan's (condition, severity) pairs it runs. `409 bench_frozen` when the benchmark's plan changed
+  while the request was checked (send it again).
   - `model`: FOLO runs the model on every image under every condition of the plan (`conditions: false` runs the
     unchanged images only; `max_images` the first so many). Its classes are matched to the benchmark's by name
     without case: `400 bench_class_mismatch` when none matches; benchmark classes it lacks are the entry's
@@ -954,7 +963,8 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
     of `GET …/images/{image_id}?condition=…`. `speed.ms_per_image` is the wall time of the unchanged pass (decode
     to boxes; images are prepared on several threads while the previous batch of 16 runs) per image, counted
     from the end of the first batch, so loading the model and warming up the device are left out: a throughput,
-    not the latency of one image.
+    not the latency of one image. Each condition's severity is graded right after its pass (its mAP pair is all
+    the result needs), so only the unchanged images' detections are kept until the end.
   - `agent`: the agent is asked for boxes as agent labeling asks (the same prompt, with the benchmark's classes
     and its description as the instructions; batches of the agent's default size, three calls in flight, every
     image scaled as labeling scales it; under a condition, the variant's JPEG). Defaults: the first 48 images,
@@ -975,10 +985,12 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
     image at every planned severity or absent (then robustness is over the conditions present, and the entry is
     partial unless all are). `400 invalid_body` names the first record that is wrong, in order: an image the
     benchmark does not have, a condition that is not in the catalog or a (condition, severity) the plan does not
-    run, a severity without its condition or the other way round, a record that repeats another (of the same
-    request, or received before), more than 1000 boxes, a class outside the benchmark's, a score outside `0..=1`
-    (when `scored`); then, when the entry is finished, an image without its unchanged record, and a condition
-    answered for some images or severities but not all. With `scored: false` every score is taken as 1.
+    run, a severity without its condition or the other way round, a record that repeats another with other
+    boxes (of the same request, or received before), more than 1000 boxes, a class outside the benchmark's, a
+    score outside `0..=1` (when `scored`); then, when the entry is finished, an image without its unchanged
+    record, and a condition answered for some images or severities but not all. A record that repeats one with
+    exactly the same boxes (and scores, when `scored`) is accepted and ignored: a client that retries a request
+    whose answer it lost gets no `400`. With `scored: false` every score is taken as 1.
     - `open: false` (the default): `predictions` is the whole entry, scored in the request and answered `done`
       (`conditions` true when a condition was answered). Up to 64 MiB.
     - `open: true`: the entry is created to be filled in parts, which is what a benchmark of any size needs (a
@@ -988,13 +1000,20 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
       one plus the plan's (condition, severity) pairs), `progress.done` the records received. An open entry is
       active (`Bench.active`, `409 bench_active`, `409 bench_entry_active`); `stop` discards it (`stopped`,
       nothing scored), and one the server stops with (or a crash leaves) is `failed` at the next start, as other
-      active entries are (its records were in memory).
+      active entries are (its records were in memory). One that gets no part (a request to `…/predictions`, a
+      retry included) for 30 minutes expires: it is `failed` ("no predictions arrived for 30 minutes", with a hint
+      to start it again), what it held is dropped, and a `bench` event says the benchmark is idle again. What an
+      open entry holds in memory is capped at 20 million boxes (the unchanged images' and those of conditions'
+      severities still incomplete): a part that would pass it is `400 invalid_body`, saying to send pass by
+      pass.
   `progress.total` and `progress.done` of a finished external entry are the records it got.
 - `POST /api/bench/benchmarks/{id}/entries/{entry_id}/predictions` body `BenchPredictions` `{ "predictions":
   [BenchPrediction] }` → `BenchEntry` (with the new `progress.done`): a part of an open external entry. Up to 64
   MiB per request, any number of requests, records in any order. A part is checked whole as above before any of
   it is taken: a `400 invalid_body` adds none of its records, so it can be fixed and sent again (a record that
-  was already received is named: "… was received in an earlier part"). **Send pass by pass** (the unchanged
+  was already received with other boxes is named: "… was received in an earlier part with other boxes"; one
+  received with the same boxes is ignored, so a part can be sent again after a lost answer). **Send pass by
+  pass** (the unchanged
   images, then each condition and severity): a (condition, severity) is graded as soon as its last image has
   arrived (its mAP pair is all the result needs) and its boxes are dropped, so the server holds about one pass
   at a time; the unchanged images' detections are kept until `finish` (the evaluation and the per-image outcomes
@@ -1008,13 +1027,17 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   A finished entry has `score` (`total`, `partial`, the five `axes`), `map50_95` with its 95% interval `ci95`
   (as in the result's `accuracy`), `conditions_run` (how many of the plan's conditions it ran completely, every
   planned severity and every image it runs; for an external entry, the conditions it answered; 0 until `done`),
-  and `speed` (a model) or `usage` (an agent). An entry is complete (not `partial` on that count) when it ran every image of the
-  benchmark and every condition of its plan; `partial` is also set when an axis could not be measured
-  (calibration without confidences or without a detection from 0.1 up).
+  and `speed` (a model) or `usage` (an agent). An entry is complete (not `partial` on that count) when it ran
+  every image of the benchmark and every condition of its plan; `partial` is also set when an axis could not be
+  measured: calibration without confidences, and also for a scored contestant with no detection at confidence
+  0.1 or above.
 - `GET /api/bench/benchmarks/{id}/entries/{entry_id}` → `BenchEntry`; `404 bench_entry_not_found`.
 - `GET /api/bench/benchmarks/{id}/entries/{entry_id}/result` → `BenchResult`: `accuracy` (with the 95% interval,
   by size and per class), `robustness` (per condition and severity; `null` when no condition ran), `calibration`
-  (`null` without confidences), `localization` and `self_labeling`. `409 bench_entry_not_done` until the entry is
+  (`null` without confidences, or when no detection reaches confidence 0.1), `localization` and `self_labeling`
+  (`threshold`: the lowest confidence on the grid `0.00 … 1.00` where at least 10 labels are kept and at least 90%
+  of them are right, `null` when there is none; `labels`: the labels kept at `threshold`, all detections when
+  there is none; a contestant without confidences reaches the target only with at least 10 detections). `409 bench_entry_not_done` until the entry is
   `done`.
 - `GET /api/bench/benchmarks/{id}/entries/{entry_id}/images?sort=order|worst&offset=0&limit=100` →
   `{ "total", "images": [BenchEntryImage] }`: per image of the entry (unchanged) the truth, the detections at or
@@ -1037,10 +1060,11 @@ process left so) is `failed` ("the server stopped before the entry finished") wi
   "epochs"?: 30, "imgsz"?, "batch"?, "device"?, "weights"?, "seed"?: 0 }, "name"? }` (`name` defaults to
   `<teacher's name> loop`; `config` comes back with the defaults filled in: the pool's split, `generations`, the
   student's `arch` and `imgsz` (the first teacher's), `epochs` and `device` (`auto`); `batch: null` is
-  `TrainConfig`'s). Per generation (1 to 5): the teacher's entry on the benchmark (a `done` entry of the model on
+  `TrainConfig`'s; `student.seed` at most 2^53 − 1). Per generation (1 to 5): the teacher's entry on the benchmark (a `done` entry of the model on
   this fingerprint that ran every image and every condition is reused, else a model entry is started: it is
   queued like any other and listed with the others), the teacher's labels of the pool (its detections from
-  `min_confidence` up, else from its entry's self-labeling threshold, else from 0.5; clipped to the image),
+  `min_confidence` up, else from its own entry's self-labeling threshold: generation 1 from the first teacher's,
+  generation 2 from the first student's, and so on; clipped to the image),
   written as a YOLO dataset `<data dir>/datasets/<name>-gen-<n>` named `<name> gen <n>` and registered (the
   pool images the teacher kept at least one box on, `labels.labeled_images` of the `labels.images` it looked
   at: an image it kept nothing on is left out, since its silence is not a label; train and val both with the
@@ -1050,16 +1074,21 @@ process left so) is `failed` ("the server stopped before the entry finished") wi
   `GET /api/runs`, queued like any other), and the student's entry; the student is the next generation's
   teacher. The pool's own labels are never read. `400 invalid_body` when the teacher's classes are not the
   benchmark's (same names without case, same order: labels are written by class index), for `generations`
-  outside `1..=5`, a `min_confidence` outside `0..=1`, an unknown `student.arch`, `student.epochs` 0 or a
-  `student.imgsz` that is not a multiple of 32 in `32..=4096`; `404 model_not_found`, `dataset_not_found`,
-  `label_job_not_found`; `400 invalid_dataset` when the pool has no image outside the benchmark (a pool split
-  defaults to `train`; a labeling job gives all its images). A loop fails (`error` and `hint` say why) when a
-  teacher keeps boxes on fewer than 10 pool images, when its run fails or is stopped by someone else, or when an entry fails; the
-  run's settings are checked when it is created, so a bad one fails the loop with `POST /api/runs`' message.
+  outside `1..=5`, a `min_confidence` outside `0..=1`, an unknown `student.arch`, `student.epochs` 0, a
+  `student.imgsz` that is not a multiple of 32 in `32..=4096` or a `student.seed` over 2^53 − 1; the students'
+  training settings are checked as `POST /api/runs` checks them (all but the dataset, which does not exist
+  yet: `device`, `weights`, `batch` and the rest, with its codes: `404 device_not_found`, `404 model_not_found`,
+  `400 invalid_config`, ...); `404 model_not_found`, `dataset_not_found`, `label_job_not_found`; `400
+  invalid_dataset` when the pool has no image outside the benchmark (a pool split defaults to `train`; a labeling
+  job gives all its images). A loop fails (`error` and `hint` say why) when a teacher has no confidence to label
+  from (no `min_confidence`, and its entry has no self-labeling threshold: "'<model>' never reaches 90% precision
+  on at least 10 labels on this benchmark, so there is no confidence to label the pool from", before anything is
+  labeled; the hint says to set `min_confidence`), when a teacher keeps boxes on fewer than 10 pool images, when
+  its run fails or is stopped by someone else, or when an entry fails.
 - `GET /api/bench/benchmarks/{id}/loops/{loop_id}` → `BenchLoop`: `generations[0]` is the first teacher, then one
   per student, each with its `labels`, `run_id`, `model_id`, `entry_id`, `score`, `map50_95` and `ci95` as far
   as the loop has come; `verdict` once `done` (the last generation's `map50_95` against generation 0's `ci95`:
-  `improved` above it, `regressed` below, `held` inside). `404 bench_loop_not_found`.
+  `improved` above it, `regressed` below, `held` inside, its bounds included). `404 bench_loop_not_found`.
 - `POST /api/bench/benchmarks/{id}/loops/{loop_id}/stop` → `BenchLoop` (`stopping`, then `stopped`): stops what the
   loop is doing (its entry, its run). `409 bench_loop_not_active` when it has ended.
 - `DELETE /api/bench/benchmarks/{id}/loops/{loop_id}` → `204` (its datasets, runs, models and entries stay).
@@ -1217,7 +1246,8 @@ mostly shown) for the others.
   `entries/<entry id>.json` (an entry, and once it is done its result and per-image outcomes) and
   `loops/<loop id>.json`, all written atomically. Variant thumbnails are in `cache/thumbs/<bench id>/`. On start
   every benchmark is listed again (one whose `bench.json` cannot be read is left out and logged, never
-  overwritten; so is an unreadable entry or loop file); entries left `queued` or `running` and loops left
+  overwritten; so is an unreadable entry or loop file; a folder without `bench.json`, a benchmark whose making a
+  crash cut short, is removed and logged); entries left `queued` or `running` and loops left
   running become `failed` ("the server stopped ...", written back). On shutdown the same happens to the active
   ones: agent calls are killed, a loop stops the run it follows.
 

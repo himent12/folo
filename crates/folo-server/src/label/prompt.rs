@@ -119,20 +119,33 @@ pub fn parse_reply(
     Ok(out)
 }
 
-/// The image entries of every reply object in `text`. Models wrap the JSON in a code fence or a sentence now and
-/// then, add a remark after it, or answer with one object per image: the objects are what counts, wherever they
-/// are (a reply read this way is a call that need not be made again).
+/// The image entries of every reply object in `text` ([`json_objects`]).
 fn reply_images(text: &str) -> Result<Vec<Value>, String> {
-    /// Braces that may fail to open a reply before the text is given up on.
+    let (replies, first_error) = json_objects::<Reply>(text);
+    match (replies.is_empty(), first_error) {
+        (false, _) => Ok(replies.into_iter().flat_map(|r| r.images).collect()),
+        (true, Some(e)) => Err(format!("the reply is not the JSON asked for: {e}")),
+        (true, None) => Err("the reply has no JSON object".into()),
+    }
+}
+
+/// Every JSON object in `text` that reads as a `T`, in order, and the first error of a `{` that did not. Models
+/// wrap the JSON in a code fence or a sentence now and then, add a remark after it, or answer with one object per
+/// item: the objects are what counts, wherever they are (a reply read this way is a call that need not be made
+/// again). A text with too many braces that open nothing is given up on, not scanned forever. Agent labeling's
+/// replies and a benchmark design's answer are read with it.
+pub(crate) fn json_objects<T: serde::de::DeserializeOwned>(
+    text: &str,
+) -> (Vec<T>, Option<serde_json::Error>) {
+    /// Braces that may fail to open an object before the text is given up on.
     const MAX_MISSES: usize = 64;
-    let (mut images, mut found, mut misses, mut first_error) = (Vec::new(), false, 0, None);
+    let (mut found, mut misses, mut first_error) = (Vec::new(), 0, None);
     let mut rest = text;
     while let Some(start) = rest.find('{').filter(|_| misses < MAX_MISSES) {
-        let mut stream = serde_json::Deserializer::from_str(&rest[start..]).into_iter::<Reply>();
+        let mut stream = serde_json::Deserializer::from_str(&rest[start..]).into_iter::<T>();
         rest = match stream.next() {
-            Some(Ok(reply)) => {
-                found = true;
-                images.extend(reply.images);
+            Some(Ok(v)) => {
+                found.push(v);
                 &rest[start + stream.byte_offset()..]
             }
             Some(Err(e)) => {
@@ -143,11 +156,7 @@ fn reply_images(text: &str) -> Result<Vec<Value>, String> {
             None => break,
         };
     }
-    match (found, first_error) {
-        (true, _) => Ok(images),
-        (false, Some(e)) => Err(format!("the reply is not the JSON asked for: {e}")),
-        (false, None) => Err("the reply has no JSON object".into()),
-    }
+    (found, first_error)
 }
 
 /// A reply box (`{"label": "car", "box": [x1, y1, x2, y2]}`) in pixels of a `width` x `height` image, or `None`

@@ -6,8 +6,10 @@
 //!
 //! The expensive part of an entry is making the variants (decode, condition, the canonical JPEG and its decode):
 //! a preparing thread does that for a batch of images at a time on the rayon pool, one batch ahead of the
-//! inference, so memory stays at a few batches whatever the benchmark's size. A self-improvement loop's teacher
-//! labels its pool through the same path ([`label_pool`]); [`Engine::infer`] keeps the two from running at once.
+//! inference, so memory stays at a few batches whatever the benchmark's size. Each variant is graded (its mAP
+//! pair, all the result needs of it) as soon as its pass is done, so only the unchanged images' detections are
+//! kept to the end. A self-improvement loop's teacher labels its pool through the same path ([`label_pool`]);
+//! [`Engine::infer`] keeps the two from running at once.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -20,13 +22,13 @@ use axum::http::StatusCode;
 use folo_api::{
     BBox, BenchContestant, BenchDetection, BenchEntryStatus, BenchEvent, BenchProgress, BenchSpeed, Model,
 };
-use folo_bench::score::Sample;
+use folo_bench::score::{self, Sample};
 use folo_bench::{Condition, conditions};
 use folo_core::Device;
 use folo_vision::{NmsConfig, PredictConfig, Predictor};
 use rayon::prelude::*;
 
-use super::results::{self, Pass};
+use super::results;
 use super::state::{SERVER_STOPPED_ENTRY, Slot};
 use crate::engine::{self, engine_error};
 use crate::error::{Error, Result};
@@ -48,10 +50,15 @@ pub struct Engine {
     guard: Option<InferenceGuard>,
     /// Set when the server shuts down.
     pub closing: AtomicBool,
-    /// Held while a model runs (an entry, or a loop's teacher on its pool): one model at a time.
-    pub infer: Mutex<()>,
+    /// Held while a model runs (an entry, or a loop's teacher on its pool): one model at a time. Taken with
+    /// [`Engine::one_at_a_time`], which gives up on a stop.
+    infer: Mutex<()>,
     queue: Mutex<VecDeque<Job>>,
     ready: Condvar,
+    /// Test support: while set, a model entry waits after its last pass, before it is graded.
+    pub hold: AtomicBool,
+    /// How long an open external entry waits for its next part, in milliseconds.
+    pub open_timeout_ms: std::sync::atomic::AtomicU64,
 }
 
 /// A model entry waiting for (or taken by) the worker.
@@ -132,6 +139,25 @@ impl Engine {
             infer: Mutex::new(()),
             queue: Mutex::new(VecDeque::new()),
             ready: Condvar::new(),
+            hold: AtomicBool::new(false),
+            open_timeout_ms: std::sync::atomic::AtomicU64::new(
+                super::external::OPEN_TIMEOUT.as_millis() as u64
+            ),
+        }
+    }
+
+    /// The right to run a model (one at a time), waited for until `cancel` is set or the server shuts down
+    /// (`None` then): a stopped entry or loop queued behind a long one ends at once.
+    pub fn one_at_a_time(&self, cancel: &AtomicBool) -> Option<std::sync::MutexGuard<'_, ()>> {
+        loop {
+            if cancel.load(Ordering::Relaxed) || self.closing.load(Ordering::SeqCst) {
+                return None;
+            }
+            match self.infer.try_lock() {
+                Ok(guard) => return Some(guard),
+                Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(20)),
+            }
         }
     }
 
@@ -407,7 +433,9 @@ fn run(engine: &Engine, job: Job) {
     finish(engine, &slot, &id, outcome);
 }
 
-/// Closes entry `id` with what its run came to.
+/// Closes entry `id` with what its run came to. The entry's file is written before the entry in memory changes:
+/// a result that cannot be written leaves a `failed` entry (with the IO error), never a `done` one without a
+/// result on disk.
 pub fn finish_entry(
     slot: &Slot,
     id: &str,
@@ -416,7 +444,7 @@ pub fn finish_entry(
 ) {
     let now = rfc3339(unix_now());
     let mut state = slot.lock();
-    let Some(e) = state.entry_mut(id) else { return };
+    let Some(e) = state.entry(id).ok() else { return };
     // A stop that was accepted (or the server's shutdown) wins over a grade that finished meanwhile: the last
     // pass is not checked for it again, and neither is the grading.
     let stopped = closing || e.entry.status == BenchEntryStatus::Stopping || e.cancel.load(Ordering::SeqCst);
@@ -424,42 +452,67 @@ pub fn finish_entry(
         Ok(Some(_)) if stopped => Ok(None),
         other => other,
     };
+    let mut entry = e.entry.clone();
     let mut parts = None;
     match outcome {
         Ok(Some((graded, speed))) => {
-            e.entry.status = BenchEntryStatus::Done;
-            e.entry.progress.done = e.entry.progress.total;
-            e.entry.progress.condition = None;
-            e.entry.progress.severity = None;
-            e.entry.score = Some(graded.score.clone());
-            e.entry.map50_95 = Some(graded.map50_95);
-            e.entry.ci95 = Some(graded.parts.accuracy.ci95);
-            e.entry.conditions_run = graded.conditions_run();
+            entry.status = BenchEntryStatus::Done;
+            entry.progress.done = entry.progress.total;
+            entry.progress.condition = None;
+            entry.progress.severity = None;
+            entry.score = Some(graded.score.clone());
+            entry.map50_95 = Some(graded.map50_95);
+            entry.ci95 = Some(graded.parts.accuracy.ci95);
+            entry.conditions_run = graded.conditions_run();
             if speed.is_some() {
-                e.entry.speed = speed;
+                entry.speed = speed;
             }
             parts = Some((graded.parts, graded.images));
         }
         Ok(None) if closing => {
-            e.entry.status = BenchEntryStatus::Failed;
-            e.entry.error = Some(SERVER_STOPPED_ENTRY.into());
-            e.entry.hint = Some("start the entry again once the server runs".into());
+            entry.status = BenchEntryStatus::Failed;
+            entry.error = Some(SERVER_STOPPED_ENTRY.into());
+            entry.hint = Some("start the entry again once the server runs".into());
         }
-        Ok(None) => e.entry.status = BenchEntryStatus::Stopped,
+        Ok(None) => entry.status = BenchEntryStatus::Stopped,
         Err(err) => {
-            e.entry.status = BenchEntryStatus::Failed;
-            e.entry.error = Some(err.body.message);
-            e.entry.hint = err.body.hint;
+            entry.status = BenchEntryStatus::Failed;
+            entry.error = Some(err.body.message);
+            entry.hint = err.body.hint;
         }
     }
-    e.entry.finished = Some(now);
-    let entry = e.entry.clone();
-    let saved = slot.save_entry(&state, &entry, parts.as_ref().map(|(r, i)| (r, i.as_slice())));
-    if let Err(err) = saved {
-        tracing::warn!(bench = %slot.id, "{err}");
+    entry.finished = Some(now);
+    let entry = write_closed(slot, &state, entry, parts.as_ref().map(|(r, i)| (r, i.as_slice())));
+    if let Some(e) = state.entry_mut(id) {
+        e.entry = entry.clone();
     }
     slot.emit(BenchEvent::Entry(Box::new(entry)));
     slot.emit_bench(&state);
+}
+
+/// Writes a closed entry's file and returns the entry to keep: as it is, or, when its file (with its result)
+/// cannot be written, `failed` with the IO error.
+pub fn write_closed(
+    slot: &Slot,
+    state: &super::state::State,
+    mut entry: folo_api::BenchEntry,
+    parts: Option<(&super::state::ResultParts, &[super::state::ImageOutcome])>,
+) -> folo_api::BenchEntry {
+    if let Err(err) = slot.save_entry(state, &entry, parts) {
+        tracing::warn!(bench = %slot.id, "{err}");
+        if entry.status == BenchEntryStatus::Done {
+            entry.status = BenchEntryStatus::Failed;
+            entry.score = None;
+            entry.map50_95 = None;
+            entry.ci95 = None;
+            entry.conditions_run = 0;
+            entry.error = Some(format!("the entry's result could not be written: {}", err.body.message));
+            entry.hint =
+                Some("free disk space or fix the data dir's permissions, then start it again".into());
+            let _ = slot.save_entry(state, &entry, None);
+        }
+    }
+    entry
 }
 
 fn finish(engine: &Engine, slot: &Slot, id: &str, outcome: Result<Option<Done>>) {
@@ -493,15 +546,14 @@ fn run_model(
         .collect();
     let passes = passes(&file.plan, conditions);
     // One model at a time: a loop's teacher labeling its pool waits for this entry, and the other way round.
-    let _one = engine.infer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if cancel.load(Ordering::Relaxed) {
-        return Ok(None);
-    }
+    let Some(_one) = engine.one_at_a_time(cancel) else { return Ok(None) };
     let p = engine.predictor(&model.path)?;
     let device = p.device();
     let _gpu = engine.guard(device);
     let mut progress = Progress { slot, id, last: None };
-    let (mut clean, mut variants) = (Vec::new(), Vec::new());
+    let classes = file.classes.len();
+    // The unchanged images' samples, kept to the end; each variant only as its mAP pair.
+    let (mut clean, mut runs) = (Vec::new(), Vec::new());
     let mut ms_per_image = 0.0f64;
     for (k, &variant) in passes.iter().enumerate() {
         let base = (k * items.len()) as u64;
@@ -530,19 +582,17 @@ fn run_model(
                 };
                 clean = samples;
             }
-            Some(v) => variants.push(Pass { variant: Some(v), samples }),
+            Some((c, s)) => runs.push((c, s, score::map(&samples, classes, true))),
         }
+    }
+    // Test support: wait here, after the last pass and before the grade (a stop that lands now must still win).
+    while engine.hold.load(Ordering::SeqCst) && !engine.closing.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(5));
     }
     let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
     let complete = images == file.images.len() && (conditions || file.plan.conditions.is_empty());
-    let spec = results::Spec {
-        classes: file.classes.len(),
-        scored: true,
-        plan: &file.plan,
-        seed: file.seed,
-        complete,
-    };
-    let graded = results::grade(&clean, &ids, &variants, &spec);
+    let spec = results::Spec { classes, scored: true, plan: &file.plan, seed: file.seed, complete };
+    let graded = results::grade_maps(&clean, &ids, &runs, &spec);
     Ok(Some(Done {
         graded,
         speed: BenchSpeed { device: device.to_string(), ms_per_image: ms_per_image as f32 },
@@ -561,10 +611,7 @@ pub fn label_pool(
     cancel: &AtomicBool,
     each: impl FnMut(usize),
 ) -> Result<Option<Vec<Vec<BBox>>>> {
-    let _one = engine.infer.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if cancel.load(Ordering::Relaxed) {
-        return Ok(None);
-    }
+    let Some(_one) = engine.one_at_a_time(cancel) else { return Ok(None) };
     let p = engine.predictor(path)?;
     let _gpu = engine.guard(p.device());
     let map: Vec<Option<u32>> =

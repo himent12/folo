@@ -11,8 +11,9 @@ default) every condition and severity of the benchmark's plan. For each pass it 
 bytes every contestant gets), runs `predict`, maps the class names to the benchmark's and sends the pass as one
 part of the entry (split further when its JSON would be over 32 MiB), so the server holds about one pass at a time
 whatever the benchmark's size. Then it finishes the entry, which the server scores, and prints the score. If
-anything fails after the entry was opened, the entry is stopped, so no half-filled entry is left behind. Only the
-standard library is needed (plus whatever your model needs).
+anything fails after the entry was opened, the entry is stopped and deleted, so no half-filled entry is left
+behind (and the script says so, or what it could not undo). Only the standard library is needed (plus whatever
+your model needs).
 """
 
 import argparse
@@ -73,12 +74,13 @@ class Api:
         self.requests = 0
         self.largest = 0
 
-    def request(self, path, body=None):
+    def request(self, path, body=None, method=None):
         data = None
         if body is not None:
             data = body if isinstance(body, bytes) else json.dumps(body).encode()
             self.largest = max(self.largest, len(data))
-        req = urllib.request.Request(self.base + path, data=data, method="GET" if data is None else "POST")
+        method = method or ("GET" if data is None else "POST")
+        req = urllib.request.Request(self.base + path, data=data, method=method)
         if data is not None:
             req.add_header("Content-Type", "application/json")
         if self.token:
@@ -115,6 +117,19 @@ def significant(v, digits=4):
 def encode(records):
     """The JSON of a part, compact."""
     return json.dumps({"predictions": records}, separators=(",", ":")).encode()
+
+
+def cleanup(api, uri):
+    """Stops and deletes the entry at `uri`; says how that went."""
+    try:
+        api.request(f"{uri}/stop", {})
+    except ApiError as e:
+        return f"the entry could not be stopped, it is still on the benchmark: {e}"
+    try:
+        api.request(uri, method="DELETE")
+    except ApiError as e:
+        return f"the entry was stopped but could not be deleted, delete it by hand: {e}"
+    return "the entry was stopped and deleted"
 
 
 def main():
@@ -201,13 +216,11 @@ def main():
                   f"part{'s' if sent else ''}, {time.time() - t0:.0f} s", file=sys.stderr, flush=True)
         entry = api.json(f"{uri}/finish", {})
     except BaseException as e:
-        # No half-filled entry is left behind.
-        try:
-            api.request(f"{uri}/stop", {})
-        except ApiError:
-            pass
+        # No half-filled entry is left behind: stopped (which drops what it received), then deleted.
+        what = cleanup(api, uri)
         if isinstance(e, ApiError):
-            sys.exit(f"{e} (the entry was stopped)")
+            sys.exit(f"{e} ({what})")
+        print(f"bench_external: {what}", file=sys.stderr)
         raise
     if unknown:
         print(f"dropped detections of classes the benchmark does not have: {unknown}", file=sys.stderr)

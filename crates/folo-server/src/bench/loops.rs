@@ -17,23 +17,30 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use folo_api::{
-    BenchEntryStatus, BenchGeneration, BenchLabels, BenchLoopPhase, BenchLoopStatus, BenchLoopVerdict,
-    DatasetFormat, Model, RegisterDataset, RunStatus, StartBenchLoop, TrainConfig,
+    BenchEntryStatus, BenchEvent, BenchGeneration, BenchLabels, BenchLoop, BenchLoopPhase, BenchLoopStatus,
+    BenchLoopVerdict, BenchSource, BenchStudent, DatasetFormat, Model, RegisterDataset, RunStatus,
+    StartBenchLoop, TrainConfig,
 };
+use rayon::prelude::*;
 
 use super::model::{self, Engine, Item};
-use super::source::SourceImage;
-use super::state::{SERVER_STOPPED_LOOP, Slot};
+use super::source::{self, PoolImage};
+use super::state::{LoopState, SERVER_STOPPED_LOOP, Slot};
+use super::{MAX_SEED, invalid, sha256};
 use crate::error::{Error, Result};
+use crate::label::check_name;
 use crate::label::dataset;
 use crate::label::job::unique_file_name;
 use crate::store::Store;
-use crate::util::{claim_dir, rfc3339, slug, unix_now};
+use crate::util::{claim_dir, fnv1a, rfc3339, slug, unique_id, unix_now};
 
 /// The share of a student's dataset that goes to `val` (both splits carry the teacher's labels).
 pub const VAL_FRACTION: f32 = 0.1;
-/// The confidence a teacher's labels are kept from when nothing else says.
-pub const DEFAULT_THRESHOLD: f32 = 0.5;
+/// Most generations of a loop.
+pub const MAX_GENERATIONS: u32 = 5;
+/// The provenance line of a student's dataset (`data.yaml`).
+const PROVENANCE: &str =
+    "# made by a FOLO self-improvement loop: the teacher's labels of the pool, no true label";
 /// Fewest pool images a teacher must keep a box on for a student to train on them.
 pub const MIN_LABELED_IMAGES: usize = 10;
 /// How often a loop looks at the entry or the run it waits for.
@@ -50,8 +57,8 @@ pub struct LoopJob {
     pub config: StartBenchLoop,
     /// The first teacher.
     pub teacher: Model,
-    /// The pool, without the images the benchmark has.
-    pub pool: Vec<SourceImage>,
+    /// The pool, without the images the benchmark has (and without labels: a pool's are never read).
+    pub pool: Vec<PoolImage>,
     /// Pool images left out because the benchmark has them.
     pub excluded: u64,
     /// `<data dir>/datasets`, where the students' datasets are written.
@@ -106,6 +113,201 @@ pub fn run(job: LoopJob) {
 
 fn failed(message: impl Into<String>) -> Error {
     Error::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
+}
+
+/// A checked `POST …/loops`: everything a loop needs but its id and its thread.
+pub struct Checked {
+    pub config: StartBenchLoop,
+    pub teacher: Model,
+    pub pool: Vec<PoolImage>,
+    pub excluded: u64,
+}
+
+/// Checks `POST /api/bench/benchmarks/{id}/loops` and finds its pool: the numbers, the teacher (its classes must
+/// be the benchmark's, in order: labels are written by class index), the students' training settings as `POST
+/// /api/runs` checks them (all but the dataset, which does not exist yet), and the pool without the images the
+/// benchmark has (`400 invalid_dataset` when nothing is left).
+pub fn check(store: &dyn Store, slot: &Slot, req: StartBenchLoop) -> Result<Checked> {
+    let generations = req.generations.unwrap_or(1);
+    if !(1..=MAX_GENERATIONS).contains(&generations) {
+        return Err(invalid(format!("generations must be in 1..={MAX_GENERATIONS}")));
+    }
+    if let Some(c) = req.min_confidence
+        && !(0.0..=1.0).contains(&c)
+    {
+        return Err(invalid(format!("min_confidence must be in 0..=1, got {c}")));
+    }
+    let s = &req.student;
+    if s.seed > MAX_SEED {
+        return Err(invalid(format!("student.seed must be at most {MAX_SEED} (2^53 - 1), got {}", s.seed)));
+    }
+    if let Some(a) = s.arch.as_deref()
+        && folo_api::Arch::parse(a).is_none()
+    {
+        return Err(invalid(format!("student.arch '{a}' is not an architecture (folo-n, folo-s, ...)")));
+    }
+    if s.epochs == Some(0) {
+        return Err(invalid("student.epochs must be at least 1"));
+    }
+    if let Some(i) = s.imgsz
+        && (!i.is_multiple_of(32) || !(32..=4096).contains(&i))
+    {
+        return Err(invalid(format!("student.imgsz must be a multiple of 32 in 32..=4096, got {i}")));
+    }
+    let teacher = store.get_model(&req.teacher)?;
+    let (classes, sizes, hashes) = {
+        let state = slot.live()?;
+        let f = &state.file;
+        let sizes: HashSet<u64> = f.images.iter().map(|i| i.bytes).collect();
+        let hashes: HashSet<String> = f.images.iter().map(|i| i.sha256.clone()).collect();
+        (f.classes.clone(), sizes, hashes)
+    };
+    let key = |c: &String| c.trim().to_lowercase();
+    if teacher.classes.len() != classes.len()
+        || !teacher.classes.iter().zip(&classes).all(|(a, b)| key(a) == key(b))
+    {
+        return Err(invalid(format!(
+            "the teacher's classes {:?} are not the benchmark's {:?} (same names, same order): its labels are \
+             written by class index",
+            teacher.classes, classes
+        ))
+        .hint("a loop's teacher is a model trained on the benchmark's classes"));
+    }
+    let name = match req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        Some(n) => check_name(n)?,
+        None => format!("{} loop", teacher.name),
+    };
+    let student = BenchStudent {
+        arch: Some(s.arch.clone().unwrap_or_else(|| teacher.arch.as_str().to_string())),
+        epochs: Some(s.epochs.unwrap_or(30)),
+        imgsz: Some(s.imgsz.unwrap_or(teacher.imgsz)),
+        batch: s.batch,
+        device: Some(s.device.clone().unwrap_or_else(|| "auto".into())),
+        weights: s.weights.clone(),
+        seed: s.seed,
+    };
+    // The students' runs are checked now, as `POST /api/runs` checks them (device, weights, batch, ...), not
+    // after the teacher's entry and its labels.
+    store.check_run(&student_config(&student, &teacher, "", String::new()))?;
+    let pool = source::pool(store, &req.pool)?;
+    // Pool images with a benchmark image's bytes are left out; only files of a benchmark image's size are read.
+    let keep: Vec<bool> = pool
+        .images
+        .par_iter()
+        .map(|im| {
+            let len = std::fs::metadata(&im.path).map(|m| m.len()).unwrap_or(u64::MAX);
+            !sizes.contains(&len)
+                || std::fs::read(&im.path).map(|b| !hashes.contains(&sha256(&b))).unwrap_or(true)
+        })
+        .collect();
+    let total = pool.images.len();
+    let images: Vec<PoolImage> =
+        pool.images.into_iter().zip(&keep).filter(|(_, k)| **k).map(|(im, _)| im).collect();
+    let excluded = (total - images.len()) as u64;
+    if images.is_empty() {
+        let why = if total == 0 {
+            format!("the pool ('{}') has no images", pool.name)
+        } else {
+            format!("every image of the pool ('{}') is in the benchmark", pool.name)
+        };
+        return Err(source::empty(
+            why,
+            "a pool is the images the teacher labels for its student: pick images the benchmark does not have",
+        ));
+    }
+    let pool_source = match req.pool {
+        BenchSource::Dataset { dataset_id, .. } => BenchSource::Dataset { dataset_id, split: pool.split },
+        other => other,
+    };
+    let config = StartBenchLoop {
+        name: Some(name),
+        teacher: teacher.id.clone(),
+        pool: pool_source,
+        generations: Some(generations),
+        min_confidence: req.min_confidence,
+        student,
+    };
+    Ok(Checked { config, teacher, pool: images, excluded })
+}
+
+/// Adds a new loop of `checked` to `slot` (`running`, written, sent) and returns it with its stop switch.
+pub fn begin(slot: &Slot, checked: &Checked) -> Result<(BenchLoop, Arc<AtomicBool>)> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut state = slot.live()?;
+    let name = checked.config.name.clone().unwrap_or_default();
+    let lid = unique_id("bl", fnv1a(name.as_bytes()) ^ unix_now().to_bits(), |l| {
+        state.loops.iter().any(|x| x.lp.id == l)
+    });
+    let lp = BenchLoop {
+        id: lid,
+        bench_id: slot.id.clone(),
+        name,
+        status: BenchLoopStatus::Running,
+        phase: Some(BenchLoopPhase::Benchmarking),
+        created: rfc3339(unix_now()),
+        finished: None,
+        config: checked.config.clone(),
+        generations: Vec::new(),
+        verdict: None,
+        error: None,
+        hint: None,
+    };
+    slot.save_loop(&state, &lp)?;
+    state.loops.push(LoopState { lp: lp.clone(), cancel: cancel.clone() });
+    slot.emit(BenchEvent::Loop(Box::new(lp.clone())));
+    slot.emit_bench(&state);
+    Ok((lp, cancel))
+}
+
+/// A student's training config: `student`'s settings (the defaults filled in from the first `teacher`) on
+/// `dataset`, named `name`; what `POST /api/runs` gets.
+fn student_config(student: &BenchStudent, teacher: &Model, dataset: &str, name: String) -> TrainConfig {
+    let mut config: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": dataset }))
+        .expect("a dataset id is a config");
+    config.name = name;
+    config.arch = student.arch.as_deref().and_then(folo_api::Arch::parse).unwrap_or(teacher.arch);
+    config.epochs = student.epochs.unwrap_or(30);
+    config.imgsz = student.imgsz.unwrap_or(teacher.imgsz);
+    if let Some(b) = student.batch {
+        config.batch = b;
+    }
+    config.device = student.device.clone().unwrap_or_else(|| "auto".into());
+    config.weights = student.weights.clone();
+    config.seed = student.seed;
+    config
+}
+
+/// The verdict of a loop: the last generation's mAP@0.5:0.95 against the first teacher's 95% interval `ci`
+/// (`improved` above it, `regressed` below, `held` inside, its bounds included).
+pub fn verdict(last: f32, ci: [f32; 2]) -> BenchLoopVerdict {
+    if last > ci[1] {
+        BenchLoopVerdict::Improved
+    } else if last < ci[0] {
+        BenchLoopVerdict::Regressed
+    } else {
+        BenchLoopVerdict::Held
+    }
+}
+
+/// The confidence a teacher labels the pool from: `min_confidence` when given, else the self-labeling threshold
+/// of its entry (`threshold`). Without either there is no confidence the benchmark supports: the loop fails here,
+/// before anything is labeled, rather than guess one.
+pub fn label_threshold(min_confidence: Option<f32>, threshold: Option<f32>, teacher: &str) -> Result<f32> {
+    min_confidence.or(threshold).ok_or_else(|| {
+        Error::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_body",
+            format!(
+                "'{teacher}' never reaches 90% precision on at least {} labels on this benchmark, so there is no \
+                 confidence to label the pool from",
+                folo_bench::score::MIN_LABELS
+            ),
+        )
+        .hint(
+            "set min_confidence: its entry's self-labeling chart shows what each confidence costs in precision and \
+             coverage",
+        )
+    })
 }
 
 impl LoopJob {
@@ -169,14 +371,7 @@ fn drive(job: &LoopJob) -> Result<Ended> {
         let Some(next) = graded(job, g, &student)? else { return Ok(Ended::Stopped) };
         teacher = next;
     }
-    let last = teacher.map50_95;
-    Ok(Ended::Done(if last > first_ci[1] {
-        BenchLoopVerdict::Improved
-    } else if last < first_ci[0] {
-        BenchLoopVerdict::Regressed
-    } else {
-        BenchLoopVerdict::Held
-    }))
+    Ok(Ended::Done(verdict(teacher.map50_95, first_ci)))
 }
 
 /// Generation `g`'s model graded by the benchmark: a finished, complete entry of it on the current fingerprint,
@@ -261,7 +456,7 @@ fn graded(job: &LoopJob, g: u32, m: &Model) -> Result<Option<Graded>> {
 /// when the loop was stopped.
 fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
     job.phase(BenchLoopPhase::Labeling);
-    let threshold = job.config.min_confidence.or(teacher.threshold).unwrap_or(DEFAULT_THRESHOLD);
+    let threshold = label_threshold(job.config.min_confidence, teacher.threshold, &teacher.model.name)?;
     let classes = job.slot.lock().file.classes.clone();
     let path = teacher
         .model
@@ -293,7 +488,7 @@ fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
     let boxes: usize = labels.iter().map(Vec::len).sum();
     // An image the teacher kept nothing on is left out, not written as a background image: its silence is not a
     // label, and a student trained on such images would learn to see nothing in them.
-    let kept: Vec<(&SourceImage, &Vec<folo_api::BBox>)> =
+    let kept: Vec<(&PoolImage, &Vec<folo_api::BBox>)> =
         job.pool.iter().zip(&labels).filter(|(_, boxes)| !boxes.is_empty()).collect();
     if kept.len() < MIN_LABELED_IMAGES {
         let message = format!(
@@ -325,7 +520,7 @@ fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
     let dir = claim_dir(&job.datasets, &slug(&name, "loop"))
         .map_err(|e| failed(format!("creating a folder in {}: {e}", job.datasets.display())))?;
     let seed = job.config.student.seed;
-    if let Err(e) = dataset::write(&dir, &classes, &written, VAL_FRACTION, seed) {
+    if let Err(e) = dataset::write(&dir, &classes, &written, VAL_FRACTION, seed, PROVENANCE) {
         let _ = std::fs::remove_dir_all(&dir);
         return Err(failed(format!("writing the dataset {}: {e}", dir.display())));
     }
@@ -353,19 +548,8 @@ fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
 /// when the loop was stopped.
 fn train(job: &LoopJob, g: u32, dataset: &str) -> Result<Option<Model>> {
     job.phase(BenchLoopPhase::Training);
-    let s = &job.config.student;
-    let mut config: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": dataset }))
-        .expect("a dataset id is a config");
-    config.name = format!("{} gen {g}", job.name());
-    config.arch = s.arch.as_deref().and_then(folo_api::Arch::parse).unwrap_or(job.teacher.arch);
-    config.epochs = s.epochs.unwrap_or(30);
-    config.imgsz = s.imgsz.unwrap_or(job.teacher.imgsz);
-    if let Some(b) = s.batch {
-        config.batch = b;
-    }
-    config.device = s.device.clone().unwrap_or_else(|| "auto".into());
-    config.weights = s.weights.clone();
-    config.seed = s.seed;
+    let config =
+        student_config(&job.config.student, &job.teacher, dataset, format!("{} gen {g}", job.name()));
     let run = job.store()?.create_run(config)?;
     job.generation(g, |row| row.run_id = Some(run.id.clone()));
     let mut stopping = false;
@@ -402,5 +586,34 @@ fn train(job: &LoopJob, g: u32, dataset: &str) -> Result<Option<Model>> {
             }
         }
         std::thread::sleep(POLL);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_verdict_is_on_the_first_teachers_interval_bounds_included() {
+        let ci = [0.30, 0.40];
+        assert_eq!(verdict(0.41, ci), BenchLoopVerdict::Improved);
+        assert_eq!(verdict(0.40, ci), BenchLoopVerdict::Held);
+        assert_eq!(verdict(0.35, ci), BenchLoopVerdict::Held);
+        assert_eq!(verdict(0.30, ci), BenchLoopVerdict::Held);
+        assert_eq!(verdict(0.2999, ci), BenchLoopVerdict::Regressed);
+        assert_eq!(verdict(0.0, [0.0, 0.0]), BenchLoopVerdict::Held);
+    }
+
+    #[test]
+    fn a_loop_labels_from_min_confidence_else_the_teachers_threshold_never_a_guess() {
+        assert_eq!(label_threshold(Some(0.2), Some(0.6), "t").unwrap(), 0.2);
+        assert_eq!(label_threshold(None, Some(0.6), "t").unwrap(), 0.6);
+        let e = label_threshold(None, None, "folo-n pond").unwrap_err();
+        assert!(
+            e.body.message.starts_with("'folo-n pond' never reaches 90% precision on at least 10 labels"),
+            "{}",
+            e.body.message
+        );
+        assert!(e.body.hint.unwrap().contains("min_confidence"));
     }
 }

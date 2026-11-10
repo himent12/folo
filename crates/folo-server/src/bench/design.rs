@@ -1,15 +1,28 @@
 //! Designing a benchmark's plan with a coding agent (`POST …/design`): what the agent is asked, the shape of its
-//! answer and how the answer becomes a valid plan. Pure functions; the call itself is made by the
-//! [`super::Benches`] service through the labeling agents.
+//! answer, how the answer becomes a valid plan, and the call itself ([`design`]), made through the labeling
+//! agents.
 //!
 //! The answer is read leniently (a JSON object anywhere in the text, as labeling replies are read) and then
 //! checked strictly: conditions the catalog does not have are dropped, severities are rounded, clamped to
 //! `1..=5`, deduplicated and sorted, weights clamped into `(0, 10]`, and what is left must be a valid plan with
 //! at least one condition.
 
-use folo_api::{BENCH_SEVERITIES, BenchDesigner, BenchPlan, BenchPlanCondition};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use axum::http::StatusCode;
+use folo_api::{
+    BENCH_SEVERITIES, BenchDesign, BenchDesigner, BenchPlan, BenchPlanCondition, DesignBench, LabelUsage,
+};
 use folo_bench::Condition;
 use folo_bench::plan::{DEFAULT_SEVERITIES, MAX_WEIGHT};
+
+use super::state::Slot;
+use crate::error::{Error, Result};
+use crate::label::agent::{AgentError, AgentRequest};
+use crate::label::{agent_jpeg, check_model, check_text};
+use crate::store::Store;
+use serde::Deserialize;
 use serde_json::Value;
 
 /// Images of the benchmark the agent sees.
@@ -88,26 +101,22 @@ pub fn reply_schema() -> Value {
     })
 }
 
-/// The first JSON object in `text` that has a `conditions` list (wrapped in a code fence or a sentence, or not).
-fn answer_object(text: &str) -> Result<serde_json::Map<String, Value>, String> {
-    const MAX_MISSES: usize = 64;
-    let (mut rest, mut misses, mut first_error) = (text, 0, None);
-    while let Some(start) = rest.find('{').filter(|_| misses < MAX_MISSES) {
-        let mut stream = serde_json::Deserializer::from_str(&rest[start..]).into_iter::<Value>();
-        rest = match stream.next() {
-            Some(Ok(Value::Object(o))) if o.get("conditions").is_some_and(Value::is_array) => return Ok(o),
-            Some(Ok(_)) => &rest[start + 1..],
-            Some(Err(e)) => {
-                misses += 1;
-                first_error.get_or_insert(e);
-                &rest[start + 1..]
-            }
-            None => break,
-        };
-    }
-    match first_error {
-        Some(e) => Err(format!("the answer is not the JSON asked for: {e}")),
-        None => Err("the answer has no JSON object with a list of conditions".into()),
+/// An answer object: the `conditions` list and the `rationale`, read item by item afterwards.
+#[derive(Deserialize)]
+struct Answer {
+    conditions: Vec<Value>,
+    #[serde(default)]
+    rationale: Option<Value>,
+}
+
+/// The first object in `text` with a `conditions` list (wrapped in a code fence or a sentence, or not), read as
+/// labeling replies are ([`crate::label::prompt::json_objects`]).
+fn answer_object(text: &str) -> Result<Answer, String> {
+    let (answers, first_error) = crate::label::prompt::json_objects::<Answer>(text);
+    match (answers.into_iter().next(), first_error) {
+        (Some(a), _) => Ok(a),
+        (None, Some(e)) => Err(format!("the answer is not the JSON asked for: {e}")),
+        (None, None) => Err("the answer has no JSON object with a list of conditions".into()),
     }
 }
 
@@ -122,7 +131,7 @@ fn clean_text(v: Option<&Value>, max: usize) -> Option<String> {
 pub fn parse_answer(text: &str, designer: BenchDesigner) -> Result<BenchPlan, String> {
     let o = answer_object(text)?;
     let mut conditions: Vec<BenchPlanCondition> = Vec::new();
-    for c in o.get("conditions").and_then(Value::as_array).into_iter().flatten() {
+    for c in &o.conditions {
         let Some(id) = c.get("condition").and_then(Value::as_str).map(|s| s.trim().to_lowercase()) else {
             continue;
         };
@@ -160,10 +169,131 @@ pub fn parse_answer(text: &str, designer: BenchDesigner) -> Result<BenchPlan, St
     }
     let plan = BenchPlan {
         conditions,
-        rationale: clean_text(o.get("rationale"), MAX_RATIONALE_CHARS),
+        rationale: clean_text(o.rationale.as_ref(), MAX_RATIONALE_CHARS),
         designed_by: Some(designer),
     };
     folo_bench::check_plan(&plan)
+}
+
+/// How long a design call may take.
+pub const DESIGN_TIMEOUT: Duration = Duration::from_secs(120);
+/// Longest note of a design request, in characters.
+pub const MAX_NOTE_CHARS: usize = 2000;
+
+/// `502 agent_failed` with `message` and the agent's `hint`.
+fn agent_failed(message: impl Into<String>, hint: Option<String>) -> Error {
+    let e = Error::new(StatusCode::BAD_GATEWAY, "agent_failed", message);
+    match hint {
+        Some(h) => e.hint(h),
+        None => e.hint("the agent's CLI answered with this; try again, or another model or agent"),
+    }
+}
+
+/// `POST /api/bench/benchmarks/{id}/design`: one call to the agent (asked once more when its answer cannot be
+/// read); the plan it proposes, not saved. A timer thread ends the call at [`DESIGN_TIMEOUT`], or when the server
+/// shuts down (`closing`).
+pub(super) fn design(
+    store: &dyn Store,
+    slot: &Slot,
+    closing: &AtomicBool,
+    req: DesignBench,
+) -> Result<BenchDesign> {
+    static CALLS: AtomicU64 = AtomicU64::new(0);
+    let note = check_text("note", &req.note, MAX_NOTE_CHARS)?;
+    let model = check_model(req.model.as_deref())?;
+    let agent = store.labeler()?.agent(req.agent)?;
+    let info = agent.info();
+    let model = model.or(info.default_model);
+    let effort = req.effort.unwrap_or(info.default_effort);
+    let file = slot.live()?.file.clone();
+    let jpegs = file
+        .images
+        .iter()
+        .take(DESIGN_IMAGES)
+        .map(|im| {
+            agent_jpeg(&slot.image_path(im)).map_err(|e| Error::internal(format!("image '{}': {e}", im.id)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let prompt = user_prompt(&file.description, &note, &file.classes, &file.class_boxes(), jpegs.len());
+    let schema = reply_schema();
+    let scratch = slot.dir.join("tmp").join(format!("design-{}", CALLS.fetch_add(1, Ordering::Relaxed)));
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| Error::internal(format!("creating {}: {e}", scratch.display())))?;
+    let cancel = AtomicBool::new(false);
+    let timed_out = AtomicBool::new(false);
+    let designer = BenchDesigner { agent: req.agent, model: model.clone() };
+    let name = req.agent.display_name();
+    let answer = std::thread::scope(|s| {
+        let (done, wait) = std::sync::mpsc::channel::<()>();
+        let (cancel, timed_out) = (&cancel, &timed_out);
+        // Ends the call at the deadline, or when the server shuts down.
+        s.spawn(move || {
+            let deadline = Instant::now() + DESIGN_TIMEOUT;
+            loop {
+                match wait.recv_timeout(Duration::from_millis(200)) {
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        let late = Instant::now() >= deadline;
+                        if late || closing.load(Ordering::SeqCst) {
+                            timed_out.store(late, Ordering::SeqCst);
+                            cancel.store(true, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                    _ => return,
+                }
+            }
+        });
+        let request = AgentRequest {
+            system: SYSTEM,
+            prompt: &prompt,
+            images: &jpegs,
+            schema: &schema,
+            model: model.as_deref(),
+            effort,
+            scratch: &scratch,
+            cancel,
+        };
+        let mut usage = LabelUsage::default();
+        let mut why = String::new();
+        let mut answer = None;
+        for _attempt in 0..2 {
+            match agent.label(&request) {
+                Ok(reply) => {
+                    usage.add(&reply.usage);
+                    match parse_answer(&reply.text, designer.clone()) {
+                        Ok(plan) => {
+                            answer = Some(Ok(BenchDesign { plan, usage }));
+                            break;
+                        }
+                        Err(e) => why = e,
+                    }
+                }
+                Err(AgentError::Cancelled | AgentError::Timeout) => {
+                    let message = if timed_out.load(Ordering::SeqCst) || !closing.load(Ordering::SeqCst) {
+                        format!("{name} did not answer within {} s", DESIGN_TIMEOUT.as_secs())
+                    } else {
+                        "the server is shutting down".to_string()
+                    };
+                    answer = Some(Err(agent_failed(message, None)));
+                    break;
+                }
+                Err(AgentError::Unavailable(m) | AgentError::Failed(m)) => {
+                    let hint = agent.hint(&m);
+                    answer = Some(Err(agent_failed(m, hint)));
+                    break;
+                }
+            }
+        }
+        drop(done);
+        answer.unwrap_or_else(|| {
+            Err(agent_failed(
+                format!("{name}'s answer is not a plan, also when asked once more: {why}"),
+                Some("try again, or a larger model".into()),
+            ))
+        })
+    });
+    let _ = std::fs::remove_dir_all(&scratch);
+    answer
 }
 
 #[cfg(test)]

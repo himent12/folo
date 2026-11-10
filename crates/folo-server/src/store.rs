@@ -579,6 +579,12 @@ pub trait Store: Send + Sync + 'static {
         Err(crate::error::Error::not_implemented("vision benchmarks")
             .hint("vision benchmarks need a real server (`folo serve` without --mock)"))
     }
+    /// Checks a run's settings as `POST /api/runs` would, all but its dataset (a self-improvement loop checks its
+    /// students' runs before their datasets exist). The default takes them as they are.
+    fn check_run(&self, config: &TrainConfig) -> Result<()> {
+        let _ = config;
+        Ok(())
+    }
     /// The file of image `image_id` of dataset `id` (what a benchmark copies, and a loop's pool reads). Stores
     /// without files answer `501 not_implemented` (the default).
     fn dataset_image_path(&self, id: &str, image_id: &str) -> Result<std::path::PathBuf> {

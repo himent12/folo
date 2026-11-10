@@ -25,12 +25,10 @@ use super::results::{self, Pass};
 use super::state::{BenchFile, Slot};
 use crate::error::{Error, Result};
 use crate::label::agent::{Agent, AgentError, AgentRequest, CALL_TIMEOUT};
-use crate::label::{agent_jpeg, agent_jpeg_of, prompt};
+use crate::label::{MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of, prompt};
 
 /// Agent calls in flight at once (as a labeling run's default).
 pub const PARALLEL: usize = crate::label::DEFAULT_PARALLEL as usize;
-/// Calls in a row that may time out or return garbage before the entry gives up.
-const MAX_SOFT_FAILURES: u32 = 3;
 
 /// Images of an entry of `total` image answers that may fail before the entry is not scored: 2%, at least one.
 pub fn allowed_failures(total: usize) -> usize {

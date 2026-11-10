@@ -1,5 +1,6 @@
-//! Scoring timings on 500 images, 10 classes, about 10 true boxes and 30 detections per image. Run with
-//! `cargo bench -p folo-bench --bench score`.
+//! Scoring timings on 500 images, 10 classes, about 10 true boxes and 30 detections per image, and on 300
+//! detections per image (what a model at validation's settings gives: confidence 0.001, up to 300 boxes). Run
+//! with `cargo bench -p folo-bench --bench score`.
 //!
 //! - `evaluate`: the whole grading of the unchanged images (AP, CocoEval sizes, the 200-resample bootstrap,
 //!   calibration, localization, self-labeling);
@@ -31,8 +32,8 @@ fn ms(d: Duration) -> f64 {
 }
 
 /// A detector-like run: each truth found with probability 0.8 (jittered box, high-ish score), plus false
-/// positives with low-ish scores, about 30 detections per image.
-fn samples(n: usize, classes: u32, rng: &mut Rng) -> Vec<Sample> {
+/// positives with low-ish scores, `per_image` detections per image.
+fn samples(n: usize, classes: u32, per_image: usize, rng: &mut Rng) -> Vec<Sample> {
     (0..n)
         .map(|_| {
             let truths: Vec<BBox> = (0..10)
@@ -60,7 +61,7 @@ fn samples(n: usize, classes: u32, rng: &mut Rng) -> Vec<Sample> {
                     }
                 }
             }
-            while detections.len() < 30 {
+            while detections.len() < per_image {
                 let (x, y) = (rng.uniform(0.0, 560.0), rng.uniform(0.0, 400.0));
                 detections.push(BenchDetection {
                     class: rng.below(classes as u64) as u32,
@@ -81,7 +82,7 @@ fn main() {
     println!(
         "folo-bench score bench, 500 images x 10 truths x 30 detections, 10 classes, {threads} threads available"
     );
-    let s = samples(500, 10, &mut Rng::seed(5));
+    let s = samples(500, 10, 30, &mut Rng::seed(5));
     let e = score::evaluate(&s, 10, true, 0);
     println!(
         "  map50-95 {:.3} [{:.3}, {:.3}]  self-labeling {:.3} at {:?}",
@@ -96,6 +97,13 @@ fn main() {
     bench("map (one variant)", 21, || score::map(&s, 10, true));
     let conf = e.accuracy.best_conf;
     bench("outcome x 500", 21, || s.iter().map(|x| score::outcome(x, 10, true, conf).wrong).sum::<u32>());
-    let big = samples(5000, 80, &mut Rng::seed(6));
+    let big = samples(5000, 80, 30, &mut Rng::seed(6));
     bench("evaluate 5000 img, 80 cls", 3, || score::evaluate(&big, 80, true, 0));
+    // What real entries carry: 200 to 300 detections per image.
+    let dense = samples(500, 10, 300, &mut Rng::seed(7));
+    bench("evaluate 500 img x 300 det", 5, || score::evaluate(&dense, 10, true, 0));
+    bench("map 500 img x 300 det", 11, || score::map(&dense, 10, true));
+    let dense_big = samples(5000, 80, 300, &mut Rng::seed(8));
+    bench("evaluate 5000 img x 300 det", 3, || score::evaluate(&dense_big, 80, true, 0));
+    bench("map 5000 img x 300 det", 3, || score::map(&dense_big, 80, true));
 }

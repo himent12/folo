@@ -138,13 +138,18 @@ struct Fixture {
 
 /// A CPU server on `home` whose Claude Code agent is scripted (Codex is not installed).
 fn fixture(home: &Path) -> Fixture {
+    fixture_with(home, |s| s)
+}
+
+/// [`fixture`] with the store changed by `change` before it serves.
+fn fixture_with(home: &Path, change: impl FnOnce(RealStore) -> RealStore) -> Fixture {
     let agent = Scripted::new(LabelAgentId::Claude, true);
-    let store = Arc::new(
+    let store = Arc::new(change(
         RealStore::open(home.to_path_buf())
             .recheck_every(Duration::ZERO)
             .device("cpu")
             .label_agents(vec![agent.clone(), Scripted::new(LabelAgentId::Codex, false)]),
-    );
+    ));
     Fixture { app: Server::new(store.clone(), Options::default()).router(), store, agent }
 }
 
@@ -939,18 +944,25 @@ async fn open_external_entries_are_filled_in_parts() {
     assert!((score.total - 100.0).abs() < 1e-3 && !score.partial, "{score:?}");
     assert_eq!((p.conditions, p.conditions_run), (true, 2));
 
-    // Refused parts take nothing; a repeat is named also across parts; an unfinished entry stays open.
+    // A part sent again as it was (a retry after a lost answer) is taken as it is; a record received before with
+    // other boxes is named, across parts too; refused parts take nothing; an unfinished entry stays open.
     let e: BenchEntry = ok(app, post(&entries, open_entry("fixable", all[..2].to_vec()))).await;
     let euri = format!("{entries}/{}", e.id);
+    let retried: BenchEntry = ok(app, post(&format!("{euri}/predictions"), parts(&all[..2]))).await;
+    assert_eq!(retried.progress.done, 2, "a retry adds nothing");
+    let mut changed = all[1].clone();
+    changed["boxes"] = json!([]);
     let again = err(
         app,
-        post(&format!("{euri}/predictions"), parts(&all[1..3])),
+        post(&format!("{euri}/predictions"), parts(&[all[2].clone(), changed])),
         StatusCode::BAD_REQUEST,
         "invalid_body",
     )
     .await;
     assert!(
-        again.message.contains("prediction 1 (image '2', unchanged) was received in an earlier part"),
+        again
+            .message
+            .contains("prediction 2 (image '2', unchanged) was received in an earlier part with other boxes"),
         "{}",
         again.message
     );
@@ -1038,6 +1050,18 @@ async fn open_external_entries_are_filled_in_parts() {
     assert!(!ok::<Bench>(app, get(&format!("/api/bench/benchmarks/{}", b.id))).await.active);
     let (status, _, _) = send(app, delete(&suri)).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+
+    // A result that cannot be written leaves the entry failed, never done without a result on disk (the entry's
+    // file is a folder here, so writing it fails).
+    let w: BenchEntry = ok(app, post(&entries, open_entry("unwritable", all.clone()))).await;
+    let file = home.join("bench").join(&b.id).join("entries").join(format!("{}.json", w.id));
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir(&file).unwrap();
+    let wf: BenchEntry = ok(app, post(&format!("{entries}/{}/finish", w.id), json!({}))).await;
+    assert_eq!((wf.status, wf.score.clone()), (BenchEntryStatus::Failed, None), "{wf:?}");
+    assert!(wf.error.as_deref().unwrap().starts_with("the entry's result could not be written"), "{wf:?}");
+    err(app, get(&format!("{entries}/{}/result", w.id)), StatusCode::CONFLICT, "bench_entry_not_done").await;
+    std::fs::remove_dir(&file).unwrap();
 
     // One left open when the server stops is failed at the next start (its predictions were in memory).
     let left: BenchEntry = ok(app, post(&entries, open_entry("left", all[..4].to_vec()))).await;
@@ -1203,6 +1227,26 @@ async fn model_entries_run_on_the_queue_and_agree_with_validation() {
     assert_eq!(ended(app, &b.id, &w.id).await.status, BenchEntryStatus::Stopped);
     err(app, get(&format!("{entries}/{}/result", w.id)), StatusCode::CONFLICT, "bench_entry_not_done").await;
     assert_eq!(ended(app, &b.id, &a.id).await.status, BenchEntryStatus::Done);
+
+    // A running entry that is stopped ends `stopped`, never `done`: also when the stop lands after its last pass,
+    // while it is graded (the worker is held there).
+    f.store.hold_bench_entries(true);
+    let r: BenchEntry =
+        ok(app, post(&entries, json!({ "contestant": { "kind": "model", "model_id": m } }))).await;
+    let t0 = std::time::Instant::now();
+    loop {
+        let now: BenchEntry = ok(app, get(&format!("{entries}/{}", r.id))).await;
+        if now.status == BenchEntryStatus::Running && now.progress.done == now.progress.total {
+            break;
+        }
+        assert!(t0.elapsed() < TIMEOUT, "{now:?}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let s: BenchEntry = ok(app, post(&format!("{entries}/{}/stop", r.id), json!({}))).await;
+    assert_eq!(s.status, BenchEntryStatus::Stopping);
+    f.store.hold_bench_entries(false);
+    let s = ended(app, &b.id, &r.id).await;
+    assert_eq!((s.status, s.score.clone(), s.map50_95), (BenchEntryStatus::Stopped, None, None), "{s:?}");
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -1423,8 +1467,13 @@ async fn entries_and_loops_left_active_fail_at_the_next_start() {
     std::fs::create_dir_all(dir.join("loops")).unwrap();
     std::fs::write(dir.join("loops").join("bl_1.json"), lp.to_string()).unwrap();
     std::fs::write(dir.join("loops").join("broken.json"), "{").unwrap();
+    // And a benchmark it was making when it died: images copied, no bench.json.
+    let unfinished = home.join("bench").join("bn_unfinished");
+    std::fs::create_dir_all(unfinished.join("images")).unwrap();
+    std::fs::write(unfinished.join("images").join("a.jpg"), b"x").unwrap();
 
     let f = fixture(&home);
+    assert!(!unfinished.exists(), "an unfinished benchmark's folder is swept at start");
     let e: BenchEntry =
         ok(&f.app, get(&format!("/api/bench/benchmarks/{bench_id}/entries/{entry_id}"))).await;
     assert_eq!(
@@ -1543,6 +1592,22 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
         "model_not_found",
     )
     .await;
+    // Seeds a browser can hold; the students' runs checked as POST /api/runs checks them, before anything runs.
+    let big =
+        json!({ "teacher": teacher, "pool": pool_src, "student": { "seed": 9_007_199_254_740_992u64 } });
+    let e = err(app, post(&loops, big), StatusCode::BAD_REQUEST, "invalid_body").await;
+    assert!(e.message.contains("student.seed must be at most 9007199254740991"), "{}", e.message);
+    for (student, status, code) in [
+        (json!({ "device": "gpu:42" }), StatusCode::NOT_FOUND, "device_not_found"),
+        (json!({ "weights": "m_none" }), StatusCode::NOT_FOUND, "model_not_found"),
+        (json!({ "batch": 0, "device": "cpu" }), StatusCode::BAD_REQUEST, "invalid_config"),
+    ] {
+        let body =
+            json!({ "teacher": teacher, "pool": pool_src, "min_confidence": 0.001, "student": student });
+        err(app, post(&loops, body), status, code).await;
+    }
+    let none: BenchLoopList = ok(app, get(&loops)).await;
+    assert!(none.loops.is_empty(), "a refused loop is not made");
 
     let started: BenchLoop = ok(
         app,
@@ -1584,16 +1649,42 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
         (vec!["circle".to_string(), "square".to_string()], labels.labeled_images)
     );
     assert!(labels.labeled_images >= 10 && labels.labeled_images <= labels.images);
-    let mut lines = Vec::new();
+    // Every label line read back as numbers: none is the pool's own label (class 1 at (1, 1)-(7, 7) of 64 px).
+    let mut rows: Vec<Vec<f64>> = Vec::new();
     for e in walk(Path::new(&student_ds.path).join("labels")) {
-        lines.extend(std::fs::read_to_string(e).unwrap().lines().map(str::to_string));
+        for line in std::fs::read_to_string(e).unwrap().lines() {
+            let row: Vec<f64> = line.split_whitespace().map(|v| v.parse().unwrap()).collect();
+            assert_eq!(row.len(), 5, "{line}");
+            rows.push(row);
+        }
     }
-    assert_eq!(lines.len() as u64, labels.boxes);
-    let wrong = format!("1 {:.6} {:.6} {:.6} {:.6}", 4.0 / 64.0, 4.0 / 64.0, 6.0 / 64.0, 6.0 / 64.0);
-    assert!(!lines.contains(&wrong), "the pool's own label reached the student");
+    assert_eq!(rows.len() as u64, labels.boxes);
+    let wrong = [1.0, 4.0 / 64.0, 4.0 / 64.0, 6.0 / 64.0, 6.0 / 64.0];
+    assert!(
+        !rows.iter().any(|r| r.iter().zip(wrong).all(|(a, b)| (a - b).abs() < 1e-4)),
+        "the pool's own label reached the student"
+    );
+    let yaml = std::fs::read_to_string(Path::new(&student_ds.path).join("data.yaml")).unwrap();
+    assert!(yaml.starts_with("# made by a FOLO self-improvement loop"), "{yaml}");
     // The teacher's entry was a fresh one, the student's another; both are on the leaderboard.
     let board: BenchEntryList = ok(app, get(&format!("/api/bench/benchmarks/{}/entries", b.id))).await;
     assert_eq!(board.entries.len(), 2);
+
+    // Without min_confidence, a teacher whose entry has no self-labeling threshold (this one never reaches 90%
+    // precision on ten labels) ends its loop before labeling: there is no confidence to label from.
+    let guess: BenchLoop = ok(app, post(&loops, json!({ "teacher": teacher, "pool": pool_src }))).await;
+    let guess = loop_ended(app, &b.id, &guess.id).await;
+    assert_eq!(guess.status, BenchLoopStatus::Failed, "{guess:?}");
+    assert!(
+        guess
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("'teacher' never reaches 90% precision on at least 10 labels"),
+        "{guess:?}"
+    );
+    assert!(guess.hint.as_deref().unwrap().contains("min_confidence"));
+    assert_eq!((guess.generations.len(), guess.generations[1].labels.clone()), (2, None));
 
     // A teacher that keeps (almost) nothing ends its loop before anything is trained: an image it is silent on
     // is not a background image.
@@ -1647,11 +1738,302 @@ async fn a_loop_teaches_a_student_on_the_teachers_labels_only() {
     let list: BenchLoopList = ok(app, get(&loops)).await;
     assert_eq!(
         list.loops.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
-        [second.id.as_str(), silent.id.as_str(), started.id.as_str()]
+        [second.id.as_str(), silent.id.as_str(), guess.id.as_str(), started.id.as_str()]
     );
     let (status, _, _) = send(app, delete(&format!("{loops}/{}", second.id))).await;
     assert_eq!(status, StatusCode::NO_CONTENT);
     err(app, get(&format!("{loops}/{}", second.id)), StatusCode::NOT_FOUND, "bench_loop_not_found").await;
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Review round 1: expiry, races, shutdown, lag, plans, the leaderboard, a loop's confidences
+// ---------------------------------------------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn open_entries_expire_without_parts() {
+    let t = TestDir::new("bench-expire");
+    let f = fixture_with(&t.join("home"), |s| s.bench_open_timeout(Duration::from_millis(400)));
+    let app = &f.app;
+    let ds = dataset(app, "shapes", 10).await;
+    let b = bench(
+        app,
+        json!({ "name": "b", "source": { "kind": "dataset", "dataset_id": ds.id }, "plan": { "conditions": [] } }),
+    )
+    .await;
+    let entries = format!("/api/bench/benchmarks/{}/entries", b.id);
+    let all = truth_predictions(&page(app, &b.id, "").await.images, None, 0.9);
+    let mut events = Events::open(app, &b.id).await;
+    assert_eq!(events.next().await.0, "bench");
+    // Parts keep an entry open...
+    let kept: BenchEntry = ok(app, post(&entries, open_entry("kept", vec![]))).await;
+    let left: BenchEntry = ok(app, post(&entries, open_entry("left", vec![]))).await;
+    // (A part sent again as it was counts as a part: a client that retries is alive.)
+    for i in 0..7 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let r = &all[i % all.len()];
+        ok::<BenchEntry>(
+            app,
+            post(&format!("{entries}/{}/predictions", kept.id), parts(std::slice::from_ref(r))),
+        )
+        .await;
+    }
+    // ... the other one got none for 400 ms: failed, with what it held dropped, and the benchmark idle again.
+    let l: BenchEntry = ok(app, get(&format!("{entries}/{}", left.id))).await;
+    assert_eq!(
+        (l.status, l.error.as_deref()),
+        (BenchEntryStatus::Failed, Some("no predictions arrived for 400 ms"))
+    );
+    assert!(l.hint.is_some() && l.finished.is_some());
+    err(
+        app,
+        post(&format!("{entries}/{}/finish", left.id), json!({})),
+        StatusCode::CONFLICT,
+        "bench_entry_not_open",
+    )
+    .await;
+    let done: BenchEntry = ok(app, post(&format!("{entries}/{}/finish", kept.id), json!({}))).await;
+    assert_eq!(done.status, BenchEntryStatus::Done);
+    assert!(!ok::<Bench>(app, get(&format!("/api/bench/benchmarks/{}", b.id))).await.active);
+    // Its events: the `bench` that goes inactive comes once both have ended.
+    let mut actives = Vec::new();
+    while actives.last() != Some(&false) {
+        let (name, data) = events.next().await;
+        if name == "bench" {
+            actives.push(data["active"].as_bool().unwrap());
+        }
+    }
+    assert!(actives.contains(&true), "{actives:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn finish_and_stop_race_without_a_hang_and_one_wins() {
+    let t = TestDir::new("bench-race");
+    let f = fixture(&t.join("home"));
+    let app = &f.app;
+    let ds = dataset(app, "shapes", 10).await;
+    let b = bench(
+        app,
+        json!({ "name": "b", "source": { "kind": "dataset", "dataset_id": ds.id }, "plan": { "conditions": [] } }),
+    )
+    .await;
+    let entries = format!("/api/bench/benchmarks/{}/entries", b.id);
+    let all = truth_predictions(&page(app, &b.id, "").await.images, None, 0.9);
+    for i in 0..40 {
+        let e: BenchEntry = ok(app, post(&entries, open_entry(&format!("race {i}"), all.clone()))).await;
+        let uri = format!("{entries}/{}", e.id);
+        let race = async {
+            tokio::join!(
+                send(app, post(&format!("{uri}/finish"), json!({}))),
+                send(app, post(&format!("{uri}/stop"), json!({})))
+            )
+        };
+        let ((fs, _, fb), (ss, _, sb)) =
+            tokio::time::timeout(Duration::from_secs(20), race).await.expect("no hang");
+        let end: BenchEntry = ok(app, get(&uri)).await;
+        match end.status {
+            // Finish won: the stop came after it and found nothing to stop.
+            BenchEntryStatus::Done => {
+                assert_eq!(fs, StatusCode::OK, "{}", String::from_utf8_lossy(&fb));
+                assert_eq!(ss, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&sb));
+            }
+            // Stop won: the finish was refused, nothing was scored.
+            BenchEntryStatus::Stopped => {
+                assert_eq!(ss, StatusCode::OK, "{}", String::from_utf8_lossy(&sb));
+                assert_eq!(fs, StatusCode::CONFLICT, "{}", String::from_utf8_lossy(&fb));
+                assert!(end.score.is_none());
+            }
+            other => panic!("ended {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn shutdown_returns_with_an_idle_worker() {
+    // The worker waits for entries; shutdown must wake it however their timing falls.
+    let t = TestDir::new("bench-shutdown");
+    for i in 0..25 {
+        let home = t.join(format!("home{i}"));
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let store = RealStore::open(home).device("cpu");
+            store.shutdown();
+            drop(store);
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(Duration::from_secs(30)).expect("shutdown returned");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscriber_that_falls_behind_gets_the_benchmark_again() {
+    let t = TestDir::new("bench-lag");
+    let f = fixture(&t.join("home"));
+    let app = &f.app;
+    let ds = dataset(app, "shapes", 10).await;
+    let b = bench(app, json!({ "name": "b", "source": { "kind": "dataset", "dataset_id": ds.id } })).await;
+    let uri = format!("/api/bench/benchmarks/{}", b.id);
+    let mut events = Events::open(app, &b.id).await;
+    assert_eq!(events.next().await.0, "bench");
+    // More changes than the stream buffers (1024) while the subscriber reads nothing.
+    for i in 0..1100 {
+        ok::<Bench>(app, put(&uri, json!({ "name": format!("name {i}") }))).await;
+    }
+    // The first thing it reads is the benchmark as it is now.
+    let (name, data) = events.next().await;
+    assert_eq!((name.as_str(), data["name"].as_str()), ("bench", Some("name 1099")));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plans_seeds_and_the_leaderboard() {
+    let t = TestDir::new("bench-board");
+    let f = fixture(&t.join("home"));
+    let app = &f.app;
+    let ds = dataset(app, "shapes", 20).await;
+    let src = json!({ "kind": "dataset", "dataset_id": ds.id });
+    // A seed a browser cannot hold is refused.
+    let e = err(
+        app,
+        post(
+            "/api/bench/benchmarks",
+            json!({ "name": "b", "source": src, "seed": 9_007_199_254_740_992u64 }),
+        ),
+        StatusCode::BAD_REQUEST,
+        "invalid_body",
+    )
+    .await;
+    assert!(e.message.contains("seed must be at most 9007199254740991"), "{}", e.message);
+    let b = bench(
+        app,
+        json!({ "name": "b", "source": src, "seed": 9_007_199_254_740_991u64, "plan": small_plan() }),
+    )
+    .await;
+    assert!(b.id.len() > 12, "a long random id: {}", b.id);
+    let uri = format!("/api/bench/benchmarks/{}", b.id);
+    let entries = format!("{uri}/entries");
+    let images = page(app, &b.id, "").await.images;
+
+    // The plan is frozen by an active entry (an open one here), not by a stopped one ...
+    let open: BenchEntry = ok(app, post(&entries, open_entry("open", vec![]))).await;
+    let e =
+        err(app, put(&uri, json!({ "plan": { "conditions": [] } })), StatusCode::CONFLICT, "bench_frozen")
+            .await;
+    assert!(e.message.contains("running entry ('open')"), "{}", e.message);
+    ok::<BenchEntry>(app, post(&format!("{entries}/{}/stop", open.id), json!({}))).await;
+    ok::<Bench>(app, put(&uri, json!({ "plan": small_plan() }))).await;
+
+    // ... and by a done one. The leaderboard: complete entries first by score, then partial ones by score (equal
+    // scores: the older first), then the unfinished; `best` is the first.
+    let mut whole = truth_predictions(&images, None, 1.0);
+    for (c, s) in [("haze", 1), ("haze", 3), ("distance", 2)] {
+        let moved = page(app, &b.id, &format!("&condition={c}&severity={s}")).await;
+        whole.extend(truth_predictions(&moved.images, Some((c, s)), 0.6));
+    }
+    let shifted: Vec<Value> = whole
+        .iter()
+        .map(|r| {
+            let mut r = r.clone();
+            for b in r["boxes"].as_array_mut().unwrap() {
+                b["x1"] = json!(b["x1"].as_f64().unwrap() + 2.0);
+                b["x2"] = json!(b["x2"].as_f64().unwrap() + 2.0);
+            }
+            r
+        })
+        .collect();
+    let complete: BenchEntry = ok(app, post(&entries, external("complete", true, shifted))).await;
+    let partial_a: BenchEntry =
+        ok(app, post(&entries, external("partial a", true, truth_predictions(&images, None, 1.0)))).await;
+    let partial_b: BenchEntry =
+        ok(app, post(&entries, external("partial b", true, truth_predictions(&images, None, 1.0)))).await;
+    let c = complete.score.clone().unwrap();
+    let p = partial_a.score.clone().unwrap();
+    assert!(!c.partial && p.partial && p.total > c.total, "{c:?} {p:?}");
+    assert_eq!(partial_b.score.clone().unwrap().total, p.total);
+    let running: BenchEntry = ok(app, post(&entries, open_entry("running", vec![]))).await;
+    let board: BenchEntryList = ok(app, get(&entries)).await;
+    let names: Vec<&str> = board.entries.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["complete", "partial a", "partial b", "running", "open"]);
+    let now: Bench = ok(app, get(&uri)).await;
+    let best = now.best.unwrap();
+    assert_eq!((best.entry_id, best.partial), (complete.id.clone(), false));
+    ok::<BenchEntry>(app, post(&format!("{entries}/{}/stop", running.id), json!({}))).await;
+    err(app, put(&uri, json!({ "plan": { "conditions": [] } })), StatusCode::CONFLICT, "bench_frozen").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loop_labels_from_each_teachers_own_threshold_unless_told() {
+    let t = TestDir::new("bench-loop-chain");
+    let home = t.join("home");
+    let (bench_id, entry_id, teacher, pool_src) = {
+        let f = fixture(&home);
+        let app = &f.app;
+        let ds = dataset(app, "shapes", 40).await;
+        let plan = json!({ "conditions": [{ "condition": "haze", "severities": [2] }] });
+        let b = bench(
+            app,
+            json!({ "name": "b", "source": { "kind": "dataset", "dataset_id": ds.id }, "plan": plan }),
+        )
+        .await;
+        // A teacher that finds something everywhere (scores near 0.5).
+        let teacher = model_with(app, &home, "teacher", &["circle", "square"], 3, true).await;
+        let e: BenchEntry = ok(
+            app,
+            post(
+                &format!("/api/bench/benchmarks/{}/entries", b.id),
+                json!({ "contestant": { "kind": "model", "model_id": teacher } }),
+            ),
+        )
+        .await;
+        assert_eq!(ended(app, &b.id, &e.id).await.status, BenchEntryStatus::Done);
+        let pool = json!({ "kind": "dataset", "dataset_id": ds.id, "split": "train" });
+        (b.id, e.id, teacher, pool)
+    };
+    // Its entry's self-labeling threshold, set to 0.37 (what a teacher that reaches the target would have).
+    let path = home.join("bench").join(&bench_id).join("entries").join(format!("{entry_id}.json"));
+    let mut file: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    file["result"]["self_labeling"]["threshold"] = json!(0.37);
+    std::fs::write(&path, file.to_string()).unwrap();
+    let f = fixture(&home);
+    let app = &f.app;
+    let loops = format!("/api/bench/benchmarks/{bench_id}/loops");
+    let student = json!({ "epochs": 1, "imgsz": 64, "batch": 4, "device": "cpu" });
+
+    // Generation 1 labels from the teacher's threshold; generation 2 from its student's, which has none: the loop
+    // ends there, naming the student.
+    let own: BenchLoop = ok(
+        app,
+        post(&loops, json!({ "teacher": teacher, "pool": pool_src, "generations": 2, "student": student })),
+    )
+    .await;
+    let own = loop_ended(app, &bench_id, &own.id).await;
+    assert_eq!(
+        own.generations[0].entry_id.as_deref(),
+        Some(entry_id.as_str()),
+        "the patched entry is reused"
+    );
+    assert_eq!(own.generations[1].labels.as_ref().map(|l| l.threshold), Some(0.37), "{own:?}");
+    let student_name = own.generations[1].model_name.clone().expect("generation 1 trained");
+    assert_eq!(own.status, BenchLoopStatus::Failed, "{own:?}");
+    assert!(
+        own.error.as_deref().unwrap().starts_with(&format!("'{student_name}' never reaches 90% precision")),
+        "{own:?}"
+    );
+    assert!(own.generations.len() == 3 && own.generations[2].labels.is_none());
+
+    // An explicit min_confidence overrides both: generation 1 and generation 2 label from it.
+    let told: BenchLoop = ok(
+        app,
+        post(&loops, json!({ "teacher": teacher, "pool": pool_src, "generations": 2, "min_confidence": 0.2, "student": student })),
+    )
+    .await;
+    let told = loop_ended(app, &bench_id, &told.id).await;
+    assert_eq!(told.generations[1].labels.as_ref().map(|l| l.threshold), Some(0.2), "{told:?}");
+    match told.status {
+        BenchLoopStatus::Done => {
+            assert_eq!(told.generations[2].labels.as_ref().map(|l| l.threshold), Some(0.2))
+        }
+        // The student keeps too little at 0.2 to train on: it said so at that confidence.
+        _ => assert!(told.error.as_deref().unwrap().contains("at confidence 0.2"), "{told:?}"),
+    }
 }
 
 /// Every file under `dir`.

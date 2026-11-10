@@ -209,11 +209,11 @@ pub struct BenchList {
 }
 
 /// A benchmark: images with their true boxes, copied in and frozen, and the plan of conditions to run them
-/// under. Its images and truth never change; its plan can change only while it has no entries.
+/// under. Its images and truth never change; its plan can change only while it has no `done` and no active entry.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Bench {
-    /// Opaque id, e.g. `bn_3f9a`.
+    /// Opaque id, e.g. `bn_3f9a0c1e5b7d` (random, never reused).
     pub id: String,
     /// Display name.
     pub name: String,
@@ -236,14 +236,16 @@ pub struct Bench {
     pub class_boxes: Vec<u64>,
     /// The conditions to run.
     pub plan: BenchPlan,
-    /// Seed of everything random in the benchmark (which images were sampled, where noise falls).
+    /// Seed of everything random in the benchmark (which images were sampled, where noise falls); at most
+    /// 2^53 − 1.
     pub seed: u64,
-    /// Identifies the benchmark's content: a hash of its images, truth, plan and seed, as hex. Two entries are
-    /// comparable when their fingerprints agree.
+    /// Identifies the benchmark's content: a hash of its images, truth, plan and seed and of the engine that grades
+    /// (`folo_bench::ENGINE_VERSION`), as hex. Two entries are comparable when their fingerprints agree.
     pub fingerprint: String,
     /// Entries, whatever their status.
     pub entries: u64,
-    /// The finished entry with the highest score; `null` before the first.
+    /// The leaderboard's first entry when it is finished: the complete entry with the highest score (the older
+    /// one of equal scores), else the partial one; `null` before the first.
     pub best: Option<BenchBest>,
     /// True while an entry of the benchmark is queued, running or stopping, or a loop of it is running or
     /// stopping (deleting it is then `409 bench_active`). A `bench` event is sent when it changes.
@@ -280,7 +282,7 @@ pub struct CreateBench {
     /// At most this many images (1 to 5000, default 500), sampled with `seed` when the source has more.
     #[serde(default)]
     pub max_images: Option<u32>,
-    /// Seed (default 0).
+    /// Seed (default 0), at most 2^53 − 1 (the largest integer a browser holds exactly).
     #[serde(default)]
     pub seed: u64,
     /// The plan; absent uses [`BenchCatalog::default_plan`].
@@ -298,7 +300,8 @@ pub struct UpdateBench {
     /// New description.
     #[serde(default)]
     pub description: Option<String>,
-    /// New plan. Only while the benchmark has no entries (`409 bench_frozen` after).
+    /// New plan. Only while the benchmark has no `done` and no active entry (`409 bench_frozen` otherwise; failed
+    /// and stopped entries do not count).
     #[serde(default)]
     pub plan: Option<BenchPlan>,
 }
@@ -631,7 +634,8 @@ pub struct BenchAxisScore {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct BenchEntryList {
-    /// The leaderboard: finished entries by score, highest first, then the others, newest first.
+    /// The leaderboard: finished complete entries by score, highest first; then finished partial entries by score;
+    /// equal scores keep the older entry first; then the unfinished ones (and failed and stopped), newest first.
     pub entries: Vec<BenchEntry>,
 }
 
@@ -649,7 +653,8 @@ pub struct BenchResult {
     pub accuracy: BenchAccuracy,
     /// Accuracy under each condition; `null` when the conditions were not run.
     pub robustness: Option<BenchRobustness>,
-    /// How well confidence predicts being right; `null` without confidences.
+    /// How well confidence predicts being right; `null` without confidences, and when no detection reaches
+    /// confidence 0.1 (the entry is then `partial`).
     pub calibration: Option<BenchCalibration>,
     /// How tight the boxes are.
     pub localization: BenchLocalization,
@@ -800,17 +805,21 @@ pub enum BenchReadiness {
 pub struct BenchSelfLabeling {
     /// The precision labels must reach (0.9).
     pub target_precision: f32,
-    /// The lowest confidence at which the detections kept are that precise; `null` when no confidence is (and
-    /// for a contestant without confidences, whose one operating point is all there is).
+    /// The lowest confidence on the grid `0.00, 0.01, ..., 1.00` at which the detections kept are that precise
+    /// and at least 10 of them are kept; `null` when no confidence is (and for a contestant without confidences,
+    /// whose one operating point is all there is: it reaches the target with at least 10 detections).
     pub threshold: Option<f32>,
-    /// Precision of the labels at `threshold` (of all detections without confidences).
+    /// Precision of the labels at `threshold` (of all detections when there is none).
     pub precision: f32,
     /// The share of all true boxes those labels find: the self-labeling axis, 0 when the target is not reached.
     pub recall: f32,
     /// Mean IoU of the right ones with their true boxes; `null` when there are none.
     pub mean_iou: Option<f32>,
-    /// Labels per image at `threshold`.
+    /// Labels per image at `threshold` (of all detections when there is none).
     pub labels_per_image: f32,
+    /// Labels (detections) kept at `threshold`; all detections when there is none.
+    #[serde(default)]
+    pub labels: u64,
     /// The verdict.
     pub readiness: BenchReadiness,
     /// Precision and recall of the labels kept at each confidence `0.00, 0.01, ..., 1.00` (one point without
@@ -878,7 +887,8 @@ pub struct StartBenchLoop {
     #[serde(default)]
     pub generations: Option<u32>,
     /// Keep a teacher's detections from this confidence up; absent uses the threshold its own benchmark entry
-    /// found ([`BenchSelfLabeling::threshold`]; 0.5 when it has none).
+    /// found ([`BenchSelfLabeling::threshold`]). A teacher whose entry has none ends the loop before labeling: a
+    /// loop never guesses a confidence.
     #[serde(default)]
     pub min_confidence: Option<f32>,
     /// How the students train.
@@ -908,7 +918,7 @@ pub struct BenchStudent {
     /// Starting weights as `TrainConfig.weights` takes them; absent trains from scratch.
     #[serde(default)]
     pub weights: Option<String>,
-    /// Seed (default 0).
+    /// Seed (default 0), at most 2^53 − 1.
     #[serde(default)]
     pub seed: u64,
 }

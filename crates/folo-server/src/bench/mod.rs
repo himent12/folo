@@ -10,8 +10,8 @@
 //!   atomically), its state in memory and its event channel;
 //! - `source`: where images and truth come from; `images`: serving images and variants;
 //! - `model`: the model-entry queue (one worker thread) and the predictor pipeline; `agent`: agent entries (a
-//!   thread each, as labeling runs); `external`: checking predictions made elsewhere; `results`: grading, the
-//!   same for every contestant;
+//!   thread each, as labeling runs); `external`: predictions made elsewhere, in one request or in parts (open
+//!   entries, which expire: a sweeper thread); `results`: grading, the same for every contestant;
 //! - `design`: designing a plan with an agent; `loops`: self-improvement loops (a thread each, driving the store).
 
 mod agent;
@@ -27,16 +27,16 @@ mod state;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
-    Bench, BenchCatalog, BenchContestant, BenchContestantSpec, BenchDesign, BenchDesigner, BenchEntry,
-    BenchEntryImage, BenchEntryImagePage, BenchEntryStatus, BenchEvent, BenchImage, BenchImagePage,
-    BenchLoop, BenchLoopPhase, BenchLoopStatus, BenchRemoved, BenchResult, BenchSource, BenchStudent,
-    CreateBench, DesignBench, LabelUsage, Split, StartBenchEntry, StartBenchLoop, UpdateBench,
+    Bench, BenchCatalog, BenchContestant, BenchContestantSpec, BenchDesign, BenchEntry, BenchEntryImage,
+    BenchEntryImagePage, BenchEntryStatus, BenchEvent, BenchImage, BenchImagePage, BenchLoop,
+    BenchLoopStatus, BenchRemoved, BenchResult, BenchSource, CreateBench, DesignBench, LabelUsage, Split,
+    StartBenchEntry, StartBenchLoop, UpdateBench,
 };
 use folo_bench::{Condition, conditions};
 use rayon::prelude::*;
@@ -46,13 +46,12 @@ use tokio::sync::broadcast;
 pub use model::InferenceGuard;
 
 use crate::error::{Error, Result};
-use crate::label::agent::{AgentError, AgentRequest};
 use crate::label::job::unique_file_name;
-use crate::label::{agent_jpeg, check_model, check_name, check_text};
+use crate::label::{check_model, check_name, check_text};
 use crate::store::{ImageData, Store};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 use model::{Engine, Job, Resolved};
-use state::{BenchFile, EntryState, ImageRecord, LoopState, Slot, State, VERSION, bench_not_found};
+use state::{BenchFile, EntryState, ImageRecord, Slot, State, VERSION, bench_not_found};
 
 /// Most images of a benchmark.
 pub const MAX_IMAGES: u32 = 5000;
@@ -66,10 +65,9 @@ pub const MAX_DESCRIPTION_CHARS: usize = 4000;
 pub const MAX_NOTE_CHARS: usize = 2000;
 /// Images an agent entry runs without `max_images`.
 pub const AGENT_IMAGES: u32 = 48;
-/// Most generations of a loop.
-pub const MAX_GENERATIONS: u32 = 5;
-/// How long a design call may take.
-pub const DESIGN_TIMEOUT: Duration = Duration::from_secs(120);
+/// The largest seed (of a benchmark, of a loop's students): 2^53 − 1, the largest integer a browser's numbers
+/// hold exactly.
+pub const MAX_SEED: u64 = (1 << 53) - 1;
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::new(StatusCode::BAD_REQUEST, "invalid_body", message)
@@ -77,14 +75,6 @@ fn invalid(message: impl Into<String>) -> Error {
 
 fn io_error(what: &str, path: &Path, e: std::io::Error) -> Error {
     Error::internal(format!("{what} {}: {e}", path.display()))
-}
-
-fn agent_failed(message: impl Into<String>, hint: Option<String>) -> Error {
-    let e = Error::new(StatusCode::BAD_GATEWAY, "agent_failed", message);
-    match hint {
-        Some(h) => e.hint(h),
-        None => e.hint("the agent's CLI answered with this; try again, or another model or agent"),
-    }
 }
 
 /// The benchmarks of a data dir, their entries and loops. See the module docs.
@@ -95,11 +85,11 @@ pub struct Benches {
     thumbs: PathBuf,
     /// `<data dir>/datasets`, where loops write their students' datasets.
     datasets: PathBuf,
-    /// In creation order.
-    benches: RwLock<Vec<Arc<Slot>>>,
+    /// In creation order (shared with the sweeper of open entries).
+    benches: Arc<RwLock<Vec<Arc<Slot>>>>,
     engine: Arc<Engine>,
-    /// The model worker's thread.
-    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// The model worker's thread and the sweeper's (open external entries that expire).
+    worker: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// Agent entries' and loops' threads, for shutdown to wait on.
     threads: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
     renders: images::Renders,
@@ -144,48 +134,51 @@ fn enqueue_model(
 }
 
 /// Stops entry `id` of `slot` if it is active: one that waits is taken out of the queue and is `stopped` at once,
-/// one that runs is `stopping` until its work ends. Returns the entry, or `409 bench_entry_not_active`.
+/// and so is an open external entry (what it received is dropped); one that runs is `stopping` until its work
+/// ends. Returns the entry, or `409 bench_entry_not_active`. The entry's file is written before it changes in
+/// memory.
 fn stop_entry_in(engine: &Engine, slot: &Slot, id: &str) -> Result<BenchEntry> {
     let mut state = slot.live()?;
-    let bench = state.file.id.clone();
-    let e = state.entry_mut(id).ok_or_else(|| state::entry_not_found(&bench, id))?;
-    // An open external entry is discarded: what it received is dropped, nothing is scored.
+    let e = state.entry(id)?;
+    let mut entry = e.entry.clone();
+    let ends = if e.open.is_some() {
+        entry.status = BenchEntryStatus::Stopped;
+        true
+    } else {
+        match e.entry.status {
+            BenchEntryStatus::Queued if engine.unqueue(&slot.id, id) => {
+                entry.status = BenchEntryStatus::Stopped;
+                true
+            }
+            BenchEntryStatus::Queued | BenchEntryStatus::Running => {
+                entry.status = BenchEntryStatus::Stopping;
+                false
+            }
+            BenchEntryStatus::Stopping => return Ok(entry),
+            s => {
+                return Err(Error::conflict(
+                    "bench_entry_not_active",
+                    format!("entry '{id}' has already ended ({})", status_name(s)),
+                )
+                .hint("nothing to stop; GET /api/bench/benchmarks/{id}/entries/{entry_id} has its result"));
+            }
+        }
+    };
+    if ends {
+        entry.finished = Some(rfc3339(unix_now()));
+    }
+    slot.save_entry(&state, &entry, None)?;
+    let e = state.entry_mut(id).expect("looked up above, under the same lock");
+    e.cancel.store(true, Ordering::SeqCst);
     if let Some(fill) = e.open.take() {
         fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner).closed = true;
-        e.entry.status = BenchEntryStatus::Stopped;
-        e.entry.finished = Some(rfc3339(unix_now()));
-        let entry = e.entry.clone();
-        slot.save_entry(&state, &entry, None)?;
-        slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
+    }
+    e.entry = entry.clone();
+    slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
+    if ends {
         slot.emit_bench(&state);
-        return Ok(entry);
     }
-    match e.entry.status {
-        BenchEntryStatus::Queued if engine.unqueue(&bench, id) => {
-            e.entry.status = BenchEntryStatus::Stopped;
-            e.entry.finished = Some(rfc3339(unix_now()));
-            e.cancel.store(true, Ordering::Relaxed);
-            let entry = e.entry.clone();
-            slot.save_entry(&state, &entry, None)?;
-            slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
-            slot.emit_bench(&state);
-            Ok(entry)
-        }
-        BenchEntryStatus::Queued | BenchEntryStatus::Running => {
-            e.entry.status = BenchEntryStatus::Stopping;
-            e.cancel.store(true, Ordering::Relaxed);
-            let entry = e.entry.clone();
-            slot.save_entry(&state, &entry, None)?;
-            slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
-            Ok(entry)
-        }
-        BenchEntryStatus::Stopping => Ok(e.entry.clone()),
-        s => Err(Error::conflict(
-            "bench_entry_not_active",
-            format!("entry '{id}' has already ended ({})", status_name(s)),
-        )
-        .hint("nothing to stop; GET /api/bench/benchmarks/{id}/entries/{entry_id} has its result")),
-    }
+    Ok(entry)
 }
 
 fn status_name(s: BenchEntryStatus) -> &'static str {
@@ -277,6 +270,14 @@ impl Benches {
     /// worker. `guard` marks inference for the store's GPU idle tracking.
     pub fn open(data_dir: &Path, guard: Option<InferenceGuard>) -> Benches {
         let root = data_dir.join("bench");
+        // A folder without `bench.json` is a benchmark whose making a crash cut short: its copied images are
+        // nobody's.
+        for e in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+            if e.path().is_dir() && !e.path().join("bench.json").exists() {
+                tracing::warn!("removing {}: a benchmark that was never finished", e.path().display());
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
         let mut benches: Vec<Arc<Slot>> = std::fs::read_dir(&root)
             .into_iter()
             .flatten()
@@ -295,19 +296,30 @@ impl Benches {
             .collect();
         benches.sort_by_cached_key(|b| (b.lock().file.created.clone(), b.id.clone()));
         let engine = Arc::new(Engine::new("auto".into(), guard));
+        let benches = Arc::new(RwLock::new(benches));
         let worker = {
             let engine = engine.clone();
             std::thread::Builder::new().name("folo-bench-models".into()).spawn(move || model::work(engine))
         };
-        let worker =
-            worker.inspect_err(|e| tracing::error!("could not start the benchmark worker: {e}")).ok();
+        let sweeper = {
+            let (engine, benches) = (engine.clone(), benches.clone());
+            std::thread::Builder::new()
+                .name("folo-bench-expiry".into())
+                .spawn(move || sweep(&engine, &benches))
+        };
+        let threads = [worker, sweeper]
+            .into_iter()
+            .filter_map(|t| {
+                t.inspect_err(|e| tracing::error!("could not start a benchmark thread: {e}")).ok()
+            })
+            .collect();
         Benches {
             root,
             thumbs: data_dir.join("cache").join("thumbs"),
             datasets: data_dir.join("datasets"),
-            benches: RwLock::new(benches),
+            benches,
             engine,
-            worker: std::sync::Mutex::new(worker),
+            worker: std::sync::Mutex::new(threads),
             threads: std::sync::Mutex::default(),
             renders: images::Renders::default(),
         }
@@ -316,6 +328,17 @@ impl Benches {
     /// The device model entries run on (the store's inference device).
     pub fn set_device(&self, device: &str) {
         self.engine.set_device(device.to_string());
+    }
+
+    /// How long an open external entry waits for its next part before it expires (default 30 minutes).
+    pub fn set_open_timeout(&self, timeout: Duration) {
+        self.engine.open_timeout_ms.store(timeout.as_millis() as u64, Ordering::SeqCst);
+    }
+
+    /// Test support: while `on`, a model entry waits after its last pass, before it is graded.
+    #[doc(hidden)]
+    pub fn hold_entries(&self, on: bool) {
+        self.engine.hold.store(on, Ordering::SeqCst);
     }
 
     fn slot(&self, id: &str) -> Result<Arc<Slot>> {
@@ -352,6 +375,9 @@ impl Benches {
         let max = req.max_images.unwrap_or(DEFAULT_IMAGES);
         if !(1..=MAX_IMAGES).contains(&max) {
             return Err(invalid(format!("max_images must be in 1..={MAX_IMAGES}")));
+        }
+        if req.seed > MAX_SEED {
+            return Err(invalid(format!("seed must be at most {MAX_SEED} (2^53 - 1), got {}", req.seed)));
         }
         let plan = match &req.plan {
             Some(p) => folo_bench::check_plan(p).map_err(invalid)?,
@@ -394,13 +420,17 @@ impl Benches {
             other => other,
         };
         let order = source::sample_order(source.images.len(), max as usize, req.seed);
-        // The id is claimed by its folder, so two requests never share one.
+        // The id is claimed by its folder, so two requests never share one. It is random and long, so a deleted
+        // benchmark's id never comes back: its image URLs are served as immutable.
         let (id, dir) = loop {
             let id = {
                 let list = self.benches.read().unwrap();
-                unique_id("bn", fnv1a(name.as_bytes()) ^ unix_now().to_bits(), |id| {
-                    list.iter().any(|b| b.id == id) || self.root.join(id).exists()
-                })
+                let taken = |id: &str| list.iter().any(|b| b.id == id) || self.root.join(id).exists();
+                let mut bytes = [0u8; 6];
+                match getrandom::fill(&mut bytes).map(|()| format!("bn_{}", state::hex(&bytes))) {
+                    Ok(id) if !taken(&id) => id,
+                    _ => unique_id("bn", fnv1a(name.as_bytes()) ^ unix_now().to_bits(), taken),
+                }
             };
             std::fs::create_dir_all(&self.root).map_err(|e| io_error("creating", &self.root, e))?;
             match std::fs::create_dir(self.root.join(&id)) {
@@ -498,15 +528,19 @@ impl Benches {
         let plan = req.plan.as_ref().map(folo_bench::check_plan).transpose().map_err(invalid)?;
         let slot = self.slot(id)?;
         let mut state = slot.live()?;
-        if plan.is_some() && !state.entries.is_empty() {
+        if plan.is_some()
+            && let Some(e) = state.frozen_by()
+        {
             return Err(Error::conflict(
                 "bench_frozen",
                 format!(
-                    "benchmark '{id}' has {} entries: its plan is fixed (entries compare only on one plan)",
-                    state.entries.len()
+                    "benchmark '{id}' has a {} entry ('{}'): its plan is fixed while it has done or active entries \
+                     (entries compare only on one plan)",
+                    status_name(e.status),
+                    e.name
                 ),
             )
-            .hint("delete its entries first, or make a new benchmark with this plan"));
+            .hint("delete its done entries and stop its active ones first, or make a new benchmark with this plan"));
         }
         if let Some(name) = name {
             state.file.name = name;
@@ -553,107 +587,9 @@ impl Benches {
         Ok(())
     }
 
-    /// `POST /api/bench/benchmarks/{id}/design`: one call to the agent (asked once more when its answer cannot be
-    /// read); the plan it proposes, not saved.
+    /// `POST /api/bench/benchmarks/{id}/design` ([`design::design`]).
     pub fn design(&self, store: &dyn Store, id: &str, req: DesignBench) -> Result<BenchDesign> {
-        static CALLS: AtomicU64 = AtomicU64::new(0);
-        let note = check_text("note", &req.note, MAX_NOTE_CHARS)?;
-        let model = check_model(req.model.as_deref())?;
-        let slot = self.slot(id)?;
-        let agent = store.labeler()?.agent(req.agent)?;
-        let info = agent.info();
-        let model = model.or(info.default_model);
-        let effort = req.effort.unwrap_or(info.default_effort);
-        let file = slot.live()?.file.clone();
-        let jpegs = file
-            .images
-            .iter()
-            .take(design::DESIGN_IMAGES)
-            .map(|im| {
-                agent_jpeg(&slot.image_path(im))
-                    .map_err(|e| Error::internal(format!("image '{}': {e}", im.id)))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let prompt =
-            design::user_prompt(&file.description, &note, &file.classes, &file.class_boxes(), jpegs.len());
-        let schema = design::reply_schema();
-        let scratch = slot.dir.join("tmp").join(format!("design-{}", CALLS.fetch_add(1, Ordering::Relaxed)));
-        std::fs::create_dir_all(&scratch).map_err(|e| io_error("creating", &scratch, e))?;
-        let cancel = AtomicBool::new(false);
-        let timed_out = AtomicBool::new(false);
-        let designer = BenchDesigner { agent: req.agent, model: model.clone() };
-        let name = req.agent.display_name();
-        let answer = std::thread::scope(|s| {
-            let (done, wait) = std::sync::mpsc::channel::<()>();
-            let (cancel, timed_out, closing) = (&cancel, &timed_out, &self.engine.closing);
-            // Ends the call at the deadline, or when the server shuts down.
-            s.spawn(move || {
-                let deadline = std::time::Instant::now() + DESIGN_TIMEOUT;
-                loop {
-                    match wait.recv_timeout(Duration::from_millis(200)) {
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                            let late = std::time::Instant::now() >= deadline;
-                            if late || closing.load(Ordering::SeqCst) {
-                                timed_out.store(late, Ordering::SeqCst);
-                                cancel.store(true, Ordering::SeqCst);
-                                return;
-                            }
-                        }
-                        _ => return,
-                    }
-                }
-            });
-            let request = AgentRequest {
-                system: design::SYSTEM,
-                prompt: &prompt,
-                images: &jpegs,
-                schema: &schema,
-                model: model.as_deref(),
-                effort,
-                scratch: &scratch,
-                cancel,
-            };
-            let mut usage = LabelUsage::default();
-            let mut why = String::new();
-            let mut answer = None;
-            for _attempt in 0..2 {
-                match agent.label(&request) {
-                    Ok(reply) => {
-                        usage.add(&reply.usage);
-                        match design::parse_answer(&reply.text, designer.clone()) {
-                            Ok(plan) => {
-                                answer = Some(Ok(BenchDesign { plan, usage }));
-                                break;
-                            }
-                            Err(e) => why = e,
-                        }
-                    }
-                    Err(AgentError::Cancelled | AgentError::Timeout) => {
-                        let message = if timed_out.load(Ordering::SeqCst) || !closing.load(Ordering::SeqCst) {
-                            format!("{name} did not answer within {} s", DESIGN_TIMEOUT.as_secs())
-                        } else {
-                            "the server is shutting down".to_string()
-                        };
-                        answer = Some(Err(agent_failed(message, None)));
-                        break;
-                    }
-                    Err(AgentError::Unavailable(m) | AgentError::Failed(m)) => {
-                        let hint = agent.hint(&m);
-                        answer = Some(Err(agent_failed(m, hint)));
-                        break;
-                    }
-                }
-            }
-            drop(done);
-            answer.unwrap_or_else(|| {
-                Err(agent_failed(
-                    format!("{name}'s answer is not a plan, also when asked once more: {why}"),
-                    Some("try again, or a larger model".into()),
-                ))
-            })
-        });
-        let _ = std::fs::remove_dir_all(&scratch);
-        answer
+        design::design(store, &*self.slot(id)?, &self.engine.closing, req)
     }
 
     /// `GET /api/bench/benchmarks/{id}/images`: a page, the truth under `variant` when one is given.
@@ -721,7 +657,7 @@ impl Benches {
                     ));
                 }
                 let name = name.ok_or_else(|| invalid("name is required for an external contestant"))?;
-                self.external(&slot, name, scored, open, predictions)
+                external::start(&slot, name, scored, open, predictions)
             }
             BenchContestantSpec::Model { model_id } => {
                 let classes = slot.live()?.file.classes.clone();
@@ -792,155 +728,19 @@ impl Benches {
         }
     }
 
-    /// An external entry: in one request, checked, scored and added `done`; `open`, added `running` with the
-    /// predictions so far (checked), to be filled by [`Benches::add_predictions`] and scored by
-    /// [`Benches::finish_open`].
-    fn external(
-        &self,
-        slot: &Arc<Slot>,
-        name: String,
-        scored: bool,
-        open: bool,
-        predictions: Vec<folo_api::BenchPrediction>,
-    ) -> Result<BenchEntry> {
-        let (file, fingerprint) = {
-            let state = slot.live()?;
-            (state.file.clone(), state.fingerprint.clone())
-        };
-        let mut fill = external::Filling::new(file.clone(), scored);
-        fill.add(predictions)?;
-        // The plan is fixed from the first entry on; before it, it may have changed under the check.
-        let changed = || {
-            Error::conflict("bench_frozen", "the benchmark's plan changed while the entry was checked")
-                .hint("send the request again")
-        };
-        if open {
-            let mut state = slot.live()?;
-            if state.fingerprint != fingerprint {
-                return Err(changed());
-            }
-            let mut entry = new_entry(
-                &state,
-                name,
-                BenchContestant::External,
-                BenchEntryStatus::Running,
-                file.images.len(),
-                false,
-                scored,
-                fill.capacity(),
-                Vec::new(),
-            );
-            entry.progress.done = fill.received;
-            fill.last_event = Some(std::time::Instant::now());
-            let cancel = Arc::new(AtomicBool::new(false));
-            let fill = Arc::new(Mutex::new(fill));
-            add_entry(slot, &mut state, entry.clone(), cancel, None, Some(fill))?;
-            return Ok(entry);
-        }
-        let finished = fill.finish()?;
-        let graded = grade_external(&file, scored, &finished);
-        let mut state = slot.live()?;
-        if state.fingerprint != fingerprint {
-            return Err(changed());
-        }
-        let mut entry = new_entry(
-            &state,
-            name,
-            BenchContestant::External,
-            BenchEntryStatus::Done,
-            file.images.len(),
-            false,
-            scored,
-            0,
-            Vec::new(),
-        );
-        entry.finished = Some(entry.created.clone());
-        done_external(&mut entry, &finished, &graded, fill.received);
-        let cancel = Arc::new(AtomicBool::new(false));
-        add_entry(slot, &mut state, entry.clone(), cancel, Some((&graded.parts, &graded.images)), None)?;
-        Ok(entry)
-    }
-
-    /// The open external entry `entry_id` of benchmark `id` and what it has received, or `409
-    /// bench_entry_not_open`.
-    fn open_entry(&self, id: &str, entry_id: &str) -> Result<(Arc<Slot>, Arc<Mutex<external::Filling>>)> {
-        let slot = self.slot(id)?;
-        let fill = {
-            let state = slot.live()?;
-            let e = state.entry(entry_id)?;
-            e.open.clone().ok_or_else(|| not_open(entry_id, &e.entry))?
-        };
-        Ok((slot, fill))
-    }
-
-    /// `POST …/entries/{entry_id}/predictions`: a part of an open external entry, checked whole (a refused part
-    /// takes none of its records) and taken.
+    /// `POST …/entries/{entry_id}/predictions` ([`external::add`]).
     pub fn add_predictions(
         &self,
         id: &str,
         entry_id: &str,
         predictions: Vec<folo_api::BenchPrediction>,
     ) -> Result<BenchEntry> {
-        let (slot, fill) = self.open_entry(id, entry_id)?;
-        // One part at a time per entry; never under the benchmark's lock (a variant may be graded here). The
-        // two locks are only ever taken benchmark first (stop, shutdown), so the filling's is let go before the
-        // benchmark's is asked for.
-        let taken = {
-            let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if f.closed {
-                None
-            } else {
-                f.add(predictions)?;
-                let emit = f.last_event.is_none_or(|t| t.elapsed() >= model::PROGRESS_EVERY);
-                if emit {
-                    f.last_event = Some(std::time::Instant::now());
-                }
-                Some((f.received, emit))
-            }
-        };
-        let Some((received, emit)) = taken else {
-            let state = slot.live()?;
-            return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
-        };
-        let mut state = slot.live()?;
-        let e = state.entry_mut(entry_id).ok_or_else(|| state::entry_not_found(id, entry_id))?;
-        e.entry.progress.done = e.entry.progress.done.max(received);
-        let entry = e.entry.clone();
-        if emit {
-            slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
-        }
-        Ok(entry)
+        external::add(&*self.slot(id)?, entry_id, predictions)
     }
 
-    /// `POST …/entries/{entry_id}/finish`: checks that the open entry is whole and scores it (`done`); a `400`
-    /// saying what is missing leaves it open.
+    /// `POST …/entries/{entry_id}/finish` ([`external::finish`]).
     pub fn finish_open(&self, id: &str, entry_id: &str) -> Result<BenchEntry> {
-        let (slot, fill) = self.open_entry(id, entry_id)?;
-        // As in `add_predictions`: the filling's lock is let go before the benchmark's is asked for.
-        let taken = {
-            let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if f.closed { None } else { Some((f.finish()?, f.scored(), f.received, f.file().clone())) }
-        };
-        let Some((finished, scored, received, file)) = taken else {
-            let state = slot.live()?;
-            return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
-        };
-        let graded = grade_external(&file, scored, &finished);
-        let mut state = slot.live()?;
-        let e = state.entry_mut(entry_id).ok_or_else(|| state::entry_not_found(id, entry_id))?;
-        if e.open.as_ref().is_none_or(|o| !Arc::ptr_eq(o, &fill)) {
-            // Stopped (or the server shut down) while it was scored.
-            return Err(not_open(entry_id, &e.entry));
-        }
-        e.open = None;
-        e.entry.status = BenchEntryStatus::Done;
-        e.entry.finished = Some(rfc3339(unix_now()));
-        done_external(&mut e.entry, &finished, &graded, received);
-        let entry = e.entry.clone();
-        slot.save_entry(&state, &entry, Some((&graded.parts, &graded.images)))?;
-        slot.emit(BenchEvent::Entry(Box::new(entry.clone())));
-        slot.emit_bench(&state);
-        Ok(entry)
+        external::finish(&*self.slot(id)?, entry_id)
     }
 
     /// `GET …/entries/{entry_id}/result`.
@@ -1040,8 +840,8 @@ impl Benches {
         Ok(self.slot(id)?.live()?.lp(loop_id)?.lp.clone())
     }
 
-    /// `POST /api/bench/benchmarks/{id}/loops`: checks the request, finds the pool and starts the loop's thread.
-    /// `store` is held weakly by the loop (see the `loops` module).
+    /// `POST /api/bench/benchmarks/{id}/loops`: checks the request ([`loops::check`]), adds the loop and starts its
+    /// thread. `weak` is the store the loop drives, held weakly (see the `loops` module).
     pub fn start_loop(
         &self,
         store: &dyn Store,
@@ -1050,134 +850,18 @@ impl Benches {
         req: StartBenchLoop,
     ) -> Result<BenchLoop> {
         let slot = self.slot(id)?;
-        let generations = req.generations.unwrap_or(1);
-        if !(1..=MAX_GENERATIONS).contains(&generations) {
-            return Err(invalid(format!("generations must be in 1..={MAX_GENERATIONS}")));
-        }
-        if let Some(c) = req.min_confidence
-            && !(0.0..=1.0).contains(&c)
-        {
-            return Err(invalid(format!("min_confidence must be in 0..=1, got {c}")));
-        }
-        let s = &req.student;
-        if let Some(a) = s.arch.as_deref()
-            && folo_api::Arch::parse(a).is_none()
-        {
-            return Err(invalid(format!("student.arch '{a}' is not an architecture (folo-n, folo-s, ...)")));
-        }
-        if s.epochs == Some(0) {
-            return Err(invalid("student.epochs must be at least 1"));
-        }
-        if let Some(i) = s.imgsz
-            && (!i.is_multiple_of(32) || !(32..=4096).contains(&i))
-        {
-            return Err(invalid(format!("student.imgsz must be a multiple of 32 in 32..=4096, got {i}")));
-        }
-        let teacher = store.get_model(&req.teacher)?;
-        let (classes, sizes, hashes) = {
-            let state = slot.live()?;
-            let f = &state.file;
-            let sizes: HashSet<u64> = f.images.iter().map(|i| i.bytes).collect();
-            let hashes: HashSet<String> = f.images.iter().map(|i| i.sha256.clone()).collect();
-            (f.classes.clone(), sizes, hashes)
-        };
-        let key = |c: &String| c.trim().to_lowercase();
-        if teacher.classes.len() != classes.len()
-            || !teacher.classes.iter().zip(&classes).all(|(a, b)| key(a) == key(b))
-        {
-            return Err(invalid(format!(
-                "the teacher's classes {:?} are not the benchmark's {:?} (same names, same order): its labels are \
-                 written by class index",
-                teacher.classes, classes
-            ))
-            .hint("a loop's teacher is a model trained on the benchmark's classes"));
-        }
-        let name = match req.name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-            Some(n) => check_name(n)?,
-            None => format!("{} loop", teacher.name),
-        };
-        let pool = source::gather(store, &req.pool, Split::Train, false)?;
-        // Pool images with a benchmark image's bytes are left out; only files of a benchmark image's size are read.
-        let keep: Vec<bool> = pool
-            .images
-            .par_iter()
-            .map(|im| {
-                let len = std::fs::metadata(&im.path).map(|m| m.len()).unwrap_or(u64::MAX);
-                !sizes.contains(&len)
-                    || std::fs::read(&im.path).map(|b| !hashes.contains(&sha256(&b))).unwrap_or(true)
-            })
-            .collect();
-        let total = pool.images.len();
-        let images: Vec<source::SourceImage> =
-            pool.images.into_iter().zip(&keep).filter(|(_, k)| **k).map(|(im, _)| im).collect();
-        let excluded = (total - images.len()) as u64;
-        if images.is_empty() {
-            let why = if total == 0 {
-                format!("the pool ('{}') has no images", pool.name)
-            } else {
-                format!("every image of the pool ('{}') is in the benchmark", pool.name)
-            };
-            return Err(source::empty(
-                why,
-                "a pool is the images the teacher labels for its student: pick images the benchmark does not have",
-            ));
-        }
-        let pool_source = match req.pool {
-            BenchSource::Dataset { dataset_id, .. } => BenchSource::Dataset { dataset_id, split: pool.split },
-            other => other,
-        };
-        let config = StartBenchLoop {
-            name: Some(name.clone()),
-            teacher: teacher.id.clone(),
-            pool: pool_source,
-            generations: Some(generations),
-            min_confidence: req.min_confidence,
-            student: BenchStudent {
-                arch: Some(s.arch.clone().unwrap_or_else(|| teacher.arch.as_str().to_string())),
-                epochs: Some(s.epochs.unwrap_or(30)),
-                imgsz: Some(s.imgsz.unwrap_or(teacher.imgsz)),
-                batch: s.batch,
-                device: Some(s.device.clone().unwrap_or_else(|| "auto".into())),
-                weights: s.weights.clone(),
-                seed: s.seed,
-            },
-        };
-        let cancel = Arc::new(AtomicBool::new(false));
-        let lp = {
-            let mut state = slot.live()?;
-            let lid = unique_id("bl", fnv1a(name.as_bytes()) ^ unix_now().to_bits(), |l| {
-                state.loops.iter().any(|x| x.lp.id == l)
-            });
-            let lp = BenchLoop {
-                id: lid,
-                bench_id: id.to_string(),
-                name,
-                status: BenchLoopStatus::Running,
-                phase: Some(BenchLoopPhase::Benchmarking),
-                created: rfc3339(unix_now()),
-                finished: None,
-                config: config.clone(),
-                generations: Vec::new(),
-                verdict: None,
-                error: None,
-                hint: None,
-            };
-            slot.save_loop(&state, &lp)?;
-            state.loops.push(LoopState { lp: lp.clone(), cancel: cancel.clone() });
-            slot.emit(BenchEvent::Loop(Box::new(lp.clone())));
-            slot.emit_bench(&state);
-            lp
-        };
+        let checked = loops::check(store, &slot, req)?;
+        let (lp, cancel) = loops::begin(&slot, &checked)?;
         let job = loops::LoopJob {
             slot: slot.clone(),
             id: lp.id.clone(),
             engine: self.engine.clone(),
             store: weak,
             cancel,
-            config,
-            teacher,
-            pool: images,
-            excluded,
+            config: checked.config,
+            teacher: checked.teacher,
+            pool: checked.pool,
+            excluded: checked.excluded,
             datasets: self.datasets.clone(),
         };
         let thread = std::thread::Builder::new()
@@ -1293,8 +977,9 @@ impl Benches {
         for t in threads.into_iter().filter(|t| t.thread().id() != me) {
             let _ = t.join();
         }
-        if let Some(w) = self.worker.lock().unwrap().take().filter(|w| w.thread().id() != me) {
-            let _ = w.join();
+        let engine_threads = std::mem::take(&mut *self.worker.lock().unwrap());
+        for t in engine_threads.into_iter().filter(|t| t.thread().id() != me) {
+            let _ = t.join();
         }
     }
 }
@@ -1328,46 +1013,21 @@ fn bench_image(im: &ImageRecord, variant: Option<(Condition, u8)>) -> Result<Ben
     Ok(BenchImage { id: im.id.clone(), file: im.file.clone(), width: im.width, height: im.height, boxes })
 }
 
-/// `409 bench_entry_not_open` for `entry`, saying what it is instead.
-fn not_open(id: &str, entry: &BenchEntry) -> Error {
-    let what = match (&entry.contestant, entry.status) {
-        (BenchContestant::External, BenchEntryStatus::Running) => "being finished".to_string(),
-        (BenchContestant::External, s) => format!("an external entry that is {}", status_name(s)),
-        (BenchContestant::Model { .. }, _) => "a model entry".to_string(),
-        (BenchContestant::Agent { .. }, _) => "an agent entry".to_string(),
-    };
-    Error::conflict(
-        "bench_entry_not_open",
-        format!("entry '{id}' is not an open external entry: it is {what}"),
-    )
-    .hint("POST /api/bench/benchmarks/{id}/entries with contestant.open: true starts one to fill in parts")
-}
-
-/// The grade of a finished external entry.
-fn grade_external(file: &BenchFile, scored: bool, finished: &external::Finished) -> results::Graded {
-    let ids: Vec<String> = file.images.iter().map(|i| i.id.clone()).collect();
-    let spec = results::Spec {
-        classes: file.classes.len(),
-        scored,
-        plan: &file.plan,
-        seed: file.seed,
-        complete: finished.complete,
-    };
-    results::grade_maps(&finished.clean, &ids, &finished.runs, &spec)
-}
-
-/// Fills in a finished external entry: its score and what it ran (`received` records).
-fn done_external(
-    entry: &mut BenchEntry,
-    finished: &external::Finished,
-    graded: &results::Graded,
-    received: u64,
-) {
-    entry.conditions = !finished.runs.is_empty();
-    entry.progress = model::progress(received);
-    entry.progress.done = received;
-    entry.ci95 = Some(graded.parts.accuracy.ci95);
-    entry.conditions_run = graded.conditions_run();
-    entry.score = Some(graded.score.clone());
-    entry.map50_95 = Some(graded.map50_95);
+/// The sweeper's thread: every so often, open external entries that got no part for the engine's timeout are
+/// failed ([`external::expire`]). Ends when the server shuts down (it looks every 50 ms).
+fn sweep(engine: &Engine, benches: &RwLock<Vec<Arc<Slot>>>) {
+    let mut last = Instant::now();
+    while !engine.closing.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(50));
+        let timeout = Duration::from_millis(engine.open_timeout_ms.load(Ordering::SeqCst));
+        // A tenth of the timeout between looks: an entry expires at most 10% late.
+        if last.elapsed() < (timeout / 10).clamp(Duration::from_millis(50), Duration::from_secs(60)) {
+            continue;
+        }
+        last = Instant::now();
+        let slots = benches.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        for slot in slots {
+            external::expire(&slot, timeout);
+        }
+    }
 }

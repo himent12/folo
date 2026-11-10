@@ -40,6 +40,9 @@ use crate::pixels::mix;
 
 /// The precision a contestant's labels must reach on the self-labeling axis.
 pub const TARGET_PRECISION: f32 = 0.9;
+/// The fewest labels a self-labeling threshold must keep: a precision measured on fewer is no support for using
+/// the threshold (a weak model can be right on its single most confident detection).
+pub const MIN_LABELS: u64 = 10;
 /// Self-labeling recall from which the verdict is [`BenchReadiness::Ready`].
 pub const READY_RECALL: f32 = 0.5;
 /// Self-labeling recall from which the verdict is [`BenchReadiness::Partial`].
@@ -403,9 +406,10 @@ struct Kept {
 }
 
 impl Kept {
-    /// Precision at least [`TARGET_PRECISION`] (exactly, in integers: `10 · right >= 9 · labels`), with a label.
+    /// Precision at least [`TARGET_PRECISION`] (exactly, in integers: `10 · right >= 9 · labels`) on at least
+    /// [`MIN_LABELS`] labels.
     fn precise(&self) -> bool {
-        self.labels > 0 && 10 * self.right >= 9 * self.labels
+        self.labels >= MIN_LABELS && 10 * self.right >= 9 * self.labels
     }
 
     fn precision(&self) -> Option<f32> {
@@ -480,6 +484,7 @@ fn self_labeling(recs: &[Rec], truths: u64, images: u64, scored: bool) -> BenchS
         recall: axis,
         mean_iou: (at.right > 0).then(|| (at.iou_sum / at.right as f64) as f32),
         labels_per_image: if images == 0 { 0.0 } else { (at.labels as f64 / images as f64) as f32 },
+        labels: at.labels,
         readiness,
         curve,
     }

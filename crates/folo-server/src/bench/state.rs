@@ -89,6 +89,8 @@ impl BenchFile {
 pub fn fingerprint(file: &BenchFile) -> String {
     let mut h = Sha256::new();
     h.update(b"folo-bench-v1\0");
+    // The engine that grades: a change of a condition's pixels or of a definition of the score is another test.
+    h.update(folo_bench::ENGINE_VERSION.to_le_bytes());
     h.update(file.seed.to_le_bytes());
     h.update((file.classes.len() as u64).to_le_bytes());
     for c in &file.classes {
@@ -204,17 +206,14 @@ impl State {
     /// The benchmark as the API shows it.
     pub fn bench(&self) -> Bench {
         let f = &self.file;
-        let best = self
-            .entries
-            .iter()
-            .filter(|e| e.entry.status == BenchEntryStatus::Done)
-            .filter_map(|e| e.entry.score.as_ref().map(|s| (e, s.total)))
-            .max_by(|a, b| a.1.total_cmp(&b.1).then_with(|| b.0.entry.created.cmp(&a.0.entry.created)))
-            .map(|(e, score)| BenchBest {
-                entry_id: e.entry.id.clone(),
-                name: e.entry.name.clone(),
-                score,
-                partial: e.entry.score.as_ref().is_some_and(|s| s.partial),
+        let entries: Vec<&BenchEntry> = self.entries.iter().map(|e| &e.entry).collect();
+        // The leaderboard's first entry, when it is finished.
+        let best =
+            ranked(&entries).first().filter(|e| e.status == BenchEntryStatus::Done).map(|e| BenchBest {
+                entry_id: e.id.clone(),
+                name: e.name.clone(),
+                score: e.score.as_ref().map_or(0.0, |s| s.total),
+                partial: e.score.as_ref().is_some_and(|s| s.partial),
             });
         Bench {
             id: f.id.clone(),
@@ -256,16 +255,10 @@ impl State {
         self.loops.iter_mut().find(|l| l.lp.id == id)
     }
 
-    /// The leaderboard: finished entries by score (highest first), then the others (newest first).
+    /// The leaderboard ([`ranked`]).
     pub fn leaderboard(&self) -> Vec<BenchEntry> {
-        let mut done: Vec<&BenchEntry> =
-            self.entries.iter().map(|e| &e.entry).filter(|e| e.status == BenchEntryStatus::Done).collect();
-        let total = |e: &BenchEntry| e.score.as_ref().map_or(0.0, |s| s.total);
-        done.sort_by(|a, b| total(b).total_cmp(&total(a)).then_with(|| newest_first(a, b)));
-        let mut rest: Vec<&BenchEntry> =
-            self.entries.iter().map(|e| &e.entry).filter(|e| e.status != BenchEntryStatus::Done).collect();
-        rest.sort_by(|a, b| newest_first(a, b));
-        done.into_iter().chain(rest).cloned().collect()
+        let entries: Vec<&BenchEntry> = self.entries.iter().map(|e| &e.entry).collect();
+        ranked(&entries).into_iter().cloned().collect()
     }
 
     /// Whether an entry or a loop of the benchmark is active.
@@ -273,11 +266,35 @@ impl State {
         self.entries.iter().any(|e| e.entry.status.is_active())
             || self.loops.iter().any(|l| l.lp.status.is_active())
     }
+
+    /// Why the plan cannot change: a `done` or an active entry (failed and stopped ones do not count, they
+    /// compare with nothing).
+    pub fn frozen_by(&self) -> Option<&BenchEntry> {
+        self.entries
+            .iter()
+            .map(|e| &e.entry)
+            .find(|e| e.status == BenchEntryStatus::Done || e.status.is_active())
+    }
 }
 
-/// Newer first (by creation time, then id, so the order is total).
-fn newest_first(a: &BenchEntry, b: &BenchEntry) -> std::cmp::Ordering {
-    b.created.cmp(&a.created).then_with(|| b.id.cmp(&a.id))
+/// The leaderboard's order of `entries` (given in creation order): finished entries that are complete
+/// (`score.partial` false) by score, highest first; then finished partial entries by score; equal scores keep the
+/// older entry first; then the unfinished ones, newest first. A benchmark's `best` is the first of this order when
+/// it is finished.
+pub fn ranked<'a>(entries: &[&'a BenchEntry]) -> Vec<&'a BenchEntry> {
+    let group = |e: &BenchEntry| match (&e.score, e.status) {
+        (Some(s), BenchEntryStatus::Done) if !s.partial => 0,
+        (_, BenchEntryStatus::Done) => 1,
+        _ => 2,
+    };
+    let total = |e: &BenchEntry| e.score.as_ref().map_or(0.0, |s| s.total);
+    let mut order: Vec<(usize, &BenchEntry)> = entries.iter().copied().enumerate().collect();
+    order.sort_by(|(i, a), (j, b)| {
+        group(a).cmp(&group(b)).then_with(|| {
+            if group(a) == 2 { j.cmp(i) } else { total(b).total_cmp(&total(a)).then_with(|| i.cmp(j)) }
+        })
+    });
+    order.into_iter().map(|(_, e)| e).collect()
 }
 
 /// `404 bench_not_found`.
@@ -601,6 +618,86 @@ mod tests {
                 boxes: vec![BBox { class: 1, x1: 0.0, y1: 0.0, x2: 5.0, y2: 5.0 }],
             }],
         }
+    }
+
+    fn entry(id: &str, status: BenchEntryStatus, score: Option<(f32, bool)>) -> BenchEntry {
+        BenchEntry {
+            id: id.into(),
+            bench_id: "bn_1".into(),
+            name: id.into(),
+            contestant: folo_api::BenchContestant::External,
+            status,
+            created: "2026-11-09T00:00:00Z".into(),
+            finished: None,
+            progress: folo_api::BenchProgress::default(),
+            images: 1,
+            conditions: false,
+            scored: true,
+            fingerprint: String::new(),
+            missing_classes: vec![],
+            score: score.map(|(total, partial)| folo_api::BenchScore { total, partial, axes: vec![] }),
+            map50_95: None,
+            ci95: None,
+            conditions_run: 0,
+            speed: None,
+            usage: None,
+            error: None,
+            hint: None,
+        }
+    }
+
+    #[test]
+    fn the_leaderboard_ranks_complete_then_partial_then_unfinished() {
+        use BenchEntryStatus as S;
+        // In creation order.
+        let entries = [
+            entry("partial-high", S::Done, Some((90.0, true))),
+            entry("complete-a", S::Done, Some((50.0, false))),
+            entry("running-old", S::Running, None),
+            entry("complete-b", S::Done, Some((70.0, false))),
+            entry("complete-tie", S::Done, Some((50.0, false))),
+            entry("failed", S::Failed, None),
+            entry("partial-low", S::Done, Some((10.0, true))),
+            entry("queued-new", S::Queued, None),
+        ];
+        let refs: Vec<&BenchEntry> = entries.iter().collect();
+        let order: Vec<&str> = ranked(&refs).iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "complete-b",
+                "complete-a",
+                "complete-tie",
+                "partial-high",
+                "partial-low",
+                "queued-new",
+                "failed",
+                "running-old"
+            ]
+        );
+        // `best` is the first of that order: a partial entry leads only when nothing complete is finished.
+        let state = |entries: Vec<BenchEntry>| State {
+            file: file(),
+            fingerprint: String::new(),
+            entries: entries
+                .into_iter()
+                .map(|entry| EntryState { entry, cancel: Arc::new(AtomicBool::new(false)), open: None })
+                .collect(),
+            loops: vec![],
+            deleted: false,
+        };
+        let best = state(entries.to_vec()).bench().best.unwrap();
+        assert_eq!((best.entry_id.as_str(), best.score, best.partial), ("complete-b", 70.0, false));
+        let best = state(vec![entries[0].clone(), entries[2].clone()]).bench().best.unwrap();
+        assert_eq!((best.entry_id.as_str(), best.partial), ("partial-high", true));
+        assert!(state(vec![entries[2].clone(), entries[5].clone()]).bench().best.is_none());
+        // The plan is frozen by a done or an active entry, not by a failed or stopped one.
+        assert!(state(vec![entries[5].clone(), entry("s", S::Stopped, None)]).frozen_by().is_none());
+        assert_eq!(
+            state(vec![entries[5].clone(), entries[2].clone()]).frozen_by().unwrap().id,
+            "running-old"
+        );
+        assert_eq!(state(vec![entries[1].clone()]).frozen_by().unwrap().id, "complete-a");
     }
 
     #[test]

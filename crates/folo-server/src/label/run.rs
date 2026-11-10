@@ -25,8 +25,8 @@ use crate::util::{rfc3339, unix_now};
 pub const AGENT_IMAGE_SIDE: u32 = 1024;
 /// JPEG quality of the images sent.
 const JPEG_QUALITY: u8 = 85;
-/// Calls in a row that may time out or return garbage before the run gives up.
-const MAX_SOFT_FAILURES: u32 = 3;
+/// Calls in a row that may time out or return garbage before the run gives up (a benchmark's agent entry too).
+pub const MAX_SOFT_FAILURES: u32 = 3;
 /// How often a run writes `job.json` at most. The file holds every image of the job, so a large job is not
 /// rewritten after each of its thousands of calls; what a crash can lose is the labels of the last few seconds.
 const SAVE_EVERY: Duration = Duration::from_secs(5);

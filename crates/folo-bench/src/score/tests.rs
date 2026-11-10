@@ -50,18 +50,18 @@ fn three_images() -> Vec<Sample> {
 }
 
 #[test]
-fn self_labeling_threshold_recall_and_verdict() {
+fn self_labeling_needs_support_and_its_curve() {
     // In confidence order: .95 R, .85 R, .75 W, .65 R, .55 W, .35 R, .05 R. Precision of what is kept from t up:
     // t <= .05: 5/7; <= .35: 4/6; <= .55: 3/5; <= .65: 3/4; <= .75: 2/3; <= .85: 2/2 = 1.
-    // The lowest grid t with precision >= 0.9 is 0.76 (t = 0.75 still keeps d4). Recall 2/5 = 0.4: `partial`.
+    // From 0.76 up the precision is 1, but on two labels: fewer than MIN_LABELS (10), so no threshold counts.
+    // Axis 0, `not_ready`; the other numbers describe every detection: precision 5/7, seven labels over three
+    // images, the right ones' IoUs .9, .7, .6, .8, 1 → mean .8.
     let e = evaluate(&three_images(), 1, true, 0);
     let s = &e.self_labeling;
-    assert_eq!(s.threshold, Some(0.76));
-    assert!(close(s.precision, 1.0) && close(s.recall, 0.4), "{s:?}");
-    assert_eq!(s.readiness, BenchReadiness::Partial);
-    // The right labels at t*: d1 (0.9) and d2 (0.7); two labels over three images.
+    assert_eq!((s.threshold, s.recall, s.readiness, s.labels), (None, 0.0, BenchReadiness::NotReady, 7));
+    assert!(close(s.precision, 5.0 / 7.0), "{s:?}");
     assert!(close(s.mean_iou.unwrap(), 0.8));
-    assert!(close(s.labels_per_image, 2.0 / 3.0));
+    assert!(close(s.labels_per_image, 7.0 / 3.0));
     assert_eq!(s.curve.len(), 101);
     let at = |c: usize| s.curve[c];
     assert_eq!((at(0).labels, at(5).labels, at(6).labels, at(75).labels, at(76).labels), (7, 7, 6, 3, 2));
@@ -167,10 +167,36 @@ fn target_precision_exactly_reached() {
     dets.push(d(0, 0.8, 500.0, 500.0, 510.0, 510.0));
     let truths = (0..10).map(|i| t(0, i as f32 * 20.0, 0.0, i as f32 * 20.0 + 10.0, 10.0)).collect();
     let s = evaluate(&[Sample { truths, detections: dets }], 1, true, 0).self_labeling;
-    assert_eq!(s.threshold, Some(0.0));
+    assert_eq!((s.threshold, s.labels), (Some(0.0), 10));
     assert!(close(s.precision, 0.9) && close(s.recall, 0.9));
     assert_eq!(s.readiness, BenchReadiness::Ready);
     assert_eq!(s.curve[81].labels, 0);
+}
+
+/// `n` right detections (score 0.8) on `n` truths, in one image.
+fn all_right(n: usize) -> Vec<Sample> {
+    let truths = (0..n).map(|i| t(0, i as f32 * 20.0, 0.0, i as f32 * 20.0 + 10.0, 10.0)).collect();
+    let detections = (0..n).map(|i| d(0, 0.8, i as f32 * 20.0, 0.0, i as f32 * 20.0 + 10.0, 10.0)).collect();
+    vec![Sample { truths, detections }]
+}
+
+#[test]
+fn a_threshold_needs_ten_labels_scored_or_not() {
+    // Nine right labels: precision 1 everywhere they are kept, but nine is fewer than MIN_LABELS. No threshold,
+    // axis 0, `not_ready`, and the numbers describe all nine.
+    for scored in [true, false] {
+        let s = evaluate(&all_right(9), 1, scored, 0).self_labeling;
+        assert_eq!((s.threshold, s.recall, s.readiness, s.labels), (None, 0.0, BenchReadiness::NotReady, 9));
+        assert!(close(s.precision, 1.0) && close(s.labels_per_image, 9.0));
+    }
+    // Ten: the lowest grid point keeping all ten (scored: 0.00; unscored: its one operating point, no threshold)
+    // reaches the target; recall 10/10, `ready`.
+    let s = evaluate(&all_right(10), 1, true, 0).self_labeling;
+    assert_eq!((s.threshold, s.recall, s.readiness, s.labels), (Some(0.0), 1.0, BenchReadiness::Ready, 10));
+    // From 0.81 up nothing is kept; from 0.01 to 0.80 all ten: the lowest is 0.00.
+    assert_eq!((s.curve[80].labels, s.curve[81].labels), (10, 0));
+    let s = evaluate(&all_right(10), 1, false, 0).self_labeling;
+    assert_eq!((s.threshold, s.recall, s.readiness, s.labels), (None, 1.0, BenchReadiness::Ready, 10));
 }
 
 #[test]
@@ -183,7 +209,7 @@ fn target_precision_never_reached() {
     }];
     let e = evaluate(&s, 1, true, 0);
     let sl = &e.self_labeling;
-    assert_eq!((sl.threshold, sl.recall, sl.readiness), (None, 0.0, BenchReadiness::NotReady));
+    assert_eq!((sl.threshold, sl.recall, sl.readiness, sl.labels), (None, 0.0, BenchReadiness::NotReady, 2));
     assert!(close(sl.precision, 0.5) && close(sl.labels_per_image, 2.0));
     assert!(close(sl.curve[0].recall, 0.5));
 }
@@ -200,12 +226,13 @@ fn unscored_contestants() {
     assert_eq!((s.threshold, s.recall, s.readiness), (None, 0.0, BenchReadiness::NotReady));
     assert!(close(s.precision, 5.0 / 7.0));
     assert!(close(e.localization.mean_iou.unwrap(), 0.8) && e.localization.matches == 5);
-    // Without the two wrong ones: 5/5 right → the axis is the recall, 1.
+    // Without the two wrong ones: 5/5 right, but five labels are fewer than MIN_LABELS: still axis 0.
     let mut clean = three_images();
     clean[0].detections.remove(2);
     clean[1].detections.remove(0);
     let s = evaluate(&clean, 1, false, 0).self_labeling;
-    assert_eq!((s.threshold, s.recall, s.readiness), (None, 1.0, BenchReadiness::Ready));
+    assert_eq!((s.threshold, s.recall, s.readiness, s.labels), (None, 0.0, BenchReadiness::NotReady, 5));
+    assert!(close(s.precision, 1.0));
     // An unscored contestant's own scores are ignored, even nonsense ones.
     let mut odd = clean.clone();
     odd[0].detections[0].score = f32::NAN;
@@ -375,13 +402,14 @@ fn robustness_retention() {
 
 #[test]
 fn total_score() {
-    // The three images: accuracy a = mAP50-95, self-labeling 0.4, calibration 1 − 2.5/6, localization 0.6, with
-    // robustness 0.688889: total = 100 · (.35 a + .25 · .688889 + .2 · .4 + .1 · (1 − 2.5/6) + .1 · .6).
+    // The three images: accuracy a = mAP50-95, self-labeling 0 (no threshold keeps ten labels), calibration
+    // 1 − 2.5/6, localization 0.6, with robustness 0.688889: total = 100 · (.35 a + .25 · .688889 + .2 · 0 +
+    // .1 · (1 − 2.5/6) + .1 · .6).
     let e = evaluate(&three_images(), 1, true, 0);
     let a = e.accuracy.map50_95 as f64;
     let rob = BenchRobustness { retention: 0.688_889, conditions: vec![] };
     let s = score(&e, Some(&rob), true);
-    let want = 100.0 * (0.35 * a + 0.25 * 0.688_889 + 0.2 * 0.4 + 0.1 * (1.0 - 2.5 / 6.0) + 0.1 * 0.6);
+    let want = 100.0 * (0.35 * a + 0.25 * 0.688_889 + 0.2 * 0.0 + 0.1 * (1.0 - 2.5 / 6.0) + 0.1 * 0.6);
     assert!((s.total as f64 - want).abs() < 1e-4, "{} {want}", s.total);
     assert!(!s.partial);
     assert_eq!(s.axes.iter().map(|a| a.axis).collect::<Vec<_>>(), BenchAxis::ALL);
