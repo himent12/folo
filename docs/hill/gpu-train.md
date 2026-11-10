@@ -198,6 +198,6 @@ the trainer clips by default) on the new binary: final mAP50 0.980, mAP50-95 **0
   `Backend::optimizer_step_many` / `unscale_check_many` hooks and `OptimItem`, defaulting to `NotSupported` (the CPU
   backend is untouched; callers fall back). `crates/folo-core/src/ops/fused.rs`: `Tensor::optimizer_step_many_`,
   `unscale_check_many_`.
-- **folo-gpu `context.rs`** (shared with inference): the flush interval; measured above, inference is no slower.
+- **folo-gpu `context/`** (shared with inference): the flush interval; measured above, inference is no slower.
 - **docs**: docs/GPU.md (command batching, profiling, weight-gradient constants, stride phases, multi-tensor
   kernels, the benchmark summary), docs/NN.md (the multi-tensor paths of SGD, AdamW, EMA, accumulation, unscale).
