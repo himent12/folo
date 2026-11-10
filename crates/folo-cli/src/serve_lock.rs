@@ -1,7 +1,8 @@
-//! One `folo serve` per data dir. Two servers on one data dir would each treat the other's active runs as
-//! interrupted (the store stops them when it opens) and write the same registries, so `folo serve` (real store)
-//! holds an exclusive OS lock on `<data dir>/serve.lock` while it runs, and writes its address to
-//! `<data dir>/serve.json` so a second start can say where the running one is (FOLO Desktop connects there).
+//! One owner per data dir. Two stores on one data dir would each treat the other's active runs as interrupted
+//! (the store stops them when it opens) and write the same registries, so `folo serve` (real store) and an
+//! embedded `folo mcp` hold an exclusive OS lock on `<data dir>/serve.lock` while they run. A server also writes
+//! its address to `<data dir>/serve.json`, so a second start can say where it is (FOLO Desktop connects there,
+//! `folo mcp` goes through it). The address is a hint: a reader checks that the server there serves this data dir.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -47,7 +48,33 @@ impl ServeLock {
     /// Records where this server listens, for a second `folo serve` on the same data dir to report.
     pub fn publish(&self, url: &str) -> std::io::Result<()> {
         let body = serde_json::json!({ "url": url, "pid": std::process::id() });
-        std::fs::write(&self.info, serde_json::to_vec(&body).expect("json"))
+        // Whole or not at all for a reader: written beside it, then renamed over it.
+        let tmp = self.info.with_extension("json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&body).expect("json"))?;
+        std::fs::rename(&tmp, &self.info)
+    }
+}
+
+/// Whether the `folo serve` at `url` serves `dir` (its `/api/system` `data_dir`): `serve.json` can be stale, and a
+/// new process may listen on a dead server's port.
+pub fn serves(url: &str, dir: &Path, token: Option<&str>) -> bool {
+    let t = std::time::Duration::from_secs(3);
+    let mut client = folo_client::Client::with_timeouts(url, t, t);
+    if let Some(token) = token {
+        client = client.token(token);
+    }
+    client
+        .get::<folo_api::SystemResponse>("/system")
+        .ok()
+        .and_then(|s| s.data_dir)
+        .is_some_and(|d| same_dir(Path::new(&d), dir))
+}
+
+/// The same folder, however it was spelled (relative, `\` or `/`, letter case on Windows).
+pub fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
     }
 }
 

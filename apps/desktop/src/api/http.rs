@@ -580,7 +580,8 @@ pub enum Spawned {
 /// What the starting server's JSON Lines told us.
 enum Startup {
     Listening(String),
-    InUse(Option<String>),
+    /// Where the data dir's owner listens (when it says), and the data dir.
+    InUse(Option<String>, Option<String>),
     Failed(String),
 }
 
@@ -590,19 +591,49 @@ fn startup_record(line: &str) -> Option<Startup> {
     let url = v["url"].as_str().map(str::to_string);
     match v["event"].as_str() {
         Some("listening") => url.map(Startup::Listening),
-        Some("data_dir_in_use") => Some(Startup::InUse(url)),
+        Some("data_dir_in_use") => Some(Startup::InUse(url, v["data_dir"].as_str().map(str::to_string))),
         _ => v["error"]["message"].as_str().map(|m| Startup::Failed(m.to_string())),
     }
 }
 
 /// Start `folo serve` (the real engine, bare until datasets/runs exist) on a free port and wait
 /// (up to `timeout`) for its address.
+/// When the data dir already has an owner, connect to it once it is listening there: retried until `timeout`,
+/// as the owner may still be starting (or be an embedded `folo mcp`, which has no address).
 pub fn spawn_server(timeout: Duration) -> Result<Spawned, String> {
     let bin = find_folo().ok_or("folo was not found (set FOLO_BIN or put folo on PATH)")?;
-    spawn_server_bin(&bin, timeout)
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let busy = match spawn_server_bin(&bin, left)? {
+            Attempt::Started(proc_) => return Ok(Spawned::Started(proc_)),
+            Attempt::InUse(Some(url), Some(dir)) if serves(&url, &dir) => return Ok(Spawned::Running(url)),
+            Attempt::InUse(..) => "another FOLO process (folo serve or folo mcp) is using the data dir",
+        };
+        if std::time::Instant::now() + Duration::from_millis(500) >= deadline {
+            return Err(busy.into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
-fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Spawned, String> {
+/// Whether the server at `url` serves the data dir `dir` (`serve.json` can be stale, and its port reused).
+fn serves(url: &str, dir: &str) -> bool {
+    let same = |a: &str, b: &str| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    HttpBackend::new(url).system().ok().and_then(|s| s.data_dir).is_some_and(|d| same(&d, dir))
+}
+
+/// One start of `folo serve`.
+enum Attempt {
+    Started(ServerProcess),
+    /// The data dir has an owner (the child has exited): where it listens, when it says, and the data dir.
+    InUse(Option<String>, Option<String>),
+}
+
+fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Attempt, String> {
     let mut cmd = Command::new(bin);
     cmd.args(SERVE_ARGS).stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null());
     #[cfg(windows)]
@@ -630,11 +661,8 @@ fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Spawned,
         let _ = child.wait();
     }
     match outcome {
-        Ok(Startup::Listening(url)) => Ok(Spawned::Started(ServerProcess { child, url })),
-        Ok(Startup::InUse(Some(url))) => Ok(Spawned::Running(url)),
-        Ok(Startup::InUse(None)) => {
-            Err("another folo serve is using the data dir and has not said where".into())
-        }
+        Ok(Startup::Listening(url)) => Ok(Attempt::Started(ServerProcess { child, url })),
+        Ok(Startup::InUse(url, dir)) => Ok(Attempt::InUse(url, dir)),
         Ok(Startup::Failed(message)) => Err(message),
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("folo serve did not start in time".into()),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -922,7 +950,7 @@ FOLO"
     fn startup_records_are_read() {
         let url = |r: Option<Startup>| match r {
             Some(Startup::Listening(u)) => format!("listening {u}"),
-            Some(Startup::InUse(u)) => format!("in use {u:?}"),
+            Some(Startup::InUse(u, d)) => format!("in use {u:?} {d:?}"),
             Some(Startup::Failed(m)) => format!("failed {m}"),
             None => "none".into(),
         };
@@ -934,9 +962,9 @@ FOLO"
             url(startup_record(
                 r#"{"event":"data_dir_in_use","data_dir":"C:/x","url":"http://127.0.0.1:7"}"#
             )),
-            r#"in use Some("http://127.0.0.1:7")"#
+            r#"in use Some("http://127.0.0.1:7") Some("C:/x")"#
         );
-        assert_eq!(url(startup_record(r#"{"event":"data_dir_in_use","url":null}"#)), "in use None");
+        assert_eq!(url(startup_record(r#"{"event":"data_dir_in_use","url":null}"#)), "in use None None");
         assert_eq!(
             url(startup_record(r#"{"error":{"code":"bind_failed","message":"could not bind","hint":null}}"#)),
             "failed could not bind"

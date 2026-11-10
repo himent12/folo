@@ -177,30 +177,21 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
     } else {
         data_dir(args.data_dir.clone())?
     };
-    // One server per data dir (the mock writes nothing): a second would stop the first one's active runs.
+    // One owner per data dir (the mock writes nothing): a second would stop the first one's active runs.
     let serve_lock = if args.mock {
         None
     } else {
         match serve_lock::acquire(&data_dir) {
             Ok(serve_lock::Acquire::Held(lock)) => Some(lock),
             Ok(serve_lock::Acquire::InUse { url }) => {
-                let dir = folo_api::json::path(&data_dir);
-                out.record(&json!({ "event": "data_dir_in_use", "data_dir": dir, "url": url }));
-                let hint = match &url {
-                    Some(url) => format!("it listens on {url}; use that one, or pass another --data-dir"),
-                    None => "stop it first, or pass another --data-dir".into(),
-                };
-                return Err(CliError::new(
-                    ExitCode::Runtime,
-                    "data_dir_in_use",
-                    format!("another folo serve is using {dir}"),
-                )
-                .hint(hint));
+                out.record(&json!({
+                    "event": "data_dir_in_use",
+                    "data_dir": folo_api::json::path(&data_dir),
+                    "url": url,
+                }));
+                return Err(data_dir_in_use(&data_dir, url.as_deref()));
             }
-            Err(e) => {
-                tracing::warn!("could not lock {}: {e}", folo_api::json::path(data_dir.join("serve.lock")));
-                None
-            }
+            Err(e) => return Err(data_dir_lock_failed(&data_dir, e)),
         }
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -219,6 +210,13 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         let addr = listener
             .local_addr()
             .map_err(|e| CliError::new(ExitCode::Runtime, "bind_failed", e.to_string()))?;
+        let url = format!("http://{addr}");
+        // Before the store opens (it can take a while): a second start can say where this one is.
+        if let Some(lock) = &serve_lock
+            && let Err(e) = lock.publish(&url)
+        {
+            tracing::warn!("could not record the address in the data dir: {e}");
+        }
         let store: Arc<dyn Store> = if args.mock {
             Arc::new(MockStore::new())
         } else {
@@ -247,12 +245,6 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
                 allow_hosts: args.allow_host.clone(),
             },
         );
-        let url = format!("http://{addr}");
-        if let Some(lock) = &serve_lock
-            && let Err(e) = lock.publish(&url)
-        {
-            tracing::warn!("could not record the address in the data dir: {e}");
-        }
         out.human(format!(
             "FOLO {VERSION} serving {} on {url}",
             if args.mock { "mock data" } else { "the real store" }
@@ -296,6 +288,24 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
     })
 }
 
+/// Another process (`folo serve`, or an embedded `folo mcp`) owns `dir`; `url` is where it listens, when it says.
+fn data_dir_in_use(dir: &std::path::Path, url: Option<&str>) -> CliError {
+    let dir = folo_api::json::path(dir);
+    let hint = match url {
+        Some(url) => format!("a folo serve listens on {url}; use that one, or pass another --data-dir"),
+        None => "stop the other folo serve or folo mcp first, or pass another --data-dir".into(),
+    };
+    CliError::new(ExitCode::Runtime, "data_dir_in_use", format!("another FOLO process is using {dir}"))
+        .hint(hint)
+}
+
+/// The data dir's lock could not be taken (not merely held elsewhere): refuse rather than share the store.
+fn data_dir_lock_failed(dir: &std::path::Path, e: std::io::Error) -> CliError {
+    let lock = folo_api::json::path(dir.join("serve.lock"));
+    CliError::new(ExitCode::Runtime, "data_dir_lock_failed", format!("could not lock {lock}: {e}"))
+        .hint("the data dir must be writable and support file locks; pass another --data-dir")
+}
+
 /// `folo mcp`: MCP over stdio. stdout belongs to the protocol, so nothing else is printed there (not even with
 /// `--json`); logs go to stderr.
 fn mcp(args: McpArgs) -> Result<(), CliError> {
@@ -310,10 +320,27 @@ fn mcp(args: McpArgs) -> Result<(), CliError> {
     } else {
         args.data_dir.clone().unwrap_or_else(default_data_dir)
     };
-    let backend = match (&args.server, args.mock) {
+    let mut backend = match (&args.server, args.mock) {
         (Some(url), _) => folo_mcp::Backend::Proxy { url: url.clone(), token: args.token.clone() },
         (None, true) => folo_mcp::Backend::Mock,
         (None, false) => folo_mcp::Backend::Real,
+    };
+    // Embedded, it owns the data dir as `folo serve` does. When a `folo serve` (FOLO Desktop's, say) already
+    // owns it, it goes through that server instead (not with --confine: the server reads datasets unconfined).
+    let _data_lock = match backend {
+        folo_mcp::Backend::Real => match serve_lock::acquire(&data_dir) {
+            Ok(serve_lock::Acquire::Held(lock)) => Some(lock),
+            Ok(serve_lock::Acquire::InUse { url: Some(url) })
+                if !args.confine && serve_lock::serves(&url, &data_dir, args.token.as_deref()) =>
+            {
+                tracing::info!(%url, "a folo serve owns the data dir: using it (as --server)");
+                backend = folo_mcp::Backend::Proxy { url, token: args.token.clone() };
+                None
+            }
+            Ok(serve_lock::Acquire::InUse { url }) => return Err(data_dir_in_use(&data_dir, url.as_deref())),
+            Err(e) => return Err(data_dir_lock_failed(&data_dir, e)),
+        },
+        _ => None,
     };
     let opts = folo_mcp::Options {
         data_dir: data_dir.clone(),
