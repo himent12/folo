@@ -515,20 +515,28 @@ impl GpuBackend {
         (out, out_per): (&wgpu::Buffer, usize),
         f: impl Fn(&Conv2dDesc, &wgpu::Buffer, &wgpu::Buffer) -> std::result::Result<(), GpuError>,
     ) -> Result<()> {
-        // An even piece keeps every piece's f16 offset 4-byte aligned for the copies.
-        let piece = (65535 / d.groups.max(1)) & !1;
+        // An even piece keeps f16 offsets 4-byte aligned, so the copies stay buffer copies; with 32768 groups or
+        // more the pieces are single images, which the strided copies also move from and to odd f16 offsets.
+        let piece = match 65535 / d.groups.max(1) {
+            p @ 0..=1 => p,
+            p => p & !1,
+        };
         if d.n * d.groups <= 65535 || piece == 0 {
             return f(d, x, out).core();
         }
+        let el = if d.dtype == crate::DType::F16 { Elem::F16 } else { Elem::F32 };
         let eb = d.dtype.size() as u64;
         for n0 in (0..d.n).step_by(piece) {
             let pd = Conv2dDesc { n: piece.min(d.n - n0), ..d.clone() };
             let xb = ((pd.n * x_per) as u64 * eb).next_multiple_of(4);
             let ob = ((pd.n * out_per) as u64 * eb).next_multiple_of(4);
             let (tx, to) = (self.ctx.alloc(xb).core()?, self.ctx.alloc(ob).core()?);
-            self.ctx.copy(x, (n0 * x_per) as u64 * eb, tx.raw(), 0, xb);
+            let (xv, ov) = (Strided::dense(&[pd.n * x_per]), Strided::dense(&[pd.n * out_per]));
+            strided::gather_strided(&self.ctx, el, x, &Strided { offset: n0 * x_per, ..xv }, tx.raw())
+                .core()?;
             f(&pd, tx.raw(), to.raw()).core()?;
-            self.ctx.copy(to.raw(), 0, out, (n0 * out_per) as u64 * eb, ob);
+            let dst = Strided { offset: n0 * out_per, ..ov.clone() };
+            strided::scatter_strided(&self.ctx, el, to.raw(), &ov, out, &dst).core()?;
         }
         Ok(())
     }

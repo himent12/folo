@@ -301,6 +301,31 @@ fn casts_round_like_the_cpu() {
 }
 
 #[test]
+fn casts_i64_to_float_round_once() {
+    let dev = dev!();
+    // 2^k + 2^(k - 24) + 1 sits just above an f32 midpoint; rounding to f64's 53 bits first drops the low 1 and
+    // leaves an exact tie that rounds down, so only a single rounding gets these right.
+    let mut ints: Vec<i64> = (54..63).map(|k| (1i64 << k) + (1 << (k - 24)) + 1).collect();
+    ints.extend([
+        (1 << 62) + (1 << 38) - 1,
+        (1 << 62) + (1 << 38),
+        (1 << 62) + (3 << 38),
+        i64::MAX,
+        i64::MAX - 1,
+    ]);
+    ints.extend([0, 1, 7, 2049, 65519, 65520, (1 << 24) - 1, 1 << 24, (1 << 24) + 1, (1 << 24) + 3, 1 << 53]);
+    ints.extend([(1 << 53) + 1, i64::MIN + (1 << 39) + 1, i64::MIN + (1 << 39) - 1]);
+    let neg: Vec<i64> = ints.iter().map(|v| v.wrapping_neg()).collect();
+    ints.extend(neg);
+    ints.push(i64::MIN);
+    let i = Tensor::from_slice(&ints, [ints.len()]).unwrap();
+    let g = i.to_device(dev).unwrap();
+    for to in [DType::F32, DType::F16] {
+        assert_same(&g.to_dtype(to).unwrap(), &i.to_dtype(to).unwrap(), &format!("i64 -> {to} of {ints:?}"));
+    }
+}
+
+#[test]
 fn unary_ops_and_gradients() {
     let dev = dev!();
     let ops = [
@@ -811,6 +836,51 @@ fn conv2d_batches_beyond_one_dispatch() {
         let (xf, wf) = (x.to_dtype(DType::F32).unwrap(), w.to_dtype(DType::F32).unwrap());
         let want = xf.conv2d(&wf, None, 1, 1, 1, 1).unwrap();
         assert_close_t(&y.to_dtype(DType::F32).unwrap(), &want, 2e-3, 2e-3, "f16 conv batch 70001");
+    }
+}
+
+#[test]
+fn conv2d_many_groups_run_one_image_at_a_time() {
+    // With 32768 groups or more not even two images fit one dispatch, so the pieces are single images; f16 ones
+    // start at odd element offsets when an image holds an odd number of elements (input, output or both).
+    let dev = dev!();
+    let q = |t: Tensor| t.to_dtype(DType::F16).unwrap().to_dtype(DType::F32).unwrap();
+    for (i, (xs, ws, g)) in [
+        ([3, 65536, 1, 1], [32768, 2, 1, 1], 32768),
+        ([3, 32769, 1, 1], [32769, 1, 1, 1], 32769),
+        ([3, 65538, 1, 1], [32769, 2, 1, 1], 32769),
+        ([3, 32769, 1, 1], [65538, 1, 1, 1], 32769),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seed = 150 + 3 * i as u64;
+        let (x, w, gy) =
+            (q(randn(&xs, seed)), q(randn(&ws, seed + 1)), q(randn(&[3, ws[0], 1, 1], seed + 2)));
+        // Forward and input gradient: on the CPU in f32, on the GPU in f32 and (autocast) in f16.
+        let run = |dev: Device, amp: bool| {
+            let xl = x.to_device(dev).unwrap().detach().requires_grad_();
+            let y = {
+                let _a = amp.then(folo_core::autocast);
+                xl.conv2d(&w.to_device(dev).unwrap(), None, 1, 0, 1, g)
+                    .unwrap_or_else(|e| panic!("conv {xs:?} {ws:?} on {dev:?} amp {amp}: {e}"))
+            };
+            assert_eq!(y.dtype(), if amp { DType::F16 } else { DType::F32 });
+            let gr = y.backward_with(&gy.to_device(dev).unwrap().to_dtype(y.dtype()).unwrap()).unwrap();
+            (y.to_dtype(DType::F32).unwrap(), gr.get(&xl).unwrap().clone())
+        };
+        let (yc, gc) = run(Device::Cpu, false);
+        let mut runs = vec![(false, 1e-5)];
+        if folo_core::backend::computes_f16(dev) {
+            // Sums of at most two f16 products in f32, rounded once to f16.
+            runs.push((true, 2e-3));
+        }
+        for (amp, tol) in runs {
+            let (yg, gg) = run(dev, amp);
+            let what = format!("conv {xs:?} {ws:?} g{g} amp {amp}");
+            assert_close_t(&yg, &yc, tol, tol, &what);
+            assert_close_t(&gg, &gc, tol, tol, &format!("{what}: input gradient"));
+        }
     }
 }
 
