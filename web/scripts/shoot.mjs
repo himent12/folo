@@ -595,8 +595,14 @@ try {
       });
     }
   }
-  // Each state has its own context and paused clock, so --qa runs several at once: FOLO_QA_JOBS, default up to 8 (most
-  // of a state's time is waiting on the page, not the CPU).
+  // FOLO_QA_SHARD=2/3 checks every third state, starting with the second: CI splits --qa over several runners, since
+  // a state costs a few CPU seconds of browser work and one runner has only so many cores.
+  const [shard, shards] = (process.env.FOLO_QA_SHARD ?? '1/1').split('/').map(Number);
+  if (!(shards >= 1 && shard >= 1 && shard <= shards)) throw new Error(`FOLO_QA_SHARD=${process.env.FOLO_QA_SHARD}: expected i/n with 1 <= i <= n`);
+  const mine = qaJobs.filter((_, i) => i % shards === shard - 1);
+  qaJobs.length = 0;
+  qaJobs.push(...mine);
+  // Each state has its own context and paused clock, so --qa runs several at once: FOLO_QA_JOBS, default up to 8.
   const jobs = Math.max(1, Number(process.env.FOLO_QA_JOBS) || Math.min(8, availableParallelism()));
   await Promise.all(
     Array.from({ length: jobs }, async () => {
@@ -609,7 +615,8 @@ try {
 }
 
 const secs = Math.round((Date.now() - started) / 1000);
-console.log(qa ? `QA: ${count} scene states checked in ${secs} s` : `${count} shots -> ${outDir} (${secs} s)`);
+const part = process.env.FOLO_QA_SHARD ? ` (shard ${process.env.FOLO_QA_SHARD})` : '';
+console.log(qa ? `QA: ${count} scene states checked in ${secs} s${part}` : `${count} shots -> ${outDir} (${secs} s)`);
 // The QA list (overflow, blank sections and covered controls): printed last, boxed in yellow. The shoot saves it next to the shots and
 // never fails on it; --qa fails on it.
 const report = resolve(outDir, only ? `qa-${only.replace(/[^\w-]+/g, '_')}.txt` : 'qa.txt');

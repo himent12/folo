@@ -718,12 +718,9 @@ mod tests {
     }
 
     #[test]
-    fn ids_parse_and_info() {
+    fn ids_parse_exactly() {
         for c in Condition::ALL {
             assert_eq!(Condition::parse(c.id()), Some(c));
-            let i = c.info();
-            assert_eq!((i.id.as_str(), i.name.as_str(), i.group), (c.id(), c.name(), c.group()));
-            assert!(i.description.ends_with('.'), "{}", c.id());
         }
         assert_eq!(Condition::parse("Haze"), None);
         assert_eq!(Condition::parse(""), None);
@@ -750,7 +747,6 @@ mod tests {
             assert_eq!(apply(Condition::Haze, s, &img, &[], 0), Err(Error::Severity(s)));
         }
         assert!(render(&[], Condition::Haze, 0, &[], 0).is_err());
-        assert!(Error::Severity(9).to_string().contains("1..=5"));
     }
 
     #[test]

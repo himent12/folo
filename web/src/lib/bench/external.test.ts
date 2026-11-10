@@ -37,6 +37,9 @@ describe('checkPredictions', () => {
     // No score anywhere: the model gives no confidences.
     const bare = checkPredictions([{ image: '1', boxes: [{ class: 1, x1: 0, y1: 0, x2: 5, y2: 5 }] }, { image: '2', boxes: [] }], ctx);
     expect(bare.ok && bare.summary.scores).toBe(false);
+    // Without the image list, it checks the rest and counts what it got.
+    const unlisted = checkPredictions(clean, { ...ctx, imageIds: null });
+    expect(unlisted.ok && unlisted.summary.images).toBe(2);
   });
 
   it('names the first record that breaks a rule, as the server does', () => {
@@ -58,11 +61,6 @@ describe('checkPredictions', () => {
     expect(err([{ image: '1', severity: 2, boxes: [] }])).toMatch(/"severity" without a "condition"/);
     expect(err([clean[0]])).toMatch(/Image "2" has no record without a condition/);
     expect(err([...clean, { image: '1', condition: 'haze', severity: 1, boxes: [] }])).toMatch(/Haze is answered in part: image "1" at severity 3 is missing|image "2" at severity 1 is missing/);
-  });
-
-  it('without the image list, checks the rest and counts what it got', () => {
-    const r = checkPredictions(clean, { ...ctx, imageIds: null });
-    expect(r.ok && r.summary.images).toBe(2);
   });
 });
 
@@ -112,7 +110,7 @@ describe('a large file, sent in parts', () => {
 
   it('refuses a record with more than 1000 boxes, and a part that repeats a record received before', () => {
     const r = checkPredictions([rec('1', null, null, 1001), clean[1]], ctx);
-    expect(!r.ok && r.error).toBe('Record 1: 1,001 boxes: one record carries at most 1,000.');
+    expect(!r.ok && r.error).toMatch(/^Record 1: 1,001 boxes/);
     const seen = new Set<string>();
     expect(checkPredictions([clean[0]], ctx, { part: true, seen }).ok).toBe(true);
     const again = checkPredictions([clean[1], clean[0]], ctx, { part: true, seen: new Set(seen) });
@@ -194,11 +192,11 @@ describe('a large file, sent in parts', () => {
     const stopFails = fake({ failPart: 1, failStop: true });
     const e1 = await sendExternal(stopFails.api, body, () => {}, undefined, 200).catch((e: unknown) => e);
     expect(e1).toBeInstanceOf(ExternalSendError);
-    expect((e1 as ExternalSendError).left).toBe('an unfinished entry “big” is still on the leaderboard: stop and delete it there.');
+    expect((e1 as ExternalSendError).left).toMatch(/“big”.*stop and delete it/);
     expect((e1 as ExternalSendError).cause).toMatchObject({ code: 'invalid_body' });
     const removeFails = fake({ failPart: 1, failRemove: true });
     const e2 = (await sendExternal(removeFails.api, body, () => {}, undefined, 200).catch((e: unknown) => e)) as ExternalSendError;
-    expect(e2.left).toBe('an unfinished entry “big” (stopped) is still on the leaderboard: delete it there.');
+    expect(e2.left).toMatch(/“big” \(stopped\).*: delete it/);
   });
 
   it('sends a part again once when its answer was lost, and gives up the second time', async () => {

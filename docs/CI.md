@@ -6,7 +6,7 @@ Five workflows check the code, one per part of the repo. A pull request runs onl
 | workflow | runs for | what it does |
 |---|---|---|
 | `ci.yml` | everything except `web/`, `site/`, `design/`, `apps/desktop/`, `docs/img/` and the other workflows (plus the few files in those folders that a Rust test reads: the package versions and Studio's command-line fixtures) | `rust (linux)`: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace` with the ONNX parity test required. `rust (windows)`: clippy and the tests on the runner with a GPU, so the GPU tests run there |
-| `web.yml` | `web/`, `design/` | `npm ci`, `npm run check`, `npm test`, then `npm run qa`: the layout checks on the production build (blank sections, overflow, covered controls and cut selects at tablet and phone sizes, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium) |
+| `web.yml` | `web/`, `design/` | `check`: `npm ci`, `npm run check`, `npm test`. `qa (1/3)` to `qa (3/3)`: `npm run qa`, the layout checks on the production build (blank sections, overflow, covered controls and cut selects at tablet and phone sizes, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium), a third of the states each (`FOLO_QA_SHARD`) |
 | `site.yml` | `site/`, `docs/`, `examples/`, `design/`, any `*.md` | the docs site: `npm ci && npm run check && npm run build` in `site/`, which fails on a broken link, anchor or image in the Markdown (site/README.md) |
 | `wasm.yml` | `crates/folo-wasm/` and the crates it depends on, `Cargo.toml`, `Cargo.lock`, `scripts/build-wasm.sh` | the browser build: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and `scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock` (docs/WASM.md) |
 | `desktop.yml` | `apps/desktop/`, `design/` and the crates the app builds | FOLO Desktop on Windows: fmt, clippy, its tests, the vendored GPUI patch test and the temp-dir hygiene test |
@@ -29,7 +29,8 @@ with pinned `onnx`, `onnxruntime` and `numpy`, kept between runs on a self-hoste
   `apps/desktop/`, add that file to `ci.yml`'s `paths`.
 - **The layout QA runs on the production build**, served as static files: every state opens a fresh browser context
   with an empty cache, and the build is one script where the dev server answers a request per module. Phone states
-  are checked once, under a coarse pointer (the stricter case).
+  are checked once, under a coarse pointer (the stricter case). A state still costs a few CPU seconds of browser
+  work (the page runs seconds of simulated time), so CI splits the states over three runners.
 
 ## Test temp dirs
 Tests make their scratch folders with `folo_test_support::TestDir` (`crates/folo-test-support`): a fresh
