@@ -14,9 +14,10 @@
   import Keyboard from '@lucide/svelte/icons/keyboard';
   import ScanSearch from '@lucide/svelte/icons/scan-search';
   import Tags from '@lucide/svelte/icons/tags';
+  import Target from '@lucide/svelte/icons/target';
   import { hub } from '$lib/api/index.svelte';
   import { failureCause } from '$lib/oom';
-  import type { Dataset, Model, Run, RunStatus } from '$lib/api/types';
+  import type { Bench, Dataset, Model, Run, RunStatus } from '$lib/api/types';
   import { prefs } from '$lib/prefs.svelte';
   import { router } from '$lib/router.svelte';
   import Ident from '$lib/ui/Ident.svelte';
@@ -66,6 +67,9 @@
   let runs = $state.raw<Run[]>([]);
   let datasets = $state.raw<Dataset[]>([]);
   let models = $state.raw<Model[]>([]);
+  /** Benchmarks, on servers that have them (a server without answers 501 or 404: none listed). */
+  let benches = $state.raw<Bench[]>([]);
+  let benchesOk = $state(false);
   /** The items chosen last (ids), read on open: with no query they head the list, under Recent. */
   let recent = $state.raw<string[]>([]);
 
@@ -83,6 +87,10 @@
       api.runs().then((r) => (runs = r), () => {});
       api.datasets().then((d) => (datasets = d), () => {});
       api.models().then((m) => (models = m), () => {});
+      api.benches().then(
+        (b) => ((benches = b), (benchesOk = true)),
+        () => ((benches = []), (benchesOk = false)),
+      );
     } else if (!open && el.open) el.close();
   });
 
@@ -116,6 +124,10 @@
       // Agent labeling, under Datasets (no nav item of its own).
       { id: 'label', group: 'Actions', label: 'Label images', match: ['Labeling jobs', 'Claude Code', 'Codex'], icon: Tags, run: go('/datasets/label') },
       { id: 'label-new', group: 'Actions', label: 'New labeling job', icon: Plus, run: go('/datasets/label?new=1') },
+      // Vision benchmarks: offered where the server has them (its list answered).
+      ...(benchesOk
+        ? [{ id: 'bench-new', group: 'Actions', label: 'New benchmark', match: ['Benchmark a model', 'Vision benchmark'], icon: Plus, run: go('/benchmarks?new=1') }]
+        : []),
       {
         id: 'theme',
         group: 'Actions',
@@ -155,6 +167,14 @@
     // A model's score with what it is on (lib/scoreSummary): "mAP50-95 0.604 on fasteners", "mAP50-95 0.701 · split unknown".
     const runById = new Map(runs.map((x) => [x.id, x]));
     const dsById = new Map(datasets.map((x) => [x.id, x]));
+    const b: Item[] = benches.map((x) => ({
+      id: `bench-${x.id}`,
+      group: 'Benchmarks',
+      label: x.name,
+      hint: [`${x.images.toLocaleString('en-US')} images`, `${x.entries} ${x.entries === 1 ? 'entry' : 'entries'}`, ...(x.best ? [`best ${x.best.score.toFixed(1)}`] : [])],
+      icon: Target,
+      run: go(`/benchmarks/${x.id}`),
+    }));
     const m: Item[] = models.map((x) => ({
       id: `model-${x.id}`,
       group: 'Models',
@@ -191,7 +211,16 @@
     // With no query: navigation, the actions and the runs in flight. A filter reads the status enum, never the hint's
     // display word ("Running"): round 26's lowercase comparison against the sentence-case label dropped every run.
     const idle = (i: Item) => i.group === 'Go to' || i.group === 'Actions' || (i.status !== undefined && ACTIVE.includes(i.status));
-    return [...page, ...nav, ...actions, ...onEntity, ...r.map((i) => ({ ...i, scoped: !idle(i) })), ...d.map((i) => ({ ...i, scoped: true })), ...m.map((i) => ({ ...i, scoped: true }))];
+    return [
+      ...page,
+      ...nav,
+      ...actions,
+      ...onEntity,
+      ...r.map((i) => ({ ...i, scoped: !idle(i) })),
+      ...d.map((i) => ({ ...i, scoped: true })),
+      ...m.map((i) => ({ ...i, scoped: true })),
+      ...b.map((i) => ({ ...i, scoped: true })),
+    ];
   });
 
   // No query: this page's commands, then Recent (the last items chosen, wherever they live), then the usual list.

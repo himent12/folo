@@ -77,7 +77,8 @@ describe('CloudPanel', () => {
     expect(fact('Instance')).toBe('RTX 4090 · 24.0 GiB · Secure Cloud');
     expect(target.querySelector('#cloud .facts a')?.getAttribute('href')).toBe('#/settings?section=cloud');
     expect(fact('Cost')).toBe('$0.42 so far');
-    expect(fact('Limit')).toMatch(/^12 h · stops by \d\d:\d\d$/);
+    // The stop time is an hour from now: with its date when that is past midnight.
+    expect(fact('Limit')).toMatch(/^12 h · stops by (\w{3} \d{1,2}, )?\d\d:\d\d$/);
     expect(fact('Last checkpoint copy')).toBe('none yet');
   });
 

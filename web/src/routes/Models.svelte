@@ -10,6 +10,7 @@
   import { prefs } from '$lib/prefs.svelte';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
+  import PhoneSections from '$lib/shell/PhoneSections.svelte';
   import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs.svelte';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
@@ -219,6 +220,8 @@
   <!-- The list toolbar (base.css): one row on laptops and up; tablets and phones put the filter field on a row of its
        own. It is always here, so the table never moves between states (DESIGN_DIRECTION §2.8): over an empty or failed
        list it is disabled, "All" alone and no counts. -->
+  <PhoneSections label="Models and benchmarks" items={[{ label: 'Models', path: '/models', current: true }, { label: 'Benchmarks', path: '/benchmarks', current: false }]} />
+
   <div class="list-toolbar">
     <div class="lt-filter">
     {#if models.data?.length}

@@ -1,12 +1,13 @@
 <script lang="ts">
   import { router, section, href } from '$lib/router.svelte';
-  import { mainNav } from './nav';
+  import { tabNav, tabOf } from './nav';
 
-  const current = $derived(section(router.route.name));
+  // A section that lives under a tab (Benchmarks under Models) makes that tab current.
+  const current = $derived(tabOf(section(router.route.name)));
 </script>
 
 <nav class="tabbar" aria-label="Main" data-tip-chrome>
-  {#each mainNav as n (n.id)}
+  {#each tabNav as n (n.id)}
     {@const active = current === n.id}
     <a href={href(n.path)} class:active aria-current={active ? 'page' : undefined}>
       <n.icon size={20} strokeWidth={1.75} aria-hidden="true" />

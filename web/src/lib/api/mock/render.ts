@@ -27,13 +27,21 @@ export async function renderImage(spec: MockDatasetSpec, img: DatasetImage, inde
   ctx.scale(scale, scale);
   const r = rng(seedOf(spec) ^ Math.imul(index + 7, 40503));
   if (spec.style === 'fasteners') drawConveyor(ctx, img, r);
+  else if (spec.style === 'pond') drawPond(ctx, img, r);
   else drawBackdrop(ctx, img, r, spec.id === 'ds_shapes_hard');
   for (const b of img.boxes) {
     const cls = spec.classes[b.class] ?? '';
     if (spec.style === 'fasteners') drawFastener(ctx, cls, b, r);
+    else if (spec.style === 'pond') drawCreature(ctx, cls, b, r);
     else drawShape(ctx, cls, b, r);
   }
   if (spec.style === 'fasteners') vignette(ctx, img.width, img.height, 0.55);
+  if (spec.style === 'pond') {
+    // The water over everything: a faint green film and the light from above, so the fish sit in it.
+    ctx.fillStyle = 'rgba(40, 92, 70, 0.14)';
+    ctx.fillRect(0, 0, img.width, img.height);
+    vignette(ctx, img.width, img.height, 0.4);
+  }
   if ('convertToBlob' in canvas) return canvas.convertToBlob({ type: 'image/jpeg', quality: 0.86 });
   return new Promise((resolve, reject) =>
     canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('toBlob failed'))), 'image/jpeg', 0.86),
@@ -347,6 +355,160 @@ function drawFastener(ctx: Ctx, cls: string, b: Box, r: () => number) {
         ctx.fill();
       }
     }
+  }
+  ctx.restore();
+}
+
+// ---------- pond (a benchmark's camera over a garden pond: koi, goldfish and frogs from above) ----------
+
+function drawPond(ctx: Ctx, img: DatasetImage, r: () => number) {
+  const { width: W, height: H } = img;
+  // Murky green water, lighter where the light comes in.
+  const g = ctx.createLinearGradient(0, 0, W * range(r, 0.2, 0.8), H);
+  g.addColorStop(0, `hsl(${range(r, 150, 165)} 32% ${range(r, 26, 32)}%)`);
+  g.addColorStop(1, `hsl(${range(r, 165, 180)} 38% ${range(r, 12, 17)}%)`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+  // The bottom: dim stones.
+  for (let i = 0; i < 14; i++) {
+    const x = range(r, 0, W);
+    const y = range(r, 0, H);
+    const rad = range(r, W * 0.02, W * 0.07);
+    ctx.fillStyle = `hsla(${range(r, 30, 60)} 12% ${range(r, 20, 34)}% / 0.55)`;
+    ctx.beginPath();
+    ctx.ellipse(x, y, rad, rad * range(r, 0.55, 0.9), range(r, 0, Math.PI), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Light from above: soft caustic patches.
+  for (let i = 0; i < 7; i++) {
+    const x = range(r, 0, W);
+    const y = range(r, 0, H);
+    const rad = range(r, W * 0.08, W * 0.3);
+    const rg = ctx.createRadialGradient(x, y, 0, x, y, rad);
+    rg.addColorStop(0, `hsla(${range(r, 70, 110)} 40% 70% / 0.16)`);
+    rg.addColorStop(1, 'hsla(90 40% 70% / 0)');
+    ctx.fillStyle = rg;
+    ctx.fillRect(0, 0, W, H);
+  }
+  // Lily pads on the surface.
+  for (let i = 0; i < 4; i++) {
+    const x = range(r, 0, W);
+    const y = range(r, 0, H);
+    const rad = range(r, W * 0.04, W * 0.08);
+    const a = range(r, 0, Math.PI * 2);
+    ctx.fillStyle = `hsl(${range(r, 95, 120)} 38% ${range(r, 24, 32)}%)`;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.arc(x, y, rad, a + 0.35, a + Math.PI * 2 - 0.05);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawCreature(ctx: Ctx, cls: string, b: Box, r: () => number) {
+  const w = b.x2 - b.x1;
+  const h = b.y2 - b.y1;
+  const cx = b.x1 + w / 2;
+  const cy = b.y1 + h / 2;
+  ctx.save();
+  ctx.translate(cx, cy);
+  if (cls === 'frog') {
+    // From above: a body, the hind legs folded beside it, two eyes at the front.
+    const flip = r() < 0.5 ? 1 : -1;
+    ctx.scale(1, flip);
+    const skin = `hsl(${range(r, 85, 110)} ${range(r, 38, 55)}% ${range(r, 32, 42)}%)`;
+    ctx.shadowColor = 'rgba(0,0,0,0.4)';
+    ctx.shadowBlur = Math.min(w, h) * 0.15;
+    ctx.fillStyle = skin;
+    for (const sx of [-1, 1]) {
+      ctx.beginPath();
+      ctx.ellipse((sx * w) / 3, h * 0.22, w * 0.2, h * 0.24, sx * 0.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.beginPath();
+    ctx.ellipse(0, 0, w * 0.32, h * 0.42, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowColor = 'transparent';
+    ctx.fillStyle = 'hsl(60 30% 70% / 0.5)';
+    ctx.beginPath();
+    ctx.ellipse(0, h * 0.02, w * 0.16, h * 0.26, 0, 0, Math.PI * 2);
+    ctx.fill();
+    for (const sx of [-1, 1]) {
+      ctx.fillStyle = skin;
+      ctx.beginPath();
+      ctx.arc(sx * w * 0.15, -h * 0.33, Math.min(w, h) * 0.11, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#14160f';
+      ctx.beginPath();
+      ctx.arc(sx * w * 0.15, -h * 0.35, Math.min(w, h) * 0.05, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+    return;
+  }
+  // A fish along the box's long side, head to one end, the tail fanned at the other.
+  const horizontal = w >= h;
+  if (!horizontal) ctx.rotate(Math.PI / 2);
+  const L = horizontal ? w : h;
+  const T = horizontal ? h : w;
+  if (r() < 0.5) ctx.scale(-1, 1);
+  const koi = cls === 'koi';
+  const base = koi ? `hsl(${range(r, 30, 45)} 30% ${range(r, 86, 92)}%)` : `hsl(${range(r, 26, 38)} 92% ${range(r, 52, 60)}%)`;
+  ctx.shadowColor = 'rgba(0,0,0,0.45)';
+  ctx.shadowBlur = T * 0.3;
+  ctx.shadowOffsetY = T * 0.12;
+  ctx.fillStyle = base;
+  // Tail.
+  ctx.beginPath();
+  ctx.moveTo(L * 0.22, 0);
+  ctx.quadraticCurveTo(L * 0.42, -T * 0.55, L * 0.5, -T * 0.48);
+  ctx.quadraticCurveTo(L * 0.4, 0, L * 0.5, T * 0.48);
+  ctx.quadraticCurveTo(L * 0.42, T * 0.55, L * 0.22, 0);
+  ctx.fill();
+  // Body.
+  ctx.beginPath();
+  ctx.ellipse(-L * 0.08, 0, L * 0.38, T * 0.3, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Pectoral fins.
+  for (const sy of [-1, 1]) {
+    ctx.beginPath();
+    ctx.ellipse(-L * 0.18, sy * T * 0.3, L * 0.08, T * 0.12, sy * 0.7, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.shadowColor = 'transparent';
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(-L * 0.08, 0, L * 0.38, T * 0.3, 0, 0, Math.PI * 2);
+  ctx.clip();
+  if (koi) {
+    // Koi: red-orange patches on white, a black fleck or two.
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = `hsl(${range(r, 4, 18)} 85% ${range(r, 46, 54)}%)`;
+      ctx.beginPath();
+      ctx.ellipse(-L * range(r, 0.3, -0.1), T * range(r, -0.15, 0.15), L * range(r, 0.08, 0.16), T * range(r, 0.14, 0.24), range(r, 0, Math.PI), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (r() < 0.6) {
+      ctx.fillStyle = 'rgba(20,20,22,0.8)';
+      ctx.beginPath();
+      ctx.ellipse(-L * range(r, 0.2, 0), T * range(r, -0.1, 0.1), L * 0.04, T * 0.07, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // The back's highlight.
+  const hl = ctx.createLinearGradient(0, -T * 0.3, 0, T * 0.3);
+  hl.addColorStop(0, 'rgba(255,255,255,0.28)');
+  hl.addColorStop(0.5, 'rgba(255,255,255,0)');
+  hl.addColorStop(1, 'rgba(0,0,0,0.18)');
+  ctx.fillStyle = hl;
+  ctx.fillRect(-L / 2, -T / 2, L, T);
+  ctx.restore();
+  // Eyes.
+  ctx.fillStyle = '#101214';
+  for (const sy of [-1, 1]) {
+    ctx.beginPath();
+    ctx.arc(-L * 0.38, sy * T * 0.12, Math.max(1, T * 0.05), 0, Math.PI * 2);
+    ctx.fill();
   }
   ctx.restore();
 }

@@ -115,7 +115,7 @@ describe('single-key shortcuts preference', () => {
 
   it('marks exactly the keys Settings turns off: single characters outside a focused component', () => {
     const single = shortcutList.filter((s) => s.single).map((s) => s.keys);
-    expect(single).toEqual(['?', '[', 'N', 'G O', 'G D', 'G R', 'G M', 'G P', 'G S', 'Escape', 'J K', 'X', '1–6', 'B']);
+    expect(single).toEqual(['?', '[', 'N', 'G O', 'G D', 'G R', 'G M', 'G B', 'G P', 'G S', 'Escape', 'J K', 'X', '1–6', 'B']);
     // The image inspector's keys are its own (they work while it is open), so they stay listed as working.
     expect(shortcutList.filter((s) => s.group === 'Datasets').every((s) => !s.single)).toBe(true);
   });

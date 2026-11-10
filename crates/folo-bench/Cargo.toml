@@ -1,0 +1,32 @@
+[package]
+name = "folo-bench"
+description = "FOLO vision benchmarks (docs/BENCH.md): stress conditions, plans and the scores of an entry"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The wire types the scores are returned in (docs/API.md, Vision benchmarks).
+folo-api.workspace = true
+# The seeded RNG (noise, occlusion patches, the bootstrap).
+folo-core.workspace = true
+# The image decoder datasets use (EXIF orientation included), so a variant has the orientation its truth has.
+folo-data.workspace = true
+# AP: `Evaluator` and `CocoEval`, never a second implementation.
+folo-vision.workspace = true
+image.workspace = true
+rayon.workspace = true
+
+[[bench]]
+name = "conditions"
+harness = false
+
+[[bench]]
+name = "score"
+harness = false
