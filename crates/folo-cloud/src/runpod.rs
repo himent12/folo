@@ -284,7 +284,8 @@ impl Provider for RunPod {
             entrypoint: ["/bin/bash", "-c"],
             cmd: [&script],
         };
-        let reply = self.api.post(&format!("{}/pods", self.rest), key, &body)?;
+        // The worker's token is in the request too, and a refusal may quote what it refused.
+        let reply = self.api.post(&format!("{}/pods", self.rest), key, &body)?.without(&spec.token);
         match reply.status {
             200..=299 => {
                 let pod: Pod = reply.json()?;
@@ -1049,5 +1050,21 @@ mod tests {
         let f = Fixture::serve(vec![problem(400, &format!("bad key {KEY}"))]);
         let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
         assert_error(&e, ErrorKind::Refused, "bad key [redacted]");
+    }
+
+    #[test]
+    fn a_worker_token_echoed_by_runpod_is_not_repeated() {
+        // A validation error names the value it refused, and `env` carries the worker's token.
+        let invalid = format!(
+            r#"{{"title":"Unprocessable Entity","status":422,"detail":"validation failed","errors":[
+                {{"message":"unexpected property","location":"body.env",
+                  "value":{{"FOLO_TOKEN":"{TOKEN}","NVIDIA_DRIVER_CAPABILITIES":"all"}}}}]}}"#
+        );
+        let f = Fixture::serve(vec![Answer::json(422, invalid)]);
+        let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+        assert_error(&e, ErrorKind::Unavailable, r#""FOLO_TOKEN":"[redacted]""#);
+        let f = Fixture::serve(vec![problem(400, &format!("bad env FOLO_TOKEN={TOKEN}"))]);
+        let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+        assert_error(&e, ErrorKind::Refused, "bad env FOLO_TOKEN=[redacted]");
     }
 }
