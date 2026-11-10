@@ -74,13 +74,23 @@ the open batch.
 Kernels never submit. Each call encodes a dispatch into one long-lived compute pass of an open command encoder.
 The batch is submitted when:
 
-- 1024 dispatches have been encoded;
+- the batch's dispatch limit is reached: 16 after the device was idle (a wait), doubling with every submission up
+  to 1024, so the GPU starts on the head of a pass while the host still encodes the rest (a synchronised batch-1
+  forward otherwise spent a third of its latency encoding before the GPU had anything to do);
 - an upload or readback needs ordering;
 - you call `ctx.flush()` (submit without waiting) or `ctx.sync()` (submit, wait, report errors).
 
 A forward pass is therefore a handful of submissions. Each dispatch's parameters take a 256-byte slot in a
 64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches and submissions
 (the backend benchmark prints them per pass).
+
+**Profiling.** `ctx.trace_begin()` / `trace_end()` record every dispatch and buffer copy encoded in between
+(`TracedOp`: kernel name, spec, workgroups, and what is needed to encode it again) and `ctx.replay(&op)` re-encodes
+one. `cargo bench -p folo-vision --bench gpu_profile` uses them on a fused forward: the host split of a
+synchronised call (encode, submit, wait), then every recorded dispatch replayed alone, summed per kernel and per
+kernel variant (`FOLO_BENCH_OPS=1` lists every dispatch). Host-side, a dispatch costs about 8–12 µs on this
+machine (bind group creation about 3–4 µs; the rest lands in wgpu's submission), so batch-1 forwards are
+host-bound: folo-n's 117 dispatches take about as long to encode and submit as the GPU takes to run them.
 
 ### Pipeline cache and specialisation constants
 
@@ -144,7 +154,7 @@ On `wasm32` the same crate runs on the browser's WebGPU. Nothing may block the p
 | reduce | `kernels::reduce::reduce`, `reduce_as` | f32, f16 (f32 accumulation) | sum, mean, max, min over the middle axis of `[outer, R, inner]`, i.e. any dim. `inner == 1`: one workgroup per row with a tree in workgroup memory; otherwise each thread owns a column and loads are coalesced |
 | softmax / log_softmax | `kernels::reduce::softmax`, `softmax_rows` | f32, f16 (f32 max, sum and exponentials) | last dim, one workgroup per row, max-shifted |
 | GEMM | `kernels::gemm::gemm` | f32, f16 | `alpha·op(A)·op(B) (+ row/col bias) → act`; A, Aᵀ, B, Bᵀ; two-level batch with arbitrary offsets and strides (stride 0 broadcasts); f16 storage with f32 accumulation |
-| conv2d | `kernels::conv::conv2d` | f32, f16 | NCHW; stride, padding, dilation, groups; fused bias + activation. Implicit GEMM, a pointwise GEMM fast path for 1×1, and a direct depthwise kernel |
+| conv2d | `kernels::conv::conv2d` | f32, f16 | NCHW; stride, padding, dilation, groups; fused bias + activation. Implicit GEMM, a pointwise GEMM fast path for 1×1, and a direct depthwise kernel (4 adjacent outputs of a row per invocation, the window unrolled by the generator, so the input columns they share load once) |
 | tensor-core GEMM / conv2d | `kernels::coop::{gemm, conv2d}` | f16 in; f16 or f32 out | cooperative matrices (16×16×16, f32 accumulation), the same GEMM / implicit-GEMM conv contract and fused `alpha` + bias + activation; `gemm::gemm` and `conv::conv2d` route f16 problems here when the context has [tensor cores](#tensor-cores-cooperative-matrices) on, and so do the f16 conv gradients (`CONV_MODE` 2 / 3, split-K, below) |
 | max_pool2d | `kernels::pooling::max_pool2d` | f32, f16 | kernel / stride / padding / dilation; padding never wins (−∞); floor mode |
 | upsample_nearest2d | `kernels::layout::upsample_nearest2d` | f32, f16 | any output size; `src = dst · in / out`, as in PyTorch `nearest` |
@@ -192,7 +202,11 @@ on the store (the GEMM and conv tiles are f32 in workgroup memory).
   load along k and scatter four scalars down the k-major tile.
 - Tile configs: `LARGE` 128×128×8 with 8×8 per thread, `MEDIUM` 64×128×16 with 4×8, `SMALL` 64×64×16 with 4×4.
   `pick_config` takes the largest config that still yields at least 64 workgroups and wastes no more than 25% of
-  its rows.
+  its rows. The forward convs pick through `pick_config_conv`, which first tries two narrow configs for few output
+  channels: `ROWS32` 32×128×32 (4×4, 256 threads) for `M <= 32` and `ROWS16` 16×128×32 (4×4, 128 threads) for
+  `M <= 16`, where a 64-row tile leaves half or three quarters of its rows empty (folo-n's 16- and 32-channel early
+  layers at 320 and 160 px: the stem 0.42 → 0.30 ms, 16 → 32 at stride 2 0.44 → 0.29 ms, a 16-channel 3×3 0.38 →
+  0.19 ms at batch 16).
 - `CONV_MODE = 1` turns the same generator into implicit-GEMM conv. The B tile is gathered straight from the NCHW
   image. Each thread keeps one output pixel for the whole K loop, so the per-element index math is a few
   divisions by constants. No im2col buffer is ever written.
@@ -327,6 +341,7 @@ build:
 | 1×1 s1 | 0.041 | 20 579 |
 | depthwise 3×3 s1, 128 ch | 0.069 | 1 707 (memory-bound) |
 | f16: 3×3 s1 / 3×3 s2 / 1×1 / depthwise | 0.270 / 0.110 / 0.039 / 0.113 | 27 935 / 17 107 / 21 272 / 1 048 |
+| depthwise with 4 outputs per invocation (hill/gpu-infer; old kernel in the same alternated runs): f32 / f16 | 0.063–0.068 / **0.044–0.051** (0.070–0.080 / 0.127–0.130) | 1 865 / 2 700 at best |
 | tensor cores, under ~65% load (regular f16 in the same run: 0.584 / 0.177 / 0.101 ms): 3×3 s1 / 3×3 s2 / 1×1 | **0.288 / 0.118 / 0.044** | 26 191 / 15 937 / 19 239 |
 | tensor cores, folo-n's stem at batch 16 (same run, regular f16 0.831 / 0.780 / 0.309 ms): 3→16 at 640, 16→32 at 320, 32→64 at 160, all 3×3 s2 | **0.245 / 0.250 / 0.097** | 5 783 / 15 104 / 39 097 |
 
@@ -429,8 +444,10 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   absolute term for accumulations), and `crates/folo-vision/tests/gpu_f16.rs` the detector (decoded boxes and
   scores, the end-to-end predictor, f16 exports loading as f16, the CPU fallback).
 - **Prediction** (folo-core's detector hooks): `letterbox_rgb8` and `detect_candidates` are the two kernels above.
-  `folo_vision::predict::Predictor` on the GPU uploads each decoded image as raw `u8` (a quarter of the f32
-  bytes), letterboxes on the device, runs the forward, decodes into candidates, and downloads the per-image counts
+  `folo_vision::predict::Predictor` on the GPU uploads the decoded images as raw `u8` (a quarter of the f32
+  bytes) in one `upload_with` (below: the pixels copied in parallel straight into reused mapped staging memory, each
+  image at a 4-byte aligned offset of one device buffer, which the letterbox kernel reads in place), letterboxes on
+  the device, runs the forward, decodes into candidates, and downloads the per-image counts
   plus up to `CANDIDATE_READBACK` (1024) records per image in one readback (a second one only for an image with
   more): about 28 KiB per image instead of the 2.8 MB of a decoded `[A, 4 + nc]` head. Nothing waits on the GPU
   before that readback. `src/tests` has no tests for these two; they are tested against the CPU path in
@@ -469,6 +486,13 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   touches neither the command batch nor the queue, so another thread can prepare the next batch while the GPU runs;
   `upload_staged` then encodes one buffer copy into a pooled buffer in stream order (no flush, no wait). The
   trainer's feeder thread stages each `u8` batch this way (docs/MODEL.md §8.3).
+- **Reused staging.** `GpuContext::upload_with(len, fill)` hands `fill` the mapped bytes of a host-visible staging
+  buffer (`wgpu::WriteOnly`, re-exported as `folo_gpu::WriteOnly`; its fixed-size chunks are `Send`, so a caller
+  can fill it from several threads), encodes the copy into a pooled buffer, submits, and maps the staging buffer
+  again once the GPU is done with it; the last few (`STAGING_KEEP` = 4) stay mapped for the next upload of the same
+  size class, and `release_memory` drops them. Against `upload` (`Queue::write_buffer`: a fresh wgpu staging
+  allocation and a serial copy per call) the predictor's batch-16 upload went from about 12 ms to 3 ms
+  (docs/hill/gpu-infer.md).
 
 ### Benchmark: a YOLOv8n-shaped network
 
@@ -512,7 +536,6 @@ update kernel.
   transposed-operand tensor-core GEMMs scatter into workgroup memory with scalar stores and are 15–40% slower than
   the plain layout (the attention products use them). The weight-gradient gather divides by the runtime `OH·OW`
   per element; incremental index tracking would save integer work.
-- The f16 depthwise conv is slower than the f32 one (2-byte scalar loads); vectorising it is a follow-up.
 - Timings are wall-clock; GPU timestamp queries would make small-kernel numbers more precise.
 - `max_pool2d` has no `ceil_mode`; upsampling is nearest-only.
 - Backend: no general elementwise fusion. The fused paths are Conv + bias + activation (inference), BatchNorm +

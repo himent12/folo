@@ -2,12 +2,14 @@
 // resize (an integer box prefilter, then 11-bit fixed-point bilinear taps; see kernels/vision.rs).
 // Params: 0 = OW, 1 = OH, 2 = source width, 3 = source height, 4 = pad x, 5 = pad y, 6 = resized width,
 // 7 = resized height, 8 = fx, 9 = fy, 10 = pad value, 11 = scale (f32), 12 = output offset (elements),
-// 13 = taps offset (words). T is the output type (f32, or f16 rounded once from the f32 value).
+// 13 = taps offset (words), 14 = source offset (bytes). T is the output type (f32, or f16 rounded once from the
+// f32 value).
 @group(0) @binding(1) var<storage, read> SRC: array<u32>;
 @group(0) @binding(2) var<storage, read> TAPS: array<u32>;
 @group(0) @binding(3) var<storage, read_write> Y: array<T>;
 
-fn byte_at(i: u32) -> u32 {
+fn byte_at(k: u32) -> u32 {
+    let i = k + pu(14u);
     return (SRC[i >> 2u] >> ((i & 3u) * 8u)) & 0xffu;
 }
 

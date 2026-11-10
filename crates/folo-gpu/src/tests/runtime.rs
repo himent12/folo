@@ -218,6 +218,36 @@ fn staged_upload_from_another_thread() {
     }
 }
 
+/// `upload_with`: bytes written in pieces into the mapped staging memory arrive, for lengths that are not a
+/// multiple of 4; the second round reuses the staging buffers the first left mapped (one size class has two
+/// lengths), and two uploads in a row without a wait each keep their own bytes.
+#[test]
+fn upload_with_reuses_mapped_staging() {
+    let ctx = gpu!();
+    for round in 0..2 {
+        for len in [1usize, 7, 4096, 4093, 300_001] {
+            let data: Vec<u8> = (0..len).map(|i| ((i + round) * 31 % 251) as u8).collect();
+            let (buf, n) = ctx
+                .upload_with(len as u64, |dst| {
+                    let (mut a, mut b) = dst.split_at(len / 2);
+                    a.copy_from_slice(&data[..len / 2]);
+                    b.copy_from_slice(&data[len / 2..]);
+                    len
+                })
+                .unwrap();
+            assert_eq!(n, len);
+            let back = ctx.read(buf.raw(), 0, len as u64).unwrap();
+            assert_eq!(back, data, "round {round}, length {len}");
+        }
+    }
+    // Two uploads back to back without a wait between them: each lands in its own buffer.
+    let (a, ()) = ctx.upload_with(8, |mut d| d.copy_from_slice(&[1; 8])).unwrap();
+    let (b, ()) = ctx.upload_with(8, |mut d| d.copy_from_slice(&[2; 8])).unwrap();
+    assert_eq!(ctx.read(a.raw(), 0, 8).unwrap(), [1; 8]);
+    assert_eq!(ctx.read(b.raw(), 0, 8).unwrap(), [2; 8]);
+    assert!(ctx.release_memory().is_ok());
+}
+
 /// A lost device (here: destroyed on purpose) makes waits and readbacks return `DeviceLost` instead of panicking
 /// inside wgpu, and stays lost. Uses a private context so the shared one other tests use is untouched.
 #[test]

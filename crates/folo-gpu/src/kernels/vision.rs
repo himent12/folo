@@ -27,8 +27,11 @@ static DETECT: KernelDef = KernelDef {
 pub struct LetterboxDesc {
     /// Canvas `[width, height]`.
     pub out: [usize; 2],
-    /// Source `[width, height]`; the source buffer is `height * width * 3` bytes, row-major RGB.
+    /// Source `[width, height]`; the source is `height * width * 3` bytes, row-major RGB, from byte
+    /// `src_offset` of its buffer.
     pub src: [usize; 2],
+    /// Byte offset of the source image in its buffer (several images can share one upload).
+    pub src_offset: usize,
     /// Top-left corner `[x, y]` of the resized image on the canvas.
     pub pad: [usize; 2],
     /// Resized `[width, height]`.
@@ -68,7 +71,7 @@ pub fn letterbox_rgb8(
         return Err(GpuError::Limit(format!("letterbox: a {fx}x{fy} prefilter block is too large")));
     }
     // Prefiltered taps must index inside the prefiltered image (checked on the host when built).
-    check_buf(src, (sw * sh * 3).div_ceil(4), DType::F32, "letterbox source")?;
+    check_buf(src, (d.src_offset + sw * sh * 3).div_ceil(4), DType::F32, "letterbox source")?;
     check_buf(taps, d.taps + 3 * (rw + rh), DType::F32, "letterbox taps")?;
     let n = ow.checked_mul(oh).ok_or_else(|| shape_err("letterbox: canvas too large"))?;
     check_buf(y, d.out_offset + 3 * n, dtype, "letterbox output")?;
@@ -87,7 +90,8 @@ pub fn letterbox_rgb8(
         .u(d.pad_value as u32)
         .f(d.scale)
         .uz(d.out_offset)?
-        .uz(d.taps)?;
+        .uz(d.taps)?
+        .uz(d.src_offset)?;
     ctx.dispatch(&k, &[src, taps, y], &p, ctx.grid_1d(n as u64, 256)?)
 }
 

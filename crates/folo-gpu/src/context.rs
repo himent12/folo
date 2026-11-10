@@ -48,6 +48,13 @@ pub fn request_tensor_cores() -> bool {
 
 /// Dispatches encoded before the open batch is submitted on its own.
 const MAX_DISPATCHES_PER_BATCH: u32 = 1024;
+/// Dispatches before the first submission after the device was idle. The limit then doubles with every submission
+/// up to [`MAX_DISPATCHES_PER_BATCH`], so the GPU starts on the head of a pass while the host still encodes the
+/// rest (a synchronised batch-1 forward otherwise spends a third of its latency encoding and submitting before
+/// the GPU has anything to do), and a long pass still costs only a handful of submissions.
+const FIRST_DISPATCHES_PER_BATCH: u32 = 16;
+/// Idle staging buffers [`GpuContext::upload_with`] keeps mapped for reuse.
+const STAGING_KEEP: usize = 4;
 /// Size of one uniform arena chunk (256 parameter slots).
 const UNIFORM_CHUNK: u64 = 64 * 1024;
 
@@ -228,15 +235,30 @@ struct UniformChunk {
     cpu: Vec<u8>,
 }
 
-#[derive(Default)]
 struct Batch {
     encoder: Option<wgpu::CommandEncoder>,
     pass: Option<wgpu::ComputePass<'static>>,
     dispatches: u32,
+    /// Dispatches at which the open batch is submitted (see [`FIRST_DISPATCHES_PER_BATCH`]).
+    limit: u32,
     chunks: Vec<UniformChunk>,
     /// Index of the chunk being filled and the byte cursor in it.
     chunk: usize,
     cursor: u64,
+}
+
+impl Default for Batch {
+    fn default() -> Self {
+        Self {
+            encoder: None,
+            pass: None,
+            dispatches: 0,
+            limit: FIRST_DISPATCHES_PER_BATCH,
+            chunks: Vec::new(),
+            chunk: 0,
+            cursor: 0,
+        }
+    }
 }
 
 struct Inner {
@@ -261,6 +283,11 @@ struct Inner {
     tensor_cores_status: Mutex<String>,
     /// The device was created with wgpu's experimental cooperative matrices (see [`GpuContext::device`]).
     experimental: bool,
+    /// Set while [`GpuContext::trace_begin`] records dispatches into `trace`.
+    tracing: AtomicBool,
+    trace: Mutex<Vec<TracedOp>>,
+    /// Mapped, idle staging buffers of [`GpuContext::upload_with`], ready for the next upload.
+    staging: Arc<Mutex<Vec<wgpu::Buffer>>>,
 }
 
 /// Host data in a staging buffer, made by [`GpuContext::stage`] (on any thread) and copied to the device with
@@ -280,6 +307,24 @@ impl Staged {
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
+}
+
+/// One operation recorded by [`GpuContext::trace_begin`]: a kernel dispatch or a buffer copy, with everything
+/// needed to encode it again ([`GpuContext::replay`]). Profiling tools replay each operation of a forward pass
+/// on its own to see where the GPU time goes.
+pub struct TracedOp {
+    /// Kernel name, or `"copy"` for a buffer copy.
+    pub name: &'static str,
+    /// The kernel's specialisation constants (empty for a copy).
+    pub spec: String,
+    /// Workgroups dispatched (`[bytes / 4, 1, 1]` for a copy).
+    pub groups: [u32; 3],
+    kind: TracedKind,
+}
+
+enum TracedKind {
+    Dispatch { kernel: Kernel, buffers: Vec<wgpu::Buffer>, params: Box<Params> },
+    Copy { src: wgpu::Buffer, src_off: u64, dst: wgpu::Buffer, dst_off: u64, len: u64 },
 }
 
 /// Work counters since the context was created (see [`GpuContext::work_stats`]).
@@ -573,6 +618,9 @@ impl GpuContext {
                 tensor_cores: AtomicBool::new(false),
                 tensor_cores_status: Mutex::new(status),
                 experimental: coop,
+                tracing: AtomicBool::new(false),
+                trace: Mutex::default(),
+                staging: Arc::default(),
             }),
         };
         if !coop {
@@ -711,6 +759,40 @@ impl GpuContext {
         }
     }
 
+    /// Starts recording every dispatch and buffer copy encoded from now on (for profiling; see [`TracedOp`]).
+    /// The recorded operations keep their buffers alive until the trace is dropped.
+    pub fn trace_begin(&self) {
+        self.inner.trace.lock().expect("trace lock").clear();
+        self.inner.tracing.store(true, Ordering::Relaxed);
+    }
+
+    /// Stops recording and returns the operations since [`GpuContext::trace_begin`], in encoding order.
+    pub fn trace_end(&self) -> Vec<TracedOp> {
+        self.inner.tracing.store(false, Ordering::Relaxed);
+        std::mem::take(&mut *self.inner.trace.lock().expect("trace lock"))
+    }
+
+    /// Encodes a recorded operation again, on the buffers it ran on (their contents are whatever they hold
+    /// now: pooled buffers may have been reused, which does not change what the operation costs).
+    pub fn replay(&self, op: &TracedOp) -> Result<()> {
+        match &op.kind {
+            TracedKind::Dispatch { kernel, buffers, params } => {
+                let refs: Vec<&wgpu::Buffer> = buffers.iter().collect();
+                self.dispatch(kernel, &refs, params, op.groups)
+            }
+            TracedKind::Copy { src, src_off, dst, dst_off, len } => {
+                self.copy(src, *src_off, dst, *dst_off, *len);
+                Ok(())
+            }
+        }
+    }
+
+    fn record(&self, op: impl FnOnce() -> TracedOp) {
+        if self.inner.tracing.load(Ordering::Relaxed) {
+            self.inner.trace.lock().expect("trace lock").push(op());
+        }
+    }
+
     /// Buffer pool counters.
     pub fn pool_stats(&self) -> PoolStats {
         self.inner.pool.lock().expect("pool lock").stats()
@@ -729,7 +811,7 @@ impl GpuContext {
 
     /// Gives the pool's cached buffers back to the driver now: [`GpuContext::trim_pool`], then submits the open
     /// batch and waits for the GPU, so wgpu frees the dropped buffers instead of holding them until the next
-    /// submission. Returns the bytes the pool released.
+    /// submission, and drops the idle staging buffers of [`GpuContext::upload_with`]. Returns the bytes released.
     ///
     /// For a long-lived process between jobs (`folo serve` after a training run, or once inference has been idle):
     /// the pool otherwise keeps up to the job's high-water mark of buffers, gigabytes after a training run, which
@@ -747,10 +829,13 @@ impl GpuContext {
                 cached
             };
             self.submit(&mut b);
+            // The idle upload staging buffers (host memory the driver pins).
+            let staged: u64 =
+                self.inner.staging.lock().expect("staging lock").drain(..).map(|b| b.size()).sum();
             // The uniform arena too (recreated on the next dispatch): its 64 KiB chunks are allocated mid-job, and a
             // live one keeps the driver allocator's whole memory block (up to 256 MiB) from being freed.
             b.chunks.clear();
-            released
+            released + staged
         };
         self.wait_idle()?;
         Ok(released)
@@ -822,6 +907,61 @@ impl GpuContext {
         buf.unmap();
         copied?;
         Ok(Staged { buf, len })
+    }
+
+    /// Uploads `len` bytes that `fill` writes straight into host-visible staging memory, into a new pooled storage
+    /// buffer. `fill` gets the mapped bytes as a [`wgpu::WriteOnly`] slice (it can be split and written from
+    /// several threads; bytes it leaves unwritten are unspecified). The copy is encoded after all work so far
+    /// and the open batch is submitted (no wait).
+    ///
+    /// Unlike [`GpuContext::upload`] (`Queue::write_buffer`, which copies into a fresh staging allocation of
+    /// wgpu's) and [`GpuContext::stage`] (a new buffer per call), the staging buffers are reused: once the GPU
+    /// has copied out of one it is mapped again and kept for the next upload of the same size class (the
+    /// last few are kept), so a stream of predictions writes its pixels once, into memory that is already mapped and
+    /// paged in.
+    pub fn upload_with<R>(
+        &self,
+        len: u64,
+        fill: impl FnOnce(wgpu::WriteOnly<'_, [u8]>) -> R,
+    ) -> Result<(GpuBuffer, R)> {
+        let len4 = len.next_multiple_of(wgpu::COPY_BUFFER_ALIGNMENT).max(wgpu::COPY_BUFFER_ALIGNMENT);
+        let class = size_class(len4);
+        let reused = {
+            let mut free = self.inner.staging.lock().expect("staging lock");
+            free.iter().position(|b| b.size() == class).map(|i| free.swap_remove(i))
+        };
+        let buf = reused.unwrap_or_else(|| {
+            self.inner.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("folo-gpu upload staging"),
+                size: class,
+                usage: wgpu::BufferUsages::MAP_WRITE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: true,
+            })
+        });
+        let written = buf
+            .slice(..len4)
+            .get_mapped_range_mut()
+            .map(|mut view| fill(view.slice(..len as usize)))
+            .map_err(|e| self.or_lost(GpuError::Map(e.to_string())));
+        buf.unmap();
+        let r = written?;
+        let out = self.alloc(len4)?;
+        self.copy(&buf, 0, out.raw(), 0, len4);
+        // A buffer may only be mapped again once the work that reads it is submitted.
+        self.flush();
+        let free = self.inner.staging.clone();
+        let again = buf.clone();
+        buf.slice(..).map_async(wgpu::MapMode::Write, move |mapped| {
+            let mut free = free.lock().expect("staging lock");
+            if mapped.is_ok() {
+                // The most recently used sizes stay.
+                if free.len() == STAGING_KEEP {
+                    free.remove(0);
+                }
+                free.push(again);
+            }
+        });
+        Ok((out, r))
     }
 
     /// A pooled storage buffer holding the bytes of `staged`, filled by a copy encoded after all work so far
@@ -947,6 +1087,12 @@ impl GpuContext {
         if len == 0 {
             return;
         }
+        self.record(|| TracedOp {
+            name: "copy",
+            spec: String::new(),
+            groups: [(len / 4).min(u32::MAX as u64) as u32, 1, 1],
+            kind: TracedKind::Copy { src: src.clone(), src_off, dst: dst.clone(), dst_off, len },
+        });
         let mut b = self.inner.batch.lock().expect("batch lock");
         self.encoder(&mut b).copy_buffer_to_buffer(src, src_off, dst, dst_off, len);
         self.bump(&mut b);
@@ -991,7 +1137,10 @@ impl GpuContext {
     /// and panics inside `Device::poll` (its message still reaches stderr through the panic hook), so the poll
     /// runs under `catch_unwind` and the loss is remembered, failing every later wait at once.
     fn wait_idle(&self) -> Result<()> {
-        self.poll_checked(wgpu::PollType::wait_indefinitely())
+        let polled = self.poll_checked(wgpu::PollType::wait_indefinitely());
+        // The GPU has nothing queued now: submit the head of the next pass early.
+        self.inner.batch.lock().expect("batch lock").limit = FIRST_DISPATCHES_PER_BATCH;
+        polled
     }
 
     /// One `Device::poll` that turns a lost device into [`GpuError::DeviceLost`]: before the poll if the loss is
@@ -1071,8 +1220,9 @@ impl GpuContext {
 
     fn bump(&self, b: &mut Batch) {
         b.dispatches += 1;
-        if b.dispatches >= MAX_DISPATCHES_PER_BATCH {
+        if b.dispatches >= b.limit {
             self.submit(b);
+            b.limit = (b.limit * 2).min(MAX_DISPATCHES_PER_BATCH);
         }
     }
 
@@ -1129,6 +1279,16 @@ impl GpuContext {
                 buffers.len()
             )));
         }
+        self.record(|| TracedOp {
+            name: kernel.name,
+            spec: kernel.spec.clone(),
+            groups,
+            kind: TracedKind::Dispatch {
+                kernel: kernel.clone(),
+                buffers: buffers.iter().map(|&b| b.clone()).collect(),
+                params: Box::new(params.clone()),
+            },
+        });
         let mut guard = self.inner.batch.lock().expect("batch lock");
         let b = &mut *guard;
         if b.cursor + UNIFORM_SLOT > UNIFORM_CHUNK {

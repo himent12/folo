@@ -44,13 +44,15 @@ pub use backend::{
     register, tensor_from_buffer,
 };
 pub use context::{
-    AdapterSummary, Capabilities, GpuContext, GpuOptions, Staged, WorkStats, request_tensor_cores,
+    AdapterSummary, Capabilities, GpuContext, GpuOptions, Staged, TracedOp, WorkStats, request_tensor_cores,
 };
 pub use dtype::DType;
 pub use error::{GpuError, Result};
 pub use kernels::elementwise::{BinaryOp, UnaryOp};
 pub use pool::{GpuBuffer, PoolStats};
 pub use tensor::GpuTensor;
+/// The write-only view of mapped staging memory that [`GpuContext::upload_with`] hands its `fill` closure.
+pub use wgpu::WriteOnly;
 
 #[cfg(test)]
 mod tests;

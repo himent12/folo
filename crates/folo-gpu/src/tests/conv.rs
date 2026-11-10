@@ -98,12 +98,17 @@ fn conv_implicit_gemm() {
 
 #[test]
 fn conv_both_tile_configs() {
-    for cfg in [TileConfig::SMALL, TileConfig::MEDIUM, TileConfig::LARGE] {
+    for cfg in
+        [TileConfig::SMALL, TileConfig::MEDIUM, TileConfig::LARGE, TileConfig::ROWS32, TileConfig::ROWS16]
+    {
         let mut d = desc(2, 16, 12, 12, 20, 1, Window2d::square(3, 1, 1));
         d.act = UnaryOp::Relu;
         run(&d, true, Some(cfg), 7);
         run(&desc(1, 8, 16, 16, 128, 1, Window2d::square(3, 1, 1)), false, Some(cfg), 8);
         run(&desc(2, 12, 6, 6, 9, 1, Window2d::square(1, 1, 0)), true, Some(cfg), 9);
+        // folo-n's first two convs: the 3-channel stem (K = 27) and 16 -> 32, both 3x3 stride 2.
+        run(&desc(2, 3, 18, 18, 16, 1, Window2d::square(3, 2, 1)), true, Some(cfg), 10);
+        run(&desc(2, 16, 14, 14, 32, 1, Window2d::square(3, 2, 1)), true, Some(cfg), 11);
     }
 }
 
@@ -135,6 +140,9 @@ fn conv_f16() {
         (desc(1, 5, 9, 9, 7, 1, Window2d::square(3, 2, 1)), false),
         (desc(2, 16, 8, 8, 24, 1, Window2d::square(1, 1, 0)), true),
         (desc(2, 8, 9, 9, 8, 8, Window2d::square(3, 1, 1)), true),
+        // Depthwise: stride 2, a width that is no multiple of the 4 outputs per invocation, channel multiplier 2.
+        (desc(2, 8, 13, 11, 8, 8, Window2d::square(3, 2, 1)), false),
+        (desc(1, 6, 7, 18, 12, 6, Window2d::square(5, 1, 2)), true),
     ] {
         let mut d = d;
         d.dtype = DType::F16;

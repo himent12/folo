@@ -133,6 +133,27 @@ impl Spec {
         self.f16
     }
 
+    /// `NAME=value` pairs (and `f16` / `coop`) on one line, for profiles and logs.
+    pub fn describe(&self) -> String {
+        let mut parts: Vec<String> = self
+            .vals
+            .iter()
+            .map(|(name, v)| match v {
+                SpecVal::U32(x) => format!("{name}={x}"),
+                SpecVal::I32(x) => format!("{name}={x}"),
+                SpecVal::Bool(x) => format!("{name}={}", u8::from(*x)),
+                SpecVal::F32(b) => format!("{name}={}", f32::from_bits(*b)),
+            })
+            .collect();
+        if self.f16 {
+            parts.push("f16".into());
+        }
+        if self.coop {
+            parts.push("coop".into());
+        }
+        parts.join(" ")
+    }
+
     fn header(&self) -> String {
         let mut s = String::new();
         // Directives first: WGSL rejects `enable` after any declaration.
@@ -165,8 +186,11 @@ pub(crate) struct KernelKey {
 }
 
 /// A compiled pipeline and its bind group layout.
+#[derive(Clone)]
 pub(crate) struct Kernel {
     pub name: &'static str,
+    /// The specialisation constants, for profiles ([`Spec::describe`]).
+    pub spec: String,
     pub pipeline: wgpu::ComputePipeline,
     pub layout: wgpu::BindGroupLayout,
     pub storage: &'static [Access],
@@ -240,7 +264,7 @@ impl Kernel {
         if let Some(err) = pollster::block_on(scope.pop()) {
             return Err(GpuError::Wgpu(format!("compiling kernel {} ({spec:?}): {err}", def.name)));
         }
-        Ok(Self { name: def.name, pipeline, layout, storage: def.storage })
+        Ok(Self { name: def.name, spec: spec.describe(), pipeline, layout, storage: def.storage })
     }
 }
 
