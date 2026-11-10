@@ -228,6 +228,19 @@ try {
     $closed = [W]::Fingerprint($brand[0], $brand[1], $brand[2], $brand[3])
     Check "Esc closes it" ($closed -eq $before) ""
 
+    # Keyboard mode: focus went back to the search field. An arrow key turns keyboard mode on (its
+    # focus ring shows); a press on the title bar's drag area turns it off, as any press does.
+    [W]::Hover((DragX), (Bar)); Settle 400
+    $field = @([int]($c.Right - (138 + 12 + 280 + 6) * $s), [int]($c.Top + 2 * $s), [int](292 * $s), [int](36 * $s))
+    $plain = [W]::Fingerprint($field[0], $field[1], $field[2], $field[3])
+    [W]::Key(0x26, 0); Settle 500   # Up
+    $ring = [W]::Fingerprint($field[0], $field[1], $field[2], $field[3])
+    [W]::Click((DragX), (Bar)); Settle 600
+    $off = [W]::Fingerprint($field[0], $field[1], $field[2], $field[3])
+    Check "a key shows the focus ring" ($ring -ne $plain) ""
+    Check "a press on the title bar leaves keyboard mode" (($off -eq $plain) -and (Same (Rect) $r0) -and -not (Zoomed)) (State)
+    Check "the window has FOLO's icon" ([W]::GetClassLongPtrW($h, -14) -ne [IntPtr]::Zero) ""
+
     # Windows 11 shows its snap layouts over Maximize: a screenshot to look at (not checked).
     [W]::Hover((BtnX 1), (Bar)); Start-Sleep -Milliseconds 1800
     $snap = Join-Path $StateDir "snap-flyout.png"

@@ -2685,8 +2685,10 @@ impl FoloApp {
                     // A caption press goes to GPUI first and only reaches Windows (drag, double-click
                     // maximize, the caption buttons) if nothing prevents its default. The focus-tracked
                     // root would (focusing itself does), so the chrome hides the root from the hit
-                    // test. The crumbs above it still take their own clicks.
+                    // test. The crumbs above it still take their own clicks. Hidden from the root, it
+                    // leaves keyboard mode itself, as the root does for any other press.
                     .occlude()
+                    .capture_any_mouse_down(self.leave_kb(cx))
                     .children(crumbs.into_iter().enumerate().map(|(i, (label, route))| {
                         let last = route.is_none();
                         let crumb = div().id(("crumb", i)).px(px(4.)).py(px(2.)).rounded(px(4.)).child(
@@ -2752,6 +2754,7 @@ impl FoloApp {
             )
             .child(
                 win_btn("win-min", "icons/win-min.svg", WindowControlArea::Min, false)
+                    .capture_any_mouse_down(self.leave_kb(cx))
                     .when(fullscreen, |d| d.on_click(|_, w, _| w.minimize_window())),
             )
             .child(
@@ -2761,19 +2764,21 @@ impl FoloApp {
                     WindowControlArea::Max,
                     false,
                 )
+                .capture_any_mouse_down(self.leave_kb(cx))
                 // Full screen's "restore" leaves full screen.
                 .when(fullscreen, |d| d.on_click(|_, w, _| w.toggle_fullscreen())),
             )
-            .child(win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true).when(
-                fullscreen,
-                |d| {
-                    // Closing this way skips the window's should-close hook: remember here.
-                    d.on_click(cx.listener(|this, _, w, cx| {
-                        this.save_window_state(w, cx);
-                        w.remove_window();
-                    }))
-                },
-            ))
+            .child(
+                win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true)
+                    .capture_any_mouse_down(self.leave_kb(cx))
+                    .when(fullscreen, |d| {
+                        // Closing this way skips the window's should-close hook: remember here.
+                        d.on_click(cx.listener(|this, _, w, cx| {
+                            this.save_window_state(w, cx);
+                            w.remove_window();
+                        }))
+                    }),
+            )
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, Option<Route>)> {
@@ -2846,6 +2851,7 @@ impl FoloApp {
             live_card =
                 Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         }
+        let brand_press = self.leave_kb(cx);
         let health = self.connection_line(compact, window, cx);
         div()
             .w(px(if compact { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR }))
@@ -2869,6 +2875,7 @@ impl FoloApp {
                     .window_control_area(WindowControlArea::Drag)
                     // See `titlebar-drag`.
                     .occlude()
+                    .capture_any_mouse_down(brand_press)
                     .child(logo(&t, 20.))
                     .when(!compact, |d| {
                         d.child(
@@ -3405,12 +3412,7 @@ impl Render for FoloApp {
                     cx.notify();
                 }
             }))
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                if this.kb {
-                    this.kb = false;
-                    cx.notify();
-                }
-            }))
+            .capture_any_mouse_down(self.leave_kb(cx))
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_drag_end))
@@ -3473,13 +3475,25 @@ impl Render for FoloApp {
                         .left_0()
                         .right_0()
                         .h(px(crate::theme::layout::DESKTOP_RESIZE_EDGE))
-                        .occlude(),
+                        .occlude()
+                        .capture_any_mouse_down(self.leave_kb(cx)),
                 )
             })
     }
 }
 
 impl FoloApp {
+    /// A press leaves keyboard mode (focus rings off). The root listens for presses anywhere, but
+    /// the window chrome hides the root from the hit test (`titlebar-drag`), so it listens too.
+    /// Only a capture-phase listener: it never prevents the press's default.
+    fn leave_kb(&self, cx: &mut Context<Self>) -> Box<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App)> {
+        Box::new(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+            if this.kb {
+                this.kb = false;
+                cx.notify();
+            }
+        }))
+    }
     /// A dialog, the stop confirmation or the inspector is up: the page behind is inert.
     pub fn modal_open(&self) -> bool {
         self.new_run.is_some()
