@@ -860,16 +860,19 @@ impl Runs {
 
     /// Queues `entry`. After [`Runs::shutdown`] has started (checked under the queue lock, so a run is either
     /// queued before the shutdown drains the queue or not at all) the run is marked `stopped` instead and the
-    /// result is `503 shutting_down`.
+    /// result is `503 shutting_down`. A run stopped or deleted since it was registered or restarted (it was `queued`
+    /// outside the queue, so it stopped at once) is not queued.
     fn enqueue(self: &Arc<Self>, entry: &Arc<RunEntry>) -> Result<()> {
         let ahead = {
+            // Lock order: the run's state, then the queue (as `stop`).
+            let mut st = entry.state.lock().unwrap();
+            if st.file.run.status != RunStatus::Queued || st.deleted {
+                return Ok(());
+            }
             let mut q = self.queue.lock().unwrap();
             if q.shutdown {
                 drop(q);
-                let mut st = entry.state.lock().unwrap();
-                if !st.deleted {
-                    entry.finish(&mut st, RunStatus::Stopped, None);
-                }
+                entry.finish(&mut st, RunStatus::Stopped, None);
                 drop(st);
                 entry.log(LogLevel::Warn, "the server is shutting down; the run was not queued");
                 return Err(shutting_down());
@@ -1070,9 +1073,9 @@ impl Runs {
             );
             return Err(err);
         }
-        let run = self.restart(e, wanted, None)?;
+        self.restart(e, wanted, None)?;
         self.enqueue(e)?;
-        Ok(Run { queue_position: self.position(&run.id), ..run })
+        Ok(self.record(e))
     }
 
     /// Resumes run `e` on a cloud connection with `wanted` ([`Runs::resume_config`]; `compute` set): queued again
@@ -1518,6 +1521,33 @@ mod tests {
         let logs = runs.logs("run_late", &LogsQuery::last(10)).unwrap();
         assert!(logs.lines.iter().any(|l| l.message.contains("not queued")));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stop that lands between a resume's restart and its enqueue (the run is `queued` but not in the queue yet,
+    /// so it stops at once): the run stays stopped and out of the queue, and no worker starts for it.
+    #[test]
+    fn a_run_stopped_before_it_is_queued_stays_out_of_the_queue() {
+        let dir = TestDir::new("runs-stop-resume");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"r"}"#).unwrap();
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: DatasetFormat::Yolo,
+        };
+        let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
+        runs.stop(e.id()).unwrap();
+        // `resume`: restart, then (after the interleaved stop) enqueue.
+        runs.restart(&e, config, None).unwrap();
+        assert_eq!(runs.stop(e.id()).unwrap().status, RunStatus::Stopped);
+        runs.enqueue(&e).unwrap();
+        let run = runs.snapshot(e.id()).unwrap();
+        assert_eq!((run.status, run.queue_position), (RunStatus::Stopped, None));
+        assert!(!runs.busy() && !*runs.worker.lock().unwrap(), "a stopped run waits in the queue");
+        let logs = runs.logs(e.id(), &LogsQuery::last(10)).unwrap();
+        assert!(logs.lines.last().unwrap().message.contains("stopped before it started"), "{:?}", logs.lines);
+        runs.shutdown(None);
     }
 
     /// `list` reads one queue: positions stay unique and gapless while another thread keeps moving runs.
