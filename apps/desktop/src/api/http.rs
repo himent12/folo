@@ -60,8 +60,12 @@ impl HttpBackend {
     }
 
     fn with_handshake(base: &str, handshake: Duration) -> Self {
+        // As typed or pasted in Settings: surrounding whitespace (a copied line's end) and a
+        // missing scheme ("127.0.0.1:7878") would otherwise make every request fail.
+        let base = base.trim().trim_end_matches('/');
+        let base = if base.contains("://") { base.to_string() } else { format!("http://{base}") };
         Self {
-            base: base.trim_end_matches('/').to_string(),
+            base,
             agent: agent(Some(Duration::from_secs(30))),
             stream_agent: stream_agent(handshake),
         }
@@ -841,6 +845,22 @@ FOLO"
     fn path_segments_are_encoded() {
         assert_eq!(seg("ds_8f2c"), "ds_8f2c");
         assert_eq!(seg("a b/c"), "a%20b%2Fc");
+    }
+
+    #[test]
+    fn a_pasted_or_bare_server_address_still_connects() {
+        // As Settings › Connection hands it over: pasted with the line's end, or typed without
+        // the scheme.
+        let (url, requests) = canned_server(vec![
+            json("200 OK", r#"{"providers":[]}"#),
+            json("200 OK", r#"{"providers":[]}"#),
+        ]);
+        let pasted = format!(" {url}/\r\n");
+        assert!(HttpBackend::new(&pasted).cloud_providers().is_ok(), "{pasted:?}");
+        assert!(requests.recv().unwrap().starts_with("GET /api/cloud/providers "));
+        let bare = url.trim_start_matches("http://").to_string();
+        assert!(HttpBackend::new(&bare).cloud_providers().is_ok(), "{bare:?}");
+        assert_eq!(HttpBackend::new(&bare).describe(), bare);
     }
 
     #[test]
