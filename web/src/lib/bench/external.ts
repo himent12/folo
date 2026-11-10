@@ -74,6 +74,8 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
   const known = ctx.imageIds ? new Set(ctx.imageIds) : null;
   const planned = new Map(ctx.plan.conditions.map((c) => [c.condition, c.severities]));
   const seen = o.seen ?? new Set<string>();
+  /** This call's records by key, as their boxes: what a repeat is compared with. */
+  const here = new Map<string, string>();
   /** Per condition and severity, the images answered. */
   const under = new Map<string, Map<number, Set<string>>>();
   const clean = new Set<string>();
@@ -97,7 +99,11 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
       if (!planned.get(cond)!.includes(sev)) return at(i, `${name(cond)} runs at severities ${planned.get(cond)!.join(', ')}, not ${sev}.`);
     }
     const key = predictionKey(r.image, cond as string | null, sev as number | null);
-    if (seen.has(key)) return at(i, `image "${r.image}"${cond ? ` under ${name(cond)} ${sev}` : ''} is answered twice.`);
+    // A record of these records repeated with the same boxes is taken once, as the server takes it (a repeat with other
+    // boxes, or of one received in an earlier part, is refused).
+    if (here.has(key) && here.get(key) === JSON.stringify(r.boxes)) continue;
+    here.set(key, JSON.stringify(r.boxes));
+    if (seen.has(key)) return at(i,`image "${r.image}"${cond ? ` under ${name(cond)} ${sev}` : ''} is answered twice.`);
     seen.add(key);
     if (!Array.isArray(r.boxes)) return at(i, '"boxes" must be an array (empty when nothing was found).');
     if (r.boxes.length > MAX_BOXES_PER_RECORD) return at(i, `${num(r.boxes.length)} boxes: one record carries at most ${num(MAX_BOXES_PER_RECORD)}.`);

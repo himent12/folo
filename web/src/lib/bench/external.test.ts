@@ -50,7 +50,7 @@ describe('checkPredictions', () => {
     expect(err([{ image: '1', boxes: [{ ...box, score: 2 }] }])).toMatch(/"score" must be between 0 and 1/);
     expect(err([{ image: '1', boxes: [{ class: 0, x1: 'a' }] }])).toMatch(/must be numbers/);
     expect(err([{ image: '1' }])).toMatch(/"boxes" must be an array/);
-    expect(err([...clean, clean[0]])).toMatch(/^Record 3: image "1" is answered twice/);
+    expect(err([...clean, { image: '1', boxes: [] }])).toMatch(/^Record 3: image "1" is answered twice/);
     expect(err([...clean, { image: '1', condition: 'rain', severity: 1, boxes: [] }])).toMatch(/unknown condition "rain"/);
     expect(err([...clean, { image: '1', condition: 'low_light', severity: 1, boxes: [] }])).toMatch(/Low light is not in this benchmark's plan/);
     expect(err([...clean, { image: '1', condition: 'haze', severity: 2, boxes: [] }])).toMatch(/Haze runs at severities 1, 3, not 2/);
@@ -108,6 +108,15 @@ describe('a large file, sent in parts', () => {
     const rp = partsOf(real, plan);
     expect(rp.length).toBeGreaterThan(1);
     for (const p of rp) expect(estimateBytes(p)).toBeLessThanOrEqual(PART_BYTES);
+  });
+
+  it('takes a record repeated with the same boxes once, as the server does, and refuses one repeated with other boxes', () => {
+    // docs/API.md: "A record that repeats one with exactly the same boxes ... is accepted and ignored".
+    const r = checkPredictions([...clean, { ...clean[0]!, boxes: [{ ...box }] }], ctx);
+    expect(r.ok && r.summary).toEqual({ images: 2, conditions: [], missing: ['haze', 'jpeg'], boxes: 1, scores: true });
+    expect(r.ok && r.predictions).toHaveLength(2);
+    const other = checkPredictions([...clean, { image: '1', boxes: [{ ...box, x2: 31 }] }], ctx);
+    expect(!other.ok && other.error).toMatch(/^Record 3: image "1" is answered twice/);
   });
 
   it('refuses a record with more than 1000 boxes, and a part that repeats a record received before', () => {
