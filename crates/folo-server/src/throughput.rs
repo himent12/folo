@@ -997,6 +997,7 @@ pub fn estimate(records: &[TrainRecord], input: &EstimateInput) -> RunEstimate {
         vram_source,
         close_mosaic: input.close_mosaic_epochs,
         cli: None,
+        cost: None,
     }
 }
 

@@ -9,10 +9,10 @@ training and evaluation pipeline, a server, a CLI and a web studio.
                 │                   │                   │ HTTP + SSE (docs/API.md)
                 ▼                   ▼                   ▼
           folo-vision ◄──────── folo-server ◄───────────┘
-         ╱     │     ╲
-   folo-nn  folo-data  (box ops / NMS / metrics: plain slices)
-      │
-  folo-core ◄── folo-gpu (registers a GPU backend at runtime)
+         ╱     │     ╲              │  ╲
+   folo-nn  folo-data  (box ops)    │   folo-cloud ──► a provider's API (launch, look up, terminate)
+      │                             ▼
+  folo-core ◄── folo-gpu       folo-client ══► another folo serve (a cloud worker), over docs/API.md
 ```
 
 ## folo-core — tensors and autograd
@@ -257,6 +257,22 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   FOLO Desktop reuses. `folo serve` runs it and serves the built Studio from `web/dist`, or from the copy compiled into the binary by
   the `embed-web` feature (release builds, see `docs/RELEASE.md`). `folo serve --mock` serves realistic
   synthetic data for UI work before or without a trained model.
+- **Cloud compute** (`folo_server::cloud`, docs/CLOUD.md): a run with `TrainConfig.compute` trains on another
+  machine's GPU and stays a run of this server. The worker is an ordinary `folo serve` reached through
+  `folo-client` with the public API: a token (`--token`), uploads in parts (`/api/uploads`, a dataset as the tar
+  stream `folo_data::pack` writes), cursors on a run's history and `Range` downloads of its weights are all it
+  needs, so any FOLO server can be one. `folo-cloud` holds the providers behind one trait (`Provider`: check
+  credentials, list offers, launch, look up, find by name, terminate): `RunPod` rents a pod per run and starts the
+  worker with a bootstrap script; `Remote` is a server that already runs. `Cloud` is the control plane of a data
+  dir: connections (`cloud/connections.json`, owner-only, never served), the instance ledger
+  (`cloud/instances/<id>.json`, written before the provider is called), a reaper thread that retries terminations
+  and cleans up after crashes, and one executor thread per cloud run through the phases provisioning → booting →
+  syncing → training → collecting → releasing. A cloud run shares the run registry, folder and event sink with
+  local runs (`RunEntry::execute` is the one claim-execute-publish path) but not the queue or the device; its
+  worker's history is mirrored poll by poll into the same `metrics.jsonl`, `log.jsonl` and `samples/`, so everything
+  downstream of a run is unchanged. A guard releases the instance on every way out, including a panic; a run that
+  trains survives this server (`runs/<id>/cloud.json` and an OS lock on `cloud.lock` let the next process follow it
+  again). Tests drive the whole lifecycle against an in-process worker (`tests/cloud.rs`).
 - **Agent labeling** (`folo_server::label`, docs/LABELING.md): labeling jobs under `<data dir>/label/<id>/`
   (unlabeled images, classes, instructions, boxes so far), labeled by a coding-agent CLI on the server's machine
   and exported as a YOLO dataset that the store registers. `Labeler` is the service behind `/api/label` (the

@@ -14,6 +14,10 @@
 //! Every validated epoch after a session's first also feeds the throughput table ([`crate::throughput`]): its
 //! training rate (the epoch's last `step` event), its validation rate (the rest of the epoch's duration) and the
 //! GPU pool's peak memory.
+//!
+//! Cloud runs (`config.compute`, docs/CLOUD.md) share the registry, the run folder and the event sink, but not the
+//! queue, the worker thread or the device: [`crate::cloud`] claims such a run when it registers it and executes it
+//! on a thread of its own through the same [`RunEntry::execute`]. They do not feed the throughput table.
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -24,8 +28,8 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use folo_api::{
-    BestEpoch, DatasetFormat, Epoch, LogLevel, LogLine, ModelMetrics, PhaseKind, QueueEvent, Run, RunEvent,
-    RunMetrics, RunStatus, StatusEvent, Step, TrainConfig,
+    BestEpoch, CloudPhase, DatasetFormat, Epoch, LogLevel, LogLine, ModelMetrics, PhaseKind, QueueEvent, Run,
+    RunCloud, RunEvent, RunLogs, RunMetrics, RunStatus, StatusEvent, Step, TrainConfig,
 };
 use folo_data::{Dataset as _, Split};
 use folo_vision::train::ResumeOverrides;
@@ -36,7 +40,7 @@ use tokio::sync::broadcast;
 use crate::engine;
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
-use crate::store::{QueueMove, Subscription};
+use crate::store::{LogsQuery, MetricsQuery, QueueMove, Subscription};
 use crate::throughput::{Throughput, TrainKey, TrainSample};
 use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
 
@@ -161,7 +165,9 @@ fn now() -> String {
     rfc3339(unix_now())
 }
 
-fn append_line(path: &Path, line: &str) {
+/// Appends `line` to the file at `path` (a run's `log.jsonl`, or the `metrics.jsonl` a cloud run mirrors); a failure
+/// is logged.
+pub(crate) fn append_line(path: &Path, line: &str) {
     let r = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -239,7 +245,7 @@ impl RunEntry {
     }
 
     /// A server-side log line (persisted and sent like the trainer's).
-    fn log(&self, level: LogLevel, message: impl Into<String>) {
+    pub(crate) fn log(&self, level: LogLevel, message: impl Into<String>) {
         let line = LogLine { t: now(), level, message: message.into() };
         self.write_log(&line);
         self.send(RunEvent::Log(line));
@@ -270,8 +276,9 @@ impl RunEntry {
         self.send(RunEvent::Status(status_event(&st.file.run)));
     }
 
-    /// The trainer's events: update the run, persist what matters, forward to subscribers.
-    fn on_event(&self, ev: &RunEvent) {
+    /// The trainer's events (or a cloud worker's, mirrored): update the run, persist what matters, forward to
+    /// subscribers.
+    pub(crate) fn on_event(&self, ev: &RunEvent) {
         if let Some(m) = self.measure.lock().unwrap().as_mut() {
             match ev {
                 RunEvent::Step(s) => m.last_step = Some(*s),
@@ -323,12 +330,108 @@ impl RunEntry {
                 self.persist(&st);
             }
             RunEvent::Log(l) => self.write_log(l),
-            // The trainer never sends these; the queue does (`Runs::notify_queue`).
-            RunEvent::Queue(_) => {}
+            // The trainer never sends these: the queue does (`Runs::notify_queue`), and only cloud runs have
+            // `cloud` events.
+            RunEvent::Queue(_) | RunEvent::Cloud(_) => {}
         }
         // Sent under the state lock, so subscribers see transitions in the order they happen.
         self.send(ev.clone());
     }
+
+    /// Takes a queued run for execution: false when it was stopped or deleted while it waited.
+    fn claim(&self) -> bool {
+        let mut st = self.state.lock().unwrap();
+        if st.file.run.status != RunStatus::Queued || st.deleted {
+            return false;
+        }
+        st.claimed = true;
+        true
+    }
+
+    /// Takes an active run a previous process left to its cloud worker, so this process follows it again: false
+    /// when it was deleted meanwhile.
+    pub(crate) fn follow(&self) -> bool {
+        let mut st = self.state.lock().unwrap();
+        st.claimed = !st.deleted;
+        st.claimed
+    }
+
+    /// Runs `execute` on a claimed run, then publishes the final status it reported ([`RunEntry::set_outcome`],
+    /// or the trainer's last `status` event; a panic is a failed run, `internal`) and lets go of the run, so a client
+    /// that sees the status may resume or delete it at once.
+    pub(crate) fn execute(&self, execute: impl FnOnce() -> Ended) {
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(execute));
+        *self.measure.lock().unwrap() = None;
+        let mut st = self.state.lock().unwrap();
+        let internal = || Some("internal".to_string());
+        let (status, error, code) = match (ran, st.outcome.take()) {
+            (Ok(Ended::LetGo), _) => {
+                st.claimed = false;
+                return;
+            }
+            (Ok(Ended::Finished), Some(o)) => o,
+            (Ok(Ended::Finished), None) => {
+                (RunStatus::Failed, Some("the trainer ended without a final status".into()), internal())
+            }
+            (Err(_), _) => {
+                let msg = "the trainer panicked (a bug)".to_string();
+                drop(st);
+                self.log(LogLevel::Error, msg.clone());
+                st = self.state.lock().unwrap();
+                (RunStatus::Failed, Some(msg), internal())
+            }
+        };
+        st.claimed = false;
+        self.finish_with_code(&mut st, status, error, code);
+    }
+
+    /// Records how the run ended, for [`RunEntry::execute`] to publish.
+    pub(crate) fn set_outcome(&self, status: RunStatus, error: Option<String>, code: Option<String>) {
+        self.state.lock().unwrap().outcome = Some((status, error, code));
+    }
+
+    /// A stop was requested ([`Runs::stop`]).
+    pub(crate) fn stop_requested(&self) -> bool {
+        self.stop.load(Ordering::Relaxed)
+    }
+
+    /// Changes the run's record outside the trainer (a cloud run's device and length from its worker) and persists
+    /// it.
+    pub(crate) fn update(&self, change: impl FnOnce(&mut Run)) {
+        let mut st = self.state.lock().unwrap();
+        change(&mut st.file.run);
+        self.persist(&st);
+    }
+
+    /// Changes a cloud run's [`RunCloud`], persists it and sends it as a `cloud` event. Nothing for a run without
+    /// one.
+    pub(crate) fn update_cloud(&self, change: impl FnOnce(&mut RunCloud)) {
+        let mut st = self.state.lock().unwrap();
+        let Some(cloud) = st.file.run.cloud.as_mut() else { return };
+        change(cloud);
+        let event = RunEvent::Cloud(Box::new(cloud.clone()));
+        self.persist(&st);
+        self.send(event);
+    }
+
+    /// The run's id.
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The run folder's `metrics.jsonl`, which a cloud run writes itself from its worker's history.
+    pub(crate) fn metrics_path(&self) -> PathBuf {
+        self.dir.join("metrics.jsonl")
+    }
+}
+
+/// How an execution of a claimed run ended ([`RunEntry::execute`]).
+pub(crate) enum Ended {
+    /// It recorded its final status: publish it.
+    Finished,
+    /// This process let go of the run without ending it (a cloud run left to its worker when the server shuts
+    /// down): it stays as persisted, for the next process to follow.
+    LetGo,
 }
 
 /// The model metrics of an epoch's validation.
@@ -418,8 +521,8 @@ impl EpochHold {
 }
 
 impl Runs {
-    /// Loads the runs under `dir`. Runs a previous process left active become `stopped`. Trained epochs are
-    /// recorded in `throughput`.
+    /// Loads the runs under `dir`. Runs a previous process left active become `stopped`, except cloud runs, which
+    /// stay as they are for [`crate::cloud`]. Trained epochs are recorded in `throughput`.
     pub fn open(dir: PathBuf, throughput: Arc<Throughput>) -> Arc<Runs> {
         let mut list = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
@@ -452,7 +555,9 @@ impl Runs {
                 let e = RunEntry::new(id, d, file);
                 {
                     let mut st = e.state.lock().unwrap();
-                    if st.file.run.status.is_active() {
+                    // An active cloud run trains on its worker without this server: `crate::cloud` follows it again
+                    // or ends it.
+                    if st.file.run.status.is_active() && st.file.run.config.compute.is_none() {
                         let was = st.file.run.status;
                         reconcile(&mut st.file, &e.dir);
                         e.finish(&mut st, RunStatus::Stopped, None);
@@ -645,15 +750,53 @@ impl Runs {
         Ok(run)
     }
 
-    /// Registers a new run (status `queued`) and queues it. `config` is already validated, its name filled in.
+    /// Registers a new run (status `queued`) and queues it. `config` is already validated, its name filled in. A
+    /// `checkpoint` (a full training checkpoint) is copied to the run's `weights/last.folo` first, so the worker
+    /// continues it as it resumes a run.
     pub fn create(
         self: &Arc<Self>,
         config: TrainConfig,
         dataset: DatasetRef,
         weights: Option<PathBuf>,
+        checkpoint: Option<&Path>,
         val_offset: u64,
         device: String,
     ) -> Result<Run> {
+        let entry = self.register(config, dataset, weights, checkpoint, val_offset, device, None)?;
+        self.enqueue(&entry)?;
+        let run = entry.run();
+        Ok(Run { queue_position: self.position(&run.id), ..run })
+    }
+
+    /// Registers a new cloud run (status `queued`, with `cloud`) like [`Runs::create`], but outside the queue: it
+    /// is claimed at once, for [`crate::cloud`] to execute.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn create_cloud(
+        &self,
+        config: TrainConfig,
+        dataset: DatasetRef,
+        weights: Option<PathBuf>,
+        checkpoint: Option<&Path>,
+        val_offset: u64,
+        device: String,
+        cloud: RunCloud,
+    ) -> Result<Arc<RunEntry>> {
+        self.register(config, dataset, weights, checkpoint, val_offset, device, Some(cloud))
+    }
+
+    /// Creates a run's folder and record and adds it to the registry; a cloud run (`cloud`) is claimed before
+    /// anything can see it.
+    #[allow(clippy::too_many_arguments)]
+    fn register(
+        &self,
+        config: TrainConfig,
+        dataset: DatasetRef,
+        weights: Option<PathBuf>,
+        checkpoint: Option<&Path>,
+        val_offset: u64,
+        device: String,
+        cloud: Option<RunCloud>,
+    ) -> Result<Arc<RunEntry>> {
         self.check_open()?;
         let mut list = self.list.write().unwrap();
         let seed = fnv1a(config.name.as_bytes()) ^ unix_now().to_bits();
@@ -661,6 +804,15 @@ impl Runs {
         let dir = self.dir.join(&id);
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
+        if let Some(src) = checkpoint {
+            let last = dir.join("weights").join("last.folo");
+            let copied =
+                std::fs::create_dir_all(dir.join("weights")).and_then(|()| std::fs::copy(src, &last));
+            if let Err(e) = copied {
+                let _ = std::fs::remove_dir_all(&dir);
+                return Err(Error::io(format!("copying {} to {}: {e}", src.display(), last.display())));
+            }
+        }
         let run = Run {
             id: id.clone(),
             name: config.name.clone(),
@@ -681,15 +833,24 @@ impl Runs {
             error_code: None,
             resolved: None,
             queue_position: None,
+            cloud,
         };
-        let file =
-            RunFile { run: run.clone(), dataset, weights, val_offset, epochs_done: 0, last_metrics: None };
-        let entry = Arc::new(RunEntry::new(id.clone(), dir, file));
-        entry.persist(&entry.state.lock().unwrap());
+        let file = RunFile { run, dataset, weights, val_offset, epochs_done: 0, last_metrics: None };
+        let entry = Arc::new(RunEntry::new(id, dir, file));
+        {
+            let mut st = entry.state.lock().unwrap();
+            st.claimed = st.file.run.cloud.is_some();
+            entry.persist(&st);
+        }
         list.push(entry.clone());
         drop(list);
-        self.enqueue(&entry)?;
-        Ok(Run { queue_position: self.position(&run.id), ..run })
+        if let Some(src) = checkpoint {
+            entry.log(
+                LogLevel::Info,
+                format!("continuing the training state of {}", folo_api::json::path(src)),
+            );
+        }
+        Ok(entry)
     }
 
     /// `503 shutting_down` once [`Runs::shutdown`] has started.
@@ -761,39 +922,12 @@ impl Runs {
             let _gate = self.gate.lock().unwrap_or_else(|p| p.into_inner());
             // Lock order: registry, then a run's state, then the queue (as `delete` and `stop` take them); the
             // queue lock is released first. A run stopped or deleted in between is skipped.
-            {
-                let mut st = entry.state.lock().unwrap();
-                if st.file.run.status != RunStatus::Queued || st.deleted {
-                    drop(st);
-                    *self.active.lock().unwrap() = None;
-                    self.activity.fetch_add(1, Ordering::SeqCst);
-                    self.idle.notify_all();
-                    continue;
-                }
-                st.claimed = true;
+            if entry.claim() {
+                entry.execute(|| {
+                    execute(&entry, &self.throughput, &self.hold);
+                    Ended::Finished
+                });
             }
-            let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                execute(&entry, &self.throughput, &self.hold)
-            }));
-            *entry.measure.lock().unwrap() = None;
-            let mut st = entry.state.lock().unwrap();
-            let internal = || Some("internal".to_string());
-            let (status, error, code) = match (ran, st.outcome.take()) {
-                (Ok(()), Some(o)) => o,
-                (Ok(()), None) => {
-                    (RunStatus::Failed, Some("the trainer ended without a final status".into()), internal())
-                }
-                (Err(_), _) => {
-                    let msg = "the trainer panicked (a bug)".to_string();
-                    drop(st);
-                    entry.log(LogLevel::Error, msg.clone());
-                    st = entry.state.lock().unwrap();
-                    (RunStatus::Failed, Some(msg), internal())
-                }
-            };
-            st.claimed = false;
-            entry.finish_with_code(&mut st, status, error, code);
-            drop(st);
             *self.active.lock().unwrap() = None;
             self.activity.fetch_add(1, Ordering::SeqCst);
             self.idle.notify_all();
@@ -815,6 +949,10 @@ impl Runs {
         if st.deleted {
             return Err(Error::not_found("run", id));
         }
+        let cloud = st.file.run.config.compute.is_some();
+        if cloud && st.file.run.status.is_active() && !st.claimed {
+            return Err(followed_elsewhere(id));
+        }
         match st.file.run.status {
             RunStatus::Queued if !st.claimed => {
                 {
@@ -835,7 +973,12 @@ impl Runs {
                 e.send(RunEvent::Status(status_event(&st.file.run)));
                 let run = st.file.run.clone();
                 drop(st);
-                e.log(LogLevel::Info, "stop requested; stopping after the current batch");
+                let message = match run.cloud.as_ref().map(|c| c.phase) {
+                    Some(p) if cloud && p < CloudPhase::Training => "stop requested; releasing the instance",
+                    _ if cloud => "stop requested; the worker stops after its current batch",
+                    _ => "stop requested; stopping after the current batch",
+                };
+                e.log(LogLevel::Info, message);
                 Ok(run)
             }
             RunStatus::Stopping => Ok(st.file.run.clone()),
@@ -862,28 +1005,19 @@ impl Runs {
         Ok(e.dir.clone())
     }
 
-    /// Resumes a `stopped` or `failed` run (same id): from `weights/last.folo` when it exists, from scratch
-    /// otherwise. `fields` are the request body's other fields: each must equal the run's config (an empty `name`
-    /// counts as omitted), except `device`, which may change.
-    pub fn resume(
-        self: &Arc<Self>,
+    /// What `POST /api/runs` with `resume_run_id` asks of a `stopped` or `failed` run: the run, and its config with
+    /// the request's `fields` (the body's other fields), which must each equal the run's config (an empty `name`
+    /// counts as omitted), except `device` and `compute`, which may change. Nothing changes yet: [`Runs::resume`]
+    /// (on this machine) or [`Runs::resume_cloud`] does.
+    pub fn resume_config(
+        &self,
         id: &str,
         fields: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<Run> {
+    ) -> Result<(Arc<RunEntry>, TrainConfig)> {
         self.check_open()?;
         let e = self.get(id)?;
-        let mut st = e.state.lock().unwrap();
-        if st.deleted {
-            return Err(Error::not_found("run", id));
-        }
-        let status = st.file.run.status;
-        if status.is_active() || st.claimed {
-            return Err(Error::conflict("run_active", format!("run '{id}' is still active")));
-        }
-        if status == RunStatus::Completed {
-            return Err(Error::conflict("run_not_resumable", format!("run '{id}' already completed"))
-                .hint("start a new run with `weights` set to its model to train further"));
-        }
+        let st = e.state.lock().unwrap();
+        resumable(&st, id)?;
         let stored = st.file.run.config.clone();
         let mut merged = serde_json::to_value(&stored).expect("configs serialize");
         for (k, v) in fields {
@@ -899,7 +1033,7 @@ impl Runs {
             .as_object()
             .unwrap()
             .iter()
-            .filter(|(k, v)| k.as_str() != "device" && b.get(k.as_str()) != Some(v))
+            .filter(|(k, v)| !matches!(k.as_str(), "device" | "compute") && b.get(k.as_str()) != Some(v))
             .map(|(k, _)| k.as_str())
             .collect();
         if !differ.is_empty() {
@@ -910,6 +1044,17 @@ impl Runs {
             )
             .hint("omit the fields, or start a new run (with `weights` to start from this run's model)"));
         }
+        if !Path::new(&st.file.dataset.path).exists() {
+            return Err(Error::not_found("dataset", &st.file.dataset.id)
+                .hint(format!("the run's dataset is gone from {}", st.file.dataset.path)));
+        }
+        drop(st);
+        Ok((e, wanted))
+    }
+
+    /// Resumes run `e` on this machine with `wanted` ([`Runs::resume_config`]): from `weights/last.folo` when it
+    /// exists (the full checkpoint state, same id), from scratch otherwise.
+    pub fn resume(self: &Arc<Self>, e: &Arc<RunEntry>, wanted: TrainConfig) -> Result<Run> {
         let device = engine::resolve(&wanted.device)?;
         // A mixed-precision run resumes in mixed precision (`amp` must match): refused before it is queued where this
         // server cannot train it, as a new run is.
@@ -925,13 +1070,35 @@ impl Runs {
             );
             return Err(err);
         }
-        if !Path::new(&st.file.dataset.path).exists() {
-            return Err(Error::not_found("dataset", &st.file.dataset.id)
-                .hint(format!("the run's dataset is gone from {}", st.file.dataset.path)));
-        }
+        let run = self.restart(e, wanted, None)?;
+        self.enqueue(e)?;
+        Ok(Run { queue_position: self.position(&run.id), ..run })
+    }
+
+    /// Resumes run `e` on a cloud connection with `wanted` ([`Runs::resume_config`]; `compute` set): queued again
+    /// with a fresh `cloud`, and claimed for [`crate::cloud`] to execute.
+    pub(crate) fn resume_cloud(
+        &self,
+        e: &Arc<RunEntry>,
+        wanted: TrainConfig,
+        cloud: RunCloud,
+    ) -> Result<Run> {
+        self.restart(e, wanted, Some(cloud))
+    }
+
+    /// Queues run `e` again with `wanted`'s `device` and `compute` (and `cloud`, for a cloud run), unless it became
+    /// active since [`Runs::resume_config`] looked at it.
+    fn restart(&self, e: &Arc<RunEntry>, wanted: TrainConfig, cloud: Option<RunCloud>) -> Result<Run> {
+        let mut st = e.state.lock().unwrap();
+        resumable(&st, &e.id)?;
         let last = e.dir.join("weights").join("last.folo");
+        st.claimed = cloud.is_some();
         let r = &mut st.file.run;
         r.config.device = wanted.device;
+        r.config.compute = wanted.compute;
+        // `cloud` is there exactly for a cloud run: one resumed here is a run of this machine from now on (what its
+        // instances cost is in its log and in the ledger).
+        r.cloud = cloud;
         r.status = RunStatus::Queued;
         r.finished = None;
         r.error = None;
@@ -951,8 +1118,7 @@ impl Runs {
                 "no epoch finished before; starting over".to_string()
             },
         );
-        self.enqueue(&e)?;
-        Ok(Run { queue_position: self.position(id), ..run })
+        Ok(run)
     }
 
     /// Subscribes to a run's events.
@@ -965,28 +1131,33 @@ impl Runs {
         Ok(Subscription { initial: status_event(&st.file.run), events })
     }
 
-    /// The run's metric history: `metrics.jsonl` (resumed epochs replace the steps and epochs they repeat) plus the
-    /// steps not flushed to it yet. `every > 1` keeps every `every`-th step and the latest.
-    pub fn metrics(&self, id: &str, every: u64) -> Result<RunMetrics> {
+    /// The run's metric history as `q` selects it: `metrics.jsonl` (resumed epochs replace the steps and epochs
+    /// they repeat) plus the steps not flushed to it yet. Those are the steps the trainer sent live, which skips some
+    /// (they reach the file at the epoch's end), so a query with a step cursor takes them only as far as they follow
+    /// on without a gap: a poller that continues after the last step it got never misses one.
+    pub fn metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics> {
         let e = self.get(id)?;
         let mut m = read_metrics(&e.dir.join("metrics.jsonl"));
         let tail = e.state.lock().unwrap().tail.clone();
-        let last = m.steps.last().map_or(0, |s| s.step);
-        m.steps.extend(tail.into_iter().filter(|s| s.step > last));
-        if every > 1 {
-            let latest = m.steps.last().map(|s| s.step);
-            m.steps.retain(|s| s.step % every == 0 || Some(s.step) == latest);
+        let mut last = m.steps.last().map_or(0, |s| s.step);
+        for s in tail {
+            if s.step <= last {
+                continue;
+            }
+            if q.after_step.is_some() && s.step != last + 1 {
+                break;
+            }
+            last = s.step;
+            m.steps.push(s);
         }
-        Ok(m)
+        Ok(q.select(m))
     }
 
-    /// The last `limit` log lines, oldest first.
-    pub fn logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>> {
+    /// The log lines `q` selects, oldest first, with the length of the whole log.
+    pub fn logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs> {
         let e = self.get(id)?;
         let text = std::fs::read_to_string(e.dir.join("log.jsonl")).unwrap_or_default();
-        let lines: Vec<LogLine> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
-        let skip = lines.len().saturating_sub(limit);
-        Ok(lines.into_iter().skip(skip).collect())
+        Ok(q.select(text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect()))
     }
 
     /// Stops accepting work, stops the active run (it keeps its last checkpoint) and marks queued runs `stopped`.
@@ -1018,6 +1189,22 @@ impl Runs {
     }
 }
 
+/// Refuses to resume a run that is deleted, still active (or claimed) or completed.
+fn resumable(st: &RunState, id: &str) -> Result<()> {
+    if st.deleted {
+        return Err(Error::not_found("run", id));
+    }
+    let status = st.file.run.status;
+    if status.is_active() || st.claimed {
+        return Err(Error::conflict("run_active", format!("run '{id}' is still active")));
+    }
+    if status == RunStatus::Completed {
+        return Err(Error::conflict("run_not_resumable", format!("run '{id}' already completed"))
+            .hint("start a new run with `weights` set to its model to train further"));
+    }
+    Ok(())
+}
+
 /// `409 run_not_queued`: moving a run that is not waiting in the queue.
 fn not_queued(id: &str, status: RunStatus) -> Error {
     let what = match status {
@@ -1027,6 +1214,13 @@ fn not_queued(id: &str, status: RunStatus) -> Error {
     };
     Error::conflict("run_not_queued", format!("run '{id}' {what}, not waiting in the queue"))
         .hint("only runs waiting in the queue (with a queue_position) can be moved")
+}
+
+/// `409 run_active` for a cloud run another FOLO process on this data dir follows (it holds `cloud.lock`): this
+/// process shows the run as persisted and leaves it alone.
+pub(crate) fn followed_elsewhere(id: &str) -> Error {
+    Error::conflict("run_active", format!("run '{id}' is followed by another FOLO process on this data dir"))
+        .hint("stop it there, or stop that process: the next `folo serve` on this data dir follows the run")
 }
 
 fn shutting_down() -> Error {
@@ -1243,6 +1437,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Mid-epoch, `/metrics` adds the steps the trainer sent live (some skipped) to the flushed file: all of them for
+    /// a chart, but with a step cursor only as far as they follow on without a gap, so a poller misses none.
+    #[test]
+    fn a_step_cursor_never_skips_a_step() {
+        let dir = TestDir::new("runs-cursor");
+        let runs = Runs::open(dir.to_path_buf(), Arc::new(Throughput::in_memory(Default::default())));
+        let config: TrainConfig = serde_json::from_str(r#"{"dataset_id":"ds_1","name":"c"}"#).unwrap();
+        let dataset = DatasetRef {
+            id: "ds_1".into(),
+            name: "d".into(),
+            path: "nowhere".into(),
+            format: DatasetFormat::Yolo,
+        };
+        let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
+        let step = |s: u64| -> Step {
+            let loss = r#""loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1"#;
+            serde_json::from_str(&format!(r#"{{"epoch":1,"step":{s},{loss}}}"#)).unwrap()
+        };
+        let line = |s: u64| folo_vision::train::event_record(&RunEvent::Step(step(s))).to_string();
+        std::fs::write(e.metrics_path(), [line(1), line(2)].join("\n")).unwrap();
+        for s in [2, 3, 5] {
+            e.on_event(&RunEvent::Step(step(s)));
+        }
+        let steps = |q: MetricsQuery| {
+            runs.metrics(e.id(), &q).unwrap().steps.iter().map(|s| s.step).collect::<Vec<_>>()
+        };
+        assert_eq!(steps(MetricsQuery::default()), [1, 2, 3, 5]);
+        assert_eq!(steps(MetricsQuery { after_step: Some(0), ..MetricsQuery::default() }), [1, 2, 3]);
+        assert_eq!(steps(MetricsQuery { after_step: Some(2), ..MetricsQuery::default() }), [3]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A create or resume that passed `check_open` before the shutdown and reaches `enqueue` after it: the run is
     /// marked stopped instead of queued, and no worker starts.
     #[test]
@@ -1270,6 +1496,7 @@ mod tests {
             error_code: None,
             resolved: None,
             queue_position: None,
+            cloud: None,
         };
         let dataset = DatasetRef {
             id: "ds_1".into(),
@@ -1288,7 +1515,8 @@ mod tests {
         assert_eq!(entry.run().status, RunStatus::Stopped);
         assert!(runs.queue.lock().unwrap().runs.is_empty());
         assert!(!*runs.worker.lock().unwrap(), "no worker for a refused run");
-        assert!(runs.logs("run_late", 10).unwrap().iter().any(|l| l.message.contains("not queued")));
+        let logs = runs.logs("run_late", &LogsQuery::last(10)).unwrap();
+        assert!(logs.lines.iter().any(|l| l.message.contains("not queued")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1326,6 +1554,7 @@ mod tests {
                 error_code: None,
                 resolved: None,
                 queue_position: None,
+                cloud: None,
             };
             let file = RunFile {
                 run,

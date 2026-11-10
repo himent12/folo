@@ -19,6 +19,8 @@ folo-data = { path = "crates/folo-data" }
 folo-vision = { path = "crates/folo-vision" }
 folo-server = { path = "crates/folo-server" }
 folo-mcp = { path = "crates/folo-mcp" }
+folo-client = { path = "crates/folo-client" }
+folo-cloud = { path = "crates/folo-cloud" }
 folo-wasm = { path = "crates/folo-wasm" }
 folo-test-support = { path = "crates/folo-test-support" }
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
@@ -57,8 +59,12 @@ schemars = "1.2"
 base64 = "0.23"
 glob = "0.3"
 http = "1"
-# Plain-HTTP client for `folo mcp --server` (loopback `folo serve`; no TLS).
+# Blocking HTTP client: folo-client (`folo mcp --server`, cloud workers) and folo-cloud (provider APIs) turn on
+# `rustls` for https.
 ureq = { version = "3", default-features = false }
+# Cloud runs (docs/CLOUD.md): datasets travel as tar streams, worker tokens and instance nonces are random bytes.
+tar = { version = "0.4", default-features = false }
+getrandom = "0.3"
 # `folo weights pull` verifies downloads against the release's SHA256SUMS.
 sha2 = "0.11"
 # Job objects, to end an agent CLI's whole process tree on Windows (crates/folo-server/src/label/tree.rs).

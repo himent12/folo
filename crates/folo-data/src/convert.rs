@@ -143,7 +143,7 @@ fn copy(from: &Path, to: &Path) -> Result<()> {
 
 /// The extension an image is written with: its own when folo-data reads that extension, otherwise one for the
 /// format its content has (a COCO `file_name` may be `a.bin` or have no extension; the YOLO reader would not see it).
-fn image_extension(p: &Path) -> String {
+pub(crate) fn image_extension(p: &Path) -> String {
     if crate::is_image_path(p) {
         return p.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
     }

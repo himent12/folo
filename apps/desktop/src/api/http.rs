@@ -130,6 +130,12 @@ impl HttpBackend {
             .map_err(|e| self.unreachable(&e))?;
         self.decode(resp)
     }
+
+    /// A DELETE: `204` decodes as `()`, a body as `T`.
+    fn delete<T: DeserializeOwned>(&self, path: &str) -> ApiResult<T> {
+        let resp = self.agent.delete(&self.url(path)).call().map_err(|e| self.unreachable(&e))?;
+        self.decode(resp)
+    }
 }
 
 /// Split an SSE stream into `(event, data)` pairs; comments and unknown fields are skipped.
@@ -314,6 +320,39 @@ impl Backend for HttpBackend {
 
     fn dataset_issues(&self, id: &str) -> ApiResult<IssuePage> {
         self.get(&format!("/datasets/{}/issues?limit=1", seg(id)))
+    }
+
+    fn cloud_providers(&self) -> ApiResult<Vec<CloudProvider>> {
+        self.get::<folo_api::CloudProviderList>("/cloud/providers").map(|l| l.providers)
+    }
+
+    fn cloud_connections(&self) -> ApiResult<Vec<CloudConnection>> {
+        self.get::<folo_api::CloudConnectionList>("/cloud/connections").map(|l| l.connections)
+    }
+
+    fn connect_cloud(&self, req: &ConnectCloud) -> ApiResult<CloudConnection> {
+        self.post("/cloud/connections", req)
+    }
+
+    fn check_cloud(&self, id: &str) -> ApiResult<CloudConnection> {
+        self.post_empty(&format!("/cloud/connections/{}/check", seg(id)))
+    }
+
+    fn disconnect_cloud(&self, id: &str) -> ApiResult<()> {
+        self.delete(&format!("/cloud/connections/{}", seg(id)))
+    }
+
+    fn cloud_offers(&self, connection: &str, refresh: bool) -> ApiResult<CloudOfferList> {
+        let query = if refresh { "?refresh=true" } else { "" };
+        self.get(&format!("/cloud/connections/{}/offers{query}", seg(connection)))
+    }
+
+    fn cloud_instances(&self) -> ApiResult<Vec<CloudInstance>> {
+        self.get::<folo_api::CloudInstanceList>("/cloud/instances").map(|l| l.instances)
+    }
+
+    fn terminate_instance(&self, id: &str) -> ApiResult<CloudInstance> {
+        self.delete(&format!("/cloud/instances/{}", seg(id)))
     }
 
     fn local_inference(&self) -> bool {
@@ -627,9 +666,27 @@ mod tests {
         std::thread::spawn(move || {
             for resp in responses {
                 let Ok((mut sock, _)) = listener.accept() else { return };
+                // The whole request, body included (answering before a POST's body is read would
+                // reset the connection under the client).
+                let mut req = Vec::new();
                 let mut buf = [0u8; 4096];
-                let n = sock.read(&mut buf).unwrap_or(0);
-                let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                loop {
+                    let n = sock.read(&mut buf).unwrap_or(0);
+                    req.extend_from_slice(&buf[..n]);
+                    let Some(end) = req.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        if n == 0 { break } else { continue }
+                    };
+                    let head = String::from_utf8_lossy(&req[..end]).to_ascii_lowercase();
+                    let body = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    if n == 0 || req.len() >= end + 4 + body {
+                        break;
+                    }
+                }
+                let _ = tx.send(String::from_utf8_lossy(&req).into_owned());
                 let _ = sock.write_all(&resp);
                 let _ = sock.flush();
                 // Dropping the socket closes the connection (cutting a short body).
@@ -673,6 +730,81 @@ FOLO"
         assert!(requests.recv().unwrap().to_ascii_lowercase().contains("if-none-match: \"w1\""));
         let cut = api.model_weights("m_1", Some("\"w1\"")).err().expect("a cut body fails");
         assert_eq!(cut.code, "server_unreachable");
+    }
+
+    /// A canned JSON response with its status line.
+    fn json(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn cloud_calls_hit_their_paths_and_decode() {
+        let offer = r#"{ "id": "NVIDIA GeForce RTX 4090@secure", "gpu": "RTX 4090", "vram_bytes": 25769803776,
+            "price_per_hour": 0.69, "region": null, "detail": "Secure Cloud", "availability": "high" }"#;
+        let conn = r#"{ "id": "cc_1", "provider": "runpod", "name": "RunPod", "created": "2026-11-08T06:00:00Z",
+            "status": "ok", "account": "you@example.com", "balance_usd": 42.17, "error": null, "note": null,
+            "checked": "2026-11-08T07:00:00Z", "values": { "api_key": "••••a1b2" } }"#;
+        let instance = format!(
+            r#"{{ "id": "ci_1", "connection_id": "cc_1", "provider": "runpod", "provider_ref": "abc123",
+            "name": "folo-run_1-4c1a", "run_id": "run_1", "offer": {offer}, "status": "terminating",
+            "created": "2026-11-08T06:00:00Z", "ended": null, "deadline": "2026-11-08T18:00:00Z",
+            "cost_usd": 0.42, "error": null }}"#
+        );
+        let (url, requests) = canned_server(vec![
+            json(
+                "200 OK",
+                r#"{ "providers": [{ "id": "runpod", "name": "RunPod", "about": "GPU pods rented by the hour.",
+                    "docs_url": "https://www.runpod.io/console/user/settings",
+                    "fields": [{ "key": "api_key", "label": "API key", "secret": true, "required": true }],
+                    "provisions": true, "self_terminates": true }] }"#,
+            ),
+            json("200 OK", &format!(r#"{{ "connections": [{conn}] }}"#)),
+            json("201 Created", conn),
+            json("200 OK", conn),
+            b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+            json("200 OK", &format!(r#"{{ "offers": [{offer}], "fetched": "2026-11-08T07:00:00Z" }}"#)),
+            json("200 OK", &format!(r#"{{ "instances": [{instance}] }}"#)),
+            json("200 OK", &instance),
+            json(
+                "409 Conflict",
+                r#"{ "error": { "code": "connection_in_use", "message": "RunPod has a live instance", "hint": null } }"#,
+            ),
+        ]);
+        let api = HttpBackend::new(&url);
+        let line = || requests.recv().unwrap().lines().next().unwrap_or_default().to_string();
+
+        let providers = api.cloud_providers().unwrap();
+        assert!(providers[0].fields[0].secret && providers[0].provisions);
+        assert_eq!(line(), "GET /api/cloud/providers HTTP/1.1");
+        assert_eq!(api.cloud_connections().unwrap()[0].balance_usd, Some(42.17));
+        assert_eq!(line(), "GET /api/cloud/connections HTTP/1.1");
+        let req = ConnectCloud {
+            provider: "runpod".into(),
+            name: String::new(),
+            values: [("api_key".to_string(), "rpa_x".to_string())].into(),
+        };
+        assert_eq!(api.connect_cloud(&req).unwrap().id, "cc_1");
+        assert_eq!(line(), "POST /api/cloud/connections HTTP/1.1");
+        assert_eq!(api.check_cloud("cc_1").unwrap().status, CloudConnectionStatus::Ok);
+        assert_eq!(line(), "POST /api/cloud/connections/cc_1/check HTTP/1.1");
+        api.disconnect_cloud("cc_1").unwrap();
+        assert_eq!(line(), "DELETE /api/cloud/connections/cc_1 HTTP/1.1");
+        let offers = api.cloud_offers("cc_1", true).unwrap();
+        assert_eq!((offers.offers[0].gpu_count, offers.offers[0].availability), (1, CloudAvailability::High));
+        assert_eq!(line(), "GET /api/cloud/connections/cc_1/offers?refresh=true HTTP/1.1");
+        assert_eq!(api.cloud_instances().unwrap()[0].status, CloudInstanceStatus::Terminating);
+        assert_eq!(line(), "GET /api/cloud/instances HTTP/1.1");
+        assert_eq!(api.terminate_instance("ci_1").unwrap().cost_usd, Some(0.42));
+        assert_eq!(line(), "DELETE /api/cloud/instances/ci_1 HTTP/1.1");
+        let busy = api.disconnect_cloud("cc_1").unwrap_err();
+        assert_eq!(
+            (busy.code.as_str(), busy.message.as_str()),
+            ("connection_in_use", "RunPod has a live instance")
+        );
     }
 
     #[test]

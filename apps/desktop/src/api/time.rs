@@ -74,6 +74,17 @@ pub fn local_datetime(t: i64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", s / 3600, s / 60 % 60)
 }
 
+/// A deadline as a clock reading in local time: "14:32" when it falls on the same day as `now`,
+/// else with its date (`local_datetime`).
+pub fn local_deadline(t: i64, now: i64) -> String {
+    let local = |x: i64| x + local_offset_at(x);
+    if local(t).div_euclid(86_400) != local(now).div_euclid(86_400) {
+        return local_datetime(t);
+    }
+    let s = local(t).rem_euclid(86_400);
+    format!("{:02}:{:02}", s / 3600, s / 60 % 60)
+}
+
 /// Seconds east of UTC at `t` (Windows: the zone's rules for that date, daylight saving included;
 /// UTC elsewhere).
 #[cfg(windows)]
@@ -158,5 +169,13 @@ mod tests {
         assert_eq!(ago(0, 7200), "2 h ago");
         assert_eq!(duration(1840.0), "30m 40s");
         assert_eq!(duration(12_000.0), "3h 20m");
+    }
+
+    #[test]
+    fn deadlines_name_the_date_only_on_another_day() {
+        let now = parse("2026-11-08T07:30:00Z").unwrap();
+        let today = local_deadline(now, now);
+        assert!(today.len() == 5 && today.as_bytes()[2] == b':', "{today}");
+        assert_eq!(local_deadline(now + 3 * 86_400, now), local_datetime(now + 3 * 86_400));
     }
 }

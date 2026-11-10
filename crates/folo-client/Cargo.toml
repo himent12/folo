@@ -1,0 +1,19 @@
+[package]
+name = "folo-client"
+description = "Blocking HTTP client for the FOLO API (docs/API.md): `folo mcp --server` and cloud workers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+folo-api.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+http.workspace = true
+ureq = { workspace = true, features = ["rustls"] }

@@ -35,7 +35,9 @@
   import { capabilityRows, deviceSummary, driverReport, type CapState } from './settings/capabilities';
   import ThemePreview from './settings/ThemePreview.svelte';
   import Throughput from './settings/Throughput.svelte';
+  import Cloud from './settings/Cloud.svelte';
   import { hasFeature } from '$lib/throughput';
+  import { hasCloud } from '$lib/cloud';
   import { href, router } from '$lib/router.svelte';
   import { SCROLL_KEYS, sectionAt } from './settings/spy';
 
@@ -50,8 +52,11 @@
   const capRows = $derived(caps ? capabilityRows(caps, sys.data?.gpus ?? []) : []);
   const capMarks: Record<CapState, typeof CircleCheck> = { on: CircleCheck, off: CircleMinus, none: CircleSlash };
 
+  /** Cloud compute: where work runs, beside Connection (servers with the `cloud` feature). */
+  const cloud = $derived(hasCloud(sys.data));
   const sections = $derived([
     { id: 'connection', label: 'Connection' },
+    ...(cloud ? [{ id: 'cloud', label: 'Cloud' }] : []),
     { id: 'appearance', label: 'Appearance' },
     { id: 'units', label: 'Units' },
     { id: 'shortcuts', label: 'Keyboard shortcuts' },
@@ -315,6 +320,8 @@
           </div>
         </div>
       </Panel>
+
+      {#if cloud}<Cloud />{/if}
 
       <Panel title="Appearance" id="appearance" divided>
         <div class="themes" role="radiogroup" aria-label="Theme">
@@ -598,6 +605,10 @@
   }
   .url-row :global(.input) {
     flex: 1;
+  }
+  /* The field shrinks to the row, never the row to the field's default width (a 320 px phone held it 4 px wide). */
+  .url-row :global(.input input) {
+    width: 0;
   }
   /* The typed URL is an identifier (mono); the placeholder is a sentence, so it stays in Geist. */
   .url-row :global(.mono-input input) {

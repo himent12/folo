@@ -126,7 +126,9 @@ in-browser module.
   images to Claude Code or Codex on your machine, shows you every box for review and correction, and makes the
   dataset ([docs/LABELING.md](docs/LABELING.md)).
 - **Runs**: start a training run, follow it live (metrics over SSE, validation samples, per-class mAP, logs), stop
-  or resume it, and compare runs.
+  or resume it, and compare runs. **Run on** trains it on a GPU rented from RunPod for the length of the run, or on
+  another FOLO server of yours, with the price before it starts and the cost while it runs
+  ([docs/CLOUD.md](docs/CLOUD.md)).
 - **Models**: evaluation results, per-class metrics, and export.
 - **Playground**: run a model on any image, on the server or **in the browser** (WebGPU or the wasm CPU). The
   in-browser backends need the wasm module (`sh scripts/build-wasm.sh`) built before Studio. Thresholds re-filter
@@ -161,8 +163,8 @@ Desktop is its own cargo workspace, so the engine's builds and CI stay GPUI-free
 ## Use FOLO from an agent
 
 **MCP.** `folo mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio (MCP 2026-07-28
-and 2025-11-25). It has 18 tools: build, register and check datasets, train, follow, stop, reorder and resume runs, evaluate,
-predict, export, and compare runs. It also has `folo://` resources (dataset images, live run status and metrics,
+and 2025-11-25). It has 22 tools: build, register and check datasets, train (here or on a cloud GPU), follow, stop, reorder and
+resume runs, evaluate, predict, export, compare runs, and look after cloud connections and instances. It also has `folo://` resources (dataset images, live run status and metrics,
 validation sample grids, the docs) and two prompts. It runs the real engine on `--data-dir`.
 
 ```sh
@@ -249,6 +251,7 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 | [QUICKSTART](docs/QUICKSTART.md) | Walkthrough: your own data, fine-tuning, export, in-browser inference |
 | [CLI](docs/CLI.md) | Every `folo` command, `--json`, exit codes, dataset tools |
 | [LABELING](docs/LABELING.md) | Unlabeled images to a dataset with Claude Code or Codex: workflow, cost, accuracy |
+| [CLOUD](docs/CLOUD.md) | Training on a rented GPU (RunPod) or another FOLO server: lifecycle, safety, providers |
 | [AGENT_COOKBOOK](docs/AGENT_COOKBOOK.md) | Recipes for agents, as MCP tool calls and as `--json` commands |
 | [MCP](docs/MCP.md) | The `folo mcp` contract: tools, resources, prompts, errors |
 | [API](docs/API.md) | The HTTP + SSE API behind Studio and Desktop |

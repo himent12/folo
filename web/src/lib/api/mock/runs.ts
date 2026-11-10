@@ -4,6 +4,7 @@
 
 import type { ClassMetrics, Epoch, LogLine, Loss, ResolvedTrain, Run, RunStatus, Step, TrainConfig } from '../types';
 import { closeMosaicEpochs } from '../progress';
+import { COLLECT_MS, RELEASE_MS, releasedAt, runCloudAt, trainAt, type CloudTimeline } from './cloud';
 import { gauss, hash, rng, smoothNoise } from './rng';
 
 export interface RunProfile {
@@ -31,6 +32,8 @@ export interface RunProfile {
     /** Fractional epochs done when it ended. */
     atEpoch: number;
     error?: string;
+    /** `Run.error_code` of a failed run, where it has one (`cloud_instance_lost`). */
+    errorCode?: string;
     /** When it ended (defaults to start + atEpoch epochs). */
     at?: number;
     /** Report `stopping` until this time (a stop was just requested). */
@@ -44,13 +47,37 @@ export interface RunProfile {
   resolved?: ResolvedTrain;
   /** Stopped while it waited: its trainer was never built, so it has no `resolved`. */
   neverStarted?: boolean;
+  /**
+   * A cloud run (`config.compute`): its hand-over around the training (./cloud). `startedAt` is when the worker starts
+   * training; the run's status waits after its last epoch while the weights are collected and the instance released.
+   */
+  cloud?: CloudTimeline;
 }
 
 export const GPU_NAME = 'NVIDIA GeForce RTX 4080 SUPER';
 
-export function totalSeconds(p: RunProfile) {
+export function totalSeconds(p: Pick<RunProfile, 'config' | 'epochSeconds'>) {
   return p.config.epochs * p.epochSeconds;
 }
+
+/** What a run's timing is made of. */
+type Timing = Pick<RunProfile, 'createdAt' | 'startedAt' | 'terminal' | 'epochSeconds' | 'config' | 'cloud'>;
+
+/** When a run's training ends if nothing stops it: its last epoch (a finished run's recorded end). */
+export function trainEnd(p: Timing): number {
+  // A cloud run's training starts when its hand-over is done, also when it was stopped before (and never started).
+  const start = p.cloud ? trainAt(p.cloud) : (p.startedAt ?? p.createdAt);
+  const t = p.terminal;
+  if (!t) return start + totalSeconds(p) * 1000;
+  // A finished cloud run's recorded end includes the release; its training ended at its last epoch.
+  return start + t.atEpoch * p.epochSeconds * 1000;
+}
+
+/** A cloud run's `Run.cloud` at `now`. */
+export const cloudOf = (p: Timing & { cloud: CloudTimeline }, now: number) => runCloudAt(p.cloud, trainEnd(p), p.epochSeconds * 1000, now);
+
+/** When a cloud run is done at the provider: a finished one's recorded end (`terminal.at`). */
+export const cloudFinish = (p: Timing & { cloud: CloudTimeline }) => releasedAt(p.cloud, trainEnd(p));
 
 /** Progress of a run at `now`: fractional epochs done (0..epochs) and the status. */
 export function progressAt(p: RunProfile, now: number): { done: number; status: RunStatus; finishedAt: number | null } {
@@ -64,7 +91,12 @@ export function progressAt(p: RunProfile, now: number): { done: number; status: 
   let elapsed = (now - p.startedAt) / 1000;
   const total = totalSeconds(p);
   if (p.loop) elapsed %= total;
-  if (elapsed >= total) return { done: p.config.epochs, status: 'completed', finishedAt: p.startedAt + total * 1000 };
+  if (elapsed >= total) {
+    // A cloud run's final status comes once its weights are home and its instance released (docs/CLOUD.md).
+    const end = p.startedAt + total * 1000 + (p.cloud ? COLLECT_MS + RELEASE_MS : 0);
+    if (now < end) return { done: p.config.epochs, status: 'running', finishedAt: null };
+    return { done: p.config.epochs, status: 'completed', finishedAt: end };
+  }
   return { done: elapsed / p.epochSeconds, status: 'running', finishedAt: null };
 }
 
@@ -184,7 +216,8 @@ const r6 = (x: number) => Math.round(x * 1e6) / 1e6;
 
 export function toRun(p: RunProfile, now: number): Run {
   const { done, status, finishedAt } = progressAt(p, now);
-  const started = p.startedAt === null ? null : loopStart(p, now);
+  // A cloud run starts when its worker trains; until then its timeline's start is still to come.
+  const started = p.startedAt === null || (p.cloud && now < p.startedAt) ? null : loopStart(p, now);
   const epochsDone = Math.floor(done);
   const best = bestOf(p, epochsDone);
   const step = Math.floor(done * p.stepsPerEpoch);
@@ -203,9 +236,12 @@ export function toRun(p: RunProfile, now: number): Run {
     steps_per_epoch: p.stepsPerEpoch,
     eta_s: running ? Math.round((p.config.epochs - done) * p.epochSeconds) : null,
     best,
-    device: p.device,
+    // A cloud run's device is the worker's GPU once it trains (docs/API.md, RunCloud).
+    device: p.cloud && (p.startedAt === null || now < p.startedAt) ? '' : p.device,
     model_id: status === 'completed' || status === 'stopped' ? (p.modelId ?? null) : null,
     error: p.terminal?.error ?? null,
+    ...(p.terminal?.errorCode ? { error_code: p.terminal.errorCode } : {}),
+    ...(p.cloud ? { cloud: cloudOf({ ...p, cloud: p.cloud }, now) } : {}),
     // Set once the trainer is built (by the time the run is `running`); never for a run stopped while it waited.
     resolved: p.resolved && started !== null && now >= started && !p.neverStarted ? p.resolved : null,
   };

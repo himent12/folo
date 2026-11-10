@@ -147,7 +147,7 @@
                       <Progress value={j.counts.images ? j.counts.labeled / j.counts.images : 0} tone={active(j) ? 'accent' : 'neutral'} label="{j.counts.labeled} of {j.counts.images} images labeled" />
                     </span>
                   </td>
-                  <td><StatusBadge plain status={st.status} label={st.label} /></td>
+                  <td><StatusBadge plain state={st} /></td>
                   <td class="hide-md">
                     {#if j.run}<Meta line><span>{runAgent(j.run, agents.data)[0]}</span><span>{runAgent(j.run, agents.data)[1]}</span></Meta>{:else}<NoValue label="no run yet" />{/if}
                   </td>
@@ -170,7 +170,7 @@
                   <span class="name truncate">{j.name}</span>
                   <span class="m-meta num"><Meta><span>{num(j.counts.labeled)} of {num(j.counts.images)} labeled</span><span>{ago(j.created)}</span></Meta></span>
                 </span>
-                <span class="m-side"><StatusBadge plain status={st.status} label={st.label} /></span>
+                <span class="m-side"><StatusBadge plain state={st} /></span>
               </a>
             </li>
           {/each}

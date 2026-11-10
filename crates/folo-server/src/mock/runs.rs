@@ -10,11 +10,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use folo_api::{
-    Arch, BestEpoch, ClassMetrics, Epoch, LogLevel, LogLine, Loss, QueueEvent, ResolvedTrain, Run, RunEvent,
-    RunMetrics, RunStatus, StatusEvent, Step, TrainConfig, ValMetrics,
+    Arch, BestEpoch, ClassMetrics, CloudInstance, CloudPhase, Epoch, LogLevel, LogLine, Loss, QueueEvent,
+    ResolvedTrain, Run, RunCloud, RunEvent, RunMetrics, RunStatus, StatusEvent, Step, TrainConfig,
+    ValMetrics,
 };
 use tokio::sync::broadcast;
 
+use super::cloud::{PHASE_S, SimCloud};
 use crate::store::{QueueMove, Subscription};
 use crate::util::{noise, rfc3339, unix_now};
 
@@ -255,6 +257,8 @@ pub struct Snap {
     pub stop_requested: Option<f64>,
     /// `(position, waiting)` while the run waits in the training queue ([`QueueEvent`]).
     pub queue: Option<(u32, u32)>,
+    /// Unix seconds of the view.
+    pub at: f64,
 }
 
 /// Wall-clock driven timeline of a live run.
@@ -274,6 +278,10 @@ pub struct LiveClock {
     /// Set by [`reschedule`] for runs in the training queue: the scheduled starts of the waiting runs ahead of this
     /// one, and of every waiting run.
     queue: Option<(Vec<Instant>, Vec<Instant>)>,
+    /// Seconds the run stays `running` after its last epoch (a cloud run collects and releases then).
+    tail_s: f64,
+    /// Seconds after `origin` its cloud instance was terminated by hand: the run fails then.
+    lost_at: Option<f64>,
 }
 
 impl LiveClock {
@@ -293,7 +301,21 @@ impl LiveClock {
             cycle: 0,
             min_start: queue_s,
             queue: None,
+            tail_s: 0.0,
+            lost_at: None,
         }
+    }
+
+    /// The same clock, `running` for `tail_s` more seconds after the last epoch (a cloud run's collecting and
+    /// releasing).
+    pub fn with_tail(mut self, tail_s: f64) -> LiveClock {
+        self.tail_s = tail_s;
+        self
+    }
+
+    /// Seconds per epoch.
+    pub fn epoch_s(&self) -> f64 {
+        self.epoch_s
     }
 
     /// When a started run frees the training slot.
@@ -315,7 +337,7 @@ impl LiveClock {
     fn snap(&mut self, curve: &Curve, now: Instant) -> Snap {
         let step_s = self.epoch_s / curve.spe as f64;
         let total = curve.total_steps();
-        let run_end = self.queue_s + curve.epochs as f64 * self.epoch_s;
+        let run_end = self.queue_s + curve.epochs as f64 * self.epoch_s + self.tail_s;
         let queue_s = self.queue_s;
         let steps_at = |t: f64| (((t - queue_s) / step_s).floor().max(0.0) as u64).min(total);
         loop {
@@ -330,8 +352,14 @@ impl LiveClock {
                 cycle: self.cycle,
                 stop_requested: self.stop_at.map(|sa| self.origin_wall + sa),
                 queue: None,
+                at: self.origin_wall + t,
             };
             let started = (t >= self.queue_s).then_some(self.origin_wall + self.queue_s);
+            if let Some(lost) = self.lost_at.filter(|&l| t >= l) {
+                let started = (lost >= self.queue_s).then_some(self.origin_wall + self.queue_s);
+                let finished = Some(self.origin_wall + lost);
+                return Snap { status: RunStatus::Failed, step: steps_at(lost), started, finished, ..base };
+            }
             if let Some(sa) = self.stop_at {
                 let started = (sa >= self.queue_s).then_some(self.origin_wall + self.queue_s);
                 let step = steps_at(sa);
@@ -415,7 +443,13 @@ pub struct SimRun {
     deleted: AtomicBool,
     /// Log lines of actions outside the timeline (queue moves), in the order they happened.
     notes: Mutex<Vec<LogLine>>,
+    /// A cloud run's hand-over ([`SimRun::with_cloud`]).
+    cloud: Option<SimCloud>,
 }
+
+/// Why a live (cloud) run failed.
+const LOST: &str = "the instance was terminated by hand before the run ended; the weights copied so far stay \
+                    (resume the run to continue from them)";
 
 impl SimRun {
     /// A new simulated run.
@@ -445,7 +479,49 @@ impl SimRun {
             hub: Mutex::default(),
             deleted: AtomicBool::new(false),
             notes: Mutex::default(),
+            cloud: None,
         }
+    }
+
+    /// The same run as a cloud run with this hand-over (a live one stays `running` while it collects and releases:
+    /// its clock needs [`LiveClock::with_tail`]).
+    pub fn with_cloud(mut self, cloud: SimCloud) -> SimRun {
+        self.cloud = Some(cloud);
+        self
+    }
+
+    /// A cloud run's hand-over.
+    pub fn cloud(&self) -> Option<&SimCloud> {
+        self.cloud.as_ref()
+    }
+
+    /// `Run.cloud` at `snap` (cloud runs only).
+    pub fn cloud_at(&self, snap: &Snap) -> Option<RunCloud> {
+        let c = self.cloud.as_ref()?;
+        let epoch_s = match &self.timeline {
+            Timeline::Static { .. } => self.curve.real_epoch_s(),
+            Timeline::Live(clock) => clock.lock().unwrap().epoch_s(),
+        };
+        let trained = snap.started.map(|s| s + self.config.epochs as f64 * epoch_s);
+        Some(c.at(snap, trained, epoch_s, self.epochs_done(snap)))
+    }
+
+    /// Its cloud instance now (cloud runs only).
+    pub fn instance(&self) -> Option<CloudInstance> {
+        let snap = self.snap();
+        let cloud = self.cloud_at(&snap)?;
+        self.cloud.as_ref().map(|c| c.instance(&self.id, &snap, &cloud))
+    }
+
+    /// Its cloud instance is terminated by hand: the run fails now unless it ended already. Returns whether it was
+    /// still alive.
+    pub fn lose(&self) -> bool {
+        let alive = self.instance().is_some_and(|i| i.status.is_alive());
+        if alive && let Timeline::Live(c) = &self.timeline {
+            let mut c = c.lock().unwrap();
+            c.lost_at = Some(Instant::now().saturating_duration_since(c.origin).as_secs_f64());
+        }
+        alive
     }
 
     /// Logs an action outside the timeline (a queue move): kept for `/logs` and sent to live subscribers.
@@ -483,6 +559,7 @@ impl SimRun {
                     cycle: 0,
                     stop_requested: None,
                     queue: None,
+                    at: unix_now(),
                 }
             }
             Timeline::Live(clock) => clock.lock().unwrap().snap(&self.curve, Instant::now()),
@@ -497,8 +574,16 @@ impl SimRun {
     fn error(&self, status: RunStatus) -> Option<String> {
         match &self.timeline {
             Timeline::Static { error, .. } if status == RunStatus::Failed => error.clone(),
+            // A live run fails only when its cloud instance is terminated by hand.
+            Timeline::Live(_) if status == RunStatus::Failed => Some(LOST.into()),
             _ => None,
         }
+    }
+
+    /// The stable code of [`SimRun::error`].
+    fn error_code(&self, status: RunStatus) -> Option<String> {
+        let lost = matches!(self.timeline, Timeline::Live(_));
+        self.error(status).map(|_| if lost { "cloud_instance_lost" } else { "training_failed" }.to_string())
     }
 
     /// Wall time of an epoch as reported in `Epoch::duration_s`.
@@ -558,21 +643,17 @@ impl SimRun {
             device: self.device.clone(),
             model_id: self.current_model(&snap),
             error: self.error(snap.status),
-            error_code: self.error(snap.status).map(|_| "training_failed".to_string()),
+            error_code: self.error_code(snap.status),
             resolved: snap.started.and(self.resolved.clone()),
             queue_position: snap.queue.map(|q| q.0),
+            cloud: self.cloud_at(&snap),
         }
     }
 
     /// Full history.
-    pub fn metrics(&self, every: u64) -> RunMetrics {
+    pub fn metrics(&self) -> RunMetrics {
         let snap = self.snap();
-        let every = every.max(1);
-        let mut steps: Vec<Step> = (1..=snap.step)
-            .filter(|s| s % every == 0 || *s == snap.step)
-            .map(|s| self.curve.step(s, self.eta_at(s)))
-            .collect();
-        steps.dedup_by_key(|s| s.step);
+        let steps: Vec<Step> = (1..=snap.step).map(|s| self.curve.step(s, self.eta_at(s))).collect();
         let epochs =
             (1..=self.epochs_done(&snap)).map(|e| self.curve.epoch(e, self.epoch_duration(e))).collect();
         RunMetrics { steps, epochs }
@@ -728,10 +809,42 @@ impl SimRun {
         if let (Some(m), Some(t)) = (self.msg_end(&snap), snap.finished) {
             out.push(line(t, m));
         }
+        out.extend(self.cloud_lines(&snap).into_iter().map(|(t, m)| line(t, (LogLevel::Info, m))));
         // Queue moves, merged in by time (the sort is stable, so lines of the same second keep their order).
         out.extend(self.notes.lock().unwrap().iter().cloned());
         out.sort_by(|a, b| a.t.cmp(&b.t));
         out
+    }
+
+    /// A cloud run's phase lines up to `snap`, with the times their phases began: before the training at the fixed
+    /// steps of [`PHASE_S`], then when it starts, ends (or is stopped) and the run is released.
+    fn cloud_lines(&self, snap: &Snap) -> Vec<(f64, String)> {
+        let (Some(c), Some(cloud)) = (&self.cloud, self.cloud_at(snap)) else { return Vec::new() };
+        let epoch_s = match &self.timeline {
+            Timeline::Static { .. } => self.curve.real_epoch_s(),
+            Timeline::Live(clock) => clock.lock().unwrap().epoch_s(),
+        };
+        let trained = snap.started.map(|s| s + self.config.epochs as f64 * epoch_s);
+        let releasing = match snap.stop_requested {
+            Some(stop) => Some(stop),
+            None => trained.map(|t| t + PHASE_S),
+        };
+        let until = snap.finished.unwrap_or(snap.at);
+        [
+            (CloudPhase::Provisioning, Some(snap.created)),
+            (CloudPhase::Booting, Some(snap.created + PHASE_S)),
+            (CloudPhase::Syncing, Some(snap.created + 2.0 * PHASE_S)),
+            (CloudPhase::Training, snap.started),
+            (CloudPhase::Collecting, trained.filter(|_| snap.stop_requested.is_none())),
+            (CloudPhase::Releasing, releasing),
+            (CloudPhase::Released, snap.finished),
+        ]
+        .into_iter()
+        .filter_map(|(p, t)| {
+            let t = t.filter(|&t| p <= cloud.phase && t <= until)?;
+            Some((t, c.phase_line(p, cloud.cost_usd)?))
+        })
+        .collect()
     }
 
     /// Events describing the change from `prev` to `now`.
@@ -752,6 +865,18 @@ impl SimRun {
             && let Some((position, waiting)) = now.queue
         {
             out.push(RunEvent::Queue(QueueEvent { position, waiting }));
+        }
+        // A cloud run's hand-over: a line when its phase changes, its state whenever it changed (progress moves in
+        // tenths, the cost in cents).
+        if let (Some(c), Some(before), Some(after)) = (&self.cloud, self.cloud_at(&prev), self.cloud_at(now))
+            && before != after
+        {
+            if before.phase != after.phase
+                && let Some(m) = c.phase_line(after.phase, after.cost_usd)
+            {
+                out.push(self.log((LogLevel::Info, m)));
+            }
+            out.push(RunEvent::Cloud(Box::new(after)));
         }
         if entering {
             out.push(status(now));

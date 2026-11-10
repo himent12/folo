@@ -4,6 +4,7 @@
 //! and one live run that advances in real time (100 epochs in ~10 minutes, then it loops). Runs created through the
 //! API are simulated the same way. Datasets registered from disk are scanned for real.
 
+mod cloud;
 mod runs;
 mod scene;
 mod throughput;
@@ -16,23 +17,26 @@ use std::sync::{Arc, RwLock};
 use axum::http::StatusCode;
 use folo_api::{
     AmpSupport, Arch, BBox, BenchmarkReport, BenchmarkRequest, Capabilities, ClassMetrics, CliCommand,
-    Dataset, DatasetFormat, DatasetIssue, ExportFormat, ExportResult, ExportSpec, GpuBackend, GpuInfo, Head,
-    ImageInfo, ImagePage, IssuePage, IssueSeverity, LogLine, Model, ModelEval, ModelMetrics, ModelPrecision,
-    ModelSource, PhaseKind, PrCurve, PredictResponse, RegisterDataset, Run, RunEstimate, RunSamples, Sample,
-    ScoredBox, Split, Splits, SyntheticDataset, TensorCoreSupport, ThroughputTable, TrainConfig, TrainedWith,
+    CloudConnection, CloudInstance, CloudOffer, CloudProvider, Compute, ConnectCloud, Dataset, DatasetFormat,
+    DatasetIssue, ExportFormat, ExportResult, ExportSpec, GpuBackend, GpuInfo, Head, ImageInfo, ImagePage,
+    IssuePage, IssueSeverity, Model, ModelEval, ModelMetrics, ModelPrecision, ModelSource, PhaseKind,
+    PrCurve, PredictResponse, RegisterDataset, Run, RunEstimate, RunLogs, RunSamples, Sample, ScoredBox,
+    Split, Splits, SyntheticDataset, TensorCoreSupport, ThroughputTable, TrainConfig, TrainedWith,
 };
 
 use crate::error::{Error, Result};
 use crate::index::{Index, read_image};
 use crate::stats::StatsBuilder;
 use crate::store::{
-    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription, Weights,
-    WeightsFormat,
+    ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
+    Store, Subscription, Weights, WeightsFormat,
 };
 use crate::util::{Rng, fnv1a, mix64, noise, parse_rfc3339, rfc3339, unique_id, unix_now};
+use cloud::{CONNECTION, PHASE_S, SEEDED_OFFER, SimCloud};
 use runs::{Curve, LiveClock, SimRun, Timeline, arch_spec};
 use scene::{Scene, Theme};
 
+pub use cloud::{ENV_MOCK_CLOUD, MockCloud};
 pub use runs::TICK;
 
 const DEVICE: &str = "NVIDIA GeForce RTX 4080 SUPER (vulkan)";
@@ -518,6 +522,9 @@ pub struct MockStore {
     weights: weights::MockWeights,
     tensor_cores: MockTensorCores,
     throughput: crate::throughput::Throughput,
+    /// How much of the cloud it serves, and its connections.
+    cloud: MockCloud,
+    connections: RwLock<Vec<CloudConnection>>,
 }
 
 /// Environment variable that picks the mock GPU's tensor-core state ([`MockTensorCores`]), so front ends can test
@@ -598,6 +605,9 @@ const MOCK_GPU: &str = "NVIDIA GeForce RTX 4080 SUPER";
 /// The scripted live run (it loops forever, so it does not block benchmark probes).
 const LIVE_RUN: &str = "run_3c02";
 
+/// The seeded cloud run (finished, released).
+const CLOUD_RUN: &str = "run_3c01";
+
 impl Default for MockStore {
     fn default() -> Self {
         MockStore::new()
@@ -636,8 +646,14 @@ fn model_bytes(params: u64, f16: bool) -> u64 {
 }
 
 impl MockStore {
-    /// Builds the mock catalogue. The live run starts at epoch ~12 so charts have data right away.
+    /// Builds the mock catalogue. The live run starts at epoch ~12 so charts have data right away. The cloud is
+    /// [`ENV_MOCK_CLOUD`]'s.
     pub fn new() -> MockStore {
+        MockStore::with_cloud(MockCloud::from_env())
+    }
+
+    /// [`MockStore::new`] serving `cloud`.
+    pub fn with_cloud(cloud: MockCloud) -> MockStore {
         let shapes = ProcDataset::new(
             "ds_5a1e",
             "shapes-1k",
@@ -770,6 +786,13 @@ impl MockStore {
         for d in &defs {
             let entry = &datasets[d.ds];
             let meta = entry.meta();
+            // The seeded cloud run (a server without the `cloud` feature has none).
+            let compute = (d.id == CLOUD_RUN && cloud != MockCloud::Off).then(|| Compute {
+                connection_id: CONNECTION.into(),
+                offer_id: SEEDED_OFFER.into(),
+                max_hours: folo_api::DEFAULT_MAX_HOURS,
+                disk_gb: None,
+            });
             let config = TrainConfig {
                 name: d.name.into(),
                 dataset_id: meta.id.clone(),
@@ -778,6 +801,7 @@ impl MockStore {
                 batch: d.batch,
                 amp: d.amp,
                 head: d.head,
+                compute: compute.clone(),
                 ..serde_json::from_str(r#"{"dataset_id":""}"#).expect("defaults")
             };
             let spe = steps_per_epoch(meta.splits.train, d.batch);
@@ -788,18 +812,27 @@ impl MockStore {
                 End::Failed(s, e) => (folo_api::RunStatus::Failed, s, Some(e.to_string())),
             };
             let created = parse_rfc3339(d.created).expect("valid date");
-            let run = SimRun::new(
+            let offer = cloud::offers().into_iter().find(|o| o.id == SEEDED_OFFER).expect("the seeded offer");
+            let device = if compute.is_some() {
+                format!("NVIDIA GeForce {} (vulkan)", offer.gpu)
+            } else {
+                DEVICE.into()
+            };
+            let mut run = SimRun::new(
                 d.id.into(),
                 config,
                 meta.classes.clone(),
                 spe,
                 curve,
-                DEVICE.into(),
+                device,
                 d.model.map(|m| m.0.to_string()),
                 false,
                 Timeline::Static { created, status, last_step, error },
             )
             .resolved_for(meta.splits.train);
+            if let Some(c) = &compute {
+                run = run.with_cloud(SimCloud::new(d.id, CONNECTION, offer, c.max_hours));
+            }
             if let Some((mid, mname)) = d.model {
                 let snap = run.snap();
                 let best = run.curve.best(run.epochs_done(&snap)).map(|b| b.epoch).unwrap_or(1);
@@ -892,7 +925,62 @@ impl MockStore {
             weights: weights::MockWeights::new(),
             tensor_cores: MockTensorCores::from_env(),
             throughput: crate::throughput::Throughput::in_memory(throughput::table()),
+            connections: RwLock::new(match cloud {
+                MockCloud::On => vec![cloud::seeded(unix_now())],
+                _ => Vec::new(),
+            }),
+            cloud,
         }
+    }
+
+    /// The providers, unless the mock serves no cloud.
+    fn providers(&self) -> Result<Vec<CloudProvider>> {
+        if self.cloud == MockCloud::Off {
+            return Err(cloud::off());
+        }
+        Ok(folo_cloud::providers().iter().map(|p| p.info()).collect())
+    }
+
+    /// Connection `id`.
+    fn connection(&self, id: &str) -> Result<CloudConnection> {
+        self.providers()?;
+        let list = self.connections.read().unwrap();
+        list.iter().find(|c| c.id == id).cloned().ok_or_else(|| crate::cloud::connection_not_found(id))
+    }
+
+    /// What connection `c` can run on: RunPod's list, or a remote server's own GPU.
+    fn offers_of(c: &CloudConnection) -> Vec<CloudOffer> {
+        match c.provider.as_str() {
+            "remote" => vec![CloudOffer {
+                id: "gpu".into(),
+                gpu: "NVIDIA GeForce RTX 3090".into(),
+                gpu_count: 1,
+                vram_bytes: 24 << 30,
+                price_per_hour: None,
+                region: None,
+                detail: None,
+                availability: folo_api::CloudAvailability::High,
+            }],
+            _ => cloud::offers(),
+        }
+    }
+
+    /// The offer a run with `compute` rents, checked as the real store checks it.
+    fn cloud_offer(&self, config: &TrainConfig, compute: &Compute) -> Result<CloudOffer> {
+        crate::cloud::check_device(config)?;
+        crate::cloud::check_limits(compute)?;
+        let c = self.connection(&compute.connection_id)?;
+        crate::cloud::find_offer(MockStore::offers_of(&c), compute)
+    }
+
+    /// Every cloud run's instance.
+    fn instances(&self) -> Vec<CloudInstance> {
+        let mut all: Vec<CloudInstance> =
+            self.runs.read().unwrap().iter().filter_map(|(r, _)| r.instance()).collect();
+        all.sort_by(|a, b| {
+            (b.status.is_alive(), &b.created, &b.id).cmp(&(a.status.is_alive(), &a.created, &a.id))
+        });
+        all
     }
 
     /// The tensor-core state `/api/system`'s `capabilities` reports (default: [`MockTensorCores::from_env`]).
@@ -1018,6 +1106,15 @@ impl Store for MockStore {
         Some(self.tensor_cores.capabilities())
     }
 
+    fn features(&self) -> &'static [&'static str] {
+        // Cursors and ranges and (unless `FOLO_MOCK_CLOUD=off`) the cloud, not uploads or checkpoints (docs/API.md,
+        // Mock mode).
+        match self.cloud {
+            MockCloud::Off => &[folo_api::FEATURE_RUN_CURSORS],
+            _ => &[folo_api::FEATURE_RUN_CURSORS, folo_api::FEATURE_CLOUD],
+        }
+    }
+
     fn throughput(&self) -> Result<ThroughputTable> {
         Ok(self.throughput.table(&throughput::gpu(), &[throughput::gpu(), throughput::cpu()]))
     }
@@ -1037,7 +1134,16 @@ impl Store for MockStore {
             close_mosaic: config.augment.close_mosaic,
             ..folo_data::AugmentConfig::default()
         };
-        let device = if config.device == "cpu" { throughput::cpu() } else { throughput::gpu() };
+        // A cloud run's time is the reference's, as on the real server.
+        let cloud = match &config.compute {
+            Some(c) => Some((self.cloud_offer(&config, c)?, c.max_hours)),
+            None => None,
+        };
+        let device = match (&cloud, config.device.as_str()) {
+            (Some((offer, _)), _) => crate::cloud::estimate_device(offer),
+            (None, "cpu") => throughput::cpu(),
+            _ => throughput::gpu(),
+        };
         let cli = crate::cli::train_command(
             &config,
             &ds.meta().path,
@@ -1057,7 +1163,10 @@ impl Store for MockStore {
             val_images: if splits.val == 0 { splits.train } else { splits.val },
         });
         estimate.cli = Some(cli.cli);
-        Ok(estimate)
+        Ok(match cloud {
+            Some((offer, max_hours)) => crate::cloud::cloud_estimate(estimate, &offer, max_hours),
+            None => estimate,
+        })
     }
 
     /// Answers at once with numbers near the table's (or the reference's): no device is used. Refused while a run
@@ -1291,12 +1400,20 @@ impl Store for MockStore {
     fn create_run(&self, mut config: TrainConfig) -> Result<Run> {
         let ds = self.dataset(&config.dataset_id)?;
         self.validate(&config)?;
+        // A cloud run rents an offer of its connection, and its worker checks `amp`.
+        let offer = match &config.compute {
+            Some(c) => Some((self.cloud_offer(&config, c)?, c.clone())),
+            None => None,
+        };
         // As the real store: a fine-tune takes the weights' architecture, and `amp` is refused up front where
         // `capabilities.amp` says it is unavailable.
         if let Some(w) = &config.weights {
             config.arch = self.get_model(w)?.arch;
         }
-        if config.amp && (config.device == "cpu" || self.tensor_cores != MockTensorCores::On) {
+        if offer.is_none()
+            && config.amp
+            && (config.device == "cpu" || self.tensor_cores != MockTensorCores::On)
+        {
             let why = if config.device == "cpu" {
                 "the run is on the CPU".to_string()
             } else {
@@ -1336,28 +1453,37 @@ impl Store for MockStore {
         let spe = steps_per_epoch(meta.splits.train, config.batch);
         let quality = 0.45 + 0.4 * (fnv1a(meta.id.as_bytes()) % 100) as f32 / 100.0;
         let curve = Curve::new(fnv1a(id.as_bytes()), quality, meta.classes.len(), &config, spe);
-        let device = match config.device.as_str() {
-            "cpu" => "CPU".to_string(),
+        let device = match (&offer, config.device.as_str()) {
+            (Some((o, _)), _) => format!("NVIDIA GeForce {} (vulkan)", o.gpu),
+            (None, "cpu") => "CPU".to_string(),
             _ => DEVICE.to_string(),
         };
-        let clock = LiveClock::new(6.0, 2.0, 0.0, false, 0.0);
-        let run = Arc::new(
-            SimRun::new(
-                id,
-                config,
-                meta.classes.clone(),
-                spe,
-                curve,
-                device,
-                Some(model_id),
-                true,
-                Timeline::Live(std::sync::Mutex::new(clock)),
-            )
-            .resolved_for(meta.splits.train),
-        );
+        // A cloud run hands over for 3 phases before it trains and 2 after, outside the training queue.
+        let clock = match offer {
+            Some(_) => LiveClock::new(6.0, 3.0 * PHASE_S, 0.0, false, 0.0).with_tail(2.0 * PHASE_S),
+            None => LiveClock::new(6.0, 2.0, 0.0, false, 0.0),
+        };
+        let cloud = offer.map(|(o, c)| SimCloud::new(&id, &c.connection_id, o, c.max_hours));
+        let local = cloud.is_none();
+        let mut sim = SimRun::new(
+            id,
+            config,
+            meta.classes.clone(),
+            spe,
+            curve,
+            device,
+            Some(model_id),
+            true,
+            Timeline::Live(std::sync::Mutex::new(clock)),
+        )
+        .resolved_for(meta.splits.train);
+        if let Some(c) = cloud {
+            sim = sim.with_cloud(c);
+        }
+        let run = Arc::new(sim);
         runs.push((Arc::clone(&run), Arc::clone(&ds)));
         drop(runs);
-        {
+        if local {
             let mut queue = self.queue.lock().unwrap();
             queue.push(Arc::clone(&run));
             runs::reschedule(&queue, std::time::Instant::now());
@@ -1429,8 +1555,8 @@ impl Store for MockStore {
         Ok(())
     }
 
-    fn run_metrics(&self, id: &str, every: u64) -> Result<folo_api::RunMetrics> {
-        Ok(self.run(id)?.0.metrics(every))
+    fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<folo_api::RunMetrics> {
+        Ok(q.select(self.run(id)?.0.metrics()))
     }
 
     fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples> {
@@ -1461,11 +1587,8 @@ impl Store for MockStore {
         Ok(RunSamples { epoch, samples })
     }
 
-    fn run_logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>> {
-        let mut lines = self.run(id)?.0.logs();
-        let skip = lines.len().saturating_sub(limit);
-        lines.drain(..skip);
-        Ok(lines)
+    fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs> {
+        Ok(q.select(self.run(id)?.0.logs()))
     }
 
     fn subscribe(&self, id: &str) -> Result<Subscription> {
@@ -1540,6 +1663,77 @@ impl Store for MockStore {
             },
             device: "gpu:0".into(),
         })
+    }
+
+    fn cloud_providers(&self) -> Result<Vec<CloudProvider>> {
+        self.providers()
+    }
+
+    fn cloud_connections(&self) -> Result<Vec<CloudConnection>> {
+        self.providers()?;
+        Ok(self.connections.read().unwrap().clone())
+    }
+
+    fn connect_cloud(&self, req: ConnectCloud) -> Result<CloudConnection> {
+        let provider = self.providers()?.into_iter().find(|p| p.id == req.provider).ok_or_else(|| {
+            Error::not_found("provider", &req.provider).hint("GET /api/cloud/providers lists the providers")
+        })?;
+        let mut list = self.connections.write().unwrap();
+        let seed = fnv1a(req.provider.as_bytes()) ^ unix_now().to_bits();
+        let id = unique_id("cc", seed, |id| list.iter().any(|c| c.id == id));
+        let c = cloud::connect(req, &provider, id, &list, unix_now())?;
+        list.push(c.clone());
+        Ok(c)
+    }
+
+    fn check_cloud(&self, id: &str) -> Result<CloudConnection> {
+        self.connection(id)?;
+        let mut list = self.connections.write().unwrap();
+        let c = list.iter_mut().find(|c| c.id == id).ok_or_else(|| crate::cloud::connection_not_found(id))?;
+        c.checked = Some(rfc3339(unix_now()));
+        Ok(c.clone())
+    }
+
+    fn disconnect_cloud(&self, id: &str) -> Result<()> {
+        self.connection(id)?;
+        let runs = self.runs.read().unwrap();
+        let busy: Vec<&str> = runs
+            .iter()
+            .filter(|(r, _)| r.cloud().is_some_and(|c| c.connection_id == id))
+            .filter(|(r, _)| r.is_active() || r.instance().is_some_and(|i| i.status.is_alive()))
+            .map(|(r, _)| r.id.as_str())
+            .collect();
+        if !busy.is_empty() {
+            return Err(Error::conflict(
+                "connection_in_use",
+                format!("connection '{id}' has active run(s) {}", busy.join(", ")),
+            )
+            .hint("stop its runs and wait until GET /api/cloud/instances shows its instances terminated"));
+        }
+        self.connections.write().unwrap().retain(|c| c.id != id);
+        Ok(())
+    }
+
+    fn cloud_offers(&self, id: &str, _refresh: bool) -> Result<folo_api::CloudOfferList> {
+        let c = self.connection(id)?;
+        Ok(folo_api::CloudOfferList { offers: MockStore::offers_of(&c), fetched: rfc3339(unix_now()) })
+    }
+
+    fn cloud_instances(&self) -> Result<Vec<CloudInstance>> {
+        self.providers()?;
+        Ok(self.instances())
+    }
+
+    /// A cloud run whose instance is terminated by hand fails with `cloud_instance_lost`.
+    fn terminate_instance(&self, id: &str) -> Result<CloudInstance> {
+        self.providers()?;
+        let runs = self.runs.read().unwrap();
+        let (run, _) = runs
+            .iter()
+            .find(|(r, _)| r.cloud().is_some_and(|c| c.instance_id == id))
+            .ok_or_else(|| crate::cloud::instance_not_found(id))?;
+        run.lose();
+        Ok(run.instance().expect("a cloud run has its instance"))
     }
 
     fn val(&self, req: folo_api::ValRequest) -> Result<folo_api::ValReport> {

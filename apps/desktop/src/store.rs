@@ -492,6 +492,14 @@ impl Store {
                     r.queue_position = Some(q.position);
                 }
             }
+            // State, not a change: the latest replaces the run's (phase, transfer, cost).
+            RunEvent::Cloud(c) => {
+                if let Some(runs) = self.runs.ready_mut()
+                    && let Some(r) = runs.iter_mut().find(|r| r.id == run_id)
+                {
+                    r.cloud = Some(*c);
+                }
+            }
             RunEvent::Log(l) => {
                 if let Some(Load::Ready(lines)) = self.logs.get_mut(run_id) {
                     lines.push(l);
@@ -763,6 +771,22 @@ mod tests {
         store.runs = Load::Ready(runs);
         store.sync_resumed();
         assert!(!store.resumed.contains(&id));
+    }
+
+    #[test]
+    fn a_cloud_event_replaces_the_runs_cloud_state() {
+        let mut store = Store::new(Arc::new(MockBackend::with_cloud_runs(4200, true)));
+        store.runs = store.api.runs().into();
+        let id = "run_c1d0";
+        let mut cloud = store.run(id).and_then(|r| r.cloud.clone()).expect("a cloud run");
+        assert_eq!(cloud.phase, crate::api::CloudPhase::Syncing);
+        cloud.phase = crate::api::CloudPhase::Training;
+        cloud.progress = None;
+        cloud.cost_usd = Some(0.31);
+        store.apply(id, RunEvent::Cloud(Box::new(cloud.clone())));
+        assert_eq!(store.run(id).unwrap().cloud.as_ref(), Some(&cloud));
+        // Another run's state stays as it was.
+        assert!(store.run("run_a19f").unwrap().cloud.is_none());
     }
 
     #[test]

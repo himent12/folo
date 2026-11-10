@@ -52,6 +52,10 @@
   import { scheduleWarnings } from './run/warnings';
   import Copy from '@lucide/svelte/icons/copy';
   import Play from '@lucide/svelte/icons/play';
+  import CloudUpload from '@lucide/svelte/icons/cloud-upload';
+  import { beforeTraining, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
+  import { prefs } from '$lib/prefs.svelte';
+  import CloudPanel from './run/CloudPanel.svelte';
   import { isOom } from '$lib/oom';
   import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands.svelte';
 
@@ -71,6 +75,16 @@
 
   const others = new Resource((s) => hub.api.runs(s), { poll: 5000 });
   const queuedOnly = $derived(run?.status === 'queued' && live.steps.length === 0);
+
+  // A cloud run (docs/CLOUD.md): where it runs, said by its provider's name ("RunPod · RTX 4090"), and its hand-over
+  // in the waiting state's place while nothing trains yet.
+  const isCloud = $derived(!!run?.cloud);
+  const cloudProviders = new Resource((s) => (isCloud ? hub.api.cloudProviders(s) : Promise.resolve(null)));
+  const provider = $derived(run?.cloud ? providerName(run.cloud.provider, cloudProviders.data ?? undefined) : '');
+  /** Before training a cloud run is the hand-over, not a wait in the training queue: its title is the phase. */
+  const handover = $derived(run?.cloud && run.status === 'queued' ? run.cloud : null);
+  /** Stop on a run waiting in the training queue takes it out of the queue (a cloud run waits in none here). */
+  const removing = $derived(run?.status === 'queued' && !run.cloud);
   const ahead = $derived(others.data?.find((r) => r.status === 'running' || r.status === 'stopping'));
 
   // Queue control (servers that list `queue_control`, docs/API.md): the run's place, Start next, Move up / down.
@@ -176,7 +190,7 @@
     return scheduleWarnings(live.logs);
   });
 
-  type Section = 'samples' | 'classes' | 'logs' | 'config';
+  type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
   // Below 960 px one section shows at a time. A queued run has nothing to sample yet, so it opens on its Config (the
   // dependency and start estimate are in the banner above); once picked, the choice holds.
   let picked = $state<Section | null>(null);
@@ -202,9 +216,9 @@
       const r = await hub.api.stopRun(run.id);
       live.run = r;
       stopOpen = false;
-      toast.info(`Stopping ${r.name}`, `The checkpoint from epoch ${r.epoch} is kept.`);
+      toast.info(`Stopping ${r.name}`, r.cloud && r.epoch === 0 ? 'Its instance is released; nothing had trained yet.' : `The checkpoint from epoch ${r.epoch} is kept.`);
     } catch (e) {
-      stopStatus.error(e, run.status === 'queued' ? 'Could not remove the run from the queue' : 'Could not stop the run');
+      stopStatus.error(e, removing ? 'Could not remove the run from the queue' : 'Could not stop the run');
     } finally {
       busy = false;
     }
@@ -242,7 +256,8 @@
     // next, so the menu never relies on it. Remove from queue last.
     const removeQueued = () => (stopOpen = true);
     if (place !== null) out.push(...queueItems(place, waitingCount, ahead, move, removeQueued));
-    else if (run.status === 'queued') out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: removeQueued });
+    // A cloud run waits in no queue here: the header's Stop releases its instance.
+    else if (run.status === 'queued' && !run.cloud) out.push({ label: REMOVE_LABEL, icon: X, danger: true, onclick: removeQueued });
     if (!active) out.push({ label: 'Delete run', icon: Trash, danger: true, onclick: () => (deleteOpen = true) });
     return out;
   };
@@ -263,7 +278,7 @@
     const r = run;
     if (!r) return [];
     const out: PageCommand[] = [];
-    if (r.status === 'running') out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: Square, run: () => (stopOpen = true) });
+    if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: Square, run: () => (stopOpen = true) });
     // As the run's banner: anything but out of memory continues from the last checkpoint.
     if (r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error)))
       out.push({ id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() });
@@ -296,7 +311,9 @@
 <!-- A queued run leads with what it waits for and when it should start (the callout under the header); the frames it
      will fill stay compact until there is data, and the config is in its rail. -->
 {#snippet waiting()}
-  {#if place !== null && place > 1}
+  {#if handover}
+    {phaseWhat(handover, provider, prefs.units)}
+  {:else if place !== null && place > 1}
     <!-- Behind other waiting runs: when it should start, then each run in front with its own time in brackets, in queue
          order (what trains now, then the waiting ones), so the sum is checkable. A run whose length the server cannot
          estimate makes the sum a floor ("more than 7m"), never an estimate of the whole (`queueWait`). -->
@@ -391,7 +408,7 @@
 {:else}
   <Page title={run.name} inlineActions>
     {#snippet lead()}
-      <StatusBadge status={run.status} />
+      <StatusBadge {run} />
       <Ident value={run.id} class="faint id" />
       <!-- Phones: the time joins the status, so the meta line below fits one row. -->
       <span class="faint when-phone">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
@@ -411,7 +428,12 @@
         <!-- Only where they differ from the defaults (f32, the NMS head); Config always says both. -->
         {#if run.config.amp}<span class="cfg">Mixed precision</span>{/if}
         {#if run.config.head === 'o2o'}<span class="cfg">{HEAD_LABEL.o2o}</span>{/if}
-        <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
+        {#if run.cloud}
+          <!-- Where a cloud run runs: its provider and GPU (the worker's own name for it once it trains). -->
+          <span class="dev cloud">{provider} · {run.device ? deviceName(run.device) : run.cloud.offer.gpu}</span>
+        {:else}
+          <span class="truncate dev" title={run.device}>{deviceName(run.device)}</span>
+        {/if}
         <span class="faint when">{run.started ? `started ${ago(run.started)}` : `created ${ago(run.created)}`}</span>
       </Meta>
     {/snippet}
@@ -419,9 +441,10 @@
       <!-- One secondary (Compare), a running run's state action (Stop), and ⋯ with the rest, the destructive action last
            (DESIGN_DIRECTION §13). Phones: Compare joins the ⋯. -->
       <span class="wide-only"><Button icon={GitCompare} href={href(`/runs/compare?ids=${run.id}`)}>Compare</Button></span>
-      {#if run.status === 'running'}
+      {#if run.status === 'running' || (run.cloud && run.status === 'queued')}
         <!-- Phones: a quiet icon button the size of ⋯ beside it, so Stop is never the largest control above the progress
-             hero; its name says what it does, and the confirm stays. -->
+             hero; its name says what it does, and the confirm stays. A cloud run can be stopped in its hand-over too:
+             its instance costs money from the launch. -->
         <span class="wide-only"><Button variant="danger" icon={Square} onclick={() => (stopOpen = true)}>Stop</Button></span>
         <span class="phone-only"><Button variant="danger" icon={Square} aria-label="Stop {run.name}" title="Stop run" onclick={() => (stopOpen = true)} /></span>
       {/if}
@@ -435,7 +458,8 @@
       {resuming}
       onresume={resume}
       waiting={queuedOnly ? waiting : undefined}
-      waitingTitle={place !== null ? queuePlace(place) : undefined}
+      waitingTitle={handover ? phaseTitle(handover, provider) : place !== null ? queuePlace(place) : undefined}
+      waitingIcon={handover && beforeTraining(handover.phase) ? CloudUpload : undefined}
       waitingActions={canStart ? startNext : undefined}
       {warnings}
       system={system.data ?? (system.error ? null : undefined)}
@@ -452,6 +476,7 @@
       <div class="waiting">
         <div class="w-main"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} essential={phone.current} cli={runCli} /></div>
         <div class="w-side">
+          {#if run.cloud}<CloudPanel cloud={run.cloud} {provider} />{/if}
           {#if place !== null && queue.length}
             <Panel title="Queue" meta="{waitingCount} waiting" pad="none" id="queue">
               <ol class="queue">
@@ -506,17 +531,19 @@
           { value: 'samples', label: 'Samples' },
           { value: 'classes', label: 'Classes' },
           { value: 'logs', label: 'Logs' },
+          ...(run.cloud ? [{ value: 'cloud' as const, label: 'Cloud' }] : []),
           { value: 'config', label: 'Config' },
         ]}
       />
     </div>
-    <div class="detail" data-show={section} id="run-sec-panel" role={stacked.current ? 'tabpanel' : undefined} aria-labelledby={stacked.current ? `run-sec-${section}` : undefined}>
+    <div class="detail" class:cloud={!!run.cloud} data-show={section} id="run-sec-panel" role={stacked.current ? 'tabpanel' : undefined} aria-labelledby={stacked.current ? `run-sec-${section}` : undefined}>
       <div class="main-col">
         <div class="part" data-part="samples"><Samples runId={run.id} classes={dataset?.classes ?? []} {epochsDone} title="{scoresTitle(evalOn)} samples" /></div>
         <div class="part" data-part="logs"><Logs logs={live.logs} version={live.version} live={active} /></div>
       </div>
       <aside class="rail" aria-label="Per-class results and config">
         <div class="part" data-part="classes"><PerClass classes={dataset?.classes ?? []} epochs={live.epochs} version={live.version} loading={live.loading} compact /></div>
+        {#if run.cloud}<div class="part" data-part="cloud"><CloudPanel cloud={run.cloud} {provider} /></div>{/if}
         <!-- One column in the rail (laptops up) and on phones; on a tablet the section is the panel's full width, so it
              takes the two columns it has on a queued run's page (a panel at 768–1279 px uses its width). -->
         <div class="part" data-part="config"><ConfigPanel config={run.config} resolved={run.resolved} datasetName={dataset?.name} weights={lineage} compact={!stacked.current || phone.current} cli={runCli} /></div>
@@ -527,16 +554,20 @@
 
   <Dialog
     bind:open={stopOpen}
-    title={run.status === 'queued' ? removeTitle(run.name) : `Stop ${run.name}?`}
-    description={run.status === 'queued'
+    title={removing ? removeTitle(run.name) : `Stop ${run.name}?`}
+    description={removing
       ? REMOVE_DESCRIPTION
-      : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'}
+      : handover
+        ? 'Its instance is released now; nothing has trained yet.'
+        : run.cloud
+          ? 'Training stops after the current step. The last checkpoint is copied here, saved as a model, and the instance released.'
+          : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'}
     size="sm"
     status={stopStatus}
   >
     {#snippet footer()}
-      <Button onclick={() => (stopOpen = false)}>{run.status === 'queued' ? 'Keep it queued' : 'Keep training'}</Button>
-      <Button variant="destructive" icon={run.status === 'queued' ? X : Square} loading={busy} onclick={stop}>{run.status === 'queued' ? REMOVE_LABEL : 'Stop run'}</Button>
+      <Button onclick={() => (stopOpen = false)}>{removing ? 'Keep it queued' : handover ? 'Keep going' : 'Keep training'}</Button>
+      <Button variant="destructive" icon={removing ? X : Square} loading={busy} onclick={stop}>{removing ? REMOVE_LABEL : 'Stop run'}</Button>
     {/snippet}
   </Dialog>
   <Dialog bind:open={deleteOpen} title="Delete {run.name}?" description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched." size="sm" status={deleteStatus}>
@@ -791,11 +822,12 @@
     .waiting {
       grid-template-columns: minmax(0, 1fr);
     }
-    /* Tablets: the queue leads, then the config, then the outputs to come. */
+    /* Tablets: the queue (a cloud run's hand-over) leads, then the config, then the outputs to come. */
     .w-side {
       display: contents;
     }
-    .w-side :global(#queue) {
+    .w-side :global(#queue),
+    .w-side :global(#cloud) {
       order: -1;
     }
   }
@@ -913,6 +945,18 @@
       grid-row: 1 / 3;
       grid-template-rows: subgrid;
     }
+    /* A cloud run's rail has its Cloud panel between Per class and Config: the log spans it and Config, so the two
+       columns still start and end together (the log is the part that grows). */
+    .detail.cloud {
+      grid-template-rows: auto auto minmax(0, 1fr);
+    }
+    .detail.cloud .main-col,
+    .detail.cloud .rail {
+      grid-row: 1 / 4;
+    }
+    .detail.cloud [data-part='logs'] {
+      grid-row: span 2;
+    }
   }
   .phone-pick {
     display: none;
@@ -941,6 +985,7 @@
     .detail:not([data-show='samples']) [data-part='samples'],
     .detail:not([data-show='classes']) [data-part='classes'],
     .detail:not([data-show='logs']) [data-part='logs'],
+    .detail:not([data-show='cloud']) [data-part='cloud'],
     .detail:not([data-show='config']) [data-part='config'] {
       display: none;
     }

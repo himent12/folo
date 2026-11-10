@@ -92,6 +92,28 @@ rebuilds its dataset indexes then). Nothing installs one by default; `folo mcp
 - `detect_format(path, format)` finds the format without reading labels; a path with nothing recognisable fails with
   a `DataError::Format` whose message starts with `UNDETECTED`.
 
+## Packing
+`pack::pack(&loaded, &mut out)` writes an opened dataset, of any format and layout, as one tar stream into any
+`io::Write`, without temporary files: how FOLO sends a dataset to another FOLO server (`/api/uploads`, a cloud
+worker; docs/CLOUD.md, Dataset). The stream is the canonical YOLO layout, as FOLO reads the dataset rather than as it
+lies on disk:
+- `data.yaml` first: the split folders that have images (`train: images/train`, ...) and `names` (every class, in
+  order, as JSON-quoted strings);
+- then for every split (train, val, test), every image in dataset order: `images/<split>/<index>.<ext>`, the source
+  file's bytes and extension, followed by `labels/<split>/<index>.txt`, written from the parsed boxes (`class cx cy w
+  h`, normalised, each `f32` in its shortest exact decimal; an empty file for an image without boxes). `<index>` is
+  the image's 0-based place in its split, zero-padded to 7 digits (more for larger splits), so names sort in
+  dataset order;
+- ustar headers with mode `0644`, owner 0 and modification time 0, so the bytes depend only on the dataset; the
+  end-of-archive marker last.
+
+Images the loader skipped (corrupt, missing, broken labels) are not in the stream. `pack::packed_len(&loaded)` is
+the stream's exact length from the image files' sizes (nothing is read), for progress. A dataset without training
+or validation images is a `DataError::Config` before anything is written. The invariant (`tests/pack.rs`, from YOLO
+and COCO sources): unpacked and opened again, the stream gives the same class names, split sizes, image order,
+image bytes and sizes, and boxes (exactly). One exception: a COCO dataset with two identical boxes on one image
+keeps one, as the YOLO reader drops duplicate label lines.
+
 ## Geometry
 - Pixel `i` covers `[i, i + 1)`. Resize is bilinear with aligned pixel centres, so box edges scale exactly by
   `new / old`; shrinking by 2x or more first box-filters by an integer factor (no aliasing).

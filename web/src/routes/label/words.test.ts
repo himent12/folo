@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import type { LabelAgent, LabelImage, LabelJob, LabelRun } from '$lib/api/types';
 import { classChangeError, classesError } from '$lib/label';
-import { imageState, jobStatus, modelLabel, runAgent, tokens, usageFacts, usd } from './words';
+import { usd } from '$lib/format';
+import { imageState, jobStatus, modelLabel, runAgent, tokens, usageFacts } from './words';
 
 const job = (status: LabelJob['status'], outcome: LabelRun['outcome'] = null) => ({ status, run: outcome ? { outcome } : null }) as LabelJob;
 const claude = { id: 'claude', models: [{ id: 'sonnet', label: 'Sonnet' }] } as LabelAgent;

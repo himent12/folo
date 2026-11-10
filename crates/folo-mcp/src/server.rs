@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use base64::Engine as _;
 use folo_server::Store;
+use folo_server::store::MetricsQuery;
 use rmcp::ErrorData as McpError;
 use rmcp::ServerHandler;
 use rmcp::model::{
@@ -98,7 +99,7 @@ impl Inner {
             FoloUri::Metrics(id) | FoloUri::Epochs(id) => {
                 self.blocking(move |s| {
                     let run = s.get_run(&id)?;
-                    let m = s.run_metrics(&id, u64::MAX)?;
+                    let m = s.run_metrics(&id, &MetricsQuery::every(u64::MAX))?;
                     Ok(hash(&(m.epochs.len(), format!("{:?}", run.status))))
                 })
                 .await
@@ -498,7 +499,7 @@ impl ServerHandler for FoloMcp {
             FoloUri::Metrics(id) => {
                 let m = self
                     .inner
-                    .blocking(move |s| s.run_metrics(&id, 1))
+                    .blocking(move |s| s.run_metrics(&id, &MetricsQuery::default()))
                     .await
                     .map_err(|e| resource_error(&uri, e))?;
                 json_contents(&serde_json::to_value(m).unwrap_or_default())
@@ -506,7 +507,7 @@ impl ServerHandler for FoloMcp {
             FoloUri::Epochs(id) => {
                 let m = self
                     .inner
-                    .blocking(move |s| s.run_metrics(&id, u64::MAX))
+                    .blocking(move |s| s.run_metrics(&id, &MetricsQuery::every(u64::MAX)))
                     .await
                     .map_err(|e| resource_error(&uri, e))?;
                 json_contents(&json!({ "epochs": m.epochs, "last_step": m.steps.last() }))

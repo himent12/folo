@@ -18,7 +18,7 @@
 import { untrack } from 'svelte';
 import { SvelteSet } from 'svelte/reactivity';
 import { hub } from './index.svelte';
-import type { Epoch, LogLine, Run, Step } from './types';
+import type { Epoch, LogLine, Run, RunCloud, Step } from './types';
 
 const MAX_LOGS = 2000;
 const ACTIVE = ['queued', 'running', 'stopping'];
@@ -123,6 +123,9 @@ export class LiveRun {
   /** The same for `queue` events: the latest place outlives snapshots requested before it (and a run not loaded yet). */
   #queueSeq = 0;
   #lastQueue: number | null = null;
+  /** The same for `cloud` events: a cloud run's latest state outlives snapshots requested before it. */
+  #cloudSeq = 0;
+  #lastCloud: RunCloud | null = null;
   /** Bumps on every rewind (resume): history requested before it describes an earlier attempt and is dropped. */
   #gen = 0;
   /** While a resumed run repeats steps it had already run: the old last step, and what the new attempt streamed. */
@@ -142,6 +145,7 @@ export class LiveRun {
       let closed = false;
       this.#lastStatus = null;
       this.#lastQueue = null;
+      this.#lastCloud = null;
       this.#replay = null;
       let lostTimer: ReturnType<typeof setTimeout> | undefined;
       this.#heard = Date.now();
@@ -180,6 +184,7 @@ export class LiveRun {
       const load = async () => {
         const seq = this.#statusSeq;
         const queueSeq = this.#queueSeq;
+        const cloudSeq = this.#cloudSeq;
         const gen = this.#gen;
         const my = ++loadIssued;
         const [snap, metrics, logs] = await Promise.all([
@@ -196,7 +201,7 @@ export class LiveRun {
         loadApplied = my;
         // Final only if the server said so in this same response (its snapshot), not because the run ended since.
         const final = !ACTIVE.includes(snap.run.status);
-        this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq, queueSeq, final);
+        this.#absorb(snap.claim() ? snap.run : (this.run ?? snap.run), metrics.steps, metrics.epochs, seq, queueSeq, cloudSeq, final);
         // Still replaying a resumed run: ask again shortly, until its new steps have replaced the old ones.
         if (this.#replay && this.run && ACTIVE.includes(this.run.status)) {
           clearTimeout(replayTimer);
@@ -283,9 +288,10 @@ export class LiveRun {
             // Terminal: refresh the snapshot for finished time, best and model id (even if history is still loading).
             const seq = this.#statusSeq;
             const gen = this.#gen;
+            const cloudSeq = this.#cloudSeq;
             snapshot().then((snap) => {
               if (closed || seq !== this.#statusSeq || gen !== this.#gen || !snap.claim()) return;
-              this.run = keepStepsPerEpoch(snap.run, this.run);
+              this.run = this.#clouded(keepStepsPerEpoch(snap.run, this.run), cloudSeq);
             }, () => {});
           }
         },
@@ -353,6 +359,15 @@ export class LiveRun {
           this.waiting = waiting;
           if (this.run && this.run.status === 'queued') this.run = { ...this.run, queue_position: position };
         },
+        cloud: (c) => {
+          if (closed) return;
+          this.#heard = Date.now();
+          // State, not a change (docs/API.md, SSE `cloud`): the latest event is the run's `cloud`. It is kept for the
+          // snapshots still in flight (#absorb), which may hold an older phase or arrive before any run is loaded.
+          this.#cloudSeq++;
+          this.#lastCloud = c;
+          if (this.run) this.run = { ...this.run, cloud: c };
+        },
         log: (l) => {
           if (closed) return;
           this.#heard = Date.now();
@@ -397,13 +412,14 @@ export class LiveRun {
   async resume(call: () => Promise<Run>): Promise<Run> {
     const seq = this.#statusSeq;
     const queueSeq = this.#queueSeq;
+    const cloudSeq = this.#cloudSeq;
     const r = await call();
     if (this.#statusSeq === seq && this.run && !ACTIVE.includes(this.run.status)) this.#rewind();
     // Progress comes from the rewind and the stream (the response may still carry the interrupted step count); the
     // status from the response unless an event already reported a newer one.
     const cur = this.run;
     const status = this.#statusSeq === seq ? { status: r.status, error: r.error } : (this.#lastStatus ?? { status: r.status, error: r.error });
-    this.run = this.#placed({ ...r, ...(cur ? { step: cur.step, epoch: cur.epoch, best: cur.best } : {}), ...status }, queueSeq);
+    this.run = this.#clouded(this.#placed({ ...r, ...(cur ? { step: cur.step, epoch: cur.epoch, best: cur.best } : {}), ...status }, queueSeq), cloudSeq);
     return r;
   }
 
@@ -422,7 +438,7 @@ export class LiveRun {
   }
 
   /** Merges a snapshot + history into what the stream has delivered so far, never moving backwards. */
-  #absorb(run: Run, steps: Step[], epochs: Epoch[], statusSeqAtStart: number, queueSeqAtStart: number, final: boolean) {
+  #absorb(run: Run, steps: Step[], epochs: Epoch[], statusSeqAtStart: number, queueSeqAtStart: number, cloudSeqAtStart: number, final: boolean) {
     // During a replay the new attempt's streamed steps / epochs are certain: re-apply them over the history.
     if (this.#replay) {
       for (const r of this.#replay.steps) [steps, epochs] = replaceFrom(steps, epochs, r);
@@ -446,7 +462,7 @@ export class LiveRun {
       if (!next.best || e.val.map50_95 > next.best.map50_95) next = { ...next, best: { epoch: e.epoch, map50_95: e.val.map50_95 } };
     // A status event that arrived after this request was sent is newer than the snapshot.
     if (this.#statusSeq !== statusSeqAtStart && this.#lastStatus) next = { ...next, ...this.#lastStatus };
-    this.run = this.#placed(next, queueSeqAtStart);
+    this.run = this.#clouded(this.#placed(next, queueSeqAtStart), cloudSeqAtStart);
   }
 
   /**
@@ -457,6 +473,11 @@ export class LiveRun {
     if (run.status !== 'queued') return run.queue_position != null ? { ...run, queue_position: null } : run;
     if (this.#queueSeq !== queueSeqAtStart && this.#lastQueue !== null) return { ...run, queue_position: this.#lastQueue };
     return run;
+  }
+
+  /** A snapshot's cloud state, corrected: a `cloud` event that arrived after the request was sent is newer. */
+  #clouded(run: Run, cloudSeqAtStart: number): Run {
+    return this.#cloudSeq !== cloudSeqAtStart && this.#lastCloud ? { ...run, cloud: this.#lastCloud } : run;
   }
 
   #bump() {
