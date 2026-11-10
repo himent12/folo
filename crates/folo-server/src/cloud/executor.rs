@@ -558,7 +558,7 @@ impl Exec {
         let record = self
             .core
             .ledger
-            .create(&self.c.connection.id, &info.id, self.entry.id(), &offer, deadline)
+            .create(&self.c.connection.id, &info.id, self.entry.id(), &offer, deadline, Some(self.limit()))
             .map_err(|e| failed(&e.body.code, e.body.message))?;
         release.arm(&record.id);
         self.private.instance_id = Some(record.id.clone());
@@ -899,6 +899,7 @@ impl Exec {
         let mut time_up = false;
         let mut wait = t.poll;
         let (mut unreachable, mut gone): (Option<Instant>, Option<Instant>) = (None, None);
+        let mut answered = false;
         let mut cost_at = Instant::now();
         let end = loop {
             if self.core.halt.is_on() {
@@ -939,6 +940,13 @@ impl Exec {
                 Ok(None) => {
                     if unreachable.is_some() {
                         self.entry.log(LogLevel::Info, "the worker answers again");
+                    }
+                    // A run followed again whose record does not say when its worker first answered (a server
+                    // of before wrote it, or that write failed): it answers now. The first time stays.
+                    if !std::mem::replace(&mut answered, true)
+                        && let Some(id) = &self.private.instance_id
+                    {
+                        let _ = self.core.ledger.booted(id);
                     }
                     (wait, unreachable, gone) = (t.poll, None, None);
                 }

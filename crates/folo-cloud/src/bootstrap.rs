@@ -23,6 +23,10 @@ use crate::{Error, ErrorKind, Result};
 /// at the deadline and collects its checkpoint in that time.
 pub const GRACE_S: u64 = 600;
 
+/// Seconds the script keeps trying to terminate the instance once it is time (5 tries, 30 s apart). After that it
+/// gives up: an instance that cannot reach its provider's API stays until something else terminates it.
+pub const TERMINATE_TRIES_S: u64 = 150;
+
 /// Seconds the script waits after it ended before the instance terminates itself, so the end of its log can still
 /// be read in the provider's console.
 const EXIT_PAUSE_S: u32 = 60;
@@ -292,6 +296,14 @@ mod tests {
             );
         }
         assert!(s.contains(r#""library_path": "libEGL_nvidia.so.0""#), "{s}");
+    }
+
+    #[test]
+    fn the_time_it_keeps_trying_to_terminate_is_the_constant() {
+        let s = script(&spec("https://example.com/folo")).unwrap();
+        let tries = &s[at(&s, "terminate_instance() {")..at(&s, "# 1. The deadline watchdog")];
+        assert!(tries.contains("for attempt in 1 2 3 4 5; do") && tries.contains("sleep 30"), "{tries}");
+        assert_eq!(TERMINATE_TRIES_S, 5 * 30);
     }
 
     #[test]

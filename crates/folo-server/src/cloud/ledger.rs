@@ -5,8 +5,9 @@
 //! server and `folo cloud terminate`) never lose each other's changes. Records of instances that ended more than
 //! [`KEEP_ENDED`] ago are removed.
 //!
-//! Next to the instance a record keeps when its worker first answered (`booted`), which the API does not show: from
-//! then, an instance that terminates itself has a known latest end ([`Ledger::last`]).
+//! Next to the instance a record keeps its time limit and when its worker first answered, which the API does not
+//! show: with them, the cost of an instance that terminated itself while nobody watched is estimated to when it
+//! should have, not to when someone looked again ([`Ledger::last`]).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -38,6 +39,10 @@ struct Record {
     /// RFC 3339 time its worker first answered; absent until then (and in records of before this field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     booted: Option<String>,
+    /// The time limit the instance was launched with, in seconds: what its own watchdog counts from the start of
+    /// its setup. Absent when it has none (and in records of before this field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lifetime_s: Option<f64>,
 }
 
 /// `404 instance_not_found`.
@@ -67,22 +72,24 @@ impl Ledger {
         Ledger { dir: cloud_dir.join("instances"), lock, self_terminating }
     }
 
-    /// The latest the instance of `r` can have lived, when that is known: an instance of a provider that arms it
-    /// to terminate itself is gone its time limit and [`folo_cloud::bootstrap::GRACE_S`] after its setup started,
-    /// whoever watched, and its setup had started when its worker answered (`booted`). So an instance that ended
-    /// while nothing followed it (this machine was off, the server crashed) is not counted as billed until
-    /// someone looked again. `None` for an instance whose worker never answered (when its setup started, if it
-    /// did, is not known) and for a provider that does not arm its instances: those count until their end is
-    /// confirmed.
+    /// When the instance of `r` should have terminated itself at the latest, where that can be told: an instance
+    /// of a provider that arms it does so its time limit and [`folo_cloud::bootstrap::GRACE_S`] after its setup
+    /// started (and keeps trying for [`folo_cloud::bootstrap::TERMINATE_TRIES_S`]), whoever watches, and its
+    /// setup had started when its worker answered (`booted`). `None` for an instance whose worker never answered
+    /// (when its setup started, if it did, is not known), one without a time limit on record, and a provider
+    /// that does not arm its instances.
+    ///
+    /// It is what the cost of an instance that nobody saw end is estimated to (this machine was off, the server
+    /// crashed): better than counting until someone looked again, and not a proof. An instance that could not
+    /// reach its provider's API to terminate itself is still there, which is why its end is only put here when
+    /// the provider says it is gone ([`Ledger::terminated`]).
     fn last(&self, r: &Record) -> Option<f64> {
-        let i = &r.instance;
-        if !self.self_terminating.contains(&i.provider) {
+        if !self.self_terminating.contains(&r.instance.provider) {
             return None;
         }
         let booted = r.booted.as_deref().and_then(parse_rfc3339)?;
-        // The time limit: the deadline is set, counted from then, just before the record is created.
-        let limit = i.deadline.as_deref().and_then(parse_rfc3339)? - parse_rfc3339(&i.created)?;
-        Some(booted + limit.max(0.0) + folo_cloud::bootstrap::GRACE_S as f64)
+        let own = folo_cloud::bootstrap::GRACE_S + folo_cloud::bootstrap::TERMINATE_TRIES_S;
+        Some(booted + r.lifetime_s?.max(0.0) + own as f64)
     }
 
     /// The instance of `r` as the API shows it at `now`: with its cost so far.
@@ -118,7 +125,8 @@ impl Ledger {
     }
 
     /// A new `launching` record for an instance of `offer` for run `run_id` on `connection_id`, named
-    /// `folo-<run id>-<nonce>`, with the run's `deadline`.
+    /// `folo-<run id>-<nonce>`, with the run's `deadline` and the time limit (`lifetime`) the instance is launched
+    /// with.
     pub fn create(
         &self,
         connection_id: &str,
@@ -126,6 +134,7 @@ impl Ledger {
         run_id: &str,
         offer: &CloudOffer,
         deadline: Option<String>,
+        lifetime: Option<Duration>,
     ) -> Result<CloudInstance> {
         let nonce = files::random_hex(2).map_err(|e| Error::internal(e.to_string()))?;
         let _lock = self.lock()?;
@@ -148,7 +157,7 @@ impl Ledger {
             cost_usd: None,
             error: None,
         };
-        let record = Record { instance, booted: None };
+        let record = Record { instance, booted: None, lifetime_s: lifetime.map(|l| l.as_secs_f64()) };
         self.write(&record)?;
         Ok(record.instance)
     }
@@ -159,10 +168,26 @@ impl Ledger {
     }
 
     /// Changes record `id` under the cloud lock (re-read first, so another process's change is not lost) and
-    /// writes it; its cost is brought up to date, and an instance that `terminated` or was `lost` gets its end
-    /// (now, or the latest it can have lived when that is known and was earlier).
+    /// writes it; its cost is brought up to date, and an instance that `terminated` or was `lost` gets its end:
+    /// now.
     pub fn update(&self, id: &str, change: impl FnOnce(&mut CloudInstance)) -> Result<CloudInstance> {
         self.change(id, |r| change(&mut r.instance))
+    }
+
+    /// The provider confirmed that instance `id` is gone: `terminated`, without an error. `was_gone` says the
+    /// provider no longer had it when it was asked, so nobody saw it end: its end is then put at when it should
+    /// have terminated itself ([`Ledger::last`]) when that is known and was earlier. An instance that was still
+    /// there ended now.
+    pub fn terminated(&self, id: &str, was_gone: bool) -> Result<CloudInstance> {
+        let now = unix_now();
+        self.change(id, |r| {
+            r.instance.status = CloudInstanceStatus::Terminated;
+            r.instance.error = None;
+            if r.instance.ended.is_none() {
+                let end = self.last(r).filter(|_| was_gone).map_or(now, |last| now.min(last));
+                r.instance.ended = Some(rfc3339(end));
+            }
+        })
     }
 
     /// The worker of instance `id` answers: its record says when (the first time only), which bounds how long the
@@ -184,8 +209,7 @@ impl Ledger {
         change(&mut r);
         let now = unix_now();
         if !r.instance.status.is_alive() && r.instance.ended.is_none() {
-            let end = self.last(&r).map_or(now, |last| now.min(last));
-            r.instance.ended = Some(rfc3339(end));
+            r.instance.ended = Some(rfc3339(now));
         }
         r.instance.cost_usd = cost(&r.instance, now, self.last(&r));
         self.write(&r)?;
@@ -260,10 +284,10 @@ mod tests {
     fn records_follow_their_instance_and_old_ones_go() {
         let dir = TestDir::new("cloud-ledger");
         let ledger = Ledger::new(&dir.join("cloud"), dir.join("cloud").join(".lock"), Vec::new());
-        let a = ledger.create("cc_1", "p", "run_1", &offer(Some(3.6)), None).unwrap();
+        let a = ledger.create("cc_1", "p", "run_1", &offer(Some(3.6)), None, None).unwrap();
         assert!(a.name.starts_with("folo-run_1-") && a.name.len() == "folo-run_1-".len() + 4, "{}", a.name);
         assert_eq!((a.status, a.provider_ref.as_deref()), (CloudInstanceStatus::Launching, None));
-        let b = ledger.create("cc_1", "p", "run_2", &offer(None), None).unwrap();
+        let b = ledger.create("cc_1", "p", "run_2", &offer(None), None, None).unwrap();
         let ended = ledger
             .update(&b.id, |i| {
                 i.provider_ref = Some("r".into());
@@ -290,16 +314,17 @@ mod tests {
     }
 
     #[test]
-    fn an_instance_that_terminates_itself_is_not_billed_past_the_latest_it_can_have_lived() {
+    fn an_instance_nobody_saw_end_is_counted_to_when_it_should_have_terminated_itself() {
         let dir = TestDir::new("cloud-ledger-last");
         let cloud = dir.join("cloud");
-        let grace = folo_cloud::bootstrap::GRACE_S as f64;
+        let own = (folo_cloud::bootstrap::GRACE_S + folo_cloud::bootstrap::TERMINATE_TRIES_S) as f64;
         // Launched ten hours ago with an hour's time limit, and nobody has looked since.
         let now = unix_now().floor();
-        let (created, deadline) = (now - 36_000.0, now - 32_400.0);
-        let forgotten = |ledger: &Ledger, provider: &str, status: CloudInstanceStatus| {
-            let i =
-                ledger.create("cc_1", provider, "run_1", &offer(Some(3.6)), Some(rfc3339(deadline))).unwrap();
+        let created = now - 36_000.0;
+        let hour = Some(Duration::from_secs(3_600));
+        let forgotten = |ledger: &Ledger, status: CloudInstanceStatus, lifetime: Option<Duration>| {
+            let deadline = Some(rfc3339(created + 3_600.0));
+            let i = ledger.create("cc_1", "arming", "run_1", &offer(Some(3.6)), deadline, lifetime).unwrap();
             ledger
                 .update(&i.id, |i| {
                     i.created = rfc3339(created);
@@ -308,58 +333,74 @@ mod tests {
                 .unwrap()
         };
         let usd = |seconds: f64| Some((seconds / 3600.0 * 3.6 * 1e4).round() / 1e4);
-        let since = |i: &CloudInstance| now - 36_000.0 <= unix_now() && i.cost_usd.unwrap() >= 35.99;
+        let ten_hours = |i: &CloudInstance| i.cost_usd.unwrap() >= 35.99;
+        let end = |i: &CloudInstance| i.ended.as_deref().and_then(parse_rfc3339).unwrap();
 
         // A provider that arms its instances, and a worker that answered four minutes after the launch request:
-        // the instance is gone an hour and the grace after that at the latest, whatever `now` is.
+        // the instance should be gone an hour and its own grace after that, whatever `now` is.
         let ledger = Ledger::new(&cloud, cloud.join(".lock"), vec!["arming".into()]);
-        let alive = forgotten(&ledger, "arming", CloudInstanceStatus::Running);
-        assert!(since(&alive), "not bounded before its worker answered: {:?}", alive.cost_usd);
+        let alive = forgotten(&ledger, CloudInstanceStatus::Running, hour);
+        assert!(ten_hours(&alive), "no estimate before its worker answered: {:?}", alive.cost_usd);
         let alive = ledger.booted_at(&alive.id, created + 240.0).unwrap();
-        assert_eq!(alive.cost_usd, usd(240.0 + 3_600.0 + grace));
-        assert_eq!(ledger.list()[0].cost_usd, usd(240.0 + 3_600.0 + grace));
-        // The first answer counts: a later one (a restart that follows the run again) does not move the bound.
-        assert_eq!(ledger.booted(&alive.id).unwrap().cost_usd, usd(240.0 + 3_600.0 + grace));
-        // Found gone, through `terminating`: it ended when it terminated itself at the latest, not when someone
-        // looked.
+        let should = 240.0 + 3_600.0 + own;
+        assert_eq!(alive.cost_usd, usd(should));
+        assert_eq!(ledger.list()[0].cost_usd, usd(should));
+        // The first answer counts: a later one (a restart that follows the run again) does not move it.
+        assert_eq!(ledger.booted(&alive.id).unwrap().cost_usd, usd(should));
+        // The provider no longer had it when it was asked: it ended when it should have, not when someone looked.
         ledger.update(&alive.id, |i| i.status = CloudInstanceStatus::Terminating).unwrap();
-        let ended = ledger.update(&alive.id, |i| i.status = CloudInstanceStatus::Terminated).unwrap();
-        assert_eq!(ended.ended.as_deref().and_then(parse_rfc3339), Some(created + 240.0 + 3_600.0 + grace));
-        assert_eq!(ended.cost_usd, usd(240.0 + 3_600.0 + grace));
-        // The file keeps the time next to the instance, and the API's instance does not carry it.
+        let gone = ledger.terminated(&alive.id, true).unwrap();
+        assert_eq!(
+            (gone.status, end(&gone), gone.cost_usd),
+            (CloudInstanceStatus::Terminated, created + should, usd(should))
+        );
+        // The file keeps the two times next to the instance, and the API's instance does not carry them.
         let file =
             std::fs::read_to_string(cloud.join("instances").join(format!("{}.json", alive.id))).unwrap();
-        assert!(file.contains(r#""booted""#) && file.contains(r#""status": "terminated""#), "{file}");
-        assert!(!serde_json::to_string(&ended).unwrap().contains("booted"));
+        assert!(file.contains(r#""booted""#) && file.contains(r#""lifetime_s": 3600.0"#), "{file}");
+        let shown = serde_json::to_string(&gone).unwrap();
+        assert!(!shown.contains("booted") && !shown.contains("lifetime_s"), "{shown}");
 
-        // An instance that ends before then ends now.
-        let early =
-            ledger.create("cc_1", "arming", "run_2", &offer(None), Some(rfc3339(now + 3_600.0))).unwrap();
+        // The provider still had it (its own termination failed, or it was not time yet): it ended now.
+        let there = forgotten(&ledger, CloudInstanceStatus::Running, hour);
+        ledger.booted_at(&there.id, created + 240.0).unwrap();
+        let there = ledger.terminated(&there.id, false).unwrap();
+        assert!((end(&there) - now).abs() < 5.0 && ten_hours(&there), "{there:?}");
+        // So does one that is terminated before its time, and one that changes status any other way.
+        let early = ledger.create("cc_1", "arming", "run_2", &offer(None), None, hour).unwrap();
         ledger.booted(&early.id).unwrap();
-        let early = ledger.update(&early.id, |i| i.status = CloudInstanceStatus::Terminated).unwrap();
-        assert!((early.ended.as_deref().and_then(parse_rfc3339).unwrap() - now).abs() < 5.0);
+        assert!((end(&ledger.terminated(&early.id, true).unwrap()) - now).abs() < 5.0);
+        let lost = forgotten(&ledger, CloudInstanceStatus::Running, hour);
+        ledger.booted_at(&lost.id, created + 240.0).unwrap();
+        let lost = ledger.update(&lost.id, |i| i.status = CloudInstanceStatus::Lost).unwrap();
+        assert!((end(&lost) - now).abs() < 5.0);
 
-        // An instance whose worker never answered: when its setup started, if it did, nobody knows. It counts
-        // until its end is confirmed, as every instance of a provider that does not arm them does.
-        let silent = forgotten(&ledger, "arming", CloudInstanceStatus::Starting);
-        assert!(since(&silent), "{:?}", silent.cost_usd);
+        // No estimate without what it takes: a worker that never answered (when its setup started, if it did,
+        // nobody knows), no time limit on record, a provider that does not arm its instances.
+        let silent = forgotten(&ledger, CloudInstanceStatus::Starting, hour);
+        assert!(ten_hours(&silent) && ten_hours(&ledger.terminated(&silent.id, true).unwrap()));
+        let unlimited = forgotten(&ledger, CloudInstanceStatus::Running, None);
+        assert!(ten_hours(&ledger.booted_at(&unlimited.id, created + 240.0).unwrap()));
         let other = TestDir::new("cloud-ledger-unarmed");
         let unarmed = Ledger::new(&other.join("cloud"), other.join("cloud").join(".lock"), Vec::new());
-        let alive = forgotten(&unarmed, "arming", CloudInstanceStatus::Running);
-        let alive = unarmed.booted_at(&alive.id, created + 240.0).unwrap();
-        assert!(since(&alive), "{:?}", alive.cost_usd);
+        let alive = forgotten(&unarmed, CloudInstanceStatus::Running, hour);
+        assert!(ten_hours(&unarmed.booted_at(&alive.id, created + 240.0).unwrap()));
     }
 
     #[test]
-    fn records_of_before_the_booted_time_still_read() {
+    fn records_of_before_the_ledger_kept_more_than_the_instance_still_read() {
         let dir = TestDir::new("cloud-ledger-old");
         let cloud = dir.join("cloud");
         let ledger = Ledger::new(&cloud, cloud.join(".lock"), vec!["p".into()]);
-        let i = ledger.create("cc_1", "p", "run_1", &offer(Some(1.0)), None).unwrap();
+        let i = ledger.create("cc_1", "p", "run_1", &offer(Some(1.0)), None, None).unwrap();
         // As a server of before wrote it: the instance alone.
         let path = cloud.join("instances").join(format!("{}.json", i.id));
         std::fs::write(&path, serde_json::to_vec_pretty(&i).unwrap()).unwrap();
         assert_eq!(ledger.get(&i.id).unwrap().id, i.id);
         assert_eq!(ledger.list().len(), 1);
+        // And a record of now reads as the instance alone, as a server of before reads it.
+        ledger.booted(&i.id).unwrap();
+        let old: CloudInstance = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(old.id, i.id);
     }
 }
