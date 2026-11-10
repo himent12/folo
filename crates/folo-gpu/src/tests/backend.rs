@@ -840,6 +840,51 @@ fn conv2d_batches_beyond_one_dispatch() {
 }
 
 #[test]
+fn conv2d_many_groups_run_one_image_at_a_time() {
+    // With 32768 groups or more not even two images fit one dispatch, so the pieces are single images; f16 ones
+    // start at odd element offsets when an image holds an odd number of elements (input, output or both).
+    let dev = dev!();
+    let q = |t: Tensor| t.to_dtype(DType::F16).unwrap().to_dtype(DType::F32).unwrap();
+    for (i, (xs, ws, g)) in [
+        ([3, 65536, 1, 1], [32768, 2, 1, 1], 32768),
+        ([3, 32769, 1, 1], [32769, 1, 1, 1], 32769),
+        ([3, 65538, 1, 1], [32769, 2, 1, 1], 32769),
+        ([3, 32769, 1, 1], [65538, 1, 1, 1], 32769),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seed = 150 + 3 * i as u64;
+        let (x, w, gy) =
+            (q(randn(&xs, seed)), q(randn(&ws, seed + 1)), q(randn(&[3, ws[0], 1, 1], seed + 2)));
+        // Forward and input gradient: on the CPU in f32, on the GPU in f32 and (autocast) in f16.
+        let run = |dev: Device, amp: bool| {
+            let xl = x.to_device(dev).unwrap().detach().requires_grad_();
+            let y = {
+                let _a = amp.then(folo_core::autocast);
+                xl.conv2d(&w.to_device(dev).unwrap(), None, 1, 0, 1, g)
+                    .unwrap_or_else(|e| panic!("conv {xs:?} {ws:?} on {dev:?} amp {amp}: {e}"))
+            };
+            assert_eq!(y.dtype(), if amp { DType::F16 } else { DType::F32 });
+            let gr = y.backward_with(&gy.to_device(dev).unwrap().to_dtype(y.dtype()).unwrap()).unwrap();
+            (y.to_dtype(DType::F32).unwrap(), gr.get(&xl).unwrap().clone())
+        };
+        let (yc, gc) = run(Device::Cpu, false);
+        let mut runs = vec![(false, 1e-5)];
+        if folo_core::backend::computes_f16(dev) {
+            // Sums of at most two f16 products in f32, rounded once to f16.
+            runs.push((true, 2e-3));
+        }
+        for (amp, tol) in runs {
+            let (yg, gg) = run(dev, amp);
+            let what = format!("conv {xs:?} {ws:?} g{g} amp {amp}");
+            assert_close_t(&yg, &yc, tol, tol, &what);
+            assert_close_t(&gg, &gc, tol, tol, &format!("{what}: input gradient"));
+        }
+    }
+}
+
+#[test]
 fn pooling_and_upsampling() {
     let dev = dev!();
     let x = randn(&[2, 3, 11, 13], 70);
