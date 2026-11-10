@@ -35,7 +35,8 @@ fn spawn(args: &[&str], inline: Option<&'static str>) -> Client {
 
 /// [`spawn`] with `FOLO_WEIGHTS_DIR` (the `folo weights` cache, listed as published models) set to `weights`.
 /// The server sees no GPU (the browser's `webgpu` backend only): these tests run on the mock or `--device cpu`,
-/// and creating a GPU device for `folo_info`'s capabilities takes about a second.
+/// and creating a GPU device for `folo_info`'s capabilities takes about a second. It looks at a dataset's files
+/// again on every request (`FOLO_DATASET_RECHECK_MS`), not after the 5 s a test would have to wait.
 fn spawn_with_weights(args: &[&str], inline: Option<&'static str>, weights: &std::path::Path) -> Client {
     let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
         .arg("mcp")
@@ -43,6 +44,7 @@ fn spawn_with_weights(args: &[&str], inline: Option<&'static str>, weights: &std
         .env("RUST_LOG", "warn")
         .env("FOLO_WEIGHTS_DIR", weights)
         .env("FOLO_GPU_BACKEND", "webgpu")
+        .env("FOLO_DATASET_RECHECK_MS", "0")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -919,14 +921,34 @@ fn confine_checks_what_a_dataset_reads() {
     .unwrap();
     let m = c.ok("register_dataset", json!({ "path": "mapped" }));
     assert_eq!(m["classes"], json!(["cat", "dog"]));
-    // Edited after registration to read outside: the next confined session re-indexes it under the guard (below).
-    // (The live re-index of a changed dataset, at most every 5 s, runs the same indexer.)
+    // Edited after registration to read outside: the re-index on the next request cannot read it, although this
+    // session has checked the dataset before.
+    let mapped_id = m["id"].as_str().unwrap().to_string();
     let outside_dir = outside.join("images/train").to_string_lossy().replace('\\', "/");
     std::fs::write(
         mapped.join("data.yaml"),
         format!("train: {outside_dir}\nval: {outside_dir}\nnames: [cat]\n"),
     )
     .unwrap();
+    let after = c.call("list_dataset_images", json!({ "dataset_id": mapped_id }));
+    if after["isError"] == true {
+        // The re-index refused the outside folder and failed.
+        let e: Value = serde_json::from_str(after["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(e["code"], "path_outside_data_dir", "{e}");
+    } else {
+        let outside_bytes = std::fs::read(outside.join("images/train/a.jpg")).unwrap();
+        for im in after["structuredContent"]["items"].as_array().unwrap() {
+            let uri = format!(
+                "folo://datasets/{mapped_id}/images/{}?size=original",
+                im["image_id"].as_str().unwrap()
+            );
+            let r = c.request("resources/read", json!({ "uri": uri }));
+            if let Some(blob) = r["result"]["contents"][0]["blob"].as_str() {
+                let bytes = base64::engine::general_purpose::STANDARD.decode(blob).unwrap();
+                assert_ne!(bytes, outside_bytes, "an outside image was served: {im}");
+            }
+        }
+    }
     let ds = c.ok("register_dataset", json!({ "path": "honest" }));
     let id = ds["id"].as_str().unwrap().to_string();
     let imgs = c.ok("list_dataset_images", json!({ "dataset_id": id }));

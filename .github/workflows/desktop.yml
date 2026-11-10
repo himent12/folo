@@ -1,6 +1,7 @@
 name: desktop
 # FOLO Desktop (GPUI) is its own cargo workspace and a slow build, so it only runs when the app, the design
-# tokens it is generated from, the wire types it shares, or the engine crates it runs locally change.
+# tokens it is generated from, the wire types it shares, or the engine crates it runs locally change, and on every
+# push to main.
 on:
   pull_request:
     paths:
@@ -18,19 +19,6 @@ on:
       - .github/workflows/desktop.yml
   push:
     branches: [main]
-    paths:
-      - apps/desktop/**
-      - design/**
-      - crates/folo-api/**
-      - crates/folo-client/**
-      - crates/folo-cloud/**
-      - crates/folo-core/**
-      - crates/folo-data/**
-      - crates/folo-gpu/**
-      - crates/folo-nn/**
-      - crates/folo-test-support/**
-      - crates/folo-vision/**
-      - .github/workflows/desktop.yml
 concurrency:
   group: desktop-${{ github.ref }}
   cancel-in-progress: true

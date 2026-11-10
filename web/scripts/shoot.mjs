@@ -598,7 +598,7 @@ try {
   // FOLO_QA_SHARD=2/3 checks every third state, starting with the second: CI splits --qa over several runners, since
   // a state costs a few CPU seconds of browser work and one runner has only so many cores.
   const [shard, shards] = (process.env.FOLO_QA_SHARD ?? '1/1').split('/').map(Number);
-  if (!(shards >= 1 && shard >= 1 && shard <= shards)) throw new Error(`FOLO_QA_SHARD=${process.env.FOLO_QA_SHARD}: expected i/n with 1 <= i <= n`);
+  if (!(Number.isInteger(shard) && Number.isInteger(shards) && shard >= 1 && shard <= shards)) throw new Error(`FOLO_QA_SHARD=${process.env.FOLO_QA_SHARD}: expected i/n with 1 <= i <= n`);
   const mine = qaJobs.filter((_, i) => i % shards === shard - 1);
   qaJobs.length = 0;
   qaJobs.push(...mine);

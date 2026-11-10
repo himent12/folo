@@ -9,7 +9,8 @@ on:
 concurrency:
   group: runners
   cancel-in-progress: false
-permissions: {}
+permissions:
+  contents: read
 jobs:
   renew:
     # Only where both kinds of self-hosted runner are configured (see ci.yml).

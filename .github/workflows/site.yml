@@ -1,16 +1,10 @@
 name: site
 # The docs site (site/README.md), generated from docs/, README.md and examples/*/README.md: `npm run check`
 # type-checks it and fails on a broken link, anchor or image; `npm run build` builds it (the same checks again).
-# It runs when the site, a Markdown file, an example or the design tokens change, and on every push to main.
+# It runs for every pull request, whatever it touches: the Markdown links to files all over the repository, and a
+# link to a file that was deleted or renamed is a broken link. It takes about 20 seconds.
 on:
   pull_request:
-    paths:
-      - site/**
-      - docs/**
-      - examples/**
-      - design/**
-      - "**.md"
-      - .github/workflows/site.yml
   push:
     branches: [main]
 concurrency:

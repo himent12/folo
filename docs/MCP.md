@@ -298,5 +298,7 @@ store (`--device cpu`, 64 px, a few seconds): a synthetic dataset, a 1-epoch run
 subscription until it completes, `list_models`, `val` on two splits, `predict` on a dataset image and the same
 file by path (boxes returned, identical), the sample grid resource, `export`, then a second run stopped after
 its first epoch, resumed (same id) and left training when the client disconnects; a new session finds it
-`stopped` by the graceful shutdown. Further tests cover `--confine` and proxy mode against `folo serve --mock` (also
-with a token); folo-mcp's own tests cover an unreachable server.
+`stopped` by the graceful shutdown. Further tests cover `--confine` (with `FOLO_DATASET_RECHECK_MS=0`, test
+support: the server looks at a dataset's files again on every request instead of after 5 s, so the test can edit a
+registered dataset to read outside the data dir and ask again at once) and proxy mode against `folo serve --mock`
+(also with a token); folo-mcp's own tests cover an unreachable server.
