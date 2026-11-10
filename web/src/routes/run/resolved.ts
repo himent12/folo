@@ -19,9 +19,9 @@ export interface Setting {
   about?: string;
 }
 
-const OPTIMIZER: Record<ResolvedTrain['optimizer'], string> = { sgd: 'SGD', adamw: 'AdamW' };
+const OPTIMIZER: Record<ResolvedTrain['optimizer'], string> = { sgd: 'SGD', adamw: 'AdamW', musgd: 'MuSGD' };
 /** What "Auto" picks, in the words of the picker's option (`optimizerLabel`). */
-export const AUTO_OPTIMIZER_ABOUT = 'AdamW for short runs, else SGD';
+export const AUTO_OPTIMIZER_ABOUT = 'AdamW for short runs, else MuSGD';
 
 /**
  * An optimizer as every screen names it (New run's picker and Summary, a run's Config, Compare): "Auto (AdamW for short

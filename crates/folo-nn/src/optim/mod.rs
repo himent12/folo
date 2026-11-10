@@ -509,7 +509,7 @@ pub fn effective_weight_decay(weight_decay: f64, batch: usize, accumulate: usize
 /// What `optimizer: auto` chooses (docs/MODEL.md §8.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoChoice {
-    /// SGD for long runs (> 10000 iterations), AdamW otherwise.
+    /// MuSGD (rule 3; SGD before it) for long runs (> 10000 iterations), AdamW otherwise.
     pub kind: OptimKind,
     /// The base LR.
     pub lr0: f64,
@@ -521,7 +521,7 @@ pub struct AutoChoice {
 
 /// The current version of the `auto` rule (docs/MODEL.md §8.2). A run's settings record the rule it started with
 /// (`TrainConfig.auto_rule`), so a resume keeps it; settings written before the key existed mean rule 1.
-pub const AUTO_RULE: u32 = 2;
+pub const AUTO_RULE: u32 = 3;
 
 /// Rule 2's floor on the AdamW `lr0`: the reference's fit `0.002 · 5 / (4 + nc)` falls below it from 7 classes on
 /// (0.000119 for 80 classes), where it trains from scratch about 5x slower than SGD (docs/hill/learn.md).
@@ -539,8 +539,9 @@ pub fn auto_optimizer(
 }
 
 /// docs/MODEL.md §8.2 `auto` by rule version: `iterations = ceil(n_train / max(batch, nbs)) · epochs`; above
-/// 10000, SGD at `lr0 = 0.01`, else AdamW at `round(0.002 · 5 / (4 + nc), 6)` (rule 1, the reference trainer's),
-/// raised to at least [`AUTO_ADAMW_MIN_LR0`] by rule 2 (any other version); momentum 0.9 and `warmup_bias_lr = 0`.
+/// 10000, SGD at `lr0 = 0.01` (rules 1 and 2) or MuSGD at `lr0 = 0.01` (rule 3, the reference trainer's choice since
+/// Ultralytics 8.4), else AdamW at `round(0.002 · 5 / (4 + nc), 6)` (rule 1, the reference trainer's), raised to at
+/// least [`AUTO_ADAMW_MIN_LR0`] from rule 2 on; momentum 0.9 and `warmup_bias_lr = 0`.
 pub fn auto_optimizer_rule(
     rule: u32,
     n_train: usize,
@@ -551,7 +552,8 @@ pub fn auto_optimizer_rule(
 ) -> AutoChoice {
     let iterations = n_train.div_ceil(batch.max(nbs).max(1)) * epochs;
     if iterations > 10_000 {
-        AutoChoice { kind: OptimKind::Sgd, lr0: 0.01, momentum: 0.9, warmup_bias_lr: 0.0 }
+        let kind = if rule >= 3 { OptimKind::MuSgd } else { OptimKind::Sgd };
+        AutoChoice { kind, lr0: 0.01, momentum: 0.9, warmup_bias_lr: 0.0 }
     } else {
         let fit = (0.002 * 5.0 / (4.0 + num_classes as f64) * 1e6).round() / 1e6;
         let lr0 = if rule == 1 { fit } else { fit.max(AUTO_ADAMW_MIN_LR0) };
@@ -641,6 +643,9 @@ mod tests {
         assert_eq!(auto_optimizer(2000, 16, 64, 30, 2).lr0, 0.001667);
         assert_eq!(auto_optimizer_rule(1, 2000, 16, 64, 30, 80).lr0, 0.000119);
         assert_eq!(auto_optimizer_rule(1, 2000, 16, 64, 30, 4), a);
-        assert_eq!(auto_optimizer(118_287, 16, 64, 100, 80).kind, OptimKind::Sgd);
+        // Long runs: MuSGD from rule 3 on, SGD before.
+        assert_eq!(auto_optimizer(118_287, 16, 64, 100, 80).kind, OptimKind::MuSgd);
+        assert_eq!(auto_optimizer_rule(2, 118_287, 16, 64, 100, 80).kind, OptimKind::Sgd);
+        assert_eq!(auto_optimizer_rule(2, 2000, 16, 64, 30, 80), auto_optimizer(2000, 16, 64, 30, 80));
     }
 }

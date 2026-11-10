@@ -53,6 +53,62 @@ is not a speed measure).
 2.268 / 1.576 vs 1.724 / 2.290 / 1.597). So FOLO's trainer learns as well as the reference per epoch on this proxy;
 the gap to the published nano numbers is schedule and data, not a trainer defect.
 
+## Round 2: after merging hill/integration
+
+**Merge check** (`8e630a7d`, the four speed branches; SGD P1, same flags as base-sgd-*):
+
+| run | seed | AP (pycocotools) | 20 epochs |
+|---|---:|---:|---:|
+| merged-sgd-s0 | 0 | 0.0845 | 506 s |
+| merged-sgd-s1 | 1 | **0.0814** | 383 s |
+
+Seed 0 is within 0.002 of the pre-merge 0.0860 / 0.0855; seed 1 is 0.0041 below its pre-merge twin. Evaluation is
+not the cause: each binary scores each checkpoint identically (pre-merge `base-sgd-s1` weights: 0.0855 with either
+binary; `merged-sgd-s1`: 0.0814 with either). Per epoch (internal mAP50-95), merged-s1 runs 0.002–0.005 under
+base-s1 from epoch 9 on; merged-s0 tracks base-s0 to epoch 13, dips (0.065 vs 0.069 at 15) and ends at 0.084.
+The merged kernels sum in other orders, so merged and pre-merge runs of one seed are different random trajectories,
+and the four FOLO SGD results span 0.0814–0.0860: the pre-merge two-seed spread (0.0005) understated the noise,
+which looks closer to ±0.002–0.003. A real regression of about 0.003 is possible but not established with two seeds
+per side; a third merged seed (or bisecting the four branches with one seed each) would settle it.
+
+### MuSGD (`--optimizer musgd`, then `auto` rule 3)
+
+Implemented from `ultralytics/optim/muon.py` and `engine/trainer.py::build_optimizer` (8.4.198): docs/MODEL.md §8.2
+has the update. P1, 20 epochs, `--optimizer musgd` / `optimizer=MuSGD` (lr0 0.01, momentum 0.937, warmup_bias_lr
+0.1, as the SGD rows), merged code base (`folo-musgd.exe` = `59293a5f`):
+
+| run | trainer | seed | AP | AP50 | AP_S | AP_M | AP_L | 20 epochs |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| merged-sgd-s0 | FOLO, SGD | 0 | 0.0845 | 0.143 | 0.043 | 0.131 | 0.170 | 506 s |
+| merged-sgd-s1 | FOLO, SGD | 1 | 0.0814 | 0.138 | 0.042 | 0.126 | 0.158 | 383 s |
+| **musgd-s0** | **FOLO, MuSGD** | 0 | **0.1131** | 0.188 | 0.059 | 0.173 | 0.259 | 415 s |
+| **musgd-s1** | **FOLO, MuSGD** | 1 | **0.1155** | 0.187 | 0.059 | 0.174 | 0.261 | 534 s |
+| ultra-sgd-s0 (round 1) | Ultralytics, SGD | 0 | 0.0853 | 0.144 | 0.043 | 0.136 | 0.175 | 820 s |
+| ultra-musgd-full-s0 | Ultralytics, MuSGD | 0 | 0.1133 | 0.188 | 0.060 | 0.172 | 0.244 | 729 s |
+
+- FOLO MuSGD vs FOLO SGD: +0.031 AP on the means (0.1143 vs 0.0830), ten times the noise; better at every epoch
+  from epoch 2 (epoch 10: 0.069 / 0.068 vs 0.046 / 0.044 internal mAP50-95). Every size bucket gains, large
+  objects most (+0.10 AP_L).
+- FOLO MuSGD vs the reference's MuSGD: 0.1131 / 0.1155 vs 0.1133, level (the reference sits between FOLO's seeds;
+  epoch-by-epoch Ultralytics mAP50-95 of the reference 0.0094 / 0.0173 / 0.0312 at epochs 3 / 4 / 5 against FOLO's
+  internal 0.013 / 0.022 / 0.033 and 0.010 / 0.019 / 0.031).
+- A first, aborted reference run (`ultra-musgd-full-s0`, attempt 1) died of CUDA out-of-memory at epoch 3 while
+  another job held GPU memory outside the lock; it was rerun from scratch (same seed, same curve).
+- **Step cost** (A/B on the shared GPU, `folo-rule3.exe`, 2-epoch runs alternated SGD, MuSGD, SGD, MuSGD, epoch-2
+  img/s): SGD 889 / 1081, MuSGD 765 / 866, means 985 vs 816: MuSGD costs about **17 %** of the step (the Muon
+  half is about 15 small matmul dispatches per conv weight per step). It still wins per GPU-hour: MuSGD passes
+  SGD's 20-epoch AP (0.083) at about epoch 13 (internal mAP50-95 0.084 / 0.087), i.e. 13 × 1.17 ≈ 15 SGD-epochs of
+  time instead of 20, and ends 0.03 AP higher. Fusing the Newton–Schulz iteration (one kernel per bucket) is the
+  follow-up that would take most of the 17 % back.
+
+**Shipped: `auto` rule 3** (`AUTO_RULE = 3`): long runs (> 10,000 iterations, e.g. full COCO) pick MuSGD at lr0
+0.01, momentum 0.9, as the reference does since 8.4; short runs are rule 2's AdamW. Shapes gate with the rule-3
+binary: `auto → adamw lr0 0.00125` (short run, unchanged), best epoch 30 mAP50 **0.978**, mAP50-95 **0.893** (pass;
+0.898 before the merge, same settings: the merged kernels' rounding). R6 (2,030 frames × 100 epochs at batch 16 =
+3,200 iterations) is a short run and resolves exactly as before. Old checkpoints resume with their rule (1 or 2:
+SGD); `--set auto_rule=2` keeps SGD for a new long run. The web mock and FOLO Desktop now compute `auto` with the
+same rule (Desktop calls `folo_nn::optim::auto_optimizer`; the web mock mirrors it in TypeScript).
+
 ## Reference diff (FOLO vs Ultralytics 8.4.198, step by step)
 
 Read against the installed reference (`ultralytics/utils/loss.py`, `utils/tal.py`, `engine/trainer.py`,
@@ -101,7 +157,7 @@ fine-tuning; from scratch on 80 classes it barely learns in 20 epochs.
 
 - The floor binds from `nc = 6` on (`fit(6) = 0.001`), so the shapes gate (4 classes, 0.00125) and R6 (2 classes,
   0.001667) resolve to exactly the settings they had: their results cannot change (checked: the shapes-v2 run below
-  logs the same `adamw lr0 0.00125`). Long runs (> 10,000 iterations: full COCO) still pick SGD.
+  logs the same `adamw lr0 0.00125`). Long runs (> 10,000 iterations: full COCO) picked SGD under rule 2 (MuSGD since rule 3, below).
 - Old checkpoints resume with the rule they started with: `TrainConfig.auto_rule` (serde default 1 when missing),
   validated to `1..=2`; tests: `folo-nn` `recipe_helpers`, `folo-vision` `train::config::tests::auto_rule_versions`.
 - Why 0.001 and not 0.002 (0.0844, level with SGD): a 0.002 floor binds for every class count (`fit(1) = 0.002`),

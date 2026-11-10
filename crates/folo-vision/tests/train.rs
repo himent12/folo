@@ -276,7 +276,10 @@ fn schedule_numbers_match_the_spec() {
     let r = smoke.resolve_optimizer(2000, 4);
     assert_eq!((r.kind, r.lr0), (folo_nn::optim::OptimKind::AdamW, 0.00125));
     let long = TrainConfig { epochs: 300, ..TrainConfig::default() };
-    assert_eq!(long.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::Sgd);
+    // Long runs: MuSGD under `auto` rule 3, SGD under the rules before it.
+    assert_eq!(long.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::MuSgd);
+    let rule2 = TrainConfig { auto_rule: 2, ..long };
+    assert_eq!(rule2.resolve_optimizer(118_287, 80).kind, folo_nn::optim::OptimKind::Sgd);
 }
 
 /// A model whose forward is NaN: every batch is skipped with a warning and no step event, the BatchNorm

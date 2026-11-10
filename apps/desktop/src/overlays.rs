@@ -776,19 +776,23 @@ impl FoloApp {
         // Short windows (the 620 px minimum): tighter rhythm and no restating helpers in the Model
         // rows, so the Schedule's controls are in view without scrolling.
         let short = window.viewport_size().height < px(700.);
-        // What Auto resolves to for this dataset, batch and length (the engine's rule: SGD at 0.01
-        // past 10,000 optimizer steps of a 64-image nominal batch, else AdamW at 0.01 / (4 + classes) to six decimals),
-        // so the form can say which, and that the rate field is then unused.
+        // What Auto resolves to for this dataset, batch and length (the engine's own rule, docs/MODEL.md §8.2:
+        // MuSGD at 0.01 past 10,000 optimizer steps of a 64-image nominal batch, else AdamW at its fitted rate), so
+        // the form can say which, and that the rate field is then unused. Written as every rate is (1.11×10⁻³).
         let auto_pick = ds.as_ref().filter(|_| opt == 0).map(|d| {
-            let steps = (d.splits.train as usize).div_ceil(BATCHES[batch].max(64) as usize)
-                * epochs.round().max(1.) as usize;
-            if steps > 10_000 {
-                ("SGD", crate::ui::fmt_lr(0.01))
-            } else {
-                let lr = (0.01 / (4. + d.classes.len() as f64) * 1e6).round() / 1e6;
-                // Written as every rate is (1.11×10⁻³).
-                ("AdamW", crate::ui::fmt_lr(lr))
-            }
+            let a = folo_nn::optim::auto_optimizer(
+                d.splits.train as usize,
+                BATCHES[batch] as usize,
+                64,
+                epochs.round().max(1.) as usize,
+                d.classes.len(),
+            );
+            let kind = match a.kind {
+                folo_nn::optim::OptimKind::Sgd => "SGD",
+                folo_nn::optim::OptimKind::AdamW => "AdamW",
+                folo_nn::optim::OptimKind::MuSgd => "MuSGD",
+            };
+            (kind, crate::ui::fmt_lr(a.lr0))
         });
         // The adapter behind "GPU 0", named as the other screens name it.
         let gpu_name =
@@ -1183,7 +1187,7 @@ impl FoloApp {
                                 (0, Some((kind, _))) => {
                                     format!("Auto: {kind} for this run, at its own learning rate")
                                 }
-                                (0, None) => "Auto: SGD for long runs, else AdamW".to_string(),
+                                (0, None) => "Auto: MuSGD for long runs, else AdamW".to_string(),
                                 (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
                                 _ => "AdamW with weight decay".to_string(),
                             }),

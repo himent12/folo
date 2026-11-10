@@ -1053,7 +1053,7 @@ fn default_lr0() -> f32 {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Optimizer {
-    /// SGD for long runs, AdamW for short ones.
+    /// MuSGD for long runs, AdamW for short ones (docs/MODEL.md §8.2).
     #[default]
     Auto,
     /// SGD with Nesterov momentum.

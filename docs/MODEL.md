@@ -645,17 +645,20 @@ Three groups, assigned by tensor name:
 
 Effective weight decay: `wd = weight_decay · batch · accumulate / nbs`.
 
-`auto`: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: SGD with `lr0 = 0.01`,
-`momentum = 0.9`. Otherwise: AdamW with `lr0 = max(round(0.002 · 5 / (4 + nc), 6), 0.001)` and `β1 = 0.9` (e.g.
+`auto`: `iterations = ceil(N_train / max(batch, nbs)) · epochs`. If `iterations > 10000`: MuSGD (below) with
+`lr0 = 0.01`, `momentum = 0.9`, as the reference trainer picks since Ultralytics 8.4. Otherwise: AdamW with `lr0 = max(round(0.002 · 5 / (4 + nc), 6), 0.001)` and `β1 = 0.9` (e.g.
 0.00125 for `nc = 4`, 0.001 from `nc = 6` on, so 0.001 for `nc = 80`). In both cases `warmup_bias_lr = 0.0`. An
 explicit `sgd`/`adamw` uses `lr0`, `momentum` and `warmup_bias_lr` as given.
 
-The 0.001 floor is FOLO's (`auto` rule 2, `TrainConfig.auto_rule = 2`). The reference trainer's fit alone (rule 1)
+`TrainConfig.auto_rule` (current: 3) versions this rule: rule 3 is the above; rule 2 picks SGD (`lr0 = 0.01`,
+`momentum = 0.9`) instead of MuSGD for long runs; rule 1 is rule 2 without the AdamW floor. On the COCO proxy of
+docs/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches about 1.35x the AP of SGD, as the reference's own
+MuSGD does. The 0.001 floor is FOLO's (rule 2 on). The reference trainer's fit alone (rule 1)
 gives 80 classes 0.000119, and a from-scratch run on a 20k-image COCO subset (20 epochs, 6,260 iterations) then
 reaches about a fifth of the AP of SGD on the same budget, in Ultralytics as in FOLO (docs/hill/learn.md). Rule 2
 changes nothing below 6 classes. Settings saved before the key existed (a checkpoint's `folo.train`, a run's
-`config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (CLI) selects it
-for a new run.
+`config.json`) mean rule 1, so a run resumes with the rule it started with; `--set auto_rule=1` (or `2`, CLI)
+selects an older rule for a new run.
 
 **SGD** (PyTorch semantics, Nesterov, no dampening), per parameter `p` with gradient `g`:
 ```

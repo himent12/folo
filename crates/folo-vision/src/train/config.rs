@@ -13,7 +13,7 @@ use crate::model::HeadMode;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OptimizerChoice {
-    /// AdamW for short runs (≤ 10000 iterations), SGD otherwise, with the LR of §8.2.
+    /// AdamW for short runs (≤ 10000 iterations), MuSGD otherwise (`auto_rule` 3; SGD before), with the LR of §8.2.
     #[default]
     Auto,
     /// SGD with Nesterov momentum.
@@ -51,8 +51,9 @@ pub struct TrainConfig {
     pub device: String,
     /// Optimizer.
     pub optimizer: OptimizerChoice,
-    /// Version of the `auto` rule (MODEL.md §8.2): 2, the current one, floors its AdamW `lr0` at 0.001; 1 is the
-    /// reference trainer's. Missing in configs from before it: 1, so a run resumes with the rule it started with.
+    /// Version of the `auto` rule (MODEL.md §8.2): 3, the current one, picks MuSGD for long runs; 2 picks SGD there
+    /// and floors the AdamW `lr0` at 0.001 (as 3 does); 1 is the reference fit without the floor, with SGD. Missing
+    /// in configs from before it: 1, so a run resumes with the rule it started with.
     #[serde(default = "legacy_auto_rule")]
     pub auto_rule: u32,
     /// Base LR (ignored by `auto`).
@@ -450,6 +451,18 @@ mod tests {
         let old: TrainConfig = serde_json::from_value(old).unwrap();
         assert_eq!(old.auto_rule, 1);
         assert_eq!(old.resolve_optimizer(2000, 80).lr0, 0.000119);
+        // Long runs: MuSGD (rule 3) vs SGD (rules 1 and 2), lr0 0.01 and momentum 0.9 either way.
+        let long = TrainConfig { epochs: 300, ..cfg.clone() };
+        let m = long.resolve_optimizer(118_287, 80);
+        assert_eq!((m.kind, m.lr0, m.momentum, m.warmup_bias_lr), (OptimKind::MuSgd, 0.01, 0.9, 0.0));
+        let r = long.resolved_train(118_287, 80);
+        assert_eq!((r.optimizer, r.betas), (folo_api::ResolvedOptimizer::Musgd, None));
+        for rule in [1, 2] {
+            assert_eq!(
+                TrainConfig { auto_rule: rule, ..long.clone() }.resolve_optimizer(118_287, 80).kind,
+                OptimKind::Sgd
+            );
+        }
         assert!(TrainConfig { auto_rule: 0, ..cfg.clone() }.validate().is_err());
         assert!(TrainConfig { auto_rule: AUTO_RULE + 1, ..cfg }.validate().is_err());
     }
