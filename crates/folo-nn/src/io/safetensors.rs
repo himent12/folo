@@ -216,12 +216,15 @@ impl Container {
             let dtype = FileDType::parse(&r.dtype)
                 .ok_or_else(|| bad(format!("tensor `{name}`: unknown dtype `{}`", r.dtype)))?;
             let mut numel = 1usize;
+            // The product of the non-zero dims: a tensor's strides reach it even when another dim is 0.
+            let mut extent = 1usize;
             let mut shape = Vec::with_capacity(r.shape.len());
             for &d in &r.shape {
                 let d = usize::try_from(d)
                     .map_err(|_| bad(format!("tensor `{name}`: dimension {d} is too large")))?;
-                numel =
-                    numel.checked_mul(d).ok_or_else(|| bad(format!("tensor `{name}`: shape overflows")))?;
+                let overflow = || bad(format!("tensor `{name}`: shape overflows"));
+                numel = numel.checked_mul(d).ok_or_else(overflow)?;
+                extent = extent.checked_mul(d.max(1)).ok_or_else(overflow)?;
                 shape.push(d);
             }
             let nbytes = numel
@@ -537,6 +540,18 @@ mod tests {
         let c = Container::parse(&bf).unwrap();
         let e = decode(&c.tensors[0], c.data(&bf, &c.tensors[0])).unwrap_err().to_string();
         assert!(e.contains("BF16") && e.contains("not support"), "{e}");
+    }
+
+    #[test]
+    fn zero_sized_tensor_with_overflowing_dims_is_refused() {
+        // numel is 0, but the other dims' product (the strides of a tensor of this shape) overflows.
+        let f = file(r#"{"z":{"dtype":"F32","shape":[0,4294967296,4294967296],"data_offsets":[0,0]}}"#, &[]);
+        let e = Container::parse(&f).unwrap_err().to_string();
+        assert!(e.contains("shape overflows"), "{e}");
+        // A zero-sized tensor whose other dims fit is still fine.
+        let ok = file(r#"{"z":{"dtype":"F32","shape":[0,65536,65536],"data_offsets":[0,0]}}"#, &[]);
+        let c = Container::parse(&ok).unwrap();
+        assert_eq!(decode(&c.tensors[0], c.data(&ok, &c.tensors[0])).unwrap().dims(), &[0, 65536, 65536]);
     }
 
     #[test]
