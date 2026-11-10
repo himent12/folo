@@ -142,6 +142,13 @@ mod tests {
         axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap().to_vec()
     }
 
+    #[test]
+    fn table_lookup_matches_a_sorted_slice() {
+        assert!(FILES.windows(2).all(|w| w[0].path < w[1].path));
+        assert_eq!(find(FILES, "favicon.svg").unwrap().etag, "W/\"f1\"");
+        assert!(find(FILES, "missing").is_none());
+    }
+
     #[tokio::test]
     async fn serves_files_with_types_and_cache_headers() {
         let res = get("/assets/app-1a2b.js?v=1", &[]);
