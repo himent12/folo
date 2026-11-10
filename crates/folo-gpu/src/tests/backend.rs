@@ -712,6 +712,39 @@ fn conv2d_weight_gradient_split_k() {
 }
 
 #[test]
+fn conv2d_input_gradient_stride_beyond_kernel() {
+    // Strides far beyond the kernel leave most stride phases without taps: the input gradient's scratch and host
+    // work must scale with the phases that have taps, not with stride².
+    let dev = dev!();
+    let ones = |shape: &[usize]| Tensor::ones(shape);
+    check(dev, &[ones(&[1, 2, 4, 4]), ones(&[3, 2, 1, 1])], 1e-5, 0.0, "stride 65536", |v| {
+        v[0].conv2d(&v[1], None, 65536, 0, 1, 1)
+    });
+    let x = ones(&[1, 2, 4, 4]).to_device(dev).unwrap().requires_grad_();
+    let w = ones(&[3, 2, 1, 1]).to_device(dev).unwrap();
+    let y = x.conv2d(&w, None, 65536, 0, 1, 1).unwrap();
+    assert_eq!(y.dims(), &[1, 3, 1, 1]);
+    let gx = y.sum_all().unwrap().backward().unwrap().get(&x).unwrap().to_vec::<f32>().unwrap();
+    let want: Vec<f32> = (0..32).map(|i| if i % 16 == 0 { 3.0 } else { 0.0 }).collect();
+    assert_eq!(gx, want, "stride 65536 input gradient");
+    for (i, (xs, ws, s, p)) in [
+        ([2, 3, 17, 19], [4, 3, 1, 1], 4, 0),
+        ([1, 4, 23, 21], [5, 4, 3, 3], 5, 1),
+        ([1, 2, 9, 9], [3, 2, 2, 2], 7, 3),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = randn(&xs, 70 + i as u64);
+        let w = randn(&ws, 80 + i as u64).mul_scalar(0.3).unwrap();
+        let atol = 1e-4 * ((ws[1] * ws[2] * ws[3]) as f32).sqrt();
+        check(dev, &[x, w], atol, 1e-4, &format!("kernel {} stride {s}", ws[2]), move |v| {
+            v[0].conv2d(&v[1], None, s, p, 1, 1)
+        });
+    }
+}
+
+#[test]
 fn pooling_and_upsampling() {
     let dev = dev!();
     let x = randn(&[2, 3, 11, 13], 70);
