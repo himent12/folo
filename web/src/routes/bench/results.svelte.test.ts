@@ -304,6 +304,29 @@ describe('New loop', () => {
     expect(document.querySelector('dialog[open] .error-state, dialog[open] [role=alert]')?.textContent ?? '').not.toMatch(/Could not start the loop/);
   });
 
+  it('keeps its forecast while the benchmark changes under it (a `bench` event and the lists loaded again)', async () => {
+    await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f103');
+    await settle(40);
+    button(/^Test it: start a loop/)!.click();
+    await settle();
+    expect(document.querySelector('dialog[open] .fc')?.getAttribute('data-forecast')).toBe('ok');
+    const results = vi.spyOn(hub.api, 'benchResult');
+    // What the dialog shows as the event lands (this handler runs after the page's).
+    let during: string | null | undefined;
+    const off = hub.api.benchEvents('bn_3c90', {
+      bench: () => {
+        flushSync();
+        during = document.querySelector('dialog[open] .fc')?.getAttribute('data-forecast');
+      },
+    });
+    await hub.api.updateBench('bn_3c90', { name: 'Fasteners, renamed' });
+    off();
+    expect(during).toBe('ok');
+    await settle(40);
+    expect(results).not.toHaveBeenCalled();
+    expect(document.querySelector('dialog[open] .fc')?.getAttribute('data-forecast')).toBe('ok');
+  });
+
   it('reads a good teacher’s labels off its entry, quietly', async () => {
     await dialog('m_fast_n');
     const fc = document.querySelector('dialog[open] .fc')!;
