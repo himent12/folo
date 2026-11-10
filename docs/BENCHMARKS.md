@@ -399,23 +399,13 @@ scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed 
   is schedule and data, not a trainer defect.
 - **The `auto` rule fix** (rule 2): `auto` picks AdamW for runs of at most 10,000 iterations with an LR fit that falls
   with the class count, 0.000119 for 80 classes; from scratch it barely learns in 20 epochs. FOLO now floors it at
-  0.001: 4.5x the reference's default result on the proxy. The floor binds from 6 classes on, so the shapes gate (4
-  classes) and R6 (2) resolve to the settings they had.
+  0.001: 4.5x the reference's default result on the proxy. The floor binds from 6 classes on, so datasets with fewer
+  classes (such as the 4-class shapes gate) resolve to the settings they had.
 - **MuSGD** (rule 3): the reference's `auto` choice since 8.4 for runs over 10,000 iterations (full COCO), now
   implemented in folo-nn (docs/MODEL.md §8.2) and `auto`'s long-run choice. +0.031 AP over SGD on the proxy (ten
   times the seed noise), level with the reference's own MuSGD, at about 17% more step time; it passes SGD's 20-epoch
   AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
   paused 300-epoch COCO run keeps SGD.
-
-**Transfer: R6** ([examples/r6](../examples/r6/README.md#fine-tuning-from-coco), 2 classes, 2030 train frames,
-`folo val` mAP50-95 of `best.folo` at 640 px). Fine-tuning from `folo-n-coco` against the same budget from scratch:
-
-| folo-n, 100 epochs | r6-clean test | r6-fresh (held out) |
-|---|---:|---:|
-| from scratch | 0.350 | 0.118 |
-| from `folo-n-coco` | **0.441** | **0.201** |
-| from scratch, 410 epochs | 0.397 | 0.130 |
-| Ultralytics YOLO26, COCO-pretrained, 1280 px (r6yolo README, not one to one) | 0.45–0.58 | 0.40–0.565 |
 
 ## FOLO on the GPU
 
@@ -504,8 +494,8 @@ passes:
 | f16 | 11.69 / 11.47 ms | **347 / 354 img/s** | 15.06 / 13.19 ms | **270 / 270 img/s** (medians 245 / 243) | **391 MiB** |
 
 - **Accuracy** (`folo val`, f32 → `--half`, GPU): shapes folo-n (examples/shapes) mAP50 0.98057 → 0.98057,
-  mAP50-95 0.90090 → 0.90096; R6 folo-n 0.69663 → 0.69661 / 0.40876 → 0.40878; R6 folo-s 0.70704 → 0.70823 /
-  0.42228 → 0.42325. Every gap is within 0.002 (largest 0.0012).
+  mAP50-95 0.90090 → 0.90096; 2-class 1080p models folo-n 0.69663 → 0.69661 / 0.40876 → 0.40878, folo-s 0.70704 →
+  0.70823 / 0.42228 → 0.42325. Every gap is within 0.002 (largest 0.0012).
 - **What f16 buys today**: half the activation memory, +15–35% batch-16 forward throughput (more for folo-s, whose
   wider layers move more bytes), +7–20% end to end at batch 16, nothing at batch 1 (launch- and latency-bound).
 - **Why it is not 1.6–2x like the incumbent's fp16**: FOLO's f16 is storage. The GEMM and conv kernels keep f32
@@ -540,9 +530,9 @@ three precisions ran back to back in one process per scale:
   load halved the f32 rows (744 vs 1385 img/s quiet), so the bars may be close in a quiet window, but that is not
   measured, and the table keeps them as behind until it is.
 - **Accuracy** (`folo val --half --tensor-cores`, GPU, against f32 and `--half` as in
-  [Half precision](#half-precision-f16)): shapes folo-n mAP50 0.98057 → 0.98057, mAP50-95 0.90090 → 0.90097; R6
-  folo-n 0.69663 → 0.69843 / 0.40876 → 0.40849; R6 folo-s 0.70704 → 0.70705 / 0.42228 → 0.42320. Every gap is
-  within 0.002 (largest 0.0018, R6 folo-n mAP50).
+  [Half precision](#half-precision-f16)): shapes folo-n mAP50 0.98057 → 0.98057, mAP50-95 0.90090 → 0.90097; 2-class
+  1080p models folo-n 0.69663 → 0.69843 / 0.40876 → 0.40849, folo-s 0.70704 → 0.70705 / 0.42228 → 0.42320. Every gap
+  is within 0.002 (largest 0.0018).
 - **Training** uses them with `--amp`: see [Mixed-precision training](#mixed-precision-training-amp).
 
 ### Mixed-precision training (AMP)
@@ -640,7 +630,7 @@ so treat them as typical, not best.
 | run | arch, imgsz, batch | images (train / val) | workers | mosaic epochs img/s | close-mosaic img/s | val img/s | epoch 1 img/s |
 |---|---|---|---|---|---|---|---|
 | COCO train2017, 50 epochs | folo-n, 640, 16, f32 | 118 287 / 5 000 | 16 | **208** | **215** | **266–284** | 168 |
-| R6, 300 epochs | folo-s, 640, 16, f32 | 2 030 / 203 | 16 | **105** | **110** | ~97 (overhead-bound) | 100 |
+| 1080p JPEGs, 300 epochs | folo-s, 640, 16, f32 | 2 030 / 203 | 16 | **105** | **110** | ~97 (overhead-bound) | 100 |
 | shapes, 30 epochs (two runs) | folo-n, 320, 16, f32 | 2 000 / 200 | 8 | **438–441** | **468–475** | 330–400 | 147–225 |
 | shapes gate, 30 epochs | folo-n, 320, 16, amp | 2 000 / 200 | 8 | **406** | **430** | 290–500 | 122 |
 | shapes, 30 epochs, CPU under load | folo-n, 320, 16, f32 | 2 000 / 200 | 8 | **14** | **20** | ~60 | 17 |
@@ -652,7 +642,7 @@ so treat them as typical, not best.
   to the 0.55, which fits both folo-n 640 → 320 px (208 → 440 img/s for a quarter of the compute) and folo-n → folo-s
   at 640 (208 → 105 for 3.3x); beyond 4x larger to the 0.8, beyond 4x smaller to the 0.25. Batch-1 latency grows
   more slowly (GPU: to the 0.35, from rows 1 and 5: 5.18 → 7.87 ms for folo-n → folo-s).
-- **Loaders differ by dataset**: R6's 1920×1080 JPEGs keep folo-n at 640 near 100–150 img/s with mosaic (four
+- **Loaders differ by dataset**: 1920×1080 JPEGs keep folo-n at 640 near 100–150 img/s with mosaic (four
   decodes per sample) and near 185 without, while COCO's smaller images give 208 / 215. The server's own
   measurements are keyed by device, arch, imgsz and amp, not by dataset.
 - **First epoch**: 4–9 s slower than a steady one on the GPU in the shapes runs (pipeline compilation, buffer pool growth); the
@@ -734,22 +724,6 @@ alone on one 640 px image's decoded head, 8400 anchors × 80 classes (`cargo ben
 
 So the top-k is 9–15x faster than NMS when candidates are plentiful, and its cost does not grow with them. On these
 validation sets the whole `folo val` call is too short to show it (0.25–0.31 s for 200 images either way).
-
-**Accuracy on real data: R6** (examples/r6). A short run, to keep the shared GPU free: 20 epochs fine-tuning from the
-R6 folo-n o2m model (`--weights D:/folo-data/runs-r6/r6-folo-n/weights/best.folo --head o2o`, 640 px, batch 16,
-`auto` → AdamW). The o2o branch starts as a copy of the o2m head (MODEL.md §6.6). The run was killed once at epoch 8
-(the process vanished, along with the COCO job sharing the GPU) and resumed from its epoch-7 checkpoint. Test splits,
-best (EMA) weights:
-
-| folo-n | r6-clean test mAP50 / mAP50-95 | r6-fresh test (held out) mAP50 / mAP50-95 |
-|---|---|---|
-| dual-head model, **o2o, no NMS** | 0.667 / 0.371 | 0.232 / 0.113 |
-| the same model, o2m + NMS | 0.706 / 0.392 | 0.281 / 0.132 |
-| the o2m-only model it started from (410 epochs) | 0.710 / 0.397 | 0.260 / 0.130 |
-
-On R6 too, the one-to-one head trails NMS on the same model (−0.021 / −0.019 mAP50-95). Twenty epochs is far from
-the hundreds the o2m model trained for, so this is a lower bound on what a full dual-assignment run gives. The o2m
-branch of the dual model stays level with the model it came from.
 
 **ONNX.** `folo export --format onnx --decode` of an o2o model has the selection in the graph (`detections:
 [B, K, 6]`, final, no NMS for the consumer; f32 rows even in an f16 graph). Parity with onnxruntime
@@ -943,7 +917,7 @@ By expected gain, from the leftovers of the hill-climb notebooks (each has the m
 4. **MuSGD step cost** (about 17% of the step): one fused Newton–Schulz kernel per column bucket instead of about 15
    dispatches per conv weight per step; then the full-scale check, a long COCO run under `auto` rule 3 (the first run of the shipped rule-3 recipe:
    momentum 0.9, warmup_bias_lr 0), and the AdamW
-   floor at 0.002 behind the shapes and R6 gates ([hill/learn.md](hill/learn.md)).
+   floor at 0.002 behind the shapes gate ([hill/learn.md](hill/learn.md)).
 5. **f32 GEMMs and weight gradients**: split-K or stream-K for the 40 px-and-below layers of the forward, a
    transposed formulation for `C_in·9 ≫ C_out` weight gradients, a direct reduction for the tensor-core stem weight
    gradient (`N = 27` on a 16×256 tile, 1.7 ms per AMP step), and the f16 weight copies written by the optimizer
@@ -951,8 +925,8 @@ By expected gain, from the leftovers of the hill-climb notebooks (each has the m
 6. **CPU batch-1 latency** (folo-n 18 ms, unchanged by the climb; target 12): fewer threads for the small 20×20 / 40×40
    layers and the head's branches side by side, measured on a quiet machine; then the CPU strided-conv input
    gradients as stride phases (about 25 ms of the CPU train step) ([hill/cpu.md](hill/cpu.md)).
-7. **Loader and start-up**: `--cache ram` of resized images for large-image sets (R6: decode and resize are 89% of a
-   mosaic sample), and a header probe cache for COCO's 30–50 s `folo train` start-up.
+7. **Loader and start-up**: `--cache ram` of resized images for large-image sets (1080p JPEGs: decode and resize are
+   89% of a mosaic sample), and a header probe cache for COCO's 30–50 s `folo train` start-up.
 8. **Upload pipelining** at batch 16: overlap the PCIe copy of one chunk with the host fill of the next (0.5–1 ms of
    the remaining 2.5 ms per batch).
 

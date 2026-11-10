@@ -1,5 +1,5 @@
 //! [`Backend`] over HTTP + SSE against `folo serve` (docs/API.md), and a launcher for a local
-//! `folo serve --mock`.
+//! `folo serve`.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -501,7 +501,7 @@ impl Backend for HttpBackend {
     }
 }
 
-/// A `folo serve --mock` started by the app; stopped when dropped.
+/// A local `folo serve` started by the app; stopped when dropped.
 pub struct ServerProcess {
     child: Child,
     pub url: String,
@@ -513,6 +513,10 @@ impl Drop for ServerProcess {
         let _ = self.child.wait();
     }
 }
+
+/// Arguments passed to `folo` when starting a local server: the real engine (never `--mock`), on a
+/// free port, emitting JSON Lines so we read its `"listening"` record.
+pub const SERVE_ARGS: &[&str] = &["--json", "serve", "--port", "0"];
 
 /// Where to find the `folo` binary: `$FOLO_BIN`, next to this executable, or on `PATH`.
 pub fn find_folo() -> Option<std::path::PathBuf> {
@@ -564,34 +568,119 @@ fn bind_to_app(child: &Child) {
 #[cfg(not(windows))]
 fn bind_to_app(_child: &Child) {}
 
-/// Start `folo serve --mock` on a free port and wait (up to `timeout`) for its address.
-pub fn spawn_mock_server(timeout: Duration) -> Result<ServerProcess, String> {
+/// What starting a local `folo serve` gave.
+pub enum Spawned {
+    /// A server this app started (and stops when the [`ServerProcess`] drops).
+    Started(ServerProcess),
+    /// The data dir already has a `folo serve` (another app's, or one started by hand), listening here: use it,
+    /// don't start a second one on the same data.
+    Running(String),
+}
+
+/// What the starting server's JSON Lines told us.
+enum Startup {
+    Listening(String),
+    /// Where the data dir's owner listens (when it says), and the data dir.
+    InUse(Option<String>, Option<String>),
+    Failed(String),
+}
+
+/// Reads one JSON Lines record of `folo --json serve`.
+fn startup_record(line: &str) -> Option<Startup> {
+    let v = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let url = v["url"].as_str().map(str::to_string);
+    match v["event"].as_str() {
+        Some("listening") => url.map(Startup::Listening),
+        Some("data_dir_in_use") => Some(Startup::InUse(url, v["data_dir"].as_str().map(str::to_string))),
+        _ => v["error"]["message"].as_str().map(|m| Startup::Failed(m.to_string())),
+    }
+}
+
+/// Start `folo serve` (the real engine, bare until datasets/runs exist) on a free port and wait
+/// (up to `timeout`) for its address.
+/// When the data dir already has an owner, connect to it once it is listening there: retried until `timeout`,
+/// as the owner may still be starting (or be an embedded `folo mcp`, which has no address).
+pub fn spawn_server(timeout: Duration) -> Result<Spawned, String> {
     let bin = find_folo().ok_or("folo was not found (set FOLO_BIN or put folo on PATH)")?;
-    let mut child = Command::new(&bin)
-        .args(["--json", "serve", "--mock", "--port", "0"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("could not start {}: {e}", bin.display()))?;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let busy = match spawn_server_bin(&bin, left)? {
+            Attempt::Started(proc_) => return Ok(Spawned::Started(proc_)),
+            Attempt::InUse(Some(url), Some(dir))
+                if serves(&url, &dir, deadline.saturating_duration_since(std::time::Instant::now())) =>
+            {
+                return Ok(Spawned::Running(url));
+            }
+            Attempt::InUse(..) => "another FOLO process (folo serve or folo mcp) is using the data dir",
+        };
+        if std::time::Instant::now() + Duration::from_millis(500) >= deadline {
+            return Err(busy.into());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// Whether the server at `url` serves the data dir `dir` (`serve.json` can be stale, and its port reused), asked
+/// within `budget` (the start deadline's remainder).
+fn serves(url: &str, dir: &str, budget: Duration) -> bool {
+    let same = |a: &str, b: &str| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    if budget.is_zero() {
+        return false;
+    }
+    let system = agent(Some(budget.min(Duration::from_secs(5))))
+        .get(&format!("{}/api/system", url.trim_end_matches('/')))
+        .call()
+        .ok()
+        .filter(|r| r.status().is_success())
+        .and_then(|mut r| r.body_mut().read_json::<SystemResponse>().ok());
+    system.and_then(|s| s.data_dir).is_some_and(|d| same(&d, dir))
+}
+
+/// One start of `folo serve`.
+enum Attempt {
+    Started(ServerProcess),
+    /// The data dir has an owner (the child has exited): where it listens, when it says, and the data dir.
+    InUse(Option<String>, Option<String>),
+}
+
+fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<Attempt, String> {
+    let mut cmd = Command::new(bin);
+    cmd.args(SERVE_ARGS).stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", bin.display()))?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line)
-                && v["event"] == "listening"
-                && let Some(url) = v["url"].as_str()
+            if let Some(rec) = startup_record(&line)
+                && tx.send(rec).is_err()
             {
-                let _ = tx.send(url.to_string());
+                break;
             }
         }
     });
     bind_to_app(&child);
-    match rx.recv_timeout(timeout) {
-        Ok(url) => Ok(ServerProcess { child, url }),
-        Err(_) => {
-            let _ = child.kill();
-            Err("folo serve did not start in time".into())
+    let outcome = rx.recv_timeout(timeout);
+    if !matches!(outcome, Ok(Startup::Listening(_))) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    match outcome {
+        Ok(Startup::Listening(url)) => Ok(Attempt::Started(ServerProcess { child, url })),
+        Ok(Startup::InUse(url, dir)) => Ok(Attempt::InUse(url, dir)),
+        Ok(Startup::Failed(message)) => Err(message),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("folo serve did not start in time".into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("folo serve exited before it was listening".into())
         }
     }
 }
@@ -869,5 +958,37 @@ FOLO"
         let e = api.health().unwrap_err();
         assert_eq!(e.code, "server_unreachable");
         assert!(e.hint.is_some());
+    }
+
+    #[test]
+    fn startup_records_are_read() {
+        let url = |r: Option<Startup>| match r {
+            Some(Startup::Listening(u)) => format!("listening {u}"),
+            Some(Startup::InUse(u, d)) => format!("in use {u:?} {d:?}"),
+            Some(Startup::Failed(m)) => format!("failed {m}"),
+            None => "none".into(),
+        };
+        assert_eq!(
+            url(startup_record(r#"{"event":"listening","url":"http://127.0.0.1:5000","mock":false}"#)),
+            "listening http://127.0.0.1:5000"
+        );
+        assert_eq!(
+            url(startup_record(
+                r#"{"event":"data_dir_in_use","data_dir":"C:/x","url":"http://127.0.0.1:7"}"#
+            )),
+            r#"in use Some("http://127.0.0.1:7") Some("C:/x")"#
+        );
+        assert_eq!(url(startup_record(r#"{"event":"data_dir_in_use","url":null}"#)), "in use None None");
+        assert_eq!(
+            url(startup_record(r#"{"error":{"code":"bind_failed","message":"could not bind","hint":null}}"#)),
+            "failed could not bind"
+        );
+        assert_eq!(url(startup_record("FOLO serving")), "none");
+    }
+
+    #[test]
+    fn spawned_server_uses_the_real_store_not_mock() {
+        assert_eq!(SERVE_ARGS, ["--json", "serve", "--port", "0"]);
+        assert!(!SERVE_ARGS.contains(&"--mock"));
     }
 }

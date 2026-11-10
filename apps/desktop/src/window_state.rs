@@ -18,6 +18,9 @@ pub struct State {
     pub window: Option<Placement>,
     /// `"dark"` or `"light"`.
     pub theme: Option<String>,
+    /// Whether connecting starts a local `folo serve` when none is running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_server: Option<bool>,
 }
 
 /// The window in logical pixels: its restored (windowed) bounds, and how it was showing.
@@ -204,6 +207,7 @@ mod tests {
                 display: Some("display-uuid".into()),
             }),
             theme: Some("light".into()),
+            spawn_server: Some(false),
         };
         save(&path, &state).unwrap();
         assert_eq!(load(&path), state);

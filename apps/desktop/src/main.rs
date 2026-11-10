@@ -65,8 +65,8 @@ const USAGE: &str = "FOLO Desktop: datasets, training runs and live inference fo
 
 Usage: folo-desktop [OPTIONS]
 
-By default it connects to a running `folo serve` ($FOLO_SERVER, else http://127.0.0.1:7878);
-when none answers it starts `folo serve --mock`, and without `folo` it uses built-in demo data.
+By default it connects to a running `folo serve` ($FOLO_SERVER, else http://127.0.0.1:7878),
+or starts a local `folo serve` when none answers. Pass --mock for the built-in demo data.
 The window and theme open as they were last closed ($FOLO_HOME or ~/.folo, desktop.json), except
 with --scenario, --width or --height.
 
@@ -149,28 +149,31 @@ fn main() {
         input::bind_keys(cx);
 
         let frozen = spec.is_some();
-        let live_step = spec.as_ref().map_or(4180, |s| s.live_step);
-        let mut mock = if spec.as_ref().is_some_and(|s| s.cloud_runs) {
-            MockBackend::with_cloud_runs(live_step, frozen)
-        } else {
-            MockBackend::new(live_step, frozen)
-        };
-        if spec.as_ref().is_some_and(|s| s.fail) {
-            mock = mock.failing();
-        }
-        if spec.as_ref().is_some_and(|s| s.empty) {
-            mock = mock.empty().without_cloud();
-        }
-        if spec.as_ref().is_some_and(|s| s.has("trouble")) {
-            mock = mock.cloud_trouble();
-        }
-        let auto = spec.is_none() && !use_mock && server.is_none();
-        let api: Arc<dyn api::Backend> = match (&spec, &server) {
-            (None, Some(url)) => Arc::new(api::http::HttpBackend::new(url)),
-            _ => Arc::new(mock),
-        };
-        let server_mode = if server.is_some() { app::ServerMode::Local } else { app::ServerMode::Mock };
+        let use_demo = spec.is_some() || use_mock;
+        let auto = !use_demo && server.is_none();
         let connect_url = server.clone().unwrap_or(default_url.clone());
+        let api: Arc<dyn api::Backend> = if use_demo {
+            let live_step = spec.as_ref().map_or(4180, |s| s.live_step);
+            let mut mock = if spec.as_ref().is_some_and(|s| s.cloud_runs) {
+                MockBackend::with_cloud_runs(live_step, frozen)
+            } else {
+                MockBackend::new(live_step, frozen)
+            };
+            if spec.as_ref().is_some_and(|s| s.fail) {
+                mock = mock.failing();
+            }
+            if spec.as_ref().is_some_and(|s| s.empty) {
+                mock = mock.empty().without_cloud();
+            }
+            if spec.as_ref().is_some_and(|s| s.has("trouble")) {
+                mock = mock.cloud_trouble();
+            }
+            Arc::new(mock)
+        } else {
+            Arc::new(api::http::HttpBackend::new(&connect_url))
+        };
+        let server_mode = if use_demo { app::ServerMode::Mock } else { app::ServerMode::Local };
+        let spawn_server = saved.spawn_server.unwrap_or(true);
 
         let (window_bounds, display_id) = match saved.window {
             Some(p) => restored_bounds(p, cx),
@@ -195,12 +198,13 @@ fn main() {
                         let mut app = app::FoloApp::new(api, frozen, window, cx);
                         app.state_path = state_path.clone();
                         app.server_mode = server_mode;
+                        app.spawn_server = spawn_server;
                         app.server_url.update(cx, |i, cx| i.set_text(connect_url.clone(), cx));
                         if let Some(s) = &spec {
                             scenario::apply(&mut app, s, window, cx);
                         }
                         if auto {
-                            app.autoconnect(connect_url.clone(), true, cx);
+                            app.autoconnect(connect_url.clone(), spawn_server, cx);
                         }
                         if open.as_deref() == Some("new-run") {
                             app.open_new_run_pending = true;

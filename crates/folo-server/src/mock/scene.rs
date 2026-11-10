@@ -13,8 +13,8 @@ pub enum Theme {
     Shapes,
     /// Vehicles, people and bicycles on a road.
     Traffic,
-    /// Operators (body + Head) in a room.
-    Operators,
+    /// Bolts and hex nuts on a conveyor belt.
+    Fasteners,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -47,11 +47,14 @@ enum Draw {
     Bicycle {
         color: Rgb,
     },
-    Operator {
+    Bolt {
         color: Rgb,
     },
-    /// Drawn as part of another object (e.g. a head).
-    Nothing,
+    /// A hex nut: its outline, and a hole in the middle.
+    Nut {
+        pts: Vec<(f32, f32)>,
+        color: Rgb,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -196,33 +199,32 @@ impl Scene {
                 scene.objs = objs.into_iter().map(|(_, o)| o).collect();
                 scene.bg = [[118, 162, 214], [214, 228, 240], [92, 94, 98], [58, 60, 64]];
             }
-            Theme::Operators => {
-                let n = if r.chance(0.03) { 0 } else { 1 + r.below(4) + r.below(2) };
-                let mut ops = Vec::new();
-                let team = [[54, 66, 82], [150, 128, 96]];
-                for _ in 0..n {
-                    let foot = r.range(hf * 0.55, hf * 0.99);
-                    let p = (foot - hf * 0.55) / (hf * 0.45);
-                    let height = (240.0 + 480.0 * p) * r.range(0.78, 1.08);
-                    let width = height * r.range(0.28, 0.38);
-                    let cx = r.range(width * 0.2, wf - width * 0.2);
-                    let geo = [cx - width * 0.5, foot - height, cx + width * 0.5, foot];
-                    let color = shade(team[r.below(2) as usize], r.range(0.85, 1.15));
-                    ops.push((foot, geo, color));
-                }
-                ops.sort_by(|a, b| a.0.total_cmp(&b.0));
-                for (_, geo, color) in ops {
-                    let height = geo[3] - geo[1];
-                    let cx = (geo[0] + geo[2]) * 0.5;
-                    let hr = height * 0.085;
-                    let hc = geo[1] + hr;
-                    scene.objs.push(Obj { class: 0, geo, draw: Draw::Operator { color } });
-                    if nc > 1 {
-                        scene.objs.push(Obj {
-                            class: 1,
-                            geo: [cx - hr, hc - hr, cx + hr, hc + hr],
-                            draw: Draw::Nothing,
-                        });
+            Theme::Fasteners => {
+                let n = if r.chance(0.03) { 0 } else { 1 + r.below(5) + r.below(2) };
+                let metals = [[148, 156, 168], [182, 164, 118], [116, 124, 136]];
+                scene.bg = [[44, 48, 54], [62, 66, 74], [36, 40, 46], [52, 56, 64]];
+                for k in 0..n {
+                    let class = if k == 0 || nc <= 1 { 0 } else { r.below(nc) as u32 };
+                    let color = shade(metals[r.below(3) as usize], r.range(0.85, 1.15));
+                    if class == 0 {
+                        let len = r.range(120.0, 260.0);
+                        let thick = len * r.range(0.24, 0.34);
+                        let cx = r.range(len * 0.6, wf - len * 0.6);
+                        let cy = r.range(thick * 0.8, hf - thick * 0.8);
+                        let geo = [cx - len * 0.5, cy - thick * 0.5, cx + len * 0.5, cy + thick * 0.5];
+                        scene.objs.push(Obj { class: 0, geo, draw: Draw::Bolt { color } });
+                    } else {
+                        let rad = r.range(36.0, 78.0);
+                        let cx = r.range(rad * 1.2, wf - rad * 1.2);
+                        let cy = r.range(rad * 1.2, hf - rad * 1.2);
+                        // The box is the hexagon's own (flat top and bottom: 0.87 of its width tall).
+                        let pts: Vec<_> = (0..6)
+                            .map(|i| {
+                                let a = i as f32 * std::f32::consts::TAU / 6.0;
+                                (cx + rad * a.cos(), cy + rad * a.sin())
+                            })
+                            .collect();
+                        scene.objs.push(Obj { class, geo: poly_box(&pts), draw: Draw::Nut { pts, color } });
                     }
                 }
             }
@@ -269,23 +271,11 @@ impl Scene {
                     c.line(vp, (wf * 0.5 + k * wf * 0.55, hf), 2.0 + 10.0 * k.abs(), [210, 206, 190]);
                 }
             }
-            Theme::Operators => {
-                let floor = hf * 0.62;
-                c.gradient(0.0, floor, self.bg[0], self.bg[1], 12.0, 40.0, self.seed);
-                c.gradient(
-                    floor,
-                    hf,
-                    shade(self.bg[2], 0.7),
-                    shade(self.bg[3], 0.5),
-                    16.0,
-                    8.0,
-                    self.seed ^ 1,
-                );
-                let mut r = Rng::new(self.seed ^ 0xc0);
-                for _ in 0..r.below(3) {
-                    let (x, w) = (r.range(0.0, wf), r.range(120.0, 360.0));
-                    let top = floor - r.range(80.0, 260.0);
-                    c.rect(x, top, x + w, floor + 60.0, shade([120, 98, 70], r.range(0.7, 1.1)));
+            Theme::Fasteners => {
+                c.gradient(0.0, hf, self.bg[0], self.bg[1], 14.0, 28.0, self.seed);
+                for slot in 1..6 {
+                    let y = hf * (slot as f32 / 6.0);
+                    c.line((0.0, y), (wf, y), 3.0, self.bg[2]);
                 }
             }
         }
@@ -340,17 +330,35 @@ impl Scene {
                     c.line((cx, y1 + bh * 0.25), (x2 - wr, y2 - wr), lw, *color);
                     c.line((x1 + bw * 0.3, y1), (x2 - bw * 0.3, y1), lw, [30, 30, 30]);
                 }
-                Draw::Operator { color } => {
-                    let hr = bh * 0.085;
-                    let legs = shade(*color, 0.7);
-                    c.rect(cx - bw * 0.32, y1 + bh * 0.55, cx - bw * 0.04, y2, legs);
-                    c.rect(cx + bw * 0.04, y1 + bh * 0.55, cx + bw * 0.32, y2, legs);
-                    c.rect(x1, y1 + hr * 2.1, x2, y1 + bh * 0.6, *color);
-                    c.rect(x1 + bw * 0.1, y1 + hr * 2.4, x2 - bw * 0.1, y1 + bh * 0.42, shade(*color, 0.8));
-                    c.ellipse(cx, y1 + hr, hr, hr, [36, 38, 42]);
-                    c.rect(cx - hr * 0.7, y1 + hr * 0.8, cx + hr * 0.7, y1 + hr * 1.3, [210, 170, 135]);
+                Draw::Bolt { color } => {
+                    let head_w = bw * 0.24;
+                    let shaft_h = bh * 0.48;
+                    let cy = (y1 + y2) * 0.5;
+                    c.rect(
+                        x1 + shadow_off,
+                        y1 + shadow_off,
+                        x1 + head_w + shadow_off,
+                        y2 + shadow_off,
+                        [18, 20, 24],
+                    );
+                    c.rect(
+                        x1 + head_w,
+                        cy - shaft_h * 0.5 + shadow_off,
+                        x2 + shadow_off,
+                        cy + shaft_h * 0.5 + shadow_off,
+                        [18, 20, 24],
+                    );
+                    c.rect(x1, y1, x1 + head_w, y2, shade(*color, 1.08));
+                    c.rect(x1 + head_w, cy - shaft_h * 0.5, x2, cy + shaft_h * 0.5, *color);
                 }
-                Draw::Nothing => {}
+                Draw::Nut { pts, color } => {
+                    let cy = (y1 + y2) * 0.5;
+                    let hole = bw * 0.5 * 0.42;
+                    let sh: Vec<_> = pts.iter().map(|&(x, y)| (x + shadow_off, y + shadow_off)).collect();
+                    c.polygon(&sh, [18, 20, 24]);
+                    c.polygon(pts, *color);
+                    c.ellipse(cx, cy, hole, hole, [34, 38, 44]);
+                }
             }
         }
         c
@@ -370,7 +378,7 @@ mod tests {
         for (theme, classes, w, h) in [
             (Theme::Shapes, names(&["circle", "square", "triangle"]), 640, 640),
             (Theme::Traffic, names(&["car", "truck", "bus", "person", "bicycle"]), 1280, 720),
-            (Theme::Operators, names(&["body", "Head"]), 1920, 1080),
+            (Theme::Fasteners, names(&["bolt", "nut"]), 1920, 1080),
         ] {
             for i in 0..50 {
                 let a = Scene::generate(theme, &classes, w, h, 9, i).labels();
@@ -386,15 +394,29 @@ mod tests {
     }
 
     #[test]
-    fn heads_inside_bodies() {
-        let classes = names(&["body", "Head"]);
-        for i in 0..30 {
-            let labels = Scene::generate(Theme::Operators, &classes, 1920, 1080, 3, i).labels();
-            let bodies: Vec<_> = labels.iter().filter(|b| b.class == 0).collect();
-            for head in labels.iter().filter(|b| b.class == 1) {
-                assert!(bodies.iter().any(|b| head.x1 >= b.x1 && head.x2 <= b.x2 && head.y1 >= b.y1));
+    fn fastener_boxes_are_what_is_drawn() {
+        let classes = names(&["bolt", "nut"]);
+        let (mut bolts, mut nuts) = (0, 0);
+        for i in 0..40 {
+            for o in Scene::generate(Theme::Fasteners, &classes, 1920, 1080, 5, i).objs {
+                match &o.draw {
+                    // The head spans the box's full height from its left edge; the shaft ends at its right edge.
+                    Draw::Bolt { .. } => bolts += 1,
+                    // Every side of the box touches the hexagon.
+                    Draw::Nut { pts, .. } => {
+                        nuts += 1;
+                        let b = poly_box(pts);
+                        for k in 0..4 {
+                            assert!((b[k] - o.geo[k]).abs() < 1e-3, "{:?} vs {:?}", b, o.geo);
+                        }
+                        let (w, h) = (o.geo[2] - o.geo[0], o.geo[3] - o.geo[1]);
+                        assert!((h / w - 3f32.sqrt() / 2.0).abs() < 1e-3, "a regular hexagon: {w} x {h}");
+                    }
+                    _ => panic!("only bolts and nuts"),
+                }
             }
         }
+        assert!(bolts > 20 && nuts > 20, "{bolts} bolts, {nuts} nuts");
     }
 
     #[test]

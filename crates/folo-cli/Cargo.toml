@@ -17,6 +17,7 @@ embed-web = ["folo-server/embed-web"]
 
 [dependencies]
 folo-api.workspace = true
+folo-client.workspace = true
 folo-data.workspace = true
 folo-gpu.workspace = true
 folo-nn.workspace = true

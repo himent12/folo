@@ -6,7 +6,7 @@ recorded as a finding.
 1. **As a human:** follow the README's 60-second quickstart. Train on the GPU, predict, export to f16 and ONNX,
    and serve Studio from a release `folo serve` (embedded Studio, with in-browser inference). Drive Studio with
    Playwright in the installed Chrome.
-2. **As an agent:** run `folo mcp` on a 200-image copy of the R6 dataset. Register and check it, train, evaluate,
+2. **As an agent:** run `folo mcp` on a 200-image 1080p dataset (`ds-200`). Register and check it, train, evaluate,
    compare, `predict_batch`, export, and try the error paths.
 3. **Desktop:** build FOLO Desktop in release, point it at the same server, take a tour and screenshots.
 
@@ -42,10 +42,10 @@ Nothing blocked a job outright. The worst problems were these:
 ## DOGFOOD-1 fixes: held or regressed
 | # | fix | status now | evidence |
 |---|---|---|---|
-| F1 | `get_dataset` lists errors first, with `list_dataset_issues` | **held** | clean r6-200: `0 errors, 0 warnings, 15 infos`, 766 B; `list_dataset_issues {severity: error}` 292 B |
+| F1 | `get_dataset` lists errors first, with `list_dataset_issues` | **held** | clean ds-200: `0 errors, 0 warnings, 15 infos`, 766 B; `list_dataset_issues {severity: error}` 292 B |
 | F2 | `gpu_out_of_memory` with a short message | not re-tested | the GPU was shared, so no OOM was provoked |
 | F3 | unknown arguments rejected | **held** | `lr` gives "did you mean `lr0`?"; `model` gives "did you mean `arch`?" |
-| F4 | `register_dataset` idempotent | **held** | the same folder written as `D:\folo-dogfood2\r6-200\` (backslashes, trailing slash) returned `ds_4cf3`, "already registered" |
+| F4 | `register_dataset` idempotent | **held** | the same folder written as `D:\folo-dogfood2\ds-200\` (backslashes, trailing slash) returned `ds_4cf3`, "already registered" |
 | F5 | CLI `--resume` refuses changed flags and completed runs | **held**, with a nit | `run_not_resumable` with the command to run; but the hint's `--data` path has `\\` separators (P3) |
 | F6 | `folo stop` / Ctrl+Break | **held** | `folo stop <run_dir>` gave `status: stopped` and the `done` record 0.64 s later |
 | F7 | truncated JPEG caught | **held** | `head -c 2000` gives `corrupt_image` "truncated JPEG" (its message had a run of spaces: fixed here) |
@@ -128,7 +128,7 @@ or inconsistent. The IDs group findings by surface:
   whether CPU postprocess really costs 5 ms. Until then, anyone tuning NMS is chasing the wrong stage.
 
 #### X2. Short runs on small datasets are almost all warmup, with no mosaic, and nothing says so (annoying, high)
-- **Repro:** MCP `train {dataset_id: r6-200, arch: folo-n, epochs: 12, imgsz: 640}` (160 train images). The
+- **Repro:** MCP `train {dataset_id: ds-200, arch: folo-n, epochs: 12, imgsz: 640}` (160 train images). The
   first log line says "batch 16 × accumulate 4, … 10 batches = 3 optimizer steps per epoch, warmup 33 steps".
   The run has 36 optimizer steps, so **33 of them are warmup**. "closing mosaic for the last 10 epochs" means
   only 2 epochs use mosaic.
@@ -148,7 +148,7 @@ or inconsistent. The IDs group findings by surface:
 - **Repro:** folo-n at 640 on 160 frames of 1920×1080 plus 40 val frames.
   - MCP: about 11 s per epoch (the step records say `imgs_per_s` 18.8).
   - CLI with `--workers 16`: 34.2 s for 3 epochs. With the default 8 workers: 29.3 s.
-- **For comparison:** examples/r6 reports 12 to 21 s per epoch for **2030** frames (about 100 to 170 img/s).
+- **For comparison:** a full 2,030-frame 1080p run took 12 to 21 s per epoch (about 100 to 170 img/s).
   Doubling the workers did not help, so this run was not limited by decode threads. The GPU was shared, so this
   report cannot pin it on FOLO.
 - **Fix:** time it on an idle GPU. Then report per-epoch time split into load, train, val and checkpoint in the
@@ -366,13 +366,13 @@ their threads.
 |---|---|---|
 | D1 | **fixed** | apps/desktop: `release` keeps cargo's defaults (no LTO, 16 codegen units); the new `dist` profile (thin LTO, one codegen unit) builds the shipped binary, and the release workflow's desktop job uses `--profile dist`. Measured on this machine (own target dir, `-j 6`): `release` built cold in 4 min 36 s to a 33.7 MB binary; `dist` then built in 2 min 5 s (its dependencies cached) to 27.0 MB, without a crash this time |
 | X1 | **fixed** (engine); Desktop relabels its stages | the predictor waits for the GPU after the letterbox and after the forward pass, so `inference_ms` holds the forward pass and `postprocess_ms` only the decode kernel, readback, NMS and rescale. Same model (shapes-n, 320 px) and 40 val images on the GPU, two runs each: before, pre 0.8–0.9 / inference 2.1–2.3 / post 2.8–2.9 ms (total 5.6–6.1); after, pre 0.7–0.8 / inference 4.1–4.3 / post 0.32–0.35 ms (total 5.1–5.4). So CPU postprocess really is about 0.3 ms, and the waits cost nothing measurable. API.md defines each field |
-| X2 | **fixed** (a resumed run keeps the closing epochs it started with) | MODEL.md §8.4: the 100-step warmup floor is capped at 30% of the run (`min(100, floor(0.3 · T))`), so the 12-epoch r6-200 run warms up for 10 of its 36 steps instead of 33; §8.6: `close_mosaic` is capped at half of the epochs. Every run with `T ≥ 334` and at least `2 · close_mosaic` epochs (the quickstart, the §10.6 gate, COCO) is unchanged. A run from scratch with fewer than 200 optimizer steps, or a warmup over half of it, gets a `warn` log line after the first one (CLI `warning:`, a `log` event, `config.json` `warnings`, MCP `run_status.warnings` and its summary line) |
+| X2 | **fixed** (a resumed run keeps the closing epochs it started with) | MODEL.md §8.4: the 100-step warmup floor is capped at 30% of the run (`min(100, floor(0.3 · T))`), so the 12-epoch ds-200 run warms up for 10 of its 36 steps instead of 33; §8.6: `close_mosaic` is capped at half of the epochs. Every run with `T ≥ 334` and at least `2 · close_mosaic` epochs (the quickstart, the §10.6 gate, COCO) is unchanged. A run from scratch with fewer than 200 optimizer steps, or a warmup over half of it, gets a `warn` log line after the first one (CLI `warning:`, a `log` event, `config.json` `warnings`, MCP `run_status.warnings` and its summary line) |
 | X3 | deferred | needs an idle GPU to measure first; a per-epoch time split is a new `Epoch` field, which FOLO Desktop builds by hand (coordinate with it). The MCP `train` tool's `workers` field goes with it |
 | C1 | fixed in #93 | |
 | C2 | deferred | cause unconfirmed; needs the fingerprint log on a fresh branch |
 | C3 | **fixed** | CLI human output, the `--resume` hint, errors and trainer log lines use `/` (`folo_api::json::path`, `folo_data::paths::shown`); `invalid_config` from the server and MCP has a hint, and `run_not_active` too |
 | M1 | **fixed** | `GET /api/system` carries the server's `data_dir`; `folo_info` reports it in proxy mode (with `/`) |
-| M2 | **fixed** | `folo://datasets/{id}/images/{image_id}` is a 512 px JPEG by default (`?size=16..2048`, `?size=original`); sample grids use 192 px cells (`?tile=64..512`). On r6-200 (1920×1080) the read of one image is 55 KB instead of 432 KB (16 KB at `?size=256`), and a 16-sample grid 111 KB instead of 244 KB |
+| M2 | **fixed** | `folo://datasets/{id}/images/{image_id}` is a 512 px JPEG by default (`?size=16..2048`, `?size=original`); sample grids use 192 px cells (`?tile=64..512`). On ds-200 (1920×1080) the read of one image is 55 KB instead of 432 KB (16 KB at `?size=256`), and a 16-sample grid 111 KB instead of 244 KB |
 | M3 | deferred | `ClassMetrics` gains `name` once FOLO Desktop (which builds it by hand) is ready for the field |
 | M4 | **fixed** | `predict` on a non-image: "<file>: not an image: The image format could not be determined"; dataset errors use `/`; the `invalid_config` prefix reads "invalid train config:" |
 | S1, S2, S4 | Studio | |

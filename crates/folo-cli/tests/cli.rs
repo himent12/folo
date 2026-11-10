@@ -219,6 +219,72 @@ fn data_dir_that_is_a_file_is_a_usage_error() {
     }
 }
 
+/// One process owns a data dir, and a relative `--data-dir` names the same folder from anywhere: a server started
+/// with `--data-dir data` reports it absolute, so a second `folo serve` points at it and an embedded `folo mcp`
+/// started from another working directory goes through it (its owner check compares the folders). No GPU (as the
+/// other tests): a slow adapter start could outlast that check's timeout.
+#[test]
+fn a_data_dir_has_one_owner_whatever_the_working_directory() {
+    use std::io::Write;
+    let (a, b) = (TestDir::new("cli-owner-a"), TestDir::new("cli-owner-b"));
+    let data = a.join("data");
+    let mut server: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["--json", "serve", "--port", "0", "--data-dir", "data"])
+        .current_dir(&*a)
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut line = String::new();
+    BufReader::new(server.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let listening: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(listening["event"], "listening", "{line}");
+    let reported = std::path::PathBuf::from(listening["data_dir"].as_str().unwrap());
+    assert!(reported.is_absolute(), "{line}");
+    assert_eq!(std::fs::canonicalize(&reported).unwrap(), std::fs::canonicalize(&data).unwrap());
+
+    let second = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["--json", "serve", "--port", "0", "--data-dir", data.to_str().unwrap()])
+        .current_dir(&*b)
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(1));
+    let first_line = String::from_utf8_lossy(&second.stdout).lines().next().unwrap_or_default().to_string();
+    let in_use: Value = serde_json::from_str(&first_line).unwrap();
+    assert_eq!((&in_use["event"], &in_use["url"]), (&Value::from("data_dir_in_use"), &listening["url"]));
+
+    let mut mcp: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["mcp", "--data-dir", data.to_str().unwrap()])
+        .current_dir(&*b)
+        .env("FOLO_GPU_BACKEND", "webgpu")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut stdin = mcp.stdin.take().unwrap();
+    for msg in [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"folo_info","arguments":{}}}"#,
+    ] {
+        writeln!(stdin, "{msg}").unwrap();
+    }
+    let info = BufReader::new(mcp.stdout.take().unwrap())
+        .lines()
+        .map_while(Result::ok)
+        .find(|l| l.contains(r#""id":2"#))
+        .expect("folo_info answered");
+    drop(stdin);
+    assert!(info.contains(r#"\"mode\":\"proxy\""#) || info.contains(r#""mode":"proxy""#), "{info}");
+}
+
 /// `folo mcp`'s stdout carries protocol messages only, also with `--json` (docs/CLI.md): a startup error is on
 /// stderr, not an error envelope on stdout.
 #[test]

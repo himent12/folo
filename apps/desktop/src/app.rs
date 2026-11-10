@@ -513,7 +513,7 @@ pub struct FoloApp {
     pub server_mode: ServerMode,
     pub server_url: Entity<TextInput>,
     pub spawn_server: bool,
-    /// A `folo serve --mock` this app started (stopped when the app quits).
+    /// A local `folo serve` this app started (stopped when the app quits).
     server_proc: Option<crate::api::http::ServerProcess>,
     /// Startup / switch in progress: what the app is doing ("Starting folo serve…").
     pub connecting: Option<SharedString>,
@@ -1386,6 +1386,7 @@ impl FoloApp {
                 display: window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()),
             }),
             theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
+            spawn_server: Some(self.spawn_server),
         };
         if let Err(e) = crate::window_state::save(path, &state) {
             eprintln!("folo-desktop: couldn't remember the window in {}: {e}", path.display());
@@ -3803,17 +3804,19 @@ impl FoloApp {
         self.retry_all(cx);
     }
 
-    /// Find a data source: a running `folo serve`, else one we start (`folo serve --mock`),
-    /// else the built-in demo data. Runs off the UI thread; the app shows "Connecting…" meanwhile.
+    /// Connect to a running `folo serve`, or start a local `folo serve` (the real engine, bare
+    /// until datasets and runs are added) when `spawn` is on; when the data dir already has a server,
+    /// connect to that one instead. If neither is reachable, stay on the HTTP backend so the
+    /// unreachable state is shown instead of silent demo data. A server this app started runs until
+    /// the app quits, whatever it connects to later: it may be training.
     pub fn autoconnect(&mut self, url: String, spawn: bool, cx: &mut Context<Self>) {
-        use crate::api::http::{HttpBackend, spawn_mock_server};
+        use crate::api::http::{HttpBackend, Spawned, spawn_server};
         self.hold_loading = true;
         self.connecting = Some(format!("Connecting to {}", url.trim_start_matches("http://")).into());
         // Only the newest attempt may install its result; older ones bail out at each step, and a
         // server an obsolete attempt started is dropped (stopped) with it.
         self.connect_seq += 1;
         let seq = self.connect_seq;
-        let live_step = 4180;
         cx.spawn(async move |this, cx| {
             let current = |this: &Self| this.connect_seq == seq;
             let probe = url.clone();
@@ -3830,11 +3833,12 @@ impl FoloApp {
                 .ok();
                 return;
             }
+            let mut spawn_err = None;
             if spawn {
                 let go_on = this
                     .update(cx, |this, cx| {
                         if current(this) {
-                            this.connecting = Some("Starting folo serve --mock…".into());
+                            this.connecting = Some("Starting folo serve…".into());
                             cx.notify();
                         }
                         current(this)
@@ -3845,38 +3849,46 @@ impl FoloApp {
                 }
                 let started = cx
                     .background_executor()
-                    .spawn(async move { spawn_mock_server(std::time::Duration::from_secs(10)) })
+                    .spawn(async move { spawn_server(std::time::Duration::from_secs(15)) })
                     .await;
-                if let Ok(proc_) = started {
-                    this.update(cx, |this, cx| {
-                        if !current(this) {
-                            return; // proc_ drops here: the stray server stops.
-                        }
-                        let backend = HttpBackend::new(&proc_.url);
-                        let url = proc_.url.clone();
-                        this.server_proc = Some(proc_);
-                        this.server_url.update(cx, |i, cx| i.set_text(url, cx));
-                        this.set_backend(Arc::new(backend), ServerMode::Local, cx);
-                    })
-                    .ok();
-                    return;
+                match started {
+                    Ok(spawned) => {
+                        this.update(cx, |this, cx| {
+                            if !current(this) {
+                                return; // A started server drops here: the stray server stops.
+                            }
+                            let url = match spawned {
+                                Spawned::Started(proc_) => {
+                                    let url = proc_.url.clone();
+                                    this.server_proc = Some(proc_);
+                                    url
+                                }
+                                // The data dir's server (another window's, or one started by hand): ours stays.
+                                Spawned::Running(url) => url,
+                            };
+                            this.server_url.update(cx, |i, cx| i.set_text(url.clone(), cx));
+                            this.set_backend(Arc::new(HttpBackend::new(&url)), ServerMode::Local, cx);
+                        })
+                        .ok();
+                        return;
+                    }
+                    Err(e) => spawn_err = Some(e),
                 }
             }
             this.update(cx, |this, cx| {
                 if !current(this) {
                     return;
                 }
-                this.set_backend(
-                    Arc::new(crate::api::mock::MockBackend::new(live_step, false)),
-                    ServerMode::Mock,
-                    cx,
-                );
-                this.toast(
-                    Tone::Info,
-                    "Using built-in demo data",
-                    Some("No folo serve was found. Start one and pick it in Settings › Connection.".into()),
-                    cx,
-                );
+                this.set_backend(Arc::new(HttpBackend::new(&url)), ServerMode::Local, cx);
+                // Say why there is no local server; the pages show the unreachable state.
+                if let Some(e) = spawn_err {
+                    this.toast(
+                        Tone::Danger,
+                        "Couldn't start folo serve",
+                        Some(format!("{e}. Start one yourself, or pick Built-in demo in Settings.").into()),
+                        cx,
+                    );
+                }
             })
             .ok();
         })
@@ -3888,9 +3900,9 @@ impl FoloApp {
     pub fn switch_source(&mut self, mode: ServerMode, cx: &mut Context<Self>) {
         match mode {
             ServerMode::Mock => {
-                // Cancels any connection attempt still in flight.
+                // Cancels any connection attempt still in flight. A server this app started keeps
+                // running (it may be training) until the app quits.
                 self.connect_seq += 1;
-                self.server_proc = None;
                 self.set_backend(
                     Arc::new(crate::api::mock::MockBackend::new(4180, false)),
                     ServerMode::Mock,

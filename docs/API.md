@@ -626,7 +626,7 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
     cloud config never uses this server's measurements: it is the reference (`source: reference`, `confidence:
     low`, `device` `cloud`, `device_name` the offer's GPU, `est_peak_vram_bytes` from the reference model), and
     `basis.note` says the reference machine may be faster or slower than that GPU. Errors as `POST /api/runs`.
-- `GET /api/runs/{id}/cli` → `{ "cli": "folo train --data D:/data/r6 --weights folo-n-coco --head o2m --epochs 15
+- `GET /api/runs/{id}/cli` → `{ "cli": "folo train --data D:/data/fasteners --weights folo-n-coco --head o2m --epochs 15
   --amp", "argv": ["folo", "train", ...] }`: the CLI command of a run's config, built from the same `TrainConfig`
   mapping the server trains with (a test parses it with the real `folo` arguments and compares the configs).
   `--data` is the dataset's folder on the server's machine, with `--format yolo|coco` when it was registered with
@@ -668,7 +668,7 @@ counts all of them:
 - **ETA of running runs**: `Run.eta_s` (and `Step.eta_s`) is the run's own measured rate, per mosaic phase: the
   batches left in mosaic epochs at the run's mean mosaic batch time, loader waits included; those in close-mosaic
   epochs at their own mean once they have started, before that at the mosaic batches' step time without the loader
-  waits (without mosaic the loader keeps up); plus the validations left at their mean. On R6 (1080p JPEGs) a mosaic
+  waits (without mosaic the loader keeps up); plus the validations left at their mean. On 1080p JPEGs a mosaic
   epoch of folo-n took 24 s and a close-mosaic one 10 s, so one rate for both is off by up to 2x.
 
 The mock (`folo serve --mock`) has measured rows on its GPU for folo-n and folo-s at 640 (f32, from its runs), a
@@ -1327,8 +1327,8 @@ mostly shown) for the others.
 `folo serve --mock` answers every endpoint with deterministic, realistic data (the same ids and values on every
 start, except live-run timestamps):
 - Datasets: `ds_5a1e` **shapes-1k** (circle / square / triangle, 640², 800 / 200), `ds_7c2f` **traffic-cams** (car /
-  truck / bus / person / bicycle, 1280×720, 1900 / 400 / 100, 3 broken labels), `ds_3b9d` **r6-operators** (body /
-  Head, 1920×1080, 700 / 160). Images are rendered procedurally on request; their boxes match the labels exactly.
+  truck / bus / person / bicycle, 1280×720, 1900 / 400 / 100, 3 broken labels), `ds_3b9d` **fasteners** (bolt /
+  nut, 1920×1080, 700 / 160). Images are rendered procedurally on request; their boxes match the labels exactly.
   `/issues` is consistent with the stats: one error per broken label file (`broken_label`, `class_overflow` or
   `out_of_range_box`, for the 3 of traffic-cams), an `empty_image` per image without boxes, and a few
   deterministic `clipped_box` / `duplicate_image` warnings.
@@ -1346,7 +1346,7 @@ start, except live-run timestamps):
   the first request and kept in memory, so the in-browser path works in mock mode (it detects nothing useful).
   `Last-Modified` is the server's start time.
 - Runs: four completed, one stopped (`run_2b02`), one failed with an out-of-memory error (`run_2b03`), all with full
-  metric histories; and one live run (`run_3c02`, r6-operators / folo-s) whose SSE stream advances in real time: a
+  metric histories; and one live run (`run_3c02`, fasteners / folo-s) whose SSE stream advances in real time: a
   100-epoch run compressed into ~10 minutes (6 s per epoch, ~7 steps per second), starting around epoch 12, then it
   loops (`status` back to `queued`, metrics restart).
 - `/api/system`'s `capabilities` reports the RTX 4080 SUPER with tensor cores on and `amp` available. To test the

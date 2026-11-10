@@ -156,12 +156,13 @@ in-browser module.
 
 The same screens, built natively in Rust on [GPUI](https://gpui.rs) (Zed's GPU-accelerated UI framework). It also has
 a command palette, keyboard navigation, and dark and light themes. It talks to a local `folo serve` over the same
-HTTP API. If no server answers on `$FOLO_SERVER` (default `http://127.0.0.1:7878`), it starts `folo serve --mock`
-for you. If it can't, it falls back to its built-in demo data, and `--server` points it at a real server.
+HTTP API. If no server answers on `$FOLO_SERVER` (default `http://127.0.0.1:7878`), it starts a local `folo serve`
+for you, empty until you add datasets and runs (its data dir is `$FOLO_HOME` or `~/.folo`). `--server` points it at
+another server, and `--mock` (or Settings › Connection) shows the built-in demo data.
 
 ```powershell
 cd apps/desktop
-cargo run --release                                   # a running folo serve, else folo serve --mock, else demo data
+cargo run --release                                   # a running folo serve, else a local one it starts
 cargo run --release -- --server http://127.0.0.1:7878 # a specific server
 ```
 
@@ -231,12 +232,10 @@ clap. [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the full picture.
 
 What works today (v0.1):
 - folo-n/s/m/l/x, trained from scratch on CPU or GPU, with resume, EMA, mosaic and the usual augmentations. On the
-  shapes gate it reaches mAP50 0.980 / mAP50-95 0.896. On a real 2,030-frame dataset folo-n reaches 0.397 mAP50-95
-  on the test split, trained from scratch ([examples/r6](examples/r6/README.md)).
+  shapes gate it reaches mAP50 0.980 / mAP50-95 0.896 ([examples/shapes](examples/shapes/README.md)).
 - COCO-pretrained weights: `folo-n-coco`, folo-n trained from scratch on COCO for 50 epochs, val2017 AP 0.314 /
   AP50 0.455 (pycocotools-exact, [examples/coco](examples/coco/README.md)). It is uploaded as a **draft** GitHub
-  release (`weights-v1`), so for now only repository writers can `folo weights pull` it. Fine-tuned from it, R6
-  reaches 0.441 test / 0.201 held-out mAP50-95 in 100 epochs (0.350 / 0.118 from scratch). `folo-n-coco-v2`
+  release (`weights-v1`), so for now only repository writers can `folo weights pull` it. `folo-n-coco-v2`
   (draft release `weights-v2`) is the interim result of a 300-epoch run paused at epoch 62: AP 0.317 / AP50 0.458.
 - YOLO and COCO datasets: reading, stats, checks and conversion. mAP that matches pycocotools.
 - `val`, `predict` and export to `.folo` (f32 or f16, a safetensors-compatible format) and ONNX (opset 17, f32 or
@@ -279,7 +278,7 @@ The live checklist is [docs/ROADMAP.md](docs/ROADMAP.md).
 | [CHANGELOG](CHANGELOG.md) · [RELEASE](docs/RELEASE.md) · [CI](docs/CI.md) · [PROCESS](docs/PROCESS.md) · [AGENTS](AGENTS.md) | What each release changed, releases, CI runners, how changes land, rules for contributors |
 
 Examples: [shapes](examples/shapes/README.md) (the convergence gate, on CPU and GPU) and
-[r6](examples/r6/README.md) (a real dataset trained from scratch).
+[coco](examples/coco/README.md) (folo-n pretrained from scratch on COCO 2017).
 
 To read these as a website with search: `cd site && npm ci && npm run dev` ([site/README.md](site/README.md)).
 

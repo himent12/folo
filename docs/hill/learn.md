@@ -24,8 +24,8 @@ Score: COCO AP (pycocotools-exact) of `best.folo` / `best.pt` on the 2,000 proxy
 FOLO, `bench/learn/coco_eval.py` (pycocotools) on Ultralytics' `save_json` detections. Wrapper scripts live in
 `D:/folo-data/runs-hill/learn/bin` (`p1.sh`, `u1.sh`, `job.sh` around the shared GPU lock).
 
-**Secondary gates.** The shapes gate (MODEL.md §10.6; mAP50 ≥ 0.90, mAP50-95 ≥ 0.75) and an R6 fine-tune from
-`folo-n-coco` (shortened to 30 epochs, r6-clean test and r6-fresh).
+**Secondary gates.** The shapes gate (MODEL.md §10.6; mAP50 ≥ 0.90, mAP50-95 ≥ 0.75) and a 30-epoch 2-class fine-tune
+from `folo-n-coco`.
 
 ## Runs
 
@@ -133,8 +133,8 @@ the MuSGD rows above are `--optimizer musgd` at momentum 0.937 and warmup_bias_l
 and warmup_bias_lr 0, and no measured run resolved `auto` to MuSGD (the proxy's 6,260 iterations, and the shapes
 gate below, resolve AdamW); the long COCO run under rule 3 (follow-up 4) is the first. Shapes gate with the rule-3
 binary: `auto → adamw lr0 0.00125` (short run, unchanged), best epoch 30 mAP50 **0.978**, mAP50-95 **0.893** (pass;
-0.898 before the merge, same settings: the merged kernels' rounding). R6 (2,030 frames × 100 epochs at batch 16 =
-3,200 iterations) is a short run and resolves exactly as before. Old checkpoints resume with their rule (1 or 2:
+0.898 before the merge, same settings: the merged kernels' rounding). Short fine-tune runs (≤ 10,000 iterations)
+resolve as before. Old checkpoints resume with their rule (1 or 2:
 SGD); `--set auto_rule=2` keeps SGD for a new long run. The web mock and FOLO Desktop now compute `auto` with the
 same rule (Desktop calls `folo_nn::optim::auto_optimizer`; the web mock mirrors it in TypeScript).
 
@@ -184,13 +184,13 @@ fine-tuning; from scratch on 80 classes it barely learns in 20 epochs.
 | **FOLO after (rule 2: AdamW 0.001)** | **0.0747** | **+0.058, 4.5x** |
 | (for scale: either trainer with SGD 0.01) | 0.085–0.086 | |
 
-- The floor binds from `nc = 6` on (`fit(6) = 0.001`), so the shapes gate (4 classes, 0.00125) and R6 (2 classes,
-  0.001667) resolve to exactly the settings they had: their results cannot change (checked: the shapes-v2 run below
+- The floor binds from `nc = 6` on (`fit(6) = 0.001`), so the shapes gate (4 classes, 0.00125) and 2-class datasets
+  (0.001667) resolve to exactly the settings they had: their results cannot change (checked: the shapes-v2 run below
   logs the same `adamw lr0 0.00125`). Long runs (> 10,000 iterations: full COCO) picked SGD under rule 2 (MuSGD since rule 3, below).
 - Old checkpoints resume with the rule they started with: `TrainConfig.auto_rule` (serde default 1 when missing),
   validated to `1..=2`; tests: `folo-nn` `recipe_helpers`, `folo-vision` `train::config::tests::auto_rule_versions`.
 - Why 0.001 and not 0.002 (0.0844, level with SGD): a 0.002 floor binds for every class count (`fit(1) = 0.002`),
-  so it would also raise shapes' and R6's LR, and R6 is a fine-tune where a higher LR can cost transfer. That needs
+  so it would also raise the LR on small-class datasets and fine-tunes where a higher LR can cost transfer. That needs
   its own gate runs (follow-up).
 
 **`--set KEY=VALUE`** (from the handed-over WIP, now tested and in docs/CLI.md): any `train` key of `config.json`,
@@ -199,13 +199,12 @@ without it get the §7 defaults.
 
 **Gates for rule 2.** Shapes (MODEL.md §10.6, `folo-learn2` = this branch, f32 on the GPU): `auto → adamw lr0
 0.00125`, as before; best epoch 29 mAP50 **0.978**, mAP50-95 **0.898**, no non-finite loss: the same as main
-(0.978 / 0.898). R6: not rerun. Its two classes resolve to 0.001667 under both rules (`fit(2) > 0.001`), so the
-fine-tune is unchanged by construction.
+(0.978 / 0.898). Two-class fine-tune: not rerun, as two classes resolve to 0.001667 under both rules (`fit(2) > 0.001`).
 
 ## Not shipped (negative or inconclusive)
 
 - **AdamW floor 0.002** (proxy 0.0844, +0.010 over the 0.001 floor, level with SGD): not shipped, see above; needs
-  shapes + R6 at the higher LR first.
+  shapes + transfer gates at the higher LR first.
 - **o2o head as auxiliary supervision:** not run. FOLO, like the reference's YOLOv10/YOLO26 head, detaches the
   one-to-one branch's inputs (MODEL.md §6.6), so its loss never reaches the backbone or the o2m branch: as an
   auxiliary signal for an o2m model it is a no-op by construction. Making it non-detached is an architecture change
@@ -223,7 +222,7 @@ fine-tune is unchanged by construction.
 2. **MuSGD step cost (17 %)**: fuse the Newton–Schulz iteration into one kernel per column bucket (today about 15
    matmul / elementwise dispatches per conv weight per step), and measure on an idle GPU.
 3. **AdamW floor 0.002** (round 1: proxy 0.0844 vs 0.0747 at 0.001): not run this round (time); needs the shapes
-   gate and an R6 fine-tune at 0.002 against the current rule.
+   gate and a transfer fine-tune at 0.002 against the current rule.
 4. **Long COCO with MuSGD**: the 300-epoch folo-n run (examples/coco) resumed from its SGD checkpoint keeps SGD
    (rule 1). A new long run under rule 3 is the full-scale check of the +38 % seen on the proxy, and the first run of
    the shipped rule-3 recipe (momentum 0.9, warmup_bias_lr 0; the proxy rows used 0.937 and 0.1).
@@ -248,6 +247,6 @@ fine-tune is unchanged by construction.
    conv weight per step: about 15 small matmuls per tensor on the GPU; a second momentum buffer in the checkpoint's
    `folo.optim`), confirm on P1 to epoch 20 against both SGD runs, then make it `auto`'s long-run choice under a
    rule 3.
-3. **AdamW floor 0.002** with shapes + R6 gates (proxy +0.010 AP over 0.001).
+3. **AdamW floor 0.002** with shapes + transfer gates (proxy +0.010 AP over 0.001).
 4. The web mock's copy of the `auto` rule (`web/src/lib/api/mock/runs.ts`) still has rule 1; only its offline
    estimates are affected (the real server resolves with folo-vision).

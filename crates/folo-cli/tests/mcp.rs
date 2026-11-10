@@ -567,7 +567,7 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     checked(c, &schemas, "export", json!({ "model_id": model_id, "format": "onnx" }));
     let models = checked(c, &schemas, "list_models", json!({ "limit": 2 }));
     assert_eq!(models["items"].as_array().unwrap().len(), 2);
-    // Head and training settings, as on the API's Model (mock: shapes-s is o2o, r6-n trained with AMP).
+    // Head and training settings, as on the API's Model (mock: shapes-s is o2o, fasteners-n trained with AMP).
     let models = checked(c, &schemas, "list_models", json!({ "limit": 200 }));
     let item = |id: &str| models["items"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap().clone();
     assert_eq!(
