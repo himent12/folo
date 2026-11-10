@@ -103,7 +103,7 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
     // boxes, or of one received in an earlier part, is refused).
     if (here.has(key) && here.get(key) === JSON.stringify(r.boxes)) continue;
     here.set(key, JSON.stringify(r.boxes));
-    if (seen.has(key)) return at(i,`image "${r.image}"${cond ? ` under ${name(cond)} ${sev}` : ''} is answered twice.`);
+    if (seen.has(key)) return at(i, `image "${r.image}"${cond ? ` under ${name(cond)} ${sev}` : ''} is answered twice.`);
     seen.add(key);
     if (!Array.isArray(r.boxes)) return at(i, '"boxes" must be an array (empty when nothing was found).');
     if (r.boxes.length > MAX_BOXES_PER_RECORD) return at(i, `${num(r.boxes.length)} boxes: one record carries at most ${num(MAX_BOXES_PER_RECORD)}.`);
