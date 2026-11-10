@@ -33,7 +33,9 @@ export interface Evaluation {
 
 export function fromModelEval(e: ModelEval): Evaluation {
   const n = e.pr.length;
-  const curves = e.pr.map((c) => c.recall.map((x, i) => ({ x, y: c.precision[i] ?? 0 })));
+  // By class, not by place: `pr` has curves for the classes with ground truth only, so a class without any has none.
+  const curves: { x: number; y: number }[][] = Array.from({ length: Math.max(e.confusion.length - 1, ...e.pr.map((c) => c.class + 1)) }, () => []);
+  for (const c of e.pr) curves[c.class] = c.recall.map((x, i) => ({ x, y: c.precision[i] ?? 0 }));
   const points = e.pr[0]?.recall.length ?? 0;
   const mean = Array.from({ length: points }, (_, i) => ({
     x: e.pr[0]?.recall[i] ?? i / Math.max(1, points - 1),
