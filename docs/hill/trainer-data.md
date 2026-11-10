@@ -46,6 +46,22 @@ bit-exact; validation results are identical (same mAP to the last digit in every
 COCO `folo val` end to end: process wall median **92 s (main) → 10.8 s** (9.9-19.9) at ce58b409, evaluation 26.6 → 8.5 s
 median, across the three sessions above.
 
+Memory of the overlapped validation (review check, 2026-11-09, integration head 448d9da9 against `main` 93c25129):
+with `sync_channel(1)` up to three batches of decoded outputs can be on the device at once, plus the contiguous copy
+`to_vec` makes of the transposed `[B, A, 4+nc]` view. `folo val --model D:/folo-weights/folo-n-coco.folo --data
+D:/folo-data/coco --device gpu:0`, 3 alternated rounds, GPU otherwise idle (under the GPU lock), sampled every 150 ms
+(the whole GPU's `memory.used` above its level before the run, since WDDM does not report per-process memory; the
+buffer pool keeps its buffers for the run, so this is its high-water mark plus the context):
+
+| | `main` | head | head / `main` |
+|---|---|---|---|
+| GPU memory above the idle level | 2883 / 3035 / 2925 MiB | 3886 / 3712 / 3805 MiB | 1.29x |
+| host peak working set | 1328 / 1305 / 1305 MB | 786 / 751 / 751 MB | 0.58x |
+| process wall | 54.6 / 41.9 / 39.6 s | 9.6 / 10.2 / 10.0 s | |
+
+mAP50 0.44944638 and mAP50-95 0.30999148 from both. The GPU peak is under 1.5x `main`'s, so the channel stays as it is
+(a bound would cost overlap for about 0.9 GB on a 16 GB card); the host peak is lower than `main`'s.
+
 ## Row 10 (FOLO on the incumbent's protocol)
 
 Epoch-2 sustained img/s, 3 rounds alternated with `main` (c50211ba), 12-23 other cores busy:
