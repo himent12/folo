@@ -147,6 +147,9 @@
       void others.refresh();
       hub.api.run(id).then(
         (r) => {
+          // Asked for while the trainer was being built: a stream that has since said the run left the queue is newer,
+          // and a run that left it never goes back (no status event would correct it until the run ends).
+          if (r.status === 'queued' && live.run?.status !== 'queued') return;
           if (live.run?.id === id) live.run = { ...live.run, status: r.status, started: r.started, queue_position: r.queue_position ?? null, resolved: r.resolved ?? live.run.resolved };
         },
         () => {},
