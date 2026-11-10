@@ -38,6 +38,9 @@ produces plain buffers that the trainer wraps in tensors.
 - `bbox` is pixel `[x, y, w, h]`; boxes are clipped to the image and normalised. `iscrowd: 1` annotations are skipped.
 - Category ids (from all JSON files) are sorted and remapped to `0..n`; names come from `categories`.
 - An image with an annotation that has a bad `bbox` or an unknown category is skipped as a broken label.
+- Image ids are numbers or strings; an integral float is its integer (`"image_id": 1.0` names `"id": 1`). Two
+  `images` entries with one id: the first is kept with every annotation of the id, the second is left out and
+  reported (`other`).
 - The annotation array is read as borrowed raw JSON, and only `image_id`, `category_id`, `bbox` and `iscrowd` are
   parsed out of each entry (segmentation polygons are skipped unbuilt): COCO 2017's `instances_train2017.json`
   (448 MB, 860k annotations) opens with a peak of 1.2 GB instead of 7 GB, with identical results. The official COCO

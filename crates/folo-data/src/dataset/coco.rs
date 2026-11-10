@@ -80,9 +80,16 @@ fn looks_like_coco(p: &Path) -> bool {
     head.contains("\"images\"") && (head.contains("\"annotations\"") || head.contains("\"categories\""))
 }
 
+/// An image id as a map key: a string as it is, a number as JSON writes it, except that an integral float is its
+/// integer (`"image_id": 1.0` names `"id": 1`).
 fn id_key(v: &Value) -> Option<String> {
     match v {
-        Value::Number(n) => Some(n.to_string()),
+        Value::Number(n) => Some(match n.as_f64() {
+            Some(f) if n.is_f64() && f.fract() == 0.0 && f.abs() < (1u64 << 53) as f64 => {
+                (f as i64).to_string()
+            }
+            _ => n.to_string(),
+        }),
         Value::String(s) => Some(s.clone()),
         _ => None,
     }
@@ -409,7 +416,19 @@ pub(crate) fn open_jsons(
             }
         }
         let list = by_split.entry(p.split).or_default();
+        // Image id -> the file of its first entry: a second entry with the id is left out (its annotations cannot
+        // be told apart from the first's).
+        let mut first: HashMap<&str, &str> = HashMap::new();
         for (id, file, declared) in &p.images {
+            if let Some(&kept) = first.get(id.as_str()) {
+                report.push(
+                    IssueKind::Other,
+                    &p.path,
+                    format!("image id {id} is used by both {kept} and {file}; {file} is left out"),
+                );
+                continue;
+            }
+            first.insert(id, file);
             let (boxes, broken) = per_image.remove(id.as_str()).unwrap_or_default();
             let image = base.join(file);
             deps.extend(image.parent().map(Path::to_path_buf));

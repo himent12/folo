@@ -172,6 +172,58 @@ fn coco_instances_with_category_remap() {
     assert_eq!(ds.stats().class_counts, vec![1, 1, 2]);
 }
 
+/// An integral float id is the integer: `"image_id": 1.0` names the image `"id": 1` (and the other way round).
+#[test]
+fn coco_integral_float_ids_match_integer_ids() {
+    let t = TempDir::new("coco-float-id");
+    let r = t.path();
+    write_png(&r.join("train/a.png"), 10, 10, [0; 3]);
+    write_png(&r.join("train/b.png"), 10, 10, [0; 3]);
+    let j = serde_json::json!({
+        "images": [
+            {"id": 1, "file_name": "a.png", "width": 10, "height": 10},
+            {"id": 2.0, "file_name": "b.png", "width": 10, "height": 10}
+        ],
+        "annotations": [
+            {"image_id": 1.0, "category_id": 0, "bbox": [0, 0, 5, 5]},
+            {"image_id": 2, "category_id": 0, "bbox": [5, 5, 5, 5]}
+        ],
+        "categories": [{"id": 0, "name": "thing"}]
+    });
+    write(&r.join("train/_annotations.coco.json"), serde_json::to_vec(&j).unwrap());
+    let ds = open(r).unwrap();
+    assert!(ds.report.issues.is_empty(), "{:#?}", ds.report);
+    assert_eq!(ds.split_sizes(), [2, 0, 0]);
+    assert_eq!((ds.train.boxes(0).len(), ds.train.boxes(1).len()), (1, 1));
+}
+
+/// Two `images` entries with one id: the first keeps its boxes, the second is reported (not silently made a
+/// background image) and left out.
+#[test]
+fn coco_duplicate_image_ids_are_reported() {
+    let t = TempDir::new("coco-dup-id");
+    let r = t.path();
+    write_png(&r.join("train/a.png"), 10, 10, [0; 3]);
+    write_png(&r.join("train/b.png"), 10, 10, [0; 3]);
+    let j = serde_json::json!({
+        "images": [
+            {"id": 7, "file_name": "a.png", "width": 10, "height": 10},
+            {"id": 7, "file_name": "b.png", "width": 10, "height": 10}
+        ],
+        "annotations": [{"image_id": 7, "category_id": 0, "bbox": [0, 0, 5, 5]}],
+        "categories": [{"id": 0, "name": "thing"}]
+    });
+    write(&r.join("train/_annotations.coco.json"), serde_json::to_vec(&j).unwrap());
+    let ds = open(r).unwrap();
+    assert_eq!(ds.split_sizes(), [1, 0, 0], "{:#?}", ds.report);
+    assert!(ds.train.entries()[0].image.ends_with("a.png"));
+    assert_eq!(ds.train.boxes(0).len(), 1);
+    let issue =
+        ds.report.issues.iter().find(|i| i.message.contains("b.png")).expect("the duplicate is reported");
+    assert_eq!(issue.kind, IssueKind::Other);
+    assert!(issue.message.contains("a.png") && issue.message.contains('7'), "{}", issue.message);
+}
+
 #[test]
 fn coco_roboflow_layout_and_single_json() {
     let t = TempDir::new("coco-rf");
