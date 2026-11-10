@@ -289,7 +289,7 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   worker's history is mirrored poll by poll into the same `metrics.jsonl`, `log.jsonl` and `samples/`, so everything
   downstream of a run is unchanged. A guard releases the instance on every way out, including a panic; a run that
   trains survives this server (`runs/<id>/cloud.json` and an OS lock on `cloud.lock` let the next process follow it
-  again). Tests drive the whole lifecycle against an in-process worker (`tests/cloud.rs`).
+  again). Tests drive the whole lifecycle against an in-process worker (`tests/cloud/`).
 - **Agent labeling** (`folo_server::label`, docs/LABELING.md): labeling jobs under `<data dir>/label/<id>/`
   (unlabeled images, classes, instructions, boxes so far), labeled by a coding-agent CLI on the server's machine
   and exported as a YOLO dataset that the store registers. `Labeler` is the service behind `/api/label` (the

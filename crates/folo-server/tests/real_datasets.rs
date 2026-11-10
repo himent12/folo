@@ -147,7 +147,7 @@ async fn synthetic_datasets_images_and_thumbnails() {
                 .await;
         assert!(e.message.contains(what), "{what}: {}", e.message);
     }
-    // Runs are checked against the engine's limits before anything is queued (tests/real_runs.rs trains).
+    // Runs are checked against the engine's limits before anything is queued (tests/real_runs/ trains).
     let cfg = json!({ "dataset_id": ds.id, "imgsz": 48 });
     err(&app, post_json("/api/runs", cfg), StatusCode::BAD_REQUEST, "invalid_config").await;
 }
