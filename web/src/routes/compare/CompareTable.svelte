@@ -4,7 +4,6 @@
    * against the baseline run), the identical ones folded. Phones show the baseline and one other run at a time.
    */
   import { MediaQuery } from 'svelte/reactivity';
-  import { untrack } from 'svelte';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import ArrowLeftRight from '@lucide/svelte/icons/arrow-left-right';
@@ -30,6 +29,10 @@
     metrics,
     sameData,
     startOf,
+    showSame = $bindable(),
+    allRuns = $bindable(),
+    otherAt = $bindable(),
+    baselineId = $bindable(),
   }: {
     chosen: Run[];
     ids: string[];
@@ -39,6 +42,14 @@
     /** Whether every run trains on one dataset: scores compare only on the same data. */
     sameData: boolean;
     startOf: (r: Run) => string | null;
+    /** The identical settings unfolded. */
+    showSame: boolean;
+    /** Phones: the whole table instead of two runs at a time. */
+    allRuns: boolean;
+    /** Phones: which of the other runs sits beside the baseline. */
+    otherAt: number;
+    /** The baseline run's id; null for the first run. */
+    baselineId: string | null;
   } = $props();
 
   const dsName = (id: string) => datasets.data?.find((d) => d.id === id)?.name ?? id;
@@ -89,7 +100,6 @@
   // What differs is the comparison; identical settings fold into one row that can be opened.
   const diffRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => differs(f)) : rows);
   const sameRows = $derived(chosen.length > 1 ? rows.filter(([, f]) => !differs(f)) : []);
-  let showSame = $state(false);
   let tableEl = $state<HTMLElement>();
   let tableMore = $state(false);
   /** Run columns (1-based) fully in view while the table scrolls sideways; null when every run fits. */
@@ -138,21 +148,6 @@
    *  never packed at the left over an empty right half, nor 500 px apart beside a 152 px setting column. */
   const laptopUp = new MediaQuery(media.laptopUp, true);
 
-  // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›; values that differ
-  // from the baseline's are marked. "All runs" opens the whole table (it scrolls). The baseline is its own choice (the
-  // first run until Swap in the table's header), never the legend's emphasis: keeping a line in front to
-  // read it must not change what the table measures against.
-  let allRuns = $state(false);
-  let otherAt = $state(0);
-  let baselineId = $state<string | null>(null);
-  // A baseline removed from the comparison is forgotten, not latent: the table falls back to the first run, and adding
-  // that run again later must not quietly make it the baseline once more.
-  $effect(() => {
-    const cur = ids;
-    untrack(() => {
-      if (baselineId !== null && !cur.includes(baselineId)) baselineId = null;
-    });
-  });
   const pairMode = $derived(narrow && chosen.length > 2 && !allRuns);
   const shared = $derived(!pairMode && laptopUp.current && chosen.length <= 3);
   const base = $derived(chosen.find((r) => r.id === baselineId) ?? chosen[0]);

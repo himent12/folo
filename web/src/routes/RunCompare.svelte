@@ -236,7 +236,23 @@
   const startOf = (r: Run) => startFrom(r.config.weights, models.data);
   const setX = (v: Axis) => (xChoice = v);
 
+  let showSame = $state(false);
   let managing = $state(false);
+  // Phones compare two runs at a time: a baseline and one other, fully in view and paged with ‹ ›; values that differ
+  // from the baseline's are marked. "All runs" opens the whole table (it scrolls). The baseline is its own choice (the
+  // first run until Swap in the table's header), never the legend's emphasis: keeping a line in front to
+  // read it must not change what the table measures against.
+  let allRuns = $state(false);
+  let otherAt = $state(0);
+  let baselineId = $state<string | null>(null);
+  // A baseline removed from the comparison is forgotten, not latent: the table falls back to the first run, and adding
+  // that run again later must not quietly make it the baseline once more.
+  $effect(() => {
+    const cur = ids;
+    untrack(() => {
+      if (baselineId !== null && !cur.includes(baselineId)) baselineId = null;
+    });
+  });
 
   const candidates = $derived((runs.data ?? []).filter((r) => !ids.includes(r.id) && r.status !== 'queued'));
 </script>
@@ -329,7 +345,7 @@
     </section>
 
     {#if chosen.length}
-      <CompareTable {chosen} {ids} {narrow} {datasets} {metrics} {sameData} {startOf} />
+      <CompareTable {chosen} {ids} {narrow} {datasets} {metrics} {sameData} {startOf} bind:showSame bind:allRuns bind:otherAt bind:baselineId />
     {/if}
   {/if}
 </Page>
