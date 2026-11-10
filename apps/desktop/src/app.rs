@@ -3356,6 +3356,22 @@ impl Render for FoloApp {
                     ),
             )
             .children(overlays)
+            // The top edge resizes the window, as the other three do. Windows only resizes where no
+            // caption area is hit, and the title bar is one up to the top: this strip, on top of
+            // it and hiding it from the hit test, is not. Maximized or full screen there is no edge,
+            // and the top pixels are the title bar's.
+            .when(!window.is_maximized() && !window.is_fullscreen(), |d| {
+                d.child(
+                    div()
+                        .id("resize-top")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(crate::theme::layout::DESKTOP_RESIZE_EDGE))
+                        .occlude(),
+                )
+            })
     }
 }
 
