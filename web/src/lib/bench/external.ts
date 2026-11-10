@@ -36,6 +36,8 @@ export interface PredictionContext {
   catalog: readonly string[];
   /** Display names of conditions, for the messages. */
   names?: Record<string, string>;
+  /** Whether the entry's scores count (the contestant gives confidences), as `contestant.scored`: default true. */
+  scored?: boolean;
 }
 
 /** A record's (image, condition, severity): what may be answered once. */
@@ -45,6 +47,24 @@ const num = (n: number) => n.toLocaleString('en-US');
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** A value as the server holds it: a number as a 32-bit float, zero's sign kept; anything else as its JSON. */
+const f32 = (v: unknown) => {
+  if (typeof v !== 'number') return `${JSON.stringify(v)}`;
+  const f = Math.fround(v);
+  return Object.is(f, -0) ? '-0' : String(f);
+};
+
+/**
+ * A record's boxes as the server compares a repeated record (crates/folo-server/src/bench/external.rs, `content`): in
+ * order, each box's class, score and corners as 32-bit floats, a missing score as 1 (its default), and no score at all
+ * when the entry's scores don't count. The order of a box's fields, and any other field, make no difference.
+ */
+export function boxesKey(boxes: unknown, scored = true): string {
+  if (!Array.isArray(boxes)) return `${JSON.stringify(boxes)}`;
+  const one = (b: unknown) => (isObj(b) ? [b.class, scored ? (b.score === undefined ? 1 : b.score) : 0, b.x1, b.y1, b.x2, b.y2].map(f32).join(',') : JSON.stringify(b));
+  return boxes.map(one).join(';');
+}
 
 /** The records of a predictions file: `{ "predictions": [...] }` or a bare array. */
 export function parsePredictions(text: string): { records: unknown[] } | { error: string } {
@@ -100,9 +120,10 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
     }
     const key = predictionKey(r.image, cond as string | null, sev as number | null);
     // A record of these records repeated with the same boxes is taken once, as the server takes it (a repeat with other
-    // boxes, or of one received in an earlier part, is refused).
-    if (here.has(key) && here.get(key) === JSON.stringify(r.boxes)) continue;
-    here.set(key, JSON.stringify(r.boxes));
+    // boxes, or of one received in an earlier part, is refused). "The same" as the server reads them (`boxesKey`).
+    const content = boxesKey(r.boxes, ctx.scored ?? true);
+    if (here.get(key) === content) continue;
+    here.set(key, content);
     if (seen.has(key)) return at(i, `image "${r.image}"${cond ? ` under ${name(cond)} ${sev}` : ''} is answered twice.`);
     seen.add(key);
     if (!Array.isArray(r.boxes)) return at(i, '"boxes" must be an array (empty when nothing was found).');
