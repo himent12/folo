@@ -48,9 +48,10 @@
   /** Where the divider is, 0–100 from the left: unchanged on its left, the condition on its right. */
   let split = $state(50);
 
-  // The first images, once per benchmark.
+  // The first images, once per benchmark: by its id, as the page hands down a new benchmark on every `bench` event.
+  const benchId = $derived(bench.id);
   $effect(() => {
-    const id = bench.id;
+    const id = benchId;
     if (hub.mode === 'connecting') return;
     void hub.epoch;
     let gone = false;
@@ -75,7 +76,7 @@
     if (!im) return;
     let gone = false;
     plainUrl = null;
-    void hub.api.benchImageUrl(bench.id, im.id).then((u) => !gone && (plainUrl = u), (e) => !gone && (error = e));
+    void hub.api.benchImageUrl(benchId, im.id).then((u) => !gone && (plainUrl = u), (e) => !gone && (error = e));
     return () => (gone = true);
   });
   $effect(() => {
@@ -85,10 +86,10 @@
     if (!im) return;
     let gone = false;
     changedUrl = null;
-    void hub.api.benchImageUrl(bench.id, im.id, { condition: c, severity: s }).then((u) => !gone && (changedUrl = u), (e) => !gone && (error = e));
+    void hub.api.benchImageUrl(benchId, im.id, { condition: c, severity: s }).then((u) => !gone && (changedUrl = u), (e) => !gone && (error = e));
     // The truth under it: only a geometric condition moves it; the others keep the image's own.
     if (c === 'distance') {
-      void hub.api.benchImages(bench.id, { offset: index, limit: 1, condition: c, severity: s }).then((p) => !gone && (changedBoxes = p.images[0]?.boxes ?? im.boxes), () => {});
+      void hub.api.benchImages(benchId, { offset: index, limit: 1, condition: c, severity: s }).then((p) => !gone && (changedBoxes = p.images[0]?.boxes ?? im.boxes), () => {});
     } else changedBoxes = im.boxes;
     return () => (gone = true);
   });

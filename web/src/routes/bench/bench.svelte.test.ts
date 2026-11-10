@@ -300,6 +300,25 @@ describe('the benchmark page', () => {
     expect(weight().value).toBe('1');
   });
 
+  it('keeps the preview on its image when the benchmark changes under it (a `bench` event)', async () => {
+    // happy-dom has no canvas to draw the mock's images: any URL does.
+    const url = vi.spyOn(hub.api, 'benchImageUrl').mockImplementation(async (_b, im, o) => `blob:${im}/${o?.condition ?? ''}`);
+    await page('/benchmarks/bn_9f03?tab=conditions');
+    [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.getAttribute('aria-label') === 'Next image')!.click();
+    await settle();
+    expect(document.querySelector('.stage .side.changed')).not.toBeNull();
+    const list = vi.spyOn(hub.api, 'benchImages');
+    url.mockClear();
+    await hub.api.updateBench('bn_9f03', { name: 'Renamed elsewhere' });
+    flushSync();
+    // Never back to a skeleton while it loads again: nothing loads again.
+    expect(document.querySelector('.stage .side.changed')).not.toBeNull();
+    await settle();
+    expect(list).not.toHaveBeenCalled();
+    expect(url).not.toHaveBeenCalled();
+    expect(document.querySelector('.pv .file')?.textContent).toBe((await hub.api.benchImages('bn_9f03', { offset: 1, limit: 1 })).images[0]!.file);
+  });
+
   it('picks finished entries for Compare, at most four, and makes Compare the one primary from two', async () => {
     await page('/benchmarks/bn_3c90');
     const boxes = [...document.querySelectorAll<HTMLInputElement>('table.board tbody input[type="checkbox"]')];
