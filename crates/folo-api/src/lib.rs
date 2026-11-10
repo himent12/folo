@@ -2,7 +2,8 @@
 //!
 //! This crate holds data types only (no IO, no async), so it can be shared by `folo-server`, the CLI and FOLO
 //! Desktop (`apps/desktop`, a separate cargo workspace that depends on this crate by path). Field names and enum
-//! spellings are the wire format; keep them in sync with `docs/API.md` and `web/src/lib/api/types.ts`.
+//! spellings are the wire format; keep them in sync with `docs/API.md` and `web/src/lib/api/types/` (re-exported by
+//! `types.ts`).
 //!
 //! Conventions: times are RFC 3339 strings, durations are seconds (`*_s`) or milliseconds (`*_ms`), boxes are pixel
 //! `xyxy` in the original image, ids are opaque strings.

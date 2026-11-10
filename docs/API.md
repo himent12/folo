@@ -7,7 +7,7 @@ Boxes in responses are **pixel `xyxy`** in the original image unless a field say
 
 This file is the contract between `folo-server` and its clients. Change it in the same PR as the code that changes the
 behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the CLI and FOLO Desktop) and
-`web/src/lib/api/types.ts` in sync.
+`web/src/lib/api/types/` (a file per section, all re-exported by `types.ts`) in sync.
 
 ## Conventions
 - Creating endpoints answer `201 Created` with the new object; deletes answer `204 No Content`; everything else `200`.
