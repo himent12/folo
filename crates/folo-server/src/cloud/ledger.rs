@@ -21,6 +21,9 @@ pub const KEEP_ENDED: Duration = Duration::from_secs(7 * 24 * 3600);
 pub(crate) struct Ledger {
     dir: PathBuf,
     lock: PathBuf,
+    /// The providers whose instances terminate themselves after their deadline
+    /// (`CloudProvider::self_terminates`), by id: what bounds an instance's life when nobody saw its end.
+    self_terminating: Vec<String>,
 }
 
 /// `404 instance_not_found`.
@@ -30,18 +33,36 @@ pub(crate) fn not_found(id: &str) -> Error {
 }
 
 /// What `instance` has cost so far (or in all, once it ended): its price per hour times the time from the launch
-/// request to the confirmed end (or `now`); `None` without a price.
-pub(crate) fn cost(instance: &CloudInstance, now: f64) -> Option<f64> {
+/// request to the confirmed end, or to `now` and at most to `last` (the latest it can have lived, when that is
+/// known); `None` without a price.
+pub(crate) fn cost(instance: &CloudInstance, now: f64, last: Option<f64>) -> Option<f64> {
     let price = instance.offer.price_per_hour?;
     let start = parse_rfc3339(&instance.created)?;
-    let end = instance.ended.as_deref().and_then(parse_rfc3339).unwrap_or(now);
+    let end = instance
+        .ended
+        .as_deref()
+        .and_then(parse_rfc3339)
+        .unwrap_or_else(|| last.map_or(now, |last| now.min(last)));
     Some(((end - start).max(0.0) / 3600.0 * price * 1e4).round() / 1e4)
 }
 
 impl Ledger {
-    /// The ledger in `cloud_dir`, guarded by the cloud lock `lock`.
-    pub fn new(cloud_dir: &Path, lock: PathBuf) -> Ledger {
-        Ledger { dir: cloud_dir.join("instances"), lock }
+    /// The ledger in `cloud_dir`, guarded by the cloud lock `lock`; `self_terminating` are the ids of the providers
+    /// whose instances terminate themselves after their deadline.
+    pub fn new(cloud_dir: &Path, lock: PathBuf, self_terminating: Vec<String>) -> Ledger {
+        Ledger { dir: cloud_dir.join("instances"), lock, self_terminating }
+    }
+
+    /// The latest `i` can have lived: an instance of a provider that arms it to terminate itself is gone
+    /// [`folo_cloud::bootstrap::GRACE_S`] after its deadline, whoever watched. So an instance that ended while
+    /// nothing followed it (this machine was off, the server crashed) is not counted as billed until someone
+    /// looked again.
+    fn last(&self, i: &CloudInstance) -> Option<f64> {
+        if !self.self_terminating.contains(&i.provider) {
+            return None;
+        }
+        let deadline = i.deadline.as_deref().and_then(parse_rfc3339)?;
+        Some(deadline + folo_cloud::bootstrap::GRACE_S as f64)
     }
 
     fn path(&self, id: &str) -> PathBuf {
@@ -106,21 +127,23 @@ impl Ledger {
     /// Record `id`, with its cost so far.
     pub fn get(&self, id: &str) -> Result<CloudInstance> {
         let mut i = self.read(id)?;
-        i.cost_usd = cost(&i, unix_now());
+        i.cost_usd = cost(&i, unix_now(), self.last(&i));
         Ok(i)
     }
 
     /// Changes record `id` under the cloud lock (re-read first, so another process's change is not lost) and
-    /// writes it; its cost is brought up to date, and an instance that `terminated` or was `lost` gets its end.
+    /// writes it; its cost is brought up to date, and an instance that `terminated` or was `lost` gets its end
+    /// (now, or the latest it can have lived when that was earlier).
     pub fn update(&self, id: &str, change: impl FnOnce(&mut CloudInstance)) -> Result<CloudInstance> {
         let _lock = self.lock()?;
         let mut i = self.read(id)?;
         change(&mut i);
         let now = unix_now();
+        let last = self.last(&i);
         if !i.status.is_alive() && i.ended.is_none() {
-            i.ended = Some(rfc3339(now));
+            i.ended = Some(rfc3339(last.map_or(now, |last| now.min(last))));
         }
-        i.cost_usd = cost(&i, now);
+        i.cost_usd = cost(&i, now, last);
         self.write(&i)?;
         Ok(i)
     }
@@ -159,7 +182,7 @@ impl Ledger {
                     self.remove(id);
                 }
                 Ok(mut i) => {
-                    i.cost_usd = cost(&i, now);
+                    i.cost_usd = cost(&i, now, self.last(&i));
                     out.push(i);
                 }
                 Err(e) => tracing::warn!("skipping {}: {}", path.display(), e.body.message),
@@ -194,7 +217,7 @@ mod tests {
     #[test]
     fn records_follow_their_instance_and_old_ones_go() {
         let dir = TestDir::new("cloud-ledger");
-        let ledger = Ledger::new(&dir.join("cloud"), dir.join("cloud").join(".lock"));
+        let ledger = Ledger::new(&dir.join("cloud"), dir.join("cloud").join(".lock"), Vec::new());
         let a = ledger.create("cc_1", "p", "run_1", &offer(Some(3.6)), None).unwrap();
         assert!(a.name.starts_with("folo-run_1-") && a.name.len() == "folo-run_1-".len() + 4, "{}", a.name);
         assert_eq!((a.status, a.provider_ref.as_deref()), (CloudInstanceStatus::Launching, None));
@@ -215,12 +238,54 @@ mod tests {
         let mut hour = ledger.get(&a.id).unwrap();
         hour.created = rfc3339(1000.0);
         hour.ended = Some(rfc3339(4600.0));
-        assert_eq!(cost(&hour, 0.0), Some(3.6));
+        assert_eq!(cost(&hour, 0.0, None), Some(3.6));
 
         ledger
             .update(&b.id, |i| i.ended = Some(rfc3339(unix_now() - KEEP_ENDED.as_secs_f64() - 60.0)))
             .unwrap();
         assert_eq!(ledger.list().len(), 1);
         assert_eq!(ledger.get(&b.id).unwrap_err().body.code, "instance_not_found", "pruned");
+    }
+
+    #[test]
+    fn an_instance_that_terminates_itself_is_not_billed_past_its_deadline() {
+        let dir = TestDir::new("cloud-ledger-last");
+        let cloud = dir.join("cloud");
+        let grace = folo_cloud::bootstrap::GRACE_S as f64;
+        let now = unix_now();
+        // Launched ten hours ago with a deadline nine hours ago, and nobody has looked since.
+        let (created, deadline) = (now - 36_000.0, now - 32_400.0);
+        let forgotten = |ledger: &Ledger, provider: &str| {
+            let i =
+                ledger.create("cc_1", provider, "run_1", &offer(Some(3.6)), Some(rfc3339(deadline))).unwrap();
+            ledger
+                .update(&i.id, |i| {
+                    i.created = rfc3339(created);
+                    i.status = CloudInstanceStatus::Running;
+                })
+                .unwrap()
+        };
+        let usd = |seconds: f64| Some((seconds / 3600.0 * 3.6 * 1e4).round() / 1e4);
+
+        // A provider that arms its instances: an hour to the deadline and the grace after it, whatever `now` is.
+        let ledger = Ledger::new(&cloud, cloud.join(".lock"), vec!["arming".into()]);
+        let alive = forgotten(&ledger, "arming");
+        assert_eq!(alive.cost_usd, usd(3_600.0 + grace));
+        assert_eq!(ledger.list()[0].cost_usd, usd(3_600.0 + grace));
+        // Found gone: it ended when it terminated itself at the latest, not when someone looked.
+        let ended = ledger.update(&alive.id, |i| i.status = CloudInstanceStatus::Terminated).unwrap();
+        assert_eq!(ended.ended.as_deref().and_then(parse_rfc3339), Some((deadline + grace).floor()));
+        assert_eq!(ended.cost_usd, usd((deadline + grace).floor() - created.floor()));
+        // An instance that ends before its deadline ends now.
+        let early =
+            ledger.create("cc_1", "arming", "run_2", &offer(None), Some(rfc3339(now + 3_600.0))).unwrap();
+        let early = ledger.update(&early.id, |i| i.status = CloudInstanceStatus::Terminated).unwrap();
+        assert!((early.ended.as_deref().and_then(parse_rfc3339).unwrap() - now).abs() < 5.0);
+
+        // A provider that does not: only its confirmed end stops the count.
+        let other = TestDir::new("cloud-ledger-unarmed");
+        let ledger = Ledger::new(&other.join("cloud"), other.join("cloud").join(".lock"), Vec::new());
+        let alive = forgotten(&ledger, "arming");
+        assert!(alive.cost_usd.unwrap() >= 35.99, "{:?}", alive.cost_usd);
     }
 }

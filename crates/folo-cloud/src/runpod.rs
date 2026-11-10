@@ -712,7 +712,7 @@ mod tests {
         let account = probing.check(&Values::from(map.clone())).unwrap();
         assert_eq!(account.label.as_deref(), Some("you@example.com"));
         let note = account.note.expect("a note");
-        assert!(note.starts_with("Instances cannot install FOLO: ") && note.ends_with(".sha256."), "{note}");
+        assert!(note.starts_with("Instances cannot install FOLO: ") && note.ends_with("_URL."), "{note}");
         assert!(note.contains("/mirror/folo-x86_64-unknown-linux-gnu.tar.gz.sha256 answers 404"), "{note}");
         let r = f.requests();
         assert_eq!(r.len(), 4);

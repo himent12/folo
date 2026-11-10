@@ -13,6 +13,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -48,9 +49,11 @@ const GONE_POLLS: u32 = 10;
 /// While an instance's worker does not answer yet, its provider is asked about it every this many poll intervals.
 const STATE_POLLS: u32 = 5;
 /// A copy of `weights/last.folo` that failed while the run trains is tried again after this long at the earliest
-/// (or after `checkpoint_every`, when that is shorter): mirroring waits for a copy, so a checkpoint that cannot
-/// be copied must not be tried at every epoch.
+/// (or after `checkpoint_every`, when that is shorter), not at every epoch.
 const COPY_RETRY_EVERY: Duration = Duration::from_secs(60);
+/// A step of one poll of the worker (its run, its history, its samples, its log) that takes this long is written
+/// to the server's log: what held the live view up.
+const SLOW_STEP: Duration = Duration::from_secs(5);
 
 /// A cloud run to execute.
 pub(crate) struct Job {
@@ -257,6 +260,20 @@ impl Drop for Release {
     }
 }
 
+/// A copy of the worker's `weights/last.folo` under way while the run trains, on a thread of its own: a checkpoint
+/// of hundreds of megabytes takes minutes on a slow link, and the live view (the next poll of the worker) and a
+/// stop must not wait for it. Dropped, it is told to end.
+struct Copying {
+    thread: Option<JoinHandle<std::result::Result<(), TransferError>>>,
+    cancel: Arc<AtomicBool>,
+}
+
+impl Drop for Copying {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
 /// One execution of a cloud run.
 struct Exec {
     core: Arc<Core>,
@@ -269,6 +286,8 @@ struct Exec {
     queued_at: Option<u32>,
     /// When a copy of `weights/last.folo` last failed while the run trained ([`COPY_RETRY_EVERY`]).
     copy_failed: Option<Instant>,
+    /// The copy of `weights/last.folo` under way, if one is.
+    copying: Option<Copying>,
     _lock: RunLock,
 }
 
@@ -284,6 +303,7 @@ impl Exec {
             dir,
             queued_at: None,
             copy_failed: None,
+            copying: None,
             _lock: lock,
         }
     }
@@ -295,6 +315,8 @@ impl Exec {
             self.private = Private::default();
             self.save();
         }
+        // What a process that died mid-copy left next to the weights (one process follows a run at a time).
+        transfer::remove_partial(&self.dir.join("weights"));
         let mut release =
             Release::new(self.core.clone(), self.entry.clone(), self.private.instance_id.clone());
         let result = match mode {
@@ -866,13 +888,27 @@ impl Exec {
                 stop_sent = Some(Instant::now());
             }
             if stop_sent.is_some_and(|s| s.elapsed() >= t.lost_grace) {
+                // A worker that has not answered since has nothing to collect from: the run is lost with its
+                // instance (a time limit that ended while nothing followed the run, and the instance with it).
+                if unreachable.is_some_and(|u| u.elapsed() >= t.lost_grace) {
+                    return Err(failed(
+                        "cloud_instance_lost",
+                        "the worker stopped answering before the run could be stopped and collected; the weights \
+                         copied so far stay (resume the run to continue from them)",
+                    ));
+                }
                 self.entry
                     .log(LogLevel::Warn, "the worker's run did not stop in time; collecting what it has");
                 break None;
             }
             match self.mirror(client, &run_id) {
                 Ok(Some(end)) => break Some(end),
-                Ok(None) => (wait, unreachable, gone) = (t.poll, None, None),
+                Ok(None) => {
+                    if unreachable.is_some() {
+                        self.entry.log(LogLevel::Info, "the worker answers again");
+                    }
+                    (wait, unreachable, gone) = (t.poll, None, None);
+                }
                 Err(e) if e.code() == "run_not_found" => {
                     return Err(failed(
                         "cloud_instance_lost",
@@ -880,6 +916,13 @@ impl Exec {
                     ));
                 }
                 Err(e) => {
+                    // Said once per silence: the run's log shows why its numbers stand still.
+                    if unreachable.is_none() {
+                        self.entry.log(
+                            LogLevel::Warn,
+                            format!("the worker did not answer ({e}); the run goes on there, asking again"),
+                        );
+                    }
                     let since = *unreachable.get_or_insert_with(Instant::now);
                     wait = (wait * 2).min(t.poll_max);
                     let lost = match self.instance_state() {
@@ -971,12 +1014,22 @@ impl Exec {
     /// subscribers get every epoch and the newest step. The worker's run once it ended.
     fn mirror(&mut self, client: &Client, run_id: &str) -> folo_client::Result<Option<Run>> {
         let id = encode(run_id);
+        let mut started = Instant::now();
+        let local = self.entry.id().to_string();
+        let mut step = |what: &str| {
+            let took = std::mem::replace(&mut started, Instant::now()).elapsed();
+            if took >= SLOW_STEP {
+                tracing::info!(run = %local, "mirroring the worker: {what} took {:.1} s", took.as_secs_f64());
+            }
+        };
         let run: Run = client.get(&format!("/runs/{id}"))?;
+        step("its run");
         self.follow_status(&run);
         // Always with the cursors (0 before the first step): only then are the steps gap-free.
         let (after_step, after_epoch) = (self.private.after_step, self.private.after_epoch);
         let path = format!("/runs/{id}/metrics?after_step={after_step}&after_epoch={after_epoch}");
         let history: RunMetrics = client.get(&path)?;
+        step("its new steps and epochs");
         let newest = history.steps.last().map(|s| s.step);
         let mut epoch_done = false;
         for ev in worker::in_order(history) {
@@ -1002,6 +1055,7 @@ impl Exec {
                 _ => {}
             }
         }
+        step("the new epochs' samples");
         loop {
             let logs: RunLogs =
                 client.get(&format!("/runs/{id}/logs?after={}&limit={LOG_PAGE}", self.private.after_log))?;
@@ -1015,20 +1069,85 @@ impl Exec {
             }
         }
         self.save();
+        step("its new log lines");
+        self.reap_copy();
         let every = self.core.tuning.checkpoint_every;
         let due = self.private.synced.is_none_or(|t| unix_now() - t >= every.as_secs_f64())
             && self.copy_failed.is_none_or(|t| t.elapsed() >= COPY_RETRY_EVERY.min(every));
-        if epoch_done && run.status.is_active() && due {
-            match self.copy(client, run_id, true, false) {
-                Ok(_) => self.copy_failed = None,
-                Err(TransferError::Stopped) => {}
-                Err(e) => {
-                    self.copy_failed = Some(Instant::now());
-                    self.entry.log(LogLevel::Warn, format!("copying weights/last.folo (retried later): {e}"))
-                }
-            }
+        if epoch_done && run.status.is_active() && due && self.copying.is_none() {
+            self.start_copy(client, run_id);
         }
         Ok((!run.status.is_active()).then_some(run))
+    }
+
+    /// Starts a copy of the worker's `weights/last.folo` into the run folder on a thread of its own
+    /// ([`Copying`]); [`Exec::reap_copy`] takes its result. It ends early when the process shuts down or a stop is
+    /// asked for (the collection at the run's end copies the final file).
+    fn start_copy(&mut self, client: &Client, run_id: &str) {
+        let weights = self.dir.join("weights");
+        let path = format!("/models/{}/weights", encode(&run_model_id(run_id, true)));
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (client, core, entry, cancelled) =
+            (client.clone(), self.core.clone(), self.entry.clone(), cancel.clone());
+        let copy = move || {
+            std::fs::create_dir_all(&weights).map_err(TransferError::Io)?;
+            let stop = || cancelled.load(Ordering::Relaxed) || core.halt.is_on() || entry.stop_requested();
+            let mut ctl = Control { progress: &mut |_| {}, stop: &stop };
+            transfer::download(&client, &path, &weights.join("last.folo"), &mut ctl).map(drop)
+        };
+        let name = format!("folo-cloud-copy-{}", self.entry.id());
+        match std::thread::Builder::new().name(name).spawn(copy) {
+            Ok(thread) => self.copying = Some(Copying { thread: Some(thread), cancel }),
+            Err(e) => {
+                self.copy_failed = Some(Instant::now());
+                tracing::warn!(run = %self.entry.id(), "could not start the checkpoint copy's thread: {e}");
+            }
+        }
+    }
+
+    /// Takes the result of the copy under way once it has ended: `Run.cloud.synced` and a log line when
+    /// `weights/last.folo` is here, a warning (and a later retry) when it failed. A worker without the file yet,
+    /// and a copy that was told to end, say nothing.
+    fn reap_copy(&mut self) {
+        if !self.copying.as_ref().is_some_and(|c| c.thread.as_ref().is_none_or(|t| t.is_finished())) {
+            return;
+        }
+        let result = self.copying.take().and_then(|mut c| c.thread.take()).map(|t| t.join());
+        match result {
+            Some(Ok(Ok(()))) => {
+                self.copy_failed = None;
+                self.synced_now();
+            }
+            Some(Ok(Err(TransferError::Stopped))) | None => {}
+            Some(Ok(Err(TransferError::Failed(e)))) if e.code() == "model_not_found" => {}
+            Some(Ok(Err(e))) => {
+                self.copy_failed = Some(Instant::now());
+                self.entry.log(LogLevel::Warn, format!("copying weights/last.folo (retried later): {e}"));
+            }
+            Some(Err(_)) => {
+                self.copy_failed = Some(Instant::now());
+                tracing::error!(run = %self.entry.id(), "the checkpoint copy's thread panicked");
+            }
+        }
+    }
+
+    /// Ends the copy under way and waits for its thread, so nothing writes `weights/last.folo` after this.
+    fn stop_copy(&mut self) {
+        if let Some(mut copying) = self.copying.take() {
+            copying.cancel.store(true, Ordering::Relaxed);
+            if let Some(thread) = copying.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    /// `weights/last.folo` in the run folder is the worker's of now.
+    fn synced_now(&mut self) {
+        let now = unix_now();
+        self.private.synced = Some(now);
+        self.save();
+        self.entry.update_cloud(|c| c.synced = Some(rfc3339(now)));
+        self.entry.log(LogLevel::Info, "copied weights/last.folo");
     }
 
     /// The worker run's status, device and length, on the local run: `queued` while it waits in the worker's queue
@@ -1076,16 +1195,9 @@ impl Exec {
         Ok(())
     }
 
-    /// Copies the worker's `last.folo` (or `best.folo`) into the run folder; false when the worker has none. With
-    /// `show` (the collection at the end), `Run.cloud.progress` follows it; without (a copy while the run trains),
-    /// a stop asked for meanwhile ends the copy, so the worker hears of the stop without waiting for it.
-    fn copy(
-        &mut self,
-        client: &Client,
-        run_id: &str,
-        last: bool,
-        show: bool,
-    ) -> std::result::Result<bool, TransferError> {
+    /// Copies the worker's `last.folo` (or `best.folo`) into the run folder at the run's end, with
+    /// `Run.cloud.progress` following it; false when the worker has none.
+    fn copy(&mut self, client: &Client, run_id: &str, last: bool) -> std::result::Result<bool, TransferError> {
         let file = if last { "last.folo" } else { "best.folo" };
         let weights = self.dir.join("weights");
         std::fs::create_dir_all(&weights).map_err(TransferError::Io)?;
@@ -1093,13 +1205,12 @@ impl Exec {
         let entry = &self.entry;
         let mut shown = None::<Instant>;
         let mut progress = |p: TransferProgress| {
-            if show && (shown.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) || p.done_bytes >= p.total_bytes)
-            {
+            if shown.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) || p.done_bytes >= p.total_bytes {
                 entry.update_cloud(|c| c.progress = Some(p));
                 shown = Some(Instant::now());
             }
         };
-        let stop = || self.core.halt.is_on() || (!show && self.entry.stop_requested());
+        let stop = || self.core.halt.is_on();
         let mut ctl = Control { progress: &mut progress, stop: &stop };
         match transfer::download(client, &path, &weights.join(file), &mut ctl) {
             Ok(_) => {}
@@ -1107,12 +1218,10 @@ impl Exec {
             Err(e) => return Err(e),
         }
         if last {
-            let now = unix_now();
-            self.private.synced = Some(now);
-            self.save();
-            self.entry.update_cloud(|c| c.synced = Some(rfc3339(now)));
+            self.synced_now();
+        } else {
+            self.entry.log(LogLevel::Info, format!("copied weights/{file}"));
         }
-        self.entry.log(LogLevel::Info, format!("copied weights/{file}"));
         Ok(true)
     }
 
@@ -1126,9 +1235,11 @@ impl Exec {
         end: Option<Run>,
         time_up: bool,
     ) -> std::result::Result<Outcome, Halt> {
+        // The copy that may still be under way would write an older `last.folo` over the final one.
+        self.stop_copy();
         self.phase(CloudPhase::Collecting, "the run ended on the worker; copying its weights");
         for last in [true, false] {
-            match self.copy(client, run_id, last, true) {
+            match self.copy(client, run_id, last) {
                 Ok(_) => {}
                 Err(TransferError::Stopped) => return Err(Halt::LetGo),
                 Err(e) => {

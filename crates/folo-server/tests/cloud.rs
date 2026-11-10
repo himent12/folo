@@ -719,7 +719,6 @@ fn an_instance_that_gives_up_before_its_worker_answers_fails_the_boot_at_once() 
     let conn = connect(&store);
     // The instance runs and its worker does not answer, as while (and when) its setup fails...
     cloud.gates.down.store(true, Ordering::SeqCst);
-    let t0 = std::time::Instant::now();
     let run = store.create_run(cloud_run(&ds, &conn.id, 1)).unwrap();
     until("the instance runs", || logged(&store, &run.id, "the instance runs").then_some(()));
     assert_eq!(phase(&run_of(&store, &run.id)), CloudPhase::Booting);
@@ -730,8 +729,8 @@ fn an_instance_that_gives_up_before_its_worker_answers_fails_the_boot_at_once() 
     let e = done.error.clone().unwrap();
     assert!(e.contains("its setup failed") && e.contains("installs FOLO from http"), "{e}");
     assert!(e.contains("log at Test cloud"), "{e}");
-    // The run does not wait for the boot timeout (30 s here, 15 minutes by default) to say so.
-    assert!(t0.elapsed() < fast().boot_timeout / 2, "{:?}", t0.elapsed());
+    // Said as soon as the provider is believed, not at the boot timeout (whose message is "did not answer within").
+    assert!(!e.contains("did not answer within"), "{e}");
     assert_eq!(phase(&done), CloudPhase::Released);
     assert_eq!(store.cloud_instances().unwrap()[0].status, CloudInstanceStatus::Terminated);
 }
@@ -755,6 +754,32 @@ fn a_worker_that_dies_loses_the_run_but_not_its_checkpoint() {
     resume(&store, &run.id, json!({}));
     let done = finished(&store, &run.id);
     assert_eq!((done.status, done.epoch), (RunStatus::Completed, 2));
+}
+
+#[test]
+fn a_stop_that_finds_the_worker_gone_loses_the_run_instead_of_collecting() {
+    no_gpu();
+    let t = TestDir::new("cloud-stop-lost");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    cloud.hold_epochs(true);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
+    until("the first checkpoint copied", || run_of(&store, &run.id).cloud.and_then(|c| c.synced));
+    // The instance is gone (it terminated itself at its deadline while nothing followed the run), and then the
+    // run is asked to stop: there is nothing to stop or to collect from.
+    cloud.kill(0);
+    store.stop_run(&run.id).unwrap();
+    let lost = finished(&store, &run.id);
+    assert_eq!(
+        (lost.status, lost.error_code.as_deref()),
+        (RunStatus::Failed, Some("cloud_instance_lost")),
+        "{:?}",
+        lost.error
+    );
+    assert!(lost.error.unwrap().contains("resume the run"));
+    assert!(t.join("home").join("runs").join(&run.id).join("weights").join("last.folo").is_file());
 }
 
 #[test]

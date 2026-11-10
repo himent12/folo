@@ -93,6 +93,15 @@ pub fn pick_offer(offers: &[CloudOffer], need: Option<u64>) -> Option<&CloudOffe
     })
 }
 
+/// The offers in the order New run's GPU menu lists them: those that can start now, then those with none in
+/// stock, each group as the server sent it (cheapest first). A provider's catalogue is mostly out of stock at its
+/// cheap end (RunPod: a dozen of the first twenty), and a menu that opens on rows that can't be picked reads as
+/// broken.
+pub fn menu_order(offers: &[CloudOffer]) -> Vec<&CloudOffer> {
+    let none = |o: &&CloudOffer| o.availability == CloudAvailability::None;
+    offers.iter().filter(|o| !none(o)).chain(offers.iter().filter(none)).collect()
+}
+
 /// Stop after's default: the high end of the time estimate × 1.5 plus half an hour, rounded up to
 /// a whole hour, at least 1; 12 (the API's default) until an estimate exists.
 pub fn default_max_hours(est_high_s: Option<f64>) -> f32 {
@@ -639,6 +648,21 @@ mod tests {
         let own = vec![offer("own", 16, None, A::Unknown), offer("4090", 24, Some(0.69), A::High)];
         assert_eq!(pick_offer(&own, None).map(|o| o.id.as_str()), Some("own"));
         assert!(pick_offer(&[offer("x", 24, Some(1.), A::None)], None).is_none());
+    }
+
+    #[test]
+    fn the_gpu_menu_lists_what_can_start_first() {
+        use CloudAvailability as A;
+        let offers = vec![
+            offer("a2000", 6, Some(0.12), A::None),
+            offer("3080ti", 12, Some(0.18), A::Low),
+            offer("a4500", 20, Some(0.19), A::None),
+            offer("3090", 24, Some(0.22), A::Unknown),
+            offer("a40", 48, Some(0.59), A::Medium),
+        ];
+        let ids: Vec<&str> = menu_order(&offers).iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, ["3080ti", "3090", "a40", "a2000", "a4500"]);
+        assert!(menu_order(&[]).is_empty());
     }
 
     #[test]

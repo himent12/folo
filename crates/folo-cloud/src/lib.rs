@@ -71,9 +71,8 @@ impl WorkerDownload {
     pub fn problem(&self) -> Option<String> {
         let WorkerDownload::Missing { url, status } = self else { return None };
         Some(format!(
-            "instances cannot install FOLO: {url} answers {status} (a release that is not published, or a private \
-             repository). Set the connection's worker download URL, or {WORKER_BASE_URL_ENV}, to a place that \
-             serves install.sh and folo-{WORKER_TARGET}.tar.gz with its .sha256"
+            "instances cannot install FOLO: {url} answers {status} (the release is not published, or its \
+             repository is private). Give the connection a worker download URL, or set {WORKER_BASE_URL_ENV}"
         ))
     }
 }

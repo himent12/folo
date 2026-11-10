@@ -269,6 +269,9 @@ impl Write for Parts<'_, '_> {
 /// server streams one request from one open file, so a file that is replaced often (a run's `last.folo`, every
 /// epoch) can only get in the way between the first answer and the second request, not once per part. Otherwise,
 /// and when that one request fails for a reason of the moment, the rest comes in parts of [`PART_BYTES`].
+///
+/// A file that was replaced in that moment too (epochs of half a second) is then asked for whole in one request,
+/// when the whole of it fits the same bounds: one request is one version, whatever happens to the file meanwhile.
 pub fn download(
     client: &Client,
     path: &str,
@@ -282,6 +285,18 @@ pub fn download(
         let _ = std::fs::remove_file(&tmp);
     }
     fetched
+}
+
+/// Removes the temporary files of downloads into `dir` that did not finish (a process killed mid-download leaves
+/// its `.<name>.<pid>.<n>.download`). For a directory nothing else downloads into at the moment.
+pub fn remove_partial(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if name.starts_with('.') && name.ends_with(".download") {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// `.<name>.<pid>.<n>.download` next to `dest`.
@@ -303,12 +318,15 @@ fn fetch(
     tmp: &Path,
     ctl: &mut Control<'_>,
 ) -> Result<Downloaded, TransferError> {
+    // The file's length, once a first part showed that all of it fits one request: what the next version is
+    // asked for at once after this one was replaced (tried once).
+    let mut whole: Option<u64> = None;
     'version: for _ in 0..=RESTARTS {
         let mut file = std::fs::File::create(tmp).map_err(TransferError::Io)?;
         let mut etag: Option<String> = None;
         let mut done = 0u64;
         // The end of the next request when it is the whole rest (decided after the first part, tried once).
-        let mut rest: Option<u64> = None;
+        let mut rest: Option<u64> = whole.take();
         loop {
             if (ctl.stop)() {
                 return Err(TransferError::Stopped);
@@ -354,8 +372,10 @@ fn fetch(
                 file.sync_all().map_err(TransferError::Io)?;
                 return Ok(Downloaded { bytes: done, etag: version.clone() });
             }
-            if first && rest_fits(part.total - done, part.bytes.len() as u64, asked.elapsed()) {
+            let (got, took) = (part.bytes.len() as u64, asked.elapsed());
+            if first && rest_fits(part.total - done, got, took) {
                 rest = Some(part.total);
+                whole = rest_fits(part.total, got, took).then_some(part.total);
             }
         }
     }

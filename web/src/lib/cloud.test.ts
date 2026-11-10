@@ -8,6 +8,7 @@ import {
   inHandover,
   isAlive,
   limitText,
+  menuOrder,
   offerLine,
   offerParts,
   phaseIndex,
@@ -133,6 +134,13 @@ describe('offers', () => {
     expect(pickOffer([offers[3]!], null)).toBeNull();
     // Compute that is not billed is the cheapest.
     expect(pickOffer([offers[2]!, offer('own', 'RTX 3090', 24, null)], 8 * GiB)).toBe('own');
+  });
+
+  it('lists what can start before what has none in stock, each as the server ordered it', () => {
+    const catalogue = [offer('a2000', 'RTX A2000', 6, 0.12, 'none'), ...offers];
+    expect(menuOrder(catalogue).map((o) => o.id)).toEqual(['a4000', '3090', '4090', 'h100', 'a2000', 'a100']);
+    expect(menuOrder(offers.slice(0, 3))).toEqual(offers.slice(0, 3));
+    expect(menuOrder([])).toEqual([]);
   });
 });
 

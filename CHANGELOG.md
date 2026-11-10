@@ -66,8 +66,32 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
   weights in retryable parts), cursors on a run's metrics and logs, `Range` on weights downloads and `checkpoint`
   on `POST /api/runs`: what makes any FOLO server usable as a worker, and useful on their own. `folo mcp --server`
   takes `--token` and `https://`.
-- The RunPod provider is written against RunPod's REST API v2 and tested against a fixture of it; it has not been
-  run against a live account yet (`crates/folo-cloud/tests/runpod_live.rs`).
+- **RunPod checked against the real service** (2026-11-10, docs/CLOUD.md, *Checking a provider against the real
+  service*): runs trained on rented A40 pods from launch to the weights in the local run folder, and what the real
+  pods showed was fixed:
+  - A pod found no GPU: the Vulkan manifest the NVIDIA runtime mounts names the driver's GLX library, which gives
+    no device without an X server. The worker's setup now checks `folo doctor` and falls back to the driver's EGL
+    library.
+  - A worker that cannot be downloaded (a release that is not published, a private repository) is found before a
+    pod is rented: the run fails with `cloud_boot_failed` at once, and the connection says so in Settings → Cloud
+    and `folo cloud connections`. Before, the pod was rented and the run waited 15 minutes.
+  - A pod whose setup fails terminates itself; the run now says so within seconds instead of at the boot timeout.
+  - `weights/last.folo` could not be copied while epochs were shorter than its download (every attempt met a
+    newer file), and each attempt held up the live metrics and a stop by about 10 seconds. A download now takes
+    the rest of a file in one request when it fits (a file replaced in between: all of it in one), the copy runs
+    on a thread of its own, and a failed one is tried again a minute later.
+  - RunPod's proxy answered an upload with its own `404` a second after the worker had answered; such an answer
+    is now tried again instead of failing the run with `cloud_sync_failed`.
+  - A run whose pod ended while nothing followed it fails with `cloud_instance_lost` (it can be resumed), not
+    `cloud_sync_failed`, and its instance is counted to 10 minutes after its deadline, not until the next start.
+  - `Run.cloud.cost_usd` is there from the first phase (it was empty for the first minute of training), and a
+    run's log says when its worker stops answering and when it answers again.
+- New run's GPU menu lists the offers that can start first (a provider's cheapest are mostly out of stock), in
+  Studio and Desktop.
+- **FOLO Desktop**: the sidebar counts the runs that train as a chip (`Runs  2`) instead of a pulsing dot and
+  "2 live", live marks breathe instead of throwing rings, and a connection's warning wraps under its row.
+  **Studio**: Settings → Connection says `Connected` with a check, as its cloud connections do, instead of a
+  ringed dot and "Live".
 
 ### Agent labeling
 - Unlabeled images to a dataset: `folo serve` hands a set of images to **Claude Code** or **Codex** on the
