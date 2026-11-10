@@ -57,7 +57,8 @@
   setCrumbs({ label: 'Runs', path: '/runs' }, { label: 'Compare' });
 
   const MAX = 4;
-  const ids = $derived((router.route.query.get('ids') ?? '').split(',').filter(Boolean).slice(0, MAX));
+  // Each run once: a link naming one twice (`?ids=a,a`) would key two rows alike, which Svelte refuses.
+  const ids = $derived([...new Set((router.route.query.get('ids') ?? '').split(',').filter(Boolean))].slice(0, MAX));
   const runs = new Resource((s) => hub.api.runs(s));
   const datasets = new Resource((s) => hub.api.datasets(s));
   // Names for runs fine-tuned from a model ("Start from").

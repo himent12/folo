@@ -235,3 +235,16 @@ describe('Compare: the phone control row', () => {
     for (const st of target.querySelectorAll('.chips .chip .st')) expect(st.parentElement?.classList.contains('v')).toBe(true);
   });
 });
+
+describe('Compare runs from a deep link', () => {
+  it('takes a run named twice in ?ids= once', async () => {
+    // `?ids=a,a,b` (a shared or edited link) put run a in every keyed row twice: Svelte refuses duplicate keys, and
+    // the page never rendered.
+    const [a, b] = (await hub.api.runs()).filter((r) => r.status !== 'queued');
+    router.route = parse(`#/runs/compare?ids=${a!.id},${a!.id},${b!.id}`);
+    c = mount(RunCompare, { target });
+    const table = await until(() => target.querySelector('#cmp-table table'), 'the table');
+    const heads = [...table.querySelectorAll('thead th .th-name')].map((n) => n.textContent);
+    expect(heads).toEqual([a!.name, b!.name]);
+  });
+});
