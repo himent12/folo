@@ -165,6 +165,13 @@ describe('the compare page', () => {
     expect(go).toHaveBeenLastCalledWith('/benchmarks/bn_3c90/compare?entries=be_f101,be_f103,be_f102', { replace: true });
   });
 
+  it('shows an entry the link names twice once', async () => {
+    await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_f101,be_f104');
+    await settle(40);
+    expect([...document.querySelectorAll('.chips .chip .nm')].map((x) => x.textContent)).toEqual(['fasteners-s-v1', 'Claude Code (sonnet)']);
+    expect(document.querySelectorAll('.cmp thead th.e-col')).toHaveLength(2);
+  });
+
   it('explains a link with fewer than two finished entries, with the way back', async () => {
     await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_gone');
     expect(text()).toMatch(/Add one more entry to compare/);

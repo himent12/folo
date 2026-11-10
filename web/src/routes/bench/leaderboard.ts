@@ -61,12 +61,15 @@ export function comparePath(benchId: string, selected: readonly string[], entrie
   return `/benchmarks/${encodeURIComponent(benchId)}/compare?entries=${ids.map(encodeURIComponent).join(',')}`;
 }
 
-/** The entry ids a compare path names (`?entries=a,b`), in that order. */
-export const compareIds = (q: URLSearchParams) =>
-  (q.get('entries') ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+/** The entry ids a compare path names (`?entries=a,b`), in that order, each once (a link may name one twice). */
+export const compareIds = (q: URLSearchParams) => [
+  ...new Set(
+    (q.get('entries') ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  ),
+];
 
 /**
  * The one scale of a leaderboard's intervals: from just under the lowest interval to just over the highest, on a
