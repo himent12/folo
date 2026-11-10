@@ -1,5 +1,5 @@
-// Runs: the first look at Overview, Datasets and Runs, a run's page in every state (live, failed, completed, queued,
-// its charts, Config and logs), and the Runs list's queue menu and run selection.
+// Runs: the list (queue menu, hover, selection, keyboard rows) and a run's page in every state (live, failed, completed,
+// queued, stopping, on a cloud instance), its charts, Config and logs.
 
 import { until } from './drive.mjs';
 
@@ -7,22 +7,6 @@ import { until } from './drive.mjs';
 
 /** @type {Scene[]} */
 export const runScenes = [
-  // The live run at the moment run-live shows it (the same `advance`), so the two screens' epoch and progress agree.
-  { name: 'overview', path: '/', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
-  { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
-  {
-    // A class-balance strip is one disclosure: opened, each class's name, box count and share, largest first.
-    name: 'datasets-class-balance',
-    path: '/datasets',
-    viewports: ['desktop', 'mobile'],
-    fullPage: false,
-    setup: async (page) => {
-      const strip = page.locator('.cs-btn:visible').first();
-      await strip.waitFor();
-      await strip.click();
-      await page.mouse.move(0, 0);
-    },
-  },
   { name: 'runs', path: '/runs', viewports: ['desktop', 'laptop', 'mobile'] },
   { name: 'run-live', path: '/runs/run_7d1e', advance: 4000, viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
@@ -89,10 +73,6 @@ export const runScenes = [
   // A run on fasteners-mini, which has no validation images: every epoch was scored on the training split, so the page
   // says so once ("Evaluated on the training split") and its titles name that split, never "Validation".
   { name: 'run-train-split', path: '/runs/run_m1n1', search: 'scenario=train-split', viewports: ['desktop', 'laptop', 'mobile'] },
-];
-
-/** @type {Scene[]} */
-export const runPageScenes = [
   // A queued run, first of two waiting: its place, what it waits for and when it should start lead; from 768 px up the
   // config beside the queue and one quiet list of what the run will have (no empty frames). Phones keep their sections.
   { name: 'run-queued', path: '/runs/run_q4n2', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -168,17 +148,6 @@ export const runPageScenes = [
     },
   },
   {
-    // DOGFOOD-3 S2, S4: Compare's settings: the capped close mosaic with the request, the head that differs.
-    name: 'run-compare-short-mosaic',
-    path: '/runs/compare?ids=run_f15c,run_c19a',
-    fullPage: true,
-    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
-    setup: async (page) => {
-      await until(page, 'td.cfg');
-      await page.mouse.move(0, 0);
-    },
-  },
-  {
     // A 5-epoch run from scratch: the trainer's warnings that it is too short to learn, as one callout.
     name: 'run-short-warning',
     path: '/runs/run_s5q1',
@@ -213,21 +182,6 @@ export const runPageScenes = [
     },
   },
   {
-    // A touch screen: the first chart of the session says "Tap to pin a value" (Compare: in its readout row).
-    name: 'chart-touch-hint',
-    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
-    fullPage: false,
-    touch: false,
-    viewports: ['mobile'],
-    setup: async (page) => {
-      const cdp = await page.context().newCDPSession(page);
-      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
-      await page.reload({ waitUntil: 'networkidle' });
-      await page.clock.runFor(2000);
-      await until(page, '.chips-head .at.hint');
-    },
-  },
-  {
     // The loss chart's one control open: smoothing and y scale behind a single button.
     name: 'run-loss-options',
     path: '/runs/run_c19a',
@@ -244,10 +198,6 @@ export const runPageScenes = [
       await page.clock.runFor(500);
     },
   },
-];
-
-/** @type {Scene[]} */
-export const runsQueueScenes = [
   { name: 'runs', path: '/runs' },
   {
     // The waiting runs say their place ("1st in queue", "2nd in queue"); the second's ⋯ opened: Start next, Move up,
@@ -263,10 +213,72 @@ export const runsQueueScenes = [
       await page.mouse.move(0, 0);
     },
   },
-];
-
-/** @type {Scene[]} */
-export const runsSelectionScenes = [
+  {
+    // Row checkboxes appear on hover (the pointer is on the second row) and are hidden elsewhere.
+    name: 'runs-hover',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.locator('tr[data-row]').nth(1).hover();
+    },
+  },
+  {
+    // Once one run is selected every row shows its checkbox, so picking the rest is one click each.
+    name: 'runs-selected',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop', 'laptop', 'tablet'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.locator('tr[data-row] .check label').first().click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Keyboard rows: J moves a roving focus over the rows, X selects the focused run for Compare.
+    name: 'runs-keyboard',
+    path: '/runs',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'tr[data-row]');
+      await page.keyboard.press('j');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+      await page.keyboard.press('j');
+      await page.keyboard.press('x');
+    },
+  },
+  {
+    // Stop's confirm; on phones Stop is the icon button beside ⋯ (named "Stop <run>") and the confirm a bottom sheet.
+    name: 'run-stop-dialog',
+    fullPage: false,
+    path: '/runs/run_7d1e',
+    themes: ['light'],
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Stop' }).click();
+    },
+  },
+  {
+    name: 'chart-hover',
+    path: '/runs/run_c19a',
+    themes: ['dark'],
+    viewports: ['desktop'],
+    fullPage: false,
+    setup: async (page) => {
+      // Scroll the chart into view first: the pointer cannot hover outside the viewport. Then require the tooltip.
+      const svg = page.locator('#run-chart svg[aria-roledescription="chart"]').first();
+      await svg.scrollIntoViewIfNeeded();
+      const box = await svg.boundingBox();
+      if (!box) throw new Error('chart-hover: no chart');
+      await page.mouse.move(box.x + box.width * 0.55, box.y + box.height * 0.45);
+      // The legend is the readout: it switches to the hovered epoch.
+      await page.locator('#run-chart .legend .note.at').waitFor({ state: 'visible', timeout: 3000 });
+    },
+  },
   {
     // Phones: one run picked. Compare (disabled, "Select 2–4 runs") stays secondary and New run keeps the one primary.
     name: 'runs-selected-phone',
@@ -309,6 +321,64 @@ export const runsSelectionScenes = [
       await page.getByRole('button', { name: 'Select to compare' }).click();
       await page.locator('.rows li .r-check').nth(1).click();
       await page.locator('.rows li .r-check').nth(2).click();
+    },
+  },
+  {
+    // A cloud run uploading its dataset: the waiting state is the phase ("Uploading data · 25%"), no queue controls,
+    // and the Cloud panel's phases with the transfer.
+    name: 'run-cloud-upload',
+    path: '/runs/run_c9e4',
+    search: 'scenario=cloud-upload',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile', 'small'],
+    setup: async (page) => {
+      await until(page, '#cloud .xfer:visible');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The Runs list with that run: its status is the phase ("Uploading data", the waiting run's neutral mark), never
+    // "Queued", and it has no place in the queue.
+    name: 'runs-cloud-upload',
+    path: '/runs',
+    search: 'scenario=cloud-upload',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'a[href$="/runs/run_c9e4"]:visible');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A cloud run training: where it runs in the header ("RunPod · RTX 4090") and the Cloud panel in the rail (phones:
+    // its section).
+    name: 'run-cloud-training',
+    path: '/runs/run_c7b1',
+    search: 'scenario=cloud-training',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page, { vp }) => {
+      if (vp === 'desktop' || vp === 'laptop') await until(page, '#cloud dd');
+      else {
+        await until(page, '[role="tab"][data-value="cloud"], [role="tab"]:has-text("Cloud")');
+        await page.getByRole('tab', { name: 'Cloud', exact: true }).click();
+      }
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A finished cloud run: released, its final cost.
+    name: 'run-cloud-done',
+    path: '/runs/run_c3d5',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile', 'small'],
+    setup: async (page, { vp }) => {
+      if (vp === 'desktop' || vp === 'laptop') await until(page, '#cloud dd');
+      else {
+        await until(page, '[role="tab"]:has-text("Cloud")');
+        await page.getByRole('tab', { name: 'Cloud', exact: true }).click();
+      }
+      await page.mouse.move(0, 0);
     },
   },
 ];

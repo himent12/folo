@@ -1,4 +1,4 @@
-// Compare runs: the chart's axes, the legend, the side-by-side table on phones, and the empty state.
+// Compare runs: the chart's axes, the legend, the touch hint, the side-by-side table on phones, and the empty state.
 
 import { until } from './drive.mjs';
 
@@ -125,4 +125,30 @@ export const runCompareScenes = [
     },
   },
   { name: 'run-compare-empty', path: '/runs/compare', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // DOGFOOD-3 S2, S4: Compare's settings: the capped close mosaic with the request, the head that differs.
+    name: 'run-compare-short-mosaic',
+    path: '/runs/compare?ids=run_f15c,run_c19a',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'td.cfg');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A touch screen: the first chart of the session says "Tap to pin a value" (Compare: in its readout row).
+    name: 'chart-touch-hint',
+    path: '/runs/compare?ids=run_7d1e,run_c19a,run_5be3,run_a2f0',
+    fullPage: false,
+    touch: false,
+    viewports: ['mobile'],
+    setup: async (page) => {
+      const cdp = await page.context().newCDPSession(page);
+      await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.clock.runFor(2000);
+      await until(page, '.chips-head .at.hint');
+    },
+  },
 ];

@@ -1,4 +1,5 @@
-// Models: the list, a model's page (curves, matrix, classes, trace, COCO) on every tier, Export, and the engine benchmark.
+// Models: the list (published weights, the engine benchmark, phones' strip to Benchmarks) and a model's page (curves,
+// matrix, classes, trace, COCO, published weights) on every tier, Export.
 
 import { until } from './drive.mjs';
 
@@ -7,9 +8,6 @@ import { until } from './drive.mjs';
 /** @type {Scene[]} */
 export const modelScenes = [
   { name: 'models', path: '/models', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
-  { name: 'models-empty', path: '/models', search: 'scenario=empty' },
-  { name: 'models-error', path: '/models', search: 'scenario=error', viewports: ['desktop', 'laptop', 'mobile'] },
-  { name: 'models-loading', path: '/models', search: 'scenario=loading', viewports: ['desktop', 'laptop', 'mobile'] },
   {
     // Phones open on the Curves section (the matrix is behind the section picker).
     name: 'model-detail',
@@ -355,4 +353,32 @@ export const modelScenes = [
       await page.locator('#engine-speed summary', { hasText: 'How this was measured' }).click();
     },
   },
+  { name: 'models-train-split', path: '/models', search: 'scenario=train-split', viewports: ['desktop', 'mobile'] },
+  {
+    // The engine benchmarks, opened from their one-line summary under the inventory.
+    name: 'models-bench',
+    path: '/models',
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      // The outer Engine benchmarks fold (the panel inside has a "How this was measured" fold of its own).
+      await until(page, 'details.bench > summary');
+      await page.locator('details.bench > summary').first().click();
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Server PR #140: published weights listed as models, their own group ("Published weights") after the datasets.
+    name: 'models-published',
+    path: '/models',
+    viewports: ['desktop', 'laptop', 'mobile'],
+  },
+  {
+    // The published weights' page: "published weights" in its meta line, its Source what they are.
+    name: 'model-published',
+    path: '/models/folo-n-coco',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+  },
+  // Phones: Benchmarks under the Models tab, a strip of the two at the top of each list; picking entries to compare.
+  { name: 'bench-nav-models', path: '/models', viewports: ['mobile'], setup: async (page) => until(page, 'nav.sections a') },
 ];

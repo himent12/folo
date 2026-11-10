@@ -1,6 +1,7 @@
-// New run: the form, its estimate and Summary, the dock below 960 px, and the errors Start can meet.
+// New run: the form, its estimate and Summary, the dock below 960 px, focus rings, Run on a cloud GPU, and the errors
+// Start can meet.
 
-import { until } from './drive.mjs';
+import { until, tabTo } from './drive.mjs';
 
 /** @typedef {import('../scenes.mjs').Scene} Scene */
 
@@ -345,6 +346,47 @@ export const runNewScenes = [
     setup: async (page) => {
       await until(page, '.aug-toggle');
       await page.locator('.aug-toggle').click();
+    },
+  },
+  {
+    name: 'run-new-focus-field',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, 'input#name');
+      await page.locator('input#name').focus();
+      await page.keyboard.press('Shift+Tab');
+      await tabTo(page, 'input#name');
+    },
+  },
+  {
+    name: 'run-new-focus-select',
+    path: '/runs/new',
+    fullPage: false,
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'select#weights');
+      await page.locator('select#weights').focus();
+      await page.keyboard.press('Shift+Tab');
+      await tabTo(page, 'select#weights');
+      await page.evaluate(() => window.scrollTo(0, 0));
+    },
+  },
+  {
+    // New run on RunPod: the GPU preselected (the cheapest with the memory), Stop after with what it caps, the device a
+    // fact; the Summary says where it runs, the cost range and the limit.
+    name: 'run-new-cloud',
+    path: '/runs/new',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      for (let t = 0; t < 8000 && !(await page.locator('select#runon option[value="cc_4d2a"]').count()); t += 250) await page.clock.runFor(250);
+      await page.selectOption('select#runon', 'cc_4d2a');
+      await until(page, '#offer-hint');
+      await until(page, '.summary .cost-note');
+      await page.clock.runFor(1000);
+      await page.mouse.move(0, 0);
     },
   },
 ];
