@@ -892,7 +892,9 @@ pub fn estimate(records: &[TrainRecord], input: &EstimateInput) -> RunEstimate {
             };
             confidence = conf;
             (lo, hi) = band;
-            let what = match (samples - m.probes, m.probes) {
+            // At most every sample is a probe (a hand-edited or older file can count more).
+            let probes = m.probes.min(samples);
+            let what = match (samples - probes, probes) {
                 (e, 0) => format!("{e} epochs of runs"),
                 (0, p) => format!("{p} benchmark probes"),
                 (e, p) => format!("{e} epochs of runs and {p} benchmark probes"),
@@ -1253,6 +1255,28 @@ mod tests {
             t.training.iter().filter(|r| r.arch == Arch::M && r.imgsz == 640 && !r.amp).collect();
         assert_eq!((m640.len(), m640[0].source), (1, ThroughputSource::Reference));
         assert!(t.inference.iter().all(|r| r.source == ThroughputSource::Reference));
+    }
+
+    /// A hand-edited or older `throughput.json` can count more probes than samples: the estimate's note must not
+    /// underflow (a panic in debug builds).
+    #[test]
+    fn a_row_with_more_probes_than_samples_still_estimates() {
+        let dir = TestDir::new("throughput-probes");
+        let path = dir.join(FILE);
+        let mut file = TableFile::default();
+        let mut rec = record(Arch::N, 640, false, &[400.0; 3], &[], &[]);
+        rec.probes = 5;
+        file.training.push(rec);
+        std::fs::write(&path, serde_json::to_vec(&file).unwrap()).unwrap();
+        let t = Throughput::open(path);
+        assert_eq!(t.file().training[0].probes, 5);
+        let e = t.estimate(&input(Arch::N, 640, false));
+        assert_eq!(e.source, ThroughputSource::Measured);
+        assert!(
+            e.basis.note.contains("3 benchmark probes") && !e.basis.note.contains("epochs"),
+            "{}",
+            e.basis.note
+        );
     }
 
     #[test]
