@@ -3,7 +3,9 @@
 //! `FOLO_BENCH_PRECISION=f32,f16,f16tc` the inference precisions, default all three, f16 only where the GPU
 //! computes in it and `f16tc` (f16 on tensor cores) only with `FOLO_GPU_TENSOR_CORES=1` on an adapter that has them;
 //! `FOLO_BENCH_SECTIONS=forward,predict,train` the sections, default all; `FOLO_BENCH_TRAIN=f32,amp` the
-//! training precisions, default both, `amp` only on a context with tensor cores).
+//! training precisions, default both, `amp` only on a context with tensor cores; `FOLO_BENCH_CLIP=1` adds the
+//! trainer's global-norm gradient clipping (`clip_grad_norm` 10, through a `GradAccumulator` as in training) to
+//! the training step, default off so the documented rows stay comparable).
 //!
 //! Per scale, 80 classes, 640×640, untrained (seed-0) weights, inference in f32 and f16 (half precision: f16
 //! weights and activations, f32 accumulation; the input is f16 too, and the predictor letterboxes into f16):
@@ -230,6 +232,9 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
     let cfg = ModelConfig::new(scale, 80).expect("config");
     let rng = &mut Rng::seed(1);
     let label = if amp { "amp" } else { "f32" };
+    // The trainer's default clipping (docs/MODEL.md §8.3), off unless `FOLO_BENCH_CLIP=1`.
+    let clip = if std::env::var("FOLO_BENCH_CLIP").is_ok_and(|v| v == "1") { 10.0 } else { 0.0 };
+    let label = if clip > 0.0 { format!("{label}, clip {clip}") } else { label.to_string() };
     println!("\nfolo-{scale} training ({label})");
     println!("  [gpu load before train: {}]", gpu_load());
     let mut model = FoloModel::new(cfg).expect("model");
@@ -307,13 +312,20 @@ fn bench_train(scale: &str, dev: Device, ctx: &GpuContext, amp: bool) {
             acc.zero();
             acc.add(&grads).expect("accumulate");
             drop(grads);
-            let finite = acc.unscale_clip(scaler.inv_scale(), 0.0).expect("unscale");
+            let finite = acc.unscale_clip(scaler.inv_scale(), clip).expect("unscale");
             if finite {
                 opt.step(&acc).expect("step");
             } else {
                 skipped += 1;
             }
             scaler.update(!finite);
+        } else if clip > 0.0 {
+            // The trainer's f32 window end: the gradients in the accumulator, clipped on the device, then the step.
+            acc.zero();
+            acc.add(&grads).expect("accumulate");
+            drop(grads);
+            acc.clip_grad_norm(clip).expect("clip");
+            opt.step(&acc).expect("step");
         } else {
             opt.step(&grads).expect("step");
             drop(grads);
