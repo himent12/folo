@@ -210,7 +210,16 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         let cors = if args.cors_any { Cors::Any } else { Cors::Loopback };
         let token = args.token.clone().and_then(folo_server::Token::new);
         let token_set = token.is_some();
-        let server = Server::new(store, Options { web: web.clone(), cors, token });
+        let server = Server::new(
+            store,
+            Options {
+                web: web.clone(),
+                cors,
+                token,
+                bind: Some(addr.ip()),
+                allow_hosts: args.allow_host.clone(),
+            },
+        );
         let url = format!("http://{addr}");
         out.human(format!(
             "FOLO {VERSION} serving {} on {url}",

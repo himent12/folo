@@ -30,6 +30,7 @@ mod util;
 pub mod web;
 
 use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -115,6 +116,14 @@ pub struct Options {
     pub cors: Cors,
     /// The token `/api` requests must carry (`None`: no token needed, the default for a server on loopback).
     pub token: Option<Token>,
+    /// The address the server listens on (`folo serve --host`). On a loopback address, and when `None` (a router
+    /// used in process), a request whose `Host` names anything but a loopback address or one of
+    /// [`Options::allow_hosts`] is refused before any handler runs (`403 forbidden_host`, the guard against DNS
+    /// rebinding; docs/API.md, Conventions). Beyond loopback every `Host` is served.
+    pub bind: Option<IpAddr>,
+    /// More `Host` names a server on loopback answers (`folo serve --allow-host`): a tunnel or reverse proxy that
+    /// keeps its own `Host`. A port in a name is ignored.
+    pub allow_hosts: Vec<String>,
 }
 
 /// Shared handler state.
@@ -157,6 +166,63 @@ fn is_same_origin(origin: &HeaderValue, host: Option<&HeaderValue>) -> bool {
     let (Ok(o), Some(Ok(h))) = (origin.to_str(), host.map(|h| h.to_str())) else { return false };
     let authority = o.strip_prefix("http://").or_else(|| o.strip_prefix("https://")).unwrap_or("");
     !authority.is_empty() && authority.eq_ignore_ascii_case(h)
+}
+
+/// The name in a `Host` value (`name`, `name:port`, `[v6]`, `[v6]:port`), lower case and without a trailing dot;
+/// `None` when the value is malformed.
+fn host_name(host: &str) -> Option<String> {
+    let (name, port) = if host.starts_with('[') {
+        let end = host.find(']')? + 1;
+        let rest = &host[end..];
+        (&host[..end], if rest.is_empty() { None } else { Some(rest.strip_prefix(':')?) })
+    } else {
+        match host.split_once(':') {
+            Some((name, port)) => (name, Some(port)),
+            None => (host, None),
+        }
+    };
+    if name.is_empty() || port.is_some_and(|p| p.parse::<u16>().is_err()) {
+        return None;
+    }
+    let name = name.to_ascii_lowercase();
+    Some(name.strip_suffix('.').map(str::to_owned).unwrap_or(name))
+}
+
+/// `localhost`, `127.x.y.z` or `[::1]` (a name from [`host_name`]).
+fn is_loopback_name(name: &str) -> bool {
+    name == "localhost"
+        || name.parse::<Ipv4Addr>().is_ok_and(|ip| ip.is_loopback())
+        || name
+            .strip_prefix('[')
+            .and_then(|n| n.strip_suffix(']'))
+            .and_then(|n| n.parse::<Ipv6Addr>().ok())
+            .is_some_and(|ip| ip.is_loopback())
+}
+
+/// DNS rebinding: a website whose name re-resolves to 127.0.0.1 makes the browser send its requests to a server
+/// on loopback, with `Host: <its name>` and a matching `Origin`, so CORS and [`guard_origin`] let them through.
+/// A server on loopback therefore answers only requests whose `Host` is a loopback name or an `--allow-host` one
+/// (`allowed`, already in [`host_name`] form). A request without `Host` (in-process tests, raw clients; a
+/// browser always sends one) is served.
+async fn guard_host(State(allowed): State<Arc<[String]>>, req: Request, next: Next) -> Response {
+    let host = match req.headers().get(header::HOST) {
+        Some(h) => Some(h.to_str().unwrap_or("")),
+        None => req.uri().authority().map(|a| a.as_str()),
+    };
+    let Some(host) = host else { return next.run(req).await };
+    if host_name(host).is_some_and(|n| is_loopback_name(&n) || allowed.contains(&n)) {
+        return next.run(req).await;
+    }
+    error::Error::new(
+        StatusCode::FORBIDDEN,
+        "forbidden_host",
+        format!("this server listens on loopback and does not answer requests for host '{host}'"),
+    )
+    .hint(
+        "reach it as localhost or 127.0.0.1; for a tunnel or reverse proxy that keeps its own Host, start the \
+         server with --allow-host <name> (and --token when others can reach that name)",
+    )
+    .into_response()
 }
 
 /// CORS only hides responses; a browser still *sends* "simple" cross-origin POSTs (form posts) without a
@@ -271,6 +337,9 @@ impl Server {
             web_wasm,
         };
         let token = opts.token.is_some();
+        let check_host = opts.bind.is_none_or(|ip| ip.to_canonical().is_loopback());
+        let allow_hosts: Arc<[String]> =
+            opts.allow_hosts.iter().filter_map(|h| host_name(h.trim())).collect();
         let api = match opts.token {
             Some(t) => routes::api().layer(axum::middleware::from_fn_with_state(t, require_token)),
             None => routes::api(),
@@ -304,21 +373,25 @@ impl Server {
                 // Readable by page scripts (Studio caches downloaded weights by ETag).
                 .expose_headers([header::ETAG, header::CONTENT_DISPOSITION]),
         };
-        let router = router
+        let mut router = router
             .layer(axum::middleware::from_fn_with_state(opts.cors, guard_origin))
             // Weights files (`application/octet-stream`) are sent as they are: f32 / f16 tensors barely compress,
             // and their Content-Length and strong ETag describe the file's own bytes.
             .layer(CompressionLayer::new().compress_when(
                 DefaultPredicate::new().and(NotForContentType::const_new("application/octet-stream")),
             ))
-            .layer(cors)
-            .layer(axum::middleware::from_fn(log_request))
-            .layer(
-                TraceLayer::new_for_http()
-                    // Without headers (the default), so a token never reaches the log.
-                    .make_span_with(DefaultMakeSpan::new().level(Level::INFO).include_headers(false))
-                    .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
-            );
+            .layer(cors);
+        if check_host {
+            // Outside the routes, the web app, CORS (which answers preflights itself) and the origin guard:
+            // nothing runs for a foreign Host.
+            router = router.layer(axum::middleware::from_fn_with_state(allow_hosts, guard_host));
+        }
+        let router = router.layer(axum::middleware::from_fn(log_request)).layer(
+            TraceLayer::new_for_http()
+                // Without headers (the default), so a token never reaches the log.
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO).include_headers(false))
+                .on_response(DefaultOnResponse::new().level(Level::DEBUG)),
+        );
         Server { router, shutdown, store, token }
     }
 

@@ -68,6 +68,14 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
   kept in `~/.folo/desktop.json` (not for `--scenario`, `--width` or `--height`). A place on a display that is
   gone opens centred on the main one.
 
+### Server
+- DNS rebinding: a server on loopback (the default `--host 127.0.0.1`, also `--mock`) answers only requests whose
+  `Host` is `localhost`, `127.x.y.z` or `[::1]` (any port, any case). A website whose name re-resolves to 127.0.0.1
+  could read every dataset, image and weights file and start agent labeling from a visitor's browser; such requests
+  are now `403 forbidden_host` before any handler runs, GETs, SSE and Studio's files included.
+  `folo serve --allow-host NAME` (repeatable) adds a name for a tunnel or reverse proxy that keeps its own `Host`. A
+  server bound beyond loopback (`--host 0.0.0.0`, cloud workers) is not checked: use `--token` there.
+
 ## 0.1.0 (2026-11)
 
 The first release: a from-scratch Rust vision framework with a YOLO-style detector, its own tensors, autograd, CPU

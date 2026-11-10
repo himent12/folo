@@ -79,6 +79,9 @@ struct GpuIdle {
     /// This store's inference used the GPU since the pool was last released (so a store that runs on the CPU never
     /// touches the process's GPU pool, which another store in the same process may be using).
     gpu_used: AtomicBool,
+    /// The ordinal of the GPU this store's inference ran on (the store's `--device`, resolved; the same for every
+    /// call), whose pool the sweeper releases.
+    gpu: AtomicUsize,
     release_after_ms: AtomicU64,
     predictors_after_ms: AtomicU64,
 }
@@ -90,6 +93,7 @@ impl GpuIdle {
             last_ms: AtomicU64::new(0),
             active: AtomicUsize::new(0),
             gpu_used: AtomicBool::new(false),
+            gpu: AtomicUsize::new(0),
             release_after_ms: AtomicU64::new(GPU_IDLE_RELEASE.as_millis() as u64),
             predictors_after_ms: AtomicU64::new(PREDICTOR_IDLE.as_millis() as u64),
         }
@@ -97,6 +101,11 @@ impl GpuIdle {
 
     fn now_ms(&self) -> u64 {
         self.started.elapsed().as_millis() as u64
+    }
+
+    /// The GPU whose pool the sweeper releases.
+    fn release_device(&self) -> Device {
+        Device::Gpu(self.gpu.load(Ordering::SeqCst))
     }
 
     /// Marks an inference call in flight until the guard drops (its end is then the last use).
@@ -109,7 +118,8 @@ impl GpuIdle {
 impl GpuUse {
     /// The call runs on `device`: a GPU's pool is released once inference is idle.
     fn on(&self, device: Device) {
-        if !device.is_cpu() {
+        if let Device::Gpu(n) = device {
+            self.idle.gpu.store(n, Ordering::SeqCst);
             self.gpu.store(true, Ordering::SeqCst);
             self.idle.gpu_used.store(true, Ordering::SeqCst);
         }
@@ -168,7 +178,7 @@ fn spawn_idle_sweeper(idle: Weak<GpuIdle>, predictors: Weak<Predictors>, runs: W
             }
             if since >= g.release_after_ms.load(Ordering::Relaxed) && g.gpu_used.swap(false, Ordering::SeqCst)
             {
-                engine::release_gpu_memory(Device::Gpu(0));
+                engine::release_gpu_memory(g.release_device());
             }
         }
     });
@@ -1567,5 +1577,24 @@ impl Store for RealStore {
         self.labeler.shutdown();
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The idle sweeper releases the pool of the GPU inference ran on (`--device gpu:1`), not always `gpu:0`.
+    #[test]
+    fn idle_release_targets_the_gpu_inference_used() {
+        for n in [0, 1, 3] {
+            let idle = Arc::new(GpuIdle::new());
+            idle.using().on(Device::Gpu(n));
+            assert!(idle.gpu_used.load(Ordering::SeqCst));
+            assert_eq!(idle.release_device(), Device::Gpu(n));
+            // A later call on the CPU does not change it.
+            idle.using().on(Device::Cpu);
+            assert_eq!(idle.release_device(), Device::Gpu(n));
+        }
     }
 }

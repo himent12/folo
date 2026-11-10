@@ -906,6 +906,53 @@ async fn images_changed_by_hand_while_they_wait_leave_the_run() {
     assert_eq!(page[1].boxes, [BBox { class: 1, x1: 10.0, y1: 10.0, x2: 60.0, y2: 60.0 }]);
 }
 
+/// When `job.json` cannot be written the request answers 500, and the job stays as it was: a change that is not
+/// on disk would be shown until a restart and then vanish.
+#[tokio::test]
+async fn a_change_that_cannot_be_saved_is_undone() {
+    let t = TestDir::new("label-save-fails");
+    let home = t.join("home");
+    let f = fixture(&home, Vec::new());
+    let app = &f.app;
+    let job = job_with_images(app, 1).await;
+    let uri = format!("/api/label/jobs/{}", job.id);
+    let before = images(app, &job.id, "").await;
+    let first = before.images[0].clone();
+    // A folder where job.json goes: writing it fails.
+    let dir = home.join("label").join(&job.id);
+    let file = dir.join("job.json");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::create_dir_all(file.join("blocked")).unwrap();
+
+    let boxes = json!({ "boxes": [{ "class": 1, "x1": 10, "y1": 10, "x2": 60, "y2": 60 }] });
+    err(
+        app,
+        put(&format!("{uri}/images/{}", first.id), boxes.clone()),
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal",
+    )
+    .await;
+    let files = [("new1.png", png(7, 200, 100)), ("new2.png", png(8, 200, 100))];
+    err(app, upload(&format!("{uri}/images"), &files), StatusCode::INTERNAL_SERVER_ERROR, "internal").await;
+    let after = images(app, &job.id, "").await;
+    assert_eq!(after.total, 1, "the images that were not saved are not listed");
+    assert_eq!(after.images[0].status, first.status);
+    assert!(after.images[0].boxes.is_empty() && after.images[0].source.is_none(), "{:?}", after.images[0]);
+    let counts: LabelJob = ok(app, get(&uri)).await;
+    assert_eq!((counts.counts.images, counts.counts.labeled), (1, 0));
+    let stored: Vec<_> =
+        std::fs::read_dir(dir.join("images")).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(stored.len(), 1, "the files of the images that were not saved are gone: {stored:?}");
+
+    // Once job.json can be written again, the same requests work, and the ids go on where they were.
+    std::fs::remove_dir_all(&file).unwrap();
+    let added: LabelImagesAdded = ok(app, upload(&format!("{uri}/images"), &files)).await;
+    let ids: Vec<_> = added.added.iter().map(|i| i.id.as_str()).collect();
+    assert_eq!(ids, ["2", "3"]);
+    let image: LabelImage = ok(app, put(&format!("{uri}/images/{}", first.id), boxes)).await;
+    assert_eq!(image.source, Some(LabelSource::Manual));
+}
+
 #[tokio::test]
 async fn events_follow_a_run() {
     let t = TestDir::new("label-events");

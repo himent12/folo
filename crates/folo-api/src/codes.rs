@@ -51,6 +51,12 @@ pub const CODES: &[Code] = &[
     c("too_many_inputs", 400, 2, "more images than predict_batch takes (MCP)"),
     c("unauthorized", 401, 1, "a request without the server's token (`folo serve --token`)"),
     c("forbidden_origin", 403, 1, "a state-changing request from a disallowed browser origin (HTTP)"),
+    c(
+        "forbidden_host",
+        403,
+        1,
+        "a request to a server on loopback for a Host that is not loopback nor --allow-host (HTTP)",
+    ),
     c("read_only", 403, 1, "a mutating tool on a --read-only server (MCP)"),
     c("path_outside_data_dir", 403, 1, "a read outside --data-dir with --confine (MCP)"),
     // Not found.

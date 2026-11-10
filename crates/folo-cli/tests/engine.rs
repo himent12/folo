@@ -586,3 +586,34 @@ fn set_train_key(path: &Path, key: &str, value: Value) {
     out.extend_from_slice(&bytes[8 + n..]);
     std::fs::write(path, out).unwrap();
 }
+
+/// An out-of-range value's hint names the command it came from (`folo describe predict --json`, not always
+/// `train`'s).
+#[test]
+fn invalid_config_hints_name_the_command() {
+    let root = TestDir::new("cli-config-hints");
+    let data = root.join("shapes");
+    let cfg =
+        SyntheticConfig { images: 4, imgsz: 32, seed: 2, val_fraction: 0.5, ..SyntheticConfig::default() };
+    write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
+    let model = root.join("m.folo");
+    let classes = cfg.classes.len();
+    folo_vision::model::FoloModel::new(folo_vision::model::ModelConfig::new("n", classes).unwrap())
+        .unwrap()
+        .save(&model)
+        .unwrap();
+    let runs = root.join("runs");
+    let image = data.join("images/train").read_dir().unwrap().next().unwrap().unwrap().path();
+    let cases: [(&str, Vec<&str>); 3] = [
+        ("predict", vec!["predict", "--json", "--model", s(&model), "--conf", "2", s(&image)]),
+        ("val", vec!["val", "--json", "--model", s(&model), "--data", s(&data), "--imgsz", "100"]),
+        ("train", vec!["train", "--json", "--data", s(&data), "--imgsz", "100", "--project", s(&runs)]),
+    ];
+    for (command, args) in cases {
+        let (code, lines, stderr) = folo(&args);
+        let e = &lines.last().unwrap_or_else(|| panic!("{command}: {stderr}"))["error"];
+        assert_eq!((code, e["code"].as_str()), (2, Some("invalid_config")), "{command}: {e}");
+        let hint = e["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains(&format!("folo describe {command} --json")), "{command}: {hint}");
+    }
+}

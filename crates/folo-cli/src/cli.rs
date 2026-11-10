@@ -93,6 +93,10 @@ pub struct ServeArgs {
     /// server listens beyond loopback; docs/CLOUD.md, Securing a server). Never logged or printed.
     #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]
     pub token: Option<String>,
+    /// A Host name a server on loopback answers besides localhost, 127.x.y.z and [::1] (repeatable): a tunnel or
+    /// reverse proxy that keeps its own Host. Other names are refused (forbidden_host) against DNS rebinding.
+    #[arg(long = "allow-host", value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+    pub allow_host: Vec<String>,
 }
 
 /// `folo describe`.

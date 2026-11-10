@@ -169,6 +169,8 @@ instead of an HTTPS endpoint (Vast.ai, Lambda) need TLS on the worker first and 
 ## Securing a server (`--token`)
 `folo serve --token <secret>` (or `FOLO_TOKEN`) requires `Authorization: Bearer <secret>` on every `/api` request
 except `GET /api/health`; anything else is `401 unauthorized`. Use it whenever the server listens beyond loopback.
+A server on loopback answers only loopback `Host` names (docs/API.md, Conventions); one reached through a tunnel
+that keeps its own `Host` needs `--allow-host <name>`, and `--token` too.
 The comparison is constant-time and the token is never logged. `folo mcp --server <url> --token <secret>` and the
 `remote` provider send it. Studio and Desktop do not sign in to a token-protected server yet: such a server is for
 API clients.

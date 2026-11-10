@@ -42,7 +42,11 @@ pub(crate) fn find_yaml(dir: &Path) -> Option<PathBuf> {
     let mut yamls: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "yaml" || e == "yml"))
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"))
+        })
         .collect();
     yamls.sort();
     yamls.into_iter().find(|p| {

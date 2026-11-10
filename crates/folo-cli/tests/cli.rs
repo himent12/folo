@@ -249,3 +249,37 @@ fn serve_mock_prints_the_url_as_json() {
     assert_eq!(v["web_ready"], false);
     assert!(v["url"].as_str().unwrap().starts_with("http://127.0.0.1:"));
 }
+
+/// `folo serve --mock` on loopback refuses a foreign `Host` (DNS rebinding) and answers the URL it prints (FOLO
+/// Desktop connects to that `http://127.0.0.1:<port>`) and an `--allow-host` name; `describe` lists the flag.
+#[test]
+fn serve_refuses_foreign_hosts_on_loopback() {
+    use std::io::{Read, Write};
+    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["serve", "--mock", "--port", "0", "--json", "--allow-host", "folo.tunnel.example"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let v: Value = serde_json::from_str(&line).unwrap();
+    let addr = v["url"].as_str().unwrap().trim_start_matches("http://").to_owned();
+    let status = |host: &str| {
+        let mut s = std::net::TcpStream::connect(&addr).unwrap();
+        write!(s, "GET /api/health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").unwrap();
+        let mut res = String::new();
+        s.read_to_string(&mut res).unwrap();
+        res.split(' ').nth(1).unwrap_or("").to_owned()
+    };
+    assert_eq!(status(&addr), "200");
+    assert_eq!(status("folo.tunnel.example"), "200");
+    assert_eq!(status("evil.example"), "403");
+    child.kill().unwrap();
+    let _ = child.wait();
+
+    let (code, stdout, _) = folo(&["describe", "serve", "--json"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("\"allow-host\"") || stdout.contains("--allow-host"), "{stdout}");
+}

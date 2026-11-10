@@ -290,6 +290,37 @@ async fn hostile_archives_are_refused_and_leave_nothing() {
     );
 }
 
+/// Entries that differ only by letter case or a trailing dot or space name one file on Windows (and on macOS's
+/// default volumes): unpacking both would silently lose an image, so the upload is refused, naming both.
+#[tokio::test(flavor = "multi_thread")]
+async fn entries_that_would_overwrite_each_other_are_refused() {
+    let t = TestDir::new("uploads-collide");
+    let home = t.join("home");
+    let app = app(open(&home));
+    let cases = [
+        ("images/train/A.jpg", "images/train/a.jpg"),
+        ("images/train/b.jpg", "images/train/b.jpg."),
+        ("images/train/c.jpg", "images/train/c.jpg "),
+        ("Images/train/d.jpg", "images/Train/D.JPG"),
+        ("labels/train/e.txt", "labels/train./e.txt"),
+    ];
+    for (first, second) in cases {
+        let mut b = tar::Builder::new(Vec::new());
+        for (name, data) in [("data.yaml", &b"names: [x]\n"[..]), (first, b"one"), (second, b"two")] {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(data.len() as u64);
+            h.set_mode(0o644);
+            b.append_data(&mut h, name, data).unwrap();
+        }
+        let bytes = b.into_inner().unwrap();
+        let u = start(&app, json!({ "kind": "dataset", "name": "collide" })).await;
+        let req = put(&format!("/api/uploads/{}/parts/0", u.id), bytes);
+        let e = err(&app, req, StatusCode::UNPROCESSABLE_ENTITY, "invalid_upload").await;
+        assert!(e.message.contains(first) && e.message.contains(second.trim_end()), "{}", e.message);
+        assert!(staging(&home).is_empty(), "{first}: {:?}", staging(&home));
+    }
+}
+
 /// Writes a folo-n weights file with two classes.
 fn model_bytes(dir: &Path) -> Vec<u8> {
     let path = dir.join("pets.folo");
