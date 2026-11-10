@@ -78,7 +78,6 @@
   import InfoButton from '$lib/ui/InfoButton.svelte';
   import InfoRegion from '$lib/ui/InfoRegion.svelte';
   import { provideInfoSlot } from '$lib/ui/infoSlot.svelte';
-  import { tooltip } from '$lib/ui/tooltip';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronUp from '@lucide/svelte/icons/chevron-up';
   import { tick } from 'svelte';
@@ -92,13 +91,13 @@
   import LineChart, { type Marker, type Series } from '$lib/charts/LineChart.svelte';
   import { runHorizon } from '$lib/charts/horizon';
   import type { Epoch, Run, Step } from '$lib/api/types';
-  import { progressText, runProgress, stepsPerEpoch } from '$lib/api/progress';
+  import { runProgress, stepsPerEpoch } from '$lib/api/progress';
   import { effectiveCloseMosaic, warmupEpochs } from './resolved';
-  import { conf, duration, eta, metric, num } from '$lib/format';
+  import { conf, metric, num } from '$lib/format';
   import Segmented from '$lib/ui/Segmented.svelte';
-  import Meta from '$lib/ui/Meta.svelte';
   import Select from '$lib/ui/Select.svelte';
   import { media } from '$lib/design/tokens';
+  import MetricStrip, { type Tab, type TabDef } from './MetricStrip.svelte';
   // The loss terms' ⓘ opens in place on phones (ui/infoSlot), under the chart's heading.
   const lossInfo = provideInfoSlot('run-chart-info');
 
@@ -125,7 +124,6 @@
     evalOn?: EvalSource | null;
   } = $props();
 
-  type Tab = 'map' | 'map50' | 'pr' | 'loss' | 'lr' | 'ips';
   let tab = $state<Tab>('map');
 
   // Phones (< 768 px) turn the six tabs into one metric picker in the chart header, where it replaces the title, and
@@ -312,23 +310,6 @@
       : [],
   );
 
-  interface TabDef {
-    id: Tab;
-    label: string;
-    value: string;
-    /** Set one step smaller after the value; plain text (the phone picker's option reads it as is). */
-    unit?: string;
-    /** A power of ten's exponent ("−4"): the tab draws the unit "× 10" with a real superscript instead. */
-    exp?: string;
-    caption: string;
-    /** Tablets (768–1023 px): a shorter label and caption, so all six tabs fit without clipping. */
-    short?: string;
-    capShort?: string;
-    title: string;
-    qualifier: string;
-    /** The qualifier's power-of-ten exponent, drawn as a superscript after it. */
-    qExp?: string;
-  }
   // The one live-value label, as in the chart's legend: "Latest · ep 37". Per-epoch values come from the last
   // validation; per-step values from the epoch the last step is in.
   const latestEp = $derived(lastEpoch ? `Latest · ep ${lastEpoch.epoch}` : 'after the first epoch');
@@ -449,18 +430,6 @@
     return true;
   });
 
-  function onkeydown(e: KeyboardEvent) {
-    const i = tabs.findIndex((t) => t.id === tab);
-    let j = i;
-    if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
-    else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
-    else if (e.key === 'Home') j = 0;
-    else if (e.key === 'End') j = tabs.length - 1;
-    else return;
-    e.preventDefault();
-    tab = tabs[j]!.id;
-    (e.currentTarget as HTMLElement).querySelector<HTMLElement>(`[data-tab="${tab}"]`)?.focus();
-  }
 </script>
 
 <!-- A power of ten as "× 10" with a real 12 px superscript; other units as they are. -->
@@ -490,59 +459,7 @@
   {/if}
   {#if !queuedFold}
   <div class="metrics-body" id="run-metrics-body">
-  <!-- Phones: a finished run's strip only repeats the completed banner above it (status, duration), so it goes. -->
-  <!-- One structure at every width: the epoch as a full-width row (count, bar, caption) over the KPI tabs. -->
-  <div class="strip" class:finished={run.status === 'completed'}>
-    <div class="epoch">
-      <span class="sr-only">Epoch</span>
-      <span class="big num">{run.epoch}<span class="of">/ {run.epochs}</span></span>
-      <div class="bar" class:has-close={mosaicOff}>
-        <div
-          class="track"
-          role="progressbar"
-          aria-label="Training progress"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={run.status === 'completed' ? 100 : Math.floor(progress * 100 + 1e-9)}
-          aria-describedby={mosaicOff ? closeId : undefined}
-        >
-          <div class="fill" class:done={run.status === 'completed'} class:bad={run.status === 'failed'} style:transform="scaleX({run.status === 'completed' ? 1 : progress})"></div>
-          <!-- Over the filled part of the bar (a finished run) the hatch is cut out of the fill in the panel colour. -->
-          {#if mosaicOff}<div class="close" class:over={run.status === 'completed' || progress >= closeFrom} style:left="{closeFrom * 100}%"></div>{/if}
-        </div>
-        <!-- The hatched end says what it is: a caption under it, the same words on hover (a hit area taller than the
-             4 px bar) and as the bar's accessible description, with the trainer's capped count. -->
-        {#if mosaicOff}
-          <span class="close-hit" aria-hidden="true" style:left="{closeFrom * 100}%" use:tooltip={closeText.full}></span>
-          <span class="close-cap" aria-hidden="true" use:tooltip={closeText.full}>{closeText.cap}</span>
-          <span class="sr-only" id={closeId}>{closeText.full}</span>
-        {/if}
-      </div>
-      <span class="cap num">
-        {#if run.status === 'queued'}Not started{:else if live}<Meta line><span>{progressText(run)}</span><span>{run.eta_s !== null ? `${eta(run.eta_s)} left` : 'estimating…'}</span></Meta>{:else}{elapsed !== null ? `${duration(elapsed)} total` : '—'}{/if}
-      </span>
-    </div>
-    <!-- Queued: the tabs read "—" until the first step, so the frame is the one a running run fills. -->
-    <!-- svelte-ignore a11y_interactive_supports_focus -->
-    <div class="tabs" role="tablist" aria-label="Metric to chart" data-scrolls {onkeydown}>
-        {#each tabs as t (t.id)}
-          <button
-            role="tab"
-            class="tab"
-            class:on={tab === t.id}
-            aria-selected={tab === t.id}
-            aria-controls="run-chart"
-            tabindex={tab === t.id ? 0 : -1}
-            data-tab={t.id}
-            onclick={() => (tab = t.id)}
-          >
-            <span class="label"><span class="full">{t.label}</span><span class="short" aria-hidden="true">{t.short ?? t.label}</span></span>
-            <span class="val num">{t.value}{#if t.unit && t.value !== '—'}{@render unitOf(t)}{/if}</span>
-            <span class="cap num"><span class="full">{t.caption}</span><span class="short" aria-hidden="true">{t.capShort ?? t.caption}</span></span>
-          </button>
-        {/each}
-      </div>
-  </div>
+  <MetricStrip {run} {live} {progress} {mosaicOff} {closeFrom} {closeId} {closeText} {elapsed} {tabs} bind:tab {unitOf} />
 
   <div class="chart" class:folded={fold} id="run-chart" role="tabpanel" aria-label={current.title}>
     {#if fold}
@@ -638,106 +555,6 @@
     border-radius: var(--radius-lg);
     min-width: 0;
   }
-  .strip {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    border-bottom: 1px solid var(--line-subtle);
-  }
-  /* The epoch: one full-width row over the tabs at every width, "38 / 100", the bar, and its caption. */
-  .epoch {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    column-gap: var(--space-4);
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--line-subtle);
-  }
-  /* Each tab is at least as wide as its value and caption, so no value is ever cut off; spare width is shared. Every
-     tier is sized to fit all six; a sideways scroll is only the fallback for values far wider than real ones. */
-  .tabs {
-    display: grid;
-    grid-template-columns: repeat(6, minmax(max-content, 1fr));
-    min-width: 0;
-    overflow-x: auto;
-    scrollbar-width: none;
-  }
-  .tab {
-    position: relative;
-    display: grid;
-    grid-template-rows: 16px 40px 16px;
-    gap: 6px;
-    align-content: start;
-    padding: var(--space-4);
-    text-align: left;
-    min-width: 0;
-    border-left: 1px solid var(--line-subtle);
-    transition: background-color var(--dur-fast) var(--ease-standard);
-  }
-  .tab:first-child {
-    border-left: 0;
-  }
-  .tab:hover {
-    background: var(--bg-hover);
-  }
-  /* The selected metric: an ink bar on the edge it shares with its chart (inside the tab, which the row may clip). */
-  .tab::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 2px;
-    background: var(--text-primary);
-    transform: scaleX(0);
-    transition: transform var(--dur-base) var(--ease-out);
-  }
-  .tab.on::after {
-    transform: scaleX(1);
-  }
-  .tab:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: -2px;
-  }
-  .label {
-    font-size: var(--type-sm-size);
-    line-height: 16px;
-    color: var(--text-tertiary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .tab.on .label {
-    color: var(--text-primary);
-  }
-  .big {
-    font-size: var(--type-2xl-size);
-    line-height: 32px;
-    letter-spacing: var(--type-2xl-tracking);
-    font-weight: var(--weight-semibold);
-  }
-  .of {
-    margin-left: 6px;
-    font-size: var(--type-lg-size);
-    font-weight: var(--weight-regular);
-    color: var(--text-tertiary);
-    letter-spacing: 0;
-  }
-  /* A fixed line box: the value's baseline sits at the same height in every tab, with or without a unit, an exponent or
-     a fallback glyph (the unit's own line-height is 1, so a 12 px span can never deepen the line). */
-  .val {
-    align-self: end;
-    height: 32px;
-    overflow: visible;
-    font-size: var(--type-2xl-size);
-    line-height: 32px;
-    letter-spacing: var(--type-2xl-tracking);
-    font-weight: var(--weight-semibold);
-    color: var(--text-secondary);
-    white-space: nowrap;
-  }
-  .tab.on .val {
-    color: var(--text-primary);
-  }
   .unit {
     line-height: 1;
     margin-left: 4px;
@@ -754,71 +571,6 @@
     font-size: var(--type-sm-size);
     line-height: 0;
     vertical-align: baseline;
-  }
-  /* A tab's caption holds figures people read ("best 0.604 · ep 150", "warmup 360 steps · linear"): secondary, not
-     the tertiary of labels people skim (DESIGN_DIRECTION §2.3). */
-  .cap {
-    font-size: var(--type-sm-size);
-    line-height: 16px;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .track {
-    position: relative;
-    height: 4px;
-    border-radius: 2px;
-    background: var(--bg-active);
-    overflow: hidden;
-  }
-  .fill {
-    position: absolute;
-    inset: 0;
-    transform-origin: left;
-    background: var(--accent-line);
-    border-radius: 2px;
-    transition: transform var(--dur-slow) var(--ease-standard);
-  }
-  .fill.done {
-    background: var(--text-secondary);
-  }
-  .fill.bad {
-    background: var(--danger-solid);
-  }
-  .bar {
-    position: relative;
-    align-self: center;
-    min-width: 0;
-  }
-  .close-hit {
-    position: absolute;
-    top: -12px;
-    bottom: -12px;
-    right: 0;
-  }
-  /* The hatch's caption ("Mosaic off after epoch 90") under it, right-aligned to the bar's end: in the epoch row's spare
-     height from the tablet up, in a line the bar keeps for it on phones. */
-  .close-cap {
-    position: absolute;
-    top: calc(100% + var(--space-1));
-    right: 0;
-    font-size: var(--type-sm-size);
-    line-height: 16px;
-    color: var(--text-tertiary);
-    white-space: nowrap;
-  }
-  .close {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    right: 0;
-    background: repeating-linear-gradient(135deg, transparent 0 3px, var(--line-strong) 3px 4px);
-    border-left: 1px solid var(--line-strong);
-  }
-  .close.over {
-    background: repeating-linear-gradient(135deg, transparent 0 3px, var(--bg-panel) 3px 4.5px);
-    border-left-color: var(--bg-panel);
   }
   .chart {
     display: grid;
@@ -950,47 +702,7 @@
     gap: var(--space-2);
     flex-wrap: wrap;
   }
-  /* Laptops: the same six tabs in one row, a step more compact (12 px sides, 20 px values), so all six fit from
-     1024 px up beside the collapsed sidebar. */
-  @media (max-width: 1279px) {
-    .tab {
-      grid-template-rows: 16px 32px 16px;
-      gap: var(--space-1);
-      padding: var(--space-3);
-    }
-    .val {
-      font-size: var(--type-xl-size);
-      line-height: 32px;
-      letter-spacing: var(--type-xl-tracking);
-    }
-  }
-  /* Tablets: six tabs share about 700 px, so each says it in fewer words ("P · R", "ep 37"), the full words their
-     accessible name; nothing clips. */
-  .short {
-    display: none;
-  }
-  @media (min-width: 768px) and (max-width: 1023px) {
-    .tab .full {
-      position: absolute;
-      width: 1px;
-      height: 1px;
-      overflow: hidden;
-      clip-path: inset(50%);
-      white-space: nowrap;
-    }
-    .tab .short {
-      display: inline;
-    }
-  }
   @media (max-width: 767px) {
-    /* Phones: six tiles would push the chart down: one compact metric picker in the chart header instead, in place of
-       the title (the qualifier stays beside it). */
-    .tabs {
-      display: none;
-    }
-    .epoch {
-      border-bottom: 0;
-    }
     .chart header {
       padding-top: var(--space-3);
       row-gap: var(--space-2);
@@ -1006,39 +718,6 @@
     h2 {
       font-size: var(--type-sm-size);
       font-weight: var(--weight-regular);
-    }
-    /* "23 / 100" and its meta on one baseline, the bar under the whole row 8 px below; the chart follows. */
-    .epoch {
-      grid-template-columns: auto minmax(0, 1fr);
-      align-items: baseline;
-      row-gap: var(--space-2);
-    }
-    .big {
-      grid-row: 1;
-      grid-column: 1;
-      align-self: baseline;
-    }
-    .epoch .cap {
-      grid-row: 1;
-      grid-column: 2;
-      align-self: baseline;
-      text-align: right;
-    }
-    .epoch .bar {
-      grid-row: 2;
-      grid-column: 1 / -1;
-      align-self: center;
-    }
-    .epoch .bar.has-close {
-      margin-bottom: var(--space-5);
-    }
-    .val {
-      height: 28px;
-      font-size: var(--type-lg-size);
-      line-height: 28px;
-    }
-    .strip.finished {
-      display: none;
     }
     .chart {
       padding: 0 var(--space-3) var(--space-3);

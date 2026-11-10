@@ -1,20 +1,8 @@
 <script lang="ts">
-  import ArrowUpRight from '@lucide/svelte/icons/arrow-up-right';
   import Box from '@lucide/svelte/icons/box';
-  import FileUp from '@lucide/svelte/icons/file-up';
-  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import Check from '@lucide/svelte/icons/check';
-  import Eye from '@lucide/svelte/icons/eye';
-  import EyeOff from '@lucide/svelte/icons/eye-off';
-  import ChevronRight from '@lucide/svelte/icons/chevron-right';
-  import ChevronUp from '@lucide/svelte/icons/chevron-up';
-  import ChevronDown from '@lucide/svelte/icons/chevron-down';
-  import ImageIcon from '@lucide/svelte/icons/image';
-  import Images from '@lucide/svelte/icons/images';
   import Plus from '@lucide/svelte/icons/plus';
   import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
-  import Upload from '@lucide/svelte/icons/upload';
-  import X from '@lucide/svelte/icons/x';
   import { onDestroy, untrack } from 'svelte';
   import { MediaQuery } from 'svelte/reactivity';
   import { ApiError } from '$lib/api/client';
@@ -23,40 +11,36 @@
   import { Resource } from '$lib/api/resource.svelte';
   import type { Dataset, DatasetImage as Img, Model, PredictInput, Prediction, Run } from '$lib/api/types';
   import { modelChoices, scoreContext } from '$lib/scoreSummary';
-  import { classColor, media } from '$lib/design/tokens';
-  import DetectionView from '$lib/detect/DetectionView.svelte';
+  import { media } from '$lib/design/tokens';
   import { filterDetections } from '$lib/detect/nms';
-  import { BrowserEngine, hasWebGpu, NO_WASM, PHASE_TEXT, probeWasm, servedBy, wasmFromSystem, type Backend } from '$lib/inference/browser.svelte';
-  import { ms, num, sentence } from '$lib/format';
+  import { BrowserEngine, hasWebGpu, NO_WASM, probeWasm, servedBy, wasmFromSystem, type Backend } from '$lib/inference/browser.svelte';
+  import { sentence } from '$lib/format';
   import { isOom } from '$lib/oom';
   import { href, router } from '$lib/router.svelte';
   import Page from '$lib/shell/Page.svelte';
   import { setCrumbs } from '$lib/shell/crumbs.svelte';
-  import SheetHandle from '$lib/ui/SheetHandle.svelte';
-  import { sheetDrag } from '$lib/ui/sheetDrag';
   import Button from '$lib/ui/Button.svelte';
   import EmptyState from '$lib/ui/EmptyState.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Panel from '$lib/ui/Panel.svelte';
-  import Segmented from '$lib/ui/Segmented.svelte';
-  import Select from '$lib/ui/Select.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Slider from '$lib/ui/Slider.svelte';
-  import Tabs from '$lib/ui/Tabs.svelte';
   import { toast } from '$lib/ui/toast.svelte';
   import DatasetPicker from './playground/DatasetPicker.svelte';
-  import DropZone from './playground/DropZone.svelte';
   import { looksLikeFolo } from './playground/folo';
-  import JsonView from './playground/JsonView.svelte';
   import { holdNoticeFocus } from './playground/noticeFocus';
   import TimingBar from './playground/TimingBar.svelte';
+  import ModelPickers from './playground/ModelPickers.svelte';
+  import ImagePanel from './playground/ImagePanel.svelte';
+  import ResultsPanel from './playground/ResultsPanel.svelte';
+  import ClassList from './playground/ClassList.svelte';
+  import PhoneDetails from './playground/PhoneDetails.svelte';
+  import SidePanels from './playground/SidePanels.svelte';
+  import { BACKEND_NAME, DEFAULTS, FETCH, simulate } from './playground/predict';
+  import { imageBlob, type Source } from './playground/source';
 
   setCrumbs({ label: 'Playground' });
 
-  // The server is asked once with loose settings and no suppression (IoU 1 keeps every candidate); the controls below
-  // re-filter and run NMS in the browser. Suppressing on the server first would lose boxes a looser IoU should keep.
-  const FETCH = { conf: 0.01, iou: 1, max_det: 1000 };
-  const DEFAULTS = { conf: 0.25, iou: 0.7, maxDet: 300 };
 
   // Phones with an image loaded: no intro line, the image full-bleed with Confidence under it. IoU, max detections
   // and the display toggles open in a non-modal bottom sheet, so the image stays in view (and live) while tuning;
@@ -124,7 +108,6 @@
   }
 
   // ---------- image source ----------
-  type Source = { kind: 'file'; file: Blob; name: string; url: string; width: number; height: number } | { kind: 'dataset'; ds: Dataset; img: Img };
   let source = $state.raw<Source | null>(null);
   const sheetShown = $derived(moreOpen && narrow.current && !!source);
   // Phones' sheet holds every threshold; a tablet's, what its strip leaves out.
@@ -304,7 +287,6 @@
   /** The server cannot send this model's file: ask for it. */
   let weightsMissing = $state(false);
   let weightsInput: HTMLInputElement;
-  const BACKEND_NAME: Record<Backend, string> = { webgpu: 'WebGPU', cpu: 'CPU' };
   const where = $derived(pred?.backend ? `browser · ${BACKEND_NAME[pred.backend]}` : 'server');
   const deviceText = $derived(
     pred?.backend ? `${BACKEND_NAME[pred.backend]}${pred.backend === 'webgpu' && engine.info?.adapter ? ` · ${engine.info.adapter}` : ''}` : (pred?.device ?? ''),
@@ -335,18 +317,6 @@
     badFile = { name: f.name, why: e instanceof Error ? sentence(e.message) : null };
   }
 
-  /** The demo has no real networks: the browser path is simulated with the documented speeds (docs/WASM.md). */
-  function simulate(p: Prediction, backend: Backend): Prediction {
-    const t = backend === 'webgpu' ? { preprocess_ms: 2.5, inference_ms: 11.1, postprocess_ms: 0.2 } : { preprocess_ms: 6, inference_ms: 477, postprocess_ms: 8 };
-    return { ...p, backend, device: backend === 'webgpu' ? 'gpu:0' : 'cpu', timing: { ...t, total_ms: t.preprocess_ms + t.inference_ms + t.postprocess_ms } };
-  }
-
-  async function imageBlob(s: Source, signal: AbortSignal): Promise<Blob> {
-    if (s.kind === 'file') return s.file;
-    const res = await fetch(await hub.api.imageUrl(s.ds.id, s.img.id), { signal });
-    if (!res.ok) throw new Error(`Could not read ${s.img.file} (HTTP ${res.status}).`);
-    return res.blob();
-  }
 
   // ---------- prediction ----------
   let predicting = $state(false);
@@ -557,9 +527,6 @@
     maxDet = DEFAULTS.maxDet;
   }
   const isDefault = $derived(conf === DEFAULTS.conf && iou === DEFAULTS.iou && maxDet === DEFAULTS.maxDet);
-  const px = (v: number) => Math.round(v);
-  /** Scores read the same everywhere here (table, the picked box's line, the label chips on the image): 2 decimals. */
-  const score = (v: number) => v.toFixed(2);
 </script>
 
 <svelte:window {onpaste} onkeydown={onwindowkey} onpointerdown={onwindowdown} />
@@ -622,29 +589,7 @@
 {/snippet}
 
 {#snippet classList()}
-  {#if !result}
-    <p class="hint">Per-class counts; each row shows or hides its class.</p>
-  {:else if counts.length === 0}
-    <p class="hint">{pred?.boxes.length ? 'Nothing above the confidence threshold.' : 'The model found nothing in this image.'}</p>
-  {:else}
-    <!-- A visibility toggle per class, never a static legend: every row wears its state (an eye, shown by default; a
-         struck eye and a dimmed row when hidden), the whole row is the button (aria-pressed: shown), and Show all
-         brings every class back. -->
-    <ul class="counts" aria-label="Detected classes">
-      {#each counts as [c, n] (c)}
-        {@const off = hidden.has(c)}
-        <li>
-          <button type="button" class:off aria-pressed={!off} onclick={() => toggleClass(c)} aria-label="Show {classes[c] ?? `class ${c}`}, {n} found">
-            <span class="vis" aria-hidden="true">{#if off}<EyeOff size={14} strokeWidth={1.75} />{:else}<Eye size={14} strokeWidth={1.75} />{/if}</span>
-            <span class="sw" style:background={classColor(c)} aria-hidden="true"></span>
-            <span class="c-name truncate">{classes[c] ?? `class ${c}`}</span>
-            <span class="c-bar" aria-hidden="true"><span style:transform="scaleX({n / maxCount})" style:background={classColor(c)}></span></span>
-            <span class="c-n num">{n}</span>
-          </button>
-        </li>
-      {/each}
-    </ul>
-  {/if}
+  <ClassList {result} {counts} {pred} {hidden} {classes} {maxCount} {toggleClass} />
 {/snippet}
 
 {#snippet timingBody()}
@@ -657,103 +602,17 @@
   {/if}
 {/snippet}
 
-{#snippet noticeStrip()}
-  <!-- What went wrong and the ways out, in one block above the image, where the result would be, at every width: the
-     image stays whole, and the failure and its recovery are in the first screen. -->
-  {#if notice}
-    {#key notice}
-      <div class="notice cta-row" bind:this={noticeEl}>
-        {#if notice === 'file'}
-          <div class="need-file" class:bad={!!badFile} role="alert">
-            <!-- A file that failed says so through its icon; the title stays ink (DESIGN_DIRECTION §2.6). -->
-            {#if badFile}<TriangleAlert size={16} strokeWidth={1.75} aria-hidden="true" />{:else}<FileUp size={16} strokeWidth={1.75} aria-hidden="true" />{/if}
-            <div class="nf-body">
-              {#if badFile}
-                <p class="n-title">{badFile.why ? `${badFile.name} could not be loaded` : `${badFile.name} is not a .folo weights file`}</p>
-                <p class="nf-text">
-                  {#if badFile.why}{badFile.why} {/if}Choose {model?.name}'s <span class="mono">weights/best.folo</span> from its run's folder, or run it on the
-                  server.
-                </p>
-              {:else}
-                <p class="n-title">This server cannot send model files yet</p>
-                <p class="nf-text">
-                  To run {model?.name} in the browser, choose its <span class="mono">.folo</span> file (<span class="mono">weights/best.folo</span>
-                  in the run's folder), or run it on the server.
-                </p>
-              {/if}
-              <div class="nf-actions cta-stack">
-                <Button size="sm" variant="primary" icon={FileUp} onclick={() => weightsInput.click()}>Choose .folo file</Button>
-                <Button size="sm" onclick={() => (runOn = 'server')}>Run on the server</Button>
-              </div>
-            </div>
-          </div>
-        {:else}
-          <ErrorState
-            {error}
-            title="Prediction failed"
-            retry={() => retryTick++}
-            compact
-            hint={!oom ? undefined : browserOff ? (smaller ? 'Use a smaller model.' : undefined) : smaller ? 'Run it in this browser, or use a smaller model.' : 'Run it in this browser instead.'}
-          >
-            {#snippet actions()}
-              {#if oom && !browserOff}
-                <Button size="sm" variant="primary" onclick={() => (runOn = localBackend)}>Run in this browser</Button>
-                {#if smaller}<Button size="sm" title="{smaller.name} is {smaller.arch}: a smaller model of the same classes" onclick={() => chooseModel(smaller.id)}>Use {smaller.name}</Button>{/if}
-              {/if}
-            {/snippet}
-          </ErrorState>
-        {/if}
-      </div>
-    {/key}
-  {/if}
-{/snippet}
-
 {#snippet intro()}
   <span>Run a model on any image. Thresholds re-filter instantly in the browser.</span>
 {/snippet}
 
 <!-- The model and where it runs: on the title row from 1024 px up, a toolbar row under the title below that. -->
 {#snippet pickers()}
-  {#if ranked.length}
-    <!-- Closed, the select shows the model's name alone; its score and everything the score is on wrap in the meta line
-         under it (never cut at the select's edge), which is also its description. The open list keeps the groups and
-         each option's context. -->
-    <div class="model-pick">
-      <span class="pick-label">Model</span>
-      <Select
-        label="Model"
-        value={modelId ?? ''}
-        options={choices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short }))}
-        onchange={chooseModel}
-        describedby={pickedMeta ? 'model-meta' : undefined}
-      />
-      {#if model}<Button icon={ArrowUpRight} href={href(`/models/${model.id}`)} aria-label="Open {model.name}" />{/if}
-      {#if pickedMeta}<p class="pick-meta num" id="model-meta">{pickedMeta}</p>{/if}
-    </div>
-    <div class="runon" role="group" aria-label="Run on" aria-describedby={runOnNote ? 'runon-note' : undefined}>
-      <span class="pick-label" aria-hidden="true">Run on</span>
-      <!-- A choice that is off says why in its own tip, and the image panel's status line says it once ("No WebGPU in
-           this browser"), so the toolbar stays one row at every tier: never a note wrapping under the group (round
-           24's tablet). The group's description is the same words, for assistive technology. -->
-      <span class="runon-seg">
-        <Segmented
-          label="Run the model on"
-          size="sm"
-          bind:value={runOn}
-          options={[
-            { value: 'server', label: 'Server' },
-            { value: 'webgpu', label: 'WebGPU', disabled: !webgpu || !!browserOff, tip: browserOff ?? 'No WebGPU in this browser' },
-            { value: 'cpu', label: 'CPU', disabled: !!browserOff, tip: browserOff ?? undefined },
-          ]}
-        />
-        {#if runOnNote}<span class="sr-only" id="runon-note">{runOnNote}</span>{/if}
-      </span>
-    </div>
-  {/if}
+  <ModelPickers {ranked} {modelId} {choices} {chooseModel} {model} {pickedMeta} bind:runOn {webgpu} {browserOff} {runOnNote} />
 {/snippet}
 
 <Page title="Playground" wide sub={source && phone.current ? undefined : intro} actions={narrow.current || !ranked.length ? undefined : pickers}>
-  {#if narrow.current && ranked.length}<div class="pg-tools">{@render pickers()}</div>{/if}
+  {#if narrow.current && ranked.length}<ModelPickers toolbar {ranked} {modelId} {choices} {chooseModel} {model} {pickedMeta} bind:runOn {webgpu} {browserOff} {runOnNote} />{/if}
 
   {#if models.error && !models.data}
     <Panel><ErrorState error={models.error} retry={() => models.refresh()} title="Could not load models" compact /></Panel>
@@ -767,287 +626,106 @@
     <!-- 8 + 4 columns; in one column (below 1024 px) the canvas takes the image's aspect (see .layout.fit). -->
     <div class="layout" class:fit={!!source && !!dims}>
       <div class="main">
-        <!-- svelte-ignore a11y_no_static_element_interactions -->
-        <div class="viewer" class:loaded={!!source} {ondragover} {ondragleave} {ondrop}>
-          <Panel pad="none">
-            <div class="vbar">
-              <span class="seg">
-                <Segmented
-                  label="Image source"
-                  size="sm"
-                  bind:value={seg}
-                  onchange={onSeg}
-                  options={[
-                    { value: 'file', label: 'Image', icon: ImageIcon },
-                    { value: 'dataset', label: 'Dataset', icon: Images },
-                  ]}
-                />
-              </span>
-              {#if runOnNote && !source}<span class="vbar-note" aria-hidden="true">{runOnNote}</span>{/if}
-              {#if source}
-                <span class="src-name mono truncate" title={sourceName}>{shortName}</span>
-                {#if dims}<span class="src-dims num">{dims.width}×{dims.height}</span>{/if}
-                <span class="vbar-gap"></span>
-                <Button size="sm" variant="ghost" class="replace" aria-label="Replace image" icon={source.kind === 'dataset' ? Images : Upload} onclick={() => (source?.kind === 'dataset' ? (pickerOpen = true) : fileInput.click())}>Replace</Button>
-                <Button size="sm" variant="ghost" class="clear" icon={X} aria-label="Clear image" onclick={clear} />
-              {/if}
-            </div>
-            {@render noticeStrip()}
-            <div class="stage" class:empty={!source} style:--ar={dims ? `${dims.width} / ${dims.height}` : undefined}>
-              {#if !source}
-                <DropZone {dragging} {samples} onbrowse={() => fileInput.click()} onpick={() => (pickerOpen = true)} onsample={(ds, img) => setSource({ kind: 'dataset', ds, img })} />
-              {:else if dims}
-                <DetectionView
-                  {src}
-                  width={dims.width}
-                  height={dims.height}
-                  boxes={pred ? kept : []}
-                  truth={truthBoxes}
-                  {classes}
-                  {labels}
-                  {scores}
-                  {only}
-                  active={activeIdx}
-                  selected={selectedIdx}
-                  onhover={(i) => (hover = i === null ? null : (kept[i] ?? null))}
-                  onselect={pickFromImage}
-                  alt={sourceName}
-                />
-                {#if notice === 'error'}
-                  <!-- A failed prediction: the image steps back and says, in its own frame, why it has no boxes (the
-                       notice above has the cause and the ways out), so it never reads as "nothing found". -->
-                  <div class="failed-veil"><span>No boxes: the prediction failed</span></div>
-                {/if}
-                {#if predicting}
-                  <div class="scan" aria-hidden="true"><span></span></div>
-                  <span class="busy" role="status">{runOn === 'server' || hub.api.mock ? `Detecting with ${model?.name}…` : PHASE_TEXT[engine.phase] || 'Starting…'}</span>
-                {/if}
-                {#if dragging}<div class="drop-hint"><span>Drop to replace</span></div>{/if}
-              {/if}
-            </div>
-            {#if source}
-              <!-- Phones: the threshold tuned most sits right under the image; the rest is one tap away below it. Tablets:
-                   Confidence and Overlap side by side, the less-used settings one tap away. -->
-              <div class="qconf" class:covered={sheetShown && !tablet}>
-                <Slider inline label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} />
-                {#if tablet}
-                  <div class="qiou" title="Non-max suppression: a lower-scoring box of the same class is dropped when it overlaps a kept one by more than this.">
-                    <Slider inline label="Overlap (IoU)" bind:value={iou} min={0.05} max={0.95} step={0.05} />
-                  </div>
-                {/if}
-              </div>
-            {/if}
-            {#if source && result}
-              <!-- Phones: the picked detection in one line under the image, so its numbers are readable without the table. -->
-              {@const sel = selectedIdx !== null ? kept[selectedIdx] : undefined}
-              <p class="pick-line num" class:empty={!sel} aria-live="polite">
-                {#if sel}
-                  <span class="sw" style:background={classColor(sel.class)} aria-hidden="true"></span>
-                  <b>{sel.name}</b> {score(sel.score)}<span class="sep" aria-hidden="true">·</span>{px(sel.x2 - sel.x1)}×{px(sel.y2 - sel.y1)} px
-                {/if}
-              </p>
-            {/if}
-            {#if source}
-              <div class="vfoot num">
-                {#if result}
-                  <!-- Each item after the first draws its own separator, so hiding one never leaves a stray dot. -->
-                  <span class="fi"><b>{rows.length}</b> shown <span class="wide">of {num(pred?.boxes.length)} candidates</span></span>
-                  <span class="fi wide">conf ≥ {conf.toFixed(2)}</span>
-                  <span class="fi" class:wide={iou === DEFAULTS.iou}>IoU {iou.toFixed(2)}</span>
-                  {#if maxDet < DEFAULTS.maxDet}<span class="fi">max {Math.round(maxDet)}</span>{/if}
-                  {#if hidden.size}<span class="fi">{hidden.size} {hidden.size === 1 ? 'class' : 'classes'} hidden</span>{/if}
-                  <span class="grow"></span>
-                  {#if selectedIdx === null}<span class="tap">Tap a box to inspect</span>{/if}
-                  <span class="faint">filtered in {result.ms < 0.01 ? '<0.01' : result.ms.toFixed(2)} ms</span>
-                {:else if notice === 'error'}
-                  <!-- The notice says what failed; the caption only adds what it does not: which model, where. -->
-                  <span class="faint truncate">{model?.name} on {runOn === 'server' ? 'the server' : `this browser · ${BACKEND_NAME[runOn]}`}</span>
-                  <span class="grow"></span>
-                {:else}
-                  <span class="faint">{predicting ? 'Running inference…' : weightsMissing ? 'Waiting for the model file' : 'Waiting for a model'}</span>
-                  <span class="grow"></span>
-                {/if}
-                <span class="more-btn" bind:this={moreBtn}>
-                  <Button size="sm" variant="ghost" iconRight={tablet ? ChevronDown : ChevronUp} aria-expanded={sheetShown} aria-controls="pg-more" onclick={() => (sheetShown ? closeSheet() : (moreOpen = true))}>{sheetTitle}</Button>
-                </span>
-              </div>
-              {#if sheetShown && tablet}
-                <!-- Tablets: a popover anchored under its button (bg.overlay, shadow-lg), over the panels below,
-                     never a bottom sheet clipped at the viewport. Escape returns focus to the button. -->
-                <div class="pop" id="pg-more" role="dialog" aria-modal="false" aria-labelledby="pg-more-title" tabindex="-1" bind:this={sheetEl}>
-                  <div class="pop-head">
-                    <h2 id="pg-more-title">{sheetTitle}</h2>
-                    {@render resetButton()}
-                  </div>
-                  {@render moreBody()}
-                </div>
-              {:else if sheetShown}
-                <!-- Phones. Non-modal: no backdrop, the image above stays visible and keeps re-filtering as the sliders move. -->
-                <div
-                  class="sheet"
-                  id="pg-more"
-                  role="dialog"
-                  aria-modal="false"
-                  aria-labelledby="pg-more-title"
-                  tabindex="-1"
-                  bind:this={sheetEl}
-                >
-                  <div class="sheet-head" use:sheetDrag={{ sheet: () => sheetEl, close: closeSheet }}>
-                    <SheetHandle />
-                    <h2 id="pg-more-title">{sheetTitle}</h2>
-                    {@render resetButton()}
-                    <Button size="sm" variant="ghost" icon={X} aria-label="Close {sheetTitle.toLowerCase()}" onclick={closeSheet} />
-                  </div>
-                  {@render moreBody()}
-                </div>
-              {/if}
-            {/if}
-          </Panel>
-        </div>
+        <ImagePanel
+          {notice}
+          bind:noticeEl
+          {badFile}
+          {model}
+          chooseWeights={() => weightsInput.click()}
+          browse={() => fileInput.click()}
+          bind:runOn
+          {error}
+          bind:retryTick
+          {oom}
+          {browserOff}
+          {smaller}
+          {localBackend}
+          {chooseModel}
+          {ondragover}
+          {ondragleave}
+          {ondrop}
+          {source}
+          bind:seg
+          {onSeg}
+          {runOnNote}
+          {sourceName}
+          {shortName}
+          {dims}
+          bind:pickerOpen
+          {clear}
+          {dragging}
+          {samples}
+          {setSource}
+          {src}
+          {pred}
+          {kept}
+          {truthBoxes}
+          {classes}
+          {labels}
+          {scores}
+          {only}
+          {activeIdx}
+          {selectedIdx}
+          bind:hover
+          {pickFromImage}
+          {predicting}
+          {engine}
+          {sheetShown}
+          {tablet}
+          bind:conf
+          bind:iou
+          {result}
+          {rows}
+          {hidden}
+          {maxDet}
+          {weightsMissing}
+          bind:moreBtn
+          {closeSheet}
+          bind:moreOpen
+          {sheetTitle}
+          bind:sheetEl
+          {resetButton}
+          {moreBody}
+        />
 
-        <div class="results">
-          <Panel pad="none">
-            <div class="tabs-row">
-              <Tabs
-                label="Result views"
-                idPrefix="pg"
-                bind:value={tab}
-                tabs={[
-                  { value: 'detections', label: 'Detections', meta: result ? String(rows.length) : undefined },
-                  { value: 'json', label: 'JSON' },
-                ]}
-              />
-            </div>
-            <div id="pg-panel" role="tabpanel" aria-labelledby="pg-{tab}">
-              {#if !result}
-                <p class="placeholder">
-                  {predicting ? 'Running inference…' : notice === 'error' ? 'No detections: the last prediction failed.' : 'Detections appear here once you run the model on an image.'}
-                </p>
-              {:else if tab === 'json'}
-                <div class="json-wrap"><JsonView value={json} label="Prediction as JSON" /></div>
-              {:else if !pred?.boxes.length}
-                <!-- Candidates are fetched down to the lowest threshold (FETCH): none means no threshold would show more. -->
-                <p class="placeholder">The model found nothing in this image, even at conf ≥ {FETCH.conf}.</p>
-              {:else if rows.length === 0}
-                <p class="placeholder">
-                  No detections at conf ≥ {conf.toFixed(2)}{hidden.size ? ' in the visible classes' : ''}.
-                  {#if conf > 0.05}<button type="button" class="inline" onclick={() => (conf = Math.max(0.01, +(conf / 2).toFixed(2)))}>Lower the threshold</button>{/if}
-                </p>
-              {:else}
-                <div class="scroll">
-                  <table class="table dense">
-                    <thead>
-                      <tr>
-                        <th scope="col" class="r idx">#</th>
-                        <th scope="col">Class</th>
-                        <th scope="col">Score</th>
-                        <th scope="col" class="r hide-sm coord" title="Box left edge, in image pixels">x1</th>
-                        <th scope="col" class="r hide-sm coord" title="Box top edge, in image pixels">y1</th>
-                        <th scope="col" class="r hide-sm coord" title="Box right edge, in image pixels">x2</th>
-                        <th scope="col" class="r hide-sm coord" title="Box bottom edge, in image pixels">y2</th>
-                        <th scope="col" class="r">Size (px)</th>
-                      </tr>
-                    </thead>
-                    <tbody bind:this={tbody}>
-                      {#each rows as { b, i }, k (i)}
-                        <tr
-                          data-det={i}
-                          tabindex={i === tabRow ? 0 : -1}
-                          class:hot={activeIdx === i}
-                          class:on={selectedIdx === i}
-                          aria-selected={selectedIdx === i ? 'true' : undefined}
-                          aria-label="{b.name}, score {score(b.score)}, {px(b.x2 - b.x1)} by {px(b.y2 - b.y1)} pixels"
-                          onpointerenter={(e) => {
-                            // A tap is not a hover: on touch the selection alone marks the row.
-                            if (e.pointerType !== 'touch') hover = b;
-                          }}
-                          onpointerleave={() => (hover = null)}
-                          onfocus={() => (picked = b)}
-                          onclick={() => (picked = b)}
-                          onkeydown={(e) => onrowkey(e, k)}
-                        >
-                          <td class="r idx faint">{i + 1}</td>
-                          <td class="lead">
-                            <span class="cls">
-                              <span class="sw" style:background={classColor(b.class)} aria-hidden="true"></span>
-                              <span class="truncate">{b.name}</span>
-                            </span>
-                          </td>
-                          <td>
-                            <span class="score">
-                              <span class="s-track" aria-hidden="true"><span style:transform="scaleX({b.score})"></span></span>
-                              <span class="num">{score(b.score)}</span>
-                            </span>
-                          </td>
-                          <td class="r muted hide-sm coord">{px(b.x1)}</td>
-                          <td class="r muted hide-sm coord">{px(b.y1)}</td>
-                          <td class="r muted hide-sm coord">{px(b.x2)}</td>
-                          <td class="r muted hide-sm coord">{px(b.y2)}</td>
-                          <td class="r muted">{px(b.x2 - b.x1)}×{px(b.y2 - b.y1)}</td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
-                </div>
-              {/if}
-            </div>
-          </Panel>
-        </div>
+        <ResultsPanel
+          {result}
+          bind:tab
+          {rows}
+          {predicting}
+          {notice}
+          {json}
+          {pred}
+          bind:conf
+          {hidden}
+          bind:tbody
+          {tabRow}
+          {activeIdx}
+          {selectedIdx}
+          bind:hover
+          bind:picked
+          {onrowkey}
+        />
 
         {#if source && phone.current}
-          <!-- Phones: classes and timing as two disclosures under the detections, folded until asked for. -->
-          <div class="discs">
-            <details class="disc">
-              <summary>
-                <ChevronRight size={14} aria-hidden="true" />
-                <span class="disc-title">Classes</span>
-                {#if result}<span class="disc-meta num">{counts.length} found{hidden.size ? ` · ${hidden.size} hidden` : ''}</span>{/if}
-              </summary>
-              <div class="disc-body">
-                {#if hidden.size}<div class="disc-act">{@render showAllButton()}</div>{/if}
-                {@render classList()}
-              </div>
-            </details>
-            <details class="disc">
-              <summary>
-                <ChevronRight size={14} aria-hidden="true" />
-                <span class="disc-title">Timing</span>
-                {#if pred}<span class="disc-meta num">{ms(pred.timing.total_ms)} · {where}</span>{/if}
-              </summary>
-              <div class="disc-body">{@render timingBody()}</div>
-            </details>
-          </div>
+          <PhoneDetails {result} {counts} {hidden} {pred} {where} {showAllButton} {classList} {timingBody} />
         {/if}
       </div>
 
-      <!-- Phones with an image: Thresholds open as a sheet from the image's footer, the rest folds under the detections. -->
-      <div class="aside" class:tucked={!!source}>
-        <div class="thresholds">
-          <Panel title="Thresholds" divided>
-            {#snippet actions()}{@render resetButton()}{/snippet}
-            <div class="sliders">
-              <Slider label="Confidence" bind:value={conf} min={0.01} max={0.95} step={0.01} hint="Hide boxes scored below this." />
-              {@render secondarySliders(false)}
-            </div>
-            <!-- What is drawn on the image: here rather than on the image's toolbar, which is only as wide as the image
-                 (on phones the same toggles sit in the Thresholds sheet). -->
-            {#if source}<div class="show" role="group" aria-label="Show on the image">{@render displayToggles()}</div>{/if}
-          </Panel>
-        </div>
-
-        <div class="classes">
-          <Panel title="Classes" meta={result ? `${counts.length} found` : undefined} divided>
-            {#snippet actions()}{@render showAllButton()}{/snippet}
-            {@render classList()}
-          </Panel>
-        </div>
-
-        <div class="timing">
-          <Panel title="Timing" meta={pred ? where : undefined} divided>
-            {@render timingBody()}
-          </Panel>
-        </div>
-      </div>
+      <SidePanels
+        {source}
+        {result}
+        {counts}
+        {pred}
+        {where}
+        bind:conf
+        {resetButton}
+        {secondarySliders}
+        {displayToggles}
+        {showAllButton}
+        {classList}
+        {timingBody}
+      />
     </div>
   {/if}
 </Page>
@@ -1056,61 +734,6 @@
 <DatasetPicker bind:open={pickerOpen} prefer={classes} onpick={(ds, img) => setSource({ kind: 'dataset', ds, img })} onclose={() => (seg = source?.kind ?? 'file')} />
 
 <style>
-  /* Label, select and open button on one row; the score's meta line under the select, wrapping, never cut. */
-  .model-pick {
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    align-items: center;
-    gap: var(--space-1) var(--space-2);
-    width: 400px;
-  }
-  .pick-meta {
-    grid-column: 2 / -1;
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-    text-wrap: pretty;
-  }
-  /* Below 1024 px: one full-width toolbar row under the title; the model select takes what Run on leaves (a choice
-     that is off says why in its tip and on the image panel's status line, never in a note that wraps the row). */
-  .pg-tools {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-2) var(--space-6);
-  }
-  .pg-tools .model-pick {
-    flex: 1 1 320px;
-    width: auto;
-    min-width: 0;
-  }
-  .pg-tools .runon {
-    flex-wrap: wrap;
-    row-gap: var(--space-1);
-  }
-  .pg-tools .runon-seg {
-    display: contents;
-  }
-  .model-pick :global(.select) {
-    min-width: 0;
-  }
-  .runon {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-  /* On the title row, Run on sits on the model select's row, not centred on the select and its meta line together. */
-  .model-pick + .runon {
-    align-self: flex-start;
-    min-height: var(--control-md);
-  }
-  .pick-label {
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-  }
-  .runon-seg {
-    display: flex;
-  }
   /* The page grid's 8 + 4 split (the rail is always 4 columns), the same with or without an image. */
   .layout {
     display: grid;
@@ -1119,61 +742,14 @@
     align-items: start;
     --stage-h: max(360px, calc(100dvh - 220px));
   }
-  .main,
-  .aside {
+  .main {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
     gap: var(--space-4);
     min-width: 0;
   }
-  .vbar {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-    min-height: 44px;
-    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--line-subtle);
-  }
-  .seg {
-    flex-shrink: 0;
-    display: flex;
-  }
-  .src-name {
-    min-width: 0;
-    color: var(--text-secondary);
-    font-size: var(--type-sm-size);
-  }
-  .src-dims {
-    color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-    flex-shrink: 0;
-  }
-  .vbar-gap {
-    flex: 1;
-  }
-  /* Why a Run on choice is off, said once on the image panel's status line, at its right end, before an image is in
-     (its tip says it at the control). */
-  /* It yields to the control beside it: on a phone under a coarse pointer the 44 px segments leave it less than a line,
-     so it wraps (right-aligned, at a space) rather than run past the panel's edge. */
-  .vbar-note {
-    min-width: 0;
-    margin-left: auto;
-    padding-right: var(--space-2);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-tertiary);
-    text-align: right;
-  }
-  .show {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 2px;
-    margin-top: var(--space-4);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--line-subtle);
-  }
   /* The first toggle's box lines up with the slider labels above. */
-  .show .tog:first-child {
+  :global(.show) .tog:first-child {
     margin-left: calc(-1 * var(--space-2));
   }
   .tog {
@@ -1211,440 +787,21 @@
     color: var(--text-inverse);
     box-shadow: none;
   }
-  /* The canvas takes the viewport minus the chrome above and below it, empty or not; an image is shown whole in it
-     (contained, centred on the inset well). */
-  .stage {
-    position: relative;
-    height: var(--stage-h);
-    background: var(--bg-inset);
-  }
-  /* Empty, the canvas is as tall as its content (the drop target, 280–480 px, and the samples; DropZone), never held
-     at the viewport's height: a sparse state gets a compact composition (DESIGN_DIRECTION 8). */
-  .stage.empty {
-    height: auto;
-    display: flex;
-    flex-direction: column;
-    border-radius: 0 0 calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px);
-    overflow: hidden;
-  }
-  .scan {
-    position: absolute;
-    inset: 0;
-    overflow: hidden;
-    pointer-events: none;
-  }
-  .scan span {
-    position: absolute;
-    left: 0;
-    right: 0;
-    height: 2px;
-    background: var(--accent-line);
-    box-shadow: 0 0 12px var(--accent-line);
-    opacity: 0.7;
-    animation: scan 1.2s var(--ease-standard) infinite alternate;
-  }
-  @keyframes scan {
-    from {
-      top: 0;
-    }
-    to {
-      top: calc(100% - 2px);
-    }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .scan span {
-      display: none;
-    }
-  }
-  .busy {
-    position: absolute;
-    top: var(--space-3);
-    left: var(--space-3);
-    padding: 2px 8px;
-    border-radius: var(--radius-sm);
-    background: var(--bg-overlay);
-    box-shadow: var(--shadow-md);
-    font-size: var(--type-sm-size);
-    color: var(--text-secondary);
-  }
-  /* A strip between the toolbar and the image: the image stays whole, the notice reads on the panel, not a photo. */
-  .notice {
-    padding: 0 var(--space-4);
-    border-bottom: 1px solid var(--line-subtle);
-  }
-  .need-file {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-3);
-    padding: var(--space-3) 0;
-  }
-  .need-file > :global(svg) {
-    flex-shrink: 0;
-    margin-top: 2px;
-    color: var(--text-tertiary);
-  }
-  .need-file.bad > :global(svg) {
-    color: var(--danger-text);
-  }
-  .nf-body {
-    display: grid;
-    gap: 2px;
-    min-width: 0;
-  }
-  .n-title {
-    font-weight: var(--weight-medium);
-  }
-  .n-title:focus,
-  .notice :global(.title:focus) {
-    outline: none;
-  }
-  .nf-text {
-    color: var(--text-secondary);
-  }
-  .nf-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
-  }
-  .failed-veil {
-    position: absolute;
-    inset: 0;
-    display: grid;
-    place-items: center;
-    padding: var(--space-4);
-    background: color-mix(in srgb, var(--bg-inset) 72%, transparent);
-    pointer-events: none;
-  }
-  .failed-veil span {
-    padding: var(--space-1) var(--space-3);
-    border-radius: var(--radius-sm);
-    background: var(--bg-overlay);
-    box-shadow: var(--shadow-md);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-secondary);
-    text-align: center;
-  }
-  .drop-hint {
-    position: absolute;
-    inset: var(--space-3);
-    display: grid;
-    place-items: center;
-    border-radius: var(--radius-md);
-    border: 1px dashed var(--accent-line);
-    background: color-mix(in srgb, var(--bg-inset) 70%, transparent);
-    font-weight: var(--weight-medium);
-  }
-  .vfoot {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    height: 32px;
-    padding: 0 var(--space-3);
-    border-top: 1px solid var(--line-subtle);
-    font-size: var(--type-sm-size);
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-  }
-  .vfoot b {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  .vfoot .truncate {
-    min-width: 0;
-  }
-  .fi + .fi::before {
-    content: '·';
-    margin-right: var(--space-2);
-    color: var(--text-tertiary);
-  }
-  .qconf,
-  .tap {
-    display: none;
-  }
-  .qconf :global(.slider) {
-    flex: 1;
-    min-width: 0;
-  }
-  .grow {
-    flex: 1;
-  }
-  .tabs-row {
-    padding: 0 var(--space-4);
-  }
-  /* A state in the frame (DESIGN_DIRECTION 8): one line with the panel's 16 px padding, on its left edge, never a
-     centred block held open. */
-  .placeholder {
-    padding: var(--space-4);
-    color: var(--text-tertiary);
-  }
-
-  /* An inline action is a link: text.primary, underlined on hover, never lime (DESIGN_DIRECTION §2.6). */
-  .inline {
-    color: var(--text-primary);
-    font-weight: var(--weight-medium);
-  }
-  .inline:hover {
-    text-decoration: underline;
-    text-underline-offset: 3px;
-  }
-  .json-wrap {
-    padding: var(--space-3);
-  }
-  .scroll {
-    overflow: auto;
-    max-height: 420px;
-  }
-  .scroll thead th {
-    position: sticky;
-    top: 0;
-    background: var(--bg-panel);
-    z-index: 1;
-  }
-  .idx {
-    width: 40px;
-  }
-  /* x1 y1 x2 y2 read as one group: tighter gaps between the four coordinate columns. */
-  .table .coord + .coord {
-    padding-left: var(--space-2);
-  }
-  .table .coord {
-    font-variant-numeric: tabular-nums;
-  }
-  tbody tr {
-    transition: background-color var(--dur-fast) var(--ease-standard);
-  }
-  tbody tr {
-    cursor: pointer;
-  }
-  /* Hover (the pointer, or the box under it on the image) is a light step, only where a pointer can hover, and never
-     on the selected row, which keeps the selection's fill (base.css .on): one highlight per meaning. */
-  @media (hover: hover) {
-    tbody tr:hover:not(.on),
-    tbody tr.hot:not(.on) {
-      background: var(--bg-hover);
-    }
-  }
-  .cls {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    max-width: 180px;
-  }
-  .sw {
-    width: 8px;
-    height: 8px;
-    border-radius: 2px;
-    flex-shrink: 0;
-  }
-  /* Class marks keep the palette hue in both themes; a hairline edge holds pale hues on light surfaces. */
-  :global([data-theme='light']) .sw,
-  :global([data-theme='light']) .c-bar span {
-    box-shadow: inset 0 0 0 1px #0a0e1433;
-  }
-  .score {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--space-2);
-  }
-  .s-track,
-  .c-bar {
-    position: relative;
-    width: 72px;
-    height: 4px;
-    border-radius: var(--radius-full);
-    background: var(--bg-active);
-    overflow: hidden;
-  }
-  .s-track span,
-  .c-bar span {
-    position: absolute;
-    inset: 0;
-    transform-origin: left;
-    border-radius: inherit;
-  }
-  /* The table's one inline bar is neutral ink (the hue is on the swatch); the hovered or selected row's in primary. */
-  .s-track span {
-    background: var(--text-tertiary);
-    transition: background-color var(--dur-fast) var(--ease-standard);
-  }
-  tbody tr:hover .s-track span,
-  tbody tr.hot .s-track span,
-  tbody tr.on .s-track span {
-    background: var(--text-primary);
-  }
-  .sliders {
-    display: grid;
-    gap: var(--space-5);
-  }
-  /* Threshold values are numbers, not code: sans with tabular numerals. */
-  .sliders :global(output.val),
-  .qconf :global(output.val) {
-    font-family: var(--font-sans);
-    font-variant-numeric: tabular-nums;
-  }
-  .pick-line {
-    display: none;
-  }
   .hint {
     color: var(--text-tertiary);
-    font-size: var(--type-sm-size);
-  }
-  .counts {
-    display: grid;
-    margin: 0 calc(-1 * var(--space-2));
-  }
-  .counts button {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    width: 100%;
-    height: 28px;
-    padding: 0 var(--space-2);
-    border-radius: var(--radius-sm);
-    transition:
-      background-color var(--dur-fast) var(--ease-standard),
-      opacity var(--dur-fast) var(--ease-standard);
-  }
-  .counts button:hover {
-    background: var(--bg-hover);
-  }
-  .counts button.off {
-    opacity: 0.4;
-  }
-  /* The row's state, before its swatch: an eye in ink while shown, a struck one (dimmed with the row) when hidden. */
-  .vis {
-    display: flex;
-    flex: none;
-    color: var(--text-secondary);
-  }
-  .off .vis {
-    color: var(--text-tertiary);
-  }
-  .counts button.off .c-name {
-    text-decoration: line-through;
-  }
-  .counts button:focus-visible {
-    outline-offset: -2px;
-  }
-  .c-name {
-    flex: 1;
-    min-width: 0;
-    text-align: left;
-  }
-  .c-bar {
-    width: 64px;
-  }
-  .c-n {
-    min-width: 24px;
-    text-align: right;
     font-size: var(--type-sm-size);
   }
   .t-sk {
     display: grid;
     gap: var(--space-3);
   }
-  /* Phones: the threshold sheet. Slider labels share one width so the tracks line up with Confidence. */
-  .sheet {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
-    z-index: var(--z-overlay);
-    display: flex;
-    flex-direction: column;
-    max-height: 45dvh;
-    background: var(--bg-overlay);
-    border-top: 1px solid var(--line-default);
-    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
-    box-shadow: var(--shadow-lg);
-    animation: sheet-in var(--dur-slow) var(--ease-out);
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  .sheet:focus {
-    outline: none;
-  }
-  @keyframes sheet-in {
-    from {
-      transform: translateY(100%);
-    }
-  }
-  .sheet-head {
-    position: relative;
-    display: flex;
-    align-items: center;
-    gap: var(--space-1);
-    min-height: 48px;
-    padding: var(--space-2) var(--space-2) 0 var(--space-4);
-    touch-action: none;
-  }
-  .sheet-head h2 {
-    flex: 1;
-    font-size: var(--type-md-size);
-    line-height: var(--type-md-line);
-    letter-spacing: var(--type-md-tracking);
-    font-weight: var(--weight-medium);
-  }
   .sheet-body {
     overflow-y: auto;
     overscroll-behavior: contain;
     padding: 0 var(--space-4) var(--space-3);
   }
-  .discs {
-    display: grid;
-    gap: var(--space-2);
-    order: 3;
-  }
-  .disc {
-    border: 1px solid var(--line-panel);
-    border-radius: var(--radius-lg);
-    background: var(--bg-panel);
-  }
-  .disc summary {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-    min-height: 44px;
-    padding: 0 var(--space-4);
-    list-style: none;
-    cursor: pointer;
-    border-radius: inherit;
-  }
-  .disc summary::-webkit-details-marker {
-    display: none;
-  }
-  .disc summary :global(svg) {
-    flex-shrink: 0;
-    color: var(--text-tertiary);
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  .disc[open] summary :global(svg) {
-    transform: rotate(90deg);
-  }
-  .disc summary:focus-visible {
-    outline-offset: -2px;
-  }
-  .disc-title {
-    font-weight: var(--weight-medium);
-  }
-  .disc-meta {
-    margin-left: auto;
-    font-size: var(--type-sm-size);
-    color: var(--text-tertiary);
-  }
-  .disc-body {
-    padding: 0 var(--space-4) var(--space-4);
-  }
-  .disc-act {
-    display: flex;
-    justify-content: flex-end;
-    margin-bottom: var(--space-1);
-  }
   /* One label column and one value column: every track (the pinned Confidence, the sheet's three) starts and ends at
      the same x. */
-  .qconf :global(.slider.inline),
   .more-sliders :global(.slider.inline) {
     grid-template-columns: 112px minmax(0, 1fr) 40px;
   }
@@ -1659,21 +816,7 @@
     min-height: 44px;
     margin-left: calc(-1 * var(--space-2));
   }
-  .more-btn {
-    display: none;
-    flex-shrink: 0;
-  }
-  .more-btn :global(svg) {
-    transition: transform var(--dur-fast) var(--ease-standard);
-  }
-  .more-btn :global([aria-expanded='true'] svg) {
-    transform: rotate(180deg);
-  }
   @media (pointer: coarse) {
-    .table.dense td {
-      height: 44px;
-    }
-    .counts button,
     .more-toggles .tog {
       height: 44px;
     }
@@ -1682,276 +825,23 @@
     .layout {
       grid-template-columns: minmax(0, 1fr);
     }
-    /* One column: the canvas takes the image's aspect at the full width, up to the canvas height, so the image fills
-       it edge to edge; empty, it is as tall as its content (the drop target and the samples, DropZone), never held at
-       the viewport's height: a sparse state gets a compact composition, so the samples sit in the first screen. */
-    .layout.fit .stage {
-      height: auto;
-      aspect-ratio: var(--ar);
-      max-height: var(--stage-h);
-      /* Edge to edge, inset by the boxes' halo (lib/detect/DetectionView): a box on the image's edge keeps its outer
-         stroke inside the frame, never cut by the viewport or the panel's edge. */
-      padding: var(--space-1);
-    }
-    .stage.empty {
-      height: auto;
-      min-height: 0;
-    }
-    /* The toolbar row takes the title row's place for the controls; no extra gap under the title. */
-    .pg-tools {
-      margin-top: calc(-1 * var(--space-1));
-    }
     /* One column: interleave the panels so the controls sit right under the image. */
-    .main,
-    .aside {
+    .main {
       display: contents;
     }
-    .viewer {
-      order: 1;
-    }
-    .thresholds {
-      order: 2;
-    }
-    .results {
-      order: 3;
-    }
-    .classes {
-      order: 4;
-    }
-    .timing {
-      order: 5;
-    }
   }
-  /* Tablets: the rail is a two-column block under the image, Thresholds beside Classes over Timing, then the
-     detections full width. */
   @media (min-width: 768px) and (max-width: 1023px) {
-    .aside {
-      order: 2;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      grid-template-rows: auto 1fr;
-      gap: var(--space-4);
-    }
-    .thresholds {
-      grid-row: span 2;
-    }
-    .thresholds {
-      display: grid;
-    }
-    /* Content-sized: Timing sits right under Classes and is as tall as what it holds (one line before a run), never
-       stretched to Thresholds' height. */
-    .timing {
-      align-self: start;
-    }
     /* With an image: the canvas at most half the viewport (a square photo letterboxed on bg.inset), Confidence and
        Overlap in one strip right under it, the rest in the sheet; the Thresholds panel steps out and Classes sits
        beside Timing. */
     .layout.fit {
       --stage-h: 50dvh;
     }
-    .aside.tucked .thresholds {
-      display: none;
-    }
-    .aside.tucked {
-      grid-template-rows: auto;
-    }
-    /* Side by side, the two panels end together (DESIGN_DIRECTION 2). */
-    .aside.tucked .classes,
-    .aside.tucked .timing {
-      display: grid;
-      align-self: stretch;
-    }
-    .qconf {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: var(--space-6);
-      align-items: center;
-      min-height: 48px;
-      padding: 0 var(--space-4);
-      border-top: 1px solid var(--line-subtle);
-    }
-    .qconf :global(.slider.inline) {
-      grid-template-columns: auto minmax(0, 1fr) 40px;
-    }
-    .qconf :global(output.val) {
-      font-family: var(--font-sans);
-      font-variant-numeric: tabular-nums;
-    }
-    .more-btn {
-      display: inline-flex;
-    }
-    .vfoot .wide {
-      display: none;
-    }
-    /* The settings the strip leaves out: a popover anchored under its button, its right edge on the button's, over
-       the panels below (never the image or the strip). Transient settings are popovers above 767 px (DESIGN_DIRECTION
-       9): no handle, no scrim, no edge it can be clipped at. */
-    .viewer {
-      position: relative;
-    }
-    .pop {
-      position: absolute;
-      top: calc(100% + 6px);
-      right: var(--space-2);
-      z-index: var(--z-overlay);
-      width: 360px;
-      background: var(--bg-overlay);
-      border: 1px solid var(--line-default);
-      border-radius: var(--radius-lg);
-      box-shadow: var(--shadow-lg);
-      color: var(--text-primary);
-      font-size: var(--type-base-size);
-      white-space: normal;
-      animation: pop-in var(--dur-fast) var(--ease-out);
-    }
-    .pop:focus {
-      outline: none;
-    }
-    .pop-head {
-      display: flex;
-      align-items: center;
-      gap: var(--space-1);
-      min-height: 40px;
-      padding: var(--space-1) var(--space-2) 0 var(--space-4);
-    }
-    .pop-head h2 {
-      flex: 1;
-      font-size: var(--type-md-size);
-      line-height: var(--type-md-line);
-      font-weight: var(--weight-medium);
-    }
-    @keyframes pop-in {
-      from {
-        opacity: 0;
-        transform: translateY(-2px);
-      }
-    }
   }
   @media (max-width: 767px) {
-    /* Phones: two rows, the model, then Run on with its control on the right; the note a row of its own under them. */
-    .pg-tools {
-      flex-direction: column;
-      align-items: stretch;
-      gap: var(--space-2);
-      margin-top: 0;
-    }
-    .pg-tools .model-pick {
-      flex: none;
-    }
-    .pg-tools .runon {
-      justify-content: space-between;
-    }
-    /* The image goes edge to edge; its bars keep the 16 px gutter inside. */
-    .viewer.loaded {
-      margin: 0 calc(-1 * var(--space-4));
-    }
-    .viewer.loaded :global(.panel) {
-      border-left: 0;
-      border-right: 0;
-      border-radius: 0;
-    }
-    .viewer.loaded .vbar,
-    .viewer.loaded .vfoot,
-    .viewer.loaded .notice,
-    .viewer.loaded .pick-line,
-    .viewer.loaded .qconf {
-      padding-left: var(--space-4);
-      padding-right: var(--space-4);
-    }
-    .viewer.loaded .vbar {
-      padding-right: var(--space-2);
-      gap: var(--space-2);
-    }
-    .viewer.loaded .vfoot {
-      height: auto;
-      min-height: 40px;
-      padding-right: var(--space-2);
-    }
-    .more-btn {
-      display: inline-flex;
-    }
     /* The open sheet covers the lower part of the screen: leave room to scroll the detections above it. */
-    .layout:has(.sheet) {
+    .layout:has(:global(.sheet)) {
       padding-bottom: 45dvh;
-    }
-    .aside.tucked,
-    .vbar .src-dims {
-      display: none;
-    }
-    .vbar .src-name {
-      display: block;
-      flex: 1;
-    }
-    .vbar-gap {
-      display: none;
-    }
-    .vbar :global(.replace .label) {
-      display: none;
-    }
-    .vbar :global(.replace) {
-      width: var(--control-sm);
-      padding: 0;
-    }
-    .vfoot .wide {
-      display: none;
-    }
-    .tap {
-      display: inline;
-      color: var(--text-tertiary);
-    }
-    .pick-line {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      min-height: 32px;
-      padding: 0 var(--space-3);
-      border-top: 1px solid var(--line-subtle);
-      font-size: var(--type-sm-size);
-      color: var(--text-secondary);
-      white-space: nowrap;
-      overflow: hidden;
-    }
-    /* Nothing picked: the live region stays in the tree but takes no room. */
-    .pick-line.empty {
-      min-height: 0;
-      border-top: 0;
-    }
-    .pick-line b {
-      color: var(--text-primary);
-      font-weight: var(--weight-medium);
-    }
-    .pick-line .sep {
-      color: var(--text-tertiary);
-    }
-    /* The open sheet holds Confidence as its first row; the pinned copy under it keeps its room but steps out. */
-    .qconf.covered {
-      visibility: hidden;
-    }
-    .qconf {
-      display: flex;
-      align-items: center;
-      gap: var(--space-3);
-      min-height: 48px;
-      padding: 0 var(--space-3);
-      border-top: 1px solid var(--line-subtle);
-    }
-    .stage,
-    .layout.fit .stage {
-      height: auto;
-      aspect-ratio: var(--ar, 4 / 3);
-      max-height: 70vh;
-    }
-    /* Full bleed: the image inset by the boxes' halo, so a box on its edge keeps its outer stroke on screen. */
-    .stage:not(.empty) {
-      padding: var(--space-1);
-    }
-    .stage.empty {
-      aspect-ratio: auto;
-      max-height: none;
-      min-height: 0;
-    }
-    .vfoot .faint {
-      display: none;
     }
   }
 </style>
