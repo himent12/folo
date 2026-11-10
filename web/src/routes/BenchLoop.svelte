@@ -81,6 +81,26 @@
   });
   const student = $derived(loop?.config.student?.arch ?? null);
   const known = <T extends { id: string }>(list: readonly T[] | undefined, x: string | null) => !!x && !!list?.some((y) => y.id === x);
+  // A live loop makes datasets, runs and models the lists loaded at mount do not have yet: a loop event naming an id
+  // a list does not know refetches that list (once per id), and only an id still missing from a list fetched after it
+  // appeared is called deleted.
+  const asked = $state<Record<string, true>>({});
+  $effect(() => {
+    const l = loop;
+    if (!l) return;
+    const want: [Resource<{ id: string }[]>, string | null][] = l.generations.flatMap((g) => [
+      [datasets, g.labels?.dataset_id ?? null],
+      [runs, g.run_id],
+      [models, g.model_id],
+    ] as [Resource<{ id: string }[]>, string | null][]);
+    for (const [r, x] of want) {
+      if (!x || !r.data || asked[x] || known(r.data, x)) continue;
+      asked[x] = true;
+      void r.refresh();
+    }
+  });
+  /** Whether an id is gone: asked for after it appeared, and still not in a list that is no longer loading. */
+  const gone = <T extends { id: string }>(r: Resource<T[]>, x: string | null) => !!x && !!r.data && !r.loading && !r.refreshing && !!asked[x] && !known(r.data, x);
   const entryKnown = (x: string | null) => !!x && live.entries.some((e) => e.id === x);
 
   // ---- the chart ----
@@ -351,8 +371,8 @@
                 <td class="hide-md">
                   {#if g?.labels}
                     <Meta>
-                      <span>{#if known(datasets.data, g.labels.dataset_id)}<a class="link" href={href(`/datasets/${g.labels.dataset_id}`)}>dataset</a>{:else if datasets.data}<span class="faint" title="No longer on this server">dataset deleted</span>{:else}<span class="faint">dataset</span>{/if}</span>
-                      {#if g.run_id}<span>{#if known(runs.data, g.run_id)}<a class="link" href={href(`/runs/${g.run_id}`)}>run</a>{:else if runs.data}<span class="faint" title="No longer on this server">run deleted</span>{:else}<span class="faint">run</span>{/if}</span>{/if}
+                      <span>{#if known(datasets.data, g.labels.dataset_id)}<a class="link" href={href(`/datasets/${g.labels.dataset_id}`)}>dataset</a>{:else if gone(datasets, g.labels.dataset_id)}<span class="faint" title="No longer on this server">dataset deleted</span>{:else}<span class="faint">dataset</span>{/if}</span>
+                      {#if g.run_id}<span>{#if known(runs.data, g.run_id)}<a class="link" href={href(`/runs/${g.run_id}`)}>run</a>{:else if gone(runs, g.run_id)}<span class="faint" title="No longer on this server">run deleted</span>{:else}<span class="faint">run</span>{/if}</span>{/if}
                     </Meta>
                   {:else}<span class="faint">{k === 0 ? 'none' : '—'}</span>{/if}
                 </td>

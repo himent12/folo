@@ -1196,7 +1196,7 @@ export interface CreateBench {
   source: BenchSource;
   /** At most this many images (1 to 5000, default 500), sampled with `seed` when the source has more. */
   max_images?: number | null;
-  /** Default 0. */
+  /** The sample's seed (default 0): a whole number from 0 to 2^53 − 1 (JSON's exact integers; larger is a `400`). */
   seed?: number;
   /** Absent: the catalog's `default_plan`. */
   plan?: BenchPlan | null;
@@ -1294,14 +1294,18 @@ export type BenchContestantSpec =
    * `open: false` (the default): `predictions` is the whole entry, scored in the request (up to 64 MiB). `open: true`:
    * the entry is created `running`, to be filled in parts (`POST …/entries/{entry_id}/predictions`, `BenchPredictions`)
    * and scored by `POST …/entries/{entry_id}/finish`; `predictions` here, if any, is its first part. An open entry is
-   * active; stopping it discards it.
+   * active (it freezes the plan); stopping it discards what it received and leaves it `stopped` until deleted; with no
+   * part for 30 minutes it fails ("no predictions arrived for 30 minutes"); it holds at most 20 million boxes (a `400`
+   * says to send pass by pass).
    */
   | { kind: 'external'; scored?: boolean; open?: boolean; predictions?: BenchPrediction[] };
 
 /**
  * `POST /api/bench/benchmarks/{id}/entries/{entry_id}/predictions`: a part of an open external entry (up to 64 MiB),
  * all or nothing: `400 invalid_body` names the first bad record (a record for an image, condition and severity already
- * received is one) and adds nothing. `409 bench_entry_not_open` on any entry that is not an open external one.
+ * received with other boxes is one) and adds nothing. A record received before with the same boxes is taken again and
+ * adds nothing, so a part whose answer was lost can be sent again. `409 bench_entry_not_open` on any entry that is not
+ * an open external one.
  */
 export interface BenchPredictions {
   predictions: BenchPrediction[];
@@ -1532,16 +1536,22 @@ export interface BenchLabelPoint {
 export interface BenchSelfLabeling {
   /** The precision labels must reach (0.9). */
   target_precision: number;
-  /** The lowest confidence at which the kept detections are that precise; null when none is (and without confidences). */
+  /**
+   * The lowest confidence on the grid at which the kept detections are that precise and at least 10 of them are kept
+   * (a precision on fewer is no support); null when none is (and without confidences, whose one operating point
+   * reaches the target only with at least 10 detections).
+   */
   threshold: number | null;
-  /** Precision of the labels at `threshold` (of all detections without confidences). */
+  /** Precision of the labels at `threshold` (of all detections when there is none). */
   precision: number;
   /** The share of all true boxes those labels find: the self-labeling axis, 0 when the target is not reached. */
   recall: number;
   /** Mean IoU of the right ones with their true boxes; null when there are none. */
   mean_iou: number | null;
-  /** Labels per image at `threshold`. */
+  /** Labels per image at `threshold` (of all detections when there is none). */
   labels_per_image: number;
+  /** Labels (detections) kept at `threshold`; all detections when there is none. */
+  labels: number;
   readiness: BenchReadiness;
   /** Precision and recall at each confidence 0.00, 0.01, …, 1.00 (one point without confidences). */
   curve: BenchLabelPoint[];
@@ -1619,8 +1629,9 @@ export interface StartBenchLoop {
   /** 1 to 5 (default 1). */
   generations?: number | null;
   /**
-   * Keep a teacher's detections from this confidence up; absent: the threshold its benchmark entry found (0.5 without
-   * one). A teacher that keeps a box on fewer than 10 pool images at it fails the loop at labeling.
+   * Keep a teacher's detections from this confidence up; absent: the threshold its benchmark entry found. A loop never
+   * guesses one: with none set and no threshold in the teacher's entry, it fails before labeling (its `hint` says to
+   * set this). A teacher that keeps a box on fewer than 10 pool images at it fails the loop at labeling.
    */
   min_confidence?: number | null;
   student?: BenchStudent;

@@ -36,7 +36,7 @@ import type {
   UpdateBench,
 } from '../types';
 import { AGENT_NAME } from '../../label';
-import { checkPredictions } from '../../bench/external';
+import { checkPredictions, predictionKey } from '../../bench/external';
 import { clonePlan, planError } from '../../bench/plan';
 import {
   AGENT_IMAGES,
@@ -50,6 +50,7 @@ import {
   isEntryActive,
   isLoopActive,
   MAX_SEVERITY,
+  planFreezes,
   rankEntries,
 } from '../../bench/rules';
 import { f1 } from '../../bench/score';
@@ -133,8 +134,11 @@ export interface MEntry {
   usage: LabelUsage | null;
   speed: { device: string; ms_per_image: number } | null;
   lastEmit: number;
-  /** An open external entry: the records received so far, and their (image, condition, severity) keys. */
-  open?: { records: BenchPrediction[]; keys: Set<string> } | null;
+  /**
+   * An open external entry: the records received so far, their (image, condition, severity) keys and boxes (a retried
+   * part is recognised by them), its boxes, and when its last part arrived.
+   */
+  open?: { records: BenchPrediction[]; keys: Set<string>; byKey: Map<string, string>; boxes: number; lastPart: number } | null;
 }
 
 export interface MLoop {
@@ -212,6 +216,27 @@ export function starvedError(teacher: string, boxes: number, labeled: number, im
   };
 }
 
+/**
+ * The server's message when a loop has no confidence to keep a teacher's labels from: none set, and the teacher's
+ * entry found no self-labeling threshold (a loop never guesses one).
+ */
+export function noThresholdError(teacher: string): { error: string; hint: string } {
+  return {
+    error: `'${teacher}' never reaches 90% precision on at least 10 labels on this benchmark, so there is no confidence to label the pool from`,
+    hint: "set min_confidence: its entry's self-labeling chart shows what each confidence costs in precision and coverage",
+  };
+}
+
+/** An open external entry fails after this long without a part. */
+export const OPEN_IDLE_MS = 30 * 60 * 1000;
+/** The most boxes an open external entry holds (the server's). */
+export const OPEN_BOXES_MAX = 20_000_000;
+let openBoxesMax = OPEN_BOXES_MAX;
+/** Tests: a smaller cap, so its refusal can be seen without 20 million boxes. */
+export const setOpenBoxesMax = (n: number) => (openBoxesMax = n);
+/** The largest seed a request may carry: JSON's exact integers. */
+export const SEED_MAX = Number.MAX_SAFE_INTEGER;
+
 /** A teacher's labels per benchmark image at a confidence, read off its result's self-labeling curve. */
 export function labelsPerImage(r: Pick<GeneratedResult, 'self_labeling'>, images: number, threshold: number): number {
   const curve = r.self_labeling.curve;
@@ -256,10 +281,14 @@ export class MockBench {
     this.#loops.unshift(l);
   }
 
-  /** An id that is not taken: `prefix_` and four hex digits. */
-  id(prefix: string, salt: string): string {
+  /** An id that is not taken: `prefix_` and `digits` hex digits (a new benchmark's are 12, as the server's are now). */
+  id(prefix: string, salt: string, digits = 4): string {
     for (let k = 0; ; k++) {
-      const id = `${prefix}_${hex(hash(`${salt}:${this.#next++}:${k}`))}`;
+      const n = this.#next++;
+      const id =
+        digits <= 4
+          ? `${prefix}_${hex(hash(`${salt}:${n}:${k}`))}`
+          : `${prefix}_${Array.from({ length: Math.ceil(digits / 8) }, (_, i) => hex(hash(`${salt}:${n}:${k}:${i}`), 8)).join('').slice(0, digits)}`;
       if (!this.#benches.some((b) => b.id === id) && !this.#entries.some((e) => e.id === id) && !this.#loops.some((l) => l.id === id)) return id;
     }
   }
@@ -470,6 +499,7 @@ export class MockBench {
     const where = body.source.kind === 'dataset' ? `the ${body.source.split ?? 'val'} split of ${src.name}` : src.name;
     if (!src.images.length) throw new ApiError(400, 'invalid_dataset', `${where[0]!.toUpperCase()}${where.slice(1)} has no labeled image.`, body.source.kind === 'label_job' ? 'Label some of its images first.' : 'Pick a split that has images.');
     const seed = body.seed ?? 0;
+    if (!Number.isSafeInteger(seed) || seed < 0) throw new ApiError(400, 'invalid_body', `field \`seed\`: a whole number from 0 to ${SEED_MAX}`);
     // A seeded shuffle, then the first `max_images`: the sample when the source has more, the order either way.
     const r = rng(hash(`bench:${seed}:${body.name}`));
     const order = src.images.map((_, i) => i);
@@ -479,7 +509,7 @@ export class MockBench {
     }
     const images = order.slice(0, max).map((k, n) => ({ ...src.images[k]!, id: String(n + 1) }));
     const b: MBench = {
-      id: this.id('bn', body.name + now),
+      id: this.id('bn', body.name + now, 12),
       name: body.name.trim(),
       description: body.description ?? '',
       classes: src.classes,
@@ -499,8 +529,9 @@ export class MockBench {
     this.advance(now);
     this.#checkFields(body);
     if (body.plan) {
-      const n = this.#entriesOf(b).length;
-      if (n) throw new ApiError(409, 'bench_frozen', `${b.name} has ${n} ${n === 1 ? 'entry' : 'entries'}: its plan is fixed so they stay comparable.`, 'Delete its entries, or make a new benchmark with the plan you want.');
+      // Frozen only by an entry that finished or is under way: a failed or stopped one graded nothing to keep comparable.
+      const n = this.#entriesOf(b).filter((e) => planFreezes(this.#status(e, now))).length;
+      if (n) throw new ApiError(409, 'bench_frozen', `${b.name} has ${n} finished or running ${n === 1 ? 'entry' : 'entries'}: its plan is fixed so they stay comparable.`, 'Delete those entries, or make a new benchmark with the plan you want.');
       this.#checkPlan(body.plan);
     }
     if (body.name !== undefined) b.name = body.name.trim();
@@ -704,7 +735,7 @@ export class MockBench {
         duration: Infinity,
         usage: null,
         speed: null,
-        open: { records: [...first], keys },
+        open: { records: [...first], keys, byKey: new Map(first.map((r) => [predictionKey(r.image, r.condition, r.severity), JSON.stringify(r.boxes)])), lastPart: now, boxes: first.reduce((n, r) => n + r.boxes.length, 0) },
       };
     } else {
       const check = checkPredictions(c.predictions ?? [], this.#ctx(b));
@@ -755,16 +786,38 @@ export class MockBench {
     return e as MEntry & { open: NonNullable<MEntry['open']> };
   }
 
-  /** A part of an open external entry: all of it or nothing (a repeated record is refused like any wrong one). */
+  /**
+   * A part of an open external entry, all of it or nothing: a record already received with the same boxes is taken
+   * again and adds nothing (a part retried after a lost answer), one with other boxes is refused; the entry holds at
+   * most OPEN_BOXES_MAX boxes.
+   */
   sendPredictions(id: string, entryId: string, predictions: BenchPrediction[], now: number): BenchEntry {
     const b = this.#bench(id);
     this.advance(now);
     const e = this.#open(b, entryId, now);
+    const fresh: BenchPrediction[] = [];
+    for (const [i, r] of (predictions ?? []).entries()) {
+      const k = r && typeof r.image === 'string' ? predictionKey(r.image, r.condition, r.severity) : null;
+      const had = k !== null ? e.open.byKey.get(k) : undefined;
+      if (had === undefined) fresh.push(r);
+      else if (had !== JSON.stringify(r.boxes))
+        throw new ApiError(400, 'invalid_body', `Record ${i + 1}: image "${r.image}"${r.condition ? ` under ${r.condition} ${r.severity}` : ''} was received before with other boxes.`);
+    }
     const keys = new Set(e.open.keys);
-    const check = checkPredictions(predictions ?? [], this.#ctx(b), { part: true, seen: keys });
+    const check = checkPredictions(fresh, this.#ctx(b), { part: true, seen: keys });
     if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
-    e.open.records.push(...predictions);
+    const boxes = e.open.boxes + fresh.reduce((n, r) => n + r.boxes.length, 0);
+    if (boxes > openBoxesMax)
+      throw new ApiError(
+        400,
+        'invalid_body',
+        `this part would make the entry hold ${boxes} boxes in memory, more than its ${openBoxesMax}: send it pass by pass (the unchanged images, then each condition and severity), so each condition's severity is graded and let go of as soon as all its images are in`,
+      );
+    e.open.records.push(...fresh);
+    for (const r of fresh) e.open.byKey.set(predictionKey(r.image, r.condition, r.severity), JSON.stringify(r.boxes));
     e.open.keys = keys;
+    e.open.boxes = boxes;
+    e.open.lastPart = now;
     const out = this.toEntry(e, now);
     this.#emit(b.id, (h) => h.entry?.(out));
     return out;
@@ -840,12 +893,11 @@ export class MockBench {
     const status = this.#status(e, now);
     if (!isEntryActive({ status })) throw new ApiError(409, 'bench_entry_not_active', `${e.name} is ${status}: nothing to stop.`);
     if (e.open) {
-      // An open external entry is discarded: nothing half-filled stays on the leaderboard.
+      // An open external entry: what it received is discarded and it ends stopped, on the leaderboard until deleted.
       e.end = { status: 'stopped', at: now, error: null, hint: null };
       e.open = null;
       const out = this.toEntry(e, now);
-      this.#entries = this.#entries.filter((x) => x !== e);
-      this.#emit(b.id, (h) => h.removed?.({ id: e.id }));
+      this.#emit(b.id, (h) => h.entry?.(out));
       const bench = this.toBench(b);
       this.#emit(b.id, (h) => h.bench?.(bench));
       return out;
@@ -897,6 +949,14 @@ export class MockBench {
     const gens = body.generations ?? 1;
     if (!Number.isInteger(gens) || gens < 1 || gens > GENERATIONS_MAX) throw new ApiError(400, 'invalid_body', `field \`generations\`: 1 to ${GENERATIONS_MAX}`);
     if (body.min_confidence != null && !(body.min_confidence >= 0 && body.min_confidence <= 1)) throw new ApiError(400, 'invalid_body', 'field `min_confidence`: 0 to 1');
+    // The students' settings, checked as POST /api/runs checks a run's, before anything is made.
+    const w = body.student?.weights;
+    if (w && !this.host.models().some((x) => x.id === w)) throw new ApiError(404, 'model_not_found', `No model with id ${w} (student.weights).`, 'List models with GET /api/models.');
+    const dev = body.student?.device;
+    if (dev && dev !== 'auto' && dev !== 'cpu' && dev !== 'gpu:0') throw new ApiError(404, 'device_not_found', `No device ${dev} on this machine.`, 'Devices: cpu, gpu:0.');
+    if (body.student?.imgsz != null && body.student.imgsz < 64) throw new ApiError(400, 'invalid_config', `imgsz must be at least 64 for training, got ${body.student.imgsz}`);
+    const seed = body.student?.seed ?? 0;
+    if (!Number.isSafeInteger(seed) || seed < 0) throw new ApiError(400, 'invalid_body', `field \`student.seed\`: a whole number from 0 to ${SEED_MAX}`);
     const pool = this.sourceImages(body.pool.kind === 'dataset' ? { ...body.pool, split: body.pool.split ?? 'train' } : body.pool, now);
     const inBench = new Set(b.images.map((i) => ('spec' in i.from ? `${i.from.spec.id}/${i.from.index}` : i.from.key)));
     const excluded = pool.images.filter((i) => inBench.has('spec' in i.from ? `${i.from.spec.id}/${i.from.index}` : i.from.key)).length;
@@ -965,6 +1025,13 @@ export class MockBench {
    * stream, and a running entry's progress at most twice a second.
    */
   advance(now: number) {
+    // An open external entry that has had no part for OPEN_IDLE_MS fails (its sender is gone).
+    for (const e of this.#entries) {
+      if (!e.open || now - e.open.lastPart < OPEN_IDLE_MS) continue;
+      e.open = null;
+      e.end = { status: 'failed', at: now, error: 'no predictions arrived for 30 minutes', hint: 'start it again (POST /api/bench/benchmarks/{id}/entries with contestant.open: true) and send its parts without long pauses' };
+      this.#tell(e, now);
+    }
     for (let guard = 0; guard < 200; guard++) {
       if (!this.#step(now)) break;
     }
@@ -1095,7 +1162,14 @@ export class MockBench {
       // images it kept nothing on are left out, and with fewer than MIN_LABELED_IMAGES the loop fails here.
       const teacher = l.generations[s.gen - 1]!;
       const te = this.#entries.find((x) => x.id === teacher.entry_id);
-      const threshold = l.config.min_confidence ?? te?.result?.self_labeling.threshold ?? 0.5;
+      const threshold = l.config.min_confidence ?? te?.result?.self_labeling.threshold ?? null;
+      if (threshold === null) {
+        // Checked when the generation starts (#afterBenchmark); here only if the entry changed under it.
+        const why = noThresholdError(teacher.model_name ?? l.teacher.name);
+        l.end = { status: 'failed', at, error: why.error, hint: why.hint };
+        l.step = null;
+        return tell();
+      }
       const imgs = l.pool.images - l.pool.excluded;
       const per = te?.result ? labelsPerImage(te.result, te.images, threshold) : 0;
       const kept = poolLabels(imgs, per, `${l.id}:${s.gen}`);
@@ -1133,6 +1207,13 @@ export class MockBench {
     }
     l.generations.push({ generation: s.gen + 1, labels: null, run_id: null, model_id: null, model_name: null, entry_id: null, score: null, map50_95: null, ci95: null });
     l.step = { gen: s.gen + 1, phase: 'labeling', at, entryId: null };
+    // No confidence to keep labels from (none set, none found by the teacher's entry): it fails before labeling.
+    const te = this.#entries.find((x) => x.id === l.generations[s.gen]?.entry_id);
+    if (l.config.min_confidence == null && te?.result && te.result.self_labeling.threshold === null) {
+      const why = noThresholdError(l.generations[s.gen]?.model_name ?? l.teacher.name);
+      l.end = { status: 'failed', at, error: why.error, hint: why.hint };
+      l.step = null;
+    }
   }
 
   #fillGeneration(l: MLoop, gen: number, e: MEntry) {

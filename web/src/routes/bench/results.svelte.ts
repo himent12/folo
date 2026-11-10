@@ -11,8 +11,11 @@ const PARALLEL = 4;
 
 export class BenchResults {
   #results = new SvelteMap<string, BenchResult>();
-  /** Entries asked for (or failed): never asked twice by the same page. */
+  /** Per entry, the error of its last load: a page shows it with a retry instead of a skeleton forever. */
+  #errors = new SvelteMap<string, unknown>();
+  /** Entries asked for: never asked twice by the same page, unless `retry` asks again. */
   #asked = new Set<string>();
+  #again = $state(0);
 
   constructor(benchId: () => string | null, entries: () => readonly BenchEntry[]) {
     $effect(() => {
@@ -20,6 +23,7 @@ export class BenchResults {
       const want = entries().filter((e) => e.status === 'done' && e.score);
       if (!id || hub.mode === 'connecting') return;
       void hub.epoch;
+      void this.#again;
       const api = hub.api;
       untrack(() => {
         const todo = want.filter((e) => !this.#asked.has(e.id));
@@ -30,8 +34,9 @@ export class BenchResults {
             const entryId = e.id;
             try {
               this.#results.set(entryId, await api.benchResult(id, entryId));
-            } catch {
-              // Its charts stay empty; the entry's own page says what is wrong.
+              this.#errors.delete(entryId);
+            } catch (err) {
+              this.#errors.set(entryId, err);
             }
           }
         };
@@ -42,5 +47,17 @@ export class BenchResults {
 
   get(entryId: string): BenchResult | undefined {
     return this.#results.get(entryId);
+  }
+
+  /** The error of an entry's result that could not be loaded, else undefined. */
+  error(entryId: string): unknown {
+    return this.#errors.get(entryId);
+  }
+
+  /** Asks again for every result that failed. */
+  retry() {
+    for (const id of this.#errors.keys()) this.#asked.delete(id);
+    this.#errors.clear();
+    this.#again++;
   }
 }

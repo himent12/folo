@@ -94,7 +94,8 @@
 
   // ---------- the plan: edited here while the benchmark has no entries, saved with Save plan ----------
   let draft = $state.raw<BenchPlan>({ conditions: [] });
-  const editable = $derived(!!bench && planEditable(bench));
+  // Fixed once an entry finished or is under way (failed and stopped ones graded nothing to keep comparable).
+  const editable = $derived(!!bench && planEditable(live.entries));
   const dirty = $derived(!!bench && editable && !samePlan(draft, bench.plan));
   // A plan from the server (the first load, a save, another tab's change) replaces the editor's unless it has edits.
   const planKey = $derived(bench ? `${bench.id}:${JSON.stringify(bench.plan)}` : '');
@@ -390,6 +391,7 @@
         {#if catalog.data}
           <PlanTab
             {bench}
+            {editable}
             catalog={catalog.data}
             bind:draft
             {dirty}

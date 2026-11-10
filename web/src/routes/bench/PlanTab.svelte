@@ -11,7 +11,7 @@
   import Sparkles from '@lucide/svelte/icons/sparkles';
   import type { Bench, BenchCatalog, BenchCondition, BenchPlan } from '$lib/api/types';
   import { planCondition, planError, planPasses, setWeight, toggleCondition, toggleSeverity, weightError } from '$lib/bench/plan';
-  import { GROUP_NAME, GROUPS, planEditable, SEVERITIES } from '$lib/bench/rules';
+  import { GROUP_NAME, GROUPS, SEVERITIES } from '$lib/bench/rules';
   import { AGENT_NAME } from '$lib/label';
   import Button from '$lib/ui/Button.svelte';
   import Gate from '$lib/ui/Gate.svelte';
@@ -24,6 +24,7 @@
 
   let {
     bench,
+    editable,
     catalog,
     draft = $bindable(),
     dirty,
@@ -34,6 +35,8 @@
     designWhy,
   }: {
     bench: Bench;
+    /** The plan can still change: no entry finished or is under way ($lib/bench/rules planEditable). */
+    editable: boolean;
     catalog: BenchCatalog;
     /** The plan as edited (the page holds it, saved or not). */
     draft: BenchPlan;
@@ -47,7 +50,6 @@
     designWhy: string | null;
   } = $props();
 
-  const editable = $derived(planEditable(bench));
   /** The plan shown: the edits while it can change, else the benchmark's own. */
   const plan = $derived(editable ? draft : bench.plan);
   /** The condition the preview shows: the plan's first at the start, then the one last looked at. */
@@ -145,7 +147,7 @@
 <div class="tab">
   {#if !editable}
     <div class="frozen">
-      <Callout tone="neutral" icon={Lock} title={FROZEN} role="note">To change it, delete the entries or make a new benchmark with the plan you want.</Callout>
+      <Callout tone="neutral" icon={Lock} title={FROZEN} role="note">To change it, delete those entries (failed and stopped ones do not count) or make a new benchmark with the plan you want.</Callout>
     </div>
   {/if}
   <div class="grid">

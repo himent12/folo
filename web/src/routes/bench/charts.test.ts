@@ -108,9 +108,10 @@ describe('comparing entries', () => {
 
   it('lines classes up by their AP, the hardest first', () => {
     const res = (aps: number[]) => ({ accuracy: { per_class: aps.map((map50_95, c) => ({ class: c, truths: 10 + c, map50: 0, map50_95 })) } }) as unknown as BenchResult;
-    const rows = classRows(['bolt', 'nut', 'pin'], [res([0.8, 0.3, 0.6]), res([0.7, 0.1, 0.65])]);
+    const rows = classRows(['bolt', 'nut', 'pin'], [605, 410, 77], [res([0.8, 0.3, 0.6]), res([0.7, 0.1, 0.65])]);
     expect(rows.map((r) => r.name)).toEqual(['nut', 'pin', 'bolt']);
-    expect(rows[0]).toMatchObject({ truths: 11, values: [0.3, 0.1] });
+    // The benchmark's own count of the class, never one entry's (an agent on 24 images counted 11 of them).
+    expect(rows[0]).toMatchObject({ truths: 410, graded: [11, 11], values: [0.3, 0.1] });
   });
 
   it('fits a dot plot to its values, from 0 when they spread low, at least 0.2 wide', () => {

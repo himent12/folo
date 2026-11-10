@@ -8,7 +8,8 @@
 //   took with their phones, so of every shape (landscape, portrait, wide, a panorama), with a plan Claude Code designed
 //   for murky water, and four entries (one whose confidences never reach 90% precision).
 // - "Shapes val": three self-improvement loops, one that improved over three generations, one that held, and one that
-//   failed at its first labeling: an early checkpoint whose labels are 90% right only where it keeps almost nothing.
+//   failed before its first labeling: an early checkpoint whose labels are 90% right only where it keeps a handful, too
+//   few to rest a threshold on (it takes 10), so its entry has none, and the loop set no confidence.
 // Names are the server's: an agent entry `Claude Code (sonnet)`, a loop `<teacher> loop`, a student `<loop> gen <n>-best`.
 // Scenario `bench-loop-gen0` adds a loop on Fasteners val that has just started: generation 0, its teacher's entry
 // waiting for the GPU.
@@ -21,6 +22,7 @@ import {
   fingerprintOf,
   labelsPerImage,
   loopName,
+  noThresholdError,
   missingClasses,
   poolLabels,
   sampleImages,
@@ -84,7 +86,7 @@ function splitImages(spec: MockDatasetSpec, split: 'train' | 'val' | 'test') {
   });
 }
 
-export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean } = {}) {
+export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean; failedOnly?: boolean } = {}) {
   const spec = (id: string) => specs.find((s) => s.id === id) as MockDatasetSpec;
   const models = new Map(mb.host.models().map((m) => [m.id, m]));
   const cat = catalog();
@@ -114,6 +116,8 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
       fail?: { ms: number; error: string; hint: string };
       usage?: MEntry['usage'];
       speed?: MEntry['speed'];
+      /** Graded on an earlier version of the benchmark (before the engine changed): a fingerprint not its own. */
+      fingerprint?: string;
     },
   ): MEntry => {
     const e: MEntry = {
@@ -125,7 +129,7 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
       images: o.images ?? b.images.length,
       conditions: o.conditions ?? true,
       scored: o.scored ?? true,
-      fingerprint: fingerprintOf(b),
+      fingerprint: o.fingerprint ?? fingerprintOf(b),
       missing: o.missing ?? [],
       skill: o.skill,
       conditionsRun: o.conditionsRun ?? null,
@@ -175,8 +179,9 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
   const n3 = loopGen(shapesVal, 'be_5a13', studentName(nLoop, 3), 'folo-s', t0 - 8 * DAY + 120 * MIN, { ...base, map: nBest + 0.063, selfRecall: 0.74 });
   const s0 = entry(shapesVal, { id: 'be_5a20', name: 'shapes-s-best', contestant: model('m_shapes_s', { arch: 'folo-s' }), at: t0 - 6 * DAY, skill: { ...base, fragility: 0.85, map: sBest, selfRecall: 0.76 }, runs: 2 * MIN, speed: { device: 'gpu:0', ms_per_image: 4.1 } });
   const s1 = loopGen(shapesVal, 'be_5a21', studentName(sLoop, 1), 'folo-s', t0 - 6 * DAY + 45 * MIN, { ...base, fragility: 0.85, map: sBest + 0.006, selfRecall: 0.75 });
-  // An early checkpoint (5 epochs): it is 90% right only from confidence ~0.75 up, where it keeps almost nothing (its
-  // self-labeling is not ready). As a loop's teacher it labels a handful of the pool, and the loop fails there.
+  // An early checkpoint (5 epochs): it is 90% right only from confidence ~0.75 up, where it keeps a handful of labels,
+  // too few to rest a threshold on: its entry has none (not ready). A loop from it without a confidence fails before
+  // labeling; with a high one it labels a handful of the pool and fails there.
   const e0 = entry(shapesVal, {
     id: 'be_5a30',
     name: models.get('m_shapes_e5')?.name ?? 'shapes-n-early',
@@ -209,6 +214,18 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
     skill: { map: 0.641, fragility: 0.82, fragile: { distance: 0.9 }, ece: 0.041, iou: 0.81, selfRecall: 0.66 },
     runs: 70 * SEC,
     speed: { device: 'gpu:0', ms_per_image: 4.1 },
+  });
+  // The same model graded before the engine changed: another fingerprint, so it does not compare with the entries of
+  // the benchmark as it is (Studio ranks it below them, out of the band and of "best").
+  entry(fastVal, {
+    id: 'be_f100',
+    name: 'fasteners-s-v1',
+    contestant: { kind: 'model', model_id: 'm_f3s1', arch: 'folo-s', params: 9_100_000, imgsz: 640 },
+    at: at(30),
+    skill: { map: 0.652, fragility: 0.82, fragile: { distance: 0.9 }, ece: 0.04, iou: 0.81, selfRecall: 0.67 },
+    runs: 70 * SEC,
+    speed: { device: 'gpu:0', ms_per_image: 4.3 },
+    fingerprint: '0e1d9a7c3b52f846',
   });
   entry(fastVal, {
     id: 'be_f102',
@@ -307,7 +324,7 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
     name: 'yolo26n-pond',
     contestant: { kind: 'external' },
     at: t0 - 2 * DAY + 3 * HOUR,
-    skill: { map: 0.472, fragility: 1.2, fragile: { haze: 1.15, color_cast: 1.7, low_contrast: 1.2 }, ece: 0.071, iou: 0.77, selfRecall: 0.39 },
+    skill: { map: 0.472, fragility: 1.2, fragile: { haze: 1.15, color_cast: 1.7, low_contrast: 1.2 }, ece: 0.071, iou: 0.77, selfRecall: 0.39, calibration: 'mixed' },
     runs: 1500,
   });
   entry(pond, {
@@ -343,9 +360,20 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
     runs: 1500,
   });
 
+  // Its scores were exported as raw logits squashed under 0.1: every image and condition answered, but calibration
+  // cannot be measured, so the entry is partial for that reason alone.
+  entry(pond, {
+    id: 'be_p205',
+    name: 'yolo26n-pond-raw',
+    contestant: { kind: 'external' },
+    at: t0 - DAY + 5 * HOUR,
+    skill: { map: 0.447, fragility: 1.2, fragile: { haze: 1.15, color_cast: 1.7 }, ece: 0, iou: 0.76, selfRecall: 0.3, calibration: 'none' },
+    runs: 1500,
+  });
+
   // ---------- Sorting tray, night shift: fresh ----------
   const hard = spec('ds_shapes_hard');
-  bench({
+  const tray = bench({
     id: 'bn_9f03',
     name: 'Sorting tray, night shift',
     description: 'Overhead camera above the sorting tray on the night shift: dim light, and motion blur from the conveyor.',
@@ -356,6 +384,22 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
     images: sampleImages(splitImages(hard, 'val'), 7, 'Sorting tray, night shift', 200),
     seed: 7,
   });
+  // Scenario `bench-failed-only`: its one entry failed (Claude Code not signed in). A failed entry graded nothing, so
+  // the plan is still open.
+  if (o.failedOnly)
+    entry(tray, {
+      id: 'be_t301',
+      name: agentEntryName('claude', 'haiku'),
+      contestant: { kind: 'agent', agent: 'claude', model: 'haiku', effort: 'medium' },
+      at: t0 - 10 * MIN,
+      images: 48,
+      conditions: false,
+      scored: false,
+      skill: agentSkill('claude', 'haiku', 'medium', 'bn_9f03:t301'),
+      runs: 18 * SEC,
+      fail: { ms: 300, error: 'Not logged in · Please run /login', hint: 'Sign in to Claude Code on the server’s machine (run `claude` and follow /login), then add the entry again.' },
+      usage: agentUsage('claude', 'haiku', 'medium', 48, tray.description, 't301'),
+    });
 
   // Every seeded entry ends (or runs on) as its timeline says; the loops are made of the finished ones.
   mb.advance(t0);
@@ -376,7 +420,7 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
     /** A student generation's labels: its teacher's, from its entry's threshold, as the server keeps them. */
     const labels = (g: number) => {
       const t = o.gens[g - 1]!;
-      const threshold = r(t).self_labeling.threshold ?? 0.5;
+      const threshold = r(t).self_labeling.threshold!;
       const kept = poolLabels(poolImages, labelsPerImage(r(t), t.images, threshold), `${o.id}:${g}`);
       return { threshold, kept };
     };
@@ -421,9 +465,16 @@ export function seedBenches(mb: MockBench, t0: number, o: { loopAtGen0?: boolean
     if (o.planned && o.planned > o.gens.length - 1) {
       const g = o.gens.length;
       const t = o.gens.at(-1)!;
-      const threshold = r(t).self_labeling.threshold ?? 0.5;
-      const kept = poolLabels(poolImages, labelsPerImage(r(t), t.images, threshold), `${o.id}:${g}`);
-      const why = starvedError(t.name, kept.boxes, kept.labeled, poolImages, threshold);
+      const threshold = r(t).self_labeling.threshold;
+      // No threshold and no min_confidence: it fails before labeling (a loop never guesses a confidence); else at
+      // labeling, with too few pool images kept.
+      const why =
+        threshold === null
+          ? noThresholdError(t.name)
+          : (() => {
+              const kept = poolLabels(poolImages, labelsPerImage(r(t), t.images, threshold), `${o.id}:${g}`);
+              return starvedError(t.name, kept.boxes, kept.labeled, poolImages, threshold);
+            })();
       l.generations.push({ generation: g, labels: null, run_id: null, model_id: null, model_name: null, entry_id: null, score: null, map50_95: null, ci95: null });
       l.end = { status: 'failed', at: (t.end?.at ?? o.at) + 4 * SEC, error: why.error, hint: why.hint };
     }

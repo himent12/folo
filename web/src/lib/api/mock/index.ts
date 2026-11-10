@@ -19,8 +19,9 @@
 // 4090) and `cloud-upload` (a cloud run uploads its dataset), for screenshots of those states. Vision benchmarks
 // (./bench, ./benchSeed): `no-bench` (no `vision_bench` feature; the endpoints answer `501 not_implemented`, as
 // `folo serve --mock` does, which `no-labeling` stands for too), `bench-agent-fails` (a design request's answer is not
-// a plan: `502 agent_failed`) and `bench-loop-gen0` (a loop on Fasteners val that has just started: generation 0, its
-// teacher's entry waiting for the GPU).
+// a plan: `502 agent_failed`), `bench-loop-gen0` (a loop on Fasteners val that has just started: generation 0, its
+// teacher's entry waiting for the GPU) and `bench-failed-only` (the fresh benchmark with one failed entry: its plan
+// still open).
 
 import { ApiError, type Api, type BenchEventHandlers, type LabelEventHandlers, type RunEventHandlers } from '../client';
 import type {
@@ -177,6 +178,8 @@ export type Scenario =
   | 'bench-agent-fails'
   // A loop at generation 0: its first teacher is being benchmarked (its entry queued behind the running one).
   | 'bench-loop-gen0'
+  // The fresh benchmark with one failed entry: its plan still open (a failed entry graded nothing).
+  | 'bench-failed-only'
   // Cloud compute: no connection; no `cloud` feature; a revoked key and an unconfirmed termination; a cloud run
   // training; one uploading its dataset.
   | 'cloud-none'
@@ -1906,7 +1909,7 @@ export class MockApi implements Api {
   #benchState(): MockBench {
     if (!this.#benchSeeded) {
       this.#benchSeeded = true;
-      if (this.scenario !== 'empty') seedBenches(this.#bench, this.#t0, { loopAtGen0: this.scenario === 'bench-loop-gen0' });
+      if (this.scenario !== 'empty') seedBenches(this.#bench, this.#t0, { loopAtGen0: this.scenario === 'bench-loop-gen0', failedOnly: this.scenario === 'bench-failed-only' });
     }
     return this.#bench;
   }

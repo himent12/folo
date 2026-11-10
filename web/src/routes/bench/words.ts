@@ -6,6 +6,7 @@ import type {
   BenchAxis,
   BenchAxisScore,
   BenchCalibration,
+  BenchCalibrationBin,
   BenchCatalog,
   BenchEntry,
   BenchGeneration,
@@ -22,10 +23,39 @@ import type {
   Model,
 } from '$lib/api/types';
 import { AXIS_NAME, TARGET_PRECISION } from '$lib/bench/rules';
+import { MIN_LABELS } from '$lib/bench/score';
 import type { OwnStatus } from '$lib/ui/StatusBadge.svelte';
 import { compact, conf, metric, ms, num, pct, usd } from '$lib/format';
 import { AGENT_NAME } from '$lib/label';
 import { modelLabel, tokens } from '../label/words';
+
+/**
+ * The fewest decimals (from `min`, at most `max`) at which `a` and `b` print differently, so a sentence that says one
+ * is above or below the other is true as printed ("0.8661 is above 0.8660", never "0.866 is above … 0.866").
+ */
+export function digitsApart(a: number, b: number, min = 3, max = 7): number {
+  for (let d = min; d < max; d++) if (Math.round(a * 10 ** d) !== Math.round(b * 10 ** d)) return d;
+  return max;
+}
+
+/** A share as a reader can see it: "29%", a small one with its decimal ("0.2%"), never a bare "0%" that is not 0. */
+export const share = (x: number) => (x > 0 && x < 0.01 ? pct(x, 1) : pct(x, 0));
+
+/** A share printed with as many decimals as it takes to differ from `ref` ("89.6%" beside "90%", never "90%" twice). */
+export function shareApart(x: number, ref: number): string {
+  if (x === ref) return share(x);
+  const d = Math.max(x > 0 && x < 0.01 ? 1 : 0, digitsApart(x * 100, ref * 100, 0, 3));
+  return pct(x, d);
+}
+
+/** A share with a decimal under 10% ("1.6%", "0.4%"), whole above ("62%"): a small share is read, not rounded away. */
+export const fine = (x: number) => (x > 0 && x < 0.1 ? pct(x, 1) : pct(x, 0));
+
+/** "1,363 labels", "1 label". */
+export const labelsText = (n: number) => `${num(n)} ${n === 1 ? 'label' : 'labels'}`;
+
+/** Labels per image as a reader can see it: "4.5 per image", "under 0.1 per image" (never "0.0" beside some labels). */
+export const perImageText = (perImage: number, labels: number) => (labels > 0 && perImage < 0.05 ? 'under 0.1 per image' : `${num(perImage, 1)} per image`);
 
 /** "71.9": a score, 0–100, one decimal. */
 export const scoreText = (total: number) => num(total, 1);
@@ -136,8 +166,11 @@ export const KIND: Record<BenchEntry['contestant']['kind'], string> = { model: '
  * "knows 2 of 8 classes". Empty for an entry that ran everything. A partial score with none of these reasons (an
  * external entry that left conditions out: the entry does not say which) reads "some conditions left out".
  */
-export function coverageFacts(e: BenchEntry, b: Pick<Bench, 'images' | 'classes' | 'plan'>, conditionsRun: number | undefined = e.status === 'done' ? e.conditions_run : undefined): string[] {
+export function coverageFacts(e: BenchEntry, b: Pick<Bench, 'images' | 'classes' | 'plan'> & Partial<Pick<Bench, 'fingerprint'>>, conditionsRun: number | undefined = e.status === 'done' ? e.conditions_run : undefined): string[] {
+  const axis = (a: BenchAxis) => e.score?.axes.find((x) => x.axis === a);
   const out: string[] = [];
+  // Graded on an earlier version of the benchmark (another fingerprint: the engine changed): said first.
+  if (b.fingerprint && e.fingerprint && e.fingerprint !== b.fingerprint && e.status === 'done') out.push(STALE_FACT);
   if (e.images < b.images) out.push(`${num(e.images)} of ${num(b.images)} images`);
   const planned = b.plan.conditions.length;
   // An open external entry has not said yet which conditions it answers: nothing to say until it is finished.
@@ -145,13 +178,29 @@ export function coverageFacts(e: BenchEntry, b: Pick<Bench, 'images' | 'classes'
   else if (planned && conditionsRun !== undefined && conditionsRun < planned) out.push(`${conditionsRun} of ${planned} conditions`);
   if (!e.scored) out.push('no confidences');
   if (e.missing_classes.length) out.push(`knows ${b.classes.length - e.missing_classes.length} of ${b.classes.length} classes`);
-  if (e.score?.partial && !out.some((f) => !f.startsWith('knows'))) out.push('some conditions left out');
+  // A scored entry whose detections never reach confidence 0.1 has no calibration: partial for that, whatever it ran.
+  if (e.scored && e.score && axis('calibration')?.value === null) out.push(CALIBRATION_NONE);
+  // Robustness not measured though it ran the conditions: none was answered completely.
+  if (planned && e.conditions && e.score && axis('robustness')?.value === null) out.push('no condition answered whole');
+  if (e.score?.partial && !out.some((f) => !f.startsWith('knows') && f !== STALE_FACT)) out.push('some conditions left out');
   return out;
 }
 
-/** Why an entry is partial, in a sentence (its score's tooltip and accessible description). */
+/** The fact for an entry graded on an earlier version of its benchmark (its fingerprint is not the benchmark's). */
+export const STALE_FACT = 'earlier version of this benchmark';
+
+/** What that means, and what to do (docs/BENCH.md: two entries compare when their fingerprints agree). */
+export const STALE_HELP =
+  'Graded on an earlier version of this benchmark (its fingerprint differs: the engine that grades changed since): its numbers do not compare with the current entries. Run it again to compare.';
+
+/** The fact for an entry that gave confidences but none from 0.1 up: calibration could not be measured. */
+export const CALIBRATION_NONE = 'calibration not measured';
+
+/** Why an entry is partial, in a sentence (its score's tooltip and accessible description), each reason its own. */
 export function partialWhy(e: BenchEntry, b: Pick<Bench, 'images' | 'classes' | 'plan'>): string {
-  const f = coverageFacts(e, b).filter((x) => !x.startsWith('knows'));
+  const f = coverageFacts(e, b)
+    .filter((x) => !x.startsWith('knows') && x !== STALE_FACT)
+    .map((x) => (x === CALIBRATION_NONE ? 'calibration not measured (no detection reached confidence 0.1)' : x));
   return `Partial: ${f.join(', ')}. It compares only loosely with complete entries.`;
 }
 
@@ -199,7 +248,7 @@ export function costFacts(e: Pick<BenchEntry, 'speed' | 'usage' | 'contestant'>)
 export const FINGERPRINT_HELP = 'A hash of the images, their truth, the plan and the seed. Entries compare when their fingerprints agree.';
 
 /** Why a plan is fixed, in one line (the conditions tab, the design action's reason). */
-export const FROZEN = 'This benchmark has entries; its plan is fixed so they stay comparable.';
+export const FROZEN = 'This benchmark has finished or running entries; its plan is fixed so they stay comparable.';
 
 
 // ---------- reading a result: docs/BENCH.md's "The score", "Definitions" and "Reading it", said for one entry ----------
@@ -252,8 +301,10 @@ export function axisRaw(
       return r.robustness ? `keeps ${pct(r.robustness.retention, 0)} of its accuracy` : null;
     case 'self_labeling': {
       const s = r.self_labeling;
-      if (s.recall > 0) return `labels ${pct(s.recall, 0)} of objects at ${pct(scored ? TARGET_PRECISION : s.precision, 0)} precision`;
-      return scored ? `never ${pct(TARGET_PRECISION, 0)} of labels right` : `${pct(s.precision, 0)} of labels right, under ${pct(TARGET_PRECISION, 0)}`;
+      if (s.recall > 0) return `labels ${share(s.recall)} of objects, ${labelsText(s.labels)} at ${pct(scored ? TARGET_PRECISION : s.precision, 0)} precision`;
+      if (scored) return `never ${pct(TARGET_PRECISION, 0)} right on ${MIN_LABELS} labels or more`;
+      if (s.labels < MIN_LABELS) return `${labelsText(s.labels)}: too few to judge`;
+      return `${shareApart(s.precision, TARGET_PRECISION)} of labels right, under ${pct(TARGET_PRECISION, 0)}`;
     }
     case 'calibration':
       return r.calibration ? `ECE ${num(r.calibration.ece, 2)}` : null;
@@ -304,30 +355,39 @@ export function intervalReading(ci: readonly [number, number], images: number): 
 /** How its confidence reads against how often it is right. */
 export type CalibrationTone = 'close' | 'over' | 'under';
 
+/** A bin holds enough detections to quote when it has at least this many and 5% of them all. */
+const QUOTE_MIN = 20;
+
 /**
  * The reliability diagram read in one sentence: "Overconfident: when it says 0.94, it is right 78% of the time." The
- * bin quoted is the one furthest off the diagonal among those holding at least 5% of the detections (a bin of three
- * detections proves nothing); the tone is the detections' mean gap, unless the ECE is under 0.03 (close).
+ * tone is the detections' mean gap (over: it says more than it gets right), or close when the ECE is under 0.03. A bin
+ * is quoted only when it holds enough detections to mean something (QUOTE_MIN and 5% of them) and says what the tone
+ * says: for over or under the bin furthest off the diagonal on that side (at least 2 points off, so the quote reads that
+ * way as printed); when close, the fullest bin within 5 points of the diagonal. With no such bin the sentence quotes
+ * the ECE alone, never a bin that contradicts it.
  */
 export function calibrationReading(c: Pick<BenchCalibration, 'ece' | 'bins'>): { tone: CalibrationTone; sentence: string } {
   const filled = c.bins.filter((b) => b.count > 0 && b.confidence !== null && b.precision !== null);
   const n = filled.reduce((s, b) => s + b.count, 0);
   if (!n) return { tone: 'close', sentence: 'No detection reached confidence 0.1, so there is nothing to read.' };
-  const big = filled.filter((b) => b.count >= 0.05 * n);
-  const pool = big.length ? big : filled;
+  const gapOf = (b: BenchCalibrationBin) => b.confidence! - b.precision!;
+  const meaningful = filled.filter((b) => b.count >= Math.max(QUOTE_MIN, 0.05 * n));
+  const says = (b: BenchCalibrationBin) => `when it says ${num(b.confidence!, 2)}, it is right ${pct(b.precision!, 0)} of the time`;
+  const ece = `ECE ${num(c.ece, 2)}`;
   if (c.ece < 0.03) {
-    const top = pool.at(-1)!;
-    return {
-      tone: 'close',
-      sentence: `Close to the diagonal: when it says ${num(top.confidence!, 2)}, it is right ${pct(top.precision!, 0)} of the time. Its confidence can be taken at its word.`,
-    };
+    const near = meaningful.filter((b) => Math.abs(gapOf(b)) <= 0.05).sort((a, b) => b.count - a.count)[0];
+    const far = meaningful.some((b) => Math.abs(gapOf(b)) > 0.1);
+    const head = near ? `Close to the diagonal (${ece}): ${says(near)}.` : `Close to the diagonal on average (${ece}).`;
+    return { tone: 'close', sentence: `${head} ${far ? 'Some of its scores are off by more: read the bins.' : 'Its confidence can be taken at its word.'}` };
   }
-  const gap = filled.reduce((s, b) => s + b.count * (b.confidence! - b.precision!), 0) / n;
-  const pick = pool.reduce((a, b) => (Math.abs(b.confidence! - b.precision!) > Math.abs(a.confidence! - a.precision!) ? b : a));
-  const says = `when it says ${num(pick.confidence!, 2)}, it is right ${pct(pick.precision!, 0)} of the time`;
-  return gap >= 0
-    ? { tone: 'over', sentence: `Overconfident: ${says}. Trust its high scores less than they claim.` }
-    : { tone: 'under', sentence: `Underconfident: ${says}. Its scores undersell it.` };
+  const gap = filled.reduce((s, b) => s + b.count * gapOf(b), 0) / n;
+  const over = gap >= 0;
+  const side = meaningful.filter((b) => (over ? gapOf(b) >= 0.02 : gapOf(b) <= -0.02));
+  const pick = side.reduce<BenchCalibrationBin | null>((a, b) => (!a || Math.abs(gapOf(b)) > Math.abs(gapOf(a)) ? b : a), null);
+  const what = pick ? `${says(pick)}` : `on average it is right ${num(Math.abs(gap) * 100, 0)} points ${over ? 'less' : 'more'} often than it says (${ece})`;
+  return over
+    ? { tone: 'over', sentence: `Overconfident: ${what}. Trust its high scores less than they claim.` }
+    : { tone: 'under', sentence: `Underconfident: ${what}. Its scores undersell it.` };
 }
 
 /** What a readiness verdict means (docs/BENCH.md, Self-labeling). */
@@ -337,27 +397,36 @@ export const READINESS_MEANS: Record<BenchReadiness, string> = {
   not_ready: 'It labels less than a quarter of all objects that way, or never gets 9 in 10 right: its own labels would not train a model.',
 };
 
-/** The self-labeling readout in words, for every case: a threshold found, never reaching 90%, no confidences. */
+/**
+ * The self-labeling readout in words, for every case: a threshold found (with the labels it rests on), none (with the
+ * best supported precision, and when a few labels alone reach 90%, that they are too few), no confidences. Every share
+ * as a reader can see it (never "0%" that is not 0, never "90%" beside "short of 90%"), never "0.0 labels per image"
+ * beside some labels.
+ */
 export function selfLabelReading(
-  s: Pick<BenchSelfLabeling, 'threshold' | 'precision' | 'recall' | 'mean_iou' | 'labels_per_image' | 'curve'>,
+  s: Pick<BenchSelfLabeling, 'threshold' | 'precision' | 'recall' | 'mean_iou' | 'labels_per_image' | 'labels' | 'curve'>,
   scored: boolean,
 ): string {
-  const per = `${num(s.labels_per_image, 1)} ${s.labels_per_image === 1 ? 'label' : 'labels'} per image`;
+  const per = perImageText(s.labels_per_image, s.labels);
   const iou = s.mean_iou !== null ? `, mean IoU ${num(s.mean_iou, 2)}` : '';
   if (!scored) {
-    const head = 'It gives no confidences, so it has one operating point';
-    return s.recall > 0
-      ? `${head}: ${pct(s.precision, 0)} of its labels are right and they cover ${pct(s.recall, 0)} of all objects (${per}${iou}).`
-      : `${head}: ${pct(s.precision, 0)} of its labels are right, short of the ${pct(TARGET_PRECISION, 0)} a label set to train on needs.`;
+    const head = `It gives no confidences, so it has one operating point: its ${labelsText(s.labels)} (${per}) ${s.labels === 1 ? 'is' : 'are'}`;
+    if (s.recall > 0) return `${head} ${pct(s.precision, 0)} right and cover ${share(s.recall)} of all objects${iou}.`;
+    if (s.labels < MIN_LABELS) return `${head} ${pct(s.precision, 0)} right: too few to rest a label set on (it takes at least ${MIN_LABELS}).`;
+    return `${head} ${shareApart(s.precision, TARGET_PRECISION)} right, short of the ${pct(TARGET_PRECISION, 0)} a label set to train on needs.`;
   }
   if (s.threshold !== null)
-    return `From confidence ${conf(s.threshold)} up, ${pct(s.precision, 0)} of its labels are right and they cover ${pct(s.recall, 0)} of all objects: ${per}${iou}.`;
-  const best = s.curve.reduce<{ c: number; p: number } | null>(
-    (a, p) => (p.precision !== null && p.labels > 0 && (!a || p.precision > a.p) ? { c: p.confidence, p: p.precision } : a),
-    null,
-  );
-  const most = best ? `: the most is ${pct(best.p, 0)}, from ${conf(best.c)} up` : '';
-  return `At no confidence are ${pct(TARGET_PRECISION, 0)} of its labels right${most}. All its detections together are ${pct(s.precision, 0)} right, ${per}.`;
+    return `From confidence ${conf(s.threshold)} up: ${labelsText(s.labels)} (${per}), ${pct(s.precision, 0)} right, ${share(s.recall)} of all objects${iou}.`;
+  // No threshold: the best precision on enough labels, and a precise handful said to be a handful.
+  const supported = s.curve.filter((p) => p.precision !== null && p.labels >= MIN_LABELS);
+  const best = supported.reduce<BenchLabelPoint | null>((a, p) => (!a || p.precision! > a.precision! ? p : a), null);
+  const few = s.curve.filter((p) => p.precision !== null && p.labels > 0 && p.labels < MIN_LABELS && p.precision >= TARGET_PRECISION).sort((a, b) => a.confidence - b.confidence)[0];
+  const most = best ? `: the best is ${shareApart(best.precision!, TARGET_PRECISION)} right, from ${conf(best.confidence)} up (${labelsText(best.labels)})` : '';
+  const handful = few ? ` From ${conf(few.confidence)} up its ${labelsText(few.labels)} ${few.labels === 1 ? 'is' : 'are'} ${pct(few.precision!, 0)} right, too few to rest a threshold on.` : '';
+  // Without a threshold nothing is kept as a label: what follows is all its detections, said as detections (the real
+  // weak teacher gave 74,593 of them, 248.6 an image, 1.6% right: never "labels per image" it would keep).
+  const all = `${num(s.labels)} ${s.labels === 1 ? 'detection' : 'detections'}`;
+  return `No confidence keeps ${MIN_LABELS} labels or more of which ${pct(TARGET_PRECISION, 0)} are right${most}, so none is kept as a label.${handful} All its detections together: ${all} (${per}), ${fine(s.precision)} right.`;
 }
 
 /** The robustness axis read: where it breaks most and where least. */
@@ -380,9 +449,17 @@ export const keptText = (r: number) => pct(r, 0);
 
 const listOf = (xs: readonly string[]) => (xs.length <= 1 ? (xs[0] ?? '') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
 
+/** Whether two intervals overlap as printed (three decimals): what a reader checks by eye against the numbers shown. */
+export const overlapAsPrinted = (x: readonly [number, number], y: readonly [number, number]) => {
+  const r = (v: number) => Math.round(v * 1000);
+  return r(x[0]) <= r(y[1]) && r(y[0]) <= r(x[1]);
+};
+
 /**
- * Whether entries' mAP intervals tell them apart, in one sentence (docs/BENCH.md: overlapping intervals are not
- * clearly different on this benchmark), read against the highest.
+ * Whether entries' mAP intervals tell them apart from the highest, in one sentence that says what was compared
+ * (docs/BENCH.md: overlapping intervals are not clearly different on this benchmark): each other entry's interval
+ * against the leader's, as printed. Two entries behind the leader are not compared with each other, so nothing is said
+ * of them as a pair.
  */
 export function intervalsVerdict(items: readonly { name: string; map: number; ci: readonly [number, number] | null }[]): string {
   const known = items.filter((i): i is { name: string; map: number; ci: readonly [number, number] } => !!i.ci);
@@ -390,13 +467,17 @@ export function intervalsVerdict(items: readonly { name: string; map: number; ci
   const sorted = [...known].sort((a, b) => b.map - a.map);
   const lead = sorted[0]!;
   const rest = sorted.slice(1);
-  const tied = rest.filter((x) => x.ci[0] <= lead.ci[1] && lead.ci[0] <= x.ci[1]);
+  const tied = rest.filter((x) => overlapAsPrinted(x.ci, lead.ci));
   const behind = rest.filter((x) => !tied.includes(x));
-  if (!behind.length)
-    return known.length === 2 ? 'Not clearly different on this benchmark: their 95% intervals overlap.' : `Not clearly different on this benchmark: every interval overlaps ${lead.name}’s.`;
-  if (!tied.length) return `${lead.name} is clearly ahead on mAP50-95: its interval is above ${known.length === 2 ? 'the other’s' : 'the others’'}.`;
-  const verb = behind.length === 1 ? 'is' : 'are';
-  return `${listOf([lead, ...tied].map((x) => x.name))} are not clearly different (their intervals overlap); ${listOf(behind.map((x) => x.name))} ${verb} clearly behind.`;
+  const its = `${lead.name}’s`;
+  if (known.length === 2)
+    return tied.length
+      ? `Not clearly different on this benchmark: their 95% intervals overlap.`
+      : `${lead.name} is clearly ahead on mAP50-95: its interval is above ${rest[0]!.name}’s.`;
+  if (!behind.length) return `Against ${lead.name}, the highest: every other interval overlaps ${its}, so none is clearly different from it on this benchmark.`;
+  if (!tied.length) return `${lead.name} is clearly ahead on mAP50-95: its interval is above each of the others’.`;
+  const verb = (xs: readonly unknown[], one: string, many: string) => (xs.length === 1 ? one : many);
+  return `Against ${lead.name}, the highest: ${listOf(tied.map((x) => x.name))} ${verb(tied, 'overlaps', 'overlap')} its interval, so ${verb(tied, 'is', 'are')} not clearly different from it; ${listOf(behind.map((x) => x.name))} ${verb(behind, 'is', 'are')} clearly below it.`;
 }
 
 /**
@@ -404,9 +485,13 @@ export function intervalsVerdict(items: readonly { name: string; map: number; ci
  * images, conditions left out, no confidences (compare on precision, recall and self-labeling, not AP), classes it
  * does not know.
  */
-export function compareCaveats(entries: readonly BenchEntry[], b: Pick<Bench, 'images' | 'classes' | 'plan'>): { id: string; text: string }[] {
+export function compareCaveats(entries: readonly BenchEntry[], b: Pick<Bench, 'images' | 'classes' | 'plan'> & Partial<Pick<Bench, 'fingerprint'>>): { id: string; text: string }[] {
   const out: { id: string; text: string }[] = [];
   const planned = b.plan.conditions.length;
+  // First: an entry graded on an earlier version of the benchmark does not compare at all (another fingerprint).
+  for (const e of entries)
+    if (b.fingerprint && e.fingerprint && e.fingerprint !== b.fingerprint)
+      out.push({ id: e.id, text: `${e.name} was graded on an earlier version of this benchmark (another fingerprint: the engine changed since): its numbers do not compare with the others’, and it is left out of “best” and the intervals’ verdict. Run it again to compare.` });
   for (const e of entries) {
     if (e.images < b.images) out.push({ id: e.id, text: `${e.name} ran ${num(e.images)} of ${num(b.images)} images: its interval is wider and its score partial.` });
     if (planned && !e.conditions) out.push({ id: e.id, text: `${e.name} ran the unchanged images only: it has no robustness to compare.` });
@@ -431,8 +516,12 @@ export function loopVerdictText(l: Pick<BenchLoop, 'verdict' | 'generations'>): 
   const first = l.generations[0];
   const last = l.generations.at(-1);
   if (!l.verdict || !first?.ci95 || last?.map50_95 == null) return null;
-  const g = `generation ${last.generation} (${metric(last.map50_95)})`;
-  const iv = `the first teacher’s 95% interval (${intervalText(first.ci95)})`;
+  // As many decimals as it takes for "above" or "below" to be true as printed (0.8661 above 0.8660, never 0.866 above
+  // 0.866); inside, three.
+  const edge = l.verdict === 'improved' ? first.ci95[1] : l.verdict === 'regressed' ? first.ci95[0] : null;
+  const d = edge === null ? 3 : digitsApart(last.map50_95, edge);
+  const g = `generation ${last.generation} (${num(last.map50_95, d)})`;
+  const iv = `the first teacher’s 95% interval (${num(first.ci95[0], d)}–${num(first.ci95[1], d)})`;
   if (l.verdict === 'improved') return `Improved: ${g} is above ${iv}. Its own labels made a better model.`;
   if (l.verdict === 'regressed') return `Regressed: ${g} is below ${iv}.`;
   return `Held: ${g} is inside ${iv}: no measurable change.`;
@@ -533,15 +622,15 @@ export function labelsLine(l: Pick<BenchLabels, 'threshold' | 'images' | 'labele
 export const MIN_LABELED_IMAGES = 10;
 /** Under this share of all objects labeled, a teacher's labels are too few to learn from (so is a verdict of not ready). */
 export const STARVED_RECALL = 0.1;
-/** The confidence a loop keeps a teacher's labels from when its entry found no threshold (the server's default). */
-export const DEFAULT_LOOP_THRESHOLD = 0.5;
-
-/** What a teacher's labels of a pool would be at a confidence, read from its entry's self-labeling curve. */
+/**
+ * What a teacher's labels of a pool would be at a confidence, read from its entry's self-labeling curve. A loop never
+ * guesses a confidence: with none set and no threshold in its entry, it fails before labeling (`from: 'none'`).
+ */
 export interface LabelForecast {
-  /** The confidence the labels are kept from. */
-  threshold: number;
-  /** Where it comes from: the entry's own threshold t*, the default (its entry never reaches 90% right), or the person's. */
-  from: 'entry' | 'default' | 'chosen';
+  /** The confidence the labels are kept from; null when there is none (the loop would fail before labeling). */
+  threshold: number | null;
+  /** Where it comes from: the entry's own threshold t*, the person's, or none (its entry found no threshold). */
+  from: 'entry' | 'chosen' | 'none';
   /** The share of the labels kept there that are right; null when it keeps none. */
   precision: number | null;
   /** The share of all objects they label. */
@@ -554,7 +643,8 @@ export interface LabelForecast {
   images: number | null;
   /** Too few to learn from: not ready at its own threshold, or under STARVED_RECALL of all objects. */
   starved: boolean;
-  /** So few that the loop would stop at labeling (under MIN_LABELED_IMAGES pool images labeled). */
+  /** The loop would fail: before labeling with no confidence to keep labels from, or at labeling with under
+   *  MIN_LABELED_IMAGES pool images labeled. */
   stops: boolean;
 }
 
@@ -565,10 +655,12 @@ export function labelPointAt(curve: readonly BenchLabelPoint[], c: number): Benc
 }
 
 /**
- * What the teacher's labels would be in a loop: at `chosen` when the person sets a confidence, else at its entry's
- * threshold (the default of 0.5 when it never reaches 90% right, as the server does), read off the entry's curve; about
- * how many of `poolImages` would get a box; and whether that is too few to train on (docs/BENCH.md, Self-improvement
- * loops).
+ * What the teacher's labels would be in a loop, by the server's rules (docs/BENCH.md, Self-improvement loops): at
+ * `chosen` when the person sets a confidence, else at its entry's threshold, read off the entry's curve; about how many
+ * of `poolImages` would get a box (each image's labels taken as a Poisson count); whether that is too few to train on;
+ * and whether the loop would fail: before labeling when there is no confidence at all (no `min_confidence` and no
+ * threshold in its entry: a loop never guesses one), at labeling when fewer than MIN_LABELED_IMAGES pool images would
+ * get a box.
  */
 export function labelForecast(
   s: Pick<BenchSelfLabeling, 'threshold' | 'readiness' | 'curve'>,
@@ -576,8 +668,9 @@ export function labelForecast(
   poolImages: number | null,
   chosen: number | null,
 ): LabelForecast {
-  const from: LabelForecast['from'] = chosen !== null ? 'chosen' : s.threshold !== null ? 'entry' : 'default';
-  const threshold = chosen ?? s.threshold ?? DEFAULT_LOOP_THRESHOLD;
+  const from: LabelForecast['from'] = chosen !== null ? 'chosen' : s.threshold !== null ? 'entry' : 'none';
+  const threshold = chosen ?? s.threshold;
+  if (threshold === null) return { threshold: null, from, precision: null, recall: 0, perImage: 0, readiness: s.readiness, images: null, starved: true, stops: true };
   const p = labelPointAt(s.curve, threshold);
   const recall = p?.recall ?? 0;
   const perImage = p && entryImages > 0 ? p.labels / entryImages : 0;
@@ -587,29 +680,28 @@ export function labelForecast(
   return { threshold, from, precision: p?.precision ?? null, recall, perImage, readiness: s.readiness, images, starved, stops };
 }
 
-/** A share as a reader can see it: "29%", and a small one with its decimal ("0.2%"), never a bare "0%" that is not 0. */
-const share = (x: number) => (x > 0 && x < 0.01 ? pct(x, 1) : pct(x, 0));
-
 /**
  * The forecast in words, for New loop: where the labels are kept from, how many are right and how many objects they
  * cover there, how many pool images would get a box; and, when that is too few, what happens and the way out.
  */
 export function forecastText(f: LabelForecast, poolImages: number | null): { title: string | null; text: string; remedy: string | null } {
+  if (f.threshold === null)
+    return {
+      title: 'Its entry found no threshold: choose a confidence',
+      text: `No confidence keeps ${MIN_LABELS} labels or more of which ${pct(TARGET_PRECISION, 0)} are right, so there is no threshold to keep its labels from, and a loop never guesses one: without a confidence set here it stops before labeling.`,
+      remedy: 'What the one you type keeps, and how many of those are right, shows here.',
+    };
   // "62% of its labels are right and they cover 41% of all objects", or "it keeps no detection there".
-  const what = f.precision === null ? 'it keeps no detection there' : `${share(f.precision)} of its labels are right ${f.starved ? 'but' : 'and'} they cover ${share(f.recall)} of all objects`;
+  const right = (x: number) => (f.from === 'chosen' ? shareApart(x, TARGET_PRECISION) : share(x));
+  const what = f.precision === null ? 'it keeps no detection there' : `${right(f.precision)} of its labels are right ${f.starved ? 'but' : 'and'} they cover ${share(f.recall)} of all objects`;
   const pool = f.images !== null && poolImages !== null ? `: about ${num(f.images)} of the pool’s ${num(poolImages)} images would get a box` : '';
-  const at =
-    f.from === 'entry'
-      ? `At its own threshold, ${conf(f.threshold)}, ${what} (${READINESS[f.readiness].toLowerCase()})${pool}.`
-      : f.from === 'default'
-        ? `Its entry never gets ${pct(TARGET_PRECISION, 0)} of its labels right, so a loop keeps them from ${conf(f.threshold)}, where ${what}${pool}.`
-        : `From ${conf(f.threshold)}, ${what}${pool}.`;
+  const at = f.from === 'entry' ? `At its own threshold, ${conf(f.threshold)}, ${what} (${READINESS[f.readiness].toLowerCase()})${pool}.` : `From ${conf(f.threshold)}, ${what}${pool}.`;
   // A confidence of the person's below the 90% a label set to train on needs: the cost said, not hidden.
   const cost = f.from === 'chosen' && f.precision !== null && f.precision < TARGET_PRECISION ? ` That is under the ${pct(TARGET_PRECISION, 0)} right a label set to train on needs: the student learns from its wrong labels too.` : '';
   if (!f.starved) return { title: null, text: at + cost, remedy: null };
   return {
     title: f.stops ? 'Too few labels: the loop would stop at labeling' : 'Too few labels to train a student on',
-    text: `${at} ${f.stops ? `A loop stops when fewer than ${MIN_LABELED_IMAGES} pool images get a box.` : 'A student learns little from so few.'}`,
+    text: `${at}${cost} ${f.stops ? `A loop stops when fewer than ${MIN_LABELED_IMAGES} pool images get a box.` : 'A student learns little from so few.'}`,
     remedy: f.from === 'chosen' ? 'A still lower confidence keeps more of its detections, fewer of them right.' : 'A lower confidence keeps more of its detections, fewer of them right.',
   };
 }
@@ -644,4 +736,19 @@ export function roundToTotal(values: readonly (number | null)[], total: number, 
     left--;
   }
   return out.map((v) => (v === null ? null : v / k));
+}
+
+/** The New loop field a server error belongs to, when the error says (`POST …/loops` checks the students' settings as
+ *  `POST /api/runs` does): `model_not_found` with starting weights is the weights' field, an `invalid_config` naming a
+ *  field is that field; anything else (a `device_not_found`: the form has no device) is the form's error. */
+export function loopErrorField(e: { code?: string; message?: string } | null | undefined, hasWeights: boolean): 'epochs' | 'imgsz' | 'weights' | 'arch' | null {
+  if (!e?.code) return null;
+  const m = (e.message ?? '').toLowerCase();
+  if (e.code === 'model_not_found') return hasWeights && !/teacher/.test(m) ? 'weights' : null;
+  if (e.code !== 'invalid_config' && e.code !== 'invalid_body') return null;
+  if (/\bimgsz\b|image size/.test(m)) return 'imgsz';
+  if (/\bepochs?\b/.test(m)) return 'epochs';
+  if (/\bweights\b/.test(m)) return 'weights';
+  if (/\barch\b|architecture/.test(m)) return 'arch';
+  return null;
 }

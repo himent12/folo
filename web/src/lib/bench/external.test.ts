@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BenchEntry, BenchPlan, BenchPrediction } from '../api/types';
-import { checkPredictions, estimateBytes, PART_BYTES, parsePredictions, partsOf, recordBytes, sendExternal, type ExternalSender, type PredictionContext } from './external';
+import { ApiError } from '../api/client';
+import { checkPredictions, estimateBytes, ExternalSendError, PART_BYTES, parsePredictions, partsOf, recordBytes, sendExternal, type ExternalSender, type PredictionContext } from './external';
 
 const plan: BenchPlan = { conditions: [{ condition: 'haze', severities: [1, 3], weight: 1 }, { condition: 'jpeg', severities: [5], weight: 1 }] };
 const ctx: PredictionContext = {
@@ -120,8 +121,9 @@ describe('a large file, sent in parts', () => {
     expect(checkPredictions([{ image: '1', condition: 'haze', severity: 1, boxes: [] }], ctx, { part: true, seen: new Set() }).ok).toBe(true);
   });
 
-  /** A server that records the calls; `fail` makes the n-th part (1-based) or the finish fail. */
-  function fake(o: { failPart?: number; failFinish?: boolean; hangPart?: number } = {}) {
+  /** A server that records the calls; `failPart` refuses the n-th part (1-based), `dropPart` loses its answer once
+   *  (the network), `failFinish` refuses the finish, `hangPart` never answers, `failStop` / `failRemove` fail the clean-up. */
+  function fake(o: { failPart?: number; dropPart?: number[]; failFinish?: boolean; hangPart?: number; failStop?: boolean; failRemove?: boolean } = {}) {
     const calls: string[] = [];
     const entry = (status: BenchEntry['status']) => ({ id: 'be_x', status }) as BenchEntry;
     let n = 0;
@@ -131,15 +133,24 @@ describe('a large file, sent in parts', () => {
         n++;
         calls.push(`send ${ps.length}`);
         if (n === o.hangPart) return new Promise<BenchEntry>(() => {});
-        if (n === o.failPart) throw new Error('Record 1: the benchmark has no image "9".');
+        if (n === o.failPart) throw new ApiError(400, 'invalid_body', 'Record 1: the benchmark has no image "9".');
+        if (o.dropPart?.includes(n)) throw new ApiError(0, 'network', 'Cannot reach the FOLO server.');
         return entry('running');
       },
       finish: async () => {
         calls.push('finish');
-        if (o.failFinish) throw new Error('Image "2" has no record without a condition.');
+        if (o.failFinish) throw new ApiError(400, 'invalid_body', 'Image "2" has no record without a condition.');
         return entry('done');
       },
-      stop: async () => (calls.push('stop'), entry('stopped')),
+      stop: async () => {
+        calls.push('stop');
+        if (o.failStop) throw new ApiError(0, 'network', 'Cannot reach the FOLO server.');
+        return entry('stopped');
+      },
+      remove: async () => {
+        calls.push('remove');
+        if (o.failRemove) throw new ApiError(0, 'network', 'Cannot reach the FOLO server.');
+      },
     };
     return { api, calls };
   }
@@ -161,19 +172,43 @@ describe('a large file, sent in parts', () => {
     expect(seen).toEqual([...seen].sort((a, b) => a - b));
   });
 
-  it('leaves nothing behind when a part or the finish fails, or the person stops it: the entry is stopped', async () => {
+  it('leaves nothing behind when a part or the finish fails, or the person stops it: the entry is stopped and deleted', async () => {
     const part = fake({ failPart: 2 });
-    await expect(sendExternal(part.api, body, () => {}, undefined, 200)).rejects.toThrow(/no image "9"/);
-    expect(part.calls.at(-1)).toBe('stop');
+    await expect(sendExternal(part.api, body, () => {}, undefined, 200)).rejects.toMatchObject({ message: expect.stringMatching(/no image "9"/), left: null });
+    expect(part.calls.slice(-2)).toEqual(['stop', 'remove']);
     expect(part.calls).not.toContain('finish');
+    // A refused part is not retried: the server said no.
+    expect(part.calls.filter((c) => c.startsWith('send'))).toHaveLength(2);
     const fin = fake({ failFinish: true });
     await expect(sendExternal(fin.api, body, () => {}, undefined, 200)).rejects.toThrow(/has no record/);
-    expect(fin.calls.slice(-2)).toEqual(['finish', 'stop']);
-    // Stopped by the person while a part is in flight: not waited for, the entry stopped.
+    expect(fin.calls.slice(-3)).toEqual(['finish', 'stop', 'remove']);
+    // Stopped by the person while a part is in flight: not waited for, the entry stopped and deleted.
     const hang = fake({ hangPart: 2 });
     const ctl = new AbortController();
     const p = sendExternal(hang.api, body, (s) => s.sent > 0 && ctl.abort(), ctl.signal, 200);
-    await expect(p).rejects.toMatchObject({ name: 'AbortError' });
-    expect(hang.calls.at(-1)).toBe('stop');
+    await expect(p).rejects.toMatchObject({ name: 'AbortError', left: null });
+    expect(hang.calls.slice(-2)).toEqual(['stop', 'remove']);
+  });
+
+  it('says exactly what is left when the clean-up fails too', async () => {
+    const stopFails = fake({ failPart: 1, failStop: true });
+    const e1 = await sendExternal(stopFails.api, body, () => {}, undefined, 200).catch((e: unknown) => e);
+    expect(e1).toBeInstanceOf(ExternalSendError);
+    expect((e1 as ExternalSendError).left).toBe('an unfinished entry “big” is still on the leaderboard: stop and delete it there.');
+    expect((e1 as ExternalSendError).cause).toMatchObject({ code: 'invalid_body' });
+    const removeFails = fake({ failPart: 1, failRemove: true });
+    const e2 = (await sendExternal(removeFails.api, body, () => {}, undefined, 200).catch((e: unknown) => e)) as ExternalSendError;
+    expect(e2.left).toBe('an unfinished entry “big” (stopped) is still on the leaderboard: delete it there.');
+  });
+
+  it('sends a part again once when its answer was lost, and gives up the second time', async () => {
+    const once = fake({ dropPart: [2] });
+    expect((await sendExternal(once.api, body, () => {}, undefined, 200)).status).toBe('done');
+    const sends = once.calls.filter((c) => c.startsWith('send'));
+    // Part 2 went twice: the server takes the same records again without adding them.
+    expect(sends.length).toBe(partsOf(all, plan, 200).length + 1);
+    const twice = fake({ dropPart: [2, 3] });
+    await expect(sendExternal(twice.api, body, () => {}, undefined, 200)).rejects.toMatchObject({ cause: { code: 'network' }, left: null });
+    expect(twice.calls.slice(-2)).toEqual(['stop', 'remove']);
   });
 });

@@ -4,6 +4,7 @@
 // large goes as an open entry filled in parts (`partsOf`, `sendExternal`): one request is capped at 64 MiB, and a
 // real run (300 images × 20 passes, up to 300 boxes an image) is far over that.
 
+import { ApiError } from '../api/client';
 import type { BenchEntry, BenchPlan, BenchPrediction, StartBenchEntry } from '../api/types';
 import { MAX_SEVERITY } from './rules';
 
@@ -204,6 +205,7 @@ export interface ExternalSender {
   send: (entryId: string, predictions: BenchPrediction[]) => Promise<BenchEntry>;
   finish: (entryId: string) => Promise<BenchEntry>;
   stop: (entryId: string) => Promise<unknown>;
+  remove: (entryId: string) => Promise<unknown>;
 }
 
 /** Where a send is: the records sent of all of them, and the open entry once it exists. */
@@ -214,10 +216,29 @@ export interface SendProgress {
 }
 
 /**
+ * A send that failed once its open entry existed: the error, and what it left on the server. `left` is null when the
+ * entry was stopped and deleted (nothing is left), else a sentence saying exactly what is left and where.
+ */
+export class ExternalSendError extends Error {
+  constructor(
+    override readonly cause: unknown,
+    readonly left: string | null,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = cause instanceof Error ? cause.name : 'ExternalSendError';
+  }
+}
+
+/** A failure worth one retry: no answer (the network, a timeout) or the server's own trouble, never a refusal. */
+const retryable = (e: unknown) => !(e instanceof ApiError) || e.status === 0 || e.status >= 500;
+
+/**
  * Sends an external entry: in one request when it is small (`maxBytes` of JSON or less), else as an open entry filled
- * in parts (./partsOf) and finished, telling `progress` after each part. Any failure once the entry exists (a part
- * refused, the finish refused, the network, `signal` aborted by the person) stops it, which discards it, so nothing
- * half-filled is left on the leaderboard; the error is thrown on.
+ * in parts (./partsOf) and finished, telling `progress` after each part. A part whose answer was lost (the network, a
+ * 5xx) is sent once more: the server takes a record it already has with the same boxes again (an idempotent retry).
+ * Any failure once the entry exists (a part refused, the finish refused, the network twice, `signal` aborted by the
+ * person) stops the entry and deletes it, so nothing is left on the leaderboard; it throws an ExternalSendError that
+ * says what is left when the stop or the delete failed too.
  */
 export async function sendExternal(
   api: ExternalSender,
@@ -236,17 +257,36 @@ export async function sendExternal(
   let entry = await api.start({ name: o.name, contestant: { kind: 'external', scored: o.scored, open: true, predictions: [] } });
   let sent = 0;
   progress({ sent, total, entry });
+  const once = async <T>(call: () => Promise<T>): Promise<T> => {
+    try {
+      return await race(call(), signal);
+    } catch (e) {
+      if (signal?.aborted || !retryable(e)) throw e;
+      return await race(call(), signal);
+    }
+  };
   try {
     for (const part of parts) {
-      entry = await race(api.send(entry.id, part), signal);
+      entry = await once(() => api.send(entry.id, part));
       sent += part.length;
       progress({ sent, total, entry });
     }
-    return await race(api.finish(entry.id), signal);
+    return await once(() => api.finish(entry.id));
   } catch (e) {
-    // Leave nothing half-filled behind; if even the stop fails, the server's own error is the one to show.
-    await api.stop(entry.id).catch(() => {});
-    throw e;
+    // Leave nothing behind: stop the open entry, then delete it; say exactly what is left if either fails.
+    const name = `an unfinished entry “${o.name}”`;
+    let left: string | null = null;
+    try {
+      await api.stop(entry.id);
+      try {
+        await api.remove(entry.id);
+      } catch {
+        left = `${name} (stopped) is still on the leaderboard: delete it there.`;
+      }
+    } catch {
+      left = `${name} is still on the leaderboard: stop and delete it there.`;
+    }
+    throw new ExternalSendError(e, left);
   }
 }
 

@@ -50,3 +50,29 @@ export interface XYStrip {
   /** The unit the readout names, e.g. "detections". */
   unit: string;
 }
+
+/**
+ * What the chart says aloud at a cursor stop (its live region): `speak` when the caller gives one; else the table row
+ * whose first cell is the stop as the axis prints it; else, since a table's rows need not print x as the axis ticks do
+ * ("0.50" against "0.5") or may hold only some stops, each series' value there, named, so every stop says something.
+ */
+export function spokenAt(
+  c: number,
+  o: {
+    series: readonly XYSeries[];
+    table: { head: readonly string[]; rows: readonly (readonly string[])[] };
+    xFormat: (v: number) => string;
+    yFormat: (v: number) => string;
+    xLabel?: string;
+    speak?: (x: number) => string;
+  },
+): string {
+  if (o.speak) return o.speak(c);
+  const row = o.table.rows.find((r) => r[0] === o.xFormat(c));
+  if (row) return row.map((cell, k) => (k ? `${o.table.head[k]} ${cell}` : cell)).join(', ');
+  const parts = o.series.flatMap((s) => {
+    const p = s.points.find((q) => Math.abs(q.x - c) < 1e-9 && q.y !== null);
+    return p ? [`${s.label} ${o.yFormat(p.y!)}`] : [];
+  });
+  return `${o.xLabel ?? o.table.head[0] ?? 'At'} ${+c.toFixed(4)}${parts.length ? `: ${parts.join(', ')}` : ''}`;
+}

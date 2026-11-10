@@ -13,7 +13,7 @@
   import { seriesText } from './ink';
   import { TouchGesture, type PinAction } from './pin';
   import { chartHint, claimOnce, TAP_HINT_KEY } from './hint';
-  import type { XYMark, XYPoint, XYRef, XYSeries, XYStrip } from './xy';
+  import { spokenAt, type XYMark, type XYPoint, type XYRef, type XYSeries, type XYStrip } from './xy';
 
   let {
     label,
@@ -36,6 +36,7 @@
     highlight = null,
     readout,
     table,
+    speak,
   }: {
     label: string;
     series: XYSeries[];
@@ -65,6 +66,8 @@
     /** The readout row above the plot: the legend at rest (`null`), the values at the cursor's stop. */
     readout: Snippet<[number | null, string | null]>;
     table: { caption: string; head: string[]; rows: string[][] };
+    /** What the keyboard's cursor says aloud at a stop (default: ./xy spokenAt, from the table or the series). */
+    speak?: (x: number) => string;
   } = $props();
 
   let width = $state(0);
@@ -190,8 +193,7 @@
     } else return;
     e.preventDefault();
     cursor = stops[j]!;
-    const row = table.rows.find((r) => r[0] === xFormat(cursor!));
-    spoken = row ? row.map((c, k) => (k ? `${table.head[k]} ${c}` : c)).join(', ') : '';
+    spoken = spokenAt(cursor, { series, table, xFormat, yFormat, xLabel, speak });
   }
   // The reading hints of every chart (./hint): "← → to inspect" on keyboard focus, "Tap to pin a value" once on touch.
   let keyFocus = $state(false);

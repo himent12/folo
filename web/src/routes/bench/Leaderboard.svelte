@@ -31,13 +31,13 @@
   import StatusBadge from '$lib/ui/StatusBadge.svelte';
   import { tooltip } from '$lib/ui/tooltip';
   import IntervalPlot from './IntervalPlot.svelte';
-  import { along, compareHint, COMPARE_MIN, finished, intervalScale, overlaps, ranks, scaleTicks, toggleSelection } from './leaderboard';
+  import { along, bandEntry, boardOrder, compareHint, COMPARE_MIN, finished, intervalScale, overlaps, ranks, scaleTicks, stale, toggleSelection } from './leaderboard';
   import ScoreAxes from './ScoreAxes.svelte';
-  import { contestantFacts, costFacts, coverageFacts, entryStatus, partialWhy, progressFacts, progressShare, scoreText, SPEED_HELP } from './words';
+  import { contestantFacts, costFacts, coverageFacts, entryStatus, partialWhy, progressFacts, progressShare, scoreText, SPEED_HELP, STALE_HELP } from './words';
 
   let {
     bench,
-    entries,
+    entries: given,
     catalog,
     agents,
     selected = $bindable([]),
@@ -62,14 +62,20 @@
     oncompare?: () => void;
   } = $props();
 
-  const rank = $derived(ranks(entries));
+  // Graded on the benchmark as it is first, then on an earlier version of it (another fingerprint: not comparable),
+  // then the rest; only the current ones are ranked, banded and drawn on the shared scale.
+  const entries = $derived(boardOrder(given, bench.fingerprint));
+  const current = $derived(entries.filter((e) => !stale(e, bench.fingerprint)));
+  const isStale = (e: BenchEntry) => stale(e, bench.fingerprint);
+  const rank = $derived(ranks(current));
   const ci = (e: BenchEntry) => e.ci95 ?? undefined;
-  const scale = $derived(intervalScale(entries.filter(finished).map((e) => ({ id: e.id, ci: e.ci95 }))));
+  const scale = $derived(intervalScale(current.filter(finished).map((e) => ({ id: e.id, ci: e.ci95 }))));
   const domain = $derived(scale?.domain ?? null);
   // The ticks for the plot's width as drawn (it narrows with its column): labels never closer than TICK_GAP.
   let plotWidth = $state(0);
   const ticks = $derived(domain ? scaleTicks(domain, plotWidth) : []);
-  const leader = $derived(entries.find(finished));
+  /** The band's entry: the leading complete entry (a partial one's number compares only loosely), else the leading one. */
+  const leader = $derived(bandEntry(current));
   const band = $derived(leader ? (ci(leader) ?? null) : null);
   // Phones: picking entries to compare is a mode of the list (its header's Select), as on Runs.
   let phonePicking = $state(false);
@@ -152,7 +158,7 @@
             {@const done = finished(e)}
             {@const st = entryStatus(e)}
             {@const cost = costFacts(e)}
-            <tr class="link" class:on class:faded={!done} data-row data-id={e.id} aria-label={e.name} onclick={() => open(e)}>
+            <tr class="link" class:on class:faded={!done || isStale(e)} data-row data-id={e.id} aria-label={e.name} onclick={() => open(e)}>
               <td class="check" onclick={(ev) => ev.stopPropagation()}>
                 {#if done}
                   <label class="hit">
@@ -160,7 +166,7 @@
                   </label>
                 {/if}
               </td>
-              <td class="r rank num">{#if rank.has(e.id)}{rank.get(e.id)}{:else}<NoValue label="not ranked" />{/if}</td>
+              <td class="r rank num">{#if rank.has(e.id)}{rank.get(e.id)}{:else}<NoValue label={isStale(e) ? 'not ranked: graded on an earlier version of this benchmark' : 'not ranked'} />{/if}</td>
               <td class="lead">
                 <a class="name" href={href(`/benchmarks/${bench.id}/entries/${e.id}`)} onclick={(ev) => ev.stopPropagation()} title={e.name}>{e.name}</a>
                 <span class="sub">{@render who(e)}</span>
@@ -175,9 +181,11 @@
                 <td class="map">
                   <span class="map-cell">
                     <span class="map-v num">{metric(e.map50_95)}</span>
-                    {#if domain && ci(e)}
+                    {#if isStale(e)}
+                      <span class="plot stale-note" use:tooltip={STALE_HELP}>not on this scale</span>
+                    {:else if domain && ci(e)}
                       {@const off = scale?.below.has(e.id) ?? false}
-                      <span class="plot" use:tooltip={`95% interval ${metric(ci(e)![0])}–${metric(ci(e)![1])}${off ? `: below this scale, which starts at ${domain[0].toFixed(2)}` : tied(e) ? ': overlaps the leader’s, so not clearly different' : ''}`}>
+                      <span class="plot" use:tooltip={`95% interval ${metric(ci(e)![0])}–${metric(ci(e)![1])}${off ? `: below this scale, which starts at ${domain[0].toFixed(2)}` : tied(e) ? `: overlaps ${leader?.name}’s, so not clearly different from it` : ''}`}>
                         <IntervalPlot value={e.map50_95 ?? 0} ci={ci(e)!} {domain} {band} height={47} below={off} />
                       </span>
                     {:else}
@@ -249,7 +257,7 @@
         {@const done = finished(e)}
         {@const f = coverageFacts(e, bench)}
         {@const on = selected.includes(e.id)}
-        <li class:faded={!done} class:on={phonePicking && on}>
+        <li class:faded={!done || isStale(e)} class:on={phonePicking && on}>
           {#if phonePicking && done}
             <label class="m-check">
               <input type="checkbox" checked={on} disabled={!on && selected.length >= 4} aria-label="Select {e.name} for comparison" onchange={() => toggle(e.id)} />
@@ -284,7 +292,7 @@
     <Meta>
       <span>{entries.length} {entries.length === 1 ? 'entry' : 'entries'}</span>
       {#if active}<span>{active} running or waiting</span>{/if}
-      {#if band}<span class="wide-only">the band is the leader's 95% interval: an interval that overlaps it is not clearly different</span>{/if}
+      {#if band && leader}<span class="wide-only">{leader.score?.partial ? 'the band is the leading entry’s 95% interval (partial: no entry is complete yet)' : 'the band is the leading complete entry’s 95% interval'}: an interval that overlaps it is not clearly different</span>{/if}
       {#if scale?.below.size}<span class="wide-only">◂ marks an interval below the scale</span>{/if}
       <!-- Tablets: Compare's prerequisite under the board, since the header keeps one row of actions. -->
       {#if doneCount >= 2}<span class="tablet-only" data-gate-why>{compareHint(selected.length)}</span>{/if}
@@ -462,6 +470,13 @@
     align-items: center;
     gap: var(--space-3);
     height: 100%;
+  }
+  .stale-note {
+    align-self: center;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-tertiary);
+    white-space: normal;
   }
   .map-v {
     text-align: right;

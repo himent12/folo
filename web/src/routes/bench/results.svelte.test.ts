@@ -5,6 +5,7 @@
 import { flushSync, mount, unmount, type Component } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index.svelte';
+import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router.svelte';
 import { toast } from '$lib/ui/toast.svelte';
@@ -82,7 +83,7 @@ describe("an entry's page", () => {
     expect(means).toEqual([...means].sort((a, b) => a - b));
     // The calibration reads itself, and self-labeling says its threshold in words.
     expect(document.querySelector('#calibration .sentence')?.textContent).toMatch(/^When it says 0\.\d\d, it is right \d+% of the time/);
-    expect(text()).toMatch(/From confidence 0\.\d\d up, \d+% of its labels are right and they cover \d+% of all objects/);
+    expect(text()).toMatch(/From confidence 0\.\d\d up: [\d,]+ labels \([\d.]+ per image\), 9\d% right, \d+% of all objects/);
   });
 
   it('pages its images and opens one large, stepping on to the next', async () => {
@@ -115,7 +116,7 @@ describe("an entry's page", () => {
 
   it('says when its confidences never reach 90% right, with no threshold drawn', async () => {
     await page(BenchEntry, '/benchmarks/bn_7a41/entries/be_p204');
-    expect(text()).toMatch(/At no confidence are 90% of its labels right/);
+    expect(text()).toMatch(/No confidence keeps 10 labels or more of which 90% are right/);
     expect(document.querySelector('#self-labeling .verdict')?.textContent).toBe('Not ready');
     expect(document.querySelector('#self-labeling .mark')).toBeNull();
   });
@@ -195,7 +196,7 @@ describe('New loop', () => {
     expect(opt('m_coco_s').textContent).toMatch(/None of these classes/);
     // Its complete entry is generation 0, so the plan costs one entry per student.
     expect(document.querySelector('dialog[open] .s-text')?.textContent).toBe('1 generation: 1 training run of 30 epochs on up to 1,920 images, 1 benchmark entry');
-    expect(text()).toMatch(/where its entry’s labels are 90% right/);
+    expect(text()).toMatch(/where its entry keeps [\d,]+ labels, 90% right/);
   });
 
   it('checks the student’s settings and the confidence, then starts the loop', async () => {
@@ -242,6 +243,49 @@ describe('New loop', () => {
     expect(arch()).toBe('folo-m');
   });
 
+  it('opened, closed and opened again on the same page, still has the students’ defaults (they follow the teacher)', async () => {
+    await page(BenchmarkPage, '/benchmarks/bn_3c90?tab=loops');
+    const newLoop = () => [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => /^New loop$/.test(b.textContent?.trim() ?? ''))!;
+    const arch = () => document.querySelector<HTMLSelectElement>('dialog[open] select[id$="-arch"]')?.value;
+    const size = () => document.querySelector<HTMLInputElement>('dialog[open] input[id$="-sz"]')?.value;
+    for (let k = 0; k < 2; k++) {
+      newLoop().click();
+      await settle();
+      expect(arch(), `opening ${k + 1}`).toBe('folo-n');
+      expect(size(), `opening ${k + 1}`).toBe('640');
+      expect(submit().disabled).toBe(false);
+      button(/^Cancel$/, document.querySelector('dialog[open]')!)!.click();
+      await settle();
+    }
+    // A size picked the first time is not kept into the next opening.
+    newLoop().click();
+    await settle();
+    const a = document.querySelector<HTMLSelectElement>('dialog[open] select[id$="-arch"]')!;
+    a.querySelector<HTMLOptionElement>('option[value="folo-m"]')!.selected = true;
+    a.dispatchEvent(new Event('change', { bubbles: true }));
+    await settle();
+    expect(arch()).toBe('folo-m');
+    button(/^Cancel$/, document.querySelector('dialog[open]')!)!.click();
+    await settle();
+    newLoop().click();
+    await settle();
+    expect(arch()).toBe('folo-n');
+  });
+
+  it('shows a refused start at the field it names', async () => {
+    await dialog('m_fast_n');
+    vi.spyOn(hub.api, 'startBenchLoop').mockRejectedValue(new ApiError(400, 'invalid_config', 'imgsz must be at least 64 for training, got 32'));
+    const sz = document.querySelector<HTMLInputElement>('input[id$="-sz"]')!;
+    sz.value = '32';
+    sz.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    await send();
+    const field = sz.closest('.field') ?? sz.parentElement!.parentElement!;
+    expect(document.querySelector('dialog[open]')?.textContent).toMatch(/imgsz must be at least 64 for training, got 32/);
+    expect(field.textContent ?? document.body.textContent).toMatch(/imgsz must be at least 64/);
+    expect(document.querySelector('dialog[open] .error-state, dialog[open] [role=alert]')?.textContent ?? '').not.toMatch(/Could not start the loop/);
+  });
+
   it('reads a good teacher’s labels off its entry, quietly', async () => {
     await dialog('m_fast_n');
     const fc = document.querySelector('dialog[open] .fc')!;
@@ -250,24 +294,36 @@ describe('New loop', () => {
     expect(submit().textContent).toMatch(/Start loop/);
   });
 
-  it('tells, before it starts, that a not-ready teacher would label too little, with the lower confidence as the way out', async () => {
-    // shapes-n-early on Shapes val: 90% right only from ~0.75, where it keeps almost nothing.
+  it('requires a confidence for a teacher whose entry found no threshold, and says what each one keeps and costs', async () => {
+    // shapes-n-early on Shapes val: 90% right only on a handful of labels, too few for a threshold. A loop never
+    // guesses a confidence, so one is required here before it can start.
     await dialog('m_shapes_e5', 'bn_5e12');
     const fc = () => document.querySelector('dialog[open] .fc')!;
-    expect(fc().getAttribute('data-forecast')).toBe('stops');
+    expect(fc().getAttribute('data-forecast')).toBe('none');
     expect(fc().getAttribute('role')).toBe('alert');
-    expect(fc().textContent).toMatch(/Too few labels: the loop would stop at labeling/);
-    expect(fc().textContent).toMatch(/\(not ready\): about \d of the pool’s 800 images would get a box\. A loop stops when fewer than 10 pool images get a box\./);
-    // Told at the button too, which says what pressing it means; it is not taken away.
-    expect(document.querySelector('dialog[open] .why')?.textContent).toBe('Its labels would be too few: the loop would stop at labeling');
-    expect(submit().textContent).toMatch(/Start anyway/);
-    expect(submit().disabled).toBe(false);
-    // The way out: the confidence field, set lower, with what that costs read off the curve.
-    button(/^Keep labels from a lower confidence/)!.click();
-    await settle();
+    expect(fc().textContent).toMatch(/Its entry found no threshold: choose a confidence/);
+    expect(document.querySelector<HTMLInputElement>('dialog[open] [role=switch], dialog[open] input[type=checkbox]')?.disabled).toBe(true);
     const conf = document.querySelector<HTMLInputElement>('input[id$="-conf"]')!;
     expect(conf).not.toBeNull();
-    expect(Number(conf.value)).toBeLessThan(0.75);
+    expect(conf.value).toBe('');
+    expect(text()).toMatch(/Required for this teacher\./);
+    expect(submit().disabled).toBe(true);
+    expect(document.querySelector('dialog[open] .why')?.textContent).toBe('Choose a confidence: its entry found no threshold');
+    expect(submit().textContent).toMatch(/Start loop/);
+    expect(text()).not.toMatch(/0\.50: its entry/);
+    const type = async (v: string) => {
+      conf.value = v;
+      conf.dispatchEvent(new Event('input', { bubbles: true }));
+      await settle();
+    };
+    // A high confidence keeps a handful: told the loop would stop at labeling, Start reads "Start anyway".
+    await type('0.9');
+    expect(fc().getAttribute('data-forecast')).toBe('stops');
+    expect(fc().textContent).toMatch(/Too few labels: the loop would stop at labeling/);
+    expect(submit().disabled).toBe(false);
+    expect(submit().textContent).toMatch(/Start anyway/);
+    // A lower one: what it keeps and what it costs in precision, read off the curve.
+    await type('0.30');
     expect(fc().getAttribute('data-forecast')).toBe('ok');
     expect(fc().textContent).toMatch(/^\s*From 0\.\d+, \d+% of its labels are right and they cover \d+% of all objects: about [\d,]+ of the pool’s 800 images would get a box\./);
     expect(submit().textContent).toMatch(/Start loop/);
@@ -306,8 +362,8 @@ describe("a loop's page", () => {
   it('says why a loop starved: the server’s message, and its generation with no labels', async () => {
     await page(BenchLoop, '/benchmarks/bn_5e12/loops/bl_9e40');
     expect(document.querySelector('[role=alert]')?.textContent).toMatch(/It failed at generation 1/);
-    expect(text()).toMatch(/The teacher 'shapes-n-early' kept \d+ box(es)? on \d of the pool's 800 images at confidence 0\.\d+: too few to train a student on \(at least 10 images\)\./);
-    expect(text()).toMatch(/A lower min_confidence keeps more of its detections/);
+    expect(text()).toMatch(/'shapes-n-early' never reaches 90% precision on at least 10 labels on this benchmark, so there is no confidence to label the pool from\./);
+    expect(text()).toMatch(/Set min_confidence: its entry's self-labeling chart/);
     const row = document.querySelectorAll('table.gens tbody tr')[1]!;
     expect(row.textContent).toMatch(/Not trained/);
     expect(row.textContent).toMatch(/None: the loop failed here/);
@@ -340,7 +396,7 @@ describe('the loops tab', () => {
   it('says why a loop failed under its name, and what a running one does for which generation', async () => {
     await page(BenchmarkPage, '/benchmarks/bn_5e12?tab=loops');
     const row = [...document.querySelectorAll('table.loops tbody tr')].find((r) => /shapes-n-early loop/.test(r.textContent ?? ''))!;
-    expect(row.querySelector('.cause')?.textContent).toMatch(/^The teacher 'shapes-n-early' kept .* too few to train a student on/);
+    expect(row.querySelector('.cause')?.textContent).toMatch(/^'shapes-n-early' never reaches 90% precision on at least 10 labels/);
     unmount(c!);
     c = undefined;
     await page(BenchmarkPage, '/benchmarks/bn_3c90?tab=loops');
@@ -373,6 +429,146 @@ describe('an open external entry', () => {
     expect(text()).toMatch(/Receiving predictions/);
     expect(text()).toMatch(/120 of 13,320 records, sent in parts/);
     expect(document.querySelector('.passes')).toBeNull();
+  });
+});
+
+describe('reading a chart with the keyboard', () => {
+  /** Focuses the chart in `root`, presses → twice, and gives what its live region said. */
+  async function speak(root: string) {
+    const svg = document.querySelector<SVGElement>(`${root} svg[aria-roledescription=chart]`)!;
+    expect(svg, root).not.toBeNull();
+    const said: string[] = [];
+    for (const key of ['ArrowRight', 'ArrowRight', 'End']) {
+      svg.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+      flushSync();
+      said.push(svg.closest('.xy')!.querySelector('[aria-live]')!.textContent ?? '');
+    }
+    return said;
+  }
+
+  it('announces a row at every stop on the self-labeling, calibration and Compare charts', async () => {
+    // The plots draw once they have a width; happy-dom lays nothing out, so every element reports one.
+    const was = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 600 });
+    try {
+      await announces();
+    } finally {
+      if (was) Object.defineProperty(HTMLElement.prototype, 'clientWidth', was);
+    }
+  });
+
+  async function announces() {
+    await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f101');
+    for (const s of await speak('#self-labeling')) expect(s).toMatch(/^From [01]\.\d+ up: [\d,]+ labels?, \d+% right, [\d.]+% of all objects$/);
+    for (const s of await speak('#calibration')) expect(s.length).toBeGreaterThan(5);
+    unmount(c!);
+    c = undefined;
+    await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_f103');
+    await settle(40);
+    // Compare's calibration overlay (its self-labeling trade-off has no stops: its table is what is read).
+    for (const s of await speak('.pair > :nth-child(1)')) expect(s).toMatch(/\d/);
+  }
+});
+
+describe('the compare page when a result fails', () => {
+  it('says so with a retry instead of skeletons, and loads it on retry', async () => {
+    const real = hub.api.benchResult.bind(hub.api);
+    let fail = true;
+    vi.spyOn(hub.api, 'benchResult').mockImplementation(async (b, e, s) => {
+      if (fail && e === 'be_f103') throw new ApiError(500, 'internal', 'the result file could not be read');
+      return real(b, e, s);
+    });
+    await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_f103');
+    await settle(40);
+    expect(text()).toMatch(/Could not load the result of fasteners-n-best/);
+    fail = false;
+    button(/^Retry|^Try again/)!.click();
+    await settle(40);
+    expect(text()).not.toMatch(/Could not load the result/);
+    expect(document.querySelector('.pair')).not.toBeNull();
+  });
+});
+
+describe('a live loop page', () => {
+  it('refetches the lists when the loop names an id they lack, and calls it deleted only if it is still missing', async () => {
+    const datasets = vi.spyOn(hub.api, 'datasets');
+    await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_f3a0');
+    // Its first student's dataset is not in the list loaded at mount: asked again, once.
+    expect(datasets.mock.calls.length).toBe(2);
+    await settle();
+    expect(datasets.mock.calls.length).toBe(2);
+    // The mock's loop datasets are not datasets of the server: after the second look, deleted.
+    expect(text()).toMatch(/dataset deleted/);
+  });
+
+  it('shows a dataset made after the page loaded as a link, never as deleted', async () => {
+    const real = hub.api.datasets.bind(hub.api);
+    const loop = await hub.api.benchLoop('bn_3c90', 'bl_f3a0');
+    const made = loop.generations[1]!.labels!.dataset_id;
+    let calls = 0;
+    vi.spyOn(hub.api, 'datasets').mockImplementation(async (s) => {
+      const list = await real(s);
+      return ++calls === 1 ? list : [...list, { ...list[0]!, id: made, name: 'fasteners-n-best loop gen 1' }];
+    });
+    await page(BenchLoop, '/benchmarks/bn_3c90/loops/bl_f3a0');
+    await settle();
+    expect(text()).not.toMatch(/dataset deleted/);
+    expect(document.querySelector(`a[href$="/datasets/${made}"]`)).not.toBeNull();
+  });
+});
+
+describe('the plan of a benchmark with only failed or stopped entries', () => {
+  it('stays editable: only a finished or running entry freezes it', async () => {
+    const e = await hub.api.startBenchEntry('bn_9f03', { name: 'gone', contestant: { kind: 'external', open: true } });
+    await page(BenchmarkPage, '/benchmarks/bn_9f03?tab=conditions');
+    // An open entry runs: frozen.
+    expect(text()).toMatch(/This benchmark has finished or running entries; its plan is fixed/);
+    unmount(c!);
+    c = undefined;
+    await hub.api.stopBenchEntry('bn_9f03', e.id);
+    await page(BenchmarkPage, '/benchmarks/bn_9f03?tab=conditions');
+    expect(text()).not.toMatch(/its plan is fixed/);
+    expect(button(/^Design with an agent/)?.disabled).toBe(false);
+  });
+});
+
+describe('an entry graded on an earlier version of the benchmark', () => {
+  it('is marked and ranked below the current ones on the leaderboard, said on its page, and called out on Compare', async () => {
+    await page(BenchmarkPage, '/benchmarks/bn_3c90');
+    const rows = [...document.querySelectorAll<HTMLElement>('table.board tbody tr[data-id]')];
+    const ids = rows.map((r) => r.dataset.id);
+    const old = rows.find((r) => r.dataset.id === 'be_f100')!;
+    expect(old.querySelector('td.ran')?.textContent).toMatch(/earlier version of this benchmark/);
+    expect(old.querySelector('td.rank')?.textContent?.trim()).toMatch(/^—not ranked: graded on an earlier version/);
+    expect(old.querySelector('.stale-note')?.textContent).toMatch(/not on this scale/);
+    // Below every current finished entry, above the unfinished ones; the current leader keeps rank 1.
+    const finishedCurrent = rows.filter((r) => r.dataset.id !== 'be_f100' && r.querySelector('td.rank')?.textContent?.trim().match(/^\d+$/));
+    for (const r of finishedCurrent) expect(ids.indexOf(r.dataset.id)).toBeLessThan(ids.indexOf('be_f100'));
+    expect(rows[0]!.dataset.id).toBe('be_f101');
+    unmount(c!);
+    c = undefined;
+    await page(BenchEntry, '/benchmarks/bn_3c90/entries/be_f100');
+    expect(text()).toMatch(/Graded on an earlier version of this benchmark/);
+    expect(text()).toMatch(/Run it again to compare/);
+    expect(text()).not.toMatch(/\d(st|nd|rd|th) of \d+ on this benchmark/);
+    unmount(c!);
+    c = undefined;
+    await page(BenchCompare, '/benchmarks/bn_3c90/compare?entries=be_f101,be_f100');
+    await settle(40);
+    expect(text()).toMatch(/fasteners-s-v1 was graded on an earlier version of this benchmark/);
+    expect(text()).toMatch(/not all on its current fingerprint/);
+    // Marked on its chip, and no difference against it (they do not compare).
+    expect([...document.querySelectorAll('.chips .chip')].map((x) => x.textContent)).toEqual([expect.not.stringMatching(/earlier version/), expect.stringMatching(/earlier version/)]);
+    expect([...document.querySelectorAll('.cmp tbody .dd')].map((x) => x.textContent)).not.toContain('±0');
+  });
+});
+
+describe('a partial entry on the leaderboard', () => {
+  it('names the reason: calibration not measured, for a complete scored entry with no confidence from 0.1', async () => {
+    await page(BenchmarkPage, '/benchmarks/bn_7a41');
+    const row = [...document.querySelectorAll('table.board tbody tr')].find((r) => /yolo26n-pond-raw/.test(r.textContent ?? ''))!;
+    expect(row.querySelector('td.ran')?.textContent).toMatch(/calibration not measured/);
+    expect(row.textContent).not.toMatch(/some conditions left out/);
   });
 });
 

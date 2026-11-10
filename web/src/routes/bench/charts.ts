@@ -2,6 +2,7 @@
 // point is for what it stands on, the scales they share, and how the Compare page lines entries up. Pure, so every mark
 // can be traced to a number of the result (./charts.test.ts).
 
+import { overlaps } from './leaderboard';
 import type { BenchCalibration, BenchConditionResult, BenchEntry, BenchGeneration, BenchLabelPoint, BenchResult } from '$lib/api/types';
 import { unitDomain, unitFitDomain, type Fit } from '$lib/charts/domain';
 import type { XYPoint } from '$lib/charts/xy';
@@ -145,15 +146,22 @@ export function conditionRows(planOrder: readonly string[], results: readonly (B
 
 /**
  * The benchmark's classes with true boxes as Compare's rows, each entry's AP@0.5:0.95 (0 for a class it does not know,
- * as scored). Sorted by the entries' mean AP, lowest first: where they struggle leads.
+ * as scored). `truths` is the benchmark's own count of the class (`Bench.class_boxes`), never one entry's; `graded` is
+ * what each entry was graded on, which differs for an entry that ran a part of the images. Sorted by the entries' mean
+ * AP, lowest first: where they struggle leads.
  */
-export function classRows(classes: readonly string[], results: readonly (BenchResult | undefined)[]): (AlignedRow & { name: string; truths: number })[] {
-  const present = new Map<number, number>();
-  for (const r of results) for (const c of r?.accuracy.per_class ?? []) present.set(c.class, c.truths);
-  const rows = [...present].map(([k, truths]) => ({
+export function classRows(
+  classes: readonly string[],
+  classBoxes: readonly number[],
+  results: readonly (BenchResult | undefined)[],
+): (AlignedRow & { name: string; truths: number; graded: (number | null)[] })[] {
+  const present = new Set<number>();
+  for (const r of results) for (const c of r?.accuracy.per_class ?? []) present.add(c.class);
+  const rows = [...present].map((k) => ({
     key: String(k),
     name: classes[k] ?? `class ${k}`,
-    truths,
+    truths: classBoxes[k] ?? 0,
+    graded: results.map((r) => (r ? (r.accuracy.per_class.find((c) => c.class === k)?.truths ?? 0) : null)),
     values: results.map((r) => (r ? (r.accuracy.per_class.find((c) => c.class === k)?.map50_95 ?? null) : null)),
   }));
   const mean = (v: (number | null)[]) => {
@@ -189,4 +197,30 @@ export function compareShown(ids: readonly string[], entries: readonly BenchEntr
     else missing.push(id);
   }
   return { shown, missing };
+}
+
+/**
+ * The best of a row of Compare's table as printed (`d` decimals): one entry, never a tie at that precision (a "best"
+ * beside an equal number says nothing). With `intervals` (the mAP row), only an entry whose interval clears every
+ * other's as printed: beside "not clearly different", a "best" would claim what the intervals deny.
+ */
+export function bestAsPrinted(values: readonly (number | null)[], d: number, intervals: readonly ((readonly [number, number]) | null)[] | null = null): Set<number> {
+  const r = values.map((x) => (x === null ? null : Math.round(x * 10 ** d)));
+  const v = r.filter((x): x is number => x !== null);
+  if (v.length < 2) return new Set();
+  const top = Math.max(...v);
+  const at = r.flatMap((x, i) => (x === top ? [i] : []));
+  if (at.length !== 1) return new Set();
+  if (intervals) {
+    const mine = intervals[at[0]!];
+    if (!mine || intervals.some((c, i) => i !== at[0] && values[i] !== null && (!c || overlaps(c, mine)))) return new Set();
+  }
+  return new Set(at);
+}
+
+/** A value's difference from the baseline as printed: of the two numbers shown, so "0.68 | 0.68" is ±0, never −0.01. */
+export function diffAsPrinted(v: number | null, base: number | null, d: number): string | null {
+  if (v === null || base === null) return null;
+  const x = (Math.round(v * 10 ** d) - Math.round(base * 10 ** d)) / 10 ** d;
+  return x === 0 ? '±0' : `${x > 0 ? '+' : '−'}${Math.abs(x).toFixed(d)}`;
 }

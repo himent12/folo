@@ -18,6 +18,7 @@
   import Repeat from '@lucide/svelte/icons/repeat';
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import { tick, untrack } from 'svelte';
+  import { ApiError } from '$lib/api/client';
   import { hub } from '$lib/api/index.svelte';
   import type { Arch, Bench, BenchEntry, BenchLoop, BenchSelfLabeling, Dataset, LabelJob, Model, Split, StartBenchLoop } from '$lib/api/types';
   import { GENERATIONS_MAX } from '$lib/bench/rules';
@@ -32,7 +33,7 @@
   import Segmented from '$lib/ui/Segmented.svelte';
   import Select from '$lib/ui/Select.svelte';
   import Switch from '$lib/ui/Switch.svelte';
-  import { forecastText, labelForecast, loopPlanText, lowerConfidence, teacherEligibility } from './words';
+  import { forecastText, labelForecast, labelsText, loopErrorField, loopPlanText, lowerConfidence, teacherEligibility } from './words';
 
   let {
     open = $bindable(false),
@@ -60,18 +61,20 @@
   const ARCHS: Arch[] = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'];
   const SPLIT_WORD: Record<Split, string> = { train: 'Train', val: 'Validation', test: 'Test' };
 
-  let teacherId = $state('');
+  // What a person chose; null follows the default, derived from the rest (the teacher, the benchmark's source), so
+  // nothing chases anything: reopening the dialog clears the choices and every default is there again at once.
+  let teacherChoice = $state<string | null>(null);
+  let datasetChoice = $state<string | null>(null);
+  let jobChoice = $state<string | null>(null);
+  let archChoice = $state<string | null>(null);
+  let sizeChoice = $state<string | null>(null);
+  let weightsChoice = $state('none');
   let poolKind = $state<'dataset' | 'label_job'>('dataset');
-  let datasetId = $state('');
   let split = $state<Split>('train');
-  let jobId = $state('');
   let generations = $state('1');
-  let arch = $state<string>('');
   let epochs = $state('30');
-  let imgsz = $state('');
-  let weights = $state('none');
   let ownThreshold = $state(true);
-  let minConf = $state('0.50');
+  let minConf = $state('');
   let name = $state('');
   let touched = $state(false);
   let busy = $state(false);
@@ -85,66 +88,42 @@
       return { value: m.id, label: e.ok ? m.name : `${m.name} · ${e.why}`, short: m.name, group: e.ok ? 'The benchmark’s classes, in its order' : 'Not eligible', disabled: !e.ok };
     }),
   );
+  /** The teacher: the one picked, else the preset (an entry's "start a loop"), else the first eligible model. */
+  const teacherId = $derived(teacherChoice ?? preset ?? ranked.find(eligible)?.id ?? '');
   const teacher = $derived(models?.find((m) => m.id === teacherId));
 
-  // Every opening starts fresh: the preset teacher, else the first eligible one; the pool's dataset the teacher's own
-  // classes' first dataset with training images.
+  // Every opening starts fresh: no choice made, every field at its default.
   $effect(() => {
     if (!open) return;
     untrack(() => {
       touched = false;
       busy = false;
       error = undefined;
-      teacherId = preset ?? '';
+      teacherChoice = datasetChoice = jobChoice = archChoice = sizeChoice = null;
+      weightsChoice = 'none';
       generations = '1';
       epochs = '30';
-      weights = 'none';
       ownThreshold = true;
-      minConf = '0.50';
+      minConf = '';
       name = '';
-      arch = '';
-      imgsz = '';
-      autoArch = '';
-      autoSize = '';
       poolKind = 'dataset';
       split = 'train';
-      datasetId = '';
-      jobId = '';
     });
   });
-  $effect(() => {
-    if (!open || teacherId || !ranked.length) return;
-    const first = ranked.find(eligible);
-    if (first) untrack(() => (teacherId = first.id));
-  });
-  // The student follows the teacher (its architecture and image size) until someone picks its own: what was set
-  // automatically follows the next teacher picked, what a person typed or chose stays.
-  let autoArch = '';
-  let autoSize = '';
-  $effect(() => {
-    const t = teacher;
-    if (!t) return;
-    untrack(() => {
-      if (!arch || arch === autoArch) arch = autoArch = t.arch;
-      if (!imgsz || imgsz === autoSize) imgsz = autoSize = String(t.imgsz);
-    });
-  });
+  /** The students follow the teacher (architecture, image size) until a person picks theirs. */
+  const arch = $derived(archChoice ?? teacher?.arch ?? '');
+  const imgsz = $derived(sizeChoice ?? (teacher ? String(teacher.imgsz) : ''));
   const sameClasses = (classes: readonly string[]) => classes.length === bench.classes.length && classes.every((c, i) => c.toLowerCase() === bench.classes[i]!.toLowerCase());
   const datasetOptions = $derived(
     [...(datasets ?? [])]
       .sort((a, b) => Number(sameClasses(b.classes)) - Number(sameClasses(a.classes)) || a.name.localeCompare(b.name))
       .map((d) => ({ value: d.id, label: d.name, group: sameClasses(d.classes) ? 'The benchmark’s classes' : 'Other datasets (their labels are not read anyway)' })),
   );
-  $effect(() => {
-    if (!open || datasetId || !datasetOptions.length) return;
-    const src = bench.source.kind === 'dataset' ? bench.source.dataset_id : null;
-    const pick = datasetOptions.find((o) => o.value === src) ?? datasetOptions[0]!;
-    untrack(() => (datasetId = pick.value));
-  });
-  $effect(() => {
-    if (!open || jobId || !jobs?.length) return;
-    untrack(() => (jobId = jobs[0]!.id));
-  });
+  /** The pool's dataset: the one picked, else the benchmark's own source dataset, else the first. */
+  const datasetId = $derived(
+    datasetChoice ?? (datasetOptions.find((o) => bench.source.kind === 'dataset' && o.value === bench.source.dataset_id) ?? datasetOptions[0])?.value ?? '',
+  );
+  const jobId = $derived(jobChoice ?? jobs?.[0]?.id ?? '');
   const dataset = $derived(datasets?.find((d) => d.id === datasetId));
   const job = $derived(jobs?.find((j) => j.id === jobId));
   const poolImages = $derived(poolKind === 'dataset' ? (dataset ? dataset.splits[split] : null) : job ? job.counts.images : null);
@@ -170,24 +149,32 @@
     );
     return () => (gone = true);
   });
+  /**
+   * Its complete entry found no threshold: a loop never guesses a confidence, so one is required here (the switch is
+   * off and cannot be turned on; Start waits for a confidence).
+   */
+  const needConf = $derived(!!teacherEntry && found?.entry === teacherEntry.id && found.self.threshold === null);
+  /** Whether the teacher's own threshold is used. */
+  const useOwn = $derived(ownThreshold && !needConf);
   const thresholdText = $derived(
     !teacherEntry
-      ? 'decided when its entry is done (it runs first)'
+      ? 'From the threshold its entry finds (that entry runs first). If it finds none, the loop stops after that entry unless you set a confidence.'
       : !found || found.entry !== teacherEntry.id
-        ? 'reading its entry…'
+        ? 'From its entry’s threshold (reading its entry…).'
         : found.self.threshold !== null
-          ? `${conf(found.self.threshold)}, where its entry’s labels are 90% right`
-          : '0.50: its entry never gets 90% of its labels right',
+          ? `From ${conf(found.self.threshold)}, where its entry keeps ${labelsText(found.self.labels)}, 90% right.`
+          : 'Off: its entry found no threshold, and a loop never guesses one.',
   );
   /** The confidence a person set, once it is a valid one; null while the teacher's own threshold is used. */
-  const chosen = $derived(!ownThreshold && minConf.trim() !== '' && Number(minConf) >= 0 && Number(minConf) <= 1 ? Number(minConf) : null);
+  const chosen = $derived(!useOwn && minConf.trim() !== '' && Number(minConf) >= 0 && Number(minConf) <= 1 ? Number(minConf) : null);
   /** What its labels would be (./words labelForecast): read off the entry's curve, live as the confidence changes. */
-  const forecast = $derived(found && (ownThreshold || chosen !== null) ? labelForecast(found.self, found.images, poolImages, chosen) : null);
+  const forecast = $derived(found && (useOwn || chosen !== null || needConf) ? labelForecast(found.self, found.images, poolImages, chosen) : null);
   const forecastWords = $derived(forecast ? forecastText(forecast, poolImages) : null);
   /** "Keep labels from a lower confidence": the switch off, a lower confidence proposed, its field focused. */
   async function lower() {
-    if (!forecast || !found) return;
-    minConf = lowerConfidence(forecast.threshold, found.bestConf).toFixed(2);
+    if (!found) return;
+    const from = forecast?.threshold ?? null;
+    minConf = (from !== null ? lowerConfidence(from, found.bestConf) : Math.max(0.05, Math.round(found.bestConf * 100) / 100)).toFixed(2);
     ownThreshold = false;
     await tick();
     document.getElementById(`${uid}-conf`)?.focus();
@@ -201,9 +188,8 @@
     { value: 'none', label: FROM_SCRATCH },
     ...(models ?? []).filter((m) => m.arch === arch && sameClasses(m.classes)).map((m) => ({ value: m.id, label: m.id === teacherId ? `${m.name} · the teacher’s weights` : m.name })),
   ]);
-  $effect(() => {
-    if (weights !== 'none' && !weightOptions.some((o) => o.value === weights)) untrack(() => (weights = 'none'));
-  });
+  /** The starting weights picked, while they still fit the architecture; else from scratch. */
+  const weights = $derived(weightOptions.some((o) => o.value === weightsChoice) ? weightsChoice : 'none');
 
   // ---------- validation ----------
   const whole = (t: string, lo: number, hi: number) => {
@@ -213,12 +199,20 @@
   const errs = $derived({
     epochs: whole(epochs, 1, 1000) ? null : 'A whole number from 1 to 1,000.',
     imgsz: whole(imgsz, 32, 4096) && Number(imgsz) % 32 === 0 ? null : 'A multiple of 32 from 32 to 4,096.',
-    conf: ownThreshold || (Number.isFinite(Number(minConf)) && minConf.trim() !== '' && Number(minConf) >= 0 && Number(minConf) <= 1) ? null : 'From 0 to 1.',
+    conf: useOwn
+      ? null
+      : minConf.trim() === ''
+        ? needConf
+          ? 'Its entry found no threshold: choose the confidence its labels are kept from.'
+          : 'Choose a confidence from 0 to 1.'
+        : Number.isFinite(Number(minConf)) && Number(minConf) >= 0 && Number(minConf) <= 1
+          ? null
+          : 'From 0 to 1.',
     name: name.trim().length > 100 ? 'At most 100 characters.' : null,
   });
   const show = (e: string | null) => (touched ? e : null);
   const missingWhy = $derived(
-    !models
+    (!models
       ? 'Loading models'
       : !models.some(eligible)
         ? `No model of this server has ${bench.name}’s classes in its order`
@@ -238,7 +232,7 @@
                   : 'Pick a labeling job'
                 : !job.counts.images
                   ? 'That job has no images'
-                  : null,
+                  : null) ?? (needConf && chosen === null ? 'Choose a confidence: its entry found no threshold' : null),
   );
   const shownErr = $derived(touched ? Object.values(errs).find((e) => e) : undefined);
   const reason = $derived(missingWhy ?? (shownErr ? 'Fix the fields first' : null));
@@ -250,12 +244,13 @@
     e.preventDefault();
     touched = true;
     error = undefined;
+    serverErr = null;
     if (Object.values(errs).some((x) => x) || reason || busy || !teacher) return;
     const body: StartBenchLoop = {
       teacher: teacher.id,
       pool: poolKind === 'dataset' ? { kind: 'dataset', dataset_id: datasetId, split } : { kind: 'label_job', job_id: jobId },
       generations: Number(generations),
-      ...(ownThreshold ? {} : { min_confidence: Number(minConf) }),
+      ...(useOwn ? {} : { min_confidence: Number(minConf) }),
       student: { arch: arch as Arch, epochs: Number(epochs), imgsz: Number(imgsz), ...(weights !== 'none' ? { weights } : {}) },
       ...(name.trim() ? { name: name.trim() } : {}),
     };
@@ -265,11 +260,22 @@
       open = false;
       onstarted(loop);
     } catch (err) {
-      error = err;
+      // At the field it belongs to when the server's error says which (the students' settings, checked as a run's),
+      // else as the form's error.
+      const f = err instanceof ApiError ? loopErrorField(err, weights !== 'none') : null;
+      if (f) serverErr = { field: f, message: (err as ApiError).message };
+      else error = err;
     } finally {
       busy = false;
     }
   }
+  /** A server error shown at its field, until that field changes. */
+  let serverErr = $state<{ field: 'epochs' | 'imgsz' | 'weights' | 'arch'; message: string } | null>(null);
+  const fieldErr = (f: 'epochs' | 'imgsz' | 'weights' | 'arch') => (serverErr?.field === f ? serverErr.message : null);
+  $effect(() => {
+    void [epochs, imgsz, weights, arch];
+    untrack(() => (serverErr = null));
+  });
 </script>
 
 <Dialog bind:open size="lg" title="New loop" description="Does a model’s own labeling train a better model? Each generation the model labels a pool of images by itself, a student trains on those labels alone, and {bench.name} grades the student, the next generation’s teacher.">
@@ -279,7 +285,7 @@
       for="{uid}-teacher"
       hint={teacher && eligible(teacher) ? `\`${teacher.arch}\` at ${num(teacher.imgsz)} px. ${teacherEntry ? 'Its complete entry here is generation 0.' : 'It has no complete entry here yet: one runs first, as generation 0.'}` : 'A model whose classes are this benchmark’s, the same names in the same order: its labels are written by class index.'}
     >
-      <Select id="{uid}-teacher" bind:value={teacherId} disabled={!models?.length} options={teacherOptions} />
+      <Select id="{uid}-teacher" bind:value={() => teacherId, (v) => (teacherChoice = v)} disabled={!models?.length} options={teacherOptions} />
     </Field>
 
     <fieldset class="group">
@@ -295,7 +301,7 @@
       {#if poolKind === 'dataset'}
         <div class="row2">
           <Field label="Dataset" for="{uid}-ds">
-            <Select id="{uid}-ds" bind:value={datasetId} disabled={!datasets?.length} options={datasetOptions} />
+            <Select id="{uid}-ds" bind:value={() => datasetId, (v) => (datasetChoice = v)} disabled={!datasets?.length} options={datasetOptions} />
           </Field>
           <Field label="Split">
             <Segmented
@@ -307,7 +313,7 @@
         </div>
       {:else}
         <Field label="Labeling job" for="{uid}-job">
-          <Select id="{uid}-job" bind:value={jobId} disabled={!jobs?.length} options={(jobs ?? []).map((j) => ({ value: j.id, label: `${j.name} · ${num(j.counts.images)} images`, short: j.name }))} />
+          <Select id="{uid}-job" bind:value={() => jobId, (v) => (jobChoice = v)} disabled={!jobs?.length} options={(jobs ?? []).map((j) => ({ value: j.id, label: `${j.name} · ${num(j.counts.images)} images`, short: j.name }))} />
         </Field>
       {/if}
       <p class="note">
@@ -322,36 +328,41 @@
     <fieldset class="group">
       <legend class="group-label">The students</legend>
       <div class="row2">
-        <Field label="Architecture" for="{uid}-arch">
-          <Select id="{uid}-arch" bind:value={arch} options={archOptions} />
+        <Field label="Architecture" for="{uid}-arch" error={fieldErr('arch')}>
+          <Select id="{uid}-arch" bind:value={() => arch, (v) => (archChoice = v)} options={archOptions} />
         </Field>
-        <Field label="Starting weights" for="{uid}-w" hint={weights === 'none' ? 'Trained from scratch on the teacher’s labels.' : undefined}>
-          <Select id="{uid}-w" bind:value={weights} options={weightOptions} />
+        <Field label="Starting weights" for="{uid}-w" error={fieldErr('weights')} hint={weights === 'none' ? 'Trained from scratch on the teacher’s labels.' : undefined}>
+          <Select id="{uid}-w" bind:value={() => weights, (v) => (weightsChoice = v)} options={weightOptions} />
         </Field>
-        <Field label="Epochs" for="{uid}-ep" error={show(errs.epochs)}>
+        <Field label="Epochs" for="{uid}-ep" error={fieldErr('epochs') ?? show(errs.epochs)}>
           <Input id="{uid}-ep" bind:value={epochs} inputmode="numeric" invalid={!!show(errs.epochs)} />
         </Field>
-        <Field label="Image size" for="{uid}-sz" error={show(errs.imgsz)} hint={teacher ? `The teacher’s is ${teacher.imgsz} px.` : undefined}>
-          <Input id="{uid}-sz" bind:value={imgsz} inputmode="numeric" suffix="px" invalid={!!show(errs.imgsz)} />
+        <Field label="Image size" for="{uid}-sz" error={fieldErr('imgsz') ?? show(errs.imgsz)} hint={teacher ? `The teacher’s is ${teacher.imgsz} px.` : undefined}>
+          <Input id="{uid}-sz" bind:value={() => imgsz, (v) => (sizeChoice = v)} inputmode="numeric" suffix="px" invalid={!!show(errs.imgsz)} />
         </Field>
       </div>
     </fieldset>
 
     <div class="conf">
-      <Switch label="Keep the teacher’s labels from its own threshold" bind:checked={ownThreshold} hint={ownThreshold ? `From ${thresholdText}.` : 'Every teacher keeps its detections from the confidence below.'} />
-      {#if !ownThreshold}
-        <Field label="Keep labels from confidence" for="{uid}-conf" error={show(errs.conf)}>
-          <div class="narrow"><Input id="{uid}-conf" bind:value={minConf} inputmode="decimal" invalid={!!show(errs.conf)} /></div>
+      <Switch
+        label="Keep the teacher’s labels from its own threshold"
+        bind:checked={() => useOwn, (v) => (ownThreshold = v)}
+        disabled={needConf}
+        hint={useOwn || needConf ? thresholdText : 'Every teacher keeps its detections from the confidence below.'}
+      />
+      {#if !useOwn}
+        <Field label="Keep labels from confidence" for="{uid}-conf" error={show(errs.conf)} hint={needConf ? 'Required for this teacher.' : undefined}>
+          <div class="narrow"><Input id="{uid}-conf" bind:value={minConf} inputmode="decimal" placeholder="e.g. 0.30" invalid={!!show(errs.conf)} /></div>
         </Field>
       {/if}
       {#if forecast && forecastWords}
         <!-- What the first teacher's labels would be, from its entry's curve: said plainly when they are too few. -->
-        <div class="fc" class:warn={forecast.starved} role={forecast.starved ? 'alert' : 'status'} data-forecast={forecast.starved ? (forecast.stops ? 'stops' : 'starved') : 'ok'}>
+        <div class="fc" class:warn={forecast.starved} role={forecast.starved ? 'alert' : 'status'} data-forecast={forecast.from === 'none' ? 'none' : forecast.starved ? (forecast.stops ? 'stops' : 'starved') : 'ok'}>
           <span class="fc-icon" aria-hidden="true">{#if forecast.starved}<TriangleAlert size={16} strokeWidth={1.75} />{:else}<Info size={16} strokeWidth={1.75} />{/if}</span>
           <div class="fc-body">
             {#if forecastWords.title}<p class="fc-title">{forecastWords.title}</p>{/if}
             <p class="fc-text">{forecastWords.text}{#if forecastWords.remedy}{' '}{forecastWords.remedy}{/if}{#if !teacherEntry}{' '}Read from its entry on part of the benchmark; the loop runs a complete one first.{/if}</p>
-            {#if forecast.starved && ownThreshold}<div class="fc-act"><Button size="sm" onclick={lower}>Keep labels from a lower confidence</Button></div>{/if}
+            {#if forecast.starved && useOwn}<div class="fc-act"><Button size="sm" onclick={lower}>Keep labels from a lower confidence</Button></div>{/if}
           </div>
         </div>
       {/if}
@@ -366,11 +377,11 @@
   </form>
   {#snippet footer()}
     <!-- What starting it does and costs, beside the button that does it. -->
-    {#if missingWhy}<p class="why" data-gate-why>{missingWhy}</p>{:else if forecast?.starved}<p class="why warn-text num" role="status"><TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />{forecast.stops ? 'Its labels would be too few: the loop would stop at labeling' : 'Its labels would be too few to train a student on'}</p>{:else}<p class="why s-text num" role="status">{summary}</p>{/if}
+    {#if missingWhy}<p class="why" data-gate-why>{missingWhy}</p>{:else if forecast?.starved}<p class="why warn-text num" role="status"><TriangleAlert size={14} strokeWidth={1.75} aria-hidden="true" />{forecast.threshold === null ? 'Without a confidence the loop would stop before labeling' : forecast.stops ? 'Its labels would be too few: the loop would stop at labeling' : 'Its labels would be too few to train a student on'}</p>{:else}<p class="why s-text num" role="status">{summary}</p>{/if}
     <Button variant="ghost" onclick={() => (open = false)}>Cancel</Button>
     <Gate {reason}>
       {#snippet children(why)}
-        <Button variant="primary" type="submit" form="{uid}-form" icon={Repeat} loading={busy} disabled={!!why} aria-describedby={why}>{forecast?.starved ? 'Start anyway' : 'Start loop'}</Button>
+        <Button variant="primary" type="submit" form="{uid}-form" icon={Repeat} loading={busy} disabled={!!why} aria-describedby={why}>{forecast?.starved && forecast.threshold !== null ? 'Start anyway' : 'Start loop'}</Button>
       {/snippet}
     </Gate>
   {/snippet}

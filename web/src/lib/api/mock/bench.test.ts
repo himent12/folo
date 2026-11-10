@@ -4,6 +4,7 @@ import { AXES, AXIS_WEIGHT, rankEntries } from '../../bench/rules';
 import { conditionRetention, expectedCalibrationError, histogramMeanIou, labelOperatingPoint, localizationAxis, readiness, retention, robustnessAxis, scoreTotal } from '../../bench/score';
 import { conditionBoxes, distanceScale } from './benchConditions';
 import { designPlan } from './benchDesign';
+import { OPEN_BOXES_MAX, setOpenBoxesMax } from './bench';
 import { MockApi } from './index';
 import benchDoc from '../../../../../docs/BENCH.md?raw';
 
@@ -113,8 +114,13 @@ describe('MockApi vision benchmarks: catalog and seeds', () => {
     const entries = await api.benchEntries('bn_3c90');
     expect(rankEntries(entries).map((e) => e.id)).toEqual(entries.map((e) => e.id));
     const by = (n: string) => entries.find((e) => e.name === n)!;
+    // Complete entries by score, then partial ones by score: a partial agent never above a complete model.
     const done = entries.filter((e) => e.status === 'done');
-    expect(done.map((e) => e.score!.total)).toEqual([...done.map((e) => e.score!.total)].sort((a, b) => b - a));
+    const complete = done.filter((e) => !e.score!.partial);
+    const partial = done.filter((e) => e.score!.partial);
+    expect(done).toEqual([...complete, ...partial]);
+    for (const g of [complete, partial]) expect(g.map((e) => e.score!.total)).toEqual([...g.map((e) => e.score!.total)].sort((a, b) => b - a));
+    expect(partial.length).toBeGreaterThan(0);
     expect(done[0]!.name).toBe('fasteners-s-v1');
     expect(by('yolo26n').contestant.kind).toBe('external');
     const claude = by('Claude Code (sonnet)');
@@ -366,8 +372,9 @@ describe('MockApi vision benchmarks: entries run', () => {
     const e = await api.startBenchEntry('bn_9f03', { name: 'parts', contestant: { kind: 'external', open: true, predictions: rec(null, null).slice(0, 50) } });
     expect(e).toMatchObject({ status: 'running', progress: { done: 50, total: 200 * (1 + passes), condition: null } });
     expect((await api.bench('bn_9f03')).active).toBe(true);
-    // A part: all or nothing. One that repeats a record received is refused and adds nothing.
-    await expect(api.sendBenchPredictions('bn_9f03', e.id, rec(null, null).slice(40, 60))).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/answered twice/) });
+    // A part: all or nothing. One that repeats a record received with other boxes is refused and adds nothing.
+    const changed = rec(null, null).slice(40, 60).map((r, k) => (k === 5 ? { ...r, boxes: [] } : r));
+    await expect(api.sendBenchPredictions('bn_9f03', e.id, changed)).rejects.toMatchObject({ status: 400, code: 'invalid_body', message: expect.stringMatching(/received before with other boxes/) });
     expect((await api.benchEntry('bn_9f03', e.id)).progress.done).toBe(50);
     expect((await api.sendBenchPredictions('bn_9f03', e.id, rec(null, null).slice(50))).progress.done).toBe(200);
     const haze = b.plan.conditions.find((c) => c.condition === 'haze')!;
@@ -382,15 +389,84 @@ describe('MockApi vision benchmarks: entries run', () => {
     // Only an open external entry takes parts.
     await expect(api.sendBenchPredictions('bn_9f03', e.id, [])).rejects.toMatchObject({ status: 409, code: 'bench_entry_not_open' });
     await expect(api.finishBenchEntry('bn_3c90', 'be_f101')).rejects.toMatchObject({ status: 409, code: 'bench_entry_not_open' });
-    // Stopping an open entry discards it.
+    // Stopping an open entry discards what it received; it stays, stopped, until deleted.
     const gone = await api.startBenchEntry('bn_9f03', { name: 'gone', contestant: { kind: 'external', open: true } });
-    const removed: string[] = [];
-    const close = api.benchEvents('bn_9f03', { removed: ({ id }) => removed.push(id) });
-    await api.stopBenchEntry('bn_9f03', gone.id);
-    expect(removed).toEqual([gone.id]);
+    expect((await api.stopBenchEntry('bn_9f03', gone.id)).status).toBe('stopped');
+    expect((await api.benchEntries('bn_9f03')).find((x) => x.id === gone.id)?.status).toBe('stopped');
+    await api.deleteBenchEntry('bn_9f03', gone.id);
     expect((await api.benchEntries('bn_9f03')).some((x) => x.id === gone.id)).toBe(false);
+  });
+
+  it('takes a part again when it repeats records with the same boxes (a retry), refuses other boxes, and caps what it holds', async () => {
+    const api = new MockApi('normal', 0);
+    const images = (await api.benchImages('bn_9f03', { limit: 1000 })).images;
+    const recs = images.map((i) => ({ image: i.id, boxes: i.boxes.map((x) => ({ ...x, score: 0.8 })) }));
+    const e = await api.startBenchEntry('bn_9f03', { name: 'retry', contestant: { kind: 'external', open: true } });
+    expect((await api.sendBenchPredictions('bn_9f03', e.id, recs.slice(0, 100))).progress.done).toBe(100);
+    // The same part again (its answer was lost): taken, nothing added.
+    expect((await api.sendBenchPredictions('bn_9f03', e.id, recs.slice(0, 120))).progress.done).toBe(120);
+    // The same record with other boxes: refused, nothing added.
+    const other = { ...recs[3]!, boxes: [] };
+    await expect(api.sendBenchPredictions('bn_9f03', e.id, [other])).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/received before with other boxes/) });
+    expect((await api.benchEntry('bn_9f03', e.id)).progress.done).toBe(120);
+    // At most so many boxes held: a part over it is refused with what to do.
+    setOpenBoxesMax(10);
+    try {
+      await expect(api.sendBenchPredictions('bn_9f03', e.id, recs.slice(120, 140))).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/boxes in memory, more than its 10: send it pass by pass/) });
+    } finally {
+      setOpenBoxesMax(OPEN_BOXES_MAX);
+    }
+  });
+
+  it('fails an open entry that hears nothing for 30 minutes; it freezes the plan while open, not once failed', async () => {
+    const api = new MockApi('normal', 0);
+    const plan = { conditions: [{ condition: 'haze', severities: [1], weight: 1, why: null }], rationale: null, designed_by: null };
+    const e = await api.startBenchEntry('bn_9f03', { name: 'idle', contestant: { kind: 'external', open: true } });
+    await expect(api.updateBench('bn_9f03', { plan })).rejects.toMatchObject({ status: 409, code: 'bench_frozen' });
+    await vi.advanceTimersByTimeAsync(29 * 60_000);
+    expect((await api.benchEntry('bn_9f03', e.id)).status).toBe('running');
+    await vi.advanceTimersByTimeAsync(61_000);
+    const failed = await api.benchEntry('bn_9f03', e.id);
+    expect(failed).toMatchObject({ status: 'failed', error: 'no predictions arrived for 30 minutes' });
+    // A failed (or stopped) entry graded nothing: the plan can change again.
+    expect((await api.updateBench('bn_9f03', { plan })).plan.conditions).toHaveLength(1);
     expect((await api.bench('bn_9f03')).active).toBe(false);
-    close();
+  });
+
+  it('gives a new benchmark a 12-digit id (the old ones keep theirs), and checks a loop’s students as a run is checked', async () => {
+    const api = new MockApi('normal', 0);
+    const b = await api.createBench({ name: 'long id', source: { kind: 'dataset', dataset_id: 'ds_shapes' } });
+    expect(b.id).toMatch(/^bn_[0-9a-f]{12}$/);
+    expect((await api.bench(b.id)).id).toBe(b.id);
+    const pool = { kind: 'dataset' as const, dataset_id: 'ds_shapes' };
+    await expect(api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_n', pool, student: { weights: 'm_gone' } })).rejects.toMatchObject({ status: 404, code: 'model_not_found' });
+    await expect(api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_n', pool, student: { device: 'gpu:3' } })).rejects.toMatchObject({ status: 404, code: 'device_not_found' });
+    await expect(api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_n', pool, student: { imgsz: 32 } })).rejects.toMatchObject({ status: 400, code: 'invalid_config', message: expect.stringMatching(/imgsz/) });
+  });
+
+  it('keeps an entry graded on an earlier version of the benchmark with its own fingerprint, out of a loop’s reuse', async () => {
+    const api = new MockApi('normal', 0);
+    const b = await api.bench('bn_3c90');
+    const old = await api.benchEntry('bn_3c90', 'be_f100');
+    expect(old.status).toBe('done');
+    expect(old.fingerprint).not.toBe(b.fingerprint);
+    // The server ranks it among the others by score; Studio puts it below the current ones (./leaderboard boardOrder).
+    expect((await api.benchEntries('bn_3c90')).some((e) => e.id === 'be_f100')).toBe(true);
+  });
+
+  it('keeps the plan open on a benchmark whose only entry failed (`bench-failed-only`)', async () => {
+    const api = new MockApi('bench-failed-only', 0);
+    const [e] = await api.benchEntries('bn_9f03');
+    expect(e).toMatchObject({ status: 'failed', name: 'Claude Code (haiku)' });
+    const plan = { conditions: [{ condition: 'low_light', severities: [3], weight: 1, why: null }], rationale: null, designed_by: null };
+    expect((await api.updateBench('bn_9f03', { plan })).plan.conditions).toHaveLength(1);
+  });
+
+  it('refuses seeds above 2^53 − 1, JSON’s exact integers', async () => {
+    const api = new MockApi('normal', 0);
+    await expect(api.createBench({ name: 'big seed', source: { kind: 'dataset', dataset_id: 'ds_shapes' }, seed: 2 ** 53 })).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/seed/) });
+    expect((await api.createBench({ name: 'ok seed', source: { kind: 'dataset', dataset_id: 'ds_shapes' }, seed: Number.MAX_SAFE_INTEGER })).seed).toBe(Number.MAX_SAFE_INTEGER);
+    await expect(api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_n', pool: { kind: 'dataset', dataset_id: 'ds_shapes' }, student: { seed: 2 ** 60 } })).rejects.toMatchObject({ status: 400 });
   });
 
   it('stops and deletes, with the conflicts of the API', async () => {
@@ -455,30 +531,34 @@ describe('MockApi vision benchmarks: loops', () => {
     expect((await api.benchEntry('bn_5e12', done.generations[1]!.entry_id!)).name).toBe('shapes-n-best loop gen 1-best');
   });
 
-  it('fails a loop whose teacher keeps boxes on fewer than 10 pool images, as the server words it', async () => {
+  it('fails a loop whose teacher has no threshold and no confidence set, before labeling, as the server words it', async () => {
     const api = new MockApi('normal', 0);
-    const starved = (await api.benchLoops('bn_5e12')).find((l) => l.status === 'failed')!;
-    expect(starved).toMatchObject({ id: 'bl_9e40', name: 'shapes-n-early loop', phase: null, verdict: null });
+    const failed = (await api.benchLoops('bn_5e12')).find((l) => l.status === 'failed')!;
+    expect(failed).toMatchObject({ id: 'bl_9e40', name: 'shapes-n-early loop', phase: null, verdict: null });
     // Generation 0 graded; generation 1 started and left with nothing in it: no labels, no run, no model.
-    expect(starved.generations[0]!.map50_95).not.toBeNull();
-    expect(starved.generations[1]).toMatchObject({ generation: 1, labels: null, run_id: null, model_id: null });
-    const m = /^the teacher 'shapes-n-early' kept (\d+) box(?:es)? on (\d+) of the pool's 800 images at confidence (0\.\d+): too few to train a student on \(at least 10 images\)$/.exec(starved.error!);
-    expect(m, starved.error!).not.toBeNull();
-    expect(Number(m![2])).toBeLessThan(10);
-    expect(Number(m![2])).toBeLessThanOrEqual(Number(m![1]));
-    expect(starved.hint).toMatch(/lower min_confidence/);
-    // The teacher's entry: not ready, its threshold the one the loop kept labels from.
-    const r = await api.benchResult('bn_5e12', starved.generations[0]!.entry_id!);
-    expect(r.self_labeling.readiness).toBe('not_ready');
-    expect(r.self_labeling.recall).toBeLessThan(0.01);
-    expect(Number(m![3])).toBeCloseTo(r.self_labeling.threshold!, 2);
-    // Starting a loop from that teacher again fails the same way, at labeling.
+    expect(failed.generations[0]!.map50_95).not.toBeNull();
+    expect(failed.generations[1]).toMatchObject({ generation: 1, labels: null, run_id: null, model_id: null });
+    expect(failed.error).toBe("'shapes-n-early' never reaches 90% precision on at least 10 labels on this benchmark, so there is no confidence to label the pool from");
+    expect(failed.hint).toMatch(/set min_confidence/);
+    // The teacher's entry: a precise handful above ~0.75, too few (under 10) to rest a threshold on.
+    const r = await api.benchResult('bn_5e12', failed.generations[0]!.entry_id!);
+    expect(r.self_labeling).toMatchObject({ threshold: null, recall: 0, readiness: 'not_ready' });
+    expect(r.self_labeling.curve.some((p) => p.precision !== null && p.precision >= 0.9 && p.labels > 0 && p.labels < 10)).toBe(true);
+    expect(r.self_labeling.labels).toBe(r.self_labeling.curve[0]!.labels);
+    // Starting one again without a confidence fails the same way, as soon as generation 1 starts.
     const l = await api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_e5', pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'train' } });
-    for (let t = 0; t < 60 && (await api.benchLoop('bn_5e12', l.id)).status === 'running'; t++) await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(1000);
     const again = await api.benchLoop('bn_5e12', l.id);
     expect(again.status).toBe('failed');
-    expect(again.error).toMatch(/too few to train a student on/);
-    expect(again.generations.at(-1)!.labels).toBeNull();
+    expect(again.error).toMatch(/so there is no confidence to label the pool from/);
+    // A confidence where it keeps a handful: it fails at labeling, under 10 pool images, as the server words it.
+    const high = await api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_e5', min_confidence: 0.9, pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'train' } });
+    for (let t = 0; t < 20 && (await api.benchLoop('bn_5e12', high.id)).status === 'running'; t++) await vi.advanceTimersByTimeAsync(1000);
+    const starved = await api.benchLoop('bn_5e12', high.id);
+    const m = /^the teacher 'shapes-n-early' kept (\d+) box(?:es)? on (\d+) of the pool's 800 images at confidence 0\.9: too few to train a student on \(at least 10 images\)$/.exec(starved.error!);
+    expect(m, starved.error!).not.toBeNull();
+    expect(Number(m![2])).toBeLessThan(10);
+    expect(starved.hint).toMatch(/lower min_confidence/);
     // A lower confidence keeps enough: the same teacher from 0.05 labels its pool, the images it kept nothing on left out.
     const low = await api.startBenchLoop('bn_5e12', { teacher: 'm_shapes_e5', min_confidence: 0.05, pool: { kind: 'dataset', dataset_id: 'ds_shapes', split: 'train' } });
     for (let t = 0; t < 20 && !(await api.benchLoop('bn_5e12', low.id)).generations[1]?.labels; t++) await vi.advanceTimersByTimeAsync(1000);
@@ -486,6 +566,20 @@ describe('MockApi vision benchmarks: loops', () => {
     expect(k.threshold).toBe(0.05);
     expect(k.labeled_images).toBeGreaterThanOrEqual(10);
     expect(k.labeled_images).toBeLessThan(k.images);
+  });
+
+  it('gives the pond a mixed-sign reliability with thin top bins, and an entry with no calibration (partial for that alone)', async () => {
+    const api = new MockApi('normal', 0);
+    const mixed = await api.benchResult('bn_7a41', 'be_p201');
+    const bins = mixed.calibration!.bins.filter((b) => b.count > 0);
+    expect(bins.some((b) => b.confidence! > b.precision!)).toBe(true);
+    expect(bins.some((b) => b.confidence! < b.precision!)).toBe(true);
+    expect(bins.some((b) => b.count < 20)).toBe(true);
+    const raw = await api.benchResult('bn_7a41', 'be_p205');
+    expect(raw.calibration).toBeNull();
+    expect(raw.entry).toMatchObject({ scored: true, images: 240, conditions: true });
+    expect(raw.entry.score!.partial).toBe(true);
+    expect(raw.entry.score!.axes.find((a) => a.axis === 'calibration')!.value).toBeNull();
   });
 
   it('runs a new loop through its phases, telling each on the stream', async () => {

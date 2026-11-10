@@ -50,17 +50,20 @@ describe('the score in rows', () => {
       robustness: { retention: 0.832, conditions: [] },
       calibration: { ece: 0.061, detections: 10, bins: [] },
       localization: { mean_iou: 0.84, matches: 10, histogram: [] },
-      self_labeling: { recall: 0.58, precision: 0.91, threshold: 0.62 },
+      self_labeling: { recall: 0.58, precision: 0.91, threshold: 0.62, labels: 1363 },
     } as unknown as BenchResult;
     expect(axisRaw('accuracy', r, true)).toBe('mAP50-95 0.641 ± 0.018');
     expect(axisRaw('robustness', r, true)).toBe('keeps 83% of its accuracy');
-    expect(axisRaw('self_labeling', r, true)).toBe('labels 58% of objects at 90% precision');
+    expect(axisRaw('self_labeling', r, true)).toBe('labels 58% of objects, 1,363 labels at 90% precision');
     expect(axisRaw('calibration', r, true)).toBe('ECE 0.06');
     expect(axisRaw('localization', r, true)).toBe('mean IoU 0.84');
-    const none = { ...r, robustness: null, calibration: null, self_labeling: { recall: 0, precision: 0.84, threshold: null } } as unknown as BenchResult;
+    const none = { ...r, robustness: null, calibration: null, self_labeling: { recall: 0, precision: 0.84, threshold: null, labels: 105 } } as unknown as BenchResult;
     expect(axisRaw('robustness', none, false)).toBeNull();
     expect(axisRaw('self_labeling', none, false)).toBe('84% of labels right, under 90%');
-    expect(axisRaw('self_labeling', none, true)).toBe('never 90% of labels right');
+    expect(axisRaw('self_labeling', none, true)).toBe('never 90% right on 10 labels or more');
+    // As printed: 89.6% is not "90% … under 90%"; a handful of labels is too few to judge.
+    expect(axisRaw('self_labeling', { ...none, self_labeling: { ...none.self_labeling, precision: 0.896 } }, false)).toBe('89.6% of labels right, under 90%');
+    expect(axisRaw('self_labeling', { ...none, self_labeling: { ...none.self_labeling, precision: 1, labels: 6 } }, false)).toBe('6 labels: too few to judge');
   });
 
   it('says why an axis was not measured', () => {
@@ -92,32 +95,62 @@ describe('calibrationReading', () => {
     });
     const close = calibrationReading({ ece: 0.02, bins: [bin(0.5, 300, 0.55, 0.54), bin(0.9, 300, 0.95, 0.93)] });
     expect(close.tone).toBe('close');
-    expect(close.sentence).toBe('Close to the diagonal: when it says 0.95, it is right 93% of the time. Its confidence can be taken at its word.');
+    expect(close.sentence).toBe('Close to the diagonal (ECE 0.02): when it says 0.55, it is right 54% of the time. Its confidence can be taken at its word.');
+  });
+
+  it('never quotes a bin that contradicts its tone, nor a thin one, nor a far one as "close"', () => {
+    // Mostly underconfident (the low bins), a thin overconfident top that is further off: the old reading said
+    // "Underconfident: when it says 0.95, it is right 40% of the time".
+    const mixed = [bin(0.1, 900, 0.15, 0.24), bin(0.2, 600, 0.25, 0.33), bin(0.9, 12, 0.95, 0.4)];
+    const r = calibrationReading({ ece: 0.09, bins: mixed });
+    expect(r.tone).toBe('under');
+    expect(r.sentence).toBe('Underconfident: when it says 0.15, it is right 24% of the time. Its scores undersell it.');
+    const only = calibrationReading({ ece: 0.05, bins: [bin(0.1, 1000, 0.15, 0.1), bin(0.9, 10, 0.95, 0.99)] });
+    expect(only.tone).toBe('over');
+    expect(only.sentence).toBe('Overconfident: when it says 0.15, it is right 10% of the time. Trust its high scores less than they claim.');
+    // No bin with enough detections in it: the average alone.
+    const flat = calibrationReading({ ece: 0.05, bins: [bin(0.1, 10, 0.15, 0.1), bin(0.5, 10, 0.55, 0.5)] });
+    expect(flat.sentence).toBe('Overconfident: on average it is right 5 points less often than it says (ECE 0.05). Trust its high scores less than they claim.');
+    // Close on average, but a well-filled bin far off: no "take it at its word", and the far bin is not quoted as close.
+    const far = calibrationReading({ ece: 0.025, bins: [bin(0.2, 2000, 0.25, 0.26), bin(0.9, 200, 0.95, 0.6)] });
+    expect(far.sentence).toBe('Close to the diagonal (ECE 0.03): when it says 0.25, it is right 26% of the time. Some of its scores are off by more: read the bins.');
   });
 });
 
 const pt = (confidence: number, precision: number | null, recall: number, labels: number): BenchLabelPoint => ({ confidence, precision, recall, labels });
 
 describe('selfLabelReading', () => {
-  it('reads the threshold it found', () => {
-    expect(selfLabelReading({ threshold: 0.62, precision: 0.912, recall: 0.58, mean_iou: 0.84, labels_per_image: 3.14, curve: [] }, true)).toBe(
-      'From confidence 0.62 up, 91% of its labels are right and they cover 58% of all objects: 3.1 labels per image, mean IoU 0.84.',
+  it('reads the threshold it found, with the labels it rests on', () => {
+    expect(selfLabelReading({ threshold: 0.32, precision: 0.904, recall: 0.94, mean_iou: 0.84, labels_per_image: 4.54, labels: 1363, curve: [] }, true)).toBe(
+      'From confidence 0.32 up: 1,363 labels (4.5 per image), 90% right, 94% of all objects, mean IoU 0.84.',
     );
   });
 
-  it('says when no confidence reaches 90%, with the most it gets and all its detections', () => {
-    const curve = [pt(0, 0.62, 0.8, 900), pt(0.5, 0.86, 0.4, 300), pt(0.9, null, 0, 0)];
-    expect(selfLabelReading({ threshold: null, precision: 0.62, recall: 0, mean_iou: 0.8, labels_per_image: 2.5, curve }, true)).toBe(
-      'At no confidence are 90% of its labels right: the most is 86%, from 0.50 up. All its detections together are 62% right, 2.5 labels per image.',
+  it('says when no confidence keeps 10 labels 90% right, with the best supported and a precise handful as a handful', () => {
+    const curve = [pt(0, 0.62, 0.8, 900), pt(0.5, 0.86, 0.4, 300), pt(0.78, 1, 0.0008, 1), pt(0.9, null, 0, 0)];
+    expect(selfLabelReading({ threshold: null, precision: 0.62, recall: 0, mean_iou: 0.8, labels_per_image: 2.5, labels: 900, curve }, true)).toBe(
+      'No confidence keeps 10 labels or more of which 90% are right: the best is 86% right, from 0.50 up (300 labels), so none is kept as a label. From 0.78 up its 1 label is 100% right, too few to rest a threshold on. All its detections together: 900 detections (2.5 per image), 62% right.',
     );
+  });
+
+  it('reads the real weak teacher: all its detections, 1.6% right, never as labels it would keep', () => {
+    const curve = [pt(0, 0.016, 0.52, 74593), pt(0.5, 0.31, 0.05, 900), pt(0.78, 1, 0.0008, 1)];
+    const t = selfLabelReading({ threshold: null, precision: 0.016, recall: 0, mean_iou: 0.71, labels_per_image: 248.6, labels: 74593, curve }, true);
+    expect(t).toMatch(/so none is kept as a label/);
+    expect(t).toMatch(/All its detections together: 74,593 detections \(248\.6 per image\), 1\.6% right\.$/);
+    expect(t).not.toMatch(/248\.6 labels/);
   });
 
   it('reads a contestant without confidences at its one point', () => {
-    expect(selfLabelReading({ threshold: null, precision: 0.93, recall: 0.61, mean_iou: 0.81, labels_per_image: 4, curve: [pt(0, 0.93, 0.61, 200)] }, false)).toBe(
-      'It gives no confidences, so it has one operating point: 93% of its labels are right and they cover 61% of all objects (4.0 labels per image, mean IoU 0.81).',
+    expect(selfLabelReading({ threshold: null, precision: 0.93, recall: 0.61, mean_iou: 0.81, labels_per_image: 4, labels: 200, curve: [pt(0, 0.93, 0.61, 200)] }, false)).toBe(
+      'It gives no confidences, so it has one operating point: its 200 labels (4.0 per image) are 93% right and cover 61% of all objects, mean IoU 0.81.',
     );
-    expect(selfLabelReading({ threshold: null, precision: 0.84, recall: 0, mean_iou: null, labels_per_image: 4, curve: [pt(0, 0.84, 0.66, 200)] }, false)).toBe(
-      'It gives no confidences, so it has one operating point: 84% of its labels are right, short of the 90% a label set to train on needs.',
+    expect(selfLabelReading({ threshold: null, precision: 0.84, recall: 0, mean_iou: null, labels_per_image: 4, labels: 200, curve: [pt(0, 0.84, 0.66, 200)] }, false)).toBe(
+      'It gives no confidences, so it has one operating point: its 200 labels (4.0 per image) are 84% right, short of the 90% a label set to train on needs.',
+    );
+    // A handful all right is not a label set, and never "0.0 per image" beside them.
+    expect(selfLabelReading({ threshold: null, precision: 1, recall: 0, mean_iou: 0.9, labels_per_image: 0.02, labels: 6, curve: [pt(0, 1, 0.01, 6)] }, false)).toBe(
+      'It gives no confidences, so it has one operating point: its 6 labels (under 0.1 per image) are 100% right: too few to rest a label set on (it takes at least 10).',
     );
   });
 });
@@ -142,9 +175,12 @@ describe('comparing entries', () => {
     const b = { name: 'b', map: 0.63, ci: [0.61, 0.65] as [number, number] };
     const c = { name: 'c', map: 0.4, ci: [0.35, 0.45] as [number, number] };
     expect(intervalsVerdict([a, b])).toBe('Not clearly different on this benchmark: their 95% intervals overlap.');
-    expect(intervalsVerdict([c, a])).toBe('a is clearly ahead on mAP50-95: its interval is above the other’s.');
-    expect(intervalsVerdict([a, b, c])).toBe('a and b are not clearly different (their intervals overlap); c is clearly behind.');
-    expect(intervalsVerdict([a, b, { ...a, name: 'd' }])).toBe('Not clearly different on this benchmark: every interval overlaps a’s.');
+    expect(intervalsVerdict([c, a])).toBe('a is clearly ahead on mAP50-95: its interval is above c’s.');
+    // Each against the leader, and said so: b and c are not compared with each other.
+    expect(intervalsVerdict([a, b, c])).toBe('Against a, the highest: b overlaps its interval, so is not clearly different from it; c is clearly below it.');
+    expect(intervalsVerdict([a, b, { ...a, name: 'd' }])).toBe('Against a, the highest: every other interval overlaps a’s, so none is clearly different from it on this benchmark.');
+    // As printed: 0.6201 and 0.6204 both print 0.620, so they overlap.
+    expect(intervalsVerdict([{ name: 'p', map: 0.7, ci: [0.6204, 0.72] }, { name: 'q', map: 0.5, ci: [0.45, 0.6201] }])).toBe('Not clearly different on this benchmark: their 95% intervals overlap.');
     expect(intervalsVerdict([a])).toBe('');
   });
 
@@ -180,6 +216,14 @@ describe('loops in words', () => {
       'Held: generation 1 (0.800) is inside the first teacher’s 95% interval (0.752–0.831): no measurable change.',
     );
     expect(loopVerdictText({ verdict: null, generations: gens })).toBeNull();
+    // The real loop: 0.8661 above 0.8660 prints with the digits that make it true.
+    const real = [
+      { generation: 0, map50_95: 0.857, ci95: [0.8476, 0.866] },
+      { generation: 2, map50_95: 0.8661, ci95: [0.85, 0.88] },
+    ] as BenchLoop['generations'];
+    expect(loopVerdictText({ verdict: 'improved', generations: real })).toBe(
+      'Improved: generation 2 (0.8661) is above the first teacher’s 95% interval (0.8476–0.8660). Its own labels made a better model.',
+    );
     expect(loopPlanText({ generations: 3, epochs: 30, poolImages: 4200, teacherEntry: false })).toBe(
       '3 generations: 3 training runs of 30 epochs on up to 4,200 images, 4 benchmark entries',
     );

@@ -17,7 +17,8 @@
   import Button from '$lib/ui/Button.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import { labelCurves, labelPointAt } from '../charts';
-  import { READINESS, READINESS_MEANS, selfLabelReading } from '../words';
+  import { MIN_LABELS } from '$lib/bench/score';
+  import { fine, labelsText, perImageText, READINESS, READINESS_MEANS, selfLabelReading, share, shareApart } from '../words';
 
   let {
     result,
@@ -45,9 +46,9 @@
   {#if hint}<span class="hint">{hint}</span>
   {:else}
     <span class="t">{c === null ? (at ? `At t* ${conf(s.threshold)}` : 'All its detections') : `From ${conf(c)} up`}</span>
-    <span class="key"><i class="ln" aria-hidden="true"></i>Right {p?.precision != null ? pct(p.precision, 0) : '—'}</span>
-    <span class="key"><i class="ln dash" aria-hidden="true"></i>Objects found {p ? pct(p.recall, 0) : '—'}</span>
-    {#if p}<span class="n">{num(p.labels)} labels</span>{/if}
+    <span class="key"><i class="ln" aria-hidden="true"></i>Right {p?.precision != null ? fine(p.precision) : '—'}</span>
+    <span class="key"><i class="ln dash" aria-hidden="true"></i>Objects found {p ? share(p.recall) : '—'}</span>
+    {#if p}<span class="n">{#if c === null && !at}{num(p.labels)} detections, none kept{:else}{labelsText(p.labels)}{#if p.labels > 0 && p.labels < MIN_LABELS}, too few to rest a threshold on{/if}{/if}</span>{/if}
   {/if}
 {/snippet}
 
@@ -71,14 +72,18 @@
           yLabel="Share"
           height={phone.current ? 240 : 280}
           refs={[{ axis: 'y', value: TARGET_PRECISION, label: '90% right: enough to train on', below: s.threshold !== null }, ...(s.threshold !== null ? [{ axis: 'x' as const, value: s.threshold, label: `t* ${conf(s.threshold)}` }] : [])]}
-          marks={at ? [{ x: at.confidence, y: at.recall, label: `${pct(at.recall, 0)} of objects`, side: at.confidence > 0.6 ? 'left' : 'right' }] : []}
+          marks={at ? [{ x: at.confidence, y: at.recall, label: `${share(at.recall)} of objects, ${labelsText(at.labels)}`, side: at.confidence > 0.6 ? 'left' : 'right' }] : []}
           {stops}
           bind:cursor
           {readout}
+          speak={(c) => {
+            const p = labelPointAt(s.curve, c);
+            return p ? `From ${conf(c)} up: ${labelsText(p.labels)}, ${p.precision !== null ? pct(p.precision, 0) : 'none'} right, ${share(p.recall)} of all objects` : `From ${conf(c)} up: no labels`;
+          }}
           table={{
             caption: 'Labels kept by confidence threshold',
             head: ['Kept from', 'Right', 'Objects found', 'Labels'],
-            rows: s.curve.filter((p) => p.labels > 0 && Math.round(p.confidence * 100) % 5 === 0).map((p) => [conf(p.confidence), p.precision !== null ? pct(p.precision, 0) : '—', pct(p.recall, 0), num(p.labels)]),
+            rows: s.curve.filter((p) => p.labels > 0 && Math.round(p.confidence * 100) % 5 === 0).map((p) => [conf(p.confidence), p.precision !== null ? pct(p.precision, 0) : '—', share(p.recall), num(p.labels)]),
           }}
         />
       {:else if one}
@@ -92,10 +97,10 @@
                 <span class="m-fill" style:width="{row.v * 100}%"></span>
                 {#if row.target}<span class="m-target" style:left="{TARGET_PRECISION * 100}%"></span>{/if}
               </span>
-              <span class="m-v num">{pct(row.v, 0)}</span>
+              <span class="m-v num">{row.target ? (one.labels >= MIN_LABELS ? shareApart(row.v, TARGET_PRECISION) : pct(row.v, 0)) : share(row.v)}</span>
             </div>
           {/each}
-          <p class="one-cap">The mark on the first bar is the 90% a label set to train on needs. {num(one.labels)} labels on {num(entry.images)} images.</p>
+          <p class="one-cap">The mark on the first bar is the 90% a label set to train on needs. {labelsText(one.labels)} on {num(entry.images)} images{#if one.labels < MIN_LABELS}: too few to rest a label set on (it takes at least {MIN_LABELS}){/if}.</p>
         </div>
       {/if}
     </div>
@@ -105,8 +110,9 @@
       <p class="sentence">{selfLabelReading(s, scored)}</p>
       <dl class="kv">
         <div><dt>Threshold t*</dt><dd class="num">{s.threshold !== null ? conf(s.threshold) : '—'}</dd></div>
-        <div><dt>Axis (objects at 90%)</dt><dd class="num">{pct(s.recall, 0)}</dd></div>
-        <div><dt>Labels per image</dt><dd class="num">{num(s.labels_per_image, 1)}</dd></div>
+        <div><dt>Axis (objects at 90%)</dt><dd class="num">{share(s.recall)}</dd></div>
+        <!-- The labels the threshold rests on (all its detections without one), and per image as a reader can see it. -->
+        <div><dt>{s.threshold !== null ? 'Labels at t*' : 'Detections (none kept)'}</dt><dd class="num">{num(s.labels)}<span class="per">{perImageText(s.labels_per_image, s.labels)}</span></dd></div>
         <div><dt>Mean IoU</dt><dd class="num">{s.mean_iou !== null ? num(s.mean_iou, 2) : '—'}</dd></div>
       </dl>
       {#if loop}
@@ -271,5 +277,13 @@
     .n {
       margin-left: var(--space-2);
     }
+  }
+  /* Per image beside the count, small, on its line: the next value's baseline is not pushed down. */
+  .per {
+    display: inline;
+    margin-left: var(--space-2);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
+    color: var(--text-secondary);
   }
 </style>

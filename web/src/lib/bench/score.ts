@@ -50,18 +50,24 @@ export function histogramMeanIou(histogram: readonly number[]): number | null {
   return histogram.reduce((a, c, i) => a + c * (0.525 + i * 0.05), 0) / n;
 }
 
+/** The fewest labels a self-labeling threshold must keep (docs/BENCH.md, Self-labeling): a precision measured on fewer is
+ * no support for using it (a weak model can be right on its single most confident detection). */
+export const MIN_LABELS = 10;
+
 /**
  * The self-labeling operating point on a curve: the lowest confidence on the grid whose kept detections are at least
- * `target` precise (and at least one is kept). Null when no confidence is. A curve of one point is a contestant
- * without confidences: that point is its operating point (`threshold` null), counted when precise enough.
+ * `target` precise on at least MIN_LABELS of them. Null when no confidence is. A curve of one point is a contestant
+ * without confidences: that point is its operating point (`threshold` null), counted when precise enough on at least
+ * MIN_LABELS detections.
  */
 export function labelOperatingPoint(curve: readonly BenchLabelPoint[], target = TARGET_PRECISION): { threshold: number | null; point: BenchLabelPoint | null } {
+  const supported = (p: BenchLabelPoint) => p.labels >= MIN_LABELS && p.precision !== null && p.precision >= target - 1e-9;
   if (curve.length === 1) {
     const p = curve[0]!;
-    return { threshold: null, point: p.precision !== null && p.precision >= target - 1e-9 ? p : null };
+    return { threshold: null, point: supported(p) ? p : null };
   }
   for (const p of [...curve].sort((a, b) => a.confidence - b.confidence)) {
-    if (p.labels > 0 && p.precision !== null && p.precision >= target - 1e-9) return { threshold: p.confidence, point: p };
+    if (supported(p)) return { threshold: p.confidence, point: p };
   }
   return { threshold: null, point: null };
 }

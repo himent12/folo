@@ -52,7 +52,7 @@
   import ScoreSection from './bench/entry/ScoreSection.svelte';
   import SelfLabelSection from './bench/entry/SelfLabelSection.svelte';
   import JumpNav from './bench/JumpNav.svelte';
-  import { ranks } from './bench/leaderboard';
+  import { ranks, stale } from './bench/leaderboard';
   import NewLoopDialog from './bench/NewLoopDialog.svelte';
   import { modelLabel } from './label/words';
   import { cannotBench } from './bench/support';
@@ -84,7 +84,8 @@
   const model = $derived(entry?.contestant.kind === 'model' ? models.data?.find((m) => m.id === (entry.contestant as { model_id: string }).model_id) : undefined);
   const rank = $derived.by(() => {
     if (!entry || !done) return null;
-    const r = ranks(live.entries);
+    // Ranked among the entries graded on the benchmark as it is; one graded on an earlier version has no rank here.
+    const r = ranks(live.entries.filter((e) => !stale(e, bench?.fingerprint ?? e.fingerprint)));
     const at = r.get(entry.id);
     return at ? { at, of: r.size } : null;
   });
@@ -260,6 +261,11 @@
       <Menu label="More entry actions" items={menu} />
     {/snippet}
 
+    {#if done && bench && stale(entry, bench.fingerprint)}
+      <Callout tone="warning" icon={TriangleAlert} title="Graded on an earlier version of this benchmark" role="note">
+        Its fingerprint is not the benchmark’s (the engine that grades has changed since), so its numbers do not compare with the current entries. Run it again to compare.
+      </Callout>
+    {/if}
     {#if done && entry.score}
       <JumpNav sections={SECTIONS} label="Sections of {entry.name}'s result" />
       <div class="sections">

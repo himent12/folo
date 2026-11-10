@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { flushSync } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Api, BenchEventHandlers } from './client';
+import { ApiError, type Api, type BenchEventHandlers } from './client';
 import { hub } from './index.svelte';
 import { applyById, LiveBench, RESYNC_MS } from './liveBench.svelte';
 import { STREAM_GRACE_MS } from './live.svelte';
@@ -146,15 +146,53 @@ describe('LiveBench ordering', () => {
     await vi.advanceTimersByTimeAsync(RESYNC_MS);
     expect(loads).toHaveBeenCalledTimes(2);
     handlers.connection?.('reconnecting');
-    await vi.advanceTimersByTimeAsync(STREAM_GRACE_MS - 1);
+    // A dropped stream loads once (a deleted benchmark answers 404 there, see below).
+    await vi.advanceTimersByTimeAsync(RESYNC_MS);
+    expect(loads).toHaveBeenCalledTimes(3);
+    await vi.advanceTimersByTimeAsync(STREAM_GRACE_MS - RESYNC_MS - 1);
     expect(live.lost).toBeNull();
     await vi.advanceTimersByTimeAsync(1);
     expect(live.lost).not.toBeNull();
     handlers.connection?.('open');
     handlers.reconnect?.();
     await vi.advanceTimersByTimeAsync(0);
-    expect(loads).toHaveBeenCalledTimes(3);
+    expect(loads).toHaveBeenCalledTimes(4);
     expect(live.lost).toBeNull();
+    stop();
+  });
+
+  it('notices a benchmark deleted elsewhere: a 404 on a load shows it gone, and nothing retries', async () => {
+    const { live, stop } = mount();
+    entries.resolve([entry('a', 'done', 70)]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.bench?.name).toBe('first');
+    const gone = new ApiError(404, 'bench_not_found', 'No benchmark with id bn_1.');
+    hub.api.bench = () => Promise.reject(gone);
+    handlers.connection?.('reconnecting');
+    await vi.advanceTimersByTimeAsync(RESYNC_MS);
+    expect(live.error).toBe(gone);
+    expect(live.bench).toBeUndefined();
+    expect(live.entries).toEqual([]);
+    const n = loads.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(loads.mock.calls.length).toBe(n);
+    stop();
+  });
+
+  it('shows a first load that failed as the error, even after a bench event, never as an empty board', async () => {
+    const { live, stop } = mount();
+    handlers.bench?.(bench('from the stream'));
+    const down = new ApiError(500, 'internal', 'boom');
+    entries = deferred<BenchEntry[]>();
+    hub.api.benchEntries = () => Promise.reject(down);
+    live.retry();
+    flushSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(live.error).toBe(down);
+    expect(live.bench).toBeUndefined();
+    expect(live.listed).toBe(false);
+    handlers.bench?.(bench('again'));
+    expect(live.bench).toBeUndefined();
     stop();
   });
 
@@ -199,9 +237,13 @@ describe('LiveBench with the mock', () => {
     expect(run().progress.done).toBeGreaterThan(before);
     await vi.advanceTimersByTimeAsync(70_000);
     expect(run().status).toBe('done');
-    // Ranked among the finished entries now, by its score.
+    // Ranked among the finished entries now: the complete ones by score, then the partial ones by score.
     const done = live.entries.filter((e) => e.status === 'done');
-    expect(done.map((e) => e.score!.total)).toEqual([...done.map((e) => e.score!.total)].sort((a, b) => b - a));
+    const complete = done.filter((e) => !e.score!.partial);
+    const partial = done.filter((e) => e.score!.partial);
+    expect(done.map((e) => e.id)).toEqual([...complete, ...partial].map((e) => e.id));
+    for (const g of [complete, partial]) expect(g.map((e) => e.score!.total)).toEqual([...g.map((e) => e.score!.total)].sort((a, b) => b - a));
+    expect(done.find((e) => e.id === 'be_f108')!.score!.partial).toBe(false);
     expect(live.bench?.entries).toBe(live.entries.length);
     stop();
   });

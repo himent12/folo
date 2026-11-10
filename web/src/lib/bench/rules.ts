@@ -1,7 +1,7 @@
 // Vision benchmarks' rules (docs/API.md, Vision benchmarks), shared by the forms that check what a person typed, the
 // screens that order and word entries, and the in-browser mock that answers as the server would.
 
-import type { Bench, BenchAxis, BenchConditionGroup, BenchEntry, BenchEntryStatus, BenchLoop, BenchLoopStatus } from '../api/types';
+import type { BenchAxis, BenchConditionGroup, BenchEntry, BenchEntryStatus, BenchLoop, BenchLoopStatus } from '../api/types';
 
 /** The feature a server lists in `/api/system` when it has the `/api/bench` endpoints. */
 export const BENCH_FEATURE = 'vision_bench';
@@ -67,17 +67,25 @@ export const isEntryActive = (e: Pick<BenchEntry, 'status'>) => ACTIVE_ENTRY.inc
 /** True while the loop runs. */
 export const isLoopActive = (l: Pick<BenchLoop, 'status'>) => ACTIVE_LOOP.includes(l.status);
 
+/** A finished entry with a score: one the leaderboard ranks. */
+const ranked = (e: BenchEntry) => e.status === 'done' && !!e.score;
+
 /**
- * The leaderboard's order, as the server sends it: finished entries by score (highest first; a tie, the older
- * first: it got there first), then every other entry, newest first.
+ * The leaderboard's order, as the server sends it (docs/API.md, entries): complete finished entries (`score.partial`
+ * false) by score, then partial finished ones by score (each a tie broken by age, the older first: it got there first),
+ * then every other entry, newest first. A partial entry never ranks above a complete one: its number compares only
+ * loosely.
  */
 export function rankEntries(entries: readonly BenchEntry[]): BenchEntry[] {
-  const done = entries.filter((e) => e.status === 'done' && e.score);
-  const rest = entries.filter((e) => !(e.status === 'done' && e.score));
-  done.sort((a, b) => (b.score?.total ?? 0) - (a.score?.total ?? 0) || a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
-  rest.sort((a, b) => b.created.localeCompare(a.created) || b.id.localeCompare(a.id));
-  return [...done, ...rest];
+  const byScore = (a: BenchEntry, b: BenchEntry) => (b.score?.total ?? 0) - (a.score?.total ?? 0) || a.created.localeCompare(b.created) || a.id.localeCompare(b.id);
+  const complete = entries.filter((e) => ranked(e) && !e.score!.partial).sort(byScore);
+  const partial = entries.filter((e) => ranked(e) && e.score!.partial).sort(byScore);
+  const rest = entries.filter((e) => !ranked(e)).sort((a, b) => b.created.localeCompare(a.created) || b.id.localeCompare(a.id));
+  return [...complete, ...partial, ...rest];
 }
+
+/** The benchmark's leader as the server names it (`Bench.best`): the first ranked entry of `rankEntries`. */
+export const leaderOf = (entries: readonly BenchEntry[]) => rankEntries(entries).find(ranked);
 
 /** What is wrong with a benchmark's name, or null. */
 export function benchNameError(name: string): string | null {
@@ -92,5 +100,11 @@ export function descriptionError(text: string): string | null {
   return text.length > DESCRIPTION_MAX ? `At most ${DESCRIPTION_MAX.toLocaleString('en-US')} characters (now ${text.length.toLocaleString('en-US')}).` : null;
 }
 
-/** Whether a benchmark's plan can still change: it has no entries (docs/API.md, `409 bench_frozen`). */
-export const planEditable = (b: Pick<Bench, 'entries'>) => b.entries === 0;
+/** Whether an entry in this state freezes its benchmark's plan: one that finished, or is under way. */
+export const planFreezes = (status: BenchEntryStatus) => status === 'done' || ACTIVE_ENTRY.includes(status);
+
+/**
+ * Whether a benchmark's plan can still change (docs/API.md, `409 bench_frozen`): it has no entry that finished or is
+ * under way. A failed or stopped entry graded nothing that a new plan would make incomparable.
+ */
+export const planEditable = (entries: readonly Pick<BenchEntry, 'status'>[]) => !entries.some((e) => planFreezes(e.status));

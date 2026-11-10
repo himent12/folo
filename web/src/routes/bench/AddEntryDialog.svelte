@@ -25,7 +25,7 @@
   import { tick, untrack } from 'svelte';
   import { hub } from '$lib/api/index.svelte';
   import type { Bench, BenchCatalog, BenchEntry, BenchPrediction, LabelAgent, Model, StartBenchEntry } from '$lib/api/types';
-  import { checkPredictions, estimateBytes, PART_BYTES, parsePredictions, partsOf, sendExternal, type PredictionSummary } from '$lib/bench/external';
+  import { checkPredictions, estimateBytes, ExternalSendError, PART_BYTES, parsePredictions, partsOf, sendExternal, type PredictionSummary } from '$lib/bench/external';
   import { planPasses } from '$lib/bench/plan';
   import { AGENT_IMAGES, IMAGES_PAGE_MAX, isEntryActive, BENCH_NAME_MAX } from '$lib/bench/rules';
   import { classColor } from '$lib/design/tokens';
@@ -101,6 +101,8 @@
   let imageIds = $state.raw<string[] | null>(null);
   /** A large file on its way in parts: the records sent of all of them; `confirm` while closing asks first. */
   let sending = $state<{ sent: number; total: number } | null>(null);
+  /** After a failed send: what it left on the server, when its clean-up failed too (null: nothing is left). */
+  let left = $state<string | null>(null);
   let confirmStop = $state(false);
   let abort: AbortController | null = null;
 
@@ -121,6 +123,7 @@
       check = null;
       modelId = '';
       sending = null;
+      left = null;
       confirmStop = false;
     });
   });
@@ -264,6 +267,7 @@
   async function sendFile() {
     if (!check?.ok) return;
     abort = new AbortController();
+    left = null;
     sending = { sent: 0, total: check.predictions.length };
     try {
       const entry = await sendExternal(
@@ -272,6 +276,7 @@
           send: (id, ps) => hub.api.sendBenchPredictions(bench.id, id, ps),
           finish: (id) => hub.api.finishBenchEntry(bench.id, id),
           stop: (id) => hub.api.stopBenchEntry(bench.id, id),
+          remove: (id) => hub.api.deleteBenchEntry(bench.id, id),
         },
         { name: extName.trim(), scored, predictions: check.predictions, plan: bench.plan },
         (p) => (sending = { sent: p.sent, total: p.total }),
@@ -280,9 +285,11 @@
       open = false;
       onstarted(entry);
     } catch (err) {
-      // Stopped by the person: the entry is discarded and the dialog closes; anything else is said in it.
-      if (abort?.signal.aborted) open = false;
-      else error = err;
+      // What the server said, and what it left: nothing (stopped and deleted), or exactly what to clean up and where.
+      left = err instanceof ExternalSendError ? err.left : null;
+      // Stopped by the person with nothing left: the dialog closes; anything else is said in it.
+      if (abort?.signal.aborted && !left) open = false;
+      else error = err instanceof ExternalSendError ? err.cause : err;
     } finally {
       sending = null;
       confirmStop = false;
@@ -451,7 +458,8 @@
       </details>
     {/if}
     {#if bench.entries === 0 && bench.plan.conditions.length}<p class="note first">The first entry fixes the plan ({bench.plan.conditions.length} conditions) so that every entry is graded on the same test.</p>{/if}
-    {#if error}<ErrorState {error} title={kind === 'external' && parts ? 'Could not add the entry: nothing was kept' : 'Could not add the entry'} compact />{/if}
+    {#if error}<ErrorState {error} title={kind === 'external' && parts ? (left ? 'Could not add the entry' : 'Could not add the entry: nothing was kept') : 'Could not add the entry'} compact />{/if}
+    {#if left}<p class="note warn-left" role="alert">{left.charAt(0).toUpperCase() + left.slice(1)}</p>{/if}
   </form>
   {#snippet footer()}
     {#if confirmStop}
@@ -541,6 +549,9 @@
     align-items: baseline;
     gap: var(--space-2);
     min-width: 0;
+  }
+  .warn-left {
+    color: var(--warning-text);
   }
   .f-send {
     display: grid;

@@ -58,6 +58,12 @@ export interface Skill {
    * nothing: a teacher that starves a loop of labels.
    */
   labelCurve?: number;
+  /**
+   * The shape of its reliability: `mixed` is underconfident where most detections are (low scores) and overconfident in
+   * a few thin top bins, so a reading that quoted the furthest bin of either side would contradict its own tone; `none`
+   * gives confidences that never reach 0.1 (calibration not measured, the entry partial for that alone).
+   */
+  calibration?: 'mixed' | 'none';
   /** Without confidences: its one operating point. */
   point?: { precision: number; recall: number };
 }
@@ -173,7 +179,17 @@ export function generateResult(input: ResultInput): GeneratedResult {
   // ---------- calibration: nine filled bins (detections from 0.1 up), precision off by what makes the ECE ----------
   let calibration: BenchCalibration | null = null;
   const detections = Math.round(T * 1.7 + input.images.length * 0.6);
-  if (input.scored && detections > 0) {
+  if (input.scored && detections > 0 && s.calibration === 'mixed') {
+    // Most detections at low scores, right more often than they say; a thin top, right far less often.
+    const SHAPE = [0, 0.34, 0.26, 0.17, 0.1, 0.06, 0.035, 0.02, 0.01, 0.005];
+    const bins: BenchCalibrationBin[] = SHAPE.map((w, b) => {
+      const count = b ? Math.max(3, Math.round(detections * w)) : 0;
+      const conf = r4(b / 10 + 0.05 + jitter(0.01));
+      const off = b <= 4 ? 0.07 + jitter(0.01) : -(0.12 + 0.05 * (b - 5));
+      return { lo: b / 10, hi: (b + 1) / 10, count, confidence: count ? conf : null, precision: count ? r4(clamp(conf + off, 0.01, 0.995)) : null };
+    });
+    calibration = { ece: r4(expectedCalibrationError(bins)), detections: bins.reduce((a, x) => a + x.count, 0), bins };
+  } else if (input.scored && detections > 0 && s.calibration !== 'none') {
     const SHAPE = [0, 0.21, 0.15, 0.11, 0.09, 0.08, 0.08, 0.08, 0.1, 0.1];
     const raw = SHAPE.map((w, b) => ({ b, n: Math.round(detections * w), conf: b ? r4(b / 10 + 0.05 + jitter(0.015)) : 0 }));
     // Over- or under-confident in proportion to how far a bin is from 0.35: scaled so the ECE comes to the skill's.
@@ -243,6 +259,7 @@ export function generateResult(input: ResultInput): GeneratedResult {
     recall: selfRecall,
     mean_iou,
     labels_per_image: r2(at.labels / Math.max(1, input.images.length)),
+    labels: at.labels,
     readiness: readiness(selfRecall),
     curve,
   };

@@ -2283,10 +2283,10 @@ export const scenes = [
   // A loop that has just started: generation 0, one step (the benchmark grades the first teacher), its entry waiting
   // for the GPU, nothing graded on the chart yet.
   { name: 'bench-loop-gen0', path: '/benchmarks/bn_3c90/loops/bl_g0a1', search: 'scenario=bench-loop-gen0', viewports: ['desktop', 'tablet', 'mobile'], setup: async (page) => until(page, '.steps li') },
-  // A loop that starved: its teacher kept boxes on a handful of pool images at its threshold, and the loop says so.
+  // A loop that failed before labeling: its teacher's entry found no threshold and none was set (a loop never guesses).
   { name: 'bench-loop-starved', path: '/benchmarks/bn_5e12/loops/bl_9e40', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, 'table.gens tbody tr') },
   {
-    // New loop with a teacher that is not ready: the warning before it starts, the lower confidence as the way out.
+    // New loop with a teacher whose entry found no threshold: the confidence is required, said before anything else.
     name: 'bench-loop-new-weak',
     path: '/benchmarks/bn_5e12?tab=loops',
     fullPage: false,
@@ -2302,69 +2302,27 @@ export const scenes = [
       await page.mouse.move(0, 0);
     },
   },
-  {
-    // The same, its way out taken: a lower confidence, and what it costs in precision.
-    name: 'bench-loop-new-lower',
+  ...[
+    // A confidence where it keeps a handful: the loop would stop at labeling; a lower one, and what it costs.
+    ['stops', '0.9'],
+    ['lower', '0.30'],
+  ].map(([which, value]) => ({
+    name: `bench-loop-new-${which}`,
     path: '/benchmarks/bn_5e12?tab=loops',
     fullPage: false,
-    viewports: ['desktop'],
-    setup: async (page) => {
+    viewports: /** @type {('desktop' | 'mobile')[]} */ (which === 'stops' ? ['desktop', 'mobile'] : ['desktop']),
+    setup: async (/** @type {import('playwright-core').Page} */ page) => {
       await until(page, 'button:has-text("New loop")');
       await page.locator('button:has-text("New loop")').first().click();
       await optionIn(page, 'dialog[open] select[id$="-teacher"]', 'm_shapes_e5');
       await page.selectOption('dialog[open] select[id$="-teacher"]', 'm_shapes_e5');
-      await until(page, 'dialog[open] .fc.warn');
-      await page.locator('dialog[open] button:has-text("Keep labels from a lower confidence")').click();
+      await until(page, 'dialog[open] input[id$="-conf"]');
+      await page.locator('dialog[open] input[id$="-conf"]').fill(value);
       await page.clock.runFor(300);
       await page.evaluate(() => document.querySelector('dialog[open] .fc')?.scrollIntoView({ block: 'center' }));
       await page.mouse.move(0, 0);
     },
-  },
-
-  // An entry's result: a complete scored model, its whole page (desktop to phone), and the phone's first screen.
-  { name: 'bench-entry', path: '/benchmarks/bn_3c90/entries/be_f101', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: async (page) => until(page, '#images .tile img') },
-  { name: 'bench-entry-full', path: '/benchmarks/bn_3c90/entries/be_f101', fullPage: true, viewports: ['mobile'], setup: async (page) => until(page, '#images .tile img') },
-  // An agent: partial (48 images, unchanged only, no confidences): robustness and calibration not measured, one point.
-  { name: 'bench-entry-agent', path: '/benchmarks/bn_3c90/entries/be_f104', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '#images .tile') },
-  // An external model with no confidences that answered 4 of 7 conditions, and one whose confidences never reach 90%.
-  { name: 'bench-entry-external', path: '/benchmarks/bn_7a41/entries/be_p203', viewports: ['desktop'], setup: async (page) => until(page, '#robustness .heat') },
-  { name: 'bench-entry-never', path: '/benchmarks/bn_7a41/entries/be_p204', viewports: ['desktop'], setup: async (page) => until(page, '#self-labeling svg') },
-  // A model that knows two of the eight classes: its per-class list marks the rest.
-  { name: 'bench-entry-mini', path: '/benchmarks/bn_3c90/entries/be_f106', viewports: ['desktop'], setup: async (page) => until(page, '#accuracy .pc li') },
-  // Running (haze, live), failed (not signed in), loading.
-  { name: 'bench-entry-running', path: '/benchmarks/bn_3c90/entries/be_f108', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.passes li') },
-  { name: 'bench-entry-failed', path: '/benchmarks/bn_3c90/entries/be_f107', viewports: ['desktop', 'mobile'] },
-  { name: 'bench-entry-loading', path: '/benchmarks/bn_3c90/entries/be_f101', search: 'scenario=loading', viewports: ['desktop', 'mobile'] },
-  {
-    // Where it breaks: a cell chosen, the condition's curve against the others and the image under it.
-    name: 'bench-entry-robustness',
-    path: '/benchmarks/bn_3c90/entries/be_f101',
-    fullPage: false,
-    keepScroll: true,
-    viewports: ['desktop', 'tablet', 'mobile'],
-    setup: async (page) => {
-      await until(page, '#robustness .heat button.cell');
-      await page.locator('#robustness .heat button.cell').nth(3).click();
-      await page.evaluate(() => document.getElementById('robustness')?.scrollIntoView({ block: 'start' }));
-      await until(page, '#robustness .stage img');
-      await page.clock.runFor(800);
-      await page.mouse.move(0, 0);
-    },
-  },
-  {
-    // The failure gallery's large view: the boxes right, wrong and missed, each listed with its class and confidence.
-    name: 'bench-entry-viewer',
-    path: '/benchmarks/bn_3c90/entries/be_f101',
-    fullPage: false,
-    viewports: ['desktop', 'mobile'],
-    setup: async (page) => {
-      await until(page, '#images .tile img');
-      await page.locator('#images .tile').first().click();
-      await until(page, 'dialog[open] .v-img img');
-      await page.clock.runFor(600);
-      await page.mouse.move(0, 0);
-    },
-  },
+  })),
   // Photos of every shape (Pond fish was made from people's phone photos): the gallery's tiles in one shape, each photo
   // whole on its well with its boxes; the large view of a portrait one and of a panorama.
   {
@@ -2458,6 +2416,45 @@ export const scenes = [
       await page.mouse.move(0, 0);
     },
   },
+  // Calibration read honestly: the pond's mixed-sign reliability (mostly under, a thin over top), and a scored entry
+  // whose confidences never reach 0.1 (no calibration, partial for that alone).
+  ...[
+    ['mixed', 'be_p201', '#calibration'],
+    ['nocal', 'be_p205', '#score'],
+  ].map(([which, entryId, anchor]) => ({
+    name: `bench-entry-calibration-${which}`,
+    path: `/benchmarks/bn_7a41/entries/${entryId}`,
+    fullPage: false,
+    keepScroll: true,
+    viewports: /** @type {('desktop' | 'mobile')[]} */ (['desktop', 'mobile']),
+    setup: async (/** @type {import('playwright-core').Page} */ page) => {
+      await until(page, anchor);
+      await page.evaluate((a) => document.querySelector(a)?.scrollIntoView({ block: 'start' }), anchor);
+      await page.clock.runFor(600);
+      await page.mouse.move(0, 0);
+    },
+  })),
+  // Self-labeling with no threshold: a precise handful said to be a handful, the label count where the threshold was.
+  {
+    name: 'bench-entry-selflabel-none',
+    path: '/benchmarks/bn_5e12/entries/be_5a30',
+    fullPage: false,
+    keepScroll: true,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#self-labeling');
+      await page.evaluate(() => document.getElementById('self-labeling')?.scrollIntoView({ block: 'start' }));
+      await page.clock.runFor(600);
+      await page.mouse.move(0, 0);
+    },
+  },
+  // The leaderboard with partial entries after every complete one; the pond's, where a partial entry scores higher.
+  { name: 'bench-board-pond', path: '/benchmarks/bn_7a41', viewports: ['desktop', 'mobile'], setup: async (page, { vp }) => until(page, vp === 'mobile' ? 'ul.rows li a' : 'table.board tbody tr') },
+  // An entry graded on an earlier version of the benchmark (another fingerprint): its page says so; Compare calls it out.
+  { name: 'bench-entry-stale', path: '/benchmarks/bn_3c90/entries/be_f100', fullPage: false, viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '#score') },
+  { name: 'bench-compare-stale', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f100', fullPage: false, viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.chips .chip') },
+  // A fresh benchmark whose only entry failed: its plan still open (a failed entry graded nothing).
+  { name: 'bench-conditions-failed-only', path: '/benchmarks/bn_9f03?tab=conditions', search: 'scenario=bench-failed-only', viewports: ['desktop', 'mobile'], setup: async (page) => until(page, '.stage img') },
   {
     // An entry's next step: a loop with this model as the first teacher.
     name: 'bench-entry-loop',

@@ -6,6 +6,7 @@ import {
   intervalReading,
   labelForecast,
   labelsLine,
+  loopErrorField,
   loopStatus,
   loopSteps,
   lowerConfidence,
@@ -164,10 +165,15 @@ describe("New loop's forecast of the teacher's labels", () => {
     const lower = labelForecast(weakSelf, 300, 1920, 0.1);
     expect(lower.recall).toBeGreaterThan(low.recall);
     expect(lower.precision!).toBeLessThan(low.precision!);
-    // Its entry never reaches 90%: the loop keeps labels from 0.5, and that is said.
+    // Its entry found no threshold and none is set: a loop never guesses one, it stops before labeling, and that is said.
     const never = labelForecast({ threshold: null, readiness: 'not_ready', curve: weak.map((p) => ({ ...p, precision: p.precision === null ? null : Math.min(0.8, p.precision) })) }, 300, 1920, null);
-    expect(never).toMatchObject({ from: 'default', threshold: 0.5, starved: true });
-    expect(forecastText(never, 1920).text).toMatch(/^Its entry never gets 90% of its labels right, so a loop keeps them from 0\.50, where /);
+    expect(never).toMatchObject({ from: 'none', threshold: null, starved: true, stops: true });
+    const w = forecastText(never, 1920);
+    expect(w.title).toBe('Its entry found no threshold: choose a confidence');
+    expect(w.text).toMatch(/a loop never guesses one: without a confidence set here it stops before labeling\.$/);
+    expect(JSON.stringify(w)).not.toMatch(/0\.5/);
+    // With one chosen, read off the curve as any other.
+    expect(labelForecast({ threshold: null, readiness: 'not_ready', curve: weak }, 300, 1920, 0.3)).toMatchObject({ from: 'chosen', threshold: 0.3 });
     // A confidence where it keeps nothing.
     const none = labelForecast({ threshold: 0.9, readiness: 'not_ready', curve: [{ confidence: 0.99, precision: null, recall: 0, labels: 0 }] }, 300, 1920, 0.99);
     expect(forecastText(none, 1920).text).toMatch(/^From 0\.99, it keeps no detection there: about 0 of the pool’s 1,920 images would get a box\./);
@@ -177,6 +183,17 @@ describe("New loop's forecast of the teacher's labels", () => {
     expect(lowerConfidence(0.78, 0.19)).toBe(0.19);
     expect(lowerConfidence(0.4, 0.55)).toBe(0.2);
     expect(lowerConfidence(0.1, null)).toBe(0.05);
+  });
+});
+
+describe('a loop the server refuses to start', () => {
+  it('puts its error at the field it names, else on the form', () => {
+    expect(loopErrorField({ code: 'invalid_config', message: 'imgsz must be at least 64 for training, got 32' }, false)).toBe('imgsz');
+    expect(loopErrorField({ code: 'invalid_config', message: 'epochs must be at least 1' }, false)).toBe('epochs');
+    expect(loopErrorField({ code: 'model_not_found', message: 'No model with id m_x (student.weights).' }, true)).toBe('weights');
+    expect(loopErrorField({ code: 'model_not_found', message: 'No model with id m_x.' }, false)).toBeNull();
+    expect(loopErrorField({ code: 'device_not_found', message: 'No device gpu:3 on this machine.' }, false)).toBeNull();
+    expect(loopErrorField({ code: 'invalid_config', message: 'batch must be at least 1' }, false)).toBeNull();
   });
 });
 

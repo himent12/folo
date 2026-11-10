@@ -111,7 +111,7 @@ describe('New benchmark', () => {
     type(document.querySelector('input[id$="-name"]')!, 'Fasteners again');
     submit().form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
     await settle();
-    expect(go).toHaveBeenCalledWith(expect.stringMatching(/^\/benchmarks\/bn_[0-9a-f]{4}$/));
+    expect(go).toHaveBeenCalledWith(expect.stringMatching(/^\/benchmarks\/bn_[0-9a-f]{12}$/));
     expect(toast.items.at(-1)?.title).toBe('Benchmark created');
   });
 });
@@ -289,8 +289,9 @@ describe('the benchmark page', () => {
   it('picks finished entries for Compare, at most four, and makes Compare the one primary from two', async () => {
     await page('/benchmarks/bn_3c90');
     const boxes = [...document.querySelectorAll<HTMLInputElement>('table.board tbody input[type="checkbox"]')];
-    // Six finished entries have a box; the running and the failed one have none.
-    expect(boxes).toHaveLength(6);
+    // Seven finished entries have a box (one graded on an earlier version of the benchmark); the running and the failed
+    // one have none.
+    expect(boxes).toHaveLength(7);
     const compare = () => [...document.querySelectorAll<HTMLElement>('header a, header button')].find((b) => /^Compare/.test(b.textContent?.trim() ?? ''))!;
     expect(compare().getAttribute('aria-disabled') === 'true' || (compare() as HTMLButtonElement).disabled).toBe(true);
     for (const b of boxes.slice(0, 5)) {
@@ -300,7 +301,9 @@ describe('the benchmark page', () => {
     expect(boxes.filter((b) => b.checked)).toHaveLength(4);
     expect(boxes[4]!.disabled).toBe(true);
     expect(text()).toMatch(/4 selected \(the maximum\)/);
-    expect(compare().getAttribute('href')).toMatch(/#\/benchmarks\/bn_3c90\/compare\?entries=be_f101,be_f102,be_f103,be_f104/);
+    // In the board's order: the complete entries first, then the partial ones.
+    const first4 = [...document.querySelectorAll<HTMLElement>('table.board tbody tr[data-id]')].slice(0, 4).map((r) => r.dataset.id);
+    expect(compare().getAttribute('href')).toBe(`#/benchmarks/bn_3c90/compare?entries=${first4.join(',')}`);
   });
 });
 

@@ -2,23 +2,32 @@
 // shared scale every row's 95% interval is drawn on, so overlapping intervals are seen to overlap.
 
 import type { BenchEntry } from '$lib/api/types';
+import { rankEntries } from '$lib/bench/rules';
 
 /** A finished entry has a score to rank and a result to open. */
 export const finished = (e: BenchEntry) => e.status === 'done' && !!e.score;
 
 /**
- * Each finished entry's rank (1 for the best; entries with the same score share it, the next one counting them: 1, 2,
- * 2, 4). The others have none.
+ * Each finished entry's rank in the leaderboard's order ($lib/bench/rules rankEntries: complete entries first, then
+ * partial ones, each by score): 1 for the first; entries of the same kind with the same score as printed share a rank,
+ * the next one counting them (1, 2, 2, 4). The others have none.
  */
 export function ranks(entries: readonly BenchEntry[]): Map<string, number> {
-  const done = entries.filter(finished).sort((a, b) => b.score!.total - a.score!.total);
+  const done = rankEntries(entries).filter(finished);
+  const same = (a: BenchEntry, b: BenchEntry) => a.score!.partial === b.score!.partial && Math.round(a.score!.total * 10) === Math.round(b.score!.total * 10);
   const out = new Map<string, number>();
   done.forEach((e, i) => {
     const prev = done[i - 1];
-    out.set(e.id, prev && prev.score!.total === e.score!.total ? out.get(prev.id)! : i + 1);
+    out.set(e.id, prev && same(prev, e) ? out.get(prev.id)! : i + 1);
   });
   return out;
 }
+
+/** The entry whose interval is the board's band: the leading complete entry, else (none complete) the leading one. */
+export const bandEntry = (entries: readonly BenchEntry[]) => {
+  const done = rankEntries(entries).filter(finished);
+  return done.find((e) => !e.score!.partial) ?? done[0];
+};
 
 /** The fewest and most entries Compare takes. */
 export const COMPARE_MIN = 2;
@@ -139,4 +148,27 @@ export function along(domain: readonly [number, number], v: number): number {
 }
 
 /** Whether two intervals overlap: the entries are not clearly different on this benchmark. */
-export const overlaps = (x: readonly [number, number], y: readonly [number, number]) => x[0] <= y[1] && y[0] <= x[1];
+export const overlaps = (x: readonly [number, number], y: readonly [number, number]) => {
+  // As printed (three decimals): what the reader checks against the numbers shown.
+  const r = (v: number) => Math.round(v * 1000);
+  return r(x[0]) <= r(y[1]) && r(y[0]) <= r(x[1]);
+};
+
+/**
+ * Whether an entry was graded on an earlier version of its benchmark: its fingerprint is not the benchmark's (the
+ * engine's version is part of it, so an engine upgrade changes it while old entries keep theirs). Such an entry does
+ * not compare with the current ones (docs/BENCH.md: two entries compare when their fingerprints agree).
+ */
+export const stale = (e: Pick<BenchEntry, 'fingerprint'>, fingerprint: string) => !!e.fingerprint && e.fingerprint !== fingerprint;
+
+/**
+ * The leaderboard as Studio shows it: the server's order (rankEntries) kept within each group, the finished entries
+ * graded on the benchmark as it is first, then the finished ones graded on an earlier version of it, then the rest.
+ * Only the first group is ranked, banded and highlighted.
+ */
+export function boardOrder(entries: readonly BenchEntry[], fingerprint: string): BenchEntry[] {
+  const order = rankEntries(entries);
+  const current = order.filter((e) => finished(e) && !stale(e, fingerprint));
+  const earlier = order.filter((e) => finished(e) && stale(e, fingerprint));
+  return [...current, ...earlier, ...order.filter((e) => !finished(e))];
+}

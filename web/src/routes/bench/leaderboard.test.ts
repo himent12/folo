@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { BenchEntry } from '$lib/api/types';
-import { along, compareHint, compareIds, comparePath, compareReason, intervalDomain, intervalScale, keepSelection, overlaps, ranks, scaleTicks, TICK_GAP, toggleSelection } from './leaderboard';
+import { along, bandEntry, boardOrder, stale, compareHint, compareIds, comparePath, compareReason, intervalDomain, intervalScale, keepSelection, overlaps, ranks, scaleTicks, TICK_GAP, toggleSelection } from './leaderboard';
 
-const e = (id: string, total: number | null, status: BenchEntry['status'] = total === null ? 'running' : 'done') => ({ id, status, score: total === null ? null : { total, partial: false, axes: [] } }) as unknown as BenchEntry;
+const e = (id: string, total: number | null, status: BenchEntry['status'] = total === null ? 'running' : 'done', partial = false, created = '2026-11-01T00:00:00Z') =>
+  ({ id, status, created, score: total === null ? null : { total, partial, axes: [] } }) as unknown as BenchEntry;
 
 describe('ranks', () => {
   it('ranks finished entries by score, ties sharing a rank (1, 2, 2, 4), and leaves the others unranked', () => {
@@ -13,6 +14,35 @@ describe('ranks', () => {
       ['c', 2],
       ['d', 4],
     ]);
+  });
+
+  it('ranks complete entries before partial ones, and the band is the leading complete one', () => {
+    // A partial agent scores highest but ranks after every complete entry; a tie as printed shares a rank (an older
+    // entry first), a partial tie with a complete one does not.
+    const board = [e('agent', 80, 'done', true, '2026-11-02T00:00:00Z'), e('m1', 60, 'done', false, '2026-11-03T00:00:00Z'), e('m2', 60.02, 'done', false, '2026-11-01T00:00:00Z'), e('ext', 60, 'done', true), e('run', null)];
+    expect([...ranks(board).entries()]).toEqual([
+      ['m2', 1],
+      ['m1', 1],
+      ['agent', 3],
+      ['ext', 4],
+    ]);
+    expect(bandEntry(board)?.id).toBe('m2');
+    // No complete entry: the leading partial one.
+    expect(bandEntry([e('agent', 80, 'done', true), e('ext', 60, 'done', true)])?.id).toBe('agent');
+    expect(bandEntry([e('run', null)])).toBeUndefined();
+  });
+});
+
+describe('entries graded on an earlier version of the benchmark', () => {
+  it('rank below the current ones, the server’s order kept within each group, out of the band', () => {
+    const fp = (x: BenchEntry, f: string) => ({ ...x, fingerprint: f }) as BenchEntry;
+    const board = [fp(e('old-hi', 90, 'done', false, '2026-10-01T00:00:00Z'), 'old'), fp(e('m1', 70), 'now'), fp(e('agent', 80, 'done', true), 'now'), fp(e('old-lo', 40), 'old'), fp(e('run', null), 'now')];
+    expect(boardOrder(board, 'now').map((x) => x.id)).toEqual(['m1', 'agent', 'old-hi', 'old-lo', 'run']);
+    const current = board.filter((x) => !stale(x, 'now'));
+    expect(bandEntry(current)?.id).toBe('m1');
+    expect([...ranks(current).keys()]).toEqual(['m1', 'agent']);
+    expect(stale(board[0]!, 'now')).toBe(true);
+    expect(stale(board[1]!, 'now')).toBe(false);
   });
 });
 

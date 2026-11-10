@@ -36,10 +36,10 @@
   import Panel from '$lib/ui/Panel.svelte';
   import Skeleton from '$lib/ui/Skeleton.svelte';
   import Callout from './run/Callout.svelte';
-  import { assignSlots, classRows, compareShown, conditionRows, dotDomain, labelTradeoff, RELIABILITY_X, SLOT_PATTERN, SLOTS } from './bench/charts';
+  import { assignSlots, bestAsPrinted, classRows, diffAsPrinted, compareShown, conditionRows, dotDomain, labelTradeoff, RELIABILITY_X, SLOT_PATTERN, SLOTS } from './bench/charts';
   import DotRows, { type DotKey } from './bench/compare/DotRows.svelte';
   import IntervalPlot from './bench/IntervalPlot.svelte';
-  import { along, COMPARE_MAX, compareIds, finished, intervalDomain } from './bench/leaderboard';
+  import { along, COMPARE_MAX, compareIds, finished, intervalDomain, stale } from './bench/leaderboard';
   import { capTicks } from '$lib/charts/domain';
   import { BenchResults } from './bench/results.svelte';
   import { cannotBench } from './bench/support';
@@ -89,6 +89,8 @@
 
   const res = $derived(shown.map((e) => results.get(e.id)));
   const loaded = $derived(shown.length > 0 && res.every((r) => !!r));
+  /** An entry whose result could not be loaded: said with a retry, never skeletons forever. */
+  const failedResult = $derived(shown.map((e) => ({ e, err: results.error(e.id) })).find((x) => x.err !== undefined));
   const caveats = $derived(bench ? compareCaveats(shown, bench) : []);
   const nameOf = (cid: string) => catalog.data?.conditions.find((c) => c.id === cid)?.name ?? cid;
 
@@ -103,22 +105,16 @@
       d: a === 'accuracy' ? 3 : 2,
     })),
   ]);
-  function best(values: (number | null)[]): Set<number> {
-    const v = values.filter((x): x is number => x !== null);
-    if (v.length < 2) return new Set();
-    const top = Math.max(...v);
-    return new Set(values.flatMap((x, i) => (x === top ? [i] : [])));
-  }
-  const diff = (v: number | null, base: number | null, d: number) => {
-    if (v === null || base === null) return null;
-    const x = +(v - base).toFixed(d);
-    return x === 0 ? '±0' : `${x > 0 ? '+' : '−'}${Math.abs(x).toFixed(d)}`;
-  };
+  /** Entries graded on an earlier version of the benchmark: never the best of a row, never in the intervals' verdict. */
+  const old = $derived(shown.map((e) => !!bench && stale(e, bench.fingerprint)));
+  const best = (key: string, values: (number | null)[], d: number) =>
+    bestAsPrinted(values.map((v, i) => (old[i] ? null : v)), d, key === 'accuracy' ? shown.map((e, i) => (old[i] ? null : e.ci95)) : null);
+  const diff = diffAsPrinted;
   const makeBaseline = (eid: string) => setIds([eid, ...ids.filter((x) => x !== eid)]);
 
   // ---- mAP intervals ----
   const ivDomain = $derived(intervalDomain(shown.flatMap((e) => (e.ci95 ? [e.ci95] : []))));
-  const verdict = $derived(intervalsVerdict(shown.map((e) => ({ name: e.name, map: e.map50_95 ?? 0, ci: e.ci95 }))));
+  const verdict = $derived(intervalsVerdict(shown.filter((_, i) => !old[i]).map((e) => ({ name: e.name, map: e.map50_95 ?? 0, ci: e.ci95 }))));
 
   // ---- robustness per condition ----
   const condRows = $derived(bench && loaded ? conditionRows(bench.plan.conditions.map((c) => c.condition), res) : []);
@@ -163,7 +159,7 @@
   );
 
   // ---- per class ----
-  const clsRows = $derived(bench && loaded ? classRows(bench.classes, res) : []);
+  const clsRows = $derived(bench && loaded ? classRows(bench.classes, bench.class_boxes, res) : []);
   const CLS_SHOWN = 12;
   let allClasses = $state(false);
   const clsShown = $derived(allClasses ? clsRows : clsRows.slice(0, CLS_SHOWN));
@@ -226,7 +222,7 @@
   </div>
 {:else}
   <Page title="Compare entries" inlineActions>
-    {#snippet sub()}<span>{bench.name} · {shown.length} {shown.length === 1 ? 'entry' : 'entries'} on one fingerprint</span>{/snippet}
+    {#snippet sub()}<span>{bench.name} · {shown.length} {shown.length === 1 ? 'entry' : 'entries'}{old.some((x) => x) ? ', not all on its current fingerprint' : ' on one fingerprint'}</span>{/snippet}
     {#snippet subPhone()}<span>{bench.name} · {shown.length} {shown.length === 1 ? 'entry' : 'entries'}</span>{/snippet}
     {#snippet actions()}{#if !phone.current}<Button icon={ArrowLeft} href={href(`/benchmarks/${bench.id}`)}>Leaderboard</Button>{/if}{/snippet}
 
@@ -238,7 +234,7 @@
           <button type="button" class="ck" aria-pressed={pinned === e.id} title={pinned === e.id ? 'Let it fall back' : 'Keep it in front'} onclick={() => (pinned = pinned === e.id ? null : e.id)}>
             {@render key(e.id)}<span class="nm">{e.name}</span>
           </button>
-          <span class="v num">{scoreText(e.score!.total)}{#if e.score!.partial}<span class="st"> · partial</span>{/if}</span>
+          <span class="v num">{scoreText(e.score!.total)}{#if e.score!.partial}<span class="st">{' · partial'}</span>{/if}{#if bench && stale(e, bench.fingerprint)}<span class="st">{' · earlier version'}</span>{/if}</span>
           <a class="act" href={href(`/benchmarks/${bench.id}/entries/${e.id}`)} aria-label="Open {e.name}" title="Open its result"><ArrowUpRight size={14} /></a>
           <button type="button" class="act rm" aria-label="Remove {e.name}" title="Remove from the comparison" onclick={() => setIds(ids.filter((x) => x !== e.id))}><X size={14} /></button>
         </span>
@@ -281,14 +277,14 @@
             </thead>
             <tbody>
               {#each rows as row (row.key)}
-                {@const b = best(row.values)}
+                {@const b = best(row.key, row.values, row.d)}
                 <tr class:total={row.key === 'score'}>
                   <td class="lead">{row.label}</td>
                   {#each row.values as v, i (i)}
                     <td class="r num" class:top={b.has(i)}>
                       {#if v === null}<NoValue label="not measured" />{:else}
                         {#if b.has(i)}<span class="best">best</span>{/if}{row.fmt(v)}
-                        {#if i > 0}{@const d = diff(v, row.values[0] ?? null, row.d)}{#if d}<span class="dd">{d}</span>{/if}{/if}
+                        {#if i > 0}{@const d = old[i] || old[0] ? null : diff(v, row.values[0] ?? null, row.d)}{#if d}<span class="dd">{d}</span>{/if}{/if}
                       {/if}
                     </td>
                   {/each}
@@ -300,7 +296,7 @@
         <!-- Phones: one block per measure, each entry's value (and its difference from the baseline) in a 2 × 2 grid. -->
         <ul class="sbs" aria-label="Scores and axes, entry by entry">
           {#each rows as row (row.key)}
-            {@const b = best(row.values)}
+            {@const b = best(row.key, row.values, row.d)}
             <li>
               <span class="sbs-h">{row.label}</span>
               <span class="sbs-g">
@@ -308,7 +304,7 @@
                   {@const v = row.values[i] ?? null}
                   <span class="sbs-v" class:top={b.has(i)}>
                     <span class="sbs-n">{@render key(e.id)}<span class="truncate">{e.name}</span></span>
-                    <span class="num">{#if v === null}<NoValue label="not measured" />{:else}{row.fmt(v)}{#if i > 0}{@const d = diff(v, row.values[0] ?? null, row.d)}{#if d}<span class="dd">{d}</span>{/if}{:else}<span class="dd">baseline</span>{/if}{#if b.has(i)}<span class="dd">best</span>{/if}{/if}</span>
+                    <span class="num">{#if v === null}<NoValue label="not measured" />{:else}{row.fmt(v)}{#if i > 0}{@const d = old[i] || old[0] ? null : diff(v, row.values[0] ?? null, row.d)}{#if d}<span class="dd">{d}</span>{/if}{:else}<span class="dd">baseline</span>{/if}{#if b.has(i)}<span class="dd">best</span>{/if}{/if}</span>
                   </span>
                 {/each}
               </span>
@@ -338,7 +334,9 @@
         {/if}
       </Panel>
 
-      {#if !loaded}
+      {#if !loaded && failedResult}
+        <ErrorState error={failedResult.err} title="Could not load the result of {failedResult.e.name}" retry={() => results.retry()} />
+      {:else if !loaded}
         {#each [280, 320, 320] as h, i (i)}<Skeleton h="{h}px" r="var(--radius-lg)" />{/each}
       {:else}
         <Panel title="Robustness by condition" meta="accuracy kept">
@@ -434,8 +432,11 @@
             label="AP50-95 per class, one dot per entry"
             {highlight}
             sub={(k) => {
-              const n = clsRows.find((r) => r.key === k)?.truths ?? 0;
-              return `${num(n)} true ${n === 1 ? 'box' : 'boxes'}`;
+              // The benchmark's count; an entry graded on a part of the images says on how many of them.
+              const row = clsRows.find((r) => r.key === k);
+              const n = row?.truths ?? 0;
+              const part = shown.flatMap((e, i) => (bench && e.images < bench.images && row?.graded[i] != null ? [`${num(row.graded[i]!)} for ${e.name}`] : []));
+              return `${num(n)} true ${n === 1 ? 'box' : 'boxes'}${part.length ? ` (graded on ${part.join(', ')})` : ''}`;
             }}
           />
           {#if clsRows.length > CLS_SHOWN}

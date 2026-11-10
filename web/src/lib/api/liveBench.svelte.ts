@@ -9,6 +9,7 @@
 
 import { untrack } from 'svelte';
 import { rankEntries } from '../bench/rules';
+import { ApiError } from './client';
 import { hub } from './index.svelte';
 import { STREAM_GRACE_MS } from './live.svelte';
 import type { Bench, BenchEntry, BenchLoop } from './types';
@@ -43,6 +44,8 @@ export class LiveBench {
   loops = $state.raw<BenchLoop[]>([]);
   error = $state.raw<unknown>(undefined);
   loading = $state(true);
+  /** The lists have loaded at least once: until then a failed load is the page's error, never "no entries yet". */
+  listed = $state(false);
   connection = $state<'idle' | 'open' | 'reconnecting'>('idle');
   /** When the stream was last heard from, set once it has been down for `STREAM_GRACE_MS`; null while it is up. */
   lost = $state<number | null>(null);
@@ -74,6 +77,7 @@ export class LiveBench {
         this.loops = [];
         this.error = undefined;
         this.loading = true;
+        this.listed = false;
         this.lost = null;
         this.connection = 'idle';
       });
@@ -95,6 +99,7 @@ export class LiveBench {
           this.loops = applyById(loops, flight.loops).sort(byCreatedDesc);
           this.#loaded = flight.sent;
           this.loading = false;
+          this.listed = true;
           this.error = undefined;
           heard = Date.now();
           if (this.lost !== null) this.lost = this.connection === 'reconnecting' ? heard : null;
@@ -102,11 +107,28 @@ export class LiveBench {
           this.#inflight.delete(flight);
         }
       };
+      // The benchmark was deleted (elsewhere): the page shows it gone, not stale data that looks live; nothing retries.
+      const gone = (e: unknown) => {
+        if (!(e instanceof ApiError && e.status === 404)) return false;
+        this.error = e;
+        this.bench = undefined;
+        this.entries = [];
+        this.loops = [];
+        this.loading = false;
+        this.listed = false;
+        return true;
+      };
       // Re-synchronising (on open, on a `bench` event, on reconnect) never gives up silently: a gap would stay.
       const sync = (attempt = 0) => {
         clearTimeout(syncTimer);
-        load().catch(() => {
-          if (!closed) syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
+        load().catch((e) => {
+          if (closed || gone(e)) return;
+          // Never listed yet: the failure is the page's error (with its retry), not an empty board.
+          if (!this.listed) {
+            this.error = e;
+            this.loading = false;
+          }
+          syncTimer = setTimeout(() => sync(attempt + 1), Math.min(15_000, 1000 * 2 ** attempt));
         });
       };
       const soon = () => {
@@ -131,6 +153,8 @@ export class LiveBench {
           // Events between the first load and the stream opening would be lost: load again once it is open.
           if (s === 'open' && this.connection === 'idle') soon();
           this.connection = s;
+          // A stream that dropped may mean the benchmark is gone: one load says so (a 404) or catches up.
+          if (s === 'reconnecting') soon();
           if (s === 'open') {
             clearTimeout(lostTimer);
             lostTimer = undefined;
@@ -146,7 +170,8 @@ export class LiveBench {
           if (closed) return;
           alive();
           this.#benchSeq++;
-          this.bench = b;
+          // While the first load's failure is shown, the benchmark alone does not make an (empty) board: the load does.
+          if (this.listed || this.error === undefined) this.bench = b;
           soon();
         },
         entry: (e) => {
@@ -174,9 +199,10 @@ export class LiveBench {
       });
 
       load().catch((e) => {
-        if (closed) return;
+        if (closed || gone(e)) return;
         this.error = e;
         this.loading = false;
+        this.bench = undefined;
       });
 
       return () => {
