@@ -41,7 +41,15 @@
   const unsupported = $derived(cannotLabel(system.data, jobs.error));
 
   // `#/datasets/label?new=1` opens the dialog (the palette's "New labeling job").
-  let creating = $state(router.route.query.get('new') === '1');
+  // Followed, not read once: the palette can ask while this page is open (pages are keyed by path, not query). The ask
+  // leaves the URL at once, so the next one is a change again.
+  let creating = $state(false);
+  const askedNew = $derived(router.route.query.get('new') === '1');
+  $effect(() => {
+    if (!askedNew) return;
+    creating = true;
+    router.go('/datasets/label', { replace: true });
+  });
 
   let query = $state('');
   let filter = $state<'all' | 'active' | 'idle'>('all');
