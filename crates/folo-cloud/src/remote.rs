@@ -89,7 +89,7 @@ impl Provider for Remote {
                     "the FOLO server at {} runs version {}, which cannot train cloud runs (it lacks {}); update it \
                      to FOLO {} or later",
                     server.host,
-                    health.version,
+                    server.scrub(&health.version),
                     missing.join(", "),
                     env!("CARGO_PKG_VERSION")
                 ),
@@ -101,7 +101,11 @@ impl Provider for Remote {
     fn offers(&self, values: &Values) -> Result<Vec<CloudOffer>> {
         let server = Server::of(values)?;
         let system = server.system(&server.client())?;
-        Ok(vec![offer(&system)])
+        // Offers are logged when a run starts.
+        let mut offer = offer(&system);
+        offer.gpu = server.scrub(&offer.gpu);
+        offer.detail = offer.detail.map(|d| server.scrub(d));
+        Ok(vec![offer])
     }
 
     fn fixed_endpoint(&self, values: &Values) -> Option<Endpoint> {
@@ -177,14 +181,20 @@ impl Server {
                 Error::new(ErrorKind::Auth, format!("the server at {} rejected the token", self.host))
             }
             None => self.unreachable(e),
-            Some(_) => Error::new(ErrorKind::Unavailable, format!("the server at {}: {e}", self.host)),
+            Some(_) => {
+                Error::new(ErrorKind::Unavailable, format!("the server at {}: {}", self.host, self.scrub(e)))
+            }
         })
     }
 
     fn unreachable(&self, e: impl std::fmt::Display) -> Error {
         Error::new(
             ErrorKind::Unavailable,
-            format!("{} does not answer ({e}); is `folo serve --host 0.0.0.0` running there?", self.url),
+            format!(
+                "{} does not answer ({}); is `folo serve --host 0.0.0.0` running there?",
+                self.url,
+                self.scrub(e)
+            ),
         )
     }
 
@@ -192,8 +202,13 @@ impl Server {
     fn not_folo(&self, why: impl std::fmt::Display) -> Error {
         Error::new(
             ErrorKind::Unavailable,
-            format!("{} does not look like a FOLO server (GET /api/health: {why})", self.url),
+            format!("{} does not look like a FOLO server (GET /api/health: {})", self.url, self.scrub(why)),
         )
+    }
+
+    /// `text`, made of what the server answered (decoded), with its token blanked out: a server may say anything.
+    fn scrub(&self, text: impl std::fmt::Display) -> String {
+        crate::scrub(&text.to_string(), [self.token.as_str()])
     }
 }
 
@@ -294,6 +309,34 @@ mod tests {
         let fields: Vec<(&str, bool, bool)> =
             info.fields.iter().map(|f| (f.key.as_str(), f.secret, f.required)).collect();
         assert_eq!(fields, [("url", false, true), ("token", true, false)]);
+    }
+
+    #[test]
+    fn what_a_server_answers_never_carries_its_token_into_a_message_or_an_offer() {
+        // The token as JSON escapes: the same text once decoded.
+        let token: String = TOKEN.chars().map(|c| format!("\\u{:04x}", c as u32)).collect();
+        let f = Fixture::serve(vec![Answer::json(
+            200,
+            format!(r#"{{"status":"{token}","version":"0.1.0","api":"v1","mock":false}}"#),
+        )]);
+        assert_error(&Remote.check(&values(&f.base(), TOKEN)).unwrap_err(), ErrorKind::Unavailable, "health");
+        // A server too old to be a worker, whose version says the token.
+        let f = Fixture::serve(vec![health(&token), system(ONE_GPU, None, r#"["queue_control"]"#)]);
+        assert_error(
+            &Remote.check(&values(&f.base(), TOKEN)).unwrap_err(),
+            ErrorKind::Refused,
+            "cannot train",
+        );
+        // An error of its own that quotes it.
+        let refused = format!(r#"{{"error":{{"code":"internal","message":"bad {token}","hint":null}}}}"#);
+        let f = Fixture::serve(vec![health("0.1.0"), Answer::json(500, refused)]);
+        assert_error(&Remote.check(&values(&f.base(), TOKEN)).unwrap_err(), ErrorKind::Unavailable, "bad");
+        // A GPU named with it: the offer is logged when a run starts.
+        let gpus =
+            format!(r#"[{{"ordinal":0,"name":"{token}","backend":"vulkan","memory_bytes":1,"util":null}}]"#);
+        let f = Fixture::serve(vec![system(&gpus, Some(ON_GPU), ALL_FEATURES)]);
+        let offers = Remote.offers(&values(&f.base(), TOKEN)).unwrap();
+        assert!(!offers[0].gpu.contains(TOKEN), "{offers:?}");
     }
 
     #[test]

@@ -90,6 +90,8 @@ app: chart plots, image canvases, code/log views. In light mode panels are white
   grey (`text.secondary` on `bg.active`), not a status hue. Each has `solid` (dots, icons, bars; ≥ 3:1 on every
   surface), `text` (readable text; AA on every surface and on its own `muted`) and `muted` (tinted backgrounds for
   badges and banners: the solid at low alpha).
+- Window: `window.close` and `window.close_text` are FOLO Desktop's Close button on hover, Windows' own red and
+  white in both themes (the caption buttons look like the system's).
 - Charts: `chart.series[0..5]` in this fixed order (sky, amber, magenta, teal, violet, orange), never cycled; the
   order keeps every adjacent pair apart under colour-vision deficiency (checked by `contrast.mjs`). The
   series deliberately exclude the accent lime (reserved for actions, live state, focus and "best" markers). Some

@@ -93,6 +93,10 @@ pub struct ServeArgs {
     /// server listens beyond loopback; docs/CLOUD.md, Securing a server). Never logged or printed.
     #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]
     pub token: Option<String>,
+    /// A Host name a server on loopback answers besides localhost, 127.x.y.z and [::1] (repeatable): a tunnel or
+    /// reverse proxy that keeps its own Host. Other names are refused (forbidden_host) against DNS rebinding.
+    #[arg(long = "allow-host", value_name = "NAME", value_parser = NonEmptyStringValueParser::new())]
+    pub allow_host: Vec<String>,
 }
 
 /// `folo describe`.
@@ -178,7 +182,7 @@ pub struct TrainArgs {
     /// Device: auto, cpu or gpu:<n>.
     #[arg(long, default_value = "auto")]
     pub device: String,
-    /// Data loader worker threads [default: min(cores, 8)].
+    /// Data loader worker threads [default: min(cores, 16)].
     #[arg(long)]
     pub workers: Option<usize>,
     /// Optimizer.
@@ -326,7 +330,7 @@ pub struct ValArgs {
     /// where they are not available.
     #[arg(long)]
     pub tensor_cores: bool,
-    /// Data loader worker threads [default: min(cores, 8)].
+    /// Data loader worker threads [default: min(cores, 16)].
     #[arg(long)]
     pub workers: Option<usize>,
     /// Also evaluate exactly as pycocotools' COCOeval does on a COCO dataset: original-image boxes, crowd regions,
@@ -403,8 +407,9 @@ pub struct ExportArgs {
     /// Target format.
     #[arg(long, value_enum, default_value_t = ExportFormatArg::FoloF16)]
     pub format: ExportFormatArg,
-    /// Output file [default: next to the input, `<name>-fused.folo` / `<name>-f16.folo` / `<name>.onnx` /
-    /// `<name>-f16.onnx`].
+    /// Output file [default: next to the input, `<name>-f16.folo` / `<name>-fused.folo` / `<name>-weights.folo` /
+    /// `<name>.onnx` / `<name>-f16.onnx` / `<name>-decoded.onnx` / `<name>-decoded-f16.onnx`, with `-2`, `-3`, ...
+    /// when taken].
     #[arg(long)]
     pub output: Option<PathBuf>,
     /// Square input size baked into the graph, a multiple of 32 (ONNX only; `.folo` files are size-independent)

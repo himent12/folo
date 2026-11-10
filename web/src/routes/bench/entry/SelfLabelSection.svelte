@@ -112,7 +112,8 @@
         <div><dt>Threshold t*</dt><dd class="num">{s.threshold !== null ? conf(s.threshold) : '—'}</dd></div>
         <div><dt>Axis (objects at 90%)</dt><dd class="num">{share(s.recall)}</dd></div>
         <!-- The labels the threshold rests on (all its detections without one), and per image as a reader can see it. -->
-        <div><dt>{s.threshold !== null ? 'Labels at t*' : 'Detections (none kept)'}</dt><dd class="num">{num(s.labels)}<span class="per">{perImageText(s.labels_per_image, s.labels)}</span></dd></div>
+        <!-- Without confidences, a point that reaches 90% keeps every box it gave as a label (the axis is their recall). -->
+        <div><dt>{s.threshold !== null ? 'Labels at t*' : !scored && s.recall > 0 ? 'Labels' : 'Detections (none kept)'}</dt><dd class="num">{num(s.labels)}<span class="per">{perImageText(s.labels_per_image, s.labels)}</span></dd></div>
         <div><dt>Mean IoU</dt><dd class="num">{s.mean_iou !== null ? num(s.mean_iou, 2) : '—'}</dd></div>
       </dl>
       {#if loop}

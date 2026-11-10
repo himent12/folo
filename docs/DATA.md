@@ -11,7 +11,7 @@ produces plain buffers that the trainer wraps in tensors.
 |---|---|
 | `*.yaml` / `*.yml` file | YOLO `data.yaml` |
 | `*.json` file | COCO instances JSON (one split, guessed from the name) |
-| directory with `data.yaml` / `dataset.yaml` (or any YAML with a `train` key) | YOLO (a YAML without split keys, e.g. only `names`, reads the `images/` + `labels/` layout next to it) |
+| directory with `data.yaml` / `dataset.yaml` (or any YAML with a `train` key; `.yaml` / `.yml` in any case) | YOLO (a YAML without split keys, e.g. only `names`, reads the `images/` + `labels/` layout next to it) |
 | directory with `annotations/instances_*.json`, COCO JSON at the root, or `train|val|valid|test/*.json` (Roboflow) | COCO |
 | directory with `images/` + `labels/` (or `train/images`, `valid/images`, ...) and no YAML | YOLO, names from `classes.txt` or `class0..` |
 
@@ -21,6 +21,8 @@ produces plain buffers that the trainer wraps in tensors.
   Roboflow-style `../train/images` paths are resolved against the root too. `names` is a list or an `{id: name}` map;
   `nc` must agree with it when both are given.
 - Image list lines: absolute, `./x` (relative to the list file), or relative to the root.
+- Text files (`data.yaml`, image lists, `classes.txt`, label files) may start with a UTF-8 byte order mark, which
+  is ignored, and may use CRLF line ends.
 - Label path: the last `images` folder becomes `labels`, the extension `.txt` (`ds/images/train/a.jpg` →
   `ds/labels/train/a.txt`). A missing label file means a background image.
 - Label lines: `class cx cy w h` or a segment polygon `class x1 y1 x2 y2 ...` (normalised; the polygon's bounding
@@ -36,6 +38,9 @@ produces plain buffers that the trainer wraps in tensors.
 - `bbox` is pixel `[x, y, w, h]`; boxes are clipped to the image and normalised. `iscrowd: 1` annotations are skipped.
 - Category ids (from all JSON files) are sorted and remapped to `0..n`; names come from `categories`.
 - An image with an annotation that has a bad `bbox` or an unknown category is skipped as a broken label.
+- Image ids are numbers or strings; an integral float is its integer (`"image_id": 1.0` names `"id": 1`). Two
+  `images` entries with one id: the first is kept with every annotation of the id, the second is left out and
+  reported (`other`).
 - The annotation array is read as borrowed raw JSON, and only `image_id`, `category_id`, `bbox` and `iscrowd` are
   parsed out of each entry (segmentation polygons are skipped unbuilt): COCO 2017's `instances_train2017.json`
   (448 MB, 860k annotations) opens with a peak of 1.2 GB instead of 7 GB, with identical results. The official COCO

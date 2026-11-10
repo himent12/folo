@@ -560,6 +560,12 @@ impl Exec {
             .ledger
             .create(&self.c.connection.id, &info.id, self.entry.id(), &offer, deadline, Some(self.limit()))
             .map_err(|e| failed(&e.body.code, e.body.message))?;
+        // Nothing could terminate an instance launched on a connection removed since the run started. Removing one
+        // looks for live records under the cloud lock this one was written under, so from here on it is refused.
+        if let Err(e) = self.core.connected(&self.c.connection.id) {
+            self.core.ledger.remove(&record.id);
+            return Err(failed(&e.body.code, e.body.message));
+        }
         release.arm(&record.id);
         self.private.instance_id = Some(record.id.clone());
         self.private.token = Some(token.clone());
@@ -597,9 +603,9 @@ impl Exec {
                     }
                     refs[0].clone()
                 }
-                Ok(_) => return Err(nothing(release, e)),
-                // Unknown: the release looks for it by its name again, and the reaper after that.
-                Err(_) => return Err(failed(e.code(), e.message)),
+                // Not listed (yet) or unknown: the release looks for it by its name again, and the reaper after
+                // that (super::reaper::LISTED_WITHIN).
+                Ok(_) | Err(_) => return Err(failed(e.code(), e.message)),
             },
             Err(e) => return Err(nothing(release, e)),
         };
@@ -865,13 +871,16 @@ impl Exec {
             Some((id, false)) => fields.insert("weights".into(), id.into()),
             None => None,
         };
+        // A `remote` server keeps the runs of the run's earlier attempts under the same name: those are not this
+        // attempt's. After a request whose answer was lost, a run of the name that is not one of them is the one it
+        // created, however it went since (it may have ended already).
+        let earlier: Vec<String> = self.named(client, &name)?.into_iter().map(|r| r.id).collect();
         let mut attempt = 1;
         let created = loop {
             match client.post::<_, Run>("/runs", &body) {
                 Ok(r) => break r,
                 Err(e) if e.is_transient() && attempt < ATTEMPTS => {
-                    if let Ok(list) = client.get::<RunList>("/runs")
-                        && let Some(r) = list.runs.into_iter().find(|r| r.name == name)
+                    if let Some(r) = self.named(client, &name)?.into_iter().find(|r| !earlier.contains(&r.id))
                     {
                         break r;
                     }
@@ -891,6 +900,25 @@ impl Exec {
         Ok(())
     }
 
+    /// The worker's runs named `name`, asked for again while it fails for a reason of the moment. When it does not
+    /// answer, the run fails: without the list, a run started now could be one the worker already trains.
+    fn named(&self, client: &Client, name: &str) -> std::result::Result<Vec<Run>, Halt> {
+        let mut attempt = 1;
+        loop {
+            match client.get::<RunList>("/runs") {
+                Ok(list) => return Ok(list.runs.into_iter().filter(|r| r.name == name).collect()),
+                Err(e) if e.is_transient() && attempt < ATTEMPTS => {
+                    attempt += 1;
+                    self.wait(self.core.tuning.poll)?;
+                }
+                Err(e) => {
+                    let code = if e.is_transient() { "cloud_sync_failed" } else { e.code() };
+                    return Err(failed(code, format!("listing the worker's runs: {e}")));
+                }
+            }
+        }
+    }
+
     /// Mirrors the worker's run until it ends (stopping it when asked to or at the time limit), then collects.
     fn train(&mut self, client: &Client) -> std::result::Result<Outcome, Halt> {
         let run_id = self.private.run_id.clone().expect("a training cloud run has a worker run");
@@ -902,6 +930,8 @@ impl Exec {
         let mut answered = false;
         let mut cost_at = Instant::now();
         let end = loop {
+            // A copy that finished is taken whatever this poll finds: a worker lost right after still leaves it.
+            self.reap_copy();
             if self.core.halt.is_on() {
                 return Err(Halt::LetGo);
             }
@@ -1287,7 +1317,9 @@ impl Exec {
         end: Option<Run>,
         time_up: bool,
     ) -> std::result::Result<Outcome, Halt> {
-        // A copy still under way is told to end and not waited for: it only writes its staged file.
+        // A copy still under way is told to end and not waited for: it only writes its staged file. One that
+        // finished is kept, should the final copy fail.
+        self.reap_copy();
         self.copying = None;
         self.phase(CloudPhase::Collecting, "the run ended on the worker; copying its weights");
         for last in [true, false] {

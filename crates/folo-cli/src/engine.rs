@@ -35,12 +35,12 @@ pub fn open_dataset_splits(
     Ok((ds, name))
 }
 
-/// Map an engine error to a CLI error: the code of `folo_api::codes` with its exit code, the message capped
-/// ([`folo_vision::Error::summary`]) and a hint for the failures an agent can fix.
-pub fn engine_error(e: folo_vision::Error) -> CliError {
+/// Map an engine error of `folo <command>` to a CLI error: the code of `folo_api::codes` with its exit code, the
+/// message capped ([`folo_vision::Error::summary`]) and a hint for the failures an agent can fix.
+pub fn engine_error(command: &str, e: folo_vision::Error) -> CliError {
     let code = e.code();
     let hint = match code {
-        "invalid_config" => Some("see `folo describe train --json` for the accepted ranges".to_string()),
+        "invalid_config" => Some(format!("see `folo describe {command} --json` for the accepted ranges")),
         "training_failed" => {
             Some("the last completed epoch's checkpoint is in <run>/weights/last.folo".into())
         }

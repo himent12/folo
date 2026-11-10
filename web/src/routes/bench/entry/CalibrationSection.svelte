@@ -65,8 +65,9 @@
       />
       <aside class="read">
         <h3 class="tone">{TONE[reading.tone]}</h3>
-        <!-- The tone is the heading: the sentence goes on from it. -->
-        <p class="sentence">{reading.sentence.replace(/^[^:]+: (\w)/, (_, c: string) => c.toUpperCase())}</p>
+        <!-- The tone is the heading: the sentence goes on from it (its first clause only: never across a full stop, which
+             a decimal point is not). -->
+        <p class="sentence">{reading.sentence.replace(/^(?:[^:.]|\.\d)+: (\w)/, (_, c: string) => c.toUpperCase())}</p>
         <dl class="kv">
           <div><dt>ECE</dt><dd class="num">{num(cal.ece, 3)}</dd></div>
           <div><dt>Calibration axis</dt><dd class="num">{num(1 - cal.ece, 2)}</dd></div>

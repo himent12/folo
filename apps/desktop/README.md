@@ -20,13 +20,59 @@ cargo run -- --help                                # every option (`--version`: 
 ```
 
 Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1–5` screens · `Ctrl ,` settings ·
-`Ctrl Shift L` theme · `Alt ←` back · `Esc` close or go up · `Tab` / arrows move focus.
+`Ctrl Shift L` theme · `F11` full screen · `Alt ←` back · `Esc` close or go up · `Tab` / arrows move focus ·
+`F6` next region.
+
+## Window
+
+The app draws its own title bar (`titlebar()` in `src/app.rs`) and tells Windows which parts of it are caption
+areas: Minimize, Maximize / Restore and Close, and two drag areas, the title bar's empty space and the sidebar's
+FOLO row (drag to move, double-click to maximize or restore, hover Maximize for the snap layouts). The breadcrumbs
+and the search field in the title bar take their own clicks. The top few pixels (`layout.desktop_resize_edge`)
+resize the window, as the other edges do, except when it is maximized or full screen.
+
+Two GPUI details keep this working; `tools/window-check.ps1` catches a regression in either:
+
+- **Caption areas are `.occlude()`d.** GPUI sends a caption press to the app first and passes it to Windows only
+  if nothing prevented its default. A focus-tracked element under the pointer does (it focuses itself), and the
+  root view is one, so without the occlusion no button, drag or double-click ever reached Windows.
+- **The top edge is a strip over the title bar** (`resize-top`, on top and occluding). Windows resizes only where
+  GPUI's hit test finds no caption area, and the title bar's drag area reaches the top of the window.
+
+Hidden from the root, the chrome also leaves keyboard mode itself on a press (`leave_kb`), as the root does for
+any other press.
+
+An overlay's scrim (the palette, a dialog, the inspector) dims the title bar too, and so hides its caption areas
+from the hit test. Each scrim carries the caption areas again (`caption_controls`, on the same row and button
+tokens as `titlebar()`), over the scrim and under the overlay's own panel: with an overlay open the window still
+moves, maximizes, minimizes and closes, and that doesn't dismiss the overlay. The whole dimmed title bar and brand
+row are one drag band then (the crumbs and the search field take no clicks); a press on the dimmed page still
+dismisses. The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
+`window.close`, `window.close_text`).
+
+`F11` (or Toggle full screen in the palette) toggles full screen. There the window has no caption areas, so the
+three buttons are plain buttons: Minimize, Restore (leaves full screen) and Close.
+
+The window opens as it was closed: its restored size and place, maximized or full screen, and the theme
+(`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
+It reopens on the display it was on (GPUI's display UUID, kept with the place: each display's bounds are in its
+own logical pixels, so with mixed scale factors their rectangles overlap and the place alone can't say which), if
+that display still shows enough of the title bar to grab; else on the display that shows the most of it (a tie
+goes to the primary display). A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
+(`--scenario`, `--width`, `--height`) neither read nor write it, and `--theme` beats the remembered theme.
+Closed while minimized, it keeps the mode it had before (`window_state::closing_mode`).
+
+The app icon (taskbar, Alt-Tab, Explorer) is `assets/folo.ico`, drawn from `design/logo.svg` and the tokens by
+`tools/make-icon.ps1` (run it again when either changes, and commit the .ico). GPUI loads icon resource 1 from the
+executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
+build needs no resource compiler or extra crate (MSVC targets only).
 
 ## Layout
 
 ```
 build.rs          generates the theme tables from design/tokens.json and embeds assets/icons/*.svg
 src/main.rs       args, fonts (design/fonts), window, keymap
+src/window_state.rs  the remembered window and theme (desktop.json), where a saved window reopens
 src/theme.rs      the active theme (Colors from tokens, dark/light), class palette, shadows
 src/api/          Backend trait (the client seam), wire types for docs/API.md, the in-app mock
 src/synth.rs      procedural "shapes" scenes behind the mock's images
@@ -40,7 +86,8 @@ src/viz.rs        images with detection boxes and label chips (design/README.md 
 src/screens/      one module per screen
 src/overlays.rs   palette, dialogs, image inspector, toasts
 src/scenario.rs   `--scenario` states for screenshots
-tools/            shoot.ps1 / shoot-all.ps1 (screenshots)
+tools/            shoot.ps1 / shoot-all.ps1 (screenshots), window-check.ps1 (the window chrome, real input),
+                  chrome-check.ps1 (its hit tests and buttons, by window message), make-icon.ps1 (assets/folo.ico)
 ```
 
 ## Data
@@ -93,6 +140,28 @@ tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://12
 ```
 
 The scripts run `$CARGO_TARGET_DIR/debug/folo-desktop.exe` unless `-Exe` names another build (a release one, say).
+
+### Window check
+
+```powershell
+tools\window-check.ps1                     # about a minute; leave the mouse alone
+tools\window-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe
+```
+
+It drives the window chrome with real mouse and keyboard input (Windows only) and prints PASS or FAIL per step:
+the breadcrumbs and search field in the title bar, Maximize / Restore, double-click and drag on both drag areas,
+the top resize edge, Minimize, `F11` on and off, the three buttons in full screen, Close, a title-bar press leaving
+keyboard mode, the window's icon, the buttons and both drags with the palette and with the New run dialog open
+(each still open after them, and dismissed by a click on the dimmed page), and the next launches (maximized, windowed and full screen again at the last size
+and place, also after closing while minimized; a saved place off every display; a corrupt state file). It exits 1 if any step fails. The remembered state goes to `$FOLO_DESKTOP_STATE`, a fresh file
+under `$FOLO_TEST_TMP\window-check` (or `-StateDir`), never the real profile, and the last check proves that. It
+also saves a screenshot of the snap layouts over Maximize there, to look at.
+
+`tools\chrome-check.ps1 -Exe <build> [-AppArgs "--scenario palette"]` is the quick check that needs no mouse: it
+asks the window what `WM_NCHITTEST` answers over each caption area, the top edge and the page, and posts a
+non-client press and release on Maximize, Minimize and Close. It works when something on the desktop swallows
+injected input (a system prompt), and with any `--scenario` (an overlay open). It does not replace window-check:
+it cannot drag, and it never proves that a real click arrives.
 
 `shots/` is gitignored. Design reviews score the shots against `REVIEW_RUBRIC.md`; `HILLCLIMB.md` logs each round.
 

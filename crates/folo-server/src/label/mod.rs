@@ -488,7 +488,7 @@ impl Labeler {
         let mut uploads: HashMap<u64, String> =
             images.iter().filter_map(|r| Some((r.hash?, r.file.clone()))).collect();
         let mut folders: HashSet<PathBuf> = images.iter().filter_map(|r| r.external.clone()).collect();
-        let first_new = images.len();
+        let (first_new, next_image) = (images.len(), state.file.next_image);
         for candidate in staged {
             let Candidate { name, source, size: (width, height) } = candidate;
             let reason = if let Source::Upload { hash, .. } = &source
@@ -542,7 +542,16 @@ impl Labeler {
         }
         let added: Vec<LabelImage> = state.file.images[first_new..].iter().map(|r| state.image(r)).collect();
         if !added.is_empty() {
-            job.save(&state)?;
+            if let Err(e) = job.save(&state) {
+                // Not on disk: the job stays as it was, without the files stored for the new images.
+                for r in state.file.images.drain(first_new..) {
+                    if r.external.is_none() {
+                        let _ = std::fs::remove_file(job.image_path(&r));
+                    }
+                }
+                state.file.next_image = next_image;
+                return Err(e);
+            }
             if added.len() > BULK_IMAGES {
                 job.emit(LabelEvent::Reload);
             } else {
@@ -600,13 +609,27 @@ impl Labeler {
         let classes = state.file.classes.len();
         let record = state.record(image_id)?;
         let boxes = check_boxes(&req.boxes, classes, (record.width, record.height))?;
+        // What the change replaces, to put back when it cannot be saved ([`State::claim`] takes the image out of
+        // a run waiting for it).
+        let old = record.clone();
+        let waiting = state.active.as_ref().is_some_and(|a| a.waiting.contains(image_id));
+        let total = state.file.run.as_ref().map(|r| r.total);
         state.claim(image_id)?;
         let record = state.record_mut(image_id).expect("the record was just read");
         record.boxes = boxes;
         record.status = LabelImageStatus::Labeled;
         record.source = Some(LabelSource::Manual);
         record.error = None;
-        job.save(&state)?;
+        if let Err(e) = job.save(&state) {
+            *state.record_mut(image_id).expect("the record was just read") = old;
+            if let (Some(run), Some(total)) = (state.file.run.as_mut(), total) {
+                run.total = total;
+            }
+            if let Some(active) = state.active.as_mut().filter(|_| waiting) {
+                active.waiting.insert(image_id.to_owned());
+            }
+            return Err(e);
+        }
         let image = state.image(state.record(image_id)?);
         job.emit(LabelEvent::Image(image.clone()));
         job.emit_job(&state);

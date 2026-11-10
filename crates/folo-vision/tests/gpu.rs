@@ -209,6 +209,39 @@ fn letterbox_on_device_is_exact() {
     }
 }
 
+/// A batch whose images fit the device's buffer limit one by one but not together still letterboxes (bit-exact
+/// with the host): the upload is split at the limit. Ignored by default: it needs a little more than the
+/// device's storage binding limit (about 2 GiB on desktop GPUs) of host and device memory.
+#[test]
+#[ignore = "uploads more than the device's buffer limit (about 2 GiB)"]
+fn letterbox_on_device_splits_a_batch_above_the_buffer_limit() {
+    use folo_data::{Letterbox, LetterboxOptions};
+    use folo_vision::predict::{letterbox_on_device, letterbox_on_host};
+    let dev = gpu!();
+    let caps = *folo_gpu::GpuContext::shared().unwrap().caps();
+    let limit = caps.max_buffer_size.min(caps.max_storage_buffer_binding_size) as usize;
+    // Four images of just over a quarter of the limit each.
+    let w = 8192u32;
+    let h = (limit / 4 + 1).div_ceil(3 * w as usize) as u32;
+    let imgs: Vec<_> = (0..4u32)
+        .map(|seed| {
+            let data = (0..3 * w as usize * h as usize)
+                .map(|i| ((i as u32).wrapping_mul(2654435761).wrapping_add(seed) >> 24) as u8)
+                .collect();
+            folo_data::Image::from_raw(w, h, data).unwrap()
+        })
+        .collect();
+    assert!(imgs.iter().map(|i| i.data.len()).sum::<usize>() > limit);
+    let opts = LetterboxOptions::default();
+    let boxes: Vec<Letterbox> =
+        imgs.iter().map(|i| Letterbox::compute(i.width, i.height, 128, 128, &opts)).collect();
+    let want = letterbox_on_host(&imgs, &boxes).unwrap();
+    let got = letterbox_on_device(&imgs, &boxes, dev).unwrap().expect("the GPU has a letterbox kernel");
+    let (g, w) = (got.to_vec::<f32>().unwrap(), want.to_vec::<f32>().unwrap());
+    let bad = g.iter().zip(&w).position(|(a, b)| a.to_bits() != b.to_bits());
+    assert!(bad.is_none(), "element {bad:?} differs");
+}
+
 /// Random head outputs with logits spread so that a good share of anchors pass `conf`.
 fn random_head(b: usize, a_side: usize, nc: usize, seed: u64) -> folo_vision::model::HeadOutput {
     let rng = &mut Rng::seed(seed);

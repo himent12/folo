@@ -234,12 +234,14 @@ pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate:
 }
 
 /// The file name a model's weights are offered under: its name reduced to `A-Z a-z 0-9 . _ -` (anything else
-/// becomes `_`, outer dots are dropped), then `.folo`, `-f16.folo` for the f16 export, or, as
-/// `POST /api/models/{id}/export` names its files, `.onnx` (`-f16.onnx` with `half`).
+/// becomes `_`, outer dots are dropped, at most 200 characters, so it is a file name on every OS), then `.folo`,
+/// `-f16.folo` for the f16 export, or, as `POST /api/models/{id}/export` names its files, `.onnx` (`-f16.onnx` with
+/// `half`).
 pub fn weights_file_name(model_name: &str, format: WeightsFormat) -> String {
     let stem: String = model_name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .take(200)
         .collect();
     // No leading dot (a hidden file) and no trailing one (Windows drops it).
     let stem = match stem.trim_matches('.') {

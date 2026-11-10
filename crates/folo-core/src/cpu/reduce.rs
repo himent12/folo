@@ -262,8 +262,10 @@ pub(crate) fn topk(x: &[f32], rows: usize, d: usize, k: usize, largest: bool) ->
     if k == 0 {
         return (vals, idx);
     }
+    // `total_cmp` orders -0.0 before 0.0; they are equal, so they tie (broken by index) like any other values.
+    let key = |v: f32| if v == 0.0 { 0.0 } else { v };
     let cmp = |a: &(f32, usize), b: &(f32, usize)| {
-        let o = if largest { b.0.total_cmp(&a.0) } else { a.0.total_cmp(&b.0) };
+        let o = if largest { key(b.0).total_cmp(&key(a.0)) } else { key(a.0).total_cmp(&key(b.0)) };
         o.then(a.1.cmp(&b.1))
     };
     let row = |(r, (v, ix)): (usize, (&mut [f32], &mut [i64]))| {

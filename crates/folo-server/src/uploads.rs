@@ -681,6 +681,8 @@ fn unreadable(e: std::io::Error) -> Error {
 fn unpack(pipe: &Arc<Pipe>, root: &Path) -> Result<()> {
     let mut archive = tar::Archive::new(PipeReader(pipe.clone()));
     let mut buf = vec![0u8; 64 * 1024];
+    // Each file's name as Windows compares it ([`folded`]) -> the entry's name.
+    let mut files: HashMap<String, String> = HashMap::new();
     for entry in archive.entries().map_err(unreadable)? {
         let mut entry = entry.map_err(unreadable)?;
         let kind = entry.header().entry_type();
@@ -697,6 +699,14 @@ fn unpack(pipe: &Arc<Pipe>, root: &Path) -> Result<()> {
                 return Err(invalid("a file entry without a name"));
             }
             let name = folo_api::json::path(&rel);
+            if let Some(other) = files.insert(folded(&rel), name.clone())
+                && other != name
+            {
+                return Err(invalid(format!(
+                    "{other} and {name} differ only by letter case or a trailing dot or space, so one would \
+                     overwrite the other on Windows; rename one (and the labels that refer to it) and pack again"
+                )));
+            }
             pipe.reading(&name);
             write_entry(&mut entry, &path, &name, &mut buf)?;
             pipe.read();
@@ -734,6 +744,15 @@ fn entry_path(entry: &tar::Entry<impl Read>) -> Result<PathBuf> {
         }
     }
     Ok(rel)
+}
+
+/// `rel` as Windows compares names: each component without trailing dots and spaces, in lower case.
+fn folded(rel: &Path) -> String {
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().trim_end_matches(['.', ' ']).to_lowercase())
+        .collect();
+    parts.join("/")
 }
 
 /// Writes file entry `name` to `path`.

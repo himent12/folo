@@ -348,6 +348,18 @@ impl Store {
         self.datasets.ready()?.iter().find(|d| d.id == id)
     }
 
+    /// What the periodic `/system` refresh says about the connection (`err`: its error, if any).
+    /// `health`, which the status line shows, is fetched once per connection; without this a server
+    /// that went away mid-session still read "Connected". Unreachable marks it down; the first answer
+    /// after that has health checked again.
+    pub fn note_reachability(&mut self, err: Option<&ApiError>) {
+        match err {
+            Some(e) if e.code == "server_unreachable" => self.health = Load::Failed(e.clone()),
+            None if matches!(self.health, Load::Failed(_)) => self.health = Load::Idle,
+            _ => {}
+        }
+    }
+
     /// Install a run's metric history, merging live events that arrived while it loaded.
     pub fn install_run_data(&mut self, run_id: &str, data: ApiResult<RunData>) {
         let mut load: Load<RunData> = data.into();
@@ -599,6 +611,25 @@ mod tests {
         // A request that was in flight across the clear lands nowhere.
         let late = Arc::new(RenderImage::new(vec![image::Frame::new(image::RgbaImage::new(1, 1))]));
         assert_eq!(c.finish(k("c"), Some(late)).len(), 1);
+    }
+
+    #[test]
+    fn a_server_that_goes_away_mid_session_shows_as_unreachable_until_it_is_back() {
+        let api = MockBackend::new(4200, true);
+        let mut store = Store::new(Arc::new(MockBackend::new(4200, true)));
+        store.health = api.health().into();
+        let down = ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7911");
+        // The 2 s refresh fails to connect: the status line must stop saying "Connected".
+        store.note_reachability(Some(&down));
+        assert!(matches!(store.health, Load::Failed(ref e) if e.code == "server_unreachable"));
+        // It answers again: health is checked again (Idle is fetched by the next ensure_core).
+        store.note_reachability(None);
+        assert!(store.health.needs_fetch());
+        // A connected server's answers and its other errors (a 500) leave a good status alone.
+        store.health = api.health().into();
+        store.note_reachability(None);
+        store.note_reachability(Some(&ApiError::new("http_error", "folo serve answered HTTP 500")));
+        assert!(store.health.ready().is_some());
     }
 
     #[test]

@@ -15,7 +15,9 @@ pub fn ground_truth(data: &str, split: Split) -> Result<CocoGroundTruth, CliErro
     folo_data::open_coco_ground_truth(data, split).map_err(|e| match e {
         folo_data::DataError::Format(m) => CliError::new(ExitCode::Usage, "usage", format!("--coco: {m}")).hint(
             format!(
-                "--coco and --save-json need COCO annotations: pass a COCO folder (annotations/instances_<split>.json)                  or the split's instances JSON; `folo dataset convert {data} <out> --to coco` writes one from a YOLO                  dataset"
+                "--coco and --save-json need COCO annotations: pass a COCO folder (annotations/instances_<split>.json) \
+                 or the split's instances JSON; `folo dataset convert {data} <out> --to coco` writes one from a YOLO \
+                 dataset"
             ),
         ),
         e => CliError::new(ExitCode::Runtime, "invalid_dataset", e.to_string()),
@@ -137,4 +139,24 @@ pub fn write_results(
     f.write_all(b"\n]\n").map_err(io)?;
     f.flush().map_err(io)?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod tests {
+    use folo_data::ImageFormat;
+    use folo_data::synthetic::{SyntheticConfig, write_yolo};
+    use folo_test_support::TestDir;
+
+    /// `--coco` / `--save-json` on a YOLO dataset: one readable hint (it had two runs of 18 spaces in it).
+    #[test]
+    fn yolo_dataset_hint_reads_as_one_sentence() {
+        let dir = TestDir::new("coco-hint");
+        let cfg = SyntheticConfig { images: 2, imgsz: 64, ..SyntheticConfig::default() };
+        write_yolo(&cfg, &dir.join("shapes"), ImageFormat::Png).unwrap();
+        let data = dir.join("shapes");
+        let e = super::ground_truth(data.to_str().unwrap(), folo_data::Split::Val).unwrap_err();
+        assert_eq!(e.code, "usage");
+        let hint = e.hint.unwrap();
+        assert!(!hint.contains("  "), "{hint}");
+    }
 }

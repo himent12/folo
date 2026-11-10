@@ -32,7 +32,9 @@ use crate::label::check_name;
 use crate::label::dataset;
 use crate::label::job::unique_file_name;
 use crate::store::Store;
-use crate::util::{claim_dir, fnv1a, rfc3339, slug, unique_id, unix_now};
+use crate::util::{
+    claim_dir, fnv1a, parse_rfc3339_millis, rfc3339, rfc3339_millis, slug, unique_id, unix_now,
+};
 
 /// The share of a student's dataset that goes to `val` (both splits carry the teacher's labels).
 pub const VAL_FRACTION: f32 = 0.1;
@@ -90,6 +92,7 @@ pub fn run(job: LoopJob) {
         // A stop that was accepted wins over a last generation that finished meanwhile, as it does for an entry.
         let stopped = lp.status == BenchLoopStatus::Stopping || job.cancelled();
         match ran {
+            _ if closing && lp.status == BenchLoopStatus::Stopping => lp.status = BenchLoopStatus::Stopped,
             _ if closing => {
                 lp.status = BenchLoopStatus::Failed;
                 lp.error = Some(SERVER_STOPPED_LOOP.into());
@@ -247,7 +250,12 @@ pub fn begin(slot: &Slot, checked: &Checked) -> Result<(BenchLoop, Arc<AtomicBoo
         name,
         status: BenchLoopStatus::Running,
         phase: Some(BenchLoopPhase::Benchmarking),
-        created: rfc3339(unix_now()),
+        // To the millisecond and later than every loop of the benchmark: the list keeps its order after a restart.
+        created: {
+            let last = state.loops.iter().filter_map(|l| parse_rfc3339_millis(&l.lp.created)).max();
+            let now = (unix_now() * 1000.0) as i64;
+            rfc3339_millis(last.map_or(now, |l| now.max(l + 1)))
+        },
         finished: None,
         config: checked.config.clone(),
         generations: Vec::new(),
@@ -402,6 +410,8 @@ fn graded(job: &LoopJob, g: u32, m: &Model) -> Result<Option<Graded>> {
     };
     let entry_id = match reuse {
         Some(id) => id,
+        // A stopped loop starts no new work (its last run may have finished while it was stopping).
+        None if job.cancelled() => return Ok(None),
         None => {
             let file_classes = job.slot.lock().file.classes.clone();
             let resolved = model::resolve(m, &file_classes)?;
@@ -550,6 +560,10 @@ fn teach(job: &LoopJob, g: u32, teacher: &Graded) -> Result<Option<String>> {
 /// Generation `g`'s student: an ordinary training run on `dataset`, followed to its end; its best model. `None`
 /// when the loop was stopped.
 fn train(job: &LoopJob, g: u32, dataset: &str) -> Result<Option<Model>> {
+    // Stopped while its dataset was written: no run.
+    if job.cancelled() {
+        return Ok(None);
+    }
     job.phase(BenchLoopPhase::Training);
     let config =
         student_config(&job.config.student, &job.teacher, dataset, format!("{} gen {g}", job.name()));

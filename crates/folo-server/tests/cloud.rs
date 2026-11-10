@@ -61,6 +61,8 @@ enum Fault {
     Fail(ErrorKind),
     /// `launch` only: creates the instance, then fails as if its answer was lost (`Unavailable`).
     LostAnswer,
+    /// `find` only: answers that there is no such instance, as a provider that does not list a new one yet.
+    Hidden,
     /// Panics, like a provider with a bug.
     Panic,
 }
@@ -98,6 +100,10 @@ struct Gates {
     old: AtomicBool,
     /// Nothing answers yet, as a provider's proxy does for an instance whose worker has not started: `404`.
     down: AtomicBool,
+    /// While set, the first request for weights cuts the worker off: from then on only weights are served, every
+    /// other request is a proxy's `502` (`cut`).
+    cut_after_weights: AtomicBool,
+    cut: AtomicBool,
 }
 
 async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
@@ -107,10 +113,47 @@ async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> 
     next.run(req).await
 }
 
+/// While set, answers the next `POST /api/runs` with a proxy's `503` (the request never reaches the server), and
+/// clears.
+async fn busy_once(State(busy): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
+    if req.method() == axum::http::Method::POST
+        && req.uri().path() == "/api/runs"
+        && busy.swap(false, Ordering::SeqCst)
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, "proxy: busy").into_response();
+    }
+    next.run(req).await
+}
+
+/// While its flag is set, the next `POST /api/runs` reaches the worker, and its answer is lost: the proxy answers
+/// `502` once the run it created has ended there (the flag clears).
+async fn lose_answer(
+    State((lose, worker)): State<(Arc<AtomicBool>, Arc<RealStore>)>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let post = req.method() == axum::http::Method::POST && req.uri().path() == "/api/runs";
+    if !(post && lose.swap(false, Ordering::SeqCst)) {
+        return next.run(req).await;
+    }
+    let _created = next.run(req).await;
+    while worker.list_runs().unwrap().iter().any(|r| r.status.is_active()) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    (StatusCode::BAD_GATEWAY, "proxy: the answer was lost").into_response()
+}
+
 async fn gate(State(g): State<Arc<Gates>>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if g.down.load(Ordering::SeqCst) {
         return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    if g.cut_after_weights.load(Ordering::SeqCst) {
+        if path.ends_with("/weights") {
+            g.cut.store(true, Ordering::SeqCst);
+        } else if g.cut.load(Ordering::SeqCst) {
+            return (StatusCode::BAD_GATEWAY, "proxy: no route to the instance").into_response();
+        }
     }
     while path.starts_with("/api/uploads") && g.uploads.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -146,6 +189,11 @@ struct Script {
     launched: u32,
     /// The servers of stopped instances, until the test cloud goes.
     stopped: Vec<Live>,
+    /// Names `find` does not list (yet), as a provider that lists a new instance late.
+    hidden: HashSet<String>,
+    /// By name: the calls of `find` (1-based) that fail, and those that list nothing.
+    find_fails: BTreeMap<String, Vec<usize>>,
+    find_hides: BTreeMap<String, Vec<usize>>,
 }
 
 /// The test provider (see the module docs).
@@ -215,6 +263,28 @@ impl TestCloud {
         self.script.lock().unwrap().calls.iter().filter(|c| c.0 == call).count()
     }
 
+    /// The calls of `call` with `arg`.
+    fn calls_with(&self, call: Call, arg: &str) -> usize {
+        self.script.lock().unwrap().calls.iter().filter(|c| c.0 == call && c.1 == arg).count()
+    }
+
+    /// The `fails`-th and `hides`-th calls of `find` for `name` (1-based) fail, or list nothing.
+    fn script_find(&self, name: &str, fails: &[usize], hides: &[usize]) {
+        let mut s = self.script.lock().unwrap();
+        s.find_fails.insert(name.to_string(), fails.to_vec());
+        s.find_hides.insert(name.to_string(), hides.to_vec());
+    }
+
+    /// `find` does not list instances named `name` while `hidden`.
+    fn hide(&self, name: &str, hidden: bool) {
+        let mut s = self.script.lock().unwrap();
+        if hidden {
+            s.hidden.insert(name.to_string())
+        } else {
+            s.hidden.remove(name)
+        };
+    }
+
     /// The instances whose server runs.
     fn live(&self) -> usize {
         self.script.lock().unwrap().instances.values().filter(|i| i.live.is_some()).count()
@@ -225,7 +295,8 @@ impl TestCloud {
         self.script.lock().unwrap().instances.values().nth(n).expect("launched").store.clone()
     }
 
-    /// Records `call` with `arg`, waits while it is held, and plays its next fault: `Ok(true)` for a lost answer.
+    /// Records `call` with `arg`, waits while it is held, and plays its next fault: `Ok(true)` for a lost answer
+    /// (or a hidden instance).
     fn call(&self, call: Call, arg: &str) -> folo_cloud::Result<bool> {
         let mut s = self.script.lock().unwrap();
         s.calls.push((call, arg.to_string()));
@@ -243,7 +314,7 @@ impl TestCloud {
             Fault::Fail(kind) => {
                 Err(folo_cloud::Error::new(kind, format!("the test cloud refuses {call:?}")))
             }
-            Fault::LostAnswer => Ok(true),
+            Fault::LostAnswer | Fault::Hidden => Ok(true),
             Fault::Panic => panic!("the test cloud panics in {call:?}"),
         }
     }
@@ -357,11 +428,18 @@ impl Provider for TestCloud {
     }
 
     fn find(&self, _: &Values, name: &str) -> folo_cloud::Result<Vec<String>> {
-        self.call(Call::Find, name)?;
+        if self.call(Call::Find, name)? {
+            return Ok(Vec::new());
+        }
         let s = self.script.lock().unwrap();
+        let n = s.calls.iter().filter(|c| c.0 == Call::Find && c.1 == name).count();
+        if s.find_fails.get(name).is_some_and(|f| f.contains(&n)) {
+            return Err(folo_cloud::Error::new(ErrorKind::Unavailable, "the test cloud does not answer"));
+        }
+        let hidden = s.hidden.contains(name) || s.find_hides.get(name).is_some_and(|h| h.contains(&n));
         Ok(s.instances
             .iter()
-            .filter(|(_, i)| i.name == name && i.live.is_some())
+            .filter(|(_, i)| i.name == name && i.live.is_some() && !hidden)
             .map(|(r, _)| r.clone())
             .collect())
     }
@@ -388,6 +466,7 @@ fn fast() -> Tuning {
         release_wait: Duration::from_millis(500),
         require_gpu: false,
         max_run: None,
+        ..Tuning::default()
     }
 }
 
@@ -707,6 +786,273 @@ fn refused_and_lost_launches() {
 }
 
 #[test]
+fn a_lost_launch_that_the_provider_lists_late_is_still_terminated() {
+    no_gpu();
+    let t = TestDir::new("cloud-late-listing");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    // The launch created an instance and its answer was lost, and the provider does not list the instance yet.
+    cloud.fail(Call::Launch, Fault::LostAnswer, 1);
+    cloud.fail(Call::Find, Fault::Hidden, usize::MAX);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 1)).unwrap();
+    let done = finished(&store, &run.id);
+    assert_eq!(done.error_code.as_deref(), Some("cloud_unavailable"));
+    assert_eq!(cloud.live(), 1);
+    // Not finding it is no proof that there is none: its record stays, so it goes once it is listed.
+    let all = store.cloud_instances().unwrap();
+    assert_eq!(all.len(), 1, "the record of the launch is kept");
+    assert_eq!(all[0].status, CloudInstanceStatus::Terminating);
+    cloud.clear(Call::Find);
+    let i = until("the instance terminated", || {
+        store.cloud_instances().unwrap().into_iter().find(|i| i.status == CloudInstanceStatus::Terminated)
+    });
+    assert_eq!((cloud.live(), i.error), (0, None));
+}
+
+/// Unix seconds as the ledger writes times (`YYYY-MM-DDTHH:MM:SSZ`).
+fn rfc3339(secs: f64) -> String {
+    let secs = secs.floor() as i64;
+    let (days, tod) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    // Howard Hinnant's civil_from_days.
+    let z = days + 719_468;
+    let (era, doe) = (z.div_euclid(146_097), z.rem_euclid(146_097));
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", tod / 3600, (tod / 60) % 60, tod % 60)
+}
+
+fn unix_now() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
+}
+
+/// Seconds an instance's watchdog adds to its run's deadline at most, as the ledger counts them: its setup's start
+/// (15 minutes), the grace and the time it keeps trying to terminate itself.
+const WATCHDOG_AFTER_DEADLINE: f64 =
+    900.0 + (folo_cloud::bootstrap::GRACE_S + folo_cloud::bootstrap::TERMINATE_TRIES_S) as f64;
+
+/// Writes the `launching` record of an instance named `name` whose launch's answer was lost (no provider id),
+/// written `age` seconds ago, with the run's deadline `deadline_in` seconds from now.
+fn lost_launch(home: &Path, conn: &str, id: &str, name: &str, age: f64, deadline_in: f64) {
+    let now = unix_now();
+    let i = json!({ "id": id, "connection_id": conn, "provider": "test", "provider_ref": null, "name": name,
+                    "run_id": null, "offer": offer("cpu@test", CloudAvailability::High), "status": "launching",
+                    "created": rfc3339(now - age), "deadline": rfc3339(now + deadline_in) });
+    let dir = home.join("cloud").join("instances");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{id}.json")), i.to_string()).unwrap();
+}
+
+fn instance(store: &RealStore, id: &str) -> Option<CloudInstance> {
+    store.cloud_instances().unwrap().into_iter().find(|i| i.id == id)
+}
+
+#[test]
+fn instances_listed_after_the_wait_are_still_terminated() {
+    no_gpu();
+    let t = TestDir::new("cloud-listed-late");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, Tuning { unseen_every: Duration::from_millis(100), ..fast() });
+    let conn = connect(&store);
+    let values = Values::from(BTreeMap::from([("api_key".to_string(), SECRET.to_string())]));
+    // Launched (and their answers lost) 4 minutes, 6 minutes and 2 hours ago, and one whose watchdog stops it in
+    // half a minute; the provider does not list any of them yet.
+    let cases = [
+        ("ci_four", 240.0, 3600.0),
+        ("ci_six", 360.0, 3600.0),
+        ("ci_hours", 7200.0, 3600.0),
+        ("ci_last", 7200.0, 30.0 - WATCHDOG_AFTER_DEADLINE),
+    ];
+    for (id, age, deadline_in) in cases {
+        let name = format!("folo-run_late-{id}");
+        cloud.hide(&name, true);
+        let spec = LaunchSpec {
+            name: name.clone(),
+            offer_id: "cpu@test".into(),
+            disk_gb: 20,
+            token: "t".into(),
+            lifetime_s: 3600,
+            worker_base_url: "http://x".into(),
+        };
+        cloud.launch(&values, &spec).unwrap();
+        lost_launch(&home, &conn.id, id, &name, age, deadline_in);
+    }
+    // The one launched 4 minutes ago is waited for; the others end, as launches that created nothing.
+    let ended = until("the records looked at", || {
+        let all = store.cloud_instances().unwrap();
+        let alive = |id: &str| all.iter().find(|i| i.id == id).map(|i| i.status.is_alive());
+        let others = ["ci_six", "ci_hours", "ci_last"];
+        (alive("ci_four") == Some(true) && others.iter().all(|i| alive(i) != Some(true))).then_some(all)
+    });
+    assert_eq!(cloud.live(), 4);
+
+    // Then the provider lists them: every one is terminated, and costs what it ran from its launch.
+    for (id, ..) in cases {
+        cloud.hide(&format!("folo-run_late-{id}"), false);
+    }
+    let t0 = Instant::now();
+    while cloud.live() > 0 {
+        assert!(t0.elapsed() < Duration::from_secs(20), "{} instance(s) still run", cloud.live());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    for (id, age, _) in cases {
+        let i = until(id, || instance(&store, id).filter(|i| i.status == CloudInstanceStatus::Terminated));
+        let ran = age / 3600.0 * 0.36;
+        assert!(i.cost_usd.unwrap() >= ran - 1e-3 && i.error.is_none(), "{id}: {i:?}");
+    }
+    // Before they were found, nothing was counted for them: nobody had seen them.
+    for i in ended.iter().filter(|i| i.id != "ci_four") {
+        assert_eq!((i.ended.as_ref(), i.cost_usd), (Some(&i.created), Some(0.0)), "{i:?}");
+    }
+}
+
+#[test]
+fn an_instance_never_listed_ends_at_no_cost_and_is_still_looked_for_after_its_watchdog_is_due() {
+    no_gpu();
+    let t = TestDir::new("cloud-never-listed");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, Tuning { unseen_every: Duration::from_millis(100), ..fast() });
+    let (kept, removed) = (connect(&store), connect(&store));
+    // Two launches whose answers were lost 6 minutes ago, and nothing the provider ever lists: one whose watchdog
+    // was due a second ago, one an hour from now on a connection that is removed meanwhile.
+    lost_launch(&home, &kept.id, "ci_kept", "folo-run_never-a", 360.0, -1.0 - WATCHDOG_AFTER_DEADLINE);
+    lost_launch(&home, &removed.id, "ci_gone", "folo-run_never-b", 360.0, 3600.0);
+    for id in ["ci_kept", "ci_gone"] {
+        let i = until(id, || instance(&store, id).filter(|i| !i.status.is_alive()));
+        assert_eq!(
+            (i.status, i.ended.as_ref(), i.cost_usd),
+            (CloudInstanceStatus::Terminated, Some(&i.created), Some(0.0))
+        );
+    }
+    // Ended, so its connection can go; the looks for it then say why they cannot be made.
+    store.disconnect_cloud(&removed.id).unwrap();
+    let gone = until("the failed look", || instance(&store, "ci_gone").filter(|i| i.error.is_some()));
+    let e = gone.error.unwrap();
+    assert!(e.contains("never listed") && e.contains(&removed.id), "{e}");
+    assert_eq!(gone.status, CloudInstanceStatus::Terminated);
+    // The other's watchdog is due already, and it is still looked for (a watchdog can fail): its record names the
+    // end of the watch, a week after its launch.
+    until("looked for again", || (cloud.calls_with(Call::Find, "folo-run_never-a") >= 2).then_some(()));
+    let file = home.join("cloud").join("instances").join("ci_kept.json");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("unseen_until"), "still watched");
+    let kept_i = instance(&store, "ci_kept").unwrap();
+    assert_eq!(
+        (kept_i.status, kept_i.cost_usd, kept_i.error),
+        (CloudInstanceStatus::Terminated, Some(0.0), None)
+    );
+    store.disconnect_cloud(&kept.id).unwrap();
+}
+
+/// Polls `f` for at most `secs` seconds (an outcome that the wrong code reaches only much later, or never).
+fn within<T>(secs: u64, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let t0 = Instant::now();
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(secs), "not within {secs} s: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_failed_look_for_a_never_found_instance_is_made_again_at_the_next_sweep() {
+    no_gpu();
+    let t = TestDir::new("cloud-look-failed");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, fast());
+    let conn = connect(&store);
+    // Never found: the first look (its 1st find) ends it, the next one (the 2nd) fails once.
+    let name = "folo-run_flaky-a1b2";
+    cloud.script_find(name, &[2], &[]);
+    lost_launch(&home, &conn.id, "ci_flaky", name, 360.0, 3600.0);
+    // Not ten minutes later: at the next sweep.
+    within(10, "a third look", || (cloud.calls_with(Call::Find, name) >= 3).then_some(()));
+    let i = within(10, "the error cleared", || instance(&store, "ci_flaky").filter(|i| i.error.is_none()));
+    assert_eq!((i.status, i.cost_usd), (CloudInstanceStatus::Terminated, Some(0.0)));
+}
+
+#[test]
+fn an_instance_listed_after_its_watchdog_was_due_is_still_found_and_terminated() {
+    no_gpu();
+    let t = TestDir::new("cloud-listed-later");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, fast());
+    let conn = connect(&store);
+    let name = "folo-run_later-a1b2";
+    let values = Values::from(BTreeMap::from([("api_key".to_string(), SECRET.to_string())]));
+    let spec = LaunchSpec {
+        name: name.into(),
+        offer_id: "cpu@test".into(),
+        disk_gb: 20,
+        token: "t".into(),
+        lifetime_s: 3600,
+        worker_base_url: "http://x".into(),
+    };
+    cloud.launch(&values, &spec).unwrap();
+    // Launched two hours ago; its watchdog was due a minute ago and did not stop it. Not listed at first.
+    cloud.script_find(name, &[], &[1]);
+    lost_launch(&home, &conn.id, "ci_later", name, 7200.0, -60.0 - WATCHDOG_AFTER_DEADLINE);
+    within(10, "the instance terminated", || (cloud.live() == 0).then_some(()));
+    let i = until("its record", || {
+        instance(&store, "ci_later").filter(|i| i.status == CloudInstanceStatus::Terminated)
+    });
+    assert!(i.cost_usd.unwrap() >= 2.0 * 0.36 - 1e-3, "costs what it ran from its launch: {i:?}");
+}
+
+#[test]
+fn the_watch_ends_only_with_a_last_look_that_succeeds() {
+    no_gpu();
+    let t = TestDir::new("cloud-last-look");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, fast());
+    let conn = connect(&store);
+    // Written eight days ago, its watchdog long due: the watch is over as soon as it starts. The first find ends
+    // it; the last look (the 2nd) fails, so it is made again (the 3rd) before the record goes.
+    let name = "folo-run_old-a1b2";
+    cloud.script_find(name, &[2], &[]);
+    lost_launch(&home, &conn.id, "ci_old", name, 8.0 * 86_400.0, -8.0 * 86_400.0);
+    within(10, "the record pruned", || instance(&store, "ci_old").is_none().then_some(()));
+    assert_eq!(cloud.calls_with(Call::Find, name), 3, "looked at last, and again after the failed look");
+}
+
+#[test]
+fn a_connection_removed_while_a_run_starts_has_nothing_launched_on_it() {
+    no_gpu();
+    let t = TestDir::new("cloud-disconnect-race");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    // The run is asked for, and while its offer is looked up the connection is removed: nothing uses it yet.
+    cloud.hold(Call::Offers);
+    let creating = {
+        let (store, config) = (store.clone(), cloud_run(&ds, &conn.id, 1));
+        std::thread::spawn(move || store.create_run(config))
+    };
+    until("the offers asked for", || (cloud.calls(Call::Offers) == 1).then_some(()));
+    store.disconnect_cloud(&conn.id).unwrap();
+    cloud.release(Call::Offers);
+    let run = creating.join().unwrap().unwrap();
+    let done = finished(&store, &run.id);
+    // An instance launched now could not be terminated: without its connection, nothing can reach the provider.
+    assert_eq!(done.status, RunStatus::Failed, "{:?}", log_of(&store, &run.id));
+    assert_eq!(done.error_code.as_deref(), Some("connection_not_found"));
+    assert_eq!((cloud.calls(Call::Launch), cloud.live()), (0, 0));
+    assert!(store.cloud_instances().unwrap().is_empty());
+}
+
+#[test]
 fn boot_failures_name_the_check_and_release() {
     no_gpu();
     let t = TestDir::new("cloud-boot");
@@ -786,6 +1132,36 @@ fn a_stop_that_finds_the_worker_gone_loses_the_run_instead_of_collecting() {
     );
     assert!(lost.error.unwrap().contains("resume the run"));
     assert!(t.join("home").join("runs").join(&run.id).join("weights").join("last.folo").is_file());
+}
+
+#[test]
+fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
+    no_gpu();
+    let t = TestDir::new("cloud-copy-lost");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    cloud.hold_epochs(true);
+    cloud.gates.cut_after_weights.store(true, Ordering::SeqCst);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
+    // The checkpoint of epoch 1 arrives whole, and after it nothing from the worker does...
+    let weights = t.join("home").join("runs").join(&run.id).join("weights");
+    // (Staged, or already moved into place by the next poll: the window of the staged file is one poll long.)
+    until("the checkpoint fetched", || {
+        let names = std::fs::read_dir(&weights).ok()?;
+        names
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .any(|n| n.starts_with(".last.folo.copy.") || n == "last.folo")
+            .then_some(())
+    });
+    // ...until its instance is gone.
+    cloud.kill(0);
+    let lost = finished(&store, &run.id);
+    assert_eq!(lost.error_code.as_deref(), Some("cloud_instance_lost"), "{:?}", log_of(&store, &run.id));
+    assert!(weights.join("last.folo").is_file(), "the checkpoint fetched is kept, to resume from");
+    assert!(lost.cloud.unwrap().synced.is_some());
 }
 
 #[test]
@@ -874,9 +1250,12 @@ fn a_restart_releases_what_a_crash_left_and_follows_a_training_run_again() {
     });
     until("the orphan terminated", || {
         let all = store.cloud_instances().unwrap();
-        let orphan = all.iter().find(|i| i.id == "ci_dead").map(|i| i.status);
-        (orphan == Some(CloudInstanceStatus::Terminated) && !all.iter().any(|i| i.id == "ci_none"))
-            .then_some(())
+        let status = |id: &str| all.iter().find(|i| i.id == id).map(|i| (i.status, i.cost_usd));
+        // The launch that created nothing ends at no cost (its record names no time limit: nothing to watch).
+        let ended = (CloudInstanceStatus::Terminated, Some(0.0));
+        (status("ci_dead").is_some_and(|s| s.0 == CloudInstanceStatus::Terminated)
+            && status("ci_none") == Some(ended))
+        .then_some(())
     });
     cloud.hold_epochs(false);
     let done = finished(&store, &run.id);
@@ -968,6 +1347,156 @@ fn a_remote_server_is_used_as_it_is_and_keeps_the_dataset() {
     assert_eq!((worker.list_datasets().unwrap().len(), worker.list_runs().unwrap().len()), (1, 2));
     drop(store);
     drop(live);
+}
+
+#[test]
+fn a_run_resumed_on_a_remote_server_does_not_take_its_old_worker_run_for_the_new_one() {
+    no_gpu();
+    let t = TestDir::new("cloud-remote-resume");
+    let worker = Arc::new(RealStore::open(t.join("worker")).recheck_every(Duration::ZERO).device("cpu"));
+    let options = Options { token: Token::new("remote-token-0123456789"), ..Options::default() };
+    let busy = Arc::new(AtomicBool::new(false));
+    let router = Server::new(worker.clone(), options)
+        .router()
+        .layer(axum::middleware::from_fn_with_state(busy.clone(), busy_once));
+    let live = Live::start(router);
+    let store = Arc::new(
+        RealStore::open_with_cloud(t.join("home"), folo_cloud::providers(), fast())
+            .recheck_every(Duration::ZERO),
+    );
+    let ds = dataset(&store);
+    let values = BTreeMap::from([
+        ("url".to_string(), live.url.clone()),
+        ("token".to_string(), "remote-token-0123456789".to_string()),
+    ]);
+    let conn =
+        store.connect_cloud(ConnectCloud { provider: "remote".into(), name: String::new(), values }).unwrap();
+    let config: TrainConfig = serde_json::from_value(json!({
+        "dataset_id": ds.id, "epochs": 2, "batch": 2, "imgsz": 64, "augment": { "close_mosaic": 1 },
+        "compute": { "connection_id": conn.id, "offer_id": "cpu" }
+    }))
+    .unwrap();
+    // Stopped after its first epoch: the worker keeps that run, stopped, under the run's name.
+    worker.hold_runs_after_epochs(true);
+    let run = store.create_run(config).unwrap();
+    until("epoch 1 here", || run_of(&store, &run.id).best);
+    store.stop_run(&run.id).unwrap();
+    assert_eq!(finished(&store, &run.id).status, RunStatus::Stopped);
+    worker.hold_runs_after_epochs(false);
+
+    // Resumed there, and the first request for the new worker run never reaches the worker.
+    busy.store(true, Ordering::SeqCst);
+    resume(&store, &run.id, json!({}));
+    let done = finished(&store, &run.id);
+    assert!(!busy.load(Ordering::SeqCst), "the request was refused once");
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
+    assert_eq!(worker.list_runs().unwrap().len(), 2, "a new worker run");
+    let m = store.run_metrics(&run.id, &MetricsQuery::default()).unwrap();
+    assert_eq!(epochs(&m), [1, 2]);
+    drop(store);
+    drop(live);
+}
+
+/// A control plane connected to a `remote` worker that loses its answer to the next `POST /api/runs` while
+/// `lose` is set ([`lose_answer`]).
+struct Lossy {
+    store: Arc<RealStore>,
+    worker: Arc<RealStore>,
+    lose: Arc<AtomicBool>,
+    ds: Dataset,
+    conn: String,
+    home: PathBuf,
+    _live: Live,
+}
+
+impl Lossy {
+    fn new(t: &TestDir) -> Lossy {
+        let worker = Arc::new(RealStore::open(t.join("worker")).recheck_every(Duration::ZERO).device("cpu"));
+        let options = Options { token: Token::new("remote-token-0123456789"), ..Options::default() };
+        let lose = Arc::new(AtomicBool::new(false));
+        let router = Server::new(worker.clone(), options)
+            .router()
+            .layer(axum::middleware::from_fn_with_state((lose.clone(), worker.clone()), lose_answer));
+        let live = Live::start(router);
+        let home = t.join("home");
+        let store = Arc::new(
+            RealStore::open_with_cloud(home.clone(), folo_cloud::providers(), fast())
+                .recheck_every(Duration::ZERO),
+        );
+        let ds = dataset(&store);
+        let values = BTreeMap::from([
+            ("url".to_string(), live.url.clone()),
+            ("token".to_string(), "remote-token-0123456789".to_string()),
+        ]);
+        let conn = store
+            .connect_cloud(ConnectCloud { provider: "remote".into(), name: String::new(), values })
+            .unwrap()
+            .id;
+        Lossy { store, worker, lose, ds, conn, home, _live: live }
+    }
+
+    /// A one-epoch run there, from `weights`.
+    fn config(&self, weights: Option<&str>) -> TrainConfig {
+        serde_json::from_value(json!({
+            "dataset_id": self.ds.id, "epochs": 1, "batch": 2, "imgsz": 64, "augment": { "close_mosaic": 1 },
+            "weights": weights, "compute": { "connection_id": self.conn, "offer_id": "cpu" }
+        }))
+        .unwrap()
+    }
+}
+
+#[test]
+fn a_worker_run_that_completed_before_its_lost_answer_was_found_is_not_trained_again() {
+    no_gpu();
+    let t = TestDir::new("cloud-lost-start");
+    let l = Lossy::new(&t);
+    // The worker took the run and it completed there before anyone asked again: it is that run, not a second.
+    l.lose.store(true, Ordering::SeqCst);
+    let run = l.store.create_run(l.config(None)).unwrap();
+    let done = finished(&l.store, &run.id);
+    assert!(!l.lose.load(Ordering::SeqCst), "the answer was lost once");
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&l.store, &run.id));
+    assert_eq!(l.worker.list_runs().unwrap().len(), 1, "trained once");
+    assert_eq!(epochs(&l.store.run_metrics(&run.id, &MetricsQuery::default()).unwrap()), [1]);
+}
+
+#[test]
+fn a_worker_run_that_failed_before_its_lost_answer_was_found_is_not_posted_again() {
+    no_gpu();
+    let t = TestDir::new("cloud-lost-failed");
+    let l = Lossy::new(&t);
+    let (store, worker, home) = (&l.store, &l.worker, &l.home);
+    let run = store.create_run(l.config(None)).unwrap();
+    assert_eq!(finished(store, &run.id).status, RunStatus::Completed);
+    // Weights that list (their header reads) and do not load (a tensor of the model is not there under its name):
+    // the worker takes the run, and it fails there.
+    let best = std::fs::read(home.join("runs").join(&run.id).join("weights").join("best.folo")).unwrap();
+    let n = u64::from_le_bytes(best[..8].try_into().unwrap()) as usize;
+    let header = std::str::from_utf8(&best[8..8 + n]).unwrap();
+    let tensors: Value = serde_json::from_str(header.trim_end()).unwrap();
+    let name = tensors.as_object().unwrap().keys().find(|k| k.starts_with("backbone.")).unwrap().clone();
+    let renamed = format!("{}~", &name[..name.len() - 1]);
+    let header = header.replacen(&format!("\"{name}\""), &format!("\"{renamed}\""), 1);
+    let file = [&best[..8], header.as_bytes(), &best[8 + n..]].concat();
+    std::fs::create_dir_all(home.join("models")).unwrap();
+    std::fs::write(home.join("models").join("broken.folo"), file).unwrap();
+    let models = store.list_models().unwrap();
+    let broken =
+        models.iter().find(|m| m.name == "broken").unwrap_or_else(|| panic!("{models:?}")).id.clone();
+    l.lose.store(true, Ordering::SeqCst);
+    let run = store.create_run(l.config(Some(&broken))).unwrap();
+    let done = finished(store, &run.id);
+    assert!(!l.lose.load(Ordering::SeqCst), "the answer was lost once");
+    let w = worker.list_runs().unwrap();
+    assert_eq!(w.len(), 2, "the failed run is not posted again: {w:?}");
+    let failed: Vec<&Run> = w.iter().filter(|r| r.status == RunStatus::Failed).collect();
+    assert_eq!(failed.len(), 1, "{w:?}");
+    assert_eq!(
+        (done.status, &done.error_code),
+        (RunStatus::Failed, &failed[0].error_code),
+        "{:?}",
+        log_of(store, &run.id)
+    );
 }
 
 // ---- /api/cloud ----------------------------------------------------------------------------------------------------

@@ -384,7 +384,8 @@
             {/if}
             <p class="note">
               {#each shown as e, i (e.id)}{#if res[i]?.calibration}<span class="ece">{@render key(e.id)}ECE {num(res[i]!.calibration!.ece, 2)}</span>{/if}{/each}
-              {#if noCal.length}<span>{noCal.map((e) => e.name).join(', ')}: no confidences, not measured.</span>{/if}
+              <!-- Not measured without confidences, or with confidences that never reach 0.1 (docs/BENCH.md, Calibration). -->
+              {#each noCal as e (e.id)}<span>{e.name}: {e.scored ? 'no detection reached confidence 0.1' : 'no confidences'}, not measured.</span>{/each}
             </p>
           </Panel>
 

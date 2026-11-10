@@ -141,7 +141,7 @@ impl RunPod {
         let reply = self.api.post(&self.graphql, key, &query).ok().filter(Reply::is_success)?;
         let me = reply.json::<Graphql>().ok()?.data?.myself?;
         Some(Account {
-            label: me.email.filter(|e| !e.is_empty()),
+            label: me.email.filter(|e| !e.is_empty()).map(|e| reply.scrub(&e)),
             balance_usd: me.client_balance,
             note: None,
         })
@@ -161,6 +161,7 @@ impl RunPod {
         if !reply.is_success() {
             return Err(self.failure(&reply));
         }
+        // The ids are used as they came (looked up, terminated): never scrubbed.
         reply.json()
     }
 
@@ -175,7 +176,14 @@ impl RunPod {
         if !reply.is_success() {
             return Err(self.failure(&reply));
         }
-        Ok(reply.json::<GpuList>()?.gpus.iter().filter_map(|g| offer(g, cloud)).collect())
+        // A GPU's name is shown and logged ("launching <gpu>"): scrubbed. Its id goes back to RunPod in a launch:
+        // as it came.
+        let mut list: GpuList = reply.json()?;
+        for g in &mut list.gpus {
+            // (A GPU without a name is shown by its id.)
+            g.name = reply.scrub(if g.name.is_empty() { &g.id } else { &g.name });
+        }
+        Ok(list.gpus.iter().filter_map(|g| offer(g, cloud)).collect())
     }
 }
 
@@ -284,10 +292,12 @@ impl Provider for RunPod {
             entrypoint: ["/bin/bash", "-c"],
             cmd: [&script],
         };
-        let reply = self.api.post(&format!("{}/pods", self.rest), key, &body)?;
+        // The worker's token is in the request too, and a refusal may quote what it refused.
+        let reply = self.api.post(&format!("{}/pods", self.rest), key, &body)?.without(&spec.token);
         match reply.status {
             200..=299 => {
                 let pod: Pod = reply.json()?;
+                // The provider's reference, used as it came.
                 check_pod_id(&pod.id).map_err(|_| {
                     Error::new(ErrorKind::Unavailable, "RunPod created a pod but did not answer with its id")
                 })?;
@@ -328,7 +338,10 @@ impl Provider for RunPod {
             // Neither `Starting` (it may never start) nor `Gone` (it may be billed): the caller asks again.
             other => Err(Error::new(
                 ErrorKind::Unavailable,
-                format!("RunPod reports pod {provider_ref} as `{other}`, a status FOLO does not know"),
+                format!(
+                    "RunPod reports pod {provider_ref} as `{}`, a status FOLO does not know",
+                    reply.scrub(other)
+                ),
             )),
         }
     }
@@ -558,11 +571,25 @@ struct Problem {
 }
 
 impl Problem {
+    /// The problem of `reply`, every text in it scrubbed of the request's credentials ([`Reply::scrub`]): they are
+    /// decoded here, so an escaped one is spelled out.
     fn of(reply: &Reply) -> Problem {
-        serde_json::from_slice(&reply.body).unwrap_or_else(|_| Problem {
+        let p: Problem = serde_json::from_slice(&reply.body).unwrap_or_else(|_| Problem {
             raw: Some(String::from_utf8_lossy(&reply.body).into_owned()),
             ..Problem::default()
-        })
+        });
+        let scrub = |t: Option<String>| t.map(|t| reply.scrub(&t));
+        // Whole, before anything shortens it: a credential cut in two would not be found.
+        let whole = |v: &serde_json::Value| match v {
+            serde_json::Value::String(s) => reply.scrub(s),
+            other => reply.scrub(&other.to_string()),
+        };
+        Problem {
+            title: scrub(p.title),
+            detail: scrub(p.detail),
+            errors: p.errors.map(|e| e.iter().map(|v| serde_json::Value::String(whole(v))).collect()),
+            raw: scrub(p.raw),
+        }
     }
 
     /// What RunPod said, shortened: the detail, else the title, else the start of the body.
@@ -1049,5 +1076,130 @@ mod tests {
         let f = Fixture::serve(vec![problem(400, &format!("bad key {KEY}"))]);
         let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
         assert_error(&e, ErrorKind::Refused, "bad key [redacted]");
+    }
+
+    #[test]
+    fn a_worker_token_echoed_by_runpod_is_not_repeated() {
+        // A validation error names the value it refused, and `env` carries the worker's token.
+        let invalid = format!(
+            r#"{{"title":"Unprocessable Entity","status":422,"detail":"validation failed","errors":[
+                {{"message":"unexpected property","location":"body.env",
+                  "value":{{"FOLO_TOKEN":"{TOKEN}","NVIDIA_DRIVER_CAPABILITIES":"all"}}}}]}}"#
+        );
+        let f = Fixture::serve(vec![Answer::json(422, invalid)]);
+        let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+        assert_error(&e, ErrorKind::Unavailable, r#""FOLO_TOKEN":"[redacted]""#);
+        let f = Fixture::serve(vec![problem(400, &format!("bad env FOLO_TOKEN={TOKEN}"))]);
+        let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+        assert_error(&e, ErrorKind::Refused, "bad env FOLO_TOKEN=[redacted]");
+    }
+
+    /// `s` with every character as a JSON `\uXXXX` escape: the same string to a JSON reader, other bytes.
+    fn escaped(s: &str) -> String {
+        s.chars().map(|c| format!("\\u{:04x}", c as u32)).collect()
+    }
+
+    #[test]
+    fn identifiers_are_used_as_the_provider_sent_them() {
+        let with_key = |key: &str| Values::from(BTreeMap::from([(API_KEY.to_string(), key.to_string())]));
+        // Short secrets (below the length that is scrubbed at all), and the real ones, inside the identifiers.
+        for (key, token, pod, gpu) in [
+            ("abc".to_string(), "abc".to_string(), "abc123xyz".to_string(), "NVIDIA abc".to_string()),
+            (KEY.to_string(), TOKEN.to_string(), format!("p{KEY}"), format!("NVIDIA {KEY}")),
+        ] {
+            let values = with_key(&key);
+            // A launch answered with a pod id that holds the worker's token succeeds, with that id.
+            let f = Fixture::serve(vec![Answer::json(
+                201,
+                format!(r#"{{"id":"{pod}","status":"PROVISIONING"}}"#),
+            )]);
+            let launching = LaunchSpec { token: token.clone(), ..spec("NVIDIA L4@secure") };
+            assert_eq!(runpod(&f).launch(&values, &launching).unwrap(), pod);
+            let f = Fixture::serve(vec![Answer::json(
+                201,
+                format!(r#"{{"id":"p{token}","status":"PROVISIONING"}}"#),
+            )]);
+            assert_eq!(runpod(&f).launch(&values, &launching).unwrap(), format!("p{token}"));
+            // `find` answers the id as it is, and terminating it sends DELETE for that id.
+            let page = format!(
+                r#"{{"pods":[{{"id":"{pod}","name":"folo-x","status":"RUNNING"}}],"pagination":{{}}}}"#
+            );
+            let f = Fixture::serve(vec![Answer::json(200, page), Answer::empty(204)]);
+            let p = runpod(&f);
+            let ids = p.find(&values, "folo-x").unwrap();
+            assert_eq!(ids, std::slice::from_ref(&pod));
+            p.terminate(&values, &ids[0]).unwrap();
+            let r = &f.requests()[1];
+            assert_eq!((r.method.as_str(), r.path.clone()), ("DELETE", format!("/v2/pods/{pod}")));
+            // An offer's id goes back to the provider in a launch as the catalog named it.
+            let gpus = format!(
+                r#"{{"gpus":[{{"id":"{gpu}","name":"G","manufacturer":"NVIDIA","memory":24,"secure":true,
+                    "community":false,"price":{{"secure":0.5}},"availability":"HIGH"}}]}}"#
+            );
+            let created = Answer::json(201, r#"{"id":"abc999","status":"PROVISIONING"}"#);
+            let f =
+                Fixture::serve(vec![Answer::json(200, gpus), Answer::json(200, r#"{"gpus":[]}"#), created]);
+            let p = runpod(&f);
+            let offer = p.offers(&values).unwrap().remove(0);
+            assert_eq!(offer.id, format!("{gpu}@secure"));
+            p.launch(&values, &LaunchSpec { token: token.clone(), ..spec(&offer.id) }).unwrap();
+            assert_eq!(f.requests()[2].json()["gpu"]["id"], gpu.as_str());
+        }
+    }
+
+    #[test]
+    fn fields_of_successful_answers_never_carry_the_key_into_a_message_or_an_offer() {
+        let key = escaped(KEY);
+        let shows = |text: &str| text.contains(KEY);
+        // A pod in a status FOLO does not know, spelled with the key.
+        let f = Fixture::serve(vec![Answer::json(200, format!(r#"{{"id":"abc123xyz","status":"{key}"}}"#))]);
+        assert_error(
+            &runpod(&f).state(&values(), "abc123xyz").unwrap_err(),
+            ErrorKind::Unavailable,
+            "a status",
+        );
+        // A GPU type named with it: its name is shown (and logged, "launching <gpu>"); its id is the provider's
+        // reference and is kept as it came (identifiers_are_used_as_the_provider_sent_them).
+        let gpus = format!(
+            r#"{{"gpus":[{{"id":"NVIDIA {key}","name":"{key}","manufacturer":"NVIDIA","memory":24,"secure":true,
+                "community":false,"price":{{"secure":0.5}},"availability":"HIGH"}}]}}"#
+        );
+        let f = Fixture::serve(vec![Answer::json(200, gpus), Answer::json(200, r#"{"gpus":[]}"#)]);
+        let offers = runpod(&f).offers(&values()).unwrap();
+        assert!(offers.len() == 1 && !shows(&offers[0].gpu), "{offers:?}");
+        // The account's email.
+        let me = format!(r#"{{"data":{{"myself":{{"email":"{key}","clientBalance":1}}}}}}"#);
+        let f = Fixture::serve(vec![Answer::json(200, NO_PODS), Answer::json(200, me)]);
+        let label = runpod(&f).check(&values()).unwrap().label.unwrap();
+        assert!(!shows(&label), "{label}");
+    }
+
+    #[test]
+    fn secrets_echoed_in_any_spelling_are_not_repeated() {
+        for (key, token) in [(KEY.to_string(), TOKEN.to_string()), (escaped(KEY), escaped(TOKEN))] {
+            let refused = format!(
+                r#"{{"title":"Bad Request","status":400,"detail":"bad key {key} and token {token}"}}"#
+            );
+            let invalid = format!(
+                r#"{{"title":"Unprocessable Entity","status":422,"detail":"validation failed for {key}","errors":[
+                    {{"message":"unexpected {token}","location":"body.env","value":{{"FOLO_TOKEN":"{token}"}}}}]}}"#
+            );
+            let f = Fixture::serve(vec![Answer::json(400, refused), Answer::json(422, invalid)]);
+            let p = runpod(&f);
+            let e = p.launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+            assert_error(&e, ErrorKind::Refused, "bad key [redacted] and token [redacted]");
+            let e = p.launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+            assert_error(&e, ErrorKind::Unavailable, "validation failed for [redacted]");
+            assert!(e.message.contains(r#""FOLO_TOKEN":"[redacted]""#), "{}", e.message);
+        }
+        // A long entry is shortened after the scrub: a token across the cut leaves no part of itself behind.
+        let long = format!(r#"{{"status":422,"detail":"x","errors":["{}{TOKEN}"]}}"#, "a".repeat(290));
+        let f = Fixture::serve(vec![Answer::json(422, long)]);
+        let e = runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap_err();
+        assert!(!e.message.contains(&TOKEN[..8]), "{}", e.message);
+        // An answer that is not an error is read as it came, also where the token's text happens to be.
+        let created = format!(r#"{{"id":"abc123xyz","name":"{TOKEN}","status":"PROVISIONING"}}"#);
+        let f = Fixture::serve(vec![Answer::json(201, created)]);
+        assert_eq!(runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")).unwrap(), "abc123xyz");
     }
 }

@@ -138,13 +138,17 @@
   /** What the forecast reads: the complete entry, else a finished one on part of the benchmark (an estimate). */
   const readEntry = $derived(teacherEntry ?? entries.find(ofTeacher));
   let found = $state.raw<{ entry: string; images: number; self: BenchSelfLabeling; bestConf: number } | null>(null);
+  // By id: the page hands down a new benchmark and new entries on every `bench` event and every load of the lists, and
+  // a finished entry's result never changes.
+  const benchId = $derived(bench.id);
+  const readId = $derived(readEntry?.id ?? null);
   $effect(() => {
-    const e = readEntry;
+    const id = readId;
     found = null;
-    if (!e) return;
+    if (!id) return;
     let gone = false;
-    hub.api.benchResult(bench.id, e.id).then(
-      (r) => !gone && (found = { entry: e.id, images: r.entry.images, self: r.self_labeling, bestConf: r.accuracy.best_conf }),
+    hub.api.benchResult(benchId, id).then(
+      (r) => !gone && (found = { entry: id, images: r.entry.images, self: r.self_labeling, bestConf: r.accuracy.best_conf }),
       () => {},
     );
     return () => (gone = true);

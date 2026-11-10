@@ -32,6 +32,19 @@ describe('model evaluation (contract of GET /api/models/{id}/eval)', () => {
     expect(ev.mean).toHaveLength(101);
     expect(ev.perClass[0]!.instances).toBe(ev.confusion[0]!.reduce((a, b) => a + b, 0));
   });
+
+  it('keeps each curve at its class when a class has no ground truth (the server sends no curve for it)', async () => {
+    // folo-server's /eval lists curves for the classes with ground truth only (`pr` in class order, with `class`):
+    // class 1 of 3 without a box in the split leaves `pr` = [class 0, class 2].
+    const e = await new MockApi('normal', 0).modelEval('m_shapes_n');
+    const pr = [e.pr[0]!, e.pr[2]!];
+    const ev = fromModelEval({ ...e, pr, per_class: [e.per_class[0]!, e.per_class[2]!] });
+    expect(ev.curves[0]!.map((p) => p.y)).toEqual(e.pr[0]!.precision);
+    expect(ev.curves[1]).toEqual([]);
+    expect(ev.curves[2]!.map((p) => p.y)).toEqual(e.pr[2]!.precision);
+    // The mean is over the classes with curves, as the server's.
+    expect(ev.mean[0]!.y).toBeCloseTo((e.pr[0]!.precision[0]! + e.pr[2]!.precision[0]!) / 2, 9);
+  });
 });
 
 describe('reduceConfusion', () => {

@@ -36,7 +36,7 @@ import type {
   UpdateBench,
 } from '../types';
 import { AGENT_NAME } from '../../label';
-import { checkPredictions, predictionKey } from '../../bench/external';
+import { boxesKey, checkPredictions, predictionKey } from '../../bench/external';
 import { clonePlan, planError } from '../../bench/plan';
 import {
   AGENT_IMAGES,
@@ -319,7 +319,10 @@ export class MockBench {
 
   toBench(b: MBench): Bench {
     const entries = rankEntries(this.#entriesOf(b).map((e) => this.toEntry(e)));
-    const top = entries.find((e) => e.status === 'done' && e.score);
+    // The leader as the server names it: done, on the benchmark's own fingerprint (one graded before the engine
+    // changed ranks below every current entry, so it never leads).
+    const fp = fingerprintOf(b);
+    const top = entries.find((e) => e.status === 'done' && e.score && e.fingerprint === fp);
     const class_boxes = b.classes.map(() => 0);
     for (const im of b.images) for (const x of im.boxes) class_boxes[x.class] = (class_boxes[x.class] ?? 0) + 1;
     return {
@@ -335,7 +338,7 @@ export class MockBench {
       class_boxes,
       plan: clonePlan(b.plan),
       seed: b.seed,
-      fingerprint: fingerprintOf(b),
+      fingerprint: fp,
       entries: entries.length,
       best: top?.score ? { entry_id: top.id, name: top.name, score: top.score.total, partial: top.score.partial } : null,
       // Exactly when DELETE answers 409 bench_active: an entry queued, running or stopping, or a loop running.
@@ -718,7 +721,7 @@ export class MockBench {
       // Open: created running, filled in parts, scored by its finish; the predictions here are its first part.
       const keys = new Set<string>();
       const first = c.predictions ?? [];
-      const check = checkPredictions(first, this.#ctx(b), { part: true, seen: keys });
+      const check = checkPredictions(first, this.#ctx(b, c.scored), { part: true, seen: keys });
       if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
       e = {
         ...base,
@@ -735,10 +738,10 @@ export class MockBench {
         duration: Infinity,
         usage: null,
         speed: null,
-        open: { records: [...first], keys, byKey: new Map(first.map((r) => [predictionKey(r.image, r.condition, r.severity), JSON.stringify(r.boxes)])), lastPart: now, boxes: first.reduce((n, r) => n + r.boxes.length, 0) },
+        open: { records: [...first], keys, byKey: new Map(first.map((r) => [predictionKey(r.image, r.condition, r.severity), boxesKey(r.boxes, c.scored ?? true)])), lastPart: now, boxes: first.reduce((n, r) => n + r.boxes.length, 0) },
       };
     } else {
-      const check = checkPredictions(c.predictions ?? [], this.#ctx(b));
+      const check = checkPredictions(c.predictions ?? [], this.#ctx(b, c.scored));
       if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
       const scored = c.scored ?? true;
       e = {
@@ -776,8 +779,8 @@ export class MockBench {
   }
 
   /** What an external contestant's records are checked against. */
-  #ctx(b: MBench) {
-    return { imageIds: b.images.map((i) => i.id), classes: b.classes.length, plan: b.plan, catalog: CONDITIONS.map((x) => x.id), names: Object.fromEntries(CONDITIONS.map((x) => [x.id, x.name])) };
+  #ctx(b: MBench, scored?: boolean) {
+    return { imageIds: b.images.map((i) => i.id), classes: b.classes.length, plan: b.plan, catalog: CONDITIONS.map((x) => x.id), names: Object.fromEntries(CONDITIONS.map((x) => [x.id, x.name])), scored };
   }
 
   #open(b: MBench, entryId: string, now: number): MEntry & { open: NonNullable<MEntry['open']> } {
@@ -800,11 +803,11 @@ export class MockBench {
       const k = r && typeof r.image === 'string' ? predictionKey(r.image, r.condition, r.severity) : null;
       const had = k !== null ? e.open.byKey.get(k) : undefined;
       if (had === undefined) fresh.push(r);
-      else if (had !== JSON.stringify(r.boxes))
+      else if (had !== boxesKey(r.boxes, e.scored))
         throw new ApiError(400, 'invalid_body', `Record ${i + 1}: image "${r.image}"${r.condition ? ` under ${r.condition} ${r.severity}` : ''} was received before with other boxes.`);
     }
     const keys = new Set(e.open.keys);
-    const check = checkPredictions(fresh, this.#ctx(b), { part: true, seen: keys });
+    const check = checkPredictions(fresh, this.#ctx(b, e.scored), { part: true, seen: keys });
     if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
     const boxes = e.open.boxes + fresh.reduce((n, r) => n + r.boxes.length, 0);
     if (boxes > openBoxesMax)
@@ -814,7 +817,7 @@ export class MockBench {
         `this part would make the entry hold ${boxes} boxes in memory, more than its ${openBoxesMax}: send it pass by pass (the unchanged images, then each condition and severity), so each condition's severity is graded and let go of as soon as all its images are in`,
       );
     e.open.records.push(...fresh);
-    for (const r of fresh) e.open.byKey.set(predictionKey(r.image, r.condition, r.severity), JSON.stringify(r.boxes));
+    for (const r of fresh) e.open.byKey.set(predictionKey(r.image, r.condition, r.severity), boxesKey(r.boxes, e.scored));
     e.open.keys = keys;
     e.open.boxes = boxes;
     e.open.lastPart = now;
@@ -828,7 +831,7 @@ export class MockBench {
     const b = this.#bench(id);
     this.advance(now);
     const e = this.#open(b, entryId, now);
-    const check = checkPredictions(e.open.records, this.#ctx(b));
+    const check = checkPredictions(e.open.records, this.#ctx(b, e.scored));
     if (!check.ok) throw new ApiError(400, 'invalid_body', check.error);
     e.conditions = check.summary.conditions.length > 0;
     e.conditionsRun = check.summary.conditions.length < b.plan.conditions.length ? check.summary.conditions : null;

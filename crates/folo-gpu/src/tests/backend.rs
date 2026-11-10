@@ -301,6 +301,31 @@ fn casts_round_like_the_cpu() {
 }
 
 #[test]
+fn casts_i64_to_float_round_once() {
+    let dev = dev!();
+    // 2^k + 2^(k - 24) + 1 sits just above an f32 midpoint; rounding to f64's 53 bits first drops the low 1 and
+    // leaves an exact tie that rounds down, so only a single rounding gets these right.
+    let mut ints: Vec<i64> = (54..63).map(|k| (1i64 << k) + (1 << (k - 24)) + 1).collect();
+    ints.extend([
+        (1 << 62) + (1 << 38) - 1,
+        (1 << 62) + (1 << 38),
+        (1 << 62) + (3 << 38),
+        i64::MAX,
+        i64::MAX - 1,
+    ]);
+    ints.extend([0, 1, 7, 2049, 65519, 65520, (1 << 24) - 1, 1 << 24, (1 << 24) + 1, (1 << 24) + 3, 1 << 53]);
+    ints.extend([(1 << 53) + 1, i64::MIN + (1 << 39) + 1, i64::MIN + (1 << 39) - 1]);
+    let neg: Vec<i64> = ints.iter().map(|v| v.wrapping_neg()).collect();
+    ints.extend(neg);
+    ints.push(i64::MIN);
+    let i = Tensor::from_slice(&ints, [ints.len()]).unwrap();
+    let g = i.to_device(dev).unwrap();
+    for to in [DType::F32, DType::F16] {
+        assert_same(&g.to_dtype(to).unwrap(), &i.to_dtype(to).unwrap(), &format!("i64 -> {to} of {ints:?}"));
+    }
+}
+
+#[test]
 fn unary_ops_and_gradients() {
     let dev = dev!();
     let ops = [
@@ -475,6 +500,22 @@ fn reductions_and_softmax() {
 }
 
 #[test]
+fn softmax_with_infinite_entries() {
+    // A non-finite maximum is replaced by 0, as on the CPU: a row with +inf gives 0 at its finite entries
+    // (NaN at the infinity), a row of -inf NaN; over the last dim (rows kernel) and another dim (columns kernel).
+    let dev = dev!();
+    let (inf, nan) = (f32::INFINITY, f32::NAN);
+    let v = [1.0f32, inf, 2.0, -inf, -inf, -inf, -inf, 3.0, -1.0, nan, 1.0, 0.5];
+    let x = Tensor::from_slice(&v, [4, 3]).unwrap();
+    for log in [false, true] {
+        let f = move |v: &[Tensor]| if log { v[0].log_softmax(1) } else { v[0].softmax(1) };
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-6, &format!("rows log={log}"), f);
+        let f = move |v: &[Tensor]| if log { v[0].t()?.log_softmax(0) } else { v[0].t()?.softmax(0) };
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-6, &format!("columns log={log}"), f);
+    }
+}
+
+#[test]
 fn matmul_layouts() {
     let dev = dev!();
     let a = randn(&[5, 37, 19], 20);
@@ -507,6 +548,27 @@ fn matmul_layouts() {
     let e1 = Tensor::zeros([3, 0]);
     let e2 = Tensor::zeros([0, 4]);
     check(dev, &[e1, e2], 0.0, 0.0, "k = 0", |v| v[0].matmul(&v[1]));
+}
+
+#[test]
+fn matmul_batches_beyond_one_dispatch() {
+    // More batch matrices than one dispatch's 65535 workgroup layers: one level (per-anchor dot products),
+    // two levels (a transposed batch that does not coalesce) with the outer and with the inner count too large.
+    let dev = dev!();
+    let a = randn(&[70000, 1, 3], 90);
+    let b = randn(&[70000, 3, 1], 91);
+    check(dev, &[a, b], 1e-5, 1e-5, "batch 70000", |v| v[0].matmul(&v[1]));
+    let a = randn(&[300, 300, 2, 3], 92);
+    let b = randn(&[300, 300, 3, 2], 93);
+    check(dev, &[a, b], 1e-5, 1e-5, "batch 300 x 300", |v| {
+        v[0].transpose(0, 1)?.matmul(&v[1].transpose(0, 1)?)
+    });
+    let a = randn(&[70000, 2, 1, 2], 94);
+    let b = randn(&[2, 2, 3], 95);
+    // The broadcast operand's gradient sums 70000 products: reduction tolerance.
+    check(dev, &[a, b], 1e-3, 1e-4, "batch 2 x 70000", |v| {
+        v[0].transpose(0, 1)?.matmul(&v[1].reshape([2, 1, 2, 3])?.expand([2, 70000, 2, 3])?)
+    });
 }
 
 struct ConvCase {
@@ -712,6 +774,117 @@ fn conv2d_weight_gradient_split_k() {
 }
 
 #[test]
+fn conv2d_input_gradient_stride_beyond_kernel() {
+    // Strides far beyond the kernel leave most stride phases without taps: the input gradient's scratch and host
+    // work must scale with the phases that have taps, not with stride².
+    let dev = dev!();
+    let ones = |shape: &[usize]| Tensor::ones(shape);
+    check(dev, &[ones(&[1, 2, 4, 4]), ones(&[3, 2, 1, 1])], 1e-5, 0.0, "stride 65536", |v| {
+        v[0].conv2d(&v[1], None, 65536, 0, 1, 1)
+    });
+    let x = ones(&[1, 2, 4, 4]).to_device(dev).unwrap().requires_grad_();
+    let w = ones(&[3, 2, 1, 1]).to_device(dev).unwrap();
+    let y = x.conv2d(&w, None, 65536, 0, 1, 1).unwrap();
+    assert_eq!(y.dims(), &[1, 3, 1, 1]);
+    let gx = y.sum_all().unwrap().backward().unwrap().get(&x).unwrap().to_vec::<f32>().unwrap();
+    let want: Vec<f32> = (0..32).map(|i| if i % 16 == 0 { 3.0 } else { 0.0 }).collect();
+    assert_eq!(gx, want, "stride 65536 input gradient");
+    for (i, (xs, ws, s, p)) in [
+        ([2, 3, 17, 19], [4, 3, 1, 1], 4, 0),
+        ([1, 4, 23, 21], [5, 4, 3, 3], 5, 1),
+        ([1, 2, 9, 9], [3, 2, 2, 2], 7, 3),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = randn(&xs, 70 + i as u64);
+        let w = randn(&ws, 80 + i as u64).mul_scalar(0.3).unwrap();
+        let atol = 1e-4 * ((ws[1] * ws[2] * ws[3]) as f32).sqrt();
+        check(dev, &[x, w], atol, 1e-4, &format!("kernel {} stride {s}", ws[2]), move |v| {
+            v[0].conv2d(&v[1], None, s, p, 1, 1)
+        });
+    }
+}
+
+#[test]
+fn conv2d_batches_beyond_one_dispatch() {
+    // The conv kernels put (image, group) on the grid's z axis, at most 65535 workgroups: larger N · groups run
+    // in pieces of the batch. A 3×3 conv, a strided one (stride-phase input gradient), a grouped 1×1 (80000
+    // layers) and a depthwise one, forward and both gradients; the bias gradient sums 70000 images.
+    let dev = dev!();
+    for (i, (xs, ws, s, p, g)) in [
+        ([70000, 1, 3, 3], [2, 1, 3, 3], 1, 1, 1),
+        ([70000, 2, 4, 4], [2, 2, 3, 3], 2, 1, 1),
+        ([40000, 4, 2, 2], [4, 2, 1, 1], 1, 0, 2),
+        ([70000, 2, 3, 3], [2, 1, 3, 3], 1, 1, 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let x = randn(&xs, 110 + i as u64);
+        let w = randn(&ws, 120 + i as u64).mul_scalar(0.3).unwrap();
+        let b = randn(&[ws[0]], 130 + i as u64);
+        check(dev, &[x, w, b], 2e-3, 1e-4, &format!("conv {xs:?} {ws:?} s{s} g{g}"), move |v| {
+            v[0].conv2d(&v[1], Some(&v[2]), s, p, 1, g)
+        });
+    }
+    // f16 with an odd image size (9 halves) and an odd last piece: the piece copies stay 4-byte aligned.
+    if folo_core::backend::backend(dev).is_ok_and(|b| b.computes_f16()) {
+        let x = randn(&[70001, 1, 3, 3], 140).to_dtype(DType::F16).unwrap();
+        let w = randn(&[2, 1, 3, 3], 141).mul_scalar(0.3).unwrap().to_dtype(DType::F16).unwrap();
+        let y = x.to_device(dev).unwrap().conv2d(&w.to_device(dev).unwrap(), None, 1, 1, 1, 1).unwrap();
+        let (xf, wf) = (x.to_dtype(DType::F32).unwrap(), w.to_dtype(DType::F32).unwrap());
+        let want = xf.conv2d(&wf, None, 1, 1, 1, 1).unwrap();
+        assert_close_t(&y.to_dtype(DType::F32).unwrap(), &want, 2e-3, 2e-3, "f16 conv batch 70001");
+    }
+}
+
+#[test]
+fn conv2d_many_groups_run_one_image_at_a_time() {
+    // With 32768 groups or more not even two images fit one dispatch, so the pieces are single images; f16 ones
+    // start at odd element offsets when an image holds an odd number of elements (input, output or both).
+    let dev = dev!();
+    let q = |t: Tensor| t.to_dtype(DType::F16).unwrap().to_dtype(DType::F32).unwrap();
+    for (i, (xs, ws, g)) in [
+        ([3, 65536, 1, 1], [32768, 2, 1, 1], 32768),
+        ([3, 32769, 1, 1], [32769, 1, 1, 1], 32769),
+        ([3, 65538, 1, 1], [32769, 2, 1, 1], 32769),
+        ([3, 32769, 1, 1], [65538, 1, 1, 1], 32769),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let seed = 150 + 3 * i as u64;
+        let (x, w, gy) =
+            (q(randn(&xs, seed)), q(randn(&ws, seed + 1)), q(randn(&[3, ws[0], 1, 1], seed + 2)));
+        // Forward and input gradient: on the CPU in f32, on the GPU in f32 and (autocast) in f16.
+        let run = |dev: Device, amp: bool| {
+            let xl = x.to_device(dev).unwrap().detach().requires_grad_();
+            let y = {
+                let _a = amp.then(folo_core::autocast);
+                xl.conv2d(&w.to_device(dev).unwrap(), None, 1, 0, 1, g)
+                    .unwrap_or_else(|e| panic!("conv {xs:?} {ws:?} on {dev:?} amp {amp}: {e}"))
+            };
+            assert_eq!(y.dtype(), if amp { DType::F16 } else { DType::F32 });
+            let gr = y.backward_with(&gy.to_device(dev).unwrap().to_dtype(y.dtype()).unwrap()).unwrap();
+            (y.to_dtype(DType::F32).unwrap(), gr.get(&xl).unwrap().clone())
+        };
+        let (yc, gc) = run(Device::Cpu, false);
+        let mut runs = vec![(false, 1e-5)];
+        if folo_core::backend::computes_f16(dev) {
+            // Sums of at most two f16 products in f32, rounded once to f16.
+            runs.push((true, 2e-3));
+        }
+        for (amp, tol) in runs {
+            let (yg, gg) = run(dev, amp);
+            let what = format!("conv {xs:?} {ws:?} g{g} amp {amp}");
+            assert_close_t(&yg, &yc, tol, tol, &what);
+            assert_close_t(&gg, &gc, tol, tol, &format!("{what}: input gradient"));
+        }
+    }
+}
+
+#[test]
 fn pooling_and_upsampling() {
     let dev = dev!();
     let x = randn(&[2, 3, 11, 13], 70);
@@ -804,6 +977,44 @@ fn index_ops() {
     }
     let r = randn(&[6, 300], 84);
     check(dev, &[r], 0.0, 0.0, "topk grad", |v| Ok(v[0].topk(10, true)?.0));
+}
+
+#[test]
+fn topk_orders_nan_and_infinities_by_total_cmp() {
+    // `f32::total_cmp`: -NaN < -inf < .. < -0 = +0 < .. < inf < NaN, NaN payloads kept. The two zeros are equal:
+    // they tie by index, as on the CPU (the last row has -0 before +0, the first two the other order).
+    let dev = dev!();
+    let nan2 = f32::from_bits(0x7fc0_0123);
+    let v = [
+        0.0f32,
+        f32::NAN,
+        -1.0,
+        f32::NEG_INFINITY,
+        1.0,
+        f32::INFINITY,
+        -f32::NAN,
+        2.0,
+        nan2,
+        -0.0,
+        0.0,
+        -nan2,
+        0.0,
+        -0.0,
+        -0.0,
+        0.0,
+    ];
+    let t = Tensor::from_slice(&v, [4, 4]).unwrap();
+    for k in 1..=4 {
+        for largest in [true, false] {
+            let (cv, ci) = t.topk(k, largest).unwrap();
+            let (gv, gi) = t.to_device(dev).unwrap().topk(k, largest).unwrap();
+            assert_same(&gv, &cv, &format!("topk values k={k} {largest}"));
+            assert_same(&gi, &ci, &format!("topk indices k={k} {largest}"));
+        }
+    }
+    // The zeros of the last row come out in index order, whatever their signs.
+    let (_, zi) = t.to_device(dev).unwrap().topk(4, true).unwrap();
+    assert_eq!(zi.to_device(Device::Cpu).unwrap().to_vec2::<i64>().unwrap()[3], vec![0, 1, 2, 3]);
 }
 
 #[test]

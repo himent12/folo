@@ -36,6 +36,8 @@ export interface PredictionContext {
   catalog: readonly string[];
   /** Display names of conditions, for the messages. */
   names?: Record<string, string>;
+  /** Whether the entry's scores count (the contestant gives confidences), as `contestant.scored`: default true. */
+  scored?: boolean;
 }
 
 /** A record's (image, condition, severity): what may be answered once. */
@@ -45,6 +47,24 @@ const num = (n: number) => n.toLocaleString('en-US');
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v);
+
+/** A value as the server holds it: a number as a 32-bit float, zero's sign kept; anything else as its JSON. */
+const f32 = (v: unknown) => {
+  if (typeof v !== 'number') return `${JSON.stringify(v)}`;
+  const f = Math.fround(v);
+  return Object.is(f, -0) ? '-0' : String(f);
+};
+
+/**
+ * A record's boxes as the server compares a repeated record (crates/folo-server/src/bench/external.rs, `content`): in
+ * order, each box's class, score and corners as 32-bit floats, a missing score as 1 (its default), and no score at all
+ * when the entry's scores don't count. The order of a box's fields, and any other field, make no difference.
+ */
+export function boxesKey(boxes: unknown, scored = true): string {
+  if (!Array.isArray(boxes)) return `${JSON.stringify(boxes)}`;
+  const one = (b: unknown) => (isObj(b) ? [b.class, scored ? (b.score === undefined ? 1 : b.score) : 0, b.x1, b.y1, b.x2, b.y2].map(f32).join(',') : JSON.stringify(b));
+  return boxes.map(one).join(';');
+}
 
 /** The records of a predictions file: `{ "predictions": [...] }` or a bare array. */
 export function parsePredictions(text: string): { records: unknown[] } | { error: string } {
@@ -74,6 +94,8 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
   const known = ctx.imageIds ? new Set(ctx.imageIds) : null;
   const planned = new Map(ctx.plan.conditions.map((c) => [c.condition, c.severities]));
   const seen = o.seen ?? new Set<string>();
+  /** This call's records by key, as their boxes: what a repeat is compared with. */
+  const here = new Map<string, string>();
   /** Per condition and severity, the images answered. */
   const under = new Map<string, Map<number, Set<string>>>();
   const clean = new Set<string>();
@@ -97,6 +119,11 @@ export function checkPredictions(records: readonly unknown[], ctx: PredictionCon
       if (!planned.get(cond)!.includes(sev)) return at(i, `${name(cond)} runs at severities ${planned.get(cond)!.join(', ')}, not ${sev}.`);
     }
     const key = predictionKey(r.image, cond as string | null, sev as number | null);
+    // A record of these records repeated with the same boxes is taken once, as the server takes it (a repeat with other
+    // boxes, or of one received in an earlier part, is refused). "The same" as the server reads them (`boxesKey`).
+    const content = boxesKey(r.boxes, ctx.scored ?? true);
+    if (here.get(key) === content) continue;
+    here.set(key, content);
     if (seen.has(key)) return at(i, `image "${r.image}"${cond ? ` under ${name(cond)} ${sev}` : ''} is answered twice.`);
     seen.add(key);
     if (!Array.isArray(r.boxes)) return at(i, '"boxes" must be an array (empty when nothing was found).');
@@ -204,6 +231,8 @@ export interface ExternalSender {
   start: (body: StartBenchEntry) => Promise<BenchEntry>;
   send: (entryId: string, predictions: BenchPrediction[]) => Promise<BenchEntry>;
   finish: (entryId: string) => Promise<BenchEntry>;
+  /** The entry as it is now (a finish whose answer was lost may have scored it). */
+  get: (entryId: string) => Promise<BenchEntry>;
   stop: (entryId: string) => Promise<unknown>;
   remove: (entryId: string) => Promise<unknown>;
 }
@@ -235,7 +264,8 @@ const retryable = (e: unknown) => !(e instanceof ApiError) || e.status === 0 || 
 /**
  * Sends an external entry: in one request when it is small (`maxBytes` of JSON or less), else as an open entry filled
  * in parts (./partsOf) and finished, telling `progress` after each part. A part whose answer was lost (the network, a
- * 5xx) is sent once more: the server takes a record it already has with the same boxes again (an idempotent retry).
+ * 5xx) is sent once more: the server takes a record it already has with the same boxes again (an idempotent retry); so
+ * is the finish, and when the first one scored the entry, the entry is read and kept.
  * Any failure once the entry exists (a part refused, the finish refused, the network twice, `signal` aborted by the
  * person) stops the entry and deletes it, so nothing is left on the leaderboard; it throws an ExternalSendError that
  * says what is left when the stop or the delete failed too.
@@ -271,7 +301,18 @@ export async function sendExternal(
       sent += part.length;
       progress({ sent, total, entry });
     }
-    return await once(() => api.finish(entry.id));
+    let tries = 0;
+    return await once(async () => {
+      try {
+        return await api.finish(entry.id);
+      } catch (err) {
+        // A finish sent again after its answer was lost finds the entry no longer open when the first one scored it.
+        if (tries++ === 0 || !(err instanceof ApiError && err.code === 'bench_entry_not_open')) throw err;
+        const now = await api.get(entry.id);
+        if (now.status !== 'done') throw err;
+        return now;
+      }
+    });
   } catch (e) {
     // Leave nothing behind: stop the open entry, then delete it; say exactly what is left if either fails.
     const name = `an unfinished entry “${o.name}”`;

@@ -211,3 +211,31 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
     expect(groups().map((th) => th.firstElementChild?.textContent)).toContain('Training split of fasteners-mini');
   });
 });
+
+describe('Runs: the status filter of a deep link', () => {
+  // `#/runs?status=finished` (the filter's label, not its value) or a run status that is no filter (`stopped`) left
+  // `groups[filter]` undefined, and the page threw on its first render.
+  for (const status of ['finished', 'stopped', 'constructor']) {
+    it(`?status=${status} is no filter: every run shows`, async () => {
+      await open(Runs as Component, `/runs?status=${status}`, new MockApi('normal', 0));
+      const rows = await vi.waitFor(() => {
+        flushSync();
+        const r = target.querySelectorAll('table.runs tbody tr[data-id]');
+        if (!r.length) throw new Error('rows not loaded');
+        return r;
+      });
+      const all = await new MockApi('normal', 0).runs();
+      expect(rows.length).toBe(all.length);
+    });
+  }
+  it('?status=failed still filters', async () => {
+    await open(Runs as Component, '/runs?status=failed', new MockApi('normal', 0));
+    const all = await new MockApi('normal', 0).runs();
+    const failed = all.filter((r) => r.status === 'failed').length;
+    expect(failed).toBeGreaterThan(0);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(target.querySelectorAll('table.runs tbody tr[data-id]').length).toBe(failed);
+    });
+  });
+});

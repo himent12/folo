@@ -654,6 +654,10 @@ fn coop_conv_gradients() {
         cdesc(1, 8, 14, 13, 12, 1, Window2d::square(2, 3, 1)),
         cdesc(2, 8, 12, 15, 16, 1, Window2d::square(4, 2, 1)),
         cdesc(2, 160, 34, 34, 136, 1, s2),
+        // Strides beyond the kernel: most phases have no taps (only the ones with taps are packed and run).
+        cdesc(2, 8, 17, 19, 12, 1, Window2d::square(1, 4, 0)),
+        cdesc(1, 8, 23, 21, 12, 1, Window2d::square(3, 5, 1)),
+        cdesc(1, 2, 4, 4, 3, 1, Window2d::square(1, 65536, 0)),
     ];
     for (i, d) in cases.iter().enumerate() {
         run_conv_grads(&ctx, d, 100 + i as u64);

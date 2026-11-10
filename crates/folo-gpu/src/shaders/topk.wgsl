@@ -1,13 +1,15 @@
 // Top-k per row, one thread per row: k selection passes, each taking the best element strictly after the
 // previous pick in the output order (value by total order, descending when LARGEST, then index ascending).
 // Spec: LARGEST. Params: 0 = rows, 1 = row length D, 2 = k. Indices are written as i64 (low word, then 0).
-@group(0) @binding(1) var<storage, read> X: array<f32>;
-@group(0) @binding(2) var<storage, read_write> V: array<f32>;
+// Values are read and written as bits: through f32 loads, NVIDIA Vulkan ordered NaN like -0 (not above inf).
+@group(0) @binding(1) var<storage, read> X: array<u32>;
+@group(0) @binding(2) var<storage, read_write> V: array<u32>;
 @group(0) @binding(3) var<storage, read_write> I: array<u32>;
 
-// Monotone key: the unsigned order of keys is the f32::total_cmp order of values.
-fn key(v: f32) -> u32 {
-    let b = bitcast<u32>(v);
+// Monotone key: the unsigned order of keys is the f32::total_cmp order of values (given as bits), except that -0
+// has +0's key: they are equal, so they tie by index, as on the CPU.
+fn key(bits: u32) -> u32 {
+    let b = select(bits, 0u, bits == 0x80000000u);
     return select(b ^ 0x80000000u, ~b, (b >> 31u) == 1u);
 }
 

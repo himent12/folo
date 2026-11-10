@@ -26,6 +26,13 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   without a preflight, state-changing requests (`POST`, `PUT`, `DELETE`) whose `Origin` header is neither such a loopback
   origin nor the server itself are refused with `403 forbidden_origin`. Requests without `Origin` (curl, agents,
   FOLO Desktop) are unaffected.
+- Host: a server listening on loopback (`folo serve`'s default `--host 127.0.0.1`, also `--mock`) answers only
+  requests whose `Host` header is `localhost`, `127.x.y.z` or `[::1]` (with or without a port, any case, `localhost.`
+  too) or a name given with `folo serve --allow-host <name>` (repeatable; for a tunnel or reverse proxy that keeps
+  its own `Host`). Anything else, reads, SSE and Studio's files included, is `403 forbidden_host` before any handler
+  runs: a website whose name re-resolves to 127.0.0.1 (DNS rebinding) sends its own name as `Host`. A request
+  without `Host` is served. A server bound beyond loopback (`--host 0.0.0.0`, a LAN address, a cloud worker) checks
+  no `Host`: protect it with `--token`.
 - Token: a server started with `folo serve --token <secret>` (or `FOLO_TOKEN`) answers `401 unauthorized` to every
   `/api` request without `Authorization: Bearer <secret>`, except `GET /api/health` (so a client can tell a server
   that is up from one it may not use). The comparison is constant-time and the token is never logged. Without
@@ -45,6 +52,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset`, `bench_class_mismatch` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes, a benchmark source without a labeled image. `bench_class_mismatch`: a model entry whose model knows none of the benchmark's classes) |
 | 401 | `unauthorized` | a request without the server's token (see Conventions) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
+| 403 | `forbidden_host` | any request to a server on loopback whose `Host` is not a loopback name nor an `--allow-host` one (see Conventions); the hint names `--allow-host` and `--token` |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
 | 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_not_open`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done; sending predictions to (or finishing) an entry that is not an open external entry |
@@ -228,7 +236,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     "confusion_conf": 0.25,        // the confusion matrix counts detections with score > confusion_conf
     "confusion_iou": 0.45 }        // ... matched to a ground truth at IoU > confusion_iou (docs/METRICS.md §7)
   ```
-  `pr` has one curve per class, in class order, sampled at 101 recall points (`0.00` to `1.00`, IoU 0.5).
+  `pr` has one curve per class that has ground truth in the split (a class without any has none; each curve names
+  its `class`), in class order, sampled at 101 recall points (`0.00` to `1.00`, IoU 0.5).
   `precision` is the COCO-interpolated envelope (it never rises with recall), and `ap50` is its mean.
   `confusion` is `(classes + 1) × (classes + 1)`: rows are the true class, columns the predicted class, and the
   last row and column are background. `confusion[c][n]` counts missed objects of class `c`, `confusion[n][c]`
@@ -283,7 +292,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `folo export --format onnx` (docs/CLI.md, ONNX export): f32, a fixed batch of 1, the model's training imgsz
   (square), and the raw head outputs `box_raw` / `cls_raw`, unless a switch says otherwise (`decode` writes
   `<model name>-decoded.onnx`, `half` `<model name>-f16.onnx`, both `-decoded-f16.onnx`, as `folo export` names
-  them). Names get `-2`, `-3`, ... when taken (exports never
+  them). In the model name, control characters and the characters a Windows file name cannot hold (`/ \ : < > " |
+  ? *`) become `-`, and it is cut to 200 bytes. Names get `-2`, `-3`, ... when taken (exports never
   overwrite). `path` uses `/` separators. A model the ONNX exporter cannot map is `501 not_implemented` naming the
   part (no FOLO v1 model hits this).
 - `GET /api/models/{id}/weights` (optional `?format=f16|onnx`) → the model's `.folo` file (docs/FORMAT.md), for loading
@@ -302,7 +312,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   - `Content-Type: application/octet-stream` (also for ONNX, which has no registered media type), `Content-Length`,
     `Content-Disposition: attachment; filename="<model name>.folo"` (`<model name>-f16.folo`; ONNX as the export
     names it: `<model name>.onnx`, `<model name>-f16.onnx` with `half`; characters outside `A-Z a-z 0-9 . _ -`
-    become `_`).
+    become `_`, and the name is cut to 200 characters).
     Real files are streamed from disk (never read into memory whole), and never gzip-compressed.
   - Validators: a strong `ETag` (real mode: the file's size and modification time in nanoseconds, cheap and exact
     for FOLO's writers, which replace files whole; a replacement keeping both the size and the exact modification
@@ -1069,7 +1079,8 @@ empty `conditions` runs the unchanged images only. Text is trimmed (empty become
   `409 bench_entry_in_loop` while a loop that is still running uses it.
 
 Entries do not survive the server: one that is queued or running when the server stops (or that a crashed
-process left so) is `failed` ("the server stopped before the entry finished") with a hint to start it again.
+process left so) is `failed` ("the server stopped before the entry finished") with a hint to start it again; one
+that was `stopping` is `stopped`.
 
 **Self-improvement loops**
 - `GET /api/bench/benchmarks/{id}/loops` → `{ "loops": [BenchLoop] }` (newest first)
@@ -1113,7 +1124,7 @@ process left so) is `failed` ("the server stopped before the entry finished") wi
   `409 bench_loop_active` while it runs.
 
 A loop does not survive the server: one that was running when the server stopped is `failed` at the next start
-("the server stopped"), with its finished generations kept.
+("the server stopped"), with its finished generations kept; one that was `stopping` is `stopped`.
 
 **Events**
 - `GET /api/bench/benchmarks/{id}/events` (SSE; a `: keep-alive` comment every 15 s): a `bench` event (`Bench`),
@@ -1161,11 +1172,12 @@ retryable and independent of proxy limits; the control plane of a cloud run uses
   bytes are on disk, so memory stays at about one part) and, on `complete`, moved to `<data dir>/datasets/<name>`
   (the name lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registered with `format` (default
   `auto`). Only regular files and directories with relative paths inside the folder are accepted: absolute paths,
-  `..`, links and devices are `422 invalid_upload` on the part that carries them, and so is a stream that is not a
-  tar archive; the session is then dropped.
+  `..`, links and devices are `422 invalid_upload` on the part that carries them, and so are two files whose paths
+  differ only by letter case or a trailing dot or space (`A.jpg` and `a.jpg`: one would overwrite the other on
+  Windows; the message names both) and a stream that is not a tar archive; the session is then dropped.
   FOLO itself sends datasets in a canonical YOLO layout (docs/CLOUD.md, *Dataset*).
 - **Models** (`kind: model`): the stream is one `.folo` file, stored as `<data dir>/models/<name>.folo` (the name
-  reduced as for exports, `-2`, ... when taken) and listed like any file there. `422 invalid_weights` when its
+  reduced as for the `Content-Disposition` of `/weights`, `-2`, ... when taken) and listed like any file there. `422 invalid_weights` when its
   header does not parse.
 - Sessions live in memory: a restart drops them (and removes what they received), and a session without a part
   for an hour expires. A real server only; the mock answers `501 not_implemented`.
@@ -1285,7 +1297,7 @@ mostly shown) for the others.
 - `cloud/connections.json`: the cloud connections with their credentials (created readable by the owner only; never
   served). `cloud/instances/<id>.json`: the ledger of launched instances, one file each, written before the
   provider is asked (docs/CLOUD.md, *Instances are never left behind*); records of instances that ended more than
-  7 days ago are removed. A cloud run's folder also has `cloud.json` (its worker's address and token, the ids it
+  7 days ago are removed (not while the reaper still looks for an instance that was never found). A cloud run's folder also has `cloud.json` (its worker's address and token, the ids it
   has there and its cursors) and `cloud.lock`, which the process that follows the run holds locked (the file
   stays). `cloud/.lock` is held across every change of `connections.json` and of a ledger record, so a server and
   `folo cloud` on one data dir never lose each other's changes.

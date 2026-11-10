@@ -77,3 +77,21 @@ describe('IssueList', () => {
     expect(target.querySelectorAll('select option')).toHaveLength(4);
   });
 });
+
+describe('IssueList: the dataset check command', () => {
+  // The path was double-quoted only when it had a space, so `D:/O'Brien/data` went bare (PowerShell reads the `'` as
+  // the start of a string) and a `$` inside double quotes was expanded. Studio quotes its commands for PowerShell
+  // (lib/trainCli `quote`, as the train command and the server's own).
+  const command = () => target.querySelector('pre code')?.textContent;
+  for (const [path, want] of [
+    ["D:/O'Brien/data", "folo dataset check 'D:/O''Brien/data' --fix-dry-run --json"],
+    ['D:/My Datasets/$r6', "folo dataset check 'D:/My Datasets/$r6' --fix-dry-run --json"],
+    ['D:/data/shapes-hard', 'folo dataset check D:/data/shapes-hard --fix-dry-run --json'],
+  ] as const) {
+    it(`quotes ${path} for PowerShell`, async () => {
+      c = mount(IssueList, { target, props: { datasetId: 'ds_shapes_hard', path, severity: 'error' } });
+      flushSync();
+      expect(command()).toBe(want);
+    });
+  }
+});

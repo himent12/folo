@@ -153,6 +153,87 @@ fn usage_errors_exit_2() {
     assert!(stdout.contains("serve"));
 }
 
+/// The `--json` error of a missing argument names it: clap puts the names on the lines after "the following
+/// required arguments were not provided:", which the message used to cut off.
+#[test]
+fn usage_errors_name_the_missing_argument() {
+    for (args, want) in [
+        (&["dataset", "stats", "--json"][..], "<PATH>"),
+        (&["train", "--json"], "--data"),
+        (&["predict", "--json", "a.jpg"], "--model"),
+    ] {
+        let (code, stdout, _) = folo(args);
+        assert_eq!(code, 2, "{args:?}");
+        let e = &json_lines(&stdout)[0]["error"];
+        assert_eq!(e["code"], "usage");
+        let message = e["message"].as_str().unwrap();
+        assert!(message.contains(want), "{args:?}: {message}");
+        assert!(!message.contains('\n') && !message.contains("Usage:"), "{args:?}: {message}");
+    }
+}
+
+/// A `--data-dir` that is a file is a usage error up front: `serve` reported `listening` and `mcp` and `cloud` ran,
+/// and every write then failed with `internal` ("creating a folder in <file>/datasets").
+#[test]
+fn data_dir_that_is_a_file_is_a_usage_error() {
+    let dir = TestDir::new("cli-data-dir-file");
+    let file = dir.join("not-a-dir");
+    std::fs::write(&file, b"x").unwrap();
+    let file = file.to_str().unwrap();
+    // `folo mcp` keeps stdout for the protocol: its error is on stderr.
+    let mcp = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["mcp", "--data-dir", file])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&mcp.stderr);
+    assert_eq!(mcp.status.code(), Some(2), "mcp: {stderr}");
+    assert!(mcp.stdout.is_empty() && stderr.contains("--data-dir"), "mcp: {stderr}");
+    for args in [
+        &["cloud", "instances", "--json", "--data-dir", file][..],
+        &["serve", "--json", "--port", "0", "--data-dir", file],
+    ] {
+        let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+            .into();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+        // A server that started anyway is still running: the ChildGuard stops it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let status = loop {
+            match child.try_wait().unwrap() {
+                Some(s) => break Some(s),
+                None if std::time::Instant::now() > deadline => break None,
+                None => std::thread::sleep(std::time::Duration::from_millis(20)),
+            }
+        };
+        let v: Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{args:?}: {e}: {line:?}"));
+        assert_eq!(v["error"]["code"], "usage", "{args:?}: {line}");
+        assert!(v["error"]["message"].as_str().unwrap().contains("--data-dir"), "{args:?}: {line}");
+        assert_eq!(status.and_then(|s| s.code()), Some(2), "{args:?}");
+    }
+}
+
+/// `folo mcp`'s stdout carries protocol messages only, also with `--json` (docs/CLI.md): a startup error is on
+/// stderr, not an error envelope on stdout.
+#[test]
+fn mcp_errors_stay_off_stdout_with_json() {
+    let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["mcp", "--json", "--server", "ftp://example.com"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(out.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    assert!(stderr.contains("--server"), "{stderr}");
+}
+
 #[test]
 fn serve_mock_prints_the_url_as_json() {
     let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
@@ -171,4 +252,38 @@ fn serve_mock_prints_the_url_as_json() {
     assert_eq!(v["mock"], true);
     assert_eq!(v["web_ready"], false);
     assert!(v["url"].as_str().unwrap().starts_with("http://127.0.0.1:"));
+}
+
+/// `folo serve --mock` on loopback refuses a foreign `Host` (DNS rebinding) and answers the URL it prints (FOLO
+/// Desktop connects to that `http://127.0.0.1:<port>`) and an `--allow-host` name; `describe` lists the flag.
+#[test]
+fn serve_refuses_foreign_hosts_on_loopback() {
+    use std::io::{Read, Write};
+    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["serve", "--mock", "--port", "0", "--json", "--allow-host", "folo.tunnel.example"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let v: Value = serde_json::from_str(&line).unwrap();
+    let addr = v["url"].as_str().unwrap().trim_start_matches("http://").to_owned();
+    let status = |host: &str| {
+        let mut s = std::net::TcpStream::connect(&addr).unwrap();
+        write!(s, "GET /api/health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").unwrap();
+        let mut res = String::new();
+        s.read_to_string(&mut res).unwrap();
+        res.split(' ').nth(1).unwrap_or("").to_owned()
+    };
+    assert_eq!(status(&addr), "200");
+    assert_eq!(status("folo.tunnel.example"), "200");
+    assert_eq!(status("evil.example"), "403");
+    child.kill().unwrap();
+    let _ = child.wait();
+
+    let (code, stdout, _) = folo(&["describe", "serve", "--json"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("\"allow-host\"") || stdout.contains("--allow-host"), "{stdout}");
 }

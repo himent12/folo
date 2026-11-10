@@ -105,6 +105,24 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
   would only repeat. On 24 COCO photos the default (Claude Code, Haiku) found 79% of the objects with 92% of its
   boxes right for under a cent.
 
+### Desktop
+- The window works on Windows: Minimize, Maximize and Close in the title bar, dragging and double-clicking the
+  title bar (and the sidebar's FOLO row) did nothing, so the window could not be maximized. They work now, and so
+  does resizing from the top edge; also with the command palette or a dialog open, which stays open.
+- Full screen: `F11`, or Toggle full screen in the command palette; the title bar's buttons work in full screen
+  too (Restore leaves it).
+- The window opens where it was closed: its size, place and maximized or full-screen state, and the theme, are
+  kept in `~/.folo/desktop.json` (not for `--scenario`, `--width` or `--height`). It reopens on the display it
+  was on, also with displays at different scales; a place on a display that is gone opens centred on the main one.
+
+### Server
+- DNS rebinding: a server on loopback (the default `--host 127.0.0.1`, also `--mock`) answers only requests whose
+  `Host` is `localhost`, `127.x.y.z` or `[::1]` (any port, any case). A website whose name re-resolves to 127.0.0.1
+  could read every dataset, image and weights file and start agent labeling from a visitor's browser; such requests
+  are now `403 forbidden_host` before any handler runs, GETs, SSE and Studio's files included.
+  `folo serve --allow-host NAME` (repeatable) adds a name for a tunnel or reverse proxy that keeps its own `Host`. A
+  server bound beyond loopback (`--host 0.0.0.0`, cloud workers) is not checked: use `--token` there.
+
 ## 0.1.0 (2026-11)
 
 The first release: a from-scratch Rust vision framework with a YOLO-style detector, its own tensors, autograd, CPU

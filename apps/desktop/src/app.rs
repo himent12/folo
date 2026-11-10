@@ -35,6 +35,7 @@ actions!(
         GoPlayground,
         GoSettings,
         ToggleTheme,
+        ToggleFullscreen,
         Back,
         Dismiss,
         OpenImage,
@@ -58,6 +59,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-5", GoPlayground, None),
         KeyBinding::new("ctrl-,", GoSettings, None),
         KeyBinding::new("ctrl-shift-l", ToggleTheme, None),
+        KeyBinding::new("f11", ToggleFullscreen, None),
         KeyBinding::new("alt-left", Back, None),
         KeyBinding::new("escape", Dismiss, None),
         KeyBinding::new("ctrl-o", OpenImage, None),
@@ -392,6 +394,10 @@ pub struct FoloApp {
     pub frozen: bool,
     /// Keep every fetch pending (loading-state screenshots).
     pub hold_loading: bool,
+    /// Where the window and theme are remembered on close (`window_state`); `None` for screenshots.
+    pub state_path: Option<std::path::PathBuf>,
+    /// How the window showed in the last frame drawn (none are drawn while it is minimized).
+    pub shown_mode: crate::window_state::WindowMode,
 
     pub root_focus: FocusHandle,
     pub focus: RefCell<HashMap<SharedString, FocusHandle>>,
@@ -622,6 +628,8 @@ impl FoloApp {
             mode: theme(cx).mode,
             frozen,
             hold_loading: false,
+            state_path: None,
+            shown_mode: crate::window_state::WindowMode::Windowed,
             root_focus,
             focus: RefCell::new(HashMap::new()),
             switch_seen: RefCell::new(HashMap::new()),
@@ -918,11 +926,16 @@ impl FoloApp {
             self.fetch(
                 cx,
                 |api| api.system(),
-                |this, r, _| {
+                |this, r, cx| {
                     if let Ok(s) = &r
                         && let Some(g) = s.system.gpus.first().and_then(|g| g.util)
                     {
                         this.store.gpu_util.push_back(g);
+                    }
+                    this.store.note_reachability(r.as_ref().err());
+                    // Back after being unreachable: check its health now, not in 2 s.
+                    if this.store.health.needs_fetch() {
+                        this.ensure_core(cx);
                     }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
@@ -1348,6 +1361,35 @@ impl FoloApp {
     pub fn toggle_theme(&mut self, cx: &mut Context<Self>) {
         let next = if self.mode == Mode::Dark { Mode::Light } else { Mode::Dark };
         self.set_mode(next, cx);
+    }
+
+    /// Remember the window (restored bounds, maximized or full screen) and the theme for the next
+    /// launch, when this one remembers (`window_state`).
+    pub fn save_window_state(&self, window: &Window, cx: &App) {
+        use crate::window_state::{Placement, State, WindowMode};
+        let Some(path) = &self.state_path else {
+            return;
+        };
+        let (b, mode) = match window.window_bounds() {
+            gpui::WindowBounds::Windowed(b) => (b, WindowMode::Windowed),
+            gpui::WindowBounds::Maximized(b) => (b, WindowMode::Maximized),
+            gpui::WindowBounds::Fullscreen(b) => (b, WindowMode::Fullscreen),
+        };
+        let mode = crate::window_state::closing_mode(mode, self.shown_mode);
+        let state = State {
+            window: Some(Placement {
+                x: b.origin.x.into(),
+                y: b.origin.y.into(),
+                width: b.size.width.into(),
+                height: b.size.height.into(),
+                mode,
+                display: window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()),
+            }),
+            theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
+        };
+        if let Err(e) = crate::window_state::save(path, &state) {
+            eprintln!("folo-desktop: couldn't remember the window in {}: {e}", path.display());
+        }
     }
 
     pub fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2595,37 +2637,32 @@ impl FoloApp {
         let t = theme(cx);
         let crumbs = self.breadcrumbs();
         let maximized = window.is_maximized();
-        let win_btn = |id: &'static str, icon_path: &'static str, area: WindowControlArea, close: bool| {
-            div()
-                .id(id)
-                .group(id)
-                .w(px(46.))
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .window_control_area(area)
-                .hover(move |s| if close { s.bg(gpui::rgb(0xC42B1C)) } else { s.bg(t.bg_hover) })
-                .active(|s| s.opacity(0.8))
-                .child(
-                    gpui::svg()
-                        .path(icon_path)
-                        .size(px(10.))
-                        .flex_none()
-                        .text_color(t.text_secondary)
-                        .group_hover(id, move |s| {
-                            s.text_color(if close { gpui::white() } else { t.text_primary })
-                        }),
-                )
-        };
+        let fullscreen = window.is_fullscreen();
+        let win_btn =
+            |base: gpui::Stateful<gpui::Div>, id: &'static str, icon_path: &'static str, close: bool| {
+                base.group(id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
+                    .active(|s| s.opacity(0.8))
+                    .child(
+                        gpui::svg()
+                            .path(icon_path)
+                            .size(px(10.))
+                            .flex_none()
+                            .text_color(t.text_secondary)
+                            .group_hover(id, move |s| {
+                                s.text_color(if close { t.window_close_text } else { t.text_primary })
+                            }),
+                    )
+            };
         let search_fh = self.fh("titlebar-search", cx);
         let search_ring = self.ring(&search_fh, window);
-        div()
-            .h(px(tsize::TOPBAR - 8.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .border_b_1()
+        let min_btn = self.caption_button("win-min", WindowControlArea::Min, fullscreen, cx);
+        let max_btn = self.caption_button("win-max", WindowControlArea::Max, fullscreen, cx);
+        let close_btn = self.caption_button("win-close", WindowControlArea::Close, fullscreen, cx);
+        titlebar_row()
             .border_color(t.line_subtle)
             .child(
                 // Breadcrumbs (draggable area).
@@ -2640,6 +2677,13 @@ impl FoloApp {
                     // The crumbs' 4 px pads put their text on the page gutter.
                     .pl(px(self.gutter() - 4.))
                     .window_control_area(WindowControlArea::Drag)
+                    // A caption press goes to GPUI first and only reaches Windows (drag, double-click
+                    // maximize, the caption buttons) if nothing prevents its default. The focus-tracked
+                    // root would (focusing itself does), so the chrome hides the root from the hit
+                    // test. The crumbs above it still take their own clicks. Hidden from the root, it
+                    // leaves keyboard mode itself, as the root does for any other press.
+                    .occlude()
+                    .capture_any_mouse_down(self.leave_kb(cx))
                     .children(crumbs.into_iter().enumerate().map(|(i, (label, route))| {
                         let last = route.is_none();
                         let crumb = div().id(("crumb", i)).px(px(4.)).py(px(2.)).rounded(px(4.)).child(
@@ -2703,14 +2747,77 @@ impl FoloApp {
                     .child(text(ty::SM, t.text_tertiary).flex_1().child("Search or jump to…"))
                     .child(shortcut(&t, &["Ctrl", "K"])),
             )
-            .child(win_btn("win-min", "icons/win-min.svg", WindowControlArea::Min, false))
+            .child(win_btn(min_btn, "win-min", "icons/win-min.svg", false))
             .child(win_btn(
+                max_btn,
                 "win-max",
-                if maximized { "icons/win-restore.svg" } else { "icons/win-max.svg" },
-                WindowControlArea::Max,
+                if maximized || fullscreen { "icons/win-restore.svg" } else { "icons/win-max.svg" },
                 false,
             ))
-            .child(win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true))
+            .child(win_btn(close_btn, "win-close", "icons/win-close.svg", true))
+    }
+
+    /// A caption button's hit area, `layout.desktop_caption_button` wide and the title bar's
+    /// height: Minimize, Maximize / Restore or Close for Windows. In full screen GPUI reports no
+    /// caption areas, so Windows doesn't act on it: it takes its own click then. Only then, since
+    /// otherwise the caption press already acts (on mouse up) and a click handler would act a
+    /// second time. `titlebar()` draws on it; `caption_controls` uses it bare.
+    fn caption_button(
+        &self,
+        id: &'static str,
+        area: WindowControlArea,
+        fullscreen: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .w(px(crate::theme::layout::DESKTOP_CAPTION_BUTTON))
+            .h_full()
+            .window_control_area(area)
+            // See `titlebar-drag`: the press must reach Windows, not focus the root.
+            .occlude()
+            .capture_any_mouse_down(self.leave_kb(cx))
+            .when(fullscreen, |d| match area {
+                WindowControlArea::Min => d.on_click(|_, w, _| w.minimize_window()),
+                // Full screen's "restore" leaves full screen.
+                WindowControlArea::Max => d.on_click(|_, w, _| w.toggle_fullscreen()),
+                // Closing this way skips the window's should-close hook: remember here.
+                WindowControlArea::Close => d.on_click(cx.listener(|this, _, w, cx| {
+                    this.save_window_state(w, cx);
+                    w.remove_window();
+                })),
+                WindowControlArea::Drag => d,
+            })
+    }
+
+    /// The window's caption areas again, bare, for an overlay to put over its scrim and under its
+    /// own panel. The scrim dims the title bar, but it also hides the title bar from the hit test,
+    /// and Windows acts only on caption areas in it: a window must still move, minimize, maximize
+    /// and close. One drag band across the top (the sidebar's brand row and the title bar, whose
+    /// dimmed crumbs and search field take no clicks under an overlay) and the three buttons,
+    /// where `titlebar()` puts them. A press here neither reaches the scrim (which would dismiss
+    /// the overlay) nor the page.
+    pub fn caption_controls(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let fullscreen = window.is_fullscreen();
+        titlebar_row()
+            .id("caption-controls")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .child(
+                div()
+                    .id("caption-drag")
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag)
+                    // See `titlebar-drag`.
+                    .occlude()
+                    .capture_any_mouse_down(self.leave_kb(cx)),
+            )
+            .child(self.caption_button("caption-min", WindowControlArea::Min, fullscreen, cx))
+            .child(self.caption_button("caption-max", WindowControlArea::Max, fullscreen, cx))
+            .child(self.caption_button("caption-close", WindowControlArea::Close, fullscreen, cx))
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, Option<Route>)> {
@@ -2783,6 +2890,7 @@ impl FoloApp {
             live_card =
                 Some(if compact { self.live_rail(&r, window, cx) } else { self.live_mini(&r, window, cx) });
         }
+        let brand_press = self.leave_kb(cx);
         let health = self.connection_line(compact, window, cx);
         div()
             .w(px(if compact { tsize::SIDEBAR_COLLAPSED } else { tsize::SIDEBAR }))
@@ -2797,13 +2905,16 @@ impl FoloApp {
                 // Brand row doubles as a drag area for the window.
                 div()
                     .id("brand")
-                    .h(px(tsize::TOPBAR - 8.))
+                    .h(px(TITLEBAR))
                     .flex_none()
                     .flex()
                     .items_center()
                     .gap(px(10.))
                     .px(px(if compact { 18. } else { 16. }))
                     .window_control_area(WindowControlArea::Drag)
+                    // See `titlebar-drag`.
+                    .occlude()
+                    .capture_any_mouse_down(brand_press)
                     .child(logo(&t, 20.))
                     .when(!compact, |d| {
                         d.child(
@@ -3213,6 +3324,13 @@ impl Render for FoloApp {
             self.open_new_run(None, window, cx);
         }
         self.narrow = window.viewport_size().width < px(1120.);
+        self.shown_mode = if window.is_fullscreen() {
+            crate::window_state::WindowMode::Fullscreen
+        } else if window.is_maximized() {
+            crate::window_state::WindowMode::Maximized
+        } else {
+            crate::window_state::WindowMode::Windowed
+        };
         let t = theme(cx);
         self.ensure_core(cx);
         self.ensure_cloud(cx);
@@ -3250,6 +3368,7 @@ impl Render for FoloApp {
             )
             .on_action(cx.listener(|this, _: &GoSettings, w, cx| this.nav_shortcut(Route::Settings, w, cx)))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
+            .on_action(cx.listener(|_, _: &ToggleFullscreen, w, _| w.toggle_fullscreen()))
             .on_action(cx.listener(|this, _: &Back, w, cx| {
                 if !this.modal_open() {
                     this.back(w, cx)
@@ -3347,12 +3466,7 @@ impl Render for FoloApp {
                     cx.notify();
                 }
             }))
-            .capture_any_mouse_down(cx.listener(|this, _, _, cx| {
-                if this.kb {
-                    this.kb = false;
-                    cx.notify();
-                }
-            }))
+            .capture_any_mouse_down(self.leave_kb(cx))
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_drag_end))
@@ -3402,10 +3516,51 @@ impl Render for FoloApp {
                     ),
             )
             .children(overlays)
+            // The top edge resizes the window, as the other three do. Windows only resizes where no
+            // caption area is hit, and the title bar is one up to the top: this strip, on top of
+            // it and hiding it from the hit test, is not. Maximized or full screen there is no edge,
+            // and the top pixels are the title bar's.
+            .when(!window.is_maximized() && !window.is_fullscreen(), |d| {
+                d.child(
+                    div()
+                        .id("resize-top")
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .right_0()
+                        .h(px(crate::theme::layout::DESKTOP_RESIZE_EDGE))
+                        .occlude()
+                        .capture_any_mouse_down(self.leave_kb(cx)),
+                )
+            })
     }
 }
 
+/// A mouse-press listener, as `capture_any_mouse_down` takes it.
+type PressListener = Box<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App)>;
+
+/// The title bar's height, and the sidebar's brand row's (the other drag area).
+const TITLEBAR: f32 = tsize::TOPBAR - 8.;
+
+/// The title bar's row, its hairline (uncoloured) included. `titlebar()` and `caption_controls`
+/// both lay out on it, so their caption buttons are the same size in the same place.
+fn titlebar_row() -> gpui::Div {
+    div().h(px(TITLEBAR)).flex_none().flex().items_center().border_b_1()
+}
+
 impl FoloApp {
+    /// A press leaves keyboard mode (focus rings off). The root listens for presses anywhere, but
+    /// the window chrome hides the root from the hit test (`titlebar-drag`), so it listens too.
+    /// Only a capture-phase listener: it never prevents the press's default.
+    fn leave_kb(&self, cx: &mut Context<Self>) -> PressListener {
+        Box::new(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+            if this.kb {
+                this.kb = false;
+                cx.notify();
+            }
+        }))
+    }
+
     /// A dialog, the stop confirmation or the inspector is up: the page behind is inert.
     pub fn modal_open(&self) -> bool {
         self.new_run.is_some()

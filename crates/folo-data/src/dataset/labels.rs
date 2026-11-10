@@ -110,8 +110,15 @@ pub(crate) fn parse_line(
     Ok(Line::Box { b, clipped: !exact })
 }
 
+/// `text` without a leading UTF-8 byte order mark (Notepad and PowerShell 5.1 write one; PyYAML and Python's
+/// `utf-8-sig` skip it too).
+pub(crate) fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// Parses YOLO label text (see [`parse_line`]). Returns `Err((line, message))` for a broken file.
 pub(crate) fn parse_yolo(text: &str, num_classes: Option<usize>) -> Result<ParsedLabels, (usize, String)> {
+    let text = strip_bom(text);
     let mut out = ParsedLabels::default();
     let mut vals: Vec<f32> = Vec::with_capacity(16);
     let mut clipped = 0usize;

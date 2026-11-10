@@ -405,8 +405,8 @@ fn round_bits(v: vec2<u32>, n: u32) -> vec2<u32> {
   }
   return shl64(q, s);
 }
-// Integer (i64 bits) to f32 as the CPU does it: round to f64's 53 bits, then to `n` bits (24 for f32, 11 for
-// the f16 path). The result has at most `n` significant bits, so both halves convert exactly.
+// Integer (i64 bits) to f32 as the CPU does it: round once, straight to `n` bits (24 for f32, 11 for the f16
+// path). The result has at most `n` significant bits, so both halves convert exactly.
 fn int2f(v: vec2<u32>, n: u32) -> f32 {
   let neg = (v.y >> 31u) == 1u;
   var m = v;
@@ -414,7 +414,7 @@ fn int2f(v: vec2<u32>, n: u32) -> f32 {
     m.x = ~v.x + 1u;
     m.y = ~v.y + select(0u, 1u, m.x == 0u);
   }
-  let r = round_bits(round_bits(m, 53u), n);
+  let r = round_bits(m, n);
   let f = f32(r.y) * 4294967296.0 + f32(r.x);
   return select(f, -f, neg);
 }

@@ -45,6 +45,8 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(num_workgroups) nwg: vec
         for (var i = lid; i < n; i += 256u) { m = max(m, f32(X[base + i])); }
     }
     m = reduce_max(lid, m);
+    // A non-finite row maximum (+inf) is replaced by 0, as on the CPU: finite entries then get 0, not NaN.
+    if ((bitcast<u32>(m) & 0x7fffffffu) >= 0x7f800000u) { m = 0.0; }
     var s = 0.0;
     if (valid) {
         for (var i = lid; i < n; i += 256u) { s += exp(f32(X[base + i]) - m); }

@@ -42,6 +42,7 @@ afterEach(() => {
   c = undefined;
   target.remove();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 const GiB = 2 ** 30;
@@ -68,6 +69,9 @@ describe('CloudPanel', () => {
   afterEach(() => vi.useRealTimers());
 
   it('shows the phases done, current and to come, the transfer, and the facts while the run is alive', () => {
+    // At noon, so the deadline an hour on is today (from 23:00 it is tomorrow, and the limit names the date too).
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 9, 12, 0));
     c = mount(CloudPanel, { target, props: { cloud: state(), provider: 'RunPod' } });
     flushSync();
     expect(phases()).toEqual([

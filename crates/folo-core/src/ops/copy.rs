@@ -502,6 +502,11 @@ mod tests {
         assert_eq!(h.to_vec::<f32>().unwrap(), x.to_vec::<f32>().unwrap());
         let i = t(&[1.7, -1.7, 300.0], &[3]).to_dtype(DType::U8).unwrap();
         assert_eq!(i.to_vec::<u8>().unwrap(), vec![1, 0, 255]);
+        // I64 → F32 rounds once: 2^62 + 2^38 + 1 is just above the midpoint of two f32 values (2^39 apart), but
+        // rounding through f64 lands exactly on it and then ties to even, one f32 step too low.
+        let big = [(1i64 << 62) + (1 << 38) + 1, -((1i64 << 62) + (1 << 38) + 1), i64::MAX, i64::MIN];
+        let f = Tensor::from_slice(&big, [4]).unwrap().to_dtype(DType::F32).unwrap();
+        assert_eq!(f.to_vec::<f32>().unwrap(), big.map(|v| v as f32));
         let bytes = Tensor::from_bytes(&[1u8, 0, 0, 0, 2, 0, 0, 0], DType::U32, [2]).unwrap();
         assert_eq!(bytes.to_vec::<u32>().unwrap(), vec![1, 2]);
     }
