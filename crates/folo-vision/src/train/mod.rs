@@ -651,6 +651,11 @@ impl Trainer {
         self.resolved
     }
 
+    /// The optimizer's parameter groups (names, parameters, base and current LR).
+    pub fn param_groups(&self) -> &[folo_nn::optim::ParamGroup] {
+        self.opt.groups()
+    }
+
     /// docs/API.md's `Run.resolved`: the optimizer, effective LR and weight decay, accumulation and warmup this run
     /// trains with (also `resolved` in its `config.json`).
     pub fn resolved_train(&self) -> folo_api::ResolvedTrain {
