@@ -17,6 +17,10 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      # No god files (AGENTS.md, Ground rules): a source file of 1000 lines or more fails the pull request. It is
+      # here because this is the one workflow that runs for every pull request, and it takes a second.
+      - name: file sizes
+        run: bash tools/file-size.sh
       # Node 24 runs the TypeScript build scripts directly (type stripping).
       - uses: actions/setup-node@v4
         with:
