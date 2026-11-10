@@ -652,8 +652,9 @@ explicit `sgd`/`adamw` uses `lr0`, `momentum` and `warmup_bias_lr` as given.
 
 `TrainConfig.auto_rule` (current: 3) versions this rule: rule 3 is the above; rule 2 picks SGD (`lr0 = 0.01`,
 `momentum = 0.9`) instead of MuSGD for long runs; rule 1 is rule 2 without the AdamW floor. On the COCO proxy of
-docs/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches about 1.35x the AP of SGD, as the reference's own
-MuSGD does. The 0.001 floor is FOLO's (rule 2 on). The reference trainer's fit alone (rule 1)
+docs/hill/learn.md (20 epochs, SGD regime forced) MuSGD reaches 1.38x the AP of SGD (0.1143 vs 0.0830), as the
+reference's own MuSGD does. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run (the long COCO run under rule 3 is
+the pending check). The 0.001 floor is FOLO's (rule 2 on). The reference trainer's fit alone (rule 1)
 gives 80 classes 0.000119, and a from-scratch run on a 20k-image COCO subset (20 epochs, 6,260 iterations) then
 reaches about a fifth of the AP of SGD on the same budget, in Ultralytics as in FOLO (docs/hill/learn.md). Rule 2
 changes nothing below 6 classes. Settings saved before the key existed (a checkpoint's `folo.train`, a run's

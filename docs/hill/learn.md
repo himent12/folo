@@ -107,7 +107,7 @@ has the update. P1, 20 epochs, `--optimizer musgd` / `optimizer=MuSGD` (lr0 0.01
 | ultra-sgd-s0 (round 1) | Ultralytics, SGD | 0 | 0.0853 | 0.144 | 0.043 | 0.136 | 0.175 | 820 s |
 | ultra-musgd-full-s0 | Ultralytics, MuSGD | 0 | 0.1133 | 0.188 | 0.060 | 0.172 | 0.244 | 729 s |
 
-- FOLO MuSGD vs FOLO SGD: +0.031 AP on the means (0.1143 vs 0.0830), ten times the noise; better at every epoch
+- FOLO MuSGD vs FOLO SGD: +0.031 AP on the means (0.1143 vs 0.0830, 1.38x), ten times the noise; better at every epoch
   from epoch 2 (epoch 10: 0.069 / 0.068 vs 0.046 / 0.044 internal mAP50-95). Every size bucket gains, large
   objects most (+0.10 AP_L).
 - FOLO MuSGD vs the reference's MuSGD: 0.1131 / 0.1155 vs 0.1133, level (the reference sits between FOLO's seeds;
@@ -123,7 +123,10 @@ has the update. P1, 20 epochs, `--optimizer musgd` / `optimizer=MuSGD` (lr0 0.01
   follow-up that would take most of the 17 % back.
 
 **Shipped: `auto` rule 3** (`AUTO_RULE = 3`): long runs (> 10,000 iterations, e.g. full COCO) pick MuSGD at lr0
-0.01, momentum 0.9, as the reference does since 8.4; short runs are rule 2's AdamW. Shapes gate with the rule-3
+0.01, momentum 0.9, as the reference does since 8.4; short runs are rule 2's AdamW. **Not validated by a run:**
+the MuSGD rows above are `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1, rule 3 ships momentum 0.9
+and warmup_bias_lr 0, and no measured run resolved `auto` to MuSGD (the proxy's 6,260 iterations, and the shapes
+gate below, resolve AdamW); the long COCO run under rule 3 (follow-up 4) is the first. Shapes gate with the rule-3
 binary: `auto → adamw lr0 0.00125` (short run, unchanged), best epoch 30 mAP50 **0.978**, mAP50-95 **0.893** (pass;
 0.898 before the merge, same settings: the merged kernels' rounding). R6 (2,030 frames × 100 epochs at batch 16 =
 3,200 iterations) is a short run and resolves exactly as before. Old checkpoints resume with their rule (1 or 2:
@@ -217,7 +220,8 @@ fine-tune is unchanged by construction.
 3. **AdamW floor 0.002** (round 1: proxy 0.0844 vs 0.0747 at 0.001): not run this round (time); needs the shapes
    gate and an R6 fine-tune at 0.002 against the current rule.
 4. **Long COCO with MuSGD**: the 300-epoch folo-n run (examples/coco) resumed from its SGD checkpoint keeps SGD
-   (rule 1). A new long run under rule 3 is the full-scale check of the +35 % seen on the proxy.
+   (rule 1). A new long run under rule 3 is the full-scale check of the +38 % seen on the proxy, and the first run of
+   the shipped rule-3 recipe (momentum 0.9, warmup_bias_lr 0; the proxy rows used 0.937 and 0.1).
 
 ### Round 1 follow-ups
 

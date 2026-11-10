@@ -14,7 +14,7 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
   step is 25% faster and `predict_batch` 32–47%; batch-1 latency is unchanged.
 - **`--optimizer musgd`** (Ultralytics 8.4's MuSGD: a Muon-orthogonalised update plus SGD) and two `auto` rule
   changes: rule 2 floors the AdamW LR of short runs at 0.001 (80-class runs from scratch learned almost nothing at
-  the old 0.000119), rule 3 picks MuSGD for runs over 10,000 iterations. Checkpoints resume with the rule they were
+  the old 0.000119), rule 3 picks MuSGD for runs over 10,000 iterations (its +0.031 AP over SGD on the COCO proxy was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run; a long COCO run under rule 3 is the follow-up). Checkpoints resume with the rule they were
   started with (`TrainConfig.auto_rule`; a missing field is rule 1), so resumed runs keep their optimizer;
   `--set auto_rule=2` keeps SGD for a new long run. `--set KEY=VALUE` sets any `train` config key.
 - The data loader defaults to up to 16 workers (was 8); the next epoch's loader starts while the last batches of the

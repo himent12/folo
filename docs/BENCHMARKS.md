@@ -403,7 +403,7 @@ scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed 
 - **MuSGD** (rule 3): the reference's `auto` choice since 8.4 for runs over 10,000 iterations (full COCO), now
   implemented in folo-nn (docs/MODEL.md §8.2) and `auto`'s long-run choice. +0.031 AP over SGD on the proxy (ten
   times the seed noise), level with the reference's own MuSGD, at about 17% more step time; it passes SGD's 20-epoch
-  AP at about epoch 13. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
+  AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
   paused 300-epoch COCO run keeps SGD.
 
 **Transfer: R6** ([examples/r6](../examples/r6/README.md#fine-tuning-from-coco), 2 classes, 2030 train frames,
@@ -940,7 +940,8 @@ By expected gain, from the leftovers of the hill-climb notebooks (each has the m
 3. **A persistent pipeline cache**: the first epoch on the GPU is mostly pipeline compilation (4–15 s), and the
    merged build's first f32 epoch is 4 s slower than `main`'s ([The trainer](#the-trainer-row-10)).
 4. **MuSGD step cost** (about 17% of the step): one fused Newton–Schulz kernel per column bucket instead of about 15
-   dispatches per conv weight per step; then the full-scale check, a long COCO run under `auto` rule 3, and the AdamW
+   dispatches per conv weight per step; then the full-scale check, a long COCO run under `auto` rule 3 (the first run of the shipped rule-3 recipe:
+   momentum 0.9, warmup_bias_lr 0), and the AdamW
    floor at 0.002 behind the shapes and R6 gates ([hill/learn.md](hill/learn.md)).
 5. **f32 GEMMs and weight gradients**: split-K or stream-K for the 40 px-and-below layers of the forward, a
    transposed formulation for `C_in·9 ≫ C_out` weight gradients, a direct reduction for the tensor-core stem weight

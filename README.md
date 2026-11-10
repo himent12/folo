@@ -43,8 +43,9 @@ run, paused there; 0.314 for the finished 50-epoch run), against
 0.409 published for yolo26n, which was pretrained on Objects365 and then trained 245 epochs on COCO
 ([examples/coco](examples/coco/README.md), docs/BENCHMARKS.md, Accuracy). Trained the same way on the same images (a
 20,000-image COCO proxy at 320 px, 20 epochs, from scratch), FOLO's trainer and Ultralytics' land level with each
-other per epoch (SGD 0.086 vs 0.085 AP, MuSGD 0.113–0.116 vs 0.113), so the gap is data and schedule, not the
-trainer; full COCO at an equal budget has not been run.
+other per epoch (SGD 0.086 vs 0.085 AP, MuSGD 0.113–0.116 vs 0.113, both optimizers chosen explicitly), so the gap is
+data and schedule, not the trainer; full COCO at an equal budget has not been run, nor has `auto`'s MuSGD recipe for
+long runs (rule 3: momentum 0.9, warmup_bias_lr 0; the proxy runs used 0.937 and 0.1).
 
 These are the hill-climb build's numbers (2026-11-09, quiet machine, alternated with the earlier build). FOLO is not
 ahead everywhere: folo-s ties yolo26s on batch-16 forward throughput, and CPU batch-1 latency did not move in the
