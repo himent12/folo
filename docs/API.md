@@ -26,6 +26,13 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   without a preflight, state-changing requests (`POST`, `PUT`, `DELETE`) whose `Origin` header is neither such a loopback
   origin nor the server itself are refused with `403 forbidden_origin`. Requests without `Origin` (curl, agents,
   FOLO Desktop) are unaffected.
+- Host: a server listening on loopback (`folo serve`'s default `--host 127.0.0.1`, also `--mock`) answers only
+  requests whose `Host` header is `localhost`, `127.x.y.z` or `[::1]` (with or without a port, any case, `localhost.`
+  too) or a name given with `folo serve --allow-host <name>` (repeatable; for a tunnel or reverse proxy that keeps
+  its own `Host`). Anything else, reads, SSE and Studio's files included, is `403 forbidden_host` before any handler
+  runs: a website whose name re-resolves to 127.0.0.1 (DNS rebinding) sends its own name as `Host`. A request
+  without `Host` is served. A server bound beyond loopback (`--host 0.0.0.0`, a LAN address, a cloud worker) checks
+  no `Host`: protect it with `--token`.
 - Token: a server started with `folo serve --token <secret>` (or `FOLO_TOKEN`) answers `401 unauthorized` to every
   `/api` request without `Authorization: Bearer <secret>`, except `GET /api/health` (so a client can tell a server
   that is up from one it may not use). The comparison is constant-time and the token is never logged. Without
@@ -45,6 +52,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes) |
 | 401 | `unauthorized` | a request without the server's token (see Conventions) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
+| 403 | `forbidden_host` | any request to a server on loopback whose `Host` is not a loopback name nor an `--allow-host` one (see Conventions); the hint names `--allow-host` and `--token` |
 | 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
 | 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on) |
