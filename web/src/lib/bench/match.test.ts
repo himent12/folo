@@ -28,6 +28,15 @@ describe('matchImage', () => {
     expect(m.wrong).toBe(3);
   });
 
+  it('gives a tie in IoU to the later true box, as the server does', () => {
+    // The wide detection overlaps both true boxes by 2/3. The server gives it the second, which leaves the first
+    // for the exact one: nothing missed, nothing wrong. Giving it the first would strand the other detection.
+    const truth = [box(0, 0, 0, 10, 10), box(0, 5, 0, 15, 10)];
+    const m = matchImage(truth, [box(0, 0, 0, 15, 10, 0.9), box(0, 0, 0, 10, 10, 0.8)]);
+    expect(m.detections.map((d) => d.truth)).toEqual([1, 0]);
+    expect([m.missed, m.wrong]).toEqual([0, 0]);
+  });
+
   it('agrees with the counts the server sends for every image of an entry', async () => {
     const api = new MockApi('normal', 0);
     for (const [b, e] of [['bn_3c90', 'be_f101'], ['bn_3c90', 'be_f104'], ['bn_7a41', 'be_p201']] as const) {

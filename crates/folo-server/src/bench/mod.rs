@@ -882,19 +882,25 @@ impl Benches {
         predictions: Vec<folo_api::BenchPrediction>,
     ) -> Result<BenchEntry> {
         let (slot, fill) = self.open_entry(id, entry_id)?;
-        // One part at a time per entry; never under the benchmark's lock (a variant may be graded here).
-        let (received, emit) = {
+        // One part at a time per entry; never under the benchmark's lock (a variant may be graded here). The
+        // two locks are only ever taken benchmark first (stop, shutdown), so the filling's is let go before the
+        // benchmark's is asked for.
+        let taken = {
             let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if f.closed {
-                let state = slot.live()?;
-                return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
+                None
+            } else {
+                f.add(predictions)?;
+                let emit = f.last_event.is_none_or(|t| t.elapsed() >= model::PROGRESS_EVERY);
+                if emit {
+                    f.last_event = Some(std::time::Instant::now());
+                }
+                Some((f.received, emit))
             }
-            f.add(predictions)?;
-            let emit = f.last_event.is_none_or(|t| t.elapsed() >= model::PROGRESS_EVERY);
-            if emit {
-                f.last_event = Some(std::time::Instant::now());
-            }
-            (f.received, emit)
+        };
+        let Some((received, emit)) = taken else {
+            let state = slot.live()?;
+            return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
         };
         let mut state = slot.live()?;
         let e = state.entry_mut(entry_id).ok_or_else(|| state::entry_not_found(id, entry_id))?;
@@ -910,14 +916,14 @@ impl Benches {
     /// saying what is missing leaves it open.
     pub fn finish_open(&self, id: &str, entry_id: &str) -> Result<BenchEntry> {
         let (slot, fill) = self.open_entry(id, entry_id)?;
-        let (finished, scored, received, file) = {
+        // As in `add_predictions`: the filling's lock is let go before the benchmark's is asked for.
+        let taken = {
             let mut f = fill.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if f.closed {
-                let state = slot.live()?;
-                return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
-            }
-            let finished = f.finish()?;
-            (finished, f.scored(), f.received, f.file().clone())
+            if f.closed { None } else { Some((f.finish()?, f.scored(), f.received, f.file().clone())) }
+        };
+        let Some((finished, scored, received, file)) = taken else {
+            let state = slot.live()?;
+            return Err(not_open(entry_id, &state.entry(entry_id)?.entry));
         };
         let graded = grade_external(&file, scored, &finished);
         let mut state = slot.live()?;

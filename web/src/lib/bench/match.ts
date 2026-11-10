@@ -50,8 +50,9 @@ export function matchImage<D extends Box & { score?: number }>(truth: readonly B
       if (t.class !== d.class || found[k] !== null) return;
       const v = iou(t, d);
       if (v >= bestIou) {
-        // Ties keep the first true box: the same rule every time.
-        if (v > bestIou || best < 0) best = k;
+        // Ties go to the later true box, as the server's matching has it (crates/folo-bench/src/score.rs): the
+        // counts drawn here must be the counts it sent.
+        best = k;
         bestIou = v;
       }
     });

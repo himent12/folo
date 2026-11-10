@@ -159,8 +159,10 @@ impl Engine {
         self.queue.lock().unwrap().drain(..).collect()
     }
 
-    /// Wakes the worker (to end it).
+    /// Wakes the worker (to end it, once `closing` is set). Under the queue's lock: the worker checks `closing`
+    /// and starts to wait under it, so the wake-up cannot fall between the two and be lost.
     pub fn wake(&self) {
+        let _queue = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         self.ready.notify_all();
     }
 
@@ -415,6 +417,13 @@ pub fn finish_entry(
     let now = rfc3339(unix_now());
     let mut state = slot.lock();
     let Some(e) = state.entry_mut(id) else { return };
+    // A stop that was accepted (or the server's shutdown) wins over a grade that finished meanwhile: the last
+    // pass is not checked for it again, and neither is the grading.
+    let stopped = closing || e.entry.status == BenchEntryStatus::Stopping || e.cancel.load(Ordering::SeqCst);
+    let outcome = match outcome {
+        Ok(Some(_)) if stopped => Ok(None),
+        other => other,
+    };
     let mut parts = None;
     match outcome {
         Ok(Some((graded, speed))) => {
