@@ -74,13 +74,23 @@ the open batch.
 Kernels never submit. Each call encodes a dispatch into one long-lived compute pass of an open command encoder.
 The batch is submitted when:
 
-- 1024 dispatches have been encoded;
+- the batch's dispatch limit is reached: 16 after the device was idle (a wait), doubling with every submission up
+  to 1024, so the GPU starts on the head of a pass while the host still encodes the rest (a synchronised batch-1
+  forward otherwise spent a third of its latency encoding before the GPU had anything to do);
 - an upload or readback needs ordering;
 - you call `ctx.flush()` (submit without waiting) or `ctx.sync()` (submit, wait, report errors).
 
 A forward pass is therefore a handful of submissions. Each dispatch's parameters take a 256-byte slot in a
 64 KiB uniform arena, which is written once per submission. `ctx.work_stats()` counts dispatches and submissions
 (the backend benchmark prints them per pass).
+
+**Profiling.** `ctx.trace_begin()` / `trace_end()` record every dispatch and buffer copy encoded in between
+(`TracedOp`: kernel name, spec, workgroups, and what is needed to encode it again) and `ctx.replay(&op)` re-encodes
+one. `cargo bench -p folo-vision --bench gpu_profile` uses them on a fused forward: the host split of a
+synchronised call (encode, submit, wait), then every recorded dispatch replayed alone, summed per kernel and per
+kernel variant (`FOLO_BENCH_OPS=1` lists every dispatch). Host-side, a dispatch costs about 8–12 µs on this
+machine (bind group creation about 3–4 µs; the rest lands in wgpu's submission), so batch-1 forwards are
+host-bound: folo-n's 117 dispatches take about as long to encode and submit as the GPU takes to run them.
 
 ### Pipeline cache and specialisation constants
 
