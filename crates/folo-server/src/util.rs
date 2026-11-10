@@ -84,6 +84,24 @@ pub fn rfc3339(unix_secs: f64) -> String {
     format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", tod / 3600, (tod / 60) % 60, tod % 60)
 }
 
+/// Formats Unix milliseconds as RFC 3339 UTC to the millisecond (`2026-11-08T12:00:00.250Z`).
+pub fn rfc3339_millis(unix_ms: i64) -> String {
+    let secs = rfc3339(unix_ms.div_euclid(1000) as f64);
+    format!("{}.{:03}Z", &secs[..19], unix_ms.rem_euclid(1000))
+}
+
+/// Parses what [`rfc3339`] or [`rfc3339_millis`] wrote back to Unix milliseconds.
+pub fn parse_rfc3339_millis(s: &str) -> Option<i64> {
+    match s.len() {
+        20 => Some(parse_rfc3339(s)? as i64 * 1000),
+        24 if s.as_bytes()[19] == b'.' && s.ends_with('Z') => {
+            let ms = s.get(20..23)?.parse::<i64>().ok()?;
+            Some(parse_rfc3339(&format!("{}Z", &s[..19]))? as i64 * 1000 + ms)
+        }
+        _ => None,
+    }
+}
+
 /// Parses `YYYY-MM-DDTHH:MM:SSZ` (as produced by [`rfc3339`]) back to Unix seconds.
 pub fn parse_rfc3339(s: &str) -> Option<f64> {
     let b = s.as_bytes();
@@ -174,6 +192,21 @@ pub fn claim_dir(parent: &Path, base: &str) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn millisecond_times_round_trip_and_sort_as_time() {
+        let t = 1_794_300_000_250;
+        let s = rfc3339_millis(t);
+        assert_eq!(s.len(), 24);
+        assert!(s.ends_with(".250Z") && s.starts_with(&rfc3339(t as f64 / 1000.0)[..19]), "{s}");
+        assert_eq!(parse_rfc3339_millis(&s), Some(t));
+        assert_eq!(parse_rfc3339_millis(&rfc3339(1_794_300_000.0)), Some(1_794_300_000_000));
+        assert!(
+            rfc3339_millis(t) < rfc3339_millis(t + 1) && rfc3339_millis(t + 1) < rfc3339_millis(t + 1000)
+        );
+        assert_eq!(parse_rfc3339_millis("2026-11-10"), None);
+        assert_eq!(parse_rfc3339_millis("2026-11-10T07:22:50,123Z"), None);
+    }
 
     #[test]
     fn slugs() {

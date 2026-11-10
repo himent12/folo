@@ -17,8 +17,15 @@ export interface MockDatasetSpec {
   /** Geometry of each class's boxes. */
   classShape: Shape[];
   splits: Record<Split, number>;
+  /** Every image's size, unless `frames` gives each its own. */
   width: number;
   height: number;
+  /**
+   * Photos of several shapes (a labeling job's uploads from phones: landscape, portrait, a panorama): each image's
+   * size picked from these by its own seed (by `weight`), its boxes placed within it. Absent: every image is
+   * `width × height`.
+   */
+  frames?: { width: number; height: number; weight: number }[];
   /** Mean boxes per image and the probability that an image is empty. */
   meanBoxes: number;
   emptyRate: number;
@@ -26,7 +33,8 @@ export interface MockDatasetSpec {
   sizeRange: [number, number];
   brokenLabels: number;
   createdAgoS: number;
-  style: 'shapes' | 'fasteners';
+  /** How ./render draws it: coloured shapes, fasteners on a conveyor, or fish and frogs in a pond (a benchmark's). */
+  style: 'shapes' | 'fasteners' | 'pond';
   /** Generation seed for synthetic datasets; built-in datasets derive theirs from the id. */
   seed?: number;
 }
@@ -126,9 +134,17 @@ export function splitOf(s: MockDatasetSpec, index: number): Split {
 export const imageId = (index: number) => `img_${String(index).padStart(6, '0')}`;
 export const imageIndex = (id: string) => Number.parseInt(id.replace(/^img_/, ''), 10);
 
+/** The size of the image at `index`: the spec's, or one of its `frames` by the image's own seed. */
+export function frameOf(s: MockDatasetSpec, index: number): { width: number; height: number } {
+  if (!s.frames?.length) return { width: s.width, height: s.height };
+  const f = s.frames[weighted(rng(seedOf(s) ^ hash(`frame:${index}`)), s.frames.map((x) => x.weight))]!;
+  return { width: f.width, height: f.height };
+}
+
 /** The image at `index`: boxes are placed with light overlap avoidance so labels stay readable. */
 export function image(s: MockDatasetSpec, index: number): DatasetImage {
   const r = rng(seedOf(s) ^ Math.imul(index + 1, 2654435761));
+  const { width: W, height: H } = frameOf(s, index);
   const split = splitOf(s, index);
   const sub = split === 'train' ? index : split === 'val' ? index - s.splits.train : index - s.splits.train - s.splits.val;
   const ext = s.format === 'coco' ? 'jpg' : 'png';
@@ -136,7 +152,7 @@ export function image(s: MockDatasetSpec, index: number): DatasetImage {
   const boxes: Box[] = [];
   if (r() >= s.emptyRate) {
     const n = Math.max(1, Math.round(s.meanBoxes + gauss(r) * s.meanBoxes * 0.55));
-    const short = Math.min(s.width, s.height);
+    const short = Math.min(W, H);
     for (let tries = 0; boxes.length < n && tries < n * 8; tries++) {
       const cls = weighted(r, s.classWeights);
       const shape = s.classShape[cls] ?? 'square';
@@ -157,16 +173,16 @@ export function image(s: MockDatasetSpec, index: number): DatasetImage {
       } else if (shape === 'square') {
         w = side * range(r, 0.85, 1.15);
       }
-      w = Math.min(w, s.width * 0.9);
-      h = Math.min(h, s.height * 0.9);
-      const x1 = range(r, 4, s.width - w - 4);
-      const y1 = range(r, 4, s.height - h - 4);
+      w = Math.min(w, W * 0.9);
+      h = Math.min(h, H * 0.9);
+      const x1 = range(r, 4, W - w - 4);
+      const y1 = range(r, 4, H - h - 4);
       const box = { class: cls, x1, y1, x2: x1 + w, y2: y1 + h };
       if (boxes.some((b) => iou(b, box) > 0.08)) continue;
       boxes.push(roundBox(box));
     }
   }
-  return { id: imageId(index), file, split, width: s.width, height: s.height, boxes };
+  return { id: imageId(index), file, split, width: W, height: H, boxes };
 }
 
 function roundBox<T extends Box>(b: T): T {
@@ -201,9 +217,9 @@ export function stats(s: MockDatasetSpec): DatasetStats {
   const per = new Array<number>(PER_IMAGE_EDGES.length - 1).fill(0);
   let boxes = 0;
   let empty = 0;
-  const area = s.width * s.height;
   for (let i = 0; i < total(s); i++) {
     const img = image(s, i);
+    const area = img.width * img.height;
     if (img.boxes.length === 0) empty++;
     per[bin(PER_IMAGE_EDGES, img.boxes.length)]!++;
     for (const b of img.boxes) {

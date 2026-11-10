@@ -20,6 +20,7 @@
 //! - `uploads/<id>/`, `uploads.json`: upload sessions in progress and the fingerprints of finished uploads
 //!   ([`crate::uploads`]); a finished dataset upload moves to `datasets/<name>/`, a model to `models/`.
 //! - `cloud/connections.json`, `cloud/instances/`: cloud connections and the instance ledger ([`crate::cloud`]).
+//! - `label/<id>/`: labeling jobs ([`crate::label`]); `bench/<id>/`: vision benchmarks ([`crate::bench`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -40,6 +41,7 @@ use folo_core::Device;
 use folo_vision::PredictConfig;
 use serde::{Deserialize, Serialize};
 
+use crate::bench::Benches;
 use crate::cloud::{self, Cloud, Job, Mode};
 use crate::engine::{self, Predictors, engine_error};
 use crate::error::{Error, Result};
@@ -293,6 +295,7 @@ pub struct RealStore {
     uploads: Arc<Uploads>,
     cloud: Cloud,
     labeler: Labeler,
+    benches: Benches,
 }
 
 impl RealStore {
@@ -345,6 +348,16 @@ impl RealStore {
         let predictors = Arc::new(Predictors::default());
         let idle = Arc::new(GpuIdle::new());
         let labeler = Labeler::open(&data_dir);
+        // Benchmark entries count as inference for the idle sweeper, as predictions do.
+        let guard: crate::bench::InferenceGuard = {
+            let idle = idle.clone();
+            Arc::new(move |device| {
+                let g = idle.using();
+                g.on(device);
+                Box::new(g)
+            })
+        };
+        let benches = Benches::open(&data_dir, Some(guard));
         spawn_idle_sweeper(Arc::downgrade(&idle), Arc::downgrade(&predictors), Arc::downgrade(&runs));
         let uploads = Uploads::open(&data_dir);
         let cloud = Cloud::with(&data_dir, providers, tuning);
@@ -363,6 +376,7 @@ impl RealStore {
             uploads,
             cloud,
             labeler,
+            benches,
         }
     }
 
@@ -378,6 +392,7 @@ impl RealStore {
     /// CPU; `cpu`; `gpu:<n>`). Training uses each run's `TrainConfig.device`.
     pub fn device(mut self, device: impl Into<String>) -> RealStore {
         self.device = device.into();
+        self.benches.set_device(&self.device);
         self
     }
 
@@ -410,6 +425,20 @@ impl RealStore {
     #[doc(hidden)]
     pub fn hold_runs_after_epochs(&self, on: bool) {
         self.runs.hold_after_epochs(on);
+    }
+
+    /// How long an open external benchmark entry waits for its next part before it expires (default 30 minutes;
+    /// tests shorten it).
+    pub fn bench_open_timeout(self, timeout: Duration) -> RealStore {
+        self.benches.set_open_timeout(timeout);
+        self
+    }
+
+    /// Test support: while `on`, every benchmark model entry waits after its last pass, before it is graded (a
+    /// stop can then land while it is graded). Nothing else turns it on.
+    #[doc(hidden)]
+    pub fn hold_bench_entries(&self, on: bool) {
+        self.benches.hold_entries(on);
     }
 
     /// Test support: replaces the labeling agents (Claude Code and Codex) with scripted ones, so tests exercise
@@ -737,8 +766,34 @@ impl RealStore {
         if idx.splits.train == 0 {
             return Err(bad("the dataset has no training images".into()));
         }
-        // Fine-tuning takes the weights' architecture, as `folo train --weights` does (`arch` would otherwise build
-        // another model and transfer almost nothing into it).
+        let (weights, target) = self.run_settings(&mut config)?;
+        let ds = self.dataset_ref(&e);
+        if config.name.trim().is_empty() {
+            config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
+        }
+        let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
+        match target {
+            RunTarget::Cloud(cloud) => {
+                let (compute, connected, offer) = *cloud;
+                let device = format!("{} at {}", offer.gpu, connected.provider.info().name);
+                let fingerprint = upload_fingerprint(ds.format, &idx);
+                let cloud = run_cloud(&compute, &connected, offer);
+                let entry =
+                    self.runs.create_cloud(config, ds, weights, checkpoint, val_offset, device, cloud)?;
+                self.start_cloud(entry, connected, Some(fingerprint))
+            }
+            RunTarget::Local(device) => {
+                self.runs.create(config, ds, weights, checkpoint, val_offset, engine::describe(device))
+            }
+        }
+    }
+
+    /// The checks of `POST /api/runs` that do not need the dataset: the starting weights (a fine-tune takes their
+    /// architecture, as `folo train --weights` does, so `config.arch` changes), the settings (on the CPU, so a
+    /// rejected config never initialises a GPU), and where the run would train: a cloud run's target, else the
+    /// device, with `amp` checked as `folo train --amp` checks it (the same answer `/api/system`'s
+    /// `capabilities.amp` gives). Returns the weights file and the target.
+    fn run_settings(&self, config: &mut TrainConfig) -> Result<(Option<PathBuf>, RunTarget)> {
         let weights = match &config.weights {
             Some(w) => {
                 let m = self.model(w)?;
@@ -747,32 +802,20 @@ impl RealStore {
             }
             None => None,
         };
-        // The settings first (on the CPU), so a rejected config never initialises a GPU.
-        let mut check = folo_vision::TrainConfig::from_api(&config).map_err(engine_error)?;
+        let mut check = folo_vision::TrainConfig::from_api(config).map_err(engine_error)?;
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
-        let ds = self.dataset_ref(&e);
-        if config.name.trim().is_empty() {
-            config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
-        }
-        let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
         // A cloud run's device and `amp` are the worker's to check (docs/CLOUD.md, worker check).
         if let Some(compute) = config.compute.clone() {
-            cloud::check_device(&config)?;
+            cloud::check_device(config)?;
             let (connected, offer) = self.cloud.target(&compute)?;
-            let device = format!("{} at {}", offer.gpu, connected.provider.info().name);
-            let fingerprint = upload_fingerprint(ds.format, &idx);
-            let cloud = run_cloud(&compute, &connected, offer);
-            let entry = self.runs.create_cloud(config, ds, weights, checkpoint, val_offset, device, cloud)?;
-            return self.start_cloud(entry, connected, Some(fingerprint));
+            return Ok((weights, RunTarget::Cloud(Box::new((compute, connected, offer)))));
         }
         let device = engine::resolve(&config.device)?;
-        // `amp` is checked here, as `folo train --amp` checks it, rather than failing the queued run: the same
-        // answer `/api/system`'s `capabilities.amp` gives (the trainer's own check, without switching anything on).
         if config.amp {
             folo_vision::train::amp_available(device).map_err(engine_error)?;
         }
-        self.runs.create(config, ds, weights, checkpoint, val_offset, engine::describe(device))
+        Ok((weights, RunTarget::Local(device)))
     }
 
     /// Hands a registered (and claimed) cloud run to its executor. A run whose executor cannot start fails with the
@@ -870,8 +913,15 @@ impl RealStore {
     }
 }
 
+/// Where a run trains ([`RealStore::run_settings`]).
+enum RunTarget {
+    Cloud(Box<(Compute, cloud::Connected, CloudOffer)>),
+    Local(Device),
+}
+
 impl Drop for RealStore {
     fn drop(&mut self) {
+        self.benches.shutdown();
         self.labeler.shutdown();
         self.runs.shutdown(None);
     }
@@ -963,7 +1013,7 @@ fn run_cloud(compute: &Compute, connected: &cloud::Connected, offer: CloudOffer)
 /// The server's own files in the data dir, left out of dataset fingerprints (the data dir may sit inside a
 /// registered dataset folder; caching an index must not make it stale).
 fn own_state(dir: &Path) -> Vec<PathBuf> {
-    vec![dir.join("cache"), dir.join("label"), registry_path(dir)]
+    vec![dir.join("cache"), dir.join("label"), dir.join("bench"), registry_path(dir)]
 }
 
 fn registry_path(dir: &Path) -> PathBuf {
@@ -1499,6 +1549,18 @@ impl Store for RealStore {
         Ok(&self.labeler)
     }
 
+    fn benches(&self) -> Result<&Benches> {
+        Ok(&self.benches)
+    }
+
+    fn check_run(&self, config: &TrainConfig) -> Result<()> {
+        self.run_settings(&mut config.clone()).map(|_| ())
+    }
+
+    fn dataset_image_path(&self, id: &str, image_id: &str) -> Result<PathBuf> {
+        self.entry(id)?.current()?.image_path(image_id)
+    }
+
     fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
         Uploads::check(&req)?;
         if let Some(existing) = req.fingerprint.as_deref().and_then(|f| self.uploaded(req.kind, f)) {
@@ -1574,6 +1636,8 @@ impl Store for RealStore {
         self.uploads.shutdown();
         // Cloud runs train on without this server; their threads let go of them (each logs it).
         self.cloud.shutdown();
+        // Before the runs: a loop stops the run it follows.
+        self.benches.shutdown();
         self.labeler.shutdown();
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();

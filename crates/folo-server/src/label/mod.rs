@@ -10,11 +10,13 @@
 pub mod agent;
 pub mod claude;
 pub mod codex;
-mod dataset;
-mod job;
+pub(crate) mod dataset;
+pub(crate) mod job;
 pub mod prompt;
 mod run;
 mod tree;
+
+pub(crate) use run::{MAX_SOFT_FAILURES, agent_jpeg, agent_jpeg_of};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -81,6 +83,30 @@ pub struct WrittenDataset {
     export: Exporting,
 }
 
+/// The images of a job as [`Labeler::job_images`] hands them out.
+pub struct JobImages {
+    /// The job's name.
+    pub name: String,
+    /// Its classes.
+    pub classes: Vec<String>,
+    /// The images, in the order they were added.
+    pub images: Vec<JobImage>,
+}
+
+/// One image of [`JobImages`].
+pub struct JobImage {
+    /// Its file name in the job (stems unique).
+    pub file: String,
+    /// Where the file is.
+    pub path: PathBuf,
+    /// Width after EXIF orientation.
+    pub width: u32,
+    /// Height.
+    pub height: u32,
+    /// Its boxes when it is labeled, pixel `xyxy`; empty otherwise.
+    pub boxes: Vec<BBox>,
+}
+
 /// The labeling jobs of a data dir and the agents that can work on them. See the module docs.
 pub struct Labeler {
     /// `<data dir>/label`.
@@ -107,8 +133,23 @@ fn path_not_found(path: &Path) -> Error {
         .hint("give a folder (or an image file) on the machine the server runs on")
 }
 
+/// The model an agent is asked for: trimmed, `None` when blank, else at most [`MAX_MODEL_CHARS`] of
+/// `A-Z a-z 0-9 . _ : / - [ ]` (it travels as a command-line argument).
+pub(crate) fn check_model(model: Option<&str>) -> Result<Option<String>> {
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
+    if let Some(m) = model
+        && (m.chars().count() > MAX_MODEL_CHARS
+            || !m.chars().all(|c| c.is_ascii_alphanumeric() || "._:/-[]".contains(c)))
+    {
+        return Err(invalid(format!(
+            "model must be at most {MAX_MODEL_CHARS} characters of A-Z a-z 0-9 . _ : / - [ ]"
+        )));
+    }
+    Ok(model.map(str::to_string))
+}
+
 /// A display name: trimmed, not blank, one line of at most [`MAX_NAME_CHARS`].
-fn check_name(name: &str) -> Result<String> {
+pub(crate) fn check_name(name: &str) -> Result<String> {
     let name = name.trim();
     if name.is_empty() {
         return Err(invalid("name must not be empty"));
@@ -154,7 +195,7 @@ fn check_classes(classes: &[String]) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn check_text(what: &str, text: &str, max: usize) -> Result<String> {
+pub(crate) fn check_text(what: &str, text: &str, max: usize) -> Result<String> {
     if text.chars().count() > max {
         return Err(invalid(format!("{what} must be at most {max} characters")));
     }
@@ -605,15 +646,8 @@ impl Labeler {
     /// `POST /api/label/jobs/{id}/start`: starts an agent run on its own thread.
     pub fn start(&self, id: &str, req: StartLabeling) -> Result<LabelJob> {
         let note = check_text("note", &req.note, MAX_NOTE_CHARS)?;
-        let model = req.model.as_deref().map(str::trim).filter(|m| !m.is_empty());
-        if let Some(m) = model
-            && (m.chars().count() > MAX_MODEL_CHARS
-                || !m.chars().all(|c| c.is_ascii_alphanumeric() || "._:/-[]".contains(c)))
-        {
-            return Err(invalid(format!(
-                "model must be at most {MAX_MODEL_CHARS} characters of A-Z a-z 0-9 . _ : / - [ ]"
-            )));
-        }
+        let model = check_model(req.model.as_deref())?;
+        let model = model.as_deref();
         if req.batch.is_some_and(|b| !(1..=MAX_BATCH).contains(&b)) {
             return Err(invalid(format!("batch must be in 1..={MAX_BATCH}")));
         }
@@ -717,8 +751,9 @@ impl Labeler {
         Ok(state.job())
     }
 
-    /// The agent `id`, installed: `501 not_supported` with how to get it otherwise.
-    fn agent(&self, id: LabelAgentId) -> Result<Arc<dyn Agent>> {
+    /// The agent `id`, installed: `501 not_supported` with how to get it otherwise. Vision benchmarks ask the
+    /// same agents ([`crate::bench`]), so scripted agents script them too.
+    pub fn agent(&self, id: LabelAgentId) -> Result<Arc<dyn Agent>> {
         let unsupported = |message: String| Error::new(StatusCode::NOT_IMPLEMENTED, "not_supported", message);
         let Some(agent) = self.agents.iter().find(|a| a.id() == id) else {
             return Err(unsupported(format!("this server has no {} agent", id.display_name())));
@@ -806,7 +841,9 @@ impl Labeler {
         }
         let path = claim_dir(&self.datasets, &slug(&name, "labeled"))
             .map_err(|e| io_error("creating a folder in", &self.datasets, e))?;
-        if let Err(e) = dataset::write(&path, &classes, &items, req.val_fraction, req.seed) {
+        if let Err(e) =
+            dataset::write(&path, &classes, &items, req.val_fraction, req.seed, dataset::PROVENANCE)
+        {
             let _ = std::fs::remove_dir_all(&path);
             return Err(io_error("writing the dataset", &path, e));
         }
@@ -829,6 +866,28 @@ impl Labeler {
             tracing::warn!(job = %job.id, "{e}");
         }
         job.emit_job(&state);
+    }
+
+    /// The images of job `id` with their files and boxes, in the order they were added: every image, or only the
+    /// `labeled` ones (with the boxes they are labeled with). What a benchmark (its truth) or a self-improvement
+    /// loop (its pool, whose boxes are never read) is made from.
+    pub fn job_images(&self, id: &str, labeled_only: bool) -> Result<JobImages> {
+        let job = self.job(id)?;
+        let state = job.live()?;
+        let images = state
+            .file
+            .images
+            .iter()
+            .filter(|r| !labeled_only || r.status == LabelImageStatus::Labeled)
+            .map(|r| JobImage {
+                file: r.file.clone(),
+                path: job.image_path(r),
+                width: r.width,
+                height: r.height,
+                boxes: if r.status == LabelImageStatus::Labeled { r.boxes.clone() } else { Vec::new() },
+            })
+            .collect();
+        Ok(JobImages { name: state.file.name.clone(), classes: state.file.classes.clone(), images })
     }
 
     /// Ends every active run (their agent calls are killed) and waits for them to close.

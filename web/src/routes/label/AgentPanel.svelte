@@ -23,11 +23,9 @@
   import Meta from '$lib/ui/Meta.svelte';
   import Panel from '$lib/ui/Panel.svelte';
   import Progress from '$lib/ui/Progress.svelte';
-  import Segmented from '$lib/ui/Segmented.svelte';
-  import Select from '$lib/ui/Select.svelte';
-  import Skeleton from '$lib/ui/Skeleton.svelte';
   import TextArea from '$lib/ui/TextArea.svelte';
   import Callout from '../run/Callout.svelte';
+  import AgentFields from './AgentFields.svelte';
   import type { AgentChoice } from './agentChoice.svelte';
   import LastRun from './LastRun.svelte';
   import { images, modelLabel, runAgent, toLabel } from './words';
@@ -75,12 +73,6 @@
   const failed = $derived(!running && run?.outcome === 'failed');
   const n = $derived(toLabel(job));
   const agent = $derived(choice.agent);
-  /** The agents that are not set up, said in words under the choice (a disabled option's tooltip alone reaches no one on touch). */
-  const notReady = $derived((agents ?? []).filter((a) => !a.available && a.hint));
-  const modelOptions = $derived([
-    ...(agent && agent.default_model === null ? [{ value: '', label: 'Default' }] : []),
-    ...(agent?.models.map((m) => ({ value: m.id, label: m.label })) ?? []),
-  ]);
   /** Why the run cannot start, in words beside the button; null when it can. */
   const why = $derived(
     job.counts.images === 0
@@ -136,36 +128,7 @@
   <!-- The settings are for the next run: while one runs, its own line above says what it uses. -->
   {#if !running}
     <div class="sec">
-      {#if agentsError && !agents}
-        <ErrorState error={agentsError} title="Could not ask which agents are installed" retry={retryAgents} compact />
-      {:else if !agents}
-        <div class="sk" aria-hidden="true"><Skeleton w="64px" h="12px" /><Skeleton h="32px" r="var(--radius-md)" /><Skeleton w="64px" h="12px" /><Skeleton h="32px" r="var(--radius-md)" /></div>
-      {:else}
-        <Field label="CLI" hint={notReady.map((a) => `${a.name}: ${a.hint}`).join(' ') || undefined}>
-          <Segmented
-            label="Agent CLI"
-            value={agent?.id ?? 'claude'}
-            options={agents.map((a) => ({ value: a.id, label: a.name, disabled: !a.available, tip: a.hint ?? undefined }))}
-            onchange={(id) => choice.pick(id)}
-          />
-        </Field>
-        {#if agent}
-          <Field label="Model" for="{uid}-model" hint={agent.id === 'claude' && agent.default_model === 'haiku' ? 'Haiku is the default: about as accurate as the larger models here, at a fraction of the cost.' : undefined}>
-            <Select id="{uid}-model" bind:value={choice.model} options={modelOptions} />
-          </Field>
-          <Field label="Effort" hint="More effort means more reasoning tokens per call and a slower run. The default, {agent.default_effort}, is the best value for {agent.name}.">
-            <Segmented
-              label="Effort"
-              bind:value={choice.effort}
-              options={[
-                { value: 'low', label: 'Low' },
-                { value: 'medium', label: 'Medium' },
-                { value: 'high', label: 'High' },
-              ]}
-            />
-          </Field>
-        {/if}
-      {/if}
+      <AgentFields {agents} {agentsError} {retryAgents} {choice} />
     </div>
   {/if}
 
@@ -217,10 +180,6 @@
   }
   .sec :global(.seg) {
     justify-self: start;
-  }
-  .sk {
-    display: grid;
-    gap: var(--space-2);
   }
   .chips {
     display: flex;

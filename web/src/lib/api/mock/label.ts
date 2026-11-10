@@ -367,6 +367,17 @@ export class MockLabeling {
     return url;
   }
 
+  /**
+   * A job's labeled images with their boxes and where their pixels come from: what a benchmark made from the job copies
+   * (docs/API.md, Vision benchmarks: "a labeling job's `labeled` images").
+   */
+  labeled(id: string, now: number): { name: string; classes: string[]; images: { file: string; width: number; height: number; boxes: Box[]; from: Img['from'] }[] } {
+    const j = this.#job(id);
+    this.advance(j, now);
+    const images = j.images.filter((i) => i.status === 'labeled').map((i) => ({ file: i.file, width: i.width, height: i.height, boxes: i.boxes.map((b) => ({ ...b })), from: i.from }));
+    return { name: j.name, classes: [...j.classes], images };
+  }
+
   // ---------- jobs ----------
 
   #checkJobFields(b: UpdateLabelJob) {

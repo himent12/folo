@@ -64,6 +64,7 @@ crates/folo-api      serde types of docs/API.md, shared by the server, the CLI a
 crates/folo-server   axum HTTP + SSE API used by Studio and by agents; serves the built web app
 crates/folo-client   blocking HTTP client of docs/API.md: `folo mcp --server`, cloud workers; transfers in parts
 crates/folo-cloud    cloud compute providers behind one trait (RunPod, a remote FOLO server), docs/CLOUD.md
+crates/folo-bench    vision benchmarks, docs/BENCH.md: stress conditions, plans, every number of an entry's score
 crates/folo-mcp      `folo mcp`: the MCP server (rmcp, stdio) over the server's Store, embedded or proxying folo serve
 crates/folo-cli      the `folo` binary (train / val / predict / export / serve / cloud / mcp / doctor)
 crates/folo-wasm     FOLO detectors in the browser (wasm-bindgen; WebGPU or the wasm CPU), docs/WASM.md
