@@ -15,7 +15,7 @@ use crate::output::{CliError, ExitCode, Out};
 pub fn run(cmd: CloudCommand, out: Out) -> Result<(), CliError> {
     match cmd {
         CloudCommand::Providers(dir) => {
-            let providers = open(&dir).providers();
+            let providers = open(&dir)?.providers();
             for p in &providers {
                 out.record(p);
             }
@@ -24,7 +24,7 @@ pub fn run(cmd: CloudCommand, out: Out) -> Result<(), CliError> {
         }
         CloudCommand::Connect(args) => connect(args, out),
         CloudCommand::Connections(dir) => {
-            let list = open(&dir).connections().map_err(api_error)?;
+            let list = open(&dir)?.connections().map_err(api_error)?;
             for c in &list {
                 out.record(c);
             }
@@ -32,19 +32,19 @@ pub fn run(cmd: CloudCommand, out: Out) -> Result<(), CliError> {
             Ok(())
         }
         CloudCommand::Check(args) => {
-            let c = open(&args.dir).check(&args.id).map_err(api_error)?;
+            let c = open(&args.dir)?.check(&args.id).map_err(api_error)?;
             out.record(&c);
             connections_table(std::slice::from_ref(&c), out);
             Ok(())
         }
         CloudCommand::Disconnect(args) => {
-            open(&args.dir).disconnect(&args.id).map_err(api_error)?;
+            open(&args.dir)?.disconnect(&args.id).map_err(api_error)?;
             out.record(&json!({ "event": "disconnected", "id": args.id }));
             out.human(format!("disconnected {}", args.id));
             Ok(())
         }
         CloudCommand::Offers(args) => {
-            let list = open(&args.dir).offers(&args.connection, args.refresh).map_err(api_error)?;
+            let list = open(&args.dir)?.offers(&args.connection, args.refresh).map_err(api_error)?;
             for o in &list.offers {
                 out.record(o);
             }
@@ -52,7 +52,7 @@ pub fn run(cmd: CloudCommand, out: Out) -> Result<(), CliError> {
             Ok(())
         }
         CloudCommand::Instances(dir) => {
-            let list = open(&dir).instances();
+            let list = open(&dir)?.instances();
             for i in &list {
                 out.record(i);
             }
@@ -60,7 +60,7 @@ pub fn run(cmd: CloudCommand, out: Out) -> Result<(), CliError> {
             Ok(())
         }
         CloudCommand::Terminate(args) => {
-            let i = open(&args.dir).terminate(&args.id).map_err(api_error)?;
+            let i = open(&args.dir)?.terminate(&args.id).map_err(api_error)?;
             out.record(&i);
             instances_table(std::slice::from_ref(&i), out);
             Ok(())
@@ -69,8 +69,8 @@ pub fn run(cmd: CloudCommand, out: Out) -> Result<(), CliError> {
 }
 
 /// The control plane of the command's data dir.
-fn open(dir: &CloudDirArgs) -> Cloud {
-    Cloud::open(&dir.data_dir.clone().unwrap_or_else(crate::default_data_dir))
+fn open(dir: &CloudDirArgs) -> Result<Cloud, CliError> {
+    Ok(Cloud::open(&crate::data_dir(dir.data_dir.clone())?))
 }
 
 /// A store error as the CLI reports it: the same code, its exit code.
@@ -121,7 +121,7 @@ fn secret(key: &str, source: &str, stdin_used: &mut bool) -> Result<String, CliE
 }
 
 fn connect(args: CloudConnectArgs, out: Out) -> Result<(), CliError> {
-    let cloud = open(&args.dir);
+    let cloud = open(&args.dir)?;
     let provider = cloud.providers().into_iter().find(|p| p.id == args.provider);
     let mut values = BTreeMap::new();
     for s in &args.set {

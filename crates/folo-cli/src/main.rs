@@ -44,7 +44,8 @@ fn main() -> std::process::ExitCode {
         Ok(cli) => cli,
         Err(e) => return usage_error(out, e),
     };
-    let out = Out { json: cli.json };
+    // `folo mcp`'s stdout belongs to the protocol, also with --json: its errors go to stderr only.
+    let out = Out { json: cli.json && !matches!(cli.command, Command::Mcp(_)) };
     match run(cli, out) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
@@ -78,8 +79,13 @@ fn usage_error(out: Out, e: clap::Error) -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     let rendered = e.render().to_string();
-    let message =
-        rendered.lines().next().unwrap_or("invalid usage").trim_start_matches("error: ").to_string();
+    // The first paragraph, on one line: a missing argument's names follow "were not provided:" on their own lines.
+    let message: Vec<&str> =
+        rendered.lines().map(str::trim).take_while(|l| !l.is_empty()).filter(|l| !l.is_empty()).collect();
+    let message = match message.join(" ").trim_start_matches("error: ") {
+        "" => "invalid usage".to_string(),
+        m => m.to_string(),
+    };
     let err =
         CliError::new(ExitCode::Usage, "usage", message).hint("run `folo --help` or `folo describe --json`");
     if out.json {
@@ -128,6 +134,21 @@ pub(crate) fn default_data_dir() -> PathBuf {
     folo_api::weights::home_dir()
 }
 
+/// `--data-dir` (else [`default_data_dir`]), refused when it is something other than a folder: the commands create
+/// it when it does not exist, but a file there failed every write later, as `internal`.
+pub(crate) fn data_dir(given: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    let dir = given.unwrap_or_else(default_data_dir);
+    if dir.exists() && !dir.is_dir() {
+        return Err(CliError::new(
+            ExitCode::Usage,
+            "usage",
+            format!("--data-dir {} is not a folder", folo_api::json::path(&dir)),
+        )
+        .hint("pass a folder (it is created when it does not exist)"));
+    }
+    Ok(dir)
+}
+
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -150,7 +171,11 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         // Before anything creates the GPU context: the device has to be created with them.
         folo_gpu::context::request_tensor_cores();
     }
-    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
+    let data_dir = if args.mock {
+        args.data_dir.clone().unwrap_or_else(default_data_dir)
+    } else {
+        data_dir(args.data_dir.clone())?
+    };
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -238,7 +263,12 @@ fn mcp(args: McpArgs) -> Result<(), CliError> {
         // As `folo serve --tensor-cores`: before anything creates the GPU context.
         folo_gpu::context::request_tensor_cores();
     }
-    let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
+    // Embedded mode writes there; a mock or proxying server does not.
+    let data_dir = if args.server.is_none() && !args.mock {
+        data_dir(args.data_dir.clone())?
+    } else {
+        args.data_dir.clone().unwrap_or_else(default_data_dir)
+    };
     let backend = match (&args.server, args.mock) {
         (Some(url), _) => folo_mcp::Backend::Proxy { url: url.clone(), token: args.token.clone() },
         (None, true) => folo_mcp::Backend::Mock,
@@ -444,6 +474,27 @@ mod tests {
             (a.mosaic, a.mixup, a.fliplr, a.scale, a.translate)
         );
         assert_eq!((t.hsv.as_slice(), t.close_mosaic), (a.hsv.as_slice(), a.close_mosaic));
+    }
+
+    /// Help strings that state a computed default state the code's: `--workers` is
+    /// `folo_vision::train::default_workers` (at most 16, not 8), and `export --output` names every default file.
+    #[test]
+    fn help_states_the_computed_defaults() {
+        let d = describe::describe(&Cli::command(), &[], false).unwrap();
+        let help = |cmd: &str, arg: &str| {
+            let c = d["commands"].as_array().unwrap().iter().find(|c| c["name"] == cmd).unwrap();
+            let a = c["args"].as_array().unwrap().iter().find(|a| a["name"] == arg).unwrap();
+            a["help"].as_str().unwrap().to_string()
+        };
+        for cmd in ["train", "val"] {
+            assert!(help(cmd, "workers").contains("min(cores, 16)"), "{cmd}: {}", help(cmd, "workers"));
+        }
+        let output = help("export", "output");
+        for name in
+            ["-f16.folo", "-fused.folo", "-weights.folo", ".onnx", "-decoded.onnx", "-decoded-f16.onnx"]
+        {
+            assert!(output.contains(name), "{name}: {output}");
+        }
     }
 
     #[test]
