@@ -525,6 +525,27 @@ fn matmul_layouts() {
     check(dev, &[e1, e2], 0.0, 0.0, "k = 0", |v| v[0].matmul(&v[1]));
 }
 
+#[test]
+fn matmul_batches_beyond_one_dispatch() {
+    // More batch matrices than one dispatch's 65535 workgroup layers: one level (per-anchor dot products),
+    // two levels (a transposed batch that does not coalesce) with the outer and with the inner count too large.
+    let dev = dev!();
+    let a = randn(&[70000, 1, 3], 90);
+    let b = randn(&[70000, 3, 1], 91);
+    check(dev, &[a, b], 1e-5, 1e-5, "batch 70000", |v| v[0].matmul(&v[1]));
+    let a = randn(&[300, 300, 2, 3], 92);
+    let b = randn(&[300, 300, 3, 2], 93);
+    check(dev, &[a, b], 1e-5, 1e-5, "batch 300 x 300", |v| {
+        v[0].transpose(0, 1)?.matmul(&v[1].transpose(0, 1)?)
+    });
+    let a = randn(&[70000, 2, 1, 2], 94);
+    let b = randn(&[2, 2, 3], 95);
+    // The broadcast operand's gradient sums 70000 products: reduction tolerance.
+    check(dev, &[a, b], 1e-3, 1e-4, "batch 2 x 70000", |v| {
+        v[0].transpose(0, 1)?.matmul(&v[1].reshape([2, 1, 2, 3])?.expand([2, 70000, 2, 3])?)
+    });
+}
+
 struct ConvCase {
     x: [usize; 4],
     w: [usize; 4],

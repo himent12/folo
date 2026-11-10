@@ -548,10 +548,20 @@ impl GpuBackend {
             g.a.outer = 0;
             g.c.outer = 0;
         }
-        if g.batch.0 * g.batch.1 > 65535 {
-            return Ok(None);
+        // One dispatch takes at most 65535 batch matrices (workgroup layers): larger batches go in pieces.
+        let (outer, inner) = g.batch;
+        let (step_i, step_o) = (inner.min(65535), (65535 / inner).max(1));
+        let (ba, bb) = (self.buf(a)?, self.buf(b)?);
+        for o in (0..outer).step_by(step_o) {
+            for i in (0..inner).step_by(step_i) {
+                let mut p = g.clone();
+                p.batch = (step_o.min(outer - o), step_i.min(inner - i));
+                for (s, base) in [(&mut p.a, &g.a), (&mut p.b, &g.b), (&mut p.c, &g.c)] {
+                    s.offset = base.offset + o * base.outer + i * base.inner;
+                }
+                gemm::gemm(&self.ctx, &p, ba, bb, None, out).core()?;
+            }
         }
-        gemm::gemm(&self.ctx, &g, self.buf(a)?, self.buf(b)?, None, out).core()?;
         Ok(Some(()))
     }
 }
