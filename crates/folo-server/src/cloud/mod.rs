@@ -67,9 +67,11 @@ pub struct Tuning {
     pub checkpoint_every: Duration,
     /// Between two passes of the reaper.
     pub reaper_every: Duration,
-    /// Between two looks for an instance that was never found, after the first (docs/CLOUD.md, *Instances are
-    /// never left behind*).
+    /// Between two looks for an instance that was never found, after the first, until its watchdog is due
+    /// (docs/CLOUD.md, *Instances are never left behind*).
     pub unseen_every: Duration,
+    /// Between two looks for an instance that was never found, once its watchdog is due.
+    pub unseen_late_every: Duration,
     /// How long a worker may stay unreachable while its provider says the instance is gone (or a `remote` server
     /// stays unreachable) before the run fails with `cloud_instance_lost`; also how long a stopped worker run may
     /// take to end.
@@ -93,6 +95,7 @@ impl Default for Tuning {
             checkpoint_every: Duration::from_secs(10 * 60),
             reaper_every: Duration::from_secs(30),
             unseen_every: Duration::from_secs(10 * 60),
+            unseen_late_every: Duration::from_secs(60 * 60),
             lost_grace: Duration::from_secs(10 * 60),
             release_wait: Duration::from_secs(60),
             require_gpu: true,

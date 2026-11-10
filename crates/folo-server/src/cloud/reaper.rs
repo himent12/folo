@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use folo_api::{CloudInstance, CloudInstanceStatus};
 use folo_cloud::InstanceState;
 
+use super::ledger::Paces;
 use super::{Core, files};
 use crate::error::Result;
 use crate::util::{parse_rfc3339, unix_now};
@@ -21,8 +22,10 @@ use crate::util::{parse_rfc3339, unix_now};
 /// - until this long after its record was written, finding none leaves it `terminating`, looked for at every
 ///   sweep;
 /// - after that it ends (`terminated`, at no cost: nobody saw it) and stays marked, and the reaper keeps looking
-///   for it every [`super::Tuning::unseen_every`] until its own watchdog would have stopped it. One that shows up
-///   is terminated as any other, and costs what it ran from its launch ([`super::ledger::Ledger::unseen`]).
+///   for it: every [`super::Tuning::unseen_every`] until its watchdog is due, every
+///   [`super::Tuning::unseen_late_every`] after (a watchdog can fail), for as long as an ended record is kept, and
+///   once more at the end; a look that fails does not count. One that shows up is terminated as any other, and
+///   costs what it ran from its launch ([`super::ledger::Ledger::unseen`]).
 pub(crate) const LISTED_WITHIN: Duration = Duration::from_secs(5 * 60);
 
 /// Whether a record written at `created` was written less than [`LISTED_WITHIN`] before `now`. A time that does not
@@ -131,7 +134,9 @@ impl Core {
     /// (the connection is gone, the provider does not answer) is the record's error.
     fn look_for_unseen(&self, record: &CloudInstance) {
         let id = &record.id;
-        match self.ledger.due(id, unix_now(), self.tuning.unseen_every) {
+        let paces = Paces { fast: self.tuning.unseen_every, slow: self.tuning.unseen_late_every };
+        let at = unix_now();
+        match self.ledger.due(id, at, paces) {
             Ok(true) => {}
             Ok(false) => return,
             Err(e) => {
@@ -144,7 +149,7 @@ impl Core {
             .map_err(|e| e.body.message)
             .and_then(|c| c.provider.find(&c.connection.values(), &record.name).map_err(|e| e.message));
         let looked = match found {
-            Ok(refs) if refs.is_empty() => self.ledger.update(id, |i| i.error = None),
+            Ok(refs) if refs.is_empty() => self.ledger.looked(id, at, Ok(())),
             Ok(refs) => {
                 tracing::warn!(
                     instance = %id,
@@ -157,12 +162,15 @@ impl Core {
                 let one = (refs.len() == 1).then(|| refs[0].clone());
                 self.ledger.reopen(id, one).and_then(|_| self.terminate_once(id))
             }
-            Err(message) => self.ledger.update(id, |i| {
-                i.error = Some(format!(
+            // Does not count: looked for again at the next sweep.
+            Err(message) => self.ledger.looked(
+                id,
+                at,
+                Err(format!(
                     "looking for the instance, which its provider never listed: {message}; check the provider's \
                      console"
-                ))
-            }),
+                )),
+            ),
         };
         if let Err(e) = looked {
             tracing::warn!(instance = %id, "looking for it: {}", e.body.message);

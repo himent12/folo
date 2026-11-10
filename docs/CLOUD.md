@@ -127,12 +127,18 @@ Rented GPUs cost money by the hour, so the ledger is written before the provider
   a provider may list a new instance late, so not finding it by its name proves little. For 5 minutes after its
   record was written it stays `terminating` and is looked for at every pass of the reaper. After that it ends:
   `terminated`, with `ended` at its `created` and so no cost (nobody saw it), and its connection can be removed.
-  The reaper still looks for it, every 10 minutes, until its own watchdog would have stopped it (the later of the
-  run's `deadline` and its time limit from the launch, plus 15 minutes for its setup to start, the 10 minutes and
-  the few it keeps trying). One that shows up then is terminated like any other (`terminating`, then `terminated`
-  with the time it ran from its launch, a warning in the server's log naming it). A look that cannot be made (the
-  connection was removed, the provider does not answer) is the record's `error`. A record whose `created` cannot
-  be read, or lies in the future (a clock that went back), skips the 5 minutes.
+  The reaper still looks for it: every 10 minutes until its watchdog is due (the later of the run's `deadline`
+  and its time limit from the launch, plus 15 minutes for its setup to start, the 10 minutes and the few it keeps
+  trying), then every hour, for 7 days from the launch (or until the watchdog is due, if that is later), and once
+  more at the end. The watchdog normally stops the instance itself, but it can fail: it gives up after five failed
+  calls, and a container that restarts counts again; that is why FOLO keeps looking. One that shows up is
+  terminated like any other (`terminating`, then `terminated` with the time it ran from its launch, a warning in
+  the server's log naming it). A look that cannot be made (the connection was removed, the provider does not
+  answer) is the record's `error` and does not count: the next pass of the reaper looks again, also for the last
+  look, so the watch only ends with a look that got its answer. After that, an instance the provider never listed
+  in all that time is not looked for again (the record goes as ended records do), and the provider's console is the
+  place to check. A record whose `created` cannot be read, or lies in the future (a clock that went back), skips
+  the 5 minutes.
 - Terminating is idempotent and retried: a request that fails leaves the instance `terminating`, and a reaper
   thread retries every 30 s (and on every start) until the provider confirms. Studio and Desktop show such an
   instance with its error, and a run does not wait for more than a minute of that: it finishes with a warning in
@@ -201,6 +207,10 @@ A FOLO server you run yourself: `folo serve --host 0.0.0.0 --token <secret>` on 
   there: the uploaded dataset (reused by later runs of the same files) and the worker's own copy of the run, named
   `<name> (<run id>)`. A server that is too old to be a worker is refused when the connection is made
   (`cloud_refused`, naming its version).
+- A start request whose answer was lost is found again as the new run of that name on the server, so two FOLO
+  servers that share one `remote` worker and have a run of the same name and id (ids are short) can take each
+  other's run for their own in that moment. Give each control plane its own worker, or distinct run names, until
+  the worker keeps an identity of each attempt.
 
 ### Adding a provider
 A provider is one type implementing `folo_cloud::Provider` (check credentials, list offers, launch, look up, find

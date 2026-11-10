@@ -191,6 +191,9 @@ struct Script {
     stopped: Vec<Live>,
     /// Names `find` does not list (yet), as a provider that lists a new instance late.
     hidden: HashSet<String>,
+    /// By name: the calls of `find` (1-based) that fail, and those that list nothing.
+    find_fails: BTreeMap<String, Vec<usize>>,
+    find_hides: BTreeMap<String, Vec<usize>>,
 }
 
 /// The test provider (see the module docs).
@@ -263,6 +266,13 @@ impl TestCloud {
     /// The calls of `call` with `arg`.
     fn calls_with(&self, call: Call, arg: &str) -> usize {
         self.script.lock().unwrap().calls.iter().filter(|c| c.0 == call && c.1 == arg).count()
+    }
+
+    /// The `fails`-th and `hides`-th calls of `find` for `name` (1-based) fail, or list nothing.
+    fn script_find(&self, name: &str, fails: &[usize], hides: &[usize]) {
+        let mut s = self.script.lock().unwrap();
+        s.find_fails.insert(name.to_string(), fails.to_vec());
+        s.find_hides.insert(name.to_string(), hides.to_vec());
     }
 
     /// `find` does not list instances named `name` while `hidden`.
@@ -422,9 +432,14 @@ impl Provider for TestCloud {
             return Ok(Vec::new());
         }
         let s = self.script.lock().unwrap();
+        let n = s.calls.iter().filter(|c| c.0 == Call::Find && c.1 == name).count();
+        if s.find_fails.get(name).is_some_and(|f| f.contains(&n)) {
+            return Err(folo_cloud::Error::new(ErrorKind::Unavailable, "the test cloud does not answer"));
+        }
+        let hidden = s.hidden.contains(name) || s.find_hides.get(name).is_some_and(|h| h.contains(&n));
         Ok(s.instances
             .iter()
-            .filter(|(_, i)| i.name == name && i.live.is_some() && !s.hidden.contains(name))
+            .filter(|(_, i)| i.name == name && i.live.is_some() && !hidden)
             .map(|(r, _)| r.clone())
             .collect())
     }
@@ -898,7 +913,7 @@ fn instances_listed_after_the_wait_are_still_terminated() {
 }
 
 #[test]
-fn an_instance_never_listed_ends_at_no_cost_and_is_looked_for_until_its_watchdog_would_have_stopped_it() {
+fn an_instance_never_listed_ends_at_no_cost_and_is_still_looked_for_after_its_watchdog_is_due() {
     no_gpu();
     let t = TestDir::new("cloud-never-listed");
     let home = t.join("home");
@@ -906,8 +921,8 @@ fn an_instance_never_listed_ends_at_no_cost_and_is_looked_for_until_its_watchdog
     let store = plane(&home, &cloud, Tuning { unseen_every: Duration::from_millis(100), ..fast() });
     let (kept, removed) = (connect(&store), connect(&store));
     // Two launches whose answers were lost 6 minutes ago, and nothing the provider ever lists: one whose watchdog
-    // would stop it within seconds, one an hour from now on a connection that is removed meanwhile.
-    lost_launch(&home, &kept.id, "ci_kept", "folo-run_never-a", 360.0, 3.0 - WATCHDOG_AFTER_DEADLINE);
+    // was due a second ago, one an hour from now on a connection that is removed meanwhile.
+    lost_launch(&home, &kept.id, "ci_kept", "folo-run_never-a", 360.0, -1.0 - WATCHDOG_AFTER_DEADLINE);
     lost_launch(&home, &removed.id, "ci_gone", "folo-run_never-b", 360.0, 3600.0);
     for id in ["ci_kept", "ci_gone"] {
         let i = until(id, || instance(&store, id).filter(|i| !i.status.is_alive()));
@@ -922,18 +937,93 @@ fn an_instance_never_listed_ends_at_no_cost_and_is_looked_for_until_its_watchdog
     let e = gone.error.unwrap();
     assert!(e.contains("never listed") && e.contains(&removed.id), "{e}");
     assert_eq!(gone.status, CloudInstanceStatus::Terminated);
-    // The other is looked for until its watch is over, then it is final.
+    // The other's watchdog is due already, and it is still looked for (a watchdog can fail): its record names the
+    // end of the watch, a week after its launch.
+    until("looked for again", || (cloud.calls_with(Call::Find, "folo-run_never-a") >= 2).then_some(()));
     let file = home.join("cloud").join("instances").join("ci_kept.json");
-    until("the watch over", || {
-        (!std::fs::read_to_string(&file).unwrap().contains("unseen_until")).then_some(())
-    });
-    assert!(cloud.calls_with(Call::Find, "folo-run_never-a") >= 2, "looked for again");
+    assert!(std::fs::read_to_string(&file).unwrap().contains("unseen_until"), "still watched");
     let kept_i = instance(&store, "ci_kept").unwrap();
     assert_eq!(
         (kept_i.status, kept_i.cost_usd, kept_i.error),
         (CloudInstanceStatus::Terminated, Some(0.0), None)
     );
     store.disconnect_cloud(&kept.id).unwrap();
+}
+
+/// Polls `f` for at most `secs` seconds (an outcome that the wrong code reaches only much later, or never).
+fn within<T>(secs: u64, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let t0 = Instant::now();
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        assert!(t0.elapsed() < Duration::from_secs(secs), "not within {secs} s: {what}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_failed_look_for_a_never_found_instance_is_made_again_at_the_next_sweep() {
+    no_gpu();
+    let t = TestDir::new("cloud-look-failed");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, fast());
+    let conn = connect(&store);
+    // Never found: the first look (its 1st find) ends it, the next one (the 2nd) fails once.
+    let name = "folo-run_flaky-a1b2";
+    cloud.script_find(name, &[2], &[]);
+    lost_launch(&home, &conn.id, "ci_flaky", name, 360.0, 3600.0);
+    // Not ten minutes later: at the next sweep.
+    within(10, "a third look", || (cloud.calls_with(Call::Find, name) >= 3).then_some(()));
+    let i = within(10, "the error cleared", || instance(&store, "ci_flaky").filter(|i| i.error.is_none()));
+    assert_eq!((i.status, i.cost_usd), (CloudInstanceStatus::Terminated, Some(0.0)));
+}
+
+#[test]
+fn an_instance_listed_after_its_watchdog_was_due_is_still_found_and_terminated() {
+    no_gpu();
+    let t = TestDir::new("cloud-listed-later");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, fast());
+    let conn = connect(&store);
+    let name = "folo-run_later-a1b2";
+    let values = Values::from(BTreeMap::from([("api_key".to_string(), SECRET.to_string())]));
+    let spec = LaunchSpec {
+        name: name.into(),
+        offer_id: "cpu@test".into(),
+        disk_gb: 20,
+        token: "t".into(),
+        lifetime_s: 3600,
+        worker_base_url: "http://x".into(),
+    };
+    cloud.launch(&values, &spec).unwrap();
+    // Launched two hours ago; its watchdog was due a minute ago and did not stop it. Not listed at first.
+    cloud.script_find(name, &[], &[1]);
+    lost_launch(&home, &conn.id, "ci_later", name, 7200.0, -60.0 - WATCHDOG_AFTER_DEADLINE);
+    within(10, "the instance terminated", || (cloud.live() == 0).then_some(()));
+    let i = until("its record", || {
+        instance(&store, "ci_later").filter(|i| i.status == CloudInstanceStatus::Terminated)
+    });
+    assert!(i.cost_usd.unwrap() >= 2.0 * 0.36 - 1e-3, "costs what it ran from its launch: {i:?}");
+}
+
+#[test]
+fn the_watch_ends_only_with_a_last_look_that_succeeds() {
+    no_gpu();
+    let t = TestDir::new("cloud-last-look");
+    let home = t.join("home");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&home, &cloud, fast());
+    let conn = connect(&store);
+    // Written eight days ago, its watchdog long due: the watch is over as soon as it starts. The first find ends
+    // it; the last look (the 2nd) fails, so it is made again (the 3rd) before the record goes.
+    let name = "folo-run_old-a1b2";
+    cloud.script_find(name, &[2], &[]);
+    lost_launch(&home, &conn.id, "ci_old", name, 8.0 * 86_400.0, -8.0 * 86_400.0);
+    within(10, "the record pruned", || instance(&store, "ci_old").is_none().then_some(()));
+    assert_eq!(cloud.calls_with(Call::Find, name), 3, "looked at last, and again after the failed look");
 }
 
 #[test]
@@ -1057,11 +1147,13 @@ fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
     let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
     // The checkpoint of epoch 1 arrives whole, and after it nothing from the worker does...
     let weights = t.join("home").join("runs").join(&run.id).join("weights");
+    // (Staged, or already moved into place by the next poll: the window of the staged file is one poll long.)
     until("the checkpoint fetched", || {
         let names = std::fs::read_dir(&weights).ok()?;
         names
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().starts_with(".last.folo.copy."))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .any(|n| n.starts_with(".last.folo.copy.") || n == "last.folo")
             .then_some(())
     });
     // ...until its instance is gone.

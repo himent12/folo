@@ -141,7 +141,7 @@ impl RunPod {
         let reply = self.api.post(&self.graphql, key, &query).ok().filter(Reply::is_success)?;
         let me = reply.json::<Graphql>().ok()?.data?.myself?;
         Some(Account {
-            label: me.email.filter(|e| !e.is_empty()),
+            label: me.email.filter(|e| !e.is_empty()).map(|e| reply.scrub(&e)),
             balance_usd: me.client_balance,
             note: None,
         })
@@ -161,7 +161,12 @@ impl RunPod {
         if !reply.is_success() {
             return Err(self.failure(&reply));
         }
-        reply.json()
+        // The ids found go to logs and the ledger.
+        let mut list: PodList = reply.json()?;
+        for p in &mut list.pods {
+            p.id = reply.scrub(&p.id);
+        }
+        Ok(list)
     }
 
     /// The offers of one cloud.
@@ -175,7 +180,12 @@ impl RunPod {
         if !reply.is_success() {
             return Err(self.failure(&reply));
         }
-        Ok(reply.json::<GpuList>()?.gpus.iter().filter_map(|g| offer(g, cloud)).collect())
+        // Offers are logged and named in errors.
+        let mut list: GpuList = reply.json()?;
+        for g in &mut list.gpus {
+            (g.id, g.name) = (reply.scrub(&g.id), reply.scrub(&g.name));
+        }
+        Ok(list.gpus.iter().filter_map(|g| offer(g, cloud)).collect())
     }
 }
 
@@ -289,10 +299,11 @@ impl Provider for RunPod {
         match reply.status {
             200..=299 => {
                 let pod: Pod = reply.json()?;
-                check_pod_id(&pod.id).map_err(|_| {
+                let id = reply.scrub(&pod.id);
+                check_pod_id(&id).map_err(|_| {
                     Error::new(ErrorKind::Unavailable, "RunPod created a pod but did not answer with its id")
                 })?;
-                Ok(pod.id)
+                Ok(id)
             }
             // An account that may not use this GPU's pool, or a key scoped away from it: RunPod's text says which.
             403 => Err(Error::new(
@@ -329,7 +340,10 @@ impl Provider for RunPod {
             // Neither `Starting` (it may never start) nor `Gone` (it may be billed): the caller asks again.
             other => Err(Error::new(
                 ErrorKind::Unavailable,
-                format!("RunPod reports pod {provider_ref} as `{other}`, a status FOLO does not know"),
+                format!(
+                    "RunPod reports pod {provider_ref} as `{}`, a status FOLO does not know",
+                    reply.scrub(other)
+                ),
             )),
         }
     }
@@ -1085,6 +1099,45 @@ mod tests {
     /// `s` with every character as a JSON `\uXXXX` escape: the same string to a JSON reader, other bytes.
     fn escaped(s: &str) -> String {
         s.chars().map(|c| format!("\\u{:04x}", c as u32)).collect()
+    }
+
+    #[test]
+    fn fields_of_successful_answers_never_carry_the_key_into_a_message_or_an_offer() {
+        let key = escaped(KEY);
+        let shows = |text: &str| text.contains(KEY);
+        // A pod in a status FOLO does not know, spelled with the key.
+        let f = Fixture::serve(vec![Answer::json(200, format!(r#"{{"id":"abc123xyz","status":"{key}"}}"#))]);
+        assert_error(
+            &runpod(&f).state(&values(), "abc123xyz").unwrap_err(),
+            ErrorKind::Unavailable,
+            "a status",
+        );
+        // A pod of that name whose id is the key: what `find` answers goes to logs and the ledger.
+        let page =
+            format!(r#"{{"pods":[{{"id":"{key}","name":"folo-x","status":"RUNNING"}}],"pagination":{{}}}}"#);
+        let f = Fixture::serve(vec![Answer::json(200, page)]);
+        let ids = runpod(&f).find(&values(), "folo-x").unwrap();
+        assert!(ids.len() == 1 && !shows(&ids[0]), "{ids:?}");
+        // A created pod whose id is the key.
+        let f =
+            Fixture::serve(vec![Answer::json(201, format!(r#"{{"id":"{key}","status":"PROVISIONING"}}"#))]);
+        match runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")) {
+            Ok(id) => assert!(!shows(&id), "{id}"),
+            Err(e) => assert_error(&e, ErrorKind::Unavailable, "pod"),
+        }
+        // A GPU type named with it: offers are logged ("launching <gpu>") and name the GPU in errors.
+        let gpus = format!(
+            r#"{{"gpus":[{{"id":"NVIDIA {key}","name":"{key}","manufacturer":"NVIDIA","memory":24,"secure":true,
+                "community":false,"price":{{"secure":0.5}},"availability":"HIGH"}}]}}"#
+        );
+        let f = Fixture::serve(vec![Answer::json(200, gpus), Answer::json(200, r#"{"gpus":[]}"#)]);
+        let offers = runpod(&f).offers(&values()).unwrap();
+        assert!(offers.len() == 1 && !shows(&offers[0].id) && !shows(&offers[0].gpu), "{offers:?}");
+        // The account's email.
+        let me = format!(r#"{{"data":{{"myself":{{"email":"{key}","clientBalance":1}}}}}}"#);
+        let f = Fixture::serve(vec![Answer::json(200, NO_PODS), Answer::json(200, me)]);
+        let label = runpod(&f).check(&values()).unwrap().label.unwrap();
+        assert!(!shows(&label), "{label}");
     }
 
     #[test]
