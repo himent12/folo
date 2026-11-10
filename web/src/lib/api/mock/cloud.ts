@@ -9,7 +9,7 @@ const GiB = 2 ** 30;
 const MIN = 60_000;
 const HOUR = 60 * MIN;
 
-/** The providers as folo-cloud lists them (`info()` of crates/folo-cloud's runpod.rs and remote.rs, word for word). */
+/** The providers as folo-cloud lists them (`info()` of crates/folo-cloud's runpod/provider.rs and remote.rs, word for word). */
 export const PROVIDERS: CloudProvider[] = [
   {
     id: 'runpod',

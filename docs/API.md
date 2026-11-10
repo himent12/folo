@@ -886,7 +886,7 @@ tests whether a model's own labels can train its successor. Servers with these e
 `/api/system`'s `features` (real mode only: the mock answers `501 not_implemented` to every endpoint below). Not
 the speed probe of `POST /api/system/benchmark`.
 
-The types are `folo_api::bench` (`crates/folo-api/src/bench.rs`), field for field. A benchmark lives in
+The types are `folo_api::bench` (`crates/folo-api/src/bench/`), field for field. A benchmark lives in
 `<data dir>/bench/<id>/` (`bench.json`, its copied `images/`, `entries/<id>.json`, `loops/<id>.json`).
 
 **Catalog**
