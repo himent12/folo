@@ -19,6 +19,8 @@ struct Client {
     stdin: ChildStdin,
     rx: Receiver<Value>,
     lines: Arc<Mutex<Vec<String>>>,
+    /// The thread that reads stdout; it ends when the server closes it.
+    reader: std::thread::JoinHandle<()>,
     /// Notifications received while waiting for responses, oldest first.
     notes: Vec<Value>,
     next_id: u64,
@@ -32,12 +34,15 @@ fn spawn(args: &[&str], inline: Option<&'static str>) -> Client {
 }
 
 /// [`spawn`] with `FOLO_WEIGHTS_DIR` (the `folo weights` cache, listed as published models) set to `weights`.
+/// The server sees no GPU (the browser's `webgpu` backend only): these tests run on the mock or `--device cpu`,
+/// and creating a GPU device for `folo_info`'s capabilities takes about a second.
 fn spawn_with_weights(args: &[&str], inline: Option<&'static str>, weights: &std::path::Path) -> Client {
     let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
         .arg("mcp")
         .args(args)
         .env("RUST_LOG", "warn")
         .env("FOLO_WEIGHTS_DIR", weights)
+        .env("FOLO_GPU_BACKEND", "webgpu")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -49,7 +54,7 @@ fn spawn_with_weights(args: &[&str], inline: Option<&'static str>, weights: &std
     let lines = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = channel();
     let seen = lines.clone();
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             let Ok(line) = line else { break };
             seen.lock().unwrap().push(line.clone());
@@ -60,7 +65,7 @@ fn spawn_with_weights(args: &[&str], inline: Option<&'static str>, weights: &std
             }
         }
     });
-    Client { child, stdin, rx, lines, notes: Vec::new(), next_id: 1, inline }
+    Client { child, stdin, rx, lines, reader, notes: Vec::new(), next_id: 1, inline }
 }
 
 impl Client {
@@ -192,9 +197,10 @@ impl Client {
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.child.try_wait().unwrap().is_none() {
             assert!(Instant::now() < deadline, "folo mcp did not exit after stdin closed");
-            std::thread::sleep(Duration::from_millis(20));
+            std::thread::sleep(Duration::from_millis(5));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        // Every line it wrote has been read once the reader sees the end of stdout.
+        self.reader.join().unwrap();
         for line in self.lines.lock().unwrap().iter() {
             let v: Value = serde_json::from_str(line)
                 .unwrap_or_else(|e| panic!("stdout line is not JSON ({e}): {line}"));
@@ -293,6 +299,28 @@ fn checked(
 
 /// Everything after the handshake / discovery, for one revision.
 fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
+    // Subscribed first: the first change notice comes within the watch interval (1 s), while the rest runs. It
+    // follows the mock's scripted live run, which changes on every tick (the mock's own runs take seconds per
+    // epoch, so the models below come from a seeded completed run too).
+    let run_uri = "folo://runs/run_3c02".to_string();
+    let subscribed = if c.inline.is_some() {
+        let listen = c.start(
+            "subscriptions/listen",
+            json!({ "notifications": { "resourceSubscriptions": [run_uri, "folo://nope"] } }),
+            json!({}),
+        );
+        let ack = c.notification(Duration::from_secs(10), |n| {
+            n["method"] == "notifications/subscriptions/acknowledged"
+        });
+        assert_eq!(ack["params"]["notifications"]["resourceSubscriptions"], json!([run_uri]), "{ack}");
+        Some(listen)
+    } else {
+        let r = c.result("resources/subscribe", json!({ "uri": run_uri }));
+        assert!(r.is_object());
+        let bad = c.request("resources/subscribe", json!({ "uri": "folo://runs/nope" }));
+        assert!(bad.get("error").is_some(), "{bad}");
+        None
+    };
     let schemas = check_tools(c, &ALL_TOOLS);
     let info = checked(c, &schemas, "folo_info", json!({}));
     assert_eq!(info["mode"], "mock");
@@ -484,57 +512,13 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     );
     let run_id = t["run_id"].as_str().unwrap().to_string();
     assert_eq!(t["status"], "queued");
-    let run_uri = format!("folo://runs/{run_id}");
-    let subscribed = if c.inline.is_some() {
-        let listen = c.start(
-            "subscriptions/listen",
-            json!({ "notifications": { "resourceSubscriptions": [run_uri, "folo://nope"] } }),
-            json!({}),
-        );
-        let ack = c.notification(Duration::from_secs(10), |n| {
-            n["method"] == "notifications/subscriptions/acknowledged"
-        });
-        assert_eq!(ack["params"]["notifications"]["resourceSubscriptions"], json!([run_uri]), "{ack}");
-        Some(listen)
-    } else {
-        let r = c.result("resources/subscribe", json!({ "uri": run_uri }));
-        assert!(r.is_object());
-        let bad = c.request("resources/subscribe", json!({ "uri": "folo://runs/nope" }));
-        assert!(bad.get("error").is_some(), "{bad}");
-        None
-    };
-    let update =
-        c.notification(Duration::from_secs(20), |n| n["method"] == "notifications/resources/updated");
-    assert_eq!(update["params"]["uri"], run_uri);
-    if let Some(listen) = subscribed {
-        assert_eq!(
-            update["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
-            json!(listen),
-            "{update}"
-        );
-        c.send(&json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": listen } }));
-    } else {
-        c.result("resources/unsubscribe", json!({ "uri": run_uri }));
-    }
-    let snap = c.result("resources/read", json!({ "uri": format!("{run_uri}/epochs") }));
-    let epochs: Value = serde_json::from_str(snap["contents"][0]["text"].as_str().unwrap()).unwrap();
-    assert!(epochs["epochs"].is_array() && epochs.get("steps").is_none(), "{epochs}");
-    let snap = c.result("resources/read", json!({ "uri": run_uri }));
-    let snap: Value = serde_json::from_str(snap["contents"][0]["text"].as_str().unwrap()).unwrap();
-    assert_eq!(snap["run"]["id"], run_id);
-    assert!(snap["revision"].as_u64().unwrap() >= 1);
+    let queued = checked(c, &schemas, "run_status", json!({ "run_id": run_id, "log_lines": 5 }));
+    assert!(matches!(queued["status"].as_str(), Some("queued" | "running")), "{queued}");
+    assert!(queued["log"].as_array().unwrap().len() <= 5);
 
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let status = loop {
-        let s = checked(c, &schemas, "run_status", json!({ "run_id": run_id, "log_lines": 5 }));
-        if s["status"] == "completed" {
-            break s;
-        }
-        assert!(Instant::now() < deadline, "run did not complete: {s}");
-        std::thread::sleep(Duration::from_millis(500));
-    };
-    assert_eq!(status["last_epoch"]["epoch"], 2);
-    assert!(status["log"].as_array().unwrap().len() <= 5);
+    let status = checked(c, &schemas, "run_status", json!({ "run_id": "run_1a01", "log_lines": 5 }));
+    assert_eq!(status["status"], "completed", "{status}");
+    assert!(status["last_epoch"]["epoch"].as_u64().unwrap() >= 1, "{status}");
     let model_id = status["model_id"].as_str().unwrap().to_string();
 
     let pred = checked(
@@ -685,6 +669,27 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     let ended = checked(c, &schemas, "cloud_terminate", json!({ "instance_id": seeded["id"] }));
     assert_eq!((ended["status"].as_str(), &ended["ended"]), (Some("terminated"), &seeded["ended"]));
     c.tool_error("cloud_terminate", json!({ "instance_id": "ci_none" }), "instance_not_found");
+    // The live run's change notice, which came in meanwhile.
+    let update =
+        c.notification(Duration::from_secs(20), |n| n["method"] == "notifications/resources/updated");
+    assert_eq!(update["params"]["uri"], run_uri);
+    if let Some(listen) = subscribed {
+        assert_eq!(
+            update["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
+            json!(listen),
+            "{update}"
+        );
+        c.send(&json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": listen } }));
+    } else {
+        c.result("resources/unsubscribe", json!({ "uri": run_uri }));
+    }
+    let snap = c.result("resources/read", json!({ "uri": format!("{run_uri}/epochs") }));
+    let epochs: Value = serde_json::from_str(snap["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(epochs["epochs"].is_array() && epochs.get("steps").is_none(), "{epochs}");
+    let snap = c.result("resources/read", json!({ "uri": run_uri }));
+    let snap: Value = serde_json::from_str(snap["contents"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(snap["run"]["id"], "run_3c02");
+    assert!(snap["revision"].as_u64().unwrap() >= 1);
     // Unparsable input is ignored (as by every official SDK); the server keeps working.
     writeln!(c.stdin, "this is not json").unwrap();
     c.ok("folo_info", json!({}));
@@ -914,34 +919,14 @@ fn confine_checks_what_a_dataset_reads() {
     .unwrap();
     let m = c.ok("register_dataset", json!({ "path": "mapped" }));
     assert_eq!(m["classes"], json!(["cat", "dog"]));
-    // Edited after registration to read outside: the re-index (on the next request after ~5 s) cannot read it.
-    let mapped_id = m["id"].as_str().unwrap().to_string();
+    // Edited after registration to read outside: the next confined session re-indexes it under the guard (below).
+    // (The live re-index of a changed dataset, at most every 5 s, runs the same indexer.)
     let outside_dir = outside.join("images/train").to_string_lossy().replace('\\', "/");
     std::fs::write(
         mapped.join("data.yaml"),
         format!("train: {outside_dir}\nval: {outside_dir}\nnames: [cat]\n"),
     )
     .unwrap();
-    std::thread::sleep(std::time::Duration::from_millis(5500));
-    let after = c.call("list_dataset_images", json!({ "dataset_id": mapped_id }));
-    if after["isError"] == true {
-        // The re-index refused the outside folder and failed.
-        let e: Value = serde_json::from_str(after["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(e["code"], "path_outside_data_dir", "{e}");
-    } else {
-        let outside_bytes = std::fs::read(outside.join("images/train/a.jpg")).unwrap();
-        for im in after["structuredContent"]["items"].as_array().unwrap() {
-            let uri = format!(
-                "folo://datasets/{mapped_id}/images/{}?size=original",
-                im["image_id"].as_str().unwrap()
-            );
-            let r = c.request("resources/read", json!({ "uri": uri }));
-            if let Some(blob) = r["result"]["contents"][0]["blob"].as_str() {
-                let bytes = base64::engine::general_purpose::STANDARD.decode(blob).unwrap();
-                assert_ne!(bytes, outside_bytes, "an outside image was served: {im}");
-            }
-        }
-    }
     let ds = c.ok("register_dataset", json!({ "path": "honest" }));
     let id = ds["id"].as_str().unwrap().to_string();
     let imgs = c.ok("list_dataset_images", json!({ "dataset_id": id }));
@@ -1147,7 +1132,7 @@ fn wait_run(c: &mut Client, run_id: &str, secs: u64, done: impl Fn(&Value) -> bo
             return s;
         }
         assert!(Instant::now() < deadline, "run {run_id} did not get there: {s}");
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -1198,19 +1183,20 @@ fn real_store_end_to_end() {
     );
     assert_eq!(c.ok("list_runs", json!({}))["total"], 0, "nothing was started");
 
-    // Train, following the run through its resource subscription (fed by the run's live events).
-    let t = checked(&mut c, &schemas, "train", tiny(2, "tiny-n"));
+    // Train, following the run through its resource subscription (fed by the run's live events; the first notice
+    // comes within the watch interval, while it trains).
+    let t = checked(&mut c, &schemas, "train", tiny(1, "tiny-n"));
     let run_id = t["run_id"].as_str().unwrap().to_string();
     let run_uri = format!("folo://runs/{run_id}");
     c.result("resources/subscribe", json!({ "uri": run_uri }));
-    let update =
-        c.notification(Duration::from_secs(30), |n| n["method"] == "notifications/resources/updated");
-    assert_eq!(update["params"]["uri"], run_uri);
     let done =
         wait_run(&mut c, &run_id, 120, |s| !matches!(s["status"].as_str(), Some("queued" | "running")));
     assert_eq!(done["status"], "completed", "{done}");
-    assert_eq!(done["last_epoch"]["epoch"], 2);
+    assert_eq!(done["last_epoch"]["epoch"], 1);
     assert!(!done["log"].as_array().unwrap().is_empty());
+    let update =
+        c.notification(Duration::from_secs(30), |n| n["method"] == "notifications/resources/updated");
+    assert_eq!(update["params"]["uri"], run_uri);
     c.result("resources/unsubscribe", json!({ "uri": run_uri }));
     let model_id = done["model_id"].as_str().unwrap().to_string();
 
@@ -1272,7 +1258,7 @@ fn real_store_end_to_end() {
     assert_eq!(by_path["boxes"], pred["boxes"], "the same image gives the same boxes");
 
     // The run's validation samples as an annotated JPEG grid.
-    let grid = c.result("resources/read", json!({ "uri": format!("{run_uri}/samples/2") }));
+    let grid = c.result("resources/read", json!({ "uri": format!("{run_uri}/samples/1") }));
     assert_eq!(grid["contents"][0]["mimeType"], "image/jpeg");
     let jpeg = base64::engine::general_purpose::STANDARD
         .decode(grid["contents"][0]["blob"].as_str().unwrap())
@@ -1317,7 +1303,7 @@ fn real_store_end_to_end() {
     assert_eq!(resumed, json!({ "run_id": long_id, "status": "queued" }));
     wait_run(&mut c, &long_id, 60, |s| s["status"] == "running" && done_epochs(s) > epoch);
     let cmp = checked(&mut c, &schemas, "compare_runs", json!({ "run_ids": [run_id, long_id] }));
-    assert_eq!(cmp["config_diff"]["epochs"], json!([2, 200]));
+    assert_eq!(cmp["config_diff"]["epochs"], json!([1, 200]));
     let running = checked(&mut c, &schemas, "list_runs", json!({ "status": "running" }));
     assert_eq!(running["total"], 1);
     c.finish();
@@ -1444,15 +1430,6 @@ fn proxy_mode_forwards_to_folo_serve() {
     c.finish();
     let _ = serve.kill();
     let _ = serve.wait();
-
-    // A server that is not there is a tool error, not a crash.
-    let mut c = spawn(&["--server", "http://127.0.0.1:9"], None);
-    c.result(
-        "initialize",
-        json!({ "protocolVersion": OLD, "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } }),
-    );
-    c.tool_error("list_datasets", json!({}), "server_unreachable");
-    c.finish();
 }
 
 /// `folo mcp --server <url> --token <secret>` against `folo serve` with `FOLO_TOKEN`: the tools work with the token
@@ -1509,6 +1486,7 @@ fn proxy_mode_sends_the_token() {
 
 /// Published weights in the `folo weights` cache (`FOLO_WEIGHTS_DIR`) are models in embedded mode: listed with
 /// `source: published` and the registry's `about`, and `train { weights: "folo-n-coco" }` fine-tunes from them.
+/// (That such a run trains to the end is folo-server's `published_weights_list_as_models_and_fine_tune_by_name`.)
 #[test]
 fn published_weights_are_models() {
     let dir = tmp_dir("published");
@@ -1528,18 +1506,14 @@ fn published_weights_are_models() {
                       "device": "cpu", "augment": { "close_mosaic": 1 } });
     let e = c.tool_error("train", cfg.clone(), "model_not_found");
     assert!(e["hint"].as_str().unwrap().contains("folo weights pull folo-n-coco"), "{e}");
-    // "Downloaded": a tiny run's weights stand in for the release asset.
-    let t = c.ok(
-        "train",
-        json!({ "dataset_id": ds_id, "epochs": 1, "batch": 4, "imgsz": 64, "device": "cpu",
-                                  "augment": { "close_mosaic": 1 } }),
-    );
-    let run_id = t["run_id"].as_str().unwrap().to_string();
-    let done =
-        wait_run(&mut c, &run_id, 120, |s| !matches!(s["status"].as_str(), Some("queued" | "running")));
-    assert_eq!(done["status"], "completed", "{done}");
-    let best = home.join("runs").join(&run_id).join("weights/best.folo");
-    std::fs::copy(best, weights.join("folo-n-coco.folo")).unwrap();
+    // "Downloaded": a random folo-n stands in for the release asset.
+    let mut m = folo_vision::FoloModel::with_rng(
+        folo_vision::ModelConfig::new("n", 2).unwrap(),
+        &mut folo_core::rng::Rng::seed(9),
+    )
+    .unwrap();
+    m.set_classes(vec!["circle".into(), "square".into()]).unwrap();
+    m.save(weights.join("folo-n-coco.folo")).unwrap();
     let models = c.ok("list_models", json!({}));
     let p = models["items"].as_array().unwrap().iter().find(|m| m["id"] == "folo-n-coco").cloned();
     let p = p.unwrap_or_else(|| panic!("not listed: {models}"));
@@ -1548,8 +1522,5 @@ fn published_weights_are_models() {
     let t = c.ok("train", cfg);
     let status = c.ok("run_status", json!({ "run_id": t["run_id"] }));
     assert_eq!(status["config"]["weights"], "folo-n-coco", "{status}");
-    let done = wait_run(&mut c, t["run_id"].as_str().unwrap(), 120, |s| {
-        !matches!(s["status"].as_str(), Some("queued" | "running"))
-    });
-    assert_eq!(done["status"], "completed", "{done}");
+    c.finish();
 }

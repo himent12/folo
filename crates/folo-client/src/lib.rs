@@ -303,9 +303,14 @@ mod tests {
 
     #[test]
     fn an_unreachable_server_is_transient_and_keeps_the_token_out_of_debug() {
-        // Port 9 (discard) is essentially never served on loopback.
-        let c = Client::with_timeouts("http://127.0.0.1:9/", Duration::from_secs(2), Duration::from_secs(2))
-            .token("s3cret");
+        // Port 9 (discard) is essentially never served on loopback. Windows retries a refused loopback connection
+        // for about 2 s, so the connection times out first: refused and timed out are both unreachable.
+        let c = Client::with_timeouts(
+            "http://127.0.0.1:9/",
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+        )
+        .token("s3cret");
         assert_eq!(c.base(), "http://127.0.0.1:9");
         assert!(!format!("{c:?}").contains("s3cret"));
         let e = c.get::<serde_json::Value>("/health").unwrap_err();

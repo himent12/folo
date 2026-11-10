@@ -199,7 +199,7 @@ or inconsistent. IDs group findings by surface:
 - **Happened:** `"path":"D:/folo-dogfood3/home\\weights\\folo-n-coco.folo"`, a mixed separator (F12 / P3
   regressed in the new command). A pull of an already-cached name returned no `sha256` or `bytes`.
 - **Now:** paths go through `folo_api::json::path`, and the cached `done` record has both fields.
-- **Test:** `tests/pretrained.rs` asserts the paths and the cached record.
+- **Test:** `tests/engine.rs` (`weights_names_export_and_coco_val`) asserts the paths and the cached record.
 
 #### C3. Export naming and casing (polish; fixed by `fix/dogfood-3`, except `-e2e`)
 - **Decode name:** `export --format onnx --decode` next to an existing raw `best.onnx` writes `best-2.onnx`.

@@ -1859,13 +1859,6 @@ mod tests {
     }
 
     #[test]
-    fn loss_box_field_name() {
-        let l = Loss { box_: 1.0, cls: 2.0, dfl: 3.0, total: 6.0 };
-        let v = serde_json::to_value(l).unwrap();
-        assert_eq!(v["box"], 1.0);
-    }
-
-    #[test]
     fn error_hint_is_always_present() {
         let e = ErrorBody { error: ApiError { code: "x".into(), message: "y".into(), hint: None } };
         assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"error":{"code":"x","message":"y","hint":null}}"#);

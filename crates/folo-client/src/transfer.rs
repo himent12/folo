@@ -19,8 +19,8 @@ pub const PART_BYTES: u64 = 8 * 1024 * 1024;
 pub const ATTEMPTS: u32 = 6;
 /// Times a download starts over because the file was replaced while it was fetched.
 pub const RESTARTS: u32 = 3;
-/// The wait before the first retry; it doubles with every retry, up to [`MAX_BACKOFF`].
-const FIRST_BACKOFF: Duration = Duration::from_millis(500);
+/// The wait before the first retry ([`Control::backoff`]); it doubles with every retry, up to [`MAX_BACKOFF`].
+pub const FIRST_BACKOFF: Duration = Duration::from_millis(500);
 const MAX_BACKOFF: Duration = Duration::from_secs(8);
 
 /// Why a transfer did not finish.
@@ -57,6 +57,8 @@ pub struct Control<'a> {
     pub progress: &'a mut dyn FnMut(TransferProgress),
     /// Asked before every part and retry: `true` ends the transfer with [`TransferError::Stopped`].
     pub stop: &'a dyn Fn() -> bool,
+    /// The wait before the first retry of a request: [`FIRST_BACKOFF`] (tests shorten it).
+    pub backoff: Duration,
 }
 
 /// What [`download`] fetched.
@@ -194,7 +196,7 @@ impl Parts<'_, '_> {
     /// (the part arrived, its answer did not), the same part (send it again), or elsewhere (the upload is broken).
     fn put(&mut self, n: u32) -> Result<(), TransferError> {
         let path = format!("/uploads/{}/parts/{n}", self.id);
-        let mut wait = FIRST_BACKOFF;
+        let mut wait = self.ctl.backoff;
         let mut attempt = 1;
         loop {
             let e = match self.client.put::<Upload>(&path, &self.buf) {
@@ -339,7 +341,7 @@ fn fetch(
 /// Calls `call` until it succeeds, fails for good, or has failed transiently [`ATTEMPTS`] times, waiting longer
 /// before each retry.
 fn retry<T>(ctl: &Control<'_>, mut call: impl FnMut() -> crate::Result<T>) -> Result<T, TransferError> {
-    let mut wait = FIRST_BACKOFF;
+    let mut wait = ctl.backoff;
     let mut attempt = 1;
     loop {
         match call() {

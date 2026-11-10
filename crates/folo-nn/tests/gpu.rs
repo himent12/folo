@@ -697,8 +697,6 @@ fn running_stats_all_finite_on_gpu() {
     }
 }
 
-/// Finite gradients whose squares (1e20) or norm (near f32::MAX) overflow `f32` still get the CPU's (`f64`) clip on
-/// the device: clipped to the norm, not zeroed or left alone.
 /// Global-norm clipping's multi-tensor kernels (`Tensor::norm_partials_many`, `scale_many_`) against the tensor ops
 /// they replace in `GradAccumulator::clip_grad_norm_device`, over more tensors than one dispatch takes and sizes
 /// around the workgroup: the largest magnitude (NaN propagating) and the two-factor scaling bit for bit; the sum of
@@ -829,6 +827,8 @@ fn device_clip_over_many_buffers() {
     }
 }
 
+/// Finite gradients whose squares (1e20) or norm (near f32::MAX) overflow `f32` still get the CPU's (`f64`) clip on
+/// the device: clipped to the norm, not zeroed or left alone.
 #[test]
 fn device_clip_survives_huge_finite_gradients() {
     let dev = gpu!();

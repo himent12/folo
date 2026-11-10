@@ -507,76 +507,120 @@ fn conv_routing_matches_regular_kernel() {
 
 // ----- conv gradients (mixed-precision training) ----------------------------------------------------------------
 
-/// f64 reference gradients of the conv `d` for the output gradient `g`: `(gx, gw)`, or their absolute-term sums
-/// with `abs` (for the error bounds).
-fn cpu_conv_grads(d: &Conv2dDesc, x: &[f32], w: &[f32], g: &[f32], abs: bool) -> (Vec<f32>, Vec<f32>) {
+/// f64 reference gradients of the conv `d` for the output gradient `g` and their absolute-term sums (for the error
+/// bounds), in one pass: `(gx, gw, sum_x, sum_w)`. Output channels are split over threads (each owns its slice of
+/// `gw` and a partial `gx`, summed in a fixed order), so the largest cases take a fraction of a second.
+type ConvGrads = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+
+fn cpu_conv_grads(d: &Conv2dDesc, x: &[f32], w: &[f32], g: &[f32]) -> ConvGrads {
     let (oh, ow) = d.output().unwrap();
     let (kh, kw) = d.win.kernel;
     let (cin_g, cout_g) = (d.c_in / d.groups, d.c_out / d.groups);
-    let mut gx = vec![0f64; x.len()];
-    let mut gw = vec![0f64; w.len()];
-    let f = |p: f64| if abs { p.abs() } else { p };
-    for n in 0..d.n {
-        for co in 0..d.c_out {
-            let grp = co / cout_g;
-            for oy in 0..oh {
-                for ox in 0..ow {
-                    let gv = g[((n * d.c_out + co) * oh + oy) * ow + ox] as f64;
-                    for ci in 0..cin_g {
-                        for ky in 0..kh {
-                            for kx in 0..kw {
-                                let iy = (oy * d.win.stride.0 + ky * d.win.dilation.0) as isize
-                                    - d.win.padding.0 as isize;
-                                let ix = (ox * d.win.stride.1 + kx * d.win.dilation.1) as isize
-                                    - d.win.padding.1 as isize;
-                                if iy < 0 || ix < 0 || iy >= d.h as isize || ix >= d.w as isize {
-                                    continue;
+    let per_co = cin_g * kh * kw;
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(d.c_out);
+    let cos = d.c_out.div_ceil(threads);
+    let (mut gw, mut sw) = (vec![0f64; w.len()], vec![0f64; w.len()]);
+    let partial_x: Vec<(Vec<f64>, Vec<f64>)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = gw
+            .chunks_mut(cos * per_co)
+            .zip(sw.chunks_mut(cos * per_co))
+            .enumerate()
+            .map(|(t, (gw, sw))| {
+                scope.spawn(move || {
+                    let (mut gx, mut sx) = (vec![0f64; x.len()], vec![0f64; x.len()]);
+                    for n in 0..d.n {
+                        for co in t * cos..((t + 1) * cos).min(d.c_out) {
+                            let grp = co / cout_g;
+                            for oy in 0..oh {
+                                for ox in 0..ow {
+                                    let gv = g[((n * d.c_out + co) * oh + oy) * ow + ox] as f64;
+                                    for ci in 0..cin_g {
+                                        for ky in 0..kh {
+                                            for kx in 0..kw {
+                                                let iy = (oy * d.win.stride.0 + ky * d.win.dilation.0)
+                                                    as isize
+                                                    - d.win.padding.0 as isize;
+                                                let ix = (ox * d.win.stride.1 + kx * d.win.dilation.1)
+                                                    as isize
+                                                    - d.win.padding.1 as isize;
+                                                if iy < 0
+                                                    || ix < 0
+                                                    || iy >= d.h as isize
+                                                    || ix >= d.w as isize
+                                                {
+                                                    continue;
+                                                }
+                                                let xi = ((n * d.c_in + grp * cin_g + ci) * d.h
+                                                    + iy as usize)
+                                                    * d.w
+                                                    + ix as usize;
+                                                let wi = ((co * cin_g + ci) * kh + ky) * kw + kx;
+                                                let (px, pw) = (gv * w[wi] as f64, gv * x[xi] as f64);
+                                                gx[xi] += px;
+                                                sx[xi] += px.abs();
+                                                gw[wi - t * cos * per_co] += pw;
+                                                sw[wi - t * cos * per_co] += pw.abs();
+                                            }
+                                        }
+                                    }
                                 }
-                                let xi =
-                                    ((n * d.c_in + grp * cin_g + ci) * d.h + iy as usize) * d.w + ix as usize;
-                                let wi = ((co * cin_g + ci) * kh + ky) * kw + kx;
-                                gx[xi] += f(gv * w[wi] as f64);
-                                gw[wi] += f(gv * x[xi] as f64);
                             }
                         }
                     }
-                }
-            }
+                    (gx, sx)
+                })
+            })
+            .collect();
+        workers.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let (mut gx, mut sx) = (vec![0f64; x.len()], vec![0f64; x.len()]);
+    for (px, ps) in &partial_x {
+        for i in 0..x.len() {
+            gx[i] += px[i];
+            sx[i] += ps[i];
         }
     }
     let cast = |v: Vec<f64>| v.into_iter().map(|s| s as f32).collect();
-    (cast(gx), cast(gw))
+    (cast(gx), cast(gw), cast(sx), cast(sw))
 }
 
 /// Both gradients of the f16 conv `d` (input gradient f16; weight gradient as `w_out`) against the f64 reference,
-/// on tensor cores (`tc`) or the regular kernels.
-fn run_conv_grads(ctx: &GpuContext, d: &Conv2dDesc, w_out: DType, tc: bool, seed: u64) {
-    ctx.set_tensor_cores(tc);
+/// on tensor cores and on the regular kernels, each with an f32 and an f16 weight gradient.
+fn run_conv_grads(ctx: &GpuContext, d: &Conv2dDesc, seed: u64) {
     let mut rng = Rng::new(seed);
     let (oh, ow) = d.output().unwrap();
     let (kh, kw) = d.win.kernel;
     let x = f16_round(&rng.vec(d.n * d.c_in * d.h * d.w, -1.0, 1.0));
     let w = f16_round(&rng.vec(d.c_out * (d.c_in / d.groups) * kh * kw, -1.0, 1.0));
     let g = f16_round(&rng.vec(d.n * d.c_out * oh * ow, -1.0, 1.0));
-    let (want_x, want_w) = cpu_conv_grads(d, &x, &w, &g, false);
-    let (sum_x, sum_w) = cpu_conv_grads(d, &x, &w, &g, true);
+    let (want_x, want_w, sum_x, sum_w) = cpu_conv_grads(d, &x, &w, &g);
     let (gx, gw, gg) =
         (upload(ctx, &x, DType::F16), upload(ctx, &w, DType::F16), upload(ctx, &g, DType::F16));
-    let dx = GpuTensor::empty(ctx, &[x.len()], DType::F16).unwrap();
-    let dw = GpuTensor::empty(ctx, &[w.len()], w_out).unwrap();
-    conv::conv2d_backward_input(ctx, d, gg.raw(), gw.raw(), dx.raw()).unwrap();
-    conv::conv2d_backward_weight_as(ctx, d, gx.raw(), gg.raw(), dw.raw(), w_out).unwrap();
-    assert_eq!(ctx.tensor_cores(), tc, "{}", ctx.tensor_cores_status());
     let ident = |d: &Conv2dDesc| Conv2dDesc { act: UnaryOp::Identity, ..d.clone() };
     let kx = d.c_out / d.groups * kh * kw;
     let tol_x: Vec<f64> =
         want_x.iter().zip(&sum_x).map(|(&y, &s)| bound(y, s as f64, kx, 0.0, DType::F16)).collect();
     let kw_ = d.n * oh * ow;
-    let tol_w: Vec<f64> =
-        want_w.iter().zip(&sum_w).map(|(&y, &s)| bound(y, s as f64, kw_, 0.0, w_out)).collect();
-    let what = format!("{:?} tensor cores {tc}", ident(d));
-    assert_within(&dx.to_vec().unwrap(), &want_x, &tol_x, &format!("input gradient of {what}"));
-    assert_within(&dw.to_vec().unwrap(), &want_w, &tol_w, &format!("weight gradient ({w_out:?}) of {what}"));
+    for tc in [true, false] {
+        ctx.set_tensor_cores(tc);
+        for w_out in [DType::F32, DType::F16] {
+            let dx = GpuTensor::empty(ctx, &[x.len()], DType::F16).unwrap();
+            let dw = GpuTensor::empty(ctx, &[w.len()], w_out).unwrap();
+            conv::conv2d_backward_input(ctx, d, gg.raw(), gw.raw(), dx.raw()).unwrap();
+            conv::conv2d_backward_weight_as(ctx, d, gx.raw(), gg.raw(), dw.raw(), w_out).unwrap();
+            assert_eq!(ctx.tensor_cores(), tc, "{}", ctx.tensor_cores_status());
+            let tol_w: Vec<f64> =
+                want_w.iter().zip(&sum_w).map(|(&y, &s)| bound(y, s as f64, kw_, 0.0, w_out)).collect();
+            let what = format!("{:?} tensor cores {tc}", ident(d));
+            assert_within(&dx.to_vec().unwrap(), &want_x, &tol_x, &format!("input gradient of {what}"));
+            assert_within(
+                &dw.to_vec().unwrap(),
+                &want_w,
+                &tol_w,
+                &format!("weight gradient ({w_out:?}) of {what}"),
+            );
+        }
+    }
 }
 
 #[test]
@@ -612,11 +656,7 @@ fn coop_conv_gradients() {
         cdesc(2, 160, 34, 34, 136, 1, s2),
     ];
     for (i, d) in cases.iter().enumerate() {
-        for tc in [true, false] {
-            for w_out in [DType::F32, DType::F16] {
-                run_conv_grads(&ctx, d, w_out, tc, 100 + i as u64);
-            }
-        }
+        run_conv_grads(&ctx, d, 100 + i as u64);
     }
     ctx.set_tensor_cores(true);
 }

@@ -19,7 +19,8 @@ with pinned `onnx`, `onnxruntime` and `numpy`, kept between runs on a self-hoste
 ## Keeping CI fast
 - **Tests are quick or they are not in the suite.** A test trains the smallest model on a handful of small images
   for a few steps; several tests that need the same run or server share it. Aim for under a second per test.
-  `#[ignore]` is for tests that need what CI does not have (network, credentials, a download), not for slow ones.
+  `#[ignore]` is for tests that need what CI does not have (network, credentials, a download) and for a documented
+  manual acceptance run (docs/MODEL.md §10.4, the overfit test), not for slow ones.
 - **The dev profile** (root `Cargo.toml`) builds folo-core, folo-nn, folo-data and folo-vision at `opt-level = 3`
   like the dependencies, because tests train and predict with them, and keeps only line tables as debug info
   (file and line in backtraces): less to generate and to link into each of the test binaries.

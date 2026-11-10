@@ -729,7 +729,7 @@ impl Exec {
             }
         };
         let stop = || self.interrupted().is_err();
-        let mut ctl = Control { progress: &mut progress, stop: &stop };
+        let mut ctl = Control { progress: &mut progress, stop: &stop, backoff: transfer::FIRST_BACKOFF };
         let up = transfer::upload(client, req, write, &mut ctl);
         match up {
             Ok(u) => Ok((u, sent)),
@@ -1044,7 +1044,7 @@ impl Exec {
             }
         };
         let stop = || self.core.halt.is_on();
-        let mut ctl = Control { progress: &mut progress, stop: &stop };
+        let mut ctl = Control { progress: &mut progress, stop: &stop, backoff: transfer::FIRST_BACKOFF };
         match transfer::download(client, &path, &weights.join(file), &mut ctl) {
             Ok(_) => {}
             Err(TransferError::Failed(e)) if e.code() == "model_not_found" => return Ok(false),

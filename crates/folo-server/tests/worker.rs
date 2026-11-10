@@ -75,13 +75,13 @@ async fn wait_run(app: &Router, id: &str, done: impl Fn(&Run) -> bool) -> Run {
             return run;
         }
         assert!(t0.elapsed() < TIMEOUT, "run {id} stuck: {run:?}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
-/// A tiny CPU run's config on dataset `ds`.
+/// A tiny CPU run's config on dataset `ds` (3 steps an epoch on the test's 5 training images).
 fn tiny(ds: &str, epochs: u32) -> Value {
-    json!({ "dataset_id": ds, "epochs": epochs, "batch": 4, "imgsz": 64, "device": "cpu",
+    json!({ "dataset_id": ds, "epochs": epochs, "batch": 2, "imgsz": 64, "device": "cpu",
             "augment": { "close_mosaic": 1 } })
 }
 
@@ -105,12 +105,12 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
     let (a, b) = (store(&t.join("a")), store(&t.join("b")));
     let (app_a, app_b) = (app(&a), app(&b));
     let body =
-        json!({ "name": "tiny", "images": 12, "imgsz": 64, "classes": ["circle", "square"], "seed": 5 });
+        json!({ "name": "tiny", "images": 6, "imgsz": 64, "classes": ["circle", "square"], "seed": 5 });
     let ds: Dataset = ok(&app_a, post_json("/api/datasets/synthetic", body)).await;
 
-    // On A: a 3-epoch run stopped after its first epoch.
+    // On A: a 2-epoch run stopped after its first epoch.
     a.hold_runs_after_epochs(true);
-    let run: Run = ok(&app_a, post_json("/api/runs", tiny(&ds.id, 3))).await;
+    let run: Run = ok(&app_a, post_json("/api/runs", tiny(&ds.id, 2))).await;
     wait_run(&app_a, &run.id, |r| r.best.is_some()).await;
     ok::<Run>(&app_a, post(&format!("/api/runs/{}/stop", run.id))).await;
     let stopped = wait_run(&app_a, &run.id, |r| r.status == RunStatus::Stopped).await;
@@ -156,7 +156,7 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
 
     // What `checkpoint` refuses.
     let with = |extra: Value| {
-        let mut body = tiny(&ds_b.id, 3);
+        let mut body = tiny(&ds_b.id, 2);
         body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         post_json("/api/runs", body)
     };
@@ -198,9 +198,9 @@ async fn a_checkpoint_continues_on_another_server_and_history_has_cursors() {
     assert_eq!(cont.status, RunStatus::Queued);
     let dir = t.join("b").join("runs").join(&cont.id);
     let done = wait_run(&app_b, &cont.id, |r| !r.status.is_active()).await;
-    assert_eq!((done.status, done.epoch, done.step), (RunStatus::Completed, 3, 9), "{done:?}");
+    assert_eq!((done.status, done.epoch, done.step), (RunStatus::Completed, 2, 6), "{done:?}");
     let m: RunMetrics = ok(&app_b, get(&format!("/api/runs/{}/metrics", cont.id))).await;
-    assert_eq!((steps(&m), epochs(&m)), ((4..=9).collect::<Vec<_>>(), vec![2, 3]));
+    assert_eq!((steps(&m), epochs(&m)), ((4..=6).collect::<Vec<_>>(), vec![2]));
     let log: RunLogs = ok(&app_b, get(&format!("/api/runs/{}/logs", cont.id))).await;
     assert!(log.lines.iter().any(|l| l.message.starts_with("continuing the training state of")), "{log:?}");
     assert!(done.model_id.is_some());

@@ -289,14 +289,14 @@ In read-only mode, `train_on_folder` is not listed.
 `crates/folo-cli/tests/mcp.rs` spawns `folo mcp` and, for **each supported revision**, runs the handshake or discovery (plus,
 for 2026-07-28, a direct tool call without discovery and an unsupported-version request), both subscription flows, `tools/list`
 (checking the schemas, their size and `additionalProperties: false`), `resources/list`, `prompts/list`, a
-`create_synthetic_dataset` → `train` (2 epochs on a tiny set) → subscribe / `run_status` → `predict` flow on the
-mock store, issues errors-first and paged, a repeated `register_dataset`, unknown and misspelled arguments, the
+`create_synthetic_dataset` → `train` → `run_status` flow and a subscription to the scripted live run on the mock
+store, `predict` / `val` / `export` with a seeded model, issues errors-first and paged, a repeated `register_dataset`, unknown and misspelled arguments, the
 shared error codes, the `/epochs` resource, the cloud tools on the mock's connection and seeded cloud run, an
 `isError` case, a JSON-RPC error case, and a read-only-mode dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout. Every
 structured tool result is validated against the tool's `outputSchema`. `real_store_end_to_end` drives the **real**
-store (`--device cpu`, 64 px, about 15 s): a synthetic dataset, a 2-epoch run followed through its resource
+store (`--device cpu`, 64 px, a few seconds): a synthetic dataset, a 1-epoch run followed through its resource
 subscription until it completes, `list_models`, `val` on two splits, `predict` on a dataset image and the same
 file by path (boxes returned, identical), the sample grid resource, `export`, then a second run stopped after
 its first epoch, resumed (same id) and left training when the client disconnects; a new session finds it
-`stopped` by the graceful shutdown. Further tests cover `--confine`, proxy mode against `folo serve --mock` (also
-with a token) and an unreachable server.
+`stopped` by the graceful shutdown. Further tests cover `--confine` and proxy mode against `folo serve --mock` (also
+with a token); folo-mcp's own tests cover an unreachable server.
