@@ -964,6 +964,7 @@ impl FoloApp {
         let name_input = f.name.clone();
         let error = f.error.clone();
         let submitting = f.submitting;
+        let opt_unknown = f.optimizer_unknown;
         let ds = datasets.get(ds_i).cloned();
         // Advanced: what differs from a fresh form's defaults, so a collapsed group still says
         // what it will do. Open while one of its fields needs fixing.
@@ -972,7 +973,9 @@ impl FoloApp {
             if f.e2e {
                 changed.push("end-to-end".into());
             }
-            if opt != 0 {
+            if opt_unknown {
+                changed.push("unknown optimizer".into());
+            } else if opt != 0 {
                 changed.push(format!("{} at {}", OPT_LABELS[opt], crate::ui::fmt_lr(lr0 as f64)));
             }
             if f.amp {
@@ -985,7 +988,7 @@ impl FoloApp {
             if changed.is_empty() { "Defaults".to_string() } else { changed.join(" · ") }
         };
         // An invalid rate (only with a chosen optimizer: Auto ignores the field) keeps it open.
-        let adv_open = f.advanced || (f.lr_invalid && opt != 0);
+        let adv_open = f.advanced || (f.lr_invalid && opt != 0) || opt_unknown;
         // A Mixed precision switch that held focus when it became blocked (the device changed by
         // key, or the server's answer arrived) has no focus stop any more: focus moves to the
         // control before it, so keys keep working. Before the controls are built, so that one
@@ -1082,7 +1085,9 @@ impl FoloApp {
         let size_seg = seg(self, "nr-imgsz", &size_refs, imgsz, window, cx, |f, i| f.imgsz = i);
         let device_seg =
             seg(self, "nr-device", &["Auto", "GPU 0", "CPU"], device, window, cx, |f, i| f.device = i);
-        let opt_seg = seg(self, "nr-opt", &OPT_LABELS, opt, window, cx, |f, i| f.optimizer = i);
+        // An unknown prefilled optimizer selects no segment.
+        let opt_sel = if opt_unknown { OPT_LABELS.len() } else { opt };
+        let opt_seg = seg(self, "nr-opt", &OPT_LABELS, opt_sel, window, cx, |f, i| f.pick_optimizer(i));
         // A typed value outside a slider's preset range widens it (rather than pinning the thumb at
         // an end, where one arrow press would jump to the end value).
         let epochs_slider = self
@@ -1464,6 +1469,7 @@ impl FoloApp {
                         // A field in the group that needs fixing keeps it open.
                         if let Some(f) = this.new_run.as_mut()
                             && !(f.lr_invalid && f.optimizer != 0)
+                            && !f.optimizer_unknown
                         {
                             f.advanced = !f.advanced;
                             cx.notify();
@@ -1543,12 +1549,14 @@ impl FoloApp {
                             "Optimizer",
                             opt_seg,
                             Some(match (opt, &auto_pick) {
+                                _ if opt_unknown => "Unknown optimizer (from a newer FOLO): pick one".to_string(),
                                 (0, Some((kind, _))) => {
                                     format!("Auto: {kind} for this run, at its own learning rate")
                                 }
                                 (0, None) => "Auto: MuSGD for long runs, else AdamW".to_string(),
                                 (1, _) => "SGD with Nesterov momentum 0.937".to_string(),
-                                _ => "AdamW with weight decay".to_string(),
+                                (2, _) => "AdamW with weight decay".to_string(),
+                                _ => "MuSGD: SGD plus a Muon update on conv weights".to_string(),
                             }),
                         )))
                         .child(
@@ -1928,6 +1936,16 @@ impl FoloApp {
                 Btn::Primary,
                 Some(go_icon),
                 "Fix the highlighted fields first",
+                window,
+                cx,
+            )
+        } else if opt_unknown {
+            self.button_disabled(
+                "nr-start",
+                go,
+                Btn::Primary,
+                Some(go_icon),
+                "Pick an optimizer first",
                 window,
                 cx,
             )
