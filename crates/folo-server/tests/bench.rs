@@ -1582,6 +1582,55 @@ async fn a_stop_that_was_accepted_survives_the_server_stopping() {
     assert!(l.finished.is_some());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn benchmarks_and_loops_keep_their_order_after_a_restart() {
+    let t = TestDir::new("bench-order");
+    let home = t.join("home");
+    let (benches, bench_id, loops) = {
+        let f = fixture(&home);
+        let app = &f.app;
+        let ds = dataset(app, "shapes", 20).await;
+        let src = json!({ "kind": "dataset", "dataset_id": ds.id, "split": "val" });
+        // Made one right after the other (many in the same second): each is later than the one before.
+        let mut made: Vec<Bench> = Vec::new();
+        for i in 0..12 {
+            let b = bench(app, json!({ "name": format!("b{i}"), "source": src, "max_images": 1, "plan": { "conditions": [] } }))
+                .await;
+            if let Some(prev) = made.last() {
+                assert!(b.created > prev.created, "{} then {}", prev.created, b.created);
+            }
+            made.push(b);
+        }
+        let list: BenchList = ok(app, get("/api/bench/benchmarks")).await;
+        let benches: Vec<String> = list.benchmarks.iter().map(|b| b.id.clone()).collect();
+        assert_eq!(benches, made.iter().rev().map(|b| b.id.clone()).collect::<Vec<_>>(), "newest first");
+        let bench_id = made[0].id.clone();
+        let teacher = model(app, &home, "teacher", &["circle", "square"], 7).await;
+        let loops = format!("/api/bench/benchmarks/{bench_id}/loops");
+        let pool = json!({ "kind": "dataset", "dataset_id": ds.id, "split": "train" });
+        let mut started: Vec<BenchLoop> = Vec::new();
+        for _ in 0..4 {
+            let l: BenchLoop = ok(app, post(&loops, json!({ "teacher": teacher, "pool": pool }))).await;
+            if let Some(prev) = started.last() {
+                assert!(l.created > prev.created, "{} then {}", prev.created, l.created);
+            }
+            started.push(l);
+        }
+        for l in &started {
+            loop_ended(app, &bench_id, &l.id).await;
+        }
+        let list: BenchLoopList = ok(app, get(&loops)).await;
+        let loops: Vec<String> = list.loops.iter().map(|l| l.id.clone()).collect();
+        assert_eq!(loops, started.iter().rev().map(|l| l.id.clone()).collect::<Vec<_>>(), "newest first");
+        (benches, bench_id, loops)
+    };
+    let f = fixture(&home);
+    let list: BenchList = ok(&f.app, get("/api/bench/benchmarks")).await;
+    assert_eq!(list.benchmarks.iter().map(|b| b.id.clone()).collect::<Vec<_>>(), benches);
+    let list: BenchLoopList = ok(&f.app, get(&format!("/api/bench/benchmarks/{bench_id}/loops"))).await;
+    assert_eq!(list.loops.iter().map(|l| l.id.clone()).collect::<Vec<_>>(), loops);
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Self-improvement loops
 // ---------------------------------------------------------------------------------------------------------------

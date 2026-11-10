@@ -17,7 +17,7 @@ use tokio::sync::broadcast;
 
 use crate::error::{Error, Result};
 use crate::index::write_atomic;
-use crate::util::{rfc3339, unix_now};
+use crate::util::{parse_rfc3339_millis, rfc3339, unix_now};
 
 /// Version of the layout of a benchmark's files.
 pub const VERSION: u32 = 1;
@@ -420,7 +420,8 @@ impl Slot {
             }
             loops.push(LoopState { lp, cancel: Arc::new(AtomicBool::new(false)) });
         }
-        loops.sort_by(|a, b| (&a.lp.created, &a.lp.id).cmp(&(&b.lp.created, &b.lp.id)));
+        // By time, not by text: one made before `created` had milliseconds has none.
+        loops.sort_by_cached_key(|l| (parse_rfc3339_millis(&l.lp.created), l.lp.id.clone()));
         let fingerprint = fingerprint(&file);
         let slot = Slot::new(dir, State { file, fingerprint, entries, loops, deleted: false });
         {

@@ -32,7 +32,9 @@ use crate::label::check_name;
 use crate::label::dataset;
 use crate::label::job::unique_file_name;
 use crate::store::Store;
-use crate::util::{claim_dir, fnv1a, rfc3339, slug, unique_id, unix_now};
+use crate::util::{
+    claim_dir, fnv1a, parse_rfc3339_millis, rfc3339, rfc3339_millis, slug, unique_id, unix_now,
+};
 
 /// The share of a student's dataset that goes to `val` (both splits carry the teacher's labels).
 pub const VAL_FRACTION: f32 = 0.1;
@@ -248,7 +250,12 @@ pub fn begin(slot: &Slot, checked: &Checked) -> Result<(BenchLoop, Arc<AtomicBoo
         name,
         status: BenchLoopStatus::Running,
         phase: Some(BenchLoopPhase::Benchmarking),
-        created: rfc3339(unix_now()),
+        // To the millisecond and later than every loop of the benchmark: the list keeps its order after a restart.
+        created: {
+            let last = state.loops.iter().filter_map(|l| parse_rfc3339_millis(&l.lp.created)).max();
+            let now = (unix_now() * 1000.0) as i64;
+            rfc3339_millis(last.map_or(now, |l| now.max(l + 1)))
+        },
         finished: None,
         config: checked.config.clone(),
         generations: Vec::new(),
