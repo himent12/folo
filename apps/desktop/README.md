@@ -87,7 +87,7 @@ src/screens/      one module per screen
 src/overlays.rs   palette, dialogs, image inspector, toasts
 src/scenario.rs   `--scenario` states for screenshots
 tools/            shoot.ps1 / shoot-all.ps1 (screenshots), window-check.ps1 (the window chrome, real input),
-                  make-icon.ps1 (assets/folo.ico)
+                  chrome-check.ps1 (its hit tests and buttons, by window message), make-icon.ps1 (assets/folo.ico)
 ```
 
 ## Data
@@ -156,6 +156,12 @@ keyboard mode, the window's icon, the buttons and both drags with the palette an
 and place, also after closing while minimized; a saved place off every display; a corrupt state file). It exits 1 if any step fails. The remembered state goes to `$FOLO_DESKTOP_STATE`, a fresh file
 under `$FOLO_TEST_TMP\window-check` (or `-StateDir`), never the real profile, and the last check proves that. It
 also saves a screenshot of the snap layouts over Maximize there, to look at.
+
+`tools\chrome-check.ps1 -Exe <build> [-AppArgs "--scenario palette"]` is the quick check that needs no mouse: it
+asks the window what `WM_NCHITTEST` answers over each caption area, the top edge and the page, and posts a
+non-client press and release on Maximize, Minimize and Close. It works when something on the desktop swallows
+injected input (a system prompt), and with any `--scenario` (an overlay open). It does not replace window-check:
+it cannot drag, and it never proves that a real click arrives.
 
 `shots/` is gitignored. Design reviews score the shots against `REVIEW_RUBRIC.md`; `HILLCLIMB.md` logs each round.
 
