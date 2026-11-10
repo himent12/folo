@@ -517,6 +517,56 @@ fn format_picks_the_labels_and_resume_keeps_it() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// `--resume` without `--device` keeps the run's device, as it keeps `--format` and `--workers`: it used to resume
+/// on `auto` (the GPU, for a run started with `--device cpu`). A stored device this machine lacks (`gpu:7`) makes
+/// that visible on any machine; `--device cpu` still overrides it.
+#[test]
+fn resume_keeps_the_runs_device() {
+    let root = TestDir::new("cli-resume-device");
+    let data = root.join("shapes");
+    let cfg = SyntheticConfig { images: 8, imgsz: 64, val_fraction: 0.25, ..SyntheticConfig::default() };
+    write_yolo(&cfg, &data, ImageFormat::Png).unwrap();
+    let project = root.join("runs");
+    let run = project.join("dev");
+    // Stopped after its first epoch (a changed `epochs` would not match the checkpoint's schedule).
+    let mut child: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["train", "--json", "--device", "cpu", "--workers", "1", "--data", s(&data), "--imgsz", "64"])
+        .args(["--batch", "4", "--epochs", "3", "--project", s(&project), "--name", "dev"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+        .into();
+    let mut asked = false;
+    for line in std::io::BufRead::lines(std::io::BufReader::new(child.stdout.take().unwrap())) {
+        let v: Value = serde_json::from_str(&line.unwrap()).unwrap();
+        if v["event"] == "epoch" && !asked {
+            let (code, _, stderr) = folo(&["stop", "--json", s(&run)]);
+            assert_eq!(code, 0, "{stderr}");
+            asked = true;
+        }
+    }
+    assert!(child.wait().unwrap().success());
+    let ckpt = run.join("weights/last.folo");
+    set_train_key(&ckpt, "device", serde_json::json!("gpu:7"));
+    // Not through `folo()`, which adds --device cpu.
+    let resume = |extra: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+            .args(["train", "--json", "--resume", s(&ckpt), "--json-events", "epoch"])
+            .args(extra)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let last: Value = serde_json::from_str(stdout.lines().last().unwrap_or("null")).unwrap();
+        (out.status.code().unwrap(), last)
+    };
+    let (code, last) = resume(&[]);
+    assert_eq!((code, &last["error"]["code"]), (3, &serde_json::json!("device_not_found")), "{last}");
+    let (code, last) = resume(&["--device", "cpu"]);
+    assert_eq!((code, &last["status"]), (0, &serde_json::json!("completed")), "{last}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// Sets `key` of the `folo.train` config stored in the checkpoint at `path` (its header only; the tensor data, whose
 /// offsets are relative to the end of the header, is kept).
 fn set_train_key(path: &Path, key: &str, value: Value) {

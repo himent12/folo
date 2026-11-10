@@ -402,7 +402,8 @@ fn resume(
     };
     let overrides = ResumeOverrides {
         workers: args.workers,
-        device: Some(args.device.clone()),
+        // The run's device unless --device says otherwise (its default, `auto`, is not the run's choice).
+        device: args.explicit.iter().any(|f| f == "device").then(|| args.device.clone()),
         data_format: Some(format),
     };
     Ok((Trainer::resume(ckpt, data, opts, overrides).map_err(engine_error)?, run_dir))
