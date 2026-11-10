@@ -45,6 +45,12 @@ const TRANSFER_LOG_EVERY: Duration = Duration::from_secs(60);
 const ATTEMPTS: u32 = 5;
 /// A booting instance its provider reports gone (or stopped) is believed after this many poll intervals of it.
 const GONE_POLLS: u32 = 10;
+/// While an instance's worker does not answer yet, its provider is asked about it every this many poll intervals.
+const STATE_POLLS: u32 = 5;
+/// A copy of `weights/last.folo` that failed while the run trains is tried again after this long at the earliest
+/// (or after `checkpoint_every`, when that is shorter): mirroring waits for a copy, so a checkpoint that cannot
+/// be copied must not be tried at every epoch.
+const COPY_RETRY_EVERY: Duration = Duration::from_secs(60);
 
 /// A cloud run to execute.
 pub(crate) struct Job {
@@ -261,6 +267,8 @@ struct Exec {
     dir: PathBuf,
     /// The worker's queue position last logged.
     queued_at: Option<u32>,
+    /// When a copy of `weights/last.folo` last failed while the run trained ([`COPY_RETRY_EVERY`]).
+    copy_failed: Option<Instant>,
     _lock: RunLock,
 }
 
@@ -275,6 +283,7 @@ impl Exec {
             fingerprint: job.upload,
             dir,
             queued_at: None,
+            copy_failed: None,
             _lock: lock,
         }
     }
@@ -351,13 +360,20 @@ impl Exec {
         self.entry.run().cloud.map_or(CloudPhase::Provisioning, |c| c.phase)
     }
 
-    /// Moves to `phase` (its progress cleared) and logs `message`.
+    /// Moves to `phase` (its progress cleared, its instance's cost so far with it) and logs `message`.
     fn phase(&self, phase: CloudPhase, message: impl Into<String>) {
+        let cost = self.cost();
         self.entry.update_cloud(|c| {
             c.phase = phase;
             c.progress = None;
+            c.cost_usd = cost.or(c.cost_usd);
         });
         self.entry.log(LogLevel::Info, message);
+    }
+
+    /// What the run's instance costs so far, as the ledger estimates it (`None` without an instance or a price).
+    fn cost(&self) -> Option<f64> {
+        self.private.instance_id.as_ref().and_then(|id| self.core.ledger.get(id).ok())?.cost_usd
     }
 
     fn offer(&self) -> CloudOffer {
@@ -558,31 +574,36 @@ impl Exec {
             s => format!("{s} s"),
         };
         let t0 = Instant::now();
-        let (url, token) = match endpoint {
+        let values = self.c.connection.values();
+        // A provider may not show an instance it has only just created: gone (or stopped) is believed once it has
+        // been the answer for a while.
+        let mut gone: Option<Instant> = None;
+        let mut believed_gone = |state: &InstanceState, poll: Duration| match state {
+            InstanceState::Stopped | InstanceState::Gone => {
+                gone.get_or_insert_with(Instant::now).elapsed() >= poll * GONE_POLLS
+            }
+            _ => {
+                gone = None;
+                false
+            }
+        };
+        let (url, token, instance) = match endpoint {
             Endpoint::Fixed(e) => {
                 self.phase(CloudPhase::Booting, format!("connecting to the FOLO server at {}", e.url));
                 self.arm_deadline();
-                (e.url, e.token)
+                (e.url, e.token, None)
             }
             Endpoint::Instance(r) => {
                 self.phase(CloudPhase::Booting, "waiting for the instance to start");
-                let values = self.c.connection.values();
-                let mut gone: Option<Instant> = None;
                 let url = loop {
                     self.interrupted()?;
                     match self.c.provider.state(&values, &r) {
                         Ok(InstanceState::Running { url }) => break url,
-                        Ok(InstanceState::Starting) => gone = None,
-                        // A provider may not show an instance it has only just created: gone is believed once it
-                        // has been the answer for a while.
-                        Ok(InstanceState::Stopped | InstanceState::Gone) => {
-                            let since = *gone.get_or_insert_with(Instant::now);
-                            if since.elapsed() >= self.core.tuning.poll * GONE_POLLS {
+                        Ok(state) => {
+                            if believed_gone(&state, self.core.tuning.poll) {
                                 // Terminated by hand meanwhile: lost, not a boot failure.
                                 self.interrupted()?;
-                                return Err(boot_failed(
-                                    "the instance stopped before its worker answered".into(),
-                                ));
+                                return Err(boot_failed("the instance stopped before it started".into()));
                             }
                         }
                         Err(e) => tracing::debug!(run = %self.entry.id(), "instance state: {e}"),
@@ -595,13 +616,19 @@ impl Exec {
                     }
                     self.wait(self.core.tuning.poll)?;
                 };
-                (url, self.private.token.clone().unwrap_or_default())
+                (url, self.private.token.clone().unwrap_or_default(), Some(r))
             }
         };
         if provisioned {
-            self.entry.log(LogLevel::Info, format!("the instance runs; waiting for its worker at {url}"));
+            self.entry.log(
+                LogLevel::Info,
+                format!(
+                    "the instance runs; it installs FOLO (a few minutes), then its worker answers at {url}"
+                ),
+            );
         }
         let client = worker::client(&url, &token);
+        let mut asked = Instant::now();
         let (health, system) = loop {
             self.interrupted()?;
             let answer = client
@@ -618,8 +645,24 @@ impl Exec {
                         minutes(timeout)
                     )));
                 }
-                Err(_) => self.wait(self.core.tuning.poll)?,
+                Err(_) => {}
             }
+            // An instance whose setup fails terminates itself (docs/CLOUD.md, `runpod`): it is gone long before
+            // the timeout, and the run says so instead of waiting for a worker that will never answer.
+            if let Some(r) =
+                instance.as_ref().filter(|_| asked.elapsed() >= self.core.tuning.poll * STATE_POLLS)
+            {
+                asked = Instant::now();
+                match self.c.provider.state(&values, r) {
+                    Ok(state) if believed_gone(&state, self.core.tuning.poll) => {
+                        self.interrupted()?;
+                        return Err(boot_failed(self.setup_failed(&values)));
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::debug!(run = %self.entry.id(), "instance state: {e}"),
+                }
+            }
+            self.wait(self.core.tuning.poll)?;
         };
         let amp = self.entry.run().config.amp;
         worker::check(&system, &health.version, provisioned && self.core.tuning.require_gpu, amp)
@@ -637,6 +680,18 @@ impl Exec {
         self.private.worker_url = Some(url);
         self.save();
         Ok(client)
+    }
+
+    /// Why an instance that is gone before its worker answered most likely is: its setup failed and it terminated
+    /// itself. Names where it installs FOLO from, the step that fails when a release is not published.
+    fn setup_failed(&self, values: &folo_cloud::Values) -> String {
+        format!(
+            "the instance stopped before its worker answered: its setup failed, and it terminated itself. It \
+             installs FOLO from {} (the connection's worker download URL names another place); the instance's log \
+             at {} says which step failed",
+            folo_cloud::worker_base_url(values, env!("CARGO_PKG_VERSION")),
+            self.c.provider.info().name
+        )
     }
 
     fn sync(&mut self, client: &Client, ds: &LoadedDataset) -> std::result::Result<Synced, Halt> {
@@ -887,8 +942,8 @@ impl Exec {
     }
 
     fn update_cost(&self) {
-        if let Some(i) = self.private.instance_id.as_ref().and_then(|id| self.core.ledger.get(id).ok()) {
-            self.entry.update_cloud(|c| c.cost_usd = i.cost_usd);
+        if let Some(cost) = self.cost() {
+            self.entry.update_cloud(|c| c.cost_usd = Some(cost));
         }
     }
 
@@ -960,15 +1015,15 @@ impl Exec {
             }
         }
         self.save();
-        let due = self
-            .private
-            .synced
-            .is_none_or(|t| unix_now() - t >= self.core.tuning.checkpoint_every.as_secs_f64());
+        let every = self.core.tuning.checkpoint_every;
+        let due = self.private.synced.is_none_or(|t| unix_now() - t >= every.as_secs_f64())
+            && self.copy_failed.is_none_or(|t| t.elapsed() >= COPY_RETRY_EVERY.min(every));
         if epoch_done && run.status.is_active() && due {
             match self.copy(client, run_id, true, false) {
-                Ok(_) => {}
+                Ok(_) => self.copy_failed = None,
                 Err(TransferError::Stopped) => {}
                 Err(e) => {
+                    self.copy_failed = Some(Instant::now());
                     self.entry.log(LogLevel::Warn, format!("copying weights/last.folo (retried later): {e}"))
                 }
             }
@@ -1022,7 +1077,8 @@ impl Exec {
     }
 
     /// Copies the worker's `last.folo` (or `best.folo`) into the run folder; false when the worker has none. With
-    /// `show`, `Run.cloud.progress` follows it.
+    /// `show` (the collection at the end), `Run.cloud.progress` follows it; without (a copy while the run trains),
+    /// a stop asked for meanwhile ends the copy, so the worker hears of the stop without waiting for it.
     fn copy(
         &mut self,
         client: &Client,
@@ -1043,7 +1099,7 @@ impl Exec {
                 shown = Some(Instant::now());
             }
         };
-        let stop = || self.core.halt.is_on();
+        let stop = || self.core.halt.is_on() || (!show && self.entry.stop_requested());
         let mut ctl = Control { progress: &mut progress, stop: &stop };
         match transfer::download(client, &path, &weights.join(file), &mut ctl) {
             Ok(_) => {}

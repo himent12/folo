@@ -44,6 +44,56 @@ pub fn worker_base_url(values: &Values, version: &str) -> String {
     }
 }
 
+/// The platform every worker runs on: the release archive an instance installs is `folo-<this>.tar.gz`.
+pub const WORKER_TARGET: &str = "x86_64-unknown-linux-gnu";
+
+/// Whether an instance could install FOLO from a place ([`worker_download`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerDownload {
+    /// `install.sh` and the archive's checksum are served there.
+    Found,
+    /// The place answers and says a file is not there (a release that is not published, a private repository, a
+    /// mistyped URL): an instance launched now would fail its setup.
+    Missing {
+        /// The file asked for.
+        url: String,
+        /// The HTTP status it was answered with.
+        status: u16,
+    },
+    /// This machine got no usable answer (no connection, a server error). The instance may still reach the place
+    /// (a mirror inside its network), so this is not a reason to refuse a launch.
+    Unknown(String),
+}
+
+impl WorkerDownload {
+    /// What to tell the user when the download is [`WorkerDownload::Missing`]: what answered what, and the way
+    /// out.
+    pub fn problem(&self) -> Option<String> {
+        let WorkerDownload::Missing { url, status } = self else { return None };
+        Some(format!(
+            "instances cannot install FOLO: {url} answers {status} (a release that is not published, or a private \
+             repository). Set the connection's worker download URL, or {WORKER_BASE_URL_ENV}, to a place that \
+             serves install.sh and folo-{WORKER_TARGET}.tar.gz with its .sha256"
+        ))
+    }
+}
+
+/// Asks `base_url` ([`worker_base_url`]) for the two small files every install starts with, `install.sh` and the
+/// archive's `.sha256`, as an instance would: without credentials. Two short requests.
+pub fn worker_download(base_url: &str) -> WorkerDownload {
+    let base = base_url.trim_end_matches('/');
+    for file in ["install.sh".to_string(), format!("folo-{WORKER_TARGET}.tar.gz.sha256")] {
+        let url = format!("{base}/{file}");
+        match http::status_of(&url) {
+            Ok(200..=299) => {}
+            Ok(status @ 400..=499) => return WorkerDownload::Missing { url, status },
+            Ok(status) => return WorkerDownload::Unknown(format!("{url} answers {status}")),
+            Err(e) => return WorkerDownload::Unknown(format!("{url} does not answer ({e})")),
+        }
+    }
+    WorkerDownload::Found
+}
+
 /// What went wrong with a provider request, by who has to act.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorKind {
@@ -58,6 +108,9 @@ pub enum ErrorKind {
     NoOffer,
     /// A connection value is missing or malformed (`invalid_body`).
     Invalid,
+    /// An instance could not become a worker: FOLO cannot be installed on it (`cloud_boot_failed`). Nothing was
+    /// launched.
+    NoWorker,
 }
 
 /// A failed provider request. The message never contains a credential.
@@ -83,6 +136,7 @@ impl Error {
             ErrorKind::Unavailable => "cloud_unavailable",
             ErrorKind::NoOffer => "offer_not_found",
             ErrorKind::Invalid => "invalid_body",
+            ErrorKind::NoWorker => "cloud_boot_failed",
         }
     }
 }
@@ -312,6 +366,40 @@ mod tests {
                 "https://github.com/himent12/folo/releases/download/v0.1.0"
             );
         }
+    }
+
+    #[test]
+    fn worker_download_tells_missing_from_unknown() {
+        use crate::fixture::{Answer, Fixture};
+        let ok = || Answer::json(200, "ok");
+        let f = Fixture::serve(vec![ok(), ok()]);
+        assert_eq!(worker_download(&f.url("/v0.1.0/")), WorkerDownload::Found);
+        let paths: Vec<String> = f.requests().into_iter().map(|r| r.path).collect();
+        assert_eq!(paths, ["/v0.1.0/install.sh", "/v0.1.0/folo-x86_64-unknown-linux-gnu.tar.gz.sha256"]);
+        assert_eq!(WorkerDownload::Found.problem(), None);
+
+        // The installer is there and the archive is not: a release without a Linux build.
+        let f = Fixture::serve(vec![ok(), Answer::json(404, "{}")]);
+        let missing = worker_download(&f.url("/v0.1.0"));
+        let url = f.url("/v0.1.0/folo-x86_64-unknown-linux-gnu.tar.gz.sha256");
+        assert_eq!(missing, WorkerDownload::Missing { url: url.clone(), status: 404 });
+        let problem = missing.problem().unwrap();
+        assert!(problem.contains(&format!("{url} answers 404")), "{problem}");
+        assert!(
+            problem.contains("worker download URL") && problem.contains(WORKER_BASE_URL_ENV),
+            "{problem}"
+        );
+
+        // A server error or no answer says nothing about what the instance will find.
+        let f = Fixture::serve(vec![Answer::json(503, "{}")]);
+        assert!(matches!(worker_download(&f.url("/x")), WorkerDownload::Unknown(m) if m.contains("503")));
+        let unknown = worker_download(&Fixture::closed_url());
+        assert!(
+            matches!(&unknown, WorkerDownload::Unknown(m) if m.contains("does not answer")),
+            "{unknown:?}"
+        );
+        assert_eq!(unknown.problem(), None);
+        assert_eq!(Error::new(ErrorKind::NoWorker, "x").code(), "cloud_boot_failed");
     }
 
     #[test]

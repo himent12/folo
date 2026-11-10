@@ -96,10 +96,15 @@ struct Gates {
     uploads: AtomicBool,
     /// `/api/system` answers like a FOLO from before cloud workers.
     old: AtomicBool,
+    /// Nothing answers yet, as a provider's proxy does for an instance whose worker has not started: `404`.
+    down: AtomicBool,
 }
 
 async fn gate(State(g): State<Arc<Gates>>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
+    if g.down.load(Ordering::SeqCst) {
+        return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
     while path.starts_with("/api/uploads") && g.uploads.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -702,6 +707,33 @@ fn boot_failures_name_the_check_and_release() {
     cloud.gates.old.store(false, Ordering::SeqCst);
     let e = boot("no-gpu", Tuning { require_gpu: true, ..fast() });
     assert!(e.contains("no GPU FOLO can use"), "{e}");
+}
+
+#[test]
+fn an_instance_that_gives_up_before_its_worker_answers_fails_the_boot_at_once() {
+    no_gpu();
+    let t = TestDir::new("cloud-setup");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    // The instance runs and its worker does not answer, as while (and when) its setup fails...
+    cloud.gates.down.store(true, Ordering::SeqCst);
+    let t0 = std::time::Instant::now();
+    let run = store.create_run(cloud_run(&ds, &conn.id, 1)).unwrap();
+    until("the instance runs", || logged(&store, &run.id, "the instance runs").then_some(()));
+    assert_eq!(phase(&run_of(&store, &run.id)), CloudPhase::Booting);
+    // ...and then it terminates itself, as the bootstrap script does when a step fails.
+    cloud.kill(0);
+    let done = finished(&store, &run.id);
+    assert_eq!((done.status, done.error_code.as_deref()), (RunStatus::Failed, Some("cloud_boot_failed")));
+    let e = done.error.clone().unwrap();
+    assert!(e.contains("its setup failed") && e.contains("installs FOLO from http"), "{e}");
+    assert!(e.contains("log at Test cloud"), "{e}");
+    // The run does not wait for the boot timeout (30 s here, 15 minutes by default) to say so.
+    assert!(t0.elapsed() < fast().boot_timeout / 2, "{:?}", t0.elapsed());
+    assert_eq!(phase(&done), CloudPhase::Released);
+    assert_eq!(store.cloud_instances().unwrap()[0].status, CloudInstanceStatus::Terminated);
 }
 
 #[test]
