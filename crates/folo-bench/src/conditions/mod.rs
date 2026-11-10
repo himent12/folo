@@ -1,9 +1,10 @@
 //! The stress conditions of a benchmark (docs/BENCH.md, *Conditions*).
 //!
 //! A [`Condition`] is a deterministic change to an image that keeps its size, at severities 1 (barely visible) to
-//! [`BENCH_SEVERITIES`] (severe, and a person can still do the job). [`apply`] makes a variant from decoded
-//! pixels; [`render`] goes from an image file to the canonical JPEG of the variant ([`encode_jpeg`], quality 95),
-//! the bytes every contestant is graded on, with the variant's true boxes.
+//! [`BENCH_SEVERITIES`](folo_api::BENCH_SEVERITIES) (severe, and a person can still do the job). [`apply`]
+//! makes a variant from decoded pixels; [`render`] goes from an image file to the canonical JPEG of the
+//! variant ([`encode_jpeg`], quality 95), the bytes every contestant is graded on, with the variant's true
+//! boxes.
 //!
 //! **Resolution.** Everything measured in pixels (blur sizes, motion length, how much detail low resolution keeps)
 //! is given for an image whose long side is 640 px and scales with the image's long side, so a severity means the

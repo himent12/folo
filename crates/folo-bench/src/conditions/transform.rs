@@ -36,9 +36,10 @@ pub(super) fn level(severity: u8) -> Result<usize, Error> {
 /// The output has the input's size. The boxes come back unchanged except for [`Condition::Distance`], which
 /// scales and shifts them exactly as it scales and shifts the pixels (a box with non-finite coordinates stays
 /// non-finite). [`Condition::Occlusion`] covers part of each box that has a finite, positive area inside the image;
-/// other boxes are left alone. Everything random comes from `seed` ([`variant_seed`]). An empty image comes back
-/// as it is, and so does one JPEG cannot hold (a side over 65,535 px) under [`Condition::Jpeg`]. A severity
-/// outside `1..=5` is [`Error::Severity`]; there is no other error.
+/// other boxes are left alone. Everything random comes from `seed`
+/// ([`variant_seed`](crate::conditions::encoding::variant_seed)). An empty image comes back as it is, and so
+/// does one JPEG cannot hold (a side over 65,535 px) under [`Condition::Jpeg`]. A severity outside `1..=5` is
+/// [`Error::Severity`]; there is no other error.
 pub fn apply(
     condition: Condition,
     severity: u8,
