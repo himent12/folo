@@ -1,0 +1,23 @@
+[package]
+name = "folo-cloud"
+description = "FOLO cloud compute providers (docs/CLOUD.md): RunPod and remote FOLO servers behind one trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+folo-api.workspace = true
+folo-client.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+http.workspace = true
+ureq = { workspace = true, features = ["rustls"] }
+
+[dev-dependencies]
+folo-test-support.workspace = true

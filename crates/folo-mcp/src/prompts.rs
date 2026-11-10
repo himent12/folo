@@ -1,5 +1,6 @@
 //! Prompts (docs/MCP.md "Prompts"). Retrieval only builds messages: it never starts jobs or touches files.
 
+use folo_server::store::{LogsQuery, MetricsQuery};
 use rmcp::ErrorData as McpError;
 use rmcp::model::{GetPromptRequestParams, GetPromptResult, Prompt, PromptArgument, PromptMessage, Role};
 use serde_json::json;
@@ -74,7 +75,10 @@ pub async fn get(inner: &Inner, req: GetPromptRequestParams) -> Result<GetPrompt
             let run_id = arg(&req, "run_id").ok_or_else(|| missing("diagnose_run", "run_id"))?;
             let id = run_id.clone();
             let (run, metrics, logs) = inner
-                .blocking(move |s| Ok((s.get_run(&id)?, s.run_metrics(&id, u64::MAX)?, s.run_logs(&id, 20)?)))
+                .blocking(move |s| {
+                    let metrics = s.run_metrics(&id, &MetricsQuery::every(u64::MAX))?;
+                    Ok((s.get_run(&id)?, metrics, s.run_logs(&id, &LogsQuery::last(20))?.lines))
+                })
                 .await
                 .map_err(|e| {
                     McpError::invalid_params(e.body.message.clone(), Some(json!({ "error": e.body })))

@@ -45,6 +45,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 # Test temp dirs under FOLO_TEST_TMP, removed on drop (docs/CI.md, Test temp dirs).
 folo-test-support = { path = "../../crates/folo-test-support" }
+# The real cloud providers, which the demo's provider list must match word for word.
+folo-cloud = { path = "../../crates/folo-cloud" }
 
 [build-dependencies]
 serde_json = "1"

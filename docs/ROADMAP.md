@@ -47,6 +47,13 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
   review in Studio → a registered YOLO dataset (`/api/label`, docs/LABELING.md; #165). Next: the same screen in FOLO
   Desktop, `folo label` and MCP tools
 
+- [x] cloud compute: training runs on a rented GPU (RunPod) or on another FOLO server, as ordinary runs of this
+  server (`TrainConfig.compute`, `/api/cloud`, `folo cloud`, Settings → Cloud and Run on in Studio and Desktop;
+  docs/CLOUD.md). The worker side is plain API: `folo serve --token`, `/api/uploads`, run cursors, weight ranges.
+  Next: check the RunPod provider against a live account (`crates/folo-cloud/tests/runpod_live.rs`) once a
+  release with this is published for workers to install; TLS on the worker, then providers that expose a raw
+  port (Vast.ai, Lambda); spot instances with automatic resume
+
 ## M5 — polish
 - [x] README showcase, QUICKSTART, screenshots, llms.txt (#71); R6 example (examples/r6)
 - [x] dogfooding report 3 (#134) and its fixes: GPU memory released after runs, published weights as models, AMP refused up front, server-built CLI command (#140); eval provenance (#138)

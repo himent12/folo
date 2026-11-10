@@ -6,6 +6,11 @@ import type {
   BenchmarkRequest,
   Box,
   CliCommand,
+  CloudConnection,
+  CloudInstance,
+  CloudOfferList,
+  CloudProvider,
+  ConnectCloud,
   CreateDataset,
   CreateLabelJob,
   CreateSyntheticDataset,
@@ -134,6 +139,28 @@ export interface Api {
   modelWeights(id: string, signal?: AbortSignal): Promise<ArrayBuffer>;
   /** The weights' current ETag (a HEAD request): it changes when the model's file does. Null when unknown. */
   modelWeightsTag(id: string, signal?: AbortSignal): Promise<string | null>;
+
+  // Cloud compute (docs/API.md, Cloud compute): servers whose `system().features` has `cloud`.
+  /** `GET /api/cloud/providers`: the kinds of compute, with the fields a connection to each takes. */
+  cloudProviders(signal?: AbortSignal): Promise<CloudProvider[]>;
+  /** `GET /api/cloud/connections`, oldest first; status, account and balance are from the last check. */
+  cloudConnections(signal?: AbortSignal): Promise<CloudConnection[]>;
+  /**
+   * `POST /api/cloud/connections`: checks the values with the provider, then stores them. `400 invalid_body` names a
+   * missing field, `422 cloud_auth_failed` is a rejected credential, `502 cloud_unavailable` a provider that does not
+   * answer. The values are credentials: never log, store or show them.
+   */
+  connectCloud(body: ConnectCloud): Promise<CloudConnection>;
+  /** `POST /api/cloud/connections/{id}/check`: checks the stored credentials again; a failed check is `status: error`. */
+  checkCloudConnection(id: string): Promise<CloudConnection>;
+  /** `DELETE /api/cloud/connections/{id}`: forgets the credentials; `409 connection_in_use` while it has live instances or active runs. */
+  disconnectCloud(id: string): Promise<void>;
+  /** `GET /api/cloud/connections/{id}/offers`, cheapest first, cached for a minute by the server unless `refresh`. */
+  cloudOffers(id: string, signal?: AbortSignal, refresh?: boolean): Promise<CloudOfferList>;
+  /** `GET /api/cloud/instances`: the live ones first, then those that ended in the last 7 days, newest first. */
+  cloudInstances(signal?: AbortSignal): Promise<CloudInstance[]>;
+  /** `DELETE /api/cloud/instances/{id}`: terminates it now (`terminating`, or `terminated` once confirmed); its run fails. */
+  terminateCloudInstance(id: string): Promise<CloudInstance>;
 
   // Agent labeling (docs/API.md; servers list `agent_labeling`).
   /** Claude Code, then Codex, each with whether its CLI is installed on the server's machine. */
@@ -435,6 +462,31 @@ export class HttpApi implements Api {
     } catch {
       return null;
     }
+  }
+
+  async cloudProviders(signal?: AbortSignal) {
+    return (await this.#req<{ providers: CloudProvider[] }>('GET', '/cloud/providers', undefined, signal)).providers;
+  }
+  async cloudConnections(signal?: AbortSignal) {
+    return (await this.#req<{ connections: CloudConnection[] }>('GET', '/cloud/connections', undefined, signal)).connections;
+  }
+  connectCloud(body: ConnectCloud) {
+    return this.#req<CloudConnection>('POST', '/cloud/connections', body);
+  }
+  checkCloudConnection(id: string) {
+    return this.#req<CloudConnection>('POST', `/cloud/connections/${encodeURIComponent(id)}/check`);
+  }
+  disconnectCloud(id: string) {
+    return this.#req<void>('DELETE', `/cloud/connections/${encodeURIComponent(id)}`);
+  }
+  cloudOffers(id: string, signal?: AbortSignal, refresh = false) {
+    return this.#req<CloudOfferList>('GET', `/cloud/connections/${encodeURIComponent(id)}/offers${qs({ refresh: refresh ? 'true' : undefined })}`, undefined, signal);
+  }
+  async cloudInstances(signal?: AbortSignal) {
+    return (await this.#req<{ instances: CloudInstance[] }>('GET', '/cloud/instances', undefined, signal)).instances;
+  }
+  terminateCloudInstance(id: string) {
+    return this.#req<CloudInstance>('DELETE', `/cloud/instances/${encodeURIComponent(id)}`);
   }
 
   predict(input: PredictInput, opts: PredictOptions, signal?: AbortSignal) {

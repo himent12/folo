@@ -25,6 +25,7 @@
   import { href } from '$lib/router.svelte';
   import Button from '$lib/ui/Button.svelte';
   import Ident from '$lib/ui/Ident.svelte';
+  import type { IconType } from '$lib/ui/types';
   import Callout from './Callout.svelte';
   import { plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
 
@@ -35,6 +36,7 @@
     onresume,
     waiting,
     waitingTitle = 'Waiting to start',
+    waitingIcon = Clock,
     waitingActions,
     warnings = [],
     system,
@@ -45,8 +47,10 @@
     onresume: () => void;
     /** A queued run: what it waits for and when it should start. */
     waiting?: Snippet;
-    /** A queued run's place, "2nd in queue", where the server reports it. */
+    /** A queued run's place, "2nd in queue", where the server reports it; a cloud run's phase. */
     waitingTitle?: string;
+    /** The waiting state's mark: a clock in the queue, a cloud for a cloud run's hand-over. */
+    waitingIcon?: IconType;
     /** A queued run's action: Start next. */
     waitingActions?: Snippet;
     /** The trainer's schedule warnings, as it wrote them (./warnings). */
@@ -162,7 +166,7 @@
   </Callout>
 {:else if run.status === 'queued' && waiting}
   <!-- The dependency and the start estimate lead; the frames below stay compact until there is data. -->
-  <Callout tone="neutral" icon={Clock} title={waitingTitle} actions={waitingActions}>{@render waiting()}</Callout>
+  <Callout tone="neutral" icon={waitingIcon} title={waitingTitle} actions={waitingActions}>{@render waiting()}</Callout>
 {:else if short}
   <!-- No outcome yet (a live run): the warning alone, one line: the cause in numbers and the fix; the engine's
        sentences, in plain words, behind "Why?". -->

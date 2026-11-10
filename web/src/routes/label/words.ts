@@ -1,14 +1,15 @@
 // What the labeling screens say about a job, a run and what it cost, one wording everywhere.
 
-import type { LabelAgent, LabelImage, LabelJob, LabelRun, LabelUsage, RunStatus } from '$lib/api/types';
-import { num } from '$lib/format';
+import type { LabelAgent, LabelImage, LabelJob, LabelRun, LabelUsage } from '$lib/api/types';
+import type { OwnStatus } from '$lib/ui/StatusBadge.svelte';
+import { num, usd } from '$lib/format';
 import { AGENT_NAME } from '$lib/label';
 
 /**
  * A job's status as a status mark (the run status whose mark it shares) and its word: "Labeling" while an agent
  * works, "Stopping", "Agent failed" when its last run ended early, else "Idle".
  */
-export function jobStatus(job: LabelJob): { status: RunStatus; label: string } {
+export function jobStatus(job: LabelJob): OwnStatus {
   if (job.status === 'running') return { status: 'running', label: 'Labeling' };
   if (job.status === 'stopping') return { status: 'stopping', label: 'Stopping' };
   if (job.run?.outcome === 'failed') return { status: 'failed', label: 'Agent failed' };
@@ -42,15 +43,9 @@ export function tokens(n: number): string {
   return `${num(n / 1e6, 1)}M`;
 }
 
-/** A cost the agent reported: "$0.02", "$1.40", "<$0.01" for a fraction of a cent. */
-export function usd(x: number): string {
-  if (x > 0 && x < 0.005) return '<$0.01';
-  return `$${num(x, 2)}`;
-}
-
 /**
  * What the agent reported a run (or a job) used, one fact each: "4 calls", "18.4k tokens in (3.2k cached)", "5.1k out",
- * "$0.02" (when it reported a cost). Nothing for a run that made no call.
+ * "$0.02" (when it reported a cost, in the one dollar format, `$lib/format` `usd`). Nothing for a run that made no call.
  */
 export function usageFacts(u: LabelUsage): string[] {
   if (u.calls === 0) return [];

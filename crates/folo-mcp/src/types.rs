@@ -178,6 +178,23 @@ pub struct RunIdArgs {
     pub run_id: String,
 }
 
+/// `cloud_offers`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CloudOffersArgs {
+    /// Connection id, e.g. `cc_4d2a` (cloud_connections).
+    pub connection_id: String,
+    /// Ask the provider again instead of using the answer of the last minute.
+    #[serde(default)]
+    pub refresh: bool,
+}
+
+/// `cloud_terminate`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct InstanceIdArgs {
+    /// Instance id, e.g. `ci_8a2f` (cloud_instances).
+    pub instance_id: String,
+}
+
 /// `reorder_run`: exactly one of `action` and `position` (docs/API.md, `POST /api/runs/{id}/queue`).
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ReorderRunArgs {

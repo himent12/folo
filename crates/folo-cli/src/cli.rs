@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use clap::builder::NonEmptyStringValueParser;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// FOLO: a from-scratch, very fast vision framework (YOLO-style detector, training, export, Studio).
@@ -45,6 +46,10 @@ pub enum Command {
     /// Published pretrained weights: list them, download them into the local cache.
     #[command(subcommand)]
     Weights(WeightsCommand),
+    /// Cloud compute (docs/CLOUD.md): providers, connections, offers and instances of the data dir, with or without
+    /// a server running.
+    #[command(subcommand)]
+    Cloud(CloudCommand),
     /// Run a Model Context Protocol server over stdio so agents can drive FOLO.
     Mcp(McpArgs),
 }
@@ -84,6 +89,10 @@ pub struct ServeArgs {
     /// `"amp": true` need it (they fail with `not_supported` without tensor cores).
     #[arg(long, env = "FOLO_GPU_TENSOR_CORES", value_parser = clap::builder::BoolishValueParser::new())]
     pub tensor_cores: bool,
+    /// Require `Authorization: Bearer <token>` on every /api request but GET /api/health (use it whenever the
+    /// server listens beyond loopback; docs/CLOUD.md, Securing a server). Never logged or printed.
+    #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]
+    pub token: Option<String>,
 }
 
 /// `folo describe`.
@@ -477,6 +486,76 @@ pub struct WeightsPullArgs {
     pub repo: String,
 }
 
+/// `folo cloud`.
+#[derive(Debug, Subcommand)]
+pub enum CloudCommand {
+    /// The providers FOLO can use and the values a connection to each takes.
+    Providers(CloudDirArgs),
+    /// Connect a provider: its values are checked with it before anything is stored.
+    Connect(CloudConnectArgs),
+    /// The connections, with what their last check found.
+    Connections(CloudDirArgs),
+    /// Check a connection's stored credentials again.
+    Check(CloudIdArgs),
+    /// Forget a connection (refused while it has live instances or active runs).
+    Disconnect(CloudIdArgs),
+    /// What a connection can run on now, cheapest first.
+    Offers(CloudOffersArgs),
+    /// The instances FOLO launched: alive first, then those that ended in the last 7 days.
+    Instances(CloudDirArgs),
+    /// Terminate an instance now (FOLO retries until the provider confirms); a run still using it fails.
+    Terminate(CloudIdArgs),
+}
+
+/// The data dir of a `folo cloud` command.
+#[derive(Debug, Args)]
+pub struct CloudDirArgs {
+    /// The data dir whose cloud state to use, as `folo serve` resolves it [default: $FOLO_HOME or ~/.folo].
+    #[arg(long, env = "FOLO_DATA_DIR")]
+    pub data_dir: Option<PathBuf>,
+}
+
+/// `folo cloud check`, `disconnect` and `terminate`.
+#[derive(Debug, Args)]
+pub struct CloudIdArgs {
+    /// The connection's id (`cc_…`), or for `terminate` the instance's (`ci_…`).
+    pub id: String,
+    #[command(flatten)]
+    pub dir: CloudDirArgs,
+}
+
+/// `folo cloud offers`.
+#[derive(Debug, Args)]
+pub struct CloudOffersArgs {
+    /// The connection's id (`cc_…`).
+    pub connection: String,
+    /// Ask the provider again instead of using the answer of the last minute.
+    #[arg(long)]
+    pub refresh: bool,
+    #[command(flatten)]
+    pub dir: CloudDirArgs,
+}
+
+/// `folo cloud connect`.
+#[derive(Debug, Args)]
+pub struct CloudConnectArgs {
+    /// The provider's id (`folo cloud providers`), e.g. runpod or remote.
+    pub provider: String,
+    /// The connection's name [default: the provider's name, with 2, 3, ... when taken].
+    #[arg(long, default_value = "")]
+    pub name: String,
+    /// A value that is not secret, as KEY=VALUE (repeatable), e.g. --set url=https://gpu-box.example.com:7878.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    pub set: Vec<String>,
+    /// A secret, from the environment (KEY=env:VAR) or from one line of stdin (KEY=-), repeatable, e.g. --secret
+    /// api_key=env:RUNPOD_API_KEY. Never as a value on the command line, which other processes and the shell
+    /// history can read.
+    #[arg(long = "secret", value_name = "KEY=env:VAR|KEY=-")]
+    pub secret: Vec<String>,
+    #[command(flatten)]
+    pub dir: CloudDirArgs,
+}
+
 /// `folo dataset`.
 #[derive(Debug, Subcommand)]
 pub enum DatasetCommand {
@@ -624,6 +703,9 @@ pub struct McpArgs {
     /// the engine in this process.
     #[arg(long, value_name = "URL")]
     pub server: Option<String>,
+    /// With --server: the token that `folo serve` was started with (`--token`), sent as `Authorization: Bearer`.
+    #[arg(long, env = "FOLO_TOKEN", hide_env_values = true, value_parser = NonEmptyStringValueParser::new())]
+    pub token: Option<String>,
     /// Embedded mode: device of `predict`, `predict_batch` and `val`: auto (the GPU when one can hold the model,
     /// else the CPU), cpu or gpu:<n>. Training runs use their own `device` setting.
     #[arg(long, env = "FOLO_DEVICE", default_value = "auto")]

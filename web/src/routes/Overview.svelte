@@ -168,7 +168,7 @@
                 <!-- Fixed widths on the shared header row: one geometry loading and loaded. -->
                 <tr>
                   <th>Run</th>
-                  <th style:width="112px">Status</th>
+                  <th style:width="128px">Status</th>
                   <th class="hide-sm" style:width="136px">Progress</th>
                   <th class="r" style:width="88px">mAP50-95</th>
                   <th class="hide-sm" style:width="120px">mAP50-95 trend</th>
@@ -200,7 +200,7 @@
                         <a class="run-name" href={href(`/runs/${r.id}`)} onclick={(e) => e.stopPropagation()}>{r.name}</a>
                         <span class="sub"><Meta line><span class="ds">{dsById.get(r.config.dataset_id)?.name ?? r.config.dataset_id}</span><Ident value={r.config.arch} /></Meta></span>
                       </td>
-                      <td use:tooltip={failureCause(r)}><StatusBadge status={r.status} plain /></td>
+                      <td use:tooltip={failureCause(r)}><StatusBadge run={r} plain /></td>
                       <td class="hide-sm">
                         <div class="prog">
                           <Progress value={runProgress(r)} size="xs" tone={r.status === 'running' ? 'accent' : 'neutral'} label="{r.name} progress" />

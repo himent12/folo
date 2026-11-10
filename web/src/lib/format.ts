@@ -183,3 +183,37 @@ export function conf(x: number | null | undefined): string {
 export function atBestF1(c: number | null | undefined): string {
   return ok(c) ? `at conf ${conf(c)} (best F1)` : 'at the best-F1 confidence';
 }
+
+/** An hourly price in US dollars: 0.69 → "$0.69/h"; "—" for compute that is not billed (`null`). */
+export function pricePerHour(x: number | null | undefined): string {
+  return ok(x) ? `$${nf(2).format(x)}/h` : '—';
+}
+
+/** An amount in US dollars: "$0.42"; under a cent "<$0.01"; from $100 whole dollars ("$1,240"); "—" when unknown. */
+export function usd(x: number | null | undefined): string {
+  if (!ok(x)) return '—';
+  if (x > 0 && x < 0.005) return '<$0.01';
+  return `$${nf(Math.abs(x) >= 100 ? 0 : 2).format(x)}`;
+}
+
+/** A range of amounts: "$0.12–$0.93", one amount when both ends read the same. */
+export function usdRange(lo: number, hi: number): string {
+  const a = usd(Math.min(lo, hi));
+  const b = usd(Math.max(lo, hi));
+  return a === b ? a : `${a}–${b}`;
+}
+
+/** Hours as a time limit is set: 12 → "12 h", 0.5 → "0.5 h", 0.25 → "0.25 h". */
+export function hoursText(h: number | null | undefined): string {
+  if (!ok(h)) return '—';
+  return `${new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }).format(h)} h`;
+}
+
+/** A moment as a clock time in local time, "14:32", with the date when it is not today: "Nov 9, 14:32". */
+export function timeOfDay(iso: string | null | undefined, now = Date.now()): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  if (d.toDateString() !== new Date(now).toDateString()) return date(iso);
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}

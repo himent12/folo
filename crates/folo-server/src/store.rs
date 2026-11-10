@@ -6,11 +6,13 @@
 
 use std::path::Path;
 
+use axum::body::Bytes;
 use folo_api::{
-    BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, Dataset, DatasetFormat, ExportResult,
+    BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, CloudConnection, CloudInstance,
+    CloudOfferList, CloudProvider, ConnectCloud, CreateUpload, Dataset, DatasetFormat, ExportResult,
     ExportSpec, GpuInfo, GpuPool, LabelDatasetRequest, LogLine, Model, ModelEval, PredictResponse,
-    RegisterDataset, Run, RunEstimate, RunEvent, RunMetrics, RunSamples, Split, StatusEvent,
-    SyntheticDataset, ThroughputTable, TrainConfig, ValReport, ValRequest,
+    RegisterDataset, Run, RunEstimate, RunEvent, RunLogs, RunMetrics, RunSamples, Split, StatusEvent,
+    SyntheticDataset, ThroughputTable, TrainConfig, Upload, UploadCreated, Uploaded, ValReport, ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -60,6 +62,72 @@ impl IssueQuery {
             total += 1;
         }
         folo_api::IssuePage { total, issues: page, counts: folo_api::IssueCounts::of(issues) }
+    }
+}
+
+/// Selection of `GET /api/runs/{id}/metrics`: the cursors first (feature `run_cursors`), then the thinning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MetricsQuery {
+    /// Keep every `every`-th step (and always the latest one); 1 keeps them all.
+    pub every: u64,
+    /// Only steps with `step > after_step`.
+    pub after_step: Option<u64>,
+    /// Only epochs with `epoch > after_epoch`.
+    pub after_epoch: Option<u32>,
+}
+
+impl Default for MetricsQuery {
+    fn default() -> Self {
+        MetricsQuery { every: 1, after_step: None, after_epoch: None }
+    }
+}
+
+impl MetricsQuery {
+    /// The whole history, thinned to every `every`-th step.
+    pub fn every(every: u64) -> MetricsQuery {
+        MetricsQuery { every, ..MetricsQuery::default() }
+    }
+
+    /// What this query selects of a run's full history `m`.
+    pub fn select(&self, mut m: RunMetrics) -> RunMetrics {
+        if let Some(after) = self.after_step {
+            m.steps.retain(|s| s.step > after);
+        }
+        if let Some(after) = self.after_epoch {
+            m.epochs.retain(|e| e.epoch > after);
+        }
+        if self.every > 1 {
+            let latest = m.steps.last().map(|s| s.step);
+            m.steps.retain(|s| s.step % self.every == 0 || Some(s.step) == latest);
+        }
+        m
+    }
+}
+
+/// Selection of `GET /api/runs/{id}/logs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogsQuery {
+    /// Most lines answered.
+    pub limit: usize,
+    /// The lines after the first `after` of the log (the oldest `limit` of them) instead of the last `limit` lines
+    /// (feature `run_cursors`).
+    pub after: Option<u64>,
+}
+
+impl LogsQuery {
+    /// The last `limit` lines.
+    pub fn last(limit: usize) -> LogsQuery {
+        LogsQuery { limit, after: None }
+    }
+
+    /// What this query selects of a run's whole log `lines` (oldest first), with the log's length.
+    pub fn select(&self, lines: Vec<LogLine>) -> RunLogs {
+        let total = lines.len() as u64;
+        let skip = match self.after {
+            Some(after) => usize::try_from(after).unwrap_or(usize::MAX),
+            None => lines.len().saturating_sub(self.limit),
+        };
+        RunLogs { lines: lines.into_iter().skip(skip).take(self.limit).collect(), total }
     }
 }
 
@@ -269,6 +337,12 @@ impl QueueMove {
     }
 }
 
+/// `501 not_implemented` of the upload methods of a store without uploads.
+fn not_uploads() -> crate::error::Error {
+    crate::error::Error::not_implemented("uploading")
+        .hint("uploads need a real server (`folo serve` without --mock)")
+}
+
 /// A live subscription to a run's events.
 pub struct Subscription {
     /// The run's state right now (sent first).
@@ -295,6 +369,11 @@ pub trait Store: Send + Sync + 'static {
     /// The data dir to report in `/api/system` (`None`: the mock store).
     fn data_dir(&self) -> Option<&Path> {
         None
+    }
+    /// The optional features of `/api/system`'s `features` that depend on the store (`folo_api::FEATURE_*`:
+    /// uploads, run cursors, checkpoints); the ones every store has are listed by the server.
+    fn features(&self) -> &'static [&'static str] {
+        &[]
     }
     /// The throughput table (`GET /api/system/throughput`): measured rows, then the reference rows of this server's
     /// devices. May block (the real store resolves `device: auto`). Stores without one answer `501
@@ -359,6 +438,13 @@ pub trait Store: Send + Sync + 'static {
         self.get_run(id)?;
         Err(crate::error::Error::not_implemented("resuming runs"))
     }
+    /// Starts a new run that continues the training state stored in model `checkpoint`'s file (`POST /api/runs`
+    /// with `checkpoint`): `404 model_not_found`, `422 invalid_weights` when the file is not a full checkpoint.
+    /// `config` is checked as for [`Store::create_run`]. Stores without checkpoints answer `501 not_implemented`.
+    fn continue_run(&self, checkpoint: &str, config: TrainConfig) -> Result<Run> {
+        let _ = (checkpoint, config);
+        Err(crate::error::Error::not_implemented("continuing a checkpoint"))
+    }
     /// One run.
     fn get_run(&self, id: &str) -> Result<Run>;
     /// `GET /api/runs/{id}/cli`: the `folo train` command of the run's config on this machine
@@ -378,12 +464,12 @@ pub trait Store: Send + Sync + 'static {
     }
     /// Deletes a run that is not active.
     fn delete_run(&self, id: &str) -> Result<()>;
-    /// Full metric history; `every > 1` keeps every `every`-th step (and always the last one).
-    fn run_metrics(&self, id: &str, every: u64) -> Result<RunMetrics>;
+    /// The run's metric history, as `q` selects it.
+    fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics>;
     /// Validation samples of an epoch (latest finished epoch when `None`).
     fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples>;
-    /// The last `limit` log lines of a run, oldest first.
-    fn run_logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>>;
+    /// The run's log lines `q` selects, oldest first, with the length of the whole log.
+    fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs>;
     /// Subscribes to a run's live events. Must be called inside a tokio runtime.
     fn subscribe(&self, id: &str) -> Result<Subscription>;
 
@@ -395,6 +481,74 @@ pub trait Store: Send + Sync + 'static {
     fn val(&self, req: ValRequest) -> Result<ValReport> {
         let _ = req;
         Err(crate::error::Error::not_implemented("validation"))
+    }
+
+    /// Starts an upload session (`POST /api/uploads`), or answers with what an earlier upload with the same
+    /// `fingerprint` became. Stores without uploads answer `501 not_implemented` (the default, also for the other
+    /// upload methods).
+    fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
+        let _ = req;
+        Err(not_uploads())
+    }
+    /// An upload session (`GET /api/uploads/{id}`).
+    fn get_upload(&self, id: &str) -> Result<Upload> {
+        let _ = id;
+        Err(not_uploads())
+    }
+    /// Part `part` of an upload's stream (`PUT /api/uploads/{id}/parts/{n}`).
+    fn upload_part(&self, id: &str, part: u32, bytes: Bytes) -> Result<Upload> {
+        let _ = (id, part, bytes);
+        Err(not_uploads())
+    }
+    /// Ends an upload and registers what it holds (`POST /api/uploads/{id}/complete`).
+    fn complete_upload(&self, id: &str) -> Result<Uploaded> {
+        let _ = id;
+        Err(not_uploads())
+    }
+    /// Drops an upload session and what it received (`DELETE /api/uploads/{id}`).
+    fn delete_upload(&self, id: &str) -> Result<()> {
+        let _ = id;
+        Err(not_uploads())
+    }
+
+    /// The cloud providers this server knows (`GET /api/cloud/providers`). Stores without cloud compute answer `501
+    /// not_implemented` (the default, also for the other cloud methods).
+    fn cloud_providers(&self) -> Result<Vec<CloudProvider>> {
+        Err(not_cloud())
+    }
+    /// The cloud connections, oldest first (`GET /api/cloud/connections`).
+    fn cloud_connections(&self) -> Result<Vec<CloudConnection>> {
+        Err(not_cloud())
+    }
+    /// Makes a cloud connection, its values checked with the provider first (`POST /api/cloud/connections`).
+    fn connect_cloud(&self, req: ConnectCloud) -> Result<CloudConnection> {
+        let _ = req;
+        Err(not_cloud())
+    }
+    /// Checks a connection's credentials again (`POST /api/cloud/connections/{id}/check`).
+    fn check_cloud(&self, id: &str) -> Result<CloudConnection> {
+        let _ = id;
+        Err(not_cloud())
+    }
+    /// Forgets a connection (`DELETE /api/cloud/connections/{id}`): `409 connection_in_use` while it has live
+    /// instances or active runs.
+    fn disconnect_cloud(&self, id: &str) -> Result<()> {
+        let _ = id;
+        Err(not_cloud())
+    }
+    /// What a connection can run on (`GET /api/cloud/connections/{id}/offers`), cached unless `refresh`.
+    fn cloud_offers(&self, id: &str, refresh: bool) -> Result<CloudOfferList> {
+        let _ = (id, refresh);
+        Err(not_cloud())
+    }
+    /// The instances this server launched (`GET /api/cloud/instances`).
+    fn cloud_instances(&self) -> Result<Vec<CloudInstance>> {
+        Err(not_cloud())
+    }
+    /// Terminates an instance now (`DELETE /api/cloud/instances/{id}`).
+    fn terminate_instance(&self, id: &str) -> Result<CloudInstance> {
+        let _ = id;
+        Err(not_cloud())
     }
 
     /// The agent-labeling service behind `/api/label` (docs/API.md, Agent labeling). Stores without one answer
@@ -420,6 +574,13 @@ pub trait Store: Send + Sync + 'static {
     }
 
     /// Called once when the server shuts down: stop background work (the real store stops the active run at a
-    /// batch boundary, keeping its last checkpoint). Blocking; the default does nothing.
+    /// batch boundary, keeping its last checkpoint, drops upload sessions and leaves cloud runs to their workers).
+    /// Blocking; the default does nothing.
     fn shutdown(&self) {}
+}
+
+/// `501 not_implemented` of the cloud methods of a store without cloud compute.
+fn not_cloud() -> crate::error::Error {
+    crate::error::Error::not_implemented("cloud compute")
+        .hint("cloud compute needs a server with the `cloud` feature (GET /api/system lists its features)")
 }

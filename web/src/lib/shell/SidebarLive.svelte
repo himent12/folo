@@ -20,7 +20,8 @@
   // that reports the run finished hides the card before the list catches up.
   const streamed = $derived(streamedRun(listed?.id));
   const live = $derived(streamed ? (training(streamed) ? streamed : undefined) : listed);
-  const queued = $derived(watched.runs?.filter((r) => r.status === 'queued').length ?? 0);
+  // Runs waiting for this machine: a cloud run in its hand-over waits for no slot here.
+  const queued = $derived(watched.runs?.filter((r) => r.status === 'queued' && !r.cloud).length ?? 0);
   const progress = $derived(live ? runProgress(live) : 0);
   // The list stopped refreshing and no stream covers the run: the card is its last known state (lib/api/freshness), so
   // it says so and stops pulsing. "Last known" only when both clocks are down.

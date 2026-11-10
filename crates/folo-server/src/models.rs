@@ -117,7 +117,7 @@ fn is_buffer(name: &str) -> bool {
 
 /// Reads only the file's header: the listing reads every file once per version, and a run checkpoint is several
 /// times the size of its weights. The tensor data is checked when the file is loaded.
-fn read_meta(path: &Path) -> Result<FileMeta> {
+pub(crate) fn read_meta(path: &Path) -> Result<FileMeta> {
     let header = Container::read_header(path).map_err(|e| match e {
         folo_nn::Error::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => Error::new(
             StatusCode::NOT_FOUND,

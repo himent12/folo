@@ -20,6 +20,10 @@ behaviour, and keep the Rust types in `crates/folo-api` (used by the server, the
   without a preflight, state-changing requests (`POST`, `PUT`, `DELETE`) whose `Origin` header is neither such a loopback
   origin nor the server itself are refused with `403 forbidden_origin`. Requests without `Origin` (curl, agents,
   FOLO Desktop) are unaffected.
+- Token: a server started with `folo serve --token <secret>` (or `FOLO_TOKEN`) answers `401 unauthorized` to every
+  `/api` request without `Authorization: Bearer <secret>`, except `GET /api/health` (so a client can tell a server
+  that is up from one it may not use). The comparison is constant-time and the token is never logged. Without
+  `--token` no header is needed (the default: the server listens on loopback). docs/CLOUD.md, *Securing a server*.
 - Outside `/api`, the server serves the built web app (`web/dist`, `--web-dir`, or the copy embedded in `embed-web`
   builds) with an SPA fallback to `index.html`; without a build it answers 404 with a hint. Embedded files carry an
   ETag; Vite's content-hashed `assets/` are `Cache-Control: immutable`, everything else `no-cache`.
@@ -33,15 +37,17 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 | status | code | when |
 |---|---|---|
 | 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes) |
+| 401 | `unauthorized` | a request without the server's token (see Conventions) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
-| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
+| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run |
+| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on) |
 | 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict` and image uploads to a labeling job, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
-| 422 | `invalid_body`, `image_decode_failed`, `invalid_weights` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read |
+| 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
 | 500 | `internal` | a bug or an IO failure |
 | 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (`POST /api/runs` with `"amp": true` where `capabilities.amp.available` is false: refused before anything is queued, with the same reason and a hint) |
+| 502 | `cloud_unavailable`, `server_unreachable`, `bad_gateway` | a cloud provider's API does not answer or fails; a worker (another FOLO server) does not answer, or answers with something that is not this API. As `Run.error_code` of a cloud run also `cloud_boot_failed`, `cloud_sync_failed` and `cloud_instance_lost` (docs/CLOUD.md) |
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
@@ -57,7 +63,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   and `queue` events), `weights_onnx` (`/weights?format=onnx`; older servers answer `400 invalid_query`), `run_cli` (`GET /api/runs/{id}/cli`
   and `RunEstimate.cli`), `web_wasm` (the Studio this server serves includes the in-browser runtime, folo-wasm,
   so its Playground can run models with WebGPU or the wasm CPU; left out for a build without it, or without a
-  web app), `agent_labeling` (the `/api/label` endpoints, Agent labeling below). `folo mcp --server` refuses the
+  web app), `agent_labeling` (the `/api/label` endpoints, Agent labeling below), `uploads` (`/api/uploads`),
+  `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
+  `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
+  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events). `folo mcp --server` refuses the
   export switches without `export_onnx_switches`.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
@@ -195,7 +204,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `source` (additive, left out by older servers): `run` (a run's `best` / `last`), `file` (`<data dir>/models`) or
   `published`; `about` only for published weights. `path` (additive): the weights file on the server's machine, `/`
   separators, what `folo train --weights`, `val --model` and `export --model` take there (left out by the mock).
-- `GET /api/models/{id}` → `Model`
+- `GET /api/models/{id}` → `Model`. The weights of a run in progress are not listed, but its `m_<run suffix>-last`
+  (and `m_<run suffix>`, once it has a `best.folo`) answer here and on `/weights` as soon as the file exists: how a
+  cloud control plane copies a worker run's checkpoint while it trains (docs/CLOUD.md).
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none, see Split fallback below), for the PR curves and confusion matrix of the Models view:
   ```jsonc
@@ -292,6 +303,14 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     time, e.g. with `touch -r`, is not noticed; mock mode: a hash of the bytes) and `Last-Modified`, with `Cache-Control: no-cache` (a run's `last.folo` changes every
     epoch). `If-None-Match` (weak comparison, `*` too) and, without it, `If-Modified-Since` answer
     `304 Not Modified` with the validators and no body. `HEAD` answers the headers alone.
+  - Ranges (feature `run_cursors`): the answer carries `Accept-Ranges: bytes`, and a request with one range,
+    `Range: bytes=<first>-<last>` or `bytes=<first>-`, gets `206 Partial Content` with `Content-Range: bytes
+    <first>-<last>/<length>` and those bytes (`<last>` is clamped to the file). A range that starts at or past the
+    end is `416 Range Not Satisfiable` with `Content-Range: bytes */<length>`; a header this server does not
+    understand (several ranges, a suffix range) is ignored and the whole file is sent with `200`. `If-Match:
+    <etag>` on any request answers `412 Precondition Failed` (no body) when the file's ETag differs, so a download
+    in parts never mixes two versions of a file that is replaced meanwhile (a run's `last.folo`): start over with
+    the new ETag. A cloud control plane copies checkpoints this way (docs/CLOUD.md).
   - CORS exposes `ETag` and `Content-Disposition` to page scripts, so Studio (also from the Vite dev server) can
     cache weights by ETag.
 
@@ -324,6 +343,26 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `invalid_config` (a field differs; the message names it), `dataset_not_found` (its dataset folder is gone).
   `weights: <model id>` without `resume_run_id` starts a **new** run initialised from those weights (matching
   tensors load; the class outputs are re-initialised when the class lists differ; no optimizer state).
+  `"checkpoint": "<model id>"` (feature `run_checkpoint`; not part of `Run.config`) starts a new run that
+  **continues** the training stored in that model's file, which must be a full checkpoint (a run's `last.folo`,
+  docs/FORMAT.md): epoch, optimizer, schedule, EMA and RNG, as `folo train --resume` does. The file is copied
+  into the new run as its `weights/last.folo`; the body's other fields are the run's `config` as usual and should
+  be those of the run that wrote the checkpoint (the trainer takes its settings from the checkpoint). Errors:
+  `model_not_found`, `422 invalid_weights` (the file has no training state), `400 invalid_body` (together with
+  `resume_run_id` or `weights`). This is how a cloud control plane resumes a run on a fresh worker: it uploads
+  the checkpoint (`/api/uploads`) and names it here.
+  **Cloud runs** (feature `cloud`, docs/CLOUD.md): with `"compute": { "connection_id", "offer_id", "max_hours"? ,
+  "disk_gb"? }` the run trains on that cloud connection instead of this machine. It is checked like any run plus:
+  `connection_not_found`, `offer_not_found`, `400 invalid_config` (`max_hours` outside `0.25..=720`, `disk_gb`
+  outside `10..=4096`), `422 cloud_auth_failed` / `502 cloud_unavailable` (the offer could not be read). `device`
+  must be `auto` (the worker picks its GPU; anything else is `400 invalid_config`), and `amp` is checked on the
+  worker, not here. The run does not enter the training queue (`queue_position` stays `null`); `Run.cloud` and
+  the `cloud` event say where it is. Resuming one (`resume_run_id`) launches a new instance and continues from the
+  checkpoint copied to this machine, with a new `Run.cloud` (its `cost_usd` is the new instance's); `compute` may
+  change like `device`, and `"compute": null` resumes it here, as a run of this machine from then on (in the
+  training queue, without `cloud`; what its instances cost stays in its log). A cloud run another FOLO process on the data dir follows (it
+  holds the run's `cloud.lock`) is shown as that process last persisted it, and stopping it here is `409
+  run_active`.
 - `GET /api/runs/{id}` → `Run`
 - `POST /api/runs/{id}/stop` → `Run` (status `stopping` → `stopped`; the last checkpoint is kept). `409 run_not_active`
   when the run already finished. A queued run stops at once; a running one after its current batch (the epoch in
@@ -353,15 +392,26 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `DELETE /api/runs/{id}` → `204` (`409 run_active` while `queued`, `running` or `stopping`). Real mode removes the run
   folder, its weights included, so its models disappear too.
 - `GET /api/runs/{id}/metrics?every=1` → `{ "steps": [Step], "epochs": [Epoch] }` (full history, for charts on page
-  load; `every=N` keeps every N-th step plus the latest one, to thin long runs)
+  load; `every=N` keeps every N-th step plus the latest one, to thin long runs). `after_step=<n>` keeps the steps
+  with `step > n` and `after_epoch=<m>` the epochs with `epoch > m` (feature `run_cursors`; either or both, applied
+  before `every`), so a client that has the history up to a step and an epoch polls for what is new. With
+  `after_step`, the steps of the epoch in progress stop before the first one the real server has not recorded yet
+  (it records them in batches), so the answer never skips a step and a poller's cursor never passes one. After a
+  resume the run repeats the steps of the epoch it restarts (they replace the earlier ones in the history), so a
+  poller that sees `Run.step` below its cursor starts again from that step.
 - `GET /api/runs/{id}/samples?epoch=<n>` → `{ "epoch", "samples": [{ "image_id", "dataset_id", "width", "height",
   "truth": [Box], "pred": [ScoredBox] }] }` (validation predictions at `conf >= 0.25` on a fixed set of 16 images,
   in original-image pixels: in real mode the first 16 of the validation split, or of the training split when there
   is none;
   `epoch` defaults to the latest finished epoch; `404 epoch_not_available` before the first validation or for a
   future epoch)
-- `GET /api/runs/{id}/logs?limit=500` → `{ "lines": [{ "t", "level": "debug|info|warn|error", "message" }] }`:
-  the run's log history, most recent `limit` lines (default 500, clamped to 1..5000), oldest first. The lines are
+- `GET /api/runs/{id}/logs?limit=500` → `{ "lines": [{ "t", "level": "debug|info|warn|error", "message" }],
+  "total": 812 }`:
+  the run's log history, most recent `limit` lines (default 500, clamped to 1..5000), oldest first. `total` counts
+  every line of the log (feature `run_cursors`; left out when it is 0, so a missing `total` reads as 0, as
+  from older servers), and `after=<n>` answers the lines after
+  the first `n` instead (the oldest `limit` of them), so `after=<total of the last answer>` polls for new lines
+  without missing or repeating one. The lines are
   the same as the SSE `log` events, so a dashboard opened mid-run loads this and then appends live events. The
   shape is stable (the MCP proxy uses it, docs/MCP.md).
 - `GET /api/runs/{id}/events` → SSE stream. Each SSE `event:` name is the payload type, `data:` is its JSON:
@@ -377,6 +427,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     status). The events carry state, not changes: a client keeps the latest one (or re-reads the run). The mock
     derives them from its schedule every 100 ms, so it sends one when a waiting run's place or the count changed,
     and changes within one tick coalesce. Servers older than the event never send it.
+  - `cloud` `RunCloud`: a cloud run's `Run.cloud` after it changed (a new phase, transfer progress at most about
+    once a second, the cost about once a minute). State, not a change: a client keeps the latest one. Only cloud
+    runs send it.
 
   The stream starts with a `status` event and replays nothing else (use `/metrics` and `/logs` for history). A `: keep-alive`
   comment is sent every 15 s. The stream stays open after the run finishes (so `EventSource` does not reconnect in a
@@ -402,10 +455,13 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "amp": false,                // mixed-precision training (docs/MODEL.md §8.8): f16 on GPU tensor cores, f32 master
                                // weights; needs `folo serve --tensor-cores` on a GPU with them, else POST /api/runs
                                // answers `501 not_supported` (nothing is queued)
-  "head": "o2m" }              // o2m | o2o: o2o adds the NMS-free one-to-one head (docs/MODEL.md §6.6), trained with
+  "head": "o2m",               // o2m | o2o: o2o adds the NMS-free one-to-one head (docs/MODEL.md §6.6), trained with
                                // dual assignment; the run's models then predict and validate without NMS (predict
                                // and val pick the head from the model, no request field needed). Additive: missing
                                // means o2m
+  "compute": null }            // or { "connection_id": "cc_1f2e", "offer_id": "NVIDIA GeForce RTX 4090@secure",
+                               // "max_hours": 12, "disk_gb": null }: train on a cloud connection (Cloud runs,
+                               // above). Left out of the object when null; missing means this machine
 // An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: epochs 1..=10000,
 // batch 1..=1024, imgsz a multiple of 32 in 32..=4096 (real mode trains at 64 or more), 0 < lr0 < 10.
 // POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.
@@ -425,7 +481,17 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "model_id": null | "m_31aa",  // set once the run completed, or stopped after at least one validated epoch
   "error": null | "...",
   "queue_position": null | 2,   // 1-based place in the training queue while the run waits there (1 starts next)
-  "resolved": null | ResolvedTrain }  // what the trainer resolved `config` to (below); null until it is built
+  "resolved": null | ResolvedTrain,   // what the trainer resolved `config` to (below); null until it is built
+  "cloud"?: RunCloud }          // only for cloud runs (config.compute): where it executes and how far it is
+// RunCloud (docs/CLOUD.md has the lifecycle). `device` of a cloud run is the worker's GPU once it trains.
+{ "connection_id": "cc_1f2e", "provider": "runpod", "offer": CloudOffer,   // the offer as it was at the start
+  "instance_id": "ci_8a2f" | null,  // GET /api/cloud/instances; null before the launch and for `remote`
+  "phase": "provisioning|booting|syncing|training|collecting|releasing|released",
+  "progress": { "done_bytes": 1048576, "total_bytes": 52428800 } | null,   // syncing / collecting (total 0: unknown)
+  "max_hours": 12, "deadline": "..." | null,   // when the time limit ends; null until the instance exists
+  "cost_usd": 0.42 | null,          // estimate so far, final once released; null without a price
+  "synced": "..." | null }          // when weights/last.folo was last copied to this machine
+// While phase is provisioning, booting or syncing the status is `queued` (nothing trains yet): show the phase.
 // ResolvedTrain: the settings the run trains with. `config` stays what was requested ("optimizer": "auto",
 // "lr0": 0.01); these are what that became (docs/MODEL.md §8.2, §8.4), as in the run folder's config.json.
 { "optimizer": "sgd|adamw",     // never auto
@@ -532,6 +598,13 @@ i7-14700KF, scaled by compute to other sizes; `note` says which and how).
   - `close_mosaic`: the close-mosaic epochs after the cap (the `close_mosaic` phase's epochs; `Run.resolved` has the
     same number once the run is built).
   - `cli`: the `folo train` command that trains this config on the server's machine (see `GET /api/runs/{id}/cli`).
+  - `cost` (a config with `compute`, feature `cloud`): `{ "price_per_hour": 0.69, "est_usd": 0.31, "est_usd_low":
+    0.12, "est_usd_high": 0.93, "max_usd": 8.28 }`: the offer's price times `est_total_s` and its range (training
+    only: booting the instance and uploading the dataset come on top), and `max_usd`, the price times
+    `compute.max_hours`, which the run cannot exceed. Left out for an offer without a price. The time estimate of a
+    cloud config never uses this server's measurements: it is the reference (`source: reference`, `confidence:
+    low`, `device` `cloud`, `device_name` the offer's GPU, `est_peak_vram_bytes` from the reference model), and
+    `basis.note` says the reference machine may be faster or slower than that GPU. Errors as `POST /api/runs`.
 - `GET /api/runs/{id}/cli` → `{ "cli": "folo train --data D:/data/r6 --weights folo-n-coco --head o2m --epochs 15
   --amp", "argv": ["folo", "train", ...] }`: the CLI command of a run's config, built from the same `TrainConfig`
   mapping the server trains with (a test parses it with the real `folo` arguments and compares the configs).
@@ -781,6 +854,114 @@ exported more than once.
   "batch": null, "parallel": null }
 ```
 
+## Uploads
+Sending a dataset or a weights file to a server that cannot read the sender's disk (feature `uploads`): a cloud
+worker, a server on another machine. An upload is a byte stream cut into parts, so every request is small,
+retryable and independent of proxy limits; the control plane of a cloud run uses exactly this (docs/CLOUD.md).
+
+- `POST /api/uploads` body `{ "kind": "dataset|model", "name", "format"?: "auto|yolo|coco", "fingerprint"?,
+  "bytes"? }` → `201 { "upload": Upload, "existing": null }`. `fingerprint` (at most 128 characters) names the
+  content: when this server already holds a finished upload of that kind with it (and the dataset is still
+  registered, the model still listed), the answer is `200 { "upload": null, "existing": { "dataset": Dataset } }`
+  (or `{ "model": Model }`) and there is nothing to send. `bytes` is the stream's length when known (reported
+  back, not checked). `400 invalid_body`: a blank `name`, a `format` with `kind: model`, a longer fingerprint.
+- `PUT /api/uploads/{id}/parts/{n}` body: the next bytes of the stream (`Content-Type:
+  application/octet-stream`, at most `max_part_bytes`, else `413 payload_too_large`) → `Upload`. `n` must be
+  `Upload.part`. Sending part `n - 1` again (a retry after a lost answer) is accepted when it has the length of the
+  part received and changes nothing; any other `n` is `409 upload_conflict`, and the hint names the part to send.
+  One part at a time per upload.
+- `GET /api/uploads/{id}` → `Upload` (where to continue after a failure).
+- `POST /api/uploads/{id}/complete` → `201 { "dataset": Dataset }` (with `stats`) or `201 { "model": Model }`.
+  A dataset's archive is whole once its end-of-archive marker has arrived: completing it earlier (inside a file,
+  or between files) is `409 upload_conflict`, and the session stays open for the rest. Content that is not usable
+  drops the session with its files: `422 invalid_upload` / `invalid_weights`, or what registering the dataset
+  answers (`400 unknown_format` / `invalid_dataset`).
+- `DELETE /api/uploads/{id}` → `204` (drops the session and what it received).
+
+```jsonc
+// Upload
+{ "id": "up_5c1d", "kind": "dataset", "name": "shapes-1k",
+  "part": 3,                    // index of the next part
+  "received_bytes": 25165824, "max_part_bytes": 33554432,
+  "expires": "..." }            // dropped then unless a part arrives first (one hour after the last one)
+```
+- **Datasets** (`kind: dataset`): the stream is a tar archive (ustar; GNU and pax long names are read) of the
+  dataset's folder, as `POST /api/datasets` would read it from disk: a `data.yaml` with `images/` and `labels/`,
+  or `annotations/instances_*.json` with the images. It is unpacked as it arrives (a part is answered once its
+  bytes are on disk, so memory stays at about one part) and, on `complete`, moved to `<data dir>/datasets/<name>`
+  (the name lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registered with `format` (default
+  `auto`). Only regular files and directories with relative paths inside the folder are accepted: absolute paths,
+  `..`, links and devices are `422 invalid_upload` on the part that carries them, and so is a stream that is not a
+  tar archive; the session is then dropped.
+  FOLO itself sends datasets in a canonical YOLO layout (docs/CLOUD.md, *Dataset*).
+- **Models** (`kind: model`): the stream is one `.folo` file, stored as `<data dir>/models/<name>.folo` (the name
+  reduced as for exports, `-2`, ... when taken) and listed like any file there. `422 invalid_weights` when its
+  header does not parse.
+- Sessions live in memory: a restart drops them (and removes what they received), and a session without a part
+  for an hour expires. A real server only; the mock answers `501 not_implemented`.
+
+## Cloud compute
+Training runs on compute that is not this machine (feature `cloud`): GPU instances rented from a provider for one
+run, or another FOLO server. docs/CLOUD.md describes the model, the lifecycle of a cloud run and each provider;
+this section is the wire contract. A cloud run is created with `TrainConfig.compute` (Training runs, above).
+
+- `GET /api/cloud/providers` → `{ "providers": [CloudProvider] }`: the kinds of compute this server knows, with the
+  fields a connection to each takes (a client builds its form from them).
+- `GET /api/cloud/connections` → `{ "connections": [CloudConnection] }` (oldest first). Nothing is checked on a
+  listing: `status`, `account` and `balance_usd` are from the last check.
+- `POST /api/cloud/connections` body `{ "provider", "name"?, "values": { "<field key>": "..." } }` → `201
+  CloudConnection`. The values are checked with the provider before anything is stored: `404 provider_not_found`,
+  `400 invalid_body` (a required field is missing or malformed; the message names it), `422 cloud_auth_failed`
+  (the provider rejects them), `502 cloud_unavailable` (it does not answer); a key that is not one of the
+  provider's fields is `400 invalid_body` too. `name` defaults to the provider's name (` 2`, ` 3`, ... when taken).
+- `POST /api/cloud/connections/{id}/check` → `CloudConnection`: checks the stored credentials again and
+  refreshes `status`, `account`, `balance_usd`, `error` and `checked`. A failed check is still `200`, with
+  `status: "error"`; only an unknown id is an error (`404 connection_not_found`).
+- `DELETE /api/cloud/connections/{id}` → `204`: forgets the credentials. `409 connection_in_use` while it has live
+  instances or active runs.
+- `GET /api/cloud/connections/{id}/offers` → `{ "offers": [CloudOffer], "fetched": "..." }`: what the connection
+  can run on now, cheapest first (offers without a price first). Answers are cached for 60 s (`fetched` is when
+  the provider was asked; `?refresh=true` asks again). `422 cloud_auth_failed`, `502 cloud_unavailable`.
+- `GET /api/cloud/instances` → `{ "instances": [CloudInstance] }`: the instances this server launched: those alive
+  first, then those that ended in the last 7 days, newest first.
+- `DELETE /api/cloud/instances/{id}` → `CloudInstance` (`terminating`, or `terminated` when the provider confirmed
+  at once): terminates it now. A run still using it fails with `cloud_instance_lost`. Terminating one that is
+  already gone answers its record; `404 instance_not_found`.
+
+Secrets never leave the server: `values` in answers holds the fields that are not secret as entered and a hint
+(`••••` plus the last 4 characters; just `••••` for a value shorter than 8 characters, so a short secret is not
+mostly shown) for the others.
+
+```jsonc
+// CloudProvider
+{ "id": "runpod", "name": "RunPod", "about": "GPU pods rented by the hour, one per run.",
+  "docs_url": "https://www.runpod.io/console/user/settings" | null,
+  "fields": [{ "key": "api_key", "label": "API key", "secret": true, "required": true,
+               "placeholder": "rpa_..." | null, "help": "..." | null }],
+  "provisions": true,        // launches an instance per run and terminates it (false: a machine that already runs)
+  "self_terminates": true }  // its instances terminate themselves after a run's deadline, also while this server is off
+// CloudConnection
+{ "id": "cc_1f2e", "provider": "runpod", "name": "RunPod", "created": "...",
+  "status": "ok|error", "account": "you@example.com" | null, "balance_usd": 42.17 | null,
+  "error": null | "...",     // why the last check failed
+  "note": null | "...",      // something to know about a working connection (an unencrypted http:// URL)
+  "checked": "..." | null, "values": { "api_key": "••••a1b2" } }
+// CloudOffer
+{ "id": "NVIDIA GeForce RTX 4090@secure",   // opaque, unique within the connection
+  "gpu": "RTX 4090", "gpu_count": 1, "vram_bytes": 25769803776,
+  "price_per_hour": 0.69 | null,            // US dollars; null for compute that is not billed (your own machine)
+  "region": null | "EU-RO-1", "detail": null | "Secure Cloud",
+  "availability": "high|medium|low|none|unknown" }   // none: launching would be refused right now
+// CloudInstance
+{ "id": "ci_8a2f", "connection_id": "cc_1f2e", "provider": "runpod",
+  "provider_ref": "abc123xyz" | null,       // the provider's own id (to find it in its console); null while launching
+  "name": "folo-run_7d1e-4c1a", "run_id": "run_7d1e" | null, "offer": CloudOffer,
+  "status": "launching|starting|running|terminating|terminated|lost",
+  "created": "...", "ended": "..." | null, "deadline": "..." | null,
+  "cost_usd": 0.42 | null,                  // price_per_hour times its lifetime: an estimate, the provider's bill counts
+  "error": null | "..." }                   // the last failed provider request about it (a termination being retried)
+```
+
 ## Real mode
 `folo serve` without `--mock` keeps its state in the data dir (`--data-dir`, default `$FOLO_HOME` or `~/.folo`):
 - `datasets.json`: the registry (`id`, `name`, `path`, `format`, `created`, and a snapshot of `classes` and
@@ -821,6 +1002,18 @@ exported more than once.
   the exports of `/weights?format=…`: `f16.folo`, and `onnx` / `decode.onnx` / `decode-dynamic-half.onnx` / … (the
   ONNX switches that are on). The hash is of the source file's path, size and modification time; copies made from
   an older version of the file are removed when a new one is made, and a run's when the run is deleted.
+
+- `cloud/connections.json`: the cloud connections with their credentials (created readable by the owner only; never
+  served). `cloud/instances/<id>.json`: the ledger of launched instances, one file each, written before the
+  provider is asked (docs/CLOUD.md, *Instances are never left behind*); records of instances that ended more than
+  7 days ago are removed. A cloud run's folder also has `cloud.json` (its worker's address and token, the ids it
+  has there and its cursors) and `cloud.lock`, which the process that follows the run holds locked (the file
+  stays). `cloud/.lock` is held across every change of `connections.json` and of a ledger record, so a server and
+  `folo cloud` on one data dir never lose each other's changes.
+- `uploads/<id>/`: the files of upload sessions in progress (a dataset is unpacked here and moved to
+  `datasets/<name>/` when it completes, so a crash never leaves half a dataset there), removed when a session
+  completes, is deleted or expires, and on start. `uploads.json`: the fingerprints of finished uploads with the
+  dataset or model each became, so the same content is not sent twice.
 
 ## Validation
 - `POST /api/val` body `{ "model_id", "dataset_id", "split": "val", "imgsz": null, "conf": 0.001, "iou": 0.7 }` →
@@ -878,3 +1071,11 @@ start, except live-run timestamps):
   per-class metrics from the model's metrics (deterministic per model, dataset and split).
 - Agent labeling (`/api/label/…`) answers `501 not_implemented` and `agent_labeling` is not in `features`: the
   mock never starts an agent CLI. Studio's own in-browser mock simulates a job for UI work.
+- Cloud: the real providers are listed; one RunPod connection exists (`cc_4d2a`, `you@example.com`, balance 42.17)
+  with a fixed list of offers (one of them with `availability: none`). `POST /api/cloud/connections` accepts any
+  values except a secret containing `bad` (`422 cloud_auth_failed`). A run created with `compute` is simulated
+  through every phase (about 2 s each of `provisioning`, `booting` and `syncing` with progress, then training like
+  any mock run, then `collecting` and `releasing`), with an instance in `/api/cloud/instances` whose cost grows
+  with its price; `DELETE` on it fails the run with `cloud_instance_lost`. `run_3c01` is a finished cloud run
+  (`cloud.phase: released`, with its cost). `FOLO_MOCK_CLOUD=none` starts without a connection, `off` leaves the
+  `cloud` feature out. `/api/uploads` answers `501 not_implemented`.

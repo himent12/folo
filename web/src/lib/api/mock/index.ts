@@ -11,8 +11,12 @@
 // stops answering, its live stream too, 3 s after load), `stale-lists` (the requests stop, the live stream keeps streaming) and `amp-refused`
 // (the server restarted without tensor cores after the page loaded: `/api/system` said mixed precision was available,
 // `POST /api/runs` refuses it with `501 not_supported`, and `/api/system` says so from then on), `no-labeling` (`folo serve
-// --mock`: no `agent_labeling` feature, and the labeling endpoints answer `501 not_implemented`) and `all-agents` (both
-// labeling agents installed; elsewhere Codex is not), for screenshots of those states.
+// --mock`: no `agent_labeling` feature, and the labeling endpoints answer `501 not_implemented`), `all-agents` (both
+// labeling agents installed; elsewhere Codex is not), and for cloud compute (docs/API.md, Mock mode → Cloud: one RunPod
+// connection, a finished cloud run): `cloud-none` (no connection, the server's `FOLO_MOCK_CLOUD=none`), `cloud-off` (no
+// `cloud` feature: `FOLO_MOCK_CLOUD=off`), `cloud-trouble` (the connection's key was revoked, so its check fails and the
+// termination of a finished run's instance cannot be confirmed), `cloud-training` (a cloud run trains on a rented RTX
+// 4090) and `cloud-upload` (a cloud run uploads its dataset), for screenshots of those states.
 
 import { ApiError, type Api, type LabelEventHandlers, type RunEventHandlers } from '../client';
 import type {
@@ -23,6 +27,12 @@ import type {
   Capabilities,
   ClassMetrics,
   CliCommand,
+  CloudConnection,
+  CloudInstance,
+  CloudOffer,
+  CloudOfferList,
+  CloudProvider,
+  ConnectCloud,
   CreateDataset,
   CreateLabelJob,
   CreateSyntheticDataset,
@@ -53,6 +63,7 @@ import type {
   Prediction,
   QueueRequest,
   Run,
+  RunCloud,
   RunLogs,
   RunEstimate,
   RunMetrics,
@@ -76,6 +87,8 @@ import {
   archInfo,
   bestOf,
   epochAt,
+  cloudFinish,
+  cloudOf,
   epochLog,
   history,
   loopStart,
@@ -85,9 +98,22 @@ import {
   startLogs,
   stepAt,
   toRun,
+  trainEnd,
   type RunProfile,
 } from './runs';
 import { COCO80 } from './coco';
+import {
+  cloudLog,
+  instanceAt,
+  PROVIDERS,
+  REMOTE_OFFER,
+  RTX_4090,
+  RUNPOD_OFFERS,
+  secretHint,
+  seedConnection,
+  trainAt,
+  type CloudTimeline,
+} from './cloud';
 import { applyQueueMove } from '../queue';
 import { uploadInChunks, type UploadProgress } from '../upload';
 import { onnxFileName } from '../client';
@@ -121,7 +147,14 @@ export type Scenario =
   // `folo serve --mock`: no agent labeling (the feature is not listed; its endpoints answer 501 not_implemented).
   | 'no-labeling'
   // Both labeling agents installed (Codex is not, elsewhere).
-  | 'all-agents';
+  | 'all-agents'
+  // Cloud compute: no connection; no `cloud` feature; a revoked key and an unconfirmed termination; a cloud run
+  // training; one uploading its dataset.
+  | 'cloud-none'
+  | 'cloud-off'
+  | 'cloud-trouble'
+  | 'cloud-training'
+  | 'cloud-upload';
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -411,9 +444,105 @@ function profiles(t0: number, scenario: Scenario = 'normal'): RunProfile[] {
     // Its best weights, scored on the training split: Overview and Models tag the score and rank it apart.
     modelId: 'm_mini_run',
   };
-  const all =
-    scenario === 'finishing' ? [...list.filter((p) => p.id !== 'run_7d1e'), finishing] : scenario === 'train-split' ? [...list, trainSplit] : list;
+  const all = [
+    ...(scenario === 'finishing' ? [...list.filter((p) => p.id !== 'run_7d1e'), finishing] : scenario === 'train-split' ? [...list, trainSplit] : list),
+    ...cloudRuns(t0, scenario),
+  ];
   return all.map((p) => withResolved({ ...p, classNames: names(p.config.dataset_id) }));
+}
+
+/** A cloud run's timeline as the seeded runs have it: a secure-cloud RTX 4090 on the demo's connection. */
+function rented(id: string, nonce: string, ref: string, launchedAt: number, ms: { provision: number; boot: number; sync: number }, upload: number, weights: number, maxHours: number): CloudTimeline {
+  return {
+    connectionId: 'cc_4d2a',
+    provider: 'runpod',
+    offer: RTX_4090,
+    maxHours,
+    instanceId: `ci_${nonce}`,
+    instanceName: `folo-${id}-${nonce}`,
+    providerRef: ref,
+    launchedAt,
+    provisionMs: ms.provision,
+    bootMs: ms.boot,
+    syncMs: ms.sync,
+    uploadBytes: upload,
+    weightsBytes: weights,
+  };
+}
+
+/**
+ * The seeded cloud runs (docs/API.md, Mock mode → Cloud): shapes-m, finished on a rented RTX 4090 two days ago (in
+ * `cloud-trouble` two hours ago, its instance's termination never confirmed); `cloud-training` adds fasteners-l
+ * training there, `cloud-upload` shapes-hard-x uploading its dataset.
+ */
+function cloudRuns(t0: number, scenario: Scenario): Omit<RunProfile, 'classNames'>[] {
+  // Without the feature, or before any connection was made (`cloud-none`: a cloud never used), there are none.
+  if (scenario === 'cloud-off' || scenario === 'cloud-none' || scenario === 'no-throughput' || scenario === 'empty') return [];
+  const compute = (hours: number) => ({ device: 'auto' as const, compute: { connection_id: 'cc_4d2a', offer_id: RTX_4090.id, max_hours: hours } });
+  const GPU_4090 = 'NVIDIA GeForce RTX 4090 (vulkan)';
+  const MiB = 2 ** 20;
+  const finishedAt = scenario === 'cloud-trouble' ? t0 - 2 * HOUR : t0 - 2 * DAY - 5 * HOUR;
+  const done = rented('run_c3d5', '4c1a', 'k2x9wq7m3fz1', finishedAt, { provision: 40_000, boot: 3 * MIN, sync: 70_000 }, 64 * MiB, 330 * MiB, 2);
+  if (scenario === 'cloud-trouble') done.stuck = 'RunPod rejected this API key';
+  const finished: Omit<RunProfile, 'classNames'> = {
+    id: 'run_c3d5',
+    name: 'shapes-m',
+    config: config('shapes-m', 'ds_shapes', 'folo-m', 100, compute(2)),
+    classes: 3,
+    classEase: [1.04, 1.0, 0.95],
+    stepsPerEpoch: optimizerSteps(800, 16),
+    epochSeconds: 9.4,
+    mapMax: 0.8,
+    tau: 9,
+    imgsPerS: 410,
+    createdAt: finishedAt,
+    startedAt: trainAt(done),
+    modelId: 'm_shapes_m',
+    device: GPU_4090,
+    cloud: done,
+  };
+  finished.terminal = { status: 'completed', atEpoch: 100, at: cloudFinish({ ...finished, cloud: done }) };
+  const out = [finished];
+  if (scenario === 'cloud-training') {
+    const c = rented('run_c7b1', '9d03', 'p7m2v8x4qk1c', t0 - 40 * MIN, { provision: 40_000, boot: 3 * MIN, sync: 140_000 }, 515 * MiB, 410 * MiB, 3);
+    out.push({
+      id: 'run_c7b1',
+      name: 'fasteners-l',
+      config: config('fasteners-l', 'ds_fasteners', 'folo-l', 100, compute(3)),
+      classes: 8,
+      classEase: FASTENER_EASE,
+      stepsPerEpoch: optimizerSteps(1920, 16),
+      epochSeconds: 60,
+      mapMax: 0.7,
+      tau: 16,
+      imgsPerS: 160,
+      createdAt: c.launchedAt,
+      startedAt: trainAt(c),
+      device: GPU_4090,
+      cloud: c,
+    });
+  }
+  if (scenario === 'cloud-upload') {
+    // A quarter of the upload is through at load: 90 s of six minutes.
+    const c = rented('run_c9e4', '2b7e', 'q4w8e2r6t1y5', t0 - 3 * MIN, { provision: 30_000, boot: 60_000, sync: 6 * MIN }, 460 * MiB, 1100 * MiB, 8);
+    out.push({
+      id: 'run_c9e4',
+      name: 'shapes-hard-x',
+      config: config('shapes-hard-x', 'ds_shapes_hard', 'folo-x', 100, compute(8)),
+      classes: 6,
+      classEase: [1.1, 1.05, 1, 0.82, 0.95, 0.75],
+      stepsPerEpoch: optimizerSteps(4000, 16),
+      epochSeconds: 45,
+      mapMax: 0.72,
+      tau: 14,
+      imgsPerS: 120,
+      createdAt: c.launchedAt,
+      startedAt: trainAt(c),
+      device: GPU_4090,
+      cloud: c,
+    });
+  }
+  return out;
 }
 
 /** The profile with `resolved`: what the real trainer resolves its config to on its dataset's training split. */
@@ -447,6 +576,10 @@ export class MockApi implements Api {
   #probing = false;
   /** Agent labeling: its jobs, runs and streams (./label). */
   #label: MockLabeling;
+  /** Cloud connections. A secret is never kept: only its hint (`••••a1b2`), as the API answers it. */
+  #connections: CloudConnection[];
+  /** Whether the server has the `cloud` feature (`/api/cloud`, `TrainConfig.compute`); older servers do not. */
+  readonly #cloudOn: boolean;
 
   constructor(
     readonly scenario: Scenario = 'normal',
@@ -457,6 +590,8 @@ export class MockApi implements Api {
     this.#datasets = scenario === 'empty' ? [] : [...specs];
     this.#throughput = new MockThroughput(this.#t0);
     this.#label = new MockLabeling(this.#t0, scenario !== 'empty', scenario === 'all-agents');
+    this.#cloudOn = !['cloud-off', 'no-throughput'].includes(scenario);
+    this.#connections = this.#cloudOn && !['empty', 'cloud-none'].includes(scenario) ? [seedConnection(this.#t0, scenario === 'cloud-trouble')] : [];
     this.#queue = this.#runs
       .filter((p) => p.startedAt === null && !p.terminal)
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -469,8 +604,9 @@ export class MockApi implements Api {
    */
   #schedule(now: number) {
     if (!this.#queue.length) return;
+    // Cloud runs train elsewhere: they never hold the slot.
     const busy = this.#runs.some(
-      (p) => !this.#queue.includes(p.id) && ((p.startedAt !== null && p.startedAt > now) || ['running', 'stopping'].includes(progressAt(p, now).status)),
+      (p) => !p.cloud && !this.#queue.includes(p.id) && ((p.startedAt !== null && p.startedAt > now) || ['running', 'stopping'].includes(progressAt(p, now).status)),
     );
     if (busy) return;
     const p = this.#runs.find((r) => r.id === this.#queue[0]);
@@ -522,9 +658,14 @@ export class MockApi implements Api {
   /** `gpu-unplugged`: the second adapter is gone once a run asked for it. */
   #unplugged = false;
 
+  /** Whether a run trains on this machine now (cloud runs use another's GPU). */
+  #trainingHere(): boolean {
+    return this.#runs.some((p) => !p.cloud && progressAt(p, Date.now()).status === 'running');
+  }
+
   #gpus(): SystemInfo['gpus'] {
     const t = Date.now() / 1000;
-    const training = this.#runs.some((p) => progressAt(p, Date.now()).status === 'running');
+    const training = this.#trainingHere();
     const gpus: SystemInfo['gpus'] = [
       {
         ordinal: 0,
@@ -546,7 +687,7 @@ export class MockApi implements Api {
    */
   #gpuPool(): GpuPool | undefined {
     if (this.scenario === 'empty' || this.scenario === 'no-throughput') return undefined;
-    const training = this.#runs.some((p) => progressAt(p, Date.now()).status === 'running');
+    const training = this.#trainingHere();
     const peak = Math.round(5.31 * 2 ** 30);
     return training
       ? { device: 'gpu:0', live_bytes: Math.round(4.62 * 2 ** 30), cached_bytes: Math.round(0.88 * 2 ** 30), peak_live_bytes: peak }
@@ -575,6 +716,7 @@ export class MockApi implements Api {
           // The in-browser runtime in this build (the name requested of the server; lib/inference `wasmFromSystem`).
           ...(this.scenario === 'no-wasm' ? [] : ['web_wasm']),
           ...(this.#labeling() ? [LABEL_FEATURE] : []),
+          ...(this.#cloudOn ? ['cloud'] : []),
         ],
         capabilities: this.#capabilities(),
         ...(pool ? { gpu_pool: pool } : {}),
@@ -599,7 +741,7 @@ export class MockApi implements Api {
     if (this.scenario === 'no-throughput') return this.#call(() => Promise.reject(this.#noRoute('POST /api/system/benchmark')));
     const busy = () => {
       const now = Date.now();
-      const active = this.#runs.find((p) => this.#created.has(p.id) && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
+      const active = this.#runs.find((p) => this.#created.has(p.id) && !p.cloud && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
       if (this.#probing) return new ApiError(409, 'run_active', 'A benchmark probe is already running.', 'Wait for it to finish.');
       if (active) return new ApiError(409, 'run_active', `Run ${active.name} is ${progressAt(active, now).status}.`, 'Measure when it has finished, or stop it first.');
       return null;
@@ -987,6 +1129,8 @@ export class MockApi implements Api {
     return this.#call(() => {
       const ds = this.#spec(body.dataset_id);
       const c = this.#withWeights(body);
+      const cloud = this.#compute(c);
+      if (cloud) return this.#createCloudRun(c, ds, cloud);
       // `gpu-unplugged`: the second adapter goes away as soon as a run asks for it.
       if (this.scenario === 'gpu-unplugged' && c.device === 'gpu:1') this.#unplugged = true;
       const gpu = /^gpu:(\d+)$/.exec(c.device);
@@ -1032,8 +1176,97 @@ export class MockApi implements Api {
       const gpu = /^gpu:(\d+)$/.exec(body.device);
       if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(body.device);
       const c = this.#withWeights(body);
-      return { ...this.#throughput.estimate(c, ds.splits.train, ds.splits.val), cli: this.#cli(c).cli };
+      const cloud = this.#compute(c, false);
+      const est = { ...this.#throughput.estimate(c, ds.splits.train, ds.splits.val, cloud?.offer.gpu), cli: this.#cli(c).cli };
+      const price = cloud?.offer.price_per_hour;
+      if (!cloud || price === null || price === undefined) return est;
+      // docs/API.md, `RunEstimate.cost`: the price over the training time (booting and the upload come on top).
+      const usd = (s: number) => Math.round(price * (s / 3600) * 100) / 100;
+      return {
+        ...est,
+        cost: {
+          price_per_hour: price,
+          est_usd: usd(est.est_total_s),
+          est_usd_low: usd(est.est_total_s_low),
+          est_usd_high: usd(est.est_total_s_high),
+          max_usd: Math.round(price * cloud.hours * 100) / 100,
+        },
+      };
     }, 120);
+  }
+
+  /**
+   * A config's `compute`, checked as `POST /api/runs` checks it (docs/API.md, Cloud runs): the connection, its offer,
+   * the time limit and `device: auto`. `refuse`: an offer with nothing available is `409 cloud_refused`, as launching
+   * it would be (an estimate launches nothing). Null for a run on this machine, and on a server without the feature,
+   * which ignores a field it does not know.
+   */
+  #compute(c: TrainConfig, refuse = true): { conn: CloudConnection; offer: CloudOffer; hours: number } | null {
+    const want = c.compute;
+    if (!want || !this.#cloudOn) return null;
+    const conn = this.#connection(want.connection_id);
+    if (conn.status === 'error') throw new ApiError(422, 'cloud_auth_failed', conn.error ?? `${conn.name} rejected the credentials`, 'Check the connection in Settings › Cloud.');
+    const offer = this.#offersOf(conn).find((o) => o.id === want.offer_id);
+    if (!offer) throw new ApiError(404, 'offer_not_found', `${conn.name} has no offer '${want.offer_id}' (any more)`, 'List its offers again: GET /api/cloud/connections/{id}/offers.');
+    const hours = want.max_hours ?? 12;
+    if (!(hours >= 0.25 && hours <= 720)) throw new ApiError(400, 'invalid_config', `\`compute.max_hours\` must be from 0.25 to 720 hours, not ${hours}`);
+    if (c.device !== 'auto') throw new ApiError(400, 'invalid_config', `\`device\` must be \`auto\` for a cloud run (the worker picks its GPU), not \`${c.device}\``);
+    if (refuse && offer.availability === 'none')
+      throw new ApiError(409, 'cloud_refused', `${conn.name} has no ${offer.gpu} (${offer.detail ?? offer.id}) available right now`, 'Pick another GPU, or try again later.');
+    return { conn, offer, hours };
+  }
+
+  /**
+   * A cloud run: out of the training queue, through every phase (about 2 s each of provisioning, booting and the
+   * upload), then training like any mock run, on the worker, then its weights collected and its instance released.
+   */
+  #createCloudRun(c: TrainConfig, ds: MockDatasetSpec, cloud: { conn: CloudConnection; offer: CloudOffer; hours: number }): Run {
+    const now = Date.now();
+    const id = `run_${(hash(c.name + now + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
+    const nonce = (hash(`${id}:nonce`) & 0xffff).toString(16).padStart(4, '0');
+    const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);
+    const provisions = PROVIDERS.find((x) => x.id === cloud.conn.provider)?.provisions ?? false;
+    const timeline: CloudTimeline = {
+      connectionId: cloud.conn.id,
+      provider: cloud.conn.provider,
+      offer: cloud.offer,
+      maxHours: cloud.hours,
+      instanceId: provisions ? `ci_${nonce}` : null,
+      instanceName: `folo-${id}-${nonce}`,
+      providerRef: (hash(`${id}:pod`) >>> 0).toString(36).padStart(7, '0'),
+      launchedAt: now,
+      // A remote server is not provisioned: it is asked at once.
+      provisionMs: provisions ? 2000 : 0,
+      bootMs: 2000,
+      syncMs: 2000,
+      // The dataset as FOLO sends it (about 90 kB an image), and best.folo with last.folo (16 bytes a parameter each).
+      uploadBytes: total(ds) * 90_000,
+      weightsBytes: archInfo[c.arch].params * 32,
+    };
+    const p: RunProfile = withResolved(
+      {
+        id,
+        name: c.name,
+        config: { ...c, compute: { ...c.compute!, max_hours: cloud.hours } },
+        classes: ds.classes.length,
+        classNames: [...ds.classes],
+        classEase: ds.classes.map((_, i) => 0.85 + 0.3 * rng(hash(id) + i)()),
+        stepsPerEpoch: optimizerSteps(ds.splits.train, c.batch),
+        epochSeconds: 600 / Math.max(1, c.epochs),
+        mapMax: 0.55 + sizeIdx * 0.04,
+        tau: Math.max(4, c.epochs / 7),
+        imgsPerS: [520, 320, 170, 130, 70][sizeIdx] ?? 200,
+        createdAt: now,
+        startedAt: trainAt(timeline),
+        modelId: `m_${id.slice(4)}`,
+        device: `NVIDIA GeForce ${cloud.offer.gpu} (vulkan)`,
+        cloud: timeline,
+      },
+      ds.splits.train,
+    );
+    this.#runs.unshift(p);
+    this.#created.add(p.id);
+    return this.#toRun(p, now);
   }
 
   /** `404 device_not_found` in the real server's words. */
@@ -1062,6 +1295,18 @@ export class MockApi implements Api {
       const { done, status } = progressAt(p, now);
       if (status !== 'running' && status !== 'queued')
         throw new ApiError(409, 'run_not_running', `Run ${p.name} is ${status}; only queued or running runs can be stopped.`);
+      if (p.cloud) {
+        // The worker's run stops, its checkpoint is collected and the instance released (before training, released at
+        // once); the run says `stopping` until then (docs/CLOUD.md, Stopping).
+        p.cloud.endAt = Math.min(now, trainEnd(p));
+        const end = cloudFinish({ ...p, cloud: p.cloud });
+        if (status === 'queued') {
+          p.startedAt = null;
+          p.neverStarted = true;
+        }
+        p.terminal = { status: 'stopped', atEpoch: done, at: end, stoppingUntil: end };
+        return this.#toRun(p, now);
+      }
       // A run that waits leaves the queue and stops at once; its trainer was never built.
       const waiting = status === 'queued';
       this.#queue = this.#queue.filter((x) => x !== p.id);
@@ -1195,6 +1440,11 @@ export class MockApi implements Api {
     let lastStart = loopStart(p, Date.now());
     let lastStep = Math.floor(last.done * p.stepsPerEpoch);
     let lastEpoch = Math.floor(last.done);
+    // A cloud run's state, sent when it changes: a phase or what it names at once, progress at most once a second and
+    // the cost about once a minute (docs/API.md, SSE `cloud`).
+    const cloudKey = (c: RunCloud) => JSON.stringify([c.phase, c.instance_id, c.deadline, c.synced]);
+    let lastCloud = p.cloud ? cloudOf({ ...p, cloud: p.cloud }, Date.now()) : null;
+    let cloudSent = Date.now();
     const t0 = setTimeout(() => {
       h.connection?.('open');
       h.status?.({ status: last.status, error: p.terminal?.error ?? null });
@@ -1243,7 +1493,17 @@ export class MockApi implements Api {
           lastEpoch++;
         }
       }
-      if (cur.status !== last.status) h.status?.({ status: cur.status, error: p.terminal?.error ?? null });
+      if (p.cloud && lastCloud) {
+        const c = cloudOf({ ...p, cloud: p.cloud }, now);
+        const moved = c.progress?.done_bytes !== lastCloud.progress?.done_bytes && now - cloudSent >= 1000;
+        const billed = c.cost_usd !== lastCloud.cost_usd && now - cloudSent >= 60_000;
+        if (cloudKey(c) !== cloudKey(lastCloud) || moved || billed) {
+          lastCloud = c;
+          cloudSent = now;
+          h.cloud?.(c);
+        }
+      }
+      if (cur.status !== last.status) h.status?.({ status: cur.status, error: p.terminal?.error ?? null, ...(p.terminal?.errorCode ? { error_code: p.terminal.errorCode } : {}) });
       if (cur.status === 'stopped' && last.status !== 'stopped')
         h.log?.({ t: new Date(now).toISOString(), level: 'warn', message: `stopped by user at epoch ${Math.floor(cur.done) + 1}; last checkpoint kept` });
       last = cur;
@@ -1266,15 +1526,185 @@ export class MockApi implements Api {
   #logHistory(id: string): LogLine[] {
     const p = this.#runs.find((r) => r.id === id);
     const notes = this.#notes.get(id) ?? [];
-    if (!p || p.startedAt === null) return [...notes];
+    if (!p) return [...notes];
     const now = Date.now();
-    const start = loopStart(p, now);
     const ds = specs.find((s) => s.id === p.config.dataset_id);
+    const cloud = p.cloud ? cloudLog(p.cloud, trainEnd(p), now, ds?.name ?? p.config.dataset_id) : [];
+    if (p.startedAt === null || now < p.startedAt) return [...cloud, ...notes].sort((a, b) => a.t.localeCompare(b.t));
+    const start = loopStart(p, now);
     const lines = startLogs(p, start, ds?.name ?? '', ds?.splits.train ?? 0);
     const done = Math.floor(progressAt(p, now).done);
     for (let e = 0; e < done; e++) lines.push(...epochLog(p, epochAt(p, e), start));
     if (p.terminal?.status === 'failed') lines.push({ t: new Date(start + done * p.epochSeconds * 1000).toISOString(), level: 'error', message: p.terminal.error ?? 'failed' });
-    return [...lines, ...notes].sort((a, b) => a.t.localeCompare(b.t));
+    return [...cloud, ...lines, ...notes].sort((a, b) => a.t.localeCompare(b.t));
+  }
+
+  // ---------- cloud ----------
+
+  /** A server without the `cloud` feature (`cloud-off`, older ones): `/api/cloud` is an unknown route. */
+  #cloudRoute(path: string) {
+    if (!this.#cloudOn) throw this.#noRoute(path);
+  }
+
+  #connection(id: string): CloudConnection {
+    const c = this.#connections.find((x) => x.id === id);
+    if (!c) throw new ApiError(404, 'connection_not_found', `no cloud connection '${id}'`, 'GET /api/cloud/connections lists them.');
+    return c;
+  }
+
+  #offersOf(c: CloudConnection): CloudOffer[] {
+    return c.provider === 'runpod' ? RUNPOD_OFFERS : [REMOTE_OFFER];
+  }
+
+  /** Every instance the mock's cloud runs launched, as at `now`: the live ones first, then the newest. */
+  #instances(now: number): { instance: CloudInstance; run: RunProfile }[] {
+    const out: { instance: CloudInstance; run: RunProfile }[] = [];
+    for (const p of this.#runs) {
+      const instance = p.cloud ? instanceAt(p.cloud, p.id, trainEnd(p), now) : null;
+      if (instance) out.push({ instance, run: p });
+    }
+    const alive = (i: CloudInstance) => i.status !== 'terminated' && i.status !== 'lost';
+    return out.sort((a, b) => Number(alive(b.instance)) - Number(alive(a.instance)) || b.instance.created.localeCompare(a.instance.created));
+  }
+
+  cloudProviders(): Promise<CloudProvider[]> {
+    return this.#call(() => {
+      this.#cloudRoute('GET /api/cloud/providers');
+      return structuredClone(PROVIDERS);
+    }, 60);
+  }
+
+  cloudConnections(): Promise<CloudConnection[]> {
+    return this.#call(() => {
+      this.#cloudRoute('GET /api/cloud/connections');
+      return structuredClone(this.#connections);
+    }, 80);
+  }
+
+  /**
+   * `POST /api/cloud/connections`: any values but a secret containing `bad` (`422 cloud_auth_failed`), as on
+   * folo-server's mock. The secrets are kept as their hint only; the provider takes a moment to answer.
+   */
+  connectCloud(body: ConnectCloud): Promise<CloudConnection> {
+    return this.#call(() => {
+      this.#cloudRoute('POST /api/cloud/connections');
+      const provider = PROVIDERS.find((x) => x.id === body.provider);
+      if (!provider) throw new ApiError(404, 'provider_not_found', `no cloud provider '${body.provider}'`, 'GET /api/cloud/providers lists them.');
+      const value = (key: string) => (body.values[key] ?? '').trim();
+      for (const f of provider.fields) if (f.required && !value(f.key)) throw new ApiError(400, 'invalid_body', `\`${f.key}\` is required to connect ${provider.name}`);
+      const url = provider.id === 'remote' ? value('url') : '';
+      if (provider.id === 'remote' && !/^https?:\/\/[^\s/]+/i.test(url)) throw new ApiError(400, 'invalid_body', '`url` must be an http:// or https:// URL');
+      const host = url.replace(/^https?:\/\//i, '').replace(/[/?#].*$/, '');
+      if (provider.fields.some((f) => f.secret && value(f.key).includes('bad')))
+        throw new ApiError(
+          422,
+          'cloud_auth_failed',
+          provider.id === 'remote' ? `the server at ${host} rejected the token` : `${provider.name} rejected this API key`,
+          provider.id === 'remote' ? 'Use the token the server was started with (`folo serve --token`).' : 'Create a key with read and write access to pods: RunPod console → Settings → API Keys.',
+        );
+      const taken = new Set(this.#connections.map((c) => c.name));
+      let name = body.name?.trim() || provider.name;
+      for (let k = 2; !body.name?.trim() && taken.has(name); k++) name = `${provider.name} ${k}`;
+      const local = /^(localhost|127\.|\[::1\]|10\.|192\.168\.)/i.test(host);
+      const now = Date.now();
+      const conn: CloudConnection = {
+        id: `cc_${(hash(`${name}:${now}:${this.#nextId++}`) & 0xffff).toString(16).padStart(4, '0')}`,
+        provider: provider.id,
+        name,
+        created: new Date(now).toISOString(),
+        status: 'ok',
+        account: provider.id === 'remote' ? host : 'you@example.com',
+        balance_usd: provider.id === 'remote' ? null : 42.17,
+        error: null,
+        note:
+          provider.id === 'remote' && /^http:/i.test(url) && !local
+            ? 'Reached over http://: the token and the data travel unencrypted. Use https:// across networks you do not control.'
+            : null,
+        checked: new Date(now).toISOString(),
+        values: Object.fromEntries(
+          provider.fields.filter((f) => value(f.key)).map((f) => [f.key, f.secret ? secretHint(value(f.key)) : value(f.key)]),
+        ),
+      };
+      this.#connections.push(conn);
+      return structuredClone(conn);
+    }, 1200);
+  }
+
+  /** `POST …/check`: the stored credentials again; the revoked key of `cloud-trouble` still fails (as `200`). */
+  checkCloudConnection(id: string): Promise<CloudConnection> {
+    return this.#call(() => {
+      this.#cloudRoute(`POST /api/cloud/connections/${id}/check`);
+      const c = this.#connection(id);
+      c.checked = new Date().toISOString();
+      return structuredClone(c);
+    }, 900);
+  }
+
+  disconnectCloud(id: string): Promise<void> {
+    return this.#call(() => {
+      this.#cloudRoute(`DELETE /api/cloud/connections/${id}`);
+      const c = this.#connection(id);
+      const now = Date.now();
+      const live = this.#instances(now).find(({ instance }) => instance.connection_id === id && instance.status !== 'terminated' && instance.status !== 'lost');
+      const active = this.#runs.find((p) => p.cloud?.connectionId === id && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
+      if (live || active)
+        throw new ApiError(
+          409,
+          'connection_in_use',
+          live ? `${c.name} has a live instance, ${live.instance.name}` : `${c.name} has an active run, ${active!.name}`,
+          'Terminate its instances, or wait for its runs to end, then disconnect it.',
+        );
+      this.#connections = this.#connections.filter((x) => x.id !== id);
+    }, 300);
+  }
+
+  cloudOffers(id: string): Promise<CloudOfferList> {
+    return this.#call(() => {
+      this.#cloudRoute(`GET /api/cloud/connections/${id}/offers`);
+      const c = this.#connection(id);
+      if (c.status === 'error') throw new ApiError(422, 'cloud_auth_failed', c.error ?? `${c.name} rejected the credentials`, 'Check the connection in Settings › Cloud.');
+      return { offers: structuredClone(this.#offersOf(c)), fetched: new Date().toISOString() };
+    }, 400);
+  }
+
+  cloudInstances(): Promise<CloudInstance[]> {
+    return this.#call(() => {
+      this.#cloudRoute('GET /api/cloud/instances');
+      return this.#instances(Date.now()).map((x) => x.instance);
+    }, 100);
+  }
+
+  /**
+   * `DELETE /api/cloud/instances/{id}`: terminating, confirmed a moment later; a run still using it fails with
+   * `cloud_instance_lost` (its copied checkpoints stay). One already gone answers its record, and one whose termination
+   * keeps failing (`cloud-trouble`) stays `terminating` with its error.
+   */
+  terminateCloudInstance(id: string): Promise<CloudInstance> {
+    return this.#call(() => {
+      this.#cloudRoute(`DELETE /api/cloud/instances/${id}`);
+      const now = Date.now();
+      const hit = this.#instances(now).find((x) => x.instance.id === id);
+      if (!hit) throw new ApiError(404, 'instance_not_found', `no cloud instance '${id}'`, 'GET /api/cloud/instances lists them.');
+      const { instance, run: p } = hit;
+      if (instance.status === 'terminated' || instance.status === 'lost' || instance.error || !p.cloud) return instance;
+      const { done, status } = progressAt(p, now);
+      if (['queued', 'running', 'stopping'].includes(status)) {
+        p.terminal = {
+          status: 'failed',
+          atEpoch: done,
+          error: `the instance ${instance.name} was terminated before the run ended; the checkpoints copied so far are kept`,
+          errorCode: 'cloud_instance_lost',
+          at: now,
+        };
+        if (status === 'queued') {
+          p.startedAt = null;
+          p.neverStarted = true;
+        }
+      }
+      p.cloud.endAt = Math.min(now, p.cloud.endAt ?? now);
+      p.cloud.lost = true;
+      return instanceAt(p.cloud, p.id, trainEnd(p), now) ?? instance;
+    }, 500);
   }
 
   // ---------- agent labeling ----------

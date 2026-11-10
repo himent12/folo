@@ -18,7 +18,7 @@ use crate::app::{ARCHS, Action, BATCHES, DEVICES, FoloApp, IMGSZ, Route, act};
 /// The optimizer segments' labels (the helper under them repeats the chosen one).
 const OPT_LABELS: [&str; 3] = ["Auto", "SGD", "AdamW"];
 use crate::controls::Btn;
-use crate::store::ImgKind;
+use crate::store::{ImgKind, Load};
 use crate::theme::{Theme, radius, theme, ty};
 use crate::ui::*;
 use crate::viz::{DrawBox, Fit, hit_box, image_rect, paint_image_with_boxes, to_image};
@@ -93,6 +93,42 @@ pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -
     (secs, vram)
 }
 
+/// A dialog's footer: its actions on the raised band under a hairline.
+fn dialog_footer(t: &Theme) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .px(px(20.))
+        .py(px(14.))
+        .border_t_1()
+        .border_color(t.line_subtle)
+        .bg(t.bg_raised)
+        // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
+        .rounded_b(px(radius::XL - 1.))
+}
+
+/// A refusal inside a dialog: the server's message, and its hint (what to change) under it.
+fn error_note(t: &Theme, message: String, hint: Option<String>) -> Div {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(8.))
+        .p(px(10.))
+        .rounded(px(radius::MD))
+        .bg(t.danger_muted)
+        .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .min_w_0()
+                .child(text(ty::SM, t.danger_text).whitespace_normal().child(message))
+                .when_some(hint, |d, h| d.child(text(ty::SM, t.text_secondary).whitespace_normal().child(h))),
+        )
+}
+
 impl FoloApp {
     pub fn overlays(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut out = Vec::new();
@@ -107,6 +143,15 @@ impl FoloApp {
         }
         if let Some(id) = self.confirm_stop.clone() {
             out.push(self.stop_dialog(&id, window, cx));
+        }
+        if self.cloud.connect.is_some() {
+            out.push(self.connect_dialog(window, cx));
+        }
+        if self.cloud.disconnect.is_some() {
+            out.push(self.disconnect_dialog(window, cx));
+        }
+        if self.cloud.terminate.is_some() {
+            out.push(self.terminate_dialog(window, cx));
         }
         if self.palette.is_some() {
             out.push(self.palette_view(window, cx));
@@ -197,7 +242,7 @@ impl FoloApp {
                 let id = r.id.clone();
                 let detail = match r.status {
                     RunStatus::Running => format!("running · epoch {} / {}", r.epoch, r.epochs),
-                    s => format!("{} · {}", s.label().to_lowercase(), r.config.arch.as_str()),
+                    _ => format!("{} · {}", status_label(r).to_lowercase(), r.config.arch.as_str()),
                 };
                 items.push(PaletteItem {
                     group: "Runs",
@@ -591,8 +636,316 @@ impl FoloApp {
         )
     }
 
+    /// New run's Run on (servers with `cloud`): this machine or a cloud connection; for a
+    /// connection, its GPU offers and Stop after, the most the run can cost said beside it. With no
+    /// connection, the way to make one.
+    fn nr_compute_rows(
+        &mut self,
+        cloud: Option<&crate::api::CloudConnection>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use crate::cloud::ComputeField;
+        let t = theme(cx);
+        let Some(f) = self.new_run.as_ref() else { return div().into_any_element() };
+        let (offer_id, hours, hours_input, hours_bad, compute_error) =
+            (f.offer.clone(), f.max_hours, f.hours_input.clone(), f.hours_invalid, f.compute_error.clone());
+        let error_on =
+            |c: ComputeField| compute_error.as_ref().filter(|(k, _)| *k == c).map(|(_, m)| m.clone());
+        let label =
+            |s: &str| text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(s.to_string());
+        let danger = |s: String| text(ty::SM, t.danger_text).whitespace_normal().child(s);
+        let quiet = |s: String| text(ty::SM, t.text_tertiary).whitespace_normal().child(s);
+        let connections = self.cloud.connections.ready().cloned().unwrap_or_default();
+        let here = self
+            .store
+            .system
+            .ready()
+            .and_then(|s| s.gpus.first())
+            .map_or("this PC".to_string(), |g| crate::ui::short_gpu(&g.name));
+        let mut options = vec![(SharedString::from("This machine"), Some(SharedString::from(here)))];
+        let mut disabled: Vec<Option<SharedString>> = vec![None];
+        for c in &connections {
+            let failed = c.status == crate::api::CloudConnectionStatus::Error;
+            options.push((
+                c.name.clone().into(),
+                Some(if failed {
+                    "check failed".into()
+                } else {
+                    c.account.clone().unwrap_or_default().into()
+                }),
+            ));
+            disabled.push(
+                failed.then(|| c.error.clone().unwrap_or_else(|| "Its last check failed".into()).into()),
+            );
+        }
+        let selected = cloud.and_then(|c| connections.iter().position(|x| x.id == c.id)).map_or(0, |i| i + 1);
+        let ids: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
+        let run_on = self.select_with(
+            "nr-run-on",
+            cloud.map_or("This machine".into(), |c| c.name.clone().into()),
+            options,
+            selected,
+            &disabled,
+            window,
+            cx,
+            Rc::new(move |this, i, _, cx| {
+                if let Some(f) = this.new_run.as_mut() {
+                    f.run_on = i.checked_sub(1).and_then(|i| ids.get(i).cloned());
+                    f.offer = None;
+                    f.want_offer = None;
+                    f.compute_error = None;
+                }
+                this.sync_compute(cx);
+            }),
+        );
+        let provisions = cloud.is_some_and(|c| {
+            self.cloud
+                .providers
+                .ready()
+                .is_some_and(|ps| ps.iter().any(|p| p.id == c.provider && p.provisions))
+        });
+        let run_on_help = match cloud {
+            None => "Trains here, on the device chosen under Model".to_string(),
+            Some(c) if provisions => {
+                format!("A GPU rented from {} for this run, by the hour", self.provider_name(&c.provider))
+            }
+            Some(_) => "That server trains it, in its own queue".to_string(),
+        };
+        let left = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(label("Run on"))
+            .child(run_on)
+            .child(match error_on(ComputeField::RunOn) {
+                Some(e) => danger(e),
+                None => quiet(run_on_help),
+            });
+        let Some(conn) = cloud else {
+            // No connection yet: the way to one, in Settings › Cloud (the form waits as a draft).
+            let right = self.cloud.connections.ready().is_some_and(|l| l.is_empty()).then(|| {
+                let link = div()
+                    .id("nr-cloud-settings")
+                    .mt(px(24.))
+                    .px(px(4.))
+                    .mx(px(-4.))
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.bg_hover))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                text(ty::SM, t.text_secondary)
+                                    .whitespace_normal()
+                                    .child("Connect a cloud in Settings to train on a rented GPU."),
+                            )
+                            .child(icon("icons/chevron-right.svg", 12., t.text_secondary)),
+                    );
+                self.bind(
+                    link,
+                    "nr-cloud-settings",
+                    radius::SM,
+                    window,
+                    cx,
+                    act(|this, w, cx| {
+                        this.close_new_run(w, cx);
+                        this.navigate(Route::Settings, w, cx);
+                    }),
+                )
+            });
+            return div()
+                .flex()
+                .gap(px(16.))
+                .child(left)
+                .child(div().flex_1().min_w_0().children(right))
+                .into_any_element();
+        };
+        // The GPU: the connection's offers, each with its price; none in stock can't be picked.
+        let offers = self.cloud.offers.get(&conn.id).cloned().unwrap_or(Load::Loading);
+        let offer =
+            offers.ready().and_then(|l| l.offers.iter().find(|o| Some(&o.id) == offer_id.as_ref()).cloned());
+        let gpu: AnyElement = match &offers {
+            Load::Ready(list) => {
+                let opts = list
+                    .offers
+                    .iter()
+                    .map(|o| {
+                        let price = fmt_price(o.price_per_hour);
+                        let detail = match o.availability {
+                            crate::api::CloudAvailability::None => format!("none available now · {price}"),
+                            crate::api::CloudAvailability::Low => format!("low stock · {price}"),
+                            _ => price,
+                        };
+                        (SharedString::from(offer_line(o)), Some(SharedString::from(detail)))
+                    })
+                    .collect();
+                let off: Vec<Option<SharedString>> = list
+                    .offers
+                    .iter()
+                    .map(|o| {
+                        (o.availability == crate::api::CloudAvailability::None)
+                            .then(|| "None available now: launching would be refused".into())
+                    })
+                    .collect();
+                let picked =
+                    offer.as_ref().and_then(|o| list.offers.iter().position(|x| x.id == o.id)).unwrap_or(0);
+                let ids: Vec<String> = list.offers.iter().map(|o| o.id.clone()).collect();
+                self.select_with(
+                    "nr-gpu",
+                    offer.as_ref().map_or("Choose a GPU".into(), |o| {
+                        format!("{} · {}", offer_line(o), fmt_price(o.price_per_hour)).into()
+                    }),
+                    opts,
+                    picked,
+                    &off,
+                    window,
+                    cx,
+                    Rc::new(move |this, i, _, _| {
+                        if let Some(f) = this.new_run.as_mut() {
+                            f.offer = ids.get(i).cloned();
+                            f.compute_error.take_if(|(c, _)| *c == ComputeField::Gpu);
+                        }
+                    }),
+                )
+            }
+            Load::Failed(e) => div()
+                .h(px(crate::theme::size::CONTROL_LG))
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(8.))
+                .child(text(ty::SM, t.danger_text).flex_1().min_w_0().ellipsis().child(e.message.clone()))
+                .child({
+                    let id = conn.id.clone();
+                    self.button(
+                        "nr-offers-retry",
+                        "Retry",
+                        Btn::Secondary,
+                        Some("icons/refresh-cw.svg"),
+                        window,
+                        cx,
+                        act(move |this, _, cx| this.ensure_offers(&id, true, cx)),
+                    )
+                })
+                .into_any_element(),
+            // Shaped like the select it becomes, inert.
+            _ => div()
+                .h(px(crate::theme::size::CONTROL_LG))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(radius::MD))
+                .bg(t.bg_inset)
+                .border_1()
+                .border_color(t.line_default)
+                .child(text(ty::BASE, t.text_tertiary).child("Loading offers…"))
+                .into_any_element(),
+        };
+        let gpu_help = match (error_on(ComputeField::Gpu), &offer) {
+            (Some(e), _) => danger(e),
+            (None, Some(o)) if o.price_per_hour.is_none() => quiet("Not billed: a machine of yours".into()),
+            (None, Some(o)) if o.availability == crate::api::CloudAvailability::Low => {
+                quiet("Low stock: the provider may refuse to start it".into())
+            }
+            _ => quiet("Billed by the hour while its instance exists".into()),
+        };
+        let right = div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(label("GPU"))
+            .child(gpu)
+            .child(gpu_help);
+        // Stop after: the run's time limit, and so the most it can cost.
+        let fh = hours_input.read(cx).focus_handle(cx);
+        let ring = self.ring(&fh, window);
+        let focused = fh.is_focused(window);
+        let bad = hours_bad || error_on(ComputeField::StopAfter).is_some();
+        let hours_box = div()
+            .relative()
+            .w(px(84.))
+            .h(px(crate::theme::size::CONTROL_MD))
+            .px(px(8.))
+            .flex()
+            .flex_none()
+            .items_center()
+            .rounded(px(radius::MD))
+            .bg(t.bg_raised)
+            .border_1()
+            .border_color(if bad {
+                t.danger_solid
+            } else if focused {
+                t.accent_line
+            } else {
+                t.line_control
+            })
+            .text_size(px(ty::SM.size))
+            .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
+            .child(hours_input);
+        let price = offer.as_ref().and_then(|o| o.price_per_hour);
+        let limit = match (provisions, price) {
+            (true, Some(p)) => format!(
+                "The run is stopped and the instance terminated after this long at the latest. It cannot cost more than {}.",
+                fmt_cost(p * hours as f64)
+            ),
+            (true, None) => {
+                "The run is stopped and the instance terminated after this long at the latest.".to_string()
+            }
+            (false, _) => "The run is stopped after this long at the latest.".to_string(),
+        };
+        let stop_after = div().flex().flex_col().gap(px(8.)).child(label("Stop after")).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(hours_box)
+                        .child(text(ty::SM, t.text_secondary).child("hours")),
+                )
+                .child(match error_on(ComputeField::StopAfter) {
+                    Some(e) => danger(e).flex_1().min_w_0(),
+                    None if hours_bad => danger("Enter hours from 0.25 to 720".into()).flex_1().min_w_0(),
+                    None => quiet(limit).flex_1().min_w_0(),
+                }),
+        );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(div().flex().gap(px(16.)).child(left).child(right))
+            .child(stop_after)
+            .into_any_element()
+    }
+
     fn new_run_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
+        // The compute choice stays whole: offers loading, one preselected, Stop after following.
+        self.sync_compute(cx);
+        let cloud_on = self.cloud_on();
+        let cloud = self
+            .new_run
+            .as_ref()
+            .and_then(|f| f.run_on.clone())
+            .filter(|_| cloud_on)
+            .and_then(|id| self.connection(&id).cloned());
+        let cloud_offer = cloud.as_ref().and_then(|c| {
+            let id = self.new_run.as_ref()?.offer.clone()?;
+            self.cloud.offers.get(&c.id)?.ready()?.offers.iter().find(|o| o.id == id).cloned()
+        });
+        let compute_rows = cloud_on.then(|| self.nr_compute_rows(cloud.as_ref(), window, cx));
         let datasets = self.store.datasets.ready().cloned().unwrap_or_default();
         let f = self.new_run.as_ref().unwrap();
         let (ds_i, arch, epochs, batch, imgsz, device, opt, lr0, mosaic, mixup, fliplr) = (
@@ -637,9 +990,9 @@ impl FoloApp {
         // key, or the server's answer arrived) has no focus stop any more: focus moves to the
         // control before it, so keys keep working. Before the controls are built, so that one
         // draws its ring this frame.
-        if self.amp_blocked(DEVICES[device]).is_some()
-            && self.focus.borrow().get("nr-amp").is_some_and(|f| f.is_focused(window))
-        {
+        // A cloud run's instance checks mixed precision when it boots: nothing here gates it.
+        let amp_why = if cloud.is_some() { None } else { self.amp_blocked(DEVICES[device]) };
+        if amp_why.is_some() && self.focus.borrow().get("nr-amp").is_some_and(|f| f.is_focused(window)) {
             // The control before it in Schedule: the learning rate, or the optimizer when Auto
             // sets the rate (the field is read-only then).
             let prev = if opt == 0 { self.fh("nr-opt", cx) } else { f.lr_input.read(cx).focus_handle(cx) };
@@ -891,6 +1244,31 @@ impl FoloApp {
                 .child(control)
                 .into_any_element()
         };
+        // A cloud run trains on what its instance has: a fact, not a choice (`device` goes as auto).
+        let device_fact = cloud.as_ref().map(|c| {
+            let instance = self
+                .cloud
+                .providers
+                .ready()
+                .is_some_and(|ps| ps.iter().any(|p| p.id == c.provider && p.provisions));
+            let fact = div()
+                .h(px(crate::theme::size::CONTROL_MD))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .rounded(px(radius::MD))
+                // A value, not an input: an outline, no well (as Auto's learning rate).
+                .border_1()
+                .border_color(t.line_subtle)
+                .child(text(ty::SM, t.text_secondary).child(if instance {
+                    "The instance's GPU"
+                } else {
+                    "The server's device"
+                }))
+                .into_any_element();
+            field("Device", fact, (!short).then(|| "The worker picks it (sent as auto)".to_string()))
+                .into_any_element()
+        });
         let body = div()
             .flex()
             .flex_col()
@@ -900,31 +1278,9 @@ impl FoloApp {
             // below, so at the end every control reads undimmed).
             .pb(px(36.))
             // Errors lead the form, where a failed submit is seen (the dialog scrolls to the top).
-            .when_some(error.clone(), |d, e| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_start()
-                        .gap(px(8.))
-                        .p(px(10.))
-                        .rounded(px(radius::MD))
-                        .bg(t.danger_muted)
-                        .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
-                        // The server's hint says what to change (device_not_found lists the
-                        // adapters there are; gpu_out_of_memory names batch, imgsz and arch).
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.))
-                                .min_w_0()
-                                .child(text(ty::SM, t.danger_text).whitespace_normal().child(e.message))
-                                .when_some(e.hint, |d, h| {
-                                    d.child(text(ty::SM, t.text_secondary).whitespace_normal().child(h))
-                                }),
-                        ),
-                )
-            })
+            // The server's hint says what to change (device_not_found lists the adapters there
+            // are; gpu_out_of_memory names batch, imgsz and arch).
+            .when_some(error.clone(), |d, e| d.child(error_note(&t, e.message, e.hint)))
             .child(
                 div().flex().gap(px(16.)).child(div().flex_1().child(field("Name", name_box, None))).child(
                     div().flex_1().child({
@@ -959,6 +1315,8 @@ impl FoloApp {
                     }),
                 ),
             )
+            // Where it trains, before what (the Device below follows from it).
+            .when_some(compute_rows, |d, rows| d.child(section("Compute")).child(rows))
             .child(section("Model"))
             .child(
                 div()
@@ -998,9 +1356,10 @@ impl FoloApp {
                         }
                     }))
                     .child(
-                        div().flex_1().child(match device_help {
-                            Some(h) => labelled("Device", h, device_seg),
-                            None => field(
+                        div().flex_1().child(match (device_fact, device_help) {
+                            (Some(fact), _) => fact,
+                            (None, Some(h)) => labelled("Device", h, device_seg),
+                            (None, None) => field(
                                 "Device",
                                 device_seg,
                                 Some(match (DEVICES[device], &gpu_name) {
@@ -1246,7 +1605,7 @@ impl FoloApp {
                 // (`capabilities.amp`); when it can't, the switch is off and inert with its reason. An older
                 // server can't say, so the requirement is stated and a run's failure tells.
                 .child({
-                    let blocked = self.amp_blocked(DEVICES[device]);
+                    let blocked = amp_why.clone();
                     let off = blocked.is_some();
                     let amp_on = amp && !off;
                     // Blocked: a disabled switch (no hover, press or focus stop); the reason is beside it.
@@ -1299,6 +1658,9 @@ impl FoloApp {
                                     // the stated need carries a code chip.
                                     match blocked {
                                         Some(why) => text(ty::SM, t.text_tertiary).whitespace_normal().child(why),
+                                        None if cloud.is_some() => text(ty::SM, t.text_tertiary)
+                                            .whitespace_normal()
+                                            .child("Checked on the instance when it boots."),
                                         // The server confirmed it can; an older one can't say, so the need is stated.
                                         None if self.store.capabilities.is_some() => {
                                             text(ty::SM, t.text_tertiary).whitespace_normal().child(
@@ -1357,7 +1719,8 @@ impl FoloApp {
             });
         self.ensure_estimate(cx);
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
-        let cpu = DEVICES[device] == "cpu";
+        let cpu = DEVICES[device] == "cpu" && cloud.is_none();
+        let compute_blocked = self.compute_blocked();
         // What the footer can honestly say. With the server's estimator: its answer for this
         // config; while a changed config is out, the last answer marked as updating (if it was for
         // the same kind of device); nothing for an unparsed value or a rejected config. Servers
@@ -1369,17 +1732,27 @@ impl FoloApp {
             Rejected(String),
             Local,
         }
+        // The last answer stands in only for the same kind of device (CPU, GPU, a cloud GPU).
+        let same_kind = |e: &crate::api::RunEstimate| {
+            (e.device == "cpu") == cpu && (e.device == "cloud") == cloud.is_some()
+        };
         let est = if !self.store.features.iter().any(|f| f == "run_estimate") {
             Est::Local
-        } else if epochs_bad || lr_bad || close_bad {
+        } else if epochs_bad
+            || lr_bad
+            || close_bad
+            || self.new_run.as_ref().is_some_and(|f| f.hours_invalid && cloud.is_some())
+        {
             Est::Invalid
+        } else if compute_blocked.is_some() {
+            Est::Pending
         } else {
             match &self.nr_estimate {
                 Some((_, crate::store::Load::Ready(e))) => Est::Server(Box::new(e.clone()), false),
                 Some((_, crate::store::Load::Failed(e))) if e.code == "not_supported" => Est::Local,
                 Some((_, crate::store::Load::Failed(e))) => Est::Rejected(e.message.clone()),
                 _ => match &self.nr_estimate_last {
-                    Some(e) if (e.device == "cpu") == cpu => Est::Server(Box::new(e.clone()), true),
+                    Some(e) if same_kind(e) => Est::Server(Box::new(e.clone()), true),
                     _ => Est::Pending,
                 },
             }
@@ -1388,7 +1761,7 @@ impl FoloApp {
         // Mixed precision trains in about 0.58x the memory (folo-n batch 16: 2022 vs 3474 MiB,
         // docs/BENCHMARKS.md) and no faster at 640 px (the epoch is bound elsewhere), so only the
         // memory moves.
-        let f16 = amp && self.amp_blocked(DEVICES[device]).is_none();
+        let f16 = amp && amp_why.is_none();
         let local_vram = if f16 { local_vram * 0.58 } else { local_vram };
         let gib = (1u64 << 30) as f32;
         // The device the estimate is for: the server's resolved one (Auto can land on the CPU).
@@ -1402,8 +1775,16 @@ impl FoloApp {
         };
         let gpu = self.store.system.ready().and_then(|s| s.gpus.first().cloned());
         // 0 = not reported (wgpu can't on every platform): make no claim about fitting.
-        // GiB, like the estimate and every size the app shows.
-        let gpu_gb = gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / gib);
+        // GiB, like the estimate and every size the app shows. A cloud run's is its offer's.
+        let gpu_gb = match (&cloud, &cloud_offer) {
+            (Some(_), Some(o)) => o.vram_bytes as f32 / gib,
+            (Some(_), None) => 0.0,
+            _ => gpu.as_ref().map_or(0.0, |g| g.memory_bytes as f32 / gib),
+        };
+        let on_gpu = match &cloud_offer {
+            Some(o) if cloud.is_some() => format!("on the {}", o.gpu),
+            _ => "on this GPU".to_string(),
+        };
         // An answer being refreshed is never a warning: it's marked as updating instead.
         let fits = !matches!(est, Est::Server(_, false) | Est::Local)
             || on_cpu
@@ -1423,8 +1804,13 @@ impl FoloApp {
             }
             _ if !fits => (
                 // No adapter name here: it can be long enough to reach the buttons.
-                format!("≈ {:.0} GiB needed, {gpu_gb:.0} GiB on this GPU", vram.unwrap_or(0.)),
-                "Lower the batch or image size".into(),
+                format!("≈ {:.0} GiB needed, {gpu_gb:.0} GiB {on_gpu}", vram.unwrap_or(0.)),
+                if cloud.is_some() {
+                    "Pick a larger GPU, or lower the batch or image size"
+                } else {
+                    "Lower the batch or image size"
+                }
+                .into(),
                 None,
             ),
             Est::Server(e, updating) => {
@@ -1448,6 +1834,10 @@ impl FoloApp {
                     match e.source {
                         crate::api::ThroughputSource::Measured => {
                             format!("Measured on this {place} · {confidence} confidence")
+                        }
+                        // A cloud GPU is never measured here: the time is the reference machine's.
+                        crate::api::ThroughputSource::Reference if e.device == "cloud" => {
+                            format!("The reference machine's rates · {confidence} confidence")
                         }
                         crate::api::ThroughputSource::Reference => {
                             format!("Reference rates, not measured here · {confidence} confidence")
@@ -1509,7 +1899,9 @@ impl FoloApp {
             .runs
             .ready()
             .and_then(|rs| rs.iter().find(|r| r.status.is_active() && r.status != RunStatus::Queued))
-            .map(|r| r.name.clone());
+            .map(|r| r.name.clone())
+            // A cloud run doesn't wait in this machine's queue.
+            .filter(|_| cloud.is_none());
         let busy = busy_with.is_some();
         let (go, going) =
             if busy { ("Queue training", "Queuing…") } else { ("Start training", "Starting…") };
@@ -1535,6 +1927,8 @@ impl FoloApp {
                 window,
                 cx,
             )
+        } else if let Some(why) = compute_blocked {
+            self.button_disabled("nr-start", go, Btn::Primary, Some(go_icon), why, window, cx)
         } else {
             self.button(
                 "nr-start",
@@ -1546,11 +1940,67 @@ impl FoloApp {
                 act(|this, w, cx| this.submit_new_run(w, cx)),
             )
         };
+        // A cloud run's money, next to the button that spends it: where it runs, what training
+        // should cost, and the most it can.
+        let runs_on = cloud.as_ref().map(|c| {
+            let provider = self.provider_name(&c.provider);
+            cloud_offer.as_ref().map_or(provider.clone(), |o| format!("{provider} · {}", o.gpu))
+        });
+        let cost_facts = runs_on.clone().map(|on| {
+            let price = cloud_offer.as_ref().and_then(|o| o.price_per_hour);
+            let hours = self.new_run.as_ref().map_or(folo_api::DEFAULT_MAX_HOURS, |f| f.max_hours);
+            let est_cost = match (&est, price) {
+                (_, None) => "not billed".to_string(),
+                (Est::Server(e, _), Some(_)) => {
+                    e.cost.as_ref().map_or("—".to_string(), |c| fmt_cost_range(c.est_usd_low, c.est_usd_high))
+                }
+                _ => "…".to_string(),
+            };
+            let limit = match price {
+                Some(p) => format!("{} at {}", fmt_cost(p * hours as f64), fmt_hours(hours)),
+                None => fmt_hours(hours),
+            };
+            let fact = |name: &str, value: String| {
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().child(name.to_string()))
+                    .child(
+                        text(ty::SM, t.text_primary)
+                            .font_weight(FontWeight::MEDIUM)
+                            .tnum()
+                            .whitespace_nowrap()
+                            .child(value),
+                    )
+            };
+            div()
+                .flex()
+                .items_center()
+                .gap(px(24.))
+                .pb(px(10.))
+                .mb(px(2.))
+                .border_b_1()
+                .border_color(t.line_subtle)
+                .child(fact("Runs on", on))
+                .child(
+                    fact("Est. cost", est_cost).child(
+                        // Its 28 px target overhangs a 20 px box (the row's texts keep their widths).
+                        div().size(px(20.)).flex_none().flex().items_center().justify_center().child(self.help_icon(
+                            "nr-help-cost",
+                            "Training only, from the time estimate: booting the instance and uploading the data come on top.",
+                            window,
+                            cx,
+                        )),
+                    ),
+                )
+                .child(fact("Limit", limit))
+        });
         let footer = div()
             .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(12.))
+            .flex_col()
+            .gap(px(10.))
             .px(px(20.))
             .py(px(14.))
             .border_t_1()
@@ -1558,28 +2008,37 @@ impl FoloApp {
             .bg(t.bg_raised)
             // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
             .rounded_b(px(radius::XL - 1.))
-            .child(estimate_line.flex_1())
+            .children(cost_facts)
             .child(
                 div()
                     .flex()
-                    .flex_none()
                     .items_center()
-                    .gap(px(8.))
-                    .child(cancel)
-                    .child(start)
-                    // Ctrl Enter triggers the button it follows.
-                    .child(shortcut(&t, &["Ctrl", "Enter"])),
+                    .justify_between()
+                    .gap(px(12.))
+                    .child(estimate_line.flex_1())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(cancel)
+                            .child(start)
+                            // Ctrl Enter triggers the button it follows.
+                            .child(shortcut(&t, &["Ctrl", "Enter"])),
+                    ),
             );
         self.dialog_frame(
             &t,
             "new-run",
             720.,
             "New training run",
-            Some(match &busy_with {
-                Some(n) => {
+            Some(match (&busy_with, &runs_on) {
+                (_, Some(on)) => format!("Trains on {on} and streams metrics into the run dashboard."),
+                (Some(n), None) => {
                     format!("{n} is training; this run queues and starts when it finishes.")
                 }
-                None => "Trains on this machine and streams metrics into the run dashboard.".into(),
+                (None, None) => "Trains on this machine and streams metrics into the run dashboard.".into(),
             }),
             body,
             footer,
@@ -1727,19 +2186,7 @@ impl FoloApp {
                 act(|this, w, cx| this.submit_synth(w, cx)),
             )
         };
-        let footer = div()
-            .flex()
-            .justify_end()
-            .gap(px(8.))
-            .px(px(20.))
-            .py(px(14.))
-            .border_t_1()
-            .border_color(t.line_subtle)
-            .bg(t.bg_raised)
-            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
-            .rounded_b(px(radius::XL - 1.))
-            .child(cancel)
-            .child(go);
+        let footer = dialog_footer(&t).justify_end().child(cancel).child(go);
         self.dialog_frame(
             &t,
             "synth-dialog",
@@ -1807,19 +2254,7 @@ impl FoloApp {
                         None => "Stops after the current batch and keeps the last finished epoch's checkpoint for export or resume. Progress after it is lost.".to_string(),
                     }),
             );
-        let footer = div()
-            .flex()
-            .justify_end()
-            .gap(px(8.))
-            .px(px(20.))
-            .py(px(14.))
-            .border_t_1()
-            .border_color(t.line_subtle)
-            .bg(t.bg_raised)
-            // The frame's 12 px corners, less its 1 px edge: a square fill would show past them.
-            .rounded_b(px(radius::XL - 1.))
-            .child(cancel)
-            .child(stop);
+        let footer = dialog_footer(&t).justify_end().child(cancel).child(stop);
         self.dialog_frame(
             &t,
             "stop-dialog",
@@ -1836,6 +2271,382 @@ impl FoloApp {
                 this.restore_focus(w);
                 cx.notify();
             }),
+        )
+    }
+
+    /// Connect a cloud: the provider, its fields as the server lists them (secrets masked), and an
+    /// optional name. The server checks the values with the provider before it keeps them; what it
+    /// refuses shows on the field it is about.
+    fn connect_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let providers = self.cloud.providers.ready().cloned().unwrap_or_default();
+        let Some(f) = self.cloud.connect.as_ref() else { return div().into_any_element() };
+        let (chosen, inputs, name, submitting, error) =
+            (f.provider, f.fields.clone(), f.name.clone(), f.submitting, f.error.clone());
+        let Some(p) = providers.get(chosen).cloned() else { return div().into_any_element() };
+        let names: Vec<&str> = providers.iter().map(|p| p.name.as_str()).collect();
+        let provider_seg = self.segmented_fill(
+            "cc-provider",
+            &names,
+            chosen,
+            window,
+            cx,
+            Rc::new(|this, i, _, cx| this.set_connect_provider(i, cx)),
+        );
+        let label =
+            |s: &str| text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(s.to_string());
+        // A field's box; Enter moves to the next field, and in the last one connects.
+        let last = inputs.len();
+        let input_box = |this: &Self,
+                         input: gpui::Entity<crate::input::TextInput>,
+                         index: usize,
+                         bad: bool,
+                         mono: bool,
+                         window: &Window,
+                         cx: &mut Context<Self>| {
+            let fh = input.read(cx).focus_handle(cx);
+            let ring = this.ring(&fh, window);
+            let focused = fh.is_focused(window);
+            div()
+                .relative()
+                .w_full()
+                .h(px(32.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(radius::MD))
+                .bg(t.bg_raised)
+                .border_1()
+                .border_color(if bad {
+                    t.danger_solid
+                } else if focused {
+                    t.accent_line
+                } else {
+                    t.line_control
+                })
+                .text_size(px(ty::BASE.size))
+                .when(mono, |d| d.font_family(crate::theme::MONO).text_size(px(ty::SM.size)))
+                .on_key_down(cx.listener(move |this, ev: &KeyDownEvent, w, cx| {
+                    if ev.keystroke.key != "enter" || ev.keystroke.modifiers.control {
+                        return;
+                    }
+                    let next = this
+                        .cloud
+                        .connect
+                        .as_ref()
+                        .and_then(|f| f.fields.get(index + 1).or((index + 1 == last).then_some(&f.name)));
+                    match next {
+                        Some(next) => w.focus(&next.read(cx).focus_handle(cx)),
+                        None => this.submit_connect(w, cx),
+                    }
+                    cx.stop_propagation();
+                }))
+                .when(ring, |d| d.child(crate::app::focus_ring(&t, radius::MD)))
+                .child(input)
+                .into_any_element()
+        };
+        let field_error = |i: usize| match &error {
+            Some(crate::cloud::ConnectError::Field(j, m)) if *j == i => Some(m.clone()),
+            _ => None,
+        };
+        let first_secret = p.fields.iter().position(|f| f.secret);
+        let mut rows: Vec<AnyElement> = Vec::new();
+        for (i, (field, input)) in p.fields.iter().zip(inputs).enumerate() {
+            let err = field_error(i);
+            // Keys and addresses in Geist Mono, where every character counts.
+            let mono = field.secret || field.key.ends_with("url");
+            let control = input_box(self, input, i, err.is_some(), mono, window, cx);
+            // Where the provider's console makes the credential, beside the first secret's help.
+            let docs = p.docs_url.clone().filter(|_| Some(i) == first_secret).map(|url| {
+                let link = div()
+                    .id("cc-docs")
+                    .flex_none()
+                    .px(px(4.))
+                    .rounded(px(radius::SM))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(t.bg_hover))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .child(
+                                text(ty::SM, t.text_secondary).whitespace_nowrap().child("Where to find it"),
+                            )
+                            .child(icon("icons/external-link.svg", 12., t.text_secondary)),
+                    );
+                self.bind(link, "cc-docs", radius::SM, window, cx, act(move |_, _, cx| cx.open_url(&url)))
+                    .tooltip(crate::controls::tip(p.docs_url.clone().unwrap_or_default(), None))
+            });
+            rows.push(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(label(&field.label))
+                            .when(!field.required, |d| {
+                                d.child(text(ty::SM, t.text_tertiary).child("Optional"))
+                            }),
+                    )
+                    .child(control)
+                    .when_some(err, |d, e| d.child(text(ty::SM, t.danger_text).whitespace_normal().child(e)))
+                    .when(field.help.is_some() || docs.is_some(), |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .justify_between()
+                                .gap(px(12.))
+                                // Providers write commands and flags as `code`.
+                                .child(
+                                    rich(
+                                        &t,
+                                        ty::SM,
+                                        t.text_tertiary,
+                                        field.help.as_deref().unwrap_or_default(),
+                                    )
+                                    .text_left()
+                                    .flex_1()
+                                    .min_w_0(),
+                                )
+                                .children(docs),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+        let name_box = input_box(self, name, last, false, false, window, cx);
+        let body = div()
+            .px(px(20.))
+            .pb(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .when_some(
+                match &error {
+                    Some(crate::cloud::ConnectError::Dialog(e)) => Some(e.clone()),
+                    _ => None,
+                },
+                |d, e| d.child(error_note(&t, e.message, e.hint)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(label("Provider"))
+                    .child(provider_seg)
+                    .when(!p.about.is_empty(), |d| {
+                        d.child(rich(&t, ty::SM, t.text_tertiary, &p.about).text_left())
+                    }),
+            )
+            .children(rows)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .child(label("Name"))
+                            .child(text(ty::SM, t.text_tertiary).child("Optional")),
+                    )
+                    .child(name_box),
+            );
+        let cancel = self.button(
+            "cc-cancel",
+            "Cancel",
+            Btn::Secondary,
+            None,
+            window,
+            cx,
+            act(|this, w, cx| this.close_connect(w, cx)),
+        );
+        let go = if submitting {
+            self.button_disabled(
+                "cc-go",
+                "Connecting…",
+                Btn::Primary,
+                Some("icons/plug.svg"),
+                "Checking the credentials with the provider…",
+                window,
+                cx,
+            )
+        } else {
+            self.button(
+                "cc-go",
+                "Connect",
+                Btn::Primary,
+                Some("icons/plug.svg"),
+                window,
+                cx,
+                act(|this, w, cx| this.submit_connect(w, cx)),
+            )
+        };
+        let footer = dialog_footer(&t).justify_end().child(cancel).child(go);
+        self.dialog_frame(
+            &t,
+            "cloud-connect",
+            520.,
+            "Connect a cloud",
+            Some("FOLO checks these with the provider, then keeps them on the server.".into()),
+            body,
+            footer,
+            window,
+            cx,
+            act(|this, w, cx| this.close_connect(w, cx)),
+        )
+    }
+
+    /// Disconnect a connection: the server forgets its credentials; runs and models stay. A
+    /// connection still in use (`409 connection_in_use`) says so here.
+    fn disconnect_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let Some(c) = self.cloud.disconnect.as_ref() else { return div().into_any_element() };
+        let (busy, error) = (c.busy, c.error.clone());
+        let conn = self.connection(&c.id).cloned();
+        let name = conn.as_ref().map_or(c.id.clone(), |c| c.name.clone());
+        // What it forgets, as the provider calls it ("the API key", "the token").
+        let secret = conn
+            .as_ref()
+            .and_then(|c| self.cloud.providers.ready()?.iter().find(|p| p.id == c.provider))
+            .and_then(|p| p.fields.iter().find(|f| f.secret))
+            .map_or("credentials".to_string(), |f| crate::cloud::in_sentence(&f.label));
+        let cancel = self.button(
+            "cd-cancel",
+            "Cancel",
+            Btn::Secondary,
+            None,
+            window,
+            cx,
+            act(|this, w, cx| this.close_confirm(w, cx)),
+        );
+        let go = if busy {
+            self.button_disabled(
+                "cd-confirm",
+                "Disconnecting…",
+                Btn::DangerCommit,
+                None,
+                "Asking the server…",
+                window,
+                cx,
+            )
+        } else {
+            self.button(
+                "cd-confirm",
+                "Disconnect",
+                Btn::DangerCommit,
+                None,
+                window,
+                cx,
+                act(|this, _, cx| this.disconnect(cx)),
+            )
+        };
+        let body = div()
+            .px(px(20.))
+            .pb(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(
+                text(ty::BASE, t.text_secondary)
+                    .whitespace_normal()
+                    .child(format!("FOLO forgets the {secret}. Runs and models stay.")),
+            )
+            .when_some(error, |d, e| d.child(error_note(&t, e.message, e.hint)));
+        let footer = dialog_footer(&t).justify_end().child(cancel).child(go);
+        self.dialog_frame(
+            &t,
+            "cloud-disconnect",
+            440.,
+            &format!("Disconnect {name}?"),
+            None,
+            body,
+            footer,
+            window,
+            cx,
+            act(|this, w, cx| this.close_confirm(w, cx)),
+        )
+    }
+
+    /// Terminate an instance by hand: it is shut down now and its run fails, keeping the
+    /// checkpoints already copied here.
+    fn terminate_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let Some(c) = self.cloud.terminate.as_ref() else { return div().into_any_element() };
+        let (busy, error) = (c.busy, c.error.clone());
+        let inst = self.cloud.instances.ready().and_then(|l| l.iter().find(|i| i.id == c.id)).cloned();
+        let what = inst.as_ref().map_or("instance".to_string(), |i| {
+            format!("{} at {}", i.offer.gpu, self.provider_name(&i.provider))
+        });
+        let run = inst
+            .as_ref()
+            .and_then(|i| i.run_id.as_deref())
+            .map(|r| self.store.run(r).map_or(r.to_string(), |run| run.name.clone()));
+        let sentence = match run {
+            Some(r) => format!(
+                "The {what} is shut down now. Its run `{r}` fails; the checkpoints already copied to this machine stay."
+            ),
+            None => format!("The {what} is shut down now."),
+        };
+        let cancel = self.button(
+            "ct-cancel",
+            "Cancel",
+            Btn::Secondary,
+            None,
+            window,
+            cx,
+            act(|this, w, cx| this.close_confirm(w, cx)),
+        );
+        let go = if busy {
+            self.button_disabled(
+                "ct-confirm",
+                "Terminating…",
+                Btn::DangerCommit,
+                Some("icons/stop.svg"),
+                "Asking the provider…",
+                window,
+                cx,
+            )
+        } else {
+            self.button(
+                "ct-confirm",
+                "Terminate",
+                Btn::DangerCommit,
+                Some("icons/stop.svg"),
+                window,
+                cx,
+                act(|this, _, cx| this.terminate(cx)),
+            )
+        };
+        let body = div()
+            .px(px(20.))
+            .pb(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(rich(&t, ty::BASE, t.text_secondary, &sentence).text_left())
+            .when_some(error, |d, e| d.child(error_note(&t, e.message, e.hint)));
+        let footer = dialog_footer(&t).justify_end().child(cancel).child(go);
+        self.dialog_frame(
+            &t,
+            "cloud-terminate",
+            440.,
+            "Terminate this instance?",
+            None,
+            body,
+            footer,
+            window,
+            cx,
+            act(|this, w, cx| this.close_confirm(w, cx)),
         )
     }
 

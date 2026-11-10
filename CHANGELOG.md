@@ -5,6 +5,24 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 
 ## Unreleased
 
+### Cloud compute
+- Train a run on a GPU that is not in this machine: one rented from **RunPod** for the length of the run, or
+  another FOLO server of yours (`remote`). The run stays a run of this server, with the same metrics, logs,
+  samples and models ([docs/CLOUD.md](docs/CLOUD.md); `TrainConfig.compute`, HTTP API under `/api/cloud`,
+  feature `cloud`; `folo cloud`; MCP `cloud_*` tools; Settings → Cloud and New run → Run on in Studio and
+  Desktop).
+- Nothing rented is left behind: every instance is written to a ledger before the provider is asked for it,
+  released on every way out of a run (also a crash or a bug), terminated with retries until the provider confirms,
+  and bounded by the run's time limit (`compute.max_hours`), which the instance also enforces on itself.
+- A cloud run that trains does not need this server: close the laptop, and the next `folo serve` follows it again
+  and fetches what it missed. A stopped or failed one resumes on a new instance from the checkpoint copied here.
+- `folo serve --token` (bearer auth for a server that listens beyond loopback), `/api/uploads` (datasets and
+  weights in retryable parts), cursors on a run's metrics and logs, `Range` on weights downloads and `checkpoint`
+  on `POST /api/runs`: what makes any FOLO server usable as a worker, and useful on their own. `folo mcp --server`
+  takes `--token` and `https://`.
+- The RunPod provider is written against RunPod's REST API v2 and tested against a fixture of it; it has not been
+  run against a live account yet (`crates/folo-cloud/tests/runpod_live.rs`).
+
 ### Agent labeling
 - Unlabeled images to a dataset: `folo serve` hands a set of images to **Claude Code** or **Codex** on the
   server's machine, Studio shows every box for review and correction, and the labeled images become a

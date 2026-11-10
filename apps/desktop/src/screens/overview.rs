@@ -406,7 +406,7 @@ impl FoloApp {
                             .ellipsis()
                             .child(r.name.clone()),
                     )
-                    .child(status_badge(&t, r.status, &r.id))
+                    .child(status_badge(&t, r, &r.id))
                     .child(div().flex_1().min_w_0().overflow_hidden().child(self.run_subtitle(
                         &t,
                         r,
@@ -734,7 +734,7 @@ impl FoloApp {
                                     return d.child(
                                         text(ty::SM, t.text_tertiary)
                                             .whitespace_nowrap()
-                                            .child(queue_text(r.queue_position)),
+                                            .child(waiting_text(&r)),
                                     );
                                 }
                                 let fill = match r.status {
@@ -828,7 +828,7 @@ impl FoloApp {
                             .child(meta(meta_w))
                             .child(div().w(px(96.)).flex_none().child(status_dot(
                                 &t,
-                                r.status,
+                                &r,
                                 &format!("ov-{}", r.id),
                             )))
                             .child(progress_el)

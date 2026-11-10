@@ -9,10 +9,13 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use folo_api::IssuePage;
 use folo_api::{
-    Arch, Dataset, ExportResult, ExportSpec, IssueSeverity, LogLevel, LogLine, Model, OnnxSwitches,
-    PredictResponse, QueueRequest, RegisterDataset, Run, RunMetrics, SyntheticDataset, ValReport, ValRequest,
+    Arch, CloudConnectionList, CloudInstance, CloudInstanceList, CloudOfferList, Dataset, ExportResult,
+    ExportSpec, IssueSeverity, LogLevel, LogLine, Model, OnnxSwitches, PredictResponse, QueueRequest,
+    RegisterDataset, Run, RunMetrics, SyntheticDataset, ValReport, ValRequest,
 };
-use folo_server::store::{ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove};
+use folo_server::store::{
+    ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
+};
 use rmcp::handler::server::common::{schema_for_input, schema_for_output};
 use rmcp::model::{
     ContentBlock, JsonObject, ProgressNotificationParam, ProgressToken, Resource, Tool, ToolAnnotations,
@@ -207,6 +210,18 @@ fn output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
     Arc::new(s)
 }
 
+/// [`output`] of a shared `folo-api` type (`Run`, `Dataset`, ...): its fields lose their descriptions at the root
+/// too, as they do in `$defs`; docs/API.md documents them.
+fn api_output<T: JsonSchema + 'static>() -> Arc<JsonObject> {
+    let mut s = (*output::<T>()).clone();
+    if let Some(Value::Object(props)) = s.get_mut("properties") {
+        for p in props.values_mut().filter_map(Value::as_object_mut) {
+            p.remove("description");
+        }
+    }
+    Arc::new(s)
+}
+
 /// Shrinks a generated schema for `tools/list` (docs/MCP.md "Schemas"), keeping what validates. Everywhere: no
 /// `$schema`, no numeric `format` (`uint32`, `float`: `integer` / `number` say enough), no `minimum: 0` from
 /// unsigned types, and defaults without f32 noise. Output schemas also drop defaults and the descriptions inside
@@ -223,7 +238,13 @@ fn compact(s: &mut JsonObject, output: bool) {
                 {
                     o.remove("format");
                 }
-                if o.get("minimum") == Some(&json!(0)) && o.get("type") == Some(&json!("integer")) {
+                // Also of an `Option` of one (`"type": ["integer", "null"]`).
+                let integer = match o.get("type") {
+                    Some(Value::String(t)) => t == "integer",
+                    Some(Value::Array(ts)) => ts.contains(&json!("integer")),
+                    _ => false,
+                };
+                if integer && o.get("minimum") == Some(&json!(0)) {
                     o.remove("minimum");
                 }
                 if output {
@@ -309,7 +330,7 @@ pub const TOOLS: &[ToolDef] = &[
                       it with statistics.",
         mutating: true,
         input: input::<RegisterArgs>,
-        output: output::<Dataset>,
+        output: api_output::<Dataset>,
     },
     ToolDef {
         name: "create_synthetic_dataset",
@@ -317,7 +338,7 @@ pub const TOOLS: &[ToolDef] = &[
                       backgrounds) for quick experiments. Reports progress.",
         mutating: true,
         input: input::<SyntheticArgs>,
-        output: output::<Dataset>,
+        output: api_output::<Dataset>,
     },
     ToolDef {
         name: "list_models",
@@ -353,7 +374,7 @@ pub const TOOLS: &[ToolDef] = &[
         description: "Stops a running run; its last checkpoint is kept.",
         mutating: true,
         input: input::<RunIdArgs>,
-        output: output::<Run>,
+        output: api_output::<Run>,
     },
     ToolDef {
         name: "reorder_run",
@@ -370,7 +391,7 @@ pub const TOOLS: &[ToolDef] = &[
                       Reports progress.",
         mutating: false,
         input: input::<ValArgs>,
-        output: output::<ValReport>,
+        output: api_output::<ValReport>,
     },
     ToolDef {
         name: "predict",
@@ -378,7 +399,7 @@ pub const TOOLS: &[ToolDef] = &[
                       pixel xyxy, highest score first.",
         mutating: false,
         input: input::<PredictArgs>,
-        output: output::<PredictResponse>,
+        output: api_output::<PredictResponse>,
     },
     ToolDef {
         name: "predict_batch",
@@ -393,7 +414,7 @@ pub const TOOLS: &[ToolDef] = &[
         description: "Exports a model (folo-f16 or onnx) to a new file under the data dir.",
         mutating: true,
         input: input::<ExportArgs>,
-        output: output::<ExportResult>,
+        output: api_output::<ExportResult>,
     },
     ToolDef {
         name: "compare_runs",
@@ -402,6 +423,36 @@ pub const TOOLS: &[ToolDef] = &[
         mutating: false,
         input: input::<CompareArgs>,
         output: output::<CompareResult>,
+    },
+    ToolDef {
+        name: "cloud_connections",
+        description: "Lists the cloud connections (account, balance, last check). Connecting takes credentials, so \
+                      it is done in Studio, Desktop or `folo cloud connect`.",
+        mutating: false,
+        input: input::<NoArgs>,
+        output: api_output::<CloudConnectionList>,
+    },
+    ToolDef {
+        name: "cloud_offers",
+        description: "What a cloud connection can run on now, cheapest first; train on one with train's \
+                      compute.offer_id.",
+        mutating: false,
+        input: input::<CloudOffersArgs>,
+        output: api_output::<CloudOfferList>,
+    },
+    ToolDef {
+        name: "cloud_instances",
+        description: "Lists the cloud instances FOLO launched, alive first, with their run, status and cost.",
+        mutating: false,
+        input: input::<NoArgs>,
+        output: api_output::<CloudInstanceList>,
+    },
+    ToolDef {
+        name: "cloud_terminate",
+        description: "Terminates a cloud instance now; a run still using it fails (cloud_instance_lost).",
+        mutating: true,
+        input: input::<InstanceIdArgs>,
+        output: api_output::<CloudInstance>,
     },
 ];
 
@@ -696,6 +747,10 @@ impl Inner {
             "predict_batch" => self.predict_batch(parse_args(args)?, progress).await,
             "export" => self.export(parse_args(args)?).await,
             "compare_runs" => self.compare_runs(parse_args(args)?).await,
+            "cloud_connections" => self.cloud_connections(parse_args(args)?).await,
+            "cloud_offers" => self.cloud_offers(parse_args(args)?).await,
+            "cloud_instances" => self.cloud_instances(parse_args(args)?).await,
+            "cloud_terminate" => self.cloud_terminate(parse_args(args)?).await,
             other => Err(Error::internal(format!("tool `{other}` has no handler"))),
         };
         res.map_err(|e| mcp_code(crate::confine::map_denied(e)))
@@ -988,8 +1043,8 @@ impl Inner {
         let run =
             self.blocking(move |s| s.create_run(a.config)).await.map_err(|e| self.amp_hint(e, false))?;
         // Embedded runs end with this process, so they are stopped on disconnect; proxied runs belong to the
-        // `folo serve` (and Studio) and outlive the session.
-        if self.proxy.is_none() {
+        // `folo serve` (and Studio) and outlive the session, and so do cloud runs, which train without this process.
+        if self.proxy.is_none() && run.config.compute.is_none() {
             self.created_runs.lock().unwrap().push(run.id.clone());
         }
         let summary = format!(
@@ -1041,7 +1096,7 @@ impl Inner {
         let rid = id.clone();
         let run =
             self.blocking(move |s| s.resume_run(&rid, &args)).await.map_err(|e| self.amp_hint(e, true))?;
-        if self.proxy.is_none() {
+        if self.proxy.is_none() && run.config.compute.is_none() {
             let mut created = self.created_runs.lock().unwrap();
             if !created.contains(&run.id) {
                 created.push(run.id.clone());
@@ -1063,9 +1118,9 @@ impl Inner {
         let (run, metrics, mut log) = self
             .blocking(move |s| {
                 let run = s.get_run(&id)?;
-                let metrics = s.run_metrics(&id, u64::MAX)?;
+                let metrics = s.run_metrics(&id, &MetricsQuery::every(u64::MAX))?;
                 // The whole log (as far as /logs serves it), for the warnings; `log` keeps the last n lines.
-                let log = s.run_logs(&id, WARNING_SCAN_LINES)?;
+                let log = s.run_logs(&id, &LogsQuery::last(WARNING_SCAN_LINES))?.lines;
                 Ok((run, metrics, log))
             })
             .await?;
@@ -1351,7 +1406,9 @@ impl Inner {
         let ids = a.run_ids.clone();
         let runs: Vec<(Run, RunMetrics)> = self
             .blocking(move |s| {
-                ids.iter().map(|id| Ok((s.get_run(id)?, s.run_metrics(id, u64::MAX)?))).collect()
+                ids.iter()
+                    .map(|id| Ok((s.get_run(id)?, s.run_metrics(id, &MetricsQuery::every(u64::MAX))?)))
+                    .collect()
             })
             .await?;
         let entries: Vec<CompareEntry> = runs
@@ -1396,6 +1453,51 @@ impl Inner {
             None => format!("{} runs, none validated yet", result.runs.len()),
         };
         out(&result, summary)
+    }
+
+    async fn cloud_connections(&self, _: NoArgs) -> Result<Output, Error> {
+        let connections = self.blocking(|s| s.cloud_connections()).await?;
+        let names: Vec<String> = connections
+            .iter()
+            .map(|c| {
+                format!("{} ({}, {})", c.id, c.provider, serde_json::to_value(c.status).unwrap_or_default())
+            })
+            .collect();
+        let summary = match names.len() {
+            0 => "no cloud connections; make one in Studio, Desktop or with `folo cloud connect`".to_string(),
+            n => format!("{n} cloud connection(s): {}", names.join(", ")),
+        };
+        out(&CloudConnectionList { connections }, summary)
+    }
+
+    async fn cloud_offers(&self, a: CloudOffersArgs) -> Result<Output, Error> {
+        let id = a.connection_id.clone();
+        let list = self.blocking(move |s| s.cloud_offers(&id, a.refresh)).await?;
+        let cheapest =
+            list.offers.iter().filter(|o| o.availability != folo_api::CloudAvailability::None).find_map(
+                |o| o.price_per_hour.map(|p| format!("; the cheapest available: {} at ${p:.2}/h", o.gpu)),
+            );
+        let summary =
+            format!("{} offers of {}{}", list.offers.len(), a.connection_id, cheapest.unwrap_or_default());
+        out(&list, summary)
+    }
+
+    async fn cloud_instances(&self, _: NoArgs) -> Result<Output, Error> {
+        let instances = self.blocking(|s| s.cloud_instances()).await?;
+        let alive = instances.iter().filter(|i| i.status.is_alive()).count();
+        let summary =
+            format!("{alive} alive, {} listed (the ended ones of the last 7 days)", instances.len());
+        out(&CloudInstanceList { instances }, summary)
+    }
+
+    async fn cloud_terminate(&self, a: InstanceIdArgs) -> Result<Output, Error> {
+        let i = self.blocking(move |s| s.terminate_instance(&a.instance_id)).await?;
+        let status = serde_json::to_value(i.status).unwrap_or_default();
+        let summary = match &i.error {
+            Some(e) => format!("{}: {status} ({e}; FOLO retries)", i.id),
+            None => format!("{}: {status}", i.id),
+        };
+        out(&i, summary)
     }
 
     /// The `folo_info` record.

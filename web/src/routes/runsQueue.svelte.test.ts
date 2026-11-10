@@ -112,6 +112,53 @@ describe('Runs: the training queue', () => {
   });
 });
 
+describe('a cloud run in its hand-over', () => {
+  /** Mounts `page` at `path` on the `cloud-upload` mock (shapes-hard-x, run_c9e4, uploading its dataset). */
+  async function show(page: Component, path: string, api = new MockApi('cloud-upload', 0)) {
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse(`#${path}`);
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(page, { target });
+  }
+
+  it('is listed by its phase and without a place in the queue, even where the server gives it one', async () => {
+    const api = new MockApi('cloud-upload', 0);
+    const list = api.runs.bind(api);
+    vi.spyOn(api, 'runs').mockImplementation(async () => (await list()).map((r) => (r.id === 'run_c9e4' ? { ...r, queue_position: 3 } : r)));
+    await show(Runs as Component, '/runs', api);
+    await vi.waitFor(
+      () => {
+        flushSync();
+        if (!target.querySelector('tr[data-id="run_q7c5"] td.act button')) throw new Error('not loaded');
+      },
+      { timeout: 4000, interval: 10 },
+    );
+    expect(row('run_c9e4').querySelector('.badge')?.textContent?.trim()).toBe('Uploading data');
+    expect(row('run_c9e4').querySelector('.badge')?.classList.contains('queued')).toBe(true);
+    expect(place('run_c9e4')).toBeUndefined();
+    expect(row('run_c9e4').querySelector('td.act button')).toBeNull();
+    // Phones: the status word leads the row's meta line.
+    const phone = target.querySelector(`ul.rows a[href$="/runs/run_c9e4"] .r-meta`);
+    expect(phone?.textContent).toMatch(/^Uploading data/);
+  });
+
+  it("titles its own page's header with the phase, not Queued", async () => {
+    await show(Run as Component, '/runs/run_c9e4');
+    const badge = await vi.waitFor(
+      () => {
+        flushSync();
+        const b = target.querySelector<HTMLElement>('.badge');
+        if (!b) throw new Error('not loaded');
+        return b;
+      },
+      { timeout: 4000, interval: 10 },
+    );
+    expect(badge.textContent?.trim()).toBe('Uploading data');
+  });
+});
+
 describe('Run: a waiting run on a server without estimates', () => {
   it('says the runs in front have no known length, never "starts in about" the training run’s time left alone', async () => {
     hub.api = new MockApi('no-throughput', 0);

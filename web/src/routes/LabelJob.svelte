@@ -236,7 +236,7 @@
 {:else}
   <Page title={job.name} inlineActions>
     {#snippet lead()}
-      <StatusBadge plain status={st.status} label={st.label} lastKnown={live.lost !== null ? lastKnown(st.label, live.lost, now.current) : undefined} />
+      <StatusBadge plain state={st} lastKnown={live.lost !== null ? lastKnown(st.label, live.lost, now.current) : undefined} />
       {#if live.connection === 'reconnecting'}<Badge tone="warning"><WifiOff size={12} /> Reconnecting</Badge>{/if}
     {/snippet}
     {#snippet sub()}

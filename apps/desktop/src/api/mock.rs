@@ -248,6 +248,455 @@ struct RunFixture {
     /// Frozen at this step (finished, stopped, failed, or a frozen clock).
     step: u64,
     logs: Vec<LogLine>,
+    /// A cloud run's simulated life on its instance; its steps and status come from there.
+    cloud: Option<CloudSim>,
+}
+
+/// The demo's clock as the simulators read it: frozen at [`MOCK_NOW`] for screenshots, else
+/// running from when the backend was made.
+#[derive(Clone, Copy)]
+struct Clock {
+    frozen: bool,
+    started: Instant,
+}
+
+impl Clock {
+    /// Seconds since the Unix epoch, with a fraction.
+    fn now(&self) -> f64 {
+        MOCK_NOW as f64 + if self.frozen { 0. } else { self.started.elapsed().as_secs_f64() }
+    }
+}
+
+/// How a cloud run ended early.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Ended {
+    /// Stopped through the API: the run keeps its checkpoint.
+    Stopped,
+    /// Its instance was terminated by hand: the run fails with `cloud_instance_lost`.
+    InstanceLost,
+}
+
+/// A cloud run's life (docs/CLOUD.md, *A cloud run, step by step*) as a function of the clock:
+/// provisioning, booting and uploading, then the training curve on the instance, then collecting
+/// the weights and releasing the instance. Everything is measured in seconds since the instance
+/// was asked for.
+#[derive(Clone)]
+struct CloudSim {
+    /// `Run.cloud` as the run started: connection, offer, instance and time limit.
+    base: RunCloud,
+    clock: Clock,
+    /// When the instance was asked for (the run's creation), Unix seconds.
+    t0: f64,
+    /// How long provisioning, booting and uploading take.
+    pre: [f64; 3],
+    /// The dataset's upload, bytes.
+    upload_bytes: u64,
+    /// Seconds per training step.
+    step_dt: f64,
+    /// Where the training clock is anchored: (seconds since `t0`, steps done then).
+    anchor: (f64, u64),
+    /// The run's length in steps.
+    total: u64,
+    /// Ended early: when, and how.
+    ended: Option<(f64, Ended)>,
+    /// Why the provider hasn't confirmed the termination (the instance stays `terminating`).
+    release_error: Option<String>,
+}
+
+/// Seconds of collecting the weights, then of releasing the instance.
+const COLLECT_S: f64 = 1.;
+const RELEASE_S: f64 = 0.5;
+
+impl CloudSim {
+    /// A run launched as `base` says at `t0` (Unix seconds) that trains `total` steps, at the
+    /// demo's pace: about 2 s for each phase before training, then as fast as a local mock run.
+    fn new(base: RunCloud, clock: Clock, t0: f64, total: u64) -> Self {
+        let pre = [2., 2., 2.];
+        Self {
+            base,
+            clock,
+            t0,
+            pre,
+            upload_bytes: 600 << 20,
+            step_dt: STEP_DT,
+            anchor: (pre.iter().sum(), 0),
+            total,
+            ended: None,
+            release_error: None,
+        }
+    }
+
+    fn elapsed(&self) -> f64 {
+        (self.clock.now() - self.t0).max(0.)
+    }
+
+    fn train_at(&self) -> f64 {
+        self.pre.iter().sum()
+    }
+
+    /// Training steps done `t` seconds in.
+    fn steps_at(&self, t: f64) -> u64 {
+        let t = self.ended.map_or(t, |(e, _)| t.min(e));
+        if t < self.train_at() {
+            return 0;
+        }
+        (self.anchor.1 + ((t - self.anchor.0).max(0.) / self.step_dt) as u64).min(self.total)
+    }
+
+    fn steps(&self) -> u64 {
+        self.steps_at(self.elapsed())
+    }
+
+    /// When training ended (all steps done, or stopped), if it has.
+    fn trained_at(&self) -> Option<f64> {
+        let natural = self.anchor.0 + self.total.saturating_sub(self.anchor.1) as f64 * self.step_dt;
+        let end = self.ended.map_or(natural, |(e, _)| e.min(natural)).max(self.train_at());
+        (self.elapsed() >= end).then_some(end)
+    }
+
+    /// When the instance was released: right away for a run that ended before training or lost its
+    /// instance, else after collecting the weights.
+    fn released_at(&self) -> Option<f64> {
+        match self.ended {
+            Some((e, how)) if how == Ended::InstanceLost || e < self.train_at() => Some(e),
+            _ => self.trained_at().map(|t| t + COLLECT_S + RELEASE_S).filter(|r| self.elapsed() >= *r),
+        }
+    }
+
+    fn phase(&self) -> (CloudPhase, Option<TransferProgress>) {
+        let t = self.elapsed();
+        let [provision, boot, sync] = self.pre;
+        if self.released_at().is_some() {
+            return (CloudPhase::Released, None);
+        }
+        if let Some(done) = self.trained_at() {
+            return if t < done + COLLECT_S {
+                // The two weights files, about 40 MB each for these models.
+                let total = 80 << 20;
+                let done_bytes = (total as f64 * (t - done) / COLLECT_S) as u64;
+                (CloudPhase::Collecting, Some(TransferProgress { done_bytes, total_bytes: total }))
+            } else {
+                (CloudPhase::Releasing, None)
+            };
+        }
+        if t < provision {
+            (CloudPhase::Provisioning, None)
+        } else if t < provision + boot {
+            (CloudPhase::Booting, None)
+        } else if t < self.train_at() {
+            let done_bytes = (self.upload_bytes as f64 * (t - provision - boot) / sync) as u64;
+            (CloudPhase::Syncing, Some(TransferProgress { done_bytes, total_bytes: self.upload_bytes }))
+        } else {
+            (CloudPhase::Training, None)
+        }
+    }
+
+    /// Whether the provider hasn't confirmed the termination: the instance stays `terminating` (and
+    /// billed) after the run was released.
+    fn stuck(&self) -> bool {
+        self.release_error.is_some() && self.trained_at().is_some_and(|t| self.elapsed() >= t + COLLECT_S)
+    }
+
+    /// Seconds the instance has existed: until it was released, or until now while it isn't.
+    fn lifetime(&self) -> f64 {
+        if self.stuck() { self.elapsed() } else { self.released_at().unwrap_or(self.elapsed()) }
+    }
+
+    /// Price times `secs`, without a price none.
+    fn cost(&self, secs: f64) -> Option<f64> {
+        self.base.offer.price_per_hour.map(|p| p * secs / 3600.)
+    }
+
+    fn at(&self, secs: f64) -> String {
+        time::format((self.t0 + secs) as i64)
+    }
+
+    /// `Run.cloud` now.
+    fn state(&self) -> RunCloud {
+        let (phase, progress) = self.phase();
+        let t = self.elapsed().min(self.ended.map_or(f64::MAX, |e| e.0));
+        let train_at = self.train_at();
+        // `last.folo` is copied every 10 minutes of training, and both files at the end.
+        let synced = match self.trained_at() {
+            Some(done) if phase >= CloudPhase::Releasing => Some(done + COLLECT_S),
+            _ if t >= train_at + 600. => Some(train_at + ((t - train_at) / 600.).floor() * 600.),
+            _ => None,
+        };
+        RunCloud {
+            phase,
+            progress,
+            deadline: (self.elapsed() >= self.pre[0]).then(|| self.at(self.base.max_hours as f64 * 3600.)),
+            // Final once released, even while the provider hasn't confirmed the termination.
+            cost_usd: self.cost(self.released_at().unwrap_or(self.elapsed())),
+            synced: synced.map(|s| self.at(s)),
+            ..self.base.clone()
+        }
+    }
+
+    /// The run as its life says now: status, times, device and `cloud`.
+    fn apply(&self, run: &mut Run) {
+        let cloud = self.state();
+        let lost = self.ended.is_some_and(|(_, how)| how == Ended::InstanceLost);
+        let stopped = self.ended.is_some_and(|(_, how)| how == Ended::Stopped);
+        run.status = match cloud.phase {
+            _ if lost => RunStatus::Failed,
+            CloudPhase::Released if stopped => RunStatus::Stopped,
+            CloudPhase::Released => RunStatus::Completed,
+            _ if stopped => RunStatus::Stopping,
+            p if p >= CloudPhase::Training => RunStatus::Running,
+            _ => RunStatus::Queued,
+        };
+        let training =
+            self.elapsed() >= self.train_at() && !self.ended.is_some_and(|(e, _)| e < self.train_at());
+        run.started = training.then(|| self.at(self.train_at()));
+        run.finished = self.released_at().map(|r| self.at(r));
+        // The worker's GPU once it trains (the offer's catalogue name, as wgpu reports it).
+        run.device = if training {
+            format!("{} (vulkan)", self.base.offer.id.split('@').next().unwrap_or(&self.base.offer.gpu))
+        } else {
+            String::new()
+        };
+        if lost {
+            run.error = Some(format!(
+                "The instance {} was terminated by hand; the checkpoints copied so far are kept.",
+                self.base.instance_id.as_deref().unwrap_or("of this run")
+            ));
+            run.error_code = Some("cloud_instance_lost".into());
+        }
+        if !run.status.is_active() {
+            run.eta_s = None;
+        }
+        run.cloud = Some(cloud);
+    }
+
+    /// The run's instance as `/api/cloud/instances` lists it.
+    fn instance(&self, run_id: &str) -> Option<CloudInstance> {
+        let id = self.base.instance_id.clone()?;
+        let (phase, _) = self.phase();
+        let stuck = self.stuck();
+        let t = self.elapsed();
+        let status = match phase {
+            _ if stuck => CloudInstanceStatus::Terminating,
+            CloudPhase::Released => CloudInstanceStatus::Terminated,
+            CloudPhase::Releasing => CloudInstanceStatus::Terminating,
+            CloudPhase::Provisioning => CloudInstanceStatus::Launching,
+            CloudPhase::Booting => CloudInstanceStatus::Starting,
+            _ => CloudInstanceStatus::Running,
+        };
+        Some(CloudInstance {
+            id,
+            connection_id: self.base.connection_id.clone(),
+            provider: self.base.provider.clone(),
+            provider_ref: (t >= self.pre[0])
+                .then(|| format!("{:016x}", hash(&format!("pod{run_id}")))[..14].to_string()),
+            name: format!("folo-{run_id}-{:04x}", hash(run_id) & 0xFFFF),
+            run_id: Some(run_id.to_string()),
+            offer: self.base.offer.clone(),
+            status,
+            created: self.at(0.),
+            ended: (status == CloudInstanceStatus::Terminated).then(|| self.at(self.lifetime())),
+            deadline: (t >= self.pre[0]).then(|| self.at(self.base.max_hours as f64 * 3600.)),
+            cost_usd: self.cost(self.lifetime()),
+            error: self.release_error.clone().filter(|_| stuck),
+        })
+    }
+}
+
+/// `Run.cloud` as a run is launched on `offer`: phase and costs follow from its [`CloudSim`]. A
+/// provider that provisions gets an instance per run.
+fn launch_state(
+    run_id: &str,
+    compute: &Compute,
+    provider: &str,
+    offer: CloudOffer,
+    provisions: bool,
+) -> RunCloud {
+    RunCloud {
+        connection_id: compute.connection_id.clone(),
+        provider: provider.into(),
+        offer,
+        instance_id: provisions.then(|| format!("ci_{:04x}", hash(run_id) & 0xFFFF)),
+        phase: CloudPhase::Provisioning,
+        progress: None,
+        max_hours: compute.max_hours,
+        deadline: None,
+        cost_usd: None,
+        synced: None,
+    }
+}
+
+/// The demo's one RunPod connection.
+const RUNPOD_CONNECTION: &str = "cc_4d2a";
+const RTX4090_OFFER: &str = "NVIDIA GeForce RTX 4090@secure";
+const L40S_OFFER: &str = "NVIDIA L40S@secure";
+const A100_OFFER: &str = "NVIDIA A100 80GB PCIe@secure";
+
+/// The providers as `folo serve` lists them: `info()` of `folo-cloud`'s RunPod and remote server,
+/// word for word (the Connect dialog is laid out for these texts).
+fn cloud_providers() -> Vec<CloudProvider> {
+    let field =
+        |key: &str, label: &str, secret: bool, required: bool, placeholder: Option<&str>, help: &str| {
+            CloudField {
+                key: key.into(),
+                label: label.into(),
+                secret,
+                required,
+                placeholder: placeholder.map(Into::into),
+                help: Some(help.into()),
+            }
+        };
+    vec![
+        CloudProvider {
+            id: "runpod".into(),
+            name: "RunPod".into(),
+            about: "Rents an on-demand GPU pod on RunPod for each run and terminates it when the run ends.".into(),
+            docs_url: Some("https://www.runpod.io/console/user/settings".into()),
+            fields: vec![
+                field(
+                    "api_key",
+                    "API key",
+                    true,
+                    true,
+                    Some("rpa_…"),
+                    "RunPod console → Settings → API Keys; the key needs read and write access to pods.",
+                ),
+                field(
+                    "worker_base_url",
+                    "Worker download URL",
+                    false,
+                    false,
+                    Some("https://example.com/folo"),
+                    "Where instances download FOLO from (install.sh and the release archive) when not the \
+                     public release of this version: a mirror, or your own build.",
+                ),
+            ],
+            provisions: true,
+            self_terminates: true,
+        },
+        CloudProvider {
+            id: "remote".into(),
+            name: "Remote FOLO server".into(),
+            about: "A FOLO server you run yourself (`folo serve --host 0.0.0.0 --token …`), on a workstation or a \
+                    VM at any cloud."
+                .into(),
+            docs_url: None,
+            fields: vec![
+                field(
+                    "url",
+                    "Server URL",
+                    false,
+                    true,
+                    Some("https://gpu-box.example.com:7878"),
+                    "The address of its `folo serve`; use https:// (a TLS proxy or a tunnel) across networks you \
+                     do not control.",
+                ),
+                field(
+                    "token",
+                    "Token",
+                    true,
+                    false,
+                    None,
+                    "Its `--token` (or FOLO_TOKEN); empty when it runs without one.",
+                ),
+            ],
+            provisions: false,
+            self_terminates: false,
+        },
+    ]
+}
+
+/// RunPod's catalogue as the demo has it, cheapest first: both clouds, one GPU out of stock and one
+/// low on it.
+fn runpod_offers() -> Vec<CloudOffer> {
+    let gib = 1u64 << 30;
+    let offer = |id: &str, gpu: &str, vram: u64, price: f64, availability: CloudAvailability| CloudOffer {
+        id: id.into(),
+        gpu: gpu.into(),
+        gpu_count: 1,
+        vram_bytes: vram * gib,
+        price_per_hour: Some(price),
+        region: None,
+        detail: Some(if id.ends_with("@secure") { "Secure Cloud" } else { "Community Cloud" }.into()),
+        availability,
+    };
+    vec![
+        offer("NVIDIA RTX A4000@community", "RTX A4000", 16, 0.17, CloudAvailability::High),
+        offer("NVIDIA GeForce RTX 3090@community", "RTX 3090", 24, 0.22, CloudAvailability::Medium),
+        offer("NVIDIA GeForce RTX 4090@community", "RTX 4090", 24, 0.34, CloudAvailability::None),
+        offer(RTX4090_OFFER, "RTX 4090", 24, 0.69, CloudAvailability::High),
+        offer("NVIDIA RTX 6000 Ada Generation@secure", "RTX 6000 Ada", 48, 0.77, CloudAvailability::Low),
+        offer(L40S_OFFER, "L40S", 48, 0.86, CloudAvailability::Medium),
+        offer(A100_OFFER, "A100 80GB", 80, 1.64, CloudAvailability::Medium),
+        offer("NVIDIA H100 80GB HBM3@secure", "H100 SXM", 80, 2.99, CloudAvailability::Low),
+    ]
+}
+
+/// The demo's RunPod connection, checked 20 minutes ago.
+fn runpod_connection() -> CloudConnection {
+    CloudConnection {
+        id: RUNPOD_CONNECTION.into(),
+        provider: "runpod".into(),
+        name: "RunPod".into(),
+        created: time::format(MOCK_NOW - 3 * 86_400),
+        status: CloudConnectionStatus::Ok,
+        account: Some("you@example.com".into()),
+        balance_usd: Some(42.17),
+        error: None,
+        note: None,
+        checked: Some(time::format(MOCK_NOW - 20 * 60)),
+        values: [("api_key".to_string(), "••••a1b2".to_string())].into(),
+    }
+}
+
+/// A secret as answers show it: `••••` and its last 4 characters.
+fn secret_hint(s: &str) -> String {
+    let tail: String = s.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("••••{tail}")
+}
+
+/// An `http://` URL to a host that isn't loopback or a private address: the connection's `note`
+/// warns about it.
+fn unencrypted(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let host = rest.split(['/', ':']).next().unwrap_or_default();
+    let private = ["localhost", "127.", "10.", "192.168.", "["].iter().any(|p| host.starts_with(p))
+        || host
+            .strip_prefix("172.")
+            .and_then(|r| r.split('.').next()?.parse::<u8>().ok())
+            .is_some_and(|b| (16..32).contains(&b));
+    !private
+}
+
+/// What a connection can run on: RunPod's catalogue, or a remote server's own GPU (not billed).
+/// A connection whose last check failed can't be asked.
+fn offers_of(conn: &CloudConnection) -> ApiResult<Vec<CloudOffer>> {
+    if conn.status == CloudConnectionStatus::Error {
+        return Err(ApiError::new("cloud_auth_failed", conn.error.clone().unwrap_or_default())
+            .with_hint("Check the connection again in Settings › Cloud."));
+    }
+    if conn.provider == "runpod" {
+        return Ok(runpod_offers());
+    }
+    Ok(vec![CloudOffer {
+        id: "gpu:0".into(),
+        gpu: "RTX 4080 SUPER".into(),
+        gpu_count: 1,
+        vram_bytes: 16 << 30,
+        price_per_hour: None,
+        region: None,
+        detail: conn.account.clone(),
+        availability: CloudAvailability::Unknown,
+    }])
+}
+
+fn no_connection(id: &str) -> ApiError {
+    ApiError::new("connection_not_found", format!("No cloud connection {id}"))
+        .with_hint("Settings › Cloud lists the connections.")
+}
+
+fn no_instance(id: &str) -> ApiError {
+    ApiError::new("instance_not_found", format!("No cloud instance {id}"))
+        .with_hint("Settings › Cloud lists the instances.")
 }
 
 type PixelCache = Mutex<HashMap<(String, String, u32), Arc<Vec<u8>>>>;
@@ -268,13 +717,29 @@ pub struct MockBackend {
     fixture_runs: Vec<String>,
     /// What the demo "measured": training and inference rows.
     measured: Mutex<(Vec<TrainThroughput>, Vec<InferThroughput>)>,
+    /// Cloud connections (one RunPod connection unless a variant says otherwise).
+    connections: Mutex<Vec<CloudConnection>>,
+    clock: Clock,
 }
 
 const LIVE_ID: &str = "run_a19f";
+/// [`MockBackend::with_cloud_runs`]'s runs: uploading its dataset, and training on its instance.
+const CLOUD_SYNCING_ID: &str = "run_c1d0";
+const CLOUD_TRAINING_ID: &str = "run_c2e1";
 
 impl MockBackend {
     /// `live_step`: where the live run starts. `frozen`: keep the clock still (screenshots).
     pub fn new(live_step: u32, frozen: bool) -> Self {
+        Self::build(live_step, frozen, false)
+    }
+
+    /// The demo with two cloud runs under way besides: one uploading its dataset, one training on
+    /// its instance (the cloud screenshots).
+    pub fn with_cloud_runs(live_step: u32, frozen: bool) -> Self {
+        Self::build(live_step, frozen, true)
+    }
+
+    fn build(live_step: u32, frozen: bool, cloud_runs: bool) -> Self {
         let h = |hours: f64| MOCK_NOW - (hours * 3600.0) as i64;
         let datasets = vec![
             DatasetFixture::new(
@@ -482,8 +947,20 @@ impl MockBackend {
             seed: 0,
             amp: false,
             head: Default::default(),
+            compute: None,
         };
-        let gpu = "NVIDIA GeForce RTX 4080 SUPER (vulkan)".to_string();
+        // Trains on a cloud connection's offer (the cloud fixtures below).
+        let on = |offer: &str, max_hours: f32, c: TrainConfig| TrainConfig {
+            compute: Some(Compute {
+                connection_id: RUNPOD_CONNECTION.into(),
+                offer_id: offer.into(),
+                max_hours,
+                disk_gb: None,
+            }),
+            device: "auto".into(),
+            ..c
+        };
+        let gpu = GPU_DEVICE.to_string();
         struct Spec {
             id: &'static str,
             config: TrainConfig,
@@ -496,7 +973,7 @@ impl MockBackend {
             model: Option<&'static str>,
             error: Option<&'static str>,
         }
-        let specs = vec![
+        let mut specs = vec![
             Spec {
                 id: LIVE_ID,
                 config: cfg("shapes-hard-m", "ds_3b91", "folo-m", 100, 32, 640, "gpu:0", 0.01),
@@ -576,9 +1053,14 @@ impl MockBackend {
                 model: Some("m_31aa"),
                 error: None,
             },
+            // The demo's one cloud run (docs/CLOUD.md), released long ago with its final cost.
             Spec {
                 id: "run_c9f1",
-                config: cfg("shapes-crowded-s", "ds_5e21", "folo-s", 80, 32, 640, "gpu:0", 0.01),
+                config: on(
+                    A100_OFFER,
+                    12.,
+                    cfg("shapes-crowded-s", "ds_5e21", "folo-s", 80, 32, 640, "auto", 0.01),
+                ),
                 status: RunStatus::Completed,
                 step: 80 * 50,
                 spe: 50,
@@ -613,10 +1095,51 @@ impl MockBackend {
                 error: None,
             },
         ];
+        if cloud_runs {
+            // Among the newest, after the live and the queued run.
+            specs.splice(
+                2..2,
+                [
+                    Spec {
+                        id: CLOUD_SYNCING_ID,
+                        config: on(
+                            L40S_OFFER,
+                            24.,
+                            cfg("shapes-crowded-l", "ds_5e21", "folo-l", 120, 32, 800, "auto", 0.01),
+                        ),
+                        status: RunStatus::Queued,
+                        step: 0,
+                        spe: 50,
+                        created_h: 0.1,
+                        map_max: 0.62,
+                        ips: 120.0,
+                        model: None,
+                        error: None,
+                    },
+                    Spec {
+                        id: CLOUD_TRAINING_ID,
+                        // The out-of-memory run above, again on a 24 GB GPU.
+                        config: on(
+                            RTX4090_OFFER,
+                            12.,
+                            cfg("shapes-hard-l-2", "ds_3b91", "folo-l", 100, 32, 1024, "auto", 0.01),
+                        ),
+                        status: RunStatus::Running,
+                        step: 4400,
+                        spe: 100,
+                        created_h: 2.4,
+                        map_max: 0.7,
+                        ips: 96.0,
+                        model: None,
+                        error: None,
+                    },
+                ],
+            );
+        }
         let now = Instant::now();
         // Each run resolved against its own dataset's class count (Auto's AdamW rate depends on it).
         let nc = |ds: &str| datasets.iter().find(|d| d.ds.id == ds).map_or(5, |d| d.ds.classes.len());
-        let runs = specs
+        let mut runs = specs
             .into_iter()
             .map(|s| {
                 let curve = Curve {
@@ -657,11 +1180,7 @@ impl MockBackend {
                         steps_per_epoch: s.spe,
                         eta_s: None,
                         best: None,
-                        device: if s.config.device == "cpu" {
-                            "AMD Ryzen 9 7950X (32 threads)".into()
-                        } else {
-                            gpu.clone()
-                        },
+                        device: if s.config.device == "cpu" { CPU_DEVICE.into() } else { gpu.clone() },
                         model_id: s.model.map(Into::into),
                         error: s.error.map(Into::into),
                         error_code: s.error.map(|_| "training_failed".into()),
@@ -669,17 +1188,58 @@ impl MockBackend {
                             resolve(&s.config, s.spe * s.config.batch as u64, nc(&s.config.dataset_id))
                         }),
                         queue_position: (s.status == RunStatus::Queued).then_some(1),
+                        cloud: None,
                         config: s.config,
                     },
                     curve,
                     live: (s.status == RunStatus::Running && !frozen).then_some((s.step, now)),
                     step: s.step.min(total),
                     logs: Vec::new(),
+                    cloud: None,
                 };
                 fixture.logs = initial_logs(&fixture, created);
                 fixture
             })
             .collect::<Vec<RunFixture>>();
+        // The cloud fixtures live on their instances: released 5 days ago after training as long as
+        // it would have here (its Duration reads the same), 6 minutes into uploading 4.8 GiB, and 2.4
+        // hours into training (at step 4,400).
+        let clock = Clock { frozen, started: now };
+        let gib = 1u64 << 30;
+        for f in &mut runs {
+            let Some(compute) = f.run.config.compute.clone() else { continue };
+            let t0 = time::parse(&f.run.created).unwrap_or(MOCK_NOW);
+            let total = f.run.epochs as u64 * f.run.steps_per_epoch;
+            let offer = runpod_offers().into_iter().find(|o| o.id == compute.offer_id);
+            let Some(offer) = offer else { continue };
+            let mut sim = CloudSim::new(
+                launch_state(&f.run.id, &compute, "runpod", offer, true),
+                clock,
+                t0 as f64,
+                total,
+            );
+            match f.run.id.as_str() {
+                CLOUD_SYNCING_ID => (sim.pre, sim.upload_bytes) = ([40., 150., 680.], gib * 24 / 5),
+                CLOUD_TRAINING_ID => {
+                    (sim.pre, sim.upload_bytes) = ([45., 230., 290.], gib * 21 / 10);
+                    sim.anchor = ((MOCK_NOW - t0) as f64, f.step);
+                }
+                _ => {
+                    let at = |t: &Option<String>| t.as_deref().and_then(time::parse).unwrap_or(t0);
+                    let trained = (at(&f.run.finished) - at(&f.run.started)) as f64 - COLLECT_S - RELEASE_S;
+                    (sim.pre, sim.upload_bytes) = ([45., 240., 360.], gib * 13 / 10);
+                    sim.step_dt = trained / total as f64;
+                }
+            }
+            // Unless anchored mid-run, training starts from step 0 when the upload ends.
+            if sim.anchor.1 == 0 {
+                sim.anchor.0 = sim.train_at();
+            }
+            f.cloud = Some(sim);
+            f.live = None;
+            f.run.queue_position = None;
+            f.logs = initial_logs(f, t0);
+        }
         // A model's operating point is its run's best epoch's (as `folo serve --mock`'s), so the run and model
         // pages name the same confidence.
         for model in &mut models {
@@ -701,6 +1261,8 @@ impl MockBackend {
             image_cache: Mutex::new(HashMap::new()),
             fail: false,
             empty: false,
+            connections: Mutex::new(vec![runpod_connection()]),
+            clock,
         }
     }
 
@@ -711,6 +1273,46 @@ impl MockBackend {
 
     pub fn empty(mut self) -> Self {
         self.empty = true;
+        self
+    }
+
+    /// A server whose cloud was never used: no connection, no cloud run, no instance (Settings ›
+    /// Cloud's empty state). The released cloud run trained on this machine instead.
+    pub fn without_cloud(self) -> Self {
+        self.connections.lock().unwrap().clear();
+        let mut runs = self.runs.lock().unwrap();
+        runs.retain(|f| f.cloud.as_ref().is_none_or(|s| s.released_at().is_some()));
+        for f in runs.iter_mut().filter(|f| f.cloud.is_some()) {
+            f.cloud = None;
+            f.run.config.compute = None;
+            f.run.config.device = "gpu:0".into();
+            f.run.device = GPU_DEVICE.into();
+            f.logs = initial_logs(f, time::parse(&f.run.created).unwrap_or(MOCK_NOW));
+        }
+        drop(runs);
+        self
+    }
+
+    /// The RunPod key revoked, and a training cloud run ([`MockBackend::with_cloud_runs`]) stopped ten
+    /// minutes ago with a termination RunPod hasn't confirmed: Settings › Cloud's problem states.
+    pub fn cloud_trouble(self) -> Self {
+        if let Some(c) = self.connections.lock().unwrap().first_mut() {
+            c.status = CloudConnectionStatus::Error;
+            c.balance_usd = None;
+            c.error = Some(
+                "RunPod rejected the API key (401 Unauthorized): it was revoked or lost write access to pods."
+                    .into(),
+            );
+            c.checked = Some(time::format(MOCK_NOW - 4 * 60));
+        }
+        for f in self.runs.lock().unwrap().iter_mut() {
+            if let Some(sim) =
+                f.cloud.as_mut().filter(|s| s.elapsed() >= s.train_at() && s.released_at().is_none())
+            {
+                sim.ended = Some((sim.elapsed() - 600., Ended::Stopped));
+                sim.release_error = Some("RunPod's API answered 502 Bad Gateway".into());
+            }
+        }
         self
     }
 
@@ -733,6 +1335,9 @@ impl MockBackend {
     /// Current step of a run fixture, advancing live runs with the clock.
     fn current_step(f: &RunFixture) -> u64 {
         let total = f.run.epochs as u64 * f.run.steps_per_epoch;
+        if let Some(sim) = &f.cloud {
+            return sim.steps().min(total);
+        }
         match f.live {
             Some((base, at)) => (base + (at.elapsed().as_secs_f64() / STEP_DT) as u64).min(total),
             None => f.step.min(total),
@@ -741,6 +1346,9 @@ impl MockBackend {
 
     fn snapshot(f: &RunFixture) -> Run {
         let mut run = f.run.clone();
+        if let Some(sim) = &f.cloud {
+            sim.apply(&mut run);
+        }
         let step = Self::current_step(f);
         let total = run.epochs as u64 * run.steps_per_epoch;
         run.step = step;
@@ -775,6 +1383,14 @@ impl MockBackend {
     }
 }
 
+/// An epoch's summary line in a run's log.
+fn epoch_line(e: u32, epochs: u32, ep: &Epoch) -> String {
+    format!(
+        "epoch {e}/{epochs} · mAP50-95 {:.3} · mAP50 {:.3} · {:.1} s",
+        ep.val.map50_95, ep.val.map50, ep.duration_s
+    )
+}
+
 fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
     let c = &f.run.config;
     let mut logs = vec![
@@ -790,7 +1406,8 @@ fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
                 c.imgsz
             ),
         ),
-        (1, LogLevel::Info, format!("device: {}", f.run.device)),
+        // The worker's, for a cloud run.
+        (1, LogLevel::Info, format!("device: {}", MockBackend::snapshot(f).device)),
         (2, LogLevel::Debug, "dataloader: 8 workers, prefetch 4 batches, mosaic 1.0".to_string()),
         (
             3,
@@ -823,8 +1440,41 @@ fn initial_logs(f: &RunFixture, created: i64) -> Vec<LogLine> {
     if f.run.id == LIVE_ID {
         logs.push((120, LogLevel::Warn, "label 'img_03417' has a box outside the image; clipped".into()));
     }
-    logs.into_iter()
-        .map(|(dt, level, message)| LogLine { t: time::format(created + 5 + dt), level, message })
+    let lines = |logs: Vec<(i64, LogLevel, String)>, from: i64| {
+        logs.into_iter().map(move |(dt, level, message)| LogLine {
+            t: time::format(from + dt),
+            level,
+            message,
+        })
+    };
+    let Some(sim) = &f.cloud else { return lines(logs, created + 5).collect() };
+    // A cloud run's own lines lead, up to where it is; the trainer's follow once it trains there.
+    let [provision, boot, _] = sim.pre.map(|s| s as i64);
+    let train_at = sim.train_at() as i64;
+    let pod = sim.instance(&f.run.id).and_then(|i| i.provider_ref).unwrap_or_default();
+    let (size, unit) = crate::ui::bytes(sim.upload_bytes);
+    let cloud = vec![
+        (
+            0,
+            LogLevel::Info,
+            format!(
+                "cloud: launching {} at {}",
+                crate::ui::offer_line(&sim.base.offer),
+                crate::ui::fmt_price(sim.base.offer.price_per_hour)
+            ),
+        ),
+        (provision, LogLevel::Info, format!("cloud: instance {pod} is up; waiting for its worker")),
+        (
+            provision + boot,
+            LogLevel::Info,
+            format!("cloud: worker ready; uploading the dataset ({size} {unit})"),
+        ),
+        (train_at, LogLevel::Info, "cloud: upload done; training on the instance".to_string()),
+    ];
+    let elapsed = sim.elapsed() as i64;
+    let trained = if elapsed >= train_at { logs } else { Vec::new() };
+    lines(cloud.into_iter().filter(|(dt, _, _)| *dt <= elapsed).collect(), created)
+        .chain(lines(trained, created + train_at + 5))
         .collect()
 }
 
@@ -853,8 +1503,14 @@ impl Backend for MockBackend {
         self.check()?;
         let t = self.started.elapsed().as_secs_f32();
         let wobble = if self.frozen { 0.0 } else { (t * 0.7).sin() * 0.02 };
+        // A run on this machine's GPU (a cloud run trains elsewhere).
         let live = !self.empty
-            && self.runs.lock().unwrap().iter().any(|f| Self::snapshot(f).status == RunStatus::Running);
+            && self
+                .runs
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|f| f.cloud.is_none() && Self::snapshot(f).status == RunStatus::Running);
         let system = SystemInfo {
             cpu: CpuInfo {
                 name: "AMD Ryzen 9 7950X".into(),
@@ -888,6 +1544,7 @@ impl Backend for MockBackend {
                 "run_cli".into(),
                 "throughput".into(),
                 "benchmark".into(),
+                folo_api::FEATURE_CLOUD.into(),
             ],
             capabilities: Some(capabilities),
             gpu_pool: None,
@@ -1137,6 +1794,21 @@ impl Backend for MockBackend {
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run> {
         self.check()?;
         let ds = self.fixture(&config.dataset_id)?;
+        // A cloud run is checked like any run plus its compute (docs/API.md, Cloud runs).
+        let target = match &config.compute {
+            Some(c) => {
+                let (conn, offer) = self.compute_offer(c, &config)?;
+                if offer.availability == CloudAvailability::None {
+                    return Err(ApiError::new(
+                        "cloud_refused",
+                        format!("{} has no {} available right now", conn.name, crate::ui::offer_line(&offer)),
+                    )
+                    .with_hint("Pick another GPU, or try again in a few minutes."));
+                }
+                Some((c.clone(), conn, offer))
+            }
+            None => None,
+        };
         let mut runs = self.runs.lock().unwrap();
         let id = format!("run_{:04x}", hash(&format!("{}{}", config.name, runs.len())) & 0xFFFF);
         let spe = (ds.ds.splits.train / config.batch.max(1) as u64).max(1);
@@ -1166,24 +1838,30 @@ impl Backend for MockBackend {
                 steps_per_epoch: spe,
                 eta_s: None,
                 best: None,
-                device: if config.device == "cpu" {
-                    "AMD Ryzen 9 7950X (32 threads)".into()
-                } else {
-                    "NVIDIA GeForce RTX 4080 SUPER (vulkan)".into()
-                },
+                device: if config.device == "cpu" { CPU_DEVICE.into() } else { GPU_DEVICE.into() },
                 model_id: None,
                 error: None,
                 error_code: None,
                 resolved: None,
                 queue_position: None,
+                cloud: None,
                 config,
             },
             curve,
-            live: (!self.frozen).then(|| (0, Instant::now())),
+            live: (!self.frozen && target.is_none()).then(|| (0, Instant::now())),
             step: 0,
             logs: Vec::new(),
+            cloud: None,
         };
-        f.logs = initial_logs(&f, now - 5);
+        if let Some((compute, conn, offer)) = target {
+            let base = launch_state(&id, &compute, &conn.provider, offer, conn.provider == "runpod");
+            let mut sim = CloudSim::new(base, self.clock, self.clock.now(), f.run.epochs as u64 * spe);
+            // The dataset as FOLO sends it: about 180 kB an image.
+            sim.upload_bytes = ds.ds.splits.total() * 180_000;
+            f.cloud = Some(sim);
+        }
+        // A local run's lines follow its start; a cloud run's its launch, now.
+        f.logs = initial_logs(&f, if f.cloud.is_some() { now } else { now - 5 });
         let run = Self::snapshot(&f);
         runs.insert(0, f);
         Ok(run)
@@ -1328,7 +2006,17 @@ impl Backend for MockBackend {
         let close =
             if config.augment.mosaic <= 0. { epochs } else { config.augment.close_mosaic.min(epochs / 2) };
         let startup = 6.0;
-        let (device, here) = if cpu { ("cpu", CPU_NAME) } else { ("gpu:0", GPU_NAME) };
+        // A cloud config trains on its offer's GPU: nothing measured here applies (no row has
+        // that device), so the estimate is the reference, plus what the run would cost.
+        let offer = match &config.compute {
+            Some(c) => Some(self.compute_offer(c, config)?.1),
+            None => None,
+        };
+        let (device, here) = match &offer {
+            Some(o) => ("cloud", o.gpu.as_str()),
+            None if cpu => ("cpu", CPU_NAME),
+            None => ("gpu:0", GPU_NAME),
+        };
         // The basis (docs/API.md): the measured row of this device with the run's arch, image
         // size, batch and precision; else the nearest measured row on it by compute (the same
         // precision preferred), carried over by the reference's ratio between the two settings
@@ -1450,13 +2138,33 @@ impl Backend for MockBackend {
                 samples: 0,
                 updated: None,
                 exact: false,
-                note: "Reference rates for this architecture at 640 px and batch 16, scaled to this \
-                       config; nothing has been measured at these settings on this machine."
-                    .into(),
+                note: match &offer {
+                    Some(o) => format!(
+                        "Reference rates of FOLO's reference machine ({}), scaled to this config; the {} may \
+                         be faster or slower.",
+                        crate::ui::short_gpu(REF_GPU),
+                        o.gpu
+                    ),
+                    None => "Reference rates for this architecture at 640 px and batch 16, scaled to this \
+                             config; nothing has been measured at these settings on this machine."
+                        .into(),
+                },
             },
         };
+        let total_s = secs + startup;
+        let cost = offer.as_ref().zip(config.compute.as_ref()).and_then(|(o, c)| {
+            let price = o.price_per_hour?;
+            let usd = |s: f64| price * s / 3600.;
+            Some(CostEstimate {
+                price_per_hour: price,
+                est_usd: usd(total_s),
+                est_usd_low: usd(total_s * lo),
+                est_usd_high: usd(total_s * hi),
+                max_usd: price * c.max_hours as f64,
+            })
+        });
         Ok(RunEstimate {
-            device: if cpu { "cpu".into() } else { "gpu:0".into() },
+            device: device.into(),
             device_name,
             train_images: train,
             val_images: val,
@@ -1478,6 +2186,7 @@ impl Backend for MockBackend {
             vram_source: (!cpu).then_some(ThroughputSource::Reference),
             close_mosaic: close,
             cli: Some(self.cli_for(config).cli),
+            cost,
         })
     }
 
@@ -1503,8 +2212,19 @@ impl Backend for MockBackend {
             .iter_mut()
             .find(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
-        if !f.run.status.is_active() {
+        if !Self::snapshot(f).status.is_active() {
             return Err(ApiError::new("run_not_active", "This run is not running"));
+        }
+        // A cloud run stops on its instance: its checkpoint is collected and the instance released
+        // (at once before training).
+        if let Some(sim) = f.cloud.as_mut() {
+            sim.ended = Some((sim.elapsed(), Ended::Stopped));
+            f.logs.push(LogLine {
+                t: time::format(self.sim_now()),
+                level: LogLevel::Warn,
+                message: "stop requested; collecting the checkpoint and releasing the instance".into(),
+            });
+            return Ok(Self::snapshot(f));
         }
         f.step = Self::current_step(f);
         f.live = None;
@@ -1585,21 +2305,19 @@ impl Backend for MockBackend {
             .iter()
             .find(|f| f.run.id == id)
             .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
-        // Epoch summaries up to now, merged with the fixture's lines in time order.
+        // Epoch summaries up to now, merged with the fixture's lines in time order (a cloud run's
+        // from when it started training on its instance).
         let created = time::parse(&f.run.created).unwrap_or(MOCK_NOW);
+        let trains_at = created + f.cloud.as_ref().map_or(10, |s| s.train_at() as i64 + 10);
         let done = (Self::current_step(f) / f.run.steps_per_epoch) as u32;
         let per_epoch = (f.run.steps_per_epoch as f64 * STEP_DT) as i64 + 1;
         let mut lines = f.logs.clone();
         let from = done.saturating_sub(60) + 1;
         for e in from..=done {
-            let ep = f.curve.epoch(e);
             lines.push(LogLine {
-                t: time::format(created + 10 + e as i64 * per_epoch),
+                t: time::format(trains_at + e as i64 * per_epoch),
                 level: LogLevel::Info,
-                message: format!(
-                    "epoch {e}/{} · mAP50-95 {:.3} · mAP50 {:.3} · {:.1} s",
-                    f.run.epochs, ep.val.map50_95, ep.val.map50, ep.duration_s
-                ),
+                message: epoch_line(e, f.run.epochs, &f.curve.epoch(e)),
             });
         }
         lines.sort_by(|a, b| a.t.cmp(&b.t));
@@ -1610,7 +2328,7 @@ impl Backend for MockBackend {
         self.check()?;
         let (tx, rx) = channel();
         let (sub, cancel) = Subscription::new(rx);
-        let (live, curve, spe, epochs, status, log_mark) = {
+        let (live, curve, spe, epochs, snap, log_mark, cloud) = {
             let runs = self.runs.lock().unwrap();
             let f = runs
                 .iter()
@@ -1621,11 +2339,16 @@ impl Backend for MockBackend {
                 f.curve.clone(),
                 f.run.steps_per_epoch,
                 f.run.epochs,
-                Self::snapshot(f).status,
+                Self::snapshot(f),
                 f.logs.len(),
+                f.cloud.is_some(),
             )
         };
-        let _ = tx.send(RunEvent::Status(StatusEvent::new(status, None).with_length(epochs, spe)));
+        let _ = tx.send(RunEvent::Status(StatusEvent::new(snap.status, None).with_length(epochs, spe)));
+        if cloud && !self.frozen {
+            self.stream_cloud(id, snap, curve, log_mark, tx, cancel);
+            return Ok(sub);
+        }
         let Some((base, at)) = live else { return Ok(sub) };
         let total = epochs as u64 * spe;
         let start_secs = self.sim_now();
@@ -1682,10 +2405,7 @@ impl Backend for MockBackend {
                         let e = (sent / spe) as u32;
                         let ep = curve.epoch(e);
                         let t = time::format(start_secs + at.elapsed().as_secs() as i64);
-                        let msg = format!(
-                            "epoch {e}/{epochs} · mAP50-95 {:.3} · mAP50 {:.3} · {:.1} s",
-                            ep.val.map50_95, ep.val.map50, ep.duration_s
-                        );
+                        let msg = epoch_line(e, epochs, &ep);
                         if tx.send(RunEvent::Epoch(ep)).is_err()
                             || tx
                                 .send(RunEvent::Log(LogLine { t, level: LogLevel::Info, message: msg }))
@@ -1704,6 +2424,156 @@ impl Backend for MockBackend {
             }
         });
         Ok(sub)
+    }
+
+    fn cloud_providers(&self) -> ApiResult<Vec<CloudProvider>> {
+        self.check()?;
+        Ok(cloud_providers())
+    }
+
+    fn cloud_connections(&self) -> ApiResult<Vec<CloudConnection>> {
+        self.check()?;
+        Ok(self.connections.lock().unwrap().clone())
+    }
+
+    fn connect_cloud(&self, req: &ConnectCloud) -> ApiResult<CloudConnection> {
+        self.check()?;
+        let provider = cloud_providers().into_iter().find(|p| p.id == req.provider).ok_or_else(|| {
+            ApiError::new("provider_not_found", format!("No cloud provider {}", req.provider))
+                .with_hint("GET /api/cloud/providers lists them.")
+        })?;
+        let value = |key: &str| req.values.get(key).map(|v| v.trim()).filter(|v| !v.is_empty());
+        if let Some(f) = provider.fields.iter().find(|f| f.required && value(&f.key).is_none()) {
+            return Err(ApiError::new("invalid_body", format!("{} is missing", f.label)));
+        }
+        // The demo's provider rejects any secret containing "bad".
+        if provider.fields.iter().any(|f| f.secret && value(&f.key).is_some_and(|v| v.contains("bad"))) {
+            return Err(ApiError::new(
+                "cloud_auth_failed",
+                format!("{} rejected these credentials", provider.name),
+            )
+            .with_hint("Check that the key is current and allowed to manage pods."));
+        }
+        let now = time::format(self.sim_now());
+        let url = value("url").map(str::to_string);
+        let mut conns = self.connections.lock().unwrap();
+        let base =
+            if req.name.trim().is_empty() { provider.name.clone() } else { req.name.trim().to_string() };
+        let name = (1..)
+            .map(|n| if n == 1 { base.clone() } else { format!("{base} {n}") })
+            .find(|n| !conns.iter().any(|c| &c.name == n))
+            .unwrap_or(base);
+        let conn = CloudConnection {
+            id: format!("cc_{:04x}", hash(&format!("{name}{}", conns.len())) & 0xFFFF),
+            provider: provider.id.clone(),
+            name,
+            created: now.clone(),
+            status: CloudConnectionStatus::Ok,
+            account: match &url {
+                Some(u) => Some(u.split("://").nth(1).unwrap_or(u).trim_end_matches('/').to_string()),
+                None => Some("you@example.com".into()),
+            },
+            balance_usd: provider.provisions.then_some(42.17),
+            error: None,
+            note: url.as_deref().filter(|u| unencrypted(u)).map(|_| {
+                "Unencrypted http://: the token and the data cross the network in the clear. Use https:// \
+                 (a TLS proxy or a tunnel)."
+                    .to_string()
+            }),
+            checked: Some(now),
+            values: provider
+                .fields
+                .iter()
+                .filter_map(|f| {
+                    let v = value(&f.key)?;
+                    Some((f.key.clone(), if f.secret { secret_hint(v) } else { v.to_string() }))
+                })
+                .collect(),
+        };
+        conns.push(conn.clone());
+        Ok(conn)
+    }
+
+    fn check_cloud(&self, id: &str) -> ApiResult<CloudConnection> {
+        self.check()?;
+        let mut conns = self.connections.lock().unwrap();
+        let c = conns.iter_mut().find(|c| c.id == id).ok_or_else(|| no_connection(id))?;
+        c.checked = Some(time::format(self.sim_now()));
+        Ok(c.clone())
+    }
+
+    fn disconnect_cloud(&self, id: &str) -> ApiResult<()> {
+        self.check()?;
+        let name = self.connection(id)?.name;
+        let in_use = self.runs.lock().unwrap().iter().any(|f| {
+            f.cloud.as_ref().is_some_and(|s| s.base.connection_id == id)
+                && (Self::snapshot(f).status.is_active()
+                    || f.cloud
+                        .as_ref()
+                        .and_then(|s| s.instance(&f.run.id))
+                        .is_some_and(|i| i.status.is_alive()))
+        });
+        if in_use {
+            return Err(ApiError::new(
+                "connection_in_use",
+                format!("{name} has a live instance or an active run"),
+            )
+            .with_hint("Terminate its instances in Settings › Cloud, or wait for its runs to end."));
+        }
+        self.connections.lock().unwrap().retain(|c| c.id != id);
+        Ok(())
+    }
+
+    fn cloud_offers(&self, connection: &str, _refresh: bool) -> ApiResult<CloudOfferList> {
+        self.check()?;
+        let conn = self.connection(connection)?;
+        Ok(CloudOfferList { offers: offers_of(&conn)?, fetched: time::format(self.sim_now()) })
+    }
+
+    fn cloud_instances(&self) -> ApiResult<Vec<CloudInstance>> {
+        self.check()?;
+        if self.empty {
+            return Ok(Vec::new());
+        }
+        let week_ago = time::format(self.sim_now() - 7 * 86_400);
+        let mut list: Vec<CloudInstance> = self
+            .runs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|f| f.cloud.as_ref()?.instance(&f.run.id))
+            .filter(|i| i.ended.as_ref().is_none_or(|e| *e >= week_ago))
+            .collect();
+        // Alive first, then the ended ones; newest first within each.
+        list.sort_by(|a, b| b.status.is_alive().cmp(&a.status.is_alive()).then(b.created.cmp(&a.created)));
+        Ok(list)
+    }
+
+    fn terminate_instance(&self, id: &str) -> ApiResult<CloudInstance> {
+        self.check()?;
+        let now = time::format(self.sim_now());
+        let mut runs = self.runs.lock().unwrap();
+        let f = runs
+            .iter_mut()
+            .find(|f| f.cloud.as_ref().is_some_and(|s| s.base.instance_id.as_deref() == Some(id)))
+            .ok_or_else(|| no_instance(id))?;
+        let run_id = f.run.id.clone();
+        if let Some(sim) =
+            f.cloud.as_mut().filter(|s| s.instance(&run_id).is_some_and(|i| i.status.is_alive()))
+        {
+            let at = sim.elapsed();
+            // The provider confirms at once; a run still using it fails.
+            sim.release_error = None;
+            if sim.released_at().is_none() {
+                sim.ended = Some((at, Ended::InstanceLost));
+                f.logs.push(LogLine {
+                    t: now,
+                    level: LogLevel::Error,
+                    message: format!("cloud: instance {id} was terminated by hand"),
+                });
+            }
+        }
+        f.cloud.as_ref().and_then(|s| s.instance(&run_id)).ok_or_else(|| no_instance(id))
     }
 
     fn predict(&self, req: &PredictRequest) -> ApiResult<PredictResponse> {
@@ -1840,6 +2710,109 @@ fn resolve(config: &TrainConfig, train_images: u64, classes: usize) -> ResolvedT
 }
 
 impl MockBackend {
+    /// A cloud run's live events, from `first` (the snapshot the stream started at) on: the steps
+    /// and epochs it trains, a `status` when its status changes, and its `cloud` state on a new
+    /// phase at once and otherwise at most once a second (transfer progress, cost). Ends once the
+    /// run is released and finished.
+    fn stream_cloud(
+        &self,
+        id: &str,
+        first: Run,
+        curve: Curve,
+        log_mark: usize,
+        tx: std::sync::mpsc::Sender<RunEvent>,
+        cancel: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        let runs = self.runs.clone();
+        let run_id = id.to_string();
+        let clock = self.clock;
+        std::thread::spawn(move || {
+            let (spe, epochs) = (first.steps_per_epoch, first.epochs);
+            let (mut sent, mut status, mut logs) = (first.step, first.status, log_mark);
+            let mut cloud = first.cloud;
+            let mut cloud_at = Instant::now();
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    return;
+                }
+                let (now, lines) = {
+                    let runs = runs.lock().unwrap();
+                    let Some(f) = runs.iter().find(|f| f.run.id == run_id) else { return };
+                    (Self::snapshot(f), f.logs.get(logs..).map(<[LogLine]>::to_vec).unwrap_or_default())
+                };
+                logs += lines.len();
+                while sent < now.step {
+                    sent += 1;
+                    let _ = tx.send(RunEvent::Step(curve.step(sent)));
+                    if sent.is_multiple_of(spe) {
+                        let e = (sent / spe) as u32;
+                        let ep = curve.epoch(e);
+                        let line = LogLine {
+                            t: time::format(clock.now() as i64),
+                            level: LogLevel::Info,
+                            message: epoch_line(e, epochs, &ep),
+                        };
+                        let _ = tx.send(RunEvent::Epoch(ep));
+                        let _ = tx.send(RunEvent::Log(line));
+                    }
+                }
+                for l in lines {
+                    let _ = tx.send(RunEvent::Log(l));
+                }
+                let phase_changed = now.cloud.as_ref().map(|c| c.phase) != cloud.as_ref().map(|c| c.phase);
+                if now.cloud != cloud && (phase_changed || cloud_at.elapsed() >= Duration::from_secs(1)) {
+                    cloud.clone_from(&now.cloud);
+                    cloud_at = Instant::now();
+                    if let Some(c) = cloud.clone()
+                        && tx.send(RunEvent::Cloud(Box::new(c))).is_err()
+                    {
+                        return;
+                    }
+                }
+                if now.status != status {
+                    status = now.status;
+                    let ev = StatusEvent::new(status, now.error.clone())
+                        .with_length(epochs, spe)
+                        .with_error_code(now.error_code.clone());
+                    let _ = tx.send(RunEvent::Status(ev));
+                }
+                if !status.is_active() && cloud.as_ref().is_some_and(|c| c.phase == CloudPhase::Released) {
+                    return;
+                }
+            }
+        });
+    }
+
+    fn connection(&self, id: &str) -> ApiResult<CloudConnection> {
+        self.connections.lock().unwrap().iter().find(|c| c.id == id).cloned().ok_or_else(|| no_connection(id))
+    }
+
+    /// The connection and offer a run's `compute` names, checked as `POST /api/runs` checks them.
+    fn compute_offer(&self, c: &Compute, config: &TrainConfig) -> ApiResult<(CloudConnection, CloudOffer)> {
+        if config.device != "auto" {
+            return Err(ApiError::new(
+                "invalid_config",
+                format!(
+                    "device must be auto for a cloud run (got {}): the worker picks its GPU",
+                    config.device
+                ),
+            ));
+        }
+        if !(folo_api::MIN_MAX_HOURS..=folo_api::MAX_MAX_HOURS).contains(&c.max_hours) {
+            return Err(ApiError::new(
+                "invalid_config",
+                format!("max_hours must be from 0.25 to 720 (got {})", c.max_hours),
+            ));
+        }
+        let conn = self.connection(&c.connection_id)?;
+        let offer = offers_of(&conn)?.into_iter().find(|o| o.id == c.offer_id).ok_or_else(|| {
+            ApiError::new("offer_not_found", format!("{} has no offer {}", conn.name, c.offer_id))
+                .with_hint("Offers change: pick one from the list again.")
+        })?;
+        Ok((conn, offer))
+    }
+
     /// The demo's `folo train` command for a config (the flags the CLI takes for what the form sets).
     fn cli_for(&self, c: &TrainConfig) -> CliCommand {
         let ds = self
@@ -1927,6 +2900,9 @@ fn fake_predictions(truth: &[BBoxT], w: u32, h: u32, q: f32, names: &[String], s
 type BBoxT = super::types::BBox;
 
 const GPU_NAME: &str = "NVIDIA GeForce RTX 4080 SUPER";
+/// `Run.device` of the demo's GPU runs, and of its CPU runs.
+const GPU_DEVICE: &str = "NVIDIA GeForce RTX 4080 SUPER (vulkan)";
+const CPU_DEVICE: &str = "AMD Ryzen 9 7950X (32 threads)";
 const CPU_NAME: &str = "AMD Ryzen 9 7950X";
 /// The reference machine (docs/BENCHMARKS.md), named on every reference row.
 const REF_GPU: &str = "NVIDIA GeForce RTX 4080 SUPER";
@@ -2156,6 +3132,7 @@ mod tests {
             seed: 0,
             amp: false,
             head: Default::default(),
+            compute: None,
         };
         // Warmup in optimizer steps, as folo_nn computes it.
         assert_eq!(resolve(&cfg(16, 30, Optimizer::Auto), 800, 3).warmup_iters, 100);
@@ -2316,6 +3293,209 @@ mod tests {
         if let Some(&last) = steps.last() {
             assert_eq!(last, stopped.step);
         }
+    }
+
+    fn cloud_config(offer: &str, max_hours: f32) -> TrainConfig {
+        let mut c = MockBackend::new(0, true).run("run_7d1e").unwrap().config;
+        c.name = "cloudy".into();
+        c.device = "auto".into();
+        c.compute = Some(Compute {
+            connection_id: RUNPOD_CONNECTION.into(),
+            offer_id: offer.into(),
+            max_hours,
+            disk_gb: None,
+        });
+        c
+    }
+
+    #[test]
+    fn the_demo_lists_the_real_providers() {
+        let real: Vec<CloudProvider> = folo_cloud::providers().iter().map(|p| p.info()).collect();
+        assert_eq!(cloud_providers(), real);
+    }
+
+    #[test]
+    fn the_default_demo_has_one_released_cloud_run() {
+        let m = MockBackend::new(0, true);
+        // The demo's runs as they were before cloud compute, one live; the oldest finished one
+        // trained on RunPod.
+        let runs = m.runs().unwrap();
+        let ids: Vec<&str> = runs.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "run_a19f", "run_b7e2", "run_52e8", "run_e4f0", "run_1a2b", "run_7d1e", "run_c9f1",
+                "run_d204", "run_0b5e"
+            ]
+        );
+        assert_eq!(
+            runs.iter().filter(|r| r.status.is_active()).count(),
+            2,
+            "the live run and the queued one"
+        );
+        assert_eq!(runs.iter().filter(|r| r.cloud.is_some()).count(), 1);
+        let released = m.run("run_c9f1").unwrap();
+        let c = released.cloud.as_ref().unwrap();
+        assert_eq!((released.status, c.phase), (RunStatus::Completed, CloudPhase::Released));
+        assert!(released.model_id.is_some() && released.device.contains("A100"));
+        // It trained as long as it did on this machine (the Runs table's Duration, 9m 21s).
+        let at = |t: &Option<String>| t.as_deref().and_then(time::parse).unwrap();
+        assert_eq!(at(&released.finished) - at(&released.started), 561);
+        // About 20 minutes of an A100 at $1.64/h, final.
+        assert!((0.5..0.6).contains(&c.cost_usd.unwrap()), "final cost {:?}", c.cost_usd);
+        let instances = m.cloud_instances().unwrap();
+        assert_eq!(instances.len(), 1);
+        assert_eq!(
+            (instances[0].status, instances[0].run_id.as_deref()),
+            (CloudInstanceStatus::Terminated, Some("run_c9f1"))
+        );
+        assert_eq!(m.cloud_connections().unwrap().len(), 1);
+        assert!(m.system().unwrap().features.iter().any(|f| f == folo_api::FEATURE_CLOUD));
+    }
+
+    #[test]
+    fn cloud_runs_upload_and_train() {
+        let m = MockBackend::with_cloud_runs(0, true);
+        let syncing = m.run("run_c1d0").unwrap();
+        let c = syncing.cloud.as_ref().expect("a cloud run");
+        assert_eq!(
+            (syncing.status, c.phase, syncing.queue_position),
+            (RunStatus::Queued, CloudPhase::Syncing, None)
+        );
+        let p = c.progress.expect("an upload in progress");
+        assert!((0.2..0.3).contains(&(p.done_bytes as f64 / p.total_bytes as f64)), "{p:?}");
+        assert!(syncing.device.is_empty() && syncing.started.is_none());
+        let training = m.run("run_c2e1").unwrap();
+        let c = training.cloud.as_ref().unwrap();
+        assert_eq!(
+            (training.status, c.phase, training.step),
+            (RunStatus::Running, CloudPhase::Training, 4400)
+        );
+        // 2.4 hours at $0.69/h so far.
+        assert!((c.cost_usd.unwrap() - 0.69 * 2.4).abs() < 0.01, "{:?}", c.cost_usd);
+        assert!(training.device.contains("RTX 4090") && c.deadline.is_some() && c.synced.is_some());
+        // Instances: the two alive first, then the released run's, terminated.
+        let instances = m.cloud_instances().unwrap();
+        let alive: Vec<bool> = instances.iter().map(|i| i.status.is_alive()).collect();
+        assert_eq!(alive, [true, true, false]);
+        assert_eq!(instances[2].status, CloudInstanceStatus::Terminated);
+        // Its estimate is the reference's, with what it would cost; the offer's price times the limit.
+        let e = m.estimate_run(&cloud_config(RTX4090_OFFER, 12.)).unwrap();
+        let cost = e.cost.expect("a priced offer has a cost");
+        assert_eq!((e.device.as_str(), e.source), ("cloud", ThroughputSource::Reference));
+        assert!(
+            (cost.max_usd - 8.28).abs() < 1e-9
+                && cost.est_usd_low < cost.est_usd
+                && cost.est_usd < cost.est_usd_high
+        );
+        assert!(m.estimate_run(&m.run("run_7d1e").unwrap().config).unwrap().cost.is_none());
+    }
+
+    #[test]
+    fn cloud_requests_are_checked_as_the_server_checks_them() {
+        let m = MockBackend::new(0, true);
+        let refused = m.create_run(cloud_config("NVIDIA GeForce RTX 4090@community", 12.)).unwrap_err();
+        assert_eq!(refused.code, "cloud_refused");
+        let too_long = m.create_run(cloud_config(RTX4090_OFFER, 1000.)).unwrap_err();
+        assert!(too_long.code == "invalid_config" && too_long.message.contains("max_hours"), "{too_long:?}");
+        let mut on_gpu = cloud_config(RTX4090_OFFER, 12.);
+        on_gpu.device = "gpu:0".into();
+        assert_eq!(m.create_run(on_gpu).unwrap_err().code, "invalid_config");
+        assert_eq!(m.create_run(cloud_config("nope", 12.)).unwrap_err().code, "offer_not_found");
+        let run = m.create_run(cloud_config(RTX4090_OFFER, 12.)).unwrap();
+        assert_eq!(
+            (run.status, run.cloud.map(|c| c.phase)),
+            (RunStatus::Queued, Some(CloudPhase::Provisioning))
+        );
+        // Connections: a secret with "bad" is rejected; a required field missing names it; the
+        // rest is kept with the secret as a hint only.
+        let req = |key: &str| ConnectCloud {
+            provider: "runpod".into(),
+            name: String::new(),
+            values: [("api_key".to_string(), key.to_string())].into(),
+        };
+        assert_eq!(m.connect_cloud(&req("rpa_bad_9")).unwrap_err().code, "cloud_auth_failed");
+        let missing = m.connect_cloud(&req("")).unwrap_err();
+        assert!(missing.code == "invalid_body" && missing.message.contains("API key"), "{missing:?}");
+        let c = m.connect_cloud(&req("rpa_SECRETa1b2")).unwrap();
+        assert_eq!((c.name.as_str(), c.values["api_key"].as_str()), ("RunPod 2", "••••a1b2"));
+        assert!(!format!("{c:?}").contains("SECRET"));
+        // A connection with live instances stays; one without goes.
+        assert_eq!(m.disconnect_cloud(RUNPOD_CONNECTION).unwrap_err().code, "connection_in_use");
+        m.disconnect_cloud(&c.id).unwrap();
+        assert_eq!(m.check_cloud(&c.id).unwrap_err().code, "connection_not_found");
+    }
+
+    #[test]
+    fn terminating_an_instance_fails_its_run() {
+        let m = MockBackend::with_cloud_runs(0, true);
+        let training = m.run("run_c2e1").unwrap();
+        let id = training.cloud.unwrap().instance_id.unwrap();
+        let gone = m.terminate_instance(&id).unwrap();
+        assert_eq!(gone.status, CloudInstanceStatus::Terminated);
+        let run = m.run("run_c2e1").unwrap();
+        assert_eq!((run.status, run.error_code.as_deref()), (RunStatus::Failed, Some("cloud_instance_lost")));
+        assert_eq!(m.terminate_instance("ci_nope").unwrap_err().code, "instance_not_found");
+    }
+
+    #[test]
+    fn cloud_variants() {
+        let none = MockBackend::with_cloud_runs(0, true).without_cloud();
+        assert!(none.cloud_connections().unwrap().is_empty() && none.cloud_instances().unwrap().is_empty());
+        let runs = none.runs().unwrap();
+        assert!(runs.iter().all(|r| r.cloud.is_none() && r.config.compute.is_none()));
+        assert_eq!(
+            runs.len(),
+            MockBackend::new(0, true).runs().unwrap().len(),
+            "the cloud runs under way go"
+        );
+        let trouble = MockBackend::with_cloud_runs(0, true).cloud_trouble();
+        let conn = &trouble.cloud_connections().unwrap()[0];
+        assert!(conn.status == CloudConnectionStatus::Error && conn.error.is_some());
+        assert_eq!(trouble.cloud_offers(&conn.id, false).unwrap_err().code, "cloud_auth_failed");
+        let stuck =
+            trouble.cloud_instances().unwrap().into_iter().find(|i| i.error.is_some()).expect("a stuck one");
+        assert_eq!(stuck.status, CloudInstanceStatus::Terminating);
+        let run = trouble.run(stuck.run_id.as_deref().unwrap()).unwrap();
+        assert_eq!((run.status, run.cloud.unwrap().phase), (RunStatus::Stopped, CloudPhase::Released));
+    }
+
+    #[test]
+    fn a_cloud_run_streams_its_phases() {
+        let m = MockBackend::new(0, false);
+        let mut config = cloud_config(RTX4090_OFFER, 12.);
+        config.epochs = 1;
+        let run = m.create_run(config).unwrap();
+        // The demo's 2 s phases and training, shortened.
+        if let Some(sim) =
+            m.runs.lock().unwrap().iter_mut().find(|f| f.run.id == run.id).and_then(|f| f.cloud.as_mut())
+        {
+            (sim.pre, sim.step_dt) = ([0.05, 0.05, 0.3], 0.01);
+            sim.anchor = (sim.train_at(), 0);
+        }
+        let rx = m.events(&run.id).unwrap();
+        let (mut phases, mut statuses, mut uploads) = (Vec::new(), Vec::new(), 0);
+        while let Ok(ev) = rx.recv_timeout(Duration::from_secs(5)) {
+            match ev {
+                RunEvent::Cloud(c) => {
+                    uploads += usize::from(c.phase == CloudPhase::Syncing && c.progress.is_some());
+                    if phases.last() != Some(&c.phase) {
+                        phases.push(c.phase);
+                    }
+                }
+                RunEvent::Status(s) => statuses.push(s.status),
+                _ => {}
+            }
+        }
+        assert!(phases.windows(2).all(|w| w[0] < w[1]), "phases in order: {phases:?}");
+        assert!(
+            phases.contains(&CloudPhase::Training) && phases.last() == Some(&CloudPhase::Released),
+            "{phases:?}"
+        );
+        assert!(uploads > 0, "the upload reports its progress");
+        assert_eq!(statuses.first(), Some(&RunStatus::Queued));
+        assert_eq!(statuses.last(), Some(&RunStatus::Completed), "{statuses:?}");
+        assert!(statuses.contains(&RunStatus::Running));
     }
 
     #[test]

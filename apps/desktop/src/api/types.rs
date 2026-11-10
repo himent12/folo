@@ -16,6 +16,11 @@ pub use folo_api::{
     PredictResponse, RegisterDataset, Run, RunEvent, RunMetrics, RunSamples, RunStatus, Sample, ScoredBox,
     Split, Splits, StatusEvent, Step, SyntheticDataset, SystemInfo, Timing, TrainConfig, ValMetrics,
 };
+pub use folo_api::{
+    CloudAvailability, CloudConnection, CloudConnectionStatus, CloudField, CloudInstance,
+    CloudInstanceStatus, CloudOffer, CloudOfferList, CloudPhase, CloudProvider, Compute, ConnectCloud,
+    CostEstimate, RunCloud, TransferProgress,
+};
 
 /// Display helpers for wire enums.
 pub trait Label {
@@ -61,6 +66,37 @@ impl Label for GpuBackend {
     }
 }
 
+/// A cloud run's phase in the words people see (docs/CLOUD.md).
+impl Label for CloudPhase {
+    fn label(&self) -> &'static str {
+        match self {
+            CloudPhase::Provisioning => "Provisioning",
+            CloudPhase::Booting => "Booting",
+            CloudPhase::Syncing => "Uploading data",
+            CloudPhase::Training => "Training",
+            CloudPhase::Collecting => "Collecting weights",
+            CloudPhase::Releasing => "Releasing",
+            CloudPhase::Released => "Released",
+            // A newer server's phase: say so plainly instead of guessing which one it is.
+            CloudPhase::Unknown => "In progress",
+        }
+    }
+}
+
+impl Label for CloudInstanceStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            CloudInstanceStatus::Launching => "Launching",
+            CloudInstanceStatus::Starting => "Starting",
+            CloudInstanceStatus::Running => "Running",
+            CloudInstanceStatus::Terminating => "Terminating",
+            CloudInstanceStatus::Terminated => "Terminated",
+            CloudInstanceStatus::Lost => "Lost",
+            CloudInstanceStatus::Unknown => "Unknown",
+        }
+    }
+}
+
 impl Label for Optimizer {
     fn label(&self) -> &'static str {
         match self {
@@ -79,6 +115,9 @@ pub trait RunExt {
     /// value, else `augment.close_mosaic` capped at half the run (docs/MODEL.md §8.4); every epoch
     /// when mosaic is off.
     fn close_mosaic_epochs(&self) -> u32;
+    /// A cloud run that hasn't reached training yet (provisioning, booting, uploading): it waits on
+    /// its instance, not in the training queue.
+    fn cloud_pending(&self) -> Option<&RunCloud>;
 }
 
 /// `close_mosaic` as the engine applies it to `epochs` (capped at half the run).
@@ -100,6 +139,13 @@ impl RunExt for Run {
     fn progress(&self) -> f32 {
         let total = (self.epochs as u64 * self.steps_per_epoch).max(1);
         (self.step as f64 / total as f64).clamp(0.0, 1.0) as f32
+    }
+
+    fn cloud_pending(&self) -> Option<&RunCloud> {
+        // Named, not compared: a newer server's phase (`Unknown`) has no known place in the order.
+        let handing_over =
+            |p: CloudPhase| matches!(p, CloudPhase::Provisioning | CloudPhase::Booting | CloudPhase::Syncing);
+        self.cloud.as_ref().filter(|c| self.status == RunStatus::Queued && handing_over(c.phase))
     }
 }
 

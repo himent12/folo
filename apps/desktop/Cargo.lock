@@ -1816,6 +1816,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "folo-client"
+version = "0.1.0"
+dependencies = [
+ "folo-api",
+ "http",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
+name = "folo-cloud"
+version = "0.1.0"
+dependencies = [
+ "folo-api",
+ "folo-client",
+ "http",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "folo-core"
 version = "0.1.0"
 dependencies = [
@@ -1836,6 +1859,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "tar",
  "thiserror 2.0.21",
  "walkdir",
 ]
@@ -1846,6 +1870,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "folo-api",
+ "folo-cloud",
  "folo-core",
  "folo-data",
  "folo-gpu",
@@ -5686,6 +5711,16 @@ dependencies = [
  "core-foundation-sys",
  "libc",
  "objc",
+]
+
+[[package]]
+name = "tar"
+version = "0.4.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
+dependencies = [
+ "filetime",
+ "libc",
 ]
 
 [[package]]

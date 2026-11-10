@@ -1,5 +1,6 @@
 //! The `folo` command-line tool. See `docs/CLI.md`.
 
+mod cloud;
 mod coco;
 mod dataset;
 mod describe;
@@ -109,6 +110,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         Command::Bench(_) => Err(not_implemented("bench", "the engine")),
         Command::Dataset(cmd) => dataset::run(cmd, out),
         Command::Weights(cmd) => weights::run(cmd, out),
+        Command::Cloud(cmd) => cloud::run(cmd, out),
         Command::Mcp(args) => mcp(args),
     }
 }
@@ -181,7 +183,9 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             _ => (None, true),
         };
         let cors = if args.cors_any { Cors::Any } else { Cors::Loopback };
-        let server = Server::new(store, Options { web: web.clone(), cors });
+        let token = args.token.clone().and_then(folo_server::Token::new);
+        let token_set = token.is_some();
+        let server = Server::new(store, Options { web: web.clone(), cors, token });
         let url = format!("http://{addr}");
         out.human(format!(
             "FOLO {VERSION} serving {} on {url}",
@@ -201,6 +205,9 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
         if !args.mock {
             out.human(format!("  Data:   {}", folo_api::json::path(&data_dir)));
         }
+        if token_set {
+            out.human("  Token:  required on /api (Authorization: Bearer)");
+        }
         out.human("Press Ctrl+C to stop.");
         out.record(&json!({
             "event": "listening",
@@ -211,6 +218,7 @@ fn serve(args: ServeArgs, out: Out) -> Result<(), CliError> {
             "web_dir": web_dir,
             "web_ready": web_ready,
             "data_dir": if args.mock { None } else { Some(&data_dir) },
+            "token": token_set,
         }));
         server
             .serve(listener, folo_server::shutdown_signal())
@@ -232,7 +240,7 @@ fn mcp(args: McpArgs) -> Result<(), CliError> {
     }
     let data_dir = args.data_dir.clone().unwrap_or_else(default_data_dir);
     let backend = match (&args.server, args.mock) {
-        (Some(url), _) => folo_mcp::Backend::Proxy(url.clone()),
+        (Some(url), _) => folo_mcp::Backend::Proxy { url: url.clone(), token: args.token.clone() },
         (None, true) => folo_mcp::Backend::Mock,
         (None, false) => folo_mcp::Backend::Real,
     };

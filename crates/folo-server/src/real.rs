@@ -17,34 +17,42 @@
 //! - `cache/eval/<model id>.json`: cached `/eval` results (`POST /api/val` is computed on every request).
 //! - `cache/weights/<model id>.<hash>.f16.folo`: f16 exports served by `GET /api/models/{id}/weights?format=f16`.
 //! - `throughput.json`: the measured throughput table ([`crate::throughput`]).
+//! - `uploads/<id>/`, `uploads.json`: upload sessions in progress and the fingerprints of finished uploads
+//!   ([`crate::uploads`]); a finished dataset upload moves to `datasets/<name>/`, a model to `models/`.
+//! - `cloud/connections.json`, `cloud/instances/`: cloud connections and the instance ledger ([`crate::cloud`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
+use axum::body::Bytes;
 use axum::http::StatusCode;
 use folo_api::{
-    BBox, BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, Dataset, DatasetFormat, ExportResult,
-    ExportSpec, GpuInfo, GpuPool, ImagePage, ImageSize, InferPrecision, LogLine, Model, ModelEval,
-    PredictResponse, RegisterDataset, Run, RunEstimate, RunMetrics, RunSamples, Sample, ScoredBox, Splits,
-    SyntheticDataset, ThroughputTable, TrainConfig, ValReport, ValRequest,
+    BBox, BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, CloudConnection, CloudInstance,
+    CloudOffer, CloudOfferList, CloudPhase, CloudProvider, Compute, ConnectCloud, CreateUpload, Dataset,
+    DatasetFormat, ExportResult, ExportSpec, GpuInfo, GpuPool, ImagePage, ImageSize, InferPrecision,
+    LogLevel, Model, ModelEval, PredictResponse, RegisterDataset, Run, RunCloud, RunEstimate, RunLogs,
+    RunMetrics, RunSamples, RunStatus, Sample, ScoredBox, Splits, SyntheticDataset, ThroughputTable,
+    TrainConfig, Upload, UploadCreated, UploadKind, Uploaded, ValReport, ValRequest,
 };
 use folo_core::Device;
 use folo_vision::PredictConfig;
 use serde::{Deserialize, Serialize};
 
+use crate::cloud::{self, Cloud, Job, Mode};
 use crate::engine::{self, Predictors, engine_error};
 use crate::error::{Error, Result};
 use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, data_error, read_image_with, write_atomic};
 use crate::label::Labeler;
-use crate::models::{ModelRef, Models, model_of};
-use crate::runs::{DatasetRef, Runs, run_model_id};
+use crate::models::{ModelRef, Models, file_model_id, model_of};
+use crate::runs::{DatasetRef, Ended, RunEntry, Runs, run_model_id};
 use crate::store::{
-    ImageData, ImageQuery, IssueQuery, PredictInput, PredictSource, QueueMove, Store, Subscription, Weights,
-    WeightsFormat, weights_file_name,
+    ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
+    Store, Subscription, Weights, WeightsFormat, weights_file_name,
 };
 use crate::throughput::{EstimateInput, InferKey, InferSample, Throughput};
+use crate::uploads::{Finished, Uploads};
 use crate::util::{claim_dir, fnv1a, rfc3339, slug, unique_id, unix_now};
 
 /// How often a dataset's files are re-checked for changes (on `GET /api/datasets/{id}` and image listings).
@@ -272,14 +280,28 @@ pub struct RealStore {
     device: String,
     precision: folo_vision::Precision,
     throughput: Arc<Throughput>,
+    uploads: Arc<Uploads>,
+    cloud: Cloud,
     labeler: Labeler,
 }
 
 impl RealStore {
     /// Opens the store rooted at `data_dir`. Registered datasets are listed right away and indexed on a background
     /// thread (from the cache when it is fresh). Datasets whose folder is gone are kept out of the list (and
-    /// logged) but stay in the registry file.
+    /// logged) but stay in the registry file. Cloud runs a previous process left are picked up
+    /// ([`crate::cloud`]), with FOLO's providers ([`folo_cloud::providers`]).
     pub fn open(data_dir: PathBuf) -> RealStore {
+        RealStore::open_with_cloud(data_dir, folo_cloud::providers(), cloud::Tuning::default())
+    }
+
+    /// [`RealStore::open`] with these cloud providers and timings. They are given at open because the cloud runs a
+    /// previous process left are picked up (and the reaper starts) right away; tests pass an in-process provider
+    /// and short timings.
+    pub fn open_with_cloud(
+        data_dir: PathBuf,
+        providers: Vec<Arc<dyn folo_cloud::Provider>>,
+        tuning: cloud::Tuning,
+    ) -> RealStore {
         let regs = read_registry(&data_dir).unwrap_or_else(|e| {
             tracing::error!("{e}; registering and unregistering datasets is disabled until it is fixed");
             Vec::new()
@@ -314,6 +336,9 @@ impl RealStore {
         let idle = Arc::new(GpuIdle::new());
         let labeler = Labeler::open(&data_dir);
         spawn_idle_sweeper(Arc::downgrade(&idle), Arc::downgrade(&predictors), Arc::downgrade(&runs));
+        let uploads = Uploads::open(&data_dir);
+        let cloud = Cloud::with(&data_dir, providers, tuning);
+        cloud.recover_and_reap(&runs);
         RealStore {
             data_dir,
             entries: RwLock::new(entries),
@@ -325,6 +350,8 @@ impl RealStore {
             device: "auto".into(),
             precision: folo_vision::Precision::F32,
             throughput,
+            uploads,
+            cloud,
             labeler,
         }
     }
@@ -357,6 +384,13 @@ impl RealStore {
     pub fn gpu_idle_release(self, pool: Duration, predictors: Duration) -> RealStore {
         self.idle.release_after_ms.store(pool.as_millis() as u64, Ordering::Relaxed);
         self.idle.predictors_after_ms.store(predictors.as_millis() as u64, Ordering::Relaxed);
+        self
+    }
+
+    /// Changes how long an upload session may go without a part before it expires (default
+    /// [`crate::uploads::UPLOAD_IDLE`]).
+    pub fn upload_idle(self, idle: Duration) -> RealStore {
+        self.uploads.set_idle(idle);
         self
     }
 
@@ -527,37 +561,10 @@ impl RealStore {
 
     /// The models of runs that finished with weights: `best.folo` (`m_<run>`) and `last.folo` (`m_<run>-last`).
     fn run_models(&self) -> Vec<ModelRef> {
-        let mut out = Vec::new();
-        for e in self.runs.entries() {
-            let run = e.run();
-            if run.model_id.is_none() {
-                continue;
-            }
-            for (last, file) in [(false, "best.folo"), (true, "last.folo")] {
-                let path = e.dir().join("weights").join(file);
-                if !path.is_file() {
-                    continue;
-                }
-                match self.models.meta(&path) {
-                    Ok(meta) => {
-                        let suffix = if last { "last" } else { "best" };
-                        // A checkpoint's `folo.metrics` are the run's best; last.folo gets its own epoch's
-                        // (unknown when a crash kept that epoch out of the history).
-                        let metrics = if last { e.last_metrics() } else { meta.metrics };
-                        let model = model_of(
-                            run_model_id(&run.id, last),
-                            format!("{}-{suffix}", run.name),
-                            &meta,
-                            Some(run.id.clone()),
-                            metrics,
-                        );
-                        out.push(ModelRef::new(model, path, Some(e.dataset())));
-                    }
-                    Err(err) => tracing::warn!("skipping {}: {err}", path.display()),
-                }
-            }
-        }
-        out
+        let finished = self.runs.entries().into_iter().filter(|e| e.run().model_id.is_some());
+        finished
+            .flat_map(|e| [false, true].into_iter().filter_map(move |last| run_model(&self.models, &e, last)))
+            .collect()
     }
 
     /// Every model, newest first.
@@ -570,11 +577,14 @@ impl RealStore {
     }
 
     fn model(&self, id: &str) -> Result<ModelRef> {
-        // Run models are found without scanning the models folder.
-        let run_id = id.strip_prefix("m_").map(|s| format!("run_{}", s.strip_suffix("-last").unwrap_or(s)));
-        if let Some(r) = run_id
-            && self.runs.get(&r).is_ok()
-            && let Some(m) = self.run_models().into_iter().find(|m| m.model.id == id)
+        // Run models are found without scanning the models folder, also those of a run in progress (not listed
+        // until it ends): a cloud control plane copies a worker run's checkpoint while it trains.
+        let run = id
+            .strip_prefix("m_")
+            .map(|s| (format!("run_{}", s.strip_suffix("-last").unwrap_or(s)), s.ends_with("-last")));
+        if let Some((r, last)) = run
+            && let Ok(e) = self.runs.get(&r)
+            && let Some(m) = run_model(&self.models, &e, last).filter(|m| m.model.id == id)
         {
             return Ok(m);
         }
@@ -635,6 +645,144 @@ impl RealStore {
             "register a dataset with the model's classes {:?} to evaluate it",
             m.model.classes
         )))
+    }
+
+    /// A new, empty folder `datasets/<base>` (`-2`, `-3`, ... when taken) for a dataset this server writes.
+    fn claim_dataset_dir(&self, base: &str) -> Result<PathBuf> {
+        let parent = self.data_dir.join("datasets");
+        claim_dir(&parent, base)
+            .map_err(|e| Error::internal(format!("creating a folder in {}: {e}", parent.display())))
+    }
+
+    /// What the finished upload of `kind` with `fingerprint` became, while it still exists (the dataset registered,
+    /// the model listed).
+    fn uploaded(&self, kind: UploadKind, fingerprint: &str) -> Option<Uploaded> {
+        let id = self.uploads.known(kind, fingerprint)?;
+        match kind {
+            UploadKind::Dataset => {
+                self.get_dataset(&id).ok().map(|d| Uploaded { dataset: Some(d), model: None })
+            }
+            UploadKind::Model => {
+                self.model(&id).ok().map(|m| Uploaded { dataset: None, model: Some(m.model) })
+            }
+        }
+    }
+
+    /// Moves an unpacked dataset upload into its own folder under `datasets/` and registers it, as `POST
+    /// /api/datasets` would. Nothing stays behind when that fails.
+    fn adopt_dataset(&self, done: &Finished) -> Result<Dataset> {
+        let dir = self.claim_dataset_dir(&slug(done.name(), "dataset"))?;
+        let path = dir.to_string_lossy().into_owned();
+        let registered = move_children(done.root(), &dir)
+            .and_then(|()| self.register(Some(done.name().to_string()), path, done.format()));
+        if registered.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        registered
+    }
+
+    /// Moves an uploaded weights file to `models/<name>.folo` (the name reduced as for downloads, `-2`, ... when
+    /// taken) once its header parses (`422 invalid_weights` otherwise), and returns its model.
+    fn adopt_model(&self, done: &Finished) -> Result<Model> {
+        let file = done.file();
+        crate::models::read_meta(&file).map_err(|e| {
+            Error::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_weights",
+                format!("the upload is not a readable .folo file: {}", e.body.message),
+            )
+            .hint("upload a FOLO weights file or checkpoint (docs/FORMAT.md)")
+        })?;
+        let dir = self.models.models_dir();
+        std::fs::create_dir_all(&dir).map_err(|e| Error::io(format!("creating {}: {e}", dir.display())))?;
+        let name = weights_file_name(done.name(), WeightsFormat::Stored);
+        let stem = name.trim_end_matches(".folo");
+        // create_new claims the name, so two uploads never share a file; the upload then replaces it atomically.
+        let mut n = 1;
+        let path = loop {
+            let tag = if n == 1 { String::new() } else { format!("-{n}") };
+            let p = dir.join(format!("{stem}{tag}.folo"));
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+                Ok(_) => break p,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n += 1,
+                Err(e) => return Err(Error::io(format!("creating {}: {e}", p.display()))),
+            }
+        };
+        if let Err(e) = std::fs::rename(&file, &path) {
+            let _ = std::fs::remove_file(&path);
+            return Err(Error::io(format!("moving {} to {}: {e}", file.display(), path.display())));
+        }
+        self.model(&file_model_id(&path)).map(|m| m.model)
+    }
+
+    /// `POST /api/runs`: checks `config` and queues a new run, which continues the training state in the
+    /// `checkpoint` file when there is one (it becomes the run's `weights/last.folo`).
+    fn start_run(&self, mut config: TrainConfig, checkpoint: Option<&Path>) -> Result<Run> {
+        let e = self.entry(&config.dataset_id)?;
+        let idx = self.fresh_index(&e)?;
+        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
+        if idx.classes.is_empty() {
+            return Err(bad("the dataset has no classes".into()));
+        }
+        if idx.splits.train == 0 {
+            return Err(bad("the dataset has no training images".into()));
+        }
+        // Fine-tuning takes the weights' architecture, as `folo train --weights` does (`arch` would otherwise build
+        // another model and transfer almost nothing into it).
+        let weights = match &config.weights {
+            Some(w) => {
+                let m = self.model(w)?;
+                config.arch = m.model.arch;
+                Some(m.path)
+            }
+            None => None,
+        };
+        // The settings first (on the CPU), so a rejected config never initialises a GPU.
+        let mut check = folo_vision::TrainConfig::from_api(&config);
+        check.device = "cpu".into();
+        check.validate().map_err(engine_error)?;
+        let ds = self.dataset_ref(&e);
+        if config.name.trim().is_empty() {
+            config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
+        }
+        let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
+        // A cloud run's device and `amp` are the worker's to check (docs/CLOUD.md, worker check).
+        if let Some(compute) = config.compute.clone() {
+            cloud::check_device(&config)?;
+            let (connected, offer) = self.cloud.target(&compute)?;
+            let device = format!("{} at {}", offer.gpu, connected.provider.info().name);
+            let fingerprint = upload_fingerprint(ds.format, &idx);
+            let cloud = run_cloud(&compute, &connected, offer);
+            let entry = self.runs.create_cloud(config, ds, weights, checkpoint, val_offset, device, cloud)?;
+            return self.start_cloud(entry, connected, Some(fingerprint));
+        }
+        let device = engine::resolve(&config.device)?;
+        // `amp` is checked here, as `folo train --amp` checks it, rather than failing the queued run: the same
+        // answer `/api/system`'s `capabilities.amp` gives (the trainer's own check, without switching anything on).
+        if config.amp {
+            folo_vision::train::amp_available(device).map_err(engine_error)?;
+        }
+        self.runs.create(config, ds, weights, checkpoint, val_offset, engine::describe(device))
+    }
+
+    /// Hands a registered (and claimed) cloud run to its executor. A run whose executor cannot start fails with the
+    /// reason, which is also the answer.
+    fn start_cloud(
+        &self,
+        entry: Arc<RunEntry>,
+        connected: cloud::Connected,
+        fingerprint: Option<String>,
+    ) -> Result<Run> {
+        let job = Job { entry: entry.clone(), connected, upload: fingerprint };
+        if let Err(e) = self.cloud.start(job, Mode::Start) {
+            entry.execute(|| {
+                entry.log(LogLevel::Error, e.body.message.clone());
+                entry.set_outcome(RunStatus::Failed, Some(e.body.message.clone()), Some(e.body.code.clone()));
+                Ended::Finished
+            });
+            return Err(e);
+        }
+        self.runs.snapshot(entry.id())
     }
 
     /// The validation samples of epoch `epoch` of a run, with image ids of its dataset.
@@ -747,6 +895,61 @@ struct BoxRecord {
     score: f32,
 }
 
+/// Run `e`'s `best.folo` (`m_<run>`) or `last.folo` (`m_<run>-last`) as a model, when the file is there.
+fn run_model(models: &Models, e: &RunEntry, last: bool) -> Option<ModelRef> {
+    let (suffix, file) = if last { ("last", "last.folo") } else { ("best", "best.folo") };
+    let path = e.dir().join("weights").join(file);
+    if !path.is_file() {
+        return None;
+    }
+    let run = e.run();
+    match models.meta(&path) {
+        Ok(meta) => {
+            // A checkpoint's `folo.metrics` are the run's best; last.folo gets its own epoch's (unknown when a crash
+            // kept that epoch out of the history).
+            let metrics = if last { e.last_metrics() } else { meta.metrics };
+            let model = model_of(
+                run_model_id(&run.id, last),
+                format!("{}-{suffix}", run.name),
+                &meta,
+                Some(run.id.clone()),
+                metrics,
+            );
+            Some(ModelRef::new(model, path, Some(e.dataset())))
+        }
+        Err(err) => {
+            tracing::warn!("skipping {}: {err}", path.display());
+            None
+        }
+    }
+}
+
+/// The fingerprint of a dataset upload: the dataset's format and the index fingerprint of its files, so the worker
+/// is sent the dataset again exactly when its files (or how they are read) changed.
+fn upload_fingerprint(format: DatasetFormat, idx: &Index) -> String {
+    let format =
+        serde_json::to_value(format).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    format!("dataset-{format}-{}", idx.fingerprint.hash)
+}
+
+/// A new [`RunCloud`] for a run on `connected`'s `offer`: `provisioning` (`booting` for a server that already
+/// runs).
+fn run_cloud(compute: &Compute, connected: &cloud::Connected, offer: CloudOffer) -> RunCloud {
+    let info = connected.provider.info();
+    RunCloud {
+        connection_id: compute.connection_id.clone(),
+        provider: info.id,
+        offer,
+        instance_id: None,
+        phase: if info.provisions { CloudPhase::Provisioning } else { CloudPhase::Booting },
+        progress: None,
+        max_hours: compute.max_hours,
+        deadline: None,
+        cost_usd: None,
+        synced: None,
+    }
+}
+
 /// The server's own files in the data dir, left out of dataset fingerprints (the data dir may sit inside a
 /// registered dataset folder; caching an index must not make it stale).
 fn own_state(dir: &Path) -> Vec<PathBuf> {
@@ -828,6 +1031,20 @@ fn load_or_build(dir: &Path, e: &Entry) {
     }
 }
 
+/// Moves every entry of `from` into the folder `to` (renames: both are in the data dir).
+fn move_children(from: &Path, to: &Path) -> Result<()> {
+    let entries =
+        std::fs::read_dir(from).map_err(|e| Error::io(format!("reading {}: {e}", from.display())))?;
+    for e in entries {
+        let e = e.map_err(|e| Error::io(format!("reading {}: {e}", from.display())))?;
+        let dest = to.join(e.file_name());
+        std::fs::rename(e.path(), &dest).map_err(|err| {
+            Error::io(format!("moving {} to {}: {err}", e.path().display(), dest.display()))
+        })?;
+    }
+    Ok(())
+}
+
 impl Store for RealStore {
     fn is_mock(&self) -> bool {
         false
@@ -847,6 +1064,15 @@ impl Store for RealStore {
 
     fn data_dir(&self) -> Option<&Path> {
         Some(&self.data_dir)
+    }
+
+    fn features(&self) -> &'static [&'static str] {
+        &[
+            folo_api::FEATURE_UPLOADS,
+            folo_api::FEATURE_RUN_CURSORS,
+            folo_api::FEATURE_RUN_CHECKPOINT,
+            folo_api::FEATURE_CLOUD,
+        ]
     }
 
     fn throughput(&self) -> Result<ThroughputTable> {
@@ -881,7 +1107,18 @@ impl Store for RealStore {
         let mut check = folo_vision::TrainConfig::from_api(&config);
         check.device = "cpu".into();
         check.validate().map_err(engine_error)?;
-        let device = engine::resolve(&config.device)?;
+        // A cloud run's time is the reference's: nothing measured here says how fast the offer's GPU is.
+        let cloud = match &config.compute {
+            Some(compute) => {
+                cloud::check_device(&config)?;
+                Some((self.cloud.target(compute)?.1, compute.max_hours))
+            }
+            None => None,
+        };
+        let device = match &cloud {
+            Some((offer, _)) => cloud::estimate_device(offer),
+            None => engine::device_id(engine::resolve(&config.device)?),
+        };
         let (train, val) = (idx.splits.train, idx.splits.val);
         let cli = crate::cli::train_command(
             &config,
@@ -890,7 +1127,7 @@ impl Store for RealStore {
             weights.as_ref().map(cli_weights).as_deref(),
         );
         let mut estimate = self.throughput.estimate(&EstimateInput {
-            device: engine::device_id(device),
+            device,
             arch: config.arch,
             imgsz: config.imgsz,
             amp: config.amp,
@@ -902,7 +1139,10 @@ impl Store for RealStore {
             val_images: if val == 0 { train } else { val },
         });
         estimate.cli = Some(cli.cli);
-        Ok(estimate)
+        Ok(match cloud {
+            Some((offer, max_hours)) => cloud::cloud_estimate(estimate, &offer, max_hours),
+            None => estimate,
+        })
     }
 
     fn run_cli(&self, id: &str) -> Result<CliCommand> {
@@ -968,9 +1208,7 @@ impl Store for RealStore {
             val_fraction: 0.2,
             ..Default::default()
         };
-        let parent = self.data_dir.join("datasets");
-        let dir = claim_dir(&parent, &slug(&req.name, "synthetic"))
-            .map_err(|e| Error::internal(format!("creating a folder in {}: {e}", parent.display())))?;
+        let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
         let t0 = Instant::now();
         if let Err(e) = folo_data::synthetic::write_yolo(&cfg, &dir, folo_data::ImageFormat::Jpeg(90)) {
             let _ = std::fs::remove_dir_all(&dir);
@@ -1072,46 +1310,44 @@ impl Store for RealStore {
         Ok(self.runs.list())
     }
 
-    fn create_run(&self, mut config: TrainConfig) -> Result<Run> {
-        let e = self.entry(&config.dataset_id)?;
-        let idx = self.fresh_index(&e)?;
-        let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);
-        if idx.classes.is_empty() {
-            return Err(bad("the dataset has no classes".into()));
+    fn create_run(&self, config: TrainConfig) -> Result<Run> {
+        self.start_run(config, None)
+    }
+
+    fn continue_run(&self, checkpoint: &str, config: TrainConfig) -> Result<Run> {
+        if config.weights.is_some() {
+            return Err(Error::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_body",
+                "checkpoint and weights cannot be combined: the checkpoint holds the weights",
+            ));
         }
-        if idx.splits.train == 0 {
-            return Err(bad("the dataset has no training images".into()));
+        let m = self.model(checkpoint)?;
+        if engine::read_model_file(&m.path)?.checkpoint().is_none() {
+            return Err(Error::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_weights",
+                format!("model '{checkpoint}' ({}) has no training state to continue", m.model.name),
+            )
+            .hint("name a full checkpoint (a run's last.folo), or start a new run with `weights` set to the model"));
         }
-        // Fine-tuning takes the weights' architecture, as `folo train --weights` does (`arch` would otherwise build
-        // another model and transfer almost nothing into it).
-        let weights = match &config.weights {
-            Some(w) => {
-                let m = self.model(w)?;
-                config.arch = m.model.arch;
-                Some(m.path)
-            }
-            None => None,
-        };
-        // The settings first (on the CPU), so a rejected config never initialises a GPU.
-        let mut check = folo_vision::TrainConfig::from_api(&config);
-        check.device = "cpu".into();
-        check.validate().map_err(engine_error)?;
-        let device = engine::resolve(&config.device)?;
-        // `amp` is checked here, as `folo train --amp` checks it, rather than failing the queued run: the same
-        // answer `/api/system`'s `capabilities.amp` gives (the trainer's own check, without switching anything on).
-        if config.amp {
-            folo_vision::train::amp_available(device).map_err(engine_error)?;
-        }
-        let ds = self.dataset_ref(&e);
-        if config.name.trim().is_empty() {
-            config.name = format!("{}-{}", ds.name, config.arch.as_str().trim_start_matches("folo-"));
-        }
-        let val_offset = if idx.splits.val == 0 { 0 } else { idx.splits.train };
-        self.runs.create(config, ds, weights, val_offset, engine::describe(device))
+        self.start_run(config, Some(&m.path))
     }
 
     fn resume_run(&self, id: &str, fields: &serde_json::Map<String, serde_json::Value>) -> Result<Run> {
-        self.runs.resume(id, fields)
+        let (entry, wanted) = self.runs.resume_config(id, fields)?;
+        let Some(compute) = wanted.compute.clone() else { return self.runs.resume(&entry, wanted) };
+        cloud::check_device(&wanted)?;
+        let (connected, offer) = self.cloud.target(&compute)?;
+        // The dataset as it is now (a run whose dataset is no longer registered uploads without a fingerprint).
+        let ds = entry.dataset();
+        let fingerprint = self
+            .entry(&ds.id)
+            .and_then(|e| self.fresh_index(&e))
+            .ok()
+            .map(|idx| upload_fingerprint(ds.format, &idx));
+        self.runs.resume_cloud(&entry, wanted, run_cloud(&compute, &connected, offer))?;
+        self.start_cloud(entry, connected, fingerprint)
     }
 
     fn get_run(&self, id: &str) -> Result<Run> {
@@ -1138,16 +1374,16 @@ impl Store for RealStore {
         Ok(())
     }
 
-    fn run_metrics(&self, id: &str, every: u64) -> Result<RunMetrics> {
-        self.runs.metrics(id, every)
+    fn run_metrics(&self, id: &str, q: &MetricsQuery) -> Result<RunMetrics> {
+        self.runs.metrics(id, q)
     }
 
     fn run_samples(&self, id: &str, epoch: Option<u32>) -> Result<RunSamples> {
         self.samples(id, epoch)
     }
 
-    fn run_logs(&self, id: &str, limit: usize) -> Result<Vec<LogLine>> {
-        self.runs.logs(id, limit)
+    fn run_logs(&self, id: &str, q: &LogsQuery) -> Result<RunLogs> {
+        self.runs.logs(id, q)
     }
 
     fn subscribe(&self, id: &str) -> Result<Subscription> {
@@ -1250,7 +1486,81 @@ impl Store for RealStore {
         Ok(&self.labeler)
     }
 
+    fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
+        Uploads::check(&req)?;
+        if let Some(existing) = req.fingerprint.as_deref().and_then(|f| self.uploaded(req.kind, f)) {
+            return Ok(UploadCreated { upload: None, existing: Some(existing) });
+        }
+        Ok(UploadCreated { upload: Some(self.uploads.create(&req)?), existing: None })
+    }
+
+    fn get_upload(&self, id: &str) -> Result<Upload> {
+        self.uploads.get(id)
+    }
+
+    fn upload_part(&self, id: &str, part: u32, bytes: Bytes) -> Result<Upload> {
+        self.uploads.put(id, part, bytes)
+    }
+
+    fn complete_upload(&self, id: &str) -> Result<Uploaded> {
+        let done = self.uploads.finish(id)?;
+        let (made, uploaded) = match done.kind() {
+            UploadKind::Dataset => {
+                let d = self.adopt_dataset(&done)?;
+                (d.id.clone(), Uploaded { dataset: Some(d), model: None })
+            }
+            UploadKind::Model => {
+                let m = self.adopt_model(&done)?;
+                (m.id.clone(), Uploaded { dataset: None, model: Some(m) })
+            }
+        };
+        if let Some(fingerprint) = done.fingerprint() {
+            self.uploads.remember(done.kind(), fingerprint, &made);
+        }
+        tracing::info!(upload = %id, made = %made, "upload completed");
+        Ok(uploaded)
+    }
+
+    fn delete_upload(&self, id: &str) -> Result<()> {
+        self.uploads.delete(id)
+    }
+
+    fn cloud_providers(&self) -> Result<Vec<CloudProvider>> {
+        Ok(self.cloud.providers())
+    }
+
+    fn cloud_connections(&self) -> Result<Vec<CloudConnection>> {
+        self.cloud.connections()
+    }
+
+    fn connect_cloud(&self, req: ConnectCloud) -> Result<CloudConnection> {
+        self.cloud.connect(req)
+    }
+
+    fn check_cloud(&self, id: &str) -> Result<CloudConnection> {
+        self.cloud.check(id)
+    }
+
+    fn disconnect_cloud(&self, id: &str) -> Result<()> {
+        self.cloud.disconnect(id)
+    }
+
+    fn cloud_offers(&self, id: &str, refresh: bool) -> Result<CloudOfferList> {
+        self.cloud.offers(id, refresh)
+    }
+
+    fn cloud_instances(&self) -> Result<Vec<CloudInstance>> {
+        Ok(self.cloud.instances())
+    }
+
+    fn terminate_instance(&self, id: &str) -> Result<CloudInstance> {
+        self.cloud.terminate(id)
+    }
+
     fn shutdown(&self) {
+        self.uploads.shutdown();
+        // Cloud runs train on without this server; their threads let go of them (each logs it).
+        self.cloud.shutdown();
         self.labeler.shutdown();
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();

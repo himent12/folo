@@ -7,9 +7,10 @@
 > source).
 
 Fastest path for an agent:
-- **MCP:** `folo mcp --data-dir DIR` (stdio). It has 18 tools: folo_info, list_datasets, get_dataset,
+- **MCP:** `folo mcp --data-dir DIR` (stdio). It has 22 tools: folo_info, list_datasets, get_dataset,
   list_dataset_issues, list_dataset_images, register_dataset, create_synthetic_dataset, list_models, train,
-  run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export and compare_runs.
+  run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export, compare_runs,
+  cloud_connections, cloud_offers, cloud_instances and cloud_terminate.
 - **CLI:** `folo <command> --json`. stdout is then JSON Lines only. Errors end with
   `{"error":{"code","message","hint"}}`. Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 not implemented.
 - **Discovery:** `folo describe --json` prints every command, argument and default, plus every MCP tool's input and
@@ -31,17 +32,21 @@ Fastest path for an agent:
   the prompts train_on_folder and diagnose_run, and the errors: `isError` results whose text is
   `{code, message, hint}`
 - [CLI](docs/CLI.md): every `folo` command (serve, describe, doctor, train, val, predict, export, dataset
-  synth|stats|check|convert, mcp), its flags and its --json records, plus the error and exit-code conventions
+  synth|stats|check|convert, weights, cloud, mcp), its flags and its --json records, plus the error and exit-code conventions
 
 ## Reference
 - [HTTP API](docs/API.md): the HTTP + SSE contract of `folo serve`, used by Studio, Desktop and `folo mcp --server`.
   It covers datasets, models (weights download), runs (live events), predict, val, export, agent labeling
-  (`/api/label`), and real vs mock mode
+  (`/api/label`), uploads, cloud compute (`/api/cloud`), and real vs mock mode
 - [Agent labeling](docs/LABELING.md): unlabeled images to a dataset. `folo serve` drives Claude Code or Codex
   (one model request per batch of images, no tools), a person reviews the boxes in Studio, and the result is a
   registered YOLO dataset. It has the workflow, the HTTP calls, what a run costs in tokens and measured accuracy
+- [Cloud compute](docs/CLOUD.md): training runs on a rented GPU (RunPod) or on another FOLO server
+  (`TrainConfig.compute`, `folo cloud`, MCP `cloud_*`). It has the lifecycle of a cloud run, how instances are
+  never left behind, the providers, and `folo serve --token`
 - [Architecture](docs/ARCHITECTURE.md): the crates (folo-core, folo-gpu, folo-nn, folo-data, folo-vision,
-  folo-api, folo-server, folo-mcp, folo-cli, folo-wasm) and how they fit together, with the backend contract
+  folo-api, folo-client, folo-cloud, folo-server, folo-mcp, folo-cli, folo-wasm) and how they fit together, with
+  the backend contract
 - [Detector spec](docs/MODEL.md): the normative spec of folo-n/s/m/l/x. It covers the blocks, the head, the loss,
   the task-aligned assigner, the training recipe and the inference path
 - [Data](docs/DATA.md): YOLO and COCO detection rules, label parsing, robustness, augmentation, the data loader,

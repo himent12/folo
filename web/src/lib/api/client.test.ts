@@ -75,3 +75,61 @@ describe('HttpApi: queue and ONNX (docs/API.md, #129)', () => {
     expect(attachmentName(null)).toBeNull();
   });
 });
+
+describe('HttpApi: cloud compute (docs/API.md, Cloud compute)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function stub(answer: (url: string) => Response) {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return answer(url);
+    });
+    return calls;
+  }
+  const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status });
+
+  it('unwraps the lists and asks the provider again only on refresh', async () => {
+    const calls = stub((url) =>
+      url.endsWith('/providers') ? json({ providers: [{ id: 'runpod' }] }) : url.includes('/offers') ? json({ offers: [], fetched: 't' }) : json({ connections: [], instances: [] }),
+    );
+    const api = new HttpApi('');
+    expect(await api.cloudProviders()).toEqual([{ id: 'runpod' }]);
+    expect(await api.cloudConnections()).toEqual([]);
+    expect(await api.cloudInstances()).toEqual([]);
+    await api.cloudOffers('cc 1');
+    await api.cloudOffers('cc 1', undefined, true);
+    expect(calls.map((c) => c.url)).toEqual([
+      '/api/cloud/providers',
+      '/api/cloud/connections',
+      '/api/cloud/instances',
+      '/api/cloud/connections/cc%201/offers',
+      '/api/cloud/connections/cc%201/offers?refresh=true',
+    ]);
+  });
+
+  it('connects with one POST, checks, disconnects and terminates on their own paths', async () => {
+    const calls = stub((url) => (url.endsWith('/connections/cc_1') ? new Response(null, { status: 204 }) : json({ id: 'x' })));
+    const api = new HttpApi('');
+    await api.connectCloud({ provider: 'runpod', name: '', values: { api_key: 'rpa_x' } });
+    await api.checkCloudConnection('cc_1');
+    await api.disconnectCloud('cc_1');
+    await api.terminateCloudInstance('ci_1');
+    expect(calls.map((c) => `${c.init.method} ${c.url}`)).toEqual([
+      'POST /api/cloud/connections',
+      'POST /api/cloud/connections/cc_1/check',
+      'DELETE /api/cloud/connections/cc_1',
+      'DELETE /api/cloud/instances/ci_1',
+    ]);
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ provider: 'runpod', name: '', values: { api_key: 'rpa_x' } });
+  });
+
+  it('passes a rejected credential on as its code, with the server message', async () => {
+    stub(() => json({ error: { code: 'cloud_auth_failed', message: 'RunPod rejected the API key', hint: null } }, 422));
+    await expect(new HttpApi('').connectCloud({ provider: 'runpod', values: { api_key: 'bad' } })).rejects.toMatchObject({
+      status: 422,
+      code: 'cloud_auth_failed',
+      message: 'RunPod rejected the API key',
+    });
+  });
+});

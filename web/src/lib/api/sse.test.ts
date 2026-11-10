@@ -45,15 +45,32 @@ afterEach(() => {
 });
 
 describe('openEventStream', () => {
+  it('listens to every event of a run stream, queue and cloud included', () => {
+    const close = openEventStream<RunEventMap>('/api/runs/r/events', RUN_EVENTS, {});
+    const es = FakeSource.all[0]!;
+    expect([...es.listeners.keys()]).toEqual(['status', 'step', 'epoch', 'log', 'queue', 'cloud']);
+    expect([...RUN_EVENTS]).toEqual([...es.listeners.keys()]);
+    close();
+    expect(es.readyState).toBe(FakeSource.CLOSED);
+  });
+
   it("delivers a run stream's queue events (servers with queue_control send them)", () => {
     const queue = vi.fn();
     const status = vi.fn();
     openEventStream<RunEventMap>('/api/runs/r/events', RUN_EVENTS, { queue, status });
     const es = FakeSource.all[0]!;
-    es.send('queue', { position: 2, waiting: 3 });
+    es.send('queue', { position: 2, waiting: 3 } satisfies RunEventMap['queue']);
     es.send('status', { status: 'queued', error: null });
     expect(queue).toHaveBeenCalledWith({ position: 2, waiting: 3 });
     expect(status).toHaveBeenCalledOnce();
+  });
+
+  it("delivers a cloud run's cloud events (servers with cloud send them)", () => {
+    const cloud = vi.fn();
+    openEventStream<RunEventMap>('/api/runs/r/events', RUN_EVENTS, { cloud });
+    const state = { connection_id: 'cc_1', provider: 'runpod', phase: 'syncing', progress: { done_bytes: 1, total_bytes: 4 } };
+    FakeSource.all[0]!.send('cloud', state);
+    expect(cloud).toHaveBeenCalledWith(state);
   });
 
   it("delivers a labeling job's events by name and ignores names it was not given", () => {

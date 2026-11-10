@@ -11,6 +11,7 @@
    */
   import type { Snippet } from 'svelte';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
+  import CodeText from './CodeText.svelte';
   import { setField } from './field';
 
   const uid = $props.id();
@@ -26,7 +27,7 @@
   }: {
     label: string;
     for?: string;
-    /** Helper text; identifiers in backticks are set as code (`folo serve`). */
+    /** Helper text; identifiers in backticks are set as code (`folo serve`), never broken inside (ui/CodeText). */
     hint?: string;
     error?: string | null;
     children: Snippet;
@@ -59,7 +60,7 @@
       >
     </p>
   {:else if hint}
-    <p class="msg" id="{base}-hint">{#each hint.split('`') as text, i (i)}{#if i % 2}<code>{text}</code>{:else}{text}{/if}{/each}</p>
+    <p class="msg" id="{base}-hint"><CodeText text={hint} /></p>
   {/if}
 </div>
 
@@ -89,9 +90,6 @@
     font-size: var(--type-sm-size);
     line-height: var(--type-sm-line);
     color: var(--text-tertiary);
-  }
-  .msg code {
-    font-family: var(--font-mono);
   }
   .msg.error {
     display: flex;
