@@ -300,7 +300,7 @@ impl Benches {
 }
 
 /// `404 image_not_found` for a benchmark's image.
-pub(super) fn image_not_found(bench: &str, id: &str) -> Error {
+fn image_not_found(bench: &str, id: &str) -> Error {
     Error::new(StatusCode::NOT_FOUND, "image_not_found", format!("benchmark '{bench}' has no image '{id}'"))
         .hint("GET /api/bench/benchmarks/{id}/images lists its images")
 }

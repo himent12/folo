@@ -116,7 +116,7 @@ pub(super) fn status_name(s: BenchEntryStatus) -> &'static str {
 }
 
 /// How many images an entry runs: `max_images` (at least 1, at most the benchmark's), else `default` (capped).
-pub(super) fn entry_images(max_images: Option<u32>, images: usize, default: usize) -> Result<usize> {
+fn entry_images(max_images: Option<u32>, images: usize, default: usize) -> Result<usize> {
     match max_images {
         Some(0) => Err(invalid("max_images must be at least 1")),
         Some(n) => Ok((n as usize).min(images)),
@@ -387,7 +387,7 @@ impl Benches {
 }
 
 /// A finished entry, or `409 bench_entry_not_done`.
-pub(super) fn done_entry(slot: &Slot, entry_id: &str) -> Result<BenchEntry> {
+fn done_entry(slot: &Slot, entry_id: &str) -> Result<BenchEntry> {
     let state = slot.live()?;
     let e = state.entry(entry_id)?;
     if e.entry.status != BenchEntryStatus::Done {

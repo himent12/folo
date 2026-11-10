@@ -245,10 +245,7 @@ pub fn estimate(records: &[TrainRecord], input: &EstimateInput) -> RunEstimate {
 
 /// Peak GPU memory of the run: measured with its device, arch, imgsz and amp (at the nearest batch, scaled by the
 /// reference's batch dependence), else the reference.
-pub(super) fn peak_vram(
-    records: &[TrainRecord],
-    input: &EstimateInput,
-) -> (Option<u64>, Option<ThroughputSource>) {
+fn peak_vram(records: &[TrainRecord], input: &EstimateInput) -> (Option<u64>, Option<ThroughputSource>) {
     let reference = |batch| reference::memory(input.arch, input.imgsz, batch, input.amp) as f64;
     let measured = records
         .iter()
