@@ -911,6 +911,8 @@ impl Exec {
         let mut answered = false;
         let mut cost_at = Instant::now();
         let end = loop {
+            // A copy that finished is taken whatever this poll finds: a worker lost right after still leaves it.
+            self.reap_copy();
             if self.core.halt.is_on() {
                 return Err(Halt::LetGo);
             }
@@ -1296,7 +1298,9 @@ impl Exec {
         end: Option<Run>,
         time_up: bool,
     ) -> std::result::Result<Outcome, Halt> {
-        // A copy still under way is told to end and not waited for: it only writes its staged file.
+        // A copy still under way is told to end and not waited for: it only writes its staged file. One that
+        // finished is kept, should the final copy fail.
+        self.reap_copy();
         self.copying = None;
         self.phase(CloudPhase::Collecting, "the run ended on the worker; copying its weights");
         for last in [true, false] {

@@ -100,6 +100,10 @@ struct Gates {
     old: AtomicBool,
     /// Nothing answers yet, as a provider's proxy does for an instance whose worker has not started: `404`.
     down: AtomicBool,
+    /// While set, the first request for weights cuts the worker off: from then on only weights are served, every
+    /// other request is a proxy's `502` (`cut`).
+    cut_after_weights: AtomicBool,
+    cut: AtomicBool,
 }
 
 async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
@@ -125,6 +129,13 @@ async fn gate(State(g): State<Arc<Gates>>, req: Request, next: Next) -> Response
     let path = req.uri().path().to_string();
     if g.down.load(Ordering::SeqCst) {
         return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    if g.cut_after_weights.load(Ordering::SeqCst) {
+        if path.ends_with("/weights") {
+            g.cut.store(true, Ordering::SeqCst);
+        } else if g.cut.load(Ordering::SeqCst) {
+            return (StatusCode::BAD_GATEWAY, "proxy: no route to the instance").into_response();
+        }
     }
     while path.starts_with("/api/uploads") && g.uploads.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -855,6 +866,34 @@ fn a_stop_that_finds_the_worker_gone_loses_the_run_instead_of_collecting() {
     );
     assert!(lost.error.unwrap().contains("resume the run"));
     assert!(t.join("home").join("runs").join(&run.id).join("weights").join("last.folo").is_file());
+}
+
+#[test]
+fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
+    no_gpu();
+    let t = TestDir::new("cloud-copy-lost");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    cloud.hold_epochs(true);
+    cloud.gates.cut_after_weights.store(true, Ordering::SeqCst);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
+    // The checkpoint of epoch 1 arrives whole, and after it nothing from the worker does...
+    let weights = t.join("home").join("runs").join(&run.id).join("weights");
+    until("the checkpoint fetched", || {
+        let names = std::fs::read_dir(&weights).ok()?;
+        names
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with(".last.folo.copy."))
+            .then_some(())
+    });
+    // ...until its instance is gone.
+    cloud.kill(0);
+    let lost = finished(&store, &run.id);
+    assert_eq!(lost.error_code.as_deref(), Some("cloud_instance_lost"), "{:?}", log_of(&store, &run.id));
+    assert!(weights.join("last.folo").is_file(), "the checkpoint fetched is kept, to resume from");
+    assert!(lost.cloud.unwrap().synced.is_some());
 }
 
 #[test]
