@@ -161,12 +161,8 @@ impl RunPod {
         if !reply.is_success() {
             return Err(self.failure(&reply));
         }
-        // The ids found go to logs and the ledger.
-        let mut list: PodList = reply.json()?;
-        for p in &mut list.pods {
-            p.id = reply.scrub(&p.id);
-        }
-        Ok(list)
+        // The ids are used as they came (looked up, terminated): never scrubbed.
+        reply.json()
     }
 
     /// The offers of one cloud.
@@ -180,10 +176,12 @@ impl RunPod {
         if !reply.is_success() {
             return Err(self.failure(&reply));
         }
-        // Offers are logged and named in errors.
+        // A GPU's name is shown and logged ("launching <gpu>"): scrubbed. Its id goes back to RunPod in a launch:
+        // as it came.
         let mut list: GpuList = reply.json()?;
         for g in &mut list.gpus {
-            (g.id, g.name) = (reply.scrub(&g.id), reply.scrub(&g.name));
+            // (A GPU without a name is shown by its id.)
+            g.name = reply.scrub(if g.name.is_empty() { &g.id } else { &g.name });
         }
         Ok(list.gpus.iter().filter_map(|g| offer(g, cloud)).collect())
     }
@@ -299,11 +297,11 @@ impl Provider for RunPod {
         match reply.status {
             200..=299 => {
                 let pod: Pod = reply.json()?;
-                let id = reply.scrub(&pod.id);
-                check_pod_id(&id).map_err(|_| {
+                // The provider's reference, used as it came.
+                check_pod_id(&pod.id).map_err(|_| {
                     Error::new(ErrorKind::Unavailable, "RunPod created a pod but did not answer with its id")
                 })?;
-                Ok(id)
+                Ok(pod.id)
             }
             // An account that may not use this GPU's pool, or a key scoped away from it: RunPod's text says which.
             403 => Err(Error::new(
@@ -1102,6 +1100,54 @@ mod tests {
     }
 
     #[test]
+    fn identifiers_are_used_as_the_provider_sent_them() {
+        let with_key = |key: &str| Values::from(BTreeMap::from([(API_KEY.to_string(), key.to_string())]));
+        // Short secrets (below the length that is scrubbed at all), and the real ones, inside the identifiers.
+        for (key, token, pod, gpu) in [
+            ("abc".to_string(), "abc".to_string(), "abc123xyz".to_string(), "NVIDIA abc".to_string()),
+            (KEY.to_string(), TOKEN.to_string(), format!("p{KEY}"), format!("NVIDIA {KEY}")),
+        ] {
+            let values = with_key(&key);
+            // A launch answered with a pod id that holds the worker's token succeeds, with that id.
+            let f = Fixture::serve(vec![Answer::json(
+                201,
+                format!(r#"{{"id":"{pod}","status":"PROVISIONING"}}"#),
+            )]);
+            let launching = LaunchSpec { token: token.clone(), ..spec("NVIDIA L4@secure") };
+            assert_eq!(runpod(&f).launch(&values, &launching).unwrap(), pod);
+            let f = Fixture::serve(vec![Answer::json(
+                201,
+                format!(r#"{{"id":"p{token}","status":"PROVISIONING"}}"#),
+            )]);
+            assert_eq!(runpod(&f).launch(&values, &launching).unwrap(), format!("p{token}"));
+            // `find` answers the id as it is, and terminating it sends DELETE for that id.
+            let page = format!(
+                r#"{{"pods":[{{"id":"{pod}","name":"folo-x","status":"RUNNING"}}],"pagination":{{}}}}"#
+            );
+            let f = Fixture::serve(vec![Answer::json(200, page), Answer::empty(204)]);
+            let p = runpod(&f);
+            let ids = p.find(&values, "folo-x").unwrap();
+            assert_eq!(ids, std::slice::from_ref(&pod));
+            p.terminate(&values, &ids[0]).unwrap();
+            let r = &f.requests()[1];
+            assert_eq!((r.method.as_str(), r.path.clone()), ("DELETE", format!("/v2/pods/{pod}")));
+            // An offer's id goes back to the provider in a launch as the catalog named it.
+            let gpus = format!(
+                r#"{{"gpus":[{{"id":"{gpu}","name":"G","manufacturer":"NVIDIA","memory":24,"secure":true,
+                    "community":false,"price":{{"secure":0.5}},"availability":"HIGH"}}]}}"#
+            );
+            let created = Answer::json(201, r#"{"id":"abc999","status":"PROVISIONING"}"#);
+            let f =
+                Fixture::serve(vec![Answer::json(200, gpus), Answer::json(200, r#"{"gpus":[]}"#), created]);
+            let p = runpod(&f);
+            let offer = p.offers(&values).unwrap().remove(0);
+            assert_eq!(offer.id, format!("{gpu}@secure"));
+            p.launch(&values, &LaunchSpec { token: token.clone(), ..spec(&offer.id) }).unwrap();
+            assert_eq!(f.requests()[2].json()["gpu"]["id"], gpu.as_str());
+        }
+    }
+
+    #[test]
     fn fields_of_successful_answers_never_carry_the_key_into_a_message_or_an_offer() {
         let key = escaped(KEY);
         let shows = |text: &str| text.contains(KEY);
@@ -1112,27 +1158,15 @@ mod tests {
             ErrorKind::Unavailable,
             "a status",
         );
-        // A pod of that name whose id is the key: what `find` answers goes to logs and the ledger.
-        let page =
-            format!(r#"{{"pods":[{{"id":"{key}","name":"folo-x","status":"RUNNING"}}],"pagination":{{}}}}"#);
-        let f = Fixture::serve(vec![Answer::json(200, page)]);
-        let ids = runpod(&f).find(&values(), "folo-x").unwrap();
-        assert!(ids.len() == 1 && !shows(&ids[0]), "{ids:?}");
-        // A created pod whose id is the key.
-        let f =
-            Fixture::serve(vec![Answer::json(201, format!(r#"{{"id":"{key}","status":"PROVISIONING"}}"#))]);
-        match runpod(&f).launch(&values(), &spec("NVIDIA L4@secure")) {
-            Ok(id) => assert!(!shows(&id), "{id}"),
-            Err(e) => assert_error(&e, ErrorKind::Unavailable, "pod"),
-        }
-        // A GPU type named with it: offers are logged ("launching <gpu>") and name the GPU in errors.
+        // A GPU type named with it: its name is shown (and logged, "launching <gpu>"); its id is the provider's
+        // reference and is kept as it came (identifiers_are_used_as_the_provider_sent_them).
         let gpus = format!(
             r#"{{"gpus":[{{"id":"NVIDIA {key}","name":"{key}","manufacturer":"NVIDIA","memory":24,"secure":true,
                 "community":false,"price":{{"secure":0.5}},"availability":"HIGH"}}]}}"#
         );
         let f = Fixture::serve(vec![Answer::json(200, gpus), Answer::json(200, r#"{"gpus":[]}"#)]);
         let offers = runpod(&f).offers(&values()).unwrap();
-        assert!(offers.len() == 1 && !shows(&offers[0].id) && !shows(&offers[0].gpu), "{offers:?}");
+        assert!(offers.len() == 1 && !shows(&offers[0].gpu), "{offers:?}");
         // The account's email.
         let me = format!(r#"{{"data":{{"myself":{{"email":"{key}","clientBalance":1}}}}}}"#);
         let f = Fixture::serve(vec![Answer::json(200, NO_PODS), Answer::json(200, me)]);

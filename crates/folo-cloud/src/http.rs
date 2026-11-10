@@ -3,9 +3,9 @@
 //! answer, whatever its status, is a [`Reply`] for the provider to map.
 //!
 //! Keys travel only in the `Authorization` header, never in a URL, so a transport error (which may quote the URL)
-//! cannot carry one, and a key a provider echoes in a body is blanked out before anything reads the body, and out
-//! of every message made from an answer however the body spells it ([`Reply::scrub`]; so is any other credential
-//! the request carried, [`Reply::without`]).
+//! cannot carry one, and a key a provider echoes in an answer is blanked out of every message made from it,
+//! however the body spells it ([`Reply::scrub`]; so is any other credential the request carried,
+//! [`Reply::without`]). The body itself is read as it came: the ids in it are used again.
 
 use std::time::Duration;
 
@@ -31,9 +31,6 @@ const MAX_TOTAL_WAIT: Duration = Duration::from_secs(20);
 /// The wait for a `429` without a readable `Retry-After`.
 const DEFAULT_WAIT: Duration = Duration::from_secs(2);
 
-/// What a key echoed in an answer is replaced with.
-const REDACTED: &[u8] = b"[redacted]";
-
 /// One provider's API: a connection pool with its timeouts, and the provider's name for messages.
 #[derive(Clone, Debug)]
 pub(crate) struct Api {
@@ -41,15 +38,14 @@ pub(crate) struct Api {
     service: &'static str,
 }
 
-/// An answer: its status and its body (with the key blanked out).
+/// An answer: its status and its body, as it came.
 #[derive(Clone)]
 pub(crate) struct Reply {
     pub status: u16,
     pub body: Vec<u8>,
     service: &'static str,
-    /// The credentials the request carried: the key, and what [`Reply::without`] adds. A body can spell them in
-    /// ways the blanking of its bytes does not see (JSON escapes), so text read out of it goes through
-    /// [`Reply::scrub`] before it becomes a message.
+    /// The credentials the request carried: the key, and what [`Reply::without`] adds. Text read out of the body
+    /// (decoded, so whatever its spelling) goes through [`Reply::scrub`] before it becomes a message.
     secrets: Vec<String>,
 }
 
@@ -71,20 +67,16 @@ impl Reply {
     }
 
     /// The answer of a request that also carried `secret` (another credential, e.g. a worker's token): no message
-    /// made from the answer repeats it ([`Reply::scrub`]). The body itself is left as it came, so an answer that
-    /// is not an error is read unchanged.
+    /// made from the answer repeats it ([`Reply::scrub`]).
     pub fn without(mut self, secret: &str) -> Reply {
         self.secrets.push(secret.to_string());
         self
     }
 
-    /// `text`, read out of the body (decoded), with every credential the request carried blanked out.
+    /// `text` for a person, read out of the body (decoded), with every credential the request carried blanked out
+    /// ([`crate::scrub`]). Not for a value that is used again.
     pub fn scrub(&self, text: &str) -> String {
-        let blank = std::str::from_utf8(REDACTED).expect("ASCII");
-        self.secrets
-            .iter()
-            .filter(|s| !s.is_empty())
-            .fold(text.to_string(), |t, s| t.replace(s.as_str(), blank))
+        crate::scrub(text, self.secrets.iter().map(String::as_str))
     }
 
     /// The body, parsed; [`ErrorKind::Unavailable`] when it is not what the provider documents.
@@ -150,7 +142,7 @@ impl Api {
                 .read_to_vec()
                 .map_err(|e| self.unavailable(e))?;
             let secrets = vec![key.to_string()];
-            return Ok(Reply { status, body: redact(body, key), service: self.service, secrets });
+            return Ok(Reply { status, body, service: self.service, secrets });
         }
     }
 
@@ -207,26 +199,6 @@ fn retry_wait(retry_after: Option<&HeaderValue>, waited: Duration) -> Option<Dur
     (waited + wait <= MAX_TOTAL_WAIT).then_some(wait)
 }
 
-/// `body` with every occurrence of `key` replaced by [`REDACTED`].
-fn redact(body: Vec<u8>, key: &str) -> Vec<u8> {
-    let key = key.as_bytes();
-    if key.is_empty() || !body.windows(key.len()).any(|w| w == key) {
-        return body;
-    }
-    let mut out = Vec::with_capacity(body.len());
-    let mut rest = &body[..];
-    while !rest.is_empty() {
-        if rest.starts_with(key) {
-            out.extend_from_slice(REDACTED);
-            rest = &rest[key.len()..];
-        } else {
-            out.push(rest[0]);
-            rest = &rest[1..];
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,10 +219,12 @@ mod tests {
     }
 
     #[test]
-    fn redact_blanks_every_occurrence_of_the_key() {
-        assert_eq!(redact(b"key k3y and k3y".to_vec(), "k3y"), b"key [redacted] and [redacted]");
-        assert_eq!(redact(b"nothing".to_vec(), "k3y"), b"nothing");
-        assert_eq!(redact(b"nothing".to_vec(), ""), b"nothing");
+    fn scrub_blanks_every_secret_long_enough_to_be_one() {
+        let secrets = ["k3y-0123456", "abc", ""];
+        assert_eq!(crate::scrub("k3y-0123456 and k3y-0123456", secrets), "[redacted] and [redacted]");
+        // Shorter than a real key or token: blanking it would shred ordinary words.
+        assert_eq!(crate::scrub("abc and abcdef", secrets), "abc and abcdef");
+        assert_eq!(crate::scrub("12345678", ["12345678"]), "[redacted]", "the minimum itself counts");
     }
 
     #[test]
@@ -262,7 +236,9 @@ mod tests {
         let api = Api::new("Test");
         let reply = api.post(&fixture.url("/things"), "rpa_SECRET", &serde_json::json!({ "a": 1 })).unwrap();
         assert_eq!(reply.status, 200);
-        assert_eq!(reply.body, br#"{"echo":"[redacted]"}"#);
+        // The body is read as it came; what a person reads from it is scrubbed.
+        assert_eq!(reply.body, br#"{"echo":"rpa_SECRET"}"#);
+        assert_eq!(reply.scrub(r#"echo: rpa_SECRET"#), "echo: [redacted]");
         let requests = fixture.requests();
         assert_eq!(requests.len(), 2);
         for r in &requests {
