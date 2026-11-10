@@ -115,6 +115,14 @@ export function trainCommand(config: TrainConfig, data: string, model?: Model): 
     }
     const words = Array.isArray(v) ? v.map(String) : [String(v)];
     if (!f.always && words.join(' ') === f.default) continue;
+    // A value that starts with `-` (a run named `--amp`) is attached, as the server's command does, so clap never
+    // reads it as a flag.
+    const word = words[0];
+    if (words.length === 1 && word?.startsWith('-')) {
+      argv.push(`${f.flag}=${word}`);
+      parts.push(quote(`${f.flag}=${word}`));
+      continue;
+    }
     argv.push(f.flag, ...words);
     // A placeholder stays readable (`<path to x.folo>`): it is there to be replaced, not run.
     const shown = f.flag === '--weights' && weights?.kind === 'placeholder' ? words : words.map(quote);

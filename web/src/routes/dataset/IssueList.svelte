@@ -11,6 +11,7 @@
   import type { DatasetIssue, IssueCounts, IssueKind, IssueSeverity } from '$lib/api/types';
   import { issueCaption, KIND_LABEL, KINDS, loadIssues } from './issues';
   import { num } from '$lib/format';
+  import { quote } from '$lib/trainCli';
   import CommandLine from '$lib/ui/CommandLine.svelte';
   import ErrorState from '$lib/ui/ErrorState.svelte';
   import Segmented from '$lib/ui/Segmented.svelte';
@@ -70,7 +71,8 @@
   }
   const where = (i: DatasetIssue) => (i.line !== null ? `${i.file}:${i.line}` : i.file);
   // --json lists every issue (the plain report stops at 200), --fix-dry-run adds each one's fix; nothing is modified.
-  const cli = $derived(`folo dataset check ${/\s/.test(path) ? `"${path}"` : path} --fix-dry-run --json`);
+  // Quoted for PowerShell, as every command Studio shows (lib/trainCli `quote`).
+  const cli = $derived(`folo dataset check ${quote(path)} --fix-dry-run --json`);
 
 </script>
 

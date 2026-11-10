@@ -115,7 +115,9 @@
     }
   }
 
-  let filter = $state<Filter>((router.route.query.get('status') as Filter | null) ?? 'all');
+  // A deep link's `?status=` is a filter only when it names one (`?status=stopped` is a status, not a filter).
+  const asked = router.route.query.get('status');
+  let filter = $state<Filter>(asked && Object.hasOwn(groups, asked) ? (asked as Filter) : 'all');
   let query = $state('');
   let selected = $state<string[]>([]);
   /** Phones: checkboxes show in select mode (or once a run is selected), so rows keep their width otherwise. */

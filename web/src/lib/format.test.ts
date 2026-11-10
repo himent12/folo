@@ -14,10 +14,22 @@ describe('format', () => {
     expect(compact(56_970_000)).toBe('57M');
     expect(compact(20_000)).toBe('20k');
   });
+  it('moves a count that rounds up to 1000 of a unit to the next unit', () => {
+    expect(compact(999_999)).toBe('1M');
+    expect(compact(999_499)).toBe('999k');
+    expect(compact(999_950_000)).toBe('1B');
+    expect(compact(-999_999)).toBe('-1M');
+  });
   it('formats bytes in both unit systems', () => {
     expect(bytes(16 * 2 ** 30)).toBe('16.0 GiB');
     expect(bytes(5_400_000, 'metric')).toBe('5.4 MB');
     expect(bytes(512)).toBe('512 B');
+  });
+  it('moves a size that rounds up to 1024 of a unit to the next unit', () => {
+    expect(bytes(2 ** 20 - 1)).toBe('1.0 MiB');
+    expect(bytes(2 ** 30 - 1)).toBe('1.0 GiB');
+    expect(bytes(999_999, 'metric')).toBe('1.0 MB');
+    expect(bytes(1023)).toBe('1,023 B');
   });
   it('formats durations', () => {
     expect(duration(42)).toBe('42s');
@@ -28,6 +40,12 @@ describe('format', () => {
     expect(ms(3.14159)).toBe('3.14 ms');
     expect(ms(12.34)).toBe('12.3 ms');
     expect(lr(0.0098)).toBe('9.80 × 10⁻³');
+  });
+  it('never writes a learning rate with a mantissa of 10', () => {
+    // 0.009996 rounds to 10.00 × 10⁻³ in the old exponent: that is 1.00 × 10⁻².
+    expect(lr(0.009996)).toBe('1.00 × 10⁻²');
+    expect(lr(0.00099951)).toBe('1.00 × 10⁻³');
+    expect(lr(-0.009996)).toBe('-1.00 × 10⁻²');
   });
   it('formats relative times', () => {
     const now = Date.parse('2026-11-08T14:30:00Z');

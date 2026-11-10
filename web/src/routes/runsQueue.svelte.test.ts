@@ -3,7 +3,7 @@
 // place and has a ⋯ menu (Start next, Move up, Move down); the new order shows at once and a refusal puts it back.
 import { flushSync, mount, unmount, type Component } from 'svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError } from '$lib/api/client';
+import { ApiError, type RunEventHandlers } from '$lib/api/client';
 import { hub } from '$lib/api/index.svelte';
 import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router.svelte';
@@ -179,5 +179,54 @@ describe('Run: a waiting run on a server without estimates', () => {
     expect(text).not.toMatch(/Starts in about/);
     expect(text).toMatch(/Starts in more than|Starts after/);
     expect(text).toMatch(/not known yet/);
+  });
+});
+
+describe('Run: Start next on a run the worker took meanwhile', () => {
+  it('keeps the status the stream reported after the refresh was asked for (never back to Queued)', async () => {
+    // Start next answers `409 run_not_queued` (the worker took the run), and the page reads the run again. That
+    // snapshot was asked for while the trainer was still being built (`queued`); the stream's `running` came first. The
+    // late snapshot put the run back to Queued, and no other status event comes until the run ends.
+    const api = new MockApi('normal', 0);
+    let handlers: RunEventHandlers = {};
+    vi.spyOn(api, 'runEvents').mockImplementation((_id, h) => {
+      handlers = h;
+      return () => {};
+    });
+    hub.api = api;
+    hub.mode = 'mock';
+    router.route = parse('#/runs/run_q7c5');
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    c = mount(Run as Component, { target });
+    const start = await vi.waitFor(
+      () => {
+        flushSync();
+        const b = [...target.querySelectorAll<HTMLButtonElement>('.callout button')].find((x) => x.textContent?.includes('Start next'));
+        if (!b) throw new Error('not loaded');
+        return b;
+      },
+      { timeout: 4000, interval: 10 },
+    );
+    const queued = await api.run('run_q7c5');
+    let answer!: (r: typeof queued) => void;
+    const real = api.run.bind(api);
+    let first = true;
+    vi.spyOn(api, 'run').mockImplementation((id: string) => {
+      if (!first) return real(id);
+      first = false;
+      return new Promise<typeof queued>((r) => (answer = r));
+    });
+    vi.spyOn(api, 'moveRun').mockRejectedValue(new ApiError(409, 'run_not_queued', "run 'run_q7c5' is starting, not waiting in the queue"));
+    start.click();
+    await vi.waitFor(() => expect(answer).toBeTypeOf('function'));
+    handlers.status?.({ status: 'running', error: null, steps_per_epoch: 50, epochs: queued.epochs });
+    flushSync();
+    const badge = () => target.querySelector('.badge')?.textContent?.trim();
+    expect(badge()).toBe('Running');
+    answer({ ...queued, status: 'queued', queue_position: null });
+    await new Promise((r) => setTimeout(r, 20));
+    flushSync();
+    expect(badge()).toBe('Running');
   });
 });

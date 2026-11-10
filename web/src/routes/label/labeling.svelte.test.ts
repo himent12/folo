@@ -225,3 +225,24 @@ describe('the job list', () => {
     });
   });
 });
+
+describe('the job list: the palette’s New labeling job', () => {
+  const dialogOpen = () => [...document.querySelectorAll<HTMLDialogElement>('dialog')].some((d) => d.open && d.textContent?.includes('New labeling job'));
+  it('opens the dialog on this page too, and again after it was closed', async () => {
+    // `?new=1` was read once, when the page mounted: on the page already (the app keys pages by path, not query) the
+    // palette changed the URL and nothing opened; after a close the URL kept `?new=1`, so the next ask did nothing.
+    history.replaceState(null, '', '#/datasets/label');
+    router.route = parse('#/datasets/label');
+    open(LabelJobs, {});
+    expect(dialogOpen()).toBe(false);
+    router.go('/datasets/label?new=1');
+    flushSync();
+    expect(dialogOpen()).toBe(true);
+    document.querySelector<HTMLButtonElement>('dialog[open] button[aria-label="Close"]')!.click();
+    flushSync();
+    expect(dialogOpen()).toBe(false);
+    router.go('/datasets/label?new=1');
+    flushSync();
+    expect(dialogOpen()).toBe(true);
+  });
+});

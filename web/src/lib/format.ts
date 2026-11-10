@@ -36,8 +36,9 @@ function trim(x: number): string {
 export function compact(x: number | null | undefined): string {
   if (!ok(x)) return '—';
   const a = Math.abs(x);
-  if (a >= 1e9) return `${trim(x / 1e9)}B`;
-  if (a >= 1e6) return `${trim(x / 1e6)}M`;
+  // From 999.5 of a unit `trim` reads 1000: that is one of the next unit.
+  if (a >= 999.5e6) return `${trim(x / 1e9)}B`;
+  if (a >= 999.5e3) return `${trim(x / 1e6)}M`;
   if (a >= 1e4) return `${trim(x / 1e3)}k`;
   return nf(0).format(x);
 }
@@ -49,7 +50,8 @@ export function bytes(x: number | null | undefined, units: 'binary' | 'metric' =
   const names = units === 'binary' ? ['B', 'KiB', 'MiB', 'GiB', 'TiB'] : ['B', 'kB', 'MB', 'GB', 'TB'];
   let i = 0;
   let v = x;
-  while (Math.abs(v) >= k && i < names.length - 1) {
+  // From k - 0.05 the one decimal reads k ("1,024.0 KiB"): that is one of the next unit.
+  while (Math.abs(v) >= k - 0.05 && i < names.length - 1) {
     v /= k;
     i++;
   }
@@ -138,7 +140,9 @@ export function pow10(e: number): string {
 export function lr(x: number | null | undefined): string {
   if (!ok(x)) return '—';
   if (x === 0) return '0';
-  const e = Math.floor(Math.log10(Math.abs(x)));
+  let e = Math.floor(Math.log10(Math.abs(x)));
+  // A mantissa that rounds up to 10 (0.009996 → "10.00") belongs to the next power.
+  if (Math.abs(Number((x / 10 ** e).toFixed(2))) >= 10) e++;
   return `${(x / 10 ** e).toFixed(2)} × ${pow10(e)}`;
 }
 
