@@ -117,6 +117,25 @@ describe('a large file, sent in parts', () => {
     expect(!other.ok && other.error).toMatch(/^Record 3: image "1" is answered twice/);
   });
 
+  it('compares a repeat by its boxes as the server reads them, not by their JSON', () => {
+    // crates/folo-server/src/bench/external.rs `content`: per box in order, class, score (1 when absent; not at all
+    // for an unscored entry) and corners as 32-bit floats. The order of a box's fields and other fields don't count.
+    const same = (b: Record<string, unknown>, c: PredictionContext = ctx) => checkPredictions([...clean, { image: '1', boxes: [b] }], c);
+    const { class: cls, score, ...corners } = box;
+    expect(same({ ...corners, score, class: cls }).ok).toBe(true);
+    expect(same({ ...box, note: 'mine' }).ok).toBe(true);
+    expect(same({ ...box, x1: box.x1 + 1e-9 }).ok).toBe(true);
+    // A missing score is 1 to the server.
+    const first = { image: '1', boxes: [{ ...box, score: 1 }] };
+    expect(checkPredictions([first, clean[1], { image: '1', boxes: [{ class: cls, ...corners }] }], ctx).ok).toBe(true);
+    // Another score is another answer, unless the entry gives no confidences.
+    expect(!same({ ...box, score: 0.5 }).ok).toBe(true);
+    expect(same({ ...box, score: 0.5 }, { ...ctx, scored: false }).ok).toBe(true);
+    // Zero's sign survives on the server (`to_bits`): -0 is another corner.
+    const zero = [{ image: '1', boxes: [{ ...box, x1: 0 }] }, clean[1]];
+    expect(!checkPredictions([...zero, { image: '1', boxes: [{ ...box, x1: -0 }] }], ctx).ok).toBe(true);
+  });
+
   it('refuses a record with more than 1000 boxes, and a part that repeats a record received before', () => {
     const r = checkPredictions([rec('1', null, null, 1001), clean[1]], ctx);
     expect(!r.ok && r.error).toMatch(/^Record 1: 1,001 boxes/);

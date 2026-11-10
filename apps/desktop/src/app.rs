@@ -1365,7 +1365,7 @@ impl FoloApp {
 
     /// Remember the window (restored bounds, maximized or full screen) and the theme for the next
     /// launch, when this one remembers (`window_state`).
-    pub fn save_window_state(&self, window: &Window, _cx: &App) {
+    pub fn save_window_state(&self, window: &Window, cx: &App) {
         use crate::window_state::{Placement, State, WindowMode};
         let Some(path) = &self.state_path else {
             return;
@@ -1383,6 +1383,7 @@ impl FoloApp {
                 width: b.size.width.into(),
                 height: b.size.height.into(),
                 mode,
+                display: window.display(cx).and_then(|d| d.uuid().ok()).map(|u| u.to_string()),
             }),
             theme: Some(if self.mode == Mode::Light { "light" } else { "dark" }.into()),
         };
@@ -2636,43 +2637,32 @@ impl FoloApp {
         let t = theme(cx);
         let crumbs = self.breadcrumbs();
         let maximized = window.is_maximized();
-        // In full screen GPUI reports no caption areas, so Windows doesn't act on the buttons: they
-        // take their own clicks then. Only then, since otherwise the caption press already acts
-        // (on mouse up) and a click handler would act a second time.
         let fullscreen = window.is_fullscreen();
-        let win_btn = |id: &'static str, icon_path: &'static str, area: WindowControlArea, close: bool| {
-            div()
-                .id(id)
-                .group(id)
-                .w(px(crate::theme::layout::DESKTOP_CAPTION_BUTTON))
-                .h_full()
-                .flex()
-                .items_center()
-                .justify_center()
-                .window_control_area(area)
-                // See `titlebar-drag`: the press must reach Windows, not focus the root.
-                .occlude()
-                .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
-                .active(|s| s.opacity(0.8))
-                .child(
-                    gpui::svg()
-                        .path(icon_path)
-                        .size(px(10.))
-                        .flex_none()
-                        .text_color(t.text_secondary)
-                        .group_hover(id, move |s| {
-                            s.text_color(if close { t.window_close_text } else { t.text_primary })
-                        }),
-                )
-        };
+        let win_btn =
+            |base: gpui::Stateful<gpui::Div>, id: &'static str, icon_path: &'static str, close: bool| {
+                base.group(id)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
+                    .active(|s| s.opacity(0.8))
+                    .child(
+                        gpui::svg()
+                            .path(icon_path)
+                            .size(px(10.))
+                            .flex_none()
+                            .text_color(t.text_secondary)
+                            .group_hover(id, move |s| {
+                                s.text_color(if close { t.window_close_text } else { t.text_primary })
+                            }),
+                    )
+            };
         let search_fh = self.fh("titlebar-search", cx);
         let search_ring = self.ring(&search_fh, window);
-        div()
-            .h(px(tsize::TOPBAR - 8.))
-            .flex_none()
-            .flex()
-            .items_center()
-            .border_b_1()
+        let min_btn = self.caption_button("win-min", WindowControlArea::Min, fullscreen, cx);
+        let max_btn = self.caption_button("win-max", WindowControlArea::Max, fullscreen, cx);
+        let close_btn = self.caption_button("win-close", WindowControlArea::Close, fullscreen, cx);
+        titlebar_row()
             .border_color(t.line_subtle)
             .child(
                 // Breadcrumbs (draggable area).
@@ -2757,33 +2747,77 @@ impl FoloApp {
                     .child(text(ty::SM, t.text_tertiary).flex_1().child("Search or jump to…"))
                     .child(shortcut(&t, &["Ctrl", "K"])),
             )
-            .child(
-                win_btn("win-min", "icons/win-min.svg", WindowControlArea::Min, false)
-                    .capture_any_mouse_down(self.leave_kb(cx))
-                    .when(fullscreen, |d| d.on_click(|_, w, _| w.minimize_window())),
-            )
-            .child(
-                win_btn(
-                    "win-max",
-                    if maximized || fullscreen { "icons/win-restore.svg" } else { "icons/win-max.svg" },
-                    WindowControlArea::Max,
-                    false,
-                )
-                .capture_any_mouse_down(self.leave_kb(cx))
+            .child(win_btn(min_btn, "win-min", "icons/win-min.svg", false))
+            .child(win_btn(
+                max_btn,
+                "win-max",
+                if maximized || fullscreen { "icons/win-restore.svg" } else { "icons/win-max.svg" },
+                false,
+            ))
+            .child(win_btn(close_btn, "win-close", "icons/win-close.svg", true))
+    }
+
+    /// A caption button's hit area, `layout.desktop_caption_button` wide and the title bar's
+    /// height: Minimize, Maximize / Restore or Close for Windows. In full screen GPUI reports no
+    /// caption areas, so Windows doesn't act on it: it takes its own click then. Only then, since
+    /// otherwise the caption press already acts (on mouse up) and a click handler would act a
+    /// second time. `titlebar()` draws on it; `caption_controls` uses it bare.
+    fn caption_button(
+        &self,
+        id: &'static str,
+        area: WindowControlArea,
+        fullscreen: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(id)
+            .w(px(crate::theme::layout::DESKTOP_CAPTION_BUTTON))
+            .h_full()
+            .window_control_area(area)
+            // See `titlebar-drag`: the press must reach Windows, not focus the root.
+            .occlude()
+            .capture_any_mouse_down(self.leave_kb(cx))
+            .when(fullscreen, |d| match area {
+                WindowControlArea::Min => d.on_click(|_, w, _| w.minimize_window()),
                 // Full screen's "restore" leaves full screen.
-                .when(fullscreen, |d| d.on_click(|_, w, _| w.toggle_fullscreen())),
-            )
+                WindowControlArea::Max => d.on_click(|_, w, _| w.toggle_fullscreen()),
+                // Closing this way skips the window's should-close hook: remember here.
+                WindowControlArea::Close => d.on_click(cx.listener(|this, _, w, cx| {
+                    this.save_window_state(w, cx);
+                    w.remove_window();
+                })),
+                WindowControlArea::Drag => d,
+            })
+    }
+
+    /// The window's caption areas again, bare, for an overlay to put over its scrim and under its
+    /// own panel. The scrim dims the title bar, but it also hides the title bar from the hit test,
+    /// and Windows acts only on caption areas in it: a window must still move, minimize, maximize
+    /// and close. One drag band across the top (the sidebar's brand row and the title bar, whose
+    /// dimmed crumbs and search field take no clicks under an overlay) and the three buttons,
+    /// where `titlebar()` puts them. A press here neither reaches the scrim (which would dismiss
+    /// the overlay) nor the page.
+    pub fn caption_controls(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let fullscreen = window.is_fullscreen();
+        titlebar_row()
+            .id("caption-controls")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
             .child(
-                win_btn("win-close", "icons/win-close.svg", WindowControlArea::Close, true)
-                    .capture_any_mouse_down(self.leave_kb(cx))
-                    .when(fullscreen, |d| {
-                        // Closing this way skips the window's should-close hook: remember here.
-                        d.on_click(cx.listener(|this, _, w, cx| {
-                            this.save_window_state(w, cx);
-                            w.remove_window();
-                        }))
-                    }),
+                div()
+                    .id("caption-drag")
+                    .flex_1()
+                    .h_full()
+                    .window_control_area(WindowControlArea::Drag)
+                    // See `titlebar-drag`.
+                    .occlude()
+                    .capture_any_mouse_down(self.leave_kb(cx)),
             )
+            .child(self.caption_button("caption-min", WindowControlArea::Min, fullscreen, cx))
+            .child(self.caption_button("caption-max", WindowControlArea::Max, fullscreen, cx))
+            .child(self.caption_button("caption-close", WindowControlArea::Close, fullscreen, cx))
     }
 
     fn breadcrumbs(&self) -> Vec<(SharedString, Option<Route>)> {
@@ -2871,7 +2905,7 @@ impl FoloApp {
                 // Brand row doubles as a drag area for the window.
                 div()
                     .id("brand")
-                    .h(px(tsize::TOPBAR - 8.))
+                    .h(px(TITLEBAR))
                     .flex_none()
                     .flex()
                     .items_center()
@@ -3504,6 +3538,15 @@ impl Render for FoloApp {
 
 /// A mouse-press listener, as `capture_any_mouse_down` takes it.
 type PressListener = Box<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App)>;
+
+/// The title bar's height, and the sidebar's brand row's (the other drag area).
+const TITLEBAR: f32 = tsize::TOPBAR - 8.;
+
+/// The title bar's row, its hairline (uncoloured) included. `titlebar()` and `caption_controls`
+/// both lay out on it, so their caption buttons are the same size in the same place.
+fn titlebar_row() -> gpui::Div {
+    div().h(px(TITLEBAR)).flex_none().flex().items_center().border_b_1()
+}
 
 impl FoloApp {
     /// A press leaves keyboard mode (focus rings off). The root listens for presses anywhere, but

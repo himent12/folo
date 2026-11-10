@@ -40,7 +40,14 @@ Two GPUI details keep this working; `tools/window-check.ps1` catches a regressio
   GPUI's hit test finds no caption area, and the title bar's drag area reaches the top of the window.
 
 Hidden from the root, the chrome also leaves keyboard mode itself on a press (`leave_kb`), as the root does for
-any other press. The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
+any other press.
+
+An overlay's scrim (the palette, a dialog, the inspector) dims the title bar too, and so hides its caption areas
+from the hit test. Each scrim carries the caption areas again (`caption_controls`, on the same row and button
+tokens as `titlebar()`), over the scrim and under the overlay's own panel: with an overlay open the window still
+moves, maximizes, minimizes and closes, and that doesn't dismiss the overlay. The whole dimmed title bar and brand
+row are one drag band then (the crumbs and the search field take no clicks); a press on the dimmed page still
+dismisses. The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
 `window.close`, `window.close_text`).
 
 `F11` (or Toggle full screen in the palette) toggles full screen. There the window has no caption areas, so the
@@ -48,7 +55,10 @@ three buttons are plain buttons: Minimize, Restore (leaves full screen) and Clos
 
 The window opens as it was closed: its restored size and place, maximized or full screen, and the theme
 (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
-A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
+It reopens on the display it was on (GPUI's display UUID, kept with the place: each display's bounds are in its
+own logical pixels, so with mixed scale factors their rectangles overlap and the place alone can't say which), if
+that display still shows enough of the title bar to grab; else on the display that shows the most of it (a tie
+goes to the primary display). A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
 (`--scenario`, `--width`, `--height`) neither read nor write it, and `--theme` beats the remembered theme.
 Closed while minimized, it keeps the mode it had before (`window_state::closing_mode`).
 
@@ -141,7 +151,8 @@ tools\window-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe
 It drives the window chrome with real mouse and keyboard input (Windows only) and prints PASS or FAIL per step:
 the breadcrumbs and search field in the title bar, Maximize / Restore, double-click and drag on both drag areas,
 the top resize edge, Minimize, `F11` on and off, the three buttons in full screen, Close, a title-bar press leaving
-keyboard mode, the window's icon, and the next launches (maximized, windowed and full screen again at the last size
+keyboard mode, the window's icon, the buttons and both drags with the palette and with the New run dialog open
+(each still open after them, and dismissed by a click on the dimmed page), and the next launches (maximized, windowed and full screen again at the last size
 and place, also after closing while minimized; a saved place off every display; a corrupt state file). It exits 1 if any step fails. The remembered state goes to `$FOLO_DESKTOP_STATE`, a fresh file
 under `$FOLO_TEST_TMP\window-check` (or `-StateDir`), never the real profile, and the last check proves that. It
 also saves a screenshot of the snap layouts over Maximize there, to look at.
