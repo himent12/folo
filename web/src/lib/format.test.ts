@@ -14,6 +14,12 @@ describe('format', () => {
     expect(compact(56_970_000)).toBe('57M');
     expect(compact(20_000)).toBe('20k');
   });
+  it('moves a count that rounds up to 1000 of a unit to the next unit', () => {
+    expect(compact(999_999)).toBe('1M');
+    expect(compact(999_499)).toBe('999k');
+    expect(compact(999_950_000)).toBe('1B');
+    expect(compact(-999_999)).toBe('-1M');
+  });
   it('formats bytes in both unit systems', () => {
     expect(bytes(16 * 2 ** 30)).toBe('16.0 GiB');
     expect(bytes(5_400_000, 'metric')).toBe('5.4 MB');

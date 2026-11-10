@@ -36,8 +36,9 @@ function trim(x: number): string {
 export function compact(x: number | null | undefined): string {
   if (!ok(x)) return '—';
   const a = Math.abs(x);
-  if (a >= 1e9) return `${trim(x / 1e9)}B`;
-  if (a >= 1e6) return `${trim(x / 1e6)}M`;
+  // From 999.5 of a unit `trim` reads 1000: that is one of the next unit.
+  if (a >= 999.5e6) return `${trim(x / 1e9)}B`;
+  if (a >= 999.5e3) return `${trim(x / 1e6)}M`;
   if (a >= 1e4) return `${trim(x / 1e3)}k`;
   return nf(0).format(x);
 }
