@@ -530,17 +530,26 @@ pub(super) fn expire(slot: &Slot, timeout: Duration) {
     if state.deleted {
         return;
     }
+    // Checked and closed in one hold of the filling's lock: a part that got in first has moved `last_part` (the
+    // entry lives on), one that comes after finds the filling closed. One that is being finished is closed
+    // already and is left to its finish.
     let stale: Vec<String> = state
         .entries
-        .iter()
-        .filter(|e| e.open.as_ref().is_some_and(|f| lock(f).last_part.elapsed() >= timeout))
-        .map(|e| e.entry.id.clone())
+        .iter_mut()
+        .filter_map(|e| {
+            {
+                let mut f = lock(e.open.as_ref()?);
+                if f.closed || f.last_part.elapsed() < timeout {
+                    return None;
+                }
+                f.closed = true;
+            }
+            e.open = None;
+            Some(e.entry.id.clone())
+        })
         .collect();
     for id in &stale {
         let e = state.entry_mut(id).expect("listed above");
-        if let Some(fill) = e.open.take() {
-            lock(&fill).closed = true;
-        }
         let mut entry = e.entry.clone();
         entry.status = BenchEntryStatus::Failed;
         entry.finished = Some(rfc3339(unix_now()));

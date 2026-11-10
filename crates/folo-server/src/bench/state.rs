@@ -283,7 +283,8 @@ impl State {
 /// `fingerprint`: finished entries with that fingerprint that are complete (`score.partial` false) by score,
 /// highest first; then finished partial ones by score; then finished entries with another fingerprint (graded
 /// before the engine changed: they do not compare with the others) by score; equal scores keep the older entry
-/// first; then the unfinished ones, newest first. A benchmark's `best` is the first of this order when it is
+/// first (by `created`, then by id: an order that does not depend on how the entries are held, so it is the same
+/// after a restart and for a client that sorts them itself); then the unfinished ones, newest first. A benchmark's `best` is the first of this order when it is
 /// finished and has the benchmark's fingerprint.
 pub fn ranked<'a>(entries: &[&'a BenchEntry], fingerprint: &str) -> Vec<&'a BenchEntry> {
     let group = |e: &BenchEntry| match (&e.score, e.status) {
@@ -293,13 +294,14 @@ pub fn ranked<'a>(entries: &[&'a BenchEntry], fingerprint: &str) -> Vec<&'a Benc
         _ => 3,
     };
     let total = |e: &BenchEntry| e.score.as_ref().map_or(0.0, |s| s.total);
-    let mut order: Vec<(usize, &BenchEntry)> = entries.iter().copied().enumerate().collect();
-    order.sort_by(|(i, a), (j, b)| {
+    let age = |a: &BenchEntry, b: &BenchEntry| a.created.cmp(&b.created).then_with(|| a.id.cmp(&b.id));
+    let mut order: Vec<&BenchEntry> = entries.to_vec();
+    order.sort_by(|a, b| {
         group(a).cmp(&group(b)).then_with(|| {
-            if group(a) == 3 { j.cmp(i) } else { total(b).total_cmp(&total(a)).then_with(|| i.cmp(j)) }
+            if group(a) == 3 { age(b, a) } else { total(b).total_cmp(&total(a)).then_with(|| age(a, b)) }
         })
     });
-    order.into_iter().map(|(_, e)| e).collect()
+    order
 }
 
 /// `404 bench_not_found`.
@@ -654,8 +656,8 @@ mod tests {
     #[test]
     fn the_leaderboard_ranks_complete_then_partial_then_unfinished() {
         use BenchEntryStatus as S;
-        // In creation order.
-        let entries = [
+        // In creation order, a second apart.
+        let mut entries = [
             entry("partial-high", S::Done, Some((90.0, true))),
             entry("complete-a", S::Done, Some((50.0, false))),
             entry("running-old", S::Running, None),
@@ -666,7 +668,11 @@ mod tests {
             entry("queued-new", S::Queued, None),
             BenchEntry { fingerprint: "older".into(), ..entry("older-engine", S::Done, Some((99.0, false))) },
         ];
-        let refs: Vec<&BenchEntry> = entries.iter().collect();
+        for (i, e) in entries.iter_mut().enumerate() {
+            e.created = format!("2026-11-09T00:00:{i:02}Z");
+        }
+        // Given in any order: the order of the result does not depend on how the entries are held.
+        let refs: Vec<&BenchEntry> = entries.iter().rev().collect();
         let order: Vec<&str> = ranked(&refs, "").iter().map(|e| e.id.as_str()).collect();
         assert_eq!(
             order,
@@ -682,6 +688,15 @@ mod tests {
                 "running-old"
             ]
         );
+        // Equal scores made in the same second: by id, whichever way they are given.
+        let twins =
+            [entry("be_b", S::Done, Some((50.0, false))), entry("be_a", S::Done, Some((50.0, false)))];
+        for given in [[&twins[0], &twins[1]], [&twins[1], &twins[0]]] {
+            assert_eq!(
+                ranked(&given, "").iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+                ["be_a", "be_b"]
+            );
+        }
         // `best` is the first of that order: a partial entry leads only when nothing complete is finished.
         let state = |entries: Vec<BenchEntry>| State {
             file: file(),

@@ -169,6 +169,9 @@ export const stale = (e: Pick<BenchEntry, 'fingerprint'>, fingerprint: string) =
 export function boardOrder(entries: readonly BenchEntry[], fingerprint: string): BenchEntry[] {
   const order = rankEntries(entries);
   const current = order.filter((e) => finished(e) && !stale(e, fingerprint));
-  const earlier = order.filter((e) => finished(e) && stale(e, fingerprint));
+  // The server ranks these by score alone (complete or not), ties to the older one.
+  const earlier = order
+    .filter((e) => finished(e) && stale(e, fingerprint))
+    .sort((a, b) => (b.score?.total ?? 0) - (a.score?.total ?? 0) || a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
   return [...current, ...earlier, ...order.filter((e) => !finished(e))];
 }

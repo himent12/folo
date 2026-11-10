@@ -49,7 +49,7 @@ use crate::error::{Error, Result};
 use crate::label::job::unique_file_name;
 use crate::label::{check_model, check_name, check_text};
 use crate::store::{ImageData, Store};
-use crate::util::{fnv1a, rfc3339, unique_id, unix_now};
+use crate::util::{fnv1a, parse_rfc3339_millis, rfc3339, rfc3339_millis, unique_id, unix_now};
 use model::{Engine, Job, Resolved};
 use state::{BenchFile, EntryState, ImageRecord, Slot, State, VERSION, bench_not_found};
 
@@ -217,13 +217,18 @@ fn new_entry(
     let id = unique_id("be", fnv1a(name.as_bytes()) ^ unix_now().to_bits(), |id| {
         state.entries.iter().any(|e| e.entry.id == id)
     });
+    // To the millisecond and later than every entry the benchmark has: `created` (then the id) is the order of
+    // the leaderboard's ties, and it has to be the order the entries were made in, also after a restart.
+    let last = state.entries.iter().filter_map(|e| parse_rfc3339_millis(&e.entry.created)).max();
+    let now = (unix_now() * 1000.0) as i64;
+    let created = rfc3339_millis(last.map_or(now, |l| now.max(l + 1)));
     BenchEntry {
         id,
         bench_id: state.file.id.clone(),
         name,
         contestant,
         status,
-        created: rfc3339(unix_now()),
+        created,
         finished: None,
         progress: model::progress(total),
         images: images as u64,

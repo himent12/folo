@@ -87,12 +87,15 @@ pub fn run(job: LoopJob) {
     job.slot.update_loop(&job.id, |lp| {
         lp.phase = None;
         lp.finished = Some(rfc3339(unix_now()));
+        // A stop that was accepted wins over a last generation that finished meanwhile, as it does for an entry.
+        let stopped = lp.status == BenchLoopStatus::Stopping || job.cancelled();
         match ran {
             _ if closing => {
                 lp.status = BenchLoopStatus::Failed;
                 lp.error = Some(SERVER_STOPPED_LOOP.into());
                 lp.hint = Some("its finished generations are kept; start a new loop to run the rest".into());
             }
+            Ok(Ok(Ended::Done(_))) if stopped => lp.status = BenchLoopStatus::Stopped,
             Ok(Ok(Ended::Done(verdict))) => {
                 lp.status = BenchLoopStatus::Done;
                 lp.verdict = Some(verdict);

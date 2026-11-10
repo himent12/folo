@@ -553,7 +553,8 @@ pub struct BenchEntry {
     pub contestant: BenchContestant,
     /// Where it stands.
     pub status: BenchEntryStatus,
-    /// RFC 3339 time it was created.
+    /// RFC 3339 time it was created, to the millisecond (`2026-11-10T07:22:50.123Z`) and later than every entry
+    /// the benchmark already had: sorting by it is the order the entries were made in.
     pub created: String,
     /// RFC 3339 time it finished, failed or was stopped; `null` until then.
     pub finished: Option<String>,
