@@ -165,11 +165,13 @@ impl LrSchedule {
         self.c.step += 1;
     }
 
-    /// The decay multiplier `lf(t)`.
+    /// The decay multiplier `lf(t)`; from `t = T - 1` on it stays at the end value `lrf` (`from_contract` accepts a
+    /// finished run's `t = T`, where the formula would go past it).
     pub fn lf(&self, t: u64) -> f64 {
         let denom = (self.total_iters().saturating_sub(1)).max(1) as f64;
         let lrf = self.c.lrf;
-        let x = t as f64 / denom;
+        // `t ≤ T - 1` gives `x ≤ 1` exactly, so the clamp changes nothing a run steps through.
+        let x = (t as f64 / denom).min(1.0);
         match self.c.kind {
             DecayKind::Linear => (1.0 - x) * (1.0 - lrf) + lrf,
             DecayKind::Cosine => lrf + (1.0 - lrf) * (1.0 + (std::f64::consts::PI * x).cos()) / 2.0,
@@ -212,6 +214,27 @@ impl LrSchedule {
 mod tests {
     use super::*;
     use folo_core::Tensor;
+
+    /// `from_contract` accepts `step == T` (a finished run's counter): the factor there is the schedule's end value
+    /// `lrf`, never below it (linear with T = 2 went to -0.98) nor back up (cosine past π).
+    #[test]
+    fn the_factor_ends_at_lrf() {
+        let lrf = 0.01;
+        for kind in [DecayKind::Linear, DecayKind::Cosine] {
+            for (epochs, spe) in [(2, 1), (1, 3), (10, 13)] {
+                let s = LrSchedule::new(kind, epochs, spe, lrf, 0.0, 0.0, 0.8).unwrap();
+                let total = s.total_iters();
+                assert!((s.lf(total - 1) - lrf).abs() < 1e-15, "{kind:?} T={total}");
+                assert_eq!(s.lf(total), s.lf(total - 1), "{kind:?} T={total}: lf(T)");
+                let mut c = s.contract().clone();
+                c.step = total;
+                let end = LrSchedule::from_contract(c).unwrap();
+                let group =
+                    ParamGroup::new("decay", vec![("w".into(), Tensor::zeros([1]))]).lr(0.01).momentum(0.9);
+                assert!(end.lr_at(total, &group) >= 0.01 * lrf - 1e-18, "{kind:?} T={total}");
+            }
+        }
+    }
 
     #[test]
     fn docs_model_10_4() {
