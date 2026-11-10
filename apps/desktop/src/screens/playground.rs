@@ -563,7 +563,7 @@ impl FoloApp {
         // An end-to-end model (the run that trained it had the one-to-one head) predicts without NMS,
         // so its IoU setting does nothing.
         let e2e = model.as_ref().is_some_and(|m| self.model_e2e(m));
-        let best_conf = model.as_ref().and_then(|m| m.metrics.as_ref()).and_then(|x| x.best_f1_conf);
+        let best_conf = model.as_ref().and_then(|m| m.metrics.as_ref()).and_then(offered_conf);
         // The built-in demo's numbers are simulated: its timing says so.
         let simulated = self.play_target.is_none() && !self.store.api.local_inference();
         let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
@@ -1329,4 +1329,32 @@ fn device_name(device: &str, system: Option<&crate::api::SystemInfo>) -> String 
         .and_then(|n| n.parse::<u32>().ok())
         .and_then(|n| system?.gpus.iter().find(|g| g.ordinal == n))
         .map_or(device.to_string(), |g| crate::ui::short_gpu(&g.name))
+}
+
+/// The confidence Playground offers as "Use … (best F1)": the model's best-F1 threshold, unless the
+/// model found nothing (precision and recall 0), where that threshold is only the end of the search
+/// grid and using it would hide every detection.
+fn offered_conf(m: &crate::api::ModelMetrics) -> Option<f32> {
+    m.best_f1_conf.filter(|_| m.precision > 0. || m.recall > 0.)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn best_f1_conf_is_offered_only_when_the_model_found_something() {
+        let m = |precision: f32, recall: f32| crate::api::ModelMetrics {
+            map50: 0.,
+            map50_95: 0.,
+            precision,
+            recall,
+            best_f1_conf: Some(1.0),
+        };
+        // A model that learned nothing yet: its "best" threshold is 1.00, which shows no boxes.
+        assert_eq!(offered_conf(&m(0., 0.)), None);
+        assert_eq!(offered_conf(&m(0.4, 0.)), Some(1.0));
+        assert_eq!(offered_conf(&m(0.8, 0.6)), Some(1.0));
+        assert_eq!(offered_conf(&crate::api::ModelMetrics { best_f1_conf: None, ..m(0.8, 0.6) }), None);
+    }
 }
