@@ -926,11 +926,16 @@ impl FoloApp {
             self.fetch(
                 cx,
                 |api| api.system(),
-                |this, r, _| {
+                |this, r, cx| {
                     if let Ok(s) = &r
                         && let Some(g) = s.system.gpus.first().and_then(|g| g.util)
                     {
                         this.store.gpu_util.push_back(g);
+                    }
+                    this.store.note_reachability(r.as_ref().err());
+                    // Back after being unreachable: check its health now, not in 2 s.
+                    if this.store.health.needs_fetch() {
+                        this.ensure_core(cx);
                     }
                     let r = r.map(|s| {
                         this.store.capabilities = s.capabilities;
