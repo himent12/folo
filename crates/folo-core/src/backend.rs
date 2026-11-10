@@ -259,9 +259,12 @@ pub struct Pool2dParams {
 }
 
 impl Pool2dParams {
-    /// Output spatial size for an input of `[h, w]`, or `None` if it would be empty.
+    /// Output spatial size for an input of `[h, w]`, or `None` if it would be empty or its arithmetic overflows
+    /// `usize`.
     pub fn output_hw(&self, h: usize, w: usize) -> Option<[usize; 2]> {
-        let f = |i: usize, k: usize, s: usize, p: usize| (i + 2 * p).checked_sub(k).map(|v| v / s + 1);
+        let f = |i: usize, k: usize, s: usize, p: usize| {
+            i.checked_add(p.checked_mul(2)?)?.checked_sub(k).map(|v| v / s + 1)
+        };
         Some([
             f(h, self.kernel[0], self.stride[0], self.padding[0])?,
             f(w, self.kernel[1], self.stride[1], self.padding[1])?,

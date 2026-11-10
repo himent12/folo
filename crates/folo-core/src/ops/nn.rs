@@ -232,8 +232,11 @@ impl Tensor {
         if p.kernel.contains(&0) || p.stride.contains(&0) {
             return Err(Error::invalid_arg(op, format!("kernel and stride must be positive: {p:?}")));
         }
-        if 2 * p.padding[0] > p.kernel[0] || 2 * p.padding[1] > p.kernel[1] {
+        if p.padding[0] > p.kernel[0] / 2 || p.padding[1] > p.kernel[1] / 2 {
             return Err(Error::invalid_arg(op, format!("padding must be at most half the kernel: {p:?}")));
+        }
+        if p.kernel[0].checked_mul(p.kernel[1]).is_none() {
+            return Err(Error::invalid_arg(op, format!("window {p:?} is too large")));
         }
         p.output_hw(h, w).ok_or_else(|| {
             Error::invalid_arg(op, format!("window {p:?} does not fit input {}", self.shape()))

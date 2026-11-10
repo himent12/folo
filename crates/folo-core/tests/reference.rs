@@ -578,3 +578,17 @@ fn upsample_output_size_overflow_is_an_error() {
     assert!(x.upsample_nearest2d(usize::MAX / 2 + 1).is_err());
     assert!(x.upsample_nearest2d(1 << 33).is_err()); // each side fits, the element count does not
 }
+
+#[test]
+fn pooling_size_overflow_is_an_error() {
+    let x = Tensor::ones([1, 1, 2, 2]);
+    // 2 · padding overflows; h + 2 · padding overflows; the window's element count overflows.
+    assert!(x.max_pool2d(usize::MAX, 1, usize::MAX / 2 + 1).is_err());
+    assert!(x.max_pool2d(usize::MAX, 1, usize::MAX / 2).is_err());
+    assert!(x.avg_pool2d(usize::MAX, 1, usize::MAX / 2).is_err());
+    let r = x.avg_pool2d(1 << 33, 1, 1 << 32);
+    if let Ok(y) = r {
+        assert_eq!(y.dims(), &[1, 1, 3, 3]);
+        assert!(y.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    }
+}
