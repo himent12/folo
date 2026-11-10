@@ -236,8 +236,20 @@ fn config_of(
     }
 }
 
+/// Keys of the `train` object whose flags do more than set the key (pick the run folder, open the dataset, create
+/// the device, ask for tensor cores), with that flag: `--set` refuses them.
+const FLAG_ONLY_KEYS: [(&str, &str); 6] = [
+    ("name", "--name"),
+    ("dataset", "--data"),
+    ("data_format", "--format"),
+    ("arch", "--model"),
+    ("device", "--device"),
+    ("amp", "--amp"),
+];
+
 /// `--set KEY=VALUE`: `cfg` with each dotted key of its JSON form replaced by the value (JSON when it parses as
-/// JSON, else a string). A key the config does not have, or a value its field cannot take, is `invalid_config`.
+/// JSON, else a string). A key the config does not have, a key of [`FLAG_ONLY_KEYS`], or a value its field cannot
+/// take, is `invalid_config`.
 fn apply_sets(cfg: TrainConfig, sets: &[String]) -> Result<TrainConfig, CliError> {
     if sets.is_empty() {
         return Ok(cfg);
@@ -251,6 +263,14 @@ fn apply_sets(cfg: TrainConfig, sets: &[String]) -> Result<TrainConfig, CliError
         let Some((key, raw)) = s.split_once('=') else {
             return Err(bad(format!("--set {s}: expected KEY=VALUE")));
         };
+        if let Some((k, flag)) = FLAG_ONLY_KEYS.iter().find(|(k, _)| *k == key.trim()) {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                "invalid_config",
+                format!("--set {k}: use {flag} (it does more than set the key: --set cannot change `{k}`)"),
+            )
+            .hint(format!("use {flag} instead of --set {k}=...")));
+        }
         let mut slot = &mut v;
         for part in key.trim().split('.') {
             let keys = slot.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>().join(", "));
@@ -713,15 +733,34 @@ mod tests {
         let sets = |s: &[&str]| s.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let c = apply_sets(
             TrainConfig::default(),
-            &sets(&["momentum=0.9", "loss.tal.topk = 13", "augment.degrees=5", "auto_rule=1", "name=abc"]),
+            &sets(&["momentum=0.9", "loss.tal.topk = 13", "augment.degrees=5", "auto_rule=1", "head=o2o"]),
         )
         .unwrap();
         assert_eq!((c.momentum, c.loss.tal.topk, c.augment.degrees, c.auto_rule), (0.9, 13, 5.0, 1));
-        assert_eq!(c.name, "abc");
+        assert_eq!(json!(c.head), json!("o2o"));
         assert_eq!(apply_sets(TrainConfig::default(), &[]).unwrap(), TrainConfig::default());
         for bad in ["momentum", "nope=1", "loss.tal.nope=1", "momentum=fast", "loss.tal.topk=-1"] {
             let e = apply_sets(TrainConfig::default(), &sets(&[bad])).unwrap_err();
             assert_eq!(e.code, "invalid_config", "{bad}");
+        }
+    }
+
+    /// Keys whose flags have side effects are refused with the flag to use: `--set name=X` was ignored, `dataset`
+    /// and `data_format` were written to config.json while training read `--data` (a later resume reopened the
+    /// wrong path), `amp` skipped asking for tensor cores and `device` skipped creating the device.
+    #[test]
+    fn set_refuses_keys_with_their_own_flags() {
+        for (key, flag) in [
+            ("name=x", "--name"),
+            ("dataset=D:/elsewhere", "--data"),
+            ("data_format=coco", "--format"),
+            ("arch=folo-s", "--model"),
+            ("device=gpu:0", "--device"),
+            (" amp =true", "--amp"),
+        ] {
+            let e = apply_sets(TrainConfig::default(), &[key.to_string()]).unwrap_err();
+            assert!(e.code == "invalid_config" && matches!(e.exit, super::ExitCode::Usage), "{key}");
+            assert!(e.message.contains(flag), "{key}: {}", e.message);
         }
     }
 
