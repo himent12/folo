@@ -557,7 +557,8 @@ pub fn letterbox_on_device_as(
 /// The `u8` images as `[H, W, 3]` tensors on `device`. On a folo-gpu device all of them share one upload: the
 /// pixels are copied in parallel straight into reused, mapped staging memory ([`folo_gpu::GpuContext::upload_with`])
 /// and each image is a view of the one device buffer (at a 4-byte aligned offset, which the letterbox kernel
-/// reads in place). Elsewhere each image is uploaded on its own.
+/// reads in place). A batch larger than the device's largest storage buffer is uploaded in several such runs,
+/// each as many images as fit. Elsewhere each image is uploaded on its own.
 fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
     let Some(ctx) = folo_gpu::context_for(device) else {
         let host: Vec<Tensor> = imgs
@@ -566,6 +567,26 @@ fn upload_images(imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
             .collect::<folo_core::Result<_>>()?;
         return Ok(host.iter().map(|t| t.to_device(device)).collect::<folo_core::Result<_>>()?);
     };
+    let caps = ctx.caps();
+    let limit = caps.max_buffer_size.min(caps.max_storage_buffer_binding_size) as usize;
+    let mut out = Vec::with_capacity(imgs.len());
+    let mut rest = imgs;
+    while !rest.is_empty() {
+        // At least one image per run (one over the limit fails in the upload, as on its own).
+        let mut total = rest[0].data.len().next_multiple_of(4);
+        let mut n = 1;
+        while n < rest.len() && total + rest[n].data.len().next_multiple_of(4) <= limit {
+            total += rest[n].data.len().next_multiple_of(4);
+            n += 1;
+        }
+        out.extend(upload_run(&ctx, &rest[..n], device)?);
+        rest = &rest[n..];
+    }
+    Ok(out)
+}
+
+/// [`upload_images`]' one shared upload of `imgs` on a folo-gpu device.
+fn upload_run(ctx: &folo_gpu::GpuContext, imgs: &[Image], device: Device) -> Result<Vec<Tensor>> {
     let mut offsets = Vec::with_capacity(imgs.len());
     let mut total = 0usize;
     for im in imgs {

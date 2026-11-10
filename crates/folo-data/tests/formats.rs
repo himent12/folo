@@ -461,3 +461,30 @@ fn open_splits_reads_only_the_asked_splits() {
     let only = open_splits(&c, &opts, &[Split::Val]).unwrap();
     assert_eq!((only.split_sizes(), only.classes.len()), ([0, 0, 0], 2));
 }
+
+/// Text files written with a UTF-8 byte order mark (Notepad, PowerShell 5.1's `Set-Content -Encoding UTF8`) read
+/// like the same files without one: label files, `classes.txt`, `data.yaml` and image lists.
+#[test]
+fn utf8_bom_is_ignored() {
+    const BOM: &str = "\u{feff}";
+    let t = TempDir::new("bom");
+    let r = t.path();
+    write(&r.join("data.yaml"), format!("{BOM}train: images/train\nval: val.txt\nnames: ['cat', 'dog']\n"));
+    write_png(&r.join("images/train/a.png"), 20, 20, [10, 10, 10]);
+    write(&r.join("labels/train/a.txt"), format!("{BOM}1 0.5 0.5 0.5 0.5\r\n"));
+    write_png(&r.join("images/val/v.png"), 20, 20, [10, 10, 10]);
+    write(&r.join("val.txt"), format!("{BOM}images/val/v.png\r\n"));
+    let ds = open(r).unwrap();
+    assert_eq!(ds.report.broken_labels(), 0, "{:#?}", ds.report);
+    assert_eq!(ds.split_sizes(), [1, 1, 0], "{:#?}", ds.report);
+    assert_eq!(ds.train.boxes(0), &[BBox::new(1, 0.5, 0.5, 0.5, 0.5)]);
+    let c = folo_data::check::check(r, &folo_data::check::CheckOptions::default()).unwrap();
+    assert!(c.issues.iter().all(|i| i.kind != folo_data::check::CheckKind::BrokenLabel), "{:#?}", c.issues);
+
+    let d = TempDir::new("bom-dir");
+    let r = d.path();
+    write_png(&r.join("images/train/a.png"), 20, 20, [10, 10, 10]);
+    write(&r.join("labels/train/a.txt"), "0 0.5 0.5 0.5 0.5\n");
+    write(&r.join("labels/classes.txt"), format!("{BOM}person\r\ncar\r\n"));
+    assert_eq!(open(r).unwrap().classes, ["person", "car"]);
+}

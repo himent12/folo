@@ -1,6 +1,6 @@
 //! YOLO format: `data.yaml`, `images/` + `labels/`.
 
-use super::labels::MAX_CLASSES;
+use super::labels::{MAX_CLASSES, strip_bom};
 use super::{
     Candidate, FileDataset, Format, IssueKind, LabelSource, LoadReport, LoadedDataset, OpenOptions, Split,
     build_entries, default_names,
@@ -49,7 +49,7 @@ pub(crate) fn find_yaml(dir: &Path) -> Option<PathBuf> {
         crate::guard::check(p)
             .and_then(|_| std::fs::read_to_string(p))
             .ok()
-            .and_then(|t| serde_yaml::from_str::<Value>(&t).ok())
+            .and_then(|t| serde_yaml::from_str::<Value>(strip_bom(&t)).ok())
             .is_some_and(|v| v.get("train").is_some())
     })
 }
@@ -76,7 +76,7 @@ pub(crate) fn scan_yaml(yaml: &Path) -> Result<YoloScan> {
     let text = crate::guard::check(yaml)
         .and_then(|_| std::fs::read_to_string(yaml))
         .map_err(|e| DataError::io(yaml, e))?;
-    let v: Value = serde_yaml::from_str(&text)
+    let v: Value = serde_yaml::from_str(strip_bom(&text))
         .map_err(|e| DataError::Format(format!("{}: invalid YAML: {e}", crate::paths::shown(yaml))))?;
     if !v.is_mapping() {
         return Err(DataError::Format(format!(
@@ -194,7 +194,14 @@ pub(crate) fn scan_dir(root: &Path) -> YoloScan {
                 None
             }
         })
-        .map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect::<Vec<_>>());
+        .map(|t| {
+            strip_bom(&t)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect::<Vec<_>>()
+        });
     YoloScan { root: root.to_path_buf(), names, splits, report, sources: vec![root.to_path_buf()] }
 }
 
@@ -356,7 +363,7 @@ fn collect_images(src: &Path, root: &Path, out: &mut Vec<PathBuf>, report: &mut 
             }
         };
         let parent = src.parent().unwrap_or(Path::new("."));
-        for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        for line in strip_bom(&text).lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
             let p = Path::new(line);
             let path = if p.is_absolute() {
                 p.to_path_buf()
