@@ -16,6 +16,7 @@ use crate::theme::{radius, theme, ty};
 use crate::ui::*;
 
 use super::error_note;
+use super::new_run_footer::NewRunSummary;
 
 /// The optimizer segments' labels (the helper under them repeats the chosen one).
 const OPT_LABELS: [&str; 4] = ["Auto", "SGD", "AdamW", "MuSGD"];
@@ -820,9 +821,7 @@ impl FoloApp {
                         .child(text(ty::SM, t.text_primary).child(n)),
                 )
             });
-        self.frame_new_run(
-            t,
-            body,
+        let form = NewRunSummary {
             ds,
             cloud,
             cloud_offer,
@@ -838,8 +837,7 @@ impl FoloApp {
             close_bad,
             submitting,
             opt_unknown,
-            window,
-            cx,
-        )
+        };
+        self.frame_new_run(t, body, form, window, cx)
     }
 }

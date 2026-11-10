@@ -48,32 +48,54 @@ pub fn estimate(arch: usize, epochs: f32, batch: u32, imgsz: u32, images: u32) -
     (secs, vram)
 }
 
+/// What `new_run_dialog` read from the form and the footer needs: the choices that decide the estimate and the
+/// cost, and what keeps Start disabled.
+pub(super) struct NewRunSummary {
+    pub(super) ds: Option<crate::api::Dataset>,
+    pub(super) cloud: Option<crate::api::CloudConnection>,
+    pub(super) cloud_offer: Option<crate::api::CloudOffer>,
+    pub(super) arch: usize,
+    pub(super) epochs: f32,
+    pub(super) batch: usize,
+    pub(super) imgsz: usize,
+    pub(super) device: usize,
+    pub(super) amp: bool,
+    pub(super) amp_why: Option<String>,
+    pub(super) epochs_bad: bool,
+    pub(super) lr_bad: bool,
+    pub(super) close_bad: bool,
+    pub(super) submitting: bool,
+    pub(super) opt_unknown: bool,
+}
+
 impl FoloApp {
     /// The New run dialog around its `body`: the footer (the estimate, a cloud run's cost, Cancel and
     /// Start) and the frame. `new_run_dialog` hands over what it read from the form.
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn frame_new_run(
         &mut self,
         t: Theme,
         body: Div,
-        ds: Option<crate::api::Dataset>,
-        cloud: Option<crate::api::CloudConnection>,
-        cloud_offer: Option<crate::api::CloudOffer>,
-        arch: usize,
-        epochs: f32,
-        batch: usize,
-        imgsz: usize,
-        device: usize,
-        amp: bool,
-        amp_why: Option<String>,
-        epochs_bad: bool,
-        lr_bad: bool,
-        close_bad: bool,
-        submitting: bool,
-        opt_unknown: bool,
+        form: NewRunSummary,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let NewRunSummary {
+            ds,
+            cloud,
+            cloud_offer,
+            arch,
+            epochs,
+            batch,
+            imgsz,
+            device,
+            amp,
+            amp_why,
+            epochs_bad,
+            lr_bad,
+            close_bad,
+            submitting,
+            opt_unknown,
+        } = form;
         self.ensure_estimate(cx);
         let images = ds.as_ref().map_or(0, |d| d.splits.train);
         let cpu = DEVICES[device] == "cpu" && cloud.is_none();
