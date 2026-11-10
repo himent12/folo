@@ -197,6 +197,21 @@ fn data_dir_that_is_a_file_is_a_usage_error() {
     }
 }
 
+/// `folo mcp`'s stdout carries protocol messages only, also with `--json` (docs/CLI.md): a startup error is on
+/// stderr, not an error envelope on stdout.
+#[test]
+fn mcp_errors_stay_off_stdout_with_json() {
+    let out = Command::new(env!("CARGO_BIN_EXE_folo"))
+        .args(["mcp", "--json", "--server", "ftp://example.com"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{stderr}");
+    assert!(out.stdout.is_empty(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    assert!(stderr.contains("--server"), "{stderr}");
+}
+
 #[test]
 fn version_has_sha_and_build_date() {
     let (code, stdout, _) = folo(&["--version"]);

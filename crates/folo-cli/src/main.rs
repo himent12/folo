@@ -44,7 +44,8 @@ fn main() -> std::process::ExitCode {
         Ok(cli) => cli,
         Err(e) => return usage_error(out, e),
     };
-    let out = Out { json: cli.json };
+    // `folo mcp`'s stdout belongs to the protocol, also with --json: its errors go to stderr only.
+    let out = Out { json: cli.json && !matches!(cli.command, Command::Mcp(_)) };
     match run(cli, out) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
