@@ -29,6 +29,12 @@ describe('format', () => {
     expect(ms(12.34)).toBe('12.3 ms');
     expect(lr(0.0098)).toBe('9.80 × 10⁻³');
   });
+  it('never writes a learning rate with a mantissa of 10', () => {
+    // 0.009996 rounds to 10.00 × 10⁻³ in the old exponent: that is 1.00 × 10⁻².
+    expect(lr(0.009996)).toBe('1.00 × 10⁻²');
+    expect(lr(0.00099951)).toBe('1.00 × 10⁻³');
+    expect(lr(-0.009996)).toBe('-1.00 × 10⁻²');
+  });
   it('formats relative times', () => {
     const now = Date.parse('2026-11-08T14:30:00Z');
     expect(ago('2026-11-08T14:29:40Z', now)).toBe('just now');

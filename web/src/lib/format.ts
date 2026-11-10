@@ -138,7 +138,9 @@ export function pow10(e: number): string {
 export function lr(x: number | null | undefined): string {
   if (!ok(x)) return '—';
   if (x === 0) return '0';
-  const e = Math.floor(Math.log10(Math.abs(x)));
+  let e = Math.floor(Math.log10(Math.abs(x)));
+  // A mantissa that rounds up to 10 (0.009996 → "10.00") belongs to the next power.
+  if (Math.abs(Number((x / 10 ** e).toFixed(2))) >= 10) e++;
   return `${(x / 10 ** e).toFixed(2)} × ${pow10(e)}`;
 }
 
