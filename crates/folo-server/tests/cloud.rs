@@ -1147,11 +1147,13 @@ fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
     let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
     // The checkpoint of epoch 1 arrives whole, and after it nothing from the worker does...
     let weights = t.join("home").join("runs").join(&run.id).join("weights");
+    // (Staged, or already moved into place by the next poll: the window of the staged file is one poll long.)
     until("the checkpoint fetched", || {
         let names = std::fs::read_dir(&weights).ok()?;
         names
             .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().starts_with(".last.folo.copy."))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .any(|n| n.starts_with(".last.folo.copy.") || n == "last.folo")
             .then_some(())
     });
     // ...until its instance is gone.
