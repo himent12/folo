@@ -338,11 +338,22 @@ pub fn open(path: impl AsRef<Path>) -> Result<LoadedDataset> {
 /// another YAML with a `train` key) means YOLO; COCO JSON under `annotations/`, the root or `train|val|test/` means
 /// COCO; `images/` + `labels/` folders without a YAML mean YOLO as well.
 pub fn open_with(path: impl AsRef<Path>, opts: &OpenOptions) -> Result<LoadedDataset> {
+    open_splits(path, opts, &Split::ALL)
+}
+
+/// [`open_with`] for some splits only: the splits in `splits` come out exactly as [`open_with`] builds them (same
+/// classes, entries and order), the others empty, and their images and labels are never read or probed (COCO
+/// files of the other splits are read for their categories only). The report and [`LoadedDataset::sources`] cover
+/// what was read. `folo val` opens just the split it evaluates this way: COCO's 5 000 validation images without
+/// checking the 118 287 training images first.
+///
+/// A YOLO dataset without class names (they are then counted from the labels of every split) is opened whole.
+pub fn open_splits(path: impl AsRef<Path>, opts: &OpenOptions, splits: &[Split]) -> Result<LoadedDataset> {
     let path = path.as_ref();
     match detect(path, opts.format)? {
-        Source::Yaml(yaml) => yolo::open_yaml(&yaml, opts),
-        Source::Coco { root, jsons } => coco::open_jsons(&root, jsons, opts),
-        Source::YoloDir(root) => yolo::open_dir(&root, opts),
+        Source::Yaml(yaml) => yolo::finish(yolo::scan_yaml(&yaml)?, opts, splits),
+        Source::Coco { root, jsons } => coco::open_jsons(&root, jsons, opts, splits),
+        Source::YoloDir(root) => yolo::finish(yolo::scan_dir(&root), opts, splits),
     }
 }
 

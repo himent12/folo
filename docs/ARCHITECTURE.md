@@ -46,9 +46,19 @@ training and evaluation pipeline, a server, a CLI and a web studio.
   `cpu::SILU_MAX_REL_ERR` (5e-7, tested).
   `Tensor::conv2d_act_cat` runs the same conv over the channel concatenation of several inputs, reading each part
   (or a channel slice of a tensor) in place, so `cat` + conv never writes the concatenation. Max pooling is
-  separable (row pass, then column pass; same first-maximum argmax as a direct scan). Batches smaller than the
-  thread pool split the pool between images. The stride-1 input gradient is the forward kernel run on the output gradient with the flipped,
-  channel-swapped kernel (no col2im); strided convs use an unfolded gradient and col2im. `f32` buffers from 16 KiB
+  separable (row pass, then column pass; same first-maximum argmax as a direct scan). A batch of several images
+  splits the pool between them: only as many images run at once (`lanes`) as their shifted-rows copies or unfolded
+  gradients fit in 16 MiB, each lane taking its images one after another, and each image's GEMMs get
+  `threads / lanes` threads (work stealing spreads the tiles); the weight gradient makes its images' operands in
+  waves of that size, each wave tiling its rows over the K parts it touches. On the CPU,
+  `Predictor::predict_batch` runs chunks of two images as concurrent forwards, the same predictions as one pass. The stride-1 input gradient is the forward kernel run on the output gradient with the flipped,
+  channel-swapped kernel (no col2im); strided convs use an unfolded gradient and col2im. The weight gradient of a
+  stride-1 conv (or a pointwise one with at least 64 input channels) is `dWᵀ = X_unfolded · gyᵀ` with the input's
+  shifted rows as A, read in place by a 6x16 micro-kernel through six row pointers (`gemm_arows`), and the output
+  gradient transposed once per image into packed B panels (zeros in the dropped columns); K is cut into parts
+  and the rows into tiles by shape alone, partials added in order. Other convs pack the unfolded input as they
+  go. folo-nn's train-mode BatchNorm on the CPU applies SiLU / ReLU in its own passes (forward and backward),
+  bit for bit BatchNorm then `Tensor::silu` / `relu` (`cpu::silu` / `cpu::silu_backward` are the shared formulas). `f32` buffers from 16 KiB
   are recycled through a size-keyed cache (`cpu::set_buffer_cache_limit`, default 1 GiB; `cpu::take_buffer` hands one
   to custom ops) so training and inference loops do not pay page faults every step. `cpu::in_pool` runs a closure on
   a worker of a dedicated rayon pool (so the per-thread state cannot reach other jobs of the global pool) with the

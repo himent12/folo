@@ -20,7 +20,7 @@ mod pool;
 mod pool_alloc;
 pub(crate) mod reduce;
 
-pub use elementwise::{SILU_MAX_REL_ERR, fast_exp};
+pub use elementwise::{SILU_MAX_REL_ERR, fast_exp, silu, silu_backward};
 pub(crate) use pool_alloc::{alloc_filled, alloc_uninit, alloc_zeroed, recycle};
 pub use pool_alloc::{buffer_cache_bytes, clear_buffer_cache, set_buffer_cache_limit};
 

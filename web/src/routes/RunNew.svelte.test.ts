@@ -1125,3 +1125,15 @@ describe('New run: the server’s figures and refusals (server PR #140)', () => 
     expect(target.querySelector('#start-why')).toBeNull();
   });
 });
+
+describe('New run from a MuSGD run', () => {
+  it('offers MuSGD and keeps it when prefilled from a run that trained with it', async () => {
+    const base = (await api.run('run_a2f0')).config;
+    const made = await api.createRun({ ...base, name: 'shapes-musgd', device: 'cpu', optimizer: 'musgd' });
+    await open(`?from=${made.id}`);
+    const sel = target.querySelector<HTMLSelectElement>('select#opt')!;
+    expect([...sel.options].map((o) => o.value)).toEqual(['auto', 'sgd', 'adamw', 'musgd']);
+    expect(sel.value).toBe('musgd');
+    expect(sel.options[sel.selectedIndex]?.textContent?.trim()).toBe('MuSGD');
+  });
+});

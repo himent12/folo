@@ -1068,6 +1068,9 @@ impl MockStore {
         if !(c.lr0.is_finite() && c.lr0 > 0.0 && c.lr0 < 10.0) {
             return bad("lr0", "must be in (0, 10)");
         }
+        if c.optimizer == folo_api::Optimizer::Unknown {
+            return bad("optimizer", "unknown value (this build knows auto, sgd, adamw and musgd)");
+        }
         let gpu_ok = c.device.strip_prefix("gpu:").is_some_and(|n| n.parse::<u32>().is_ok());
         if !(c.device == "auto" || c.device == "cpu" || gpu_ok) {
             return bad("device", "must be auto, cpu or gpu:<n>");
@@ -1497,6 +1500,7 @@ impl Store for MockStore {
 
     fn run_cli(&self, id: &str) -> Result<CliCommand> {
         let (run, ds) = self.run(id)?;
+        crate::cli::check_optimizer(&run.config)?;
         let weights = run.config.weights.as_deref().map(mock_weights);
         Ok(crate::cli::train_command(&run.config, &ds.meta().path, ds.meta().format, weights.as_deref()))
     }

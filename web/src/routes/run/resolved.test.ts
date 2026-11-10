@@ -51,7 +51,7 @@ describe('Run › Config wording', () => {
 
   it('keeps the request as it is without a resolution (queued runs, older servers)', () => {
     // A value cell holds one short value; what Auto picks goes under the label.
-    expect(optimizerSetting(config, null)).toEqual({ value: 'Auto', about: 'AdamW for short runs, else SGD' });
+    expect(optimizerSetting(config, null)).toEqual({ value: 'Auto', about: 'AdamW, or MuSGD for long runs' });
     expect(lrSetting(config, undefined)).toEqual({ value: '0.01' });
     expect(batchSetting(config, null)).toEqual({ value: '8' });
   });

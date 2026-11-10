@@ -154,8 +154,8 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
             cfg.imgsz, cfg.batch
         )));
     }
-    let mut ev = Evaluator::new(nc);
-    let mut samples = Vec::new();
+    let ev = Evaluator::new(nc);
+    let samples = Vec::new();
     if ds.is_empty() {
         return Ok(ValResult {
             report: ev.compute(),
@@ -174,45 +174,124 @@ pub fn validate(model: &FoloModel, ds: Arc<dyn Dataset>, cfg: &ValConfig) -> Res
             ..LoaderConfig::val(cfg.batch, cfg.imgsz)
         },
     )?;
-    let mut index = 0usize;
-    let mut kept = Vec::new();
-    for batch in loader.epoch(0) {
-        let mut batch = batch?;
-        let truths = batch_truths(&batch);
-        let x = batch_tensor(&mut batch, device, model.dtype())?;
-        let pred = model.predict_raw_as(&x, &cfg.nms, head)?;
-        for (i, img) in pred.images.iter().enumerate() {
-            ev.add_image(&img.detections, &truths[i]);
-            let meta = &batch.meta[i];
+    // The download of a batch's decoded outputs and the host post-processing (NMS per image, metrics, samples)
+    // run on a second thread while this one encodes the next batches' forward passes, so the GPU does not wait
+    // for the host. Batches reach that thread in order, so the result is the serial one.
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Decoded>(1);
+    let (ev, samples, kept) = std::thread::scope(|scope| -> Result<_> {
+        // Owned here, so an early error return closes the channel and the scope can join the thread.
+        let tx = tx;
+        let post = scope.spawn(|| -> Result<Post> {
+            let mut post = Post { ev, samples, kept: Vec::new(), index: 0 };
+            for d in rx {
+                post.add(d, &*ds, cfg)?;
+            }
+            Ok(post)
+        });
+        for batch in loader.epoch(0) {
+            let mut batch = batch?;
+            let truths = batch_truths(&batch);
+            let x = batch_tensor(&mut batch, device, model.dtype())?;
+            let output = {
+                let _g = folo_core::no_grad();
+                model.forward_head(&x, head)?
+            };
+            drop(x);
+            let (nc, mode) = (output.num_classes, output.mode);
+            let images = if output.box_raw.device().is_cpu() {
+                Outputs::Host(output.decode_images()?)
+            } else {
+                // Encoded here, downloaded by the other thread (HeadOutput::decode_images' device path).
+                Outputs::Device(output.decoded_on_device()?, output.num_anchors())
+            };
+            drop(output);
+            if tx.send(Decoded { images, nc, mode, truths, meta: batch.meta }).is_err() {
+                break; // the post-processing thread failed; joining it below reports why
+            }
+        }
+        drop(tx);
+        let post = post.join().unwrap_or_else(|p| std::panic::resume_unwind(p))?;
+        Ok((post.ev, post.samples, post.kept))
+    })?;
+    Ok(ValResult { report: ev.compute(), samples, detections: kept, seconds: t0.elapsed().as_secs_f64() })
+}
+
+/// One batch's decoded outputs and ground truth, on their way to [`Post`].
+struct Decoded {
+    images: Outputs,
+    nc: usize,
+    mode: HeadMode,
+    truths: Vec<Vec<Truth>>,
+    meta: Vec<folo_data::ImageMeta>,
+}
+
+/// A batch's decoded outputs ([`crate::model::HeadOutput::decode_images`]).
+enum Outputs {
+    /// Per image: decoded boxes and class scores.
+    Host(Vec<(Vec<Xyxy>, Vec<f32>)>),
+    /// [`crate::model::HeadOutput::decoded_on_device`] (not read back yet) and the anchor count.
+    Device(Tensor, usize),
+}
+
+/// The host half of [`validate`]: post-processing, metrics, samples and kept detections, batch by batch in order.
+struct Post {
+    ev: Evaluator,
+    samples: Vec<ValSample>,
+    kept: Vec<(usize, Vec<Detection>)>,
+    /// Images seen so far.
+    index: usize,
+}
+
+impl Post {
+    fn add(&mut self, d: Decoded, ds: &dyn Dataset, cfg: &ValConfig) -> Result<()> {
+        use rayon::prelude::*;
+        let Decoded { images, nc, mode, truths, meta } = d;
+        let post = |(b, s): (Vec<Xyxy>, Vec<f32>)| crate::nms::postprocess(&b, &s, nc, &cfg.nms, mode);
+        let dets: Vec<Vec<Detection>> = match images {
+            Outputs::Host(images) => images.into_par_iter().map(post).collect(),
+            Outputs::Device(t, a) => {
+                let all = t.to_vec::<f32>()?;
+                if mode == HeadMode::O2m {
+                    // NMS straight from the downloaded rows, without splitting them into boxes and scores.
+                    all.par_chunks_exact(a * (4 + nc))
+                        .map(|rows| crate::nms::non_max_suppression_rows(rows, nc, &cfg.nms))
+                        .collect()
+                } else {
+                    crate::model::HeadOutput::split_decoded(&all, a, nc).into_par_iter().map(post).collect()
+                }
+            }
+        };
+        for (i, dets) in dets.into_iter().enumerate() {
+            self.ev.add_image(&dets, &truths[i]);
+            let meta = &meta[i];
             let unmap = |b: &Xyxy| {
                 let [x1, y1, x2, y2] = meta.unmap_xyxy([b.x1, b.y1, b.x2, b.y2]);
                 Xyxy::new(x1, y1, x2, y2)
             };
-            if cfg.keep_detections {
-                kept.push((
-                    meta.index,
-                    img.detections.iter().map(|d| Detection { bbox: unmap(&d.bbox), ..*d }).collect(),
-                ));
-            }
-            if index < cfg.samples {
-                samples.push(ValSample {
+            if self.index < cfg.samples {
+                self.samples.push(ValSample {
                     index: meta.index,
                     file: ds.image_path(meta.index).map(|p| p.display().to_string()),
                     width: meta.orig_size[0],
                     height: meta.orig_size[1],
                     truth: truths[i].iter().map(|t| Truth { bbox: unmap(&t.bbox), class: t.class }).collect(),
-                    pred: img
-                        .detections
+                    pred: dets
                         .iter()
                         .filter(|d| d.score >= cfg.sample_conf)
                         .map(|d| Detection { bbox: unmap(&d.bbox), ..*d })
                         .collect(),
                 });
             }
-            index += 1;
+            if cfg.keep_detections {
+                self.kept.push((
+                    meta.index,
+                    dets.iter().map(|d| Detection { bbox: unmap(&d.bbox), ..*d }).collect(),
+                ));
+            }
+            self.index += 1;
         }
+        Ok(())
     }
-    Ok(ValResult { report: ev.compute(), samples, detections: kept, seconds: t0.elapsed().as_secs_f64() })
 }
 
 /// docs/API.md's `ValMetrics` of a report. `best_f1_conf` is the report's `best_conf`, `None` when no class has
@@ -235,5 +314,102 @@ pub fn val_metrics(r: &EvalReport) -> folo_api::ValMetrics {
                 recall: c.recall,
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use folo_data::Split;
+    use folo_data::synthetic::{SyntheticConfig, SyntheticDataset};
+    use folo_nn::io::ModelConfig;
+
+    /// The pipelined [`validate`] (post-processing on a second thread) gives exactly what the serial loop gives:
+    /// predict, then score each image in order. With conf 0 an untrained model keeps a box at every anchor, so NMS,
+    /// the metrics, the samples and the kept detections all have work to do.
+    #[test]
+    fn validate_matches_the_serial_loop() {
+        check_against_serial(Device::Cpu);
+    }
+
+    /// The same on a GPU, where the other thread also downloads the decoded outputs.
+    #[test]
+    fn validate_matches_the_serial_loop_on_gpu() {
+        let ctx = match folo_gpu::GpuContext::shared() {
+            Ok(c) => c,
+            Err(e) => return eprintln!("note: skipping GPU test, no adapter: {e}"),
+        };
+        if ctx.summary().device_type == "Cpu" && std::env::var("FOLO_GPU_TEST_SOFTWARE").is_err() {
+            return eprintln!("note: skipping GPU test on software adapter {}", ctx.summary().name);
+        }
+        check_against_serial(folo_gpu::init().unwrap());
+    }
+
+    fn check_against_serial(device: Device) {
+        let cfg = SyntheticConfig {
+            images: 10,
+            classes: vec!["circle".into(), "square".into()],
+            imgsz: 64,
+            seed: 5,
+            val_fraction: 0.0,
+            ..SyntheticConfig::default()
+        };
+        let ds: Arc<dyn Dataset> = Arc::new(SyntheticDataset::new(cfg, Split::Train).unwrap());
+        let model = FoloModel::new(ModelConfig::new("n", 2).unwrap()).unwrap();
+        let model = crate::train::place_model(model, device).unwrap();
+        model.eval();
+        let mut vc = ValConfig { samples: 5, keep_detections: true, workers: 2, ..ValConfig::new(64, 4) };
+        // Untrained scores sit near the class prior, so keep everything: NMS then has every anchor to sort out.
+        (vc.nms.conf, vc.sample_conf) = (0.0, 0.0);
+        let got = validate(&model, ds.clone(), &vc).unwrap();
+
+        let lc = LoaderConfig { workers: 0, u8_images: !device.is_cpu(), ..LoaderConfig::val(4, 64) };
+        let loader = DataLoader::new(ds.clone(), lc).unwrap();
+        let mut ev = Evaluator::new(2);
+        let (mut samples, mut kept, mut index) = (Vec::new(), Vec::new(), 0);
+        for batch in loader.epoch(0) {
+            let mut batch = batch.unwrap();
+            let truths = batch_truths(&batch);
+            let x = batch_tensor(&mut batch, device, DType::F32).unwrap();
+            let pred = model.predict_raw(&x, &vc.nms).unwrap();
+            for (i, img) in pred.images.iter().enumerate() {
+                ev.add_image(&img.detections, &truths[i]);
+                let meta = &batch.meta[i];
+                let unmap = |b: &Xyxy| {
+                    let [x1, y1, x2, y2] = meta.unmap_xyxy([b.x1, b.y1, b.x2, b.y2]);
+                    Xyxy::new(x1, y1, x2, y2)
+                };
+                if index < vc.samples {
+                    samples.push(ValSample {
+                        index: meta.index,
+                        file: None,
+                        width: meta.orig_size[0],
+                        height: meta.orig_size[1],
+                        truth: truths[i]
+                            .iter()
+                            .map(|t| Truth { bbox: unmap(&t.bbox), class: t.class })
+                            .collect(),
+                        pred: img
+                            .detections
+                            .iter()
+                            .filter(|d| d.score >= vc.sample_conf)
+                            .map(|d| Detection { bbox: unmap(&d.bbox), ..*d })
+                            .collect(),
+                    });
+                }
+                kept.push((
+                    meta.index,
+                    img.detections.iter().map(|d| Detection { bbox: unmap(&d.bbox), ..*d }).collect(),
+                ));
+                index += 1;
+            }
+        }
+        assert!(
+            kept.iter().map(|k: &(usize, Vec<Detection>)| k.1.len()).sum::<usize>() > 100,
+            "too few boxes to test"
+        );
+        assert_eq!(got.report, ev.compute());
+        assert_eq!(got.samples, samples);
+        assert_eq!(got.detections, kept);
     }
 }

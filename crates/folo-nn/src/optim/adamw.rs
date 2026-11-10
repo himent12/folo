@@ -6,7 +6,8 @@ use folo_core::backend::OptimStep;
 use folo_core::{DType, Tensor};
 
 use super::{
-    GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, take_state, validate_groups,
+    GradSource, OptimKind, Optimizer, ParamGroup, cpu_fast, for_each_param, step_many, take_state,
+    validate_groups,
 };
 use crate::{Error, Result};
 
@@ -149,7 +150,25 @@ impl Optimizer for AdamW {
             })
             .collect();
         let (groups, state) = (&self.groups, &self.state);
+        let adamw = |gi: usize| {
+            let c = &coefs[gi];
+            OptimStep::AdamW {
+                decay: c.decay,
+                beta1: c.b1,
+                one_minus_beta1: c.one_minus_b1,
+                beta2: c.b2,
+                one_minus_beta2: c.one_minus_b2,
+                step_size: c.step_size,
+                bc2_sqrt: c.bc2_sqrt,
+                eps: c.eps,
+            }
+        };
+        let done =
+            step_many("adamw", groups, grads, adamw, |gi, pi| vec![&state[gi][pi].0, &state[gi][pi].1])?;
         for_each_param(groups, |gi, pi| {
+            if done[gi] {
+                return Ok(());
+            }
             let (name, p) = &groups[gi].params[pi];
             let Some(g) = grads.grad(p) else { return Ok(()) };
             if g.shape() != p.shape() {

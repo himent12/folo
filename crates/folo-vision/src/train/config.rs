@@ -2,23 +2,26 @@
 
 use folo_core::Device;
 use folo_data::AugmentConfig;
-use folo_nn::optim::{OptimKind, auto_optimizer, effective_weight_decay};
+use folo_nn::optim::{AUTO_RULE, OptimKind, auto_optimizer_rule, effective_weight_decay};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::loss::LossConfig;
 use crate::model::HeadMode;
 
-/// `optimizer`: `auto`, `sgd` or `adamw` (docs/MODEL.md §8.2).
+/// `optimizer`: `auto`, `sgd`, `adamw` or `musgd` (docs/MODEL.md §8.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OptimizerChoice {
-    /// AdamW for short runs (≤ 10000 iterations), SGD otherwise, with the LR of §8.2.
+    /// AdamW for short runs (≤ 10000 iterations), MuSGD otherwise (`auto_rule` 3; SGD before), with the LR of §8.2.
     #[default]
     Auto,
     /// SGD with Nesterov momentum.
     Sgd,
     /// AdamW (decoupled weight decay).
     Adamw,
+    /// MuSGD: SGD plus a Muon (orthogonalised momentum) update on conv weights.
+    Musgd,
 }
 
 /// A training run's settings. The JSON shape is docs/API.md's `TrainConfig` (`dataset_id` and `weights` are the
@@ -48,6 +51,11 @@ pub struct TrainConfig {
     pub device: String,
     /// Optimizer.
     pub optimizer: OptimizerChoice,
+    /// Version of the `auto` rule (MODEL.md §8.2): 3, the current one, picks MuSGD for long runs; 2 picks SGD there
+    /// and floors the AdamW `lr0` at 0.001 (as 3 does); 1 is the reference fit without the floor, with SGD. Missing
+    /// in configs from before it: 1, so a run resumes with the rule it started with.
+    #[serde(default = "legacy_auto_rule")]
+    pub auto_rule: u32,
     /// Base LR (ignored by `auto`).
     pub lr0: f64,
     /// Final LR fraction: the last iteration runs at `lr0 · lrf`.
@@ -88,6 +96,9 @@ pub struct TrainConfig {
     pub augment: AugmentConfig,
     /// Validation batch size; `0` means `2 · batch` (§8.7).
     pub val_batch: usize,
+    /// Loss gains and assigner settings (docs/MODEL.md §7; `reg_max` is the model's, whatever is given here).
+    /// Missing in configs from before it: the §7 defaults.
+    pub loss: LossConfig,
 }
 
 impl Default for TrainConfig {
@@ -102,6 +113,7 @@ impl Default for TrainConfig {
             imgsz: 640,
             device: "auto".into(),
             optimizer: OptimizerChoice::Auto,
+            auto_rule: AUTO_RULE,
             lr0: 0.01,
             lrf: 0.01,
             momentum: 0.937,
@@ -120,6 +132,7 @@ impl Default for TrainConfig {
             workers: default_workers(),
             augment: AugmentConfig::default(),
             val_batch: 0,
+            loss: LossConfig::default(),
         }
     }
 }
@@ -129,9 +142,16 @@ pub fn f32_decimal(v: f32) -> f64 {
     v.to_string().parse().unwrap_or(v as f64)
 }
 
-/// `min(available cores, 8)`.
+/// The `auto_rule` of settings written before the key existed.
+fn legacy_auto_rule() -> u32 {
+    1
+}
+
+/// `min(available cores, 16)`: decoding and mosaic of large images (four decodes per sample) need more than 8
+/// workers to keep up with a GPU (1920x1080 JPEGs: 83 mosaic samples/s on 8 workers, 140 on 16), and the batches
+/// do not depend on the count.
 pub fn default_workers() -> usize {
-    std::thread::available_parallelism().map_or(4, |n| n.get().min(8))
+    std::thread::available_parallelism().map_or(4, |n| n.get().min(16))
 }
 
 /// What the optimizer settings resolve to for a given training set (docs/MODEL.md §8.2).
@@ -149,10 +169,11 @@ pub struct ResolvedOptim {
 
 impl TrainConfig {
     /// The API.md `TrainConfig` mapped onto the trainer's: the shared fields are copied, the augmentation fields
-    /// it names override [`AugmentConfig::default`], and every recipe key keeps its MODEL.md default.
-    pub fn from_api(c: &folo_api::TrainConfig) -> Self {
+    /// it names override [`AugmentConfig::default`], and every recipe key keeps its MODEL.md default. An
+    /// optimizer this build does not know ([`folo_api::Optimizer::Unknown`]) is [`Error::Config`].
+    pub fn from_api(c: &folo_api::TrainConfig) -> Result<Self> {
         let a = &c.augment;
-        TrainConfig {
+        Ok(TrainConfig {
             name: c.name.clone(),
             dataset: c.dataset_id.clone(),
             arch: c.arch.as_str().to_string(),
@@ -164,6 +185,12 @@ impl TrainConfig {
                 folo_api::Optimizer::Auto => OptimizerChoice::Auto,
                 folo_api::Optimizer::Sgd => OptimizerChoice::Sgd,
                 folo_api::Optimizer::Adamw => OptimizerChoice::Adamw,
+                folo_api::Optimizer::Musgd => OptimizerChoice::Musgd,
+                folo_api::Optimizer::Unknown => {
+                    return Err(Error::Config(
+                        "optimizer: unknown value (this build knows auto, sgd, adamw and musgd)".into(),
+                    ));
+                }
             },
             lr0: f32_decimal(c.lr0),
             amp: c.amp,
@@ -183,7 +210,7 @@ impl TrainConfig {
                 ..AugmentConfig::default()
             },
             ..TrainConfig::default()
-        }
+        })
     }
 
     /// The scale letter of `arch` (`folo-n` → `n`).
@@ -242,6 +269,25 @@ impl TrainConfig {
             return bad(format!("val_batch must be at most 4096, got {}", self.val_batch));
         }
         self.augment.validate().map_err(|e| Error::Config(format!("augment: {e}")))?;
+        if !(1..=AUTO_RULE).contains(&self.auto_rule) {
+            return bad(format!("auto_rule must be in 1..={AUTO_RULE}, got {}", self.auto_rule));
+        }
+        let l = &self.loss;
+        for (name, v) in [
+            ("loss.box_gain", l.box_gain),
+            ("loss.cls_gain", l.cls_gain),
+            ("loss.dfl_gain", l.dfl_gain),
+            ("loss.tal.alpha", l.tal.alpha),
+            ("loss.tal.beta", l.tal.beta),
+            ("loss.tal.min_box_size", l.tal.min_box_size),
+        ] {
+            if !(v.is_finite() && v >= 0.0) {
+                return bad(format!("{name} must be a finite number >= 0, got {v}"));
+            }
+        }
+        if l.tal.topk == 0 || l.tal.topk2 == Some(0) {
+            return bad("loss.tal.topk and loss.tal.topk2 must be at least 1".into());
+        }
         let device = resolve_device(&self.device)?;
         if !self.device.trim().eq_ignore_ascii_case("auto") {
             super::can_place(device)?;
@@ -272,7 +318,14 @@ impl TrainConfig {
     pub fn resolve_optimizer(&self, n_train: usize, num_classes: usize) -> ResolvedOptim {
         match self.optimizer {
             OptimizerChoice::Auto => {
-                let a = auto_optimizer(n_train, self.batch, self.nbs, self.epochs as usize, num_classes);
+                let a = auto_optimizer_rule(
+                    self.auto_rule,
+                    n_train,
+                    self.batch,
+                    self.nbs,
+                    self.epochs as usize,
+                    num_classes,
+                );
                 ResolvedOptim {
                     kind: a.kind,
                     lr0: a.lr0,
@@ -280,8 +333,12 @@ impl TrainConfig {
                     warmup_bias_lr: a.warmup_bias_lr,
                 }
             }
-            OptimizerChoice::Sgd | OptimizerChoice::Adamw => ResolvedOptim {
-                kind: if self.optimizer == OptimizerChoice::Sgd { OptimKind::Sgd } else { OptimKind::AdamW },
+            OptimizerChoice::Sgd | OptimizerChoice::Adamw | OptimizerChoice::Musgd => ResolvedOptim {
+                kind: match self.optimizer {
+                    OptimizerChoice::Sgd => OptimKind::Sgd,
+                    OptimizerChoice::Musgd => OptimKind::MuSgd,
+                    _ => OptimKind::AdamW,
+                },
                 lr0: self.lr0,
                 momentum: self.momentum,
                 warmup_bias_lr: self.warmup_bias_lr,
@@ -301,10 +358,10 @@ impl ResolvedOptim {
     ) -> folo_api::ResolvedTrain {
         let adamw = self.kind == OptimKind::AdamW;
         folo_api::ResolvedTrain {
-            optimizer: if adamw {
-                folo_api::ResolvedOptimizer::Adamw
-            } else {
-                folo_api::ResolvedOptimizer::Sgd
+            optimizer: match self.kind {
+                OptimKind::Sgd => folo_api::ResolvedOptimizer::Sgd,
+                OptimKind::AdamW => folo_api::ResolvedOptimizer::Adamw,
+                OptimKind::MuSgd => folo_api::ResolvedOptimizer::Musgd,
             },
             lr0: self.lr0,
             lrf: cfg.lrf,
@@ -343,6 +400,7 @@ impl ResolvedOptim {
         let kind = match o.get("type")?.as_str()? {
             "sgd" => OptimKind::Sgd,
             "adamw" => OptimKind::AdamW,
+            "musgd" => OptimKind::MuSgd,
             _ => return None,
         };
         let resolved = ResolvedOptim {
@@ -385,6 +443,36 @@ pub fn resolve_device(s: &str) -> Result<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `auto_rule`: new configs use rule 3 (MuSGD for long runs, the AdamW lr0 floored at 0.001 since rule 2),
+    /// settings stored before the key existed (a checkpoint's `folo.train`) resume with rule 1, the reference fit;
+    /// other versions are invalid.
+    #[test]
+    fn auto_rule_versions() {
+        let cfg = TrainConfig { epochs: 30, batch: 16, ..TrainConfig::default() };
+        assert_eq!(cfg.auto_rule, AUTO_RULE);
+        assert_eq!(cfg.resolve_optimizer(2000, 80).lr0, 0.001);
+        assert_eq!(cfg.resolve_optimizer(2000, 4).lr0, 0.00125, "4 classes are above the floor");
+        let mut old = serde_json::to_value(&cfg).unwrap();
+        old.as_object_mut().unwrap().remove("auto_rule");
+        let old: TrainConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(old.auto_rule, 1);
+        assert_eq!(old.resolve_optimizer(2000, 80).lr0, 0.000119);
+        // Long runs: MuSGD (rule 3) vs SGD (rules 1 and 2), lr0 0.01 and momentum 0.9 either way.
+        let long = TrainConfig { epochs: 300, ..cfg.clone() };
+        let m = long.resolve_optimizer(118_287, 80);
+        assert_eq!((m.kind, m.lr0, m.momentum, m.warmup_bias_lr), (OptimKind::MuSgd, 0.01, 0.9, 0.0));
+        let r = long.resolved_train(118_287, 80);
+        assert_eq!((r.optimizer, r.betas), (folo_api::ResolvedOptimizer::Musgd, None));
+        for rule in [1, 2] {
+            assert_eq!(
+                TrainConfig { auto_rule: rule, ..long.clone() }.resolve_optimizer(118_287, 80).kind,
+                OptimKind::Sgd
+            );
+        }
+        assert!(TrainConfig { auto_rule: 0, ..cfg.clone() }.validate().is_err());
+        assert!(TrainConfig { auto_rule: AUTO_RULE + 1, ..cfg }.validate().is_err());
+    }
 
     /// `Run.resolved`: `auto` resolved for a short run, and the same numbers back from a `config.json` with the
     /// `resolved` object and from one written before it (rebuilt from its other keys).
