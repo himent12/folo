@@ -64,7 +64,7 @@ describe('ConfigPanel', () => {
     const r = rows(null);
     // One short value; what Auto picks is a line under the label, never a long value wrapping in the value column.
     expect(r['Optimizer']?.textContent).toBe('Auto');
-    expect(r['Optimizer']?.previousElementSibling?.querySelector('.sub')?.textContent).toBe('AdamW for short runs, else MuSGD');
+    expect(r['Optimizer']?.previousElementSibling?.querySelector('.sub')?.textContent).toBe('AdamW, or MuSGD for long runs');
     expect(r['Optimizer']?.querySelector('.mono')).toBeNull();
     expect(r['Initial LR']?.textContent).toBe('0.01');
     expect(r['Batch']?.textContent).toBe('16');
