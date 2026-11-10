@@ -18,14 +18,14 @@ use crate::draw::annotate;
 use crate::engine::{engine_error, open_dataset_splits};
 use crate::output::{CliError, ExitCode, Out};
 
-fn nn_error(e: folo_nn::Error) -> CliError {
-    engine_error(e.into())
+fn nn_error(command: &str, e: folo_nn::Error) -> CliError {
+    engine_error(command, e.into())
 }
 
 /// A weights file that cannot be read: `invalid_weights` saying what the file is not, instead of a parser
 /// detail such as a header length.
-fn weights_error(path: &Path, e: folo_nn::Error) -> CliError {
-    let mut err = nn_error(e);
+fn weights_error(command: &str, path: &Path, e: folo_nn::Error) -> CliError {
+    let mut err = nn_error(command, e);
     if err.code == "invalid_weights" {
         err.message = folo_api::codes::cap(
             &format!("{} is not a .folo weights file ({})", folo_api::json::path(path), err.message),
@@ -41,14 +41,20 @@ fn weights_error(path: &Path, e: folo_nn::Error) -> CliError {
 /// Open weights for inference (EMA when present, fused) on `device`, in f16 with `half` where the device computes
 /// in it (an f16 export is uploaded as it is); otherwise in f32, with a note on stderr when `half` asked for f16.
 /// `tensor_cores` asks for the tensor-core f16 kernels (a note on stderr when they are unavailable or unused).
-fn open_model(path: &Path, device: &str, half: bool, tensor_cores: bool) -> Result<FoloModel, CliError> {
+fn open_model(
+    command: &str,
+    path: &Path,
+    device: &str,
+    half: bool,
+    tensor_cores: bool,
+) -> Result<FoloModel, CliError> {
     let path = &crate::weights::resolve(path)?;
     if tensor_cores {
         folo_gpu::context::request_tensor_cores();
     }
     crate::engine::init_device(device);
-    let device = resolve_device(device).map_err(engine_error)?;
-    can_place(device).map_err(engine_error)?;
+    let device = resolve_device(device).map_err(|e| engine_error(command, e))?;
+    can_place(device).map_err(|e| engine_error(command, e))?;
     let fallback = if half { f16_unavailable(device) } else { None };
     if let Some(why) = &fallback {
         eprintln!("note: --half: {why}");
@@ -65,8 +71,8 @@ fn open_model(path: &Path, device: &str, half: bool, tensor_cores: bool) -> Resu
             eprintln!("note: --tensor-cores: {}", ctx.tensor_cores_status());
         }
     }
-    let file = ModelFile::open(path).map_err(|e| weights_error(path, e))?;
-    FoloModel::from_file_for_inference(&file, device, precision.dtype()).map_err(nn_error)
+    let file = ModelFile::open(path).map_err(|e| weights_error(command, path, e))?;
+    FoloModel::from_file_for_inference(&file, device, precision.dtype()).map_err(|e| nn_error(command, e))
 }
 
 /// The precision a model runs in.
@@ -75,7 +81,7 @@ fn precision_of(model: &FoloModel) -> Precision {
 }
 
 pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
-    let model = open_model(&args.model, &args.device, args.half, args.tensor_cores)?;
+    let model = open_model("val", &args.model, &args.device, args.half, args.tensor_cores)?;
     let split = match args.split {
         SplitArg::Train => Split::Train,
         SplitArg::Val => Split::Val,
@@ -116,7 +122,7 @@ pub fn val(args: ValArgs, out: Out) -> Result<(), CliError> {
     let device = model.device().to_string();
     let precision = precision_of(&model);
     let head = cfg.head.unwrap_or(model.head_mode());
-    let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(engine_error)?;
+    let r = validate(&model, Arc::new(part.clone()), &cfg).map_err(|e| engine_error("val", e))?;
     let m = val_metrics(&r.report);
     let names = model.classes();
     let name = |c: u32| names.get(c as usize).cloned().unwrap_or_else(|| c.to_string());
@@ -300,7 +306,7 @@ fn write_new(dst: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
-    let model = open_model(&args.model, &args.device, args.half, args.tensor_cores)?;
+    let model = open_model("predict", &args.model, &args.device, args.half, args.tensor_cores)?;
     let images = collect_images(&args.sources)?;
     let cfg = PredictConfig {
         imgsz: args.imgsz.unwrap_or(model.imgsz()),
@@ -310,7 +316,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
         rect: true,
         head: args.head.map(Into::into),
     };
-    let predictor = Predictor::new(model, cfg).map_err(engine_error)?;
+    let predictor = Predictor::new(model, cfg).map_err(|e| engine_error("predict", e))?;
     let destinations = match &args.save {
         Some(dir) => Some(save_paths(dir, &images)?),
         None => None,
@@ -336,7 +342,7 @@ pub fn predict(args: PredictArgs, out: Out) -> Result<(), CliError> {
             }
         };
         let decode_ms = t.elapsed().as_secs_f64() * 1e3;
-        let mut p = predictor.predict(&img).map_err(engine_error)?;
+        let mut p = predictor.predict(&img).map_err(|e| engine_error("predict", e))?;
         p.timing.preprocess_ms += decode_ms;
         p.timing.total_ms += decode_ms;
         let ti = p.timing;
@@ -469,7 +475,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     };
     // The record's dtype is lowercase, as `val` and `predict` write it.
     let dtype_name = dtype.as_str().to_ascii_lowercase();
-    let file = ModelFile::open(&args.model).map_err(|e| weights_error(&args.model, e))?;
+    let file = ModelFile::open(&args.model).map_err(|e| weights_error("export", &args.model, e))?;
     if args.format == ExportFormatArg::Weights && file.metadata().fused {
         return Err(CliError::new(
             ExitCode::Usage,
@@ -560,7 +566,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
             Ok(x) => x,
             Err(e) => {
                 let _ = std::fs::remove_file(&output); // only the file claimed above
-                return Err(engine_error(e));
+                return Err(engine_error("export", e));
             }
         };
         let value = |v: &OnnxValue| {
@@ -617,7 +623,7 @@ pub fn export(mut args: ExportArgs, out: Out) -> Result<(), CliError> {
     };
     if let Err(e) = written {
         let _ = std::fs::remove_file(&output); // only the file claimed above
-        return Err(nn_error(e));
+        return Err(nn_error("export", e));
     }
     let bytes = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
     out.record(&json!({

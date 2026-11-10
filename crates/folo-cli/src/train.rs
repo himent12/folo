@@ -53,7 +53,7 @@ pub fn train(args: TrainArgs, out: Out) -> Result<(), CliError> {
             if fresh {
                 discard_if_empty(&run_dir, out);
             }
-            return Err(engine_error(e));
+            return Err(engine_error("train", e));
         }
     };
     finish(&summary, &run_dir, trainer.config(), &trainer.resolved_train(), out);
@@ -149,7 +149,7 @@ fn start(
     };
     let arch = if let Some(init) = init {
         let p = crate::weights::resolve(Path::new(init))?;
-        let file = folo_nn::io::ModelFile::open(&p).map_err(|e| engine_error(e.into()))?;
+        let file = folo_nn::io::ModelFile::open(&p).map_err(|e| engine_error("train", e.into()))?;
         weights = Some(p);
         if file.metadata().config.has_o2o() {
             weights_head = folo_vision::model::HeadMode::O2o;
@@ -163,7 +163,7 @@ fn start(
     let mut cfg =
         apply_sets(config_of(args, name.clone(), absolute(data_arg), arch, weights_head), &args.set)?;
     // Validate before creating the run folder, so a typo leaves nothing behind.
-    cfg.validate().map_err(engine_error)?;
+    cfg.validate().map_err(|e| engine_error("train", e))?;
     let data = train_data(&ds)?;
     let run_dir = reserve_dir(&args.project, &name).map_err(|e| {
         CliError::new(
@@ -184,7 +184,7 @@ fn start(
         Ok(t) => Ok((t, run_dir)),
         Err(e) => {
             discard_if_empty(&run_dir, out);
-            Err(engine_error(e))
+            Err(engine_error("train", e))
         }
     }
 }
@@ -323,7 +323,7 @@ fn resume(
             format!("{} does not exist", folo_api::json::path(ckpt)),
         ));
     }
-    let file = folo_nn::io::ModelFile::open(ckpt).map_err(|e| engine_error(e.into()))?;
+    let file = folo_nn::io::ModelFile::open(ckpt).map_err(|e| engine_error("train", e.into()))?;
     let Some(c) = file.checkpoint() else {
         return Err(CliError::new(
             ExitCode::Usage,
@@ -406,7 +406,7 @@ fn resume(
         device: args.explicit.iter().any(|f| f == "device").then(|| args.device.clone()),
         data_format: Some(format),
     };
-    Ok((Trainer::resume(ckpt, data, opts, overrides).map_err(engine_error)?, run_dir))
+    Ok((Trainer::resume(ckpt, data, opts, overrides).map_err(|e| engine_error("train", e))?, run_dir))
 }
 
 /// Flags a resume may change: where and how fast it runs, where its data is, and how it reports.
