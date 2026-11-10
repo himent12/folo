@@ -39,6 +39,10 @@ Two GPUI details keep this working; `tools/window-check.ps1` catches a regressio
 - **The top edge is a strip over the title bar** (`resize-top`, on top and occluding). Windows resizes only where
   GPUI's hit test finds no caption area, and the title bar's drag area reaches the top of the window.
 
+Hidden from the root, the chrome also leaves keyboard mode itself on a press (`leave_kb`), as the root does for
+any other press. The caption buttons' width and Close's hover colours are tokens (`layout.desktop_caption_button`,
+`window.close`, `window.close_text`).
+
 `F11` (or Toggle full screen in the palette) toggles full screen. There the window has no caption areas, so the
 three buttons are plain buttons: Minimize, Restore (leaves full screen) and Close.
 
@@ -46,6 +50,12 @@ The window opens as it was closed: its restored size and place, maximized or ful
 (`src/window_state.rs`), kept in `<FOLO_HOME or ~/.folo>/desktop.json` (`$FOLO_DESKTOP_STATE` names another file).
 A place no connected display shows enough of opens centred on the primary display. Launches for screenshots
 (`--scenario`, `--width`, `--height`) neither read nor write it, and `--theme` beats the remembered theme.
+Closed while minimized, it keeps the mode it had before (`window_state::closing_mode`).
+
+The app icon (taskbar, Alt-Tab, Explorer) is `assets/folo.ico`, drawn from `design/logo.svg` and the tokens by
+`tools/make-icon.ps1` (run it again when either changes, and commit the .ico). GPUI loads icon resource 1 from the
+executable; `build.rs` turns the .ico into a compiled resource file in plain Rust and hands it to link.exe, so the
+build needs no resource compiler or extra crate (MSVC targets only).
 
 ## Layout
 
@@ -66,7 +76,8 @@ src/viz.rs        images with detection boxes and label chips (design/README.md 
 src/screens/      one module per screen
 src/overlays.rs   palette, dialogs, image inspector, toasts
 src/scenario.rs   `--scenario` states for screenshots
-tools/            shoot.ps1 / shoot-all.ps1 (screenshots), window-check.ps1 (the window chrome, real input)
+tools/            shoot.ps1 / shoot-all.ps1 (screenshots), window-check.ps1 (the window chrome, real input),
+                  make-icon.ps1 (assets/folo.ico)
 ```
 
 ## Data
@@ -129,9 +140,9 @@ tools\window-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe
 
 It drives the window chrome with real mouse and keyboard input (Windows only) and prints PASS or FAIL per step:
 the breadcrumbs and search field in the title bar, Maximize / Restore, double-click and drag on both drag areas,
-the top resize edge, Minimize, `F11` on and off, the three buttons in full screen, Close, and the next launches
-(maximized, windowed and full screen again at the last size and place; a saved place off every display; a
-corrupt state file). It exits 1 if any step fails. The remembered state goes to `$FOLO_DESKTOP_STATE`, a fresh file
+the top resize edge, Minimize, `F11` on and off, the three buttons in full screen, Close, a title-bar press leaving
+keyboard mode, the window's icon, and the next launches (maximized, windowed and full screen again at the last size
+and place, also after closing while minimized; a saved place off every display; a corrupt state file). It exits 1 if any step fails. The remembered state goes to `$FOLO_DESKTOP_STATE`, a fresh file
 under `$FOLO_TEST_TMP\window-check` (or `-StateDir`), never the real profile, and the last check proves that. It
 also saves a screenshot of the snap layouts over Maximize there, to look at.
 
