@@ -475,6 +475,22 @@ fn reductions_and_softmax() {
 }
 
 #[test]
+fn softmax_with_infinite_entries() {
+    // A non-finite maximum is replaced by 0, as on the CPU: a row with +inf gives 0 at its finite entries
+    // (NaN at the infinity), a row of -inf NaN; over the last dim (rows kernel) and another dim (columns kernel).
+    let dev = dev!();
+    let (inf, nan) = (f32::INFINITY, f32::NAN);
+    let v = [1.0f32, inf, 2.0, -inf, -inf, -inf, -inf, 3.0, -1.0, nan, 1.0, 0.5];
+    let x = Tensor::from_slice(&v, [4, 3]).unwrap();
+    for log in [false, true] {
+        let f = move |v: &[Tensor]| if log { v[0].log_softmax(1) } else { v[0].softmax(1) };
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-6, &format!("rows log={log}"), f);
+        let f = move |v: &[Tensor]| if log { v[0].t()?.log_softmax(0) } else { v[0].t()?.softmax(0) };
+        check(dev, std::slice::from_ref(&x), 1e-6, 1e-6, &format!("columns log={log}"), f);
+    }
+}
+
+#[test]
 fn matmul_layouts() {
     let dev = dev!();
     let a = randn(&[5, 37, 19], 20);
