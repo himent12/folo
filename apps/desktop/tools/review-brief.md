@@ -28,7 +28,7 @@ predictions over the dashed labels). **Open every PNG**, at full resolution wher
 (zoom in before calling something clipped).
 
 Also read the source (path in your task) for states screenshots can't show: hover, pressed, focus rings, keyboard
-paths (`src/controls/`, `src/app.rs`, `src/overlays.rs`), motion, resizing logic.
+paths (`src/controls/`, `src/app/`, `src/overlays/`), motion, resizing logic.
 
 Known platform limits (don't score these against the app): GPUI has no letter-spacing; the window's own caption buttons
 are drawn by the app.
