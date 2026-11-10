@@ -231,6 +231,12 @@ impl ShiftedRows {
         let mut buf = super::alloc_uninit(planes.len() * per_ci + wq + NR);
         let fill = |(ci, dst): (usize, &mut [f32])| {
             let src = planes[ci];
+            // The `pstride - plane` floats after each plane are zeros: the dropped columns of the last output
+            // row read into them, and the weight gradient multiplies those by its zero columns (a recycled
+            // buffer's NaN there would make 0 · NaN).
+            for s in 0..phases.len() {
+                dst[s * pstride + plane..(s + 1) * pstride].iter_mut().for_each(|v| *v = 0.0);
+            }
             if sx == 1 {
                 for &(a, _, s) in &phases {
                     let d = &mut dst[s * pstride..s * pstride + plane];
