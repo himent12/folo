@@ -19,7 +19,7 @@ npm run shoot      # screenshots of the built site into site/shots (installed Ch
 
 ## What it does
 - **Pages.** Every `docs/*.md` and `examples/*/README.md` becomes a page at `<name>/` (`docs/AGENT_COOKBOOK.md` →
-  `agent-cookbook/`, `examples/r6/README.md` → `examples/r6/`). The sidebar groups and labels are in
+  `agent-cookbook/`, `examples/shapes/README.md` → `examples/shapes/`). The sidebar groups and labels are in
   `scripts/config.ts` (`NAV`); a doc missing from `NAV` fails the build.
 - **Landing page.** Built from `README.md` by heading: the pitch and highlights, "Why FOLO: the numbers" (the headline
   comparison, whose every number comes from docs/BENCHMARKS.md), the quickstart, Studio and Desktop with their

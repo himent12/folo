@@ -179,15 +179,15 @@ mod tests {
     #[test]
     fn defaults_are_left_out_and_arguments_quoted() {
         let mut c: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
-        let cmd = train_command(&c, "D:/data/r6", DatasetFormat::Auto, None);
-        assert_eq!(cmd.cli, "folo train --data D:/data/r6");
-        c.name = "r6 n".into();
+        let cmd = train_command(&c, "D:/data/fasteners", DatasetFormat::Auto, None);
+        assert_eq!(cmd.cli, "folo train --data D:/data/fasteners");
+        c.name = "fasteners n".into();
         c.amp = true;
         c.augment.hsv = [0.0, 0.5, 0.25];
         let cmd = train_command(&c, "C:/Users/a b/data", DatasetFormat::Coco, Some("folo-n-coco"));
         assert_eq!(
             cmd.cli,
-            "folo train --data 'C:/Users/a b/data' --format coco --weights folo-n-coco --name 'r6 n' --head o2m \
+            "folo train --data 'C:/Users/a b/data' --format coco --weights folo-n-coco --name 'fasteners n' --head o2m \
              --hsv '0,0.5,0.25' --amp"
         );
         assert_eq!(cmd.argv[3], "C:/Users/a b/data");

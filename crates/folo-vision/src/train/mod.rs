@@ -1594,7 +1594,7 @@ mod tests {
         assert!(device_lost(&Error::Nn(folo_nn::Error::Core(lost()))));
         assert!(!device_lost(&Error::Core(other)));
         assert!(!device_lost(&Error::Failed("GPU device lost".into())));
-        let p = Path::new("runs/r6/weights/last.folo");
+        let p = Path::new("runs/shapes/weights/last.folo");
         let m = device_loss_message(&Error::Core(lost()), Some((p, 266)));
         assert!(m.contains("GPU device lost") && m.contains("after epoch 266"), "{m}");
         assert!(m.contains(&format!("--resume {}", p.display())), "{m}");

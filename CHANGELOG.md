@@ -164,8 +164,7 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
   tensor cores with dynamic loss scaling (#101).
 - COCO 2017 support with 6x less loader memory, a pycocotools-exact COCOeval and `folo weights` to pull pretrained
   weights (#72); `folo-n-coco`, val2017 AP 0.314 / AP50 0.455 after 50 epochs from scratch, in the draft release
-  `weights-v1` (#128). Fine-tuned from it, the R6 example reaches 0.441 test mAP50-95 in 100 epochs (0.350 from
-  scratch).
+  `weights-v1` (#128).
 - Short-run schedules, timing split and other dogfooding fixes (#69, #99).
 
 ### Inference and export

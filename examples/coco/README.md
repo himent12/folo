@@ -1,8 +1,8 @@
-# COCO: folo-n pretrained from scratch, and fine-tuning from it
+# COCO: folo-n pretrained from scratch
 
 folo-n trained **from scratch** on COCO train2017 at 640 px on one RTX 4080 SUPER for **50 epochs** (8.7 h of
-epochs), evaluated on val2017 with FOLO's pycocotools-exact evaluator, published as `folo-n-coco` (a draft
-release for now, [Publish](#publish)), and used to fine-tune the R6 detector ([Fine-tuning](#fine-tuning-r6)).
+epochs), evaluated on val2017 with FOLO's pycocotools-exact evaluator, and published as `folo-n-coco` (a draft
+release for now, [Publish](#publish)).
 
 **Result: AP 0.314 / AP50 0.455 on val2017** (f32; f16 the same to three decimals), cross-checked number for number
 against pycocotools. Ultralytics' published nano models reach 0.395 (YOLO11n) and 0.409 (YOLO26n). YOLO26n was
@@ -192,21 +192,6 @@ Once the release is published, everyone who can read the repository uses the sam
 `gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`, then
 `sha256sum -c --ignore-missing SHA256SUMS`.
 
-## Fine-tuning: R6
-
-`--weights folo-n-coco` on the 2-class R6 set (examples/r6) against a from-scratch control with the same flags,
-seed and epoch budget, both evaluated on r6-clean test and the held-out r6-fresh. Results:
-[examples/r6, Fine-tuning from COCO](../r6/README.md#fine-tuning-from-coco).
-
-| folo-n, 100 epochs on R6 (best.folo, 640 px) | r6-clean test mAP50-95 | r6-fresh (held out) mAP50-95 | r6-fresh Head |
-|---|---:|---:|---:|
-| from scratch | 0.350 | 0.118 | 0.047 |
-| **from folo-n-coco** | **0.441** | **0.201** | **0.105** |
-| *from scratch, 410 epochs (examples/r6)* | *0.397* | *0.130* | *0.053* |
-
-Pretraining is worth more than four times the epochs. In 100 epochs the fine-tune beats the 410-epoch from-scratch
-run on both splits, and it generalises much better to unseen footage (+70% on r6-fresh over the same budget).
-
 ## v2: a 300-epoch schedule, paused at epoch 62
 
 The 50-epoch run above ended at its schedule's floor, still gaining every epoch. v2 trains the same folo-n from
@@ -322,8 +307,7 @@ gh release create weights-v2 --draft --repo himent12/folo --title "FOLO pretrain
 
 `weights-v2` is a **draft** release, as `weights-v1` is, and its notes say "interim: 62 of 300 epochs, run paused".
 `folo weights pull folo-n-coco-v2` (and `-f16`) already works for repository writers (checked: both pull and verify).
-The exported files reproduce the `best.folo` numbers above exactly (all 12 stats, f32 and f16). The R6 fine-tune
-comparison from v2 has not been run: for v1 it took two 100-epoch runs of about 44 min each.
+The exported files reproduce the `best.folo` numbers above exactly (all 12 stats, f32 and f16).
 
 ### Resume (v2)
 
@@ -337,4 +321,4 @@ folo train --resume D:/folo-data/runs-coco/coco-folo-n-long/weights/last.folo --
 Checked on a copy of the run folder: it resumes "after epoch 62 (optimizer step 114590)" with mixed precision and the
 stored loss scale (16384). At the measured 442 s per epoch, the remaining 238 epochs take about 29 h. Run it hidden,
 in its own process group, and never next to a `folo serve` that holds GPU memory. When it finishes, re-run the
-evaluation, export a final `folo-n-coco-v2` (or v3) and repeat the R6 fine-tune comparison.
+evaluation and export a final `folo-n-coco-v2` (or v3).

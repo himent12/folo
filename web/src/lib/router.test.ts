@@ -76,10 +76,10 @@ describe('hashUrl (a path URL opened directly, DOGFOOD-3 S5)', () => {
     expect(route(compare).name).toBe('run-compare');
     expect(route(compare).query.get('ids')).toBe('a,b');
     // Both kinds at once, encoded values kept as they were meant.
-    const both = at('/runs/new', '?mock=1&from=run%20a%26b&scenario=gpu-unplugged&name=caf%C3%A9+r6');
+    const both = at('/runs/new', '?mock=1&from=run%20a%26b&scenario=gpu-unplugged&name=caf%C3%A9+n2');
     expect(both).toMatch(/^\/\?mock=1&scenario=gpu-unplugged#\/runs\/new\?/);
     expect(new URLSearchParams(both!.slice(0, both!.indexOf('#')).replace(/^\/\?/, '')).get('mock')).toBe('1');
-    expect(Object.fromEntries(route(both).query)).toEqual({ from: 'run a&b', name: 'café r6' });
+    expect(Object.fromEntries(route(both).query)).toEqual({ from: 'run a&b', name: 'café n2' });
   });
 
   it('keeps a hash route that is already there', () => {

@@ -72,8 +72,8 @@ Fastest path for an agent:
 ## Examples
 - [Shapes](examples/shapes/README.md): the convergence gate (folo-n on synthetic shapes at 320 px). It has the
   commands and per-epoch results on CPU (72 min) and GPU (169 s)
-- [R6](examples/r6/README.md): folo-n trained from scratch on real gameplay footage at 640 px. It has the commands,
-  the training curve, test and held-out results, and prediction images
+- [COCO](examples/coco/README.md): folo-n pretrained from scratch on COCO 2017 at 640 px, with pycocotools parity and
+  `folo weights`
 
 ## Apps
 - [FOLO Studio](web/README.md): the web app (Svelte 5 + TypeScript + Vite). It covers the dev server, checks,

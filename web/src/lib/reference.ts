@@ -31,7 +31,7 @@ interface RefRow extends PhaseRates {
 
 /**
  * The document's whole-run rows (batch 16), plus amp at 640 as the f32 rate times the training step's ratio (1.24 for
- * folo-n, 1.61 for folo-s). Validation of the R6 run is overhead-bound (~97 img/s).
+ * folo-n, 1.61 for folo-s). Validation of the 1080p run is overhead-bound (~97 img/s).
  */
 const ROWS: RefRow[] = [
   { arch: 'folo-n', imgsz: 640, amp: false, cpu: false, mosaic: 208, close: 215, val: 275 },

@@ -118,8 +118,7 @@ folo train --data my-data --model folo-s --epochs 100 --imgsz 640
 Things to know:
 - **Sizes**: the sizes are `folo-n`, `folo-s`, `folo-m`, `folo-l` and `folo-x`. folo-n is 2.6 M parameters and
   6.5 GFLOPs at 640; folo-s is 9.5 M and 21.6 GFLOPs.
-- **Small objects**: use a larger `--imgsz` (a multiple of 32). [examples/r6](../examples/r6/README.md) shows what
-  640 px costs on far-away targets.
+- **Small objects**: use a larger `--imgsz` (a multiple of 32) when targets are only a few pixels across at 640 px.
 - **Data loading**: with large JPEGs and mosaic, the data loader can set the pace. `--workers N` (default
   `min(cores, 8)`) adds decode threads.
 - **Device**: `--device cpu` or `--device gpu:<n>` pins the device. `gpu:<n>` without a usable adapter fails with
@@ -133,7 +132,7 @@ Things to know:
   and the run ends with a `done` record that names the weights.
 
 Two complete recipes with their results: [examples/shapes](../examples/shapes/README.md) (the convergence gate, CPU
-vs GPU) and [examples/r6](../examples/r6/README.md) (2,030 real gameplay frames, from scratch).
+vs GPU) and [examples/coco](../examples/coco/README.md) (folo-n pretrained from scratch on COCO 2017).
 
 ## 5. Fine-tune
 
@@ -150,16 +149,15 @@ are re-initialised, and everything else is kept. As a check: fine-tuning the sha
 **Pretrained weights.** `folo-n-coco` is folo-n trained on COCO ([examples/coco](../examples/coco/README.md)). It is
 in a **draft** GitHub release for now, so only people with write access to the repository can download it.
 `folo-n-coco-v2` (draft release `weights-v2`) is an interim, slightly better checkpoint (val2017 AP 0.317 against
-0.314) from a longer run that is paused at epoch 62 of 300; its R6 fine-tune has not been measured yet.
+0.314) from a longer run that is paused at epoch 62 of 300.
 
 ```sh
 folo weights pull folo-n-coco                                    # into ~/.folo/weights/, checksum verified
 folo train --data my-data --weights folo-n-coco --epochs 20      # takes the weights' architecture (folo-n)
 ```
 
-On the dev machine, 20 epochs from `folo-n-coco` on the 2,030 R6 frames ([examples/r6](../examples/r6/README.md))
-took 6 min 14 s and reached mAP50-95 0.432 on its val split. Studio and MCP do not resolve published names yet: copy
-the file into `<data dir>/models/` and it shows up as a model to start from ([CLI.md, Weights](CLI.md#weights)).
+Studio and MCP list downloaded published weights as models once pulled (`folo weights pull`), or you can copy a `.folo`
+file into `<data dir>/models/` ([CLI.md, Weights](CLI.md#weights)).
 
 `--resume` is different: it continues an *interrupted* run with its stored settings. To train further after a run
 **completed**, start a new run with `--model .../best.folo`.

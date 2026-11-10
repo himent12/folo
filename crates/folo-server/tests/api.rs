@@ -124,12 +124,12 @@ async fn datasets_and_images() {
     let app = server.router();
     let list: DatasetList = ok(&app, get("/api/datasets")).await;
     let names: Vec<_> = list.datasets.iter().map(|d| d.name.as_str()).collect();
-    assert_eq!(names, ["shapes-1k", "traffic-cams", "r6-operators"]);
+    assert_eq!(names, ["shapes-1k", "traffic-cams", "fasteners"]);
     assert!(list.datasets.iter().all(|d| d.stats.is_none()));
-    let r6 = list.datasets.iter().find(|d| d.name == "r6-operators").unwrap();
-    assert_eq!(r6.classes, ["body", "Head"]);
+    let fasteners = list.datasets.iter().find(|d| d.name == "fasteners").unwrap();
+    assert_eq!(fasteners.classes, ["bolt", "nut"]);
 
-    let full: Dataset = ok(&app, get(&format!("/api/datasets/{}", r6.id))).await;
+    let full: Dataset = ok(&app, get(&format!("/api/datasets/{}", fasteners.id))).await;
     let stats = full.stats.unwrap();
     assert_eq!(stats.class_counts.iter().sum::<u64>(), stats.boxes);
     assert_eq!(stats.box_size_hist.counts.iter().sum::<u64>(), stats.boxes);
@@ -137,19 +137,20 @@ async fn datasets_and_images() {
     assert_eq!(stats.boxes_per_image_hist.counts.iter().sum::<u64>(), n);
 
     let page: ImagePage =
-        ok(&app, get(&format!("/api/datasets/{}/images?split=val&offset=10&limit=5", r6.id))).await;
+        ok(&app, get(&format!("/api/datasets/{}/images?split=val&offset=10&limit=5", fasteners.id))).await;
     assert_eq!(page.total, full.splits.val);
     assert_eq!(page.images.len(), 5);
     assert!(page.images.iter().all(|i| i.split == Split::Val && i.width == 1920 && i.height == 1080));
-    let heads: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images?class=1&limit=1000", r6.id))).await;
-    assert!(heads.images.iter().all(|i| i.boxes.iter().any(|b| b.class == 1)));
-    assert!(heads.total < n);
+    let nuts: ImagePage =
+        ok(&app, get(&format!("/api/datasets/{}/images?class=1&limit=1000", fasteners.id))).await;
+    assert!(nuts.images.iter().all(|i| i.boxes.iter().any(|b| b.class == 1)));
+    assert!(nuts.total < n);
     let again: ImagePage =
-        ok(&app, get(&format!("/api/datasets/{}/images?split=val&offset=10&limit=5", r6.id))).await;
+        ok(&app, get(&format!("/api/datasets/{}/images?split=val&offset=10&limit=5", fasteners.id))).await;
     assert_eq!(again, page, "mock data is deterministic");
     err(
         &app,
-        get(&format!("/api/datasets/{}/images?split=nope", r6.id)),
+        get(&format!("/api/datasets/{}/images?split=nope", fasteners.id)),
         StatusCode::BAD_REQUEST,
         "invalid_query",
     )
@@ -157,17 +158,22 @@ async fn datasets_and_images() {
 
     let img = &page.images[0];
     let (status, headers, body) =
-        send(&app, get(&format!("/api/datasets/{}/images/{}", r6.id, img.id))).await;
+        send(&app, get(&format!("/api/datasets/{}/images/{}", fasteners.id, img.id))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers[header::CONTENT_TYPE], "image/jpeg");
     let decoded = image::load_from_memory(&body).unwrap();
     assert_eq!((decoded.width(), decoded.height()), (1920, 1080));
     let (_, _, thumb) =
-        send(&app, get(&format!("/api/datasets/{}/images/{}?thumb=256", r6.id, img.id))).await;
+        send(&app, get(&format!("/api/datasets/{}/images/{}?thumb=256", fasteners.id, img.id))).await;
     let t = image::load_from_memory(&thumb).unwrap();
     assert_eq!((t.width(), t.height()), (256, 144));
-    err(&app, get(&format!("/api/datasets/{}/images/zzz", r6.id)), StatusCode::NOT_FOUND, "image_not_found")
-        .await;
+    err(
+        &app,
+        get(&format!("/api/datasets/{}/images/zzz", fasteners.id)),
+        StatusCode::NOT_FOUND,
+        "image_not_found",
+    )
+    .await;
     err(&app, get("/api/datasets/ds_none"), StatusCode::NOT_FOUND, "dataset_not_found").await;
 
     // Synthetic datasets.
@@ -244,7 +250,7 @@ async fn models() {
     .await;
     err(&app, get("/api/models/m_none"), StatusCode::NOT_FOUND, "model_not_found").await;
 
-    // Head and training settings: shapes-s is an o2o model, r6-n was trained with AMP, its f16 export has no
+    // Head and training settings: shapes-s is an o2o model, fasteners-n was trained with AMP, its f16 export has no
     // `folo.train`; each matches its run's config.
     let by_id = |id: &str| list.models.iter().find(|m| m.id == id).unwrap();
     assert_eq!(by_id("m_31ab").head, Head::O2o);
@@ -573,7 +579,7 @@ async fn real_store_disk_dataset_and_engine_checks() {
     let ds_dir = root.join("ds");
     std::fs::create_dir_all(ds_dir.join("images/train")).unwrap();
     std::fs::create_dir_all(ds_dir.join("labels/train")).unwrap();
-    std::fs::write(ds_dir.join("data.yaml"), "names:\n  0: body\n  1: Head\n").unwrap();
+    std::fs::write(ds_dir.join("data.yaml"), "names:\n  0: bolt\n  1: nut\n").unwrap();
     image::RgbImage::from_pixel(64, 32, image::Rgb([1, 2, 3]))
         .save(ds_dir.join("images/train/x.png"))
         .unwrap();
@@ -589,7 +595,7 @@ async fn real_store_disk_dataset_and_engine_checks() {
     assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
     let ds: Dataset = serde_json::from_slice(&b).unwrap();
     assert_eq!((ds.name.as_str(), ds.format), ("ds", DatasetFormat::Yolo));
-    assert_eq!(ds.classes, ["body", "Head"]);
+    assert_eq!(ds.classes, ["bolt", "nut"]);
     assert_eq!(ds.stats.unwrap().class_counts, [1, 1]);
     let page: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images", ds.id))).await;
     assert_eq!(page.images[0].boxes[0].x1, 16.0);
@@ -988,7 +994,7 @@ async fn predictions_stay_within_the_model_classes() {
     // A matching model keeps the dataset's classes.
     let req = json!({ "model_id": "m_53d1", "dataset_id": "ds_3b9d", "image_id": "000700", "conf": 0.0 });
     let p: PredictResponse = ok(&app, post_json("/api/predict", req)).await;
-    assert!(p.boxes.iter().any(|b| b.name == "body"));
+    assert!(p.boxes.iter().any(|b| b.name == "bolt"));
 }
 
 #[tokio::test]

@@ -4,8 +4,8 @@ import type { Model, TrainConfig } from '$lib/api/types';
 import { quote, serverCommand, trainCommand, weightsRef } from './trainCli';
 
 const base: TrainConfig = {
-  name: 'r6-s',
-  dataset_id: 'ds_r6',
+  name: 'fasteners-s',
+  dataset_id: 'ds_fasteners',
   arch: 'folo-s',
   epochs: 100,
   batch: 16,
@@ -18,7 +18,7 @@ const base: TrainConfig = {
   seed: 0,
 };
 const model = (extra: Partial<Model> = {}) => ({ id: 'm_d849e303', name: 'fasteners-n-best', arch: 'folo-n', ...extra }) as Model;
-const ft = (extra: Partial<TrainConfig> = {}): TrainConfig => ({ ...base, name: 'r6-n-2', arch: 'folo-n', epochs: 15, weights: 'm_d849e303', ...extra });
+const ft = (extra: Partial<TrainConfig> = {}): TrainConfig => ({ ...base, name: 'fasteners-n-2', arch: 'folo-n', epochs: 15, weights: 'm_d849e303', ...extra });
 
 /**
  * PowerShell's word splitting for the commands this module writes: bare words and single-quoted ones, where a doubled
@@ -33,14 +33,14 @@ function split(line: string): string[] {
 
 describe('trainCommand (DOGFOOD-3 S1)', () => {
   it('fine-tunes from the weights file without --model, which conflicts with --weights', () => {
-    const c = trainCommand(ft({ amp: true }), 'D:/folo-dogfood3/r6', model({ path: 'D:/folo/models/fasteners-n-best.folo' }));
-    expect(c.line).toBe('folo train --data D:/folo-dogfood3/r6 --weights D:/folo/models/fasteners-n-best.folo --epochs 15 --batch 16 --imgsz 640 --amp --head o2m --name r6-n-2');
+    const c = trainCommand(ft({ amp: true }), 'D:/folo-dogfood3/fasteners', model({ path: 'D:/folo/models/fasteners-n-best.folo' }));
+    expect(c.line).toBe('folo train --data D:/folo-dogfood3/fasteners --weights D:/folo/models/fasteners-n-best.folo --epochs 15 --batch 16 --imgsz 640 --amp --head o2m --name fasteners-n-2');
     expect(c.argv).not.toContain('--model');
     expect(c.placeholder).toBeNull();
   });
 
   it('names the file by placeholder where the server does not report its path, never the model id', () => {
-    const c = trainCommand(ft(), 'D:/r6', model());
+    const c = trainCommand(ft(), 'D:/fasteners', model());
     expect(c.line).toContain('--weights <path to fasteners-n-best.folo>');
     expect(c.line).not.toContain('m_d849e303');
     expect(c.placeholder).toBe('fasteners-n-best.folo');
@@ -50,21 +50,21 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
 
   it('names published weights by their published name, as the server does', () => {
     const coco = model({ id: 'folo-n-coco', name: 'folo-n-coco', source: 'published', about: 'folo-n trained on COCO' });
-    const c = trainCommand(ft({ weights: 'folo-n-coco' }), 'D:/r6', coco);
-    expect(c.line).toBe('folo train --data D:/r6 --weights folo-n-coco --epochs 15 --batch 16 --imgsz 640 --head o2m --name r6-n-2');
+    const c = trainCommand(ft({ weights: 'folo-n-coco' }), 'D:/fasteners', coco);
+    expect(c.line).toBe('folo train --data D:/fasteners --weights folo-n-coco --epochs 15 --batch 16 --imgsz 640 --head o2m --name fasteners-n-2');
     expect(c.placeholder).toBeNull();
     // Even where the server also reports its cached file: the name is what the CLI looks up.
     expect(weightsRef('folo-n-coco', { ...coco, path: 'C:/Users/me/.folo/weights/folo-n-coco.folo' })).toEqual({ kind: 'path', value: 'folo-n-coco' });
   });
 
   it('trains from scratch with --model, leaving out what the CLI defaults to', () => {
-    expect(trainCommand(base, 'D:/r6').line).toBe('folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --name r6-s');
+    expect(trainCommand(base, 'D:/fasteners').line).toBe('folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name fasteners-s');
   });
 
   it('carries every TrainConfig setting that differs from the CLI default', () => {
     const c = trainCommand(
       { ...base, device: 'gpu:1', optimizer: 'adamw', lr0: 0.002, head: 'o2o', seed: 7, augment: { mosaic: 0.5, mixup: 0.1, hsv: [0, 0.5, 0.3], fliplr: 0, scale: 0.25, translate: 0.2, close_mosaic: 5 } },
-      'D:/r6',
+      'D:/fasteners',
     );
     expect(c.parts.slice(6)).toEqual([
       '--device gpu:1',
@@ -79,36 +79,36 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
       '--translate 0.2',
       '--close-mosaic 5',
       '--seed 7',
-      '--name r6-s',
+      '--name fasteners-s',
     ]);
   });
 
   it('quotes words as PowerShell reads them: an apostrophe is doubled inside single quotes', () => {
-    expect(quote('D:/data/r6')).toBe('D:/data/r6');
-    expect(quote('D:\\data\\r6')).toBe('D:\\data\\r6');
-    expect(quote('D:/my data/r6')).toBe("'D:/my data/r6'");
+    expect(quote('D:/data/fasteners')).toBe('D:/data/fasteners');
+    expect(quote('D:\\data\\fasteners')).toBe('D:\\data\\fasteners');
+    expect(quote('D:/my data/fasteners')).toBe("'D:/my data/fasteners'");
     expect(quote("D:/O'Brien/data")).toBe("'D:/O''Brien/data'");
     // PowerShell ends a single-quoted string at a typographic quote too: doubled the same way.
     expect(quote('D:/O’Brien’s/data')).toBe("'D:/O’’Brien’’s/data'");
     // An array, splatting, a variable, a comment, an escape, a subexpression, a separator, the stop-parsing token.
     for (const w of ['a,b', '@x', '$x', '#x', 'a`b', '(x)', 'a;b', '--%']) expect(quote(w)).toBe(`'${w}'`);
-    const c = trainCommand(base, 'C:/Users/me/My Datasets/r6');
+    const c = trainCommand(base, 'C:/Users/me/My Datasets/fasteners');
     expect(split(c.line).slice(1)).toEqual(c.argv);
   });
 
   it("quotes apostrophes in the dataset and weights paths, and in the run's name", () => {
-    const c = trainCommand(ft({ name: "Bob's r6" }), "D:/O'Brien/data", model({ path: "D:/models/O'Brien's best.folo" }));
-    expect(c.line).toBe("folo train --data 'D:/O''Brien/data' --weights 'D:/models/O''Brien''s best.folo' --epochs 15 --batch 16 --imgsz 640 --head o2m --name 'Bob''s r6'");
+    const c = trainCommand(ft({ name: "Bob's fasteners" }), "D:/O'Brien/data", model({ path: "D:/models/O'Brien's best.folo" }));
+    expect(c.line).toBe("folo train --data 'D:/O''Brien/data' --weights 'D:/models/O''Brien''s best.folo' --epochs 15 --batch 16 --imgsz 640 --head o2m --name 'Bob''s fasteners'");
     expect(split(c.line).slice(1)).toEqual(c.argv);
     expect(c.argv).toContain("D:/O'Brien/data");
   });
 
   it('attaches a value that starts with a dash, so the CLI never reads it as a flag (as the server does)', () => {
-    const c = trainCommand({ ...base, name: '--amp' }, 'D:/r6');
+    const c = trainCommand({ ...base, name: '--amp' }, 'D:/fasteners');
     expect(c.argv).toContain('--name=--amp');
     expect(c.argv).not.toContain('--amp');
-    expect(c.line).toBe('folo train --data D:/r6 --model folo-s --epochs 100 --batch 16 --imgsz 640 --name=--amp');
-    const spaced = trainCommand({ ...base, name: '-my run' }, 'D:/r6');
+    expect(c.line).toBe('folo train --data D:/fasteners --model folo-s --epochs 100 --batch 16 --imgsz 640 --name=--amp');
+    const spaced = trainCommand({ ...base, name: '-my run' }, 'D:/fasteners');
     expect(spaced.argv.at(-1)).toBe('--name=-my run');
     expect(split(spaced.line).slice(1)).toEqual(spaced.argv);
   });
@@ -125,31 +125,31 @@ describe('trainCommand (DOGFOOD-3 S1)', () => {
 const FIXTURE = new URL('./trainCli.fixtures.json', import.meta.url);
 const withPath = model({ path: 'D:/folo/data/models/fasteners-n-best.folo' });
 const cases: { name: string; config: TrainConfig; data: string; model?: Model }[] = [
-  { name: 'from scratch', config: base, data: 'D:/folo-dogfood3/r6' },
-  { name: 'fine-tune from a path', config: ft(), data: 'D:/folo-dogfood3/r6', model: withPath },
-  { name: 'fine-tune, mixed precision, end to end', config: ft({ amp: true, head: 'o2o', device: 'gpu:0' }), data: 'D:/folo-dogfood3/r6', model: withPath },
-  { name: 'mixed precision', config: { ...base, amp: true }, data: 'D:/r6' },
-  { name: 'end to end', config: { ...base, head: 'o2o' }, data: 'D:/r6' },
-  { name: 'device auto', config: { ...base, device: 'auto' }, data: 'D:/r6' },
-  { name: 'device cpu', config: { ...base, device: 'cpu' }, data: 'D:/r6' },
-  { name: 'device gpu:0', config: { ...base, device: 'gpu:0' }, data: 'D:/r6' },
-  { name: 'device gpu:1', config: { ...base, device: 'gpu:1' }, data: 'D:/r6' },
-  { name: 'adamw at a custom lr0', config: { ...base, optimizer: 'adamw', lr0: 0.002 }, data: 'D:/r6' },
-  { name: 'sgd at a custom lr0', config: { ...base, optimizer: 'sgd', lr0: 0.05 }, data: 'D:/r6' },
+  { name: 'from scratch', config: base, data: 'D:/folo-dogfood3/fasteners' },
+  { name: 'fine-tune from a path', config: ft(), data: 'D:/folo-dogfood3/fasteners', model: withPath },
+  { name: 'fine-tune, mixed precision, end to end', config: ft({ amp: true, head: 'o2o', device: 'gpu:0' }), data: 'D:/folo-dogfood3/fasteners', model: withPath },
+  { name: 'mixed precision', config: { ...base, amp: true }, data: 'D:/fasteners' },
+  { name: 'end to end', config: { ...base, head: 'o2o' }, data: 'D:/fasteners' },
+  { name: 'device auto', config: { ...base, device: 'auto' }, data: 'D:/fasteners' },
+  { name: 'device cpu', config: { ...base, device: 'cpu' }, data: 'D:/fasteners' },
+  { name: 'device gpu:0', config: { ...base, device: 'gpu:0' }, data: 'D:/fasteners' },
+  { name: 'device gpu:1', config: { ...base, device: 'gpu:1' }, data: 'D:/fasteners' },
+  { name: 'adamw at a custom lr0', config: { ...base, optimizer: 'adamw', lr0: 0.002 }, data: 'D:/fasteners' },
+  { name: 'sgd at a custom lr0', config: { ...base, optimizer: 'sgd', lr0: 0.05 }, data: 'D:/fasteners' },
   {
     name: 'augmentation and seed',
     config: { ...base, arch: 'folo-m', batch: 8, imgsz: 960, epochs: 300, seed: 42, augment: { mosaic: 0.5, mixup: 0.1, hsv: [0, 0.5, 0.3], fliplr: 0, scale: 0.25, translate: 0.2, close_mosaic: 0 } },
-    data: 'D:/r6',
+    data: 'D:/fasteners',
   },
-  { name: 'a dataset path with spaces', config: { ...base, arch: 'folo-n' }, data: 'C:/Users/me/My Datasets/r6' },
+  { name: 'a dataset path with spaces', config: { ...base, arch: 'folo-n' }, data: 'C:/Users/me/My Datasets/fasteners' },
   { name: 'a Windows path', config: { ...base, arch: 'folo-l' }, data: 'D:\\data\\shapes' },
-  { name: 'an apostrophe in the dataset path and the name', config: { ...base, name: "Bob's r6" }, data: "D:/O'Brien/data" },
-  { name: 'a name that starts with a dash', config: { ...base, name: '--amp' }, data: 'D:/r6' },
-  { name: 'an apostrophe in the weights path', config: ft(), data: 'D:/r6', model: model({ path: "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo" }) },
+  { name: 'an apostrophe in the dataset path and the name', config: { ...base, name: "Bob's fasteners" }, data: "D:/O'Brien/data" },
+  { name: 'a name that starts with a dash', config: { ...base, name: '--amp' }, data: 'D:/fasteners' },
+  { name: 'an apostrophe in the weights path', config: ft(), data: 'D:/fasteners', model: model({ path: "C:/Users/O'Brien/FOLO models/fasteners-n-best.folo" }) },
   {
     name: 'fine-tune from published weights',
     config: ft({ weights: 'folo-n-coco' }),
-    data: 'D:/folo-dogfood3/r6',
+    data: 'D:/folo-dogfood3/fasteners',
     model: model({ id: 'folo-n-coco', name: 'folo-n-coco', source: 'published' }),
   },
 ];

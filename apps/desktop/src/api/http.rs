@@ -1,5 +1,5 @@
 //! [`Backend`] over HTTP + SSE against `folo serve` (docs/API.md), and a launcher for a local
-//! `folo serve --mock`.
+//! `folo serve`.
 
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Command, Stdio};
@@ -501,7 +501,7 @@ impl Backend for HttpBackend {
     }
 }
 
-/// A `folo serve --mock` started by the app; stopped when dropped.
+/// A local `folo serve` started by the app; stopped when dropped.
 pub struct ServerProcess {
     child: Child,
     pub url: String,
@@ -513,6 +513,10 @@ impl Drop for ServerProcess {
         let _ = self.child.wait();
     }
 }
+
+/// Arguments passed to `folo` when starting a local server: the real engine (never `--mock`), on a
+/// free port, emitting JSON Lines so we read its `"listening"` record.
+pub const SERVE_ARGS: &[&str] = &["--json", "serve", "--port", "0"];
 
 /// Where to find the `folo` binary: `$FOLO_BIN`, next to this executable, or on `PATH`.
 pub fn find_folo() -> Option<std::path::PathBuf> {
@@ -564,16 +568,23 @@ fn bind_to_app(child: &Child) {
 #[cfg(not(windows))]
 fn bind_to_app(_child: &Child) {}
 
-/// Start `folo serve --mock` on a free port and wait (up to `timeout`) for its address.
-pub fn spawn_mock_server(timeout: Duration) -> Result<ServerProcess, String> {
+/// Start `folo serve` (the real engine, bare until datasets/runs exist) on a free port and wait
+/// (up to `timeout`) for its address.
+pub fn spawn_server(timeout: Duration) -> Result<ServerProcess, String> {
     let bin = find_folo().ok_or("folo was not found (set FOLO_BIN or put folo on PATH)")?;
-    let mut child = Command::new(&bin)
-        .args(["--json", "serve", "--mock", "--port", "0"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .stdin(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("could not start {}: {e}", bin.display()))?;
+    spawn_server_bin(&bin, timeout)
+}
+
+fn spawn_server_bin(bin: &std::path::Path, timeout: Duration) -> Result<ServerProcess, String> {
+    let mut cmd = Command::new(bin);
+    cmd.args(SERVE_ARGS).stdout(Stdio::piped()).stderr(Stdio::null()).stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("could not start {}: {e}", bin.display()))?;
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let (tx, rx) = channel();
     std::thread::spawn(move || {
@@ -869,5 +880,11 @@ FOLO"
         let e = api.health().unwrap_err();
         assert_eq!(e.code, "server_unreachable");
         assert!(e.hint.is_some());
+    }
+
+    #[test]
+    fn spawned_server_uses_the_real_store_not_mock() {
+        assert_eq!(SERVE_ARGS, ["--json", "serve", "--port", "0"]);
+        assert!(!SERVE_ARGS.contains(&"--mock"));
     }
 }

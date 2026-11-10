@@ -29,7 +29,7 @@ bit-exact; validation results are identical (same mAP to the last digit in every
 | validation (COCO val2017, multi-label NMS at conf 0.001) | forward + full-decode readback 11-19 s, split 0.7-3.3 s, NMS 0.4-4 s, metrics 0.1 s | serial: the GPU waits for the host and vice versa; each batch of 32 downloads 32 x 8400 x 84 f32 (90 MB) |
 | row 10, epoch 2 | f32: 2278 ms, of which loader waits 62 ms (first batch 52 ms), step 2216 ms | the loader keeps up (0 ms waits after batch 2); the epoch is the GPU step |
 | checkpoints (folo-n) | 1347 tensors, 169-297 ms to download one by one; the write 30-110 ms, up to 10 s under disk contention | one GPU wait per tensor |
-| R6 loader (1920x1080 JPEG, mosaic) | decode 12 ms + resize 5 ms per image, x4 per sample = ~89% of a sample; mosaic 2, affine 4, HSV 2.3 ms (loaded machine) | loader-bound: 83 samples/s on 8 workers, 140 on 16 |
+| 1080p JPEG loader (1920x1080 JPEG, mosaic) | decode 12 ms + resize 5 ms per image, x4 per sample = ~89% of a sample; mosaic 2, affine 4, HSV 2.3 ms (loaded machine) | loader-bound: 83 samples/s on 8 workers, 140 on 16 |
 | synthetic 640 px loader | 675 samples/s on 8 workers, 1003 on 16 | above the 500/s target already |
 
 ## Wins (A/B, alternated, medians)
@@ -41,7 +41,7 @@ bit-exact; validation results are identical (same mAP to the last digit in every
 | NMS straight from the downloaded `[A, 4+nc]` rows (no split copy) | ce58b409 | evaluation 8.4-17.9 s (median 15.1) | 7.8-16.1 s (median 8.5) | same, others 7-24 cores: **inside the noise**, kept because it is the same computation without a 90 MB copy per batch |
 | next epoch's loader starts when the previous epoch took its last batch | c444f759 | epoch-2 loader wait 56-62 ms (first batch 40-52 ms) | 2-5 ms (first batch 0 ms) | traced, row 10, f32 and amp, 6 runs |
 | checkpoint tensors in one download per dtype | c444f759 | 169-297 ms per checkpoint | 21-42 ms | both paths timed back to back in the same process, 7 pairs |
-| default loader workers min(cores, 16) instead of min(cores, 8) | 5b6b311a | R6 loader 83 samples/s | 140 samples/s | pipeline bench, R6 train split, loaded machine |
+| default loader workers min(cores, 16) instead of min(cores, 8) | 5b6b311a | 1080p loader 83 samples/s | 140 samples/s | pipeline bench, 1080p train split, loaded machine |
 
 COCO `folo val` end to end: process wall median **92 s (main) → 10.8 s** (9.9-19.9) at ce58b409, evaluation 26.6 → 8.5 s
 median, across the three sessions above.
@@ -93,7 +93,7 @@ step-only figure of docs/BENCHMARKS.md (that figure is older than the current st
 1. **Validation readback**: the scoring thread is now the limit (download 90 MB per batch + NMS at conf 0.001,
    multi-label). A device-side multi-label candidate kernel (folo-gpu; the single-label `detect_candidates` exists)
    would download only the pairs above `conf`.
-2. **`--cache ram` for large images** (R6: decode + resize are ~89% of a mosaic sample). Caching the resized image
+2. **`--cache ram` for large images** (1080p JPEGs: decode + resize are ~89% of a mosaic sample). Caching the resized image
    keeps the pixels and targets identical, but `Transformed::orig_size` and the letterbox ratio of a sample would
    then describe the cached image: the transform (`augment/pipeline.rs`) needs to take the original size from the
    cache, which is agent learn's file, so it was left for a coordinated change.

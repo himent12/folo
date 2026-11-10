@@ -11,7 +11,7 @@ It is a separate cargo workspace, so the root workspace and its CI stay GPUI-fre
 
 ```powershell
 $env:CARGO_TARGET_DIR = "D:\folo-build\desktop"   # keep build output off C:
-cargo run                                          # finds or starts folo serve, else demo data
+cargo run                                          # connects to or starts folo serve (real store, bare)
 cargo run -- --server http://127.0.0.1:7878        # a specific server
 cargo run -- --mock                                # built-in demo data
 cargo run -- --theme light
@@ -117,9 +117,9 @@ its cost and a Terminate; New run's Compute section picks where a run trains (th
 GPU offer and Stop after, with the cost beside Start training); a cloud run's page shows its phases, instance,
 cost and time limit. `src/cloud.rs` holds the state and the rules those surfaces share.
 
-By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts
-`folo serve --mock` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit; if that
-fails it falls back to the built-in demo data and says so. `--server URL` and `--mock` pick a source explicitly;
+By default the app looks for `folo serve` at `$FOLO_SERVER` (or `http://127.0.0.1:7878`); if none answers it starts a
+local `folo serve` on a free port (`$FOLO_BIN`, next to the executable, or on `PATH`) and stops it on exit, opening
+bare against the real data dir (`$FOLO_HOME` or `~/.folo`). `--server URL` and `--mock` pick a source explicitly;
 Settings › Connection switches at runtime. `--open run:<id>` (or `dataset:`, `model:`, `runs`, …) starts on a screen.
 
 ## Design tokens
