@@ -625,9 +625,6 @@ fn conv2d_backward_input_phased(
     Ok(())
 }
 
-/// 32×128 tiles, depth 32, 4×4 per thread: weight gradients with at most 32 output channels.
-pub(crate) const NARROW: TileConfig = TileConfig { bm: 32, bn: 128, bk: 32, tm: 4, tn: 4 };
-
 /// Tile configuration of a regular (not tensor-core) weight gradient with `m = C_out/groups` rows and
 /// `n = C_in/groups·KH·KW` columns, by the shape alone: split-K supplies the workgroups, so the tile is picked for
 /// arithmetic intensity (as [`coop`]'s weight gradients) rather than by [`gemm::pick_config`]'s occupancy rule,
@@ -635,7 +632,8 @@ pub(crate) const NARROW: TileConfig = TileConfig { bm: 32, bn: 128, bk: 32, tm: 
 pub(crate) fn pick_config_weight_grad(ctx: &GpuContext, m: usize, n: usize) -> TileConfig {
     let cfg = match m {
         _ if n < 128 => TileConfig::SMALL,
-        0..=32 => NARROW,
+        // Weight gradients with at most 32 output channels.
+        0..=32 => TileConfig::ROWS32,
         _ if m.div_ceil(128) * 128 * 4 <= m * 5 => TileConfig::LARGE,
         _ => TileConfig::MEDIUM,
     };
