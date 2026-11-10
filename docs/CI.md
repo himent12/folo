@@ -63,7 +63,8 @@ Linux runners are managed with `python tools/gha_boat_runner.py up|renew|down <n
 
 To fall back to GitHub-hosted runners, delete the variable (`gh variable delete RUNS_ON_LINUX`); the workflow then
 uses `ubuntu-latest` / `windows-latest`. Self-hosted jobs keep a persistent `CARGO_TARGET_DIR` outside the checkout,
-so incremental builds stay warm.
+so incremental builds stay warm. That folder only grows (two Linux runners once reached 119 GB and failed tests
+with "No space left on device"), so `rust (linux)` starts from an empty one when the runner has under 20 GB free.
 
 The same variables drive every workflow, `release.yml` included (its Linux and Windows jobs, including the CLI
 build matrix that its `plan` job writes). Release builds are the exception to the persistent target dir: they always start

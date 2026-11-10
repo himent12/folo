@@ -54,11 +54,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # Self-hosted runners keep a persistent target dir outside the checkout (checkout cleans ignored files).
+      # Self-hosted runners keep a persistent target dir outside the checkout (checkout cleans ignored files). It
+      # only grows (every branch and profile leaves its artifacts), and a full disk fails whatever test writes next:
+      # under 20 GB free, the job starts from an empty one.
       - name: persistent target dir (self-hosted, linux)
         if: runner.environment == 'self-hosted' && runner.os == 'Linux'
         shell: bash
-        run: echo "CARGO_TARGET_DIR=$HOME/gha/folo-target" >> "$GITHUB_ENV"
+        run: |
+          target="$HOME/gha/folo-target"
+          free="$(df --output=avail -BG "$HOME" | tail -1 | tr -dc 0-9)"
+          if [ -d "$target" ] && [ "${free:-0}" -lt 20 ]; then
+            echo "::warning::${free} GB free on $(hostname): removing $target ($(du -sh "$target" | cut -f1))"
+            rm -rf "$target"
+          fi
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
       - name: persistent target dir (self-hosted, windows)
         if: runner.environment == 'self-hosted' && runner.os == 'Windows'
         shell: powershell
