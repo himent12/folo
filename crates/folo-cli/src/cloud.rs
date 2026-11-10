@@ -88,10 +88,13 @@ fn usage(message: impl Into<String>) -> CliError {
 
 /// `KEY=VALUE` split at its first `=`.
 fn pair<'a>(flag: &str, s: &'a str) -> Result<(&'a str, &'a str), CliError> {
-    s.split_once('=')
-        .filter(|(k, _)| !k.trim().is_empty())
-        .map(|(k, v)| (k.trim(), v))
-        .ok_or_else(|| usage(format!("{flag} takes KEY=VALUE, got `{s}`")))
+    s.split_once('=').filter(|(k, _)| !k.trim().is_empty()).map(|(k, v)| (k.trim(), v)).ok_or_else(|| {
+        match flag {
+            // What was given may be the secret itself: it is not repeated.
+            "--secret" => usage("--secret takes KEY=env:VAR or KEY=-"),
+            _ => usage(format!("{flag} takes KEY=VALUE, got `{s}`")),
+        }
+    })
 }
 
 /// The value of a `--secret KEY=SOURCE`: the environment variable of `env:VAR`, or a line of stdin for `-`
@@ -275,5 +278,10 @@ mod tests {
         assert!(e.message.contains("is not set"), "{}", e.message);
         assert_eq!(pair("--set", "url=https://a=b").unwrap(), ("url", "https://a=b"));
         assert!(pair("--set", "=x").is_err() && pair("--set", "nothing").is_err());
+        // A secret given without its key is not repeated in the error (which `--json` prints to stdout).
+        for given in ["rpa_SECRET", "=rpa_SECRET"] {
+            let e = pair("--secret", given).unwrap_err();
+            assert!(!e.message.contains("rpa_SECRET") && e.message.contains("KEY="), "{}", e.message);
+        }
     }
 }

@@ -560,6 +560,12 @@ impl Exec {
             .ledger
             .create(&self.c.connection.id, &info.id, self.entry.id(), &offer, deadline, Some(self.limit()))
             .map_err(|e| failed(&e.body.code, e.body.message))?;
+        // Nothing could terminate an instance launched on a connection removed since the run started. Removing one
+        // looks for live records under the cloud lock this one was written under, so from here on it is refused.
+        if let Err(e) = self.core.connected(&self.c.connection.id) {
+            self.core.ledger.remove(&record.id);
+            return Err(failed(&e.body.code, e.body.message));
+        }
         release.arm(&record.id);
         self.private.instance_id = Some(record.id.clone());
         self.private.token = Some(token.clone());
@@ -597,9 +603,9 @@ impl Exec {
                     }
                     refs[0].clone()
                 }
-                Ok(_) => return Err(nothing(release, e)),
-                // Unknown: the release looks for it by its name again, and the reaper after that.
-                Err(_) => return Err(failed(e.code(), e.message)),
+                // Not listed (yet) or unknown: the release looks for it by its name again, and the reaper after
+                // that (super::reaper::LISTED_WITHIN).
+                Ok(_) | Err(_) => return Err(failed(e.code(), e.message)),
             },
             Err(e) => return Err(nothing(release, e)),
         };
@@ -870,8 +876,11 @@ impl Exec {
             match client.post::<_, Run>("/runs", &body) {
                 Ok(r) => break r,
                 Err(e) if e.is_transient() && attempt < ATTEMPTS => {
+                    // Only an active one: a `remote` server keeps the ended runs of the run's earlier attempts,
+                    // under the same name.
                     if let Ok(list) = client.get::<RunList>("/runs")
-                        && let Some(r) = list.runs.into_iter().find(|r| r.name == name)
+                        && let Some(r) =
+                            list.runs.into_iter().find(|r| r.name == name && r.status.is_active())
                     {
                         break r;
                     }
@@ -902,6 +911,8 @@ impl Exec {
         let mut answered = false;
         let mut cost_at = Instant::now();
         let end = loop {
+            // A copy that finished is taken whatever this poll finds: a worker lost right after still leaves it.
+            self.reap_copy();
             if self.core.halt.is_on() {
                 return Err(Halt::LetGo);
             }
@@ -1287,7 +1298,9 @@ impl Exec {
         end: Option<Run>,
         time_up: bool,
     ) -> std::result::Result<Outcome, Halt> {
-        // A copy still under way is told to end and not waited for: it only writes its staged file.
+        // A copy still under way is told to end and not waited for: it only writes its staged file. One that
+        // finished is kept, should the final copy fail.
+        self.reap_copy();
         self.copying = None;
         self.phase(CloudPhase::Collecting, "the run ended on the worker; copying its weights");
         for last in [true, false] {

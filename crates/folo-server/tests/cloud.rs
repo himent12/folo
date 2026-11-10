@@ -61,6 +61,8 @@ enum Fault {
     Fail(ErrorKind),
     /// `launch` only: creates the instance, then fails as if its answer was lost (`Unavailable`).
     LostAnswer,
+    /// `find` only: answers that there is no such instance, as a provider that does not list a new one yet.
+    Hidden,
     /// Panics, like a provider with a bug.
     Panic,
 }
@@ -98,6 +100,10 @@ struct Gates {
     old: AtomicBool,
     /// Nothing answers yet, as a provider's proxy does for an instance whose worker has not started: `404`.
     down: AtomicBool,
+    /// While set, the first request for weights cuts the worker off: from then on only weights are served, every
+    /// other request is a proxy's `502` (`cut`).
+    cut_after_weights: AtomicBool,
+    cut: AtomicBool,
 }
 
 async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
@@ -107,10 +113,29 @@ async fn gone(State(gone): State<Arc<AtomicBool>>, req: Request, next: Next) -> 
     next.run(req).await
 }
 
+/// While set, answers the next `POST /api/runs` with a proxy's `503` (the request never reaches the server), and
+/// clears.
+async fn busy_once(State(busy): State<Arc<AtomicBool>>, req: Request, next: Next) -> Response {
+    if req.method() == axum::http::Method::POST
+        && req.uri().path() == "/api/runs"
+        && busy.swap(false, Ordering::SeqCst)
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, "proxy: busy").into_response();
+    }
+    next.run(req).await
+}
+
 async fn gate(State(g): State<Arc<Gates>>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
     if g.down.load(Ordering::SeqCst) {
         return axum::http::StatusCode::NOT_FOUND.into_response();
+    }
+    if g.cut_after_weights.load(Ordering::SeqCst) {
+        if path.ends_with("/weights") {
+            g.cut.store(true, Ordering::SeqCst);
+        } else if g.cut.load(Ordering::SeqCst) {
+            return (StatusCode::BAD_GATEWAY, "proxy: no route to the instance").into_response();
+        }
     }
     while path.starts_with("/api/uploads") && g.uploads.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -225,7 +250,8 @@ impl TestCloud {
         self.script.lock().unwrap().instances.values().nth(n).expect("launched").store.clone()
     }
 
-    /// Records `call` with `arg`, waits while it is held, and plays its next fault: `Ok(true)` for a lost answer.
+    /// Records `call` with `arg`, waits while it is held, and plays its next fault: `Ok(true)` for a lost answer
+    /// (or a hidden instance).
     fn call(&self, call: Call, arg: &str) -> folo_cloud::Result<bool> {
         let mut s = self.script.lock().unwrap();
         s.calls.push((call, arg.to_string()));
@@ -243,7 +269,7 @@ impl TestCloud {
             Fault::Fail(kind) => {
                 Err(folo_cloud::Error::new(kind, format!("the test cloud refuses {call:?}")))
             }
-            Fault::LostAnswer => Ok(true),
+            Fault::LostAnswer | Fault::Hidden => Ok(true),
             Fault::Panic => panic!("the test cloud panics in {call:?}"),
         }
     }
@@ -357,7 +383,9 @@ impl Provider for TestCloud {
     }
 
     fn find(&self, _: &Values, name: &str) -> folo_cloud::Result<Vec<String>> {
-        self.call(Call::Find, name)?;
+        if self.call(Call::Find, name)? {
+            return Ok(Vec::new());
+        }
         let s = self.script.lock().unwrap();
         Ok(s.instances
             .iter()
@@ -707,6 +735,58 @@ fn refused_and_lost_launches() {
 }
 
 #[test]
+fn a_lost_launch_that_the_provider_lists_late_is_still_terminated() {
+    no_gpu();
+    let t = TestDir::new("cloud-late-listing");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    // The launch created an instance and its answer was lost, and the provider does not list the instance yet.
+    cloud.fail(Call::Launch, Fault::LostAnswer, 1);
+    cloud.fail(Call::Find, Fault::Hidden, usize::MAX);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 1)).unwrap();
+    let done = finished(&store, &run.id);
+    assert_eq!(done.error_code.as_deref(), Some("cloud_unavailable"));
+    assert_eq!(cloud.live(), 1);
+    // Not finding it is no proof that there is none: its record stays, so it goes once it is listed.
+    let all = store.cloud_instances().unwrap();
+    assert_eq!(all.len(), 1, "the record of the launch is kept");
+    assert_eq!(all[0].status, CloudInstanceStatus::Terminating);
+    cloud.clear(Call::Find);
+    let i = until("the instance terminated", || {
+        store.cloud_instances().unwrap().into_iter().find(|i| i.status == CloudInstanceStatus::Terminated)
+    });
+    assert_eq!((cloud.live(), i.error), (0, None));
+}
+
+#[test]
+fn a_connection_removed_while_a_run_starts_has_nothing_launched_on_it() {
+    no_gpu();
+    let t = TestDir::new("cloud-disconnect-race");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    // The run is asked for, and while its offer is looked up the connection is removed: nothing uses it yet.
+    cloud.hold(Call::Offers);
+    let creating = {
+        let (store, config) = (store.clone(), cloud_run(&ds, &conn.id, 1));
+        std::thread::spawn(move || store.create_run(config))
+    };
+    until("the offers asked for", || (cloud.calls(Call::Offers) == 1).then_some(()));
+    store.disconnect_cloud(&conn.id).unwrap();
+    cloud.release(Call::Offers);
+    let run = creating.join().unwrap().unwrap();
+    let done = finished(&store, &run.id);
+    // An instance launched now could not be terminated: without its connection, nothing can reach the provider.
+    assert_eq!(done.status, RunStatus::Failed, "{:?}", log_of(&store, &run.id));
+    assert_eq!(done.error_code.as_deref(), Some("connection_not_found"));
+    assert_eq!((cloud.calls(Call::Launch), cloud.live()), (0, 0));
+    assert!(store.cloud_instances().unwrap().is_empty());
+}
+
+#[test]
 fn boot_failures_name_the_check_and_release() {
     no_gpu();
     let t = TestDir::new("cloud-boot");
@@ -786,6 +866,34 @@ fn a_stop_that_finds_the_worker_gone_loses_the_run_instead_of_collecting() {
     );
     assert!(lost.error.unwrap().contains("resume the run"));
     assert!(t.join("home").join("runs").join(&run.id).join("weights").join("last.folo").is_file());
+}
+
+#[test]
+fn a_checkpoint_fetched_just_before_the_worker_is_lost_is_kept() {
+    no_gpu();
+    let t = TestDir::new("cloud-copy-lost");
+    let cloud = TestCloud::new(&t.join("workers"));
+    let store = plane(&t.join("home"), &cloud, fast());
+    let ds = dataset(&store);
+    let conn = connect(&store);
+    cloud.hold_epochs(true);
+    cloud.gates.cut_after_weights.store(true, Ordering::SeqCst);
+    let run = store.create_run(cloud_run(&ds, &conn.id, 2)).unwrap();
+    // The checkpoint of epoch 1 arrives whole, and after it nothing from the worker does...
+    let weights = t.join("home").join("runs").join(&run.id).join("weights");
+    until("the checkpoint fetched", || {
+        let names = std::fs::read_dir(&weights).ok()?;
+        names
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with(".last.folo.copy."))
+            .then_some(())
+    });
+    // ...until its instance is gone.
+    cloud.kill(0);
+    let lost = finished(&store, &run.id);
+    assert_eq!(lost.error_code.as_deref(), Some("cloud_instance_lost"), "{:?}", log_of(&store, &run.id));
+    assert!(weights.join("last.folo").is_file(), "the checkpoint fetched is kept, to resume from");
+    assert!(lost.cloud.unwrap().synced.is_some());
 }
 
 #[test]
@@ -966,6 +1074,54 @@ fn a_remote_server_is_used_as_it_is_and_keeps_the_dataset() {
     }
     assert!(store.cloud_instances().unwrap().is_empty(), "no ledger record");
     assert_eq!((worker.list_datasets().unwrap().len(), worker.list_runs().unwrap().len()), (1, 2));
+    drop(store);
+    drop(live);
+}
+
+#[test]
+fn a_run_resumed_on_a_remote_server_does_not_take_its_old_worker_run_for_the_new_one() {
+    no_gpu();
+    let t = TestDir::new("cloud-remote-resume");
+    let worker = Arc::new(RealStore::open(t.join("worker")).recheck_every(Duration::ZERO).device("cpu"));
+    let options = Options { token: Token::new("remote-token-0123456789"), ..Options::default() };
+    let busy = Arc::new(AtomicBool::new(false));
+    let router = Server::new(worker.clone(), options)
+        .router()
+        .layer(axum::middleware::from_fn_with_state(busy.clone(), busy_once));
+    let live = Live::start(router);
+    let store = Arc::new(
+        RealStore::open_with_cloud(t.join("home"), folo_cloud::providers(), fast())
+            .recheck_every(Duration::ZERO),
+    );
+    let ds = dataset(&store);
+    let values = BTreeMap::from([
+        ("url".to_string(), live.url.clone()),
+        ("token".to_string(), "remote-token-0123456789".to_string()),
+    ]);
+    let conn =
+        store.connect_cloud(ConnectCloud { provider: "remote".into(), name: String::new(), values }).unwrap();
+    let config: TrainConfig = serde_json::from_value(json!({
+        "dataset_id": ds.id, "epochs": 2, "batch": 2, "imgsz": 64, "augment": { "close_mosaic": 1 },
+        "compute": { "connection_id": conn.id, "offer_id": "cpu" }
+    }))
+    .unwrap();
+    // Stopped after its first epoch: the worker keeps that run, stopped, under the run's name.
+    worker.hold_runs_after_epochs(true);
+    let run = store.create_run(config).unwrap();
+    until("epoch 1 here", || run_of(&store, &run.id).best);
+    store.stop_run(&run.id).unwrap();
+    assert_eq!(finished(&store, &run.id).status, RunStatus::Stopped);
+    worker.hold_runs_after_epochs(false);
+
+    // Resumed there, and the first request for the new worker run never reaches the worker.
+    busy.store(true, Ordering::SeqCst);
+    resume(&store, &run.id, json!({}));
+    let done = finished(&store, &run.id);
+    assert!(!busy.load(Ordering::SeqCst), "the request was refused once");
+    assert_eq!(done.status, RunStatus::Completed, "{:?}", log_of(&store, &run.id));
+    assert_eq!(worker.list_runs().unwrap().len(), 2, "a new worker run");
+    let m = store.run_metrics(&run.id, &MetricsQuery::default()).unwrap();
+    assert_eq!(epochs(&m), [1, 2]);
     drop(store);
     drop(live);
 }

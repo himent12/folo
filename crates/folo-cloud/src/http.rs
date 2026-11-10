@@ -53,6 +53,13 @@ impl Reply {
         (200..300).contains(&self.status)
     }
 
+    /// The answer with `secret` (another credential the request carried, e.g. a worker's token) blanked out of its
+    /// body as the key is.
+    pub fn without(mut self, secret: &str) -> Reply {
+        self.body = redact(self.body, secret);
+        self
+    }
+
     /// The body, parsed; [`ErrorKind::Unavailable`] when it is not what the provider documents.
     pub fn json<T: DeserializeOwned>(&self) -> Result<T> {
         serde_json::from_slice(&self.body).map_err(|e| {
