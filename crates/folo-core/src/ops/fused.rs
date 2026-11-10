@@ -534,4 +534,93 @@ impl Tensor {
             Err(e) => Err(e),
         }
     }
+
+    /// Global-norm clipping's reductions over many tensors in one backend call
+    /// ([`crate::backend::Backend::norm_partials_many`]; the GPU takes 16 tensors per dispatch): a 1-D `F32`
+    /// tensor of partials, one per 256 elements of each tensor, whose maximum is the largest `|x|` (NaN propagating,
+    /// as `max_all`) or whose sum is the sum of `((x * h) * h)^2`, every term rounded as
+    /// `x.mul(h).mul(h).square()` would round it. Each partial is reduced in a fixed order, so the result is
+    /// deterministic, but the summation order differs from per-tensor `sum_all`s. `Ok(None)` when the backend has
+    /// no such kernel or a tensor does not fit (every tensor `F32`, contiguous from the start of its storage, on
+    /// one device; `h` one `F32` element there); the caller then uses tensor ops.
+    pub fn norm_partials_many(
+        xs: &[&Tensor],
+        op: crate::backend::NormReduce,
+        h: Option<&Tensor>,
+    ) -> Result<Option<Tensor>> {
+        let Some(first) = xs.first() else { return Ok(None) };
+        let dev = first.device();
+        let dense = |t: &Tensor| {
+            t.dtype() == DType::F32
+                && t.device() == dev
+                && t.layout().contiguous_range() == Some(0..t.numel())
+        };
+        if !xs.iter().all(|t| dense(t)) || !h.is_none_or(|h| dense(h) && h.numel() == 1) {
+            return Ok(None);
+        }
+        let b = first.backend()?;
+        let guards: Vec<_> = xs.iter().map(|t| t.cell().read()).collect();
+        let hg = h.map(|h| h.cell().read());
+        let views: Vec<crate::backend::View<'_>> =
+            guards.iter().zip(xs).map(|(g, t)| crate::backend::View::new(g, t.layout())).collect();
+        let hv = hg.as_ref().zip(h).map(|(g, t)| crate::backend::View::new(g, t.layout()));
+        match b.norm_partials_many(&views, op, hv) {
+            Ok(s) => {
+                let n = xs.iter().map(|t| t.numel().div_ceil(256)).sum::<usize>();
+                Ok(Some(Tensor::wrap(s, Shape::new(&[n]), "norm_partials_many")?))
+            }
+            Err(e) if unsupported(&e) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `x = (x * f1) * f2` in place for every tensor of `xs`, with one-element `F32` factor tensors on the same
+    /// device, through the backend's multi-tensor kernel ([`crate::backend::Backend::scale_many`]): the same
+    /// values as `x.mul_assign(f1)` followed by `x.mul_assign(f2)`. Returns `Ok(false)`, touching nothing, when
+    /// the backend has no such kernel or a tensor does not fit (as [`Tensor::unscale_check_many_`]; the factors
+    /// one dense `F32` element each, no storage used twice); the caller then uses tensor ops.
+    pub fn scale_many_(xs: &[&Tensor], f1: &Tensor, f2: &Tensor) -> Result<bool> {
+        const OP: &str = "scale_many_";
+        if is_grad_enabled() && xs.iter().any(|t| t.requires_grad()) {
+            return Err(Error::Autograd(format!(
+                "{OP}: in-place update of a tensor that requires grad; run it under no_grad()"
+            )));
+        }
+        let dev = f1.device();
+        let dense = |t: &Tensor| {
+            t.dtype() == DType::F32
+                && t.device() == dev
+                && t.layout().contiguous_range() == Some(0..t.numel())
+        };
+        let fits = xs.iter().all(|t| dense(t)) && [f1, f2].iter().all(|f| dense(f) && f.numel() == 1);
+        let mut seen = std::collections::HashSet::new();
+        if !fits || !xs.iter().copied().chain([f1, f2]).all(|t| seen.insert(std::sync::Arc::as_ptr(t.cell())))
+        {
+            return Ok(false);
+        }
+        if xs.is_empty() {
+            return Ok(true);
+        }
+        let b = f1.backend()?;
+        let r = {
+            let (g1, g2) = (f1.cell().read(), f2.cell().read());
+            let mut xw: Vec<_> = xs.iter().map(|t| t.cell().write_unversioned()).collect();
+            let mut xm: Vec<&mut crate::Storage> = xw.iter_mut().map(|g| &mut **g).collect();
+            let ns: Vec<usize> = xs.iter().map(|t| t.numel()).collect();
+            let v1 = crate::backend::View::new(&g1, f1.layout());
+            let v2 = crate::backend::View::new(&g2, f2.layout());
+            let r = b.scale_many(&mut xm, &ns, v1, v2);
+            if !matches!(&r, Err(e) if unsupported(e)) {
+                for t in xs {
+                    t.cell().mark_modified();
+                }
+            }
+            r
+        };
+        match r {
+            Ok(()) => Ok(true),
+            Err(e) if unsupported(&e) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
 }

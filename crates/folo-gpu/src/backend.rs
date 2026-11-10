@@ -27,8 +27,8 @@
 use std::sync::{Arc, OnceLock};
 
 use folo_core::backend::{
-    Backend, BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, OptimItem, OptimStep, Pool2dParams,
-    ReduceOp, RunningUpdate, UnaryOp, View,
+    Backend, BinaryOp, Conv2dParams, DetectDecode, LetterboxImage, NormReduce, OptimItem, OptimStep,
+    Pool2dParams, ReduceOp, RunningUpdate, UnaryOp, View,
 };
 use folo_core::{
     CpuStorage, DType as CoreDType, Device, DeviceStorage, Error, Layout, Result, Shape, Storage, Tensor,
@@ -1185,6 +1185,32 @@ impl Backend for GpuBackend {
         let bufs =
             xs.iter().zip(ns).map(|(x, &n)| Ok((self.storage_buf(x)?, n))).collect::<Result<Vec<_>>>()?;
         optim::unscale_check_many(&self.ctx, &bufs, factor, self.storage_buf(flag)?).core()
+    }
+
+    fn norm_partials_many(&self, xs: &[View<'_>], op: NormReduce, h: Option<View<'_>>) -> Result<Storage> {
+        let _p = profile::scope(|| "norm_partials_many".to_string());
+        let op = match op {
+            NormReduce::AbsMax => optim::NormPartial::AbsMax,
+            NormReduce::ScaledSquares => optim::NormPartial::ScaledSquares,
+            _ => return Err(Error::NotSupported { op: "norm_partials_many", backend: BACKEND_NAME }),
+        };
+        let dense = xs.iter().map(|v| self.dense(v)).collect::<Result<Vec<_>>>()?;
+        let bufs: Vec<(&wgpu::Buffer, usize)> =
+            dense.iter().zip(xs).map(|(d, v)| (d.raw(), v.layout.numel())).collect();
+        let hd = h.as_ref().map(|v| self.dense(v)).transpose()?;
+        let ns: Vec<usize> = bufs.iter().map(|b| b.1).collect();
+        let n = optim::norm_partials_len(&ns);
+        let out = self.alloc(CoreDType::F32, n.max(1))?;
+        optim::norm_partials_many(&self.ctx, op, &bufs, hd.as_ref().map(|d| d.raw()), out.raw()).core()?;
+        Ok(self.wrap(CoreDType::F32, n, out))
+    }
+
+    fn scale_many(&self, xs: &mut [&mut Storage], ns: &[usize], f1: View<'_>, f2: View<'_>) -> Result<()> {
+        let _p = profile::scope(|| "scale_many".to_string());
+        let (d1, d2) = (self.dense(&f1)?, self.dense(&f2)?);
+        let bufs =
+            xs.iter().zip(ns).map(|(x, &n)| Ok((self.storage_buf(x)?, n))).collect::<Result<Vec<_>>>()?;
+        optim::scale_many(&self.ctx, &bufs, d1.raw(), d2.raw()).core()
     }
 
     fn unscale_check(&self, x: &mut Storage, n: usize, factor: f32, flag: &mut Storage) -> Result<()> {

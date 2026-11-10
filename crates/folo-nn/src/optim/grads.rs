@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use folo_core::backend::OptimStep;
+use folo_core::backend::{NormReduce, OptimStep};
 use folo_core::{DType, Device, Grads, Tensor, TensorId, no_grad};
 
 use super::GradSource;
@@ -196,19 +196,34 @@ impl GradAccumulator {
             let refs: Vec<&Tensor> = v.iter().collect();
             Ok(Tensor::cat(&refs, 0)?)
         };
-        let peaks = bufs.iter().map(|b| Ok(b.abs()?.max_all()?.reshape([1])?)).collect::<Result<Vec<_>>>()?;
-        let peak = cat(peaks)?.max_all()?;
+        // On the GPU each reduction is one multi-tensor call (16 buffers per dispatch) and a reduction of its
+        // partials, instead of a few tensor ops per buffer; the maximum is exact either way.
+        let peak = match Tensor::norm_partials_many(&bufs, NormReduce::AbsMax, None)? {
+            Some(p) => p.max_all()?,
+            None => {
+                let peaks =
+                    bufs.iter().map(|b| Ok(b.abs()?.max_all()?.reshape([1])?)).collect::<Result<Vec<_>>>()?;
+                cat(peaks)?.max_all()?
+            }
+        };
         let scale = peak.gt_scalar(0.0)?.where_cond(&peak, &peak.ones_like()?)?;
         // Work in units of s = the largest magnitude, through h = 1 / sqrt(s): every intermediate (g·h, g·h², max·h,
         // r·sqrt(s)) stays a normal f32 for any finite s, where 1 / s or max / s could be subnormal (and flushed to
         // zero by the GPU's division) and n = s·r could overflow.
         let root = scale.sqrt()?;
         let h = root.recip()?;
-        let sq = bufs
-            .iter()
-            .map(|b| Ok(b.mul(&h)?.mul(&h)?.square()?.sum_all()?.reshape([1])?))
-            .collect::<Result<Vec<_>>>()?;
-        let r = cat(sq)?.sum_all()?.sqrt()?; // n_b / s, the norm of the buffers as they are
+        // The same terms in another summation order (per 256 elements, then over the partials).
+        let sum = match Tensor::norm_partials_many(&bufs, NormReduce::ScaledSquares, Some(&h))? {
+            Some(p) => p.sum_all()?,
+            None => {
+                let sq = bufs
+                    .iter()
+                    .map(|b| Ok(b.mul(&h)?.mul(&h)?.square()?.sum_all()?.reshape([1])?))
+                    .collect::<Result<Vec<_>>>()?;
+                cat(sq)?.sum_all()?
+            }
+        };
+        let r = sum.sqrt()?; // n_b / s, the norm of the buffers as they are
         // The norm of `pre · g` is n = pre · n_b, so with max' = max / pre and eps' = 1e-6 / pre:
         // n > max ⇔ r·sqrt(s) > max'·h, and pre · max / (n + 1e-6) = max / (n_b + eps') = h · (max·h / (r + eps'·h²)),
         // applied as two factors (or `pre` alone below the threshold).
@@ -218,10 +233,11 @@ impl GradAccumulator {
         let k = h.mul_scalar(max)?.div(&r.add(&h.mul(&h)?.mul_scalar((1e-6 / pre_f) as f32)?)?)?;
         let keep = if pre == 1.0 { one.clone() } else { one.mul_scalar(pre)? };
         let (f1, f2) = (clip.where_cond(&h, &keep)?, clip.where_cond(&k, &one)?);
-        for s in self.slots.iter().filter(|s| s.valid) {
-            let b = s.buf.as_ref().expect("valid");
-            b.mul_assign(&f1)?;
-            b.mul_assign(&f2)?;
+        if !Tensor::scale_many_(&bufs, &f1, &f2)? {
+            for b in &bufs {
+                b.mul_assign(&f1)?;
+                b.mul_assign(&f2)?;
+            }
         }
         Ok(r)
     }
