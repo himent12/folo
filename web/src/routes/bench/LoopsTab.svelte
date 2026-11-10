@@ -132,7 +132,7 @@
           <a class="m-row" href={href(path(l))}>
             <span class="m-main">
               <span class="name truncate">{l.name}</span>
-              <span class="m-meta num"><Meta><span>{loopStatus(l).label}</span>{#if s.length}<span>{scoreText(s[0]!)} → {scoreText(s.at(-1)!)}</span>{/if}<span>{(l.config.generations ?? 1)} {(l.config.generations ?? 1) === 1 ? 'generation' : 'generations'}</span></Meta></span>
+              <span class="m-meta num"><Meta><span>{loopStatus(l).label}</span>{#if s.length > 1}<span>{scoreText(s[0]!)} → {scoreText(s.at(-1)!)}</span>{:else if s.length}<span>{scoreText(s[0]!)}</span>{/if}<span>{(l.config.generations ?? 1)} {(l.config.generations ?? 1) === 1 ? 'generation' : 'generations'}</span></Meta></span>
               {#if l.status === 'failed'}<span class="m-cause" data-fact><CodeText text={sentence(l.error ?? 'The loop failed.')} /></span>{/if}
             </span>
             <span class="m-side">{#if l.verdict}<span class="verdict">{VERDICT[l.verdict].word}</span>{:else}<StatusBadge plain dotOnly state={loopStatus(l)} />{/if}</span>

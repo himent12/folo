@@ -443,6 +443,15 @@ describe('the loops tab', () => {
     await page(BenchmarkPage, '/benchmarks/bn_3c90?tab=loops');
     expect(text()).toMatch(/Training gen 1/);
   });
+
+  it('gives a loop with one generation scored one score on phones, never a change from it to itself', async () => {
+    await page(BenchmarkPage, '/benchmarks/bn_5e12?tab=loops');
+    const loop = (await hub.api.benchLoops('bn_5e12')).find((l) => l.name === 'shapes-n-early loop')!;
+    const scored = loop.generations.filter((g) => g.score !== null);
+    expect(scored).toHaveLength(1);
+    const li = [...document.querySelectorAll('ul.rows li')].find((r) => /shapes-n-early loop/.test(r.textContent ?? ''))!;
+    expect(li.querySelector('.m-meta')?.textContent).not.toMatch(/→/);
+  });
 });
 
 describe('the failure gallery', () => {
