@@ -911,7 +911,8 @@ fn index_ops() {
 
 #[test]
 fn topk_orders_nan_and_infinities_by_total_cmp() {
-    // `f32::total_cmp`: -NaN < -inf < .. < -0 < +0 < .. < inf < NaN, NaN payloads kept.
+    // `f32::total_cmp`: -NaN < -inf < .. < -0 = +0 < .. < inf < NaN, NaN payloads kept. The two zeros are equal:
+    // they tie by index, as on the CPU (the last row has -0 before +0, the first two the other order).
     let dev = dev!();
     let nan2 = f32::from_bits(0x7fc0_0123);
     let v = [
@@ -927,8 +928,12 @@ fn topk_orders_nan_and_infinities_by_total_cmp() {
         -0.0,
         0.0,
         -nan2,
+        0.0,
+        -0.0,
+        -0.0,
+        0.0,
     ];
-    let t = Tensor::from_slice(&v, [3, 4]).unwrap();
+    let t = Tensor::from_slice(&v, [4, 4]).unwrap();
     for k in 1..=4 {
         for largest in [true, false] {
             let (cv, ci) = t.topk(k, largest).unwrap();
@@ -937,6 +942,9 @@ fn topk_orders_nan_and_infinities_by_total_cmp() {
             assert_same(&gi, &ci, &format!("topk indices k={k} {largest}"));
         }
     }
+    // The zeros of the last row come out in index order, whatever their signs.
+    let (_, zi) = t.to_device(dev).unwrap().topk(4, true).unwrap();
+    assert_eq!(zi.to_device(Device::Cpu).unwrap().to_vec2::<i64>().unwrap()[3], vec![0, 1, 2, 3]);
 }
 
 #[test]

@@ -6,8 +6,10 @@
 @group(0) @binding(2) var<storage, read_write> V: array<u32>;
 @group(0) @binding(3) var<storage, read_write> I: array<u32>;
 
-// Monotone key: the unsigned order of keys is the f32::total_cmp order of values (given as bits).
-fn key(b: u32) -> u32 {
+// Monotone key: the unsigned order of keys is the f32::total_cmp order of values (given as bits), except that -0
+// has +0's key: they are equal, so they tie by index, as on the CPU.
+fn key(bits: u32) -> u32 {
+    let b = select(bits, 0u, bits == 0x80000000u);
     return select(b ^ 0x80000000u, ~b, (b >> 31u) == 1u);
 }
 
