@@ -444,8 +444,9 @@ pub fn resolve_device(s: &str) -> Result<Device> {
 mod tests {
     use super::*;
 
-    /// `auto_rule`: new configs use rule 2 (the AdamW lr0 floored at 0.001), settings stored before the key
-    /// existed (a checkpoint's `folo.train`) resume with rule 1, the reference fit; other versions are invalid.
+    /// `auto_rule`: new configs use rule 3 (MuSGD for long runs, the AdamW lr0 floored at 0.001 since rule 2),
+    /// settings stored before the key existed (a checkpoint's `folo.train`) resume with rule 1, the reference fit;
+    /// other versions are invalid.
     #[test]
     fn auto_rule_versions() {
         let cfg = TrainConfig { epochs: 30, batch: 16, ..TrainConfig::default() };
