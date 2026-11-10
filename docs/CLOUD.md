@@ -82,24 +82,31 @@ and next to a local run). `Run.cloud.phase` and the SSE `cloud` event follow it:
   when the time is up (it ends `stopped`, with its checkpoint, and can be resumed), and is terminated whatever
   happens. Providers that can (`self_terminates`) also arm the instance to terminate itself 10 minutes after the
   deadline, so the bound holds when this machine is off.
-- **Failure.** Anything that fails after an instance exists still releases it. A worker that stops answering
-  for 10 minutes while the provider says the instance is gone fails the run with `cloud_instance_lost`; the
-  checkpoints copied so far stay, so it can be resumed. A failure code is in `Run.error_code`:
-  `cloud_auth_failed`, `cloud_refused` (no capacity, no balance), `cloud_unavailable`, `cloud_boot_failed`,
-  `cloud_sync_failed`, `cloud_instance_lost`.
+- **Failure.** Anything that fails after an instance exists still releases it (also a bug: the release runs
+  while the panic unwinds). A worker that stops answering for 10 minutes while the provider says the instance is
+  gone (for `remote`: while it does not answer at all) fails the run with `cloud_instance_lost`, and so does an
+  instance terminated by hand; the checkpoints copied so far stay, so it can be resumed. A launch request that
+  fails as `cloud_unavailable` may have gone through: the instance is looked up by its name, and one that exists is
+  used. A failure code is in `Run.error_code`: `cloud_auth_failed`, `cloud_refused` (no capacity, no balance),
+  `cloud_unavailable`, `cloud_boot_failed`, `cloud_sync_failed`, `cloud_instance_lost`.
 - **Resuming.** `POST /api/runs` with `resume_run_id` resumes a stopped or failed cloud run on a new instance of
-  its `compute` (which may change, like `device`): the copied `weights/last.folo` is uploaded and the worker
-  continues it (`checkpoint`, docs/API.md). With `"compute": null` the run resumes on this machine instead.
+  its `compute` (which may change, like `device`), with a new `Run.cloud`: the copied `weights/last.folo` is
+  uploaded and the worker continues it (`checkpoint`, docs/API.md), so the step numbers go on. With `"compute":
+  null` the run resumes on this machine instead; it keeps its last `Run.cloud` (`released`), and `config.compute`
+  says where it trains now.
 - **Restarts.** A cloud run does not need this server: close the laptop and it keeps training. On start the
   server picks up every cloud run that was `training` (its history is fetched from the worker's cursors) and
   releases the instances of runs that had not got that far (they become `stopped`). On shutdown cloud runs are
-  left alone, with a log line saying so. One process follows a run at a time (`runs/<id>/cloud.lock`).
+  left alone, with a log line saying so (`folo mcp` does not stop the cloud runs of its session either). One
+  process follows a run at a time: the one that holds `runs/<id>/cloud.lock`; another shows the run as it was last
+  persisted and refuses to stop it (`409 run_active`).
 
 ## Instances are never left behind
 Rented GPUs cost money by the hour, so the ledger is written before the provider is called and survives crashes:
 - `cloud/instances/<id>.json` is created (`launching`, with the unique instance name `folo-<run id>-<nonce>`)
   *before* the launch request. A server that dies in between finds the record on start, asks the provider for
-  instances of that name and terminates them.
+  instances of that name and terminates them (and drops the record when there are none). The reaper leaves alone
+  the instances of runs a process follows (it holds their `cloud.lock`), so a launch in flight is never touched.
 - Terminating is idempotent and retried: a request that fails leaves the instance `terminating`, and a reaper
   thread retries every 30 s (and on every start) until the provider confirms. Studio and Desktop show such an
   instance with its error, and a run does not wait for more than a minute of that: it finishes with a warning in

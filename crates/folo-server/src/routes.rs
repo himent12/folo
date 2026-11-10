@@ -10,12 +10,14 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use folo_api::{
-    API_VERSION, BenchmarkReport, BenchmarkRequest, CliCommand, CreateUpload, DatasetList, ExportSpec,
-    Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList, OnnxSwitches, PredictRequest, QueueRequest,
-    RegisterDataset, RunEstimate, RunEvent, RunList, RunLogs, Split, SyntheticDataset, SystemInfo,
-    SystemResponse, ThroughputTable, TrainConfig, Upload, Uploaded, ValReport, ValRequest,
+    API_VERSION, BenchmarkReport, BenchmarkRequest, CliCommand, CloudConnection, CloudConnectionList,
+    CloudInstance, CloudInstanceList, CloudOfferList, CloudProviderList, ConnectCloud, CreateUpload,
+    DatasetList, ExportSpec, Health, ImagePage, IssuePage, LogLevel, LogLine, ModelList, OnnxSwitches,
+    PredictRequest, QueueRequest, RegisterDataset, RunEstimate, RunEvent, RunList, RunLogs, Split,
+    SyntheticDataset, SystemInfo, SystemResponse, ThroughputTable, TrainConfig, Upload, Uploaded, ValReport,
+    ValRequest,
 };
 use futures_util::{Stream, StreamExt, stream};
 use serde::Deserialize;
@@ -77,6 +79,13 @@ pub fn api() -> Router<AppState> {
         .route("/uploads/{id}", get(get_upload).delete(delete_upload))
         .route("/uploads/{id}/parts/{n}", put(upload_part).layer(DefaultBodyLimit::max(MAX_PART_BYTES)))
         .route("/uploads/{id}/complete", post(complete_upload))
+        .route("/cloud/providers", get(cloud_providers))
+        .route("/cloud/connections", get(cloud_connections).post(connect_cloud))
+        .route("/cloud/connections/{id}", delete(disconnect_cloud))
+        .route("/cloud/connections/{id}/check", post(check_cloud))
+        .route("/cloud/connections/{id}/offers", get(cloud_offers))
+        .route("/cloud/instances", get(cloud_instances))
+        .route("/cloud/instances/{id}", delete(terminate_instance))
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }
@@ -500,6 +509,59 @@ async fn complete_upload(State(st): State<AppState>, ApiPath(id): ApiPath<String
 async fn delete_upload(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {
     blocking(&st, move |s| s.delete_upload(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---- cloud -------------------------------------------------------------------------------------------------------
+
+async fn cloud_providers(State(st): State<AppState>) -> Result<Json<CloudProviderList>> {
+    Ok(Json(CloudProviderList { providers: st.store.cloud_providers()? }))
+}
+
+async fn cloud_connections(State(st): State<AppState>) -> Result<Json<CloudConnectionList>> {
+    Ok(Json(CloudConnectionList { connections: blocking(&st, |s| s.cloud_connections()).await? }))
+}
+
+/// `POST /api/cloud/connections`: checks the values with the provider, then stores them (`201`).
+async fn connect_cloud(State(st): State<AppState>, ApiJson(req): ApiJson<ConnectCloud>) -> Result<Response> {
+    let c = blocking(&st, move |s| s.connect_cloud(req)).await?;
+    Ok((StatusCode::CREATED, Json(c)).into_response())
+}
+
+async fn check_cloud(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+) -> Result<Json<CloudConnection>> {
+    Ok(Json(blocking(&st, move |s| s.check_cloud(&id)).await?))
+}
+
+async fn disconnect_cloud(State(st): State<AppState>, ApiPath(id): ApiPath<String>) -> Result<StatusCode> {
+    blocking(&st, move |s| s.disconnect_cloud(&id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct OffersParams {
+    #[serde(default)]
+    refresh: bool,
+}
+
+async fn cloud_offers(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+    ApiQuery(p): ApiQuery<OffersParams>,
+) -> Result<Json<CloudOfferList>> {
+    Ok(Json(blocking(&st, move |s| s.cloud_offers(&id, p.refresh)).await?))
+}
+
+async fn cloud_instances(State(st): State<AppState>) -> Result<Json<CloudInstanceList>> {
+    Ok(Json(CloudInstanceList { instances: blocking(&st, |s| s.cloud_instances()).await? }))
+}
+
+async fn terminate_instance(
+    State(st): State<AppState>,
+    ApiPath(id): ApiPath<String>,
+) -> Result<Json<CloudInstance>> {
+    Ok(Json(blocking(&st, move |s| s.terminate_instance(&id)).await?))
 }
 
 // ---- runs --------------------------------------------------------------------------------------------------------

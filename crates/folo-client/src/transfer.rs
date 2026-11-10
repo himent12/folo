@@ -30,6 +30,8 @@ pub enum TransferError {
     Stopped,
     /// A request failed for good: an error answer, or a transient failure that outlived the retries.
     Failed(Error),
+    /// The file was replaced every time it was fetched ([`RESTARTS`] restarts): it changes faster than it downloads.
+    Replaced,
     /// The stream could not be produced, or the destination file not written.
     Io(std::io::Error),
 }
@@ -39,6 +41,9 @@ impl std::fmt::Display for TransferError {
         match self {
             TransferError::Stopped => f.write_str("the transfer was stopped"),
             TransferError::Failed(e) => write!(f, "{e}"),
+            TransferError::Replaced => {
+                write!(f, "the file was replaced {} times while it was downloaded", RESTARTS + 1)
+            }
             TransferError::Io(e) => write!(f, "{e}"),
         }
     }
@@ -142,7 +147,13 @@ fn complete(
         {
             match retry(ctl, || client.post::<_, UploadCreated>("/uploads", req))? {
                 UploadCreated { existing: Some(existing), .. } => Ok(existing),
-                _ => Err(TransferError::Failed(e)),
+                // The server does not know the content after all: the session this question opened is not needed.
+                created => {
+                    if let Some(u) = created.upload {
+                        let _ = client.delete(&format!("/uploads/{}", encode(&u.id)));
+                    }
+                    Err(TransferError::Failed(e))
+                }
             }
         }
         other => other,
@@ -322,15 +333,7 @@ fn fetch(
             }
         }
     }
-    let message = format!("{path} was replaced {} times while it was downloaded", RESTARTS + 1);
-    Err(TransferError::Failed(Error {
-        status: Some(StatusCode::PRECONDITION_FAILED),
-        error: ApiError {
-            code: "cloud_sync_failed".into(),
-            message,
-            hint: Some("the file changes faster than it can be copied; try again later".into()),
-        },
-    }))
+    Err(TransferError::Replaced)
 }
 
 /// Calls `call` until it succeeds, fails for good, or has failed transiently [`ATTEMPTS`] times, waiting longer

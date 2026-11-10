@@ -921,7 +921,9 @@ async fn run_logs_history() {
     let list: RunList = ok(&app, get("/api/runs")).await;
     let by = |s: RunStatus| list.runs.iter().find(|r| r.status == s).unwrap().clone();
 
-    let done = by(RunStatus::Completed);
+    // A run trained here (a cloud run's log starts with its launch and ends with its release).
+    let done =
+        list.runs.iter().find(|r| r.status == RunStatus::Completed && r.cloud.is_none()).unwrap().clone();
     let all: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs?limit=5000", done.id))).await;
     let msgs: Vec<&str> = all.lines.iter().map(|l| l.message.as_str()).collect();
     assert!(msgs[0].starts_with("training "));

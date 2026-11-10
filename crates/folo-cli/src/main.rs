@@ -1,5 +1,6 @@
 //! The `folo` command-line tool. See `docs/CLI.md`.
 
+mod cloud;
 mod coco;
 mod dataset;
 mod describe;
@@ -109,6 +110,7 @@ fn run(cli: Cli, out: Out) -> Result<(), CliError> {
         Command::Bench(_) => Err(not_implemented("bench", "the engine")),
         Command::Dataset(cmd) => dataset::run(cmd, out),
         Command::Weights(cmd) => weights::run(cmd, out),
+        Command::Cloud(cmd) => cloud::run(cmd, out),
         Command::Mcp(args) => mcp(args),
     }
 }

@@ -4,10 +4,12 @@
 //! `https://`, the server's `--token` when it has one). The MCP layer runs the calls on tokio's blocking pool.
 
 use folo_api::{
-    Dataset, DatasetList, ExportResult, ExportSpec, FEATURE_EXPORT_ONNX_SWITCHES, GpuInfo, Health, ImagePage,
-    IssuePage, Model, ModelEval, ModelList, PredictRequest, PredictResponse, QueueAction, QueueRequest,
-    RegisterDataset, Run, RunEstimate, RunList, RunLogs, RunMetrics, RunSamples, SyntheticDataset,
-    SystemInfo, SystemResponse, ThroughputTable, TrainConfig, ValReport, ValRequest,
+    CloudConnection, CloudConnectionList, CloudInstance, CloudInstanceList, CloudOfferList, CloudProvider,
+    CloudProviderList, ConnectCloud, Dataset, DatasetList, ExportResult, ExportSpec,
+    FEATURE_EXPORT_ONNX_SWITCHES, GpuInfo, Health, ImagePage, IssuePage, Model, ModelEval, ModelList,
+    PredictRequest, PredictResponse, QueueAction, QueueRequest, RegisterDataset, Run, RunEstimate, RunList,
+    RunLogs, RunMetrics, RunSamples, SyntheticDataset, SystemInfo, SystemResponse, ThroughputTable,
+    TrainConfig, ValReport, ValRequest,
 };
 use folo_client::{Client, encode};
 use folo_server::store::{
@@ -308,6 +310,38 @@ impl Store for HttpStore {
 
     fn estimate_run(&self, config: TrainConfig) -> Result<RunEstimate, Error> {
         self.post("/runs/estimate", &config)
+    }
+
+    fn cloud_providers(&self) -> Result<Vec<CloudProvider>, Error> {
+        Ok(self.get::<CloudProviderList>("/cloud/providers")?.providers)
+    }
+
+    fn cloud_connections(&self) -> Result<Vec<CloudConnection>, Error> {
+        Ok(self.get::<CloudConnectionList>("/cloud/connections")?.connections)
+    }
+
+    fn connect_cloud(&self, req: ConnectCloud) -> Result<CloudConnection, Error> {
+        self.post("/cloud/connections", &req)
+    }
+
+    fn check_cloud(&self, id: &str) -> Result<CloudConnection, Error> {
+        self.client.post_empty(&format!("/cloud/connections/{}/check", encode(id))).map_err(store_error)
+    }
+
+    fn disconnect_cloud(&self, id: &str) -> Result<(), Error> {
+        self.delete(&format!("/cloud/connections/{}", encode(id)))
+    }
+
+    fn cloud_offers(&self, id: &str, refresh: bool) -> Result<CloudOfferList, Error> {
+        self.get(&format!("/cloud/connections/{}/offers?refresh={refresh}", encode(id)))
+    }
+
+    fn cloud_instances(&self) -> Result<Vec<CloudInstance>, Error> {
+        Ok(self.get::<CloudInstanceList>("/cloud/instances")?.instances)
+    }
+
+    fn terminate_instance(&self, id: &str) -> Result<CloudInstance, Error> {
+        self.client.delete_json(&format!("/cloud/instances/{}", encode(id))).map_err(store_error)
     }
 }
 

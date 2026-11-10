@@ -218,7 +218,7 @@ fn tmp_dir(name: &str) -> TestDir {
     TestDir::new(&format!("mcp-test-{name}"))
 }
 
-const ALL_TOOLS: [&str; 18] = [
+const ALL_TOOLS: [&str; 22] = [
     "folo_info",
     "list_datasets",
     "get_dataset",
@@ -237,6 +237,10 @@ const ALL_TOOLS: [&str; 18] = [
     "predict_batch",
     "export",
     "compare_runs",
+    "cloud_connections",
+    "cloud_offers",
+    "cloud_instances",
+    "cloud_terminate",
 ];
 
 /// `tools/list` with schema checks; returns `name -> outputSchema`.
@@ -664,6 +668,23 @@ fn full_flow(c: &mut Client, data_dir: &std::path::Path) {
     assert_eq!(unknown["error"]["code"], -32602, "{unknown}");
     let method = c.request("no/such/method", json!({}));
     assert_eq!(method["error"]["code"], -32601, "{method}");
+    // Cloud: the mock's connection, its offers, and run_3c01's instance (terminating one that is gone answers it).
+    let conns = checked(c, &schemas, "cloud_connections", json!({}));
+    assert_eq!(conns["connections"][0]["id"], "cc_4d2a");
+    let offers = checked(c, &schemas, "cloud_offers", json!({ "connection_id": "cc_4d2a" }));
+    assert!(offers["offers"].as_array().unwrap().len() > 1);
+    c.tool_error("cloud_offers", json!({ "connection_id": "cc_none" }), "connection_not_found");
+    let instances = checked(c, &schemas, "cloud_instances", json!({}));
+    let seeded = instances["instances"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["run_id"] == "run_3c01")
+        .unwrap()
+        .clone();
+    let ended = checked(c, &schemas, "cloud_terminate", json!({ "instance_id": seeded["id"] }));
+    assert_eq!((ended["status"].as_str(), &ended["ended"]), (Some("terminated"), &seeded["ended"]));
+    c.tool_error("cloud_terminate", json!({ "instance_id": "ci_none" }), "instance_not_found");
     // Unparsable input is ignored (as by every official SDK); the server keeps working.
     writeln!(c.stdin, "this is not json").unwrap();
     c.ok("folo_info", json!({}));
@@ -746,6 +767,9 @@ fn read_only_hides_and_rejects_mutating_tools() {
         "predict",
         "predict_batch",
         "compare_runs",
+        "cloud_connections",
+        "cloud_offers",
+        "cloud_instances",
     ];
     check_tools(&mut c, &listed);
     for (tool, args) in [
@@ -755,6 +779,7 @@ fn read_only_hides_and_rejects_mutating_tools() {
         ("stop_run", json!({ "run_id": "run_3c02" })),
         ("reorder_run", json!({ "run_id": "run_3c02", "action": "top" })),
         ("export", json!({ "model_id": "m_31aa", "format": "onnx" })),
+        ("cloud_terminate", json!({ "instance_id": "ci_3c01" })),
     ] {
         c.tool_error(tool, args, "read_only");
     }
@@ -1373,6 +1398,14 @@ fn proxy_mode_forwards_to_folo_serve() {
     assert_eq!(st["status"], "stopped");
     assert!(!st["log"].as_array().unwrap().is_empty());
     checked(&mut c, &schemas, "compare_runs", json!({ "run_ids": ["run_2b02", "run_2b03"] }));
+    // The cloud tools go to /api/cloud of the server.
+    let offers =
+        checked(&mut c, &schemas, "cloud_offers", json!({ "connection_id": "cc_4d2a", "refresh": true }));
+    assert!(offers["offers"].as_array().unwrap().len() > 1);
+    let instances = checked(&mut c, &schemas, "cloud_instances", json!({}));
+    let seeded = instances["instances"][0]["id"].clone();
+    checked(&mut c, &schemas, "cloud_terminate", json!({ "instance_id": seeded }));
+    c.tool_error("cloud_terminate", json!({ "instance_id": "ci_none" }), "instance_not_found");
     let t = checked(&mut c, &schemas, "train", json!({ "dataset_id": "ds_5a1e", "epochs": 1 }));
     let stopped = checked(&mut c, &schemas, "stop_run", json!({ "run_id": t["run_id"] }));
     assert_eq!(stopped["status"], "stopping");

@@ -203,7 +203,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `source` (additive, left out by older servers): `run` (a run's `best` / `last`), `file` (`<data dir>/models`) or
   `published`; `about` only for published weights. `path` (additive): the weights file on the server's machine, `/`
   separators, what `folo train --weights`, `val --model` and `export --model` take there (left out by the mock).
-- `GET /api/models/{id}` → `Model`
+- `GET /api/models/{id}` → `Model`. The weights of a run in progress are not listed, but its `m_<run suffix>-last`
+  (and `m_<run suffix>`, once it has a `best.folo`) answer here and on `/weights` as soon as the file exists: how a
+  cloud control plane copies a worker run's checkpoint while it trains (docs/CLOUD.md).
 - `GET /api/models/{id}/eval` → validation results of the model on its dataset's `val` split (`train` when there is
   none, see Split fallback below), for the PR curves and confusion matrix of the Models view:
   ```jsonc
@@ -355,7 +357,11 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   must be `auto` (the worker picks its GPU; anything else is `400 invalid_config`), and `amp` is checked on the
   worker, not here. The run does not enter the training queue (`queue_position` stays `null`); `Run.cloud` and
   the `cloud` event say where it is. Resuming one (`resume_run_id`) launches a new instance and continues from the
-  checkpoint copied to this machine; `compute` may change like `device`, and `"compute": null` resumes it here.
+  checkpoint copied to this machine, with a new `Run.cloud` (its `cost_usd` is the new instance's); `compute` may
+  change like `device`, and `"compute": null` resumes it here: the run then keeps its last `cloud` (`released`), and
+  `config.compute` (now `null`) says where it trains. A cloud run another FOLO process on the data dir follows (it
+  holds the run's `cloud.lock`) is shown as that process last persisted it, and stopping it here is `409
+  run_active`.
 - `GET /api/runs/{id}` → `Run`
 - `POST /api/runs/{id}/stop` → `Run` (status `stopping` → `stopped`; the last checkpoint is kept). `409 run_not_active`
   when the run already finished. A queued run stops at once; a running one after its current batch (the epoch in
@@ -387,7 +393,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `GET /api/runs/{id}/metrics?every=1` → `{ "steps": [Step], "epochs": [Epoch] }` (full history, for charts on page
   load; `every=N` keeps every N-th step plus the latest one, to thin long runs). `after_step=<n>` keeps the steps
   with `step > n` and `after_epoch=<m>` the epochs with `epoch > m` (feature `run_cursors`; either or both, applied
-  before `every`), so a client that has the history up to a step and an epoch polls for what is new. After a
+  before `every`), so a client that has the history up to a step and an epoch polls for what is new. With
+  `after_step`, the steps of the epoch in progress stop before the first one the real server has not recorded yet
+  (it records them in batches), so the answer never skips a step and a poller's cursor never passes one. After a
   resume the run repeats the steps of the epoch it restarts (they replace the earlier ones in the history), so a
   poller that sees `Run.step` below its cursor starts again from that step.
 - `GET /api/runs/{id}/samples?epoch=<n>` → `{ "epoch", "samples": [{ "image_id", "dataset_id", "width", "height",
@@ -741,8 +749,8 @@ this section is the wire contract. A cloud run is created with `TrainConfig.comp
 - `POST /api/cloud/connections` body `{ "provider", "name"?, "values": { "<field key>": "..." } }` → `201
   CloudConnection`. The values are checked with the provider before anything is stored: `404 provider_not_found`,
   `400 invalid_body` (a required field is missing or malformed; the message names it), `422 cloud_auth_failed`
-  (the provider rejects them), `502 cloud_unavailable` (it does not answer). `name` defaults to the provider's
-  name (` 2`, ` 3`, ... when taken).
+  (the provider rejects them), `502 cloud_unavailable` (it does not answer); a key that is not one of the
+  provider's fields is `400 invalid_body` too. `name` defaults to the provider's name (` 2`, ` 3`, ... when taken).
 - `POST /api/cloud/connections/{id}/check` → `CloudConnection`: checks the stored credentials again and
   refreshes `status`, `account`, `balance_usd`, `error` and `checked`. A failed check is still `200`, with
   `status: "error"`; only an unknown id is an error (`404 connection_not_found`).
@@ -758,7 +766,8 @@ this section is the wire contract. A cloud run is created with `TrainConfig.comp
   already gone answers its record; `404 instance_not_found`.
 
 Secrets never leave the server: `values` in answers holds the fields that are not secret as entered and a hint
-(`••••` plus the last 4 characters) for the others.
+(`••••` plus the last 4 characters; just `••••` for a value shorter than 8 characters, so a short secret is not
+mostly shown) for the others.
 
 ```jsonc
 // CloudProvider
@@ -826,7 +835,9 @@ Secrets never leave the server: `values` in answers holds the fields that are no
   served). `cloud/instances/<id>.json`: the ledger of launched instances, one file each, written before the
   provider is asked (docs/CLOUD.md, *Instances are never left behind*); records of instances that ended more than
   7 days ago are removed. A cloud run's folder also has `cloud.json` (its worker's address and token, the ids it
-  has there and its cursors) and, while a process follows it, `cloud.lock`.
+  has there and its cursors) and `cloud.lock`, which the process that follows the run holds locked (the file
+  stays). `cloud/.lock` is held across every change of `connections.json` and of a ledger record, so a server and
+  `folo cloud` on one data dir never lose each other's changes.
 - `uploads/<id>/`: the files of upload sessions in progress, removed when a session completes, is deleted or
   expires, and on start.
 

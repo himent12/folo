@@ -81,6 +81,7 @@ this machine lacks `device_not_found` with the devices it has in the hint, a GPU
 | `dataset convert IN OUT --to yolo\|coco [--from auto\|yolo\|coco]` | works | Converts between YOLO and COCO; images are copied unchanged. |
 | `weights list` | works | Every published weights name (see [Weights](#weights)), whether it is downloaded, and its cache path. One record per name with `--json`: `{"name","release","asset","path","cached","about"}`. |
 | `weights pull NAME [--force] [--repo himent12/folo]` | works | Downloads a published weights file from its GitHub release with the GitHub CLI (`gh release download`; the repository is private, so `gh auth login` first), checks its SHA-256 against the release's `SHA256SUMS` and that it opens as a `.folo` file, then moves it into the cache. Already cached: nothing is downloaded unless `--force`. `--json`: `{"event":"done","name","path","downloaded","sha256","bytes"}`. Unknown name: `weights_not_found` (exit 3); `gh` missing or failing: `gh_failed`; bad hash: `checksum_mismatch` (exit 1, nothing installed). |
+| `cloud providers\|connect\|connections\|check\|disconnect\|offers\|instances\|terminate [--data-dir DIR]` | works | Cloud compute on the data dir, with or without a server running: see [Cloud](#cloud). |
 | `mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server URL [--token SECRET]] [--device auto] [--tensor-cores]` | works | Model Context Protocol server over stdio (MCP 2026-07-28 and 2025-11-25), see `docs/MCP.md`. stdout carries protocol messages only (also with `--json`); logs go to stderr. By default it embeds the real store on `--data-dir` (env `FOLO_DATA_DIR`, default `$FOLO_HOME` or `~/.folo`): datasets, training, models, `val`, `predict` and `export` on the FOLO engine, the same data `folo serve` uses. `--mock` serves mock data, `--server` forwards to a running `folo serve` (`http://` or `https://`; `--token`, env `FOLO_TOKEN`, is the token that server was started with), `--read-only` hides and rejects mutating tools, `--confine` only reads inside `--data-dir`, `--device` (env `FOLO_DEVICE`) is where inference and `val` run, `--tensor-cores` (env `FOLO_GPU_TENSOR_CORES=1`) asks for the GPU's tensor cores as `folo serve --tensor-cores` does (`train` with `"amp": true` needs them; without, it answers `not_supported` before starting anything). Published weights pulled with `folo weights pull` are models (`train { "weights": "folo-n-coco" }`). Exits 0 when the client closes stdin; the runs it started are stopped first (an active run after its current batch, keeping its last checkpoint). Recipes: `docs/AGENT_COOKBOOK.md`. |
 
 `folo describe --json` is the authoritative list of arguments and defaults. Its `mcp_tools` array lists every
@@ -247,6 +248,35 @@ while the server runs lists at once; the server reads the same cache (`$FOLO_WEI
 accounts with write access to the repository, so `folo weights pull` already works for them. Everyone else needs the
 release published first. Without `folo`, `gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`
 (or `weights-v2` with `'folo-n-coco-v2*'`) then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
+
+## Cloud
+
+`folo cloud` looks after the cloud compute of a data dir (docs/CLOUD.md): the connections in
+`cloud/connections.json` and the instance ledger in `cloud/instances/`. It works on the files through
+`folo_server::cloud`, so it needs no server, and a running `folo serve` on the same data dir sees its changes at
+once (both take the data dir's cloud lock around every change). Every command takes `--data-dir` (as `folo serve`:
+`$FOLO_DATA_DIR`, else `$FOLO_HOME` or `~/.folo`) and `--json`, which prints one record per item: the API's objects
+(docs/API.md, *Cloud compute*). Without `--json` each prints a small aligned table. Errors are the API's codes with
+their exit codes (`connection_not_found` and `instance_not_found` exit 3, `cloud_auth_failed`, `cloud_unavailable`
+and `connection_in_use` exit 1, `invalid_body` exit 2).
+
+| command | what it does |
+|---|---|
+| `cloud providers` | The providers and the fields a connection to each takes (`[key]` optional, `key (secret)` a credential). |
+| `cloud connect PROVIDER [--name NAME] [--set KEY=VALUE]... [--secret KEY=env:VAR \| KEY=-]...` | Checks the values with the provider, then stores the connection (`POST /api/cloud/connections`). Values that are not secret go in `--set`; secrets come from an environment variable (`--secret api_key=env:RUNPOD_API_KEY`) or from one line of stdin (`--secret token=-`, once per command), never from the command line itself, which other processes and the shell history can read: a literal, or a secret field in `--set`, is a `usage` error (exit 2) that says so. The record shows each secret as `••••` and its last 4 characters (just `••••` below 8 characters); a `note` (an unencrypted `http://` URL) is printed too. |
+| `cloud connections` | Every connection with what its last check found. |
+| `cloud check ID` | Checks a connection's stored credentials again; a failed check is the record's `status: error` (exit 0). |
+| `cloud disconnect ID` | Forgets a connection (`{"event":"disconnected","id"}`); `connection_in_use` while it has live instances or active runs. |
+| `cloud offers CONNECTION [--refresh]` | What the connection can run on now, cheapest first; answers of the last minute are reused unless `--refresh`. |
+| `cloud instances` | The instances FOLO launched: alive first, then those that ended in the last 7 days, newest first, each with its cost so far. |
+| `cloud terminate ID` | Terminates an instance now, through the same path as `DELETE /api/cloud/instances/{id}`: `terminated` when the provider confirms, else `terminating` with the error (a server's reaper retries it). An instance that is gone answers its record. A run still using it fails with `cloud_instance_lost`. |
+
+```sh
+RUNPOD_API_KEY=rpa_... folo cloud connect runpod --secret api_key=env:RUNPOD_API_KEY
+folo cloud connect remote --set url=https://gpu-box.example.com:7878 --secret token=- < token.txt
+folo cloud offers cc_4d2a --json
+folo cloud instances
+```
 
 ## Adding a command
 1. Add the clap `Args` struct in `crates/folo-cli/src/cli.rs` with doc comments on every field (they become the help

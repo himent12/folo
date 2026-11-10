@@ -46,6 +46,10 @@ pub enum Command {
     /// Published pretrained weights: list them, download them into the local cache.
     #[command(subcommand)]
     Weights(WeightsCommand),
+    /// Cloud compute (docs/CLOUD.md): providers, connections, offers and instances of the data dir, with or without
+    /// a server running.
+    #[command(subcommand)]
+    Cloud(CloudCommand),
     /// Run a Model Context Protocol server over stdio so agents can drive FOLO.
     Mcp(McpArgs),
 }
@@ -480,6 +484,76 @@ pub struct WeightsPullArgs {
     /// GitHub repository (owner/name) whose release holds the weights.
     #[arg(long, default_value = crate::WEIGHTS_REPO)]
     pub repo: String,
+}
+
+/// `folo cloud`.
+#[derive(Debug, Subcommand)]
+pub enum CloudCommand {
+    /// The providers FOLO can use and the values a connection to each takes.
+    Providers(CloudDirArgs),
+    /// Connect a provider: its values are checked with it before anything is stored.
+    Connect(CloudConnectArgs),
+    /// The connections, with what their last check found.
+    Connections(CloudDirArgs),
+    /// Check a connection's stored credentials again.
+    Check(CloudIdArgs),
+    /// Forget a connection (refused while it has live instances or active runs).
+    Disconnect(CloudIdArgs),
+    /// What a connection can run on now, cheapest first.
+    Offers(CloudOffersArgs),
+    /// The instances FOLO launched: alive first, then those that ended in the last 7 days.
+    Instances(CloudDirArgs),
+    /// Terminate an instance now (FOLO retries until the provider confirms); a run still using it fails.
+    Terminate(CloudIdArgs),
+}
+
+/// The data dir of a `folo cloud` command.
+#[derive(Debug, Args)]
+pub struct CloudDirArgs {
+    /// The data dir whose cloud state to use, as `folo serve` resolves it [default: $FOLO_HOME or ~/.folo].
+    #[arg(long, env = "FOLO_DATA_DIR")]
+    pub data_dir: Option<PathBuf>,
+}
+
+/// `folo cloud check`, `disconnect` and `terminate`.
+#[derive(Debug, Args)]
+pub struct CloudIdArgs {
+    /// The connection's id (`cc_…`), or for `terminate` the instance's (`ci_…`).
+    pub id: String,
+    #[command(flatten)]
+    pub dir: CloudDirArgs,
+}
+
+/// `folo cloud offers`.
+#[derive(Debug, Args)]
+pub struct CloudOffersArgs {
+    /// The connection's id (`cc_…`).
+    pub connection: String,
+    /// Ask the provider again instead of using the answer of the last minute.
+    #[arg(long)]
+    pub refresh: bool,
+    #[command(flatten)]
+    pub dir: CloudDirArgs,
+}
+
+/// `folo cloud connect`.
+#[derive(Debug, Args)]
+pub struct CloudConnectArgs {
+    /// The provider's id (`folo cloud providers`), e.g. runpod or remote.
+    pub provider: String,
+    /// The connection's name [default: the provider's name, with 2, 3, ... when taken].
+    #[arg(long, default_value = "")]
+    pub name: String,
+    /// A value that is not secret, as KEY=VALUE (repeatable), e.g. --set url=https://gpu-box.example.com:7878.
+    #[arg(long = "set", value_name = "KEY=VALUE")]
+    pub set: Vec<String>,
+    /// A secret, from the environment (KEY=env:VAR) or from one line of stdin (KEY=-), repeatable, e.g. --secret
+    /// api_key=env:RUNPOD_API_KEY. Never as a value on the command line, which other processes and the shell
+    /// history can read.
+    #[arg(long = "secret", value_name = "KEY=env:VAR|KEY=-")]
+    pub secret: Vec<String>,
+    #[command(flatten)]
+    pub dir: CloudDirArgs,
 }
 
 /// `folo dataset`.

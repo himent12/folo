@@ -245,7 +245,7 @@ or, without WebGPU, on the wasm CPU (single-threaded, about 0.5 s) ([WASM.md](WA
 ## 9. From an agent
 
 Everything above is also available to agents in two ways:
-- **MCP**: `folo mcp --data-dir D:/folo-data`, with 18 tools, `folo://` resources and prompts. To register it:
+- **MCP**: `folo mcp --data-dir D:/folo-data`, with 22 tools, `folo://` resources and prompts. To register it:
   `claude mcp add folo -- folo mcp --data-dir D:/folo-data`.
 - **CLI**: any command with `--json`. stdout then carries JSON Lines only, and the exit codes are stable.
 

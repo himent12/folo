@@ -541,6 +541,9 @@ mod tests {
         assert_eq!(serde_json::from_str::<CloudPhase>(r#""migrating""#).unwrap(), CloudPhase::Unknown);
         let status: CloudInstanceStatus = serde_json::from_str(r#""paused""#).unwrap();
         assert!(status == CloudInstanceStatus::Unknown && status.is_alive());
-        assert_eq!(serde_json::from_str::<CloudAvailability>(r#""plenty""#).unwrap(), CloudAvailability::Unknown);
+        assert_eq!(
+            serde_json::from_str::<CloudAvailability>(r#""plenty""#).unwrap(),
+            CloudAvailability::Unknown
+        );
     }
 }

@@ -8,10 +8,11 @@ use std::path::Path;
 
 use axum::body::Bytes;
 use folo_api::{
-    BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, CreateUpload, Dataset, ExportResult,
-    ExportSpec, GpuInfo, GpuPool, LogLine, Model, ModelEval, PredictResponse, RegisterDataset, Run,
-    RunEstimate, RunEvent, RunLogs, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset,
-    ThroughputTable, TrainConfig, Upload, UploadCreated, Uploaded, ValReport, ValRequest,
+    BenchmarkReport, BenchmarkRequest, Capabilities, CliCommand, CloudConnection, CloudInstance,
+    CloudOfferList, CloudProvider, ConnectCloud, CreateUpload, Dataset, ExportResult, ExportSpec, GpuInfo,
+    GpuPool, LogLine, Model, ModelEval, PredictResponse, RegisterDataset, Run, RunEstimate, RunEvent,
+    RunLogs, RunMetrics, RunSamples, Split, StatusEvent, SyntheticDataset, ThroughputTable, TrainConfig,
+    Upload, UploadCreated, Uploaded, ValReport, ValRequest,
 };
 use tokio::sync::broadcast;
 
@@ -510,7 +511,54 @@ pub trait Store: Send + Sync + 'static {
         Err(not_uploads())
     }
 
+    /// The cloud providers this server knows (`GET /api/cloud/providers`). Stores without cloud compute answer `501
+    /// not_implemented` (the default, also for the other cloud methods).
+    fn cloud_providers(&self) -> Result<Vec<CloudProvider>> {
+        Err(not_cloud())
+    }
+    /// The cloud connections, oldest first (`GET /api/cloud/connections`).
+    fn cloud_connections(&self) -> Result<Vec<CloudConnection>> {
+        Err(not_cloud())
+    }
+    /// Makes a cloud connection, its values checked with the provider first (`POST /api/cloud/connections`).
+    fn connect_cloud(&self, req: ConnectCloud) -> Result<CloudConnection> {
+        let _ = req;
+        Err(not_cloud())
+    }
+    /// Checks a connection's credentials again (`POST /api/cloud/connections/{id}/check`).
+    fn check_cloud(&self, id: &str) -> Result<CloudConnection> {
+        let _ = id;
+        Err(not_cloud())
+    }
+    /// Forgets a connection (`DELETE /api/cloud/connections/{id}`): `409 connection_in_use` while it has live
+    /// instances or active runs.
+    fn disconnect_cloud(&self, id: &str) -> Result<()> {
+        let _ = id;
+        Err(not_cloud())
+    }
+    /// What a connection can run on (`GET /api/cloud/connections/{id}/offers`), cached unless `refresh`.
+    fn cloud_offers(&self, id: &str, refresh: bool) -> Result<CloudOfferList> {
+        let _ = (id, refresh);
+        Err(not_cloud())
+    }
+    /// The instances this server launched (`GET /api/cloud/instances`).
+    fn cloud_instances(&self) -> Result<Vec<CloudInstance>> {
+        Err(not_cloud())
+    }
+    /// Terminates an instance now (`DELETE /api/cloud/instances/{id}`).
+    fn terminate_instance(&self, id: &str) -> Result<CloudInstance> {
+        let _ = id;
+        Err(not_cloud())
+    }
+
     /// Called once when the server shuts down: stop background work (the real store stops the active run at a
-    /// batch boundary, keeping its last checkpoint, and drops upload sessions). Blocking; the default does nothing.
+    /// batch boundary, keeping its last checkpoint, drops upload sessions and leaves cloud runs to their workers).
+    /// Blocking; the default does nothing.
     fn shutdown(&self) {}
+}
+
+/// `501 not_implemented` of the cloud methods of a store without cloud compute.
+fn not_cloud() -> crate::error::Error {
+    crate::error::Error::not_implemented("cloud compute")
+        .hint("cloud compute needs a server with the `cloud` feature (GET /api/system lists its features)")
 }

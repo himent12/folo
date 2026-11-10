@@ -7,9 +7,10 @@
 > source).
 
 Fastest path for an agent:
-- **MCP:** `folo mcp --data-dir DIR` (stdio). It has 18 tools: folo_info, list_datasets, get_dataset,
+- **MCP:** `folo mcp --data-dir DIR` (stdio). It has 22 tools: folo_info, list_datasets, get_dataset,
   list_dataset_issues, list_dataset_images, register_dataset, create_synthetic_dataset, list_models, train,
-  run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export and compare_runs.
+  run_status, list_runs, stop_run, reorder_run, val, predict, predict_batch, export, compare_runs,
+  cloud_connections, cloud_offers, cloud_instances and cloud_terminate.
 - **CLI:** `folo <command> --json`. stdout is then JSON Lines only. Errors end with
   `{"error":{"code","message","hint"}}`. Exit codes: 0 ok, 1 runtime, 2 usage, 3 not found, 4 not implemented.
 - **Discovery:** `folo describe --json` prints every command, argument and default, plus every MCP tool's input and

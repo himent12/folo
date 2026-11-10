@@ -252,6 +252,12 @@ impl Client {
         self.finish(self.auth(self.agent.delete(self.url(path))).call()).map(|_| ())
     }
 
+    /// `DELETE /api{path}` of an endpoint that answers with a body (`DELETE /api/cloud/instances/{id}`), parsed.
+    pub fn delete_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let (_, b) = self.finish(self.auth(self.agent.delete(self.url(path))).call())?;
+        self.parse(&b)
+    }
+
     /// `GET /api{path}` for the bytes `range` of a file, with `If-Match: etag` when `etag` is given: a file that
     /// was replaced since answers `412 Precondition Failed` (an [`Error`] with that status) instead of bytes of
     /// another version. A range starting at or past the end of the file is `416`.

@@ -419,11 +419,19 @@ fn lock(m: &Mutex<Progress>) -> MutexGuard<'_, Progress> {
 fn spawn_sweeper(uploads: Weak<Uploads>) {
     let spawned = std::thread::Builder::new().name("folo-uploads".into()).spawn(move || {
         loop {
-            let tick = match uploads.upgrade() {
-                Some(u) => (u.idle() / 2).clamp(Duration::from_millis(10), Duration::from_secs(60)),
-                None => return,
-            };
-            std::thread::sleep(tick);
+            // The idle limit is read again while waiting, so one set after the start applies at once.
+            let since = Instant::now();
+            loop {
+                let tick = match uploads.upgrade() {
+                    Some(u) => (u.idle() / 2).clamp(Duration::from_millis(10), Duration::from_secs(60)),
+                    None => return,
+                };
+                let left = tick.saturating_sub(since.elapsed());
+                if left.is_zero() {
+                    break;
+                }
+                std::thread::sleep(left.min(Duration::from_millis(100)));
+            }
             match uploads.upgrade() {
                 Some(u) => u.expire(),
                 None => return,

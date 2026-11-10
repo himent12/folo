@@ -9,6 +9,7 @@
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
 pub mod cli;
+pub mod cloud;
 mod engine;
 pub mod error;
 mod index;

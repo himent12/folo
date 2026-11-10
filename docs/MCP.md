@@ -20,7 +20,7 @@ Claude Code and Codex are in the README ([Use FOLO from an agent](../README.md#u
 `folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp.rs`.
 
 ## Status
-Implemented: both protocol revisions, all 18 tools with generated input and output schemas, every resource and
+Implemented: both protocol revisions, all 22 tools with generated input and output schemas, every resource and
 both subscription flows, both prompts, paging and size limits, `--read-only`, `--confine`, and proxy mode. Every
 tool goes through the [`Store`](../crates/folo-server/src/store.rs) behind the server, so what works depends on
 it:
@@ -38,6 +38,7 @@ it:
 | `export` | `folo-f16` or `onnx` (f32, batch 1, the model's imgsz, raw head outputs; `decode`, `dynamic` and `half` switch those) to `exports/` | a `mock://` path (nothing is written) | `POST /api/models/{id}/export` |
 | run subscriptions | fired by the run's live events | fired by the mock runs' events | polled every second |
 | `folo://runs/{id}/samples/{epoch}` | the run's validation samples (first 16 val images) | rendered mock samples | `/api/runs/{id}/samples` |
+| `cloud_*`, `train` with `compute` | the data dir's connections and instance ledger; cloud runs on their worker (docs/CLOUD.md) | the mock's RunPod connection `cc_4d2a`, simulated cloud runs | `/api/cloud/...`, `POST /api/runs` |
 
 `get_dataset`'s `issues` and `list_dataset_issues` come from `Store::list_issues` (`/api/datasets/{id}/issues`
 in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the ONNX switches `half`, `dynamic` and
@@ -76,10 +77,11 @@ in proxy mode). Real mode has no `not_implemented` tool left. `export` takes the
 ## Results and errors
 Every tool declares an `inputSchema` and an `outputSchema`. The schemas are generated from the same Rust types as the
 HTTP API (`schemars`), so `folo describe --json` prints identical schemas, and docs/API.md is the source of field
-meanings. They are compacted for `tools/list` (about 60 KB for all 18 tools): no `$schema`, no numeric `format`
-annotations, no `minimum: 0` of unsigned types, defaults without f32 noise (`0.01`, not `0.009999999776482582`);
-output schemas also leave out defaults and the field descriptions of the shared types in `$defs` (`Run`,
-`TrainConfig`, `Epoch`, ...; docs/API.md documents them) and write string enums as `enum`. Every input schema,
+meanings. They are compacted for `tools/list` (about 63 KB for all 22 tools; a test keeps it under 64 KiB): no `$schema`,
+no numeric `format` annotations, no `minimum: 0` of unsigned types (also optional ones), defaults without f32 noise
+(`0.01`, not `0.009999999776482582`); output schemas also leave out defaults and the field descriptions of the shared
+types, in `$defs` and when the result is one (`Run`, `TrainConfig`, `Epoch`, `Dataset`, `CloudInstance`, ...;
+docs/API.md documents them), and write string enums as `enum`. Every input schema,
 nested objects included, has `additionalProperties: false`: **an argument the tool does not know is an
 `invalid_arguments` error**, never silently ignored, and the message suggests the likely name
 (``unknown argument `lr`; did you mean `lr0`?``; also `model` → `arch`, `augment.mosiac` → `mosaic`).
@@ -148,10 +150,16 @@ nested objects included, has `additionalProperties: false`: **an argument the to
 | `predict_batch` | `{ model_id, paths: string[] \| glob: string, conf?, iou? }`, at most 256 images **after** glob expansion (more is a `too_many_inputs` error) | `{ batch_id, processed, failed: [{ path, code, message }] (first 50), failed_total, boxes_total, per_class_counts (by class name), timing: { total_ms, mean_ms }, details_uri }` plus a `resource_link` to `folo://predictions/{batch_id}` with the per-image boxes |
 | `export` | `{ model_id, format: "folo-f16"\|"onnx", decode?, dynamic?, half? }` (the switches: ONNX only; in proxy mode the server must list `export_onnx_switches` in `/api/system` `features`) | `{ path, bytes }` |
 | `compare_runs` | `{ run_ids: string[] (2–8) }` | `runs`: per run `run_id, name, status, arch, epochs_done, epochs, best, best_metrics, final_train_loss, duration_s`; `config_diff`: dotted TrainConfig paths that differ, each with one value per run |
+| `cloud_connections` | `{}` | `{ connections: [CloudConnection] }` (docs/API.md, *Cloud compute*): provider, account, balance and the last check, secrets only as a hint. No tool makes a connection or takes credentials: that is Studio's, Desktop's or `folo cloud connect`'s (docs/CLI.md, Cloud) |
+| `cloud_offers` | `{ connection_id, refresh?: false }` | `{ offers: [CloudOffer], fetched }`, cheapest first; a run trains on one with `train { compute: { connection_id, offer_id } }` |
+| `cloud_instances` | `{}` | `{ instances: [CloudInstance] }`: the instances FOLO launched, alive first, with their run, status and cost so far |
+| `cloud_terminate` | `{ instance_id }` | `CloudInstance` (`terminated`, or `terminating` with the error FOLO retries): terminates the instance now; a run still using it fails with `cloud_instance_lost` |
 
-Read-only mode (`--read-only`) exposes only `folo_info`, `list_*`, `get_dataset`, `run_status`, `val`, `predict`,
-`predict_batch` and `compare_runs`. Mutating tools are not listed, and they are **also rejected at dispatch**
-(`read_only` tool error) if called anyway.
+`train`'s `compute` (TrainConfig, docs/API.md *Cloud runs*) trains the run on a cloud connection; `run_status` then
+has the run's `cloud` (phase, instance, cost). Read-only mode (`--read-only`) exposes only `folo_info`, `list_*`,
+`get_dataset`, `run_status`, `val`, `predict`, `predict_batch`, `compare_runs`, `cloud_connections`, `cloud_offers`
+and `cloud_instances`. Mutating tools are not listed, and they are **also rejected at dispatch** (`read_only` tool
+error) if called anyway.
 
 ## Resources
 Each resource read returns a JSON snapshot, unless stated otherwise.
@@ -238,7 +246,8 @@ In read-only mode, `train_on_folder` is not listed.
 - **Embedded mode** (default): runs execute inside the `folo mcp` process. Run state is persisted under
   `--data-dir/runs/<id>/` (config, metrics, checkpoints at every epoch). When the MCP client disconnects (stdin
   closes) or the process receives a shutdown signal, the runs this session started are stopped (`stop_run` on
-  each), then the store is shut down (`Store::shutdown`: queued runs become `stopped`, and the process waits, at
+  each; not cloud runs, which train on their worker without this process, and which the next `folo mcp` or `folo
+  serve` on the data dir follows again, docs/CLOUD.md), then the store is shut down (`Store::shutdown`: queued runs become `stopped`, and the process waits, at
   most a minute, for the active run to stop after its current batch), then the process exits. A `train` still
   in flight at that point fails with `shutting_down` instead of queueing a run nobody would train. The current epoch
   is abandoned, the last epoch's checkpoint is kept, and the status becomes `stopped`. In proxy mode runs belong
@@ -258,8 +267,8 @@ In read-only mode, `train_on_folder` is not listed.
   read by the MCP process and uploaded as multipart), `export` → `POST /api/models/{id}/export`. `run_status`
   takes its `log` from `GET /api/runs/{id}/logs` and its `last_step` / `last_epoch` from `/metrics`, `val` →
   `POST /api/val`, `predict_batch` → one `POST /api/predict` upload per image (until the planned
-  `POST /api/predict/batch` exists), `compare_runs` → `GET /api/runs/{id}` + `/metrics` per run, dataset images
-  and sample grids → `GET /api/datasets/{id}/images/{image_id}`. Run resources are polled the same way as in
+  `POST /api/predict/batch` exists), `compare_runs` → `GET /api/runs/{id}` + `/metrics` per run, the `cloud_*`
+  tools → `/api/cloud/*`, dataset images and sample grids → `GET /api/datasets/{id}/images/{image_id}`. Run resources are polled the same way as in
   embedded mode, so subscriptions work through the proxy too. Every tool works in proxy mode; errors from the
   server keep their codes and statuses (an answer that is not FOLO's, such as a proxy's error page, is
   `bad_gateway`). A server that does not answer is the `server_unreachable` tool error. The URL may be `http://` or
@@ -282,8 +291,8 @@ for 2026-07-28, a direct tool call without discovery and an unsupported-version 
 (checking the schemas, their size and `additionalProperties: false`), `resources/list`, `prompts/list`, a
 `create_synthetic_dataset` → `train` (2 epochs on a tiny set) → subscribe / `run_status` → `predict` flow on the
 mock store, issues errors-first and paged, a repeated `register_dataset`, unknown and misspelled arguments, the
-shared error codes, the `/epochs` resource, an `isError` case, a JSON-RPC error case, and a read-only-mode
-dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout. Every
+shared error codes, the `/epochs` resource, the cloud tools on the mock's connection and seeded cloud run, an
+`isError` case, a JSON-RPC error case, and a read-only-mode dispatch rejection. It asserts that nothing but valid JSON-RPC lines appears on stdout. Every
 structured tool result is validated against the tool's `outputSchema`. `real_store_end_to_end` drives the **real**
 store (`--device cpu`, 64 px, about 15 s): a synthetic dataset, a 2-epoch run followed through its resource
 subscription until it completes, `list_models`, `val` on two splits, `predict` on a dataset image and the same
