@@ -131,10 +131,11 @@ Rented GPUs cost money by the hour, so the ledger is written before the provider
 - A connection cannot be removed while it has live instances (`409 connection_in_use`).
 
 Cost is an estimate: `price_per_hour` of the offer times the time from the launch to the confirmed termination.
-An instance whose end nobody saw (this machine was off) is counted to the latest it can have lived when its
-provider arms it to terminate itself (`self_terminates`): 10 minutes after its deadline, plus the 15 minutes it
-may have taken to boot, since the instance counts its time limit from the start of its setup. `Run.cloud.cost_usd`
-follows the estimate at every phase and once a minute while the run trains. The provider's bill is the truth.
+An instance whose end nobody saw (this machine was off) is counted to the latest it can have lived, when that is
+known: one whose provider arms it to terminate itself (`self_terminates`) and whose worker had answered is gone
+its time limit and 10 minutes after that answer at the latest (the ledger keeps when). One whose worker never
+answered counts until its end is confirmed. `Run.cloud.cost_usd` follows the estimate at every phase and once a
+minute while the run trains. The provider's bill is the truth.
 
 ## Providers
 

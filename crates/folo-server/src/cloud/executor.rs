@@ -13,7 +13,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -280,18 +280,24 @@ impl GoneSince {
     }
 }
 
-/// The name of the file a copy of `weights/last.folo` is fetched into while the run trains
-/// ([`Copying`]): next to it, and one of the names [`transfer::remove_partial`] removes.
-const STAGED_COPY: &str = ".last.folo.copy.download";
+/// The file a copy of `weights/last.folo` is fetched into while the run trains ([`Copying`]), in `weights`: a
+/// name of its own for every copy of this process (an older copy's thread that is still about to clean up must
+/// not find a newer copy's file under its name), and one of the names [`transfer::remove_partial`] removes.
+fn staged_copy(weights: &Path) -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    weights.join(format!(".last.folo.copy.{}.{n}.download", std::process::id()))
+}
 
 /// A copy of the worker's `weights/last.folo` under way while the run trains, on a thread of its own: a checkpoint
 /// of hundreds of megabytes takes minutes on a slow link, and the live view (the next poll of the worker), a stop
 /// and the collection at the run's end must not wait for it.
 ///
-/// The thread only ever writes [`STAGED_COPY`]. The executor moves that file to `weights/last.folo` when it takes
-/// the result ([`Exec::reap_copy`]), so a copy that outlives its run (a request that was in flight when the run
-/// failed, or when the final file was collected) can never put an old checkpoint over a newer one. Dropped, the
-/// copy is told to end, and its staged file is removed by whichever side comes last.
+/// The thread only ever writes its own staging file ([`staged_copy`]). The executor moves that file to
+/// `weights/last.folo` when it takes the result ([`Exec::reap_copy`]), so a copy that outlives its run (a request
+/// that was in flight when the run failed, or when the final file was collected) can never put an old checkpoint
+/// over a newer one. Dropped, the copy is told to end, and its staged file is removed by whichever side comes
+/// last.
 struct Copying {
     thread: Option<JoinHandle<std::result::Result<(), TransferError>>>,
     cancel: Arc<AtomicBool>,
@@ -719,6 +725,8 @@ impl Exec {
                     i.status = CloudInstanceStatus::Running;
                 }
             });
+            // Its setup has started, so its own clock runs: the latest it can live is known from here.
+            let _ = self.core.ledger.booted(id);
         }
         let device = system.capabilities.map_or_else(|| "its default device".to_string(), |c| c.device);
         self.entry
@@ -1106,11 +1114,11 @@ impl Exec {
     }
 
     /// Starts a copy of the worker's `weights/last.folo` on a thread of its own ([`Copying`]): it fetches the file
-    /// into [`STAGED_COPY`], and [`Exec::reap_copy`] takes its result. It ends early when the process shuts down
+    /// into a staging file, and [`Exec::reap_copy`] takes its result. It ends early when the process shuts down
     /// or a stop is asked for (the collection at the run's end copies the final file).
     fn start_copy(&mut self, client: &Client, run_id: &str) {
         let weights = self.dir.join("weights");
-        let staged = weights.join(STAGED_COPY);
+        let staged = staged_copy(&weights);
         let path = format!("/models/{}/weights", encode(&run_model_id(run_id, true)));
         let cancel = Arc::new(AtomicBool::new(false));
         let (client, core, entry) = (client.clone(), self.core.clone(), self.entry.clone());
@@ -1331,14 +1339,17 @@ mod tests {
     #[test]
     fn a_copy_that_is_dropped_leaves_no_staged_file_and_tells_its_thread() {
         let dir = folo_test_support::TestDir::new("cloud-copying");
-        let staged = dir.join(STAGED_COPY);
+        let (staged, newer) = (staged_copy(&dir), staged_copy(&dir));
+        assert_ne!(staged, newer, "every copy has a staging file of its own");
         std::fs::write(&staged, b"an older checkpoint").unwrap();
+        std::fs::write(&newer, b"a newer copy's download").unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
         drop(Copying { thread: None, cancel: cancel.clone(), staged: staged.clone() });
         assert!(cancel.load(Ordering::SeqCst) && !staged.exists());
-        // The name is one a later run of the executor sweeps away, should both sides miss it.
+        assert!(newer.exists(), "an old copy's clean-up leaves a newer copy's file alone");
+        // The names are ones a later run of the executor sweeps away, should both sides miss one.
         std::fs::write(&staged, b"x").unwrap();
         transfer::remove_partial(&dir);
-        assert!(!staged.exists());
+        assert!(!staged.exists() && !newer.exists());
     }
 }
