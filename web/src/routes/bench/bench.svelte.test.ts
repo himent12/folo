@@ -333,6 +333,24 @@ describe('the benchmark page', () => {
     expect(compare.getAttribute('href')).toBe('#/benchmarks/bn_3c90/compare?entries=be_f101,be_f100');
   });
 
+  it('waits for its entries before it shows a leaderboard or a plan, though the stream names the benchmark first', async () => {
+    vi.useFakeTimers();
+    try {
+      // The stream's first `bench` event (30 ms) comes before the lists (140 ms, the demo's own latency).
+      hub.api = new MockApi('normal', 140);
+      router.route = parse('#/benchmarks/bn_3c90');
+      open(BenchmarkPage as Component, {});
+      await vi.advanceTimersByTimeAsync(60);
+      flushSync();
+      expect(text()).not.toMatch(/No entries yet/);
+      await vi.advanceTimersByTimeAsync(400);
+      flushSync();
+      expect(document.querySelectorAll('table.board tbody tr[data-id]').length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('picks finished entries for Compare, at most four, and makes Compare the one primary from two', async () => {
     await page('/benchmarks/bn_3c90');
     const boxes = [...document.querySelectorAll<HTMLInputElement>('table.board tbody input[type="checkbox"]')];

@@ -300,7 +300,8 @@
       <ErrorState error={live.error} title="Could not load this benchmark" retry={() => live.retry()} />
     {/if}
   </Page>
-{:else if !bench}
+{:else if !bench || live.loading}
+  <!-- Until the lists load too: the stream's first `bench` event can come first, and an empty list is no board. -->
   <div class="sk-page" aria-busy="true" aria-label="Loading benchmark">
     <div class="sk-head"><Skeleton w="min(240px, 60%)" h="24px" /><Skeleton w="min(420px, 90%)" h="14px" /></div>
     <div class="sk-head"><Skeleton w="min(500px, 90%)" h="12px" /><Skeleton w="min(380px, 70%)" h="12px" /></div>
