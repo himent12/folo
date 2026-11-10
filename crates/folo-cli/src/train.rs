@@ -921,7 +921,7 @@ mod tests {
             let crate::cli::Command::Train(args) = cli.command else { panic!("not train: {}", cmd.cli) };
             assert_eq!(args.data.as_deref(), Some(data), "{}", cmd.cli);
             assert_eq!(args.weights.as_deref(), weights, "{}", cmd.cli);
-            // Read as the server reads the registered dataset (runs.rs `data_format`).
+            // Read as the server reads the registered dataset (runs/mod.rs `data_format`).
             let want_format = match format {
                 folo_api::DatasetFormat::Auto => folo_data::Format::Auto,
                 folo_api::DatasetFormat::Yolo => folo_data::Format::Yolo,

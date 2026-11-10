@@ -223,7 +223,7 @@ impl RunEntry {
         self.state.lock().unwrap().outcome = Some((status, error, code));
     }
 
-    /// A stop was requested ([`Runs::stop`]).
+    /// A stop was requested ([`Runs::stop`](crate::runs::Runs::stop)).
     pub(crate) fn stop_requested(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }

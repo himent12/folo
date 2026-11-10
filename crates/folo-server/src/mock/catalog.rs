@@ -8,14 +8,13 @@ use folo_api::{
 
 use crate::util::{fnv1a, parse_rfc3339, rfc3339, unix_now};
 
-use super::cloud::{self, CONNECTION, SEEDED_OFFER, SimCloud};
+use super::cloud::{self, CONNECTION, MockCloud, SEEDED_OFFER, SimCloud};
 use super::datasets::{DatasetEntry, ProcDataset};
 use super::models::{EvalBasis, StaticModel};
 use super::runs::{Curve, LiveClock, SimRun, Timeline, arch_spec};
 use super::scene::Theme;
 use super::{
-    CLOUD_RUN, DEVICE, MockCloud, MockStore, MockTensorCores, model_bytes, steps_per_epoch, throughput,
-    weights,
+    CLOUD_RUN, DEVICE, MockStore, MockTensorCores, model_bytes, steps_per_epoch, throughput, weights,
 };
 
 struct RunDef {
@@ -43,7 +42,7 @@ enum End {
 
 impl MockStore {
     /// Builds the mock catalogue. The live run starts at epoch ~12 so charts have data right away. The cloud is
-    /// [`ENV_MOCK_CLOUD`]'s.
+    /// [`ENV_MOCK_CLOUD`](crate::mock::cloud::ENV_MOCK_CLOUD)'s.
     pub fn new() -> MockStore {
         MockStore::with_cloud(MockCloud::from_env())
     }

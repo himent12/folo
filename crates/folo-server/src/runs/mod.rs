@@ -1,5 +1,5 @@
 //! Training runs of the real store: a registry persisted under `<data dir>/runs/<id>/`, a FIFO queue and one
-//! worker thread that trains one run at a time with folo-vision's [`Trainer`].
+//! worker thread that trains one run at a time with folo-vision's [`Trainer`](folo_vision::Trainer).
 //!
 //! Each run folder holds `run.json` (the API `Run` plus what the server needs to restart it, rewritten atomically
 //! on every status change and after every epoch), `log.jsonl` (every log line, flushed as it happens), and what the

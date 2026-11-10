@@ -135,7 +135,7 @@ impl Exec {
                     refs[0].clone()
                 }
                 // Not listed (yet) or unknown: the release looks for it by its name again, and the reaper after
-                // that (super::reaper::LISTED_WITHIN).
+                // that (crate::cloud::reaper::LISTED_WITHIN).
                 Ok(_) | Err(_) => return Err(failed(e.code(), e.message)),
             },
             Err(e) => return Err(nothing(release, e)),

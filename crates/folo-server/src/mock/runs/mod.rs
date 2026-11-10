@@ -87,7 +87,8 @@ pub struct Snap {
     pub cycle: u64,
     /// Unix seconds of the stop request, if one was made in this cycle.
     pub stop_requested: Option<f64>,
-    /// `(position, waiting)` while the run waits in the training queue ([`QueueEvent`]).
+    /// `(position, waiting)` while the run waits in the training queue
+    /// ([`QueueEvent`](folo_api::QueueEvent)).
     pub queue: Option<(u32, u32)>,
     /// Unix seconds of the view.
     pub at: f64,

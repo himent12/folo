@@ -54,7 +54,7 @@ pub fn infer_row(r: &InferRecord) -> InferThroughput {
 /// Image sizes the reference rows are listed at.
 pub const REFERENCE_SIZES: [u32; 2] = [640, 320];
 
-/// See [`Throughput::table`].
+/// See [`Throughput::table`](crate::throughput::recording::Throughput::table).
 pub fn table(file: &TableFile, auto: &DeviceId, devices: &[DeviceId]) -> ThroughputTable {
     // Rows without a rate (none are written, but a hand-edited file may have them) neither list nor shadow.
     let rated = || file.training.iter().filter(|r| !(r.mosaic.is_empty() && r.close_mosaic.is_empty()));

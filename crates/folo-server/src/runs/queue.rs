@@ -261,8 +261,9 @@ impl Runs {
         }
     }
 
-    /// Test support: while `on`, every run waits after each epoch until this is turned off or the run is asked to
-    /// stop ([`EpochHold`]), so a test can stop a run that would otherwise finish first.
+    /// Test support: while `on`, every run waits after each epoch until this is turned off or the run is
+    /// asked to stop ([`EpochHold`](crate::runs::EpochHold)), so a test can stop a run that would otherwise
+    /// finish first.
     pub fn hold_after_epochs(&self, on: bool) {
         *self.hold.on.lock().unwrap_or_else(|p| p.into_inner()) = on;
         self.hold.lifted.notify_all();

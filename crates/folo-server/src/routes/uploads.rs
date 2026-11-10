@@ -30,7 +30,8 @@ pub(super) async fn get_upload(
     Ok(Json(blocking(&st, move |s| s.get_upload(&id)).await?))
 }
 
-/// `PUT /api/uploads/{id}/parts/{n}`: the body is the next bytes of the stream (at most [`MAX_PART_BYTES`]).
+/// `PUT /api/uploads/{id}/parts/{n}`: the body is the next bytes of the stream (at most
+/// [`MAX_PART_BYTES`](crate::uploads::MAX_PART_BYTES)).
 pub(super) async fn upload_part(
     State(st): State<AppState>,
     ApiPath((id, n)): ApiPath<(String, u32)>,

@@ -19,14 +19,14 @@ use crate::store::{
 };
 use crate::util::{Rng, fnv1a, mix64, noise, rfc3339, unique_id, unix_now};
 
-use super::cloud::{self, SimCloud};
+use super::cloud::{self, MockCloud, PHASE_S, SimCloud};
 use super::datasets::{DatasetEntry, ProcDataset};
 use super::models::{EvalBasis, fake_detections};
 use super::runs::{self, Curve, LiveClock, SimRun, Timeline, arch_spec};
 use super::scene::Theme;
 use super::{
-    DEVICE, LIVE_RUN, MOCK_GPU, MockCloud, MockStore, MockTensorCores, PHASE_S, mock_weights, model_bytes,
-    quality_of, steps_per_epoch, throughput, val,
+    DEVICE, LIVE_RUN, MOCK_GPU, MockStore, MockTensorCores, mock_weights, model_bytes, quality_of,
+    steps_per_epoch, throughput, val,
 };
 
 impl Store for MockStore {
