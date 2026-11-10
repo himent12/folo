@@ -5,6 +5,28 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 
 ## Unreleased
 
+### Vision benchmarks
+- Make a benchmark from your own labeled images and run **any vision model** on it: a FOLO model, Claude Code or
+  Codex looking at the images, or predictions from a model that runs anywhere else
+  ([docs/BENCH.md](docs/BENCH.md); HTTP API under `/api/bench`, feature `vision_bench`; **Benchmarks** in
+  Studio). A benchmark is frozen (images and truth copied in, a fingerprint over all of it) and carries a plan of
+  stress conditions: twelve deterministic image changes (low light, overexposure, low contrast, defocus, motion
+  blur, sensor noise, haze, colour cast, JPEG compression, low resolution, distance, occlusion) at severities 1
+  to 5, served as the same bytes to every contestant. A coding agent can design the plan from the benchmark's
+  description and a few of its images (one request).
+- Every entry gets a score from 0 to 100 made of five axes with exact definitions: accuracy (mAP@0.5:0.95 with a
+  bootstrap interval), robustness (the accuracy kept under the plan's conditions), self-labeling (the share of
+  objects it labels by itself while 9 in 10 labels are right), calibration (1 − ECE) and localization. Studio
+  shows the leaderboard with every entry's interval on one scale, and per entry where the score comes from, the
+  accuracy kept per condition and severity, the reliability diagram, the label curve and the images it gets most
+  wrong; two to four entries compare side by side.
+- **Self-improvement loops** test whether a model can teach its successor: the model labels a pool of images by
+  itself, a student (the same or a larger architecture) trains on those labels alone, the benchmark grades the
+  student, and the student is the next generation's teacher. No true label enters training or the choice of the
+  best checkpoint; the verdict is read against the first teacher's interval.
+- New crate `folo-bench` (conditions, plans, scoring): pure, deterministic for every thread count, each number
+  tested against a hand-worked case.
+
 ### Cloud compute
 - Train a run on a GPU that is not in this machine: one rented from **RunPod** for the length of the run, or
   another FOLO server of yours (`remote`). The run stays a run of this server, with the same metrics, logs,
