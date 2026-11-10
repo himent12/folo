@@ -1,0 +1,528 @@
+//! A run's page: its header and actions, the failure banner and the KPI strip.
+
+use std::sync::Arc;
+
+use gpui::prelude::FluentBuilder;
+use gpui::{
+    AnyElement, Context, FontWeight, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window,
+    div, px,
+};
+
+use super::duration_of;
+use crate::api::{Run, RunExt, RunStatus, time};
+use crate::app::{FoloApp, Route, act};
+use crate::charts::sparkline;
+use crate::controls::Btn;
+use crate::screens::{detail_header, loading_rows, page_header};
+use crate::store::Load;
+use crate::theme::{radius, theme, ty};
+use crate::ui::*;
+
+impl FoloApp {
+    /// Resume a stopped or failed run where it left off (its last finished epoch).
+    /// The last finished (validated) epoch, from the loaded history: where a resume continues from
+    /// (`weights/last.folo`). None until the history is in (the run's own fields don't say).
+    fn last_finished_epoch(&self, r: &Run) -> Option<u32> {
+        let d = self.store.run_data.get(&r.id)?.ready()?;
+        Some(d.metrics.epochs.last().map_or(0, |e| e.epoch))
+    }
+
+    fn resume_button(&self, r: &Run, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let rid = r.id.clone();
+        let from = self.last_finished_epoch(r).map(|e| e + 1);
+        self.button(
+            "run-resume",
+            from.map_or("Resume".to_string(), |f| format!("Resume from epoch {f}")),
+            Btn::Secondary,
+            Some("icons/play.svg"),
+            window,
+            cx,
+            act(move |this, _, cx| this.resume_run(rid.clone(), cx)),
+        )
+        .tooltip(crate::controls::tip(
+            if from == Some(1) {
+                "No epoch finished: starts over with the same config"
+            } else {
+                "Continues from the last saved checkpoint"
+            },
+            None,
+        ))
+        .into_any_element()
+    }
+
+    pub fn run_view(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let Some(r) = self.store.run(id).cloned() else {
+            let header = page_header(&t, "Run", "", vec![]);
+            let body = if self.store.runs.is_loading() {
+                panel(&t).child(loading_rows(&t, "run", 6)).into_any_element()
+            } else if let Some(e) = self.store.runs.error().cloned() {
+                self.error_panel(&e, "run-retry", window, cx)
+            } else {
+                panel(&t)
+                    .child(empty_state(
+                        &t,
+                        "icons/circle-alert.svg",
+                        "Run not found",
+                        "It may have been deleted.",
+                        Tone::Neutral,
+                    ))
+                    .into_any_element()
+            };
+            return self.page_frame(&t, header, body, cx);
+        };
+        self.ensure_run_data(id, cx);
+        self.ensure_logs(id, cx);
+        if r.epoch > 0 {
+            self.ensure_samples(id, cx);
+        }
+        let now = self.store.api.now();
+        let ds_name = self
+            .store
+            .dataset_summary(&r.config.dataset_id)
+            .map_or(r.config.dataset_id.clone(), |d| d.name.clone());
+        // The subtitle leads with the architecture and its e2e tag, as every list does.
+        let subtitle = self.run_subtitle(&t, &r, ty::BASE, t.text_secondary, "hdr");
+
+        let mut actions = Vec::new();
+        match r.status {
+            RunStatus::Running | RunStatus::Queued => {
+                if r.status == RunStatus::Queued
+                    && r.queue_position.is_some_and(|p| p > 1)
+                    && self.store.features.iter().any(|f| f == "queue_control")
+                {
+                    let rid = r.id.clone();
+                    actions.push(
+                        self.button(
+                            "run-next",
+                            "Start next",
+                            Btn::Secondary,
+                            Some("icons/play.svg"),
+                            window,
+                            cx,
+                            act(move |this, _, cx| {
+                                this.move_queued(rid.clone(), crate::api::QueueAction::Top, cx)
+                            }),
+                        )
+                        .tooltip(crate::controls::tip("Move it to the front of the queue", None))
+                        .into_any_element(),
+                    );
+                }
+                let rid = r.id.clone();
+                actions.push(
+                    self.button(
+                        "run-stop",
+                        "Stop run",
+                        Btn::Danger,
+                        Some("icons/stop.svg"),
+                        window,
+                        cx,
+                        act(move |this, w, cx| {
+                            this.ask_stop(rid.clone(), w, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element(),
+                );
+            }
+            RunStatus::Completed | RunStatus::Stopped => {
+                if r.status == RunStatus::Stopped {
+                    actions.push(self.resume_button(&r, window, cx));
+                }
+                if let Some(mid) = r.model_id.clone() {
+                    let m2 = mid.clone();
+                    actions.push(
+                        self.button(
+                            "run-try",
+                            "Try in Playground",
+                            Btn::Secondary,
+                            Some("icons/scan-eye.svg"),
+                            window,
+                            cx,
+                            act(move |this, w, cx| {
+                                this.play_model = Some(m2.clone());
+                                this.play_pred = Load::Idle;
+                                this.navigate(Route::Playground, w, cx);
+                                this.run_predict(cx);
+                            }),
+                        )
+                        .into_any_element(),
+                    );
+                    actions.push(
+                        self.button(
+                            "run-model",
+                            "Open model",
+                            Btn::Primary,
+                            Some("icons/box.svg"),
+                            window,
+                            cx,
+                            act(move |this, w, cx| this.navigate(Route::Model(mid.clone()), w, cx)),
+                        )
+                        .into_any_element(),
+                    );
+                }
+            }
+            RunStatus::Failed => {
+                // Reuse the whole config; for out-of-memory failures, halve the batch. Resuming an
+                // OOM failure would hit the same limit (the config can't change), so it isn't offered.
+                let mut cfg = r.config.clone();
+                let oom = r.error.as_deref().is_some_and(is_gpu_oom);
+                // Mixed precision refused (no tensor cores): the new run trains in f32, and resuming
+                // would hit the same refusal.
+                let no_amp = r.error_code.as_deref() == Some("not_supported") && cfg.amp;
+                if !oom && !no_amp {
+                    actions.push(self.resume_button(&r, window, cx));
+                }
+                let note = if no_amp {
+                    cfg.amp = false;
+                    Some("Mixed precision turned off: it isn't available on this run's device.".to_string())
+                } else {
+                    oom.then(|| crate::app::retry_batch(cfg.batch)).flatten().map(|to| {
+                        let from = cfg.batch;
+                        cfg.batch = to;
+                        format!("Batch lowered from {from} to {to} so the run fits in GPU memory.")
+                    })
+                };
+                actions.push(
+                    self.button(
+                        "run-retry-cfg",
+                        "New run from this config",
+                        // The way forward after a failure: the page's primary action.
+                        Btn::Primary,
+                        Some("icons/refresh-cw.svg"),
+                        window,
+                        cx,
+                        act(move |this, w, cx| this.open_new_run_from(&cfg, note.clone(), w, cx)),
+                    )
+                    .into_any_element(),
+                );
+            }
+            RunStatus::Stopping => {}
+        }
+        let title = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(text(ty::XL, t.text_primary).child(r.name.clone()))
+            .child(status_badge(&t, &r, &format!("hdr-{}", r.id)))
+            // The subtitle's e2e tag explains itself on hover; this help gives it a keyboard route.
+            .when(r.config.head == crate::api::Head::O2o, |d| {
+                d.child(self.help_icon("run-head-help", FoloApp::E2E_HELP, window, cx))
+            });
+        let header = detail_header(&t, title, subtitle, actions);
+
+        let mut body = div().flex().flex_col().gap(px(16.));
+        if r.status == RunStatus::Failed {
+            body = body.child(self.failure_banner(&r, cx));
+        }
+        // Where it runs, how far the hand-over is and what it costs, ahead of the training itself.
+        if let Some(c) = r.cloud.clone() {
+            body = body.child(self.cloud_run_panel(&r, &c, now, window, cx));
+        }
+        let data = self.store.run_data.get(id).map(|l| match l {
+            Load::Ready(d) => Ok((
+                d.derived(),
+                d.recent_ips(120),
+                d.last_epoch().cloned(),
+                d.metrics.epochs.len().checked_sub(2).map(|i| d.metrics.epochs[i].val.map50_95),
+            )),
+            Load::Failed(e) => Err(Some(e.clone())),
+            _ => Err(None),
+        });
+        match data {
+            Some(Ok((d, ips, last, prev))) => {
+                let window_w = f32::from(window.viewport_size().width);
+                let short = window.viewport_size().height < px(700.);
+                body = body.child(self.kpi_strip(&r, &ips, last.as_ref(), prev, now, window_w, short, cx));
+                body = body.child(self.run_charts(&r, &d, window, cx));
+            }
+            Some(Err(Some(e))) => body = body.child(self.error_panel(&e, "run-data-retry", window, cx)),
+            _ => {
+                body = body.child(panel(&t).h(px(96.)).child(loading_rows(&t, "kpi", 2)));
+                body = body.child(div().h(px(560.)).child(skeleton(&t, "charts")));
+            }
+        }
+        let samples = self.samples_panel(&r, window, cx);
+        let logs = self.logs_panel(&r, window, cx);
+        // Samples, then the log, each full width: an epoch's log line (~52 mono characters) reads on
+        // one line, as in a terminal, instead of wrapping in a 2/5 column at every window size.
+        body = body.child(div().flex().child(samples)).child(div().flex().child(logs));
+        body = body.child(self.config_panel(&r, &ds_name, window, cx));
+        self.page_frame(&t, header, body, cx)
+    }
+
+    fn failure_banner(&self, r: &Run, cx: &mut Context<Self>) -> AnyElement {
+        let t = theme(cx);
+        let msg = r.error.clone().unwrap_or_else(|| "The run failed.".into());
+        let hint = if r.error_code.as_deref() == Some("not_supported") && r.config.amp {
+            "Mixed precision needs a GPU with tensor cores (and folo serve --tensor-cores); this run's device had none. New run from this config trains without it.".to_string()
+        } else if is_gpu_oom(&msg) {
+            match crate::app::retry_batch(r.config.batch) {
+                Some(to) => format!(
+                    "The batch didn't fit in GPU memory. New run from this config starts with batch {to}; a smaller image size or architecture also helps."
+                ),
+                None => "The batch didn't fit in GPU memory and can't go lower: lower the image size or pick a smaller architecture in New run from this config.".to_string(),
+            }
+        } else {
+            "See the log below for details.".to_string()
+        };
+        div()
+            .flex()
+            .gap(px(12.))
+            .p(px(14.))
+            .rounded(px(radius::LG))
+            .bg(t.danger_muted)
+            .border_1()
+            .border_color(crate::theme::alpha(t.danger_solid, 0.35))
+            .child(icon("icons/circle-x.svg", 18., t.danger_solid))
+            .child(
+                // Shrinks beside the icon, so a long backend message wraps inside the banner.
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(4.))
+                    .child(
+                        text(ty::BASE, t.text_primary)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(format!("Failed in epoch {} of {}", r.epoch, r.epochs)),
+                    )
+                    .child(
+                        div()
+                            .font_family(crate::theme::MONO)
+                            .text_size(px(ty::SM.size))
+                            .text_color(t.danger_text)
+                            .child(msg),
+                    )
+                    .child(text(ty::SM, t.text_secondary).child(hint)),
+            )
+            .into_any_element()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn kpi_strip(
+        &self,
+        r: &Run,
+        ips: &[f32],
+        last: Option<&crate::api::Epoch>,
+        prev: Option<f32>,
+        now: i64,
+        window_w: f32,
+        short: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = theme(cx);
+        // One row of five; very narrow windows wrap to two rows, one type step smaller.
+        let narrow = window_w < 1000.;
+        // Short windows: tighter tiles (padding only; every value keeps its detail line).
+        let compact = short;
+        let big = if narrow { ty::XL } else { ty::X2XL };
+        let live = r.status == RunStatus::Running;
+        // Change since the previous epoch only means something while training.
+        let delta = match (last, prev) {
+            (Some(l), Some(p)) if live => {
+                let d = l.val.map50_95 - p;
+                let (c, s) = if d >= 0.0 {
+                    (t.success_text, format!("+{d:.3}"))
+                } else {
+                    (t.danger_text, format!("{d:.3}"))
+                };
+                let best = r.best.as_ref().map_or(String::new(), |b| format!("· best {}", f3(b.map50_95)));
+                Some(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .child(text(ty::SM, c).tnum().child(format!("{s} vs last")))
+                        .child(text(ty::SM, t.text_tertiary).tnum().child(best)),
+                )
+            }
+            _ => None,
+        };
+        let ips_now = ips.last().copied();
+        let ips_avg = if ips.is_empty() { None } else { Some(ips.iter().sum::<f32>() / ips.len() as f32) };
+        // Smooth the throughput trace so the sparkline shows the trend, not per-step jitter.
+        let pts: Vec<(f32, f32)> = ips.iter().enumerate().map(|(i, v)| (i as f32, *v)).collect();
+        let smooth: Vec<f32> = crate::charts::ema(&pts, 0.85).into_iter().map(|p| p.1).collect();
+        let duration_tile = |label: &str, secs: Option<f64>, detail: gpui::Div| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .min_w_0()
+                .child(caption(&t, label))
+                .child(duration_metric(&t, secs, big, ty::SM))
+                .child(detail)
+        };
+        let time_tile = if live || r.status == RunStatus::Queued {
+            duration_tile(
+                "Time left",
+                r.eta_s,
+                text(ty::SM, t.text_tertiary).tnum().child(
+                    duration_of(r, now).map_or(String::new(), |d| format!("{} elapsed", time::duration(d))),
+                ),
+            )
+        } else {
+            duration_tile(
+                "Duration",
+                duration_of(r, now),
+                text(ty::SM, t.text_tertiary).child(
+                    r.finished
+                        .as_deref()
+                        .and_then(time::parse)
+                        .map_or(String::new(), |f| format!("ended {}", time::ago(f, now))),
+                ),
+            )
+        };
+        let tiles: Vec<gpui::Div> = vec![
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(caption(&t, "Epoch"))
+                .child(metric(&t, r.epoch.to_string(), &format!("/ {}", r.epochs), big, ty::SM))
+                .child(div().pt(px(if compact { 4. } else { 6. })).child(progress(
+                    &t,
+                    r.progress(),
+                    if live { t.accent_fill() } else { t.text_tertiary },
+                    3.,
+                ))),
+            stat_sized(
+                &t,
+                // "final" only for a run that finished; a stopped or failed one ends on its last evaluated epoch.
+                if live {
+                    "mAP50-95 · latest"
+                } else if r.status == RunStatus::Completed {
+                    "mAP50-95 · final"
+                } else {
+                    "mAP50-95 · last evaluated"
+                },
+                last.map_or("–".into(), |e| f3(e.val.map50_95)),
+                big,
+                delta.or_else(|| {
+                    r.best.as_ref().map(|b| {
+                        text(ty::SM, t.text_tertiary).tnum().child(format!(
+                            "best {} @ {}",
+                            f3(b.map50_95),
+                            b.epoch
+                        ))
+                    })
+                }),
+            ),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(caption(&t, "Precision / Recall"))
+                .child(metric_pair(
+                    &t,
+                    big,
+                    last.map_or("–".into(), |e| format!("{:.3}", e.val.precision)),
+                    last.map_or("–".into(), |e| format!("{:.3}", e.val.recall)),
+                ))
+                // The epoch's own operating point once the engine reports it (`best_f1_conf`); the
+                // P/R chart below states the match rule, so the tile's line fits at 1280.
+                .child(text(ty::SM, t.text_tertiary).ellipsis().child(pr_caption(
+                    last.and_then(|e| e.val.best_f1_conf),
+                    self.eval_split(r),
+                    false,
+                ))),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(caption(&t, if live { "Throughput" } else { "Final throughput" }))
+                .child(
+                    div()
+                        .flex()
+                        .items_end()
+                        .gap(px(10.))
+                        .child(metric(
+                            &t,
+                            ips_now.map_or("–".into(), |v| format!("{v:.0}")),
+                            "img/s",
+                            big,
+                            ty::SM,
+                        ))
+                        .child(
+                            // A glance, not a chart: 160 px in the one-row strip; in the wrapped
+                            // two-column tile a little wider (240), so 120 steps don't spread into
+                            // a noise band.
+                            div()
+                                .flex_1()
+                                .min_w(px(40.))
+                                .max_w(px(if narrow { 240. } else { 160. }))
+                                .h(px(28.))
+                                .pb(px(4.))
+                                .when(smooth.len() > 2, |d| {
+                                    d.child(sparkline(
+                                        &t,
+                                        Arc::new(smooth.clone()),
+                                        t.text_secondary,
+                                        24.,
+                                        live,
+                                    ))
+                                }),
+                        ),
+                )
+                .child(text(ty::SM, t.text_tertiary).tnum().child(
+                    ips_avg.map_or(String::new(), |a| format!("avg {a:.0} · last {} steps", ips.len())),
+                )),
+            time_tile,
+        ];
+        let tile = |content: gpui::Div| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .px(px(16.))
+                .py(px(if compact { 8. } else { 12. }))
+                .child(content.when(compact, |d| d.gap(px(2.))))
+        };
+        let per_row = if window_w < 1000. { 3 } else { 5 };
+        let mut rows = Vec::new();
+        let mut it = tiles.into_iter().peekable();
+        let mut first = true;
+        while it.peek().is_some() {
+            // Full width, so the two-column span below has a width to take a fraction of.
+            let mut row = div().w_full().flex();
+            if !first {
+                row = row.border_t_1().border_color(t.line_subtle);
+            }
+            let wrapped = !first;
+            first = false;
+            for (i, c) in it.by_ref().take(per_row).enumerate() {
+                if i > 0 {
+                    row = row.child(vline(&t));
+                }
+                // On a 3-column grid: the wrapped row's first tile (Throughput, whose sparkline
+                // fills it) spans two columns, so its divider lines up with the first row's second.
+                // flex_1's 0 basis would win over a width, so the basis is set itself.
+                row = row.child(if wrapped && per_row == 3 && i == 0 {
+                    tile(c).flex_none().flex_basis(gpui::relative(2. / 3.))
+                } else {
+                    tile(c)
+                });
+            }
+            rows.push(row);
+        }
+        panel(&t).flex().flex_col().children(rows).into_any_element()
+    }
+}
+
+/// A run that failed with `gpu_out_of_memory`. Runs carry the message, not the code (docs/API.md):
+/// the server writes "the GPU ran out of memory (…)", older servers the driver's "… out of memory …".
+fn is_gpu_oom(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("out of memory") || m.contains("outofmemory")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn out_of_memory_failures_are_recognised() {
+        use super::is_gpu_oom;
+        assert!(is_gpu_oom("the GPU ran out of memory (Out of Memory: tried to allocate 2.1 GiB)"));
+        assert!(is_gpu_oom("wgpu: OutOfMemory"));
+        assert!(!is_gpu_oom("invalid dataset: no training images"));
+    }
+}
