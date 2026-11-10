@@ -502,18 +502,42 @@ pub fn apply(
                     row[ox * 3..(ox + w2) * 3].copy_from_slice(src);
                 }
             });
-            // Input coordinate x lands on ox + x · w2 / w (area_taps), and so do the boxes.
-            let (sx, sy) = (w2 as f64 / w as f64, h2 as f64 / h as f64);
-            let (fx, fy) =
-                (|x: f32| (ox as f64 + x as f64 * sx) as f32, |y: f32| (oy as f64 + y as f64 * sy) as f32);
-            for b in &mut boxes {
-                (b.x1, b.y1, b.x2, b.y2) = (fx(b.x1), fy(b.y1), fx(b.x2), fy(b.y2));
-            }
+            distance_boxes(&mut boxes, w, h, s);
             out
         }
         Condition::Occlusion => occlusion(raw, w, h, &boxes, OCCLUSION_AREA[i], seed),
     };
     Ok((RgbImage::from_raw(w as u32, h as u32, data).expect("conditions keep the size"), boxes))
+}
+
+/// The true boxes of a `width` x `height` image under `condition` at `severity`, without the pixels: exactly the
+/// boxes [`apply`] returns (only [`Condition::Distance`] moves them), for listing a variant's truth without
+/// rendering it. A severity outside `1..=5` is [`Error::Severity`].
+pub fn moved_boxes(
+    condition: Condition,
+    severity: u8,
+    width: u32,
+    height: u32,
+    boxes: &[BBox],
+) -> Result<Vec<BBox>, Error> {
+    let i = level(severity)?;
+    let mut boxes = boxes.to_vec();
+    if condition == Condition::Distance && width > 0 && height > 0 {
+        distance_boxes(&mut boxes, width as usize, height as usize, DISTANCE_SCALE[i]);
+    }
+    Ok(boxes)
+}
+
+/// [`Condition::Distance`]'s box mapping: input coordinate x lands on `ox + x · w2 / w` (`area_taps`), as the
+/// pixels do.
+fn distance_boxes(boxes: &mut [BBox], w: usize, h: usize, s: f32) {
+    let (w2, h2) = (shrink(w, s), shrink(h, s));
+    let (ox, oy) = ((w - w2) / 2, (h - h2) / 2);
+    let (sx, sy) = (w2 as f64 / w as f64, h2 as f64 / h as f64);
+    let (fx, fy) = (|x: f32| (ox as f64 + x as f64 * sx) as f32, |y: f32| (oy as f64 + y as f64 * sy) as f32);
+    for b in boxes {
+        (b.x1, b.y1, b.x2, b.y2) = (fx(b.x1), fy(b.y1), fx(b.x2), fy(b.y2));
+    }
 }
 
 /// `n · s` rounded, at least 1 and at most `n`.
@@ -837,6 +861,21 @@ mod tests {
         let img = scene(640, 480);
         let (_, b) = apply(Condition::Distance, 3, &img, &[bx(100.0, 40.0, 220.0, 160.0)], 0).unwrap();
         assert_eq!(b[0], bx(210.0, 140.0, 270.0, 200.0));
+    }
+
+    #[test]
+    fn moved_boxes_are_the_boxes_apply_returns() {
+        let boxes = [bx(100.0, 40.0, 220.0, 160.0), bx(0.0, 0.0, 33.5, 17.25)];
+        for (w, h) in [(640u32, 480u32), (333, 101)] {
+            let img = scene(w, h);
+            for c in Condition::ALL {
+                for s in 1..=5 {
+                    let (_, want) = apply(c, s, &img, &boxes, 3).unwrap();
+                    assert_eq!(moved_boxes(c, s, w, h, &boxes).unwrap(), want, "{} {s} {w}x{h}", c.id());
+                }
+            }
+        }
+        assert_eq!(moved_boxes(Condition::Distance, 0, 10, 10, &boxes), Err(Error::Severity(0)));
     }
 
     #[test]

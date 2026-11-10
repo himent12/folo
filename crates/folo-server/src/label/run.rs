@@ -402,7 +402,11 @@ fn plural(n: u64, word: &'static str) -> String {
 
 /// The image at `path` as an agent gets it: upright, at most [`AGENT_IMAGE_SIDE`] on its long side, JPEG.
 pub fn agent_jpeg(path: &Path) -> Result<Vec<u8>, String> {
-    let image = folo_data::read_image(path).map_err(|e| e.to_string())?;
+    agent_jpeg_of(folo_data::read_image(path).map_err(|e| e.to_string())?)
+}
+
+/// A decoded image as an agent gets it ([`agent_jpeg`]): at most [`AGENT_IMAGE_SIDE`] on its long side, JPEG.
+pub fn agent_jpeg_of(image: folo_data::Image) -> Result<Vec<u8>, String> {
     let long = image.width.max(image.height);
     let image = if long > AGENT_IMAGE_SIDE {
         let scale = f64::from(AGENT_IMAGE_SIDE) / f64::from(long);

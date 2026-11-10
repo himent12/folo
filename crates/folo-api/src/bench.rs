@@ -245,6 +245,10 @@ pub struct Bench {
     pub entries: u64,
     /// The finished entry with the highest score; `null` before the first.
     pub best: Option<BenchBest>,
+    /// True while an entry of the benchmark is queued, running or stopping, or a loop of it is running or
+    /// stopping (deleting it is then `409 bench_active`). A `bench` event is sent when it changes.
+    #[serde(default)]
+    pub active: bool,
 }
 
 /// The leading entry of a [`Bench`].
@@ -257,6 +261,9 @@ pub struct BenchBest {
     pub name: String,
     /// Its score, `0..=100`.
     pub score: f32,
+    /// Its `score.partial`: the score compares only loosely with complete entries.
+    #[serde(default)]
+    pub partial: bool,
 }
 
 /// `POST /api/bench/benchmarks`: a new benchmark.
@@ -550,6 +557,13 @@ pub struct BenchEntry {
     pub score: Option<BenchScore>,
     /// mAP@0.5:0.95 on the unchanged images, repeated here for lists; `null` until `done`.
     pub map50_95: Option<f32>,
+    /// The 95% interval of `map50_95` (`BenchResult.accuracy.ci95`), repeated here for lists; `null` until `done`.
+    #[serde(default)]
+    pub ci95: Option<[f32; 2]>,
+    /// How many of the plan's conditions the entry ran completely (every planned severity, every image it runs;
+    /// for an external entry, the conditions its predictions answered); 0 when none, and until `done`.
+    #[serde(default)]
+    pub conditions_run: u32,
     /// How fast the model ran (a model contestant, once `done`).
     #[serde(default)]
     pub speed: Option<BenchSpeed>,

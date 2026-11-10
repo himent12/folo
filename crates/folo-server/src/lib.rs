@@ -3,11 +3,12 @@
 //! Implements the contract in `docs/API.md` on axum. Handlers sit on a [`Store`]: [`MockStore`] serves deterministic
 //! synthetic data (`folo serve --mock`), [`RealStore`] serves datasets from disk (read with folo-data, indexed and
 //! cached under the data dir), trains runs with folo-vision's trainer on a background worker, lists their models,
-//! runs inference and has coding agents label images ([`label`]). The request / response types live in the `folo-api` crate (re-exported as [`api`]) so the CLI and
+//! runs inference, has coding agents label images ([`label`]) and runs vision benchmarks ([`bench`]). The request / response types live in the `folo-api` crate (re-exported as [`api`]) so the CLI and
 //! FOLO Desktop share them.
 //!
 //! See `docs/ARCHITECTURE.md` for how this crate fits into FOLO.
 
+pub mod bench;
 pub mod cli;
 pub mod cloud;
 mod engine;

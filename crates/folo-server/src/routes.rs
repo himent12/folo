@@ -104,12 +104,13 @@ pub fn api() -> Router<AppState> {
         .route("/label/jobs/{id}/events", get(label_events))
         .route("/label/jobs/{id}/logs", get(label_logs))
         .route("/label/jobs/{id}/dataset", post(label_dataset))
+        .merge(crate::bench::http::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
 }
 
 /// Runs a store call on the blocking pool (stores may read files or render images).
-async fn blocking<T, F>(st: &AppState, f: F) -> Result<T>
+pub(crate) async fn blocking<T, F>(st: &AppState, f: F) -> Result<T>
 where
     T: Send + 'static,
     F: FnOnce(&dyn Store) -> Result<T> + Send + 'static,
@@ -172,6 +173,7 @@ async fn system(State(st): State<AppState>) -> Result<Json<SystemResponse>> {
     let optional = [
         (st.web_wasm, folo_api::FEATURE_WEB_WASM),
         (st.store.labeler().is_ok(), folo_api::FEATURE_AGENT_LABELING),
+        (st.store.benches().is_ok(), folo_api::FEATURE_VISION_BENCH),
     ];
     let features = features
         .into_iter()
@@ -307,7 +309,7 @@ async fn image(
 }
 
 /// An image as a response: its bytes with their type, cacheable forever when they never change.
-fn image_response(img: ImageData) -> Response {
+pub(crate) fn image_response(img: ImageData) -> Response {
     let cache = if img.immutable { "public, max-age=31536000, immutable" } else { "no-cache" };
     (
         [

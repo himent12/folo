@@ -129,7 +129,8 @@ right.
 - With a few dozen images the intervals are wide. That is what they are for.
 
 ## Who can run
-- **A FOLO model**: any model of the server. Its classes are matched to the benchmark's by name (without case); a
+- **A FOLO model**: any model of the server, run as validation runs it (so its mAP on the unchanged images is the
+  one `folo val` reports on them). Its classes are matched to the benchmark's by name (without case); a
   benchmark class the model does not know scores 0 and is listed on the entry.
 - **A coding agent**: Claude Code or Codex, asked for boxes exactly as agent labeling asks
   ([LABELING.md](LABELING.md), same CLIs, same cost per call). Agents give no confidences. By default an agent
@@ -158,7 +159,7 @@ pond should weigh haze and a green cast, not JPEG artifacts. **Design with an ag
 description, its classes and a few of its images to Claude Code or Codex (the connection agent labeling uses),
 and gets back a plan drawn from the catalog: which conditions, how severe, how much each counts, and why. It is
 a proposal: you see it next to the current plan, change what you disagree with, and save it. One model request,
-no tools.
+no tools (a second one only when the first answer cannot be read).
 
 ## Self-improvement loops
 The self-labeling axis says how good a model's own labels are. A loop tests what they are worth:

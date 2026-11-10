@@ -36,18 +36,18 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 
 | status | code | when |
 |---|---|---|
-| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes) |
+| 400 | `bad_request`, `invalid_path`, `invalid_query`, `invalid_body`, `invalid_config`, `unknown_format`, `invalid_dataset`, `bench_class_mismatch` | malformed input (`invalid_config`: a `TrainConfig` field is out of range, or the dataset has no classes / training images; the message names it. `invalid_dataset`: e.g. more than 4096 classes, a benchmark source without a labeled image. `bench_class_mismatch`: a model entry whose model knows none of the benchmark's classes) |
 | 401 | `unauthorized` | a request without the server's token (see Conventions) |
 | 403 | `forbidden_origin` | a state-changing request from a disallowed browser origin (see Conventions) |
-| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
+| 404 | `dataset_not_found`, `image_not_found`, `model_not_found`, `run_not_found`, `label_job_not_found`, `path_not_found`, `device_not_found`, `epoch_not_available`, `route_not_found`, `upload_not_found`, `provider_not_found`, `connection_not_found`, `offer_not_found`, `instance_not_found`, `bench_not_found`, `bench_entry_not_found`, `bench_loop_not_found` | something named does not exist (`device_not_found`: a `gpu:<n>` this machine has no usable adapter for; the hint lists the devices it has). The `*_not_found` of listed things hint at the list that has them |
 | 405 | `method_not_allowed` | wrong HTTP method on a known path |
-| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on) |
-| 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict` and image uploads to a labeling job, 2 MiB elsewhere) |
+| 409 | `run_active`, `run_not_active`, `run_not_resumable`, `run_not_queued`, `label_job_active`, `label_job_not_active`, `upload_conflict`, `connection_in_use`, `cloud_refused`, `bench_frozen`, `bench_active`, `bench_entry_active`, `bench_entry_not_active`, `bench_entry_not_done`, `bench_entry_in_loop`, `bench_loop_active`, `bench_loop_not_active` | deleting (or resuming) a run that is still active; stopping one that is not; resuming one that completed; moving one that does not wait in the queue; changing a labeling job while its agent run is active, or an image while it is in an agent call; stopping a job without a run; an upload part out of order or an upload completed before it is whole; removing a cloud connection with live instances or active runs; a cloud provider that says no (no capacity for the offer, no balance, a quota: its message is passed on); changing the plan of a benchmark that has entries; deleting a benchmark with an active entry or loop, an active entry, an entry a running loop uses, or a running loop; stopping an entry or a loop that has ended; the result or images of an entry that is not done |
+| 413 | `payload_too_large` | body over the limit (64 MiB for `/api/predict`, image uploads to a labeling job and new benchmark entries, 2 MiB elsewhere) |
 | 415 | `unsupported_media_type` | JSON endpoint called without `Content-Type: application/json` |
 | 422 | `invalid_body`, `image_decode_failed`, `invalid_weights`, `invalid_upload`, `cloud_auth_failed` | well-formed JSON with wrong types / missing required fields; an upload that is not an image; a `.folo` file that cannot be read; an uploaded archive that is not a readable tar or holds something unsafe; credentials a cloud provider rejects |
 | 500 | `internal` | a bug or an IO failure |
 | 501 | `not_implemented`, `not_supported` | the feature exists in the API but not yet in the engine (streaming inference; in mock mode, resuming runs); `not_supported`: valid, but this machine cannot run it (`POST /api/runs` with `"amp": true` where `capabilities.amp.available` is false: refused before anything is queued, with the same reason and a hint) |
-| 502 | `cloud_unavailable`, `server_unreachable`, `bad_gateway` | a cloud provider's API does not answer or fails; a worker (another FOLO server) does not answer, or answers with something that is not this API. As `Run.error_code` of a cloud run also `cloud_boot_failed`, `cloud_sync_failed` and `cloud_instance_lost` (docs/CLOUD.md) |
+| 502 | `cloud_unavailable`, `server_unreachable`, `bad_gateway`, `agent_failed` | a cloud provider's API does not answer or fails; a worker (another FOLO server) does not answer, or answers with something that is not this API; a coding agent's call fails or its answer is not usable (designing a benchmark plan). As `Run.error_code` of a cloud run also `cloud_boot_failed`, `cloud_sync_failed` and `cloud_instance_lost` (docs/CLOUD.md) |
 | 507 | `gpu_out_of_memory` | the GPU ran out of memory (inference; a training run fails with this message in `Run.error`); the hint says to lower `batch` or `imgsz` or use a smaller `arch` |
 
 ## System
@@ -66,7 +66,7 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   web app), `agent_labeling` (the `/api/label` endpoints, Agent labeling below), `uploads` (`/api/uploads`),
   `run_cursors` (`after_step` / `after_epoch` on `/metrics`, `after` and `total` on `/logs`, `Range` on `/weights`),
   `run_checkpoint` (`checkpoint` on `POST /api/runs`; these three are what a cloud worker needs, docs/CLOUD.md),
-  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events). `folo mcp --server` refuses the
+  `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below). `folo mcp --server` refuses the
   export switches without `export_onnx_switches`.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
   so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
@@ -859,10 +859,11 @@ Grades what a vision model sees ([BENCH.md](BENCH.md) is the guide and defines e
 a frozen set of images with their true boxes plus a plan of stress conditions; an **entry** is one contestant's
 run of it (a model of this server, a coding agent, or predictions made anywhere else) with its score; a **loop**
 tests whether a model's own labels can train its successor. Servers with these endpoints list `vision_bench` in
-`/api/system`'s `features` (real mode only: the mock answers `501 not_implemented`). Not the speed probe of
-`POST /api/system/benchmark`.
+`/api/system`'s `features` (real mode only: the mock answers `501 not_implemented` to every endpoint below). Not
+the speed probe of `POST /api/system/benchmark`.
 
-The types are `folo_api::bench` (`crates/folo-api/src/bench.rs`), field for field.
+The types are `folo_api::bench` (`crates/folo-api/src/bench.rs`), field for field. A benchmark lives in
+`<data dir>/bench/<id>/` (`bench.json`, its copied `images/`, `entries/<id>.json`, `loops/<id>.json`).
 
 **Catalog**
 - `GET /api/bench/catalog` → `BenchCatalog`: `{ "conditions": [{ "id", "name", "group", "description" }],
@@ -876,93 +877,162 @@ The types are `folo_api::bench` (`crates/folo-api/src/bench.rs`), field for fiel
 - `POST /api/bench/benchmarks` body `CreateBench` → `201 Bench`:
   `{ "name", "description"?: "", "source": { "kind": "dataset", "dataset_id", "split"?: "val" } | { "kind":
   "label_job", "job_id" }, "max_images"?: 500, "seed"?: 0, "plan"?: BenchPlan }`. Copies the source's images
-  and true boxes into the benchmark (a dataset split's images, or a labeling job's `labeled` images; the classes
-  are the source's). A source with more than `max_images` (1 to 5000) is sampled with `seed`; the benchmark's
-  image order is a seeded shuffle either way. `name` as a labeling job's; `description` at most 4000 characters.
-  `400 invalid_body` for a plan that is not valid (below), `404 dataset_not_found` / `label_job_not_found`, `400
-  invalid_dataset` when the source has no labeled image.
-- `GET /api/bench/benchmarks/{id}` → `Bench`
-- `PUT /api/bench/benchmarks/{id}` body `{ "name"?, "description"?, "plan"? }` → `Bench`. Absent fields stay.
-  `409 bench_frozen` for a `plan` once the benchmark has entries (delete them, or make a new benchmark).
-- `DELETE /api/bench/benchmarks/{id}` → `204`: the benchmark, its images, entries and loops (never a model, a
-  run or a dataset a loop made). `409 bench_active` while an entry or a loop of it is active.
+  (byte for byte) and true boxes into the benchmark: a dataset split's images (every image of the split; one
+  without boxes is a background image), or a labeling job's `labeled` images with their boxes. The classes are
+  the source's (1 to 80). A source with more than `max_images` (1 to 5000) is sampled with `seed`: the
+  benchmark's order is a seeded shuffle of the source cut to `max_images`, so the sample and the order are one
+  draw and a prefix of the order is a fair sample; the same source and seed give the same benchmark. Image ids
+  are `1`, `2`, ... in that order; file names are the source's (made unique by stem). True boxes are clipped to
+  the image and a box with less than a pixel of width or height left is dropped, so `boxes` counts exactly what
+  is scored. `source` comes back with the split filled in. `name` as a labeling job's; `description` at most
+  4000 characters. `400 invalid_body` for a plan that is not valid (below) and for a bad `name`, `description`
+  or `max_images`, `404 dataset_not_found` / `label_job_not_found`, `400 invalid_dataset` when no labeled image
+  comes out of the source (an empty split, a job with nothing labeled) or it has no classes or more than 80.
+- `fingerprint`: SHA-256 (hex) over the seed, the classes, every image's content hash, size and true boxes in
+  order, and the plan's conditions, severities and weights (not `rationale`, `why` or `designed_by`).
+- `GET /api/bench/benchmarks/{id}` → `Bench`; `404 bench_not_found`. `entries` counts every entry, `best` is the
+  `done` entry with the highest score (`{ "entry_id", "name", "score", "partial" }`, `partial` its
+  `score.partial`), and `active` is true while an entry of the benchmark is queued, running or stopping or a loop
+  of it is running or stopping (exactly when `DELETE` is `409 bench_active`).
+- `PUT /api/bench/benchmarks/{id}` body `{ "name"?, "description"?, "plan"? }` → `Bench`. Absent fields stay; the
+  fingerprint follows a new plan. `409 bench_frozen` for a `plan` once the benchmark has entries (delete them, or
+  make a new benchmark); the name and description can change any time.
+- `DELETE /api/bench/benchmarks/{id}` → `204`: the benchmark, its images, thumbnails, entries and loops (never a
+  model, a run or a dataset a loop made). `409 bench_active` while an entry or a loop of it is active.
 
 A **plan** is `{ "conditions": [{ "condition": "haze", "severities": [1, 3, 5], "weight"?: 1, "why"?: null }],
 "rationale"?: null, "designed_by"?: null }`. It is valid when every `condition` is in the catalog and named at
 most once, `severities` are 1 to 5 distinct values in `1..=5` in ascending order, and `0 < weight <= 10`. An
-empty `conditions` runs the unchanged images only.
+empty `conditions` runs the unchanged images only. Text is trimmed (empty becomes `null`).
 
 - `POST /api/bench/benchmarks/{id}/design` body `{ "agent": "claude" | "codex", "model"?, "effort"?, "note"?: "" }`
   → `BenchDesign` `{ "plan": BenchPlan, "usage": LabelUsage }`. One call to the agent (as agent labeling makes
-  them: no tools, one request) with the benchmark's description, classes and up to four of its images; the
-  answer is a valid plan with `designed_by` and `rationale` set, **not saved**: `PUT` it to adopt it. The request
-  is answered when the agent is (up to two minutes). `501 not_supported` when the agent's CLI is not installed,
-  `502 agent_failed` with the CLI's message and a hint when the call fails or its answer is not a plan.
+  them: no tools, one request; `model` and `effort` default to the agent's, `model` checked as for labeling,
+  `note` at most 2000 characters) with the benchmark's description and the note, its classes with their box
+  counts, the catalog and the first four of its images (scaled as labeling scales them). The answer is read as
+  labeling replies are (a JSON object anywhere in the text) and then cleaned: conditions the catalog does not
+  have and repeats are dropped, severities rounded, clamped to `1..=5`, deduplicated and sorted (none: 1, 3, 5),
+  weights clamped to `0.1..=10` (none: 1), `why` cut to 300 and `rationale` to 2000 characters. What is left
+  must be a valid plan with at least one condition; it comes back with `designed_by` and `rationale` set,
+  **not saved**: `PUT` it to adopt it. An answer that cannot be read is asked for once more (never more);
+  `usage` adds up both calls. The request is answered when the agent is (at most two minutes). `501
+  not_supported` when the agent's CLI is not installed, `502 agent_failed` when the CLI fails (its message, and
+  the agent's hint when it has one), does not answer in two minutes, or answers twice with something that is not
+  a plan (the reason).
 
 **Images**
 - `GET /api/bench/benchmarks/{id}/images?offset=0&limit=100&condition=&severity=` → `{ "total", "images":
   [BenchImage] }` in the benchmark's order (`limit` capped at 1000). `boxes` are the true boxes; with `condition`
-  and `severity` they are the true boxes under that condition (a geometric condition moves them).
-- `GET /api/bench/benchmarks/{id}/images/{image_id}` → the image file. With `?condition=haze&severity=3`: the
-  image under that condition, a JPEG at quality 95 of the same size, byte for byte what every contestant is
-  graded on. `?thumb=256` as for dataset images. `400 invalid_query` for an unknown condition or a severity
-  outside `1..=5`, or one without the other. Any condition of the catalog is served, in the plan or not.
+  and `severity` they are the true boxes under that condition (`distance` moves them; the others do not).
+- `GET /api/bench/benchmarks/{id}/images/{image_id}` → the image file as stored. With `?condition=haze&severity=3`:
+  the image under that condition, a JPEG at quality 95 of the same size, byte for byte what every contestant is
+  graded on (rendered on request; recent ones are kept in memory). `?thumb=256` as for dataset images, for both
+  (variant thumbnails are cached under the data dir too). These URLs never change content: `Cache-Control:
+  public, max-age=31536000, immutable`. `400 invalid_query` for an unknown condition, a severity outside
+  `1..=5`, or one without the other (empty values count as absent); `404 image_not_found` for an unknown image.
+  Any condition of the catalog is served, in the plan or not.
 
 **Entries**
-- `GET /api/bench/benchmarks/{id}/entries` → `{ "entries": [BenchEntry] }`: the leaderboard, finished entries by
-  score (highest first), then the others (newest first).
+- `GET /api/bench/benchmarks/{id}/entries` → `{ "entries": [BenchEntry] }`: the leaderboard, `done` entries by
+  `score.total` (highest first), then the others (newest first).
 - `POST /api/bench/benchmarks/{id}/entries` body `StartBenchEntry` → `201 BenchEntry`:
   `{ "contestant": { "kind": "model", "model_id" } | { "kind": "agent", "agent", "model"?, "effort"? } |
   { "kind": "external", "scored"?: true, "predictions": [BenchPrediction] }, "name"?, "max_images"?,
-  "conditions"? }`.
+  "conditions"? }`. `name` (one line of at most 100 characters) defaults to the model's name, or the agent's and
+  its model's (`Claude Code (haiku)`). `max_images` runs the first so many images (at least 1, `400
+  invalid_body` for 0; more than the benchmark has runs them all). `progress.total` is the entry's images times
+  one plus the plan's (condition, severity) pairs it runs.
   - `model`: FOLO runs the model on every image under every condition of the plan (`conditions: false` runs the
     unchanged images only; `max_images` the first so many). Its classes are matched to the benchmark's by name
     without case: `400 bench_class_mismatch` when none matches; benchmark classes it lacks are the entry's
-    `missing_classes`. Model entries run one at a time (`queued` until their turn).
-  - `agent`: the agent is asked for boxes as agent labeling asks, with the benchmark's classes and description.
-    Defaults: the first 48 images, `conditions: false`. `501 not_supported` when its CLI is not installed.
-    `scored` is false: agents give no confidences.
-  - `external`: `name` is required. Each prediction is `{ "image": "<image id>", "condition"?, "severity"?,
-    "boxes": [{ "class", "score"?: 1, "x1", "y1", "x2", "y2" }] }`, boxes in pixels of the image as served.
-    Every image of the benchmark must have a record without `condition`; a condition of the plan is either
-    answered for every image at every planned severity or absent (then robustness is over the conditions
-    present, and the entry is partial unless all are). The entry is scored in the request and answered `done`.
-    `400 invalid_body` names the first record that is wrong (an unknown image or condition, a class outside the
-    benchmark's, a duplicate, a missing image). Up to 64 MiB.
-  A finished entry has `score` (`total`, `partial`, the five `axes`), `map50_95`, and `speed` (a model) or
-  `usage` (an agent).
-- `GET /api/bench/benchmarks/{id}/entries/{entry_id}` → `BenchEntry`
+    `missing_classes`, and detections of classes the benchmark lacks are dropped. `404 model_not_found`. Model
+    entries run one at a time in the order they were started (`queued` until their turn, then `running`), on the
+    server's inference device (`folo serve --device`, as `/api/predict`), in f32, with validation's settings (square
+    letterbox at the model's size, NMS at confidence 0.001 and IoU 0.7, multi-label, 300 detections; boxes not
+    clipped to the image, as validation scores them), so the unchanged images' mAP is what `POST /api/val` (and
+    `folo val`) gives on the same images in the same order. Under a condition the model gets exactly the bytes
+    of `GET …/images/{image_id}?condition=…`. `speed.ms_per_image` is the wall time of the unchanged pass (decode
+    to boxes; images are prepared on several threads while the previous batch of 16 runs) divided by its
+    images.
+  - `agent`: the agent is asked for boxes as agent labeling asks (the same prompt, with the benchmark's classes
+    and its description as the instructions; batches of the agent's default size, three calls in flight, every
+    image scaled as labeling scales it; under a condition, the variant's JPEG). Defaults: the first 48 images,
+    `conditions: false` (each condition is another call per batch). The entry is `running` from the start, on a
+    thread of its own (never behind the model queue). `501 not_supported` when its CLI is not installed. `scored`
+    is false: agents give no confidences. `usage` adds up the calls. Failures follow labeling runs: a CLI that
+    cannot be started or reports an error ends the entry at once as `failed` with the CLI's message and the
+    agent's hint, and so do three calls in a row that time out or return garbage; a reply that cannot be read is
+    asked for once more. An image whose call still failed, or that a reply left out, has no answer: when at most
+    2% of the entry's image answers (at least one) are missing they count as images where the agent found
+    nothing; with more the entry is `failed` ("N of M images got no usable answer from the agent"), because that
+    score would not be honest.
+  - `external`: `name` is required; `max_images` and `conditions` are `400 invalid_body` (the predictions say
+    what ran). Each prediction is `{ "image": "<image id>", "condition"?, "severity"?, "boxes": [{ "class",
+    "score"?: 1, "x1", "y1", "x2", "y2" }] }`, boxes in pixels of the image as served. Every image of the
+    benchmark must have a record without `condition`; a condition of the plan is either answered for every image
+    at every planned severity or absent (then robustness is over the conditions present, and the entry is
+    partial unless all are). `400 invalid_body` names the first record that is wrong, in order: an image the
+    benchmark does not have, a condition that is not in the catalog or a (condition, severity) the plan does not
+    run, a severity without its condition or the other way round, a record that repeats another, a class outside
+    the benchmark's, a score outside `0..=1` (when `scored`); then an image without its unchanged record, and a
+    condition answered for some images or severities but not all. With `scored: false` every score is taken as
+    1. The entry is scored in the request and answered `done` (`conditions` true when a condition was answered).
+    Up to 64 MiB.
+  A finished entry has `score` (`total`, `partial`, the five `axes`), `map50_95` with its 95% interval `ci95`
+  (as in the result's `accuracy`), `conditions_run` (how many of the plan's conditions it ran completely, every
+  planned severity and every image it runs; for an external entry, the conditions it answered; 0 until `done`),
+  and `speed` (a model) or `usage` (an agent). An entry is complete (not `partial` on that count) when it ran every image of the
+  benchmark and every condition of its plan; `partial` is also set when an axis could not be measured
+  (calibration without confidences or without a detection from 0.1 up).
+- `GET /api/bench/benchmarks/{id}/entries/{entry_id}` → `BenchEntry`; `404 bench_entry_not_found`.
 - `GET /api/bench/benchmarks/{id}/entries/{entry_id}/result` → `BenchResult`: `accuracy` (with the 95% interval,
   by size and per class), `robustness` (per condition and severity; `null` when no condition ran), `calibration`
   (`null` without confidences), `localization` and `self_labeling`. `409 bench_entry_not_done` until the entry is
   `done`.
 - `GET /api/bench/benchmarks/{id}/entries/{entry_id}/images?sort=order|worst&offset=0&limit=100` →
-  `{ "total", "images": [BenchEntryImage] }`: per image the truth, the detections at or above the entry's
-  best-F1 confidence, and how many true boxes were `missed` and detections `wrong`. `worst` puts the images with
-  the most `missed + wrong` first. `409 bench_entry_not_done` as above.
-- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop` → `BenchEntry`. `409 bench_entry_not_active` when it
-  is not queued or running.
+  `{ "total", "images": [BenchEntryImage] }`: per image of the entry (unchanged) the truth, the detections at or
+  above the entry's best-F1 confidence, and how many true boxes were `missed` and detections `wrong`. `worst`
+  puts the images with the most `missed + wrong` first (ties in the benchmark's order); any other `sort` is `400
+  invalid_query`. `409 bench_entry_not_done` as above.
+- `POST /api/bench/benchmarks/{id}/entries/{entry_id}/stop` → `BenchEntry`: a `queued` entry is `stopped` at once;
+  a `running` one is `stopping` until its work ends (checked between batches; agent calls in flight are killed),
+  then `stopped`. `409 bench_entry_not_active` when it has ended.
 - `DELETE /api/bench/benchmarks/{id}/entries/{entry_id}` → `204`. `409 bench_entry_active` while it is active,
   `409 bench_entry_in_loop` while a loop that is still running uses it.
+
+Entries do not survive the server: one that is queued or running when the server stops (or that a crashed
+process left so) is `failed` ("the server stopped before the entry finished") with a hint to start it again.
 
 **Self-improvement loops**
 - `GET /api/bench/benchmarks/{id}/loops` → `{ "loops": [BenchLoop] }` (newest first)
 - `POST /api/bench/benchmarks/{id}/loops` body `StartBenchLoop` → `201 BenchLoop`:
   `{ "teacher": "<model id>", "pool": BenchSource, "generations"?: 1, "min_confidence"?, "student"?: { "arch"?,
-  "epochs"?: 30, "imgsz"?, "batch"?, "device"?, "weights"?, "seed"?: 0 }, "name"? }`. Per generation (1 to 5):
-  the teacher's entry on the benchmark (an existing finished, complete entry of the model on this fingerprint is
-  reused), the teacher's labels of the pool written as a dataset and registered (train and val both from the
-  pool with the teacher's labels, 10% val; pool images whose bytes are in the benchmark are left out), a
-  training run of the student on it (an ordinary run: it is in `GET /api/runs`, queued like any other), and the
-  student's entry. The pool's own labels are never read. `400 invalid_body` when the teacher's classes are not
-  the benchmark's (same names, same order), `400 invalid_dataset` when the pool has no image outside the
-  benchmark. A loop fails when a teacher's labels are empty, or when its run fails or is stopped.
+  "epochs"?: 30, "imgsz"?, "batch"?, "device"?, "weights"?, "seed"?: 0 }, "name"? }` (`name` defaults to
+  `<teacher's name> loop`; `config` comes back with the defaults filled in: the pool's split, `generations`, the
+  student's `arch` and `imgsz` (the first teacher's), `epochs` and `device` (`auto`); `batch: null` is
+  `TrainConfig`'s). Per generation (1 to 5): the teacher's entry on the benchmark (a `done` entry of the model on
+  this fingerprint that ran every image and every condition is reused, else a model entry is started: it is
+  queued like any other and listed with the others), the teacher's labels of the pool (its detections from
+  `min_confidence` up, else from its entry's self-labeling threshold, else from 0.5; clipped to the image),
+  written as a YOLO dataset `<data dir>/datasets/<name>-gen-<n>` named `<name> gen <n>` and registered (train
+  and val both from the pool with the teacher's labels, 10% val rounded, at least one image in train; pool images
+  whose bytes are in the benchmark are left out and counted in `labels.excluded`), a training run of the student
+  on it named `<name> gen <n>` (an ordinary run, through the same path as `POST /api/runs`: it is in
+  `GET /api/runs`, queued like any other), and the student's entry; the student is the next generation's
+  teacher. The pool's own labels are never read. `400 invalid_body` when the teacher's classes are not the
+  benchmark's (same names without case, same order: labels are written by class index), for `generations`
+  outside `1..=5`, a `min_confidence` outside `0..=1`, an unknown `student.arch`, `student.epochs` 0 or a
+  `student.imgsz` that is not a multiple of 32 in `32..=4096`; `404 model_not_found`, `dataset_not_found`,
+  `label_job_not_found`; `400 invalid_dataset` when the pool has no image outside the benchmark (a pool split
+  defaults to `train`; a labeling job gives all its images). A loop fails (`error` and `hint` say why) when a
+  teacher keeps no box at all, when its run fails or is stopped by someone else, or when an entry fails; the
+  run's settings are checked when it is created, so a bad one fails the loop with `POST /api/runs`' message.
 - `GET /api/bench/benchmarks/{id}/loops/{loop_id}` → `BenchLoop`: `generations[0]` is the first teacher, then one
   per student, each with its `labels`, `run_id`, `model_id`, `entry_id`, `score`, `map50_95` and `ci95` as far
-  as the loop has come; `verdict` once `done` (`improved` above the first teacher's interval, `regressed` below,
-  `held` inside).
-- `POST /api/bench/benchmarks/{id}/loops/{loop_id}/stop` → `BenchLoop`: stops what the loop is doing (its entry,
-  its run). `409 bench_loop_not_active` when it has ended.
+  as the loop has come; `verdict` once `done` (the last generation's `map50_95` against generation 0's `ci95`:
+  `improved` above it, `regressed` below, `held` inside). `404 bench_loop_not_found`.
+- `POST /api/bench/benchmarks/{id}/loops/{loop_id}/stop` → `BenchLoop` (`stopping`, then `stopped`): stops what the
+  loop is doing (its entry, its run). `409 bench_loop_not_active` when it has ended.
 - `DELETE /api/bench/benchmarks/{id}/loops/{loop_id}` → `204` (its datasets, runs, models and entries stay).
   `409 bench_loop_active` while it runs.
 
@@ -970,10 +1040,13 @@ A loop does not survive the server: one that was running when the server stopped
 ("the server stopped"), with its finished generations kept.
 
 **Events**
-- `GET /api/bench/benchmarks/{id}/events` (SSE): a `bench` event (`Bench`), then `entry` (`BenchEntry`, on every
-  change; progress at most twice a second), `loop` (`BenchLoop`), `bench` again when the benchmark changes, and
-  `removed` (`{ "id" }`, an entry or a loop was deleted), until the client disconnects or the benchmark is
-  deleted. A subscriber that fell behind gets the current `bench` and should load the lists again.
+- `GET /api/bench/benchmarks/{id}/events` (SSE; a `: keep-alive` comment every 15 s): a `bench` event (`Bench`),
+  then `entry` (`BenchEntry`, on every change; progress at most twice a second), `loop` (`BenchLoop`, on every
+  change), `bench` again when the benchmark changes (name, plan, entry count, best entry), and `removed`
+  (`{ "id" }`, an entry or a loop was deleted), until the client disconnects, the benchmark is deleted or the
+  server shuts down. A subscriber that fell behind gets the current `bench` and should load the lists again.
+  A new entry sends `entry`, then `bench`; a finished one too; a deleted one `removed`, then `bench`; a `bench`
+  event is also sent whenever `active` changes.
 
 ## Uploads
 Sending a dataset or a weights file to a server that cannot read the sender's disk (feature `uploads`): a cloud
@@ -1092,7 +1165,7 @@ mostly shown) for the others.
 - `cache/datasets/<id>.json`: each dataset's index (images, sizes, boxes, stats, issues) plus a fingerprint of the files it
   was built from (relative path, size and modification time of every file under the dataset folder and under
   everything outside it that folo-data read: split folders and image lists a `data.yaml` points to, folders of
-  every candidate image and label, also skipped ones, and split paths or a `path:` that do not exist yet; the data dir's own `cache/` and
+  every candidate image and label, also skipped ones, and split paths or a `path:` that do not exist yet; the data dir's own `cache/`, `label/`, `bench/` and
   `datasets.json` are left out, so a data dir inside a dataset folder does not invalidate it). On start the
   registry is listed immediately and every dataset is checked on a background thread: a fresh cache is loaded, a
   stale or missing one rebuilt; requests for a dataset that is still being indexed wait for it. While running,
@@ -1110,6 +1183,14 @@ mostly shown) for the others.
   process left active is closed as `stopped` (its finished images keep their labels), and files in `images/`
   that no image of the job refers to (an upload a crash interrupted) are removed. On shutdown the active runs'
   agent calls are killed.
+- `bench/<bench id>/`: one folder per vision benchmark: `bench.json` (its definition: classes, source, seed,
+  plan, and every image with its file name, size, SHA-256 and true boxes), `images/` (the copied files),
+  `entries/<entry id>.json` (an entry, and once it is done its result and per-image outcomes) and
+  `loops/<loop id>.json`, all written atomically. Variant thumbnails are in `cache/thumbs/<bench id>/`. On start
+  every benchmark is listed again (one whose `bench.json` cannot be read is left out and logged, never
+  overwritten; so is an unreadable entry or loop file); entries left `queued` or `running` and loops left
+  running become `failed` ("the server stopped ...", written back). On shutdown the same happens to the active
+  ones: agent calls are killed, a loop stops the run it follows.
 
 - `runs/<id>/`: one folder per training run: `run.json` (the `Run` plus the dataset reference, rewritten atomically
   on every status change and after every epoch), `log.jsonl` (every log line, as `/logs` returns them),

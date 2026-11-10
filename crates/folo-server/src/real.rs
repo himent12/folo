@@ -20,6 +20,7 @@
 //! - `uploads/<id>/`, `uploads.json`: upload sessions in progress and the fingerprints of finished uploads
 //!   ([`crate::uploads`]); a finished dataset upload moves to `datasets/<name>/`, a model to `models/`.
 //! - `cloud/connections.json`, `cloud/instances/`: cloud connections and the instance ledger ([`crate::cloud`]).
+//! - `label/<id>/`: labeling jobs ([`crate::label`]); `bench/<id>/`: vision benchmarks ([`crate::bench`]).
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -40,6 +41,7 @@ use folo_core::Device;
 use folo_vision::PredictConfig;
 use serde::{Deserialize, Serialize};
 
+use crate::bench::Benches;
 use crate::cloud::{self, Cloud, Job, Mode};
 use crate::engine::{self, Predictors, engine_error};
 use crate::error::{Error, Result};
@@ -283,6 +285,7 @@ pub struct RealStore {
     uploads: Arc<Uploads>,
     cloud: Cloud,
     labeler: Labeler,
+    benches: Benches,
 }
 
 impl RealStore {
@@ -335,6 +338,16 @@ impl RealStore {
         let predictors = Arc::new(Predictors::default());
         let idle = Arc::new(GpuIdle::new());
         let labeler = Labeler::open(&data_dir);
+        // Benchmark entries count as inference for the idle sweeper, as predictions do.
+        let guard: crate::bench::InferenceGuard = {
+            let idle = idle.clone();
+            Arc::new(move |device| {
+                let g = idle.using();
+                g.on(device);
+                Box::new(g)
+            })
+        };
+        let benches = Benches::open(&data_dir, Some(guard));
         spawn_idle_sweeper(Arc::downgrade(&idle), Arc::downgrade(&predictors), Arc::downgrade(&runs));
         let uploads = Uploads::open(&data_dir);
         let cloud = Cloud::with(&data_dir, providers, tuning);
@@ -353,6 +366,7 @@ impl RealStore {
             uploads,
             cloud,
             labeler,
+            benches,
         }
     }
 
@@ -368,6 +382,7 @@ impl RealStore {
     /// CPU; `cpu`; `gpu:<n>`). Training uses each run's `TrainConfig.device`.
     pub fn device(mut self, device: impl Into<String>) -> RealStore {
         self.device = device.into();
+        self.benches.set_device(&self.device);
         self
     }
 
@@ -862,6 +877,7 @@ impl RealStore {
 
 impl Drop for RealStore {
     fn drop(&mut self) {
+        self.benches.shutdown();
         self.labeler.shutdown();
         self.runs.shutdown(None);
     }
@@ -953,7 +969,7 @@ fn run_cloud(compute: &Compute, connected: &cloud::Connected, offer: CloudOffer)
 /// The server's own files in the data dir, left out of dataset fingerprints (the data dir may sit inside a
 /// registered dataset folder; caching an index must not make it stale).
 fn own_state(dir: &Path) -> Vec<PathBuf> {
-    vec![dir.join("cache"), dir.join("label"), registry_path(dir)]
+    vec![dir.join("cache"), dir.join("label"), dir.join("bench"), registry_path(dir)]
 }
 
 fn registry_path(dir: &Path) -> PathBuf {
@@ -1486,6 +1502,14 @@ impl Store for RealStore {
         Ok(&self.labeler)
     }
 
+    fn benches(&self) -> Result<&Benches> {
+        Ok(&self.benches)
+    }
+
+    fn dataset_image_path(&self, id: &str, image_id: &str) -> Result<PathBuf> {
+        self.entry(id)?.current()?.image_path(image_id)
+    }
+
     fn create_upload(&self, req: CreateUpload) -> Result<UploadCreated> {
         Uploads::check(&req)?;
         if let Some(existing) = req.fingerprint.as_deref().and_then(|f| self.uploaded(req.kind, f)) {
@@ -1561,6 +1585,8 @@ impl Store for RealStore {
         self.uploads.shutdown();
         // Cloud runs train on without this server; their threads let go of them (each logs it).
         self.cloud.shutdown();
+        // Before the runs: a loop stops the run it follows.
+        self.benches.shutdown();
         self.labeler.shutdown();
         self.runs.shutdown(Some(SHUTDOWN_WAIT));
         self.throughput.flush();
