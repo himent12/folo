@@ -3502,11 +3502,14 @@ impl Render for FoloApp {
     }
 }
 
+/// A mouse-press listener, as `capture_any_mouse_down` takes it.
+type PressListener = Box<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App)>;
+
 impl FoloApp {
     /// A press leaves keyboard mode (focus rings off). The root listens for presses anywhere, but
     /// the window chrome hides the root from the hit test (`titlebar-drag`), so it listens too.
     /// Only a capture-phase listener: it never prevents the press's default.
-    fn leave_kb(&self, cx: &mut Context<Self>) -> Box<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App)> {
+    fn leave_kb(&self, cx: &mut Context<Self>) -> PressListener {
         Box::new(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
             if this.kb {
                 this.kb = false;
@@ -3514,6 +3517,7 @@ impl FoloApp {
             }
         }))
     }
+
     /// A dialog, the stop confirmation or the inspector is up: the page behind is inert.
     pub fn modal_open(&self) -> bool {
         self.new_run.is_some()
