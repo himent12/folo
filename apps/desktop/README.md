@@ -25,7 +25,7 @@ Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1
 
 ## Window
 
-The app draws its own title bar (`titlebar()` in `src/app.rs`) and tells Windows which parts of it are caption
+The app draws its own title bar (`titlebar()` in `src/app/titlebar.rs`) and tells Windows which parts of it are caption
 areas: Minimize, Maximize / Restore and Close, and two drag areas, the title bar's empty space and the sidebar's
 FOLO row (drag to move, double-click to maximize or restore, hover Maximize for the snap layouts). The breadcrumbs
 and the search field in the title bar take their own clicks. The top few pixels (`layout.desktop_resize_edge`)
@@ -78,13 +78,13 @@ src/api/          Backend trait (the client seam), wire types for docs/API.md, t
 src/synth.rs      procedural "shapes" scenes behind the mock's images
 src/local.rs      local inference: folo-vision's Predictor in process, on folo-gpu or the CPU
 src/store.rs      fetched state, live run data (SSE events), the decoded-image cache
-src/app.rs        root view: chrome, sidebar, routing, fetching, live event pump, actions
+src/app/          root view: chrome, sidebar, routing, fetching, live event pump, actions
 src/controls.rs   focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
 src/ui.rs         stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
 src/charts.rs     canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram
 src/viz.rs        images with detection boxes and label chips (design/README.md box spec)
 src/screens/      one module per screen
-src/overlays.rs   palette, dialogs, image inspector, toasts
+src/overlays/     palette, dialogs, image inspector, toasts
 src/scenario.rs   `--scenario` states for screenshots
 tools/            shoot.ps1 / shoot-all.ps1 (screenshots), window-check.ps1 (the window chrome, real input),
                   chrome-check.ps1 (its hit tests and buttons, by window message), make-icon.ps1 (assets/folo.ico)
