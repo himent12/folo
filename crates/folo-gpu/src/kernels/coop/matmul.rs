@@ -78,7 +78,7 @@ fn aligned4(s: &BatchStrides) -> bool {
 /// [`DType::F16`]), f32 accumulation, and `C` and the bias stored as `out` (f16 or f32). Fails with
 /// [`GpuError::Unsupported`] unless the context has tensor cores ([`crate::Capabilities::coop_f16`]); ignores the
 /// run-time switch ([`GpuContext::set_tensor_cores`]), which only governs the automatic routing in
-/// [`super::gemm::gemm`].
+/// [`crate::kernels::gemm::gemm`].
 #[allow(clippy::too_many_arguments)]
 pub fn gemm(
     ctx: &GpuContext,

@@ -50,7 +50,7 @@ pub fn conv2d(
 }
 
 /// The implicit-GEMM conv on tensor cores for a validated, non-depthwise, non-pointwise f16 conv `d` whose GEMM
-/// view is `g` (as built by [`super::conv::conv2d`]). Returns `false` (nothing encoded) when the kernel failed to
+/// view is `g` (as built by [`crate::kernels::conv::conv2d`]). Returns `false` (nothing encoded) when the kernel failed to
 /// build.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_conv(
@@ -117,7 +117,7 @@ fn grid(g: &GemmDesc, cfg: CoopConfig, layers: usize) -> Result<[u32; 3]> {
 }
 
 /// The input gradient of the f16 conv `d` on tensor cores (`CONV_MODE` 2, a transposed conv as implicit GEMM):
-/// `g` is the GEMM view built by [`super::conv::conv2d_backward_input`] (`M = C_in/groups`, `N = H·W`,
+/// `g` is the GEMM view built by [`crate::kernels::conv::conv2d_backward_input`] (`M = C_in/groups`, `N = H·W`,
 /// `K = C_out/groups·KH·KW`), `wt` the weight permuted to `[groups, C_in/groups, C_out/groups, KH·KW]`, `grad` the
 /// output gradient and `gx` the f16 result. Returns `false` (nothing encoded) when the kernel failed to build.
 pub(crate) fn encode_conv_backward_input(
@@ -148,7 +148,7 @@ pub(crate) fn encode_conv_backward_input(
 }
 
 /// One stride phase of the f16 conv `d`'s input gradient on tensor cores (`CONV_MODE` 2 with `PHASE`, see
-/// [`super::conv`]'s stride-phase decomposition): `g` is the phase's GEMM view (`M = C_in/groups`, `N` its
+/// [`crate::kernels::conv`]'s stride-phase decomposition): `g` is the phase's GEMM view (`M = C_in/groups`, `N` its
 /// pixels, `K = C_out/groups · th · tw`), `packed` the phase-packed weight. Returns `false` (nothing encoded) when
 /// the kernel failed to build.
 #[allow(clippy::too_many_arguments)]
@@ -156,7 +156,7 @@ pub(crate) fn encode_conv_backward_input_phase(
     ctx: &GpuContext,
     d: &Conv2dDesc,
     g: &GemmDesc,
-    phase: &super::conv::Phase,
+    phase: &crate::kernels::conv::Phase,
     vec_a: bool,
     packed: &wgpu::Buffer,
     grad: &wgpu::Buffer,
@@ -199,7 +199,7 @@ const MAX_PARTIAL_ELEMS: usize = 16 << 20;
 
 /// The weight gradient of the f16 conv `d` on tensor cores (`CONV_MODE` 3): `K = N·OH·OW` folds the batch into
 /// the reduction, `A` rows are output-gradient planes read across images, `B` the image gathered as a transposed
-/// im2col. `g` is the GEMM view built by [`super::conv::conv2d_backward_weight`]. `K` is split into chunks (one
+/// im2col. `g` is the GEMM view built by [`crate::kernels::conv::conv2d_backward_weight`]. `K` is split into chunks (one
 /// z-layer each, f32 partial slabs summed by a column reduction) when the weight alone has too few tiles to fill
 /// the GPU. `gw` is written as `out` (f32 or f16; partial sums stay f32). Returns `false` (nothing encoded) when
 /// the kernel failed to build.
@@ -229,7 +229,7 @@ pub(crate) fn encode_conv_backward_weight(
     let splits = np.div_ceil(ks);
     // Partial slabs (and an f16 result) go through an f32 buffer and a column reduction / cast.
     let tmp = if splits > 1 || out != DType::F32 {
-        Some(ctx.alloc(DType::F32.bytes(super::prod(&[splits, wn])?))?)
+        Some(ctx.alloc(DType::F32.bytes(crate::kernels::prod(&[splits, wn])?))?)
     } else {
         None
     };
@@ -246,7 +246,7 @@ pub(crate) fn encode_conv_backward_weight(
         .bool("CHECK", check)
         .u32("CONV_MODE", 3)
         .bool("SPLIT", splits > 1);
-    let spec = super::conv::weight_grad_spec(with_window(spec, d), d, oh, ow);
+    let spec = crate::kernels::conv::weight_grad_spec(with_window(spec, d), d, oh, ow);
     let Some(kernel) = build(ctx, spec) else { return Ok(false) };
     let p = gemm_params(g)?
         .at(24)
@@ -263,10 +263,10 @@ pub(crate) fn encode_conv_backward_weight(
     ctx.dispatch(&kernel, &[grad, x, ctx.dummy(), target], &p, grid(g, cfg, d.groups * splits)?)?;
     if let Some(t) = &tmp {
         if splits > 1 {
-            let op = super::reduce::ReduceOp::Sum;
-            super::reduce::reduce_as(ctx, op, (t.raw(), DType::F32), (gw, out), 1, splits, wn)?;
+            let op = crate::kernels::reduce::ReduceOp::Sum;
+            crate::kernels::reduce::reduce_as(ctx, op, (t.raw(), DType::F32), (gw, out), 1, splits, wn)?;
         } else {
-            super::layout::cast(ctx, t.raw(), gw, wn, true)?;
+            crate::kernels::layout::cast(ctx, t.raw(), gw, wn, true)?;
         }
     }
     Ok(true)

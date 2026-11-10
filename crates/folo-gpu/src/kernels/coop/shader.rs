@@ -52,10 +52,10 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let (va, vb, vc) = (spec.get_bool("VEC_A"), spec.get_bool("VEC_B"), spec.get_bool("VEC_C"));
     let (ta, tb) = (spec.get_bool("TRANS_A"), spec.get_bool("TRANS_B"));
     let check = spec.get_bool("CHECK");
-    // 0 = plain GEMM, 1 = conv forward, 2 = conv input gradient, 3 = conv weight gradient (as `super::gemm`).
+    // 0 = plain GEMM, 1 = conv forward, 2 = conv input gradient, 3 = conv weight gradient (as `crate::kernels::gemm`).
     let mode = spec.get_u32("CONV_MODE", 0);
     let conv = mode != 0;
-    // Input gradient of one stride phase (`super::conv`'s stride-phase decomposition).
+    // Input gradient of one stride phase (`crate::kernels::conv`'s stride-phase decomposition).
     let phase = mode == 2 && spec.get_bool("PHASE");
     let split = spec.get_bool("SPLIT");
     let bias = spec.get_u32("BIAS_KIND", 0);
@@ -74,7 +74,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
     let mut s = String::new();
     s.push_str(UNARY_FN);
     if phase {
-        s.push_str(super::conv::PHASE_PIXEL);
+        s.push_str(crate::kernels::conv::PHASE_PIXEL);
     }
     let _ = writeln!(s, "alias CT = {ct};");
     let _ = writeln!(s, "@group(0) @binding(1) var<storage, read> MA: array<{}>;", vty(va, "f16"));
@@ -178,7 +178,7 @@ pub(crate) fn gen_coop(spec: &Spec) -> String {
                  \x20 let cj = n0 + {}; let cjok = cj < N;\n\
                  \x20 let cci = cj / (KH * KW); let cr = cj % (KH * KW);\n\
                  \x20 let cdh = i32((cr / KW) * DH) - PH; let cdw = i32((cr % KW) * DW) - PW;",
-                super::conv::weight_grad_dims(spec),
+                crate::kernels::conv::weight_grad_dims(spec),
                 pb.inner_expr()
             );
         }

@@ -25,11 +25,6 @@ mod matmul;
 mod shader;
 mod support;
 
-// The submodules reach the other kernel modules as `super::conv`, `super::layout`, `super::reduce` and
-// `super::prod` (and their doc links `super::gemm`) through these imports, as when this module was one file.
-#[cfg(doc)]
-use super::gemm;
-use super::{conv, layout, prod, reduce};
 use crate::context::GpuContext;
 use crate::error::{Result, shape_err};
 
