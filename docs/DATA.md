@@ -11,7 +11,7 @@ produces plain buffers that the trainer wraps in tensors.
 |---|---|
 | `*.yaml` / `*.yml` file | YOLO `data.yaml` |
 | `*.json` file | COCO instances JSON (one split, guessed from the name) |
-| directory with `data.yaml` / `dataset.yaml` (or any YAML with a `train` key) | YOLO (a YAML without split keys, e.g. only `names`, reads the `images/` + `labels/` layout next to it) |
+| directory with `data.yaml` / `dataset.yaml` (or any YAML with a `train` key; `.yaml` / `.yml` in any case) | YOLO (a YAML without split keys, e.g. only `names`, reads the `images/` + `labels/` layout next to it) |
 | directory with `annotations/instances_*.json`, COCO JSON at the root, or `train|val|valid|test/*.json` (Roboflow) | COCO |
 | directory with `images/` + `labels/` (or `train/images`, `valid/images`, ...) and no YAML | YOLO, names from `classes.txt` or `class0..` |
 

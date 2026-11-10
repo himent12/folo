@@ -100,6 +100,32 @@ fn yolo_names_map_roboflow_paths_and_no_verify() {
     assert!(open(r).is_err());
 }
 
+/// A YAML found by its `train` key is found whatever the case of its extension (`.YAML`, `.Yml`): on a
+/// case-sensitive file system `DATA.YAML` was not looked at.
+#[test]
+fn yaml_extension_case_does_not_matter() {
+    for name in ["Shapes.YAML", "shapes.Yml"] {
+        let t = TempDir::new("yolo-yaml-case");
+        let r = t.path();
+        write_png(&r.join("images/train/1.png"), 8, 8, [0; 3]);
+        write(
+            &r.join("labels/train/1.txt"),
+            "1 0.5 0.5 0.5 0.5
+",
+        );
+        write(
+            &r.join(name),
+            "train: images/train
+val: images/train
+names: [ring, cross]
+",
+        );
+        let ds = open(r).unwrap();
+        assert_eq!(ds.classes, ["ring", "cross"], "{name}");
+        assert_eq!(ds.split_sizes(), [1, 1, 0], "{name}");
+    }
+}
+
 #[test]
 fn yolo_dir_without_yaml() {
     let t = TempDir::new("yolo-dir");
