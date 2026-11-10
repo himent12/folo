@@ -476,6 +476,27 @@ mod tests {
         assert_eq!((t.hsv.as_slice(), t.close_mosaic), (a.hsv.as_slice(), a.close_mosaic));
     }
 
+    /// Help strings that state a computed default state the code's: `--workers` is
+    /// `folo_vision::train::default_workers` (at most 16, not 8), and `export --output` names every default file.
+    #[test]
+    fn help_states_the_computed_defaults() {
+        let d = describe::describe(&Cli::command(), &[], false).unwrap();
+        let help = |cmd: &str, arg: &str| {
+            let c = d["commands"].as_array().unwrap().iter().find(|c| c["name"] == cmd).unwrap();
+            let a = c["args"].as_array().unwrap().iter().find(|a| a["name"] == arg).unwrap();
+            a["help"].as_str().unwrap().to_string()
+        };
+        for cmd in ["train", "val"] {
+            assert!(help(cmd, "workers").contains("min(cores, 16)"), "{cmd}: {}", help(cmd, "workers"));
+        }
+        let output = help("export", "output");
+        for name in
+            ["-f16.folo", "-fused.folo", "-weights.folo", ".onnx", "-decoded.onnx", "-decoded-f16.onnx"]
+        {
+            assert!(output.contains(name), "{name}: {output}");
+        }
+    }
+
     #[test]
     fn describe_covers_every_command() {
         let d = describe::describe(&Cli::command(), &[], true).unwrap();

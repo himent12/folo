@@ -178,7 +178,7 @@ pub struct TrainArgs {
     /// Device: auto, cpu or gpu:<n>.
     #[arg(long, default_value = "auto")]
     pub device: String,
-    /// Data loader worker threads [default: min(cores, 8)].
+    /// Data loader worker threads [default: min(cores, 16)].
     #[arg(long)]
     pub workers: Option<usize>,
     /// Optimizer.
@@ -326,7 +326,7 @@ pub struct ValArgs {
     /// where they are not available.
     #[arg(long)]
     pub tensor_cores: bool,
-    /// Data loader worker threads [default: min(cores, 8)].
+    /// Data loader worker threads [default: min(cores, 16)].
     #[arg(long)]
     pub workers: Option<usize>,
     /// Also evaluate exactly as pycocotools' COCOeval does on a COCO dataset: original-image boxes, crowd regions,
@@ -403,8 +403,9 @@ pub struct ExportArgs {
     /// Target format.
     #[arg(long, value_enum, default_value_t = ExportFormatArg::FoloF16)]
     pub format: ExportFormatArg,
-    /// Output file [default: next to the input, `<name>-fused.folo` / `<name>-f16.folo` / `<name>.onnx` /
-    /// `<name>-f16.onnx`].
+    /// Output file [default: next to the input, `<name>-f16.folo` / `<name>-fused.folo` / `<name>-weights.folo` /
+    /// `<name>.onnx` / `<name>-f16.onnx` / `<name>-decoded.onnx` / `<name>-decoded-f16.onnx`, with `-2`, `-3`, ...
+    /// when taken].
     #[arg(long)]
     pub output: Option<PathBuf>,
     /// Square input size baked into the graph, a multiple of 32 (ONNX only; `.folo` files are size-independent)
