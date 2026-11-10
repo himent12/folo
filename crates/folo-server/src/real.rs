@@ -1148,6 +1148,7 @@ impl Store for RealStore {
     fn run_cli(&self, id: &str) -> Result<CliCommand> {
         let e = self.runs.get(id)?;
         let config = e.run().config;
+        crate::cli::check_optimizer(&config)?;
         // A published model by its name; any other by the file the run started from.
         let weights = match (&config.weights, e.weights()) {
             (Some(w), _) if folo_api::weights::find(w).is_some() => Some(w.clone()),

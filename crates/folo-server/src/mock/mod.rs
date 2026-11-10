@@ -1500,6 +1500,7 @@ impl Store for MockStore {
 
     fn run_cli(&self, id: &str) -> Result<CliCommand> {
         let (run, ds) = self.run(id)?;
+        crate::cli::check_optimizer(&run.config)?;
         let weights = run.config.weights.as_deref().map(mock_weights);
         Ok(crate::cli::train_command(&run.config, &ds.meta().path, ds.meta().format, weights.as_deref()))
     }

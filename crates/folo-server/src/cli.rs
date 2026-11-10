@@ -62,7 +62,7 @@ pub fn train_command(
             Optimizer::Sgd => Some("sgd"),
             Optimizer::Adamw => Some("adamw"),
             Optimizer::Musgd => Some("musgd"),
-            // A run of a newer build: no flag value here says what it trained with.
+            // Refused by `check_optimizer` before a command is built for a run.
             Optimizer::Unknown => None,
         };
         if let Some(o) = o {
@@ -100,6 +100,21 @@ pub fn train_command(
         argv.push("--amp".into());
     }
     CliCommand { cli: shell_join(&argv), argv }
+}
+
+/// Refuses (`invalid_config`) the command of a config whose optimizer this build does not know
+/// ([`Optimizer::Unknown`]: a run made by a newer FOLO): no `--optimizer` value here says what it trained with, and
+/// leaving the flag out would train `auto` instead.
+pub fn check_optimizer(config: &TrainConfig) -> crate::error::Result<()> {
+    if config.optimizer != Optimizer::Unknown {
+        return Ok(());
+    }
+    Err(crate::error::Error::new(
+        axum::http::StatusCode::BAD_REQUEST,
+        "invalid_config",
+        "this run's optimizer is unknown to this server (made by a newer FOLO): no folo train command here repeats it",
+    )
+    .hint("use the CLI of the FOLO version that made the run, or start a new run with --optimizer auto, sgd, adamw or musgd"))
 }
 
 /// The `auto` rule (`TrainConfig.auto_rule`, docs/MODEL.md §8.2) a run trained with, from the `config.json` the
@@ -206,6 +221,21 @@ mod tests {
         c.optimizer = Optimizer::Sgd;
         let sgd = train_command(&c, "D:/coco", DatasetFormat::Coco, None);
         assert_eq!(with_auto_rule(sgd.clone(), &c, Some(1)).cli, sgd.cli, "an explicit optimizer");
+    }
+
+    /// A run whose optimizer this build does not know gets no command (one without `--optimizer` would train
+    /// `auto`): `invalid_config`, naming the unknown optimizer; known ones pass.
+    #[test]
+    fn unknown_optimizer_has_no_command() {
+        let mut c: TrainConfig = serde_json::from_value(serde_json::json!({ "dataset_id": "ds_1" })).unwrap();
+        for o in [Optimizer::Auto, Optimizer::Sgd, Optimizer::Adamw, Optimizer::Musgd] {
+            c.optimizer = o;
+            assert!(check_optimizer(&c).is_ok(), "{o:?}");
+        }
+        c.optimizer = serde_json::from_value(serde_json::json!("lion")).unwrap();
+        let e = check_optimizer(&c).unwrap_err().body;
+        assert_eq!(e.code, "invalid_config");
+        assert!(e.message.contains("optimizer is unknown"), "{}", e.message);
     }
 
     #[test]
