@@ -494,7 +494,7 @@ impl Models {
         let dir = self.data_dir.join("exports");
         std::fs::create_dir_all(&dir)
             .map_err(|e| Error::internal(format!("creating {}: {e}", dir.display())))?;
-        let base = m.model.name.replace(['/', '\\', ':'], "-");
+        let base = export_stem(&m.model.name);
         let (suffix, ext) = match format {
             ExportFormat::FoloF16 => ("-f16", "folo"),
             ExportFormat::Onnx => match (spec.onnx.decode, spec.onnx.half) {
@@ -529,6 +529,27 @@ impl Models {
         Ok(ExportResult { path: folo_api::json::path(&out), bytes })
     }
 }
+
+/// The start of an export's file name for a model called `name` (a run's name is any text): the characters no file
+/// name may hold, on Windows either, become `-`, and it is cut to [`MAX_STEM_BYTES`], so every model can be exported.
+fn export_stem(name: &str) -> String {
+    let mut stem = String::new();
+    for c in name.chars() {
+        let c = if c.is_control() || matches!(c, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*') {
+            '-'
+        } else {
+            c
+        };
+        if stem.len() + c.len_utf8() > MAX_STEM_BYTES {
+            break;
+        }
+        stem.push(c);
+    }
+    stem
+}
+
+/// Longest [`export_stem`], in bytes: file names hold 255, and the export's suffix and `-2`, ... follow.
+const MAX_STEM_BYTES: usize = 200;
 
 /// The `onnx` export of `POST /api/models/{id}/export` (and `/weights?format=onnx`): `folo export --format onnx`'s
 /// defaults (f32, batch 1, the model's training imgsz, raw head outputs) unless a switch says otherwise, with the
@@ -743,5 +764,30 @@ mod tests {
             (Some(false), Some(false), Some(true))
         );
         assert_eq!((fused(Some("yes")), fused(Some("TRUE"))), (None, None));
+    }
+
+    /// A run model is named after its run, and a run's name is any text: the export still gets a file.
+    #[test]
+    fn models_with_any_name_export() {
+        let dir = folo_test_support::TestDir::new("models-export-names");
+        let path = dir.join("w.folo");
+        let mut m = folo_vision::FoloModel::with_rng(
+            folo_nn::io::ModelConfig::new("n", 1).unwrap(),
+            &mut folo_core::rng::Rng::seed(1),
+        )
+        .unwrap();
+        m.set_classes(vec!["cat".into()]).unwrap();
+        m.set_imgsz(64);
+        m.save(&path).unwrap();
+        let models = Models::new(dir.join("home"));
+        let meta = read_meta(&path).unwrap();
+        let spec = ExportSpec { format: ExportFormat::FoloF16, onnx: Default::default() };
+        for name in ["cats <v2>? \"best\" | *-best", "tab\there-best", &"long".repeat(80)] {
+            let m = ModelRef::new(model_of("m_1".into(), name.into(), &meta, None, None), path.clone(), None);
+            let out = models.export(&m, spec).unwrap_or_else(|e| panic!("{name:?}: {e}"));
+            let file = Path::new(&out.path).file_name().unwrap().to_string_lossy().into_owned();
+            assert!(file.ends_with("-f16.folo") && file.len() <= 255, "{file}");
+            assert!(!file.contains(['<', '>', '?', '"', '|', '*', '\t']), "{file}");
+        }
     }
 }
