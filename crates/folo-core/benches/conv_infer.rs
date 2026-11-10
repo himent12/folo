@@ -4,7 +4,8 @@
 //! Every distinct conv of the folo-n forward is timed on its own (median of repeated calls), weighted by how many
 //! times the forward runs it, and grouped by kernel path (stem, k×k stride 1, k×k stride 2, 1×1, depthwise). The
 //! GF/s/thread column is the throughput divided by the rayon pool size, so a 1-thread run is per-core efficiency;
-//! the min column (the fastest call) is the steadier figure on a busy machine.
+//! the min column (the fastest call) is the steadier figure on a busy machine. The calls are made from inside
+//! folo-core's CPU pool (`folo_core::cpu::in_pool`), as a model forward makes them.
 //!
 //! `RAYON_NUM_THREADS` sets the pool; `FOLO_BENCH_BUDGET_MS` (default 150) the time per shape; an argument filters
 //! shapes by group name (`stem`, `k3s1`, `k3s2`, `1x1`, `dw`).
@@ -89,6 +90,10 @@ fn time(budget: Duration, mut f: impl FnMut()) -> (f64, f64) {
 }
 
 fn main() {
+    folo_core::cpu::in_pool(run);
+}
+
+fn run() {
     let filter = std::env::args().skip(1).find(|a| !a.starts_with('-'));
     let budget_ms = std::env::var("FOLO_BENCH_BUDGET_MS").ok().and_then(|s| s.parse().ok()).unwrap_or(150);
     let budget = Duration::from_millis(budget_ms);
@@ -100,7 +105,7 @@ fn main() {
     );
     let _g = no_grad();
     let mut rng = Rng::seed(3);
-    let mut groups: Vec<(&str, f64, f64)> = Vec::new();
+    let mut groups: Vec<(&str, f64, f64, f64)> = Vec::new();
     for &(group, c, o, k, s, hw, gr, calls) in SHAPES {
         if filter.as_ref().is_some_and(|f| f != group) {
             continue;
@@ -126,28 +131,34 @@ fn main() {
             Some(g) => {
                 g.1 += t * calls as f64;
                 g.2 += flops * calls as f64;
+                g.3 += tmin * calls as f64;
             }
-            None => groups.push((group, t * calls as f64, flops * calls as f64)),
+            None => groups.push((group, t * calls as f64, flops * calls as f64, tmin * calls as f64)),
         }
     }
     println!("\nper forward (weighted by calls):");
-    let (mut tt, mut tf) = (0.0, 0.0);
-    for (g, t, f) in &groups {
+    let (mut tt, mut tf, mut tm) = (0.0, 0.0, 0.0);
+    for (g, t, f, m) in &groups {
         println!(
-            "{g:<6} {:>9.3} ms {:>9.1} GF/s {:>8.1} GF/s/thr",
+            "{g:<6} {:>9.3} ms {:>9.1} GF/s {:>8.1} GF/s/thr   fastest calls {:>9.3} ms {:>8.1} GF/s/thr",
             t * 1e3,
             f / t / 1e9,
-            f / t / 1e9 / threads as f64
+            f / t / 1e9 / threads as f64,
+            m * 1e3,
+            f / m / 1e9 / threads as f64
         );
         tt += t;
         tf += f;
+        tm += m;
     }
     println!(
-        "{:<6} {:>9.3} ms {:>9.1} GF/s {:>8.1} GF/s/thr ({:.2} GFLOP)",
+        "{:<6} {:>9.3} ms {:>9.1} GF/s {:>8.1} GF/s/thr   fastest calls {:>9.3} ms {:>8.1} GF/s/thr ({:.2} GFLOP)",
         "all",
         tt * 1e3,
         tf / tt / 1e9,
         tf / tt / 1e9 / threads as f64,
+        tm * 1e3,
+        tf / tm / 1e9 / threads as f64,
         tf / 1e9
     );
 }
