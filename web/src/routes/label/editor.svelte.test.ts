@@ -238,3 +238,25 @@ describe('the labeling editor: keys', () => {
     expect(key('ArrowRight').defaultPrevented).toBe(false);
   });
 });
+
+describe('the labeling editor: a linked image the job does not have', () => {
+  it('closes instead of opening empty, and says why', async () => {
+    // `?image=` of an image removed since (a shared link, another tab, the agent's own removal): the editor opened as an
+    // empty dialog titled "Image", with only Save and Discard.
+    const at = '#/datasets/label/lb_7c21?image=img_gone';
+    history.replaceState(null, '', at);
+    router.route = parse(at);
+    const info = vi.spyOn(toast, 'info');
+    c = mount(LabelJobPage, { target });
+    await vi.waitFor(() => {
+      flushSync();
+      if (!document.querySelector('.grid, [role=grid], .tile, .empty, .tiles')) throw new Error('loading');
+    });
+    await vi.waitFor(() => {
+      flushSync();
+      expect(router.route.query.get('image')).toBeNull();
+    });
+    expect(editor()?.open).toBeFalsy();
+    expect(info).toHaveBeenCalled();
+  });
+});

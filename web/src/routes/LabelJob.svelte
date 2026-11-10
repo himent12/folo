@@ -81,6 +81,17 @@
     router.go(`/datasets/label/${encodeURIComponent(id)}${s ? `?${s}` : ''}`, { replace: true });
   }
   const shown = $derived(show === 'all' ? live.images : live.images.filter((i) => inFilter(i, show)));
+  // A linked image the job does not have (removed since, a stale link) would open the editor empty: the job holds all
+  // its images once loaded, so the link is dropped and the page says why.
+  $effect(() => {
+    const want = imageParam;
+    if (!want || live.loading || live.error || live.images.some((i) => i.id === want)) return;
+    untrack(() => {
+      // page-level: the editor never opened for it.
+      toast.info('Image not in this job', `${want} has been removed from it.`);
+      setQuery({ image: null });
+    });
+  });
 
   // ---------- the instructions: saved when the field is left, and before a run starts (label/instructions) ----------
   const instructions = new Instructions(
