@@ -78,8 +78,13 @@ fn usage_error(out: Out, e: clap::Error) -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     let rendered = e.render().to_string();
-    let message =
-        rendered.lines().next().unwrap_or("invalid usage").trim_start_matches("error: ").to_string();
+    // The first paragraph, on one line: a missing argument's names follow "were not provided:" on their own lines.
+    let message: Vec<&str> =
+        rendered.lines().map(str::trim).take_while(|l| !l.is_empty()).filter(|l| !l.is_empty()).collect();
+    let message = match message.join(" ").trim_start_matches("error: ") {
+        "" => "invalid usage".to_string(),
+        m => m.to_string(),
+    };
     let err =
         CliError::new(ExitCode::Usage, "usage", message).hint("run `folo --help` or `folo describe --json`");
     if out.json {

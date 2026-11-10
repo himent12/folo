@@ -131,6 +131,25 @@ fn usage_errors_exit_2() {
     assert!(stdout.contains("serve"));
 }
 
+/// The `--json` error of a missing argument names it: clap puts the names on the lines after "the following
+/// required arguments were not provided:", which the message used to cut off.
+#[test]
+fn usage_errors_name_the_missing_argument() {
+    for (args, want) in [
+        (&["dataset", "stats", "--json"][..], "<PATH>"),
+        (&["train", "--json"], "--data"),
+        (&["predict", "--json", "a.jpg"], "--model"),
+    ] {
+        let (code, stdout, _) = folo(args);
+        assert_eq!(code, 2, "{args:?}");
+        let e = &json_lines(&stdout)[0]["error"];
+        assert_eq!(e["code"], "usage");
+        let message = e["message"].as_str().unwrap();
+        assert!(message.contains(want), "{args:?}: {message}");
+        assert!(!message.contains('\n') && !message.contains("Usage:"), "{args:?}: {message}");
+    }
+}
+
 #[test]
 fn version_has_sha_and_build_date() {
     let (code, stdout, _) = folo(&["--version"]);
