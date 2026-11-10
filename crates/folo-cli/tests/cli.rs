@@ -221,7 +221,8 @@ fn data_dir_that_is_a_file_is_a_usage_error() {
 
 /// One process owns a data dir, and a relative `--data-dir` names the same folder from anywhere: a server started
 /// with `--data-dir data` reports it absolute, so a second `folo serve` points at it and an embedded `folo mcp`
-/// started from another working directory goes through it (its owner check compares the folders).
+/// started from another working directory goes through it (its owner check compares the folders). No GPU (as the
+/// other tests): a slow adapter start could outlast that check's timeout.
 #[test]
 fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     use std::io::Write;
@@ -230,6 +231,7 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     let mut server: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
         .args(["--json", "serve", "--port", "0", "--data-dir", "data"])
         .current_dir(&*a)
+        .env("FOLO_GPU_BACKEND", "webgpu")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -247,6 +249,7 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     let second = Command::new(env!("CARGO_BIN_EXE_folo"))
         .args(["--json", "serve", "--port", "0", "--data-dir", data.to_str().unwrap()])
         .current_dir(&*b)
+        .env("FOLO_GPU_BACKEND", "webgpu")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -258,6 +261,7 @@ fn a_data_dir_has_one_owner_whatever_the_working_directory() {
     let mut mcp: ChildGuard = Command::new(env!("CARGO_BIN_EXE_folo"))
         .args(["mcp", "--data-dir", data.to_str().unwrap()])
         .current_dir(&*b)
+        .env("FOLO_GPU_BACKEND", "webgpu")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
