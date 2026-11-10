@@ -229,6 +229,19 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   naming it. `folo export --format onnx` and `POST /api/models/{id}/export` call `export_file`; parity with
   onnxruntime is `crates/folo-cli/tests/onnx.rs` + `bench/parity/onnx_check.py` (docs/CLI.md, ONNX export).
 
+## folo-bench — vision benchmarks
+- The engine of [docs/BENCH.md](BENCH.md), a pure library (no files, no server types) that `folo-server`'s
+  `/api/bench` builds on. `conditions`: the twelve stress conditions (`Condition`, ids as in the catalog), each a
+  deterministic, size-keeping change at severities 1 to 5, with pixel sizes given at a 640 px long side and scaled
+  with the image; `apply` makes a variant (only `distance` moves the true boxes), `render` goes from an image file
+  (decoded as datasets are, `folo_data::decode`) to the canonical quality-95 JPEG. Pixels touch only IEEE basic
+  operations (the sRGB curve and Gaussian weights come from tables built without libm) and noise is seeded per row,
+  so a variant has the same bytes on every machine and thread count.
+- `plan`: the catalog, the default plan, `check_plan` (docs/API.md's rules) and `variants`. `score`: every number
+  of BENCH.md's *Definitions* from plain per-image truths and detections, returned as the `folo_api` wire types.
+  AP is folo-vision's `Evaluator` (and `CocoEval` for the size buckets), never a second implementation; the
+  bootstrap interval reruns it on 200 seeded resamples in parallel.
+
 ## folo-wasm — FOLO in the browser
 - `crates/folo-wasm` (wasm-bindgen) loads a `.folo` file from bytes and runs `folo_vision::Predictor`'s steps on
   WebGPU (folo-gpu's browser backend, async device creation and readback) or on folo-core's CPU kernels compiled to

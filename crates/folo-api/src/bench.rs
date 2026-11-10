@@ -1091,14 +1091,14 @@ mod tests {
 
     #[test]
     fn requests_take_their_defaults() {
-        let c: CreateBench = serde_json::from_str(
-            r#"{"name":"pond","source":{"kind":"dataset","dataset_id":"ds_1"}}"#,
-        )
-        .unwrap();
+        let c: CreateBench =
+            serde_json::from_str(r#"{"name":"pond","source":{"kind":"dataset","dataset_id":"ds_1"}}"#)
+                .unwrap();
         assert_eq!(c.source, BenchSource::Dataset { dataset_id: "ds_1".into(), split: None });
         assert!(c.plan.is_none() && c.max_images.is_none() && c.description.is_empty() && c.seed == 0);
 
-        let p: BenchPlanCondition = serde_json::from_str(r#"{"condition":"haze","severities":[1,3]}"#).unwrap();
+        let p: BenchPlanCondition =
+            serde_json::from_str(r#"{"condition":"haze","severities":[1,3]}"#).unwrap();
         assert_eq!((p.weight, p.why), (1.0, None));
 
         let s: StartBenchEntry = serde_json::from_str(

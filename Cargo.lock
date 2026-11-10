@@ -664,6 +664,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "folo-bench"
+version = "0.1.0"
+dependencies = [
+ "folo-api",
+ "folo-core",
+ "folo-data",
+ "folo-vision",
+ "image",
+ "rayon",
+]
+
+[[package]]
 name = "folo-cli"
 version = "0.1.0"
 dependencies = [

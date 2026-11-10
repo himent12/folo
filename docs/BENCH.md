@@ -41,6 +41,20 @@ benchmark's seed, the image and the severity decide where noise falls). Severity
 is severe, and a person can still do the job.
 
 <!-- conditions:begin (crates/folo-bench/src/conditions.rs is the source; its test keeps this table in step) -->
+| id | Name | Group | What it does | Parameter | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|---|---|---|
+| `low_light` | Low light | light | Darkens the scene as a short exposure does and adds the sensor noise that comes with it: dusk, indoors, night. | gain in linear light, noise `n` (σ = n·√(signal + 0.004)) | ×0.6 n 0.02 | ×0.4 n 0.03 | ×0.25 n 0.04 | ×0.15 n 0.05 | ×0.08 n 0.06 |
+| `overexposure` | Overexposure | light | Brightens the scene as a long exposure does, clipping highlights to white: glare, a bright sky, a flash too close. | gain in linear light, clipped | ×1.3 | ×1.6 | ×2 | ×2.5 | ×3.2 |
+| `low_contrast` | Low contrast | light | Pulls every pixel toward the image's mean grey: flat light, an overcast day, a washed-out screen. | share of the deviation from the mean kept | 0.75 | 0.58 | 0.45 | 0.34 | 0.25 |
+| `defocus` | Defocus | blur | Blurs the image as a lens out of focus does. | Gaussian σ, px at 640 | 1 | 2 | 3 | 4.5 | 6 |
+| `motion_blur` | Motion blur | blur | Smears the image along one direction, as a moving camera or subject does during the exposure. | length, px at 640 | 4 | 8 | 13 | 19 | 26 |
+| `sensor_noise` | Sensor noise | noise | Adds grain to every pixel and channel, as a small or hot sensor does. | σ, of 255 | 5 | 12 | 22 | 34 | 50 |
+| `haze` | Haze | medium | Scatters light: blends the scene toward a bright veil and softens detail, as fog, smoke or murky water do. | transmission `t`, blur σ px at 640 | t 0.82 σ 0.4 | t 0.66 σ 0.8 | t 0.52 σ 1.2 | t 0.4 σ 1.6 | t 0.3 σ 2 |
+| `color_cast` | Colour cast | medium | Absorbs red and tints the scene blue-green, as water does with depth (or tinted light). | red kept in linear light | ×0.8 | ×0.6 | ×0.45 | ×0.33 | ×0.22 |
+| `jpeg` | JPEG compression | digital | Re-encodes the image as a low-quality JPEG, with the blocks and smeared colour of strong compression. | quality | 40 | 20 | 12 | 8 | 5 |
+| `low_resolution` | Low resolution | digital | Downscales the image and scales it back up, so fine detail is lost: a cheap camera, a digital zoom. | downscale factor at 640 (at least 1) | 1.5× | 2× | 3× | 4× | 6× |
+| `distance` | Distance | geometry | Shrinks the whole scene onto a canvas of the same size, so every object is smaller, as if seen from farther away; the true boxes move with it. | scale of the scene | ×0.8 | ×0.65 | ×0.5 | ×0.375 | ×0.25 |
+| `occlusion` | Occlusion | geometry | Covers part of every object with a flat patch, as something in front of it would; the true boxes stay. | share of each box covered | 10% | 20% | 30% | 40% | 50% |
 <!-- conditions:end -->
 
 The image a contestant gets under a condition is a JPEG at quality 95 of the changed pixels, the same bytes for
@@ -60,8 +74,9 @@ An entry gets one number from 0 to 100, the weighted mean of five axes, each bet
 
 `score = 100 · Σ weight · axis / Σ weight`, over the axes that were measured. An axis that could not be measured
 (calibration for a contestant without confidences, robustness for an entry that ran no conditions) is left out
-and the entry is marked **partial**, as is an entry that ran a part of the images: it ranks on the leaderboard
-with a mark, because its number compares only loosely with complete entries.
+and the entry is marked **partial**, as is an entry that ran a part of the images or of the plan's conditions:
+it ranks on the leaderboard with a mark, because its number compares only loosely with complete entries. (A
+benchmark whose plan has no conditions has no robustness axis for anyone; its entries are not partial for that.)
 
 Speed is reported for FOLO models (milliseconds per image on the server's device) and is not part of the score:
 it depends on the machine, and an external model's cannot be measured here.
