@@ -5,9 +5,14 @@
 //! 1. arms the deadline watchdog: after the run's lifetime plus [`GRACE_S`] the instance terminates itself, whatever
 //!    the rest of the script is doing (nothing later can disarm it);
 //! 2. installs what the image lacks (`ca-certificates`, `curl`, the Vulkan loader);
-//! 3. makes sure the Vulkan loader can find the NVIDIA driver (FOLO's GPU backend is wgpu on Vulkan);
+//! 3. makes sure the Vulkan loader has a manifest for the NVIDIA driver (FOLO's GPU backend is wgpu on Vulkan);
 //! 4. installs `folo` with the release's `install.sh`, which verifies the archive's SHA-256;
-//! 5. prints `folo doctor` (the adapters, in the instance's log) and runs `folo serve` in the foreground.
+//! 5. checks that `folo` finds the GPU, and when it does not, points the Vulkan loader at the driver's EGL library
+//!    instead of its GLX one. The manifest the NVIDIA runtime mounts names the GLX library, which gives Vulkan no
+//!    device in a container without an X server (seen on RunPod, driver 595: the loader cannot get
+//!    `vkCreateInstance` from it, with or without the X client libraries installed); the EGL library is the same
+//!    driver's headless entry;
+//! 6. prints `folo doctor` (the adapters, in the instance's log) and runs `folo serve` in the foreground.
 //!
 //! However the script ends (a failed step, `folo serve` exiting or crashing), the instance terminates itself after
 //! a short pause, so a broken worker does not idle at GPU prices. The token is never part of the script.
@@ -17,6 +22,10 @@ use crate::{Error, ErrorKind, Result};
 /// Seconds an instance outlives its run's lifetime before it terminates itself: the control plane stops the run
 /// at the deadline and collects its checkpoint in that time.
 pub const GRACE_S: u64 = 600;
+
+/// Seconds the script keeps trying to terminate the instance once it is time (5 tries, 30 s apart). After that it
+/// gives up: an instance that cannot reach its provider's API stays until something else terminates it.
+pub const TERMINATE_TRIES_S: u64 = 150;
 
 /// Seconds the script waits after it ended before the instance terminates itself, so the end of its log can still
 /// be read in the provider's console.
@@ -143,7 +152,34 @@ cd "$(mktemp -d)"
 curl -fsSL --retry 3 --proto '=https,http' -o install.sh "$BASE/install.sh"
 sh install.sh --base-url "$BASE" --dir /usr/local/bin
 
-# 5. The worker.
+# 5. The GPU, as folo sees it (0x10de = 4318 is NVIDIA). The manifest's GLX library gives Vulkan no device in a
+#    container without an X server; the driver's EGL library is its headless entry, so when folo finds no GPU the
+#    loader is pointed at a manifest for that one instead.
+has_gpu() {{
+  local doctor
+  doctor="$(folo doctor --json 2>/dev/null || true)"
+  case "$doctor" in *'"vendor":4318'*) return 0 ;; *) return 1 ;; esac
+}}
+log "looking for the GPU"
+if has_gpu; then
+  log "folo finds the NVIDIA GPU"
+else
+  mkdir -p /usr/local/share/folo
+  cat > /usr/local/share/folo/nvidia_egl_icd.json <<'EOF_EGL'
+{{ "file_format_version": "1.0.0", "ICD": {{ "library_path": "libEGL_nvidia.so.0", "api_version": "1.3.0" }} }}
+EOF_EGL
+  # Loaders before 1.3.207 read VK_ICD_FILENAMES, later ones VK_DRIVER_FILES.
+  export VK_DRIVER_FILES=/usr/local/share/folo/nvidia_egl_icd.json
+  export VK_ICD_FILENAMES=/usr/local/share/folo/nvidia_egl_icd.json
+  if has_gpu; then
+    log "folo finds the NVIDIA GPU through the driver's EGL library"
+  else
+    unset VK_DRIVER_FILES VK_ICD_FILENAMES
+    log "warning: folo finds no NVIDIA GPU; the control plane will refuse this worker"
+  fi
+fi
+
+# 6. The worker.
 log "folo doctor"
 folo doctor --tensor-cores || log "warning: folo doctor failed"
 if [ -z "${{FOLO_TOKEN:-}}" ]; then
@@ -192,6 +228,8 @@ mod tests {
             "/etc/vulkan/icd.d/nvidia_icd.json <<'EOF_ICD'",
             "curl -fsSL --retry 3 --proto '=https,http' -o install.sh \"$BASE/install.sh\"",
             "sh install.sh --base-url \"$BASE\" --dir /usr/local/bin",
+            "if has_gpu; then",
+            "/usr/local/share/folo/nvidia_egl_icd.json <<'EOF_EGL'",
             "folo doctor --tensor-cores",
             "folo serve --host 0.0.0.0 --port \"$PORT\" --tensor-cores",
         ];
@@ -232,6 +270,40 @@ mod tests {
             assert!(e.message.contains("worker_base_url"), "{}", e.message);
         }
         assert!(check_base_url("http://10.0.0.5:8000/folo").is_ok());
+    }
+
+    #[test]
+    fn the_gpu_check_falls_back_to_the_egl_driver() {
+        let s = script(&spec("https://example.com/folo")).unwrap();
+        // The probe reads folo's own answer (no pipe into grep: with pipefail, grep closing early fails it).
+        assert!(s.contains(r#"doctor="$(folo doctor --json 2>/dev/null || true)""#), "{s}");
+        assert!(s.contains(r#"*'"vendor":4318'*) return 0"#), "{s}");
+        // Both spellings of the loader's variable, set only for the fallback and dropped when it does not help.
+        let fallback = &s[at(
+            &s,
+            "EOF_EGL
+  #",
+        )..at(&s, "# 6. The worker.")];
+        for line in [
+            "export VK_DRIVER_FILES=/usr/local/share/folo/nvidia_egl_icd.json",
+            "export VK_ICD_FILENAMES=/usr/local/share/folo/nvidia_egl_icd.json",
+            "unset VK_DRIVER_FILES VK_ICD_FILENAMES",
+        ] {
+            assert!(
+                fallback.contains(line),
+                "`{line}` is missing from:
+{fallback}"
+            );
+        }
+        assert!(s.contains(r#""library_path": "libEGL_nvidia.so.0""#), "{s}");
+    }
+
+    #[test]
+    fn the_time_it_keeps_trying_to_terminate_is_the_constant() {
+        let s = script(&spec("https://example.com/folo")).unwrap();
+        let tries = &s[at(&s, "terminate_instance() {")..at(&s, "# 1. The deadline watchdog")];
+        assert!(tries.contains("for attempt in 1 2 3 4 5; do") && tries.contains("sleep 30"), "{tries}");
+        assert_eq!(TERMINATE_TRIES_S, 5 * 30);
     }
 
     #[test]

@@ -255,12 +255,15 @@ impl Cloud {
     pub fn with(data_dir: &Path, providers: Vec<Arc<dyn Provider>>, tuning: Tuning) -> Cloud {
         let dir = data_dir.join("cloud");
         let lock = dir.join(".lock");
+        let self_terminating =
+            providers.iter().map(|p| p.info()).filter(|p| p.self_terminates).map(|p| p.id).collect();
+        let ledger = Ledger::new(&dir, lock.clone(), self_terminating);
         let core = Core {
             data_dir: data_dir.to_path_buf(),
             providers,
             tuning,
-            connections: Connections::new(&dir, lock.clone()),
-            ledger: Ledger::new(&dir, lock),
+            connections: Connections::new(&dir, lock),
+            ledger,
             offers: Mutex::default(),
             halt: Halt::default(),
         };

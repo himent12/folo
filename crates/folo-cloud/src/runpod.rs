@@ -69,6 +69,8 @@ pub struct RunPod {
     rest: String,
     graphql: String,
     proxy: String,
+    /// Whether the worker's download is asked for before a launch and at a check ([`crate::worker_download`]).
+    probe: bool,
 }
 
 impl Default for RunPod {
@@ -80,18 +82,25 @@ impl Default for RunPod {
 impl RunPod {
     /// The provider against its real service.
     pub fn new() -> RunPod {
-        RunPod::with_urls(API_URL, GRAPHQL_URL, PROXY_URL)
+        RunPod { probe: true, ..RunPod::with_urls(API_URL, GRAPHQL_URL, PROXY_URL) }
     }
 
     /// The provider against other URLs (a test fixture): the REST base (`.../v2`), the GraphQL endpoint and the
-    /// proxy pattern ([`PROXY_URL`]).
+    /// proxy pattern ([`PROXY_URL`]). It does not ask for the worker's download (a fixture has none).
     pub fn with_urls(rest: &str, graphql: &str, proxy: &str) -> RunPod {
         RunPod {
             api: Api::new("RunPod"),
             rest: rest.trim_end_matches('/').to_string(),
             graphql: graphql.to_string(),
             proxy: proxy.to_string(),
+            probe: false,
         }
+    }
+
+    /// What stands between an instance and its worker, if this machine can tell: the place it installs FOLO from
+    /// answers that the files are not there.
+    fn download_problem(&self, base_url: &str) -> Option<String> {
+        self.probe.then(|| crate::worker_download(base_url).problem()).flatten()
     }
 
     /// The error of an answer the call has no meaning of its own for.
@@ -217,7 +226,11 @@ impl Provider for RunPod {
             return Err(self.failure(&reply));
         }
         // Best effort: a working key is a working connection, also when GraphQL does not answer.
-        Ok(self.account(key).unwrap_or_default())
+        let mut account = self.account(key).unwrap_or_default();
+        // A connection whose instances cannot install FOLO works, and every run on it would fail: say so here.
+        let base_url = crate::worker_base_url(values, env!("CARGO_PKG_VERSION"));
+        account.note = self.download_problem(&base_url).map(|p| sentence(&p));
+        Ok(account)
     }
 
     fn offers(&self, values: &Values) -> Result<Vec<CloudOffer>> {
@@ -254,6 +267,10 @@ impl Provider for RunPod {
             lifetime_s: spec.lifetime_s,
             terminate: SELF_TERMINATE,
         })?;
+        // Before anything is rented: a pod that cannot download FOLO only costs money until it gives up.
+        if let Some(problem) = self.download_problem(&spec.worker_base_url) {
+            return Err(Error::new(ErrorKind::NoWorker, problem));
+        }
         let image = std::env::var(IMAGE_ENV).ok().filter(|i| !i.trim().is_empty());
         let port = format!("{WORKER_PORT}/http");
         let body = CreatePod {
@@ -343,6 +360,13 @@ impl Provider for RunPod {
             _ => Err(self.failure(&reply)),
         }
     }
+}
+
+/// `message` as a sentence of its own: a capital first, a full stop last.
+fn sentence(message: &str) -> String {
+    let mut chars = message.chars();
+    let first = chars.next().map(|c| c.to_uppercase().collect::<String>()).unwrap_or_default();
+    format!("{first}{}.", chars.as_str().trim_end_matches('.'))
 }
 
 /// The connection's API key, which must look like one (it goes into a header).
@@ -674,6 +698,52 @@ mod tests {
         assert_eq!((r[1].method.as_str(), r[1].path.as_str()), ("POST", "/graphql"));
         assert!(r[1].json()["query"].as_str().unwrap().contains("myself"));
         assert_key_only_in_headers(&f);
+    }
+
+    #[test]
+    fn check_notes_a_worker_download_that_is_not_there() {
+        let pods = || Answer::json(200, NO_PODS);
+        let me = || Answer::json(200, r#"{"data":{"myself":{"email":"you@example.com","clientBalance":5}}}"#);
+        // Pods, the account, then the two files of the download: the installer is there, the archive is not.
+        let f = Fixture::serve(vec![pods(), me(), Answer::json(200, "ok"), Answer::json(404, "{}")]);
+        let mut map = values().as_map().clone();
+        map.insert(WORKER_BASE_URL_FIELD.into(), f.url("/mirror"));
+        let probing = RunPod { probe: true, ..runpod(&f) };
+        let account = probing.check(&Values::from(map.clone())).unwrap();
+        assert_eq!(account.label.as_deref(), Some("you@example.com"));
+        let note = account.note.expect("a note");
+        assert!(note.starts_with("Instances cannot install FOLO: ") && note.ends_with("_URL."), "{note}");
+        assert!(note.contains("/mirror/folo-x86_64-unknown-linux-gnu.tar.gz.sha256 answers 404"), "{note}");
+        let r = f.requests();
+        assert_eq!(r.len(), 4);
+        // The key goes to RunPod only, never to the place the worker is downloaded from.
+        assert!(r[2..].iter().all(|r| r.header("authorization").is_none() && r.path.starts_with("/mirror/")));
+
+        // A download that is there leaves no note.
+        let f = Fixture::serve(vec![pods(), me(), Answer::json(200, "ok"), Answer::json(200, "ok")]);
+        map.insert(WORKER_BASE_URL_FIELD.into(), f.url("/mirror"));
+        let probing = RunPod { probe: true, ..runpod(&f) };
+        assert_eq!(probing.check(&Values::from(map)).unwrap().note, None);
+    }
+
+    #[test]
+    fn launch_rents_nothing_when_the_worker_cannot_be_downloaded() {
+        let f = Fixture::serve(vec![Answer::json(404, "{}")]);
+        let probing = RunPod { probe: true, ..runpod(&f) };
+        let missing = LaunchSpec { worker_base_url: f.url("/v9.9.9"), ..spec("NVIDIA L4@secure") };
+        let e = probing.launch(&values(), &missing).unwrap_err();
+        assert_error(&e, ErrorKind::NoWorker, "/v9.9.9/install.sh answers 404");
+        assert_eq!(e.code(), "cloud_boot_failed");
+        let r = f.requests();
+        assert_eq!((r.len(), r[0].method.as_str()), (1, "GET"), "no pod was asked for");
+
+        // With the download there, the pod is created.
+        let created = Answer::json(201, r#"{"id":"abc123xyz","status":"PROVISIONING"}"#);
+        let f = Fixture::serve(vec![Answer::json(200, "ok"), Answer::json(200, "ok"), created]);
+        let probing = RunPod { probe: true, ..runpod(&f) };
+        let there = LaunchSpec { worker_base_url: f.url("/v0.1.0"), ..spec("NVIDIA L4@secure") };
+        assert_eq!(probing.launch(&values(), &there).unwrap(), "abc123xyz");
+        assert_eq!(f.requests()[2].path, "/v2/pods");
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use folo_api::{CloudInstance, CloudInstanceStatus};
+use folo_cloud::InstanceState;
 
 use super::{Core, files};
 use crate::error::Result;
@@ -34,15 +35,17 @@ impl Core {
                 Some(r) => vec![r.clone()],
                 None => c.provider.find(&values, &record.name).map_err(|e| e.message)?,
             };
-            refs.iter().try_for_each(|r| c.provider.terminate(&values, r)).map_err(|e| e.message)
+            // Whether the provider still had it: an instance that was gone before this ended at a time nobody
+            // saw, one that is terminated here ends now (the ledger tells them apart for its cost).
+            let was_gone =
+                refs.iter().all(|r| matches!(c.provider.state(&values, r), Ok(InstanceState::Gone)));
+            refs.iter().try_for_each(|r| c.provider.terminate(&values, r)).map_err(|e| e.message)?;
+            Ok(was_gone)
         });
         match terminated {
-            Ok(()) => {
+            Ok(was_gone) => {
                 tracing::info!(instance = %id, "terminated the cloud instance");
-                self.ledger.update(id, |i| {
-                    i.status = CloudInstanceStatus::Terminated;
-                    i.error = None;
-                })
+                self.ledger.terminated(id, was_gone)
             }
             Err(message) => {
                 tracing::warn!(instance = %id, "terminating the cloud instance failed (retried): {message}");

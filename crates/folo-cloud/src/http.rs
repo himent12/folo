@@ -141,6 +141,22 @@ impl Api {
     }
 }
 
+/// Time for [`status_of`] to get its answer's headers: it runs before a launch someone waits for.
+const STATUS_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The status `GET url` is answered with, redirects followed; `Err` (what happened, for people) when there is no
+/// answer. Sends no credentials: the URL is a download anyone may host, not a provider's API. The body is not
+/// read.
+pub(crate) fn status_of(url: &str) -> std::result::Result<u16, String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(STATUS_TIMEOUT))
+        .build()
+        .into();
+    agent.get(url).call().map(|res| res.status().as_u16()).map_err(|e| e.to_string())
+}
+
 /// How long to wait before sending a request again that was answered `429` with `retry_after`, after `waited`
 /// already; `None` when the call has waited long enough.
 fn retry_wait(retry_after: Option<&HeaderValue>, waited: Duration) -> Option<Duration> {
@@ -234,6 +250,18 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::Unavailable);
         assert!(e.message.starts_with("Test does not answer"), "{}", e.message);
         assert!(!format!("{e:?}").contains("rpa_SECRET"));
+    }
+
+    #[test]
+    fn status_of_asks_without_credentials() {
+        let fixture = Fixture::serve(vec![Answer::json(404, "{}"), Answer::json(200, "ok")]);
+        assert_eq!(status_of(&fixture.url("/install.sh")), Ok(404));
+        assert_eq!(status_of(&fixture.url("/install.sh")), Ok(200));
+        for r in fixture.requests() {
+            assert_eq!((r.method.as_str(), r.path.as_str()), ("GET", "/install.sh"));
+            assert_eq!(r.header("authorization"), None);
+        }
+        assert!(status_of(&format!("{}/x", Fixture::closed_url())).is_err());
     }
 
     #[test]

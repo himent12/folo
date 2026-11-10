@@ -8,7 +8,11 @@
 //! `launch_wait_and_terminate` rents the cheapest offer that has stock for a few minutes (typically a few US
 //! cents; the pod is terminated as soon as it runs, also when the test fails, and terminates itself after 25
 //! minutes in any case). The pod's worker installs the release of this crate's version, which need not exist:
-//! the test only waits for RunPod to report the pod running.
+//! the test only waits for RunPod to report the pod running, so it launches without asking for the download
+//! first (`RunPod::with_urls`; `RunPod::new` refuses to rent a pod that could not install FOLO).
+//!
+//! The whole lifecycle (a worker that boots, finds its GPU, trains and is released) is checked by a real run:
+//! docs/CLOUD.md, *Checking a provider against the real service*.
 //!
 //! Without `RUNPOD_API_KEY` each test says so and passes.
 
@@ -16,7 +20,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use folo_api::CloudAvailability;
-use folo_cloud::runpod::RunPod;
+use folo_cloud::runpod::{self, RunPod};
 use folo_cloud::{InstanceState, LaunchSpec, Provider, Values};
 
 /// The connection of `RUNPOD_API_KEY`, if it is set.
@@ -91,7 +95,7 @@ fn launch_wait_and_terminate() {
         eprintln!("skipped: set FOLO_LIVE_LAUNCH=1 to rent a pod");
         return;
     }
-    let provider = RunPod::new();
+    let provider = RunPod::with_urls(runpod::API_URL, runpod::GRAPHQL_URL, runpod::PROXY_URL);
     let offers = provider.offers(&values).unwrap();
     let offer = offers
         .iter()

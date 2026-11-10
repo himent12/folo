@@ -20,7 +20,7 @@
   import { publishedSummary } from '$lib/published';
   import ClassStrip from '$lib/detect/ClassStrip.svelte';
   import { bytes, compact, deviceName, duration, num, pricePerHour, sentence, usd, usdRange } from '$lib/format';
-  import { availabilityNote, hasCloud, limitText, maxCost, offerLine } from '$lib/cloud';
+  import { availabilityNote, hasCloud, limitText, maxCost, menuOrder, offerLine } from '$lib/cloud';
   import { fitFix, IMGSZ_STEPS, isOom, oomCalibration, useLabel, vramForecaster, type OomFix } from '$lib/oom';
   import { prefs } from '$lib/prefs.svelte';
   import { REF_CPU, REF_GPU, referenceSource } from '$lib/reference';
@@ -1202,7 +1202,7 @@
                       invalid={!!errors.offer}
                       describedby={errors.offer ? 'offer-error' : 'offer-hint'}
                       options={offers
-                        ? offers.map((o) => {
+                        ? menuOrder(offers).map((o) => {
                             const note = availabilityNote(o.availability);
                             // Closed, the GPU and its memory; the price and the rest are the line under it.
                             return {
