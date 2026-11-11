@@ -13,6 +13,7 @@ import { lr, metric, num } from '$lib/format';
 import { etaText, lastKnown, Now } from '$lib/api/freshness';
 import StatusBadge, { statusWord } from '$lib/ui/StatusBadge';
 import { deviceParts } from './device';
+import { starting, STARTING } from './slot';
 import { runEvalSource, scoresTitle } from '$lib/evaluated';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
@@ -24,14 +25,15 @@ import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 
 export interface LiveRunCardProps {
-  run: Run | null;
+  run: Run;
   dataset?: Dataset | null;
+  /** The dataset as people know it (./datasetLabel): undefined while loading (a placeholder), null to leave it out. */
+  datasetName?: string | null;
   lost?: number | null;
 }
 
 /**
- * `run: null` while the runs load: the same card with real labels and placeholder values, so nothing moves. `lost`
- * (bindable) reports when the run's stream went quiet (`LiveRun.lost`), so the page can tell a server that stopped
+ * `run`: the run in the training slot (./slot), training or starting; its stream keeps the card live. `lost` (bindable) reports when the run's stream went quiet (`LiveRun.lost`), so the page can tell a server that stopped
  * answering from lists that alone failed to refresh. `dataset`: undefined while the datasets load, null when the run's
  * is not to be had (its split then unknown: "Evaluation").
  */
@@ -41,7 +43,7 @@ export default function LiveRunCard(props: LiveRunCardProps) {
   // placeholder, never a guess that changes when it arrives ("Evaluation" in the skeleton, "Validation" loaded).
   const scores = computed(() => (props.dataset === undefined ? null : scoresTitle(runEvalSource(props.dataset))));
 
-  const runId = computed(() => props.run?.id ?? null);
+  const runId = computed(() => props.run.id);
   const live = new LiveRun(() => runId.get());
   const run = computed(() => live.run ?? props.run);
   // The stream went quiet: what the card shows is the last known state, as of then. The status says so, the estimate
@@ -83,11 +85,8 @@ export default function LiveRunCard(props: LiveRunCardProps) {
     return Number.isFinite(hi) ? unitDomain(hi, chartH.get() - 30) : undefined;
   });
   const zoomed = computed(() => unitZoomed(fit.get()));
-  const horizon = computed<[number, number]>(() => (run.get() ? [0, Math.max(1, lastEpoch.get())] : [0, 1]));
-  const progress = computed(() => {
-    const r = run.get();
-    return r ? runProgress(r) : 0;
-  });
+  const horizon = computed<[number, number]>(() => [0, Math.max(1, lastEpoch.get())]);
+  const progress = computed(() => runProgress(run.get()));
 
   // The focal chart's vocabulary, as on the run page (run/RunMetrics): the best epoch a hollow ink ring (the title's
   // "○ best"), pulsed once when a new best lands, and the line's end the live mark (a filled lime dot, the heartbeat).
@@ -95,111 +94,76 @@ export default function LiveRunCard(props: LiveRunCardProps) {
   const pulse = signal(0);
   effect.pre(() => {
     const r = run.get();
-    pulse.set(pulser.see(r?.best?.epoch ?? null, r?.status === 'running'));
+    pulse.set(pulser.see(r.best?.epoch ?? null, r.status === 'running'));
   });
   const best = computed<Marker[]>(() => {
-    const b = run.get()?.best;
+    const b = run.get().best;
     return b ? [{ x: b.epoch, y: b.map50_95, label: 'best', quiet: true, pulse: pulse.get() }] : [];
   });
 
   // The device this run is using, live: its own label, plus load only from the GPU it actually trains on.
   const sys = new Resource((s) => hub.api.system(s), { poll: 2000 });
   // The GPU's load is a live reading: once the server stops answering it is dropped, not shown as current.
-  const deviceItems = computed(() => {
-    const r = run.get();
-    return r ? deviceParts(r, sys.stale === undefined ? (sys.data?.gpus ?? []) : []) : [];
-  });
+  const deviceItems = computed(() => deviceParts(run.get(), sys.stale === undefined ? (sys.data?.gpus ?? []) : []));
 
-  const r = () => run.get() as Run;
+  const r = () => run.get();
 
   // "Training now" is the status badge and the progress bar; the card's edge stays a plain hairline.
   return (
-    <section class="card" aria-labelledby={run.get() ? 'live-title' : undefined} aria-label={run.get() ? undefined : 'Loading training'} aria-busy={!run.get()}>
+    <section class="card" aria-labelledby="live-title">
       <header>
         <div class="title-row">
-          {run.get() ? (
-            <>
-              <StatusBadge run={r()} lastKnown={live.lost !== null ? lastKnown(statusWord(r()), live.lost, now.current) : undefined} />{' '}
-              <h2 id="live-title">
-                <a href={href(`/runs/${r().id}`)}>{r().name}</a>
-              </h2>
-            </>
+          {starting(r()) ? (
+            // Taken by the worker or next with the slot free (./slot): about to train, not waiting.
+            <StatusBadge state={STARTING} lastKnown={live.lost !== null ? lastKnown(STARTING.label, live.lost, now.current) : undefined} />
           ) : (
-            <>
-              <Skeleton w="80px" h="20px" r="var(--radius-full)" />{' '}
-              <h2>
-                &#8203;<Skeleton inline w="min(160px, 30vw)" h="16px" />
-              </h2>
-            </>
-          )}
+            <StatusBadge run={r()} lastKnown={live.lost !== null ? lastKnown(statusWord(r()), live.lost, now.current) : undefined} />
+          )}{' '}
+          <h2 id="live-title">
+            <a href={href(`/runs/${r().id}`)}>{r().name}</a>
+          </h2>
         </div>{' '}
         <p class="meta">
-          {run.get() ? (
-            // Whole items wrap to a second line rather than lose the last one (DESIGN_DIRECTION §2.3).
-            <Meta>
-              <span>{props.dataset?.name ?? r().config.dataset_id}</span>{' '}
-              <Ident value={r().config.arch} />{' '}
-              <span class="num">{r().config.imgsz} px</span>{' '}
-              <span class="num">batch {r().config.batch}</span>{' '}
-              <For each={deviceItems.get()} key={(part) => part}>
-                {(part) => <span class="dev num">{part()}</span>}
-              </For>
-            </Meta>
-          ) : (
-            // The trailing span takes the place of the device, which phones hide.
-            <>
+          {/* Whole items wrap to a second line rather than lose the last one (DESIGN_DIRECTION §2.3). */}
+          <Meta>
+            {props.datasetName === undefined ? (
               <span>
-                &#8203;<Skeleton inline w="min(280px, 48vw)" h="10px" />
+                &#8203;<Skeleton inline w="72px" h="10px" />
               </span>
-              <span></span>
-            </>
-          )}
+            ) : props.datasetName ? (
+              <span>{props.datasetName}</span>
+            ) : null}{' '}
+            <Ident value={r().config.arch} />{' '}
+            <span class="num">{r().config.imgsz} px</span>{' '}
+            <span class="num">batch {r().config.batch}</span>{' '}
+            <For each={deviceItems.get()} key={(part) => part}>
+              {(part) => <span class="dev num">{part()}</span>}
+            </For>
+          </Meta>
         </p>{' '}
         <div class="cta">
-          {run.get() ? (
-            <Button size="sm" variant="ghost" iconRight={ArrowRight} href={href(`/runs/${r().id}`)}>
-              Open run
-            </Button>
-          ) : (
-            <Skeleton w="88px" h="var(--control-sm)" />
-          )}
+          <Button size="sm" variant="ghost" iconRight={ArrowRight} href={href(`/runs/${r().id}`)}>
+            Open run
+          </Button>
         </div>
       </header>{' '}
       <div class="body">
         <div class="stats">
           <div class="epoch">
-            <Stat label="Epoch" value={run.get() ? num(r().epoch) : ''} unit={run.get() ? `/ ${r().epochs}` : undefined} size="lg" loading={!run.get()} />{' '}
+            <Stat label="Epoch" value={num(r().epoch)} unit={`/ ${r().epochs}`} size="lg" />{' '}
             {/* Lime is "now": a last known progress is drawn in ink. */}
             <Progress value={progress.get()} size="sm" label="Training progress" tone={live.lost !== null ? 'neutral' : 'accent'} />{' '}
             <p class="eta num">
-              {run.get() ? (
-                <>
-                  <span>{progressText(r())}</span>{' '}
-                  <span>{etaText(r().eta_s, live.lost, now.current)}</span>
-                </>
-              ) : (
-                <>
-                  <span>
-                    &#8203;<Skeleton inline w="40px" h="10px" />
-                  </span>
-                  <span>
-                    &#8203;<Skeleton inline w="64px" h="10px" />
-                  </span>
-                </>
-              )}
+              <span>{progressText(r())}</span>{' '}
+              <span>{etaText(r().eta_s, live.lost, now.current)}</span>
             </p>
           </div>{' '}
           <div class="grid">
             {/* The best epoch's score; the chart's legend reads the latest one, and each says which it is. */}
-            <Stat
-              label="mAP50-95"
-              value={metric(run.get()?.best?.map50_95)}
-              sub={run.get()?.best ? `best · ep ${r().best!.epoch}` : 'best, after the first epoch'}
-              loading={!run.get()}
-            />{' '}
-            <Stat label="Throughput" value={num(charts.get().lastStep?.imgs_per_s, 0)} unit="img/s" loading={!run.get()} />{' '}
-            <Stat label="Learning rate" value={lr(charts.get().lastStep?.lr)} loading={!run.get()} />{' '}
-            <Stat label="Loss" value={num(charts.get().lastStep?.loss.total, 3)} sub="last step, raw" loading={!run.get()} />
+            <Stat label="mAP50-95" value={metric(r().best?.map50_95)} sub={r().best ? `best · ep ${r().best!.epoch}` : 'best, after the first epoch'} />{' '}
+            <Stat label="Throughput" value={num(charts.get().lastStep?.imgs_per_s, 0)} unit="img/s" />{' '}
+            <Stat label="Learning rate" value={lr(charts.get().lastStep?.lr)} />{' '}
+            <Stat label="Loss" value={num(charts.get().lastStep?.loss.total, 3)} sub="last step, raw" />
           </div>
         </div>{' '}
         <div class="chart">
@@ -208,10 +172,10 @@ export default function LiveRunCard(props: LiveRunCardProps) {
           <p class="chart-title">
             {scores.get() ? scores.get() : <Skeleton inline w="72px" h="12px" />} mAP{' '}
             <span class="faint">
-              {narrow() && lastEpoch.get() ? `Latest · ep ${lastEpoch.get()}` : `by epoch, so far${run.get()?.best ? ` · ○ best at ep ${r().best!.epoch}` : ''}`}
+              {narrow() && lastEpoch.get() ? `Latest · ep ${lastEpoch.get()}` : `by epoch, so far${r().best ? ` · ○ best at ep ${r().best!.epoch}` : ''}`}
             </span>
           </p>{' '}
-          {!run.get() || live.loading ? (
+          {live.loading ? (
             <ChartSkeleton height={chartH.get()} />
           ) : (
             <LineChart
