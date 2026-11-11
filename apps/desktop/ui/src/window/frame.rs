@@ -5,8 +5,6 @@
 //! Performance: the window keeps two frames (`rendered_frame`, `next_frame`) and swaps them after each draw;
 //! `Frame::clear` empties every list but keeps its capacity, so a steady-state frame allocates nothing a
 //! reused `Vec` avoids. Element states are moved, not cloned, from the previous frame when touched again.
-#![allow(dead_code)] // skeleton
-
 use std::{any::Any, collections::HashMap};
 
 use smallvec::SmallVec;
@@ -21,8 +19,15 @@ use crate::{
 pub struct HitboxId(pub(crate) usize);
 
 impl HitboxId {
-    /// Whether the mouse is over this hitbox and nothing above it blocks it (last frame's hit test).
+    /// Whether the mouse is over this hitbox and nothing above it blocks it (the current hit test). A
+    /// `BlockMouseExceptScroll` hitbox above it makes this `false` while `should_handle_scroll` stays true.
     pub fn is_hovered(self, window: &crate::Window) -> bool {
+        let hit_test = &window.mouse_hit_test;
+        hit_test.ids.iter().take(hit_test.hover_hitbox_count).any(|id| *id == self)
+    }
+
+    /// Whether the mouse is over this hitbox for scrolling (only a `BlockMouse` hitbox above it blocks).
+    pub fn should_handle_scroll(self, window: &crate::Window) -> bool {
         window.mouse_hit_test.ids.contains(&self)
     }
 }
@@ -56,6 +61,17 @@ impl Hitbox {
     /// Whether the mouse is over it (and not blocked).
     pub fn is_hovered(&self, window: &crate::Window) -> bool {
         self.id.is_hovered(window)
+    }
+
+    /// Whether it should handle scroll wheel events (see `HitboxId::should_handle_scroll`).
+    pub fn should_handle_scroll(&self, window: &crate::Window) -> bool {
+        self.id.should_handle_scroll(window)
+    }
+
+    /// Whether `point` is inside its bounds (ignoring the content mask and occlusion, as GPUI's
+    /// `Deref<Target = Bounds>` gives).
+    pub fn contains(&self, point: &crate::Point<Pixels>) -> bool {
+        self.bounds.contains(point)
     }
 }
 
@@ -189,18 +205,66 @@ impl Frame {
         }
     }
 
-    /// Empties every list, keeping capacity (element states are handled by the swap).
+    /// Empties every list, keeping capacity. Called on the frame that was just replaced, so its element
+    /// states are the ones nothing touched this frame: they are dropped.
     pub(crate) fn clear(&mut self) {
-        todo!("window")
+        self.focus = None;
+        self.element_states.clear();
+        self.hitboxes.clear();
+        self.mouse_listeners.clear();
+        self.dispatch_tree.clear();
+        self.scene.clear();
+        self.cursor_styles.clear();
+        self.input_handlers.clear();
+        self.tooltip_requests.clear();
+        self.window_control_hitboxes.clear();
+        self.deferred_draws.clear();
     }
 
-    /// Hit tests `position` against this frame's hitboxes.
-    pub(crate) fn hit_test(&self, _position: crate::Point<Pixels>) -> HitTest {
-        todo!("window")
+    /// Hit tests `position` against this frame's hitboxes (GPUI's `Frame::hit_test`): topmost first, each
+    /// clipped by its content mask, stopping after a `BlockMouse` one; hover stops counting after the first
+    /// `BlockMouseExceptScroll` one.
+    pub(crate) fn hit_test(&self, position: crate::Point<Pixels>) -> HitTest {
+        let mut hit_test = HitTest::default();
+        let mut hover_count_set = false;
+        for hitbox in self.hitboxes.iter().rev() {
+            if !hitbox.bounds.intersect(&hitbox.content_mask.bounds).contains(&position) {
+                continue;
+            }
+            hit_test.ids.push(hitbox.id);
+            if !hover_count_set && hitbox.behavior == HitboxBehavior::BlockMouseExceptScroll {
+                hit_test.hover_hitbox_count = hit_test.ids.len();
+                hover_count_set = true;
+            }
+            if hitbox.behavior == HitboxBehavior::BlockMouse {
+                break;
+            }
+        }
+        if !hover_count_set {
+            hit_test.hover_hitbox_count = hit_test.ids.len();
+        }
+        hit_test
     }
 
     /// The focus path (root first) of the focused element in this frame's dispatch tree.
     pub(crate) fn focus_path(&self) -> SmallVec<[FocusId; 8]> {
-        todo!("window")
+        self.focus.map(|id| self.dispatch_tree.focus_path(id)).unwrap_or_default()
+    }
+
+    /// The cursor this frame asks for under the mouse (GPUI's `Frame::cursor_style`): the last window-wide
+    /// request wins over everything; otherwise the last request whose hitbox is hovered.
+    pub(crate) fn cursor_style(&self, window: &crate::Window) -> Option<CursorStyle> {
+        let mut style = None;
+        for request in self.cursor_styles.iter().rev() {
+            match request.hitbox_id {
+                None => return Some(request.style),
+                Some(id) => {
+                    if style.is_none() && id.is_hovered(window) {
+                        style = Some(request.style);
+                    }
+                }
+            }
+        }
+        style
     }
 }

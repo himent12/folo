@@ -1,6 +1,4 @@
 //! Window ids and handles: `WindowId`, `AnyWindowHandle`, `WindowHandle<V>`. Owner tag: `"window"`.
-#![allow(dead_code)] // skeleton
-
 use std::{any::TypeId, marker::PhantomData};
 
 use crate::{App, AppContext, Context, Entity, Window};
@@ -68,18 +66,28 @@ impl<V: 'static> WindowHandle<V> {
     /// Updates the root view with the window (`Err` when the window has closed).
     pub fn update<C, R>(
         &self,
-        _cx: &mut C,
-        _update: impl FnOnce(&mut V, &mut Window, &mut Context<V>) -> R,
+        cx: &mut C,
+        update: impl FnOnce(&mut V, &mut Window, &mut Context<V>) -> R,
     ) -> anyhow::Result<R>
     where
         C: AppContext,
     {
-        todo!("window")
+        cx.update_window(self.any_handle, |root, window, cx| {
+            let view = root.downcast::<V>().map_err(|_| anyhow::anyhow!("the window's root view is not a {}", std::any::type_name::<V>()))?;
+            Ok(view.update(cx, |view, cx| update(view, window, cx)))
+        })?
     }
 
     /// The root view's entity.
-    pub fn entity(&self, _cx: &App) -> anyhow::Result<Entity<V>> {
-        todo!("window")
+    pub fn entity(&self, cx: &App) -> anyhow::Result<Entity<V>> {
+        let window = cx
+            .windows
+            .get(&self.any_handle.id)
+            .ok_or_else(|| anyhow::anyhow!("window closed"))?
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("window is being updated"))?;
+        let root = window.root.clone().ok_or_else(|| anyhow::anyhow!("window has no root view"))?;
+        root.downcast::<V>().map_err(|_| anyhow::anyhow!("the window's root view is not a {}", std::any::type_name::<V>()))
     }
 }
 

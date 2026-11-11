@@ -1,12 +1,10 @@
 //! Window queries and operations the app calls (size, scale, rem, line height, mouse, modifiers, bounds,
 //! display, maximize / full screen / minimize / zoom, title, close) and focus. Owner tag: `"window"`.
 //! Most forward to the platform window or read the window's state.
-#![allow(dead_code)] // skeleton
-
 use std::{rc::Rc, sync::Arc};
 
 use crate::{
-    App, Bounds, FocusHandle, Modifiers, Pixels, PlatformDisplay, Point, Size, Window, WindowBounds,
+    App, Bounds, FocusHandle, FocusId, Modifiers, Pixels, PlatformDisplay, Point, Size, Window, WindowBounds,
     WindowTextSystem,
 };
 
@@ -28,7 +26,7 @@ impl Window {
 
     /// The text style's line height at the current font size.
     pub fn line_height(&self) -> Pixels {
-        todo!("window")
+        self.text_style().line_height_in_pixels(self.rem_size())
     }
 
     /// The per-window text system (shaping, line layout cache).
@@ -101,28 +99,47 @@ impl Window {
         self.removed = true;
     }
 
-    /// Focuses `handle` (focus listeners run and the window redraws at the end of the update).
-    pub fn focus(&mut self, _handle: &FocusHandle) {
-        todo!("window")
+    /// Focuses `handle`; the window redraws (GPUI's `Window::focus`: nothing happens if it already is).
+    pub fn focus(&mut self, handle: &FocusHandle) {
+        self.focus_id(handle.id);
+    }
+
+    /// Focuses the element with `id` (what `focus` and Tab navigation do).
+    pub(crate) fn focus_id(&mut self, id: FocusId) {
+        if self.focus == Some(id) {
+            return;
+        }
+        self.focus = Some(id);
+        self.refresh();
     }
 
     /// Clears focus.
     pub fn blur(&mut self) {
-        todo!("window")
+        self.focus = None;
+        self.refresh();
     }
 
     /// The focused handle, if any (and still alive).
-    pub fn focused(&self, _cx: &App) -> Option<FocusHandle> {
-        todo!("window")
+    pub fn focused(&self, cx: &App) -> Option<FocusHandle> {
+        self.focus.and_then(|id| FocusHandle::for_id(id, &cx.focus_handles))
+    }
+
+    /// The focused id, if its handle is still alive (`focused` without making a handle).
+    pub(crate) fn focused_id(&self, cx: &App) -> Option<FocusId> {
+        self.focus.filter(|id| cx.focus_handles.handles.read().contains_key(id))
     }
 
     /// Moves focus to the next tab stop of the rendered frame (wrapping).
     pub fn focus_next(&mut self) {
-        todo!("window")
+        if let Some(id) = self.rendered_frame.dispatch_tree.next_tab_stop(self.focus, false) {
+            self.focus_id(id);
+        }
     }
 
     /// Moves focus to the previous tab stop (wrapping).
     pub fn focus_prev(&mut self) {
-        todo!("window")
+        if let Some(id) = self.rendered_frame.dispatch_tree.next_tab_stop(self.focus, true) {
+            self.focus_id(id);
+        }
     }
 }
