@@ -88,7 +88,8 @@ export default function Overview() {
   const streamLost = signal<number | null>(null);
   const streaming = computed(() => !!live.get() && streamLost.get() === null);
   const now = new Now(() => stale.get());
-  const fresh = computed(() => datasets.data?.length === 0 && runList.get()?.length === 0 && models.data?.length === 0);
+  const noDatasets = computed(() => datasets.data?.length === 0);
+  const fresh = computed(() => noDatasets.get() && runList.get()?.length === 0 && models.data?.length === 0);
   function retryAll() {
     void runs.refresh();
     void models.refresh();
@@ -225,12 +226,25 @@ export default function Overview() {
                 <EmptyState
                   icon={Activity}
                   title="Nothing is training"
-                  description={runList.get()!.length ? 'Start a run to watch its loss, mAP and samples update live here.' : 'Train your first detector: pick a dataset, a model size and go.'}
-                  actions={() => (
-                    <Button variant="primary" icon={Plus} href={href('/runs/new')}>
-                      New run
-                    </Button>
-                  )}
+                  description={
+                    noDatasets.get()
+                      ? 'Add a dataset to train on, then start a run to watch it here.'
+                      : runList.get()!.length
+                        ? 'Start a run to watch its loss, mAP and samples update live here.'
+                        : 'Train your first detector: pick a dataset, a model size and go.'
+                  }
+                  actions={() =>
+                    // With no dataset, New run could only say "Add a dataset first": open Add dataset instead.
+                    noDatasets.get() ? (
+                      <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>
+                        Add dataset
+                      </Button>
+                    ) : (
+                      <Button variant="primary" icon={Plus} href={href('/runs/new')}>
+                        New run
+                      </Button>
+                    )
+                  }
                 />
               </Panel>
             )}
@@ -502,7 +516,16 @@ export default function Overview() {
                     </For>
                   </ul>
                 ) : datasets.data.length === 0 ? (
-                  <EmptyState icon={Images} title="No datasets registered" description="Register a YOLO or COCO folder, or generate a sample set of shapes." />
+                  <EmptyState
+                    icon={Images}
+                    title="No datasets registered"
+                    description="Register a YOLO or COCO folder, or generate a sample set of shapes."
+                    actions={() => (
+                      <Button size="sm" icon={Plus} href={href('/datasets?add=folder')}>
+                        Add dataset
+                      </Button>
+                    )}
+                  />
                 ) : (
                   <ul class="dslist" use:balanced={{ n: Math.min(6, datasets.data.length), min: 280 }}>
                     <For each={firstDatasets.get()} key={(d) => d.id}>

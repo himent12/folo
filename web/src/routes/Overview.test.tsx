@@ -115,6 +115,21 @@ describe('Overview', () => {
     expect(target.querySelector('#best-models .unranked')!.textContent).toMatch(/not ranked: could not load runs\.$/);
   });
 
+  it('with no dataset left, its actions open Add dataset rather than a New run that cannot start', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    api.datasets = async () => [];
+    open(api);
+    const links = await vi.waitFor(() => {
+      flush();
+      const found = [...target.querySelectorAll<HTMLAnchorElement>('.live a, #datasets a')].filter((a) => a.textContent?.includes('Add dataset'));
+      if (found.length < 2) throw new Error('still waiting for the empty states');
+      return found;
+    });
+    for (const a of links) expect(a.getAttribute('href')).toBe('#/datasets?add=folder');
+    expect(target.querySelector('.live')!.textContent).not.toContain('New run');
+  });
+
   it('refetches Best models when a run ends, and not on an unchanged list', async () => {
     const runs = await idleRuns();
     const run = runs.find((r) => r.status === 'completed')!;
