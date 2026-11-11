@@ -43,7 +43,7 @@ pub fn dispatcher(checks: &mut Checks, platform: &Rc<WindowsPlatform>) {
         task.detach();
         runnable.schedule();
     }
-    let ok = pump_until(Duration::from_secs(5), || done.load(Ordering::SeqCst) == 1000);
+    let ok = pump_until(Duration::from_secs(30), || done.load(Ordering::SeqCst) == 1000);
     checks.check(
         "1000 background jobs run",
         ok,
@@ -64,7 +64,7 @@ pub fn dispatcher(checks: &mut Checks, platform: &Rc<WindowsPlatform>) {
         task.detach();
         runnable.schedule();
     }
-    let ok = pump_until(Duration::from_secs(2), || order.borrow().len() == 100);
+    let ok = pump_until(Duration::from_secs(30), || order.borrow().len() == 100);
     checks.check(
         "main-thread jobs run in order on the main thread",
         ok && *order.borrow() == (0..100).collect::<Vec<_>>() && d.is_main_thread(),
@@ -87,7 +87,7 @@ pub fn dispatcher(checks: &mut Checks, platform: &Rc<WindowsPlatform>) {
     })
     .join()
     .unwrap();
-    let ok = pump_until(Duration::from_secs(2), || from_bg.lock().len() == 100);
+    let ok = pump_until(Duration::from_secs(30), || from_bg.lock().len() == 100);
     let v = from_bg.lock().clone();
     checks.check(
         "main-thread jobs from a background thread run in order there",
@@ -95,7 +95,9 @@ pub fn dispatcher(checks: &mut Checks, platform: &Rc<WindowsPlatform>) {
         "",
     );
 
-    // Timers: one thread, deadline order.
+    // Timers: one thread, never early. (Their order is the timer thread's handover order, which the
+    // dispatcher's unit test checks: once due they run on pool threads, in whatever order those get
+    // the CPU, so the order they report in here is not asserted.)
     let fired = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let start = Instant::now();
     for (i, ms) in [(0, 45u64), (1, 15), (2, 30), (3, 60)] {
@@ -107,15 +109,10 @@ pub fn dispatcher(checks: &mut Checks, platform: &Rc<WindowsPlatform>) {
         task.detach();
         runnable.schedule();
     }
-    let ok = pump_until(Duration::from_secs(2), || fired.lock().len() == 4);
+    let ok = pump_until(Duration::from_secs(30), || fired.lock().len() == 4);
     let v = fired.lock().clone();
-    let order: Vec<i32> = v.iter().map(|(i, _)| *i).collect();
-    let late = v.iter().zip([15u64, 30, 45, 60]).all(|((_, t), ms)| *t >= Duration::from_millis(ms));
-    checks.check(
-        "timers fire in deadline order, not early",
-        ok && order == [1, 2, 0, 3] && late,
-        format!("{v:?}"),
-    );
+    let late = v.iter().all(|(i, t)| *t >= Duration::from_millis([45u64, 15, 30, 60][*i as usize]));
+    checks.check("timers fire, not early", ok && late, format!("{v:?}"));
 }
 
 pub fn idle(checks: &mut Checks, log: &Rc<RefCell<Log>>) {

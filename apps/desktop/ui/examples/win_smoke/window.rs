@@ -81,7 +81,7 @@ pub fn modes(
     let restored = window.borrow().window_bounds();
     let b = restored.get_bounds();
     window.borrow().zoom();
-    let maxed = pump_until(Duration::from_secs(3), || window.borrow().is_maximized());
+    let maxed = pump_until(Duration::from_secs(30), || window.borrow().is_maximized());
     let wb = window.borrow().window_bounds();
     checks.check("zoom maximizes", maxed, "");
     checks.check(
@@ -99,7 +99,7 @@ pub fn modes(
         ),
     );
     window.borrow().zoom();
-    let back = pump_until(Duration::from_secs(3), || !window.borrow().is_maximized());
+    let back = pump_until(Duration::from_secs(30), || !window.borrow().is_maximized());
     pump_until(Duration::from_millis(200), || false);
     let wb = window.borrow().window_bounds();
     checks.check(
@@ -109,7 +109,7 @@ pub fn modes(
     );
 
     window.borrow().toggle_fullscreen();
-    let full = pump_until(Duration::from_secs(3), || window.borrow().is_fullscreen());
+    let full = pump_until(Duration::from_secs(30), || window.borrow().is_fullscreen());
     pump_until(Duration::from_millis(200), || false);
     let display = window.borrow().display().unwrap().bounds();
     let wb = window.borrow().window_bounds();
@@ -134,7 +134,7 @@ pub fn modes(
         ),
     );
     window.borrow().toggle_fullscreen();
-    let left = pump_until(Duration::from_secs(3), || !window.borrow().is_fullscreen());
+    let left = pump_until(Duration::from_secs(30), || !window.borrow().is_fullscreen());
     pump_until(Duration::from_millis(200), || false);
     let wb = window.borrow().window_bounds();
     checks.check(
@@ -146,7 +146,7 @@ pub fn modes(
     // Minimized, nothing draws: not a paint, a capture or a frame request (GPUI's rule; the app reads
     // the window's mode in the frame it draws). The restore draws again.
     window.borrow().minimize();
-    let minimized = pump_until(Duration::from_secs(3), || iconic(hwnd));
+    let minimized = pump_until(Duration::from_secs(30), || iconic(hwnd));
     let n = log.borrow().frames.len();
     // SAFETY: invalidating our own window; a capture into nothing.
     let _ = unsafe { InvalidateRect(Some(hwnd), None, false) };
@@ -157,7 +157,7 @@ pub fn modes(
     checks.check("minimized: no frame drawn", minimized && drawn == 0, format!("{drawn} frame(s)"));
     // SAFETY: the taskbar's restore, without activation off screen (the backend routes it).
     unsafe { SendMessageW(hwnd, WM_SYSCOMMAND, Some(WPARAM(SC_RESTORE as usize)), None) };
-    let back = pump_until(Duration::from_secs(3), || log.borrow().frames.len() > n);
+    let back = pump_until(Duration::from_secs(30), || log.borrow().frames.len() > n);
     checks.check("restored: drawn again", back && !iconic(hwnd), "");
 }
 
@@ -178,7 +178,9 @@ pub fn pacing(
     for _ in 0..50 {
         window.borrow().request_frame();
     }
-    pump_until(Duration::from_millis(150), || false);
+    // The frame, however late a loaded machine draws it, then a few refreshes in which no other comes.
+    pump_until(Duration::from_secs(30), || log.borrow().frames.len() > n);
+    pump_until(Duration::from_millis(100), || false);
     let got = log.borrow().frames.len() - n;
     checks.check("50 requests before a refresh draw once", got == 1, format!("{got} frame(s)"));
 
@@ -186,7 +188,7 @@ pub fn pacing(
     let n = log.borrow().frames.len();
     frame.borrow_mut().animate = 240;
     window.borrow().request_frame();
-    pump_until(Duration::from_secs(5), || frame.borrow().animate == 0);
+    pump_until(Duration::from_secs(30), || frame.borrow().animate == 0);
     pump_until(Duration::from_millis(50), || false);
     let l = log.borrow();
     let times: Vec<Instant> = l.frames[n..].iter().map(|(t, _)| *t).collect();

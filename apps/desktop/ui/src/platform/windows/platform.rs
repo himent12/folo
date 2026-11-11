@@ -121,6 +121,12 @@ impl WindowsPlatform {
         self.shared.windows.borrow_mut().push(window.hwnd().0 as isize);
         Ok(window)
     }
+
+    /// The windows opened so far (tests reach a core window's HWND through it).
+    #[cfg(test)]
+    pub(crate) fn window_handles(&self) -> Vec<HWND> {
+        self.shared.windows.borrow().iter().map(|&h| HWND(h as _)).collect()
+    }
 }
 
 impl Drop for WindowsPlatform {
@@ -156,6 +162,8 @@ impl Platform for WindowsPlatform {
         for callback in self.quit_callbacks.borrow_mut().iter_mut() {
             callback();
         }
+        // Nothing runs main-thread work any more: drop what is queued and let the dispatcher's threads go.
+        self.shared.dispatcher.shut_down();
     }
 
     fn quit(&self) {
@@ -257,11 +265,11 @@ impl Platform for WindowsPlatform {
     }
 
     fn write_to_clipboard(&self, item: ClipboardItem) {
-        clipboard::write_to_clipboard(item);
+        clipboard::write_to_clipboard(self.shared.message_window(), item);
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        clipboard::read_from_clipboard()
+        clipboard::read_from_clipboard(self.shared.message_window())
     }
 }
 

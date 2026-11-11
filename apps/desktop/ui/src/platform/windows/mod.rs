@@ -18,6 +18,8 @@ mod platform;
 mod platform_window;
 mod present;
 mod shell;
+#[cfg(test)]
+mod tests;
 mod util;
 mod window;
 

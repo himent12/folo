@@ -214,6 +214,14 @@ pub trait PlatformWindow: 'static {
 
     /// Moves the IME candidate window next to `bounds` (window logical pixels).
     fn update_ime_position(&self, bounds: Bounds<Pixels>);
+
+    /// Whether the window should type a key's text itself when nothing handled the key
+    /// (`Window::insert_text_for_key`): only for a platform with no text input of its own (headless).
+    /// Win32 (`WM_CHAR`, dead keys, the IME) and winit deliver typed text themselves, with the
+    /// layout's Caps Lock, AltGr and dead-key handling, which a keystroke's `key_char` does not have.
+    fn inserts_key_text(&self) -> bool {
+        false
+    }
 }
 
 /// Runs tasks: on a background pool, on the main thread, or after a delay.

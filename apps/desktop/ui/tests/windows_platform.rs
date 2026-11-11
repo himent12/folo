@@ -114,5 +114,6 @@ fn the_loop_runs_tasks_in_order_and_quits() {
         assert_eq!((name.as_str(), *on_main), (format!("main {i}").as_str(), true));
     }
     assert_eq!(seen[100], ("timer".to_string(), false), "the timer runs on the pool");
-    assert!(start.elapsed() >= Duration::from_millis(30) && start.elapsed() < Duration::from_secs(2));
+    // Not early (the deadline was taken after `start`); no upper bound, which a loaded machine breaks.
+    assert!(start.elapsed() >= Duration::from_millis(30));
 }

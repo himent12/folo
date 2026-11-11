@@ -29,7 +29,7 @@ impl WindowInner {
         lparam: LPARAM,
     ) -> LRESULT {
         let handled = match msg {
-            WM_ACTIVATE => self.handle_activate(wparam),
+            WM_ACTIVATE => self.handle_activate(hwnd, wparam),
             WM_CREATE => self.handle_create(hwnd),
             WM_MOVE => self.handle_move(hwnd, lparam),
             WM_SIZE => self.handle_size(wparam, lparam),
@@ -71,6 +71,7 @@ impl WindowInner {
             WM_XBUTTONUP => xbutton(wparam).and_then(|b| self.handle_mouse_up(b, lparam)).or(Some(1)),
             WM_MOUSEWHEEL => self.handle_mouse_wheel(hwnd, wparam, lparam),
             WM_MOUSEHWHEEL => self.handle_mouse_horizontal_wheel(hwnd, wparam, lparam),
+            WM_CAPTURECHANGED => self.handle_capture_changed(hwnd, lparam),
             WM_SYSKEYDOWN => self.handle_syskeydown(hwnd, wparam, lparam),
             WM_SYSKEYUP => self.handle_syskeyup(hwnd, wparam, lparam),
             WM_SYSCOMMAND => self.handle_system_command(wparam),
@@ -100,8 +101,12 @@ impl WindowInner {
         }
     }
 
-    fn handle_activate(self: &Rc<Self>, wparam: WPARAM) -> Option<isize> {
+    fn handle_activate(self: &Rc<Self>, hwnd: HWND, wparam: WPARAM) -> Option<isize> {
         let activated = wparam.loword() > 0;
+        if !activated {
+            // A button held while the user switches away is released somewhere else.
+            self.end_presses(hwnd);
+        }
         // GPUI reports activation from the executor, after the message: do the same through the queue.
         let this = self.clone();
         super::post_call(
@@ -367,6 +372,9 @@ impl WindowInner {
         let (x, y) = (lparam.signed_loword() as i32, lparam.signed_hiword() as i32);
         let (click_count, scale_factor) = {
             let mut state = self.state.borrow_mut();
+            if !state.pressed_buttons.contains(&button) {
+                state.pressed_buttons.push(button);
+            }
             (state.click_state.update(button, point(DevicePixels(x), DevicePixels(y))), state.scale_factor)
         };
         let input = PlatformInput::MouseDown(MouseDownEvent {
@@ -380,12 +388,15 @@ impl WindowInner {
     }
 
     fn handle_mouse_up(&self, button: MouseButton, lparam: LPARAM) -> Option<isize> {
-        // SAFETY: releasing our capture.
-        let _ = unsafe { ReleaseCapture() };
-        let (click_count, scale_factor) = {
-            let state = self.state.borrow();
-            (state.click_state.current_count, state.scale_factor)
+        let (click_count, scale_factor, still_pressed) = {
+            let mut state = self.state.borrow_mut();
+            state.pressed_buttons.retain(|b| *b != button);
+            (state.click_state.current_count, state.scale_factor, !state.pressed_buttons.is_empty())
         };
+        if !still_pressed {
+            // SAFETY: releasing our capture (its WM_CAPTURECHANGED finds nothing pressed).
+            let _ = unsafe { ReleaseCapture() };
+        }
         let input = PlatformInput::MouseUp(MouseUpEvent {
             button,
             position: logical_point(
@@ -397,6 +408,58 @@ impl WindowInner {
             click_count,
         });
         handled_result(self.dispatch_input(input))
+    }
+
+    /// The mouse capture went elsewhere: another window took it, or Windows ended it (`WM_CANCELMODE`
+    /// for a menu or a dialog, a switch to another app). A button pressed in the window is then
+    /// released where we never hear of it, so each gets its mouse up now and the app's drags, slider
+    /// drags and selections end. (GPUI 0.2.2 does nothing here, and a press outlived the capture.)
+    fn handle_capture_changed(&self, hwnd: HWND, lparam: LPARAM) -> Option<isize> {
+        if lparam.0 != hwnd.0 as isize {
+            self.cancel_presses(hwnd);
+        }
+        Some(0)
+    }
+
+    /// Ends the buttons pressed in the window: lets go of the capture if we hold it (whose
+    /// `WM_CAPTURECHANGED` releases them), and releases any still pressed.
+    fn end_presses(&self, hwnd: HWND) {
+        if self.state.borrow().pressed_buttons.is_empty() {
+            return;
+        }
+        // SAFETY: plain capture calls for our own window.
+        unsafe {
+            if GetCapture() == hwnd {
+                let _ = ReleaseCapture();
+            }
+        }
+        self.cancel_presses(hwnd);
+    }
+
+    /// A mouse up for each button pressed in the window, where the cursor is now.
+    fn cancel_presses(&self, hwnd: HWND) {
+        let (buttons, click_count, scale_factor) = {
+            let mut state = self.state.borrow_mut();
+            (std::mem::take(&mut state.pressed_buttons), state.click_state.current_count, state.scale_factor)
+        };
+        if buttons.is_empty() {
+            return;
+        }
+        let mut p = POINT::default();
+        // SAFETY: valid out pointers; reading the cursor position does not move it.
+        unsafe {
+            let _ = GetCursorPos(&mut p);
+            let _ = ScreenToClient(hwnd, &mut p);
+        }
+        let position = logical_point(p.x as f32, p.y as f32, scale_factor);
+        for button in buttons {
+            self.dispatch_input(PlatformInput::MouseUp(MouseUpEvent {
+                button,
+                position,
+                modifiers: super::keyboard::current_modifiers(),
+                click_count,
+            }));
+        }
     }
 
     fn handle_mouse_wheel(&self, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) -> Option<isize> {
