@@ -110,3 +110,28 @@ fn close_mosaic_follows_the_epochs_until_set_by_hand() {
     type_into(&mut app, window, |f| f.epochs_input.clone(), "15");
     assert_eq!(state(&mut app), (20, true, "20".into()));
 }
+
+#[test]
+fn a_runs_filter_does_not_wait_for_the_next_visit() {
+    use super::{Route, RunFilter};
+    let (mut app, window) = open();
+    let filter = |app: &mut HeadlessApp| drive(app, window, |this, _, _| this.run_filter);
+    // The queue toast's View queue: Runs, filtered to the active runs.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Runs, w, cx);
+        this.run_filter = RunFilter::Active;
+    });
+    // Into a run and back up: the list as it was left.
+    drive(&mut app, window, |this, w, cx| {
+        let id = this.store.runs.ready().unwrap()[0].id.clone();
+        this.navigate(Route::Run(id), w, cx);
+        this.navigate(Route::Runs, w, cx);
+    });
+    assert_eq!(filter(&mut app), RunFilter::Active);
+    // Elsewhere and back later (sidebar, Ctrl+3): all runs again.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Overview, w, cx);
+        this.navigate(Route::Runs, w, cx);
+    });
+    assert_eq!(filter(&mut app), RunFilter::All);
+}

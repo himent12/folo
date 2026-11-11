@@ -19,6 +19,11 @@ impl FoloApp {
             return;
         }
         let prev = std::mem::replace(&mut self.route, route);
+        // Runs opens on all runs, unless coming up from one of them: a filter (one the queue
+        // toast set, say) doesn't wait there to make the list look empty later.
+        if self.route == Route::Runs && !matches!(prev, Route::Run(_)) {
+            self.run_filter = super::RunFilter::All;
+        }
         self.history.push(prev);
         if self.history.len() > 50 {
             self.history.remove(0);

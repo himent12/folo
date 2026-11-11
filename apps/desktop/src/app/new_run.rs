@@ -499,8 +499,8 @@ impl FoloApp {
                                     "View queue".into(),
                                     Rc::new(
                                         move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
+                                            this.navigate(Route::Runs, w, cx);
                                             this.run_filter = RunFilter::Active;
-                                            this.navigate(Route::Runs, w, cx)
                                         },
                                     ),
                                 )),

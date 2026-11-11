@@ -20,6 +20,7 @@ impl FoloApp {
     pub fn runs(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = theme(cx);
         let runs = self.store.runs.ready().cloned().unwrap_or_default();
+        let total = runs.len();
         let count = |f: RunFilter| runs.iter().filter(|r| matches_filter(r, f)).count();
         let active = count(RunFilter::Active);
         let subtitle = if self.store.runs.is_loading() {
@@ -317,17 +318,35 @@ impl FoloApp {
                 .into_any_element()
             })
             .collect();
+        // A filter that hides every run says how to see them again.
+        let show_all = (rows.is_empty() && total > 0).then(|| {
+            self.button(
+                "runs-show-all",
+                if total == 1 { "Show the 1 run".to_string() } else { format!("Show all {total} runs") },
+                Btn::Secondary,
+                None,
+                window,
+                cx,
+                act(|this, _, cx| {
+                    this.run_filter = RunFilter::All;
+                    cx.notify();
+                }),
+            )
+        });
         let table = panel(&t).overflow_hidden().child(head).map(|d| {
             if self.store.runs.is_loading() {
                 d.child(loading_rows(&t, "runs", 6))
             } else if rows.is_empty() {
-                d.child(empty_state(
-                    &t,
-                    "icons/activity.svg",
-                    "No runs here",
-                    "Runs matching this filter will show up here.",
-                    Tone::Neutral,
-                ))
+                d.child(
+                    empty_state(
+                        &t,
+                        "icons/activity.svg",
+                        "No runs here",
+                        "Runs matching this filter will show up here.",
+                        Tone::Neutral,
+                    )
+                    .children(show_all),
+                )
             } else {
                 d.children(rows)
             }
