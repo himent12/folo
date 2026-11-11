@@ -44,12 +44,13 @@ export default function ModelPickers(props: ModelPickersProps) {
               value={props.modelId ?? ''}
               options={props.choices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short }))}
               onchange={props.chooseModel}
-              describedby={props.pickedMeta ? 'model-meta' : undefined}
+              describedby={props.model ? 'model-meta' : undefined}
             />
             {props.model ? <Button icon={ArrowUpRight} href={href(`/models/${props.model.id}`)} aria-label={`Open ${props.model.name}`} /> : null}
-            {props.pickedMeta ? (
+            {/* Always a line ("Not evaluated" for a model without a score), so switching models never moves the page. */}
+            {props.model ? (
               <p class="pick-meta num" id="model-meta">
-                {props.pickedMeta}
+                {props.pickedMeta ?? 'Not evaluated'}
               </p>
             ) : null}
           </div>

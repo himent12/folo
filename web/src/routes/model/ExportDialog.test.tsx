@@ -129,12 +129,13 @@ describe('ExportDialog', () => {
     c = mount(ExportDialog, { target, props: { model: { ...model, id: 'm_fast_n' }, open: true } });
     flushSync();
     const checks = () => [...target.ownerDocument.querySelectorAll<HTMLInputElement>('dialog [role="group"] input[type="checkbox"]')];
-    // Hidden until ONNX is picked, also on a server that has them.
-    await new Promise((r) => setTimeout(r, 20));
-    flushSync();
-    expect(checks()).toHaveLength(0);
+    // There and off until ONNX is picked (models F17: picking it does not grow the dialog under the pointer).
+    const off = await until(() => (checks().length === 3 ? checks() : null), 'the switches');
+    expect(off.every((b) => b.disabled)).toBe(true);
+    const height = target.ownerDocument.querySelector('dialog fieldset')!.childElementCount;
     target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
-    const boxes = await until(() => (checks().length === 3 ? checks() : null), 'the switches');
+    const boxes = await until(() => (checks().every((b) => !b.disabled) ? checks() : null), 'the switches on');
+    expect(target.ownerDocument.querySelector('dialog fieldset')!.childElementCount).toBe(height);
     const names = boxes.map((b) => b.closest('label')?.querySelector('.sw-name')?.textContent);
     expect(names).toEqual(['Decode boxes in the graph', 'Dynamic input size', 'Half precision (f16)']);
     boxes[0]!.click();
@@ -167,7 +168,7 @@ describe('ExportDialog: ONNX download (weights_onnx)', () => {
     target.ownerDocument.querySelector<HTMLInputElement>('input[value="onnx"]')!.click();
     return until(() => {
       const all = [...target.ownerDocument.querySelectorAll<HTMLInputElement>('dialog [role="group"] input[type="checkbox"]')];
-      return all.length === 3 ? all : null;
+      return all.length === 3 && all.every((b) => !b.disabled) ? all : null;
     }, 'the switches');
   };
 

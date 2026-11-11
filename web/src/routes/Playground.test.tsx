@@ -311,3 +311,20 @@ describe('Playground: a cold first prediction', () => {
     expect(p.cold).toBeUndefined();
   });
 });
+
+describe('Playground: the model caption', () => {
+  // models F17: a model without a score kept no caption line, and the workspace moved up 20 px on switching to it.
+  it('keeps the line under the model select for a model without a score', async () => {
+    const api = new MockApi('normal', 0);
+    const models = api.models.bind(api);
+    api.models = async () => (await models()).map((m) => (m.id === 'm_hard_s' ? { ...m, metrics: null } : m));
+    hub.api = api;
+    hub.mode = 'mock';
+    target = document.createElement('div');
+    document.body.appendChild(target);
+    router.route = parse('#/playground?model=m_hard_s');
+    c = mount(Playground, { target });
+    const meta = await until(() => target.querySelector('#model-meta'), 'the caption');
+    expect(meta.textContent).toBe('Not evaluated');
+  });
+});
