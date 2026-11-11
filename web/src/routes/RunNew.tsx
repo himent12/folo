@@ -38,7 +38,7 @@ import { MAX_RUN_NAME, nameHint, runName, uniqueName } from './runnew/name';
 import WhyLine from './runnew/WhyLine';
 import { START_KEYS, startKeys } from './runnew/startKeys';
 import { aheadLine, aheadOf, startedToast } from './runnew/queue';
-import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
+import { isPublished, otherSizeChoices, scoreContextOf, startHintOf } from './runnew/weights';
 import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
 import DatasetSection from './runnew/DatasetSection';
 import ModelSection from './runnew/ModelSection';
@@ -224,19 +224,21 @@ export default function RunNew() {
 
   const dataset = computed(() => datasets.data?.find((d) => d.id === datasetId.get()));
 
-  // A fine-tune trains the weights' own architecture (docs/API.md, TrainConfig.weights), so the weights listed are the
-  // chosen size's and switching size drops another size's choice. Published weights (`folo weights pull`, `source:
-  // published`) are listed whatever the size, in a group of their own: picking them sets the size to theirs. Fused
-  // weights (an export) load for inference only, so they are never a starting point.
+  // A fine-tune trains the weights' own architecture (docs/API.md, TrainConfig.weights), so the weights listed first are
+  // the chosen size's and switching size drops another size's choice. Trained models of the other sizes follow, a
+  // group per size, and published weights (`folo weights pull`, `source: published`) in a group of their own: picking
+  // either sets the size to theirs. Fused weights (an export) load for inference only, so they are never a starting point.
   const startable = computed(() => (models.data ?? []).filter((m) => m.fused !== true));
   const weightOptions = computed(() => startable.get().filter((m) => !isPublished(m) && m.arch === arch.get()));
   const publishedOptions = computed(() => startable.get().filter(isPublished));
   // Each starting point's score with what it is on (lib/scoreSummary): grouped by dataset and split, best first.
   const scoreCtx = computed(() => scoreContextOf(runs, datasets));
   const weightChoices = computed(() => modelChoices(weightOptions.get(), scoreCtx.get()));
+  const otherOptions = computed(() => startable.get().filter((m) => !isPublished(m) && m.arch !== arch.get()));
+  const otherChoices = computed(() => otherSizeChoices(otherOptions.get(), arch.get(), scoreCtx.get()));
   const picked = computed(() => (weights.get() === 'none' ? undefined : startable.get().find((m) => m.id === weights.get())));
   /** Start from's hint: the picked weights' score with all of its context, and what published weights are. */
-  const startHint = computed(() => startHintOf(picked.get(), scoreCtx.get()));
+  const startHint = computed(() => startHintOf(picked.get(), scoreCtx.get(), arch.get(), weightOptions.get().length, otherOptions.get()));
   /** Published weights' provenance: the server's description, then the score with what it is on. */
   const pickedAbout = computed(() => {
     const p = picked.get();
@@ -256,10 +258,10 @@ export default function RunNew() {
     const m = list.find((x) => x.id === w);
     if (!m || m.arch !== a) weights.set('none');
   });
-  /** Start from picked: published weights of another size bring their size (the size picker follows). */
+  /** Start from picked: weights of another size (trained or published) bring their size (the size picker follows). */
   function pickWeights(id: string) {
     const m = startable.get().find((x) => x.id === id);
-    if (m && isPublished(m) && m.arch !== arch.get()) arch.set(m.arch);
+    if (m && m.arch !== arch.get()) arch.set(m.arch);
   }
   const gpu = computed(() => system.data?.gpus[0]);
 
@@ -685,6 +687,7 @@ export default function RunNew() {
               pickedAbout={pickedAbout.get()}
               errors={errors.get()}
               weightChoices={weightChoices.get()}
+              otherChoices={otherChoices.get()}
               publishedOptions={publishedOptions.get()}
               scoreCtx={scoreCtx.get()}
               pickWeights={pickWeights}

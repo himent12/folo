@@ -34,6 +34,8 @@ export interface ModelSectionProps {
   pickedAbout: string | null;
   errors: FormErrors;
   weightChoices: ModelChoice<Model>[];
+  /** Trained models of the other sizes (runnew/weights `otherSizeChoices`): picking one switches the size. */
+  otherChoices: ModelChoice<Model>[];
   publishedOptions: Model[];
   scoreCtx: (m: Model) => ScoreContext;
   pickWeights: (id: string) => void;
@@ -190,6 +192,7 @@ export default function ModelSection(props: ModelSectionProps) {
             options={[
               { value: 'none', label: FROM_SCRATCH },
               ...props.weightChoices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short })),
+              ...props.otherChoices.map((c) => ({ value: c.model.id, label: c.label, group: c.group, short: c.short })),
               ...props.publishedOptions.map((m) => ({
                 value: m.id,
                 label: m.metrics ? `${m.name} · ${scoreText(m.metrics.map50_95, props.scoreCtx(m))}` : m.name,

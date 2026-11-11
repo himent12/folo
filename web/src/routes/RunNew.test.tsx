@@ -649,3 +649,24 @@ describe('New run on a dataset with no training images', () => {
     expect(asked.mock.calls.filter(([c]) => c.dataset_id === 'ds_shapes')).toHaveLength(0);
   });
 });
+
+describe('New run: start from a model of another size', () => {
+  it('lists the trained models of other sizes, says so when this size has none, and switches the size when one is picked', async () => {
+    const real = api.models.bind(api);
+    vi.spyOn(api, 'models').mockImplementation(async (...a) => (await real(...a)).filter((m) => m.arch === 'folo-n'));
+    await open();
+    expect(target.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-s');
+    const sel = target.querySelector<HTMLSelectElement>('select#weights')!;
+    const others = await until(() => [...sel.querySelectorAll<HTMLOptionElement>('optgroup[label="folo-n: switches the size"] option')].filter((o) => o.value).length || null, 'the folo-n models');
+    const trained = (await real()).filter((m) => m.arch === 'folo-n' && m.fused !== true && m.source !== 'published').length;
+    expect(others).toBe(trained);
+    expect(target.querySelector('#weights-hint')?.textContent).toBe(`No trained folo-s models yet. ${trained} trained folo-n models are in the list: picking one switches the size.`);
+    const opt = sel.querySelector<HTMLOptionElement>('optgroup[label="folo-n: switches the size"] option')!;
+    opt.selected = true;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector<HTMLInputElement>('input[name="arch"]:checked')?.value).toBe('folo-n');
+    expect(sel.value).toBe(opt.value);
+    expect(target.querySelector('#weights-error')).toBeNull();
+  });
+});
