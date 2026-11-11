@@ -96,6 +96,10 @@ impl<K: Hash + Eq + Clone, V: Clone> ByteCache<K, V> {
         self.map.len()
     }
 
+    pub fn set_budget(&mut self, budget: usize) {
+        self.budget = budget;
+    }
+
     pub fn clear(&mut self) {
         self.map.clear();
         self.bytes = 0;

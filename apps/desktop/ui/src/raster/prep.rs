@@ -69,6 +69,17 @@ impl Caches {
         self.gradients.end_frame();
     }
 
+    /// Splits `total` bytes over the caches in the default proportions.
+    pub fn set_budget(&mut self, total: usize) {
+        let sum = SHADOW_BUDGET + PATH_BUDGET + IMAGE_BUDGET + 2 * TABLE_BUDGET;
+        let part = |b: usize| (total as u128 * b as u128 / sum as u128) as usize;
+        self.shadows.set_budget(part(SHADOW_BUDGET));
+        self.paths.set_budget(part(PATH_BUDGET));
+        self.images.set_budget(part(IMAGE_BUDGET));
+        self.luts.set_budget(part(TABLE_BUDGET));
+        self.gradients.set_budget(part(TABLE_BUDGET));
+    }
+
     /// The bytes every cache holds.
     pub fn bytes(&self) -> usize {
         self.shadows.bytes() + self.paths.bytes() + self.images.bytes() + self.luts.bytes() + self.gradients.bytes()

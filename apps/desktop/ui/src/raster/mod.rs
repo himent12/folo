@@ -124,6 +124,12 @@ impl Renderer {
         self.caches.bytes()
     }
 
+    /// Bounds the renderer's caches to about `bytes` in all (default 108 MB: shadows 24, paths 16,
+    /// resampled images 64, tables 2 + 2; a frame usually needs a small part of it).
+    pub fn set_cache_budget(&mut self, bytes: usize) {
+        self.caches.set_budget(bytes);
+    }
+
     /// The next frame repaints everything (after a resize, or when `frame` is a new buffer).
     pub fn invalidate(&mut self) {
         self.tiles.invalidate();
