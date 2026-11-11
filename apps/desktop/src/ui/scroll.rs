@@ -48,16 +48,20 @@ pub fn paint_thumb(
     if !(hot || over || scrolled) {
         return;
     }
+    let bounds = Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.)));
+    // Clipped away entirely (a scroll area below the page's fold, such as a live run's log following
+    // its new lines): nothing to draw, and no frames to keep drawing it. A frame that brings it into
+    // view paints it, and asks for more, while the scroll is still recent.
+    if !bounds.intersects(&window.content_mask().bounds) {
+        return;
+    }
     // Shown only by a recent scroll: keep painting until that lapses, so it hides on time.
     if scrolled && !hot && !over {
         window.request_animation_frame();
     }
     // 3:1 against the surface in both themes (45 % read about 1.9:1).
     let color = crate::theme::alpha(t.text_tertiary, if hot { 1.0 } else { 0.8 });
-    window.paint_quad(
-        fill(Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.))), color)
-            .corner_radii(px(2.)),
-    );
+    window.paint_quad(fill(bounds, color).corner_radii(px(2.)));
 }
 
 /// A scroll area's origin, its last vertical offset, and when that last changed.
