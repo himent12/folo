@@ -546,3 +546,44 @@ fn a_subscription_dropped_after_its_callback_subscribed_again_is_removed() {
     drop(added.take());
     assert!(!app.read(|cx| cx.observers.has(&source.entity_id())), "nothing is left for the emitter");
 }
+
+#[test]
+fn dropping_the_app_drops_its_queued_tasks_and_dispatcher() {
+    let mut app = app();
+    let dispatcher = Arc::downgrade(app.dispatcher());
+    let drops = Rc::new(Cell::new(0));
+    // A task waiting on a timer, and one queued and never pumped: both runnables sit in the dispatcher's
+    // queues, and each one's scheduler holds the dispatcher.
+    app.update(|cx| {
+        let tracked = Tracked(drops.clone());
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            drop(tracked);
+        })
+        .detach()
+    });
+    app.run_until_idle();
+    let tracked = Tracked(drops.clone());
+    app.update(|cx| cx.spawn(async move |_| drop(tracked)).detach());
+    drop(app);
+    assert_eq!(drops.get(), 2, "both tasks' state is dropped with the app");
+    assert!(dispatcher.upgrade().is_none(), "nothing keeps the dispatcher alive");
+}
+
+#[test]
+fn a_main_thread_task_woken_off_the_main_thread_after_the_app_is_gone_does_not_panic() {
+    let mut app = app();
+    let (tx, rx) = crate::oneshot::channel::<()>();
+    app.update(|cx| {
+        cx.spawn(async move |cx| {
+            cx.background_spawn(async move { rx.await.ok() }).await;
+        })
+        .detach()
+    });
+    app.run_until_idle();
+    drop(app);
+    // Waking the background task from another thread cancels it there, which wakes the main-thread task
+    // awaiting it on that thread: that task must not be dropped there (async-task panics).
+    let sender = std::thread::spawn(move || tx.send(()).ok());
+    assert!(sender.join().is_ok());
+}

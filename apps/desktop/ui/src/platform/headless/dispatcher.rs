@@ -184,17 +184,31 @@ fn take_next_due(delayed: &mut Vec<(Instant, Runnable)>, now: Instant) -> Option
     Some(delayed.remove(ix).1)
 }
 
-impl Drop for HeadlessDispatcher {
-    fn drop(&mut self) {
+impl HeadlessDispatcher {
+    /// Stops the dispatcher: queued runnables are dropped (cancelling their tasks), later ones are dropped
+    /// as they arrive, and pool threads exit once their current job ends. The headless platform calls it
+    /// when it is dropped: a queued runnable's scheduler holds the dispatcher, so the queues would keep
+    /// the dispatcher, the tasks' state and the pool alive forever. Call it on the main thread.
+    pub fn shut_down(&self) {
         let mut state = self.shared.state.lock();
         state.shut_down = true;
-        // Dropping queued runnables cancels their tasks; do it outside the lock.
+        // Dropping queued runnables cancels their tasks, which may schedule others: outside the lock.
         let foreground = std::mem::take(&mut state.foreground);
         let delayed = std::mem::take(&mut state.delayed);
+        let background = std::mem::take(&mut state.background);
+        state.outstanding -= background.len();
         drop(state);
         self.shared.work.notify_all();
+        self.shared.progress.notify_all();
         drop(foreground);
         drop(delayed);
+        drop(background);
+    }
+}
+
+impl Drop for HeadlessDispatcher {
+    fn drop(&mut self) {
+        self.shut_down();
     }
 }
 
@@ -227,6 +241,12 @@ impl PlatformDispatcher for HeadlessDispatcher {
     fn dispatch_on_main_thread(&self, runnable: Runnable) {
         let mut state = self.shared.state.lock();
         if state.shut_down {
+            drop(state);
+            // Dropping a main-thread task off the main thread panics inside async-task (a pool thread
+            // waking it after shutdown): leak that one instead.
+            if !self.is_main_thread() {
+                std::mem::forget(runnable);
+            }
             return;
         }
         state.foreground.push_back(runnable);

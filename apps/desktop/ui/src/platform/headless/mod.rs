@@ -107,6 +107,12 @@ impl HeadlessPlatform {
     }
 }
 
+impl Drop for HeadlessPlatform {
+    fn drop(&mut self) {
+        self.dispatcher.shut_down();
+    }
+}
+
 impl Platform for HeadlessPlatform {
     fn dispatcher(&self) -> Arc<dyn PlatformDispatcher> {
         self.dispatcher.clone()
