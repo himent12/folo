@@ -2,12 +2,13 @@
 
     python -m unittest discover -s bench/finetune -p "test_*.py"
 
-No GPU, network, torch or Ultralytics needed; the pycocotools test is skipped without pycocotools, the layout test
-without Pillow.
+No GPU, network, torch or Ultralytics needed; the scorer tests are skipped without numpy and pycocotools, the layout
+tests without Pillow. test_run_folo.py covers run_folo.py against a fake server.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 import json
 import sys
@@ -26,7 +27,8 @@ import run_ultralytics  # noqa: E402
 import scorer  # noqa: E402
 
 HAS_PIL = importlib.util.find_spec("PIL") is not None
-HAS_COCO = importlib.util.find_spec("pycocotools") is not None
+# Imported, not only found: pycocotools on the path without numpy (another environment's site-packages) cannot score.
+COCO_MISSING = scorer.missing()
 
 
 class Labels(unittest.TestCase):
@@ -140,6 +142,45 @@ class Layout(unittest.TestCase):
             # Any change to a file the tools read changes the digest.
             (a / "labels" / "train" / "0001.txt").write_text("0 0.5 0.5 0.1 0.1\n")
             self.assertNotEqual(datasets.layout_digest(a), meta["layout_sha256"])
+            # Ultralytics' label cache next to the labels is not part of it.
+            (b / "labels" / "train.cache").write_bytes(b"derived")
+            self.assertEqual(datasets.layout_digest(b), meta["layout_sha256"])
+
+    def test_a_tampered_cached_dataset_is_laid_out_again_and_refused_by_the_runners(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as t:
+            src, root = Path(t) / "src", Path(t) / "root"
+            self.make_src(src)
+            archive = root / "_downloads" / "toy.zip"
+            archive.parent.mkdir(parents=True)
+            with zipfile.ZipFile(archive, "w") as z:
+                for f in sorted(src.rglob("*")):
+                    if f.is_file():
+                        z.write(f, f.relative_to(src).as_posix())
+            spec = datasets.Spec(
+                name="toy", title="Toy", domain="test", url="https://example.invalid/toy.zip",
+                sha256=datasets.sha256_file(archive), licence="MIT", licence_url="", source="", kind="yolo_zip",
+                classes=("thing",), eval_split="val",
+            )
+            spec = dataclasses.replace(spec, layout_sha256=datasets.fetch(spec, root)["layout_sha256"])
+            dest = root / "toy"
+            self.assertEqual(datasets.verify_layout(spec, dest), spec.layout_sha256)
+            label = dest / "labels" / "train" / "0000.txt"
+            good = label.read_text()
+            label.write_text("0 0.1 0.1 0.1 0.1\n")  # meta.json still names the recorded digest
+            with self.assertRaises(SystemExit) as e:
+                datasets.verify_layout(spec, dest)  # what run_folo.py / run_ultralytics.py check before a run
+            self.assertIn("changed", str(e.exception))
+            meta = datasets.fetch(spec, root)  # not taken from meta.json: hashed, found changed, laid out again
+            self.assertEqual(label.read_text(), good)
+            self.assertEqual(meta["layout_sha256"], spec.layout_sha256)
+            self.assertEqual(datasets.verify_layout(spec, dest), spec.layout_sha256)
+            (dest / "images" / "val" / "0000.jpg").unlink()  # a deleted image too
+            with self.assertRaises(SystemExit):
+                datasets.verify_layout(spec, dest)
+            datasets.fetch(spec, root)
+            self.assertTrue((dest / "images" / "val" / "0000.jpg").is_file())
 
 
 class Scorer(unittest.TestCase):
@@ -193,7 +234,7 @@ class Scorer(unittest.TestCase):
         self.assertEqual((out[0]["score"], out[1]), (0.9, dets[1]))
         self.assertEqual(dets[0]["bbox"], [10, 10, -5, 20])  # the input is not changed
 
-    @unittest.skipUnless(HAS_COCO, "needs pycocotools")
+    @unittest.skipIf(COCO_MISSING, f"needs numpy and pycocotools ({COCO_MISSING})")
     def test_inverted_box_counts_as_a_false_positive(self):
         dets = [
             {"image_id": 1, "category_id": 1, "bbox": [10, 10, -20, 20], "score": 0.9},  # ranks first, matches nothing
@@ -205,7 +246,7 @@ class Scorer(unittest.TestCase):
         self.assertLess(s["ap"], 1.0)
         self.assertGreater(s["ap"], 0.5)
 
-    @unittest.skipUnless(HAS_COCO, "needs pycocotools")
+    @unittest.skipIf(COCO_MISSING, f"needs numpy and pycocotools ({COCO_MISSING})")
     def test_score_perfect_half_and_empty(self):
         perfect = [
             {"image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "score": 0.9},
@@ -364,14 +405,16 @@ class Runners(unittest.TestCase):
         class A:
             epochs, batch, imgsz, weights, device = 100, 16, 640, "folo-n-coco-v2", "cpu"
 
-        pre = run_folo.train_config(common.RunKey("folo", "folo-n", "bccd", "pretrained", 1), "ds_1", A, None)
+        pre = run_folo.train_config(common.RunKey("folo", "folo-n", "bccd", "pretrained", 1), "ds_1", A, None, "ft-x")
         self.assertEqual(pre["weights"], "folo-n-coco-v2")
         self.assertEqual((pre["seed"], pre["epochs"], pre["batch"], pre["imgsz"]), (1, 100, 16, 640))
         self.assertEqual((pre["arch"], pre["device"]), ("folo-n", "cpu"))
-        self.assertEqual(pre["name"], "ft-folo-n-bccd-pretrained-s1")
+        self.assertEqual(pre["name"], "ft-x")
         self.assertNotIn("compute", pre)
         self.assertNotIn("optimizer", pre)  # FOLO's default (auto)
-        scr = run_folo.train_config(common.RunKey("folo", "folo-s", "bccd", "scratch", 0), "ds_1", A, {"connection_id": "c"})
+        scr = run_folo.train_config(
+            common.RunKey("folo", "folo-s", "bccd", "scratch", 0), "ds_1", A, {"connection_id": "c"}, "ft-y"
+        )
         self.assertNotIn("weights", scr)
         self.assertEqual(scr["compute"], {"connection_id": "c"})
         self.assertEqual((scr["arch"], scr["device"]), ("folo-s", "auto"))  # a cloud run trains on its pod's GPU
@@ -390,14 +433,27 @@ class Runners(unittest.TestCase):
 
             def call(self, method, path):
                 self.deleted.append(path)
+                return {"status": "terminated"}
 
         m = run_folo.Matrix.__new__(run_folo.Matrix)
         m.api = FakeApi()
         m.log = lambda msg: None
-        m.reap(set())  # nothing of its own: nothing is touched (it once meant "every live instance")
+        self.assertEqual(m.reap(set()), [])  # nothing of its own: nothing is touched (it once meant "every live one")
         self.assertEqual(m.api.deleted, [])
-        m.reap({"run_mine"})
+        self.assertEqual(m.reap({"run_mine"}), [])
         self.assertEqual(m.api.deleted, ["/api/cloud/instances/ci_mine"])
+
+    def test_scorer_imports_are_checked_up_front(self):
+        old = scorer.NEEDS
+        scorer.NEEDS = ("folo_no_such_module",)
+        try:
+            self.assertIn("folo_no_such_module", scorer.missing())
+            with self.assertRaises(SystemExit) as e:
+                scorer.require()
+            self.assertIn(sys.executable, str(e.exception))
+            self.assertIn("Nothing was started", str(e.exception))
+        finally:
+            scorer.NEEDS = old
 
     def test_wall_seconds(self):
         run = {"started": "2026-11-10T10:00:00Z", "finished": "2026-11-10T10:02:30.5Z"}

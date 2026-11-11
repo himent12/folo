@@ -11,10 +11,34 @@ detections per image (pycocotools' default `maxDets`), 101-point interpolated pr
 from __future__ import annotations
 
 import contextlib
+import importlib
 import io
 import json
 import sys
 from pathlib import Path
+
+NEEDS = ("numpy", "pycocotools.coco", "pycocotools.cocoeval")
+
+
+def missing() -> str | None:
+    """Why this Python cannot score (a module of NEEDS it cannot import), or None."""
+    for mod in NEEDS:
+        try:
+            importlib.import_module(mod)
+        except Exception as e:
+            return f"{mod}: {type(e).__name__}: {e}"
+    return None
+
+
+def require() -> None:
+    """Exit with a clear message unless this Python can score: the runners call it before anything is launched or
+    rented, so a run is never trained only to fail at its scoring."""
+    why = missing()
+    if why:
+        raise SystemExit(
+            f"the scorer needs numpy and pycocotools, which this Python ({sys.executable}) cannot import ({why}): "
+            "pip install numpy pycocotools, or run with a Python that has them. Nothing was started."
+        )
 
 
 def check_detections(gt: dict, dets: list[dict]) -> None:

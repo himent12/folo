@@ -238,10 +238,14 @@ def data_yaml(classes: list[str], splits: list[str]) -> str:
 
 def layout_digest(root: Path) -> str:
     """sha256 over the sorted relative paths and sha256 of every file the tools read (data.yaml, images, labels,
-    annotations), so the same dataset laid out on two machines has the same digest."""
+    annotations), so the same dataset laid out on two machines has the same digest. The label caches Ultralytics
+    writes next to the labels (`labels/<split>.cache`, derived from them) are not part of it."""
     h = hashlib.sha256()
     files = [root / "data.yaml"] + sorted(
-        p for d in ("images", "labels", "annotations") for p in (root / d).rglob("*") if p.is_file()
+        p
+        for d in ("images", "labels", "annotations")
+        for p in (root / d).rglob("*")
+        if p.is_file() and p.suffix != ".cache"
     )
     for p in files:
         h.update(p.relative_to(root).as_posix().encode())
@@ -385,15 +389,31 @@ def lay_out(spec: Spec, src: Path, dest: Path) -> dict:
     return meta
 
 
+def verify_layout(spec: Spec, dest: Path) -> str:
+    """The layout digest of the dataset in `dest`, recomputed from its files (never taken from meta.json), checked
+    against the recorded one: what a runner trains on and scores against, and records as provenance."""
+    if not (dest / "data.yaml").is_file():
+        raise SystemExit(f"{dest}: no dataset there (python bench/finetune/datasets.py fetch --only {spec.name})")
+    got = layout_digest(dest)
+    if spec.layout_sha256 and got != spec.layout_sha256:
+        raise SystemExit(
+            f"{spec.name}: the files in {dest} have layout digest {got}, not the recorded {spec.layout_sha256}: they "
+            f"changed since they were laid out; lay them out again (datasets.py fetch --only {spec.name})"
+        )
+    return got
+
+
 def fetch(spec: Spec, root: Path, check_digest: bool = True) -> dict:
     """Download (cached), verify and lay out one dataset under `root`; returns its meta. Skips the work when the
-    layout is already there with the recorded digest."""
+    layout is already there and its files (hashed again, not meta.json's word for it) have the recorded digest."""
     dest = root / spec.name
     meta_path = dest / "meta.json"
-    if meta_path.is_file() and spec.layout_sha256:
+    if meta_path.is_file() and (dest / "data.yaml").is_file() and spec.layout_sha256:
         meta = json.loads(meta_path.read_text())
         if meta.get("layout_sha256") == spec.layout_sha256:
-            return meta
+            if layout_digest(dest) == spec.layout_sha256:
+                return meta
+            print(f"{spec.name}: files in {dest} changed since they were laid out: laying it out again", file=sys.stderr)
     archive = root / "_downloads" / Path(spec.url).name
     download(spec.url, archive, spec.sha256)
     with tempfile.TemporaryDirectory(dir=root, prefix=f".{spec.name}-") as tmp:

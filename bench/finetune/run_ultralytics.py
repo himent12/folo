@@ -36,6 +36,7 @@ sys.path.insert(0, str(HERE))
 
 import common  # noqa: E402
 import datasets  # noqa: E402
+import scorer  # noqa: E402
 
 # Ultralytics publishes its COCO checkpoints in this release; --download-weights fetches yolo26<size>.pt from it.
 ASSETS_URL = "https://github.com/ultralytics/assets/releases/download/v8.4.0"
@@ -116,6 +117,7 @@ def run_one(args) -> None:
     data_dir = Path(args.data_root) / args.dataset
     yaml = data_dir / "data.yaml"
     gt_path = data_dir / "annotations" / f"instances_{spec.eval_split}.json"
+    layout_sha = datasets.verify_layout(spec, data_dir)  # the files this run trains on and is scored against
     work = Path(args.work_dir)
     weights = Path(args.weights).resolve()
     weights_sha = ensure_weights(weights, False)
@@ -123,8 +125,6 @@ def run_one(args) -> None:
     import torch
     import ultralytics
     from ultralytics import YOLO
-
-    import scorer
 
     project = work / "runs"
     patience = max(100, args.epochs)
@@ -193,7 +193,7 @@ def run_one(args) -> None:
             "torch": torch.__version__,
             "cuda": torch.version.cuda,
             "python": platform.python_version(),
-            "dataset_layout_sha256": json.loads((data_dir / "meta.json").read_text())["layout_sha256"],
+            "dataset_layout_sha256": layout_sha,
         },
         compute={
             "where": args.compute_label or platform.node(),
@@ -239,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dataset", help=argparse.SUPPRESS)
     ap.add_argument("--seed", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args(argv)
+    scorer.require()  # before any training: a run that cannot be scored is time (and a pod's money) lost
     if args.one:
         run_one(args)
         return 0
@@ -279,7 +280,7 @@ def main(argv: list[str] | None = None) -> int:
             log.close()
             tail = (logs / f"{key.stem}.log").read_text(errors="replace").strip().splitlines()[-1:]
             print(f"{key.stem}: {'done' if rc == 0 else f'failed (exit {rc})'} {tail[0] if tail else ''}", flush=True)
-            if rc != 0:
+            if rc != 0 or not key.result_path(Path(args.results)).is_file():
                 failed.append(key.stem)
 
     for key, cmd in todo:
@@ -293,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
         reap()
         time.sleep(2)
     if failed:
-        print(f"failed: {failed}", flush=True)
+        print(f"FAILED: {len(failed)} of {len(todo)} runs have no result: {failed} (their logs: {logs})", flush=True)
     return 1 if failed else 0
 
 
