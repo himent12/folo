@@ -371,6 +371,8 @@ describe('the benchmark page', () => {
     // Seven finished entries have a box (one graded on an earlier version of the benchmark); the running and the failed
     // one have none.
     expect(boxes).toHaveLength(7);
+    // The header asks to select two: the boxes show without a hover once two entries are finished.
+    expect(document.querySelector('table.board')?.classList.contains('pickable')).toBe(true);
     const compare = () => [...document.querySelectorAll<HTMLElement>('header a, header button')].find((b) => /^Compare/.test(b.textContent?.trim() ?? ''))!;
     expect(compare().getAttribute('aria-disabled') === 'true' || (compare() as HTMLButtonElement).disabled).toBe(true);
     for (const b of boxes.slice(0, 5)) {
