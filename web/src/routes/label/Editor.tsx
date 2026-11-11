@@ -17,7 +17,7 @@ import Plus from '$icons/plus';
 import Sparkles from '$icons/sparkles';
 import Trash from '$icons/trash-2';
 import X from '$icons/x';
-import { computed, createUniqueId, css, effect, Index, onWindow, signal } from 'fw';
+import { computed, createUniqueId, css, effect, Index, MediaQuery, onWindow, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { LiveLabelJob } from '$lib/api/liveLabel';
 import type { Box, LabelImage, LabelJob } from '$lib/api/types';
@@ -26,6 +26,7 @@ import { num } from '$lib/format';
 import { NOTE_MAX } from '$lib/label';
 import { router } from '$lib/router';
 import { dialogKey } from '$lib/shell/pageCommands';
+import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
 import { DialogStatus } from '$lib/ui/feedback';
@@ -176,6 +177,8 @@ export default function Editor(props: EditorProps) {
     return !!cur && cur.status === 'labeled' && !cur.reviewed && !dirty.get() && !locked.get();
   });
   const reviewing = signal(false);
+  /** No keyboard to name a key for. */
+  const touch = new MediaQuery(TOUCH_ONLY, false);
   /** The next image of the filter whose labels nobody has checked: after this one, then from the start. */
   function nextToReview(fromId: string): string | null {
     const list = props.images;
@@ -365,7 +368,7 @@ export default function Editor(props: EditorProps) {
               <p class="state">Save keeps it as labeled by hand, {draft.get().length ? 'with these boxes' : 'with no boxes: a background image'}.</p>
             ) : reviewable.get() ? (
               <p class="state">
-                Labels right? <Kbd keys="Enter" subtle /> marks them reviewed and opens the next image to review.
+                Labels right? {touch.current ? 'Looks right' : <Kbd keys="Enter" subtle />} marks them reviewed and opens the next image to review.
               </p>
             ) : img.get()?.reviewed && !locked.get() ? (
               <p class="state">Reviewed. Edit and save to change the labels.</p>
