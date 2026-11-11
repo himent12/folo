@@ -12,9 +12,6 @@
 //! every callback gets `(&mut Window, &mut App)`. Platform callbacks hold only a weak reference to the app
 //! and the window's handle, and lease the window for each call.
 
-// Until the runtime package opens windows through `Window::new` (branch desktop/fw-core-runtime).
-#![allow(dead_code)]
-
 mod dispatch;
 mod draw;
 mod element_api;
@@ -29,6 +26,9 @@ mod paint;
 mod primitives;
 mod text_paint;
 mod trace;
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) use dispatch::*;
 pub use focus::*;

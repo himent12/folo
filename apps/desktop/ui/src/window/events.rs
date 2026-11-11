@@ -87,7 +87,7 @@ impl Window {
             FileDropEvent::Entered { position, paths } => {
                 self.mouse_position = position;
                 if self.active_drag.is_none() {
-                    self.active_drag = Some(AnyDrag::new(paths, position));
+                    self.active_drag = Some(AnyDrag::new(paths));
                 }
                 mouse_move(position)
             }
@@ -146,14 +146,6 @@ impl Window {
                 self.active_drag = None;
                 self.refresh();
             }
-        }
-    }
-
-    /// Translates a file drop (kept for callers that have one in hand; `dispatch_event` does the same).
-    pub(crate) fn dispatch_file_drop(&mut self, event: &FileDropEvent, cx: &mut App) {
-        let input = self.translate_file_drop(event.clone(), cx);
-        if let Some(mouse_event) = input.mouse_event() {
-            self.dispatch_mouse_event(mouse_event, cx);
         }
     }
 
@@ -309,17 +301,6 @@ impl Window {
         }
     }
 
-    /// Recomputes the hit test for the current mouse position against the rendered frame and resets the
-    /// cursor when the hovered set changed. (Hover styles redraw through their own mouse-move listeners,
-    /// as GPUI's do, so a move within one hitbox costs no frame.)
-    pub(crate) fn reset_hover(&mut self, cx: &mut App) {
-        let hit_test = self.rendered_frame.hit_test(self.mouse_position);
-        if hit_test != self.mouse_hit_test {
-            self.mouse_hit_test = hit_test;
-            self.reset_cursor_style(cx);
-        }
-    }
-
     /// The `on_hit_test_window_control` callback: the control area under the mouse in the rendered frame
     /// (an area under an occluding element is not reported).
     pub(crate) fn hit_test_window_control(&self) -> Option<WindowControlArea> {
@@ -330,20 +311,11 @@ impl Window {
             .find(|control| hit_test.ids.contains(&control.hitbox.id))
             .map(|control| control.area)
     }
-
-    /// Whether the event dispatched now should keep propagating (cleared by `cx.stop_propagation()`).
-    pub(crate) fn propagation_stopped(&self, cx: &App) -> bool {
-        !cx.propagate_event
-    }
 }
 
 impl AnyDrag {
-    /// A drag of external files that started at `position`.
-    pub(crate) fn new(paths: ExternalPaths, position: crate::Point<crate::Pixels>) -> Self {
-        AnyDrag {
-            value: std::sync::Arc::new(paths),
-            value_type: std::any::TypeId::of::<ExternalPaths>(),
-            cursor_offset: position,
-        }
+    /// A drag of external files (GPUI also keeps where it started, for a drag view; file drags have none).
+    pub(crate) fn new(paths: ExternalPaths) -> Self {
+        AnyDrag { value: std::sync::Arc::new(paths), value_type: std::any::TypeId::of::<ExternalPaths>() }
     }
 }

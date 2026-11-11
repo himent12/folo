@@ -97,7 +97,9 @@ impl Window {
     /// End of a draw: input handler to the platform, caches told the frame ended, the frames swapped,
     /// the cursor applied, animation frames requested.
     fn finish_frame(&mut self, cx: &mut App) {
-        if let Some(Some(slot)) = self.next_frame.input_handlers.pop() {
+        if let Some(Some(slot)) = self.next_frame.input_handlers.pop()
+            && Some(slot.focus_id) == self.focus
+        {
             let handler = SharedInputHandler::new(slot.handler);
             self.input_handler = Some(handler.clone());
             self.platform_window.set_input_handler(Box::new(WindowInputHandler {

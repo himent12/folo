@@ -114,6 +114,11 @@ pub mod raster_pending {
         pub fn len(&self) -> usize {
             self.masks.len()
         }
+
+        /// Whether the cache is empty.
+        pub fn is_empty(&self) -> bool {
+            self.masks.is_empty()
+        }
     }
 
     impl<K: Hash + Eq + Clone> Default for MaskCache<K> {

@@ -229,21 +229,6 @@ impl DispatchTree {
         path
     }
 
-    /// The focus ids on the path from the root to the node of `focus_id`.
-    pub(crate) fn focus_path(&self, focus_id: FocusId) -> SmallVec<[FocusId; 8]> {
-        let mut path = SmallVec::new();
-        let mut current = self.focusable_node_ids.get(&focus_id).copied();
-        while let Some(id) = current {
-            let node = &self.nodes[id.0];
-            if let Some(focus_id) = node.focus_id {
-                path.push(focus_id);
-            }
-            current = node.parent;
-        }
-        path.reverse();
-        path
-    }
-
     /// The key contexts on `dispatch_path` (root first).
     pub(crate) fn context_path(&self, dispatch_path: &[DispatchNodeId]) -> SmallVec<[KeyContext; 4]> {
         dispatch_path.iter().filter_map(|id| self.nodes.get(id.0)?.context.clone()).collect()
@@ -365,7 +350,6 @@ mod tests {
         tree.pop_node();
         assert!(tree.node_stack.is_empty());
         assert_eq!(tree.dispatch_path(b).as_slice(), [root, a, b]);
-        assert_eq!(tree.focus_path(FocusId(12)).as_slice(), [FocusId(10), FocusId(12)]);
         assert!(tree.focus_contains(FocusId(10), FocusId(13)));
         assert!(!tree.focus_contains(FocusId(12), FocusId(13)));
 

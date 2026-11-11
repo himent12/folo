@@ -76,8 +76,6 @@ pub struct AnyDrag {
     pub(crate) value: Arc<dyn Any>,
     /// Its type.
     pub(crate) value_type: TypeId,
-    /// Where the cursor grabbed it, relative to the drag view (unused for file drags).
-    pub(crate) cursor_offset: Point<Pixels>,
 }
 
 /// A mouse move while something of type `T` is dragged over the window (`on_drag_move`).
