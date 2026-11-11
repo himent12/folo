@@ -45,7 +45,7 @@ pub(crate) const TABLE_BUDGET: usize = 2 << 20;
 /// Frames an unused entry survives even under budget (about a minute at 60 Hz).
 const MAX_IDLE: u64 = 3600;
 
-type LutKey = [u32; 9];
+type LutKey = [u32; 10];
 
 /// The renderer's caches.
 pub(crate) struct Caches {
@@ -143,11 +143,12 @@ impl GlyphTables {
                     b(c[1]),
                     b(c[2]),
                     b(c[3]),
-                    b(g[0]) ^ blend.apply as u32,
+                    b(g[0]),
                     b(g[1]),
                     b(g[2]),
                     b(g[3]),
                     b(blend.grayscale_enhanced_contrast),
+                    blend.apply as u32,
                 ];
                 let lut =
                     caches.luts.get_or_insert_with(&key, || (Arc::new(AlphaLut::glyph(c, blend)), 1024 + 64));

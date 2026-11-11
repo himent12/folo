@@ -3,10 +3,7 @@
 //! correction GPUI's Linux renderer applies to the masks (`platform/blade/shaders.wgsl`).
 
 use super::fonts::State;
-use crate::{
-    Bounds, DevicePixels, GlyphBlend, RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, Size,
-    point, size,
-};
+use crate::{Bounds, DevicePixels, GlyphBlend, RenderGlyphParams, SUBPIXEL_VARIANTS_X, Size, point, size};
 use anyhow::{Context as _, Result, bail};
 use cosmic_text::{CacheKey, CacheKeyFlags, SwashContent, SwashImage};
 use std::collections::HashMap;
@@ -52,25 +49,29 @@ fn gamma_ratios(gamma: f32) -> [f32; 4] {
 }
 
 impl State {
-    /// The swash cache key for `params`, with GPUI's subpixel shift.
-    fn cache_key(&self, params: &RenderGlyphParams) -> CacheKey {
+    /// The swash cache key for `params` with its subpixel shift, and the whole device pixels (down) the y
+    /// shift leaves out of the key, which the image's placement takes.
+    fn cache_key(&self, params: &RenderGlyphParams) -> (CacheKey, i32) {
         let font = &self.loaded_font(params.font_id).font;
         // GPUI divides the device-pixel variant by the scale factor here (so at scale 2 the four x variants
         // bin to three shifts); kept for parity with GPUI on Linux.
         let shift_x = params.subpixel_variant.x as f32 / SUBPIXEL_VARIANTS_X as f32 / params.scale_factor;
-        let shift_y = params.subpixel_variant.y as f32 / SUBPIXEL_VARIANTS_Y as f32 / params.scale_factor;
-        CacheKey::new(
+        // The y variant moves the glyph down by its share of a device pixel (as GPUI's macOS backend shifts
+        // it; on Windows and Linux there is one vertical variant and the shift is zero). Swash draws y up,
+        // so its offset is the negated shift: a bin above and one whole pixel down.
+        let shift_y = params.subpixel_variant.y as f32 / self.subpixel_variants_y.max(1) as f32;
+        let (key, _, y) = CacheKey::new(
             font.id(),
             params.glyph_id.0 as u16,
             (params.font_size * params.scale_factor).into(),
-            (shift_x, shift_y.trunc()),
+            (shift_x, -shift_y),
             CacheKeyFlags::empty(),
-        )
-        .0
+        );
+        (key, -y)
     }
 
     fn image(&mut self, params: &RenderGlyphParams) -> Result<&SwashImage> {
-        let key = self.cache_key(params);
+        let key = self.cache_key(params).0;
         if self.images.0.len() >= IMAGE_CACHE_ENTRIES && !self.images.0.contains_key(&key) {
             self.images.0.clear();
         }
@@ -83,9 +84,10 @@ impl State {
     }
 
     pub fn raster_bounds(&mut self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+        let dy = self.cache_key(params).1;
         let placement = self.image(params)?.placement;
         Ok(Bounds {
-            origin: point(DevicePixels(placement.left), DevicePixels(-placement.top)),
+            origin: point(DevicePixels(placement.left), DevicePixels(dy - placement.top)),
             size: size(DevicePixels(placement.width as i32), DevicePixels(placement.height as i32)),
         })
     }
@@ -140,6 +142,50 @@ mod tests {
         assert!((blend.gamma_ratios[0] - 0.1469 / 4.0 * norm13).abs() < 1e-6);
         assert_eq!(gamma_ratios(1.0), [0.0; 4]);
         assert_eq!(gamma_ratios(5.0), gamma_ratios(2.2));
+    }
+
+    /// The coverage-weighted mean of the mask's pixel-centre rows, in device pixels from the baseline (down).
+    fn centroid_y(state: &mut State, params: &RenderGlyphParams) -> f32 {
+        let bounds = state.raster_bounds(params).unwrap();
+        let (_, mask) = state.rasterize_glyph(params, bounds).unwrap();
+        let w = bounds.size.width.0 as usize;
+        let (mut sum, mut weight) = (0., 0.);
+        for (i, &a) in mask.iter().enumerate() {
+            sum += (bounds.origin.y.0 as f32 + (i / w) as f32 + 0.5) * a as f32;
+            weight += a as f32;
+        }
+        sum / weight
+    }
+
+    #[test]
+    fn vertical_variants_move_the_glyph_down_by_their_share_of_a_pixel() {
+        let geist: &'static [u8] = include_bytes!("../../../../../../design/fonts/Geist-Regular.ttf");
+        let mut state = State::new();
+        state.add_fonts(vec![geist.into()]);
+        let font_id = state.font_id(&crate::font("Geist")).unwrap();
+        let glyph_id = state.glyph_for_char(font_id, 'E').unwrap();
+        let params = |y: u8, scale: f32| RenderGlyphParams {
+            font_id,
+            glyph_id,
+            font_size: crate::px(13.),
+            subpixel_variant: crate::Point { x: 0, y },
+            scale_factor: scale,
+            is_emoji: false,
+        };
+        // macOS has four vertical variants; the count is set here so this runs on every platform.
+        state.subpixel_variants_y = 4;
+        for scale in [1., 2.] {
+            let base = centroid_y(&mut state, &params(0, scale));
+            for y in 1..4u8 {
+                let moved = centroid_y(&mut state, &params(y, scale)) - base;
+                let want = y as f32 / 4.;
+                assert!((moved - want).abs() < 0.03, "scale {scale} variant {y}: moved {moved}, want {want}");
+            }
+        }
+        // One vertical variant (Windows, Linux): variant 0 is the unshifted glyph, as before.
+        let four = state.raster_bounds(&params(0, 1.5)).unwrap();
+        state.subpixel_variants_y = 1;
+        assert_eq!(state.raster_bounds(&params(0, 1.5)).unwrap(), four);
     }
 
     #[test]

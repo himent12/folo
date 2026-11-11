@@ -42,6 +42,8 @@ pub(super) struct State {
     pub loaded_fonts: Vec<LoadedFont>,
     font_ids_by_family: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     pub images: super::raster::ImageCache,
+    /// The platform's vertical subpixel positions (`SUBPIXEL_VARIANTS_Y`; tests set others).
+    pub subpixel_variants_y: u8,
 }
 
 impl State {
@@ -54,6 +56,7 @@ impl State {
             loaded_fonts: Vec::new(),
             font_ids_by_family: HashMap::new(),
             images: Default::default(),
+            subpixel_variants_y: crate::SUBPIXEL_VARIANTS_Y,
         }
     }
 
