@@ -99,11 +99,26 @@ impl RealStore {
                 return Ok((self.dataset_ref(&e), Some(idx.fingerprint.hash.clone())));
             }
         }
-        Err(Error::not_found("dataset", "?").hint(format!(
-            "register a dataset with the model's classes {:?} to evaluate it",
-            m.model.classes
-        )))
+        Err(no_matching_dataset(&m.model.classes))
     }
+}
+
+/// `404 no_matching_dataset`: no registered dataset has exactly `classes`, so `/eval` has nothing to run on. The
+/// message names the count and the first few classes, never the whole list (a COCO model has 80).
+pub(crate) fn no_matching_dataset(classes: &[String]) -> Error {
+    const SHOWN: usize = 4;
+    let mut names = classes.iter().take(SHOWN).map(String::as_str).collect::<Vec<_>>().join(", ");
+    if classes.len() > SHOWN {
+        names.push_str(", …");
+    }
+    let n = classes.len();
+    let what = if n == 1 { "class".to_string() } else { format!("{n} classes") };
+    Error::new(
+        StatusCode::NOT_FOUND,
+        "no_matching_dataset",
+        format!("no registered dataset has this model's {what} ({names})"),
+    )
+    .hint("register a dataset with exactly these classes, in this order, to evaluate it")
 }
 
 /// Run `e`'s `best.folo` (`m_<run>`) or `last.folo` (`m_<run>-last`) as a model, when the file is there.
@@ -132,5 +147,21 @@ fn run_model(models: &Models, e: &RunEntry, last: bool) -> Option<ModelRef> {
             tracing::warn!("skipping {}: {err}", path.display());
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_matching_dataset_names_a_few_classes_not_all() {
+        let coco: Vec<String> = (0..80).map(|i| format!("c{i}")).collect();
+        let e = no_matching_dataset(&coco);
+        assert_eq!((e.status, e.body.code.as_str()), (StatusCode::NOT_FOUND, "no_matching_dataset"));
+        assert_eq!(e.body.message, "no registered dataset has this model's 80 classes (c0, c1, c2, c3, …)");
+        assert!(!e.body.hint.unwrap().contains("c4"));
+        let one = no_matching_dataset(&["person".to_string()]);
+        assert_eq!(one.body.message, "no registered dataset has this model's class (person)");
     }
 }

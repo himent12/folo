@@ -3,6 +3,7 @@ import { flush as flushSync } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
+import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
 import type { ModelEval } from '$lib/api/types';
 import { parse, router } from '$lib/router';
@@ -123,5 +124,24 @@ describe('Model on a phone: the work before the summary', () => {
     flushSync();
     expect(line.getAttribute('aria-expanded')).toBe('true');
     expect(target.querySelectorAll('section.kpi-grid .kg-cell')).toHaveLength(4);
+  });
+});
+
+describe('Model: no dataset to evaluate on', () => {
+  it('says it is not evaluated, with no Retry and no class dump', async () => {
+    const api = hub.api as MockApi;
+    api.modelEval = async () => {
+      throw new ApiError(404, 'no_matching_dataset', "no registered dataset has this model's 80 classes (person, bicycle, car, motorcycle, …)", 'register a dataset');
+    };
+    router.route = parse('#/models/m_coco_s');
+    c = mount(Model, { target });
+    await until(() => text('#pr-title').length && target.querySelector('.empty'), 'the empty state');
+    const panel = target.querySelector('.empty')!.textContent!;
+    expect(panel).toContain('Not evaluated');
+    expect(panel).toContain('80 classes');
+    expect(panel).not.toContain('person');
+    expect([...target.querySelectorAll('button')].some((b) => b.textContent?.trim() === 'Retry')).toBe(false);
+    expect(target.textContent).toContain('Not evaluated: no registered dataset has its classes');
+    expect(target.textContent).not.toContain('split not reported');
   });
 });

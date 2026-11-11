@@ -30,6 +30,8 @@ export interface DetailsListProps {
   source: EvalSource;
   ev: Evaluation | null;
   lineage: Origin | null;
+  /** No registered dataset has the model's classes: there is no evaluation to describe. */
+  unevaluated?: boolean;
   stored: string | null;
   head: 'o2m' | 'o2o';
   aboutOpen?: boolean;
@@ -158,17 +160,21 @@ export default function DetailsList(props: DetailsListProps) {
         <dt>Evaluated on</dt>
         {/* The dataset as the value, the split and its images under it, so the row keeps the rail's alignment. */}
         <dd class="evald">
-          {src().datasetName && src().datasetId ? (
+          {props.unevaluated ? (
+            <span class="muted">Not evaluated: no registered dataset has its classes</span>
+          ) : src().datasetName && src().datasetId ? (
             <a class="link" href={href(`/datasets/${encodeURIComponent(src().datasetId!)}`)}>
               {src().datasetName}
             </a>
           ) : src().datasetName ? (
             <span>{src().datasetName}</span>
           ) : null}{' '}
-          <span class="num" class:faint={!!src().datasetName}>
-            {src().split ? `${splitWord(src().split!)} split` : 'split not reported'}
-            {props.ev ? `, ${num(props.ev.images)} ${props.ev.images === 1 ? 'image' : 'images'}` : ''}
-          </span>
+          {props.unevaluated ? null : (
+            <span class="num" class:faint={!!src().datasetName}>
+              {src().split ? `${splitWord(src().split!)} split` : 'split not reported'}
+              {props.ev ? `, ${num(props.ev.images)} ${props.ev.images === 1 ? 'image' : 'images'}` : ''}
+            </span>
+          )}
         </dd>
       </div>
       {props.lineage ? (

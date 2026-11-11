@@ -21,6 +21,7 @@ import { href, router } from '$lib/router';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
 import Button from '$lib/ui/Button';
+import EmptyState from '$lib/ui/EmptyState';
 import ErrorState from '$lib/ui/ErrorState';
 import Menu from '$lib/ui/Menu';
 import Panel from '$lib/ui/Panel';
@@ -82,6 +83,14 @@ export default function Model() {
   const evaluation = new Resource((s) => hub.api.modelEval(id.get(), s));
   // This server's measured latency for the architecture (GET /api/system/throughput), where it has predicted with it.
   const tp = new Resource((s) => loadThroughput(hub.api, s));
+  /** No registered dataset has this model's classes (an imported file): nothing to evaluate on, and no retry helps. */
+  const unevaluable = computed(() => evaluation.error instanceof ApiError && evaluation.error.code === 'no_matching_dataset');
+  const notEvaluated = () => (
+    <EmptyState
+      title="Not evaluated"
+      description={`No registered dataset has this model's ${m().classes.length === 1 ? 'class' : `${num(m().classes.length)} classes`}. Register one with the same classes, in the same order, to see its curves and per-class figures.`}
+    />
+  );
   const ev = computed(() => {
     if (!evaluation.data) return null;
     const e = fromModelEval(evaluation.data);
@@ -228,6 +237,7 @@ export default function Model() {
       source={source.get()}
       ev={ev.get()}
       lineage={lineage.get()}
+      unevaluated={unevaluable.get()}
       stored={stored.get()}
       head={head()}
       bind:aboutOpen={aboutOpen}
@@ -386,6 +396,8 @@ export default function Model() {
                         bind:hovered={prHovered}
                         onback={backTo.get() !== null ? backToClasses : undefined}
                       />
+                    ) : unevaluable.get() ? (
+                      notEvaluated()
                     ) : evaluation.error ? (
                       <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
                     ) : (
@@ -411,8 +423,12 @@ export default function Model() {
                     ) : evaluation.error ? (
                       // The failure is said once, in the curves' panel (or here on a phone, where that panel is another section).
                       <>
-                        {phone.current ? (
+                        {phone.current && unevaluable.get() ? (
+                          notEvaluated()
+                        ) : phone.current ? (
                           <ErrorState error={evaluation.error} retry={() => evaluation.refresh()} compact title="Could not load the evaluation" />
+                        ) : unevaluable.get() ? (
+                          <p class="quiet">Not evaluated.</p>
                         ) : (
                           <p class="quiet">The per-class figures show once the evaluation loads.</p>
                         )}
