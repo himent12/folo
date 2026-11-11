@@ -289,6 +289,45 @@ public static class FoloDrive {
         }
         return new int[] { 1, over, max, x0, y0, x1, y1 };
     }
+    // Pixels that differ between two captures of the same still state (what animates by itself, such as
+    // the breathing status dot), grown by `grow` pixels: comparisons skip them.
+    public static bool[] LiveMask(Bitmap a, Bitmap b, int grow) {
+        int w = a.Width, h = a.Height;
+        var mask = new bool[w * h];
+        if (b.Width != w || b.Height != h) return mask;
+        int[] pa = Pixels(a), pb = Pixels(b);
+        for (int i = 0; i < pa.Length; i++) {
+            if (((pa[i] ^ pb[i]) & 0xFFFFFF) == 0) continue;
+            int x = i % w, y = i / w;
+            for (int j = Math.Max(0, y - grow); j <= Math.Min(h - 1, y + grow); j++)
+                for (int k = Math.Max(0, x - grow); k <= Math.Min(w - 1, x + grow); k++) mask[j * w + k] = true;
+        }
+        return mask;
+    }
+    public static bool[] Or(bool[] a, bool[] b) {
+        var r = new bool[a.Length];
+        for (int i = 0; i < a.Length; i++) r[i] = a[i] || (i < b.Length && b[i]);
+        return r;
+    }
+    public static int Count(bool[] m) { int n = 0; foreach (bool v in m) if (v) n++; return n; }
+    // Like Diff, inside the rectangle (x, y, rw, rh) only (rw <= 0: everywhere) and skipping masked pixels.
+    public static int[] DiffMasked(Bitmap a, Bitmap b, int tol, bool[] mask, int rx, int ry, int rw, int rh) {
+        if (a.Width != b.Width || a.Height != b.Height) return new int[] { 0, -1, -1, 0, 0, 0, 0 };
+        int[] pa = Pixels(a), pb = Pixels(b);
+        int w = a.Width, h = a.Height;
+        if (rw <= 0) { rx = 0; ry = 0; rw = w; rh = h; }
+        int over = 0, max = 0, x0 = int.MaxValue, y0 = int.MaxValue, x1 = -1, y1 = -1;
+        for (int y = Math.Max(0, ry); y < Math.Min(h, ry + rh); y++)
+            for (int x = Math.Max(0, rx); x < Math.Min(w, rx + rw); x++) {
+                int i = y * w + x;
+                if (pa[i] == pb[i] || (mask != null && mask.Length == pa.Length && mask[i])) continue;
+                int d = 0;
+                for (int s = 0; s < 24; s += 8) d = Math.Max(d, Math.Abs(((pa[i] >> s) & 255) - ((pb[i] >> s) & 255)));
+                max = Math.Max(max, d);
+                if (d > tol) { over++; x0 = Math.Min(x0, x); y0 = Math.Min(y0, y); x1 = Math.Max(x1, x); y1 = Math.Max(y1, y); }
+            }
+        return new int[] { 1, over, max, x0, y0, x1, y1 };
+    }
     // A hash of a rectangle of a capture (device pixels).
     public static long Hash(Bitmap b, int x, int y, int w, int h) {
         x = Math.Max(0, x); y = Math.Max(0, y);
