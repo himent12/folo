@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement, Styled,
     Window, div, px,
 };
@@ -162,7 +162,7 @@ impl FoloApp {
                     .flex()
                     .items_center()
                     .gap(px(8.))
-                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+                    .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
                         if ev.keystroke.key == "enter" {
                             this.switch_source(ServerMode::Local, cx);
                             cx.stop_propagation();
@@ -283,7 +283,7 @@ impl FoloApp {
                     )
                     .child(
                         text(ty::SM, t.text_tertiary)
-                            .child("FOLO Only Looks Once · GPUI · MIT OR Apache-2.0"),
+                            .child("FOLO Only Looks Once · folo-ui · MIT OR Apache-2.0"),
                     ),
             ),
         );

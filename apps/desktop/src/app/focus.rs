@@ -4,7 +4,7 @@
 
 use std::cell::RefCell;
 
-use gpui::{
+use folo_ui::{
     App, Context, FocusHandle, Focusable, ParentElement, Pixels, ScrollHandle, SharedString, Styled, Window,
     div, px,
 };
@@ -41,7 +41,7 @@ impl FoloApp {
     /// the window chrome hides the root from the hit test (`titlebar-drag`), so it listens too.
     /// Only a capture-phase listener: it never prevents the press's default.
     pub(super) fn leave_kb(&self, cx: &mut Context<Self>) -> PressListener {
-        Box::new(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+        Box::new(cx.listener(|this, _: &folo_ui::MouseDownEvent, _, cx| {
             if this.kb {
                 this.kb = false;
                 cx.notify();
@@ -181,7 +181,7 @@ thread_local! {
 /// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible,
 /// clear of the edge fades (24 px, so 32 at the top) and of the key-hint strip over the page's
 /// bottom (32 px, so 40 there). Runs once per request.
-fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
+fn reveal(b: folo_ui::Bounds<Pixels>, window: &mut Window) {
     let Some(handles) = REVEAL.with(|r| r.borrow_mut().take()) else { return };
     let margin = px(8.);
     let (top_m, bottom_m) = (px(32.), px(40.));
@@ -217,7 +217,7 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
         if dy != px(0.) {
             let off = h.offset();
             let y = (off.y - dy).clamp(-h.max_offset().height, px(0.));
-            h.set_offset(gpui::point(off.x, y));
+            h.set_offset(folo_ui::point(off.x, y));
             window.refresh();
         }
         return;
@@ -225,7 +225,7 @@ fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
 }
 
 /// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
-pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
+pub fn focus_ring(t: &Theme, radius: f32) -> folo_ui::Div {
     let off = tsize::FOCUS_OFFSET + tsize::FOCUS_RING;
     div()
         .absolute()
@@ -237,8 +237,8 @@ pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
         .border_2()
         .border_color(t.focus)
         // Keyboard focus moved here: make sure the control (and its ring) is on screen.
-        .child(gpui::canvas(|b, window, _| reveal(b, window), |_, _, _, _| {}).size_full())
+        .child(folo_ui::canvas(|b, window, _| reveal(b, window), |_, _, _, _| {}).size_full())
 }
 
 /// A mouse-press listener, as `capture_any_mouse_down` takes it.
-type PressListener = Box<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App)>;
+type PressListener = Box<dyn Fn(&folo_ui::MouseDownEvent, &mut Window, &mut App)>;

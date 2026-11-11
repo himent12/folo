@@ -1,7 +1,7 @@
 //! Moving between pages: navigate, back, the parent route, and the Ctrl+number shortcuts (inert
 //! while a dialog is up).
 
-use gpui::{Context, Window, px};
+use folo_ui::{Context, Window, px};
 
 use crate::store::*;
 
@@ -57,7 +57,7 @@ impl FoloApp {
             self.reload_cloud();
         }
         self.after_bench_navigate();
-        self.page_scroll.set_offset(gpui::point(px(0.), px(0.)));
+        self.page_scroll.set_offset(folo_ui::point(px(0.), px(0.)));
         self.chart_hover = None;
         self.export_open = false;
         self.pr_pin = None;

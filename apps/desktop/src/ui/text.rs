@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{Div, FontFeatures, FontWeight, Hsla, ParentElement, SharedString, Styled, Svg, div, px, svg};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{Div, FontFeatures, FontWeight, Hsla, ParentElement, SharedString, Styled, Svg, div, px, svg};
 
 use crate::theme::{Theme, TypeStep, radius, ty};
 
@@ -32,7 +32,7 @@ pub fn text(s: TypeStep, color: Hsla) -> Div {
     div().font_family(crate::theme::SANS).step(s).text_color(color)
 }
 
-/// A group heading (palette groups, form sections). Sentence case: GPUI has no letter-spacing, and
+/// A group heading (palette groups, form sections). Sentence case: folo-ui has no letter-spacing, and
 /// untracked capitals look cramped next to sentence-case titles.
 pub fn overline(t: &Theme, label: &str) -> Div {
     text(ty::SM, t.text_tertiary).font_weight(FontWeight::MEDIUM).child(label.to_string())
@@ -47,7 +47,7 @@ pub fn caption(t: &Theme, label: &str) -> Div {
 /// one text element, so words space and wrap as body text does, with code in Geist Mono on a
 /// chip fill (a no-break space either side for its padding).
 pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
-    let (sans, mono) = (gpui::font(crate::theme::SANS), gpui::font(crate::theme::MONO));
+    let (sans, mono) = (folo_ui::font(crate::theme::SANS), folo_ui::font(crate::theme::MONO));
     let mut text = String::new();
     let mut runs = Vec::new();
     for (i, part) in content.split('`').enumerate() {
@@ -55,11 +55,11 @@ pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
             continue;
         }
         let code = i % 2 == 1;
-        // No-break spaces keep a code span together where they can, but GPUI's wrapper can still
+        // No-break spaces keep a code span together where they can, but the line wrapper can still
         // break at one, so a command that must stay whole belongs on its own chip line.
         let seg =
             if code { format!("\u{a0}{}\u{a0}", part.replace(' ', "\u{a0}")) } else { part.to_string() };
-        runs.push(gpui::TextRun {
+        runs.push(folo_ui::TextRun {
             len: seg.len(),
             font: if code { mono.clone() } else { sans.clone() },
             color: if code { t.text_primary } else { color },
@@ -74,7 +74,7 @@ pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
         .line_height(px(s.line))
         .text_color(color)
         .text_center()
-        .child(gpui::StyledText::new(text).with_runs(runs))
+        .child(folo_ui::StyledText::new(text).with_runs(runs))
 }
 
 pub fn icon(path: &'static str, size: f32, color: Hsla) -> Svg {
@@ -92,7 +92,7 @@ pub fn inline_link(t: &Theme, label: impl Into<SharedString>) -> Div {
         .child(icon("icons/chevron-right.svg", 12., t.text_secondary))
 }
 
-/// Truncation that ends in "…" wherever the element sits. GPUI 0.2.2's `truncate()` measures
+/// Truncation that ends in "…" wherever the element sits. folo-ui's `truncate()` measures
 /// no-wrap text once at its unbounded width and keeps that, so a flex-sized text clips without
 /// an ellipsis; wrapping text clamped to one line re-measures at each width and truncates there.
 /// Every truncated text uses this (a test keeps `.truncate()` out).
@@ -111,7 +111,7 @@ pub fn meta_row(
     size: TypeStep,
     color: Hsla,
     lead: impl Into<SharedString>,
-    tag: Option<gpui::Stateful<Div>>,
+    tag: Option<folo_ui::Stateful<Div>>,
     rest: &[String],
 ) -> Div {
     let rest: Vec<&str> = rest.iter().map(String::as_str).filter(|s| !s.is_empty()).collect();

@@ -1,8 +1,8 @@
 //! The root view's render: title bar, sidebar, page and overlays, the key-hint strip, and the
 //! window's key and mouse handlers.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render, SharedString, Styled,
     Window, div, px,
 };
@@ -30,7 +30,7 @@ impl Render for FoloApp {
         if self.scroll_end_pending > 0 {
             self.scroll_end_pending -= 1;
             let max = self.page_scroll.max_offset().height;
-            self.page_scroll.set_offset(gpui::point(px(0.), -max));
+            self.page_scroll.set_offset(folo_ui::point(px(0.), -max));
             window.request_animation_frame();
         }
         if self.reveal_pending > 0 {
@@ -127,7 +127,7 @@ impl Render for FoloApp {
             .on_action(cx.listener(|this, _: &Dismiss, w, cx| this.dismiss(w, cx)))
             // Keyboard mode turns on in the capture phase, before a focused control (a slider, a
             // segmented group) consumes the key, so its first keyboard step already shows the ring.
-            .capture_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 let nav = matches!(
                     ev.keystroke.key.as_str(),
                     "up" | "down" | "left" | "right" | "home" | "end" | "pageup" | "pagedown"
@@ -137,7 +137,7 @@ impl Render for FoloApp {
                     cx.notify();
                 }
             }))
-            .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 // Enter and Space only when nothing took them (typed into a field they're text).
                 if matches!(ev.keystroke.key.as_str(), "enter" | "space") && !this.kb {
                     this.kb = true;
@@ -156,7 +156,7 @@ impl Render for FoloApp {
                     let (y, max) = (-s.offset().y, s.max_offset().height);
                     let page = (s.bounds().size.height - px(32.)).max(px(32.));
                     let to = if ev.keystroke.key == "pageup" { y - page } else { y + page };
-                    s.set_offset(gpui::point(s.offset().x, -to.clamp(px(0.), max)));
+                    s.set_offset(folo_ui::point(s.offset().x, -to.clamp(px(0.), max)));
                     cx.stop_propagation();
                     cx.notify();
                     return;
@@ -190,7 +190,7 @@ impl Render for FoloApp {
             .on_mouse_move(cx.listener(Self::on_drag_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_drag_end))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_drag_end))
-            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, w, cx| {
+            .on_drop(cx.listener(|this, paths: &folo_ui::ExternalPaths, w, cx| {
                 this.play_drop_hover = false;
                 // A dialog or the inspector is up: don't navigate out from under it.
                 if this.modal_open() {
@@ -259,7 +259,7 @@ impl Render for FoloApp {
 /// The strip over the page's bottom edge that names the focused control's keys: 32 px, a
 /// hairline above, a keyboard glyph and the keys. An overlay, so focusing a control never moves
 /// the page (its last 32 px are the page's own bottom padding).
-fn key_hint_strip(t: &Theme, keys: SharedString) -> gpui::Stateful<gpui::Div> {
+fn key_hint_strip(t: &Theme, keys: SharedString) -> folo_ui::Stateful<folo_ui::Div> {
     div()
         .id("key-hint")
         .flex_none()

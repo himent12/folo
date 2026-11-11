@@ -32,8 +32,8 @@ pub struct Placement {
     pub height: f32,
     #[serde(default)]
     pub mode: WindowMode,
-    /// The display it was on: GPUI's display UUID, stable across launches where the platform has
-    /// one (GPUI's display id is not). The bounds are in that display's logical pixels, and with
+    /// The display it was on: folo-ui's display UUID, stable across launches where the platform has
+    /// one (the display id is not). The bounds are in that display's logical pixels, and with
     /// mixed scale factors displays' rectangles overlap, so they alone can't say which one it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<String>,
@@ -75,9 +75,9 @@ pub fn remembers(scenario: bool, size_given: bool) -> bool {
 }
 
 /// The mode to remember on close. A minimized window reports itself windowed (Windows has no
-/// "minimized from maximized" in what GPUI returns), and GPUI draws no frame while minimized, so the
+/// "minimized from maximized" in what folo-ui returns), and folo-ui draws no frame while minimized, so the
 /// mode of the last frame drawn (`shown`) is how it will come back: use it when the window says
-/// windowed. Full screen survives minimizing in GPUI's own report.
+/// windowed. Full screen survives minimizing in folo-ui's own report.
 pub fn closing_mode(reported: WindowMode, shown: WindowMode) -> WindowMode {
     match reported {
         WindowMode::Windowed => shown,
@@ -150,7 +150,7 @@ pub fn place(
     let (width, height) = (saved.width.min(d.width), saved.height.min(d.height));
     let rect = match on {
         // Still on screen: keep the position, pulled in only until the centre is on the display
-        // (GPUI opens bounds whose centre is elsewhere at its own default place instead).
+        // (folo-ui opens bounds whose centre is elsewhere at its own default place instead).
         // `max` then `min`, not `clamp`, so a tiny display can't panic.
         Some(_) => Rect {
             x: saved.x.max(d.x - width / 2. + 1.).min(d.x + d.width - width / 2. - 1.),
@@ -288,7 +288,7 @@ mod tests {
         assert_eq!(off, r(0., 0., 1366., 768.));
     }
 
-    /// GPUI gives each display's bounds in its own logical pixels, so with mixed scale factors the
+    /// folo-ui gives each display's bounds in its own logical pixels, so with mixed scale factors the
     /// rectangles overlap: a 2560x1440 primary at 100% and a 3840x2160 display to its right at 200%.
     const MIXED: [Rect; 2] = [
         Rect { x: 0., y: 0., width: 2560., height: 1440. },

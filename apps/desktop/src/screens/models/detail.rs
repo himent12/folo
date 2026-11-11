@@ -1,7 +1,7 @@
 //! A model's page: its header, metrics and evaluation layout, and the export menu.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -168,19 +168,19 @@ impl FoloApp {
         // Where precision and recall are taken: the best-F1 confidence, named when the record has it.
         // The headline names the split; this tile's narrow caption says where on the curve.
         let op_point = pr_caption(mm.as_ref().and_then(|x| x.best_f1_conf), "", true);
-        let tile = |content: gpui::Div| {
+        let tile = |content: folo_ui::Div| {
             div()
                 .flex_grow()
-                .flex_basis(gpui::relative(0.144))
+                .flex_basis(folo_ui::relative(0.144))
                 .min_w_0()
                 .px(px(16.))
                 .py(px(14.))
                 .child(content)
         };
-        let wide_tile = |content: gpui::Div| {
+        let wide_tile = |content: folo_ui::Div| {
             div()
                 .flex_grow()
-                .flex_basis(gpui::relative(0.21))
+                .flex_basis(folo_ui::relative(0.21))
                 .min_w_0()
                 .px(px(16.))
                 .py(px(14.))
@@ -192,7 +192,7 @@ impl FoloApp {
         // Every tile: caption, a value line as tall as the headline's (values bottom-aligned on one
         // baseline), then the detail line.
         let small =
-            |label: &str, value: String, unit: &str, detail: Option<gpui::Div>| {
+            |label: &str, value: String, unit: &str, detail: Option<folo_ui::Div>| {
                 div()
                     .flex()
                     .flex_col()
@@ -207,27 +207,33 @@ impl FoloApp {
         let kpis = panel(&t)
             .flex()
             .child(
-                div().flex_grow().flex_basis(gpui::relative(0.28)).min_w_0().px(px(16.)).py(px(14.)).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(caption(&t, "mAP50-95"))
-                        .child(
-                            text(ty::X3XL, t.text_primary)
-                                .h(px(ty::X3XL.line))
-                                .tnum()
-                                .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
-                        )
-                        .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().ellipsis().child(
-                            match &head_ds {
-                                Some((d, split)) => {
-                                    format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
-                                }
-                                None => "IoU 0.50–0.95".to_string(),
-                            },
-                        )),
-                ),
+                div()
+                    .flex_grow()
+                    .flex_basis(folo_ui::relative(0.28))
+                    .min_w_0()
+                    .px(px(16.))
+                    .py(px(14.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(caption(&t, "mAP50-95"))
+                            .child(
+                                text(ty::X3XL, t.text_primary)
+                                    .h(px(ty::X3XL.line))
+                                    .tnum()
+                                    .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
+                            )
+                            .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().ellipsis().child(
+                                match &head_ds {
+                                    Some((d, split)) => {
+                                        format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
+                                    }
+                                    None => "IoU 0.50–0.95".to_string(),
+                                },
+                            )),
+                    ),
             )
             .child(vline(&t))
             .child(tile(small(
@@ -310,12 +316,12 @@ impl FoloApp {
                             .flex()
                             .gap(px(16.))
                             .child(
-                                div().flex_grow().flex_basis(gpui::relative(0.54)).min_w_0().flex().child(pr),
+                                div().flex_grow().flex_basis(folo_ui::relative(0.54)).min_w_0().flex().child(pr),
                             )
                             .child(
                                 div()
                                     .flex_grow()
-                                    .flex_basis(gpui::relative(0.46))
+                                    .flex_basis(folo_ui::relative(0.46))
                                     .min_w(px(440.))
                                     .flex()
                                     .child(cm),
@@ -389,7 +395,7 @@ impl FoloApp {
                 }),
             )
             // Captured before the button's own Enter/Space toggle.
-            .capture_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 if this.export_open && matches!(ev.keystroke.key.as_str(), "enter" | "space") {
                     let fmt = fmts[this.export_hl.min(fmts.len() - 1)];
                     this.export_model(mid.clone(), fmt, cx);
@@ -400,14 +406,14 @@ impl FoloApp {
             .when(open, |d| {
                 let cell = self.menu_trigger.clone();
                 d.child(
-                    gpui::canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {})
+                    folo_ui::canvas(move |b, _, _| cell.set(Some(b)), |_, _, _, _| {})
                         .absolute()
                         .top_0()
                         .left_0()
                         .size_full(),
                 )
             })
-            .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 let open = this.export_open;
                 match ev.keystroke.key.as_str() {
                     "down" | "up" if !open => {
@@ -431,14 +437,14 @@ impl FoloApp {
             }));
         let menu = open.then(|| {
             let mid = m.id.clone();
-            gpui::deferred(
+            folo_ui::deferred(
                 div()
                     .absolute()
                     .top(px(34.))
                     .right_0()
                     .w(px(300.))
                     .occlude()
-                    .on_mouse_down_out(cx.listener(|this, ev: &gpui::MouseDownEvent, _, cx| {
+                    .on_mouse_down_out(cx.listener(|this, ev: &folo_ui::MouseDownEvent, _, cx| {
                         let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
                         if this.export_open && !on_trigger {
                             this.export_open = false;

@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use gpui::Context;
+use folo_ui::Context;
 
 use crate::api::*;
 use crate::store::*;

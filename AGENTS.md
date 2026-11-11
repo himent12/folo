@@ -6,7 +6,7 @@ FOLO is built almost entirely by AI agents coordinated from one orchestrator thr
 ## What FOLO is
 A from-scratch, very fast vision framework in Rust (a YOLO-style object detector, plus training, evaluation and export)
 with two front ends sharing one design language: **FOLO Studio**, a web app (`web/`), and **FOLO Desktop**, a native
-GPUI app (`apps/desktop/`), for datasets, training runs and live inference. It is meant to be pleasant for people and
+app on its own UI framework, folo-ui (`apps/desktop/`), for datasets, training runs and live inference. It is meant to be pleasant for people and
 easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes).
 
 ## Ground rules
@@ -28,7 +28,7 @@ easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes)
 - **Docs as you go.** Public items get a doc comment. When you change behaviour or an interface, update the matching file
   in `docs/` in the same PR.
 - **No god files.** A source file stays under 1000 lines, every line counted (`bash tools/file-size.sh`, which CI runs
-  on every pull request; vendored code and docs are exempt). Before a file gets there, split it by responsibility
+  on every pull request; docs and data are exempt). Before a file gets there, split it by responsibility
   into a folder of modules named for what they hold (`runs.rs` → `runs/mod.rs` + `runs/queue.rs`, a route's parts in
   its folder, an integration test as `tests/api/main.rs` + topic files so it stays one binary), never by line count
   into `part2` or `misc`.
@@ -77,7 +77,8 @@ crates/folo-cli      the `folo` binary (train / val / predict / export / serve /
 crates/folo-wasm     FOLO detectors in the browser (wasm-bindgen; WebGPU or the wasm CPU), docs/WASM.md
 crates/folo-test-support  test-only helpers (a dev-dependency): TestDir / TestFile / ChildGuard, FOLO_TEST_TMP
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
-apps/desktop/        FOLO Desktop (Rust + GPUI, its own cargo workspace; talks to folo-server over docs/API.md)
+apps/desktop/        FOLO Desktop (Rust, its own cargo workspace: the app and ui/ = folo-ui, its UI framework;
+                     talks to folo-server over docs/API.md)
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md
 bench/finetune/      fine-tuning accuracy: folo-n vs yolo26n on small public datasets, one pycocotools scorer
 docs/                QUICKSTART, ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, MCP, FORMAT (.folo), ROADMAP, BOAT,

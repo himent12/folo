@@ -3,8 +3,8 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -144,7 +144,7 @@ impl FoloApp {
                     }))
                     // A real pointer move (not a row scrolled under a still pointer) ends keyboard
                     // mode, so the hovered class isolates again.
-                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                    .on_mouse_move(cx.listener(move |this, _: &folo_ui::MouseMoveEvent, _, cx| {
                         if this.kb {
                             this.kb = false;
                             this.pr_focus = Some(class);
@@ -159,7 +159,7 @@ impl FoloApp {
                     )
                     .child(
                         // A known width (the legend row is 220 px: 14 swatch, 68 name, 70 P, 44 AP50
-                        // and three 8 px gaps), so long class names end in "…" (GPUI truncates against
+                        // and three 8 px gaps), so long class names end in "…" (text truncates against
                         // the pre-shrink width). A pinned class ends its slot with a pin, the columns
                         // after it unmoved.
                         div()
@@ -392,7 +392,7 @@ fn pr_pattern(class: u32) -> u32 {
 }
 
 /// A 14 px legend swatch drawing `pattern` (see [`pr_pattern`]) in `color`.
-fn pattern_swatch(color: gpui::Hsla, pattern: u32) -> gpui::Div {
+fn pattern_swatch(color: folo_ui::Hsla, pattern: u32) -> folo_ui::Div {
     let bar = |w: f32| div().w(px(w)).h(px(2.)).flex_none().bg(color);
     let dot = || div().size(px(2.)).flex_none().rounded_full().bg(color);
     let row = div().w(px(14.)).h(px(2.)).flex().items_center().overflow_hidden();

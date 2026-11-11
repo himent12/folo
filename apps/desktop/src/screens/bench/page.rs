@@ -1,7 +1,7 @@
 //! A benchmark's page: its header and its tabs.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::format::source_line;
 use crate::api::time;

@@ -2,9 +2,9 @@
 
 use std::rc::Rc;
 
-use gpui::Focusable;
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::Focusable;
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
@@ -24,7 +24,7 @@ impl FoloApp {
         let label =
             |s: &str| text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(s.to_string());
         let input_box = |this: &Self,
-                         input: gpui::Entity<crate::input::TextInput>,
+                         input: folo_ui::Entity<crate::input::TextInput>,
                          bad: bool,
                          w: f32,
                          window: &Window,

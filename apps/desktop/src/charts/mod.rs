@@ -1,4 +1,4 @@
-//! Charts painted with GPUI canvas primitives: line charts (raw + smoothed series, gradient
+//! Charts painted with folo-ui canvas primitives: line charts (raw + smoothed series, gradient
 //! areas, markers, hover crosshair with a readout), sparklines and histograms.
 //!
 //! Charts are plain functions of their data. Hover state is owned by the caller: the chart reports
@@ -27,6 +27,6 @@ pub use text::{mono_width, text_width};
 
 use std::rc::Rc;
 
-use gpui::{App, Window};
+use folo_ui::{App, Window};
 
 pub type HoverFn = Rc<dyn Fn(Option<f32>, &mut Window, &mut App)>;

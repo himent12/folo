@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use gpui::{
+use folo_ui::{
     Animation, AnimationExt, Div, FontWeight, Hsla, IntoElement, ParentElement, SharedString, Styled, div, px,
 };
 
@@ -49,24 +49,25 @@ pub fn status_tone(s: RunStatus) -> Tone {
 
 /// A small status dot. `live` breathes: the dot itself eases dimmer and back, with nothing drawn around it (a ring
 /// growing out of every live dot read as a row of little O's).
-pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> gpui::AnyElement {
+pub fn dot(color: Hsla, size: f32, live: bool, id: impl Into<SharedString>) -> folo_ui::AnyElement {
     let dot = div().size(px(size)).flex_none().rounded_full().bg(color);
     if !live || reduce_motion() {
         return dot.into_any_element();
     }
     let id: SharedString = id.into();
-    dot.with_animation(
-        gpui::ElementId::Name(format!("breathe-{id}").into()),
+    // An opacity-only animation: the window re-fades the dot at each refresh without rebuilding the UI.
+    dot.with_opacity_animation(
+        folo_ui::ElementId::Name(format!("breathe-{id}").into()),
         Animation::new(Duration::from_millis(2400)).repeat(),
         // One cosine period per loop, so the loop has no seam: full, down to 40 %, full.
-        |d, p| d.opacity(0.7 + 0.3 * (p * std::f32::consts::TAU).cos()),
+        |p| 0.7 + 0.3 * (p * std::f32::consts::TAU).cos(),
     )
     .into_any_element()
 }
 
 /// The compact end-to-end tag in tables (the title rows carry the full badge and its help).
-pub fn e2e_tag(t: &Theme, id: impl Into<SharedString>) -> gpui::Stateful<Div> {
-    use gpui::{InteractiveElement, StatefulInteractiveElement};
+pub fn e2e_tag(t: &Theme, id: impl Into<SharedString>) -> folo_ui::Stateful<Div> {
+    use folo_ui::{InteractiveElement, StatefulInteractiveElement};
     div()
         .id(id.into())
         .tooltip(crate::controls::tip(crate::app::FoloApp::E2E_HELP, None))

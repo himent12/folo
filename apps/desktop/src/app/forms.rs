@@ -2,7 +2,7 @@
 //! parse and carry over from the run a form was made from.
 use crate::api::*;
 use crate::input::TextInput;
-use gpui::{Entity, Subscription};
+use folo_ui::{Entity, Subscription};
 /// Close mosaic: a whole number of epochs, at most the run's length.
 pub fn parse_close(s: &str, epochs: f32) -> Option<u32> {
     s.trim().parse::<u32>().ok().filter(|v| (*v as f32) <= epochs)

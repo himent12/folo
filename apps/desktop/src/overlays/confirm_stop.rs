@@ -1,6 +1,6 @@
 //! The confirmation before stopping a run.
 
-use gpui::{AnyElement, Context, ParentElement, Styled, Window, div, px};
+use folo_ui::{AnyElement, Context, ParentElement, Styled, Window, div, px};
 
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;

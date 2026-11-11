@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -99,7 +99,7 @@ impl FoloApp {
                 .min_w_0()
                 .flex()
                 .child(
-                    gpui::canvas(
+                    folo_ui::canvas(
                         move |b, window, _| {
                             if cols.get() != Some(b.size.width) {
                                 cols.set(Some(b.size.width));
@@ -211,7 +211,7 @@ impl FoloApp {
                     // keeps its number on the empty cells' fill, so the ramp marks real confusions.
                     let faint = !diag && !na && (v as f32 / row_sums[r] as f32) < 0.02;
                     let fill = if na {
-                        gpui::transparent_black()
+                        folo_ui::transparent_black()
                     } else if v == 0 || faint {
                         crate::theme::over(t.bg_panel, t.bg_hover)
                     } else {
@@ -334,7 +334,7 @@ impl FoloApp {
                     cx.propagate();
                 }
             }))
-            .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, _, cx| {
+            .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, _, cx| {
                 let key = ev.keystroke.key.as_str();
                 let arrows = matches!(key, "left" | "right" | "up" | "down" | "home" | "end");
                 // A cell from another model's (larger) matrix doesn't count: start over.
@@ -443,7 +443,7 @@ fn err_alpha(frac: f32) -> f32 {
 #[cfg(test)]
 mod matrix_tests {
     use crate::theme::{Mode, Theme, alpha, over};
-    use gpui::{Hsla, Rgba};
+    use folo_ui::{Hsla, Rgba};
 
     fn contrast(a: Hsla, b: Hsla) -> f32 {
         let lum = |c: Hsla| {

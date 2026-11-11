@@ -1,7 +1,7 @@
 //! A benchmark's Leaderboard tab: who can run, the ranked entries and each entry's row.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -105,7 +105,7 @@ impl FoloApp {
             run_controls = run_controls.child(div().w(px(220.)).child(select)).child(run);
         }
         let head_row = panel_header(&t, "Leaderboard").child(run_controls);
-        let cols = |d: gpui::Stateful<gpui::Div>| d.flex().items_center().gap(px(16.)).px(px(16.));
+        let cols = |d: folo_ui::Stateful<folo_ui::Div>| d.flex().items_center().gap(px(16.)).px(px(16.));
         let head = div()
             .flex()
             .items_center()
@@ -180,7 +180,7 @@ impl FoloApp {
         b: &Bench,
         e: &BenchEntry,
         rank: Option<usize>,
-        cols: impl Fn(gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div>,
+        cols: impl Fn(folo_ui::Stateful<folo_ui::Div>) -> folo_ui::Stateful<folo_ui::Div>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {

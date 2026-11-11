@@ -80,8 +80,10 @@ Fastest path for an agent:
 ## Apps
 - [FOLO Studio](web/README.md): the web app (Svelte 5 + TypeScript + Vite). It covers the dev server, checks,
   tests, screenshots (`npm run shoot`) and data sources
-- [FOLO Desktop](apps/desktop/README.md): the native GPUI app. It covers running it, connecting to `folo serve`,
+- [FOLO Desktop](apps/desktop/README.md): the native app. It covers running it, connecting to `folo serve`,
   `--mock`, `--scenario`, layout and screenshots
+- [folo-ui](apps/desktop/ui/README.md): Desktop's UI framework (GPUI's API, CPU-rendered). It covers building and
+  testing it, platforms, developer switches and the design record (`DESIGN.md`)
 - [Design system](design/README.md): the shared design tokens (`design/tokens.json`) both apps generate their
   themes from
 - UI hill-climb docs, for UI work only:

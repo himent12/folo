@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use gpui::Entity;
+use folo_ui::Entity;
 
 use crate::api::*;
 use crate::input::TextInput;

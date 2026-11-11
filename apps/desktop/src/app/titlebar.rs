@@ -1,8 +1,8 @@
 //! The title bar: breadcrumbs, search, the window's caption buttons, and the caption areas that
 //! stay above a scrim.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, WindowControlArea, div, px,
 };
@@ -18,7 +18,7 @@ pub(super) const TITLEBAR: f32 = tsize::TOPBAR - 8.;
 
 /// The title bar's row, its hairline (uncoloured) included. `titlebar()` and `caption_controls`
 /// both lay out on it, so their caption buttons are the same size in the same place.
-fn titlebar_row() -> gpui::Div {
+fn titlebar_row() -> folo_ui::Div {
     div().h(px(TITLEBAR)).flex_none().flex().items_center().border_b_1()
 }
 
@@ -28,25 +28,27 @@ impl FoloApp {
         let crumbs = self.breadcrumbs();
         let maximized = window.is_maximized();
         let fullscreen = window.is_fullscreen();
-        let win_btn =
-            |base: gpui::Stateful<gpui::Div>, id: &'static str, icon_path: &'static str, close: bool| {
-                base.group(id)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
-                    .active(|s| s.opacity(0.8))
-                    .child(
-                        gpui::svg()
-                            .path(icon_path)
-                            .size(px(10.))
-                            .flex_none()
-                            .text_color(t.text_secondary)
-                            .group_hover(id, move |s| {
-                                s.text_color(if close { t.window_close_text } else { t.text_primary })
-                            }),
-                    )
-            };
+        let win_btn = |base: folo_ui::Stateful<folo_ui::Div>,
+                       id: &'static str,
+                       icon_path: &'static str,
+                       close: bool| {
+            base.group(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
+                .active(|s| s.opacity(0.8))
+                .child(
+                    folo_ui::svg()
+                        .path(icon_path)
+                        .size(px(10.))
+                        .flex_none()
+                        .text_color(t.text_secondary)
+                        .group_hover(id, move |s| {
+                            s.text_color(if close { t.window_close_text } else { t.text_primary })
+                        }),
+                )
+        };
         let search_fh = self.fh("titlebar-search", cx);
         let search_ring = self.ring(&search_fh, window);
         let min_btn = self.caption_button("win-min", WindowControlArea::Min, fullscreen, cx);
@@ -67,7 +69,7 @@ impl FoloApp {
                     // The crumbs' 4 px pads put their text on the page gutter.
                     .pl(px(self.gutter() - 4.))
                     .window_control_area(WindowControlArea::Drag)
-                    // A caption press goes to GPUI first and only reaches Windows (drag, double-click
+                    // A caption press goes to the app first and only reaches Windows (drag, double-click
                     // maximize, the caption buttons) if nothing prevents its default. The focus-tracked
                     // root would (focusing itself does), so the chrome hides the root from the hit
                     // test. The crumbs above it still take their own clicks. Hidden from the root, it
@@ -126,7 +128,7 @@ impl FoloApp {
                     .hover(|s| s.border_color(t.line_strong))
                     .active(|s| s.bg(t.bg_active))
                     .on_click(cx.listener(|this, _, w, cx| this.open_palette(w, cx)))
-                    .on_key_down(cx.listener(|this, ev: &gpui::KeyDownEvent, w, cx| {
+                    .on_key_down(cx.listener(|this, ev: &folo_ui::KeyDownEvent, w, cx| {
                         if matches!(ev.keystroke.key.as_str(), "enter" | "space") {
                             this.open_palette(w, cx);
                             cx.stop_propagation();
@@ -148,7 +150,7 @@ impl FoloApp {
     }
 
     /// A caption button's hit area, `layout.desktop_caption_button` wide and the title bar's
-    /// height: Minimize, Maximize / Restore or Close for Windows. In full screen GPUI reports no
+    /// height: Minimize, Maximize / Restore or Close for Windows. In full screen folo-ui reports no
     /// caption areas, so Windows doesn't act on it: it takes its own click then. Only then, since
     /// otherwise the caption press already acts (on mouse up) and a click handler would act a
     /// second time. `titlebar()` draws on it; `caption_controls` uses it bare.
@@ -158,7 +160,7 @@ impl FoloApp {
         area: WindowControlArea,
         fullscreen: bool,
         cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    ) -> folo_ui::Stateful<folo_ui::Div> {
         div()
             .id(id)
             .w(px(crate::theme::layout::DESKTOP_CAPTION_BUTTON))
@@ -187,7 +189,11 @@ impl FoloApp {
     /// dimmed crumbs and search field take no clicks under an overlay) and the three buttons,
     /// where `titlebar()` puts them. A press here neither reaches the scrim (which would dismiss
     /// the overlay) nor the page.
-    pub fn caption_controls(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    pub fn caption_controls(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> folo_ui::Stateful<folo_ui::Div> {
         let fullscreen = window.is_fullscreen();
         titlebar_row()
             .id("caption-controls")

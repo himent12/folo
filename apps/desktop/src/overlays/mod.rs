@@ -10,8 +10,8 @@ mod palette;
 mod synth;
 mod toasts;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -100,7 +100,7 @@ impl FoloApp {
         window: &Window,
         cx: &mut Context<Self>,
         on_click: Action,
-    ) -> gpui::Stateful<Div> {
+    ) -> folo_ui::Stateful<Div> {
         div()
             .id(id)
             .absolute()
@@ -156,7 +156,7 @@ impl FoloApp {
                             div()
                                 .id(id)
                                 .w(px(width))
-                                .max_h(gpui::relative(0.92))
+                                .max_h(folo_ui::relative(0.92))
                                 .occlude()
                                 .flex()
                                 .flex_col()
@@ -201,7 +201,7 @@ impl FoloApp {
                                         .border_color(if scrolled {
                                             t.line_subtle
                                         } else {
-                                            gpui::transparent_black()
+                                            folo_ui::transparent_black()
                                         })
                                         .child(
                                             div()

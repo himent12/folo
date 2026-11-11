@@ -1,14 +1,19 @@
-# Launch FOLO Desktop in a scenario, capture the window's client area to a PNG, then close it.
-# Usage: tools\shoot.ps1 -Scenario run-live -Out shots\r1\run-live.png [-Width 1280 -Height 800] [-Exe path]
+# Render FOLO Desktop in a scenario to a PNG, headless: `folo-desktop --scenario ... --shot <png>` runs the app
+# on folo-ui's headless platform (no window, no cursor, no focus), settles it on a fake clock and writes the
+# frame. It takes well under a second.
+# Usage: tools\shoot.ps1 -Scenario run-live -Out shots\r1\run-live.png [-Width 1280 -Height 800] [-Scale 1.5]
+#        [-Exe path] [-ExtraArgs "--server http://127.0.0.1:7878 --open run:run_9d9d"]
+# The PNG is Width*Scale x Height*Scale pixels. -Scale defaults to 1.5, the scale of the dev PC's display, at
+# which every design review has been shot. -Scenario none passes no --scenario: give -ExtraArgs a source then
+# (`--server URL` or `--mock`), or the app looks for, and may start, a local folo serve as a normal launch does.
 param(
     [Parameter(Mandatory = $true)][string]$Scenario,
     [Parameter(Mandatory = $true)][string]$Out,
     [int]$Width = 1280,
     [int]$Height = 800,
+    [double]$Scale = 1.5,
     [string]$Exe = "",
-    [int]$DelayMs = 2200,
-    # Extra arguments for the app, e.g. "--server http://127.0.0.1:7878". With -Scenario none, no
-    # scenario is passed and the app connects to real data.
+    # Extra arguments for the app, e.g. "--server http://127.0.0.1:7878 --open run:run_9d9d".
     [string]$ExtraArgs = ""
 )
 
@@ -18,72 +23,16 @@ if (-not $Exe) {
     $Exe = Join-Path $target "debug/folo-desktop.exe"
 }
 $Exe = (Resolve-Path $Exe).Path
-Add-Type -AssemblyName System.Drawing
-if (-not ("FoloWin" -as [type])) {
-    Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public static class FoloWin {
-    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-    [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
-    [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
-    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
-}
-"@
-}
-[FoloWin]::SetProcessDPIAware() | Out-Null
-# Park the cursor in the screen corner so no hover state leaks into the capture.
-[FoloWin]::SetCursorPos(0, 0) | Out-Null
+$dir = Split-Path -Parent $Out
+if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
+$Out = [System.IO.Path]::GetFullPath($Out)
 
-$argList = @("--width", $Width, "--height", $Height)
+$scaleText = $Scale.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+$argList = @("--width", $Width, "--height", $Height, "--scale", $scaleText, "--shot", $Out)
 if ($Scenario -ne "none") { $argList = @("--scenario", $Scenario) + $argList }
-if ($ExtraArgs) { $argList += $ExtraArgs.Split(" ") }
-$p = Start-Process -FilePath $Exe -ArgumentList $argList -PassThru
-try {
-    $deadline = (Get-Date).AddSeconds(25)
-    while ($p.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline) {
-        Start-Sleep -Milliseconds 100
-        $p.Refresh()
-    }
-    if ($p.MainWindowHandle -eq 0) { throw "window did not appear for $Scenario" }
-    Start-Sleep -Milliseconds $DelayMs
-    $h = $p.MainWindowHandle
-    $r = New-Object FoloWin+RECT
-    for ($i = 0; $i -lt 50; $i++) {
-        $p.Refresh(); $h = $p.MainWindowHandle
-        [FoloWin]::GetClientRect($h, [ref]$r) | Out-Null
-        $w = $r.Right - $r.Left; $hh = $r.Bottom - $r.Top
-        if ($w -gt 100 -and $hh -gt 100) { break }
-        Start-Sleep -Milliseconds 100
-    }
-    # A capture can catch the swap chain before its first frame (an all-black image): sample a
-    # grid of pixels and capture again, up to three times, before giving up on the scenario.
-    for ($try = 0; $try -lt 4; $try++) {
-        $bmp = New-Object System.Drawing.Bitmap $w, $hh
-        $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $hdc = $g.GetHdc()
-        [FoloWin]::PrintWindow($h, $hdc, 3) | Out-Null   # PW_CLIENTONLY | PW_RENDERFULLCONTENT
-        $g.ReleaseHdc($hdc)
-        $g.Dispose()
-        $lit = $false
-        for ($y = 8; $y -lt $hh -and -not $lit; $y += [Math]::Max(1, [int]($hh / 12))) {
-            for ($x = 8; $x -lt $w; $x += [Math]::Max(1, [int]($w / 12))) {
-                $c = $bmp.GetPixel($x, $y)
-                if ($c.R + $c.G + $c.B -gt 0) { $lit = $true; break }
-            }
-        }
-        if ($lit) { break }
-        $bmp.Dispose()
-        if ($try -eq 3) { throw "capture of $Scenario stayed black" }
-        Start-Sleep -Milliseconds 800
-    }
-    $dir = Split-Path -Parent $Out
-    if ($dir -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Force $dir | Out-Null }
-    $bmp.Save($Out, [System.Drawing.Imaging.ImageFormat]::Png)
-    $bmp.Dispose()
-    "$Out ${w}x${hh}"
-}
-finally {
-    if (-not $p.HasExited) { $p.Kill() }
-}
+if ($ExtraArgs) { $argList += $ExtraArgs.Split(" ", [System.StringSplitOptions]::RemoveEmptyEntries) }
+& $Exe @argList
+if ($LASTEXITCODE -ne 0) { throw "folo-desktop --shot failed for $Scenario (exit $LASTEXITCODE)" }
+Add-Type -AssemblyName System.Drawing
+$img = [System.Drawing.Image]::FromFile($Out)
+try { "$Out $($img.Width)x$($img.Height)" } finally { $img.Dispose() }

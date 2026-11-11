@@ -1,7 +1,7 @@
 //! Toggles: filter chips and switches.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnimationExt, Context, Div, InteractiveElement, IntoElement, ParentElement, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -118,7 +118,7 @@ impl FoloApp {
                 } else if t.is_dark() {
                     t.text_primary
                 } else {
-                    gpui::white()
+                    folo_ui::white()
                 };
                 let knob =
                     div().absolute().top(px(2.)).size(px(14.)).rounded_full().bg(knob).shadow(t.shadow_sm());
@@ -137,8 +137,8 @@ impl FoloApp {
                 } else {
                     knob.with_animation(
                         SharedString::from(format!("{key}-knob-{on}")),
-                        gpui::Animation::new(std::time::Duration::from_millis(120))
-                            .with_easing(gpui::ease_out_quint()),
+                        folo_ui::Animation::new(std::time::Duration::from_millis(120))
+                            .with_easing(folo_ui::ease_out_quint()),
                         move |d, p| d.left(px(from + (to - from) * p)),
                     )
                     .into_any_element()

@@ -8,7 +8,11 @@ mod format;
 mod legend;
 mod metric;
 mod motion;
+#[cfg(test)]
+mod motion_tests;
 mod scroll;
+#[cfg(test)]
+mod scroll_tests;
 mod status;
 mod surface;
 mod text;

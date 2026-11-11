@@ -1,7 +1,7 @@
 //! The model list: the models table and its sortable column headers.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -41,14 +41,14 @@ impl FoloApp {
             return self.page_frame(&t, header, err, cx);
         }
         let now = self.store.api.now();
-        // Narrow windows drop whole columns (GPUI truncates against pre-shrink widths).
+        // Narrow windows drop whole columns (text truncates against pre-shrink widths).
         // Budget: every column at full width needs about 1,030 px of content; Params goes first
         // (below 1360), then From run (below 1240).
         let vw = window.viewport_size().width;
         let wide = vw >= px(1240.);
         let params_col = vw >= px(1360.);
-        let cols = |d: gpui::Stateful<gpui::Div>| d.flex().items_center().gap(px(16.)).px(px(16.));
-        // The name takes what the other columns leave (GPUI truncates against a known width, so
+        let cols = |d: folo_ui::Stateful<folo_ui::Div>| d.flex().items_center().gap(px(16.)).px(px(16.));
+        // The name takes what the other columns leave (text truncates against a known width, so
         // it's computed: content width less the fixed columns, their 16 px gaps, row padding).
         let name_w = {
             let content = self.content_width(window);
@@ -175,7 +175,7 @@ impl FoloApp {
                             .cursor_pointer()
                             .hover(|s| s.bg(t.bg_hover))
                             .active(|s| s.bg(t.bg_active))
-                            .on_key_down(cx.listener(move |this, ev: &gpui::KeyDownEvent, w, cx| {
+                            .on_key_down(cx.listener(move |this, ev: &folo_ui::KeyDownEvent, w, cx| {
                                 let next = match ev.keystroke.key.as_str() {
                                     "down" => i + 1,
                                     "up" if i > 0 => i - 1,

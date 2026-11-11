@@ -1,7 +1,7 @@
 //! Selects: a dropdown trigger and its listbox.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -85,7 +85,7 @@ impl FoloApp {
                 let cell = self.menu_trigger.clone();
                 // Where the trigger is decides where the menu fits; a move redraws once.
                 d.child(
-                    gpui::canvas(
+                    folo_ui::canvas(
                         move |b, window, _| {
                             if cell.get() != Some(b) {
                                 cell.set(Some(b));
@@ -179,7 +179,7 @@ impl FoloApp {
             Vec::new()
         };
         let menu = (open && !empty).then(|| {
-            gpui::deferred(
+            folo_ui::deferred(
                 div()
                     .absolute()
                     .when(!up, |d| d.top(px(tsize::CONTROL_LG + 4.)))
@@ -187,7 +187,7 @@ impl FoloApp {
                     .left_0()
                     .right_0()
                     .occlude()
-                    .on_mouse_down_out(cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    .on_mouse_down_out(cx.listener(move |this, ev: &folo_ui::MouseDownEvent, _, cx| {
                         let on_trigger = this.menu_trigger.get().is_some_and(|b| b.contains(&ev.position));
                         if this.menu_open == Some(key) && !on_trigger {
                             this.menu_open = None;

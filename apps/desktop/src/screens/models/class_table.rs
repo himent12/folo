@@ -1,7 +1,7 @@
 //! The per-class metrics table.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -86,7 +86,7 @@ impl FoloApp {
                             cx.notify();
                         }
                     }))
-                    .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+                    .on_mouse_move(cx.listener(move |this, _: &folo_ui::MouseMoveEvent, _, cx| {
                         if this.kb {
                             this.kb = false;
                             this.pr_focus = Some(class);
@@ -138,12 +138,12 @@ impl FoloApp {
 const CLASS_NAME_MAX: f32 = 168.;
 
 /// A per-class metric column: equal shares of the width after the class column, at least 120.
-fn metric_col() -> gpui::Div {
+fn metric_col() -> folo_ui::Div {
     div().flex_1().min_w(px(120.)).flex().items_center()
 }
 
 /// A fixed-width table cell whose content sits flush right (headers and values share it, so they
 /// line up to the pixel).
-pub(super) fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
+pub(super) fn num_cell(w: f32, content: impl IntoElement) -> folo_ui::Div {
     div().w(px(w)).flex_none().flex().justify_end().child(content)
 }

@@ -1,6 +1,6 @@
 //! The dataset index, and class names summarised to fit.
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
 use crate::api::SplitsExt;
 use crate::app::{FoloApp, act};

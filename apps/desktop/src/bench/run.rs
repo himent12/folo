@@ -1,6 +1,6 @@
 //! Contestants: which models and coding agents can run on a benchmark, running one, and stopping an entry.
 
-use gpui::Context;
+use folo_ui::Context;
 
 use super::merge::upsert_entry;
 use super::state::Contender;

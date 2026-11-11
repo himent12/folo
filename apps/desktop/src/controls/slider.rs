@@ -1,7 +1,7 @@
 //! Sliders.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     Context, Div, InteractiveElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Stateful,
     Styled, Window, canvas, div, px, relative,
 };
@@ -124,12 +124,12 @@ impl FoloApp {
                         .top(px(7.))
                         .size(px(14.))
                         .rounded_full()
-                        .bg(if dragging { t.accent_fill() } else { gpui::white() })
+                        .bg(if dragging { t.accent_fill() } else { folo_ui::white() })
                         .border_2()
                         .border_color(t.accent_fill())
                         .shadow(t.shadow_sm())
                         .hover(|s| {
-                            s.shadow(t.shadow_md()).bg(crate::theme::over(gpui::white(), t.accent_muted))
+                            s.shadow(t.shadow_md()).bg(crate::theme::over(folo_ui::white(), t.accent_muted))
                         })
                         .when(ring, |d| d.child(focus_ring(&t, 7.))),
                 ),

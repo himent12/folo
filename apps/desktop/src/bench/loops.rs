@@ -1,6 +1,6 @@
 //! Loops: the models that can teach one, the New loop form, and applying and stopping a loop.
 
-use gpui::Context;
+use folo_ui::Context;
 
 use super::load::route_bench;
 use super::merge::upsert_loop;

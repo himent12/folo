@@ -1,7 +1,7 @@
 //! The panel shown while nothing trains, and the machine at a glance.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px};
 
 use super::page::hero_height;
 use crate::app::{FoloApp, Route, act};
@@ -139,7 +139,7 @@ impl FoloApp {
         let Some(s) = self.store.system.ready().cloned() else {
             return panel(&t).h(px(48.)).child(skeleton(&t, "sys-strip")).into_any_element();
         };
-        let cell = |label: String, value: String, frac: f32, color: gpui::Hsla| {
+        let cell = |label: String, value: String, frac: f32, color: folo_ui::Hsla| {
             div()
                 .flex_1()
                 .min_w_0()

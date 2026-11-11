@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, canvas, div, px, uniform_list,
 };
@@ -40,7 +40,7 @@ impl FoloApp {
             cx,
             Rc::new(move |this, i, _, _| {
                 this.ds_split = splits[i];
-                this.grid_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
             }),
         );
         // Counts follow the split filter: boxes per class among the images shown.
@@ -74,7 +74,7 @@ impl FoloApp {
                         if this.ds_class.is_some() {
                             this.ds_empty_only = false;
                         }
-                        this.grid_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+                        this.grid_scroll.scroll_to_item(0, folo_ui::ScrollStrategy::Top);
                         cx.notify();
                     }),
                 )
@@ -298,7 +298,7 @@ impl FoloApp {
                             .rounded(px(radius::MD))
                             .cursor_pointer()
                             .border_1()
-                            .border_color(gpui::transparent_black())
+                            .border_color(folo_ui::transparent_black())
                             // Over an image a fill wouldn't show: the edge answers instead.
                             .hover(|s| s.border_color(t.line_strong))
                             .active(|s| s.border_color(t.text_tertiary))
@@ -335,20 +335,23 @@ impl FoloApp {
                                             .flex()
                                             .items_center()
                                             .justify_between()
-                                            .bg(gpui::linear_gradient(
+                                            .bg(folo_ui::linear_gradient(
                                                 180.,
-                                                gpui::linear_color_stop(gpui::hsla(0., 0., 0., 0.), 0.),
-                                                gpui::linear_color_stop(gpui::hsla(0., 0., 0., 0.7), 1.),
+                                                folo_ui::linear_color_stop(folo_ui::hsla(0., 0., 0., 0.), 0.),
+                                                folo_ui::linear_color_stop(
+                                                    folo_ui::hsla(0., 0., 0., 0.7),
+                                                    1.,
+                                                ),
                                             ))
                                             .when(!focused, |d| d.invisible())
                                             .group_hover(SharedString::from(key.clone()), |s| s.visible())
                                             .child(
-                                                text(ty::SM, gpui::white())
+                                                text(ty::SM, folo_ui::white())
                                                     .font_family(crate::theme::MONO)
                                                     .child(meta.id.clone()),
                                             )
                                             .child(
-                                                text(ty::SM, gpui::hsla(0., 0., 1., 0.75))
+                                                text(ty::SM, folo_ui::hsla(0., 0., 1., 0.75))
                                                     .tnum()
                                                     .ellipsis()
                                                     .child(what),
@@ -371,9 +374,9 @@ impl FoloApp {
                                 return;
                             };
                             let strategy = if j < idx {
-                                gpui::ScrollStrategy::Top
+                                folo_ui::ScrollStrategy::Top
                             } else {
-                                gpui::ScrollStrategy::Bottom
+                                folo_ui::ScrollStrategy::Bottom
                             };
                             this.grid_scroll.scroll_to_item(j / cols, strategy);
                             this.kb = true;

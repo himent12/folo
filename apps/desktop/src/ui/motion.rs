@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use gpui::{Animation, AnimationExt, IntoElement, SharedString, Styled};
+use folo_ui::{Animation, AnimationExt, IntoElement, SharedString, Styled};
 
 static REDUCE_MOTION: AtomicBool = AtomicBool::new(false);
 
@@ -36,14 +36,14 @@ pub fn reduce_motion() -> bool {
 }
 
 /// Fade an overlay in over 160 ms when it first appears (instant under Reduce motion).
-pub fn appear<E: IntoElement + Styled + 'static>(el: E, id: &str) -> gpui::AnyElement {
+pub fn appear<E: IntoElement + Styled + 'static>(el: E, id: &str) -> folo_ui::AnyElement {
     if reduce_motion() {
         return el.into_any_element();
     }
-    el.with_animation(
+    el.with_opacity_animation(
         SharedString::from(id.to_string()),
-        Animation::new(Duration::from_millis(160)).with_easing(gpui::ease_out_quint()),
-        |d, p| d.opacity(p),
+        Animation::new(Duration::from_millis(160)).with_easing(folo_ui::ease_out_quint()),
+        |p| p,
     )
     .into_any_element()
 }

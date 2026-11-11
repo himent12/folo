@@ -1,7 +1,7 @@
 //! The stage: the image with its boxes, zoom and pan, and dropping or opening an image.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Bounds, Context, InteractiveElement, IntoElement, MouseMoveEvent, ParentElement,
     StatefulInteractiveElement, Styled, Window, canvas, div, px,
 };
@@ -84,7 +84,7 @@ impl FoloApp {
                 .flex()
                 .items_center()
                 .justify_center()
-                .on_drag_move(cx.listener(|this, _: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                .on_drag_move(cx.listener(|this, _: &folo_ui::DragMoveEvent<folo_ui::ExternalPaths>, _, cx| {
                     if !this.play_drop_hover {
                         this.play_drop_hover = true;
                         cx.notify();
@@ -308,7 +308,7 @@ impl FoloApp {
                                     .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
                                 })
                                 .child(
-                                    // A long file name ends in "…" at its known budget, as GPUI needs.
+                                    // A long file name ends in "…" at its known budget, as truncation needs.
                                     // What the toolbar shed shows on hover and on keyboard focus.
                                     self.disclose(
                                         div().id("play-file-name"),
@@ -372,8 +372,12 @@ impl FoloApp {
                     .flex_1()
                     .min_h_0()
                     .bg(t.bg_inset)
-                    .cursor(if zoom > 1.0 { gpui::CursorStyle::OpenHand } else { gpui::CursorStyle::Arrow })
-                    .on_scroll_wheel(cx.listener(move |this, ev: &gpui::ScrollWheelEvent, w, cx| {
+                    .cursor(if zoom > 1.0 {
+                        folo_ui::CursorStyle::OpenHand
+                    } else {
+                        folo_ui::CursorStyle::Arrow
+                    })
+                    .on_scroll_wheel(cx.listener(move |this, ev: &folo_ui::ScrollWheelEvent, w, cx| {
                         let Some(b) = wheel_cell.get() else { return };
                         let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
                         let new_zoom =
@@ -390,16 +394,19 @@ impl FoloApp {
                         cx.notify();
                     }))
                     .on_mouse_down(
-                        gpui::MouseButton::Left,
-                        cx.listener(move |this, ev: &gpui::MouseDownEvent, w, _| {
+                        folo_ui::MouseButton::Left,
+                        cx.listener(move |this, ev: &folo_ui::MouseDownEvent, w, _| {
                             w.focus(&canvas_fh);
                             this.play_drag = Some((ev.position, this.play_pan));
                         }),
                     )
-                    .on_mouse_up(gpui::MouseButton::Left, cx.listener(|this, _, _, _| this.play_drag = None))
+                    .on_mouse_up(
+                        folo_ui::MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.play_drag = None),
+                    )
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                         if let Some((from, pan0)) = this.play_drag
-                            && ev.pressed_button == Some(gpui::MouseButton::Left)
+                            && ev.pressed_button == Some(folo_ui::MouseButton::Left)
                             && this.play_zoom > 1.0
                         {
                             this.play_pan = (
@@ -431,8 +438,8 @@ impl FoloApp {
                             |_, _, _| (),
                             move |b, _, window, cx| {
                                 let inner = Bounds::new(
-                                    b.origin + gpui::point(px(16.), px(16.)),
-                                    b.size - gpui::size(px(32.), px(32.)),
+                                    b.origin + folo_ui::point(px(16.), px(16.)),
+                                    b.size - folo_ui::size(px(32.), px(32.)),
                                 );
                                 paint_cell.set(Some(inner));
                                 paint_image_with_boxes(

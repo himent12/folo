@@ -1,0 +1,105 @@
+[package]
+name = "folo-ui"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/himent12/folo"
+description = "folo-ui: FOLO Desktop's own UI framework (CPU-rendered, GPUI's API)"
+publish = false
+
+[lib]
+name = "folo_ui"
+path = "src/lib.rs"
+
+# `portable-text` (cosmic-text) and `winit` (winit + softbuffer + arboard + rfd) are always on off Windows: there
+# the same crates are plain target dependencies below. On Windows they are opt-in (tests, the winit backend on the
+# dev machine). Code gates on `#[cfg(any(not(windows), feature = "..."))]`.
+[features]
+default = []
+portable-text = ["dep:cosmic-text"]
+winit = ["dep:winit", "dep:softbuffer", "dep:arboard", "dep:rfd"]
+# The deterministic `FixedTextSystem` (text/types.rs) for tests in other crates.
+test-support = []
+
+[dependencies]
+anyhow = "1"
+async-task = "4.7"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Paths are tessellated as GPUI 0.2.2 tessellates them (lyon 1.0.19 with lyon_tessellation 1.0.23), so strokes
+# and fills cover the same samples (DESIGN.md, commodity crates).
+lyon = "=1.0.19"
+parking_lot = "0.12"
+resvg = { version = "0.45", default-features = false }
+smallvec = { version = "1.6", features = ["union"] }
+taffy = "=0.9.0"
+tiny-skia = "0.11"
+usvg = { version = "0.45", default-features = false }
+# PlatformDisplay::uuid: the app keeps the display's UUID string (GPUI's: v5 of the device name) in desktop.json.
+uuid = { version = "1", features = ["v5"] }
+
+[target.'cfg(windows)'.dependencies]
+# The version wgpu-hal uses, so the app links one copy (gpu-allocator, which accepts 0.53 to 0.62, follows).
+windows = { version = "0.62", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Xps",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_System_Ole",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# `#[implement]` (the DirectWrite text renderer, the OLE drop target) expands to `::windows_core` paths; the
+# same 0.62 copy `windows` uses.
+windows-core = "0.62"
+cosmic-text = { version = "0.14", optional = true }
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+arboard = { version = "3", optional = true }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"], optional = true }
+
+[target.'cfg(not(windows))'.dependencies]
+cosmic-text = "0.14"
+winit = "0.30"
+softbuffer = "0.4"
+# wayland-data-control: the clipboard in a Wayland session without XWayland (pure Rust, no system library).
+arboard = { version = "3", features = ["wayland-data-control"] }
+# The xdg-desktop-portal backend (no GTK).
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+
+[dev-dependencies]
+# Test temp files under FOLO_TEST_TMP, removed on drop (docs/CI.md, Test temp dirs).
+folo-test-support = { path = "../../../crates/folo-test-support" }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[[bench]]
+name = "raster"
+harness = false

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gpui::{Hsla, SharedString};
+use folo_ui::{Hsla, SharedString};
 
 use super::HoverFn;
 use super::axis::format_tick;

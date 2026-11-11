@@ -1,7 +1,7 @@
 //! Text formatting: queue places, confidences, paths, counts, sizes, rates, devices and plurals.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{Div, Hsla, ParentElement, Styled, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{Div, Hsla, ParentElement, Styled, div, px};
 
 use super::cloud::fmt_transfer;
 use super::text::{StyledExt, text};

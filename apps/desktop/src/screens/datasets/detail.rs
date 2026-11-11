@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -134,7 +134,7 @@ impl FoloApp {
             .items_center()
             .gap(px(10.))
             .min_w_0()
-            // A long name gives way (ellipsis, full name on hover) before the actions do; GPUI
+            // A long name gives way (ellipsis, full name on hover) before the actions do; text
             // truncates against a known width, so it's capped by the window's.
             .child(
                 div()
@@ -176,7 +176,7 @@ impl FoloApp {
                 .flex()
                 .items_center()
                 .border_b_2()
-                .border_color(if on { t.text_primary } else { gpui::transparent_black() })
+                .border_color(if on { t.text_primary } else { folo_ui::transparent_black() })
                 .cursor_pointer()
                 .child(
                     div()

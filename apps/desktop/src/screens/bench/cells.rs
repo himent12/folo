@@ -1,11 +1,11 @@
 //! Table cells the benchmark tables share: names with badges, numbers and bars.
 
-use gpui::{FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
+use folo_ui::{FontWeight, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
 use crate::theme::{Theme, ty};
 use crate::ui::*;
 
-/// A name and its badges on one line `width` px wide. GPUI truncates text only against a width it
+/// A name and its badges on one line `width` px wide. folo-ui truncates text only against a width it
 /// knows, so the name gets one: its own width, or what the badges leave of the line.
 pub(super) fn name_with_badges(
     t: &Theme,
@@ -13,7 +13,7 @@ pub(super) fn name_with_badges(
     name: &str,
     badges: &[(&str, Tone)],
     width: f32,
-) -> gpui::Div {
+) -> folo_ui::Div {
     use crate::charts::text_width;
     // Medium weight runs a little wider than the regular face text_width measures.
     let mut measure = |s: &str| f32::from(text_width(window, s, ty::SM.size)) * 1.04;
@@ -34,7 +34,7 @@ pub(super) fn name_with_badges(
         .children(badges.iter().map(|(l, tone)| badge(t, l.to_string(), *tone)))
 }
 
-pub(super) fn num_cell(w: f32, content: impl IntoElement) -> gpui::Div {
+pub(super) fn num_cell(w: f32, content: impl IntoElement) -> folo_ui::Div {
     div().w(px(w)).flex_none().flex().justify_end().child(content)
 }
 
@@ -44,8 +44,8 @@ pub(super) fn bar_row(
     label: impl Into<SharedString>,
     frac: f32,
     value: String,
-    color: gpui::Hsla,
-) -> gpui::Div {
+    color: folo_ui::Hsla,
+) -> folo_ui::Div {
     div()
         .flex()
         .items_center()

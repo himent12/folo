@@ -13,7 +13,7 @@ Status keys: `[ ]` todo, `[~]` in progress, `[x]` merged. The orchestrator keeps
 - [x] server + CLI skeleton with `--mock` (#7); real dataset commands and store (#29)
 - [x] gpu: wgpu device, buffer pool, WGSL kernels (SGEMM ~31 TFLOPS on RTX 4080 SUPER) (#10)
 - [~] Studio (web/): all screens, in-browser Playground, real-server smoke, mixed-precision and capability-aware New run; one breakpoint system and blank-section QA in CI (#126); hill-climb round 28 (r26: Sol min 8.5, Opus min 8; r27: line 11 at 8 from both)
-- [~] Desktop (apps/desktop, GPUI): all screens, real server, local GPU inference, capability-aware New run; hill-climb round 56 (in-round reviews reached 9 on every line at r55 #150; an independent check with fresh reviewers on main gave Opus 8.75 / Sol 8.8, so r56 #161 fixes those findings)
+- [~] Desktop (apps/desktop, on its own UI framework folo-ui, which replaced GPUI): all screens, real server, local GPU inference, capability-aware New run; hill-climb round 56 (in-round reviews reached 9 on every line at r55 #150; an independent check with fresh reviewers on main gave Opus 8.75 / Sol 8.8, so r56 #161 fixes those findings)
 
 ## M2 — learning end to end
 - [x] nn: layers, init, SGD/AdamW, schedules, EMA, .folo IO (#21)

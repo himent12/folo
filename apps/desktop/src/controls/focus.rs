@@ -1,7 +1,7 @@
 //! Focus and activation: making an element a Tab stop that a click, Enter and Space activate.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     Context, Div, InteractiveElement, KeyDownEvent, ParentElement, Stateful, StatefulInteractiveElement,
     Styled, Window,
 };
@@ -32,7 +32,7 @@ impl FoloApp {
         el: Stateful<Div>,
         key: &str,
         radius_px: f32,
-        ring_color: gpui::Hsla,
+        ring_color: folo_ui::Hsla,
         window: &Window,
         cx: &mut Context<Self>,
         action: Action,

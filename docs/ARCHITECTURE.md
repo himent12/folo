@@ -2,7 +2,7 @@
 
 FOLO ("**F**OLO **O**nly **L**ooks **O**nce" — a play on YOLO) is a vision framework written from scratch in Rust: a
 tensor engine with autograd, CPU and GPU kernels, neural-network layers, a YOLO-style real-time object detector, a
-training and evaluation pipeline, a server, a CLI and a web studio.
+training and evaluation pipeline, a server, a CLI, a web studio and a native desktop app on its own UI framework.
 
 ```
             folo-cli  ──────────────┐            web/ (FOLO Studio)
@@ -323,12 +323,42 @@ The exact block definitions, layer tables, parameter names, head, loss, training
 ## Front ends
 - **FOLO Studio** (`web/`): Svelte 5 + TypeScript + Vite, a custom design system (tokens, components) and no UI kit.
   Talks only to `docs/API.md`; `web/src/lib/api/` holds the typed client and a dev mock.
-- **FOLO Desktop** (`apps/desktop/`): native Rust app on GPUI (Zed's GPU-accelerated UI framework). Same screens and
+- **FOLO Desktop** (`apps/desktop/`): native Rust app on folo-ui, its own UI framework (below). Same screens and
   design language as Studio. It talks to a local `folo serve` over the same API (it can spawn one), so the engine and
   the UI stay decoupled. Its Playground can also run a model in process ("Run on: Local GPU / Local CPU"): it fetches
   the f16 weights from `GET /api/models/{id}/weights` (revalidated by ETag) and runs folo-vision's `Predictor` on
   folo-gpu or the CPU. Its Benchmarks screens use `folo-bench` only in the built-in demo, to grade its fixtures as the
-  server would. It is a separate cargo workspace so the main workspace and its CI stay GPUI-free.
+  server would. It is a separate cargo workspace (the app and folo-ui) so the main workspace does not build the UI.
+
+## folo-ui — FOLO Desktop's UI framework
+- `apps/desktop/ui` (crate `folo-ui`, a member of the desktop workspace; design record `ui/DESIGN.md`, how to work
+  on it `ui/README.md`). Its public API is GPUI 0.2.2's for exactly the subset the app uses (same names, signatures
+  and behaviour, re-exported flat from the crate root), so the app reads as it did on GPUI; the engine under it is
+  its own. Layers, bottom up: platform (Win32, winit + softbuffer, headless), raster (the renderer), text, the app
+  runtime, the window, the elements and styles.
+- Runtime (`app/`): one UI thread; `App` in an `Rc<RefCell<…>>` holds entities, globals, observers and the effect
+  queue, flushed after every platform callback. Tasks are `async-task` runnables on the platform's dispatcher, so an
+  idle app has no timer and no thread awake.
+- Window (`window/`): a frame renders the root view, lays the elements out with taffy (pinned to the version and the
+  style mapping GPUI used, so every box lands where it did), prepaints (bounds, hitboxes, scroll offsets, deferred
+  draws, the tooltip), paints a `Scene` and dispatches input through the hitboxes and the key-context tree. A window
+  draws only when something made it dirty, at most once per display refresh; while nothing changes nothing runs.
+- Renderer (`raster/`): the scene (quads, shadows, glyph and SVG sprites, images, paths, underlines, each with its
+  clip) is binned into 64 px tiles; each tile's ordered primitives are hashed, cut at the topmost opaque cover, and
+  only tiles whose hash changed are rasterized, on the calling thread or on the renderer's own small pool (not
+  rayon's, which belongs to the engine). Coverage formulas are GPUI's; blending is 8-bit source-over in gamma space
+  as GPUI's DX11 renderer did. Rendering frame A then B into one buffer gives the same bytes as B into a fresh one,
+  for every thread count (tested on random scenes). Caches (shadows, paths, resampled images, glyph masks) are
+  bounded in bytes. No GPU device, swap chain or shader: the GPU stays with training and inference.
+- Text (`text/`): line layout, wrapping and truncation with GPUI's rules, a per-window line layout cache; glyphs from
+  DirectWrite on Windows (as GPUI used it: same masks, subpixel variants, contrast and gamma) and from cosmic-text
+  elsewhere and in deterministic tests (feature `portable-text`).
+- Platforms (`platform/`): Win32 (own window class and message loop, custom title bar through
+  `WM_NCCALCSIZE` / `WM_NCHITTEST`, IME, clipboard, file dialogs, per-monitor DPI, presenting damage rectangles with
+  GDI); winit + softbuffer on Linux and macOS (also built on Windows with feature `winit`); headless, driven by
+  `HeadlessApp` (fake clock, synthetic input, a framebuffer to read back), which the tests and
+  `folo-desktop --shot <png>` use. Windows is where it runs; Linux runs the headless tests in CI; macOS is
+  type-checked (`apps/desktop/tools/cross-check.sh`).
 
 ## Agent-first design
 - Machine-readable everything: `--json`, JSON Schemas for configs, `folo describe` prints the CLI surface as JSON.

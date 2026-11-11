@@ -1,6 +1,6 @@
 //! New benchmark: where images can come from, and the form that creates one.
 
-use gpui::{AppContext, Context, Focusable, Window};
+use folo_ui::{AppContext, Context, Focusable, Window};
 
 use super::state::{BENCH_SPLITS, NewBenchForm};
 use crate::api::*;

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gpui::{Context, SharedString};
+use folo_ui::{Context, SharedString};
 
 use crate::api::*;
 use crate::store::*;
@@ -250,7 +250,7 @@ impl FoloApp {
             self.toast(Tone::Neutral, "Can't open an image yet", Some(why.into()), cx);
             return;
         }
-        let rx = cx.prompt_for_paths(gpui::PathPromptOptions {
+        let rx = cx.prompt_for_paths(folo_ui::PathPromptOptions {
             files: true,
             directories: false,
             multiple: false,

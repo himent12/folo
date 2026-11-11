@@ -4,9 +4,9 @@
 use std::rc::Rc;
 
 use crate::api::SplitsExt;
-use gpui::Focusable;
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::Focusable;
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -268,7 +268,7 @@ impl FoloApp {
             (f.close_input.clone(), f.close_invalid)
         };
         let number_box = |this: &Self,
-                          input: gpui::Entity<crate::input::TextInput>,
+                          input: folo_ui::Entity<crate::input::TextInput>,
                           bad: bool,
                           window: &Window,
                           cx: &mut Context<Self>| {
@@ -602,7 +602,7 @@ impl FoloApp {
                     div()
                         // The left column's width (the 16 px gap halved off), so the switch sits by its
                         // label, not across a two-column dialog.
-                        .w(gpui::relative(0.5))
+                        .w(folo_ui::relative(0.5))
                         .pr(px(8.))
                         .flex()
                         .items_center()
@@ -733,7 +733,7 @@ impl FoloApp {
                     div()
                         // The left column's width (the 16 px gap halved off), so the switch sits by its
                         // label, not across a two-column dialog.
-                        .w(gpui::relative(0.5))
+                        .w(folo_ui::relative(0.5))
                         .pr(px(8.))
                         .flex()
                         .items_center()

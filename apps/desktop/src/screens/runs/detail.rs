@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, IntoElement, ParentElement, StatefulInteractiveElement, Styled, Window,
     div, px,
 };
@@ -344,7 +344,7 @@ impl FoloApp {
         // Smooth the throughput trace so the sparkline shows the trend, not per-step jitter.
         let pts: Vec<(f32, f32)> = ips.iter().enumerate().map(|(i, v)| (i as f32, *v)).collect();
         let smooth: Vec<f32> = crate::charts::ema(&pts, 0.85).into_iter().map(|p| p.1).collect();
-        let duration_tile = |label: &str, secs: Option<f64>, detail: gpui::Div| {
+        let duration_tile = |label: &str, secs: Option<f64>, detail: folo_ui::Div| {
             div()
                 .flex()
                 .flex_col()
@@ -374,7 +374,7 @@ impl FoloApp {
                 ),
             )
         };
-        let tiles: Vec<gpui::Div> = vec![
+        let tiles: Vec<folo_ui::Div> = vec![
             div()
                 .flex()
                 .flex_col()
@@ -470,7 +470,7 @@ impl FoloApp {
                 )),
             time_tile,
         ];
-        let tile = |content: gpui::Div| {
+        let tile = |content: folo_ui::Div| {
             div()
                 .flex_1()
                 .min_w_0()
@@ -498,7 +498,7 @@ impl FoloApp {
                 // fills it) spans two columns, so its divider lines up with the first row's second.
                 // flex_1's 0 basis would win over a width, so the basis is set itself.
                 row = row.child(if wrapped && per_row == 3 && i == 0 {
-                    tile(c).flex_none().flex_basis(gpui::relative(2. / 3.))
+                    tile(c).flex_none().flex_basis(folo_ui::relative(2. / 3.))
                 } else {
                     tile(c)
                 });

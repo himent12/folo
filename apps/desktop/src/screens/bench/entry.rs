@@ -1,7 +1,7 @@
 //! An entry's page: its header and its result on the five axes.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, relative};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{AnyElement, Context, IntoElement, ParentElement, Styled, Window, div, px, relative};
 
 use super::cells::bar_row;
 use super::format::{axis_name, axis_text, contestant_line, entry_frac, entry_tone, pct};
@@ -146,7 +146,7 @@ impl FoloApp {
         let score = e.score.as_ref();
         let axis = |a: BenchAxis| score.and_then(|s| s.axes.iter().find(|x| x.axis == a)).copied();
         // The score and its five axes, each with its weight.
-        let kpi = |content: gpui::Div, basis: f32| {
+        let kpi = |content: folo_ui::Div, basis: f32| {
             div().flex_grow().flex_basis(relative(basis)).min_w_0().px(px(16.)).py(px(14.)).child(content)
         };
         let mut kpis = panel(&t).flex().flex_wrap().child(kpi(

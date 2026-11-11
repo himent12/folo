@@ -1,10 +1,10 @@
-//! The decoded-image cache: GPUI images keyed by dataset, image and size, and the conversion from
+//! The decoded-image cache: `RenderImage`s keyed by dataset, image and size, and the conversion from
 //! backend pixels.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use gpui::RenderImage;
+use folo_ui::RenderImage;
 
 use crate::api::*;
 
@@ -83,7 +83,7 @@ impl ImageCache {
     }
 }
 
-/// Turn backend pixels into a GPUI image (BGRA frames).
+/// Turn backend pixels into a `RenderImage` (BGRA frames).
 pub fn to_render_image(data: ImageData) -> Option<Arc<RenderImage>> {
     let (w, h, mut px) = match data {
         ImageData::Rgba { width, height, pixels } => (width, height, pixels),

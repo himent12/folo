@@ -1,7 +1,7 @@
 //! Metrics: value pairs, KPI values and stats, durations and key/value rows.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{Div, IntoElement, ParentElement, SharedString, Styled, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{Div, IntoElement, ParentElement, SharedString, Styled, div, px};
 
 use super::text::{StyledExt, caption, text};
 use crate::theme::{Theme, TypeStep, ty};
@@ -26,7 +26,7 @@ pub fn metric(
     s: TypeStep,
     unit_step: TypeStep,
 ) -> Div {
-    // GPUI's flex baseline doesn't align mixed sizes, so bottom-align and lift the unit by the
+    // The flex baseline doesn't align mixed sizes, so bottom-align and lift the unit by the
     // difference between the two lines' baselines. A space's width apart ("9.42 M", as text
     // writes a number and its unit everywhere).
     div()

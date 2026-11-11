@@ -1,0 +1,578 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/color.rs, crates/gpui/src/style.rs (Fill)
+//! Colours: `Rgba`, `Hsla`, `Background` (solid, linear gradient, slash pattern) and `Fill`.
+
+use std::fmt::{self, Display, Formatter};
+use std::hash::{Hash, Hasher};
+
+/// Convert an RGB hex color code number to a color type
+pub fn rgb(hex: u32) -> Rgba {
+    let [_, r, g, b] = hex.to_be_bytes().map(|b| (b as f32) / 255.0);
+    Rgba { r, g, b, a: 1.0 }
+}
+
+/// Convert an RGBA hex color code number to [`Rgba`]
+pub fn rgba(hex: u32) -> Rgba {
+    let [r, g, b, a] = hex.to_be_bytes().map(|b| (b as f32) / 255.0);
+    Rgba { r, g, b, a }
+}
+
+/// Swap from RGBA with premultiplied alpha to BGRA
+pub fn swap_rgba_pa_to_bgra(color: &mut [u8]) {
+    color.swap(0, 2);
+    if color[3] > 0 {
+        let a = color[3] as f32 / 255.;
+        color[0] = (color[0] as f32 / a) as u8;
+        color[1] = (color[1] as f32 / a) as u8;
+        color[2] = (color[2] as f32 / a) as u8;
+    }
+}
+
+/// An RGBA color
+#[derive(PartialEq, Clone, Copy, Default)]
+#[repr(C)]
+pub struct Rgba {
+    /// The red component of the color, in the range 0.0 to 1.0
+    pub r: f32,
+    /// The green component of the color, in the range 0.0 to 1.0
+    pub g: f32,
+    /// The blue component of the color, in the range 0.0 to 1.0
+    pub b: f32,
+    /// The alpha component of the color, in the range 0.0 to 1.0
+    pub a: f32,
+}
+
+impl fmt::Debug for Rgba {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "rgba({:#010x})", u32::from(*self))
+    }
+}
+
+impl Rgba {
+    /// Create a new [`Rgba`] color by blending this and another color together
+    pub fn blend(&self, other: Rgba) -> Self {
+        if other.a >= 1.0 {
+            other
+        } else if other.a <= 0.0 {
+            *self
+        } else {
+            Rgba {
+                r: (self.r * (1.0 - other.a)) + (other.r * other.a),
+                g: (self.g * (1.0 - other.a)) + (other.g * other.a),
+                b: (self.b * (1.0 - other.a)) + (other.b * other.a),
+                a: self.a,
+            }
+        }
+    }
+}
+
+impl From<Rgba> for u32 {
+    fn from(rgba: Rgba) -> Self {
+        let r = (rgba.r * 255.0) as u32;
+        let g = (rgba.g * 255.0) as u32;
+        let b = (rgba.b * 255.0) as u32;
+        let a = (rgba.a * 255.0) as u32;
+        (r << 24) | (g << 16) | (b << 8) | a
+    }
+}
+
+impl From<Hsla> for Rgba {
+    fn from(color: Hsla) -> Self {
+        let h = color.h;
+        let s = color.s;
+        let l = color.l;
+
+        let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+        let x = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
+        let m = l - c / 2.0;
+        let cm = c + m;
+        let xm = x + m;
+
+        let (r, g, b) = match (h * 6.0).floor() as i32 {
+            0 | 6 => (cm, xm, m),
+            1 => (xm, cm, m),
+            2 => (m, cm, xm),
+            3 => (m, xm, cm),
+            4 => (xm, m, cm),
+            _ => (cm, m, xm),
+        };
+
+        Rgba { r: r.clamp(0., 1.), g: g.clamp(0., 1.), b: b.clamp(0., 1.), a: color.a }
+    }
+}
+
+/// An HSLA color
+#[derive(Default, Copy, Clone, Debug)]
+#[repr(C)]
+pub struct Hsla {
+    /// Hue, in a range from 0 to 1
+    pub h: f32,
+
+    /// Saturation, in a range from 0 to 1
+    pub s: f32,
+
+    /// Lightness, in a range from 0 to 1
+    pub l: f32,
+
+    /// Alpha, in a range from 0 to 1
+    pub a: f32,
+}
+
+impl PartialEq for Hsla {
+    fn eq(&self, other: &Self) -> bool {
+        self.h
+            .total_cmp(&other.h)
+            .then(self.s.total_cmp(&other.s))
+            .then(self.l.total_cmp(&other.l).then(self.a.total_cmp(&other.a)))
+            .is_eq()
+    }
+}
+
+impl PartialOrd for Hsla {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Hsla {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.h
+            .total_cmp(&other.h)
+            .then(self.s.total_cmp(&other.s))
+            .then(self.l.total_cmp(&other.l).then(self.a.total_cmp(&other.a)))
+    }
+}
+
+impl Eq for Hsla {}
+
+impl Hash for Hsla {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u32(u32::from_be_bytes(self.h.to_be_bytes()));
+        state.write_u32(u32::from_be_bytes(self.s.to_be_bytes()));
+        state.write_u32(u32::from_be_bytes(self.l.to_be_bytes()));
+        state.write_u32(u32::from_be_bytes(self.a.to_be_bytes()));
+    }
+}
+
+impl Display for Hsla {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "hsla({:.2}, {:.2}%, {:.2}%, {:.2})", self.h * 360., self.s * 100., self.l * 100., self.a)
+    }
+}
+
+/// Construct an [`Hsla`] object from plain values
+pub fn hsla(h: f32, s: f32, l: f32, a: f32) -> Hsla {
+    Hsla { h: h.clamp(0., 1.), s: s.clamp(0., 1.), l: l.clamp(0., 1.), a: a.clamp(0., 1.) }
+}
+
+/// Pure black in [`Hsla`]
+pub const fn black() -> Hsla {
+    Hsla { h: 0., s: 0., l: 0., a: 1. }
+}
+
+/// Transparent black in [`Hsla`]
+pub const fn transparent_black() -> Hsla {
+    Hsla { h: 0., s: 0., l: 0., a: 0. }
+}
+
+/// Transparent white in [`Hsla`]
+pub const fn transparent_white() -> Hsla {
+    Hsla { h: 0., s: 0., l: 1., a: 0. }
+}
+
+/// Opaque grey in [`Hsla`], values will be clamped to the range [0, 1]
+pub fn opaque_grey(lightness: f32, opacity: f32) -> Hsla {
+    Hsla { h: 0., s: 0., l: lightness.clamp(0., 1.), a: opacity.clamp(0., 1.) }
+}
+
+/// Pure white in [`Hsla`]
+pub const fn white() -> Hsla {
+    Hsla { h: 0., s: 0., l: 1., a: 1. }
+}
+
+/// The color red in [`Hsla`]
+pub const fn red() -> Hsla {
+    Hsla { h: 0., s: 1., l: 0.5, a: 1. }
+}
+
+/// The color blue in [`Hsla`]
+pub const fn blue() -> Hsla {
+    Hsla { h: 0.6666667, s: 1., l: 0.5, a: 1. }
+}
+
+/// The color green in [`Hsla`]
+pub const fn green() -> Hsla {
+    Hsla { h: 0.33333334, s: 1., l: 0.25, a: 1. }
+}
+
+/// The color yellow in [`Hsla`]
+pub const fn yellow() -> Hsla {
+    Hsla { h: 0.16666667, s: 1., l: 0.5, a: 1. }
+}
+
+impl Hsla {
+    /// Converts this HSLA color to an RGBA color.
+    pub fn to_rgb(self) -> Rgba {
+        self.into()
+    }
+
+    /// The color red
+    pub const fn red() -> Self {
+        red()
+    }
+
+    /// The color green
+    pub const fn green() -> Self {
+        green()
+    }
+
+    /// The color blue
+    pub const fn blue() -> Self {
+        blue()
+    }
+
+    /// The color black
+    pub const fn black() -> Self {
+        black()
+    }
+
+    /// The color white
+    pub const fn white() -> Self {
+        white()
+    }
+
+    /// The color transparent black
+    pub const fn transparent_black() -> Self {
+        transparent_black()
+    }
+
+    /// Returns true if the HSLA color is fully transparent, false otherwise.
+    pub fn is_transparent(&self) -> bool {
+        self.a == 0.0
+    }
+
+    /// Returns true if the HSLA color is fully opaque, false otherwise.
+    pub fn is_opaque(&self) -> bool {
+        self.a == 1.0
+    }
+
+    /// Blends `other` on top of `self` based on `other`'s alpha value. The resulting color is a combination of `self`'s and `other`'s colors.
+    pub fn blend(self, other: Hsla) -> Hsla {
+        let alpha = other.a;
+
+        if alpha >= 1.0 {
+            other
+        } else if alpha <= 0.0 {
+            self
+        } else {
+            let converted_self = Rgba::from(self);
+            let converted_other = Rgba::from(other);
+            let blended_rgb = converted_self.blend(converted_other);
+            Hsla::from(blended_rgb)
+        }
+    }
+
+    /// Returns a new HSLA color with the same hue, and lightness, but with no saturation.
+    pub fn grayscale(&self) -> Self {
+        Hsla { h: self.h, s: 0., l: self.l, a: self.a }
+    }
+
+    /// Fade out the color by a given factor. This factor should be between 0.0 and 1.0.
+    /// Where 0.0 will leave the color unchanged, and 1.0 will completely fade out the color.
+    pub fn fade_out(&mut self, factor: f32) {
+        self.a *= 1.0 - factor.clamp(0., 1.);
+    }
+
+    /// Multiplies the alpha value of the color by a given factor
+    /// and returns a new HSLA color.
+    pub fn opacity(&self, factor: f32) -> Self {
+        Hsla { h: self.h, s: self.s, l: self.l, a: self.a * factor.clamp(0., 1.) }
+    }
+
+    /// Returns a new HSLA color with the same hue, saturation,
+    /// and lightness, but with a new alpha value.
+    pub fn alpha(&self, a: f32) -> Self {
+        Hsla { h: self.h, s: self.s, l: self.l, a: a.clamp(0., 1.) }
+    }
+}
+
+impl From<Rgba> for Hsla {
+    fn from(color: Rgba) -> Self {
+        let r = color.r;
+        let g = color.g;
+        let b = color.b;
+
+        let max = r.max(g.max(b));
+        let min = r.min(g.min(b));
+        let delta = max - min;
+
+        let l = (max + min) / 2.0;
+        let s = if l == 0.0 || l == 1.0 {
+            0.0
+        } else if l < 0.5 {
+            delta / (2.0 * l)
+        } else {
+            delta / (2.0 - 2.0 * l)
+        };
+
+        let h = if delta == 0.0 {
+            0.0
+        } else if max == r {
+            ((g - b) / delta).rem_euclid(6.0) / 6.0
+        } else if max == g {
+            ((b - r) / delta + 2.0) / 6.0
+        } else {
+            ((r - g) / delta + 4.0) / 6.0
+        };
+
+        Hsla { h, s, l, a: color.a }
+    }
+}
+
+/// The kind of a `Background`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub enum BackgroundTag {
+    /// One colour.
+    Solid = 0,
+    /// A linear gradient between two stops.
+    LinearGradient = 1,
+    /// Diagonal stripes.
+    PatternSlash = 2,
+}
+
+/// A color space for color interpolation.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[repr(C)]
+pub enum ColorSpace {
+    #[default]
+    /// The sRGB color space.
+    Srgb = 0,
+    /// The Oklab color space.
+    Oklab = 1,
+}
+
+impl Display for ColorSpace {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            ColorSpace::Srgb => write!(f, "sRGB"),
+            ColorSpace::Oklab => write!(f, "Oklab"),
+        }
+    }
+}
+
+/// A background color, which can be either a solid color or a linear gradient.
+#[derive(Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct Background {
+    /// Which kind of background this is.
+    pub tag: BackgroundTag,
+    /// The colour space gradients interpolate in.
+    pub color_space: ColorSpace,
+    /// The colour of a solid background (and of a pattern's stripes).
+    pub solid: Hsla,
+    /// A gradient's angle in degrees, or a pattern's stripe height.
+    pub gradient_angle_or_pattern_height: f32,
+    /// A gradient's two colour stops.
+    pub colors: [LinearColorStop; 2],
+}
+
+impl std::fmt::Debug for Background {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self.tag {
+            BackgroundTag::Solid => write!(f, "Solid({:?})", self.solid),
+            BackgroundTag::LinearGradient => {
+                write!(
+                    f,
+                    "LinearGradient({}, {:?}, {:?})",
+                    self.gradient_angle_or_pattern_height, self.colors[0], self.colors[1]
+                )
+            }
+            BackgroundTag::PatternSlash => {
+                write!(f, "PatternSlash({:?}, {})", self.solid, self.gradient_angle_or_pattern_height)
+            }
+        }
+    }
+}
+
+impl Eq for Background {}
+impl Default for Background {
+    fn default() -> Self {
+        Self {
+            tag: BackgroundTag::Solid,
+            solid: Hsla::default(),
+            color_space: ColorSpace::default(),
+            gradient_angle_or_pattern_height: 0.0,
+            colors: [LinearColorStop::default(), LinearColorStop::default()],
+        }
+    }
+}
+
+/// Creates a hash pattern background
+pub fn pattern_slash(color: Hsla, width: f32, interval: f32) -> Background {
+    let width_scaled = (width * 255.0) as u32;
+    let interval_scaled = (interval * 255.0) as u32;
+    let height = ((width_scaled * 0xFFFF) + interval_scaled) as f32;
+
+    Background {
+        tag: BackgroundTag::PatternSlash,
+        solid: color,
+        gradient_angle_or_pattern_height: height,
+        ..Default::default()
+    }
+}
+
+/// Creates a solid background color.
+pub fn solid_background(color: impl Into<Hsla>) -> Background {
+    Background { solid: color.into(), ..Default::default() }
+}
+
+/// Creates a LinearGradient background color.
+pub fn linear_gradient(
+    angle: f32,
+    from: impl Into<LinearColorStop>,
+    to: impl Into<LinearColorStop>,
+) -> Background {
+    Background {
+        tag: BackgroundTag::LinearGradient,
+        gradient_angle_or_pattern_height: angle,
+        colors: [from.into(), to.into()],
+        ..Default::default()
+    }
+}
+
+/// A color stop in a linear gradient.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(C)]
+pub struct LinearColorStop {
+    /// The color of the color stop.
+    pub color: Hsla,
+    /// The percentage of the gradient, in the range 0.0 to 1.0.
+    pub percentage: f32,
+}
+
+/// Creates a new linear color stop.
+pub fn linear_color_stop(color: impl Into<Hsla>, percentage: f32) -> LinearColorStop {
+    LinearColorStop { color: color.into(), percentage }
+}
+
+impl LinearColorStop {
+    /// Returns a new color stop with the same color, but with a modified alpha value.
+    pub fn opacity(&self, factor: f32) -> Self {
+        Self { percentage: self.percentage, color: self.color.opacity(factor) }
+    }
+}
+
+impl Background {
+    /// Use specified color space for color interpolation.
+    pub fn color_space(mut self, color_space: ColorSpace) -> Self {
+        self.color_space = color_space;
+        self
+    }
+
+    /// Returns a new background color with the same hue, saturation, and lightness, but with a modified alpha value.
+    pub fn opacity(&self, factor: f32) -> Self {
+        let mut background = *self;
+        background.solid = background.solid.opacity(factor);
+        background.colors = [self.colors[0].opacity(factor), self.colors[1].opacity(factor)];
+        background
+    }
+
+    /// Returns whether the background color is transparent.
+    pub fn is_transparent(&self) -> bool {
+        match self.tag {
+            BackgroundTag::Solid => self.solid.is_transparent(),
+            BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.is_transparent()),
+            BackgroundTag::PatternSlash => self.solid.is_transparent(),
+        }
+    }
+}
+
+impl From<Hsla> for Background {
+    fn from(value: Hsla) -> Self {
+        Background { tag: BackgroundTag::Solid, solid: value, ..Default::default() }
+    }
+}
+impl From<Rgba> for Background {
+    fn from(value: Rgba) -> Self {
+        Background { tag: BackgroundTag::Solid, solid: Hsla::from(value), ..Default::default() }
+    }
+}
+
+/// The kinds of fill that can be applied to a shape.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Fill {
+    /// A solid color fill.
+    Color(Background),
+}
+
+impl Fill {
+    /// Unwrap this fill into a solid color, if it is one.
+    pub fn color(&self) -> Option<Background> {
+        match self {
+            Fill::Color(color) => Some(*color),
+        }
+    }
+}
+
+impl Default for Fill {
+    fn default() -> Self {
+        Self::Color(Background::default())
+    }
+}
+
+impl From<Hsla> for Fill {
+    fn from(color: Hsla) -> Self {
+        Self::Color(color.into())
+    }
+}
+
+impl From<Rgba> for Fill {
+    fn from(color: Rgba) -> Self {
+        Self::Color(color.into())
+    }
+}
+
+impl From<Background> for Fill {
+    fn from(background: Background) -> Self {
+        Self::Color(background)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn close(a: Rgba, r: f32, g: f32, b: f32, alpha: f32) {
+        let eps = 1e-5;
+        assert!(
+            (a.r - r).abs() < eps
+                && (a.g - g).abs() < eps
+                && (a.b - b).abs() < eps
+                && (a.a - alpha).abs() < eps,
+            "{a:?} != ({r}, {g}, {b}, {alpha})"
+        );
+    }
+
+    /// Expected values worked by hand from GPUI's `From<Hsla> for Rgba`.
+    #[test]
+    fn hsla_to_rgba_matches_gpui_formula() {
+        close(hsla(0., 1., 0.5, 1.).into(), 1., 0., 0., 1.);
+        close(hsla(2. / 3., 1., 0.5, 1.).into(), 0., 0., 1., 1.);
+        close(hsla(0.5, 0.5, 0.25, 0.8).into(), 0.125, 0.375, 0.375, 0.8);
+        close(hsla(0.1, 0.6, 0.7, 1.).into(), 0.88, 0.736, 0.52, 1.);
+        // h == 1 lands in the `6` arm (red), as GPUI's does.
+        close(hsla(1., 1., 0.5, 1.).into(), 1., 0., 0., 1.);
+        close(black().to_rgb(), 0., 0., 0., 1.);
+        close(white().to_rgb(), 1., 1., 1., 1.);
+    }
+
+    #[test]
+    fn rgb_hex_and_back() {
+        close(rgb(0x336699), 0.2, 0.4, 0.6, 1.);
+        close(rgba(0x33669980), 0.2, 0.4, 0.6, 128. / 255.);
+        let back: Hsla = rgb(0x336699).into();
+        close(back.to_rgb(), 0.2, 0.4, 0.6, 1.);
+        assert!(transparent_black().is_transparent() && black().is_opaque());
+        assert_eq!(black().opacity(0.5).a, 0.5);
+    }
+}

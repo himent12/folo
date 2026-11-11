@@ -1,7 +1,7 @@
 //! Chart groups: one Tab stop that steps a shared chart cursor.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, Div, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
     Styled, Window,
 };

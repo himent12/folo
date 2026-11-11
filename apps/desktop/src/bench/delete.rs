@@ -1,6 +1,6 @@
 //! Deleting an entry, a loop or a benchmark after the second click.
 
-use gpui::Context;
+use folo_ui::Context;
 
 use super::load::route_bench;
 use crate::app::{FoloApp, Route};

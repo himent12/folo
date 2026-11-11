@@ -1,7 +1,7 @@
 //! First run: what FOLO needs, in order, with the next step as the one primary action.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{AnyElement, Context, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
 
 use crate::app::{FoloApp, Route, act};
 use crate::controls::Btn;
@@ -146,7 +146,7 @@ impl FoloApp {
                         window,
                         cx,
                         act(move |this, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(c.to_string()));
+                            cx.write_to_clipboard(folo_ui::ClipboardItem::new_string(c.to_string()));
                             this.toast(Tone::Neutral, "Copied", Some(format!("`{c}`").into()), cx);
                         }),
                     )

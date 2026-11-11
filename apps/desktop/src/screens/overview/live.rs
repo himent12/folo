@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
 
 use super::page::hero_height;
 use crate::api::{Run, RunExt, time};
@@ -251,10 +251,9 @@ impl FoloApp {
             )
             // Progress as a hairline rail across the panel.
             .child(
-                div()
-                    .h(px(2.))
-                    .bg(t.bg_inset)
-                    .child(div().h_full().w(gpui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
+                div().h(px(2.)).bg(t.bg_inset).child(
+                    div().h_full().w(folo_ui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill()),
+                ),
             )
             .child(div().w_full().py(px(card_pad_y)).child(kpis))
             // The chart section is the run page's chart card without its frame: a header row on a
@@ -270,7 +269,7 @@ impl FoloApp {
     fn system_footer(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let t = theme(cx);
         let s = self.store.system.ready()?.clone();
-        let meter = |label: String, value: String, frac: f32, color: gpui::Hsla| {
+        let meter = |label: String, value: String, frac: f32, color: folo_ui::Hsla| {
             div()
                 .flex()
                 .items_center()

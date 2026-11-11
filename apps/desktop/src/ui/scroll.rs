@@ -1,6 +1,6 @@
 //! Scroll chrome: the thumb's geometry and painting, and the edge fades.
 
-use gpui::{Bounds, Hsla, Pixels, ScrollHandle, Styled, fill, point, px, size};
+use folo_ui::{Bounds, Hsla, Pixels, ScrollHandle, Styled, fill, point, px, size};
 
 use crate::theme::Theme;
 
@@ -29,15 +29,30 @@ impl ThumbGeo {
     }
 }
 
-/// Paint the thumb (GPUI draws none), so overflow is visible.
-pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut gpui::Window) {
+/// Paint the thumb (folo-ui draws none), so overflow is visible.
+pub fn paint_thumb(
+    t: &Theme,
+    handle: &ScrollHandle,
+    hot: bool,
+    window: &mut folo_ui::Window,
+    cx: &folo_ui::App,
+) {
     let Some(g) = ThumbGeo::of(handle) else { return };
     // An overlay thumb: shown while dragged, while the pointer is over its area, and for a moment
     // after the content scrolls; otherwise the content has the space to itself. Movement is
     // recorded on every paint, whatever else shows the thumb.
-    let scrolled = recently_scrolled(handle);
+    // The executor's clock, not the wall clock: a headless `--shot` runs on a fake clock and settles
+    // like the real app (the thumb hides 800 ms after a scenario's scroll, before the capture).
+    let scrolled = recently_scrolled(handle, cx.background_executor().now());
     let over = handle.bounds().contains(&window.mouse_position());
     if !(hot || over || scrolled) {
+        return;
+    }
+    let bounds = Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.)));
+    // Clipped away entirely (a scroll area below the page's fold, such as a live run's log following
+    // its new lines): nothing to draw, and no frames to keep drawing it. A frame that brings it into
+    // view paints it, and asks for more, while the scroll is still recent.
+    if !bounds.intersects(&window.content_mask().bounds) {
         return;
     }
     // Shown only by a recent scroll: keep painting until that lapses, so it hides on time.
@@ -46,10 +61,7 @@ pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut gpu
     }
     // 3:1 against the surface in both themes (45 % read about 1.9:1).
     let color = crate::theme::alpha(t.text_tertiary, if hot { 1.0 } else { 0.8 });
-    window.paint_quad(
-        fill(Bounds::new(point(g.right - px(6.), g.y + px(2.)), size(px(4.), g.thumb - px(4.))), color)
-            .corner_radii(px(2.)),
-    );
+    window.paint_quad(fill(bounds, color).corner_radii(px(2.)));
 }
 
 /// A scroll area's origin, its last vertical offset, and when that last changed.
@@ -66,12 +78,12 @@ pub fn scroll_edges(
     bg: Hsla,
     inset: f32,
     radius: f32,
-) -> impl Iterator<Item = gpui::Canvas<()>> {
+) -> impl Iterator<Item = folo_ui::Canvas<()>> {
     // Read at paint time, after this frame's layout set the scroll extent: a fade decided while
     // building the frame used the last frame's extent, so a window's first frames (and a still
     // capture) showed no fade over content below the fold.
     let h = handle.clone();
-    let painter = gpui::canvas(
+    let painter = folo_ui::canvas(
         |_, _, _| (),
         move |b, _, window, _| {
             let y = h.offset().y;
@@ -85,21 +97,21 @@ pub fn scroll_edges(
             let fade = |top: bool| {
                 let at = if top { b.top() + inset } else { b.bottom() - inset - px(24.) };
                 let corners = if top {
-                    gpui::Corners { top_left: r, top_right: r, ..Default::default() }
+                    folo_ui::Corners { top_left: r, top_right: r, ..Default::default() }
                 } else {
-                    gpui::Corners { bottom_left: r, bottom_right: r, ..Default::default() }
+                    folo_ui::Corners { bottom_left: r, bottom_right: r, ..Default::default() }
                 };
-                gpui::quad(
+                folo_ui::quad(
                     Bounds::new(point(b.left() + inset, at), size(w, px(24.))),
                     corners,
-                    gpui::linear_gradient(
+                    folo_ui::linear_gradient(
                         if top { 180. } else { 0. },
-                        gpui::linear_color_stop(bg, 0.25),
-                        gpui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
+                        folo_ui::linear_color_stop(bg, 0.25),
+                        folo_ui::linear_color_stop(crate::theme::alpha(bg, 0.), 1.),
                     ),
                     px(0.),
-                    gpui::transparent_black(),
-                    gpui::BorderStyle::default(),
+                    folo_ui::transparent_black(),
+                    folo_ui::BorderStyle::default(),
                 )
             };
             if above {
@@ -113,12 +125,11 @@ pub fn scroll_edges(
     std::iter::once(painter.absolute().top_0().left_0().size_full())
 }
 
-/// Whether `handle`'s content moved in the last 800 ms.
-fn recently_scrolled(handle: &ScrollHandle) -> bool {
+/// Whether `handle`'s content moved in the 800 ms before `now`.
+fn recently_scrolled(handle: &ScrollHandle, now: std::time::Instant) -> bool {
     let b = handle.bounds();
     let key = (f32::from(b.origin.x), f32::from(b.origin.y));
     let y = f32::from(handle.offset().y);
-    let now = std::time::Instant::now();
     SCROLLED.with(|s| {
         let mut s = s.borrow_mut();
         match s.iter_mut().find(|(k, _, _)| *k == key) {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
-use gpui::Context;
+use folo_ui::Context;
 
 use crate::api::*;
 use crate::store::*;
@@ -252,7 +252,7 @@ impl FoloApp {
         image: &str,
         kind: ImgKind,
         cx: &mut Context<Self>,
-    ) -> Option<Arc<gpui::RenderImage>> {
+    ) -> Option<Arc<folo_ui::RenderImage>> {
         let key = ImgKey { dataset: dataset.to_string(), image: image.to_string(), kind };
         match self.store.images_px.get(&key) {
             Some(ImgSlot::Ready(img)) => return Some(img.clone()),

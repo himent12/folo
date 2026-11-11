@@ -2,9 +2,9 @@
 
 use std::rc::Rc;
 
-use gpui::Focusable;
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::Focusable;
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, KeyDownEvent, ParentElement,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -41,7 +41,7 @@ impl FoloApp {
         // A field's box; Enter moves to the next field, and in the last one connects.
         let last = inputs.len();
         let input_box = |this: &Self,
-                         input: gpui::Entity<crate::input::TextInput>,
+                         input: folo_ui::Entity<crate::input::TextInput>,
                          index: usize,
                          bad: bool,
                          mono: bool,

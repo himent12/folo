@@ -1,7 +1,7 @@
 //! Segmented controls.
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     Context, Div, FontWeight, InteractiveElement, KeyDownEvent, ParentElement, SharedString, Stateful,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -145,7 +145,7 @@ impl FoloApp {
                     .rounded(px(radius::SM))
                     .when(!dead, |d| d.cursor_pointer())
                     .border_1()
-                    .border_color(gpui::transparent_black())
+                    .border_color(folo_ui::transparent_black())
                     .when(on, |d| d.bg(t.bg_raised).border_color(t.line_control))
                     .when(!on && !dead, |d| d.hover(|s| s.bg(t.bg_hover)))
                     // The selected option answers the pointer too: hover tint over its raised fill.

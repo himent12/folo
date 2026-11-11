@@ -3,8 +3,8 @@
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -56,7 +56,7 @@ impl FoloApp {
                         div().flex_1().h(px(16.)).rounded(px(3.)).bg(t.bg_inset).child(
                             div()
                                 .h_full()
-                                .w(gpui::relative(c as f32 / max))
+                                .w(folo_ui::relative(c as f32 / max))
                                 .rounded(px(3.))
                                 .bg(t.class_on(i as u32, crate::theme::Surface::Panel)),
                         ),
@@ -194,7 +194,7 @@ impl FoloApp {
         key: &str,
         hover_key: &'static str,
         bins: usize,
-        content: gpui::Div,
+        content: folo_ui::Div,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {

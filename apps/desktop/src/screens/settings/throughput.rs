@@ -2,8 +2,8 @@
 
 use std::rc::Rc;
 
-use gpui::prelude::FluentBuilder;
-use gpui::{
+use folo_ui::prelude::FluentBuilder;
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, SharedString,
     StatefulInteractiveElement, Styled, Window, div, px,
 };
@@ -97,7 +97,7 @@ impl FoloApp {
         let infer = self.tp_view == 1;
         // Fixed columns (the panel is at most 880 px): device, architecture, image size, batch
         // (training), precision, latency (inference), rate, then source and age.
-        let cell = |w: f32, right: bool, el: gpui::Div| {
+        let cell = |w: f32, right: bool, el: folo_ui::Div| {
             el.w(px(w)).flex_none().whitespace_nowrap().when(right, |d| d.text_right())
         };
         let head = div()

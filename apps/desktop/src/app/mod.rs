@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{
+use folo_ui::{
     AnyElement, App, AppContext, Bounds, Context, Entity, FocusHandle, KeyBinding, Pixels, ScrollHandle,
     SharedString, Subscription, Task, Window, actions, px,
 };
@@ -206,7 +206,7 @@ pub struct Inspector {
     pub index: usize,
     pub zoom: f32,
     pub pan: (f32, f32),
-    pub drag_from: Option<(gpui::Point<Pixels>, (f32, f32))>,
+    pub drag_from: Option<(folo_ui::Point<Pixels>, (f32, f32))>,
     pub hover_box: Option<usize>,
     /// An image to land on once the dataset's image list is in (opened from a run's sample).
     pub want: Option<String>,
@@ -220,7 +220,7 @@ pub type ModelsOrderKey = (usize, usize, &'static str, bool);
 pub struct PlayImage {
     pub name: SharedString,
     pub input: PredictInput,
-    pub image: Arc<gpui::RenderImage>,
+    pub image: Arc<folo_ui::RenderImage>,
     pub width: u32,
     pub height: u32,
 }
@@ -289,7 +289,7 @@ pub struct FoloApp {
     pub ds_hover_tile: Option<String>,
     /// Filtered image indices keyed by (dataset, split, class, list length).
     pub ds_filter_cache: RefCell<Option<FilterCache>>,
-    pub grid_scroll: gpui::UniformListScrollHandle,
+    pub grid_scroll: folo_ui::UniformListScrollHandle,
     pub grid_width: Rc<std::cell::Cell<Pixels>>,
     pub inspector: Option<Inspector>,
     /// Focus target of the inspector so its keys (arrows, +/-, 0, Esc) work as soon as it opens.
@@ -357,7 +357,7 @@ pub struct FoloApp {
     /// Stage zoom (1 = fit) and pan in px, like the inspector.
     pub play_zoom: f32,
     pub play_pan: (f32, f32),
-    pub play_drag: Option<(gpui::Point<Pixels>, (f32, f32))>,
+    pub play_drag: Option<(folo_ui::Point<Pixels>, (f32, f32))>,
     /// Generation of the latest image load request (older completions are dropped).
     play_load_seq: u64,
     /// Generation of the image on stage; predictions are tagged with it.
@@ -444,14 +444,14 @@ pub struct FoloApp {
     pub menu_hl: usize,
     pub menu_scroll: ScrollHandle,
     /// Bounds of the open select's trigger, so a click on it toggles rather than counting as outside.
-    pub menu_trigger: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    pub menu_trigger: Rc<std::cell::Cell<Option<folo_ui::Bounds<Pixels>>>>,
     /// The confusion matrix's column area as last laid out (its headings fit names to it).
     pub cm_cols: Rc<std::cell::Cell<Option<Pixels>>>,
     /// The inspector's and the Playground's image views as last laid out (for pan clamping).
-    pub insp_view: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    pub insp_view: Rc<std::cell::Cell<Option<folo_ui::Bounds<Pixels>>>>,
     /// The inspector's label list (focus reveal scrolls it).
     pub insp_list_scroll: ScrollHandle,
-    pub play_view: Rc<std::cell::Cell<Option<gpui::Bounds<Pixels>>>>,
+    pub play_view: Rc<std::cell::Cell<Option<folo_ui::Bounds<Pixels>>>>,
 
     pub drag: Option<Drag>,
     pub slider_bounds: Rc<RefCell<HashMap<&'static str, Bounds<Pixels>>>>,
@@ -514,7 +514,7 @@ impl FoloApp {
             ds_tile: 168.,
             ds_hover_tile: None,
             ds_filter_cache: RefCell::new(None),
-            grid_scroll: gpui::UniformListScrollHandle::new(),
+            grid_scroll: folo_ui::UniformListScrollHandle::new(),
             grid_width: Rc::new(std::cell::Cell::new(px(900.))),
             inspector: None,
             inspector_focus: cx.focus_handle(),

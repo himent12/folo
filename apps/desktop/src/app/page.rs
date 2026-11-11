@@ -1,7 +1,7 @@
 //! The page area: routing to each screen, and the frame, gutter and content width every page
 //! uses.
 
-use gpui::{
+use folo_ui::{
     AnyElement, Context, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
     Window, div, px,
 };

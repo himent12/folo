@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use gpui::{
+use folo_ui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine,
@@ -514,7 +514,7 @@ impl Element for TextElement {
     fn request_layout(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
+        _: Option<&folo_ui::InspectorElementId>,
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
@@ -527,7 +527,7 @@ impl Element for TextElement {
     fn prepaint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
+        _: Option<&folo_ui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
         window: &mut Window,
@@ -621,7 +621,7 @@ impl Element for TextElement {
     fn paint(
         &mut self,
         _: Option<&GlobalElementId>,
-        _: Option<&gpui::InspectorElementId>,
+        _: Option<&folo_ui::InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut (),
         prepaint: &mut PrepaintState,
@@ -633,7 +633,7 @@ impl Element for TextElement {
         let line = prepaint.line.take().unwrap();
         let scroll_x = prepaint.scroll_x;
         let selection = prepaint.selection.take();
-        window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
+        window.with_content_mask(Some(folo_ui::ContentMask { bounds }), |window| {
             if let Some(selection) = selection {
                 window.paint_quad(selection)
             }
@@ -737,7 +737,7 @@ mod tests {
     #[test]
     fn caret_stays_in_view() {
         use super::follow_caret;
-        use gpui::px;
+        use folo_ui::px;
         // Typing past the right edge scrolls so the caret sits 8 px inside.
         assert_eq!(follow_caret(px(0.), px(300.), px(300.), px(200.), px(8.)), px(108.));
         // Moving home scrolls back to the start.
