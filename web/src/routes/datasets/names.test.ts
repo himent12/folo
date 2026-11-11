@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cleanPath, isFullPath, NAME_RE, suggestName } from './names';
+import { cleanPath, isFullPath, NAME_RE, nameFromPath, suggestName, uniqueName } from './names';
 
 describe('suggestName', () => {
   it('turns what was typed into the nearest valid name', () => {
@@ -11,6 +11,29 @@ describe('suggestName', () => {
     for (const raw of ['a'.repeat(80) + '!', 'x y z', '-a-', 'ok.name_1']) expect(NAME_RE.test(suggestName(raw)!)).toBe(true);
     expect(suggestName('!!!')).toBeNull();
     expect(suggestName('')).toBeNull();
+  });
+});
+
+describe('nameFromPath', () => {
+  it('makes a tidy name from the folder, never from a file name or its extension', () => {
+    expect(nameFromPath('D:\\folo-ux\\work-datasets\\blood cells copy (2)')).toBe('blood-cells-copy-2');
+    expect(nameFromPath('D:/data/my set - v2/')).toBe('my-set-v2');
+    expect(nameFromPath('D:\\folo-data\\finetune\\bccd\\annotations\\instances_test.json')).toBe('bccd');
+    expect(nameFromPath('D:/data/coco/instances_val.json')).toBe('instances_val');
+    expect(nameFromPath('/home/me/fasteners/data.yaml')).toBe('fasteners');
+    expect(nameFromPath('D:/data/shapes')).toBe('shapes');
+    expect(nameFromPath('')).toBe('');
+  });
+});
+
+describe('uniqueName', () => {
+  it('numbers a name that is taken, ignoring case, and stays within 64 characters', () => {
+    const taken = new Set(['shapes-synth', 'shapes-synth-2', 'bccd']);
+    expect(uniqueName('shapes-synth', taken)).toBe('shapes-synth-3');
+    expect(uniqueName('BCCD', taken)).toBe('BCCD-2');
+    expect(uniqueName('fasteners', taken)).toBe('fasteners');
+    const long = 'a'.repeat(64);
+    expect(uniqueName(long, new Set([long]))).toBe(`${'a'.repeat(62)}-2`);
   });
 });
 

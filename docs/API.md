@@ -122,8 +122,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 - `POST /api/datasets` body `{ "name"?, "path", "format": "auto|yolo|coco" }` → `201 Dataset` with `stats`.
   Registers a dataset on disk: a folder, a `data.yaml` or a COCO instances `.json`. `path` must be absolute
   (surrounding whitespace and one pair of quotes, as Windows' "Copy as path" adds, are ignored; a relative path is
-  `400 invalid_body`, never resolved against the server's working directory); `name` defaults to the folder name,
-  `format` to `auto`. Datasets are read with folo-data, exactly as for training (formats and detection rules:
+  `400 invalid_body`, never resolved against the server's working directory); `name` defaults to the folder's name
+  (for a COCO file in `annotations/`, the folder above it; for a `data.yaml`, its folder), numbered `-2`, `-3`, ...
+  when a dataset already has that name; `format` defaults to `auto`. Datasets are read with folo-data, exactly as for training (formats and detection rules:
   `docs/DATA.md`): YOLO from `data.yaml` (`path`, `train`, `val`, `test`, `names`; a YAML with only `names` uses the
   folder layout) or `images/{train,val,test}` + `labels/…`; COCO from `annotations/instances_*.json` (Roboflow
   layouts too). Corrupt or missing images and images with broken labels are left out (`stats.broken_labels` counts

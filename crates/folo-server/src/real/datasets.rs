@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use folo_api::{Dataset, DatasetFormat};
 
 use crate::error::{Error, Result};
-use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, write_atomic};
+use crate::index::{Fingerprint, INDEX_VERSION, Index, absolute, default_name, write_atomic};
 use crate::runs::DatasetRef;
 use crate::store::Store;
 use crate::util::{claim_dir, fnv1a, rfc3339, unique_id, unix_now};
@@ -136,7 +136,11 @@ impl RealStore {
             list.iter().any(|e| e.reg.lock().unwrap().id == id) || regs.iter().any(|r| r.id == id)
         });
         let name = name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
-            idx.base.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "dataset".into())
+            let lower = |n: &str| n.to_lowercase();
+            default_name(Path::new(&path), |n| {
+                list.iter().any(|e| lower(&e.reg.lock().unwrap().name) == lower(n))
+                    || regs.iter().any(|r| lower(&r.name) == lower(n))
+            })
         });
         let reg = Registration {
             id,

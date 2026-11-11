@@ -17,7 +17,7 @@ import Segmented from '$lib/ui/Segmented';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
 import { noTraining } from '../dataset/health';
-import { cleanPath, isFullPath, NAME_RE, suggestName } from './names';
+import { cleanPath, isFullPath, NAME_RE, nameFromPath, suggestName, uniqueName } from './names';
 
 type Mode = 'folder' | 'synthetic';
 
@@ -27,8 +27,9 @@ const MAX_SHAPES = 8;
 export interface AddDatasetDialogProps {
   open?: boolean;
   mode?: Mode;
-  /** The datasets already listed, to tell a new registration from an existing one (fetched when absent). */
-  known?: readonly { id: string }[];
+  /** The datasets already listed, to tell a new registration from an existing one and to keep names apart (fetched when
+   *  absent). */
+  known?: readonly { id: string; name: string }[];
 }
 
 const nameError = (v: string) => (!v.trim() ? 'Required.' : NAME_RE.test(v.trim()) ? null : 'Letters, digits, ".", "_" and "-" only (max 64).');
@@ -37,6 +38,10 @@ const nameFix = (v: string, set: (n: string) => void) => {
   const n = suggestName(v);
   return n && n !== v.trim() ? { label: `Try ${n}`, apply: () => set(n) } : null;
 };
+/** A typed name another dataset has: allowed (the server keeps both), but the two would read the same everywhere. */
+const takenHint = (n: string) => `A dataset is already called ${n}. Another name tells them apart.`;
+/** The sample set's default name, numbered when taken ("shapes-synth-2"). */
+const SYNTH_NAME = 'shapes-synth';
 const FIX: Record<string, string> = { name: 'Fix the name first', path: 'Fix the folder path first', images: 'Fix the image count first', classes: 'Add at least one class', seed: 'Fix the seed first' };
 
 export default function AddDatasetDialog(props: AddDatasetDialogProps) {
@@ -65,7 +70,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   const format = signal<CreateDataset['format']>('auto');
 
   // Synthetic
-  const sName = signal('shapes-synth');
+  const sName = signal('');
   const sImages = signal<number | null>(1000);
   const classes = signal<string[]>(['circle', 'square', 'triangle']);
   const classDraft = signal('');
@@ -74,17 +79,18 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
 
   /** The path as it will be sent: a pasted "Copy as path" loses its quotes. */
   const cleaned = computed(() => cleanPath(path.get()));
-  /** A folder's last path segment, as a default name. */
-  const derivedName = computed(
-    () =>
-      cleaned
-        .get()
-        .replace(/[\\/]+$/, '')
-        .split(/[\\/]/)
-        .pop()
-        ?.replace(/[^A-Za-z0-9._-]/g, '-') ?? '',
-  );
+  /** The datasets there are, when the page did not give them: for names, and to tell a registered folder. */
+  const fetched = signal<readonly { id: string; name: string }[] | null>(null);
+  effect(() => {
+    if (open.get() && !props.known) void hub.api.datasets().then((l) => fetched.set(l), () => {});
+  });
+  /** Names in use (lower case): a default never repeats one, and a typed one that does is pointed out. */
+  const taken = computed(() => new Set((props.known ?? fetched.get() ?? []).map((d) => d.name.toLowerCase())));
+  const isTaken = (n: string) => !!n && taken.get().has(n.toLowerCase());
+  /** The folder's name, tidied and numbered when taken, as the default name. */
+  const derivedName = computed(() => uniqueName(nameFromPath(cleaned.get()), taken.get()));
   const folderName = computed(() => name.get().trim() || derivedName.get());
+  const synthName = computed(() => sName.get().trim() || uniqueName(SYNTH_NAME, taken.get()));
 
   const errs = computed<Partial<Record<string, string | null>>>(() => {
     if (mode.get() === 'folder') {
@@ -97,7 +103,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     const images = sImages.get();
     const s = seed.get();
     return {
-      name: nameError(sName.get()),
+      name: nameError(synthName.get()),
       images: images === null || !Number.isFinite(images) || images < 10 || images > 20000 ? 'Between 10 and 20,000.' : null,
       classes: classes.get().length === 0 ? 'Add at least one class.' : null,
       seed: s === null || !Number.isInteger(s) || s < 0 ? 'A non-negative integer.' : null,
@@ -150,12 +156,12 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     work.set({ what: m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${num(images)} images`, since: Date.now() });
     try {
       // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
-      const before = m === 'folder' ? (props.known ?? (await hub.api.datasets().catch(() => []))) : [];
+      const before = m === 'folder' ? (props.known ?? fetched.peek() ?? (await hub.api.datasets().catch(() => []))) : [];
       const ds =
         m === 'folder'
           ? await hub.api.createDataset({ name: folderName.get(), path: cleaned.get(), format: format.get() })
           : await hub.api.createSyntheticDataset({
-              name: sName.get().trim(),
+              name: synthName.get(),
               images,
               classes: classes.get(),
               imgsz: Number(imgsz.get()),
@@ -268,6 +274,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
                   for={`${uid}-name`}
                   error={show(errs.get().name)}
                   fix={show(errs.get().name) ? nameFix(folderName.get(), (n) => name.set(n)) : null}
+                  hint={isTaken(name.get().trim()) ? takenHint(name.get().trim()) : undefined}
                 >
                   <Input
                     id={`${uid}-name`}
@@ -296,9 +303,17 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
                   label="Name"
                   for={`${uid}-sname`}
                   error={show(errs.get().name)}
-                  fix={show(errs.get().name) ? nameFix(sName.get(), (n) => sName.set(n)) : null}
+                  fix={show(errs.get().name) ? nameFix(synthName.get(), (n) => sName.set(n)) : null}
+                  hint={isTaken(sName.get().trim()) ? takenHint(sName.get().trim()) : undefined}
                 >
-                  <Input id={`${uid}-sname`} bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.get().name)} />
+                  <Input
+                    id={`${uid}-sname`}
+                    bind:value={sName}
+                    placeholder={uniqueName(SYNTH_NAME, taken.get())}
+                    autocomplete="off"
+                    spellcheck={false}
+                    invalid={!!show(errs.get().name)}
+                  />
                 </Field>{' '}
                 <Field label="Classes" for={`${uid}-classes`} error={show(errs.get().classes)} hint={classes.get().length >= MAX_SHAPES ? `${MAX_SHAPES} of ${MAX_SHAPES}: one shape each, so no more fit.` : `Press Enter or comma to add. Up to ${MAX_SHAPES}, one shape each.`}>
                   <ClassChips id={`${uid}-classes`} bind:classes={classes} bind:draft={classDraft} max={MAX_SHAPES} placeholder="circle, square, …" />

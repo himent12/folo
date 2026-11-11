@@ -33,7 +33,7 @@ afterEach(() => {
   target.remove();
 });
 
-async function register(path: string, known?: { id: string }[]) {
+async function register(path: string, known?: { id: string; name: string }[]) {
   const go = vi.spyOn(router, 'go').mockImplementation(() => {});
   c = mount(AddDatasetDialog, { target, props: { open: true, known } });
   flushSync();
@@ -88,7 +88,7 @@ describe('AddDatasetDialog', () => {
 
   it('says a folder is already registered, and opens it, instead of announcing a new dataset', async () => {
 
-    const go = await register('D:\\data\\shapes\\', [{ id: 'ds_fasteners' }, { id: 'ds_shapes' }]);
+    const go = await register('D:\\data\\shapes\\', [{ id: 'ds_fasteners', name: 'fasteners' }, { id: 'ds_shapes', name: 'shapes' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'info', title: 'Already registered as shapes' });
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
   });
@@ -108,7 +108,7 @@ describe('AddDatasetDialog', () => {
     flushSync();
     expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.placeholder).toBe('shapes');
     unmount(c);
-    const go = await register(' "D:\\data\\shapes" ', [{ id: 'ds_fasteners' }]);
+    const go = await register(' "D:\\data\\shapes" ', [{ id: 'ds_fasteners', name: 'fasteners' }]);
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
   });
 
@@ -151,7 +151,7 @@ describe('AddDatasetDialog', () => {
   it('says where the images went when none can train (a COCO test file registered alone)', async () => {
     const ds = await hub.api.dataset('ds_shapes');
     vi.spyOn(hub.api, 'createDataset').mockResolvedValue({ ...ds, id: 'ds_new', name: 'bccd', splits: { train: 0, val: 0, test: 72 } });
-    await register('D:/data/bccd/annotations/instances_test.json', [{ id: 'ds_shapes' }]);
+    await register('D:/data/bccd/annotations/instances_test.json', [{ id: 'ds_shapes', name: 'shapes' }]);
     expect(toast.items[0]).toMatchObject({ title: 'Dataset registered', detail: 'bccd · all 72 images are in the test split, none to train on' });
   });
 
@@ -167,8 +167,30 @@ describe('AddDatasetDialog', () => {
     expect(document.getElementById(input.getAttribute('aria-describedby')!.split(' ')[0]!)?.textContent).toContain('8 of 8');
   });
 
+  it('numbers the default name when it is taken, and points out a typed name that is', async () => {
+    const create = vi.spyOn(hub.api, 'createSyntheticDataset');
+    vi.spyOn(router, 'go').mockImplementation(() => {});
+    const known = [{ id: 'ds_a', name: 'shapes-synth' }, { id: 'ds_b', name: 'bccd' }];
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic', known } });
+    flushSync();
+    const field = document.querySelector<HTMLInputElement>('input[id$="-sname"]')!;
+    expect(field.placeholder).toBe('shapes-synth-2');
+    field.value = 'BCCD';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(document.getElementById(field.getAttribute('aria-describedby')!.split(' ')[0]!)?.textContent).toBe(
+      'A dataset is already called BCCD. Another name tells them apart.',
+    );
+    field.value = '';
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    field.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    await vi.waitFor(() => expect(create).toHaveBeenCalled());
+    expect(create.mock.calls[0]![0].name).toBe('shapes-synth-2');
+  });
+
   it('announces a dataset that was not in the list as new', async () => {
-    const go = await register('D:/data/shapes', [{ id: 'ds_fasteners' }]);
+    const go = await register('D:/data/shapes', [{ id: 'ds_fasteners', name: 'fasteners' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'success', title: 'Dataset registered' });
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
   });

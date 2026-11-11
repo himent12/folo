@@ -232,6 +232,11 @@ async fn coco_folders_and_registration_errors() {
     let page: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images?limit=1", b.id))).await;
     assert!(page.images[0].file.starts_with("images/train/"), "{}", page.images[0].file);
 
+    // A COCO file registered alone is named after the folder above annotations/, numbered as that name is taken.
+    let file = t.join("coco/annotations/instances_train.json");
+    let c: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": file }))).await;
+    assert_eq!(c.name, "coco-2");
+
     let missing = json!({ "path": t.join("nope").to_str().unwrap() });
     err(&app, post_json("/api/datasets", missing), StatusCode::NOT_FOUND, "path_not_found").await;
     std::fs::create_dir_all(t.join("empty")).unwrap();
@@ -241,7 +246,7 @@ async fn coco_folders_and_registration_errors() {
     let bad = json!({ "path": yolo.to_str().unwrap() });
     err(&app, post_json("/api/datasets", bad), StatusCode::BAD_REQUEST, "invalid_dataset").await;
     let list: DatasetList = ok(&app, get("/api/datasets")).await;
-    assert_eq!(list.datasets.len(), 2, "failed registrations are not recorded");
+    assert_eq!(list.datasets.len(), 3, "failed registrations are not recorded");
 }
 
 #[tokio::test]

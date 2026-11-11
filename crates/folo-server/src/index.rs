@@ -220,6 +220,29 @@ pub fn requested_path(raw: &str) -> Result<String> {
     Ok(t.to_string())
 }
 
+/// The name of a dataset registered without one: its folder's name (the folder above `annotations/` for a COCO file,
+/// the folder of a `data.yaml`, a file's stem otherwise), numbered `-2`, `-3`, ... while `taken` says a dataset has it.
+pub fn default_name(path: &Path, taken: impl Fn(&str) -> bool) -> String {
+    let name = |p: Option<&Path>| p.and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
+    let base = if path.is_file() {
+        let dir = path.parent();
+        let yaml =
+            path.extension().is_some_and(|e| e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml"));
+        match name(dir) {
+            Some(d) if yaml => Some(d),
+            Some(d) if d.eq_ignore_ascii_case("annotations") => name(dir.and_then(Path::parent)),
+            _ => path.file_stem().map(|n| n.to_string_lossy().into_owned()),
+        }
+    } else {
+        name(Some(path))
+    };
+    let base = base.filter(|b| !b.trim().is_empty()).unwrap_or_else(|| "dataset".into());
+    if !taken(&base) {
+        return base;
+    }
+    (2..).map(|n| format!("{base}-{n}")).find(|n| !taken(n)).expect("some number is free")
+}
+
 use folo_data::paths::relative_to;
 pub use folo_data::paths::{lexical, normalize as absolute};
 
@@ -504,6 +527,23 @@ mod tests {
 
     fn tmp(tag: &str) -> TestDir {
         TestDir::new(&format!("index-{tag}"))
+    }
+
+    #[test]
+    fn default_names_come_from_the_folder_and_are_numbered_when_taken() {
+        let dir = tmp("names");
+        let bccd = dir.join("bccd");
+        std::fs::create_dir_all(bccd.join("annotations")).unwrap();
+        for f in ["annotations/instances_test.json", "data.yaml", "loose.json"] {
+            std::fs::write(bccd.join(f), "{}").unwrap();
+        }
+        let free = |_: &str| false;
+        assert_eq!(default_name(&bccd, free), "bccd");
+        assert_eq!(default_name(&bccd.join("annotations/instances_test.json"), free), "bccd");
+        assert_eq!(default_name(&bccd.join("data.yaml"), free), "bccd");
+        assert_eq!(default_name(&bccd.join("loose.json"), free), "loose");
+        let taken = |n: &str| ["bccd", "bccd-2"].contains(&n.to_lowercase().as_str());
+        assert_eq!(default_name(&bccd, taken), "bccd-3");
     }
 
     #[test]

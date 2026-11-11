@@ -1,6 +1,7 @@
 //! [`Store`] for [`MockStore`].
 
 use std::io::Cursor;
+use std::path::Path;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -12,7 +13,7 @@ use folo_api::{
 };
 
 use crate::error::{Error, Result};
-use crate::index::{Index, requested_path};
+use crate::index::{Index, default_name, requested_path};
 use crate::store::{
     ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
     Store, Subscription, Weights, WeightsFormat,
@@ -220,11 +221,7 @@ impl Store for MockStore {
             list.iter().any(|d| d.meta().id == id)
         });
         let name = req.name.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| {
-            index
-                .base
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "dataset".into())
+            default_name(Path::new(&req.path), |n| list.iter().any(|d| d.meta().name.eq_ignore_ascii_case(n)))
         });
         let meta = Dataset {
             id,
