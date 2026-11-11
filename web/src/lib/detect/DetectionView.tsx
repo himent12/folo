@@ -219,11 +219,13 @@ export default function DetectionView(props: DetectionViewProps) {
                         <>
                           {c() && c()!.leader > 0 ? (
                             /* Hung below its box: a leader from the box's bottom stroke keeps ownership readable. */
+                            /* Each binding reads the chip again (`?.`): the list can shrink under a binding that has not
+                               re-run yet (a threshold drag), so the chip checked above may be gone. */
                             <span
                               class="leader"
-                              style:left={`${Math.max(0, c()!.dx + 6) - 2}px`}
+                              style:left={`${Math.max(0, (c()?.dx ?? 0) + 6) - 2}px`}
                               style:top={`${(b().y2 - b().y1) * geo.get()!.s + 2}px`}
-                              style:height={`${c()!.dy - (b().y2 - b().y1) * geo.get()!.s - 4 + clear()}px`}
+                              style:height={`${(c()?.dy ?? 0) - (b().y2 - b().y1) * geo.get()!.s - 4 + clear()}px`}
                             ></span>
                           ) : null}
                           <span
