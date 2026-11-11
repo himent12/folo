@@ -57,6 +57,54 @@ describe('ErrorState', () => {
     r.done();
   });
 
+  it('says a deleted thing is gone the same way on every screen: its list, no Retry, no agent hint (shell F7)', () => {
+    for (const [code, title, msg, list, path] of [
+      ['run_not_found', 'Run not found', 'This run was deleted or the link is wrong.', 'All runs', '#/runs'],
+      ['model_not_found', 'Model not found', 'This model was deleted or the link is wrong.', 'All models', '#/models'],
+      ['dataset_not_found', 'Dataset not found', 'This dataset was deleted or the link is wrong.', 'All datasets', '#/datasets'],
+      ['bench_not_found', 'Benchmark not found', 'This benchmark was deleted or the link is wrong.', 'All benchmarks', '#/benchmarks'],
+      ['label_job_not_found', 'Labeling job not found', 'This labeling job was deleted or the link is wrong.', 'All labeling jobs', '#/datasets/label'],
+    ]) {
+      const r = render({
+        error: new ApiError(404, code!, `thing 'x_1' does not exist`, 'list_things (MCP) or GET /api/things lists the things that exist'),
+        title: 'Could not load this',
+        retry: () => {},
+      });
+      expect(r.text('.title')).toBe(title);
+      expect(r.text('.msg')).toBe(msg);
+      expect(r.target.querySelector('.hint')).toBeNull();
+      expect(r.target.textContent).not.toContain('MCP');
+      const buttons = [...r.target.querySelectorAll('.acts a, .acts button')];
+      expect(buttons.map((b) => b.textContent?.trim())).toEqual([list]);
+      expect(buttons[0]!.getAttribute('href')).toBe(path);
+      expect(r.text('.code .line')).toBe(`${code} · HTTP 404`);
+      r.done();
+    }
+  });
+
+  it('leaves the way to the list to the page header when it has that link already', () => {
+    const page = document.createElement('div');
+    page.className = 'page';
+    page.innerHTML = '<header><a href="#/models">All models</a></header>';
+    document.body.appendChild(page);
+    const c = mount(() => <ErrorState error={new ApiError(404, 'model_not_found', "model 'm_1' does not exist")} />, page);
+    flushSync();
+    expect(page.querySelector('.err .acts')).toBeNull();
+    c.unmount();
+    page.remove();
+  });
+
+  it('keeps a 404 that is not a deleted thing (a device) as an error, and an agent-only hint with the details', () => {
+    const r = render({ error: new ApiError(404, 'device_not_found', 'no gpu:3', null), retry: () => {}, title: 'Could not start' });
+    expect(r.text('.title')).toBe('Could not start');
+    expect(r.text('.acts button')).toContain('Retry');
+    r.done();
+    const agent = render({ error: new ApiError(409, 'run_active', 'a run is active', 'run_status (GET /api/runs/{id}) has its state'), title: 'Could not delete' });
+    expect(agent.target.querySelector('.hint')).toBeNull();
+    expect([...agent.target.querySelectorAll('.code .line')].map((e) => e.textContent)).toContain('Server hint: Run_status (GET /api/runs/{id}) has its state.');
+    agent.done();
+  });
+
   it('shows no hint when the server had none', () => {
     const r = render({ error: new ApiError(500, 'internal', 'boom', null) });
     expect(r.target.querySelector('.hint')).toBeNull();
