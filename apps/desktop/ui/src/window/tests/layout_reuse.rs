@@ -241,3 +241,27 @@ fn a_root_laid_out_less_often_than_last_frame_is_laid_out_anew() {
         .expect("window");
     assert_eq!(frames.0, frames.1);
 }
+
+#[test]
+fn a_scale_change_lays_out_anew() {
+    // 300 x 200 logical at 1x, then 150 x 100 at 2x: the same device size, the same styles. The text needs
+    // twice the device pixels: what the tree recorded at 1x must not answer.
+    let render = |_: &mut crate::Window, _: &mut crate::Context<super::TestView>| {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(div().bg(hsla(0.3, 0.6, 0.6, 1.)).child(SharedString::from("loss 0.6123 epoch")))
+            .into_any_element()
+    };
+    let (mut app, handle) = open(size(px(300.), px(200.)), 1.0, render);
+    app.update(|cx| {
+        cx.update_window(handle, |_, window, cx| window.on_resize(size(px(150.), px(100.)), 2.0, cx))
+    })
+    .expect("window");
+    let rescaled = app.frame(handle).clone();
+    let (mut fresh, fresh_handle) = open(size(px(150.), px(100.)), 2.0, render);
+    let fresh_quads = super::quads_of(&mut fresh, fresh_handle, hsla(0.3, 0.6, 0.6, 1.));
+    assert_eq!(super::quads_of(&mut app, handle, hsla(0.3, 0.6, 0.6, 1.)), fresh_quads);
+    assert!(fresh.frame(fresh_handle) == &rescaled);
+}
