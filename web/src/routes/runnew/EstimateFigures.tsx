@@ -21,7 +21,10 @@ import { roughBytes, type Shown } from './summary';
 
 export interface EstimateFiguresProps {
   where: string;
-  /** Settings no figure can stand for (a dataset with nothing to train on): dashes, never 0 steps or "under 1 min". */
+  /**
+   * Settings no figure can stand for (an epoch count out of range, a dataset with nothing to train on): dashes, never a
+   * figure for settings Start refuses.
+   */
   blocked: boolean;
   estReady: boolean;
   sched: Warmup;

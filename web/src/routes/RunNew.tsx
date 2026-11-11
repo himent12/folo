@@ -392,8 +392,9 @@ export default function RunNew() {
   );
   const valid = computed(() => prefilled.get() && Object.values(errors.get()).every((e) => e === null));
   /**
-   * Settings no estimate can stand for: no dataset, or one with nothing to train on. The Summary shows dashes (never
-   * "0 optimizer steps" or "under 1 min"), no memory verdict, and the server is not asked.
+   * Settings no estimate can stand for: no dataset, or one with nothing to train on, or an epoch count (or Close mosaic)
+   * out of range. The Summary shows dashes (never "0 optimizer steps", "under 1 min" or "24–55 h" for 99,999 epochs),
+   * no memory verdict, and the server is not asked.
    */
   const noFigures = computed(() => !!errors.get().dataset || !isInt(epochs.get(), 1, 10000) || !!errors.get().close);
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
@@ -612,7 +613,7 @@ export default function RunNew() {
   const Figures = (p: { where: string }) => (
     <EstimateFigures
       where={p.where}
-      blocked={!!errors.get().dataset}
+      blocked={noFigures.get()}
       estReady={estReady.get()}
       sched={sched.get()}
       batchN={batchN.get()}

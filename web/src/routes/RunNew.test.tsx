@@ -670,3 +670,24 @@ describe('New run: start from a model of another size', () => {
     expect(target.querySelector('#weights-error')).toBeNull();
   });
 });
+
+describe('New run: an epoch count out of range', () => {
+  it('shows no estimate while the field is wrong, and the figures again once it is fixed', async () => {
+    await open();
+    const est = () => [...target.querySelectorAll('.summary .est > dd.num')].map((d) => d.textContent);
+    const type = (v: string) => {
+      const el = target.querySelector<HTMLInputElement>('input#epochs')!;
+      el.value = v;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      flushSync();
+    };
+    for (const bad of ['99999', '0']) {
+      type(bad);
+      expect(target.querySelector('#epochs-error')).not.toBeNull();
+      expect(est()).toEqual(['—no estimate', '—no estimate']);
+    }
+    type('20');
+    await until(() => !est().includes('—no estimate'), 'the figures');
+    expect(est()[1]).toMatch(/\d/);
+  });
+});
