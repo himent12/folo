@@ -432,8 +432,10 @@ pairs models by size, so a folo-s against yolo26s table is added the same way on
   Vulkan; `folo val` of the copied-back `best.folo` on the CPU of the control plane. Ultralytics 8.4.198 with torch
   2.5.1+cu124 on one `ubuntu:22.04` pod (NVIDIA driver 595.91): seed 0 of every dataset alone on the GPU, seeds 1
   and 2 two at a time (to fit the budget), which changes no number but their training time. The whole matrix
-  cost about $1.55 (the from-scratch control of brain-tumor ran a little later than the rest, on the same GPU
-  type).
+  cost about $1.55 of A40 time: $0.93 for FOLO's 19 pods (FOLO's own per-pod estimates; $0.856 of it is in the
+  result files, the rest is 3 runs repeated after a runner bug) and $0.62 for Ultralytics' two pods (by uptime,
+  one of them a pod that never started); the from-scratch control of brain-tumor ran a little later than the
+  rest, on the same GPU type. bench/finetune/README.md has the accounting and its sources.
 
 <!-- finetune:begin -->
 | dataset | domain | licence | classes | train images | train boxes | scored on: images / boxes |
