@@ -35,7 +35,7 @@ import { tooltip } from '$lib/ui/tooltip';
 import type { AgentChoice } from './agentChoice';
 import { newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
 import EditCanvas from './EditCanvas';
-import { imageState } from './words';
+import { askOutcome, imageState } from './words';
 
 export interface EditorProps {
   live: LiveLabelJob;
@@ -89,6 +89,7 @@ export default function Editor(props: EditorProps) {
       draft.set(cur.boxes);
       selected.set(null);
       note.set('');
+      asked.set(null);
       status.clear();
     } else if (!sameBoxes(cur.boxes, base.get()) && sameBoxes(draft.get(), base.get())) {
       base.set(cur.boxes);
@@ -223,6 +224,18 @@ export default function Editor(props: EditorProps) {
   // ---------- asking the agent again ----------
   const note = signal('');
   const asking = signal(false);
+  /** When the run "Ask the agent again" started began (its `started`), followed until it ends; null: none. */
+  const asked = signal<string | null>(null);
+  // Once that run ends, the status line says what came of it: the new boxes, the agent's error, or the stop.
+  effect(() => {
+    const started = asked.get();
+    const run = props.job.run;
+    if (started === null || !run || run.started !== started || run.outcome === null) return;
+    const out = askOutcome(run, img.get());
+    if (!out) return;
+    asked.set(null);
+    status.show(out.tone, out.title, out.detail);
+  });
   const askWhy = computed(() =>
     props.job.status !== 'idle'
       ? 'The agent is busy with a run; ask once it is done'
@@ -241,8 +254,10 @@ export default function Editor(props: EditorProps) {
     asking.set(true);
     status.clear();
     try {
-      await props.live.act(() => hub.api.startLabeling(props.job.id, { ...req, image_ids: [cur.id], note: note.peek().trim() }));
+      const job = await props.live.act(() => hub.api.startLabeling(props.job.id, { ...req, image_ids: [cur.id], note: note.peek().trim() }));
       status.info(`${props.choice.agent?.name ?? 'The agent'} is labeling this image again`, 'Its new boxes show here when it is done.');
+      // After the line above: a run that has already ended (an agent that fails at once) replaces it.
+      if (job.run) asked.set(job.run.started);
     } catch (e) {
       status.error(e, 'Could not ask the agent');
     } finally {

@@ -63,6 +63,20 @@ export function usageFacts(u: LabelUsage): string[] {
   ];
 }
 
+/**
+ * What the editor says once the run "Ask the agent again" started has ended: the image's new boxes, why the agent
+ * could not label it (the run's error and hint, or the image's own), or that the run was stopped. Null while the
+ * image is still with the agent (its last event may come after the run's end).
+ */
+export function askOutcome(run: LabelRun, img: LabelImage | undefined): { tone: 'success' | 'info' | 'error'; title: string; detail?: string } | null {
+  const failed = `${AGENT_NAME[run.agent]} could not label it again`;
+  if (run.outcome === 'failed') return { tone: 'error', title: failed, detail: [run.error, run.hint].filter(Boolean).join(' ') || undefined };
+  if (run.outcome === 'stopped') return { tone: 'info', title: 'The run was stopped', detail: 'The image keeps the boxes it had.' };
+  if (!img || img.status === 'labeling') return null;
+  if (img.status === 'failed') return { tone: 'error', title: failed, detail: img.error ?? undefined };
+  return { tone: 'success', title: 'New boxes', detail: imageState(img) };
+}
+
 /** An image's state in words, as the editor says it: a failed one with the reason the server gives. */
 export function imageState(img: LabelImage): string {
   if (img.status === 'labeling') return 'The agent is labeling it';

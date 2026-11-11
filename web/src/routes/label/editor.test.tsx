@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The labeling editor on the job page, over the mock: saving (also while another image opens or the boxes change),
 // leaving with unsaved boxes by any route, saving an image not labeled yet as it is, its keys only while it is the
-// topmost dialog, and the keyboard's way to add, move and resize a box.
+// topmost dialog, the keyboard's way to add, move and resize a box, and "Ask the agent again" following its run.
 import { flush as flushSync } from 'fw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
@@ -242,6 +242,32 @@ describe('the labeling editor: keys', () => {
   it('leaves the arrows alone when no box is selected', async () => {
     await openEditor('1');
     expect(key('ArrowRight').defaultPrevented).toBe(false);
+  });
+});
+
+describe('the labeling editor: asking the agent again', () => {
+  it("follows the run it started: the line becomes the image's new boxes once the run ends", async () => {
+    await openEditor('2');
+    const ask = await vi.waitFor(() => {
+      flushSync();
+      const b = inEditor('Ask Claude Code');
+      if (!b || b.disabled) throw new Error('agents loading');
+      return b;
+    });
+    click(ask);
+    const line = () => editor()!.querySelector('.dialog-status')?.textContent ?? '';
+    await vi.waitFor(() => {
+      flushSync();
+      expect(line()).toMatch(/is labeling this image again/);
+    });
+    // The mock's agent answers a call 1.5 s after the run starts: its stream applies it on the next tick.
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now + 2000);
+    await vi.waitFor(() => {
+      flushSync();
+      expect(line()).toMatch(/New boxes/);
+    });
+    expect(line()).not.toMatch(/is labeling this image again/);
   });
 });
 

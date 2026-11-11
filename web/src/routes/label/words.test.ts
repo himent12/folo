@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LabelAgent, LabelImage, LabelJob, LabelRun } from '$lib/api/types';
 import { classChangeError, classesError } from '$lib/label';
-import { imageState, jobStatus, modelLabel, runAgent, tokens, usageFacts } from './words';
+import { askOutcome, imageState, jobStatus, modelLabel, runAgent, tokens, usageFacts } from './words';
 
 const job = (status: LabelJob['status'], outcome: LabelRun['outcome'] = null) => ({ status, run: outcome ? { outcome } : null }) as LabelJob;
 const claude = { id: 'claude', models: [{ id: 'sonnet', label: 'Sonnet' }] } as LabelAgent;
@@ -48,6 +48,26 @@ describe('agents and images', () => {
     expect(imageState(img('labeled', 0, 'manual'))).toBe('No objects, edited by hand');
     expect(imageState(img('failed'))).toBe('The agent could not label it');
     expect(imageState({ ...img('failed'), error: 'the reply left this image out' })).toBe('The agent could not label it: the reply left this image out');
+  });
+});
+
+describe('askOutcome', () => {
+  const run = (outcome: LabelRun['outcome'], error: string | null = null, hint: string | null = null) => ({ agent: 'claude', outcome, error, hint }) as LabelRun;
+  const img = (status: LabelImage['status'], boxes = 0, error: string | null = null) => ({ status, boxes: Array.from({ length: boxes }), source: 'agent', error }) as LabelImage;
+
+  it("turns the editor's line into the run's error, the image's own error or its new boxes once the run ends", () => {
+    expect(askOutcome(run('failed', '`claude` printed no result', 'Run `claude -p hi`.'), img('pending'))).toEqual({
+      tone: 'error',
+      title: 'Claude Code could not label it again',
+      detail: '`claude` printed no result Run `claude -p hi`.',
+    });
+    expect(askOutcome(run('completed'), img('failed', 0, 'the reply left this image out'))).toMatchObject({ tone: 'error', detail: 'the reply left this image out' });
+    expect(askOutcome(run('completed'), img('labeled', 2))).toEqual({ tone: 'success', title: 'New boxes', detail: '2 boxes, drawn by the agent' });
+    expect(askOutcome(run('stopped'), img('labeled', 2))?.tone).toBe('info');
+  });
+
+  it('waits while the image is still with the agent', () => {
+    expect(askOutcome(run('completed'), img('labeling'))).toBeNull();
   });
 });
 
