@@ -204,6 +204,7 @@ export default function Inspector(props: InspectorProps) {
     if (!v) return;
     const onwheel = (e: WheelEvent) => {
       e.preventDefault();
+      touched.set(true);
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? vh.peek() : 1;
       const [px, py] = local(e);
       zoomAt(Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.002)), px, py, false);
@@ -215,7 +216,8 @@ export default function Inspector(props: InspectorProps) {
   const pointers = new Map<number, { x: number; y: number }>();
   let pinch: { d: number; mx: number; my: number } | null = null;
   const dragging = signal(false);
-  /** The touch gesture hint fades once someone has touched the image. */
+  /** The hint over the image (keys, gestures) fades once someone has used the viewer (a key, the wheel, a press), so
+   *  it never sits on boxes in the corner for longer than it takes to read. */
   const touched = signal(false);
 
   function pinchState() {
@@ -226,7 +228,7 @@ export default function Inspector(props: InspectorProps) {
 
   function onpointerdown(e: PointerEvent) {
     if (e.button !== 0) return;
-    if (e.pointerType === 'touch') touched.set(true);
+    touched.set(true);
     viewport.peek()!.setPointerCapture(e.pointerId);
     const [px, py] = local(e);
     pointers.set(e.pointerId, { x: px, y: py });
@@ -288,6 +290,7 @@ export default function Inspector(props: InspectorProps) {
     else if (k === '0') fit();
     else return;
     e.preventDefault();
+    touched.set(true);
   }
 
   const zoomTools = () => (
@@ -326,8 +329,10 @@ export default function Inspector(props: InspectorProps) {
               <span class="file mono truncate" title={im().file}>
                 {stem(im().file)}
               </span>
+              {/* One line on phones too: "train", without the word split beside the cut file name. */}
               <span class="split" title="Split">
-                {im().split} split
+                {im().split}
+                <span class="split-word"> split</span>
               </span>
             </>
           ) : (
@@ -497,6 +502,8 @@ css`
     font-weight: var(--weight-medium);
   }
   .split {
+    flex-shrink: 0;
+    white-space: nowrap;
     color: var(--text-tertiary);
   }
   .pos {
@@ -618,18 +625,18 @@ css`
   .hint .touch {
     display: none;
   }
+  .hint {
+    transition: opacity var(--dur-slow) var(--ease-in);
+  }
+  .hint.touched {
+    opacity: 0;
+  }
   @media (pointer: coarse) {
     .hint .fine {
       display: none;
     }
     .hint .touch {
       display: inline-flex;
-    }
-    .hint {
-      transition: opacity var(--dur-slow) var(--ease-in);
-    }
-    .hint.touched {
-      opacity: 0;
     }
   }
   @keyframes enter {
@@ -660,6 +667,9 @@ css`
     }
     header {
       padding-left: var(--space-3);
+    }
+    .split-word {
+      display: none;
     }
     /* The zoom bar under the image carries the controls and the gesture hint. */
     .head-zoom,
