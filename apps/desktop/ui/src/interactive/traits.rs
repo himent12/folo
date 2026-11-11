@@ -113,7 +113,7 @@ pub trait InteractiveElement: Sized {
         todo!("window")
     }
 
-    /// Any mouse move while the window has the element painted (bubble, when hovered or not: GPUI's rule).
+    /// A mouse move over the element (bubble phase, only while its hitbox is hovered, as GPUI).
     fn on_mouse_move(mut self, _listener: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static) -> Self {
         let _ = self.interactivity();
         todo!("window")
