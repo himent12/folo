@@ -12,7 +12,7 @@ use super::duration_of;
 use crate::api::{Run, RunExt, RunStatus, time};
 use crate::app::{FoloApp, Route, RunFilter, act};
 use crate::controls::Btn;
-use crate::screens::{loading_rows, page_header, th};
+use crate::screens::{FirstStep, loading_rows, page_header, th};
 use crate::theme::{theme, ty};
 use crate::ui::*;
 
@@ -318,6 +318,8 @@ impl FoloApp {
                 .into_any_element()
             })
             .collect();
+        let step = self.next_first_step();
+        let mut first = self.first_step_button("runs-first", step, window, cx);
         // A filter that hides every run says how to see them again.
         let show_all = (rows.is_empty() && total > 0).then(|| {
             self.button(
@@ -336,6 +338,18 @@ impl FoloApp {
         let table = panel(&t).overflow_hidden().child(head).map(|d| {
             if self.store.runs.is_loading() {
                 d.child(loading_rows(&t, "runs", 6))
+            } else if total == 0 {
+                // An empty server: what to do first, and the button that does it.
+                let body = match step {
+                    FirstStep::AddDataset => {
+                        "Training needs a dataset first: add a YOLO or COCO folder, or generate a synthetic one."
+                    }
+                    _ => "Start one with New run: pick a dataset, an architecture and how long to train.",
+                };
+                d.child(
+                    empty_state(&t, "icons/activity.svg", "No runs yet", body, Tone::Neutral)
+                        .children(first.take()),
+                )
             } else if rows.is_empty() {
                 d.child(
                     empty_state(
