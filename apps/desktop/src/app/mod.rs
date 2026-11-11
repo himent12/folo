@@ -16,6 +16,8 @@ mod playground;
 mod preferences;
 mod render;
 mod sidebar;
+#[cfg(test)]
+pub(crate) mod tests;
 mod titlebar;
 
 use std::cell::RefCell;

@@ -136,9 +136,10 @@ impl FoloApp {
             ds_i,
             window,
             cx,
-            Rc::new(|this, i, _, _| {
+            Rc::new(|this, i, _, cx| {
                 if let Some(f) = this.new_run.as_mut() {
                     f.dataset = i;
+                    this.resuggest_run_name(cx);
                 }
             }),
         );
@@ -167,7 +168,20 @@ impl FoloApp {
         let arch_seg = div()
             .w_full()
             .font_family(crate::theme::MONO)
-            .child(seg(self, "nr-arch", &["n", "s", "m", "l", "x"], arch, window, cx, |f, i| f.arch = i))
+            .child(self.segmented_fill(
+                "nr-arch",
+                &["n", "s", "m", "l", "x"],
+                arch,
+                window,
+                cx,
+                Rc::new(|this, i, _, cx| {
+                    if let Some(f) = this.new_run.as_mut() {
+                        f.arch = i;
+                        // The suggested name carries the architecture's letter.
+                        this.resuggest_run_name(cx);
+                    }
+                }),
+            ))
             .into_any_element();
         let batch_labels: Vec<String> = BATCHES.iter().map(|b| b.to_string()).collect();
         let batch_refs: Vec<&str> = batch_labels.iter().map(String::as_str).collect();

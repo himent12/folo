@@ -14,6 +14,7 @@ use crate::ui::*;
 
 use super::forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, batch_index, carry_over, parse_epochs, parse_lr,
+    suggested_name,
 };
 use super::{FoloApp, Route, RunFilter};
 
@@ -82,6 +83,8 @@ impl FoloApp {
                 let (hi, hv) = (f.hours_input.clone(), crate::ui::hours_value(c.max_hours));
                 hi.update(cx, |i, cx| i.set_text(hv, cx));
             }
+            // Named after that run, not suggested from the choices: it stays as it is.
+            f.name_suggested = None;
             let input = f.name.clone();
             input.update(cx, |i, cx| i.set_text(name, cx));
         }
@@ -125,9 +128,10 @@ impl FoloApp {
             .ready()
             .and_then(|d| d.get(idx))
             .map_or("shapes".to_string(), |d| d.name.clone());
+        let suggested = suggested_name(&ds_name, ARCHS[1], n);
         let name = cx.new(|cx| {
             let mut i = TextInput::new("run name", cx);
-            i.set_text(format!("{ds_name}-s-{n}"), cx);
+            i.set_text(suggested.clone(), cx);
             i
         });
         let fh = name.read(cx).focus_handle(cx);
@@ -152,6 +156,15 @@ impl FoloApp {
             i
         });
         let subs = vec![
+            cx.subscribe(&name, |this: &mut Self, _, ev: &InputEvent, _| {
+                let InputEvent::Changed(s) = ev;
+                // Any other text than the suggestion is the user's: it stays as typed.
+                if let Some(f) = this.new_run.as_mut()
+                    && f.name_suggested.as_deref().is_some_and(|n| n != s.as_ref())
+                {
+                    f.name_suggested = None;
+                }
+            }),
             cx.subscribe(&hours_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                 let InputEvent::Changed(s) = ev;
                 if let Some(f) = this.new_run.as_mut() {
@@ -214,6 +227,7 @@ impl FoloApp {
         ];
         self.new_run = Some(NewRunForm {
             name,
+            name_suggested: Some(suggested),
             dataset: idx,
             arch: 1,
             epochs: 100.0,
@@ -253,6 +267,19 @@ impl FoloApp {
         });
         window.focus(&fh);
         cx.notify();
+    }
+
+    /// Suggests the name again for the form's dataset and architecture, unless it was typed.
+    pub fn resuggest_run_name(&mut self, cx: &mut Context<Self>) {
+        let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
+        let Some(f) = self.new_run.as_mut() else { return };
+        let Some(ds) = self.store.datasets.ready().and_then(|d| d.get(f.dataset)) else { return };
+        let name = suggested_name(&ds.name, ARCHS[f.arch], n);
+        if f.name_suggested.as_ref().is_none_or(|s| *s == name) {
+            return;
+        }
+        f.name_suggested = Some(name.clone());
+        f.name.clone().update(cx, |i, cx| i.set_text(name, cx));
     }
 
     /// The New run form as the config it would submit (its name as typed), or None without a

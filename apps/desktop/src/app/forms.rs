@@ -74,8 +74,17 @@ pub struct SynthForm {
     pub error: Option<String>,
 }
 
+/// The name New run suggests: the dataset, the architecture's letter and the run's number
+/// ("shapes-n-4").
+pub fn suggested_name(dataset: &str, arch: Arch, n: usize) -> String {
+    format!("{dataset}-{}-{n}", arch.as_str().trim_start_matches("folo-"))
+}
+
 pub struct NewRunForm {
     pub name: Entity<TextInput>,
+    /// The name the form suggested while the field still holds it: it follows the dataset and the
+    /// architecture until the name is typed (then `None`).
+    pub name_suggested: Option<String>,
     pub dataset: usize,
     pub arch: usize,
     pub epochs: f32,
@@ -241,7 +250,14 @@ mod retry_tests {
 
 #[cfg(test)]
 mod form_tests {
-    use super::{format_lr, parse_epochs, parse_lr};
+    use super::{format_lr, parse_epochs, parse_lr, suggested_name};
+
+    #[test]
+    fn suggested_names_follow_the_choices() {
+        assert_eq!(suggested_name("shapes-ux", crate::api::Arch::S, 4), "shapes-ux-s-4");
+        assert_eq!(suggested_name("shapes-ux", crate::api::Arch::N, 4), "shapes-ux-n-4");
+        assert_eq!(suggested_name("bccd", crate::api::Arch::X, 12), "bccd-x-12");
+    }
 
     #[test]
     fn typed_numbers_validate() {
