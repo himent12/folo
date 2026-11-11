@@ -6,13 +6,14 @@
 // Then the run splits where Svelte's text sequence would have ended at a `{@render}`: the text before that part stays
 // in the run's node, the part is rendered after it, and the text after it is a run of its own. Nothing is evaluated
 // twice: the effect that found the part becomes that part's own effect, keeping only what the part read, so a change
-// in the text around it never re-creates it.
+// in the text around it never re-creates it. What the part renders is a memo the run owns, so reading it again (a
+// later split elsewhere in the run) never re-creates it either.
 //
 // A run in a template is inside an element: what a split renders goes in beside it. A run in a fragment has no element
 // of its own, and the insert that holds the fragment knows only the nodes it was given: such a run is a reader of its
 // nodes, which a split (at creation or later) extends, so that insert places, moves and removes them all.
 
-import { dropSourcesThrough, getOwner, isReader, reader, renderEffect, runWithOwner, signal, sourceMark, untrack, type Owner, type Reader, type Signal } from './core';
+import { dropSourcesThrough, getOwner, isReader, memo, reader, renderEffect, runWithOwner, signal, sourceMark, untrack, type Owner, type Reader, type Signal } from './core';
 import { insert } from './dom';
 
 type Part = string | (() => unknown);
@@ -90,7 +91,9 @@ function bind(node: Text, parts: Part[], owner: Owner | null, nodes: Nodes | nul
       const after = parts.slice(i + 1);
       runWithOwner(owner, () => {
         bind(node, before, owner, nodes);
-        const rendered = reader(() => content!.get());
+        // The part's content, owned by the run and created once per value (a snippet is called once): an insert that
+        // reads it again (the fragment's, when another part splits later) gets the same nodes, never new ones.
+        const rendered = memo(() => content!.get());
         if (nodes !== null) {
           const rest = after.length > 0 ? document.createTextNode('') : null;
           const added: JSX.Element[] = rest !== null ? [rendered as JSX.Element, rest] : [rendered as JSX.Element];

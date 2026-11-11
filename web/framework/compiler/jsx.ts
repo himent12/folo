@@ -30,6 +30,7 @@ import {
   type Knowledge,
 } from './ast.ts';
 import { cleanJsxText, decodeEntities, escapeAttr, escapeText, RAW_TEXT, SVG, VOID } from './html.ts';
+import { eventOf } from '../runtime/names.ts';
 
 type Node = any;
 type Range = { s: number; e: number };
@@ -739,9 +740,7 @@ class Template {
         continue;
       }
       if (name.length > 2 && name.startsWith('on')) {
-        let type = name.slice(2).toLowerCase();
-        const capture = type.endsWith('capture') && type !== 'gotpointercapture' && type !== 'lostpointercapture';
-        if (capture) type = type.slice(0, -7);
+        const { type, capture } = eventOf(name.slice(2).toLowerCase());
         if (!expr) c.fail(a, `${name} takes a handler`);
         const handler: Chunk[] = isDynamic(expr) ? ['function (e) { const h = ', ...c.paren(expr, svg), '; return h == null ? undefined : h.call(this, e); }'] : c.paren(expr, svg);
         if (!capture && DELEGATED.has(type)) {

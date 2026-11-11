@@ -1,9 +1,9 @@
 // Control flow: Show ({#if}), For ({#each} with a key), Index ({#each} without one), Switch/Match ({#if}/{:else if}),
 // Key ({#key}), Dynamic (<svelte:element> / a component chosen at runtime), Portal.
 
-import { createRoot, computed, getOwner, isReader, memo, onCleanup, owning, reader, renderEffect, signal, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
+import { createRoot, computed, getOwner, isReader, memo, onCleanup, owning, reader, signal, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
 import { createComponent, splitProps } from './component';
-import { insert, insertExpression, removeInserted } from './dom';
+import { insert, setLeave } from './dom';
 import { spread } from './spread';
 import { inBranch, leaveBranch, type Branch } from './transition';
 
@@ -380,17 +380,29 @@ export function Dynamic<P>(props: DynamicProps<P>): JSX.Element {
 // Portal
 
 /**
- * Renders its children into `mount` (default `document.body`) instead of in place, after what the mount holds; its
- * nodes leave the mount with its owner (what else the mount holds stays).
+ * Renders its children into `mount` (default `document.body`) instead of in place, after what the mount holds. It
+ * renders between two empty comments of its own, so everything between them is its own: when it goes, all of that
+ * goes, nodes still playing an outro too, and what else the mount holds stays.
  */
 export function Portal(props: { mount?: Node; children: JSX.Element }): JSX.Element {
   const mount = props.mount ?? document.body;
   const owner: Owner | null = getOwner();
   createRoot(() => {
-    // `insert(mount, () => props.children, null)`, keeping what it rendered for the removal.
-    let current: unknown = [];
-    renderEffect<unknown>((c) => (current = insertExpression(mount, props.children, c, null, false, true)), current);
-    onCleanup(() => removeInserted(current));
+    const start = mount.appendChild(document.createComment(''));
+    const end = mount.appendChild(document.createComment(''));
+    insert(mount, () => props.children, end);
+    onCleanup(() => {
+      const parent = start.parentNode;
+      if (parent === null) return;
+      for (let n = start.nextSibling; n !== null && n !== end; ) {
+        const next: ChildNode | null = n.nextSibling;
+        setLeave(n, undefined);
+        parent.removeChild(n);
+        n = next;
+      }
+      start.remove();
+      end.remove();
+    });
   }, owner);
   return undefined;
 }

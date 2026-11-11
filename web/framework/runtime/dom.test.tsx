@@ -225,6 +225,19 @@ describe('attributes', () => {
     expect(h2).toHaveBeenCalledTimes(1);
   });
 
+  it('spread ongotpointercapture / onlostpointercapture listen to those events (not a capture phase)', () => {
+    const got = vi.fn();
+    const lost = vi.fn();
+    const props = { ongotpointercapture: got, onlostpointercapture: lost };
+    const { container, unmount } = render(() => <div {...props} />);
+    const div = container.querySelector('div')!;
+    div.dispatchEvent(new Event('gotpointercapture'));
+    div.dispatchEvent(new Event('lostpointercapture'));
+    expect(got).toHaveBeenCalledOnce();
+    expect(lost).toHaveBeenCalledOnce();
+    unmount();
+  });
+
   it('a spread class that goes away is removed; the scope class and class: directives stay', () => {
     const props = signal<Record<string, unknown>>({ class: 'old', title: 't' });
     const active = signal(true);
@@ -580,6 +593,50 @@ describe('Svelte attribute and prop semantics', () => {
     bound!.selectedIndex = 0;
     bound!.dispatchEvent(new Event('change'));
     expect(v.get()).toBe(0);
+    unmount();
+  });
+
+  it('a spread <option> value keeps the number: single and multiple selects bound to numbers select it', () => {
+    const one = signal<number>(1);
+    const many = signal<number[]>([1]);
+    const extra = { title: 'opt' };
+    const { container, unmount } = render(() => (
+      <div>
+        <select bind:value={one}>
+          <option {...extra} value={0}>zero</option>
+          <option {...extra} value={1}>one</option>
+        </select>
+        <select multiple bind:value={many}>
+          <option {...extra} value={0}>zero</option>
+          <option {...extra} value={1}>one</option>
+        </select>
+      </div>
+    ));
+    flush();
+    const [single, multi] = container.querySelectorAll('select');
+    expect(single!.selectedIndex).toBe(1);
+    expect([...multi!.options].map((o) => o.selected)).toEqual([false, true]);
+    single!.selectedIndex = 0;
+    single!.dispatchEvent(new Event('change'));
+    expect(one.get()).toBe(0);
+    unmount();
+  });
+
+  it('a spread option value that goes away leaves no typed value behind', () => {
+    const p = signal<Record<string, unknown>>({ value: 1 });
+    const { container, unmount } = render(() => (
+      <select>
+        <option {...p.get()}>one</option>
+      </select>
+    ));
+    const option = container.querySelector('option')! as HTMLOptionElement & { __value?: unknown };
+    expect(option.__value).toBe(1);
+    expect(option.value).toBe('1');
+    p.set({});
+    flush();
+    // As `<option value={undefined}>`: '' (Svelte), the number gone.
+    expect(option.__value).toBeUndefined();
+    expect(option.value).toBe('');
     unmount();
   });
 

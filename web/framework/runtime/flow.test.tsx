@@ -368,6 +368,33 @@ describe('Portal', () => {
   });
 });
 
+describe('Portal outros', () => {
+  it('a node leaving with an outro inside a portal goes with the portal, and only it', async () => {
+    const slow = () => ({ duration: 50, css: (t: number) => `opacity: ${t}` });
+    const m = document.body.appendChild(document.createElement('div'));
+    m.append('keep');
+    const shown = signal(true);
+    const { unmount } = render(() => (
+      <Portal mount={m}>
+        <Show when={shown.get()}>
+          <b out:slow={{}}>leaving</b>
+        </Show>
+      </Portal>
+    ));
+    expect(m.textContent).toBe('keepleaving');
+    shown.set(false);
+    flush();
+    // The outro runs: the node stays for now.
+    expect(m.querySelector('b')).not.toBeNull();
+    unmount();
+    expect(m.querySelector('b')).toBeNull();
+    expect(m.textContent).toBe('keep');
+    await new Promise((r) => setTimeout(r, 80));
+    expect(m.textContent).toBe('keep');
+    m.remove();
+  });
+});
+
 describe('Switch / Key', () => {
   it('Switch shows the first matching case', () => {
     const n = signal(1);

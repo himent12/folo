@@ -6,8 +6,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { onCleanup, renderEffect, runWithOwner } from './core';
-import { clsx, hasSetter, propName, setAttribute, setStyle, styleParts, toClass, type ClassValue } from './dom';
+import { clsx, hasSetter, propName, setAttribute, setStyle, setValue, styleParts, toClass, type ClassValue } from './dom';
 import { DELEGATED, on, setDelegated } from './events';
+import { eventOf } from './names';
 
 const SKIP = new Set(['children', 'ref', '$$scope']);
 
@@ -58,9 +59,7 @@ export function spread(
       if (key === 'style') continue;
       if (value === prev[key] && !(value === undefined && el.hasAttribute(key))) continue;
       if (key[0] === 'o' && key[1] === 'n') {
-        let type = key.slice(2);
-        const capture = type.endsWith('capture');
-        if (capture) type = type.slice(0, -7);
+        const { type, capture } = eventOf(key.slice(2));
         if (!capture && DELEGATED.has(type)) {
           setDelegated(el, type, value);
         } else {
@@ -81,23 +80,30 @@ export function spread(
         }
         continue;
       }
-      if (key === 'value' || key === 'checked') {
+      if (key === 'value') {
+        if (value == null && el.nodeName !== 'OPTION') {
+          // Back to the default value; no typed value (`__value`) left behind.
+          const input = el as HTMLInputElement & { __value?: unknown };
+          const d = input.defaultValue;
+          input.removeAttribute('value');
+          input.defaultValue = d;
+          input.value = prev[key] === undefined ? d : '';
+          input.__value = undefined;
+        } else {
+          // As `value={...}` without a spread: the typed value is kept (`__value`, what a bound <select> compares),
+          // and an <option> that loses it takes '' (as Svelte: without the attribute, its text would be its value).
+          setValue(el, value);
+        }
+        continue;
+      }
+      if (key === 'checked') {
+        const input = el as HTMLInputElement;
         if (value == null) {
-          const input = el as HTMLInputElement;
-          if (key === 'value') {
-            const d = input.defaultValue;
-            input.removeAttribute('value');
-            input.defaultValue = d;
-            input.value = prev[key] === undefined ? d : '';
-          } else {
-            const d = input.defaultChecked;
-            input.removeAttribute('checked');
-            input.defaultChecked = d;
-            input.checked = prev[key] === undefined ? d : false;
-          }
-        } else if (key === 'value') {
-          if (prev[key] == null || (el as HTMLInputElement).value !== value) (el as HTMLInputElement).value = value as string;
-        } else (el as HTMLInputElement).checked = !!value;
+          const d = input.defaultChecked;
+          input.removeAttribute('checked');
+          input.defaultChecked = d;
+          input.checked = prev[key] === undefined ? d : false;
+        } else input.checked = !!value;
         continue;
       }
       const name = el.namespaceURI === 'http://www.w3.org/1999/xhtml' ? (propName(key) ?? key) : key;

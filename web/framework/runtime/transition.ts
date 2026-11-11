@@ -5,7 +5,7 @@
 // Animations keyframes, with a dummy animation for the delay. A duration of 0 (`motion(ms)` under reduced motion)
 // skips it.
 
-import { effectNow, untrack } from './core';
+import { effectNow, isReader, untrack } from './core';
 import { setLeave } from './dom';
 
 export type EasingFunction = (t: number) => number;
@@ -103,11 +103,14 @@ export function inBranch<T>(b: Branch | null, introOk: boolean, fn: () => T): T 
   }
 }
 
-function collect(value: unknown, out: Node[]): void {
+/**
+ * The top nodes of a branch's value. A fragment's text run (text.ts, `$$run`) counts with what its splits rendered:
+ * the run's nodes, and its parts, which are memos the run owns, read for the nodes they hold (never called again).
+ */
+function collect(value: unknown, out: Node[], inRun = false): void {
   if (value instanceof Node) out.push(value);
-  else if (Array.isArray(value)) for (const v of value) collect(v, out);
-  // A fragment's text run (text.ts): its nodes are the fragment's own.
-  else if (typeof value === 'function' && (value as { $$run?: 1 }).$$run === 1) collect(untrack(value as () => unknown), out);
+  else if (Array.isArray(value)) for (const v of value) collect(v, out, inRun);
+  else if (isReader(value) && (inRun || (value as { $$run?: 1 }).$$run === 1)) collect(untrack(value), out, true);
 }
 
 /**

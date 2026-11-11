@@ -155,6 +155,72 @@ describe('text runs', () => {
     unmount();
   });
 
+  it('a later split elsewhere in a fragment run keeps the parts split before (their DOM and state)', () => {
+    const a = signal<JSX.Element>('a');
+    const b = signal<JSX.Element>('b');
+    const made = vi.fn();
+    const button = () => {
+      made();
+      return <button>btn</button>;
+    };
+    const Frag = () => <>start {a.get()} mid {b.get()} end</>;
+    const { container, unmount } = render(() => (
+      <div>
+        <Frag />
+      </div>
+    ));
+    const div = container.querySelector('div')!;
+    a.set(() => button);
+    flush();
+    const btn = div.querySelector('button')!;
+    btn.dataset.state = 'pressed';
+    expect(div.textContent).toBe('start btn mid b end');
+    const i = document.createElement('i');
+    i.textContent = 'i';
+    b.set(i);
+    flush();
+    expect(div.textContent).toBe('start btn mid i end');
+    expect(div.querySelector('button')).toBe(btn);
+    expect(btn.dataset.state).toBe('pressed');
+    expect(made).toHaveBeenCalledOnce();
+    b.set('plain');
+    flush();
+    expect(div.textContent).toBe('start btn mid plain end');
+    expect(div.querySelector('button')).toBe(btn);
+    expect(made).toHaveBeenCalledOnce();
+    unmount();
+  });
+
+  it("a split part's outro keeps it in the DOM with the run's text until the outro ends", async () => {
+    const ends: string[] = [];
+    const slow = (node: Element) => {
+      node.addEventListener('outroend', () => ends.push('out'));
+      return { duration: 10, css: (t: number) => `opacity: ${t}` };
+    };
+    // The compiler cannot see `label` as a snippet: its call is a part of the run, which splits there.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const Frag = (p: { label: () => any }) => <>start {p.label()} end</>;
+    const shown = signal(true);
+    const { container, unmount } = render(() => (
+      <div>
+        <Show when={shown.get()}>
+          <Frag label={() => <b out:slow={{}}>bold</b>} />
+        </Show>
+      </div>
+    ));
+    const div = container.querySelector('div')!;
+    expect(html(div)).toBe('start <b>bold</b> end');
+    shown.set(false);
+    flush();
+    // Leaving (made inert, as Svelte does), the part with the text around it.
+    expect(div.querySelector('b')?.inert).toBe(true);
+    expect(div.textContent).toBe('start bold end');
+    await new Promise((r) => setTimeout(r, 80));
+    expect(ends).toEqual(['out']);
+    expect(html(div)).toBe('');
+    unmount();
+  });
+
   it('a late split in a For row moves with its row', () => {
     const rows = signal(['x', 'y', 'z']);
     const v = signal<JSX.Element>('t');
