@@ -1,14 +1,14 @@
-use folo_ui::path_builder::{Path, PathContour, PathMode};
 use folo_ui::{
-    Bounds, ContentMask, FillRule, LineCap, LineJoin, PathBuilder, PathKind, Pixels, Point, Primitive, Scene,
-    StylePaint, linear_color_stop, linear_gradient, paint_path, point, px, red, size,
+    Bounds, BuiltPath, ContentMask, FillRule, LineCap, LineJoin, PathBuilder, PathContour, PathKind,
+    PathMode, Pixels, Point, Primitive, Scene, StylePaint, linear_color_stop, linear_gradient, paint_path,
+    point, px, red, size,
 };
 
 fn p(x: f32, y: f32) -> Point<Pixels> {
     point(px(x), px(y))
 }
 
-fn polyline(points: &[(f32, f32)], width: f32, dash: &[f32]) -> Path<Pixels> {
+fn polyline(points: &[(f32, f32)], width: f32, dash: &[f32]) -> BuiltPath {
     let mut b = PathBuilder::stroke(px(width));
     if !dash.is_empty() {
         b = b.dash_array(&dash.iter().map(|d| px(*d)).collect::<Vec<_>>());

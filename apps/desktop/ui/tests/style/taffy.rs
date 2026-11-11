@@ -101,3 +101,13 @@ fn fields_set_directly_map_through() {
     assert_eq!(t.size.width, Dimension::auto());
     assert_eq!(t.flex_basis, Dimension::length(40.));
 }
+
+#[test]
+fn available_space_converts_both_ways() {
+    use folo_ui::{AvailableSpace, Size, size};
+    let s: Size<AvailableSpace> = size(px(10.), px(20.)).into();
+    assert_eq!(s.width, AvailableSpace::Definite(px(10.)));
+    assert_eq!(taffy::AvailableSpace::from(s.height), taffy::AvailableSpace::Definite(20.));
+    assert_eq!(AvailableSpace::from(taffy::AvailableSpace::MaxContent), AvailableSpace::MaxContent);
+    assert_eq!(AvailableSpace::min_size().height, AvailableSpace::MinContent);
+}

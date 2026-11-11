@@ -99,9 +99,10 @@ pub enum PathMode<P> {
     },
 }
 
-/// A built path (GPUI's `Path<Pixels>`): contours, how to paint them, and the painted area's bounds.
+/// A built path (GPUI's `BuiltPath<Pixels>`; named `BuiltPath` because the scene primitive is `Path`): contours,
+/// how to paint them, and the painted area's bounds. `PathBuilder::build` returns `BuiltPath<Pixels>`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Path<P: Clone + Debug + Default + PartialEq> {
+pub struct BuiltPath<P: Clone + Debug + Default + PartialEq = Pixels> {
     /// The contours (dashes already cut into their own contours).
     pub contours: Vec<PathContour<P>>,
     /// Fill or stroke.
@@ -110,9 +111,9 @@ pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
 }
 
-impl Path<Pixels> {
+impl BuiltPath<Pixels> {
     /// This path in device pixels.
-    pub fn scale(&self, factor: f32) -> Path<ScaledPixels> {
+    pub fn scale(&self, factor: f32) -> BuiltPath<ScaledPixels> {
         let contours = self
             .contours
             .iter()
@@ -130,11 +131,11 @@ impl Path<Pixels> {
                 miter_limit: *miter_limit,
             },
         };
-        Path { contours, mode, bounds: self.bounds.scale(factor) }
+        BuiltPath { contours, mode, bounds: self.bounds.scale(factor) }
     }
 }
 
-impl Path<ScaledPixels> {
+impl BuiltPath<ScaledPixels> {
     /// The scene's geometry for this path (a new id).
     pub fn to_path_data(&self) -> PathData {
         let contours =
@@ -155,7 +156,12 @@ impl Path<ScaledPixels> {
 
 /// Pushes a path as GPUI's `Window::paint_path` does: scaled to device pixels, the paint faded by the
 /// element opacity, clipped by the content mask, skipped when its bounds are outside the mask.
-pub fn paint_path(scene: &mut Scene, cx: &StylePaint, path: &Path<Pixels>, color: impl Into<Background>) {
+pub fn paint_path(
+    scene: &mut Scene,
+    cx: &StylePaint,
+    path: &BuiltPath<Pixels>,
+    color: impl Into<Background>,
+) {
     let path = path.scale(cx.scale_factor);
     let clip = cx.content_mask.scale(cx.scale_factor).bounds;
     if path.bounds.intersect(&clip).is_empty() {
@@ -209,7 +215,7 @@ impl Affine {
     }
 }
 
-/// Builds a filled or stroked [`Path`] (GPUI's `PathBuilder`).
+/// Builds a filled or stroked [`BuiltPath`] (GPUI's `PathBuilder`).
 #[derive(Clone, Debug)]
 pub struct PathBuilder {
     subpaths: Vec<SubPath>,
@@ -346,7 +352,7 @@ impl PathBuilder {
     }
 
     /// Resolves the path: transform, flatten, dash, and compute the painted bounds.
-    pub fn build(self) -> anyhow::Result<Path<Pixels>> {
+    pub fn build(self) -> anyhow::Result<BuiltPath<Pixels>> {
         let transform = self.transform;
         let map = |p: Point<Pixels>| transform.map_or(p, |t| t.apply(p));
         let tolerance = match self.style {
@@ -363,7 +369,7 @@ impl PathBuilder {
         let path = match self.style {
             PathStyle::Fill(options) => {
                 let bounds = points_bounds(contours.iter().flat_map(|c| c.points.iter().copied()));
-                Path { contours, mode: PathMode::Fill(options.fill_rule), bounds }
+                BuiltPath { contours, mode: PathMode::Fill(options.fill_rule), bounds }
             }
             PathStyle::Stroke(options) => {
                 if let Some(dashes) = &self.dash_array {
@@ -376,7 +382,7 @@ impl PathBuilder {
                     join: options.line_join,
                     miter_limit: options.miter_limit,
                 };
-                Path { contours, mode, bounds }
+                BuiltPath { contours, mode, bounds }
             }
         };
         Ok(path)

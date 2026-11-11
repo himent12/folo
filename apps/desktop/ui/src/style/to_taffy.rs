@@ -197,3 +197,54 @@ where
         TaffySize { width: size.width.into(), height: size.height.into() }
     }
 }
+
+/// The space available to lay an element out in (GPUI's `AvailableSpace`).
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
+pub enum AvailableSpace {
+    /// This many pixels.
+    Definite(Pixels),
+    /// Indefinite: lay out under a min-content constraint.
+    #[default]
+    MinContent,
+    /// Indefinite: lay out under a max-content constraint.
+    MaxContent,
+}
+
+impl AvailableSpace {
+    /// Min-content on both axes.
+    pub const fn min_size() -> Size<Self> {
+        Size { width: Self::MinContent, height: Self::MinContent }
+    }
+}
+
+impl From<AvailableSpace> for taffy::style::AvailableSpace {
+    fn from(space: AvailableSpace) -> Self {
+        match space {
+            AvailableSpace::Definite(Pixels(value)) => Self::Definite(value),
+            AvailableSpace::MinContent => Self::MinContent,
+            AvailableSpace::MaxContent => Self::MaxContent,
+        }
+    }
+}
+
+impl From<taffy::style::AvailableSpace> for AvailableSpace {
+    fn from(space: taffy::style::AvailableSpace) -> Self {
+        match space {
+            taffy::style::AvailableSpace::Definite(value) => Self::Definite(Pixels(value)),
+            taffy::style::AvailableSpace::MinContent => Self::MinContent,
+            taffy::style::AvailableSpace::MaxContent => Self::MaxContent,
+        }
+    }
+}
+
+impl From<Pixels> for AvailableSpace {
+    fn from(pixels: Pixels) -> Self {
+        AvailableSpace::Definite(pixels)
+    }
+}
+
+impl From<Size<Pixels>> for Size<AvailableSpace> {
+    fn from(size: Size<Pixels>) -> Self {
+        Size { width: AvailableSpace::Definite(size.width), height: AvailableSpace::Definite(size.height) }
+    }
+}

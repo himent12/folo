@@ -12,6 +12,7 @@ pub use layout::*;
 pub use paint::*;
 pub use refine::*;
 pub use text::*;
+pub use to_taffy::{AvailableSpace, ToTaffy};
 
 use refine::{full_ty, refine_full, refine_part, refineable, refinement_ty};
 
