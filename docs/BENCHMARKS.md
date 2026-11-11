@@ -510,8 +510,10 @@ as YOLO26n on three of the four datasets and lost on one:
   (about 14, small and touching), where the stronger pretraining is most likely to show.
 - **Brain tumor (MRI): level.** folo-n's mean is 0.017 higher, but YOLO26n's seeds spread over 0.413–0.459 and
   folo-n's over 0.439–0.460, so the difference is inside the noise of three seeds on 223 images.
-- **Signatures and pills: level** (differences of 0.007 and 0.002 AP, inside the seed spread). Signatures are
-  saturated for both (AP50 1.000, AP 0.98–0.99 on 35 images): this dataset cannot tell the two apart.
+- **Signatures and pills: level.** Pills differ by 0.002 AP, inside the seed spread. On signatures folo-n's mean is
+  0.007 higher and its three seeds are all above YOLO26n's, but only just (the closest pair is 0.9874 against
+  0.9871), and the set is saturated for both (AP50 1.000, AP 0.98–0.99 on 35 images): this dataset cannot tell the
+  two apart.
 - **What the pretrained weights buy** (folo-n from scratch, one seed, the same 100 epochs): 0.017 AP on BCCD,
   0.067 on pills, 0.069 on signatures and 0.080 on brain-tumor. From-scratch training on these small sets gets
   surprisingly close, which says as much about the datasets (few classes, large or regular objects) as about the
