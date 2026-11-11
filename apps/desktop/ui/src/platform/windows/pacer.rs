@@ -2,6 +2,7 @@
 //! Frame pacing: one helper thread that, while any window asked for a frame, waits for the compositor
 //! (`DwmFlush`, so it follows the display's real refresh rate) and posts each such window one
 //! `WM_FOLO_FRAME`. With no request pending it blocks on a condition variable: an idle app does nothing.
+//! `shut_down` (when the platform's loop ends) stops the thread and joins it.
 
 use super::WM_FOLO_FRAME;
 use ::windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -10,6 +11,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use parking_lot::{Condvar, Mutex};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// A wait shorter than this means `DwmFlush` returned without a composition (display asleep, nothing
@@ -40,7 +42,10 @@ impl FrameSlot {
 #[derive(Default)]
 struct State {
     waiting: Vec<Arc<FrameSlot>>,
-    running: bool,
+    /// The thread, once started (taken by `shut_down` to join it).
+    thread: Option<JoinHandle<()>>,
+    /// Set by `shut_down`: the thread exits and no other starts.
+    stopped: bool,
 }
 
 /// The platform's frame pacer.
@@ -57,14 +62,31 @@ impl Pacer {
             return;
         }
         let mut state = self.state.lock();
+        if state.stopped {
+            return;
+        }
         state.waiting.push(slot.clone());
-        if !state.running {
-            state.running = true;
+        if state.thread.is_none() {
             let pacer = self.clone();
-            let _ = std::thread::Builder::new().name("folo-ui-vsync".into()).spawn(move || pacer.run());
+            state.thread =
+                std::thread::Builder::new().name("folo-ui-vsync".into()).spawn(move || pacer.run()).ok();
         }
         drop(state);
         self.wake.notify_one();
+    }
+
+    /// Stops the thread and waits for it (at most one refresh). Later requests are ignored.
+    pub(crate) fn shut_down(&self) {
+        let thread = {
+            let mut state = self.state.lock();
+            state.stopped = true;
+            state.waiting.clear();
+            state.thread.take()
+        };
+        self.wake.notify_all();
+        if let Some(thread) = thread {
+            let _ = thread.join();
+        }
     }
 
     fn run(&self) {
@@ -72,8 +94,11 @@ impl Pacer {
         loop {
             {
                 let mut state = self.state.lock();
-                while state.waiting.is_empty() {
+                while state.waiting.is_empty() && !state.stopped {
                     self.wake.wait(&mut state);
+                }
+                if state.stopped {
+                    return;
                 }
             }
             let start = Instant::now();
@@ -116,6 +141,27 @@ pub(crate) fn refresh_period() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shut_down_stops_and_joins_the_thread() {
+        let pacer = Arc::new(Pacer::default());
+        // A null window: the frame message goes to the pacer thread's own queue, which nobody reads.
+        let slot = FrameSlot::new(HWND::default());
+        pacer.request(&slot);
+        assert!(pacer.state.lock().thread.is_some(), "the thread started");
+        pacer.shut_down();
+        assert!(pacer.state.lock().thread.is_none());
+        assert_eq!(Arc::strong_count(&pacer), 1, "the thread has ended and dropped its pacer");
+        // Requests after the shutdown start nothing.
+        let slot = FrameSlot::new(HWND::default());
+        pacer.request(&slot);
+        {
+            let state = pacer.state.lock();
+            assert!(state.thread.is_none() && state.waiting.is_empty());
+        }
+        assert_eq!(Arc::strong_count(&pacer), 1);
+        pacer.shut_down();
+    }
 
     #[test]
     fn the_refresh_period_is_sane() {
