@@ -159,7 +159,9 @@ impl IDropTarget_Impl for DropTarget_Impl {
 mod tests {
     use super::*;
     use ::windows::Win32::Foundation::{HGLOBAL, TRUE};
-    use ::windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, STGMEDIUM, STGMEDIUM_0};
+    use ::windows::Win32::System::Com::{
+        COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, STGMEDIUM, STGMEDIUM_0,
+    };
     use ::windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
     use ::windows::Win32::UI::Shell::{DROPFILES, SHCreateDataObject};
     use std::mem::ManuallyDrop;
@@ -178,7 +180,11 @@ mod tests {
         unsafe {
             let block = GlobalAlloc(GMEM_MOVEABLE, header + wide.len() * 2).unwrap();
             let at = GlobalLock(block) as *mut u8;
-            at.cast::<DROPFILES>().write(DROPFILES { pFiles: header as u32, fWide: TRUE, ..Default::default() });
+            at.cast::<DROPFILES>().write(DROPFILES {
+                pFiles: header as u32,
+                fWide: TRUE,
+                ..Default::default()
+            });
             std::ptr::copy_nonoverlapping(wide.as_ptr(), at.add(header).cast::<u16>(), wide.len());
             let _ = GlobalUnlock(block);
             let data: IDataObject = SHCreateDataObject(None, None, None).unwrap();
