@@ -41,14 +41,20 @@ mod window;
 // Skeleton stand-ins for other packages' names (see the file); removed as those packages land.
 mod pending;
 
+pub use assets::*;
 pub use color::*;
+pub use easing::*;
 pub use geometry::*;
 pub use image::*;
 pub use input_events::*;
 pub use keystroke::*;
+pub use path_builder::*;
 pub use platform::*;
 pub use scene::*;
 pub use shared_string::*;
+pub use style::*;
+pub use styled::*;
+pub use svg::*;
 pub use text::*;
 
 pub use action::*;
