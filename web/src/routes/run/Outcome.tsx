@@ -15,7 +15,7 @@ import Database from '$icons/database';
 import Play from '$icons/play';
 import RotateCcw from '$icons/rotate-ccw';
 import ScanSearch from '$icons/scan-search';
-import Square from '$icons/square';
+import CircleStop from '$icons/circle-stop';
 import TriangleAlert from '$icons/triangle-alert';
 import { computed, css, effect, For, signal } from 'fw';
 import { hub } from '$lib/api/index';
@@ -132,6 +132,18 @@ export default function Outcome(props: OutcomeProps) {
   );
 
   const status = () => props.run.status;
+  /** "best mAP50-95 0.604 at epoch 150"; a model that detected nothing says so instead of "best 0.000 at epoch 1". */
+  const bestFact = () => (
+    <span>
+      {props.run.best && props.run.best.map50_95 > 0 ? (
+        <>
+          best mAP50-95 <span class="num">{metric(props.run.best.map50_95)}</span> at epoch {props.run.best.epoch}
+        </>
+      ) : (
+        'no detections'
+      )}
+    </span>
+  );
   /** A failure's cause in plain words (./failure), by its error code; null: the server's message is the cause. */
   const summary = computed(() => (props.run.status === 'failed' ? failureSummary(props.run.error_code, props.datasetName ?? 'this run') : null));
   /**
@@ -263,11 +275,7 @@ export default function Outcome(props: OutcomeProps) {
           title={`Completed in ${duration(props.elapsed)}`}
           moreLabel="Why?"
           also={short.get()}
-          facts={() => (
-            <span>
-              best mAP50-95 <span class="num">{metric(props.run.best?.map50_95)}</span> at epoch {props.run.best?.epoch ?? 0}
-            </span>
-          )}
+          facts={() => bestFact()}
           actions={() => (
             <>
               {scheduleFix()}
@@ -284,9 +292,7 @@ export default function Outcome(props: OutcomeProps) {
           brief
           facts={() => (
             <>
-              <span>
-                best mAP50-95 <span class="num">{metric(props.run.best?.map50_95)}</span> at epoch {props.run.best?.epoch ?? 0}
-              </span>
+              {bestFact()}
               <span>saved as a model</span>
             </>
           )}
@@ -296,7 +302,7 @@ export default function Outcome(props: OutcomeProps) {
         // A run stopped before its first epoch ended has no checkpoint: it says so, and starts again rather than resumes.
         <Callout
           tone="neutral"
-          icon={Square}
+          icon={CircleStop}
           title={stoppedTitle(props.run)}
           moreLabel="Why?"
           also={short.get()}

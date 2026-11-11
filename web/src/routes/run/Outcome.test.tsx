@@ -204,9 +204,13 @@ describe('Outcome', () => {
     const done = (map50_95: number): Run => ({ ...short('completed'), best: { epoch: 5, map50_95 } });
     let r = render(done(0.073));
     expect(r.labels).toEqual(['Open model', 'Try in Playground']);
+    expect(r.target.querySelector('.c-text')?.textContent).toContain('best mAP50-95 0.073 at epoch 5');
     r.done();
     r = render(done(0));
     expect(r.labels).toEqual(['Open model']);
+    // Nothing detected is said in words, never "best mAP50-95 0.000 at epoch 1".
+    expect(r.target.querySelector('.c-text')?.textContent).toContain('no detections');
+    expect(r.target.querySelector('.c-text')?.textContent).not.toContain('0.000');
     r.done();
   });
 

@@ -404,21 +404,26 @@ export default function RunMetrics(props: RunMetricsProps) {
     const r = props.run.resolved;
     return r ? `${warmupWords(r)} · ${r.cos_lr ? 'cosine' : 'linear'}` : 'warmup 3 epochs · linear';
   });
+  // Nothing detected yet (a best mAP of exactly 0, precision and recall both 0): said in words, never "best 0.000 at
+  // epoch 1" or "conf 1.00", which read as a finding.
+  const noneYet = computed(() => (live.get() ? 'no detections yet' : 'no detections'));
   const tabs = computed((): TabDef[] => {
     const run = props.run;
+    const nothing = run.best?.map50_95 === 0;
     const le = lastEpoch.get();
     const ls = lastStep.get();
     const pc = prConf.get();
     const sl = smoothedLast.get();
+    const prNone = !!le && le.val.precision === 0 && le.val.recall === 0;
     return [
       {
         id: 'map',
         label: 'mAP50-95',
         value: metric(le?.val.map50_95),
-        caption: run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
-        capShort: run.best ? `best · ep ${run.best.epoch}` : 'not yet',
+        caption: nothing ? noneYet.get() : run.best ? `best ${metric(run.best.map50_95)} · ep ${run.best.epoch}` : 'after the first epoch',
+        capShort: nothing ? noneYet.get() : run.best ? `best · ep ${run.best.epoch}` : 'not yet',
         title: `${scoresTitle(evalOn())} mAP50-95`,
-        qualifier: run.best ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
+        qualifier: run.best && !nothing ? `by epoch · ○ best ${metric(run.best.map50_95)} at epoch ${run.best.epoch}` : 'by epoch',
       },
       { id: 'map50', label: 'mAP50', value: metric(le?.val.map50), caption: latestEp.get(), capShort: latestShort.get(), title: `${scoresTitle(evalOn())} mAP50`, qualifier: 'by epoch' },
       {
@@ -427,8 +432,8 @@ export default function RunMetrics(props: RunMetricsProps) {
         short: 'P · R',
         value: le ? `${metric(le.val.precision)} · ${metric(le.val.recall)}` : '—',
         // The latest epoch's threshold: "conf 0.31 · ep 37" (each epoch has its own, so the chart says "each at").
-        caption: le ? (pc != null ? `conf ${conf(pc)} · ep ${le.epoch}` : `best-F1 conf · ep ${le.epoch}`) : 'after the first epoch',
-        capShort: le && pc != null ? `conf ${conf(pc)}` : latestShort.get(),
+        caption: prNone ? noneYet.get() : le ? (pc != null ? `conf ${conf(pc)} · ep ${le.epoch}` : `best-F1 conf · ep ${le.epoch}`) : 'after the first epoch',
+        capShort: prNone ? noneYet.get() : le && pc != null ? `conf ${conf(pc)}` : latestShort.get(),
         title: 'Precision and recall',
         qualifier: pc != null ? `by epoch · at each epoch's best-F1 conf (latest ${conf(pc)})` : "by epoch · at each epoch's best-F1 confidence",
       },
@@ -482,7 +487,7 @@ export default function RunMetrics(props: RunMetricsProps) {
    */
   const phoneQualifier = computed(() => {
     const b = props.run.best;
-    return tab.get() === 'map' && b ? `by epoch · ○ best${b.epoch === lastEpoch.get()?.epoch ? '' : ` ${metric(b.map50_95)}`} · ep ${b.epoch}` : current.get().qualifier;
+    return tab.get() === 'map' && b && b.map50_95 !== 0 ? `by epoch · ○ best${b.epoch === lastEpoch.get()?.epoch ? '' : ` ${metric(b.map50_95)}`} · ep ${b.epoch}` : current.get().qualifier;
   });
 
   // Phones: folding hands focus to the control that reopens it, and opening to the one that folds it again, so a

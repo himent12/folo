@@ -9,7 +9,7 @@ import Box from '$icons/box';
 import ChevronsUp from '$icons/chevrons-up';
 import GitCompare from '$icons/git-compare-arrows';
 import ScanSearch from '$icons/scan-search';
-import Square from '$icons/square';
+import CircleStop from '$icons/circle-stop';
 import Trash from '$icons/trash-2';
 import X from '$icons/x';
 import WifiOff from '$icons/wifi-off';
@@ -63,6 +63,8 @@ import { isOom } from '$lib/oom';
 import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import RunSkeleton from './run/RunSkeleton';
 import WaitingPanels from './run/WaitingPanels';
+import { wasResumed } from './run/resumes';
+import { exactTime } from './runs/when';
 import DeleteRun from './run/DeleteRun';
 
 type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
@@ -248,9 +250,23 @@ export default function Run() {
     void live.version;
     return live.epochs.length;
   });
+  // How long it took: from start to end, as the Runs list says; a run resumed after a stop counts its epochs' training
+  // time instead, not the hours it sat stopped (the log says when it resumed, ./run/resumes).
   const elapsed = computed(() => {
     const r = run.get();
-    return r?.started ? ((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000 : null;
+    if (!r?.started) return null;
+    if (!active.get() && resumed.get()) {
+      void live.version;
+      const trained = live.epochs.reduce((a, e) => a + e.duration_s, 0);
+      if (trained > 0) return trained;
+    }
+    return ((r.finished ? Date.parse(r.finished) : Date.now()) - Date.parse(r.started)) / 1000;
+  });
+  /** Its log says it was resumed (read once it has ended: a live run's duration is its wall time so far). */
+  const resumed = computed(() => {
+    if (active.get()) return false;
+    void live.version;
+    return wasResumed(live.logs);
   });
   // The trainer's "too short to learn" warnings, from the log (./run/warnings): one callout, never a toast. Read from
   // the lines added since the last update only (./run/warningsLog).
@@ -352,7 +368,7 @@ export default function Run() {
     const r = run.get();
     if (!r) return [];
     const out: PageCommand[] = [];
-    if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: Square, run: () => stopOpen.set(true) });
+    if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: CircleStop, run: () => stopOpen.set(true) });
     // As the run's banner: anything but out of memory continues from the last checkpoint.
     if (r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error)))
       out.push(
@@ -430,7 +446,12 @@ export default function Run() {
     </>
   );
 
-  const when = () => (R().started ? `started ${ago(R().started!)}` : `created ${ago(R().created)}`);
+  // One word in every state ("created", as the Runs list's column), the exact times on hover.
+  const when = () => (
+    <time datetime={R().created} title={`Created ${exactTime(R().created)}${R().started ? ` · started ${exactTime(R().started)}` : ''}`}>
+      created {ago(R().created)}
+    </time>
+  );
 
   return (
     <>
@@ -518,12 +539,12 @@ export default function Run() {
                   // hand-over too: its instance costs money from the launch.
                   <>
                     <span class="wide-only">
-                      <Button variant="danger" icon={Square} onclick={() => stopOpen.set(true)}>
+                      <Button variant="danger" icon={CircleStop} onclick={() => stopOpen.set(true)}>
                         Stop
                       </Button>
                     </span>
                     <span class="phone-only">
-                      <Button variant="danger" icon={Square} aria-label={`Stop ${R().name}`} title="Stop run" onclick={() => stopOpen.set(true)} />
+                      <Button variant="danger" icon={CircleStop} aria-label={`Stop ${R().name}`} title="Stop run" onclick={() => stopOpen.set(true)} />
                     </span>
                   </>
                 ) : null}
@@ -686,7 +707,7 @@ export default function Run() {
             footer={() => (
               <>
                 <Button onclick={() => stopOpen.set(false)}>{removing.get() ? 'Keep it queued' : handover.get() ? 'Keep going' : 'Keep training'}</Button>
-                <Button variant="destructive" icon={removing.get() ? X : Square} loading={busy.get()} onclick={stop}>
+                <Button variant="destructive" icon={removing.get() ? X : CircleStop} loading={busy.get()} onclick={stop}>
                   {removing.get() ? REMOVE_LABEL : 'Stop run'}
                 </Button>
               </>

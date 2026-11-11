@@ -125,9 +125,10 @@ export default function Samples(props: SamplesProps) {
                   <span class="long">ground truth</span>
                   <span class="short">truth</span>
                 </span>
-                <span class="count-key num">
-                  <span class="long">7/8 = predictions / true boxes</span>
-                  <span class="short">7/8 = predicted / true</span>
+                {/* What a tile's corner count means, as a key: letters, never a count that reads like data. */}
+                <span class="count-key">
+                  <span class="long">n/m = predictions / true boxes</span>
+                  <span class="short">n/m = predicted / true</span>
                 </span>
               </div>
               <div class="conf">

@@ -76,3 +76,20 @@ describe('the run chart when the history failed to load', () => {
     unmount(c);
   });
 });
+
+describe('the run chart before anything is detected', () => {
+  it('says "no detections yet" instead of "best 0.000 · ep 1" and "conf 1.00"', () => {
+    window.matchMedia = ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as unknown as typeof window.matchMedia;
+    const val = { map50: 0, map50_95: 0, precision: 0, recall: 0, best_f1_conf: 1, per_class: [] };
+    const epochs = new AppendLog<Epoch>();
+    epochs.push({ epoch: 1, train_loss: { box: 1, cls: 1, dfl: 1, total: 3 }, val, duration_s: 10 });
+    const live = { ...run, status: 'running' as const, best: { epoch: 1, map50_95: 0 } };
+    const c = render(() => <RunMetrics run={live} steps={new AppendLog<Step>()} epochs={epochs} version={1} loading={false} />, target);
+    flushSync();
+    const caps = [...target.querySelectorAll('.tab .cap .full')].map((e) => e.textContent?.trim());
+    expect(caps[0]).toBe('no detections yet');
+    expect(caps[2]).toBe('no detections yet');
+    expect(target.textContent).not.toMatch(/best 0\.000|conf 1\.00/);
+    unmount(c);
+  });
+});
