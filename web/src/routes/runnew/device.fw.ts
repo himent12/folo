@@ -1,0 +1,26 @@
+// fw twin of device.ts: the same code, importing the fw modules (cloudPick, resource, the hub, prefs).
+/** How the form names a device: in its errors, in the Device field's message and in the Summary's Device row. */
+import type { Resource } from '$lib/api/resource';
+import type { SystemInfo } from '$lib/api/types';
+import { deviceName } from '$lib/format';
+
+/** A device in a sentence, named once with its value: "Auto", "GPU 1 (gpu:1)", "CPU" (values elsewhere: `gpu:1`). */
+export const devWord = (d: string) => (d === 'auto' ? 'Auto' : d === 'cpu' ? 'CPU' : `${d.replace(/^gpu:/, 'GPU ')} (${d})`);
+
+/** The Device field's line after Start was refused: the device is unusable here, or gone, and what to pick instead. */
+export function deviceMessage(deviceErr: { device: string; gone: boolean; detail: string } | null, system: Resource<SystemInfo>): string | null {
+  const e = deviceErr;
+  if (!e) return null;
+  if (!e.gone) return `This server cannot train on ${devWord(e.device)}. Pick Auto or CPU.`;
+  const others = [...(system.data?.gpus ?? []).map((g) => `gpu:${g.ordinal}`).filter((d) => d !== e.device), 'cpu'].map(devWord);
+  return `${devWord(e.device)} is no longer available. Pick Auto, ${others.length > 1 ? `${others.slice(0, -1).join(', ')} or ${others.at(-1)}` : others[0]}.`;
+}
+
+/** The Summary's Device row: the device and the GPU it names. */
+export function deviceLabelOf(device: string, gpu: SystemInfo['gpus'][number] | undefined, system: Resource<SystemInfo>): string {
+  const shortGpu = deviceName;
+  if (device === 'auto') return `Auto${gpu ? ` · ${shortGpu(gpu.name)}` : ''}`;
+  if (device === 'cpu') return 'CPU';
+  const g = system.data?.gpus.find((x) => `gpu:${x.ordinal}` === device);
+  return g ? `${device} · ${shortGpu(g.name)}` : device;
+}
