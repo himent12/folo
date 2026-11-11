@@ -1,20 +1,8 @@
 // Adapted from GPUI (Apache-2.0): crates/gpui/src/window.rs (`PaintQuad`, `quad`, `fill`, `outline`)
-//! The element-author paint API on `Window` (GPUI's signatures): quads, paths, images, SVG icons, glyphs,
-//! emoji, shadows, underlines, plus `PaintQuad`, `ContentMask` and the `quad` / `fill` / `outline` helpers.
-//! Owner tag: `"window"`.
-//!
-//! Every paint call scales to device pixels, intersects with the current content mask and pushes one
-//! primitive onto `next_frame.scene` (painter's order). Element opacity multiplies colour alpha here.
-//! Glyph and icon masks come from the window's `MaskCache`s (keyed by glyph params / SVG path and size), so
-//! steady frames rasterize nothing; images are shared as `Arc<RenderImage>`.
-#![allow(dead_code)] // skeleton
+//! `PaintQuad` and the `quad` / `fill` / `outline` helpers. The `Window` paint methods that take them are in
+//! `primitives.rs`. Owner tag: `"window"`.
 
-use std::sync::Arc;
-
-use crate::{
-    App, Background, BorderStyle, Bounds, BoxShadow, Corners, Edges, FontId, GlyphId, Hsla, Pixels, Point,
-    RenderImage, SharedString, StrikethroughStyle, UnderlineStyle, Window, transparent_black,
-};
+use crate::{Background, BorderStyle, Bounds, Corners, Edges, Hsla, Pixels, transparent_black};
 
 /// A quad to paint: bounds, corner radii, background, borders.
 #[derive(Clone, Debug)]
@@ -99,94 +87,5 @@ pub fn outline(
         border_widths: (1.).into(),
         border_color: border_color.into(),
         border_style,
-    }
-}
-
-impl Window {
-    /// Paints a quad.
-    pub fn paint_quad(&mut self, _quad: PaintQuad) {
-        todo!("window")
-    }
-
-    /// Paints a path built by `PathBuilder` (fill or stroke) with a colour or gradient.
-    pub fn paint_path(&mut self, _path: crate::BuiltPath, _color: impl Into<Background>) {
-        todo!("window")
-    }
-
-    /// Paints frame `frame_index` of an image.
-    pub fn paint_image(
-        &mut self,
-        _bounds: Bounds<Pixels>,
-        _corner_radii: Corners<Pixels>,
-        _data: Arc<RenderImage>,
-        _frame_index: usize,
-        _grayscale: bool,
-    ) -> anyhow::Result<()> {
-        todo!("window")
-    }
-
-    /// Paints an SVG asset as a single-colour icon (mask from the icon cache).
-    pub fn paint_svg(
-        &mut self,
-        _bounds: Bounds<Pixels>,
-        _path: SharedString,
-        _color: Hsla,
-        _cx: &App,
-    ) -> anyhow::Result<()> {
-        todo!("window")
-    }
-
-    /// Paints one glyph (mask from the glyph cache; the renderer applies the text backend's blend).
-    pub fn paint_glyph(
-        &mut self,
-        _origin: Point<Pixels>,
-        _font_id: FontId,
-        _glyph_id: GlyphId,
-        _font_size: Pixels,
-        _color: Hsla,
-    ) -> anyhow::Result<()> {
-        todo!("window")
-    }
-
-    /// Paints a colour emoji glyph.
-    pub fn paint_emoji(
-        &mut self,
-        _origin: Point<Pixels>,
-        _font_id: FontId,
-        _glyph_id: GlyphId,
-        _font_size: Pixels,
-    ) -> anyhow::Result<()> {
-        todo!("window")
-    }
-
-    /// Paints box shadows under a rounded rectangle.
-    pub fn paint_shadows(
-        &mut self,
-        _bounds: Bounds<Pixels>,
-        _corner_radii: Corners<Pixels>,
-        _shadows: &[BoxShadow],
-    ) {
-        todo!("window")
-    }
-
-    /// Paints an underline (straight or wavy).
-    pub fn paint_underline(&mut self, _origin: Point<Pixels>, _width: Pixels, _style: &UnderlineStyle) {
-        todo!("window")
-    }
-
-    /// Paints a strikethrough.
-    pub fn paint_strikethrough(
-        &mut self,
-        _origin: Point<Pixels>,
-        _width: Pixels,
-        _style: &StrikethroughStyle,
-    ) {
-        todo!("window")
-    }
-
-    /// Runs `f` as one layer. GPUI batches primitives by layer for the GPU; the CPU renderer has nothing to
-    /// batch, so this only runs `f`.
-    pub fn paint_layer<R>(&mut self, _bounds: Bounds<Pixels>, f: impl FnOnce(&mut Self) -> R) -> R {
-        f(self)
     }
 }

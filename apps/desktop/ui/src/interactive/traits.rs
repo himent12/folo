@@ -1,12 +1,10 @@
 //! `InteractiveElement` and `StatefulInteractiveElement`: the builder methods the app calls on `div()` and
 //! `div().id(..)`, with GPUI 0.2.2's signatures. Each only records into `Interactivity`. Owner tag:
 //! `"window"`.
-#![allow(dead_code)] // skeleton
-
-use std::fmt::Debug;
+use std::{any::TypeId, fmt::Debug, rc::Rc};
 
 use crate::{
-    Action, AnyView, App, ClickEvent, DragMoveEvent, ElementId, FocusHandle, Interactivity, KeyContext,
+    DispatchPhase, HitboxBehavior, Overflow, Action, AnyView, App, ClickEvent, DragMoveEvent, ElementId, FocusHandle, Interactivity, KeyContext,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle, ScrollWheelEvent,
     SharedString, Stateful, StyleRefinement, Window, WindowControlArea,
 };
@@ -30,6 +28,7 @@ pub trait InteractiveElement: Sized {
 
     /// Tracks a focus handle (focus styles, key dispatch, tab stops).
     fn track_focus(mut self, focus_handle: &FocusHandle) -> Self {
+        self.interactivity().focusable = true;
         self.interactivity().tracked_focus_handle = Some(focus_handle.clone());
         self
     }
@@ -68,105 +67,167 @@ pub trait InteractiveElement: Sized {
     /// Bubble-phase left/right/middle mouse down on the element.
     fn on_mouse_down(
         mut self,
-        _button: MouseButton,
-        _listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+        button: MouseButton,
+        listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        self.interactivity().mouse_down_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
+            if phase == DispatchPhase::Bubble && event.button == button && hitbox.is_hovered(window) {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// Capture-phase mouse down of any button on the element.
     fn capture_any_mouse_down(
         mut self,
-        _listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+        listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        self.interactivity().mouse_down_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
+            if phase == DispatchPhase::Capture && hitbox.is_hovered(window) {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// Mouse up on the element.
     fn on_mouse_up(
         mut self,
-        _button: MouseButton,
-        _listener: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
+        button: MouseButton,
+        listener: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        self.interactivity().mouse_up_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
+            if phase == DispatchPhase::Bubble && event.button == button && hitbox.is_hovered(window) {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// Mouse down outside the element (capture phase).
     fn on_mouse_down_out(
         mut self,
-        _listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+        listener: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        // GPUI tests the raw bounds here (not hover), in the capture phase.
+        self.interactivity().mouse_down_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
+            if phase == DispatchPhase::Capture && !hitbox.contains(&window.mouse_position()) {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// Mouse up of `button` outside the element (capture phase).
     fn on_mouse_up_out(
         mut self,
-        _button: MouseButton,
-        _listener: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
+        button: MouseButton,
+        listener: impl Fn(&MouseUpEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        self.interactivity().mouse_up_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
+            if phase == DispatchPhase::Capture && event.button == button && !hitbox.is_hovered(window) {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// A mouse move over the element (bubble phase, only while its hitbox is hovered, as GPUI).
-    fn on_mouse_move(mut self, _listener: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+    fn on_mouse_move(mut self, listener: impl Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.interactivity().mouse_move_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
+            if phase == DispatchPhase::Bubble && hitbox.is_hovered(window) {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// Mouse moves while a `T` is dragged over the element.
     fn on_drag_move<T: 'static>(
         mut self,
-        _listener: impl Fn(&DragMoveEvent<T>, &mut Window, &mut App) + 'static,
+        listener: impl Fn(&DragMoveEvent<T>, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        // GPUI: capture phase, for any position, while a `T` is dragged.
+        self.interactivity().mouse_move_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
+            if phase == DispatchPhase::Capture
+                && let Some(drag) = window.active_drag.as_ref()
+                && drag.value_type == TypeId::of::<T>()
+            {
+                let event = DragMoveEvent::new(event.clone(), hitbox.bounds, drag.value.clone());
+                listener(&event, window, cx)
+            }
+        }));
+        self
     }
 
     /// Scroll wheel over the element.
     fn on_scroll_wheel(
         mut self,
-        _listener: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
+        listener: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        self.interactivity().scroll_wheel_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
+            if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// Bubble-phase handler of action `A` when the element is on the focus path.
-    fn on_action<A: Action>(mut self, _listener: impl Fn(&A, &mut Window, &mut App) + 'static) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+    fn on_action<A: Action>(mut self, listener: impl Fn(&A, &mut Window, &mut App) + 'static) -> Self {
+        self.interactivity().action_listeners.push((
+            TypeId::of::<A>(),
+            Box::new(move |action, phase, window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && let Some(action) = action.downcast_ref::<A>()
+                {
+                    listener(action, window, cx)
+                }
+            }),
+        ));
+        self
     }
 
     /// Bubble-phase key down when the element is on the focus path.
-    fn on_key_down(mut self, _listener: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+    fn on_key_down(mut self, listener: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.interactivity().key_down_listeners.push(Box::new(move |event, phase, window, cx| {
+            if phase == DispatchPhase::Bubble {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// Capture-phase key down when the element is on the focus path.
     fn capture_key_down(
         mut self,
-        _listener: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
+        listener: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        self.interactivity().key_down_listeners.push(Box::new(move |event, phase, window, cx| {
+            if phase == DispatchPhase::Capture {
+                listener(event, window, cx)
+            }
+        }));
+        self
     }
 
     /// A `T` (`ExternalPaths` for files) dropped on the element.
-    fn on_drop<T: 'static>(mut self, _listener: impl Fn(&T, &mut Window, &mut App) + 'static) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+    fn on_drop<T: 'static>(mut self, listener: impl Fn(&T, &mut Window, &mut App) + 'static) -> Self {
+        self.interactivity().drop_listeners.push((
+            TypeId::of::<T>(),
+            Box::new(move |value, window, cx| {
+                if let Some(value) = value.downcast_ref::<T>() {
+                    listener(value, window, cx)
+                }
+            }),
+        ));
+        self
     }
 
     /// Blocks mouse events and hover for whatever is under the element.
     fn occlude(mut self) -> Self {
-        self.interactivity().occlude_mouse = true;
+        self.interactivity().hitbox_behavior = HitboxBehavior::BlockMouse;
         self
     }
 
@@ -181,14 +242,14 @@ pub trait InteractiveElement: Sized {
 pub trait StatefulInteractiveElement: InteractiveElement {
     /// Scrolls horizontally on overflow.
     fn overflow_x_scroll(mut self) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        self.interactivity().base_style.overflow.x = Some(Overflow::Scroll);
+        self
     }
 
     /// Scrolls vertically on overflow.
     fn overflow_y_scroll(mut self) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+        self.interactivity().base_style.overflow.y = Some(Overflow::Scroll);
+        self
     }
 
     /// Reports scroll state to (and takes offsets from) `scroll_handle`.
@@ -217,20 +278,20 @@ pub trait StatefulInteractiveElement: InteractiveElement {
     }
 
     /// A click (mouse down and up on the element, or Enter / Space while focused, as GPUI 0.2.2).
-    fn on_click(mut self, _listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+    fn on_click(mut self, listener: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> Self {
+        self.interactivity().click_listeners.push(Rc::new(listener));
+        self
     }
 
     /// Hover enter (`true`) and leave (`false`).
-    fn on_hover(mut self, _listener: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+    fn on_hover(mut self, listener: impl Fn(&bool, &mut Window, &mut App) + 'static) -> Self {
+        self.interactivity().hover_listener = Some(Box::new(listener));
+        self
     }
 
     /// A tooltip shown after the hover delay.
-    fn tooltip(mut self, _build_tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Self {
-        let _ = self.interactivity();
-        todo!("window")
+    fn tooltip(mut self, build_tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static) -> Self {
+        self.interactivity().tooltip_builder = Some(Rc::new(build_tooltip));
+        self
     }
 }
