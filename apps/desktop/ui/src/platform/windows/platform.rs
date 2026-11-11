@@ -121,6 +121,12 @@ impl WindowsPlatform {
         self.shared.windows.borrow_mut().push(window.hwnd().0 as isize);
         Ok(window)
     }
+
+    /// The windows opened so far (tests reach a core window's HWND through it).
+    #[cfg(test)]
+    pub(crate) fn window_handles(&self) -> Vec<HWND> {
+        self.shared.windows.borrow().iter().map(|&h| HWND(h as _)).collect()
+    }
 }
 
 impl Drop for WindowsPlatform {
