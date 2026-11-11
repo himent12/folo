@@ -6,8 +6,6 @@
 //! so `Context<T>` can deref to `&mut App` while `T` is borrowed. Strong handles share one ref count per entity
 //! (`EntityRefCounts`); when it reaches zero the entity id is queued in `dropped_entity_ids` and the state is
 //! released at the end of the next effect flush.
-#![allow(dead_code)] // skeleton
-
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
@@ -16,7 +14,7 @@ use std::{
     marker::PhantomData,
     sync::{
         Arc, Weak,
-        atomic::{AtomicU64, AtomicUsize},
+        atomic::{AtomicU64, AtomicUsize, Ordering::SeqCst},
     },
 };
 
@@ -83,39 +81,81 @@ impl EntityMap {
 
     /// Reserves an id and a strong handle for an entity being built.
     pub(crate) fn reserve<T: 'static>(&self) -> Entity<T> {
-        todo!("runtime")
+        let entity_id = EntityId(self.next_id.fetch_add(1, SeqCst));
+        self.ref_counts.write().counts.insert(entity_id, AtomicUsize::new(1));
+        Entity {
+            any_entity: AnyEntity {
+                entity_id,
+                entity_type: TypeId::of::<T>(),
+                entity_map: Arc::downgrade(&self.ref_counts),
+            },
+            entity_type: PhantomData,
+        }
     }
 
     /// Stores the built state of a reserved entity.
-    pub(crate) fn insert<T: 'static>(&mut self, _entity: &Entity<T>, _state: T) {
-        todo!("runtime")
+    pub(crate) fn insert<T: 'static>(&mut self, entity: &Entity<T>, state: T) {
+        self.entities.insert(entity.entity_id(), Some(Box::new(state)));
     }
 
     /// Takes the state out for an update. Panics when it is already leased (a re-entrant update).
-    pub(crate) fn lease<T: 'static>(&mut self, _entity: &Entity<T>) -> Lease<T> {
-        todo!("runtime")
+    #[track_caller]
+    pub(crate) fn lease<T: 'static>(&mut self, entity: &Entity<T>) -> Lease<T> {
+        let id = entity.entity_id();
+        let state = match self.entities.get_mut(&id) {
+            Some(slot) => slot.take().unwrap_or_else(|| double_lease_panic::<T>("update")),
+            None => panic!("{} {id} was released or is still being built", std::any::type_name::<T>()),
+        };
+        Lease { entity: Some(state), id, _marker: PhantomData }
     }
 
     /// Puts leased state back.
-    pub(crate) fn end_lease<T>(&mut self, _lease: Lease<T>) {
-        todo!("runtime")
+    pub(crate) fn end_lease<T>(&mut self, mut lease: Lease<T>) {
+        // A slot removed meanwhile (its last handle dropped during the update) drops the state instead.
+        if let Some(slot) = self.entities.get_mut(&lease.id) {
+            *slot = lease.entity.take();
+        }
     }
 
     /// Reads an entity's state. Panics when it is leased out.
-    pub(crate) fn read<T: 'static>(&self, _entity: &Entity<T>) -> &T {
-        todo!("runtime")
+    #[track_caller]
+    pub(crate) fn read<T: 'static>(&self, entity: &Entity<T>) -> &T {
+        let id = entity.entity_id();
+        match self.entities.get(&id) {
+            Some(Some(state)) => state.downcast_ref::<T>().expect("entity state type"),
+            Some(None) => double_lease_panic::<T>("read"),
+            None => panic!("{} {id} was released or is still being built", std::any::type_name::<T>()),
+        }
     }
 
     /// Removes and returns the states of entities whose last strong handle dropped.
     pub(crate) fn take_dropped(&mut self) -> Vec<(EntityId, Box<dyn Any>)> {
-        todo!("runtime")
+        let mut ref_counts = self.ref_counts.write();
+        let dropped = std::mem::take(&mut ref_counts.dropped_entity_ids);
+        dropped
+            .into_iter()
+            .filter_map(|id| {
+                // Queued at zero; a handle can no longer come back (weak upgrades fail at zero).
+                let count = ref_counts.counts.remove(&id)?;
+                debug_assert_eq!(count.load(SeqCst), 0, "dropped entity {id} still has handles");
+                self.entities.remove(&id).flatten().map(|state| (id, state))
+            })
+            .collect()
     }
+}
+
+#[track_caller]
+fn double_lease_panic<T>(operation: &str) -> ! {
+    panic!(
+        "cannot {operation} {} while it is already being updated (a re-entrant update of the same entity)",
+        std::any::type_name::<T>()
+    )
 }
 
 impl<T: 'static> Lease<T> {
     /// The leased state.
     pub(crate) fn state_mut(&mut self) -> &mut T {
-        todo!("runtime")
+        self.entity.as_mut().and_then(|state| state.downcast_mut::<T>()).expect("entity state type")
     }
 }
 
@@ -161,13 +201,32 @@ impl AnyEntity {
 
 impl Clone for AnyEntity {
     fn clone(&self) -> Self {
-        todo!("runtime")
+        if let Some(ref_counts) = self.entity_map.upgrade() {
+            let ref_counts = ref_counts.read();
+            let count = ref_counts.counts.get(&self.entity_id).expect("cloned a released entity handle");
+            let previous = count.fetch_add(1, SeqCst);
+            assert_ne!(previous, 0, "cloned a released entity handle");
+        }
+        AnyEntity {
+            entity_id: self.entity_id,
+            entity_type: self.entity_type,
+            entity_map: self.entity_map.clone(),
+        }
     }
 }
 
 impl Drop for AnyEntity {
     fn drop(&mut self) {
-        // skeleton: decrement the count and queue the id at zero.
+        let Some(ref_counts) = self.entity_map.upgrade() else { return };
+        let ref_counts = ref_counts.upgradable_read();
+        let Some(count) = ref_counts.counts.get(&self.entity_id) else { return };
+        let previous = count.fetch_sub(1, SeqCst);
+        assert_ne!(previous, 0, "over-released an entity handle");
+        if previous == 1 {
+            // The last strong handle: release the state at the next flush.
+            let mut ref_counts = parking_lot::RwLockUpgradableReadGuard::upgrade(ref_counts);
+            ref_counts.dropped_entity_ids.push(self.entity_id);
+        }
     }
 }
 
@@ -279,7 +338,26 @@ impl AnyWeakEntity {
 
     /// A strong handle, if the entity is still alive.
     pub fn upgrade(&self) -> Option<AnyEntity> {
-        todo!("runtime")
+        let ref_counts = self.entity_ref_counts.upgrade()?;
+        let counts = ref_counts.read();
+        let count = counts.counts.get(&self.entity_id)?;
+        // Increment unless it is zero (released, or about to be).
+        let mut current = count.load(SeqCst);
+        loop {
+            if current == 0 {
+                return None;
+            }
+            match count.compare_exchange_weak(current, current + 1, SeqCst, SeqCst) {
+                Ok(_) => break,
+                Err(actual) => current = actual,
+            }
+        }
+        drop(counts);
+        Some(AnyEntity {
+            entity_id: self.entity_id,
+            entity_type: self.entity_type,
+            entity_map: self.entity_ref_counts.clone(),
+        })
     }
 }
 

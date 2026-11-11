@@ -1,10 +1,10 @@
 //! App methods that forward to the platform: clipboard, displays, file prompts, URLs, quit, activate.
 //! Owner tag: `"runtime"`.
-#![allow(dead_code)] // skeleton
 
 use std::{
     path::{Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 
 use crate::{App, ClipboardItem, PathPromptOptions, PlatformDisplay};
@@ -55,10 +55,36 @@ impl App {
     }
 
     /// Quits: runs the quit observers (waiting briefly for their futures), then stops the platform loop.
+    ///
+    /// GPUI's `quit` asks the platform, whose quit callback runs `shutdown`; our platforms have no quit
+    /// callback, so this is `shutdown` then `platform.quit()`: the `on_app_quit` callbacks run once, every
+    /// window is dropped, and their futures get `SHUTDOWN_TIMEOUT` (100 ms, as GPUI) on this thread.
     pub fn quit(&mut self) {
-        todo!("runtime")
+        if self.quitting {
+            return;
+        }
+        self.quitting = true;
+        let futures: Vec<_> =
+            self.quit_observers.remove(&()).into_iter().map(|mut on_quit| on_quit(self)).collect();
+        // A leased window (the update that called `quit`) is dropped when that update ends.
+        let windows: Vec<_> = self.windows.drain().collect();
+        self.window_order.clear();
+        drop(windows);
+
+        let all = async move {
+            for future in futures {
+                future.await;
+            }
+        };
+        if self.background_executor.block_with_timeout(SHUTDOWN_TIMEOUT, all).is_none() {
+            eprintln!("folo-ui: timed out waiting for on_app_quit");
+        }
+        self.platform.quit();
     }
 }
+
+/// How long `quit` waits for the `on_app_quit` futures (GPUI's value).
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(100);
 
 impl crate::Bounds<crate::Pixels> {
     /// Bounds of `size` centred on display `display_id` (or the primary display), as GPUI's.

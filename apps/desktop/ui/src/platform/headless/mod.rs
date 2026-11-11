@@ -1,90 +1,29 @@
 //! The headless platform: no OS window, fixed size and scale, synthetic input, renders to a `Framebuffer`.
 //! Owner tag: `"elements"`. Driven by `HeadlessApp` (tests, `folo-desktop --shot`, CI).
 //!
-//! Determinism: the dispatcher never starts a thread. Main-thread, background and delayed runnables wait
-//! in queues that `HeadlessDispatcher::run_until_idle` pumps on the calling thread, and its clock moves only
-//! when the test calls `advance_clock`. A window's `request_frame` just records that a frame is wanted.
-#![allow(dead_code)] // skeleton
+//! Determinism: the clock moves only when the harness advances it, main-thread runnables run when it pumps,
+//! and background jobs run on real threads that `run_until_idle` waits for (`dispatcher.rs`). A window's
+//! `request_frame` just records that a frame is wanted; the harness draws it.
+
+mod dispatcher;
+
+pub use dispatcher::*;
 
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use anyhow::Result;
-use async_task::Runnable;
-use parking_lot::Mutex;
 
 use crate::{
-    Bounds, ClipboardItem, CursorStyle, DevicePixels, DispatchEventResult, DisplayId, Framebuffer, Modifiers,
-    Pixels, Platform, PlatformDispatcher, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformTextSystem, PlatformWindow, Point, RequestFrameOptions, Size, WindowAppearance, WindowBounds,
-    WindowControlArea, WindowParams, oneshot,
+    Bounds, ClipboardItem, CursorStyle, DevicePixels, DispatchEventResult, DisplayId, Framebuffer,
+    HeadlessOptions, Modifiers, Pixels, Platform, PlatformDispatcher, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformTextSystem, PlatformWindow, Point, RequestFrameOptions, Size, TextBackend,
+    WindowAppearance, WindowBounds, WindowControlArea, WindowParams, oneshot,
 };
-
-/// The queues and clock behind `HeadlessDispatcher`.
-#[derive(Default)]
-pub(crate) struct DispatcherState {
-    /// The fake time (starts at the dispatcher's creation).
-    pub(crate) now: Option<Instant>,
-    /// Main-thread runnables.
-    pub(crate) foreground: VecDeque<Runnable>,
-    /// Background runnables (run on the pumping thread, in order).
-    pub(crate) background: VecDeque<Runnable>,
-    /// Delayed runnables and when they are due, in insertion order.
-    pub(crate) delayed: Vec<(Instant, Runnable)>,
-}
-
-/// A dispatcher whose queues the test pumps.
-#[derive(Default)]
-pub struct HeadlessDispatcher {
-    /// The queues.
-    pub(crate) state: Mutex<DispatcherState>,
-}
-
-impl HeadlessDispatcher {
-    /// Runs queued runnables (foreground and background) until none is left; delayed ones stay until due.
-    /// Returns whether anything ran.
-    pub fn run_until_idle(&self) -> bool {
-        todo!("elements")
-    }
-
-    /// Moves the clock forward, making due delayed runnables ready.
-    pub fn advance_clock(&self, _duration: Duration) {
-        todo!("elements")
-    }
-
-    /// Whether nothing is queued or due.
-    pub fn is_idle(&self) -> bool {
-        todo!("elements")
-    }
-}
-
-impl PlatformDispatcher for HeadlessDispatcher {
-    fn is_main_thread(&self) -> bool {
-        true
-    }
-
-    fn dispatch(&self, runnable: Runnable) {
-        self.state.lock().background.push_back(runnable);
-    }
-
-    fn dispatch_on_main_thread(&self, runnable: Runnable) {
-        self.state.lock().foreground.push_back(runnable);
-    }
-
-    fn dispatch_after(&self, _duration: Duration, _runnable: Runnable) {
-        todo!("elements")
-    }
-
-    fn now(&self) -> Instant {
-        todo!("elements")
-    }
-}
 
 /// The one headless display (the window's size, at the origin).
 #[derive(Debug)]
@@ -127,12 +66,36 @@ pub struct HeadlessPlatform {
     pub(crate) windows: RefCell<Vec<Rc<HeadlessWindowState>>>,
     /// Set by `quit`.
     pub(crate) quit_requested: Cell<bool>,
+    /// What the next file prompts answer (`None`: cancelled). Tests set it.
+    pub(crate) prompt_answer: RefCell<Option<Vec<PathBuf>>>,
+    /// URLs passed to `open_url` and paths to `reveal_path`, for tests to assert on.
+    pub(crate) opened: RefCell<Vec<String>>,
 }
 
 impl HeadlessPlatform {
     /// A platform with windows of `size` at `scale_factor`, shaping text with `text_system`.
-    pub fn new(_size: Size<Pixels>, _scale_factor: f32, _text_system: Arc<dyn PlatformTextSystem>) -> Self {
-        todo!("elements")
+    pub fn new(size: Size<Pixels>, scale_factor: f32, text_system: Arc<dyn PlatformTextSystem>) -> Self {
+        HeadlessPlatform {
+            dispatcher: Arc::new(HeadlessDispatcher::new()),
+            text_system,
+            size,
+            scale_factor,
+            display: Rc::new(HeadlessDisplay { bounds: Bounds::new(Point::default(), size) }),
+            clipboard: RefCell::new(None),
+            cursor_style: Cell::new(CursorStyle::default()),
+            windows: RefCell::new(Vec::new()),
+            quit_requested: Cell::new(false),
+            prompt_answer: RefCell::new(None),
+            opened: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// A platform for `options`, with the text backend it names. Panics when that backend is not built
+    /// into this binary (`Fixed` needs feature `test-support`; `Portable` on Windows needs `portable-text`).
+    pub fn from_options(options: HeadlessOptions) -> Self {
+        let text =
+            text_backend(options.text).unwrap_or_else(|error| panic!("headless text backend: {error:#}"));
+        Self::new(options.size, options.scale_factor, text)
     }
 
     /// The dispatcher (for the harness to pump).
@@ -169,20 +132,40 @@ impl Platform for HeadlessPlatform {
     }
 
     fn open_window(&self, _options: WindowParams) -> Result<Box<dyn PlatformWindow>> {
-        todo!("elements")
+        // Every headless window has the platform's size, whatever bounds the app asked for.
+        let state = Rc::new(HeadlessWindowState {
+            size: Cell::new(self.size),
+            scale_factor: self.scale_factor,
+            mouse_position: Cell::new(Point::default()),
+            modifiers: Cell::new(Modifiers::default()),
+            frame_requested: Cell::new(false),
+            callbacks: RefCell::new(HeadlessCallbacks::default()),
+            input_handler: RefCell::new(None),
+            presented: RefCell::new(Framebuffer::default()),
+            last_damage: RefCell::new(Vec::new()),
+            title: RefCell::new(String::new()),
+            maximized: Cell::new(false),
+            fullscreen: Cell::new(false),
+        });
+        self.windows.borrow_mut().push(state.clone());
+        Ok(Box::new(HeadlessWindow { state, display: self.display.clone() }))
     }
 
     fn window_appearance(&self) -> WindowAppearance {
         WindowAppearance::Dark
     }
 
-    fn open_url(&self, _url: &str) {}
+    fn open_url(&self, url: &str) {
+        self.opened.borrow_mut().push(url.to_string());
+    }
 
     fn prompt_for_paths(
         &self,
         _options: crate::PathPromptOptions,
     ) -> oneshot::Receiver<Result<Option<Vec<PathBuf>>>> {
-        todo!("elements")
+        let (tx, rx) = oneshot::channel();
+        tx.send(Ok(self.prompt_answer.borrow().clone())).ok();
+        rx
     }
 
     fn prompt_for_new_path(
@@ -190,10 +173,15 @@ impl Platform for HeadlessPlatform {
         _directory: &Path,
         _suggested_name: Option<&str>,
     ) -> oneshot::Receiver<Result<Option<PathBuf>>> {
-        todo!("elements")
+        let (tx, rx) = oneshot::channel();
+        let answer = self.prompt_answer.borrow().as_ref().and_then(|paths| paths.first().cloned());
+        tx.send(Ok(answer)).ok();
+        rx
     }
 
-    fn reveal_path(&self, _path: &Path) {}
+    fn reveal_path(&self, path: &Path) {
+        self.opened.borrow_mut().push(path.display().to_string());
+    }
 
     fn set_cursor_style(&self, style: CursorStyle) {
         self.cursor_style.set(style)
@@ -374,9 +362,32 @@ impl PlatformWindow for HeadlessWindow {
 
     fn on_appearance_changed(&self, _callback: Box<dyn FnMut()>) {}
 
-    fn present(&mut self, _frame: &Framebuffer, _damage: &[Bounds<DevicePixels>]) {
-        todo!("elements")
+    fn present(&mut self, frame: &Framebuffer, damage: &[Bounds<DevicePixels>]) {
+        self.state.presented.borrow_mut().clone_from(frame);
+        let mut last_damage = self.state.last_damage.borrow_mut();
+        last_damage.clear();
+        last_damage.extend_from_slice(damage);
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+}
+
+/// The `PlatformTextSystem` for a headless text backend.
+pub(crate) fn text_backend(backend: TextBackend) -> Result<Arc<dyn PlatformTextSystem>> {
+    match backend {
+        #[cfg(windows)]
+        TextBackend::Native => Ok(Arc::new(crate::text::dwrite::DirectWriteTextSystem::new()?)),
+        #[cfg(not(windows))]
+        TextBackend::Native => Ok(Arc::new(crate::text::portable::CosmicTextSystem::new())),
+        #[cfg(any(not(windows), feature = "portable-text"))]
+        TextBackend::Portable => Ok(Arc::new(crate::text::portable::CosmicTextSystem::new())),
+        #[cfg(not(any(not(windows), feature = "portable-text")))]
+        TextBackend::Portable => {
+            anyhow::bail!("`TextBackend::Portable` needs folo-ui's `portable-text` feature")
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        TextBackend::Fixed => Ok(Arc::new(crate::FixedTextSystem::new())),
+        #[cfg(not(any(test, feature = "test-support")))]
+        TextBackend::Fixed => anyhow::bail!("`TextBackend::Fixed` needs folo-ui's `test-support` feature"),
+    }
 }
