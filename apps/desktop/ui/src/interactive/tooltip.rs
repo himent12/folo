@@ -101,16 +101,20 @@ fn handle_tooltip_mouse_move(
     window: &mut Window,
     cx: &mut App,
 ) {
-    let schedule = match active_tooltip.borrow().as_ref() {
-        None => check_is_hovered(window) && phase.bubble(),
-        Some(ActiveTooltip::WaitingForShow { .. }) => {
-            if !check_is_hovered(window) {
-                // Cancelling: dropping the task stops the timer.
-                drop(active_tooltip.borrow_mut().take());
-            }
-            false
+    // Read the state into a value first: a `match` on `borrow()` would hold the borrow through the arms.
+    let waiting = match active_tooltip.borrow().as_ref() {
+        None => false,
+        Some(ActiveTooltip::WaitingForShow { .. }) => true,
+        Some(ActiveTooltip::Visible { .. }) => return,
+    };
+    let schedule = if waiting {
+        if !check_is_hovered(window) {
+            // Cancelling: dropping the task stops the timer.
+            drop(active_tooltip.borrow_mut().take());
         }
-        Some(ActiveTooltip::Visible { .. }) => false,
+        false
+    } else {
+        check_is_hovered(window) && phase.bubble()
     };
     if !schedule {
         return;
