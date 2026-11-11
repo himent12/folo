@@ -308,6 +308,13 @@ impl WindowInner {
         if std::mem::replace(&mut self.state.borrow_mut().hovered, true) {
             return;
         }
+        if self.offscreen {
+            // The real cursor is never over an off-screen window, so Windows would post WM_MOUSELEAVE
+            // at once and undo every hover a posted mouse move made: there, only a posted
+            // WM_MOUSELEAVE ends the hover.
+            self.with_callback(|c| &mut c.hovered_status_change, |f| f(true));
+            return;
+        }
         let mut track = TRACKMOUSEEVENT {
             cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
             dwFlags: flags,
