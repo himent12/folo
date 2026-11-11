@@ -1,6 +1,8 @@
 # FOLO Desktop: its own cargo workspace so the root workspace and its CI stay GPUI-free.
 [workspace]
 resolver = "3"
+# folo-ui (ui/): the UI framework replacing GPUI (ui/DESIGN.md).
+members = [".", "ui"]
 # The vendored GPUI builds as a patched dependency, not a member (its own tests run from its manifest).
 exclude = ["vendor/gpui"]
 
