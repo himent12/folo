@@ -120,8 +120,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 ## Datasets
 - `GET /api/datasets` → `{ "datasets": [Dataset] }` (oldest first, without `stats`)
 - `POST /api/datasets` body `{ "name"?, "path", "format": "auto|yolo|coco" }` → `201 Dataset` with `stats`.
-  Registers a dataset on disk: a folder, a `data.yaml` or a COCO instances `.json` (relative paths are resolved
-  against the server's working directory and stored absolute in `path`); `name` defaults to the folder name,
+  Registers a dataset on disk: a folder, a `data.yaml` or a COCO instances `.json`. `path` must be absolute
+  (surrounding whitespace and one pair of quotes, as Windows' "Copy as path" adds, are ignored; a relative path is
+  `400 invalid_body`, never resolved against the server's working directory); `name` defaults to the folder name,
   `format` to `auto`. Datasets are read with folo-data, exactly as for training (formats and detection rules:
   `docs/DATA.md`): YOLO from `data.yaml` (`path`, `train`, `val`, `test`, `names`; a YAML with only `names` uses the
   folder layout) or `images/{train,val,test}` + `labels/…`; COCO from `annotations/instances_*.json` (Roboflow

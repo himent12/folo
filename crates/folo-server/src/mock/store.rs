@@ -12,7 +12,7 @@ use folo_api::{
 };
 
 use crate::error::{Error, Result};
-use crate::index::Index;
+use crate::index::{Index, requested_path};
 use crate::store::{
     ImageData, ImageQuery, IssueQuery, LogsQuery, MetricsQuery, PredictInput, PredictSource, QueueMove,
     Store, Subscription, Weights, WeightsFormat,
@@ -191,7 +191,8 @@ impl Store for MockStore {
         Ok(self.datasets.read().unwrap().iter().map(|d| d.meta().clone()).collect())
     }
 
-    fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
+    fn register_dataset(&self, mut req: RegisterDataset) -> Result<Dataset> {
+        req.path = requested_path(&req.path)?;
         // Registering a folder again (by its canonical path) returns the dataset it already is: checked before
         // indexing and again under the write lock.
         let want = std::fs::canonicalize(&req.path).ok();

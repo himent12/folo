@@ -280,26 +280,17 @@ async fn external_split_sources_are_watched() {
 }
 
 #[tokio::test]
-async fn relative_paths_are_registered_absolute() {
-    // Under the working directory (the package folder), so a relative path to it exists.
-    let name = format!(".folo-rel-test-{}", std::process::id());
-    let local = TestDir::at(std::env::current_dir().unwrap().join(&name));
-    let yolo = local.join("yolo");
-    write_shapes(&yolo, 6);
-    let loaded = folo_data::open(&yolo).unwrap();
-    folo_data::convert::convert(&loaded, &local.join("coco"), folo_data::Format::Coco).unwrap();
+async fn relative_paths_are_refused() {
+    // A relative path would resolve against the server's working directory, a folder the client never sees.
     let t = TestDir::new("real-relative");
     let app = app(&t.join("home"));
-    let rel = format!("./{name}/coco/annotations/instances_train.json");
-    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": rel }))).await;
-    assert!(Path::new(&ds.path).is_absolute(), "{}", ds.path);
-    assert_eq!((ds.format, ds.splits.train), (DatasetFormat::Coco, loaded.split_sizes()[0] as u64));
-    let page: ImagePage = ok(&app, get(&format!("/api/datasets/{}/images?limit=100", ds.id))).await;
-    for im in &page.images {
-        let (status, _, b) =
-            send(&app, get(&format!("/api/datasets/{}/images/{}?thumb=16", ds.id, im.id))).await;
-        assert_eq!(status, StatusCode::OK, "{}: {}", im.file, String::from_utf8_lossy(&b));
+    for rel in ["shapes", "./shapes/data.yaml", "\"shapes\""] {
+        let body = json!({ "path": rel });
+        let e = err(&app, post_json("/api/datasets", body), StatusCode::BAD_REQUEST, "invalid_body").await;
+        assert!(e.message.ends_with("is not a full path"), "{}", e.message);
     }
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert!(list.datasets.is_empty());
 }
 
 #[tokio::test]

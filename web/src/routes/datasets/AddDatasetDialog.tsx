@@ -15,7 +15,7 @@ import Input from '$lib/ui/Input';
 import Segmented from '$lib/ui/Segmented';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
-import { NAME_RE, suggestName } from './names';
+import { cleanPath, isFullPath, NAME_RE, suggestName } from './names';
 
 type Mode = 'folder' | 'synthetic';
 
@@ -32,7 +32,7 @@ const nameFix = (v: string, set: (n: string) => void) => {
   const n = suggestName(v);
   return n && n !== v.trim() ? { label: `Try ${n}`, apply: () => set(n) } : null;
 };
-const FIX: Record<string, string> = { name: 'Fix the name first', path: 'Enter a folder path', images: 'Fix the image count first', classes: 'Add at least one class', seed: 'Fix the seed first' };
+const FIX: Record<string, string> = { name: 'Fix the name first', path: 'Fix the folder path first', images: 'Fix the image count first', classes: 'Add at least one class', seed: 'Fix the seed first' };
 
 export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   const open = bindable(props, 'open', false);
@@ -56,12 +56,13 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   const imgsz = signal<'320' | '480' | '640' | '1024'>('640');
   const seed = signal<number | null>(0);
 
+  /** The path as it will be sent: a pasted "Copy as path" loses its quotes. */
+  const cleaned = computed(() => cleanPath(path.get()));
   /** A folder's last path segment, as a default name. */
   const derivedName = computed(
     () =>
-      path
+      cleaned
         .get()
-        .trim()
         .replace(/[\\/]+$/, '')
         .split(/[\\/]/)
         .pop()
@@ -74,7 +75,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const n = folderName.get();
       return {
         name: n ? nameError(n) : null,
-        path: path.get().trim() ? null : 'Required: an absolute folder path on the server.',
+        path: !cleaned.get() ? 'Required: an absolute folder path on the server.' : isFullPath(cleaned.get()) ? null : 'Use the full path, such as D:/data/my-dataset.',
       };
     }
     const images = sImages.get();
@@ -91,7 +92,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
    *  was typed are still checked on submit, next to their fields. */
   const missing = computed(() =>
     mode.get() === 'folder'
-      ? path.get().trim()
+      ? cleaned.get()
         ? null
         : 'Enter a folder path'
       : classes.get().length || classDraft.get().trim()
@@ -129,7 +130,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const before = m === 'folder' ? (props.known ?? (await hub.api.datasets().catch(() => []))) : [];
       const ds =
         m === 'folder'
-          ? await hub.api.createDataset({ name: folderName.get(), path: path.get().trim(), format: format.get() })
+          ? await hub.api.createDataset({ name: folderName.get(), path: cleaned.get(), format: format.get() })
           : await hub.api.createSyntheticDataset({
               name: sName.get().trim(),
               images: Math.round(sImages.get() ?? 0),

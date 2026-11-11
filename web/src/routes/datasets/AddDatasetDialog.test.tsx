@@ -99,6 +99,33 @@ describe('AddDatasetDialog', () => {
     expect(go).toHaveBeenCalledWith('/datasets/ds_shapes_hard');
   });
 
+  it('takes a path pasted in quotes (Windows "Copy as path"), and names it without them', async () => {
+    c = mount(AddDatasetDialog, { target, props: { open: true } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="e.g. D:/data/my-dataset"]')!;
+    input.value = '"D:\\data\\shapes"';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.placeholder).toBe('shapes');
+    unmount(c);
+    const go = await register(' "D:\\data\\shapes" ', [{ id: 'ds_fasteners' }]);
+    expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
+  });
+
+  it('asks for a full path in the form instead of sending a relative one', async () => {
+    const create = vi.spyOn(hub.api, 'createDataset');
+    c = mount(AddDatasetDialog, { target, props: { open: true } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[placeholder="e.g. D:/data/my-dataset"]')!;
+    input.value = 'bccd';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    input.form!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    expect(document.querySelector('.msg.error')?.textContent).toContain('Use the full path, such as D:/data/my-dataset.');
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('announces a dataset that was not in the list as new', async () => {
     const go = await register('D:/data/shapes', [{ id: 'ds_fasteners' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'success', title: 'Dataset registered' });

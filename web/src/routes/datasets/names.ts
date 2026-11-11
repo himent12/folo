@@ -16,3 +16,18 @@ export function suggestName(raw: string): string | null {
     .replace(/[-._]+$/, '');
   return NAME_RE.test(n) ? n : null;
 }
+
+/**
+ * A folder path as typed or pasted: surrounding whitespace and one pair of matching quotes removed (Windows' "Copy as
+ * path" adds them), as the server does.
+ */
+export function cleanPath(raw: string): string {
+  const t = raw.trim();
+  const m = /^(["'])(.*)\1$/s.exec(t);
+  return (m ? m[2]! : t).trim();
+}
+
+/** A full path the server can find whatever its working directory: a drive (`D:\`, `D:/`), a share (`\\host`) or `/`. */
+export function isFullPath(path: string): boolean {
+  return /^([A-Za-z]:[\\/]|[\\/])/.test(path);
+}

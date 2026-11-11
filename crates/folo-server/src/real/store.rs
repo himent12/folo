@@ -19,7 +19,7 @@ use crate::bench::Benches;
 use crate::cloud::{self};
 use crate::engine::{self, engine_error};
 use crate::error::{Error, Result};
-use crate::index::{data_error, read_image_with, write_atomic};
+use crate::index::{data_error, read_image_with, requested_path, write_atomic};
 use crate::label::Labeler;
 use crate::runs::run_model_id;
 use crate::store::{
@@ -175,7 +175,7 @@ impl Store for RealStore {
     }
 
     fn register_dataset(&self, req: RegisterDataset) -> Result<Dataset> {
-        self.register(req.name, req.path, req.format)
+        self.register(req.name, requested_path(&req.path)?, req.format)
     }
 
     fn create_synthetic(&self, req: SyntheticDataset) -> Result<Dataset> {

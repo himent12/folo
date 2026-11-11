@@ -274,12 +274,15 @@ export class MockServer {
 
   createDataset(body: CreateDataset): Promise<Dataset> {
     return this.call(() => {
-      // As on the server: a folder that is already registered (by its path, whatever the spelling) answers with the
-      // existing dataset, its name kept.
+      // As on the server: surrounding quotes and whitespace are dropped, a relative path is refused, and a folder that
+      // is already registered (by its path, whatever the spelling) answers with the existing dataset, its name kept.
+      const path = body.path.trim().replace(/^(["'])(.*)\1$/s, '$2').trim();
+      if (!/^([A-Za-z]:[\\/]|[\\/])/.test(path))
+        throw new ApiError(400, 'invalid_body', `'${path}' is not a full path`, "use the folder's full path on the machine running folo serve, such as D:/data/my-dataset");
       const key = (p: string) => p.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-      const known = this.state.datasets.find((d) => key(d.path) === key(body.path));
+      const known = this.state.datasets.find((d) => key(d.path) === key(path));
       if (known) return toDataset(known, this.state.t0, true);
-      throw new ApiError(400, 'dataset_not_found_on_disk', `No YOLO or COCO dataset found at ${body.path}.`, 'The mock server cannot read your disk; connect to folo serve to register folders.');
+      throw new ApiError(400, 'dataset_not_found_on_disk', `No YOLO or COCO dataset found at ${path}.`, 'The mock server cannot read your disk; connect to folo serve to register folders.');
     }, 400);
   }
 

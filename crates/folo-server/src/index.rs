@@ -202,6 +202,24 @@ pub fn data_error(e: folo_data::DataError, path: &str) -> Error {
     }
 }
 
+/// The path of a dataset to register, as sent: surrounding whitespace and one pair of matching quotes removed
+/// (Windows' "Copy as path" adds them). It must be absolute: a relative one would resolve against the server's
+/// working directory, a folder the person who sent it never sees (`400 invalid_body`).
+pub fn requested_path(raw: &str) -> Result<String> {
+    let t = raw.trim();
+    let t = ['"', '\''].iter().find_map(|&q| t.strip_prefix(q)?.strip_suffix(q)).unwrap_or(t).trim();
+    let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_body", m);
+    if t.is_empty() {
+        return Err(bad("path must not be empty".into()));
+    }
+    if !Path::new(t).is_absolute() {
+        return Err(bad(format!("'{t}' is not a full path")).hint(
+            "use the folder's full path on the machine running folo serve, such as D:/data/my-dataset",
+        ));
+    }
+    Ok(t.to_string())
+}
+
 use folo_data::paths::relative_to;
 pub use folo_data::paths::{lexical, normalize as absolute};
 
@@ -486,6 +504,32 @@ mod tests {
 
     fn tmp(tag: &str) -> TestDir {
         TestDir::new(&format!("index-{tag}"))
+    }
+
+    #[test]
+    fn requested_paths_lose_quotes_and_must_be_absolute() {
+        let dir = tmp("requested");
+        let p = dir.to_str().unwrap();
+        for raw in [
+            p.to_string(),
+            format!("\"{p}\""),
+            format!("  '{p}' "),
+            format!(
+                "\" {p}\"
+"
+            ),
+        ] {
+            assert_eq!(requested_path(&raw).unwrap(), p, "{raw:?}");
+        }
+        for raw in ["bccd", "\"data/x\"", "  ", "\"\""] {
+            let e = requested_path(raw).unwrap_err();
+            assert_eq!(
+                (e.status, e.body.code.as_str()),
+                (StatusCode::BAD_REQUEST, "invalid_body"),
+                "{raw:?}"
+            );
+        }
+        assert_eq!(requested_path("bccd").unwrap_err().body.message, "'bccd' is not a full path");
     }
 
     #[test]
