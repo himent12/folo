@@ -28,11 +28,6 @@ const NONE: Screen = { path: null, comp: null };
 /** After the first screen has shown, the other chunks load in idle time (once). */
 const IDLE_PRELOAD_MS = 1000;
 
-// The first screen's chunk: fetched with the shell, not after it.
-{
-  const first = router.route.name;
-  if (first !== 'not-found') void preload(first).catch(() => {});
-}
 
 export default function App() {
   const paletteOpen = signal(false);

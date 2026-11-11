@@ -1,7 +1,7 @@
 // Control flow: Show ({#if}), For ({#each} with a key), Index ({#each} without one), Switch/Match ({#if}/{:else if}),
 // Key ({#key}), Dynamic (<svelte:element> / a component chosen at runtime), Portal.
 
-import { createRoot, computed, getOwner, isReader, memo, ownedBy, reader, signal, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
+import { createRoot, computed, getOwner, isReader, memo, owning, reader, signal, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
 import { createComponent, splitProps } from './component';
 import { insert } from './dom';
 import { spread } from './spread';
@@ -104,7 +104,6 @@ export function For<T>(props: ForProps<T>): JSX.Element {
 
   const make = (item: T, i: number, key: unknown): Row<T> =>
     createRoot((dispose) => {
-      ownedBy(mapped);
       const sig = keyFn ? signal(item) : null;
       const idx = withIndex ? signal(i) : null;
       const row: Row<T> = { key, item, sig, idx, dispose, value: undefined, b: { t: null } };
@@ -138,7 +137,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
           for (const r of rows) drop(r);
           rows = [];
           if (fallback === null && props.fallback !== undefined) {
-            fallback = createRoot((dispose) => (ownedBy(mapped), { dispose, value: settle(inBranch(null, ran, () => props.fallback)) }), parent);
+            fallback = createRoot((dispose) => ({ dispose, value: settle(inBranch(null, ran, () => props.fallback)) }), parent);
           }
           ran = true;
           return fallback !== null ? [fallback.value] : [];
@@ -212,6 +211,7 @@ export function For<T>(props: ForProps<T>): JSX.Element {
     },
     { equals: false },
   );
+  owning(mapped);
   eager(mapped);
   return reader(() => mapped.get());
 }
@@ -242,8 +242,7 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         for (let i = rows.length; i < n; i++) {
           rows.push(
             createRoot((dispose) => {
-              ownedBy(mapped);
-              const sig = signal<T>(list[i]!);
+                      const sig = signal<T>(list[i]!);
               const b: Branch = { t: null };
               return { sig, dispose, b, value: settle(inBranch(b, ran, () => fn(() => sig.get(), i))) };
             }, parent),
@@ -255,7 +254,7 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
         }
         rows.length = n;
         if (n === 0 && fallback === null && props.fallback !== undefined) {
-          fallback = createRoot((dispose) => (ownedBy(mapped), { dispose, value: settle(inBranch(null, ran, () => props.fallback)) }), parent);
+          fallback = createRoot((dispose) => ({ dispose, value: settle(inBranch(null, ran, () => props.fallback)) }), parent);
         } else if (n > 0 && fallback !== null) {
           fallback.dispose();
           fallback = null;
@@ -266,6 +265,7 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
     },
     { equals: false },
   );
+  owning(mapped);
   eager(mapped);
   return reader(() => mapped.get());
 }

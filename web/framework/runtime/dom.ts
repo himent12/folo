@@ -223,19 +223,12 @@ function cleanChildren(parent: Node, current: Current, marker: Node | null | und
   return [node];
 }
 
-const moveBefore: ((this: Node, node: Node, child: Node | null) => void) | undefined =
-  typeof Element !== 'undefined' ? ((Element.prototype as any).moveBefore as typeof moveBefore) : undefined;
-
-/** Moves a node that is already in `parent`, keeping focus and state where the browser can (`moveBefore`). */
+/**
+ * Moves a node that is already in `parent`, keeping focus where it was. With `insertBefore`, as Svelte moves rows:
+ * Chrome's `moveBefore` would keep focus by itself, but a node moved with it stops restyling its descendants when
+ * its own attributes change afterwards (a chip moved first, then pressed, kept its unpressed key).
+ */
 function move(parent: Node, node: Node, ref: Node | null): void {
-  if (moveBefore !== undefined && node.isConnected && (parent as Element).isConnected) {
-    try {
-      moveBefore.call(parent, node, ref);
-      return;
-    } catch {
-      // Not movable this way (e.g. across documents): fall back.
-    }
-  }
   const active = typeof document !== 'undefined' ? document.activeElement : null;
   const hadFocus = active !== null && active !== document.body && node.contains(active);
   parent.insertBefore(node, ref);

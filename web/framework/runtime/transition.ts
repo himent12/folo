@@ -5,7 +5,7 @@
 // Animations keyframes, with a dummy animation for the delay. A duration of 0 (`motion(ms)` under reduced motion)
 // skips it.
 
-import { effect, untrack } from './core';
+import { effectNow, untrack } from './core';
 import { setLeave } from './dom';
 
 export type EasingFunction = (t: number) => number;
@@ -259,7 +259,7 @@ export function transition<P>(el: Element, fn: TransitionFn<P>, params: (() => P
   }
   if (branch !== null) (branch.t ??= []).push(manager);
   if (flags & IN && intro) {
-    effect(() => {
+    effectNow(() => {
       untrack(() => {
         html.inert = inert;
         introAnim?.abort();

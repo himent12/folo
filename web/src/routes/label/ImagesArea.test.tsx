@@ -67,9 +67,9 @@ describe('the job grid', () => {
     flush();
     const cells = () => container.querySelectorAll('.cell').length;
     // Rows 0-6 (5 in view, 2 of overscan): 28 tiles, each made once. (TileGrid's first pass, before it knows its
-    // width, has 8 rows of one column; the eighth row goes when the width is known, before any of its tiles is made.)
+    // width, has 8 rows of one column: the eighth row's tile, im28, is made and dropped.)
     expect(cells()).toBe(28);
-    expect(urls.mock.calls.map((c) => c[1]).sort()).toEqual(Array.from({ length: 28 }, (_, i) => `im${i}`).sort());
+    expect(urls.mock.calls.map((c) => c[1]).sort()).toEqual([...Array.from({ length: 28 }, (_, i) => `im${i}`), 'im28'].sort());
     const made = urls.mock.calls.length;
     const kept = container.querySelector('[data-i="8"] .tile');
 

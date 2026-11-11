@@ -120,8 +120,10 @@ effect(() => {
   return () => document.removeEventListener('pointerdown', away);
 });
 ```
-Same timing as Svelte: after the component is in the DOM, and after the DOM updates of each later flush; parents'
-effects before children's, siblings in order. The returned function runs before the next run and on teardown.
+Same timing as Svelte: after the component is in the DOM, and after the DOM updates of each later flush. A
+component's own effects (written in its body) are created once it has rendered, as Svelte defers them to its mount, so
+the effects and actions of the components and elements it renders run before its own; siblings in order. The returned
+function runs before the next run and on teardown.
 Teardown order on unmount: children first, then the parent (Svelte's order).
 
 | Svelte | fw |
@@ -530,8 +532,8 @@ unmount();
 11. **Dynamic component variables** — `<Icon/>` where `Icon` comes from props: `<Dynamic component={...}>`.
 12. **`style:--x`** — `style={{ '--x': v }}`.
 13. **`$effect` that only syncs a value** into another state is better as a `computed`.
-14. **Order of effect creation**: write effects in the component body before `return <JSX/>` (Svelte runs the script
-    before the template; fw runs effects in creation order).
+14. **Order of effects**: a component's body effects run after those of what it renders, whatever their place in the
+    body (both Svelte and fw defer them to the mount); among themselves they run in the order written.
 
 ## 12. Checking your port
 

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // Regressions the ports found: each test is the smallest repro of a difference from Svelte that a screen hit.
 import { describe, expect, it, vi } from 'vitest';
-import { bindable, createUniqueId, deep, flush, For, Show, signal } from 'fw';
+import { bindable, createUniqueId, deep, effect, flush, For, onMount, Show, signal } from 'fw';
 import { render } from '../testing';
 
 const html = (el: Element) => el.innerHTML.replace(/<!---->/g, '');
@@ -92,6 +92,31 @@ describe('creation order', () => {
     const n = (id: string) => Number(id.slice(1));
     expect(n(ids[1]!)).toBe(n(ids[0]!) + 1);
     expect(n(ids[2]!)).toBe(n(ids[0]!) + 2);
+    unmount();
+  });
+});
+
+describe('branches re-created in document order', () => {
+  it("a conditional among a fragment's components flips before one inside a later component (both on one change)", () => {
+    const order: string[] = [];
+    const A = (p: { n: string }) => {
+      order.push(p.n);
+      createUniqueId();
+      return <i />;
+    };
+    const Panel = (p: { children?: JSX.Element }) => <section>{p.children}</section>;
+    const Page = (p: { children?: JSX.Element }) => <main>{p.children}</main>;
+    const data = signal(false);
+    const { unmount } = render(() => (
+      <Page>
+        {data.get() ? <A n="callout" /> : null}
+        <Panel>{data.get() ? <A n="curves" /> : null}</Panel>
+        <Panel>{data.get() ? <A n="matrix" /> : null}</Panel>
+      </Page>
+    ));
+    data.set(true);
+    flush();
+    expect(order).toEqual(['callout', 'curves', 'matrix']);
     unmount();
   });
 });
@@ -383,5 +408,55 @@ describe('styles as Svelte writes them (set_style)', () => {
       Object.defineProperty(proto, 'cssText', cssText);
       setProperty.mockRestore();
     }
+  });
+});
+
+describe("a component's own effects run after what it renders (Svelte defers them to its mount)", () => {
+  it("children's effects and actions first, then the parent's; effects inside effects are not deferred", () => {
+    const order: string[] = [];
+    const act = (_: Element, n: string) => void order.push(`action ${n}`);
+    const Child = (p: { n: string }) => {
+      effect(() => void order.push(`child ${p.n}`));
+      return <b use:act={p.n} />;
+    };
+    const Parent = () => {
+      effect(() => void order.push('parent'));
+      onMount(() => void order.push('parent mount'));
+      return (
+        <div use:act={'parent-div'}>
+          <Child n="a" />
+          <Child n="b" />
+        </div>
+      );
+    };
+    const { unmount } = render(() => <Parent />);
+    flush();
+    expect(order).toEqual(['action parent-div', 'action a', 'child a', 'action b', 'child b', 'parent', 'parent mount']);
+    unmount();
+  });
+});
+
+describe('effects run in tree order, as Svelte walks its effect tree', () => {
+  it('an effect in a branch created late runs at the branch place, before the effects of the component around it', () => {
+    const order: string[] = [];
+    const data = signal(0);
+    const shown = signal(false);
+    const Dialog = () => {
+      effect(() => void order.push(`dialog ${data.get()}`));
+      return <i />;
+    };
+    const Page = () => {
+      effect(() => void order.push(`page ${data.get()}`));
+      return <div>{shown.get() ? <Dialog /> : null}</div>;
+    };
+    const { unmount } = render(() => <Page />);
+    flush();
+    shown.set(true);
+    flush();
+    order.length = 0;
+    data.set(1);
+    flush();
+    expect(order).toEqual(['dialog 1', 'page 1']);
+    unmount();
   });
 });

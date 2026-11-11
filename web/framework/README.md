@@ -82,17 +82,21 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
   (checked transitively, so a diamond recomputes once: glitch-free). A computed with no subscribers holds no
   subscriptions, so it is garbage-collected with whatever created it.
 - **Effects**: a write pushes a "maybe stale" mark down the graph and queues effects; a flush (microtask, or
-  `flush()`) runs render effects (DOM bindings) first, then user effects, parents before children, each re-running only
-  if a source actually changed.
+  `flush()`) runs in cycles, as Svelte's: the render jobs queued so far (DOM bindings, and the owning computeds below),
+  then the user effects queued so far, each in tree order (parents before children, siblings in document order; a
+  branch created late stands at its memo's place); what they queue is the next cycle. Each re-runs only if a
+  source actually changed. A component's own `effect`s (and `onMount`) are created once it has rendered, as Svelte
+  defers a component's top-level `$effect` to its mount: the effects and actions of what it renders run first.
 - Dependencies are doubly linked nodes shared by the source's subscriber list and the target's source list. A re-run
   walks its previous links and reuses those it reads again (no allocation in steady state; a test asserts it).
 - **Owners**: components, effects and roots form a tree; disposing a node disposes its children (in order) then runs
   its cleanups. Context lives on owners (each component gets one, so `setContext` scopes like Svelte's).
 - **Memos** (`memo`) are owning computeds: what a branch creates belongs to it, so reading a branch from several
   places, or again, never re-creates it. A memo (and a list's rows) is created where it is written, as Svelte creates
-  a block, so components come into being in document order (and `createUniqueId` numbers them as Svelte does). Since
-  a branch then exists before the effect that reads it, an effect inside a branch whose memo is stale first has that
-  memo refreshed (it may be disposed by it): Svelte's parent-before-child order. Functions are either *readers*
+  a block, so components come into being in document order (and `createUniqueId` numbers them as Svelte does). When
+  what a memo (or a list) reads changes, it is re-evaluated in the render phase at its own place in the tree,
+  not when the effect that reads it gets its turn: branches are re-created in document order, before the effects
+  inside them (which a flip disposes before they run), as Svelte runs blocks in tree order. Functions are either *readers*
   (memos, list accessors: read in place) or *snippets* (called once in a memo of their own, read in an effect of
   their own, so a change inside a branch never re-runs the expression that returned it).
 
@@ -101,8 +105,9 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
 - `insert` renders text (reusing its text node), nodes, arrays and reactive functions before a marker node (static
   sibling, `<!>` comment) or as the parent's only content (then clearing is one `textContent = ''`).
 - Lists are reconciled by node identity: common prefix and suffix skipped, end-for-end swaps handled directly, then
-  the longest increasing subsequence of old positions stays and only the rest moves (`moveBefore` keeps focus where
-  the browser has it). `For` maps rows by key (an item replaced under the same key updates the row in place),
+  the longest increasing subsequence of old positions stays and only the rest moves (`insertBefore`, as Svelte;
+  focus is put back where it was: Chrome's `moveBefore` leaves a moved node's descendants unstyled after a later
+  attribute change). `For` maps rows by key (an item replaced under the same key updates the row in place),
   `Index` by position.
 - Events: Svelte 5's delegated set (click, input, keydown, pointer*, ...) goes through one listener per type on each
   render root and the document, walking the event path with Svelte's propagation algorithm; others use

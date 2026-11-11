@@ -1,6 +1,6 @@
 // Element refs, actions (`use:`) and two-way bindings (`bind:`), with Svelte 5's behaviour.
 
-import { effect, onCleanup, renderEffect, untrack } from './core';
+import { effectNow, onCleanup, renderEffect, untrack } from './core';
 import { on } from './events';
 
 /** Something `bind:` can read and write: a signal, a `bindable` prop, `field(obj, key)`. */
@@ -36,7 +36,7 @@ export interface ActionReturn<P = undefined> {
  * is re-evaluated to a different value (always, for an object literal), `destroy` on removal.
  */
 export function use<E extends Element, P>(el: E, action: Action<E, P>, param?: () => P): void {
-  effect(() => {
+  effectNow(() => {
     const payload = untrack(() => action(el, param?.() as P)) || {};
     if (param && payload.update) {
       let inited = false;
@@ -150,7 +150,7 @@ function bindSelect(select: SelectEl, sig: Bindable<unknown>): void {
     select.__value = value;
   });
   // After the options are in (a user effect runs after the render effects that insert them), then on every change.
-  effect(() => {
+  effectNow(() => {
     let value = sig.get();
     selectOption(select, value, mounting);
     if (mounting && value === undefined) {
@@ -171,7 +171,7 @@ function bindSelect(select: SelectEl, sig: Bindable<unknown>): void {
 export function selectValue(select: Element, fn: () => unknown): void {
   const el = select as SelectEl;
   let prev: unknown = {};
-  effect(() => {
+  effectNow(() => {
     const value = fn();
     if (value === prev) return;
     prev = value;
@@ -228,7 +228,7 @@ const watchers = new WeakMap<Element, Set<() => void>>();
 /** Internal: `bind:clientWidth={sig}` and co. (read-only), via a shared ResizeObserver, as Svelte does. */
 export function bindSize(el: Element, key: SizeKey, sig: { set(v: number): void }): void {
   const update = () => sig.set((el as HTMLElement)[key]);
-  effect(() => {
+  effectNow(() => {
     untrack(update);
     if (typeof ResizeObserver === 'undefined') return;
     observer ??= new ResizeObserver((entries) => {

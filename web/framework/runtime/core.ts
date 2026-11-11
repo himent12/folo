@@ -27,7 +27,11 @@ const USER = 64;
 const FRESH = 128;
 /** An owner linked into its parent's child list (disposed with it). */
 const ATTACHED = 256;
-/** A computed that owns a subtree (a memo's branch, a list's rows): see `settleOwners`. */
+/**
+ * A computed that owns a subtree (a memo's branch, a list's rows). When what it reads changes it is re-evaluated in the
+ * render phase at its own place (its creation order, which is document order), as Svelte runs a block before what
+ * comes after it, not when the effect that reads it gets to it.
+ */
 const OWNING = 512;
 
 interface Link {
@@ -80,8 +84,6 @@ let owner: Owner | null = null;
 /** Bumped on every write; lets an untracked computed skip a check when nothing at all changed. */
 let globalVersion = 0;
 let nextId = 0;
-/** Owning computeds marked stale and not refreshed yet: while any exist, an effect checks its ancestors first. */
-let staleOwning = 0;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Dependency links
@@ -284,6 +286,9 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
   _version = 0;
   _globalVersion = globalVersion - 1;
   _flags = OUTDATED;
+  _id = nextId++;
+  /** An owning computed's place: the owner it was created in (see `position`). */
+  _owner: Owner | null = null;
   _node: Link | undefined = undefined;
   _targets: Link | undefined = undefined;
   _sources: Link | undefined = undefined;
@@ -294,7 +299,6 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     this._equals = equals === undefined ? is : equals;
   }
   _refresh(): boolean {
-    if ((this._flags & (NOTIFIED | OWNING)) === (NOTIFIED | OWNING)) staleOwning--;
     this._flags &= ~NOTIFIED;
     if (this._flags & RUNNING) return false;
     // Subscribed and not marked: every source change would have reached it, so it is current.
@@ -344,17 +348,18 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     if (this._targets === undefined) return;
     unsubscribeLink(this, node);
     if (this._targets === undefined) {
-      if ((this._flags & (NOTIFIED | OWNING)) === (NOTIFIED | OWNING)) {
-        staleOwning--;
-        this._flags = (this._flags & ~NOTIFIED) | OUTDATED;
-      }
+      // Nobody reads it any more (its branch went): a queued re-evaluation is dropped (see `_update`).
+      if (this._flags & OWNING) this._flags = (this._flags & ~NOTIFIED) | OUTDATED;
       this._flags &= ~TRACKING;
       for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
     }
   }
   _notify(): void {
     if (!(this._flags & NOTIFIED)) {
-      if (this._flags & OWNING) staleOwning++;
+      if (this._flags & OWNING) {
+        renderQueue.push(this);
+        schedule();
+      }
       this._flags |= OUTDATED | NOTIFIED;
       for (let node = this._targets; node !== undefined; node = node._nt) node._t._notify();
     }
@@ -372,6 +377,17 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     listener = undefined;
     try {
       return this.get();
+    } finally {
+      listener = prev;
+    }
+  }
+  /** An owning computed's turn in the render phase (see OWNING): brought up to date if it is still read. */
+  _update(): void {
+    if ((this._flags & (NOTIFIED | TRACKING)) !== (NOTIFIED | TRACKING)) return;
+    const prev = listener;
+    listener = undefined;
+    try {
+      this._refresh();
     } finally {
       listener = prev;
     }
@@ -398,30 +414,18 @@ export class Owner {
   _cleanups: Cleanup | Cleanup[] | null = null;
   _ctx: Map<unknown, unknown> | null = null;
   _flags = 0;
-  /** The computed this subtree is the content of (a memo's branch, a list row), if any. */
-  _m: ComputedNode<unknown> | null = null;
+  /**
+   * Its place among its siblings (creation order; a branch's root takes its memo's place): with its ancestors', its
+   * position in the tree, which is the order effects run in.
+   */
+  _id = nextId++;
 }
 
-/** Internal: the current owner (a list row's root) is content of `c`, an owning computed (see `settleOwners`). */
-export function ownedBy(c: ReadSignal<unknown>): void {
+/** Internal: `c` owns what it creates (a list's rows): it is re-evaluated at its own place in the render phase. */
+export function owning(c: ReadSignal<unknown>): void {
   const n = c as ComputedNode<unknown>;
-  if (!(n._flags & OWNING)) n._flags |= OWNING;
-  if (owner !== null) owner._m = n;
-}
-
-/**
- * Before `node` runs: refreshes the outermost stale computed whose content `node` is in (a branch whose condition
- * changed, a list whose rows changed), as Svelte runs a block before its children. That may dispose `node`. Effects
- * are ordered by creation, and a branch is created before the effect that reads it, so without this a branch's effect
- * could run once more with the state that removes it.
- */
-function settleOwners(node: Owner): void {
-  for (;;) {
-    let stale: ComputedNode<unknown> | null = null;
-    for (let o = node._parent; o !== null; o = o._parent) if (o._m !== null && o._m._flags & NOTIFIED) stale = o._m;
-    if (stale === null || node._flags & DISPOSED) return;
-    stale._refresh();
-  }
+  n._flags |= OWNING;
+  n._owner = owner;
 }
 
 function attach(parent: Owner | null, child: Owner): void {
@@ -576,13 +580,15 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
   const c = new ComputedNode<T>(() => {
     if (root !== null) dispose(root);
     const r = (root = new Owner());
-    r._m = c as ComputedNode<unknown>;
+    // The branch stands where the memo was written, not where it was (re)created.
+    r._id = c._id;
     attach(parent, r);
     owner = r;
     const v = fn();
     return (typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
   }, options?.equals);
   c._flags |= OWNING;
+  c._owner = parent;
   // Created now, where it is written, as Svelte creates a block: what it renders comes before what follows it in the
   // document (component order, `createUniqueId` numbering). Untracked: whoever reads it later subscribes then. An
   // error is kept for that first read.
@@ -652,7 +658,14 @@ export function createContext<T>(defaultValue?: T): Context<T | undefined> {
 // ---------------------------------------------------------------------------------------------------------------------
 // Effects and the scheduler
 
-let renderQueue: EffectNode[] = [];
+/** What the render phase runs, in creation order: DOM bindings, and owning computeds (branches, lists). */
+interface Job {
+  _id: number;
+  _flags: number;
+  _update(): void;
+}
+
+let renderQueue: Job[] = [];
 let userQueue: EffectNode[] = [];
 let scheduled = false;
 let flushing = false;
@@ -661,7 +674,6 @@ class EffectNode extends Owner implements Target {
   _sources: Link | undefined = undefined;
   _fn: (prev: any) => any;
   _value: unknown;
-  _id = nextId++;
   constructor(fn: (prev: any) => any, value: unknown, flags: number) {
     super();
     this._fn = fn;
@@ -677,10 +689,6 @@ class EffectNode extends Owner implements Target {
   }
   _update(): void {
     if (this._flags & DISPOSED) return;
-    if (staleOwning > 0) {
-      settleOwners(this);
-      if (this._flags & DISPOSED) return;
-    }
     const f = this._flags;
     this._flags = f & ~NOTIFIED;
     if (f & FRESH || needsToRecompute(this)) this._run();
@@ -717,11 +725,43 @@ function schedule(): void {
   }
 }
 
-const byId = (a: EffectNode, b: EffectNode) => a._id - b._id;
+/** A job's position in the tree: the places of its ancestors, from the root, then its own. */
+function position(j: Job): number[] {
+  const out: number[] = [];
+  let o: Owner | null = j instanceof Owner ? j : (out.push(j._id), (j as ComputedNode<unknown>)._owner);
+  for (; o !== null; o = o._parent) out.push(o._id);
+  return out.reverse();
+}
+
+function before(a: number[], b: number[]): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return a[i]! - b[i]!;
+  return a.length - b.length;
+}
 
 /**
- * Runs every pending effect now: first the DOM bindings (render effects), then user effects; repeats while effects
- * write (port of `flushSync`). Writes otherwise flush on their own in a microtask. Effects run parent before child,
+ * Runs `q` in tree order, as Svelte walks its effect tree (parents before children, siblings in document order: a
+ * branch created late runs at its memo's place); returns the first error.
+ */
+function run(q: Job[], error: unknown): unknown {
+  if (q.length > 1) {
+    const keys = new Map<Job, number[]>();
+    for (const j of q) keys.set(j, position(j));
+    q.sort((a, b) => before(keys.get(a)!, keys.get(b)!));
+  }
+  for (let i = 0; i < q.length; i++) {
+    try {
+      q[i]!._update();
+    } catch (e) {
+      error ??= e;
+    }
+  }
+  return error;
+}
+
+/**
+ * Runs every pending effect now, in cycles: the DOM bindings (render effects), then user effects; repeats while
+ * effects write (port of `flushSync`). Writes otherwise flush on their own in a microtask. Effects run parent before child,
  * siblings in creation order.
  */
 export function flush(): void {
@@ -739,27 +779,16 @@ export function flush(): void {
         userQueue = [];
         throw new Error('fw: effects kept writing what they read (more than 1000 rounds in one flush)');
       }
-      let q: EffectNode[];
-      if (renderQueue.length > 0) {
-        q = renderQueue;
-        renderQueue = [];
-      } else {
-        q = userQueue;
-        userQueue = [];
-      }
-      for (let i = 1; i < q.length; i++) {
-        if (q[i - 1]!._id > q[i]!._id) {
-          q.sort(byId);
-          break;
-        }
-      }
-      for (let i = 0; i < q.length; i++) {
-        try {
-          q[i]!._update();
-        } catch (e) {
-          error ??= e;
-        }
-      }
+      // One cycle, as Svelte's flush: the render jobs queued so far, then the user effects queued so far (those of
+      // components the render jobs just created included); what they queue in turn is the next cycle. A page that goes
+      // and the page that comes so settle in one cycle before anything rendered earlier re-runs over the gap between
+      // them (a count one page's cleanup lowers and the next page's effect raises).
+      const q = renderQueue;
+      renderQueue = [];
+      error = run(q, error);
+      const u = userQueue;
+      userQueue = [];
+      error = run(u, error);
     }
   } finally {
     flushing = false;
@@ -811,13 +840,44 @@ export function renderEffect<T>(fn: (prev: T) => T, init?: T): void {
 /**
  * A side effect (port of `$effect`): runs after the component is in the DOM, then whenever what it read changes, after
  * the DOM bindings of that flush. A returned function runs before the next run and when the owner goes away.
+ *
+ * Called in a component's body (not inside another effect), it is created once the component has rendered, as Svelte
+ * defers a component's top-level `$effect` to its mount: the effects of what it renders (child components, actions)
+ * come first, and so run first.
  */
 export function effect(fn: () => void | Cleanup): void {
+  if (deferred !== null && owner === deferred.owner && listener === undefined) deferred.fns.push(fn);
+  else effectNow(fn);
+}
+
+/** Internal: a user effect created now, never deferred (actions and bindings, which Svelte creates in place). */
+export function effectNow(fn: () => void | Cleanup): void {
   const e = new EffectNode(fn, undefined, USER);
   attach(owner, e);
   userQueue.push(e);
   e._flags |= NOTIFIED;
   schedule();
+}
+
+/** The component being created, and the effects its body asked for (see `effect`). */
+let deferred: { owner: Owner | null; fns: (() => void | Cleanup)[] } | null = null;
+
+/**
+ * Internal: runs a component's function (in its owner) and then creates the effects its body asked for, after what it
+ * rendered (Svelte's `pop()`).
+ */
+export function deferEffects<T>(fn: () => T): T {
+  const prev = deferred;
+  const d: { owner: Owner | null; fns: (() => void | Cleanup)[] } = { owner, fns: [] };
+  deferred = d;
+  let out: T;
+  try {
+    out = fn();
+  } finally {
+    deferred = prev;
+  }
+  for (const f of d.fns) effectNow(f);
+  return out;
 }
 
 /**
