@@ -8,7 +8,28 @@ pub fn parse_close(s: &str, epochs: f32) -> Option<u32> {
     s.trim().parse::<u32>().ok().filter(|v| (*v as f32) <= epochs)
 }
 
+/// Close mosaic's default for a run of `epochs`: the trainer's 10 under its own cap (half the run),
+/// as Studio's New run has it.
+pub fn auto_close_mosaic(epochs: u32) -> u32 {
+    capped_close_mosaic(10, epochs)
+}
+
 impl NewRunForm {
+    /// While close mosaic is still the form's default, it follows the epoch count: the text its
+    /// field should show now, when the value moved.
+    pub fn follow_epochs(&mut self) -> Option<String> {
+        if !self.close_auto || self.epochs_invalid {
+            return None;
+        }
+        let v = auto_close_mosaic(self.epochs.round() as u32);
+        self.close_invalid = false;
+        if self.close_mosaic.round() as u32 == v {
+            return None;
+        }
+        self.close_mosaic = v as f32;
+        Some(v.to_string())
+    }
+
     /// Validate the close-mosaic text against the current epoch count.
     pub fn check_close(&mut self, s: &str) {
         match parse_close(s, self.epochs) {
@@ -115,6 +136,9 @@ pub struct NewRunForm {
     pub lr_invalid: bool,
     pub close_input: Entity<TextInput>,
     pub close_invalid: bool,
+    /// Close mosaic is the form's default and follows the epoch count (`follow_epochs`) until it
+    /// is set by hand.
+    pub close_auto: bool,
     /// Mixed-precision training (f16 on tensor cores). Sent only for a GPU device.
     pub amp: bool,
     /// The NMS-free end-to-end head (`head: o2o`); off is the default one-to-many head.
@@ -300,6 +324,13 @@ mod tests {
         assert_eq!(crate::api::capped_close_mosaic(10, 15), 7);
         assert_eq!(crate::api::capped_close_mosaic(10, 100), 10);
         assert_eq!(crate::api::capped_close_mosaic(10, 1), 0);
+    }
+
+    #[test]
+    fn close_mosaic_default_is_studios() {
+        // 10, never more than half the run (Studio's autoCloseMosaic: 0, 1, 2, 10, 10).
+        let auto: Vec<u32> = [1, 2, 5, 20, 100].into_iter().map(super::auto_close_mosaic).collect();
+        assert_eq!(auto, [0, 1, 2, 10, 10]);
     }
 
     #[test]

@@ -527,8 +527,10 @@ impl FoloApp {
                                     close_slider,
                                     close_bad.then_some("Enter a whole number up to the epoch count"),
                                 ))
-                                // Which epochs those are (the label already says what they do).
-                                .child(text(ty::SM, t.text_tertiary).child({
+                                // Which epochs those are (the label already says what they do);
+                                // none while either count is invalid (it would describe the last
+                                // good one).
+                                .when(!epochs_bad && !close_bad, |d| d.child(text(ty::SM, t.text_tertiary).child({
                                     // As the engine runs it: capped at half the run.
                                     let last = epochs.round().max(1.) as u32;
                                     let asked = close_mosaic.round() as u32;
@@ -542,7 +544,7 @@ impl FoloApp {
                                         1 => format!("Epoch {last} trains on whole images{capped}"),
                                         _ => format!("Epochs {}–{last} train on whole images{capped}", last - n + 1),
                                     }
-                                })),
+                                }))),
                         ),
                     ),
             )

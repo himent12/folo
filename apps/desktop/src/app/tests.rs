@@ -74,3 +74,39 @@ fn the_suggested_run_name_follows_the_choices_until_typed() {
     });
     assert_eq!(run_name(&mut app, window), "my run");
 }
+
+/// Types `text` into one of the New run form's inputs.
+fn type_into(
+    app: &mut HeadlessApp,
+    window: WindowHandle<FoloApp>,
+    which: fn(&super::NewRunForm) -> folo_ui::Entity<crate::input::TextInput>,
+    text: &str,
+) {
+    let text = text.to_string();
+    drive(app, window, move |this, _, cx| {
+        let input = which(this.new_run.as_ref().unwrap());
+        input.update(cx, |i, cx| i.set_text(text, cx));
+    });
+}
+
+#[test]
+fn close_mosaic_follows_the_epochs_until_set_by_hand() {
+    let (mut app, window) = open();
+    drive(&mut app, window, |this, w, cx| this.open_new_run(None, w, cx));
+    let state = |app: &mut HeadlessApp| {
+        drive(app, window, |this, _, cx| {
+            let f = this.new_run.as_ref().unwrap();
+            (f.close_mosaic as u32, f.close_invalid, f.close_input.read(cx).text().to_string())
+        })
+    };
+    assert_eq!(state(&mut app), (10, false, "10".into()));
+    // 3 epochs: the untouched default follows (half the run) instead of turning invalid.
+    type_into(&mut app, window, |f| f.epochs_input.clone(), "3");
+    assert_eq!(state(&mut app), (1, false, "1".into()));
+    type_into(&mut app, window, |f| f.epochs_input.clone(), "50");
+    assert_eq!(state(&mut app), (10, false, "10".into()));
+    // Set by hand, it stays, and is checked against the epochs.
+    type_into(&mut app, window, |f| f.close_input.clone(), "20");
+    type_into(&mut app, window, |f| f.epochs_input.clone(), "15");
+    assert_eq!(state(&mut app), (20, true, "20".into()));
+}

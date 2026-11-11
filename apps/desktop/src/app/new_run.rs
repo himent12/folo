@@ -13,8 +13,8 @@ use crate::store::*;
 use crate::ui::*;
 
 use super::forms::{
-    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, batch_index, carry_over, parse_epochs, parse_lr,
-    suggested_name,
+    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, auto_close_mosaic, batch_index, carry_over,
+    parse_epochs, parse_lr, suggested_name,
 };
 use super::{FoloApp, Route, RunFilter};
 
@@ -68,6 +68,8 @@ impl FoloApp {
             f.mixup = config.augment.mixup;
             f.fliplr = config.augment.fliplr;
             f.close_mosaic = config.augment.close_mosaic as f32;
+            // That run's default still follows the epochs; a value it set by hand stays.
+            f.close_auto = config.augment.close_mosaic == auto_close_mosaic(config.epochs);
             f.scale = config.augment.scale;
             f.amp = config.amp;
             f.e2e = config.head == Head::O2o;
@@ -186,6 +188,10 @@ impl FoloApp {
             cx.subscribe(&close_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                 let InputEvent::Changed(s) = ev;
                 if let Some(f) = this.new_run.as_mut() {
+                    // Any other text than the default the form put there is the user's.
+                    if s.trim() != format!("{:.0}", f.close_mosaic) {
+                        f.close_auto = false;
+                    }
                     f.check_close(s);
                     cx.notify();
                 }
@@ -200,9 +206,14 @@ impl FoloApp {
                         }
                         None => f.epochs_invalid = true,
                     }
-                    // Close mosaic is bounded by the epochs: recheck it against the new count.
-                    let close = f.close_input.read(cx).text();
-                    f.check_close(&close);
+                    // Close mosaic follows the epochs while it is the default; a value set by
+                    // hand is bounded by them: recheck it against the new count.
+                    if let Some(v) = f.follow_epochs() {
+                        f.close_input.clone().update(cx, |i, cx| i.set_text(v, cx));
+                    } else if !f.close_auto {
+                        let close = f.close_input.read(cx).text();
+                        f.check_close(&close);
+                    }
                     cx.notify();
                 }
             }),
@@ -248,6 +259,7 @@ impl FoloApp {
             lr_input,
             close_input,
             close_invalid: false,
+            close_auto: true,
             amp: false,
             e2e: false,
             advanced: false,
