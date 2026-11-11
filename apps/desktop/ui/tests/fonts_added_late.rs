@@ -65,6 +65,17 @@ fn assert_a_late_font_is_used(text: TextBackend) {
 #[cfg(any(not(windows), feature = "portable-text"))]
 #[test]
 fn a_font_added_after_the_first_frame_is_used_portable() {
+    // The frame before Geist is added is drawn in a system font from the text system's fallback stack. A
+    // machine with none of them (a bare CI image) cannot draw it, which says nothing about the code under
+    // test: the backend's own test below still runs there.
+    use folo_ui::text::portable::CosmicTextSystem;
+    let system = CosmicTextSystem::new();
+    let fallbacks =
+        ["Helvetica", "Segoe UI", "Ubuntu", "Adwaita Sans", "Cantarell", "Noto Sans", "DejaVu Sans", "Arial"];
+    if !fallbacks.iter().any(|family| system.font_id(&font(*family)).is_ok()) {
+        eprintln!("skipped: none of the fallback families {fallbacks:?} is installed");
+        return;
+    }
     assert_a_late_font_is_used(TextBackend::Portable);
 }
 

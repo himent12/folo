@@ -81,8 +81,12 @@ impl TextSystem {
     /// generation moves on (see the module docs); font ids already handed out stay valid.
     pub fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.platform_text_system.add_fonts(fonts)?;
-        self.font_ids_by_font.write().clear();
-        self.wrapper_pool.lock().clear();
+        // Cleared and moved on under both locks (the pool's first, as `line_wrapper` takes them), so a
+        // resolution or a wrapper from before the add cannot be published after it.
+        let mut wrapper_pool = self.wrapper_pool.lock();
+        let mut font_ids = self.font_ids_by_font.write();
+        font_ids.clear();
+        wrapper_pool.clear();
         self.font_generation.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
@@ -106,8 +110,13 @@ impl TextSystem {
         if let Some(font_id) = font_id {
             font_id
         } else {
+            let generation = self.font_generation();
             let font_id = self.platform_text_system.font_id(font);
-            self.font_ids_by_font.write().insert(font.clone(), clone_font_id_result(&font_id));
+            // Not cached if fonts were added meanwhile (on another thread): the answer may be the old one.
+            let mut font_ids = self.font_ids_by_font.write();
+            if self.font_generation() == generation {
+                font_ids.insert(font.clone(), clone_font_id_result(&font_id));
+            }
             font_id
         }
     }
