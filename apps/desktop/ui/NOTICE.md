@@ -45,5 +45,6 @@ when you adapt another file.
 | `platform/windows/{chrome, clipboard, display, drop_target, events, keyboard, pacer, platform, platform_window, shell, util, window}.rs` | `platform/windows/` (`events.rs`, `window.rs`, `platform.rs`, `keyboard.rs`, `display.rs`, `clipboard.rs`, `util.rs`, `vsync.rs`, `system_settings.rs`): message handling, title bar, key names, display UUID, window placement formulas |
 | `raster/quad_eval.rs`, `raster/gradient.rs`, `raster/shadow.rs`, `raster/image.rs`, `raster/path.rs` (underlines) | `platform/windows/shaders.hlsl` (quad, gradient, Oklab, shadow, polychrome sprite and underline fragment maths) |
 | `raster/sprite.rs` | `platform/windows/alpha_correction.hlsl` (glyph contrast and gamma correction) |
+| `elements/anchored.rs`, `elements/uniform_list.rs`, `elements/text.rs`, `elements/animation.rs` | `elements/anchored.rs`, `elements/uniform_list.rs`, `elements/text.rs`, `elements/animation.rs` (layout, measure and scroll rules) |
 
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.

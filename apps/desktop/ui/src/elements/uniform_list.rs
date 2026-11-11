@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/elements/uniform_list.rs (measure, visible range, scroll_to_item)
 //! `uniform_list`: a virtual list of equal-height rows that renders only the visible range, with
 //! `UniformListScrollHandle` and `ScrollStrategy`. Owner tag: `"elements"`. Row height is measured from the
 //! first row, as GPUI does.

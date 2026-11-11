@@ -54,8 +54,12 @@ impl Application {
         let args: Vec<String> = std::env::args().collect();
         match shot::ShotArgs::parse(&args) {
             Ok(Some(request)) => {
-                let platform =
-                    Rc::new(crate::platform::headless::HeadlessPlatform::from_options(request.options));
+                let platform = crate::platform::headless::HeadlessPlatform::try_from_options(request.options)
+                    .unwrap_or_else(|error| {
+                        eprintln!("folo-ui: --shot: {error:#}");
+                        std::process::exit(2)
+                    });
+                let platform = Rc::new(platform);
                 let app = App::new_app(platform.clone(), Arc::new(()));
                 return Application(
                     app,
@@ -63,7 +67,10 @@ impl Application {
                 );
             }
             Ok(None) => {}
-            Err(error) => panic!("--shot: {error:#}"),
+            Err(error) => {
+                eprintln!("folo-ui: --shot: {error:#}");
+                std::process::exit(2)
+            }
         }
         native_text_system()
             .and_then(native_application)

@@ -93,9 +93,12 @@ impl HeadlessPlatform {
     /// A platform for `options`, with the text backend it names. Panics when that backend is not built
     /// into this binary (`Fixed` needs feature `test-support`; `Portable` on Windows needs `portable-text`).
     pub fn from_options(options: HeadlessOptions) -> Self {
-        let text =
-            text_backend(options.text).unwrap_or_else(|error| panic!("headless text backend: {error:#}"));
-        Self::new(options.size, options.scale_factor, text)
+        Self::try_from_options(options).unwrap_or_else(|error| panic!("headless text backend: {error:#}"))
+    }
+
+    /// `from_options`, returning the error when the text backend is not built into this binary.
+    pub fn try_from_options(options: HeadlessOptions) -> Result<Self> {
+        Ok(Self::new(options.size, options.scale_factor, text_backend(options.text)?))
     }
 
     /// The dispatcher (for the harness to pump).

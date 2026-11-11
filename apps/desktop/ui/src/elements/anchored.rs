@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/elements/anchored.rs (the fit and snap rules)
 //! `anchored()`: positions its children at a point (or its own layout position), anchored by a corner, and
 //! keeps them inside the window (`snap_to_window_with_margin`). Owner tag: `"elements"`.
 

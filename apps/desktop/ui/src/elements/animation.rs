@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/elements/animation.rs (progress rule)
 //! `Animation` and `AnimationExt::with_animation`: re-renders an element with a progress `0..=1` each frame
 //! while the animation runs (it calls `request_animation_frame`; a finished, non-repeating animation stops
 //! asking, so the window goes idle). Start time is element state keyed by the animation id. Owner tag:

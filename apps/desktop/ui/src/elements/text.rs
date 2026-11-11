@@ -1,3 +1,4 @@
+// Adapted from GPUI (Apache-2.0): crates/gpui/src/elements/text.rs (the measure function)
 //! Text as elements: `&'static str`, `String`, `SharedString`, and `StyledText` (text with runs). Owner tag:
 //! `"elements"`. Shaping, wrapping and truncation are the text package's (`WindowTextSystem::shape_text`,
 //! `LineWrapper`); this element measures through `request_measured_layout`, keeps the shaped lines from
