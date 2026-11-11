@@ -203,6 +203,9 @@ impl HeadlessDispatcher {
         drop(foreground);
         drop(delayed);
         drop(background);
+        // The main-thread tasks that are waiting, not queued: dropped here, on their thread (on another
+        // thread, from the last `Arc`'s drop, there are none of this dispatcher's).
+        crate::executor::drop_foreground_futures(self);
     }
 }
 
@@ -241,13 +244,10 @@ impl PlatformDispatcher for HeadlessDispatcher {
     fn dispatch_on_main_thread(&self, runnable: Runnable) {
         let mut state = self.shared.state.lock();
         if state.shut_down {
+            // Dropped on whatever thread woke it (a main-thread runnable holds nothing of its future:
+            // `executor`); dropping it may schedule another: outside the lock.
             drop(state);
-            // Dropping a main-thread task off the main thread panics inside async-task (a pool thread
-            // waking it after shutdown): leak that one instead.
-            if !self.is_main_thread() {
-                std::mem::forget(runnable);
-            }
-            return;
+            return drop(runnable);
         }
         state.foreground.push_back(runnable);
         drop(state);

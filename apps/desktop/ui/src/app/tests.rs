@@ -570,20 +570,30 @@ fn dropping_the_app_drops_its_queued_tasks_and_dispatcher() {
     assert!(dispatcher.upgrade().is_none(), "nothing keeps the dispatcher alive");
 }
 
+/// A main-thread task waiting (not queued) when the app goes, woken later on another thread: its future
+/// and what it holds are dropped with the app, on the main thread, and its waking elsewhere neither
+/// panics nor keeps anything (the dispatcher) alive.
 #[test]
-fn a_main_thread_task_woken_off_the_main_thread_after_the_app_is_gone_does_not_panic() {
+fn a_waiting_main_thread_task_is_dropped_with_the_app_and_its_late_wake_elsewhere_is_harmless() {
     let mut app = app();
+    let dispatcher = Arc::downgrade(app.dispatcher());
+    let drops = Rc::new(Cell::new(0));
     let (tx, rx) = crate::oneshot::channel::<()>();
     app.update(|cx| {
+        let tracked = Tracked(drops.clone());
         cx.spawn(async move |cx| {
             cx.background_spawn(async move { rx.await.ok() }).await;
+            drop(tracked);
         })
         .detach()
     });
     app.run_until_idle();
     drop(app);
-    // Waking the background task from another thread cancels it there, which wakes the main-thread task
-    // awaiting it on that thread: that task must not be dropped there (async-task panics).
+    assert_eq!(drops.get(), 1, "the waiting task's state is dropped with the app");
+    // Waking the background task from another thread cancels it there, which would wake the main-thread
+    // task awaiting it on that thread.
     let sender = std::thread::spawn(move || tx.send(()).ok());
     assert!(sender.join().is_ok());
+    assert_eq!(drops.get(), 1);
+    assert!(dispatcher.upgrade().is_none(), "nothing keeps the dispatcher alive");
 }

@@ -4,19 +4,30 @@
 //! Tasks are `async-task` runnables: waking one schedules it on its dispatcher queue, so an idle app has no
 //! timer and no thread awake. Dropping a `Task` cancels it; `detach` lets it run to the end.
 //!
-//! A foreground task is an `async_task::spawn_local` task: it is polled only on the thread that spawned it
-//! (the platform runs main-thread runnables there). A task woken after the app is gone just runs: its
-//! `AsyncApp` calls return `Err`, nothing panics.
+//! A foreground task is polled only on the thread that spawned it (the platform runs main-thread runnables
+//! there). Its future lives in that thread's registry (`FOREGROUND`), and the async-task holds only a
+//! handle to it that owns nothing of it, so a foreground runnable may be dropped on any thread: a waker on
+//! a pool thread that schedules it after the dispatcher shut down drops it there. The future itself is
+//! dropped only on its thread: when it finishes or its task is cancelled, or when the dispatcher shuts
+//! down (`drop_foreground_futures`), which cancels the tasks that are waiting as well as the queued ones.
+//! A task woken while the app is gone but its dispatcher is not just runs: its `AsyncApp` calls return
+//! `Err`, nothing panics.
 
 use std::{
+    any::Any,
+    cell::RefCell,
+    collections::HashMap,
     fmt,
     future::Future,
     marker::PhantomData,
     pin::{Pin, pin},
     rc::Rc,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     task::{Context, Poll, Wake, Waker},
-    thread::Thread,
+    thread::{Thread, ThreadId},
     time::{Duration, Instant},
 };
 
@@ -166,9 +177,16 @@ impl ForegroundExecutor {
     where
         R: 'static,
     {
+        let future = ForegroundFuture::register(dispatcher_key(&*self.dispatcher), future);
         let dispatcher = self.dispatcher.clone();
-        let (runnable, task) =
-            async_task::spawn_local(future, move |runnable| dispatcher.dispatch_on_main_thread(runnable));
+        // SAFETY: async-task's conditions hold: the future (`ForegroundFuture`, ids only) is `Send` and
+        // `'static`, and so is the schedule closure (an `Arc` of a `Send + Sync` dispatcher). What
+        // `spawn` would add, a `Send` output, is not needed: the output is made only on this thread
+        // (`ForegroundFuture::poll` asserts it) and is read through `Task<R>`, which is not `Send` unless
+        // `R` is; a detached task's output is dropped by `Runnable::run`, here too.
+        let (runnable, task) = unsafe {
+            async_task::spawn_unchecked(future, move |runnable| dispatcher.dispatch_on_main_thread(runnable))
+        };
         runnable.schedule();
         Task(TaskState::Spawned(task))
     }
@@ -176,5 +194,114 @@ impl ForegroundExecutor {
     /// The dispatcher's clock.
     pub fn now(&self) -> Instant {
         self.dispatcher.now()
+    }
+}
+
+/// The key of a dispatcher's foreground tasks in the registry: its address.
+fn dispatcher_key(dispatcher: &dyn PlatformDispatcher) -> usize {
+    dispatcher as *const dyn PlatformDispatcher as *const () as usize
+}
+
+thread_local! {
+    /// This thread's live foreground futures.
+    static FOREGROUND: RefCell<Registry> = RefCell::default();
+}
+
+/// Foreground futures by dispatcher (`dispatcher_key`) and task; a future is `None` while it is polled.
+#[derive(Default)]
+struct Registry {
+    tasks: HashMap<usize, HashMap<u64, Option<Box<dyn Any>>>>,
+}
+
+impl Registry {
+    /// Removes a task, returning its future if it is here (not being polled).
+    fn remove(&mut self, dispatcher: usize, id: u64) -> Option<Box<dyn Any>> {
+        let tasks = self.tasks.get_mut(&dispatcher)?;
+        let future = tasks.remove(&id).flatten();
+        if tasks.is_empty() {
+            self.tasks.remove(&dispatcher);
+        }
+        future
+    }
+}
+
+/// Drops the futures of every foreground task of `dispatcher` that lives on this thread, waiting or
+/// queued (the platforms call it from the dispatcher's `shut_down`, on the main thread: nothing will run
+/// them any more). Their runnables are left holding nothing, and their tasks never finish. A task being
+/// polled right now is dropped when its poll returns.
+pub(crate) fn drop_foreground_futures(dispatcher: &dyn PlatformDispatcher) {
+    let key = dispatcher_key(dispatcher);
+    let futures = FOREGROUND.try_with(|r| r.try_borrow_mut().ok().and_then(|mut r| r.tasks.remove(&key)));
+    // Outside the borrow: dropping a future can spawn or end other tasks.
+    drop(futures);
+}
+
+/// What a foreground task's async-task holds: the ids of its future in its thread's registry. So it is
+/// `Send`, and dropping it on another thread drops nothing that belongs to the main thread.
+struct ForegroundFuture<F> {
+    dispatcher: usize,
+    id: u64,
+    thread: ThreadId,
+    future: PhantomData<fn() -> F>,
+}
+
+impl<F: Future + 'static> ForegroundFuture<F> {
+    /// Puts `future` in this thread's registry.
+    fn register(dispatcher: usize, future: F) -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let future: Box<dyn Any> = Box::new(Box::pin(future));
+        FOREGROUND.with_borrow_mut(|r| r.tasks.entry(dispatcher).or_default().insert(id, Some(future)));
+        ForegroundFuture { dispatcher, id, thread: std::thread::current().id(), future: PhantomData }
+    }
+}
+
+impl<F: Future + 'static> Future for ForegroundFuture<F> {
+    type Output = F::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        assert_eq!(std::thread::current().id(), self.thread, "a foreground task polled off its thread");
+        let (dispatcher, id) = (self.dispatcher, self.id);
+        // Taken out for the poll, which may spawn or end other foreground tasks.
+        let taken = FOREGROUND.with_borrow_mut(|r| {
+            r.tasks.get_mut(&dispatcher).and_then(|tasks| tasks.get_mut(&id)).and_then(Option::take)
+        });
+        // Gone: its dispatcher shut down, and the task never finishes.
+        let Some(taken) = taken else { return Poll::Pending };
+        let mut future = *taken.downcast::<Pin<Box<F>>>().expect("a foreground future of its own type");
+        let poll = future.as_mut().poll(cx);
+        let left = FOREGROUND.with_borrow_mut(|r| {
+            if poll.is_ready() {
+                r.remove(dispatcher, id);
+                return None;
+            }
+            match r.tasks.get_mut(&dispatcher).and_then(|tasks| tasks.get_mut(&id)) {
+                Some(slot) => {
+                    *slot = Some(Box::new(future));
+                    None
+                }
+                // The dispatcher shut down during the poll.
+                None => Some(future),
+            }
+        });
+        // Outside the borrow (on this thread, where it belongs).
+        drop(left);
+        poll
+    }
+}
+
+impl<F> Drop for ForegroundFuture<F> {
+    fn drop(&mut self) {
+        // On another thread (a runnable dropped there after the shutdown) the future is not this
+        // thread's to drop: `drop_foreground_futures` dropped it on its own thread.
+        if std::thread::current().id() != self.thread {
+            return;
+        }
+        let future = FOREGROUND
+            .try_with(|r| r.try_borrow_mut().ok().and_then(|mut r| r.remove(self.dispatcher, self.id)))
+            .ok()
+            .flatten();
+        // Outside the borrow.
+        drop(future);
     }
 }

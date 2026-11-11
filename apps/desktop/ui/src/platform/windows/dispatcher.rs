@@ -28,18 +28,16 @@ pub(crate) struct MainQueue {
     wake_pending: AtomicBool,
     /// The platform's message-only window (0 until it exists).
     hwnd: AtomicIsize,
-    main_thread: ThreadId,
     /// Set (under the tasks' lock) by `shut_down`: nothing runs main-thread tasks any more.
     shut_down: AtomicBool,
 }
 
 impl MainQueue {
-    fn new(main_thread: ThreadId) -> Self {
+    fn new() -> Self {
         Self {
             tasks: Mutex::new(VecDeque::new()),
             wake_pending: AtomicBool::new(false),
             hwnd: AtomicIsize::new(0),
-            main_thread,
             shut_down: AtomicBool::new(false),
         }
     }
@@ -47,8 +45,9 @@ impl MainQueue {
     fn push(&self, runnable: Runnable) {
         let mut tasks = self.tasks.lock();
         if self.shut_down.load(Ordering::Acquire) {
+            // Dropping it cancels its task, which may schedule another: outside the lock.
             drop(tasks);
-            return self.discard(VecDeque::from([runnable]));
+            return drop(runnable);
         }
         tasks.push_back(runnable);
         drop(tasks);
@@ -79,31 +78,22 @@ impl MainQueue {
         }
     }
 
-    /// Drops whatever is left (on the main thread, where the tasks' futures live).
+    /// Drops whatever is left.
     pub(crate) fn clear(&self) {
         let left = std::mem::take(&mut *self.tasks.lock());
-        self.discard(left);
+        drop(left);
     }
 
-    /// Stops taking tasks and drops the queued ones.
+    /// Stops taking tasks and drops the queued ones. A task woken later, on any thread, is dropped there:
+    /// a main-thread runnable holds nothing of its future (`executor`), which the dispatcher's `shut_down`
+    /// dropped on the main thread.
     fn shut_down(&self) {
         let left = {
             let mut tasks = self.tasks.lock();
             self.shut_down.store(true, Ordering::Release);
             std::mem::take(&mut *tasks)
         };
-        self.discard(left);
-    }
-
-    /// Drops main-thread runnables, cancelling their tasks. Off the main thread (a pool thread waking a
-    /// task after the loop ended) it leaks them instead: dropping one there panics inside async-task,
-    /// which aborts the process.
-    fn discard(&self, runnables: VecDeque<Runnable>) {
-        if std::thread::current().id() == self.main_thread {
-            drop(runnables);
-        } else {
-            runnables.into_iter().for_each(std::mem::forget);
-        }
+        drop(left);
     }
 }
 
@@ -309,7 +299,7 @@ impl WindowsDispatcher {
         let main_thread = std::thread::current().id();
         Self {
             main_thread,
-            main: Arc::new(MainQueue::new(main_thread)),
+            main: Arc::new(MainQueue::new()),
             pool: Arc::new(Pool { state: Mutex::new(PoolState::default()), work: Condvar::new() }),
             timers: Arc::new(Timers { state: Mutex::new(TimerState::default()), changed: Condvar::new() }),
         }
@@ -334,6 +324,8 @@ impl WindowsDispatcher {
     /// without this the queues would keep it, the tasks' state and those threads alive. Main thread.
     pub(crate) fn shut_down(&self) {
         self.main.shut_down();
+        // The main-thread tasks that are waiting, not queued: dropped here, on their thread.
+        crate::executor::drop_foreground_futures(self);
         // The timer first: it hands due runnables to the pool.
         self.timers.shut_down();
         self.pool.shut_down();
@@ -361,6 +353,7 @@ impl PlatformDispatcher for WindowsDispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
     use std::sync::mpsc;
 
     fn spawn_with(dispatcher: Arc<WindowsDispatcher>, f: impl FnOnce() + Send + 'static) {
@@ -454,7 +447,7 @@ mod tests {
         spawn_with(d.clone(), move || tx.send(()).unwrap());
         rx.recv_timeout(Duration::from_secs(30)).expect("a background job ran");
         let dd = d.clone();
-        let (runnable, task) = async_task::spawn_local(async {}, move |r| dd.dispatch_on_main_thread(r));
+        let (runnable, task) = async_task::spawn(async {}, move |r| dd.dispatch_on_main_thread(r));
         task.detach();
         runnable.schedule();
         let dd = d.clone();
@@ -480,16 +473,30 @@ mod tests {
         assert!(weak.upgrade().is_none(), "nothing keeps the dispatcher alive");
     }
 
-    /// A main-thread task woken on another thread after the shutdown is leaked, not dropped there
-    /// (async-task panics on that drop; on a pool thread the process would abort).
+    /// A main-thread task waiting when the dispatcher shuts down: its future is dropped then, on the main
+    /// thread, and its runnable, scheduled later on another thread, is dropped there without a panic (it
+    /// holds nothing of the future) and keeps nothing alive (it used to be leaked, with the dispatcher).
     #[test]
-    fn a_main_thread_task_woken_elsewhere_after_shut_down_is_not_dropped_there() {
+    fn a_main_thread_task_woken_elsewhere_after_shut_down_is_dropped_there() {
         let d = Arc::new(WindowsDispatcher::new());
+        let weak = Arc::downgrade(&d);
+        let state = Rc::new(());
+        let (tx, rx) = crate::oneshot::channel::<()>();
+        let held = state.clone();
+        let executor = crate::ForegroundExecutor::new(d.clone());
+        executor
+            .spawn(async move {
+                rx.await.ok();
+                drop(held);
+            })
+            .detach();
+        d.main.run_pending();
+        assert_eq!(Rc::strong_count(&state), 2, "the task waits, holding its state");
         d.shut_down();
-        let dd = d.clone();
-        let (runnable, task) = async_task::spawn_local(async {}, move |r| dd.dispatch_on_main_thread(r));
-        task.detach();
-        // A `Runnable` is Send: scheduling it from another thread is what a waker there does.
-        std::thread::spawn(move || runnable.schedule()).join().expect("no panic off the main thread");
+        assert_eq!(Rc::strong_count(&state), 1, "its state is dropped at the shutdown, on this thread");
+        // Waking it on another thread schedules its runnable there, after the shutdown.
+        std::thread::spawn(move || tx.send(()).ok()).join().expect("no panic off the main thread");
+        drop((executor, d));
+        assert!(weak.upgrade().is_none(), "nothing keeps the dispatcher alive");
     }
 }

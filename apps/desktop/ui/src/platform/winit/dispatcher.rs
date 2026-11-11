@@ -8,8 +8,8 @@ use async_task::Runnable;
 use parking_lot::{Condvar, Mutex};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, VecDeque};
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
 use std::thread::{self, ThreadId};
 use std::time::{Duration, Instant};
 
@@ -27,7 +27,18 @@ pub struct WinitDispatcher {
     main: Mutex<MainQueue>,
     waker: MainWaker,
     pool: Arc<Pool>,
-    timer: OnceLock<Arc<Timer>>,
+    /// The timer thread, started by the first `dispatch_after`. One lock for starting it and for
+    /// `shut_down`, so a timer cannot start unseen by the shutdown.
+    timer: Mutex<TimerSlot>,
+    /// Tests: runs while a timer is being started (under the slot's lock).
+    #[cfg(test)]
+    on_timer_start: Mutex<Option<Box<dyn Fn() + Send>>>,
+}
+
+enum TimerSlot {
+    NotStarted,
+    Running(Arc<Timer>),
+    ShutDown,
 }
 
 #[derive(Default)]
@@ -45,7 +56,9 @@ impl WinitDispatcher {
             main: Mutex::new(MainQueue::default()),
             waker,
             pool: Arc::new(Pool::default()),
-            timer: OnceLock::new(),
+            timer: Mutex::new(TimerSlot::NotStarted),
+            #[cfg(test)]
+            on_timer_start: Mutex::new(None),
         }
     }
 
@@ -79,22 +92,14 @@ impl WinitDispatcher {
             main.shut_down = true;
             std::mem::take(&mut main.runnables)
         };
-        self.discard_main(runnables);
+        drop(runnables);
+        // The main-thread tasks that are waiting, not queued: dropped here, on their thread.
+        crate::executor::drop_foreground_futures(self);
         // The timer first: it hands due runnables to the pool under its lock.
-        if let Some(timer) = self.timer.get() {
+        if let TimerSlot::Running(timer) = std::mem::replace(&mut *self.timer.lock(), TimerSlot::ShutDown) {
             timer.shut_down();
         }
         self.pool.shut_down();
-    }
-
-    /// Drops main-thread runnables, cancelling their tasks. Off the main thread (a pool thread waking a task
-    /// after the loop ended) it leaks them instead: dropping one there panics inside async-task.
-    fn discard_main(&self, runnables: VecDeque<Runnable>) {
-        if self.is_main_thread() {
-            drop(runnables);
-        } else {
-            runnables.into_iter().for_each(std::mem::forget);
-        }
     }
 }
 
@@ -111,8 +116,10 @@ impl PlatformDispatcher for WinitDispatcher {
         let wake = {
             let mut main = self.main.lock();
             if main.shut_down {
+                // Dropped on whatever thread woke it (a main-thread runnable holds nothing of its
+                // future: `executor`); dropping it may schedule another: outside the lock.
                 drop(main);
-                return self.discard_main(VecDeque::from([runnable]));
+                return drop(runnable);
             }
             main.runnables.push_back(runnable);
             !std::mem::replace(&mut main.wake_pending, true)
@@ -120,17 +127,36 @@ impl PlatformDispatcher for WinitDispatcher {
         if wake && !(self.waker)() {
             // The loop has exited: nothing will run these.
             let runnables = std::mem::take(&mut self.main.lock().runnables);
-            self.discard_main(runnables);
+            drop(runnables);
         }
     }
 
     fn dispatch_after(&self, duration: Duration, runnable: Runnable) {
-        if duration.is_zero() || self.pool.state.lock().shut_down {
-            // After `shut_down` the pool drops it, and no timer thread starts.
+        if duration.is_zero() {
             return self.pool.dispatch(runnable);
         }
-        let timer = self.timer.get_or_init(|| Timer::start(self.pool.clone()));
-        timer.schedule(Instant::now() + duration, runnable);
+        let timer = {
+            let mut slot = self.timer.lock();
+            match &*slot {
+                TimerSlot::Running(timer) => Some(timer.clone()),
+                TimerSlot::ShutDown => None,
+                TimerSlot::NotStarted => {
+                    #[cfg(test)]
+                    if let Some(hook) = &*self.on_timer_start.lock() {
+                        hook();
+                    }
+                    let timer = Timer::start(self.pool.clone());
+                    *slot = TimerSlot::Running(timer.clone());
+                    Some(timer)
+                }
+            }
+        };
+        match timer {
+            // A timer stopped meanwhile drops it.
+            Some(timer) => timer.schedule(Instant::now() + duration, runnable),
+            // After `shut_down`: dropped (outside the lock: that may schedule another), no timer starts.
+            None => drop(runnable),
+        }
     }
 }
 
@@ -432,7 +458,10 @@ mod tests {
             async_task::spawn(async {}, move |r| d2.dispatch_after(Duration::from_secs(3600), r));
         runnable.schedule();
         task.detach();
-        let timer = Arc::downgrade(d.timer.get().expect("the timer started"));
+        let timer = match &*d.timer.lock() {
+            TimerSlot::Running(timer) => Arc::downgrade(timer),
+            _ => panic!("the timer started"),
+        };
 
         d.shut_down();
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -449,5 +478,48 @@ mod tests {
         }
         assert!(timer.upgrade().is_none(), "the timer thread exits");
         assert!(weak.upgrade().is_none(), "nothing keeps the dispatcher alive");
+    }
+
+    /// A timer being started on another thread while the main thread shuts the dispatcher down: the
+    /// shutdown waits for it and stops it (it used to see no timer, and the new one ran forever).
+    #[test]
+    fn a_timer_started_during_shut_down_is_stopped() {
+        let (d, _) = dispatcher();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel::<()>();
+        let go_rx = std::sync::Mutex::new(go_rx);
+        *d.on_timer_start.lock() = Some(Box::new(move || {
+            entered_tx.send(()).unwrap();
+            go_rx.lock().unwrap().recv().unwrap();
+        }));
+        let d2 = d.clone();
+        let starter = thread::spawn(move || {
+            let d3 = d2.clone();
+            let (runnable, task) =
+                async_task::spawn(async {}, move |r| d3.dispatch_after(Duration::from_secs(3600), r));
+            runnable.schedule();
+            task.detach();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).expect("the timer is starting");
+        // The shutdown runs while the start is paused before the timer is published.
+        let (done_tx, done_rx) = mpsc::channel();
+        let d4 = d.clone();
+        let stopper = thread::spawn(move || {
+            d4.shut_down();
+            done_tx.send(()).unwrap();
+        });
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the shutdown waits for the start"
+        );
+        go_tx.send(()).unwrap();
+        starter.join().unwrap();
+        stopper.join().unwrap();
+        let TimerSlot::ShutDown = *d.timer.lock() else { panic!("the slot is shut down") };
+        assert_eq!(
+            Arc::strong_count(&d),
+            1,
+            "nothing else holds the dispatcher (the timer's runnable is gone)"
+        );
     }
 }

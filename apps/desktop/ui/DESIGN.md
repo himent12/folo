@@ -252,7 +252,11 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
   (`on_mouse_up_out`, the pressed style) and clicks and drops nothing, even with the cursor still over the
   element pressed.
 - `PlatformDispatcher`: `dispatch` (background, a pool that grows on demand and lets idle threads exit),
-  `dispatch_on_main_thread`, `dispatch_after`, `is_main_thread`.
+  `dispatch_on_main_thread`, `dispatch_after`, `is_main_thread`. When the loop ends the backend shuts its
+  dispatcher down on the main thread: queued runnables are dropped, the foreground tasks that are waiting
+  have their futures dropped there too (a foreground future lives in its thread's registry, and its
+  runnable holds only its ids: `executor.rs`), later runnables are dropped on whatever thread they
+  arrive, and the pool and timer threads exit.
 - **Frames.** The window draws when it is dirty, at most once per display refresh; while a frame asks for
   another (`request_animation_frame`) the backend keeps a refresh-rate tick, otherwise there is no timer and
   the process sleeps in the message loop. Resizing repaints synchronously (no black edges).

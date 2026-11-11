@@ -230,7 +230,10 @@ pub trait PlatformDispatcher: Send + Sync {
     fn is_main_thread(&self) -> bool;
     /// Runs `runnable` on a background thread (a pool that grows on demand and lets idle threads exit).
     fn dispatch(&self, runnable: Runnable);
-    /// Runs `runnable` on the main thread.
+    /// Runs `runnable` on the main thread. Once the dispatcher has shut down it is dropped instead, on
+    /// whatever thread it arrives (a waker on a pool thread): the foreground executor's runnables hold
+    /// nothing of their futures, which live on the main thread (`executor`). A shut-down calls
+    /// `executor::drop_foreground_futures` on the main thread.
     fn dispatch_on_main_thread(&self, runnable: Runnable);
     /// Runs `runnable` on a background thread after `duration`.
     fn dispatch_after(&self, duration: Duration, runnable: Runnable);
