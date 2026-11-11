@@ -84,6 +84,15 @@ pub fn parse_images(s: &str) -> Option<u64> {
     s.trim().replace([',', '_', ' '], "").parse::<u64>().ok().filter(|v| (1..=100_000).contains(v))
 }
 
+/// What is wrong with the Generate synthetic form's name and image count as typed, each shown
+/// under its field at once (and Generate waits until both are right).
+pub fn synth_errors(name: &str, images: &str) -> (Option<&'static str>, Option<&'static str>) {
+    (
+        name.trim().is_empty().then_some("Give the dataset a name"),
+        parse_images(images).is_none().then_some("A whole number from 1 to 100,000"),
+    )
+}
+
 pub struct SynthForm {
     /// Which opening of the dialog this is: a late answer only touches its own dialog.
     pub id: u64,
@@ -353,5 +362,12 @@ mod tests {
         assert_eq!(parse_images("0"), None);
         assert_eq!(parse_images("100001"), None);
         assert_eq!(parse_images("ten"), None);
+        use super::synth_errors;
+        assert_eq!(synth_errors("shapes", "1,000"), (None, None));
+        assert_eq!(
+            synth_errors("  ", "0"),
+            (Some("Give the dataset a name"), Some("A whole number from 1 to 100,000"))
+        );
+        assert_eq!(synth_errors("s", "200000").1, Some("A whole number from 1 to 100,000"));
     }
 }

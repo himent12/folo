@@ -33,6 +33,8 @@ pub const ALL: &[&str] = &[
     "palette",
     "palette+light",
     "datasets",
+    "synth",
+    "synth+invalid",
     "dataset",
     "dataset+light",
     "dataset+filter",
@@ -161,6 +163,19 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
     match screen {
         "overview" | "toast" | "kb-focus" | "palette" => app.route = Route::Overview,
         "datasets" => app.route = Route::Datasets,
+        // Generate synthetic; `+invalid` with an image count out of range (its message in place).
+        "synth" => {
+            app.route = Route::Datasets;
+            // The demo can't generate (it says so instead): open the dialog as against folo serve.
+            let mode = std::mem::replace(&mut app.server_mode, crate::app::ServerMode::Local);
+            app.open_synth(window, cx);
+            app.server_mode = mode;
+            if s.has("invalid")
+                && let Some(f) = app.synth.as_ref()
+            {
+                f.images.clone().update(cx, |i, cx| i.set_text("200000", cx));
+            }
+        }
         "dataset" => {
             app.route = Route::Dataset("ds_3b91".into());
             if s.has("filter") {

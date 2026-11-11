@@ -20,7 +20,7 @@ impl FoloApp {
         let f = self.synth.as_ref().unwrap();
         let (name, images, imgsz, classes, submitting, error) =
             (f.name.clone(), f.images.clone(), f.imgsz, f.classes, f.submitting, f.error.clone());
-        let images_ok = crate::app::parse_images(&images.read(cx).text()).is_some();
+        let (name_err, images_err) = crate::app::synth_errors(&name.read(cx).text(), &images.read(cx).text());
         let label =
             |s: &str| text(ty::SM, t.text_secondary).font_weight(FontWeight::MEDIUM).child(s.to_string());
         let input_box = |this: &Self,
@@ -54,24 +54,21 @@ impl FoloApp {
                 .child(input)
                 .into_any_element()
         };
-        let row = |name: &str, control: AnyElement, help: &str| {
+        // A field's problem takes its help line's place, in red: shown at once, and nothing moves.
+        let row = |name: &str, control: AnyElement, help: &str, bad: Option<&str>| {
             div()
                 .flex()
                 .items_center()
                 .justify_between()
                 .gap(px(16.))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(label(name))
-                        .child(text(ty::SM, t.text_tertiary).child(help.to_string())),
-                )
+                .child(div().flex().flex_col().gap(px(2.)).child(label(name)).child(match bad {
+                    Some(msg) => text(ty::SM, t.danger_text).child(msg.to_string()),
+                    None => text(ty::SM, t.text_tertiary).child(help.to_string()),
+                }))
                 .child(control)
         };
-        let name_box = input_box(self, name, false, 200., window, cx);
-        let images_box = input_box(self, images, !images_ok, 120., window, cx);
+        let name_box = input_box(self, name, name_err.is_some(), 200., window, cx);
+        let images_box = input_box(self, images, images_err.is_some(), 120., window, cx);
         let size_labels: Vec<String> = crate::app::SYNTH_IMGSZ.iter().map(|s| format!("{s} px")).collect();
         let size_refs: Vec<&str> = size_labels.iter().map(String::as_str).collect();
         let size_seg = self.segmented(
@@ -104,13 +101,14 @@ impl FoloApp {
             .flex()
             .flex_col()
             .gap(px(16.))
-            .child(row("Name", name_box, "Folder under the server's data dir"))
-            .child(row("Images", images_box, "Split 80 / 20 into train and val"))
-            .child(row("Image size", size_seg.into_any_element(), "Square JPEGs"))
+            .child(row("Name", name_box, "Folder under the server's data dir", name_err))
+            .child(row("Images", images_box, "Split 80 / 20 into train and val", images_err))
+            .child(row("Image size", size_seg.into_any_element(), "Square JPEGs", None))
             .child(row(
                 "Classes",
                 class_seg.into_any_element(),
                 crate::app::SYNTH_CLASSES[classes].join(", ").as_str(),
+                None,
             ))
             .when_some(error, |d, e| {
                 d.child(
@@ -138,6 +136,16 @@ impl FoloApp {
                 Btn::Primary,
                 Some("icons/zap.svg"),
                 "Writing images…",
+                window,
+                cx,
+            )
+        } else if name_err.is_some() || images_err.is_some() {
+            self.button_disabled(
+                "syn-go",
+                "Generate",
+                Btn::Primary,
+                Some("icons/zap.svg"),
+                "Fix the highlighted fields first",
                 window,
                 cx,
             )

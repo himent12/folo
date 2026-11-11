@@ -72,16 +72,10 @@ impl FoloApp {
             return;
         }
         let name = f.name.read(cx).text().trim().to_string();
+        // Each field says what's wrong under itself, and Generate is off until both are right
+        // (Enter included).
         let images = parse_images(&f.images.read(cx).text());
-        let (Some(images), false) = (images, name.is_empty()) else {
-            f.error = Some(if name.is_empty() {
-                ApiError::new("invalid_name", "Give the dataset a name.")
-            } else {
-                ApiError::new("invalid_body", "Images: a whole number from 1 to 100,000.")
-            });
-            cx.notify();
-            return;
-        };
+        let (Some(images), false) = (images, name.is_empty()) else { return };
         f.submitting = true;
         f.error = None;
         let form = f.id;

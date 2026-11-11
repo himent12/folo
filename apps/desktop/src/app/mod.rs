@@ -39,7 +39,7 @@ use crate::ui::*;
 pub use focus::focus_ring;
 pub use forms::{
     ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, format_lr,
-    parse_images, retry_batch,
+    retry_batch, synth_errors,
 };
 pub use playground::PLAY_CONF_FLOOR;
 pub use sidebar::logo;
