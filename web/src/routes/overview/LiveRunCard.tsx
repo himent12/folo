@@ -13,7 +13,7 @@ import { lr, metric, num } from '$lib/format';
 import { etaText, lastKnown, Now } from '$lib/api/freshness';
 import StatusBadge, { statusWord } from '$lib/ui/StatusBadge';
 import { deviceParts } from './device';
-import { starting } from './slot';
+import { starting, STARTING } from './slot';
 import { runEvalSource, scoresTitle } from '$lib/evaluated';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
@@ -115,7 +115,7 @@ export default function LiveRunCard(props: LiveRunCardProps) {
         <div class="title-row">
           {starting(r()) ? (
             // Taken by the worker or next with the slot free (./slot): about to train, not waiting.
-            <StatusBadge state={{ status: 'queued', label: 'Starting' }} lastKnown={live.lost !== null ? lastKnown('Starting', live.lost, now.current) : undefined} />
+            <StatusBadge state={STARTING} lastKnown={live.lost !== null ? lastKnown(STARTING.label, live.lost, now.current) : undefined} />
           ) : (
             <StatusBadge run={r()} lastKnown={live.lost !== null ? lastKnown(statusWord(r()), live.lost, now.current) : undefined} />
           )}{' '}

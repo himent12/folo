@@ -4,6 +4,7 @@
 // reports no position). Cloud runs wait in no queue here and never hold this slot.
 
 import type { Run } from '$lib/api/types';
+import type { OwnStatus } from '$lib/ui/StatusBadge';
 
 const training = (r: Run) => r.status === 'running' || r.status === 'stopping';
 const waiting = (r: Run) => r.status === 'queued' && !r.cloud;
@@ -16,3 +17,6 @@ export function slotRun(runs: readonly Run[] | undefined): Run | undefined {
 
 /** A run in the slot that has not started training yet: the card says "Starting", not "Queued". */
 export const starting = (r: Pick<Run, 'status'>) => r.status === 'queued';
+
+/** Its badge: the mark of a waiting run, the word of one about to train (never a cloud run: those hold no slot). */
+export const STARTING: OwnStatus = { status: 'queued', label: 'Starting' };
