@@ -95,7 +95,7 @@ export default function ExportDialog(props: ExportDialogProps) {
   /** The ONNX switches go with the request when the server takes them (`weights_onnx` takes them as query parameters). */
   const onnxSwitches = computed(() => switchesOk.get() || onnxDirect.get());
   /** Direct ONNX download: the file it will be, by the server's naming rule, and the file once it arrived. */
-  const onnxName = computed(() => onnxFileName(model().name, onnxSwitches.get() && switches.get().half));
+  const onnxName = computed(() => onnxFileName(model().name, onnxSwitches.get() && switches.get().half, onnxSwitches.get() && switches.get().decode));
   const direct = computed(() => format.get() === 'onnx' && onnxDirect.get() && !demo.get());
   /** The format as listed, for the demo preview's size. */
   const picked = computed(() => formats.find((f) => f.value === format.get())!);

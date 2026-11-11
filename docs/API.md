@@ -311,7 +311,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   remote browser gets the file instead of a server path.
   - `Content-Type: application/octet-stream` (also for ONNX, which has no registered media type), `Content-Length`,
     `Content-Disposition: attachment; filename="<model name>.folo"` (`<model name>-f16.folo`; ONNX as the export
-    names it: `<model name>.onnx`, `<model name>-f16.onnx` with `half`; characters outside `A-Z a-z 0-9 . _ -`
+    names it: `<model name>.onnx`, `-decoded.onnx` with `decode`, `-f16.onnx` with `half`, `-decoded-f16.onnx` with
+    both; characters outside `A-Z a-z 0-9 . _ -`
     become `_`, and the name is cut to 200 characters).
     Real files are streamed from disk (never read into memory whole), and never gzip-compressed.
   - Validators: a strong `ETag` (real mode: the file's size and modification time in nanoseconds, cheap and exact

@@ -249,7 +249,13 @@ async fn mock_weights_are_a_real_folo_n_file() {
     let (status, hh, bh, _) = send(&app, get(urihalf, &[])).await;
     assert_eq!(status, StatusCode::OK);
     assert!(is_onnx(&bh) && bh.len() < bx.len());
-    assert!(header(&hh, header::CONTENT_DISPOSITION).ends_with("-f16.onnx\""));
+    assert!(header(&hh, header::CONTENT_DISPOSITION).ends_with("-decoded-f16.onnx\""));
+    // Decoded alone: named apart from the raw graph, as the export path is.
+    let (_, hd, _, _) = send(&app, get("/api/models/m_31aa/weights?format=onnx&decode=true", &[])).await;
+    assert_eq!(
+        header(&hd, header::CONTENT_DISPOSITION),
+        format!("attachment; filename=\"{}-decoded.onnx\"", model.name)
+    );
     assert_ne!(header(&hh, header::ETAG), etagx);
     // An f16 model (its stored file is the f16 export) still downloads ONNX as ONNX.
     let (status, h53, b53, _) = send(&app, get("/api/models/m_53d2/weights?format=onnx", &[])).await;
@@ -342,7 +348,10 @@ async fn real_weights_stream_with_validators_and_a_cached_f16_export() {
     let (status, hh, bh, _) = send(&app, get(&format!("{urix}&decode=true&half=true"), &[])).await;
     assert_eq!(status, StatusCode::OK);
     assert!(is_onnx(&bh) && bh.len() < bx.len() && bh != bx);
-    assert_eq!(header(&hh, header::CONTENT_DISPOSITION), "attachment; filename=\"pets_n_v2-f16.onnx\"");
+    assert_eq!(
+        header(&hh, header::CONTENT_DISPOSITION),
+        "attachment; filename=\"pets_n_v2-decoded-f16.onnx\""
+    );
     let mut names = f16_cache(&home);
     names.sort();
     assert_eq!(names.len(), 3, "{names:?}");
