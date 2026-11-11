@@ -194,8 +194,8 @@ fn tooltip_appears_after_its_delay_and_hides_when_the_mouse_leaves() {
     let (mut app, window) = open(size(px(300.), px(200.)), 1.0, |_, _| {
         div()
             .size_full()
-            // A hover style, as the app's buttons have: GPUI redraws on leaving only through it, and the
-            // tooltip hides at the next draw.
+            // A hover style, as the app's buttons have (without one, see
+            // `a_tooltip_without_a_hover_style_hides_when_the_mouse_leaves`).
             .child(div().id("tipped").w(px(50.)).h(px(20.)).hover(|s| s.bg(color(3))).tooltip(|_, cx| {
                 let render: RenderFn =
                     Rc::new(|_, _| div().w(px(30.)).h(px(10.)).bg(color(9)).into_any_element());
@@ -269,4 +269,140 @@ fn a_file_drop_reaches_on_drop_and_drag_moves_see_the_paths() {
         with_window(&mut app, window, |window, _| window.active_drag.is_none()),
         "the drop ends the drag"
     );
+}
+
+/// A target that logs its drops, filling a 200 x 100 window's top-left 100 x 50 (hover colour 2).
+fn drop_target(
+    events: &Log,
+) -> impl Fn(&mut Window, &mut crate::Context<TestView>) -> crate::AnyElement + 'static {
+    let events = events.clone();
+    move |_, _| {
+        let events = events.clone();
+        div()
+            .size_full()
+            .child(div().id("target").w(px(100.)).h(px(50.)).bg(color(1)).hover(|s| s.bg(color(2))).on_drop(
+                move |paths: &crate::ExternalPaths, _, _| {
+                    events.borrow_mut().push(format!("drop {}", paths.paths()[0].display()))
+                },
+            ))
+            .into_any_element()
+    }
+}
+
+#[test]
+fn a_file_drop_from_outside_the_window_reaches_on_drop() {
+    let events = log();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, drop_target(&events));
+    // The pointer left the window, then drags a file in from outside (no mouse move reaches the window: the
+    // platforms report the drag only as file-drop events).
+    with_window(&mut app, window, |window, cx| window.on_hover_status_change(false, cx));
+    app.frame(window);
+    let paths = crate::ExternalPaths(smallvec::smallvec![std::path::PathBuf::from("a.png")]);
+    let drop = |app: &mut HeadlessApp, event| app.simulate_input(window, PlatformInput::FileDrop(event));
+    drop(&mut app, crate::FileDropEvent::Entered { position: point(px(20.), px(20.)), paths });
+    app.frame(window);
+    drop(&mut app, crate::FileDropEvent::Pending { position: point(px(25.), px(20.)) });
+    drop(&mut app, crate::FileDropEvent::Submit { position: point(px(25.), px(20.)) });
+    assert_eq!(*events.borrow(), ["drop a.png"]);
+}
+
+#[test]
+fn a_file_drag_that_leaves_the_window_ends_its_hover() {
+    let events = log();
+    let (mut app, window) = open(size(px(200.), px(100.)), 1.0, drop_target(&events));
+    with_window(&mut app, window, |window, cx| window.on_hover_status_change(false, cx));
+    app.frame(window);
+    let paths = crate::ExternalPaths(smallvec::smallvec![std::path::PathBuf::from("a.png")]);
+    let drop = |app: &mut HeadlessApp, event| app.simulate_input(window, PlatformInput::FileDrop(event));
+    drop(&mut app, crate::FileDropEvent::Entered { position: point(px(20.), px(20.)), paths });
+    app.frame(window);
+    assert!(with_window(&mut app, window, |window, _| window.hovered.get()), "the drag hovers the window");
+    // Hover styles are off during a drag; once it left, the target must not look hovered at the drag's
+    // last position.
+    drop(&mut app, crate::FileDropEvent::Exited);
+    assert!(app.is_dirty(window), "leaving redraws");
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(1)).len(), 1, "no hover once the drag left the window");
+    assert!(with_window(&mut app, window, |window, _| !window.hovered.get()));
+    // The next real mouse move over the window hovers again.
+    mouse_move(&mut app, window, 10., 10.);
+    app.frame(window);
+    assert_eq!(quads_of(&mut app, window, color(2)).len(), 1);
+    assert!(events.borrow().is_empty());
+}
+
+/// A tooltip view that counts its drops.
+struct Tip(Rc<std::cell::Cell<u32>>);
+
+impl crate::Render for Tip {
+    fn render(&mut self, _: &mut Window, _: &mut crate::Context<Self>) -> impl IntoElement {
+        div().w(px(30.)).h(px(10.)).bg(color(9))
+    }
+}
+
+impl Drop for Tip {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+/// A window whose 50 x 20 element at the top left has a `Tip` tooltip (no hover style, no cursor), while
+/// `shown` is set.
+fn tipped_window(
+    shown: Rc<std::cell::Cell<bool>>,
+    drops: Rc<std::cell::Cell<u32>>,
+) -> (HeadlessApp, AnyWindowHandle) {
+    open(size(px(300.), px(200.)), 1.0, move |_, _| {
+        let drops = drops.clone();
+        let tipped = div().id("tipped").w(px(50.)).h(px(20.)).tooltip(move |_, cx| {
+            let drops = drops.clone();
+            cx.new(|_| Tip(drops)).into()
+        });
+        div().size_full().children(shown.get().then_some(tipped)).into_any_element()
+    })
+}
+
+/// Hovers the tipped element until its tooltip shows.
+fn show_tip(app: &mut HeadlessApp, window: AnyWindowHandle) {
+    mouse_move(app, window, 10., 10.);
+    app.advance_clock(Duration::from_millis(500));
+    app.frame(window);
+    assert_eq!(quads_of(app, window, color(9)).len(), 1, "the tooltip shows");
+}
+
+#[test]
+fn a_tooltip_without_a_hover_style_hides_when_the_mouse_leaves() {
+    let (mut app, window) = tipped_window(Rc::new(true.into()), Rc::default());
+    show_tip(&mut app, window);
+    mouse_move(&mut app, window, 200., 150.);
+    assert!(app.is_dirty(window), "leaving the element redraws");
+    app.frame(window);
+    assert!(quads_of(&mut app, window, color(9)).is_empty(), "hidden once the mouse left");
+}
+
+#[test]
+fn a_shown_tooltip_whose_element_goes_away_is_dropped() {
+    let (shown, drops) = (Rc::new(std::cell::Cell::new(true)), Rc::new(std::cell::Cell::new(0)));
+    let (mut app, window) = tipped_window(shown.clone(), drops.clone());
+    show_tip(&mut app, window);
+    shown.set(false);
+    with_window(&mut app, window, |window, _| window.refresh());
+    app.frame(window);
+    app.run_until_idle();
+    assert!(quads_of(&mut app, window, color(9)).is_empty());
+    assert_eq!(drops.get(), 1, "the tooltip view is dropped with its element");
+}
+
+#[test]
+fn a_tooltip_whose_element_goes_away_before_it_shows_is_dropped() {
+    let (shown, drops) = (Rc::new(std::cell::Cell::new(true)), Rc::new(std::cell::Cell::new(0)));
+    let (mut app, window) = tipped_window(shown.clone(), drops.clone());
+    mouse_move(&mut app, window, 10., 10.);
+    shown.set(false);
+    with_window(&mut app, window, |window, _| window.refresh());
+    app.frame(window);
+    app.advance_clock(Duration::from_millis(500));
+    app.run_until_idle();
+    assert!(!app.is_dirty(window), "nothing left to show");
+    assert_eq!(drops.get(), 0, "no tooltip is built for an element that is gone");
 }
