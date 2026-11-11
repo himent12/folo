@@ -521,3 +521,28 @@ fn quit_polls_every_app_quit_future_together() {
     app.update(|cx| cx.quit());
     assert!(done.get(), "the first quit future saw the second's signal");
 }
+
+#[test]
+fn a_subscription_dropped_after_its_callback_subscribed_again_is_removed() {
+    // The callback adds an observer of the same emitter, then drops its own subscription.
+    let mut app = app();
+    let source = app.update(|cx| cx.new(|_| Counter::default()));
+    let seen = Rc::new(Cell::new(0));
+    let slot: Rc<RefCell<Option<Subscription>>> = Rc::default();
+    let added: Rc<RefCell<Vec<Subscription>>> = Rc::default();
+    let sub = app.update(|cx| {
+        let (seen, slot, added) = (seen.clone(), slot.clone(), added.clone());
+        cx.observe(&source, move |source, cx| {
+            seen.set(seen.get() + 1);
+            added.borrow_mut().push(cx.observe(&source, |_, _| {}));
+            let original = slot.borrow_mut().take();
+            drop(original);
+        })
+    });
+    *slot.borrow_mut() = Some(sub);
+    app.update(|cx| source.update(cx, |_, cx| cx.notify()));
+    app.update(|cx| source.update(cx, |_, cx| cx.notify()));
+    assert_eq!(seen.get(), 1, "the dropped subscription's callback no longer runs");
+    drop(added.take());
+    assert!(!app.read(|cx| cx.observers.has(&source.entity_id())), "nothing is left for the emitter");
+}
