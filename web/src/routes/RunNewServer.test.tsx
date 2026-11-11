@@ -449,7 +449,7 @@ describe('New run: DOGFOOD-3', () => {
     expect(target.querySelector('.dock-est')?.textContent).toContain('Estimating…');
   });
 
-  it("states the GPU memory estimate alone where the adapter's size is not reported (memory_bytes 0)", async () => {
+  it("states the GPU memory estimate alone where the adapter's size is not reported (memory_bytes 0), with no fault", async () => {
     hub.api = api = new MockApi('normal', 0);
     const sys = api.system.bind(api);
     vi.spyOn(api, 'system').mockImplementation(async () => {
@@ -461,7 +461,8 @@ describe('New run: DOGFOOD-3', () => {
     expect(dd.textContent).toMatch(/^~[\d.]+ GiB$/);
     const summary = target.querySelector('.summary')!.textContent!;
     expect(summary).not.toContain('unknown');
-    expect(summary.split('This GPU’s memory size isn’t reported.')).toHaveLength(2);
+    expect(summary).not.toContain('reported');
+    expect(target.querySelector('.summary .vram')).toBeNull();
   });
 });
 

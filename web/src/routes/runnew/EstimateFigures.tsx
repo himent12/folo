@@ -214,11 +214,10 @@ export default function EstimateFigures(props: EstimateFiguresProps) {
               </>
             ) : null}
           </dl>
-          {/* Some adapters report no memory size (`memory_bytes: 0`, e.g. through Vulkan): the estimate stands alone,
-              said once. */}
-          {props.memShown && !props.gpuMem ? (
-            <p class="calib">{props.onCloud ? 'The offer does not say how much memory its GPU has.' : 'This GPU’s memory size isn’t reported.'}</p>
-          ) : null}
+          {/* A GPU of this machine whose size the server cannot read (`memory_bytes: 0`, an adapter driven through DX12 or
+              Metal): the estimate stands alone, with no meter and no sentence that would read like a fault. A cloud
+              offer that leaves its memory out is the provider's silence, said once. */}
+          {props.memShown && !props.gpuMem && props.onCloud ? <p class="calib">The offer does not say how much memory its GPU has.</p> : null}
           {props.scale > 1 && !props.onCpu ? <p class="calib">Scaled up from the failed run's settings, which did not fit.</p> : null}
           {props.memShown && props.gpuMem ? (
             <div class="vram" class:stale={props.estStale} aria-hidden="true">

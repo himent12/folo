@@ -83,8 +83,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below). `folo mcp --server` refuses the
   export switches without `export_onnx_switches`.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
-  so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
-  `memory_bytes` is `0` and `util` `null`.
+  so ordinal 0 is the adapter `gpu:0` and `device: auto` use. `memory_bytes` is the adapter's largest device-local
+  memory heap on Vulkan (an RTX 4080 SUPER reports 15.7 GiB), and `0` through DX12 or Metal, where wgpu cannot say; wgpu
+  reports no load, so `util` is `null`.
 - `Capabilities` (`/api/system`'s `capabilities`, also in `folo doctor --json` and MCP's `folo_info`) says what a
   run with `device: auto` can use on this server, so a client can disable a switch, showing the reason, before it
   submits a run:

@@ -323,8 +323,8 @@ export default function RunNew() {
   // The figures wait for the server's devices and the dataset: until then "Estimating…", never a CPU guess or 0 steps.
   // A cloud run's figures wait for its GPU too.
   const estReady = computed(() => !!dataset.get() && (system.data !== undefined || system.error !== undefined) && (!onCloud.get() || !!cloudPick.compute));
-  // wgpu cannot report adapter memory (real servers send 0): then there is no meter and no out-of-memory guess. A cloud
-  // run's memory is its offer's.
+  // The server reads an adapter's memory through Vulkan; through DX12 or Metal (and from servers before that) it sends 0:
+  // then there is no meter and no out-of-memory guess. A cloud run's memory is its offer's.
   const gpuMem = computed(() => {
     const g = gpu.get();
     return onCloud.get() ? cloudPick.offer?.vram_bytes || null : g && g.memory_bytes > 0 ? g.memory_bytes : null;

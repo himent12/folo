@@ -39,6 +39,9 @@ pub struct AdapterSummary {
     /// Whether the adapter offers the 16×16×16 f16 → f32 cooperative matrices the tensor-core kernels need
     /// (wgpu's experimental `EXPERIMENTAL_COOPERATIVE_MATRIX`; native Vulkan / Metal only).
     pub tensor_cores: bool,
+    /// Dedicated memory in bytes: the largest device-local heap on Vulkan (on an integrated GPU, the share of system
+    /// memory it may use); 0 where wgpu offers no way to ask (DX12, Metal, the browser).
+    pub memory_bytes: u64,
     /// Largest buffer in bytes.
     pub max_buffer_size: u64,
     /// Largest storage buffer binding in bytes.
@@ -66,6 +69,7 @@ impl AdapterSummary {
             driver_info: i.driver_info,
             shader_f16: adapter.features().contains(wgpu::Features::SHADER_F16),
             tensor_cores: crate::kernels::coop::adapter_supports(adapter),
+            memory_bytes: device_memory(adapter),
             max_buffer_size: l.max_buffer_size,
             max_storage_buffer_binding_size: l.max_storage_buffer_binding_size,
             max_compute_workgroup_storage_size: l.max_compute_workgroup_storage_size,
@@ -73,6 +77,31 @@ impl AdapterSummary {
             subgroup_size: (i.subgroup_min_size, i.subgroup_max_size),
         }
     }
+}
+
+/// [`AdapterSummary::memory_bytes`]: wgpu's own adapter info has no memory size, so it is read from the Vulkan
+/// physical device behind the adapter (`vkGetPhysicalDeviceMemoryProperties`).
+fn device_memory(adapter: &wgpu::Adapter) -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    // SAFETY: the guard is dropped at the end of this block and only the physical device's memory properties are read
+    // through it: nothing is created, destroyed or used by the GPU.
+    if let Some(a) = unsafe { adapter.as_hal::<wgpu::hal::api::Vulkan>() } {
+        // SAFETY: `raw_physical_device` belongs to `raw_instance`, which outlives the call (the adapter holds it).
+        let props = unsafe {
+            a.shared_instance().raw_instance().get_physical_device_memory_properties(a.raw_physical_device())
+        };
+        /// `VK_MEMORY_HEAP_DEVICE_LOCAL_BIT`.
+        const DEVICE_LOCAL: u32 = 0x1;
+        return props
+            .memory_heaps_as_slice()
+            .iter()
+            .filter(|h| h.flags.as_raw() & DEVICE_LOCAL != 0)
+            .map(|h| h.size)
+            .max()
+            .unwrap_or(0);
+    }
+    let _ = adapter;
+    0
 }
 
 impl std::fmt::Display for AdapterSummary {
