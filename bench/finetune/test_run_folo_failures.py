@@ -146,7 +146,10 @@ class Shutdown(Case):
         m.release()
         with self.assertRaises(SystemExit):
             self.matrix()
-        m.unsettled = False  # the test is over: its clean-up frees the work dir
+        # The test is over: let the worker return, then its clean-up may free the work dir.
+        self.gate.set()
+        fut.result(timeout=10)
+        m.unsettled = False
         self.assertTrue(any(name in p and "unresolved" in p for p in problems), problems)
         self.assertEqual(run_folo.finish(m, [], {}, problems), 1)
         self.assertIn(name, "\n".join(m.logged))

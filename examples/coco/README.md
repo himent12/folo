@@ -391,8 +391,8 @@ size and another optimizer, so it isolates neither.
 
 ### Results (folo-s, val2017)
 
-`best.folo` is `last.folo` (the same file, epoch 56) and the published file; `folo val --coco` on the pod's GPU,
-640 px, the MODEL.md §9.3 validation settings, 5000 images, 36,335 boxes plus 446 crowd regions:
+`best.folo` and `last.folo` are identical epoch-56 checkpoints, and the published `folo-s-coco.folo` holds their
+exported EMA weights (all three evaluate to the same numbers); `folo val --coco` on the pod's GPU, 640 px, the MODEL.md §9.3 validation settings, 5000 images, 36,335 boxes plus 446 crowd regions:
 
 | | AP | AP50 | AP75 | AP_S | AP_M | AP_L | AR1 | AR10 | AR100 | AR_S | AR_M | AR_L |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -403,8 +403,9 @@ size and another optimizer, so it isolates neither.
 `conf > 0.001`) gives all 12 stats equal to four decimals, f32 and f16. `--half --tensor-cores` gives the f16 numbers
 exactly. `folo val` took 25 s for the 5000 images on the pod in f32 and f16, 17 s with tensor cores.
 
-**Against the incumbent.** Ultralytics publishes AP 0.470 for YOLO11s and 0.480 for YOLO26s (Objects365
-pretraining, a long COCO schedule, evolved hyperparameters; [the YOLO26 paper](https://arxiv.org/abs/2606.03748)).
+**Against the incumbent.** Ultralytics publishes AP 0.470 for YOLO11s (its recipe is not given on its model page)
+and 0.480 for YOLO26s (YOLO26: Objects365 pretraining, a long COCO schedule, evolved hyperparameters;
+[the YOLO26 paper](https://arxiv.org/abs/2606.03748)).
 folo-s at 56 epochs from random init on COCO alone is **0.05–0.06 AP behind them**, and above the published nano
 models (YOLO11n 0.395, YOLO26n 0.409). As for folo-n, data, schedule, recipe and architecture all differ, so the gap
 cannot be split into those causes.

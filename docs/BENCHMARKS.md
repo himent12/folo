@@ -533,10 +533,11 @@ as YOLO26n on three of the four datasets and lost on one:
   not investigated, so this is one dataset's result, not evidence that folo-s fine-tunes better in general.
 - **Signatures: folo-s is 0.012 AP higher** (0.992 against 0.980; ranges 0.991–0.994 and 0.978–0.981) on a
   saturated set (AP50 1.000 for both, 35 images). **Pills: level** (0.806 against 0.805).
-- **The bigger model buys nothing on these datasets**, for either tool: folo-s is within 0.007 AP of folo-n on all
-  four (0.600 / 0.447 / 0.992 / 0.806 against 0.607 / 0.452 / 0.989 / 0.804), at 1.2 to 1.7 times the training
-  time (3.0 to 17.4 minutes per run against 2.5 to 10.1), and YOLO26s is level with or below YOLO26n. A few
-  hundred images of one to three classes do not use the capacity; a small model is the right choice there.
+- **The bigger model brought no consistent accuracy gain in these four default-recipe comparisons**, for either
+  tool: folo-s is within 0.007 AP of folo-n on all four (0.600 / 0.447 / 0.992 / 0.806 against 0.607 / 0.452 /
+  0.989 / 0.804), at 1.2 to 1.7 times the training time (3.0 to 17.4 minutes per run against 2.5 to 10.1), and
+  YOLO26s is level with or below YOLO26n. Why was not investigated (the datasets are small and have one to three
+  classes; no recipe was tuned per size).
 
 ## FOLO on the GPU
 
