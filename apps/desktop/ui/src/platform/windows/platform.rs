@@ -162,6 +162,8 @@ impl Platform for WindowsPlatform {
         for callback in self.quit_callbacks.borrow_mut().iter_mut() {
             callback();
         }
+        // Nothing runs main-thread work any more: drop what is queued and let the dispatcher's threads go.
+        self.shared.dispatcher.shut_down();
     }
 
     fn quit(&self) {
