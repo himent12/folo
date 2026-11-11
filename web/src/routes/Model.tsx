@@ -9,6 +9,8 @@ import { computed, css, effect, MediaQuery, signal, tick } from 'fw';
 import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import { hub } from '$lib/api/index';
 import { fromModelEval } from '$lib/api/evaluation';
+import { ApiError } from '$lib/api/client';
+import { refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model as ModelT, Run } from '$lib/api/types';
 import { fallbackNotice, sourceShort, splitWord, type EvalSource } from '$lib/evaluated';
@@ -41,6 +43,10 @@ import ConfusionPanel from './model/ConfusionPanel';
 export default function Model() {
   const id = computed(() => router.route.params.id ?? '');
   const model = new Resource((s) => hub.api.model(id.get(), s));
+  // A run that ends, or is deleted, changes the models: this one's metrics, or whether it still exists.
+  refreshOnModelsChange(model);
+  /** The model went away while shown (its run was deleted): the page says so instead of showing what it was. */
+  const gone = computed(() => (model.stale instanceof ApiError && model.stale.status === 404 ? model.stale : null));
 
   effect(() => {
     setCrumbs({ label: 'Models', path: '/models' }, { label: model.data?.name ?? id.get() });
@@ -230,10 +236,10 @@ export default function Model() {
 
   return (
     <>
-      {model.error && !model.data ? (
+      {(model.error && !model.data) || gone.get() ? (
         <Page title="Model" actions={() => <Button icon={ArrowLeft} href={href('/models')}>All models</Button>}>
           {/* Nothing to frame: the message frameless on the content edge (DESIGN_DIRECTION 8), as on Run and Not found. */}
-          <ErrorState error={model.error} retry={() => model.refresh()} title="Could not load this model" />
+          <ErrorState error={gone.get() ?? model.error} retry={() => model.refresh()} title="Could not load this model" />
         </Page>
       ) : !model.data ? (
         <Page title="Model" sub={() => <Skeleton w="320px" h="14px" />}>

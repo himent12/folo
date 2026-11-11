@@ -6,6 +6,7 @@ import { computed, css, effect, MediaQuery, onCleanup, onWindow, signal, untrack
 import { ApiError } from '$lib/api/client';
 import { hub } from '$lib/api/index';
 import type { MockApi } from '$lib/api/mock';
+import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model, PredictInput, Prediction, Run } from '$lib/api/types';
 import { modelChoices, scoreContext } from '$lib/scoreSummary';
@@ -36,6 +37,7 @@ import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
 import { BACKEND_NAME, DEFAULTS, FETCH, simulate } from './playground/predict';
 import { imageBlob, type Source } from './playground/source';
+import { followVanished } from './playground/vanished';
 
 type RunOn = 'server' | Backend;
 type Seg = 'file' | 'dataset' | 'webcam';
@@ -96,10 +98,12 @@ export default function Playground() {
   // Dragging the sheet's header down closes it; a shorter pull springs back (ui/sheetDrag, as every sheet).
 
   // ---------- model ----------
-  const models = new Resource((s) => hub.api.models(s));
+  // Kept current (lib/api/models): a deleted model leaves the picker, a finished run's joins it.
+  const models = modelsResource();
   // What each model's score is on (lib/scoreSummary): the picker groups models by dataset and split, best first within
   // a group (on a tie the earlier checkpoint), and never ranks one group against another.
   const runs = new Resource((s) => hub.api.runs(s));
+  refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
   const choices = computed(() => {
     // Until the runs and datasets answer (or fail) the splits are unknown: wait, so the default never switches.
@@ -124,6 +128,7 @@ export default function Playground() {
     pickedModel.set(id);
     router.go(`/playground?model=${encodeURIComponent(id)}`, { replace: true });
   }
+  followVanished(() => model.get(), () => ranked.get(), chooseModel);
 
   effect(() => {
     const s = source.get();

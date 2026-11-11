@@ -4,6 +4,7 @@ import Search from '$icons/search';
 import { computed, css, For, MediaQuery, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { bestMark, bestWord } from '$lib/bestMark';
+import { modelsResource, refreshOnModelsChange } from '$lib/api/models';
 import { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run } from '$lib/api/types';
 import { ago, bytes, compact, date, metric, num, sizeIn, sizeUnit } from '$lib/format';
@@ -76,11 +77,13 @@ const range = (n: number) => Array.from({ length: n }, (_, i) => i);
 export default function Models() {
   setCrumbs({ label: 'Models' });
 
-  const models = new Resource((s) => hub.api.models(s));
+  // Kept current: a run that ends or is deleted, or the tab shown again, fetches the list again (lib/api/models).
+  const models = modelsResource();
   // No models yet: the empty state's New run is the page's create action, so the top bar's steps aside.
   ownCreateAction(() => models.data?.length === 0);
   // Only for source-run names and evaluation datasets; the list still renders if these fail.
   const runs = new Resource((s) => hub.api.runs(s));
+  refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
   // This server's measured speed, for the engine benchmarks' "Measured on this server" lines (null on older servers).
   const throughput = new Resource((s) => loadThroughput(hub.api, s));
