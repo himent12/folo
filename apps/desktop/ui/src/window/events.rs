@@ -24,6 +24,17 @@ impl Window {
     pub(crate) fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
         cx.propagate_event = true;
         self.default_prevented = false;
+        // A pointer event means the mouse is over the window (Windows sends no `MouseExited`, and the
+        // hover callback may lag the first move).
+        if matches!(
+            event,
+            PlatformInput::MouseMove(_)
+                | PlatformInput::MouseDown(_)
+                | PlatformInput::MouseUp(_)
+                | PlatformInput::ScrollWheel(_)
+        ) {
+            self.hovered.set(true);
+        }
 
         let event = match event {
             PlatformInput::MouseMove(event) => {
@@ -114,7 +125,7 @@ impl Window {
 
     /// Dispatches a mouse event to the rendered frame's mouse listeners.
     pub(crate) fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        let hit_test = self.rendered_frame.hit_test(self.mouse_position);
+        let hit_test = self.hit_test_mouse(&self.rendered_frame);
         if hit_test != self.mouse_hit_test {
             self.mouse_hit_test = hit_test;
             self.reset_cursor_style(cx);
@@ -299,6 +310,23 @@ impl Window {
                 }
             }
         }
+    }
+
+    /// The `on_hover_status_change` callback. Leaving the window clears hover: an empty hit test, and the
+    /// rendered frame's mouse-move listeners run once with it, so hover styles redraw, `on_hover(false)`
+    /// fires and pending tooltips cancel (the platforms send no `MouseExited` for this).
+    pub(crate) fn on_hover_status_change(&mut self, hovered: bool, cx: &mut App) {
+        self.hovered.set(hovered);
+        if !hovered {
+            let event = MouseMoveEvent {
+                position: self.mouse_position,
+                pressed_button: None,
+                modifiers: self.modifiers,
+            };
+            cx.propagate_event = true;
+            self.dispatch_mouse_event(&event, cx);
+        }
+        self.refresh();
     }
 
     /// The `on_hit_test_window_control` callback: the control area under the mouse in the rendered frame

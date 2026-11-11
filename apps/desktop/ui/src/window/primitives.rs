@@ -15,8 +15,7 @@ use crate::{
     AlphaMask, App, Background, Bounds, BoxShadow, BuiltPath, ColorMask, ColorSprite, Corners, FontId,
     GlyphId, Hsla, Image, MonoSprite, PaintQuad, Pixels, Point, RenderGlyphParams, RenderImage,
     RenderSvgParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, SharedString, Size, SpriteKind,
-    StrikethroughStyle, StylePaint, Underline, UnderlineStyle, Window, size, svg_sprite_bounds,
-    window::raster::Mask,
+    StrikethroughStyle, StylePaint, Underline, UnderlineStyle, Window, raster::Mask, size, svg_sprite_bounds,
 };
 
 impl Window {

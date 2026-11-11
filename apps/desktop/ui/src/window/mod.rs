@@ -46,14 +46,13 @@ use std::{
 
 use smallvec::SmallVec;
 
+use crate::raster;
 use crate::{
     AnyDrag, AnyView, App, AppCell, Bounds, DisplayId, Framebuffer, GlyphBlend, GroupHitboxes, Modifiers,
     Pixels, PlatformWindow, Point, RenderGlyphParams, RenderSvgParams, Size, SvgRenderer,
     TextStyleRefinement, WindowBounds, WindowOptions, WindowParams, WindowTextSystem,
     element::ElementIdStack, px,
 };
-// `crate::raster` once the raster package lands (same names and signatures).
-pub(crate) use crate::pending::raster_pending as raster;
 
 /// The `on_window_should_close` handler.
 pub(crate) type ShouldCloseHandler = Box<dyn FnMut(&mut Window, &mut App) -> bool>;
@@ -375,10 +374,7 @@ fn wire_callbacks(platform_window: &dyn PlatformWindow, app: Weak<AppCell>, hand
     platform_window.on_hover_status_change(Box::new({
         let app = app.clone();
         move |hovered| {
-            update_window(&app, handle, |window, _| {
-                window.hovered.set(hovered);
-                window.refresh();
-            });
+            update_window(&app, handle, |window, cx| window.on_hover_status_change(hovered, cx));
         }
     }));
     platform_window.on_should_close(Box::new({

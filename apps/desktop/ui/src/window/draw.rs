@@ -26,21 +26,28 @@ use crate::{
 
 impl Window {
     /// The `on_request_frame` callback: runs `on_next_frame` callbacks, then draws and presents if dirty
-    /// (or if `options.force_render`), or only presents a frame drawn earlier and not yet shown.
+    /// (`force_render` also repaints every tile), or only presents a frame drawn earlier and not yet shown.
+    /// With `require_presentation` the platform gets a `present` even when nothing changed (it lost what it
+    /// showed: expose, resize, DPI change, capture), and copies the whole frame.
     pub(crate) fn on_request_frame(&mut self, options: RequestFrameOptions, cx: &mut App) {
         let callbacks = std::mem::take(&mut *self.next_frame_callbacks.borrow_mut());
         for callback in callbacks {
             callback(self, cx);
         }
+        if options.force_render {
+            self.renderer.invalidate();
+        }
+        let mut presented = false;
         if self.dirty.get() || options.force_render {
             self.draw(cx);
-            self.present();
+            presented = self.present();
             if trace_frames() {
                 print_frame(&self.frame_times);
             }
         } else if self.needs_present {
-            self.present();
-        } else if options.require_presentation {
+            presented = self.present();
+        }
+        if options.require_presentation && !presented {
             self.present_all();
         }
         self.platform_window.completed_frame();
@@ -76,7 +83,7 @@ impl Window {
         self.sort_deferred_draws();
         self.prepaint_deferred_draws(cx);
         let mut tooltip_element = if self.active_drag.is_none() { self.prepaint_tooltip(cx) } else { None };
-        self.mouse_hit_test = self.next_frame.hit_test(self.mouse_position);
+        self.mouse_hit_test = self.hit_test_mouse(&self.next_frame);
         let prepainted = Instant::now();
         self.frame_times.prepaint_us = micros_since(laid_out);
 
@@ -128,6 +135,11 @@ impl Window {
         }
     }
 
+    /// The hit test of the mouse against `frame`: nothing while the mouse is outside the window.
+    pub(crate) fn hit_test_mouse(&self, frame: &crate::window::Frame) -> crate::window::HitTest {
+        if self.hovered.get() { frame.hit_test(self.mouse_position) } else { Default::default() }
+    }
+
     /// Sets the platform cursor from the rendered frame, when the mouse is over the window (GPUI).
     pub(crate) fn reset_cursor_style(&self, cx: &App) {
         if self.hovered.get() {
@@ -137,8 +149,8 @@ impl Window {
     }
 
     /// Renders `rendered_frame.scene` into the framebuffer (`Renderer::render`, with the text backend's
-    /// `GlyphBlend`) and presents the damage, unless it is empty.
-    pub(crate) fn present(&mut self) {
+    /// `GlyphBlend`) and presents the damage, unless it is empty. Returns whether it presented.
+    pub(crate) fn present(&mut self) -> bool {
         let start = Instant::now();
         self.damage =
             self.renderer.render(&self.rendered_frame.scene, self.glyph_blend, &mut self.framebuffer);
@@ -150,6 +162,7 @@ impl Window {
         }
         self.frame_times.present_us = micros_since(rastered);
         self.needs_present = false;
+        !self.damage.is_empty()
     }
 
     /// Presents the whole framebuffer again (the platform lost what it showed).
@@ -165,19 +178,16 @@ impl Window {
     }
 
     /// The platform resized the window or changed its scale: new viewport and scale, framebuffer resized,
-    /// renderer invalidated, and a synchronous draw + present (no black edges while dragging).
-    pub(crate) fn on_resize(&mut self, content_size: Size<Pixels>, scale_factor: f32, cx: &mut App) {
+    /// renderer invalidated, window dirty. Both backends follow this callback at once (inside `WM_SIZE` /
+    /// `Resized`) with a `require_presentation` frame request, which draws and presents synchronously, so a
+    /// live resize never shows an unpainted edge; drawing here as well would draw every size twice.
+    pub(crate) fn on_resize(&mut self, content_size: Size<Pixels>, scale_factor: f32, _cx: &mut App) {
         self.viewport_size = content_size;
         self.scale_factor = scale_factor;
         self.display_id = self.platform_window.display().map(|display| display.id());
         self.resize_framebuffer();
         self.renderer.invalidate();
-        self.dirty.set(true);
-        self.draw(cx);
-        self.present();
-        if trace_frames() {
-            print_frame(&self.frame_times);
-        }
+        self.refresh();
     }
 
     /// The window moved: the display (and its scale) may have changed.

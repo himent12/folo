@@ -44,11 +44,32 @@ fn resize_repaints_at_the_new_size() {
     let (mut app, window) =
         open(size(px(200.), px(100.)), 1.0, |_, _| div().size_full().bg(color(1)).into_any_element());
     let drawn = frame_count(&mut app, window);
-    with_window(&mut app, window, |window, cx| window.on_resize(size(px(300.), px(120.)), 1.5, cx));
-    assert_eq!(frame_count(&mut app, window), drawn + 1, "drawn synchronously");
+    // What both backends do inside a resize: the callback, then at once a frame that must be presented.
+    with_window(&mut app, window, |window, cx| {
+        window.on_resize(size(px(300.), px(120.)), 1.5, cx);
+        let options = RequestFrameOptions { require_presentation: true, force_render: false };
+        window.on_request_frame(options, cx);
+    });
+    assert_eq!(frame_count(&mut app, window), drawn + 1, "drawn once, synchronously");
     assert_bounds(quad_of(&mut app, window, color(1)), device(0., 0., 300., 120., 1.5));
     let framebuffer = app.frame(window);
     assert_eq!((framebuffer.width, framebuffer.height), (450, 180));
+}
+
+#[test]
+fn a_required_presentation_presents_the_whole_frame_even_when_nothing_changed() {
+    let (mut app, window) =
+        open(size(px(200.), px(100.)), 1.0, |_, _| div().size_full().bg(color(1)).into_any_element());
+    app.platform().windows.borrow()[0].last_damage.borrow_mut().clear();
+    let drawn = frame_count(&mut app, window);
+    with_window(&mut app, window, |window, cx| {
+        let options = RequestFrameOptions { require_presentation: true, force_render: false };
+        window.on_request_frame(options, cx);
+    });
+    assert_eq!(frame_count(&mut app, window), drawn, "nothing was dirty: no draw");
+    let damage = app.platform().windows.borrow()[0].last_damage.borrow().clone();
+    assert_eq!(damage.len(), 1);
+    assert_eq!((damage[0].size.width.0, damage[0].size.height.0), (200, 100));
 }
 
 #[test]
