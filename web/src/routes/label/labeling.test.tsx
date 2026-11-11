@@ -82,6 +82,22 @@ describe('New labeling job', () => {
     expect(why(submitButton())).toBe('Fix the classes first');
   });
 
+  it('focuses Name on open, and keeps what was typed when it is closed and opened again', async () => {
+    const props = deep({ open: true } as JobDialogProps);
+    open(JobDialog, props);
+    await vi.waitFor(() => expect(document.activeElement?.id).toMatch(/-name$/));
+    type(document.querySelector('input[id$="-name"]')!, 'street');
+    type(document.querySelector('input[id$="-classes"]')!, 'car, person');
+    type(document.querySelector('textarea')!, 'Every car.');
+    props.open = false;
+    flushSync();
+    props.open = true;
+    flushSync();
+    expect(document.querySelector<HTMLInputElement>('input[id$="-name"]')!.value).toBe('street');
+    expect(document.querySelector<HTMLInputElement>('input[id$="-classes"]')!.value).toBe('car, person');
+    expect(document.querySelector('textarea')!.value).toBe('Every car.');
+  });
+
   it('says which pasted classes did not fit under the limit', () => {
     open(JobDialog, { open: true });
     const input = document.querySelector<HTMLInputElement>('input[id$="-classes"]')!;
