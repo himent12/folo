@@ -240,6 +240,40 @@ describe('text runs', () => {
     unmount();
   });
 
+  it('snippets a snippet returns (in arrays at any depth) keep their nodes through a later split elsewhere', () => {
+    const a = signal<JSX.Element>('a');
+    const b = signal<JSX.Element>('b');
+    let made = 0;
+    const inner = () => {
+      made++;
+      return <input />;
+    };
+    const outer = () => [[inner]] as unknown as JSX.Element;
+    const Frag = () => <>start {a.get()} mid {b.get()} end</>;
+    const { container, unmount } = render(() => (
+      <div>
+        <Frag />
+      </div>
+    ));
+    const div = container.querySelector('div')!;
+    a.set([outer] as unknown as JSX.Element);
+    flush();
+    const input = div.querySelector('input')!;
+    input.value = 'typed';
+    const i = document.createElement('i');
+    i.textContent = 'i';
+    b.set(i);
+    flush();
+    expect(div.querySelector('input')).toBe(input);
+    expect(input.value).toBe('typed');
+    expect(made).toBe(1);
+    a.set('gone');
+    flush();
+    expect(div.querySelector('input')).toBeNull();
+    expect(div.textContent).toBe('start gone mid i end');
+    unmount();
+  });
+
   it("a split part's outro keeps it in the DOM with the run's text until the outro ends", async () => {
     const ends: string[] = [];
     const slow = (node: Element) => {

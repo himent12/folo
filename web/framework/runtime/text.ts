@@ -30,12 +30,13 @@ function unwrap(v: unknown): unknown {
 }
 
 /**
- * A split part's value with every snippet in it, in arrays at any depth too, wrapped in a memo created now (in the
- * part's memo, which owns them): reading the value again reads those memos, never calls a snippet again (`insert`
+ * A split part's value with every snippet in it, in arrays at any depth and in what snippets return too, wrapped in a
+ * memo created now (in the part's memo, which owns them): reading the value again reads those memos, never calls a snippet again (`insert`
  * would wrap a bare one anew on each read).
  */
 function settle(v: unknown): unknown {
-  if (typeof v === 'function') return isReader(v) ? v : memo(v as () => unknown);
+  // What a snippet or reader returns is settled too, inside its own memo, which then owns (and disposes) those memos.
+  if (typeof v === 'function') return memo(() => settle((v as () => unknown)()));
   return Array.isArray(v) ? v.map(settle) : v;
 }
 
