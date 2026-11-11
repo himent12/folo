@@ -331,9 +331,12 @@ unsafe extern "system" fn message_window_procedure(
             LRESULT(0)
         }
         WM_FOLO_CALL => {
-            // SAFETY: `post_call` leaked exactly this box for this message.
-            let call = unsafe { Box::from_raw(lparam.0 as *mut Box<dyn FnOnce()>) };
-            call();
+            let call = lparam.0 as *mut Box<dyn FnOnce()>;
+            if !call.is_null() {
+                // SAFETY: `post_call` leaked exactly this box for this message (not null: checked).
+                let call = unsafe { Box::from_raw(call) };
+                call();
+            }
             LRESULT(0)
         }
         WM_FOLO_QUIT => {

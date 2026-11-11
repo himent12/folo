@@ -52,6 +52,14 @@ impl DropTarget {
     }
 }
 
+/// Answers through OLE's `pdwEffect` out pointer (never null from OLE; a null one is ignored).
+fn set_effect(effect: *mut DROPEFFECT, value: DROPEFFECT) {
+    if !effect.is_null() {
+        // SAFETY: OLE passes a valid effect pointer for the duration of the call; not null (checked).
+        unsafe { *effect = value };
+    }
+}
+
 /// The paths in a data object's `CF_HDROP`, if it has one.
 fn dropped_paths(data: &IDataObject) -> Option<SmallVec<[PathBuf; 2]>> {
     let format = FORMATETC {
@@ -96,8 +104,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         let data = data.ok()?;
         let paths = dropped_paths(data);
         let accepted = if paths.is_some() { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
-        // SAFETY: OLE passes a valid effect pointer.
-        unsafe { *effect = accepted };
+        set_effect(effect, accepted);
         if let Some(paths) = paths {
             self.send(PlatformInput::FileDrop(FileDropEvent::Entered {
                 position: self.position(pt),
@@ -117,8 +124,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         pt: &POINTL,
         effect: *mut DROPEFFECT,
     ) -> ::windows::core::Result<()> {
-        // SAFETY: OLE passes a valid effect pointer.
-        unsafe { *effect = DROPEFFECT_COPY };
+        set_effect(effect, DROPEFFECT_COPY);
         if let Some(helper) = self.helper() {
             // SAFETY: as in DragEnter.
             let _ = unsafe { helper.DragOver(&POINT { x: pt.x, y: pt.y }, DROPEFFECT_COPY) };
@@ -144,8 +150,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         effect: *mut DROPEFFECT,
     ) -> ::windows::core::Result<()> {
         let data = data.ok()?;
-        // SAFETY: OLE passes a valid effect pointer.
-        unsafe { *effect = DROPEFFECT_COPY };
+        set_effect(effect, DROPEFFECT_COPY);
         if let Some(helper) = self.helper() {
             // SAFETY: as in DragEnter.
             let _ = unsafe { helper.Drop(data, &POINT { x: pt.x, y: pt.y }, DROPEFFECT_COPY) };
