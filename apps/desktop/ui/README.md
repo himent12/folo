@@ -95,7 +95,7 @@ cargo run -p folo-ui --example text_probe -- <lines.txt> <out-dir> [scale]  # Di
 
 | Platform | Backend | What is verified |
 | --- | --- | --- |
-| Windows | Win32 (`platform/windows`), DirectWrite text | built, linted and tested in CI; the app runs and ships here; headless shots within 0.004 % of the GPUI app's pixels (`PARITY.md`); real-window checks with posted messages, off screen and on a private desktop (`win_smoke`; the app's `interact-check.ps1`, `chrome-check.ps1`, `window-check.ps1 -Sandbox`, copy and paste included); cost against GPUI in `PERF.md` |
+| Windows | Win32 (`platform/windows`), DirectWrite text | built, linted and tested in CI; the app runs and ships here; headless shots within 0.004 % of the GPUI app's pixels (`PARITY.md`); real-window checks with posted messages, off screen and on a private desktop (`win_smoke`; the app's `interact-check.ps1`, `chrome-check.ps1`, `window-check.ps1 -Sandbox`; copy and paste with `interact-check.ps1 -Sandbox -Clipboard`); cost against GPUI in `PERF.md` |
 | Linux | winit + softbuffer, cosmic-text | CI builds the app, runs every test (all headless) and renders a headless `--shot`; no window has been opened on Linux |
 | macOS | winit + softbuffer, cosmic-text | type-checked and linted for `aarch64-apple-darwin` and `x86_64-apple-darwin` by `tools/cross-check.sh` (in CI too); nothing is linked or run on macOS |
 
