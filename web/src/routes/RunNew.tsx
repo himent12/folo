@@ -1,5 +1,6 @@
 import Images from '$icons/images';
 import Play from '$icons/play';
+import Plus from '$icons/plus';
 import { computed, css, deep, effect, signal, tick, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
@@ -655,9 +656,13 @@ export default function RunNew() {
             title="Add a dataset first"
             description="Runs train on a registered dataset: add a folder or generate a synthetic one."
             actions={() => (
-              <Button variant="primary" href={href('/datasets')}>
-                Go to Datasets
-              </Button>
+              // Straight to the Add dataset dialog, as Overview's first step (Datasets reads `?add=`).
+              <>
+                <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>
+                  Add dataset
+                </Button>
+                <Button href={href('/datasets?add=synthetic')}>Generate sample set</Button>
+              </>
             )}
           />
         </Panel>

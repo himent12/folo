@@ -691,3 +691,17 @@ describe('New run: an epoch count out of range', () => {
     expect(est()[1]).toMatch(/\d/);
   });
 });
+
+describe('New run with no dataset yet', () => {
+  it('leads straight to the Add dataset dialog, or to a generated sample set', async () => {
+    hub.api = api = new MockApi('empty', 0);
+    router.route = parse('#/runs/new');
+    c = mount(RunNew, { target });
+    await until(() => target.textContent?.includes('Add a dataset first'), 'the empty state');
+    const links = [...target.querySelectorAll<HTMLAnchorElement>('a')].map((a) => [a.textContent?.trim(), a.getAttribute('href')]);
+    expect(links).toEqual([
+      ['Add dataset', '#/datasets?add=folder'],
+      ['Generate sample set', '#/datasets?add=synthetic'],
+    ]);
+  });
+});
