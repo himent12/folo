@@ -30,7 +30,7 @@ mod store;
 mod training;
 mod uploads;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -188,14 +188,9 @@ impl RealStore {
             tracing::error!("{e}; registering and unregistering datasets is disabled until it is fixed");
             Vec::new()
         });
-        let mut entries = Vec::new();
-        for r in regs {
-            if !Path::new(&r.path).exists() {
-                tracing::warn!(id = %r.id, path = %r.path, "skipping registered dataset: the path does not exist");
-                continue;
-            }
-            entries.push(Arc::new(Entry::new(r, State::Pending)));
-        }
+        // A dataset whose folder is gone stays listed (indexing fails with `path_not_found`), so clients can say so
+        // and unregister it; it works again as soon as the folder is back.
+        let entries: Vec<_> = regs.into_iter().map(|r| Arc::new(Entry::new(r, State::Pending))).collect();
         if !entries.is_empty() {
             let todo = entries.clone();
             let dir = data_dir.clone();

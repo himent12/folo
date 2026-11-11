@@ -463,3 +463,32 @@ async fn registering_a_folder_again_returns_the_same_dataset() {
     let list: DatasetList = ok(&a, get("/api/datasets")).await;
     assert_eq!(list.datasets.len(), 1);
 }
+
+/// A registered folder that is moved away stays in the list (also after a restart), says what is wrong, can be
+/// unregistered, and works again when it is back.
+#[tokio::test]
+async fn a_missing_folder_stays_listed_and_can_be_unregistered() {
+    let t = TestDir::new("real-moved");
+    let (home, data, moved) = (t.join("home"), t.join("shapes"), t.join("shapes-moved"));
+    write_shapes(&data, 6);
+    let app = app(&home);
+    let ds: Dataset = ok(&app, post_json("/api/datasets", json!({ "path": data, "name": "mine" }))).await;
+    std::fs::rename(&data, &moved).unwrap();
+    for app in [app.clone(), restart(&home)] {
+        let list: DatasetList = ok(&app, get("/api/datasets")).await;
+        assert_eq!(list.datasets.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["mine"]);
+        let e = err(&app, get(&format!("/api/datasets/{}", ds.id)), StatusCode::NOT_FOUND, "path_not_found")
+            .await;
+        assert!(e.message.starts_with("the folder of dataset 'mine' is gone"), "{}", e.message);
+        assert!(e.hint.unwrap().contains("move the folder back"));
+    }
+    std::fs::rename(&moved, &data).unwrap();
+    let back: Dataset = ok(&app, get(&format!("/api/datasets/{}", ds.id))).await;
+    assert_eq!(back.splits, ds.splits);
+    std::fs::rename(&data, &moved).unwrap();
+    let app = restart(&home);
+    let (status, _, _) = send(&app, delete(&format!("/api/datasets/{}", ds.id))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let list: DatasetList = ok(&app, get("/api/datasets")).await;
+    assert!(list.datasets.is_empty());
+}

@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
+use axum::http::StatusCode;
 use folo_api::{Dataset, DatasetFormat};
 
 use crate::error::{Error, Result};
@@ -47,7 +48,9 @@ impl RealStore {
         }
         let reg = e.reg();
         tracing::info!(id = %reg.id, "dataset files changed; re-indexing");
-        match Index::build(&reg.path, reg.format, &own_state(&self.data_dir)) {
+        match Index::build(&reg.path, reg.format, &own_state(&self.data_dir))
+            .map_err(|err| folder_gone(err, &reg))
+        {
             Ok(idx) => {
                 let idx = Arc::new(idx);
                 save_index(&self.data_dir, e, &idx);
@@ -171,6 +174,21 @@ impl RealStore {
     }
 }
 
+/// A registered dataset whose folder no longer exists: said as that (still `404 path_not_found`), not with the
+/// registration error's advice on which folder to pass.
+fn folder_gone(err: Error, reg: &Registration) -> Error {
+    if err.body.code != "path_not_found" || Path::new(&reg.path).exists() {
+        return err;
+    }
+    let (name, path) = (&reg.name, folo_data::paths::shown(&reg.path));
+    let message = format!("the folder of dataset '{name}' is gone: '{path}' does not exist");
+    Error::new(StatusCode::NOT_FOUND, "path_not_found", message).hint(format!(
+        "move the folder back (FOLO picks it up again within seconds), or unregister the dataset with \
+         DELETE /api/datasets/{} (its files are never deleted)",
+        reg.id
+    ))
+}
+
 /// The server's own files in the data dir, left out of dataset fingerprints (the data dir may sit inside a
 /// registered dataset folder; caching an index must not make it stale).
 fn own_state(dir: &Path) -> Vec<PathBuf> {
@@ -239,7 +257,7 @@ pub(super) fn load_or_build(dir: &Path, e: &Entry) {
         return;
     }
     let t0 = Instant::now();
-    match Index::build(&reg.path, reg.format, &own_state(dir)) {
+    match Index::build(&reg.path, reg.format, &own_state(dir)).map_err(|err| folder_gone(err, &reg)) {
         Ok(idx) => {
             tracing::info!(id = %reg.id, images = idx.images.len(), secs = t0.elapsed().as_secs_f32(), "indexed");
             save_index(dir, e, &idx);

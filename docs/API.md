@@ -1259,8 +1259,10 @@ mostly shown) for the others.
   registry is listed immediately and every dataset is checked on a background thread: a fresh cache is loaded, a
   stale or missing one rebuilt; requests for a dataset that is still being indexed wait for it. While running,
   `GET /api/datasets/{id}` and image listings re-check the fingerprint at most every 5 s and re-index when files
-  were added, removed or edited. Datasets whose folder no longer exists are left out of the list (but stay in the
-  registry).
+  were added, removed or edited. A dataset whose folder no longer exists (moved, renamed, deleted) stays in the list
+  with its last classes and splits; `GET /api/datasets/{id}` and its images answer `404 path_not_found` ("the folder
+  of dataset '<name>' is gone: ...") until the folder is back (it is re-checked like any change), and `DELETE`
+  unregisters it.
 - `cache/thumbs/<id>/`: thumbnails, keyed by the image's path, size, modification time and the requested side.
 - `datasets/<name>/`: synthetic datasets and the datasets made from labeling jobs. `DELETE /api/datasets/{id}`
   removes the dataset's caches, never its files.

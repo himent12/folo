@@ -61,6 +61,17 @@ export default function Dataset() {
 
   const ds = new Resource((s) => hub.api.dataset(id.get(), s));
   const d = () => ds.data;
+  /** The dataset could not be read: what went wrong. */
+  const failure = computed(() => (ds.error && !d() ? ds.error : undefined));
+  /** Its folder is gone (moved, renamed, deleted): the dataset is still registered, so it can be removed. */
+  const gone = computed(() => {
+    const e = failure.get();
+    return e instanceof ApiError && e.code === 'path_not_found';
+  });
+  /** A dataset that cannot be read, as the list has it: its name for the page, and that it is there to remove. */
+  const listed = new Resource(async (s) => (failure.get() ? ((await hub.api.datasets(s)).find((x) => x.id === id.get()) ?? null) : null));
+  /** The dataset the header's actions (Copy path, Remove from FOLO) act on, whether or not it could be read. */
+  const target = () => d() ?? listed.data ?? undefined;
 
   const cls = computed(() => {
     const p = clsParam.get();
@@ -74,7 +85,7 @@ export default function Dataset() {
   });
 
   effect(() => {
-    setCrumbs({ label: 'Datasets', path: '/datasets' }, { label: d()?.name ?? id.get() });
+    setCrumbs({ label: 'Datasets', path: '/datasets' }, { label: target()?.name ?? id.get() });
   });
   // The header's "Train on this dataset" is this page's create action: the top bar's New run steps aside.
   ownCreateAction();
@@ -119,7 +130,7 @@ export default function Dataset() {
 
   // ---------- header actions ----------
   async function copyPath() {
-    const dd = d();
+    const dd = target();
     if (!dd) return;
     // page-level: the header's Copy path, outside any dialog.
     try {
@@ -135,7 +146,7 @@ export default function Dataset() {
   /** A failed delete says so in its dialog, which stays open for another try (the toaster sits behind the modal). */
   const deleteStatus = new DialogStatus();
   async function remove() {
-    const dd = d();
+    const dd = target();
     if (!dd) return;
     deleting.set(true);
     try {
@@ -178,31 +189,61 @@ export default function Dataset() {
 
   const moreItems: MenuItem[] = [
     { label: 'Copy path', icon: Copy, onclick: copyPath },
-    { label: 'Delete dataset', icon: Trash, danger: true, onclick: () => confirmDelete.set(true) },
+    { label: 'Remove from FOLO', icon: Trash, danger: true, onclick: () => confirmDelete.set(true) },
   ];
 
   const dd = () => d()!;
+  const tg = () => target()!;
   const pg = () => pager.get()!;
   /** The filtered count, "…" until the first page answers. */
   const matched = () => (pager.get()?.total != null ? num(pager.get()!.total!) : '…');
 
   return (
     <>
-      {ds.error && !d() ? (
+      {failure.get() ? (
         /* Nothing to frame: the message frameless on the content edge (DESIGN_DIRECTION 8), as on Run and Not found;
-           the way back is the header's action, as on Model. */
+           the way back is the header's action, as on Model. A dataset that is still registered keeps its name and its
+           ⋯ menu, so it can always be removed. */
         <Page
-          title="Dataset"
+          title={listed.data?.name ?? 'Dataset'}
           actions={() => (
-            <Button icon={ArrowLeft} href={href('/datasets')}>
-              All datasets
-            </Button>
+            <>
+              <Button icon={ArrowLeft} href={href('/datasets')}>
+                All datasets
+              </Button>
+              {listed.data ? <Menu label="More dataset actions" items={moreItems} /> : null}
+            </>
           )}
         >
-          {ds.error instanceof ApiError && ds.error.status === 404 ? (
-            <ErrorState error={ds.error} title="Dataset not found" />
+          {gone.get() ? (
+            <ErrorState
+              error={failure.get()}
+              title="Folder missing"
+              hint="It was moved, renamed or deleted. Put it back and press Retry, or remove the dataset from FOLO: its files are never deleted."
+              retry={() => ds.refresh()}
+              actions={
+                listed.data ? (
+                  <Button size="sm" icon={Trash} onclick={() => confirmDelete.set(true)}>
+                    Remove from FOLO
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : failure.get() instanceof ApiError && (failure.get() as ApiError).status === 404 ? (
+            <ErrorState error={failure.get()} title="Dataset not found" />
           ) : (
-            <ErrorState error={ds.error} title="Could not load this dataset" retry={() => ds.refresh()} />
+            <ErrorState
+              error={failure.get()}
+              title="Could not load this dataset"
+              retry={() => ds.refresh()}
+              actions={
+                listed.data ? (
+                  <Button size="sm" icon={Trash} onclick={() => confirmDelete.set(true)}>
+                    Remove from FOLO
+                  </Button>
+                ) : undefined
+              }
+            />
           )}
         </Page>
       ) : !d() ? (
@@ -403,26 +444,28 @@ export default function Dataset() {
             />
           ) : null}
 
-          <Dialog
-            bind:open={confirmDelete}
-            title={`Delete ${dd().name}?`}
-            size="sm"
-            status={deleteStatus}
-            footer={() => (
-              <>
-                <Button onclick={() => confirmDelete.set(false)}>Cancel</Button>
-                <Button variant="destructive" icon={Trash} loading={deleting.get()} onclick={remove}>
-                  Delete dataset
-                </Button>
-              </>
-            )}
-          >
-            <p class="confirm">
-              <b>{dd().name}</b> will be unregistered from FOLO. The files in <span class="mono">{dd().path}</span> stay on disk, and runs that used it keep their results.
-            </p>
-          </Dialog>
         </>
       )}
+      {target() ? (
+        <Dialog
+          bind:open={confirmDelete}
+          title={`Remove ${tg().name} from FOLO?`}
+          size="sm"
+          status={deleteStatus}
+          footer={() => (
+            <>
+              <Button onclick={() => confirmDelete.set(false)}>Cancel</Button>
+              <Button variant="destructive" icon={Trash} loading={deleting.get()} onclick={remove}>
+                Remove from FOLO
+              </Button>
+            </>
+          )}
+        >
+          <p class="confirm">
+            <b>{tg().name}</b> will be unregistered from FOLO. The files in <span class="mono">{tg().path}</span> stay on disk, and runs that used it keep their results.
+          </p>
+        </Dialog>
+      ) : null}
     </>
   );
 }
