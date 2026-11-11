@@ -19,6 +19,7 @@ import { showShortcuts } from '$lib/shell/shortcuts';
 import { fadeScroll } from '$lib/ui/fadeScroll';
 import Button from '$lib/ui/Button';
 import DriverReport from '$lib/ui/DriverReport';
+import ErrorState from '$lib/ui/ErrorState';
 import Kbd from '$lib/ui/Kbd';
 import Meta from '$lib/ui/Meta';
 import { keyPrefs } from '$lib/ui/keyPrefs';
@@ -58,6 +59,8 @@ export default function Settings() {
   // sits low on the page: a real server answers once its GPU is up, and the panel must not push the forms down.
   const sys = new Resource((s) => hub.api.system(s));
   const caps = computed(() => sys.data?.capabilities);
+  /** `/api/system` failed with nothing loaded: System says so (with Retry) instead of being missing (shell F11c). */
+  const sysFailed = computed(() => sys.error !== undefined && !sys.data);
   /** FOLO's own GPU buffer pool (`gpu_pool`): absent until the server has used the GPU, and from older servers. */
   const pool = computed(() => sys.data?.gpu_pool);
   const capRows = computed(() => {
@@ -73,7 +76,7 @@ export default function Settings() {
     { id: 'appearance', label: 'Appearance' },
     { id: 'units', label: 'Units' },
     { id: 'shortcuts', label: 'Keyboard shortcuts' },
-    ...(caps.get() ? [{ id: 'system', label: 'System' }] : []),
+    ...(caps.get() || sysFailed.get() ? [{ id: 'system', label: 'System' }] : []),
     { id: 'about', label: 'About' },
   ]);
   /** The server's own reasons as plain text, for an issue or a terminal. */
@@ -383,6 +386,10 @@ export default function Settings() {
                   <Throughput benchmark={hasFeature(sys.data, 'benchmark')} />
                 ) : null}
               </div>
+            </Panel>
+          ) : sysFailed.get() ? (
+            <Panel title="System" id="system" divided>
+              <ErrorState error={sys.error} retry={() => sys.refresh()} compact hint="The System and Cloud sections show once it loads." />
             </Panel>
           ) : null}
 
