@@ -103,6 +103,7 @@ impl WindowTextSystem {
     ) -> Result<SmallVec<[WrappedLine; 1]>> {
         let mut runs = runs.iter().filter(|run| run.len > 0).cloned().peekable();
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
+        let font_generation = self.text_system.font_generation();
 
         let mut lines = SmallVec::new();
         let mut line_start = 0;
@@ -167,6 +168,7 @@ impl WindowTextSystem {
                 // The lines this one may still use (GPUI passes `usize::MAX` less the lines so far
                 // when there is no clamp, which limits nothing).
                 line_clamp.map(|max_lines| max_lines - wrapped_lines),
+                font_generation,
             );
             wrapped_lines += layout.wrap_boundaries.len();
 
@@ -222,6 +224,7 @@ impl WindowTextSystem {
         let mut last_font: Option<FontId> = None;
         let mut font_runs = self.font_runs_pool.lock().pop().unwrap_or_default();
         font_runs.clear();
+        let font_generation = self.text_system.font_generation();
 
         for run in runs.iter() {
             let decoration_changed = if let Some(last_run) = last_run
@@ -248,8 +251,13 @@ impl WindowTextSystem {
             }
         }
 
-        let layout =
-            self.line_layout_cache.layout_line(SharedString::new(text), font_size, &font_runs, force_width);
+        let layout = self.line_layout_cache.layout_line(
+            SharedString::new(text),
+            font_size,
+            &font_runs,
+            force_width,
+            font_generation,
+        );
 
         self.font_runs_pool.lock().push(font_runs);
 

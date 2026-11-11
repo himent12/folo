@@ -121,6 +121,12 @@ The API is GPUI's where the app uses it. Below it, these differ by design:
 - The line layout cache's key for a wrapped line holds the line limit (`line_clamp`), so a text drawn
   with two clamps, in one frame or one after the other, is wrapped to each (GPUI 0.2.2's key left it
   out: the first clamp asked for a text, font and width was reused, also in later frames).
+- Fonts added after text was drawn are used from the next frame: `TextSystem::add_fonts` forgets font
+  resolutions (the backends forget their family lookups too) and moves a font generation on, which the
+  line layout caches' keys, the line wrapper pool and layout reuse carry (GPUI 0.2.2 kept the
+  resolutions, so a family drawn before its font was added stayed on its fallback). Font ids handed
+  out stay valid: an id always names the same face, so metrics, raster bounds and masks keyed by id
+  stay right.
 - A shown tooltip hides on the mouse move that leaves its element (GPUI 0.2.2 waited for the next
   prepaint, so a tooltip on an element without a hover style stayed up), and a tooltip's timer and
   visibility callback hold its state weakly (GPUI's cycle leaked the state and the tooltip view once the
@@ -179,14 +185,14 @@ paint into a `Scene`, then rasterize and present the damage. Two things keep it 
 - **Layout reuse** (`window/layout_tree.rs`). The elements still add their layout nodes every frame (children
   before parents), but into our own node storage running taffy's algorithms, which keeps what the previous frame
   computed. A new node whose style, kind, measure key (the text element's text and font) and children equal a
-  node of the previous frame takes that node's place and keeps its records: each layout request it received
-  last frame with its answer. While this frame asks the same requests in the same order, they are answered from
-  the records and nothing under the node runs; its measured leaves replay last frame's measure calls in order,
-  so their state (the text element's shaped lines) is what a fresh layout leaves. The first request that
-  differs makes the node diverge: its subtree forgets everything and is laid out from scratch, the requests it
-  already answered included. Every result, every measure call and every final position is therefore exactly
-  what laying out a fresh tree gives (GPUI's behaviour); only the cost differs. Nodes measured without a key
-  are never reused.
+  node of the previous frame (at the same scale, with no fonts added since) takes that node's place and keeps
+  its records: each layout request it received last frame with its answer. While this frame asks the same
+  requests in the same order, they are answered from the records and nothing under the node runs; its
+  measured leaves replay last frame's measure calls in order, so their state (the text element's shaped
+  lines) is what a fresh layout leaves. The first request that differs makes the node diverge: its subtree
+  forgets everything and is laid out from scratch, the requests it already answered included. Every result,
+  every measure call and every final position is therefore exactly what laying out a fresh tree gives
+  (GPUI's behaviour); only the cost differs. Nodes measured without a key are never reused.
 
 ## Renderer contract (`raster`)
 

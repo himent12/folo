@@ -189,6 +189,10 @@ impl DirectWriteState {
             self.factory.CreateFontCollectionFromFontSet(&set)?
         };
         self.custom_font_collection = Some(collection);
+        // A family may now be in the bundled collection: select fonts again (GPUI kept its selections, so
+        // a family asked for before its font was added stayed on the system UI font). Ids handed out
+        // stay valid.
+        self.font_selections.clear();
         Ok(())
     }
 }

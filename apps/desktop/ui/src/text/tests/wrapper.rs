@@ -249,3 +249,30 @@ fn wrappers_return_to_the_pool_with_their_width_cache() {
     let _ = wrap(&mut other, &[LineFragment::text("a")], 30.);
     assert_eq!(counting.layout_calls(), shaped + 1);
 }
+
+#[test]
+fn wrappers_from_before_fonts_were_added_are_not_reused() {
+    let text_system = |added: bool| {
+        let text_system = Arc::new(TextSystem::new(Arc::new(super::WideningTextSystem::default())));
+        if added {
+            text_system.add_fonts(Vec::new()).unwrap();
+        }
+        text_system
+    };
+    let truncate =
+        |wrapper: &mut LineWrapper| wrapper.truncate_line("abcdefghij".into(), px(60.), "…", &runs(&[10])).0;
+    let want = truncate(&mut text_system(true).line_wrapper(super::dummy_font(), px(10.)));
+    assert_eq!(want, "abc…");
+
+    let text_system = text_system(false);
+    // One wrapper goes back to the pool before fonts are added, one is held until after.
+    let mut pooled = text_system.line_wrapper(super::dummy_font(), px(10.));
+    let mut held = text_system.line_wrapper(super::dummy_font(), px(10.));
+    assert_eq!((truncate(&mut pooled), truncate(&mut held)), ("abcdefghij".into(), "abcdefghij".into()));
+    drop(pooled);
+    text_system.add_fonts(Vec::new()).unwrap();
+    drop(held);
+    let mut first = text_system.line_wrapper(super::dummy_font(), px(10.));
+    let mut second = text_system.line_wrapper(super::dummy_font(), px(10.));
+    assert_eq!((truncate(&mut first), truncate(&mut second)), (want.clone(), want));
+}

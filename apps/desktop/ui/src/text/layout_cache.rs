@@ -4,7 +4,8 @@
 //!
 //! A key holds everything a layout depends on: the text, size, font runs, wrap width and line limit (a
 //! wrapped layout's boundaries stop at the limit; GPUI's key leaves it out, so the first clamp asked
-//! for a text and width won, even in later frames).
+//! for a text and width won, even in later frames), and the text system's font generation (added fonts
+//! can change which face a character falls back to: `TextSystem`'s module docs).
 
 use super::fx_hash::FxHashMap;
 use crate::{FontRun, LineLayout, Pixels, PlatformTextSystem, SharedString, WrappedLineLayout, px};
@@ -105,6 +106,7 @@ impl LineLayoutCache {
         runs: &[FontRun],
         wrap_width: Option<Pixels>,
         max_lines: Option<usize>,
+        font_generation: u64,
     ) -> Arc<WrappedLineLayout>
     where
         Text: AsRef<str>,
@@ -112,9 +114,15 @@ impl LineLayoutCache {
     {
         // Without a wrap width there are no boundaries to limit.
         let max_lines = wrap_width.and(max_lines);
-        let key =
-            &CacheKeyRef { text: text.as_ref(), font_size, runs, wrap_width, max_lines, force_width: None }
-                as &dyn AsCacheKeyRef;
+        let key = &CacheKeyRef {
+            text: text.as_ref(),
+            font_size,
+            runs,
+            wrap_width,
+            max_lines,
+            force_width: None,
+            font_generation,
+        } as &dyn AsCacheKeyRef;
 
         let current_frame = self.current_frame.upgradable_read();
         if let Some(layout) = current_frame.wrapped_lines.get(key) {
@@ -130,7 +138,8 @@ impl LineLayoutCache {
         } else {
             drop(current_frame);
             let text = SharedString::from(text);
-            let unwrapped_layout = self.layout_line::<&SharedString>(&text, font_size, runs, None);
+            let unwrapped_layout =
+                self.layout_line::<&SharedString>(&text, font_size, runs, None, font_generation);
             let wrap_boundaries = if let Some(wrap_width) = wrap_width {
                 unwrapped_layout.compute_wrap_boundaries(text.as_ref(), wrap_width, max_lines)
             } else {
@@ -144,6 +153,7 @@ impl LineLayoutCache {
                 wrap_width,
                 max_lines,
                 force_width: None,
+                font_generation,
             });
 
             let mut current_frame = self.current_frame.write();
@@ -160,6 +170,7 @@ impl LineLayoutCache {
         font_size: Pixels,
         runs: &[FontRun],
         force_width: Option<Pixels>,
+        font_generation: u64,
     ) -> Arc<LineLayout>
     where
         Text: AsRef<str>,
@@ -172,6 +183,7 @@ impl LineLayoutCache {
             wrap_width: None,
             max_lines: None,
             force_width,
+            font_generation,
         } as &dyn AsCacheKeyRef;
 
         let current_frame = self.current_frame.upgradable_read();
@@ -208,6 +220,7 @@ impl LineLayoutCache {
                 wrap_width: None,
                 max_lines: None,
                 force_width,
+                font_generation,
             });
             let layout = Arc::new(layout);
             current_frame.lines.insert(key.clone(), layout.clone());
@@ -229,6 +242,7 @@ struct CacheKey {
     wrap_width: Option<Pixels>,
     max_lines: Option<usize>,
     force_width: Option<Pixels>,
+    font_generation: u64,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
@@ -239,6 +253,7 @@ struct CacheKeyRef<'a> {
     wrap_width: Option<Pixels>,
     max_lines: Option<usize>,
     force_width: Option<Pixels>,
+    font_generation: u64,
 }
 
 impl PartialEq for dyn AsCacheKeyRef + '_ {
@@ -264,6 +279,7 @@ impl AsCacheKeyRef for CacheKey {
             wrap_width: self.wrap_width,
             max_lines: self.max_lines,
             force_width: self.force_width,
+            font_generation: self.font_generation,
         }
     }
 }

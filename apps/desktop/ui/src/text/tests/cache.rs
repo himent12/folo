@@ -130,3 +130,23 @@ fn the_line_clamp_is_part_of_a_wrapped_key() {
     window.finish_frame();
     assert_eq!(lines(Some(2)), 2);
 }
+
+#[test]
+fn layouts_from_before_fonts_were_added_are_not_reused() {
+    let platform = Arc::new(super::WideningTextSystem::default());
+    let text_system = Arc::new(TextSystem::new(platform));
+    let window = WindowTextSystem::new(text_system.clone());
+    let text = SharedString::from("abc def");
+    let wrapped = |window: &WindowTextSystem| {
+        let lines = window.shape_text(text.clone(), px(10.), &runs(&[7]), Some(px(50.)), None).unwrap();
+        lines[0].wrap_boundaries().len()
+    };
+    assert_eq!((shape(&window, "abc def", 10.).width, wrapped(&window)), (px(42.), 0));
+    window.finish_frame();
+    assert_eq!((shape(&window, "abc def", 10.).width, wrapped(&window)), (px(42.), 0));
+    // The same font ids now shape twice as wide: in this frame and the next, nothing is reused.
+    text_system.add_fonts(Vec::new()).unwrap();
+    assert_eq!((shape(&window, "abc def", 10.).width, wrapped(&window)), (px(84.), 1));
+    window.finish_frame();
+    assert_eq!((shape(&window, "abc def", 10.).width, wrapped(&window)), (px(84.), 1));
+}

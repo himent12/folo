@@ -113,3 +113,67 @@ impl PlatformTextSystem for CountingTextSystem {
         self.inner.glyph_blend()
     }
 }
+
+/// `FixedTextSystem` whose glyphs are twice as wide once fonts are added, under the same font ids: what
+/// a character falling back to an added face looks like to the caches.
+#[derive(Default)]
+pub(super) struct WideningTextSystem {
+    inner: FixedTextSystem,
+    widened: std::sync::atomic::AtomicBool,
+}
+
+impl PlatformTextSystem for WideningTextSystem {
+    fn add_fonts(&self, _fonts: Vec<std::borrow::Cow<'static, [u8]>>) -> anyhow::Result<()> {
+        self.widened.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+    fn all_font_names(&self) -> Vec<String> {
+        self.inner.all_font_names()
+    }
+    fn font_id(&self, descriptor: &Font) -> anyhow::Result<crate::FontId> {
+        self.inner.font_id(descriptor)
+    }
+    fn font_metrics(&self, font_id: crate::FontId) -> crate::FontMetrics {
+        self.inner.font_metrics(font_id)
+    }
+    fn typographic_bounds(
+        &self,
+        font_id: crate::FontId,
+        glyph_id: crate::GlyphId,
+    ) -> anyhow::Result<crate::Bounds<f32>> {
+        self.inner.typographic_bounds(font_id, glyph_id)
+    }
+    fn advance(&self, font_id: crate::FontId, glyph_id: crate::GlyphId) -> anyhow::Result<crate::Size<f32>> {
+        self.inner.advance(font_id, glyph_id)
+    }
+    fn glyph_for_char(&self, font_id: crate::FontId, ch: char) -> Option<crate::GlyphId> {
+        self.inner.glyph_for_char(font_id, ch)
+    }
+    fn glyph_raster_bounds(
+        &self,
+        params: &crate::RenderGlyphParams,
+    ) -> anyhow::Result<crate::Bounds<crate::DevicePixels>> {
+        self.inner.glyph_raster_bounds(params)
+    }
+    fn rasterize_glyph(
+        &self,
+        params: &crate::RenderGlyphParams,
+        raster_bounds: crate::Bounds<crate::DevicePixels>,
+    ) -> anyhow::Result<(crate::Size<crate::DevicePixels>, Vec<u8>)> {
+        self.inner.rasterize_glyph(params, raster_bounds)
+    }
+    fn layout_line(
+        &self,
+        text: &str,
+        font_size: crate::Pixels,
+        runs: &[crate::FontRun],
+    ) -> crate::LineLayout {
+        let widen = if self.widened.load(Ordering::Relaxed) { 2. } else { 1. };
+        let mut layout = self.inner.layout_line(text, font_size * widen, runs);
+        layout.font_size = font_size;
+        layout
+    }
+    fn glyph_blend(&self) -> crate::GlyphBlend {
+        self.inner.glyph_blend()
+    }
+}

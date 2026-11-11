@@ -57,12 +57,13 @@ impl TaffyLayoutEngine {
         style: &Style,
         rem_size: Pixels,
         scale_factor: f32,
+        font_generation: u64,
         children: impl IntoIterator<Item = LayoutId>,
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
         self.child_buffer.clear();
         self.child_buffer.extend(children.into_iter().map(|id| id.0));
-        LayoutId(self.tree.add(taffy_style, &self.child_buffer, None, scale_factor))
+        LayoutId(self.tree.add(taffy_style, &self.child_buffer, None, scale_factor, font_generation))
     }
 
     /// Adds a leaf measured by `measured`.
@@ -71,10 +72,11 @@ impl TaffyLayoutEngine {
         style: &Style,
         rem_size: Pixels,
         scale_factor: f32,
+        font_generation: u64,
         measured: Measured,
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
-        LayoutId(self.tree.add(taffy_style, &[], Some(measured), scale_factor))
+        LayoutId(self.tree.add(taffy_style, &[], Some(measured), scale_factor, font_generation))
     }
 
     /// Computes the layout under `id` in `available_space` (measured leaves call back into the window).
@@ -135,7 +137,8 @@ impl Window {
     ) -> LayoutId {
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        self.layout_engine_mut().request_layout(&style, rem_size, scale_factor, children)
+        let font_generation = self.text_system.font_generation();
+        self.layout_engine_mut().request_layout(&style, rem_size, scale_factor, font_generation, children)
     }
 
     /// Adds a leaf whose size `measure` computes from the known dimensions and available space.
@@ -146,7 +149,14 @@ impl Window {
         let measured = Measured { measure: Box::new(measure), key: None, reset: None };
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        self.layout_engine_mut().request_measured_layout(&style, rem_size, scale_factor, measured)
+        let font_generation = self.text_system.font_generation();
+        self.layout_engine_mut().request_measured_layout(
+            &style,
+            rem_size,
+            scale_factor,
+            font_generation,
+            measured,
+        )
     }
 
     /// `request_measured_layout` for a measure function whose results depend only on `key` and the requests
@@ -162,7 +172,14 @@ impl Window {
         let measured = Measured { measure: Box::new(measure), key: Some(key), reset: Some(Box::new(reset)) };
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        self.layout_engine_mut().request_measured_layout(&style, rem_size, scale_factor, measured)
+        let font_generation = self.text_system.font_generation();
+        self.layout_engine_mut().request_measured_layout(
+            &style,
+            rem_size,
+            scale_factor,
+            font_generation,
+            measured,
+        )
     }
 
     /// Computes the layout under `layout_id` in `available_space`.

@@ -1,6 +1,15 @@
 // Adapted from GPUI (Apache-2.0): crates/gpui/src/text_system.rs
 //! `TextSystem`: the app-wide text front (font ids with GPUI's fallback stack, cached metrics and raster
 //! bounds, the line wrapper pool) over a `PlatformTextSystem`.
+//!
+//! Adding fonts can change what a family resolves to and which face a character falls back to. So
+//! `add_fonts` forgets the resolutions and moves the font generation on, and everything that keeps a
+//! result of resolution or fallback carries the generation it was made under: the line layout caches
+//! (in their keys), the line wrappers (a wrapper from an older generation is not pooled again) and the
+//! windows' layout reuse (`window/layout_tree.rs`). A `FontId` always names the same face, so ids
+//! handed out stay valid (scenes already made paint as they were), and what is keyed by id alone stays
+//! right: metrics, raster bounds and glyph masks. (GPUI 0.2.2 kept the old resolutions: a family drawn
+//! before its font was added stayed on its fallback.)
 
 use super::fx_hash::FxHashMap;
 use crate::{
@@ -12,6 +21,7 @@ use parking_lot::{Mutex, RwLock, RwLockUpgradableReadGuard};
 use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 /// The app-wide text system: resolves fonts, caches metrics and glyph raster bounds, and pools line
@@ -25,6 +35,8 @@ pub struct TextSystem {
     pub(crate) font_runs_pool: Mutex<Vec<Vec<crate::FontRun>>>,
     fallback_font_stack: SmallVec<[Font; 2]>,
     glyph_blend: OnceLock<GlyphBlend>,
+    /// How many times fonts were added (see the module docs).
+    font_generation: AtomicU64,
 }
 
 impl TextSystem {
@@ -51,6 +63,7 @@ impl TextSystem {
                 font("Arial"),
             ],
             glyph_blend: OnceLock::new(),
+            font_generation: AtomicU64::new(0),
         }
     }
 
@@ -64,9 +77,20 @@ impl TextSystem {
         names
     }
 
-    /// Adds font files (the app's bundled fonts).
+    /// Adds font files (the app's bundled fonts). Families are resolved again from now on, and the font
+    /// generation moves on (see the module docs); font ids already handed out stay valid.
     pub fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
-        self.platform_text_system.add_fonts(fonts)
+        self.platform_text_system.add_fonts(fonts)?;
+        self.font_ids_by_font.write().clear();
+        self.wrapper_pool.lock().clear();
+        self.font_generation.fetch_add(1, Ordering::AcqRel);
+        Ok(())
+    }
+
+    /// Moves on each time fonts are added: what was shaped or measured under another generation may
+    /// resolve or fall back differently now.
+    pub fn font_generation(&self) -> u64 {
+        self.font_generation.load(Ordering::Acquire)
     }
 
     /// The id of `font`, cached (also when the backend fails, as GPUI).
@@ -217,12 +241,13 @@ impl TextSystem {
     /// A line wrapper for `font` at `font_size`, from the pool (it returns to the pool when dropped).
     pub fn line_wrapper(self: &Arc<Self>, font: Font, font_size: Pixels) -> LineWrapperHandle {
         let lock = &mut self.wrapper_pool.lock();
+        let font_generation = self.font_generation();
         let font_id = self.resolve_font(&font);
         let wrappers = lock.entry(FontIdWithSize { font_id, font_size }).or_default();
         let wrapper = wrappers
             .pop()
             .unwrap_or_else(|| LineWrapper::new(font_id, font_size, self.platform_text_system.clone()));
-        LineWrapperHandle { wrapper: Some(wrapper), text_system: self.clone() }
+        LineWrapperHandle { wrapper: Some(wrapper), text_system: self.clone(), font_generation }
     }
 
     /// The device-pixel bounds of a glyph's raster, relative to its (floored) origin; cached.
@@ -260,12 +285,18 @@ struct FontIdWithSize {
 pub struct LineWrapperHandle {
     wrapper: Option<LineWrapper>,
     text_system: Arc<TextSystem>,
+    /// The font generation the wrapper was taken under (its cached widths are of those fonts).
+    font_generation: u64,
 }
 
 impl Drop for LineWrapperHandle {
     fn drop(&mut self) {
         let mut state = self.text_system.wrapper_pool.lock();
         let wrapper = self.wrapper.take().expect("a handle holds its wrapper until dropped");
+        if self.font_generation != self.text_system.font_generation() {
+            // Fonts were added meanwhile: its character widths may be stale.
+            return;
+        }
         state
             .entry(FontIdWithSize { font_id: wrapper.font_id, font_size: wrapper.font_size })
             .or_default()

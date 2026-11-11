@@ -85,6 +85,8 @@ impl State {
             };
             db.load_font_source(source);
         }
+        // A family may now have (bundled) faces: resolve families again. Ids handed out stay valid.
+        self.font_ids_by_family.clear();
     }
 
     pub fn all_font_names(&self) -> Vec<String> {

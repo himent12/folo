@@ -22,10 +22,11 @@
 //! pixels, so the rem size and the scale applied to lengths are in it), its kind and measure key (compared;
 //! the text element's key holds its text, resolved font size and line height, fonts and wrapping style),
 //! its children (compared, through the nodes they were reused from), the requests (compared one by one),
-//! and the scale factor the measure function's logical results were converted with (a frame at another
-//! scale reuses nothing). Nodes measured without a key are never reused. Text shaping comes from the
-//! window's line layout cache, which a replay keeps warm, so a measure in a reused subtree sees what a
-//! fresh layout of this window would.
+//! the scale factor the measure function's logical results were converted with (a frame at another
+//! scale reuses nothing), and the text system's font generation (after fonts are added, a family can
+//! resolve to another face: a node added under another generation is not reused). Nodes measured
+//! without a key are never reused. Text shaping comes from the window's line layout cache, which a
+//! replay keeps warm, so a measure in a reused subtree sees what a fresh layout of this window would.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -96,6 +97,8 @@ struct Node {
     invocations: Vec<Invocation>,
     /// The measure function ran (or replayed) this frame.
     measured_now: bool,
+    /// The text system's font generation when the node was added (reuse needs it unchanged).
+    font_generation: u64,
     unrounded: Layout,
     final_layout: Layout,
 }
@@ -165,13 +168,15 @@ impl LayoutTree {
     }
 
     /// Adds a node with `children`; `measured` for a measured leaf. `scale_factor` is the frame's (the
-    /// one `style` was converted with and `compute` will measure with).
+    /// one `style` was converted with and `compute` will measure with), `font_generation` the text
+    /// system's.
     pub(crate) fn add(
         &mut self,
         style: Style,
         children: &[NodeId],
         measured: Option<Measured>,
         scale_factor: f32,
+        font_generation: u64,
     ) -> NodeId {
         self.scale = scale_factor.to_bits();
         let id = NodeId::from(self.nodes.len());
@@ -185,7 +190,7 @@ impl LayoutTree {
             self.nodes[usize::from(*child)].sig.hash(&mut hasher);
         }
         let sig = hasher.finish();
-        let reuse = self.find_previous(sig, &style, children, measured.as_ref());
+        let reuse = self.find_previous(sig, &style, children, measured.as_ref(), font_generation);
         let first = self.children.len() as u32;
         self.children.extend_from_slice(children);
         for child in children {
@@ -205,6 +210,7 @@ impl LayoutTree {
             matched: 0,
             invocations: Vec::new(),
             measured_now: false,
+            font_generation,
             unrounded: Layout::new(),
             final_layout: Layout::new(),
         };
@@ -230,6 +236,7 @@ impl LayoutTree {
         style: &Style,
         children: &[NodeId],
         measured: Option<&Measured>,
+        font_generation: u64,
     ) -> Option<u32> {
         if self.scale != self.previous_scale {
             return None;
@@ -250,6 +257,7 @@ impl LayoutTree {
         self.by_sig.get(&sig)?.iter().copied().find(|&ix| {
             let old = &self.previous[ix as usize];
             !self.taken[ix as usize]
+                && old.font_generation == font_generation
                 && old.measured.as_ref().map(|m| m.key.as_ref()) == measured.map(|_| key)
                 && old.style == *style
                 && self.previous_children[old.first as usize..(old.first + old.count) as usize]

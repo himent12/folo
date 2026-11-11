@@ -266,3 +266,24 @@ fn a_scale_change_lays_out_anew() {
     assert_eq!(super::quads_of(&mut app, handle, hsla(0.3, 0.6, 0.6, 1.)), fresh_quads);
     assert!(fresh.frame(fresh_handle) == &rescaled);
 }
+
+#[test]
+fn adding_fonts_lays_out_anew() {
+    let mut rng = Rng(7);
+    let model = Rc::new(RefCell::new((random_node(&mut rng, 4), 240.)));
+    let (mut app, handle) = window(model);
+    app.update(|cx| cx.text_system().add_fonts(Vec::new())).expect("add no fonts");
+    app.update(|cx| cx.update_window(handle, |_, window, _| window.refresh())).expect("window");
+    app.frame(handle);
+    let (answered, computed) = app.read(|cx| match cx.windows.get(&handle.id) {
+        Some(Some(window)) => {
+            let tree = &window.layout_engine.as_ref().expect("engine").tree;
+            (tree.answered_last, tree.computed_last)
+        }
+        _ => (0, 0),
+    });
+    assert!(
+        answered == 0 && computed > 0,
+        "nothing answers from last frame's records: {answered} / {computed}"
+    );
+}
