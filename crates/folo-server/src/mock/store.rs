@@ -345,6 +345,7 @@ impl Store for MockStore {
 
     fn create_run(&self, mut config: TrainConfig) -> Result<Run> {
         let ds = self.dataset(&config.dataset_id)?;
+        crate::store::check_run_name(&config.name)?;
         self.validate(&config)?;
         // A cloud run rents an offer of its connection, and its worker checks `amp`.
         let offer = match &config.compute {

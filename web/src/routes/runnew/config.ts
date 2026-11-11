@@ -1,5 +1,6 @@
 import type { Arch, Augment, Capabilities, Device, Optimizer, TrainConfig } from '$lib/api/types';
 import type { CloudPick } from './cloudPick';
+import { runName } from './name';
 
 /** The run the form describes, as the request (`POST /api/runs`) the estimate, the CLI command and Start send. */
 export function trainConfig(
@@ -22,7 +23,7 @@ export function trainConfig(
   cloudPick: CloudPick,
 ): TrainConfig {
   return {
-    name: name.trim(),
+    name: runName(name),
     dataset_id: datasetId,
     arch,
     epochs,

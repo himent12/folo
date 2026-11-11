@@ -11,6 +11,7 @@ import { Resource } from '$lib/api/resource';
 import type { CloudConnection, CloudProvider, Compute, SystemInfo } from '$lib/api/types';
 import { DEFAULT_HOURS, defaultMaxHours, hasCloud, MAX_HOURS, MIN_HOURS, pickOffer, providerName } from '$lib/cloud';
 import { sentence } from '$lib/format';
+import type { CloudDraft } from './draft';
 
 /** "Run on" when the run trains here. */
 export const LOCAL = 'local';
@@ -79,8 +80,11 @@ export class CloudPick {
   readonly offers;
   /** The next offers request asks the provider again instead of the server's cached answer. */
   #fresh = false;
-  /** A copied run's choice, held until the lists can say whether it still exists. */
-  #wanted = signal<{ compute: Compute; gpu: string } | null>(null);
+  /**
+   * A copied run's choice (or a draft's: `draft`, where a GPU may not have been picked yet), held until the lists can
+   * say whether it still exists.
+   */
+  #wanted = signal<{ compute: Compute; gpu: string; draft?: boolean } | null>(null);
 
   constructor(system: () => SystemInfo | undefined) {
     const on = () => hasCloud(system());
@@ -95,13 +99,19 @@ export class CloudPick {
     });
 
     // A copied run's connection and GPU, once the lists say they still exist; else this machine, and a note says why.
+    // A draft's GPU that is no longer offered (or none picked yet) leaves the GPU to the preselection.
     effect(() => {
       const want = this.#wanted.get();
       const list = this.connections.data;
       if (!want || !list) return;
       const conn = list.find((c) => c.id === want.compute.connection_id);
       if (!conn || conn.status === 'error') {
-        this.#drop(`The run’s cloud connection is ${conn ? 'not working' : 'gone'}, so this one trains on this machine.`);
+        const state = conn ? 'not working' : 'gone';
+        this.#drop(
+          want.draft
+            ? `The cloud connection you picked is ${state}, so this run trains on this machine.`
+            : `The run’s cloud connection is ${state}, so this one trains on this machine.`,
+        );
         return;
       }
       const got = this.offers.data;
@@ -110,7 +120,8 @@ export class CloudPick {
         this.offerId = want.compute.offer_id;
         this.offerChosen = true;
         this.#wanted.set(null);
-      } else this.#drop(`${conn.name} no longer offers the run’s ${want.gpu}, so this one trains on this machine.`);
+      } else if (want.draft) this.#wanted.set(null);
+      else this.#drop(`${conn.name} no longer offers the run’s ${want.gpu}, so this one trains on this machine.`);
     });
   }
 
@@ -200,6 +211,21 @@ export class CloudPick {
       this.hours = compute.max_hours;
       this.hoursEdited = true;
     }
+  }
+
+  /** What a draft holds (runnew/draft). */
+  get draft(): CloudDraft {
+    return { target: this.target, offerId: this.offerId, offerChosen: this.offerChosen, hours: this.hours, hoursEdited: this.hoursEdited };
+  }
+
+  /** A draft's choice: its connection and the GPU picked by hand, if they still exist, and its time limit. */
+  restore(d: CloudDraft) {
+    this.hours = d.hours;
+    this.hoursEdited = d.hoursEdited;
+    if (d.target === LOCAL) return;
+    this.choose(d.target);
+    const offer = d.offerChosen && d.offerId ? d.offerId : '';
+    this.#wanted.set({ compute: { connection_id: d.target, offer_id: offer, max_hours: d.hours ?? undefined }, gpu: 'GPU', draft: true });
   }
 
   #drop(why: string) {

@@ -17,7 +17,9 @@ import Button from '$lib/ui/Button';
 import Spinner from '$lib/ui/Spinner';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
+import { tooltip } from '$lib/ui/tooltip';
 import type { ShortRun } from './estimate';
+import { START_KEYS } from './startKeys';
 import { roughBytes, type Shown } from './summary';
 
 export interface StartDockProps {
@@ -43,6 +45,8 @@ export interface StartDockProps {
   applyFix: (f: OomFix) => void;
   submitting: boolean;
   valid: boolean;
+  /** "Start training", or "Queue run" while another run holds this machine. */
+  startLabel: string;
 }
 
 export default function StartDock(props: StartDockProps) {
@@ -124,17 +128,19 @@ export default function StartDock(props: StartDockProps) {
           {props.fix ? useLabel(props.fix) : 'Finding a fit'}
         </Button>
       ) : (
-        <Button
-          type="submit"
-          variant="primary"
-          size="lg"
-          icon={Play}
-          loading={props.submitting}
-          disabled={!props.valid}
-          aria-describedby={props.showWhy ? 'dock-why' : undefined}
-        >
-          Start training
-        </Button>
+        <span class="start-tip" use:tooltip={{ text: props.startLabel, keys: START_KEYS }}>
+          <Button
+            type="submit"
+            variant="primary"
+            size="lg"
+            icon={Play}
+            loading={props.submitting}
+            disabled={!props.valid}
+            aria-describedby={props.showWhy ? 'dock-why' : undefined}
+          >
+            {props.startLabel}
+          </Button>
+        </span>
       )}
     </div>
   );
@@ -153,6 +159,9 @@ css`
   }
   .dock {
     display: none;
+  }
+  .start-tip {
+    display: inline-flex;
   }
   @media (max-width: 1023px) {
     /* Beside the sidebar (its content may start at the left edge, so the bar starts where the page does). */

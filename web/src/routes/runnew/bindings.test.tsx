@@ -69,6 +69,8 @@ async function start(): Promise<TrainConfig> {
 }
 
 beforeEach(() => {
+  // New run keeps a draft for the tab (runnew/draft): every test starts from a fresh tab.
+  sessionStorage.clear();
   api = new MockApi('normal', 0);
   api.imageUrl = async () => 'data:,';
   hub.api = api;

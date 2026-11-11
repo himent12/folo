@@ -224,6 +224,23 @@ pub fn check_export(spec: &ExportSpec) -> Result<()> {
     Ok(())
 }
 
+/// The longest run name `POST /api/runs` takes, in characters (as long as a dataset's name may be).
+pub const MAX_RUN_NAME_CHARS: usize = 64;
+
+/// `400 invalid_config` for a run name over [`MAX_RUN_NAME_CHARS`] (every store's `create_run` checks this): one long
+/// name would otherwise widen every list that shows runs and their models.
+pub fn check_run_name(name: &str) -> Result<()> {
+    if name.chars().count() > MAX_RUN_NAME_CHARS {
+        return Err(crate::error::Error::new(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_config",
+            format!("name: must be at most {MAX_RUN_NAME_CHARS} characters"),
+        )
+        .hint("pick a shorter run name, or leave it empty for <dataset name>-<size>"));
+    }
+    Ok(())
+}
+
 /// An IO error on the weights file of model `id`: `model_not_found` when the file is gone, else `internal`.
 pub fn weights_io(e: std::io::Error, path: &std::path::Path, id: &str) -> crate::error::Error {
     if e.kind() == std::io::ErrorKind::NotFound {

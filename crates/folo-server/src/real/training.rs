@@ -23,6 +23,7 @@ impl RealStore {
     /// `POST /api/runs`: checks `config` and queues a new run, which continues the training state in the
     /// `checkpoint` file when there is one (it becomes the run's `weights/last.folo`).
     pub(super) fn start_run(&self, mut config: TrainConfig, checkpoint: Option<&Path>) -> Result<Run> {
+        crate::store::check_run_name(&config.name)?;
         let e = self.entry(&config.dataset_id)?;
         let idx = self.fresh_index(&e)?;
         let bad = |m: String| Error::new(StatusCode::BAD_REQUEST, "invalid_config", m);

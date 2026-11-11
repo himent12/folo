@@ -83,8 +83,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   `cloud` (`/api/cloud`, `TrainConfig.compute`, `Run.cloud` and `cloud` events), `vision_bench` (the `/api/bench` endpoints, Vision benchmarks below). `folo mcp --server` refuses the
   export switches without `export_onnx_switches`.) In real mode `gpus` comes from folo-gpu
   (wgpu): every physical adapter once, through its preferred backend (software adapters are left out), best first,
-  so ordinal 0 is the adapter `gpu:0` and `device: auto` use. wgpu reports neither memory size nor load, so
-  `memory_bytes` is `0` and `util` `null`.
+  so ordinal 0 is the adapter `gpu:0` and `device: auto` use. `memory_bytes` is the adapter's largest device-local
+  memory heap on Vulkan (an RTX 4080 SUPER reports 15.7 GiB), and `0` through DX12 or Metal, where wgpu cannot say; wgpu
+  reports no load, so `util` is `null`.
 - `Capabilities` (`/api/system`'s `capabilities`, also in `folo doctor --json` and MCP's `folo_info`) says what a
   run with `device: auto` can use on this server, so a client can disable a switch, showing the reason, before it
   submits a run:
@@ -479,7 +480,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "compute": null }            // or { "connection_id": "cc_1f2e", "offer_id": "NVIDIA GeForce RTX 4090@secure",
                                // "max_hours": 12, "disk_gb": null }: train on a cloud connection (Cloud runs,
                                // above). Left out of the object when null; missing means this machine
-// An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: epochs 1..=10000,
+// An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: name at most 64 characters
+// (as a dataset's; longer is `400 invalid_config`), epochs 1..=10000,
 // batch 1..=1024, imgsz a multiple of 32 in 32..=4096 (real mode trains at 64 or more), 0 < lr0 < 10.
 // POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.
 // Real mode maps TrainConfig onto the trainer's config (docs/MODEL.md §8.1): the other recipe keys keep their
