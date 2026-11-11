@@ -100,7 +100,6 @@ css`
     padding: 0 var(--space-4) 0 var(--space-6);
     background: color-mix(in srgb, var(--bg-app) 86%, transparent);
     backdrop-filter: blur(12px) saturate(1.4);
-    -webkit-backdrop-filter: blur(12px) saturate(1.4);
     border-bottom: 1px solid var(--line-subtle);
   }
   .mobile-logo,
