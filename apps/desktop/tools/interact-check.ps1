@@ -8,8 +8,9 @@
 #
 # Off screen (FOLO_UI_OFFSCREEN=1) the window is outside every display and never activated; nothing
 # touches the cursor, the keyboard or the clipboard of the person at the PC. -Sandbox runs the same on a
-# private desktop (sandbox-run.ps1) and adds the clipboard steps (copy and paste), which off screen would
-# overwrite your clipboard: the sandbox saves its text first and puts it back afterwards.
+# private desktop (sandbox-run.ps1) and adds the clipboard steps (copy and paste): the clipboard is
+# shared with you, so it saves every format byte for byte first and puts it back afterwards
+# (clip-save.ps1), and skips them when a format cannot be restored exactly.
 # "Equal" means no pixel differs by more than 8 levels (the breathing status dot's pulse; see the GPUI
 # baseline's noise floor). Scratch files go under -Out ($FOLO_TEST_TMP\interact-check by default).
 param(
@@ -367,32 +368,43 @@ try {
     }
 
     # ---------- 7. clipboard (private desktop only): copy from and paste into a text field
-    # The clipboard belongs to the window station, which the private desktop shares with you: the steps
-    # run only when it holds nothing but text (or nothing), which is put back exactly afterwards.
-    $formats = @()
+    # The clipboard belongs to the window station, which the private desktop shares with you. Before the
+    # steps every format on it is saved byte for byte (clip-save.ps1) and afterwards put back and compared;
+    # the steps skip themselves when a format cannot be restored exactly (a bitmap or metafile handle), and
+    # nothing is put back over something you copied meanwhile.
     if ((Wants "clipboard") -and $InSandbox) {
-        $formats = @(try { [System.Windows.Forms.Clipboard]::GetDataObject().GetFormats() } catch { @() })
-        $textOnly = @($formats | Where-Object { $_ -notmatch '^(Text|UnicodeText|System.String|OEMText|Locale)$' }).Count -eq 0
-        if (-not $textOnly) { "SKIP  clipboard steps: your clipboard holds $($formats -join ', '), which could not be put back exactly" }
+        . (Join-Path $PSScriptRoot "clip-save.ps1")
+        $why = ""
+        $seq0 = [FoloClip]::GetClipboardSequenceNumber()
+        $list0 = [FoloClip]::List()
+        $saved = [FoloClip]::Save([ref]$why)
+        if ($null -eq $saved) { "SKIP  clipboard steps: your clipboard holds a format that could not be put back exactly ($why)" }
     }
-    if ((Wants "clipboard") -and $InSandbox -and $textOnly) {
-        $saved = try { [System.Windows.Forms.Clipboard]::GetText() } catch { "" }
+    if ((Wants "clipboard") -and $InSandbox -and $null -ne $saved) {
+        $last = $seq0
         try {
             Launch @("--scenario", "overview", "--width", "1280", "--height", "800")
             Learn
             Key 0x4B "ctrl"; Settle 400
             Key 0x41 "ctrl"; Key 0x2E; Keys "runs"; Settle 300
             $runsPanel = Snap
+            # Someone copied since the save: theirs must not be overwritten; stop here.
+            if ([FoloClip]::GetClipboardSequenceNumber() -ne $seq0) { throw "the clipboard changed before the copy step" }
             Key 0x41 "ctrl"; Key 0x43 "ctrl"; Settle 200
             $copied = [System.Windows.Forms.Clipboard]::GetText()
             Pass "Ctrl+C copies the field's selection" ($copied -eq "runs") "clipboard '$copied'"
             [System.Windows.Forms.Clipboard]::SetText("models")
+            $last = [FoloClip]::GetClipboardSequenceNumber()
             Key 0x41 "ctrl"; Key 0x2E; Keys "runs"; Key 0x41 "ctrl"; Key 0x56 "ctrl"; Settle 300
             $pasted = Snap
             Key 0x41 "ctrl"; Key 0x2E; Keys "models"; Settle 300
             Pass "Ctrl+V pastes over the selection" ((Same $pasted (Snap) $panel) -and (-not (Same $pasted $runsPanel $panel))) ""
         } finally {
-            if ($saved) { [System.Windows.Forms.Clipboard]::SetText($saved) } else { [System.Windows.Forms.Clipboard]::Clear() }
+            if ([FoloClip]::GetClipboardSequenceNumber() -ne $seq0) {
+                $did = [FoloClip]::Restore($saved, $last)
+                $same = [FoloClip]::Same($saved) -and ([FoloClip]::List() -eq $list0)
+                Pass "your clipboard is back byte for byte" $same "$did; formats before '$list0', after '$([FoloClip]::List())'"
+            }
         }
     }
 
