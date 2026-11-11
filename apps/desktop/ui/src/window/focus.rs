@@ -4,14 +4,12 @@
 //! A handle's id is in the map while any strong handle lives. Which handle is focused is per window
 //! (`Window::focus`); whether an element "contains" focus is answered from the last rendered frame's
 //! dispatch tree (the focus path), as GPUI does.
-#![allow(dead_code)] // skeleton
-
 use std::{
     collections::HashMap,
     fmt,
     sync::{
         Arc, Weak,
-        atomic::{AtomicU64, AtomicUsize},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -30,13 +28,18 @@ impl FocusId {
     }
 
     /// Whether the focused element is this one or a descendant of it in the last frame.
-    pub fn contains_focused(&self, _window: &Window, _cx: &App) -> bool {
-        todo!("window")
+    pub fn contains_focused(&self, window: &Window, cx: &App) -> bool {
+        window.focused_id(cx).is_some_and(|focused| self.contains(focused, window))
     }
 
     /// Whether this element is the focused one or inside it in the last frame.
-    pub fn within_focused(&self, _window: &Window, _cx: &App) -> bool {
-        todo!("window")
+    pub fn within_focused(&self, window: &Window, cx: &App) -> bool {
+        window.focused_id(cx).is_some_and(|focused| focused.contains(*self, window))
+    }
+
+    /// Whether `other` is this element or inside it in the last rendered frame.
+    pub(crate) fn contains(&self, other: FocusId, window: &Window) -> bool {
+        window.rendered_frame.dispatch_tree.focus_contains(*self, other)
     }
 }
 
@@ -73,24 +76,48 @@ pub struct FocusHandle {
 
 impl FocusHandle {
     /// A new handle in `handles`.
-    pub(crate) fn new(_handles: &Arc<FocusMap>) -> Self {
-        todo!("window")
+    pub(crate) fn new(handles: &Arc<FocusMap>) -> Self {
+        let id = FocusId(handles.next_id.fetch_add(1, Ordering::Relaxed) + 1);
+        handles
+            .handles
+            .write()
+            .insert(id, FocusRef { ref_count: AtomicUsize::new(1), tab_stop: false, tab_index: 0 });
+        FocusHandle { id, handles: handles.clone(), tab_stop: false, tab_index: 0 }
     }
 
     /// A strong handle to an existing id, if it is still alive.
-    pub(crate) fn for_id(_id: FocusId, _handles: &Arc<FocusMap>) -> Option<Self> {
-        todo!("window")
+    pub(crate) fn for_id(id: FocusId, handles: &Arc<FocusMap>) -> Option<Self> {
+        let map = handles.handles.read();
+        let entry = map.get(&id)?;
+        // A count of zero means the last handle is being dropped right now.
+        let mut count = entry.ref_count.load(Ordering::SeqCst);
+        loop {
+            if count == 0 {
+                return None;
+            }
+            match entry.ref_count.compare_exchange(count, count + 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(actual) => count = actual,
+            }
+        }
+        Some(FocusHandle { id, handles: handles.clone(), tab_stop: entry.tab_stop, tab_index: entry.tab_index })
     }
 
     /// Makes the handle a Tab stop (or not).
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
+        if let Some(entry) = self.handles.handles.write().get_mut(&self.id) {
+            entry.tab_stop = tab_stop;
+        }
         self
     }
 
     /// Sets its position in Tab order.
     pub fn tab_index(mut self, tab_index: isize) -> Self {
         self.tab_index = tab_index;
+        if let Some(entry) = self.handles.handles.write().get_mut(&self.id) {
+            entry.tab_index = tab_index;
+        }
         self
     }
 
@@ -122,13 +149,19 @@ impl FocusHandle {
 
 impl Clone for FocusHandle {
     fn clone(&self) -> Self {
-        todo!("window")
+        // `self` keeps the entry alive, so it is there.
+        Self::for_id(self.id, &self.handles).expect("a live focus handle has an entry")
     }
 }
 
 impl Drop for FocusHandle {
     fn drop(&mut self) {
-        // skeleton: decrement the entry's count and remove it at zero.
+        let mut map = self.handles.handles.write();
+        if let Some(entry) = map.get(&self.id)
+            && entry.ref_count.fetch_sub(1, Ordering::SeqCst) == 1
+        {
+            map.remove(&self.id);
+        }
     }
 }
 
