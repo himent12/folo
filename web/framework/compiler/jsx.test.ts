@@ -111,10 +111,17 @@ describe('expressions', () => {
     expect(code).toMatch(/_\$bindStyle\(_el\$1, _v\$\d+, \(\) => \(\{ "top": _v\$\d+\(\) \}\)\)/);
   });
 
+  it('a static style with directives is set with them, not in the template (Svelte set_style)', () => {
+    const code = compile('const x = <div style="color: red" style:top={t()} style:left="1px" />;');
+    expect(templates(code)).toEqual(['<div></div>']);
+    expect(code).toMatch(/_\$bindStyle\(_el\$1, "color: red", \(\) => \(\{ "top": _v\$\d+\(\), "left": _v\$\d+\(\) \}\)\)/);
+    expect(templates(compile('const x = <div style="color: red" />;'))).toEqual(['<div style="color: red"></div>']);
+  });
+
   it('directives', () => {
     const code = compile('const x = <div class:on={a()} style:top={t()} use:tip={p()} transition:fly={{ y: 8 }} ref={r} bind:value={v} />;');
     expect(code).toContain('_$toggleClass(_el$1, "on", () => (a()))');
-    expect(code).toContain('_$styleProp(_el$1, "top", () => (t()))');
+    expect(code).toMatch(/_\$bindStyle\(_el\$1, "", \(\) => \(\{ "top": _v\$\d+\(\) \}\)\)/);
     expect(code).toContain('_$use(_el$1, tip, () => (p()))');
     expect(code).toContain('_$transition(_el$1, fly, () => ({ y: 8 }), 3)');
     expect(code).toContain('_$ref(_el$1, (r))');

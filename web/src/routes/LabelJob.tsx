@@ -8,12 +8,11 @@ import Square from '$icons/square';
 import Trash from '$icons/trash-2';
 import WifiOff from '$icons/wifi-off';
 import { computed, css, effect, field, For, MediaQuery, signal, untrack } from 'fw';
-import { AppendLog } from '$lib/api/appendLog';
 import { ApiError, hub } from '$lib/api/index';
 import { isActive, LiveLabelJob } from '$lib/api/liveLabel';
 import { lastKnown, Now } from '$lib/api/freshness';
 import { Resource } from '$lib/api/resource';
-import type { Dataset, LogLine } from '$lib/api/types';
+import type { Dataset } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { ago, num } from '$lib/format';
 import { AGENT_NAME, INSTRUCTIONS_MAX } from '$lib/label';
@@ -44,7 +43,6 @@ import { cannotLabel } from './label/support';
 import Unsupported from './label/Unsupported';
 import { Uploads } from './label/uploads';
 import { Instructions } from './label/instructions';
-import { syncLog } from './label/logSync';
 import { images as imagesText, jobStatus, toLabel } from './label/words.fw';
 
 /** The loading page's tiles. */
@@ -230,15 +228,6 @@ export default function LabelJob() {
   });
   const now = new Now(() => live.lost !== null);
 
-  // ---------- the log ----------
-  // run/Logs reads an append log, the job's log is a list LiveLabelJob replaces with each line (label/logSync).
-  const logLines = new AppendLog<LogLine>();
-  const log = computed(() => {
-    void live.version;
-    syncLog(logLines, live.logs);
-    return logLines;
-  });
-
   pageCommands((): PageCommand[] => {
     const cur = job.get();
     if (!cur) return [];
@@ -398,7 +387,7 @@ export default function LabelJob() {
                   />
                 </div>
                 <div class="logs">
-                  <Logs log={log.get()} version={live.version} live={running.get()} />
+                  <Logs log={live.logsLog} version={live.version} live={running.get()} />
                 </div>
               </aside>
             </div>

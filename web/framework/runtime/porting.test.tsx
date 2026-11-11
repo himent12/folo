@@ -1,0 +1,387 @@
+// @vitest-environment happy-dom
+// Regressions the ports found: each test is the smallest repro of a difference from Svelte that a screen hit.
+import { describe, expect, it, vi } from 'vitest';
+import { bindable, createUniqueId, deep, flush, For, Show, signal } from 'fw';
+import { render } from '../testing';
+
+const html = (el: Element) => el.innerHTML.replace(/<!---->/g, '');
+
+describe('conditional children', () => {
+  it("a conditional as a component's children builds its branch once per flip", () => {
+    let made = 0;
+    const Leaf = () => {
+      made++;
+      return <b>leaf</b>;
+    };
+    const Box = (p: { children?: JSX.Element }) => <div>{p.children}</div>;
+    const on = signal(false);
+    const { container, unmount } = render(() => <Box>{on.get() ? <Leaf /> : null}</Box>);
+    expect(made).toBe(0);
+    on.set(true);
+    flush();
+    expect(made).toBe(1);
+    expect(html(container)).toBe('<div><b>leaf</b></div>');
+    on.set(false);
+    flush();
+    on.set(true);
+    flush();
+    expect(made).toBe(2);
+    unmount();
+  });
+
+  it("a <Show> as a component's children builds its branch once per flip", () => {
+    let made = 0;
+    const Leaf = () => {
+      made++;
+      return <b>leaf</b>;
+    };
+    const Box = (p: { children?: JSX.Element }) => <div>{p.children}</div>;
+    const on = signal(false);
+    const { unmount } = render(() => (
+      <Box>
+        <Show when={on.get()}>
+          <Leaf />
+        </Show>
+      </Box>
+    ));
+    on.set(true);
+    flush();
+    expect(made).toBe(1);
+    unmount();
+  });
+
+  it("a snippet whose whole content is a conditional builds its branch once per flip", () => {
+    let made = 0;
+    const Leaf = () => {
+      made++;
+      return <b>leaf</b>;
+    };
+    const on = signal(false);
+    const body = () => <>{on.get() ? <Leaf /> : null}</>;
+    const Panel = (p: { body: () => JSX.Element }) => <section>{p.body()}</section>;
+    const { unmount } = render(() => (
+      <div>
+        {body()}
+        <Panel body={body} />
+      </div>
+    ));
+    on.set(true);
+    flush();
+    expect(made).toBe(2);
+    unmount();
+  });
+});
+
+describe('creation order', () => {
+  it('a conditional in children is created before the components that follow it (Svelte order)', () => {
+    const order: string[] = [];
+    const ids: string[] = [];
+    const A = (p: { n: string; children?: JSX.Element }) => {
+      order.push(p.n);
+      ids.push(createUniqueId());
+      return <i>{p.children}</i>;
+    };
+    const c = signal(true);
+    const { unmount } = render(() => (
+      <A n="page">
+        {c.get() ? <A n="cond" /> : null}
+        <A n="static" />
+      </A>
+    ));
+    expect(order).toEqual(['page', 'cond', 'static']);
+    const n = (id: string) => Number(id.slice(1));
+    expect(n(ids[1]!)).toBe(n(ids[0]!) + 1);
+    expect(n(ids[2]!)).toBe(n(ids[0]!) + 2);
+    unmount();
+  });
+});
+
+describe('text runs', () => {
+  it('static text between blocks and a run keeps its own nodes (no template merge)', () => {
+    const a = signal(true);
+    const b = signal(true);
+    const c = signal('c');
+    const { container, unmount } = render(() => (
+      <p>
+        {a.get() ? <b /> : null}
+        {' '}
+        {b.get() ? <i /> : null}
+        {' '}
+        {c.get()}
+      </p>
+    ));
+    const p = container.querySelector('p')!;
+    expect(html(p)).toBe('<b></b> <i></i> c');
+    c.set('d');
+    a.set(false);
+    flush();
+    expect(html(p)).toBe(' <i></i> d');
+    unmount();
+  });
+
+  it('two local snippet calls side by side are each rendered once', () => {
+    let made = 0;
+    const a = () => {
+      made++;
+      return <b>a</b>;
+    };
+    const b = () => {
+      made++;
+      return <i>b</i>;
+    };
+    const { container, unmount } = render(() => (
+      <p>
+        {a()}
+        {b()}
+      </p>
+    ));
+    expect(made).toBe(2);
+    expect(html(container.querySelector('p')!)).toBe('<b>a</b><i>b</i>');
+    unmount();
+  });
+
+  it('a snippet call in a run splits it as Svelte does: the text after it stays one node', () => {
+    let made = 0;
+    const link = () => {
+      made++;
+      return <a>run</a>;
+    };
+    const x = signal('7m');
+    const { container, unmount } = render(() => (
+      <span>
+        {' '}
+        {link()} ({x.get()}) and
+      </span>
+    ));
+    const span = container.querySelector('span')!;
+    const texts = [...span.childNodes].filter((n) => n.nodeType === 3 && (n as Text).data !== '').map((n) => (n as Text).data);
+    expect(texts).toEqual([' ', ' (7m) and']);
+    expect(made).toBe(1);
+    const tail = [...span.childNodes].find((n) => n.nodeType === 3 && (n as Text).data === ' (7m) and');
+    x.set('8m');
+    flush();
+    expect(tail!.textContent).toBe(' (8m) and');
+    expect(made).toBe(1);
+    unmount();
+  });
+
+  it('a run part that renders a node (unknown to the compiler) is created once and kept when the text changes', () => {
+    let made = 0;
+    const Tag = () => {
+      made++;
+      return <b>t</b>;
+    };
+    const Box = (p: { lead: string; tag?: JSX.Element }) => (
+      <span>
+        {p.lead}: {p.tag} {p.lead}!
+      </span>
+    );
+    const lead = signal('x');
+    const { container, unmount } = render(() => <Box lead={lead.get()} tag={<Tag />} />);
+    const span = container.querySelector('span')!;
+    expect(span.textContent).toBe('x: t x!');
+    expect(made).toBe(1);
+    lead.set('y');
+    flush();
+    expect(span.textContent).toBe('y: t y!');
+    expect(made).toBe(1);
+    unmount();
+  });
+
+  it('two snippet props side by side in a run are each rendered once', () => {
+    let made = 0;
+    const Leaf = (p: { n: string }) => {
+      made++;
+      return <b>{p.n}</b>;
+    };
+    const Row = (p: { left: unknown; right: unknown }) => (
+      <p>
+        {p.left as string}
+        {p.right as string}
+      </p>
+    );
+    const { container, unmount } = render(() => <Row left={() => <Leaf n="l" />} right={() => <Leaf n="r" />} />);
+    expect(made).toBe(2);
+    expect(container.querySelector('p')!.textContent).toBe('lr');
+    unmount();
+  });
+
+  it('a ternary of snippets is a block: its branch is created only when the condition flips', () => {
+    let made = 0;
+    const on = signal(true);
+    const n = signal(1);
+    const a = () => {
+      made++;
+      return <b>a</b>;
+    };
+    const b = () => {
+      made++;
+      return <i>b</i>;
+    };
+    const { container, unmount } = render(() => (
+      <p>
+        {on.get() ? a() : b()} n={n.get()}
+      </p>
+    ));
+    expect(made).toBe(1);
+    n.set(2);
+    flush();
+    expect(made).toBe(1);
+    expect(container.querySelector('p')!.textContent).toBe('a n=2');
+    on.set(false);
+    flush();
+    expect(made).toBe(2);
+    expect(container.querySelector('p')!.textContent).toBe('b n=2');
+    unmount();
+  });
+});
+
+describe('branches settle before their effects', () => {
+  it("a branch's bindings never run with the state that removes it (the branch is created before its reader)", () => {
+    const short = signal<{ scratch: boolean } | null>({ scratch: true });
+    const Box = (p: { children?: JSX.Element }) => <div>{p.children}</div>;
+    const { container, unmount } = render(() => (
+      <Box>
+        {short.get() ? <span>{short.get()!.scratch ? 'short' : 'warmup'}</span> : null}
+        <i />
+      </Box>
+    ));
+    expect(container.textContent).toBe('short');
+    short.set(null);
+    expect(() => flush()).not.toThrow();
+    expect(container.textContent).toBe('');
+    short.set({ scratch: false });
+    flush();
+    expect(container.textContent).toBe('warmup');
+    unmount();
+  });
+});
+
+describe('bindable', () => {
+  it('a prop the parent does not bind: the parent wins on any change, even back to the value a write was made over', () => {
+    let child!: { set(v: boolean): void; get(): boolean };
+    const Check = (p: { checked?: boolean }) => {
+      const checked = bindable(p, 'checked', false);
+      child = checked;
+      return <i>{String(checked.get())}</i>;
+    };
+    // A plain read (not memoized, as in Svelte): the prop's getter reads the parent's state directly.
+    const parent = deep({ on: false });
+    const { container, unmount } = render(() => <Check checked={parent.on} />);
+    child.set(true);
+    flush();
+    expect(container.textContent).toBe('true');
+    parent.on = true;
+    flush();
+    parent.on = false;
+    flush();
+    expect(container.textContent).toBe('false');
+    // A -> B -> A with no read in between: still the parent's.
+    child.set(true);
+    flush();
+    expect(container.textContent).toBe('true');
+    parent.on = true;
+    parent.on = false;
+    flush();
+    expect(container.textContent).toBe('false');
+    unmount();
+  });
+});
+
+describe('select bindings re-select when the options change (Svelte init_select)', () => {
+  const settle = async () => {
+    flush();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  it("value '' with options arriving later leaves nothing selected", async () => {
+    const v = signal('');
+    const opts = signal<string[]>([]);
+    const { container, unmount } = render(() => (
+      <select bind:value={v}>
+        <For each={opts.get()}>{(o) => <option value={o()}>{o()}</option>}</For>
+      </select>
+    ));
+    await settle();
+    opts.set(['a', 'b']);
+    await settle();
+    expect(container.querySelector('select')!.selectedIndex).toBe(-1);
+    expect(v.get()).toBe('');
+    unmount();
+  });
+
+  it("value 'b' with options going ['a'] -> ['a', 'b'] selects b once it exists", async () => {
+    const v = signal('b');
+    const opts = signal(['a']);
+    const { container, unmount } = render(() => (
+      <select bind:value={v}>
+        <For each={opts.get()}>{(o) => <option value={o()}>{o()}</option>}</For>
+      </select>
+    ));
+    await settle();
+    const sel = container.querySelector('select')!;
+    expect(sel.selectedIndex).toBe(-1);
+    opts.set(['a', 'b']);
+    await settle();
+    expect(sel.value).toBe('b');
+    expect(v.get()).toBe('b');
+    unmount();
+  });
+
+  it('a one-way value={...} re-selects too', async () => {
+    const opts = signal(['a']);
+    const { container, unmount } = render(() => (
+      <select value="b">
+        <For each={opts.get()}>{(o) => <option value={o()}>{o()}</option>}</For>
+      </select>
+    ));
+    await settle();
+    opts.set(['a', 'b']);
+    await settle();
+    expect(container.querySelector('select')!.value).toBe('b');
+    unmount();
+  });
+});
+
+describe('styles as Svelte writes them (set_style)', () => {
+  it('first the attribute text (cssText), then setProperty for a directive or style object key that changed', () => {
+    const top = signal('1px');
+    const c = signal('red');
+    const proto = CSSStyleDeclaration.prototype;
+    const setProperty = vi.spyOn(proto, 'setProperty');
+    const cssText = Object.getOwnPropertyDescriptor(proto, 'cssText')!;
+    const texts: string[] = [];
+    Object.defineProperty(proto, 'cssText', {
+      configurable: true,
+      get: cssText.get,
+      set(v: string) {
+        texts.push(v);
+        cssText.set!.call(this, v);
+      },
+    });
+    try {
+      const { container, unmount } = render(() => (
+        <div>
+          <i style="color: blue" style:top={top.get()} />
+          <b style={{ '--c': c.get(), width: '2px' }} />
+        </div>
+      ));
+      expect(texts).toEqual(['color: blue; top: 1px;', '--c: red; width: 2px;']);
+      expect(setProperty).not.toHaveBeenCalled();
+      top.set('2px');
+      c.set('blue');
+      flush();
+      expect(setProperty.mock.calls).toEqual([
+        ['top', '2px', undefined],
+        ['--c', 'blue', undefined],
+      ]);
+      expect(texts.length).toBe(2);
+      expect(container.querySelector('i')!.style.top).toBe('2px');
+      unmount();
+    } finally {
+      Object.defineProperty(proto, 'cssText', cssText);
+      setProperty.mockRestore();
+    }
+  });
+});

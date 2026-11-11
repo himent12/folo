@@ -592,8 +592,7 @@ export default function RunNew() {
     requestAnimationFrame(() => landOn(key));
   }
 
-  // The Svelte original's snippets, as local components: a component is created once where it stands (consecutive
-  // snippet calls would be one text run to fw's compiler, which renders the first one twice to find out it is not text).
+  // The Svelte original's snippets, as local components.
   const Review = (p: { withName: boolean }) => (
     <ReviewList withName={p.withName} name={name.get()} errors={errors.get()} review={review.get()} jump={jump} />
   );

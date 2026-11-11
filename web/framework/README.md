@@ -54,8 +54,14 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
 - Static HTML (with the file's scope class baked in) is parsed once and cloned with `cloneNode(true)`; dynamic nodes
   are reached by `firstChild`/`nextSibling` walks, never queries. SVG fragments parse inside `<svg>`.
 - An expression is reactive only if it contains a call or a property read; identifiers and literals are set once.
-- `{a ? b : c}` and `{a && b}` in child position compile to a truthiness memo plus an owning memo: a branch is
-  created when the condition flips, as `{#if}` does.
+- A *block* is an expression that renders more than text, as far as the file shows: JSX in it, a call of a local
+  snippet (`const link = () => <a/>`, every binding of the name in the file being one), a snippet prop
+  (`props.children`, or a property the file's types declare `JSX.Element` or a function returning one), or a
+  conditional with one in a branch. It is Svelte's `{#if}` / `{@render}` and never joins a text run.
+- `{a ? b : c}` and `{a && b}` that render blocks compile to a truthiness memo plus an owning memo: a branch is
+  created when the condition flips, as `{#if}` does (a branch that is an expression is a function of its own, so the
+  branch's memo tracks only the condition). One that renders text is a text expression, as in Svelte (one binding;
+  `a && b` renders nothing for any falsy `a`).
 - Components are calls with a props object of getters (`get title() { return expr }`), so `props.title` read where it
   is used is tracked; children are a function (Svelte's snippet), a single `{(x) => ...}` child is passed through.
   A prop expression Svelte would memoize (`$.derived`: it calls something, or is more than an identifier or member
@@ -64,7 +70,10 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
   source map is exact for all embedded code.
 - Text follows JSX whitespace rules (see PORTING.md §8 for the Svelte differences). Adjacent static text and
   expressions compile to one text node with one binding (`run`), where Svelte makes one: Chrome shapes per text node.
-  An expression that renders a node or a snippet splits its run into one insert per part, once.
+  A run part that turns out to render more than text (a prop the compiler could not see as a snippet) splits the run
+  where Svelte's text sequence would end: the text before it stays in the run's node, the part is rendered after it,
+  the text after it is a run of its own. Nothing is evaluated twice: the run's binding becomes the part's own,
+  keeping only what the part read (a source read both by the part and by the text before it is the one exception).
 - Booleans on attributes follow Svelte: dropped on false only for its boolean attributes, stringified otherwise.
 
 ### Reactivity (`runtime/core.ts`)
@@ -80,8 +89,12 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
 - **Owners**: components, effects and roots form a tree; disposing a node disposes its children (in order) then runs
   its cleanups. Context lives on owners (each component gets one, so `setContext` scopes like Svelte's).
 - **Memos** (`memo`) are owning computeds: what a branch creates belongs to it, so reading a branch from several
-  places, or again, never re-creates it. Functions are either *readers* (memos, list accessors: read in place) or
-  *snippets* (called once in an owner of their own).
+  places, or again, never re-creates it. A memo (and a list's rows) is created where it is written, as Svelte creates
+  a block, so components come into being in document order (and `createUniqueId` numbers them as Svelte does). Since
+  a branch then exists before the effect that reads it, an effect inside a branch whose memo is stale first has that
+  memo refreshed (it may be disposed by it): Svelte's parent-before-child order. Functions are either *readers*
+  (memos, list accessors: read in place) or *snippets* (called once in a memo of their own, read in an effect of
+  their own, so a change inside a branch never re-runs the expression that returned it).
 
 ### DOM (`runtime/dom.ts`, `flow.ts`, `events.ts`)
 
@@ -96,6 +109,10 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
   `addEventListener`.
 - Attributes, properties, `class` (clsx, scope class, `class:`), `style` (string or object, `style:`), spreads and
   `bind:` follow Svelte 5's runtime (`set_attribute`, `set_class`, `set_style`, `set_attributes`, `bind_value`...).
+  Styles take Svelte's path exactly: the first time (and whenever the `style` attribute's value changes) the whole
+  attribute text is written (`cssText`, directives and style objects appended); later a changed directive or object
+  key alone goes through `setProperty` (Chrome serializes an exact half pixel differently on the two paths). A
+  `<select>`'s value is selected again when its options change (`init_select`'s MutationObserver).
 - Transitions: Svelte's engine (keyframes sampled from `css(t, u)`, Web Animations) with local intros/outros on
   `For`/`Show`/`Key`/`Switch` branches.
 

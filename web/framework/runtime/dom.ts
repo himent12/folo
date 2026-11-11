@@ -69,11 +69,17 @@ export function insert(parent: Node, value: unknown, marker?: Node | null, initi
     else insertExpression(parent, value, initial, marker);
     return;
   }
-  renderEffect<Current>((current) => insertExpression(parent, (value as () => unknown)(), current, marker), initial);
+  // An expression (`{props.children}`, `{row()}`): re-evaluated when what it reads changes. A reader or snippet it
+  // returns is read in an effect of its own, so a change inside a branch never re-runs the expression (which would
+  // create the branch again).
+  renderEffect<Current>((current) => insertExpression(parent, (value as () => unknown)(), current, marker, false, true), initial);
 }
 
-/** Internal: applies `value` over `current` (what was rendered before) and returns what is rendered now. */
-export function insertExpression(parent: Node, value: unknown, current: Current, marker?: Node | null, unwrap?: boolean): Current {
+/**
+ * Internal: applies `value` over `current` (what was rendered before) and returns what is rendered now. `expression`:
+ * `value` is what an expression returned, so a reader it returned is read in an effect of its own.
+ */
+export function insertExpression(parent: Node, value: unknown, current: Current, marker?: Node | null, unwrap?: boolean, expression?: boolean): Current {
   while (typeof current === 'function') current = current();
   if (value === current) return current;
   const t = typeof value;
@@ -104,10 +110,12 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
   }
 
   if (t === 'function') {
-    // A reader is read here, in the effect that is running; a snippet is called in an effect of its own.
-    if (isReader(value)) return insertExpression(parent, value(), current, marker, unwrap);
+    // A reader read by `insert` itself is read here, in the effect that is running. A snippet is called once (a memo
+    // owns what it creates) and read, like a reader an expression returned, in an effect of its own.
+    if (isReader(value) && !expression) return insertExpression(parent, value(), current, marker, unwrap);
+    const read = isReader(value) ? value : memo(value as () => unknown);
     let cur: Current = current;
-    renderEffect<Current>((c) => (cur = insertExpression(parent, (value as () => unknown)(), c, marker)), current);
+    renderEffect<Current>((c) => (cur = insertExpression(parent, read(), c, marker)), current);
     return () => cur;
   }
 
@@ -524,79 +532,155 @@ export function toggleClass(el: Element, name: string, fn: () => unknown): void 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Styles
+// Styles: Svelte 5's `set_style` / `to_style`, step for step. The first application (and any change of the `style`
+// attribute's value) writes the whole attribute text (`cssText`) with the directives appended; later changes of a
+// directive alone go through `setProperty`. Chrome stores a value written either way slightly differently (an exact half
+// pixel serializes as `17.2813px` one way and `17.2812px` the other), so the mechanism is the one Svelte uses.
 
-/** Internal: `style:prop={value}` (custom properties included); `null`/`undefined` remove it. */
-export function styleProp(el: Element, name: string, fn: () => unknown, important?: boolean): void {
-  renderEffect<unknown>((prev) => {
-    const v = fn();
-    if (v !== prev) {
-      const style = (el as HTMLElement).style;
-      if (v == null || v === '') style.removeProperty(name);
-      else style.setProperty(name, String(v), important ? 'important' : '');
-    }
-    return v;
-  }, UNSET);
-}
-
-/** `style` as a string (`cssText`) or an object of properties (`{ color: 'red', '--x': '2px' }`). */
+/** `style` as a string (`cssText`) or an object of properties (`{ color: 'red', '--x': '2px' }`, as `style:` directives). */
 export type StyleValue = string | null | undefined | false | Record<string, string | number | null | undefined | false>;
 
+type Styles = Record<string, unknown>;
+
+const kebab = new Map<string, string>();
+/** A style object's key as a property name (`aspectRatio` → `aspect-ratio`; custom properties as they are). */
 function cssName(k: string): string {
-  return k.startsWith('--') ? k : k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+  if (k.charCodeAt(0) === 45 /* - */ || !/[A-Z]/.test(k)) return k;
+  let n = kebab.get(k);
+  if (n === undefined) kebab.set(k, (n = k.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase())));
+  return n;
 }
 
-/** Applies a style value over the previous one; returns what to keep for the next call. */
-export function applyStyle(el: Element, value: StyleValue, prev: StyleValue | typeof UNSET): StyleValue {
-  const style = (el as HTMLElement).style;
-  if (value == null || value === false || typeof value === 'string') {
-    if (typeof prev === 'object' && prev !== null && prev !== UNSET) for (const k in prev) style.removeProperty(cssName(k));
-    if (value == null || value === false || value === '') {
-      if (prev !== UNSET || el.hasAttribute('style')) el.removeAttribute('style');
-    } else if (value !== prev) style.cssText = value;
-    return value;
+/** A style object as directives (`false` is no value). */
+function objectStyles(o: Record<string, unknown>): Styles {
+  const out: Styles = {};
+  for (const k in o) {
+    const v = o[k];
+    out[cssName(k)] = v === false ? undefined : v;
   }
-  if (typeof prev === 'string' && prev !== '') style.cssText = '';
-  const old = typeof prev === 'object' && prev !== null && prev !== UNSET ? (prev as Record<string, unknown>) : undefined;
-  if (old !== undefined) for (const k in old) if (!(k in value)) style.removeProperty(cssName(k));
-  for (const k in value) {
-    const v = value[k];
-    if (old !== undefined && old[k] === v) continue;
-    if (v == null || v === false || v === '') style.removeProperty(cssName(k));
-    else style.setProperty(cssName(k), String(v));
+  return out;
+}
+
+function appendStyles(styles: Styles, important: boolean): string {
+  const separator = important ? ' !important;' : ';';
+  let css = '';
+  for (const key of Object.keys(styles)) {
+    const value = styles[key];
+    if (value != null && value !== '') css += ' ' + key + ': ' + value + separator;
   }
-  return { ...value };
+  return css;
+}
+
+function toCssName(name: string): string {
+  return name[0] !== '-' || name[1] !== '-' ? name.toLowerCase() : name;
+}
+
+/** Svelte's `to_style`: the attribute's declarations minus those a directive sets, then the directives. */
+export function toStyle(value: unknown, styles?: Styles, important?: Styles): string | null {
+  if (!styles && !important) return value == null ? null : String(value);
+  let out = '';
+  if (value) {
+    const text = String(value).replaceAll(/\/\*.*?\*\//g, '').trim();
+    let inStr: false | string = false;
+    let inApo = 0;
+    let inComment = false;
+    const reserved: string[] = [];
+    if (styles) reserved.push(...Object.keys(styles).map(toCssName));
+    if (important) reserved.push(...Object.keys(important).map(toCssName));
+    let start = 0;
+    let nameAt = -1;
+    const len = text.length;
+    for (let i = 0; i < len; i++) {
+      const c = text[i]!;
+      if (inComment) {
+        if (c === '/' && text[i - 1] === '*') inComment = false;
+      } else if (inStr) {
+        if (inStr === c) inStr = false;
+      } else if (c === '/' && text[i + 1] === '*') inComment = true;
+      else if (c === '"' || c === "'") inStr = c;
+      else if (c === '(') inApo++;
+      else if (c === ')') inApo--;
+      if (!inComment && inStr === false && inApo === 0) {
+        if (c === ':' && nameAt === -1) nameAt = i;
+        else if (c === ';' || i === len - 1) {
+          if (nameAt !== -1) {
+            const name = toCssName(text.substring(start, nameAt).trim());
+            if (!reserved.includes(name)) {
+              if (c !== ';') i++;
+              out += ' ' + text.substring(start, i).trim() + ';';
+            }
+          }
+          start = i + 1;
+          nameAt = -1;
+        }
+      }
+    }
+  }
+  if (styles) out += appendStyles(styles, false);
+  if (important) out += appendStyles(important, true);
+  out = out.trim();
+  return out === '' ? null : out;
+}
+
+function updateStyles(el: HTMLElement, prev: Styles | undefined, next: Styles, priority?: string): void {
+  for (const key in next) {
+    const value = next[key];
+    if ((prev === undefined ? undefined : prev[key]) !== value) {
+      if (value == null) el.style.removeProperty(key);
+      else el.style.setProperty(key, value as string, priority);
+    }
+  }
+  // Keys a style object no longer has (directives always have the same keys).
+  if (prev !== undefined) for (const key in prev) if (!(key in next) && prev[key] != null) el.style.removeProperty(key);
+}
+
+type StyleCached = HTMLElement & { $$style?: unknown };
+
+/**
+ * Svelte's `set_style`: `value` is the `style` attribute's value (`''` when the element only has directives), `next`
+ * and `nextImportant` the directives (and style objects). The attribute text is rewritten when `value` changes (and
+ * the first time); otherwise only the directives that changed are set.
+ */
+export function setStyle(el: Element, value: unknown, prev: Styles | undefined, next: Styles | undefined, prevImportant?: Styles, nextImportant?: Styles): void {
+  const e = el as StyleCached;
+  if (e.$$style !== value) {
+    const text = toStyle(value, next, nextImportant);
+    if (text == null) el.removeAttribute('style');
+    else e.style.cssText = text;
+    e.$$style = value;
+    return;
+  }
+  if (next) updateStyles(e, prev, next);
+  if (nextImportant) updateStyles(e, prevImportant, nextImportant, 'important');
 }
 
 /**
- * Applies `style:` directives over the style attribute (Svelte's `set_style` with directives): after the attribute
- * was rewritten (`all`), every directive again; otherwise only those that changed.
+ * Internal: an element's `style` (a string, an object, or `''` when it has only directives) with its `style:`
+ * directives (`dirs`, and `important` for `|important` ones), as Svelte's `set_style` in one render effect.
  */
-export function applyStyleDirs(el: Element, d: Record<string, unknown>, prev: Record<string, unknown> | undefined, all: boolean): void {
-  const style = (el as HTMLElement).style;
-  for (const k in d) {
-    const v = d[k];
-    if (!all && prev !== undefined && prev[k] === v) continue;
-    if (v == null || v === '' || v === false) style.removeProperty(k);
-    else style.setProperty(k, String(v));
-  }
-}
-
-/**
- * Internal: a reactive `style` attribute (string or object), with the element's `style:` directives when it has both
- * (they win over the attribute, as in Svelte).
- */
-export function bindStyle(el: Element, fn: () => StyleValue, dirs?: () => Record<string, unknown>): void {
-  let prev: StyleValue | typeof UNSET = UNSET;
-  let prevValue: unknown = UNSET;
-  let prevDirs: Record<string, unknown> | undefined;
+export function bindStyle(el: Element, value: (() => StyleValue) | string | null, dirs?: () => Styles, important?: () => Styles): void {
+  let prev: Styles | undefined;
+  let prevImportant: Styles | undefined;
   renderEffect(() => {
-    const v = fn();
-    const d = dirs?.();
-    const changed = v !== prevValue || typeof v === 'object';
-    if (changed) prev = applyStyle(el, v, prev);
-    if (d !== undefined) applyStyleDirs(el, d, prevDirs, changed);
-    prevValue = v;
-    prevDirs = d;
+    let v: unknown = typeof value === 'function' ? value() : value;
+    let next = dirs?.();
+    if (v !== null && typeof v === 'object') {
+      const o = objectStyles(v as Record<string, unknown>);
+      next = next === undefined ? o : Object.assign(o, next);
+      v = '';
+    } else if (v === false) v = null;
+    const nextImportant = important?.();
+    setStyle(el, v, prev, next, prevImportant, nextImportant);
+    prev = next;
+    prevImportant = nextImportant;
   });
+}
+
+/** Internal (spreads): a spread's `style` value with the element's directives, as `bindStyle` takes them. */
+export function styleParts(value: unknown, dirs: Styles | undefined): [unknown, Styles | undefined] {
+  if (value !== null && typeof value === 'object') {
+    const o = objectStyles(value as Record<string, unknown>);
+    return ['', dirs === undefined ? o : Object.assign(o, dirs)];
+  }
+  return [value === false ? null : value, dirs];
 }

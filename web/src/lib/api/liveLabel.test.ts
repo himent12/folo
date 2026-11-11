@@ -126,6 +126,24 @@ describe('LiveLabelJob ordering', () => {
     stop();
   });
 
+  it('keeps its log as an append log: a later line is appended in place, one out of order replaces the list', async () => {
+    const { live, stop } = mount();
+    page.resolve({ total: 0, images: [] });
+    await vi.advanceTimersByTimeAsync(0);
+    const r0 = live.logsLog.read(null);
+    expect(r0.added.map((l) => l.message)).toEqual(['added 3 images']);
+    handlers.log?.({ t: '2026-11-09T10:00:05Z', level: 'info', message: 'b' });
+    const r1 = live.logsLog.read(r0.cursor);
+    expect(r1.reset).toBe(false);
+    expect(r1.added.map((l) => l.message)).toEqual(['b']);
+    // Earlier than the last line: merged in time order, as before (a new list).
+    handlers.log?.({ t: '2026-11-09T10:00:01Z', level: 'info', message: 'a' });
+    const r2 = live.logsLog.read(r1.cursor);
+    expect(r2.reset).toBe(true);
+    expect(live.logs.map((l) => l.message)).toEqual(['added 3 images', 'a', 'b']);
+    stop();
+  });
+
   it('loads the images again on reload, replacing its list', async () => {
     const { live, stop } = mount();
     page.resolve({ total: 1, images: [img('1')] });

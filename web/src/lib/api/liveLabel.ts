@@ -11,7 +11,8 @@
 
 import { effect, signal, untrack } from 'fw';
 import { hub } from './index';
-import { mergeLogs, STREAM_GRACE_MS } from './live';
+import { AppendLog } from './appendLog';
+import { MAX_LOGS, mergeLogs, STREAM_GRACE_MS } from './live';
 import type { LabelImage, LabelJob, LogLine } from './types';
 
 /** Images per request while loading (the API's cap). */
@@ -104,8 +105,19 @@ export class LiveLabelJob {
   set version(v: number) {
     this.#version.set(v);
   }
-  /** The job's log, oldest first; `version` bumps when it changes (run/Logs reads it in place). */
-  logs: LogLine[] = [];
+  /**
+   * The job's log (the latest 2000 lines), oldest first, as an append log, as LiveRun's: a line that comes after the
+   * last is appended (the cap trims the front), anything else (a load, a line out of order) replaces the list.
+   * `version` bumps when it changes (run/Logs reads only what was added since).
+   */
+  readonly logsLog = new AppendLog<LogLine>();
+  /** The job's log, oldest first (the append log's list: the same array while it only grows). */
+  get logs(): LogLine[] {
+    return this.logsLog.items;
+  }
+  set logs(v: LogLine[]) {
+    this.logsLog.replace(v);
+  }
   #retry = signal(0);
   /** Every `job` event bumps it: a snapshot or an action's answer older than the latest event is not applied. */
   #jobSeq = 0;
@@ -236,7 +248,12 @@ export class LiveLabelJob {
         log: (l) => {
           if (closed) return;
           heard = Date.now();
-          this.logs = mergeLogs(this.logs, [l]);
+          const last = this.logs.at(-1);
+          // After the last line (strictly: an equal time may be a duplicate, which mergeLogs drops): appended in place.
+          if (last === undefined || last.t.localeCompare(l.t) < 0) {
+            this.logs.push(l);
+            if (this.logs.length > MAX_LOGS) this.logsLog.trimFront(this.logs.length - MAX_LOGS);
+          } else this.logs = mergeLogs(this.logs, [l]);
           this.#version.set((v) => v + 1);
         },
         reconnect: () => sync(),

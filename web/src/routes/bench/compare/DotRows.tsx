@@ -140,7 +140,7 @@ export default function DotRows(props: DotRowsProps) {
                 <For each={order.get()} key={(o) => o.k.id}>
                   {(o) => {
                     const v = () => r().values[o().i] ?? null;
-                    return <>{v() !== null ? <>{mark(() => o().k, () => v()!, () => highlight() !== null && highlight() !== o().k.id)}</> : null}</>;
+                    return <>{v() !== null ? mark(() => o().k, () => v()!, () => highlight() !== null && highlight() !== o().k.id) : null}</>;
                   }}
                 </For>
               </span>

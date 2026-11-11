@@ -1,7 +1,7 @@
 // Reactive data structures: `deep` (Svelte's `$state` proxy for objects and arrays mutated in place), `ReactiveMap` /
 // `ReactiveSet` (SvelteMap / SvelteSet) and `MediaQuery` (svelte/reactivity).
 
-import { isTracking, onCleanup, signal, untrack, type Signal } from './core';
+import { isTracking, signal, untrack, watchedSignal, type Signal } from './core';
 
 const STATE = Symbol('fw.deep');
 
@@ -293,26 +293,21 @@ export function mediaQuery(query: string): MediaQuery {
 }
 
 /**
- * Port of svelte/reactivity `createSubscriber`: `subscribe()` inside an effect starts `start(update)` once for all
- * subscribers and stops it when the last one goes; `update()` re-runs what called `subscribe()`.
+ * Port of svelte/reactivity `createSubscriber`: `subscribe()` read by an effect, or by a computed an effect reads,
+ * starts `start(update)` once for all of them and stops it when the last one goes; `update()` re-runs what called
+ * `subscribe()`. Read anywhere else (untracked, or in a computed nothing watches) it starts nothing.
  */
 export function createSubscriber(start: (update: () => void) => (() => void) | void): () => void {
-  let subscribers = 0;
-  const version = counter();
   let stop: (() => void) | void;
+  const version: Signal<number> = watchedSignal(0, (on) => {
+    if (on) stop = untrack(() => start(() => bump(version)));
+    else {
+      const s = stop;
+      stop = undefined;
+      s?.();
+    }
+  });
   return () => {
-    if (!isTracking()) return;
-    version.get();
-    untrack(() => {
-      if (subscribers++ === 0) stop = start(() => bump(version));
-    });
-    onCleanup(() => {
-      queueMicrotask(() => {
-        if (--subscribers === 0) {
-          stop?.();
-          stop = undefined;
-        }
-      });
-    });
+    if (isTracking()) version.get();
   };
 }

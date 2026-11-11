@@ -55,11 +55,6 @@ const SPLIT_NAME = { train: 'training', val: 'validation', test: 'test' } as con
 const genWord = (g: number) => (g === 0 ? 'Teacher' : `Gen ${g}`);
 const known = <T extends { id: string }>(list: readonly T[] | undefined, x: string | null) => !!x && !!list?.some((y) => y.id === x);
 const caveatWord = () => <>What it does not show</>;
-/**
- * The spaces Svelte keeps between the blocks of the "Now" links (so the paragraph is never :empty while shown),
- * as expressions: two static spaces with only blocks between them merge into one template text node in fw today.
- */
-const SPACE = ' ';
 
 export default function BenchLoop() {
   const id = computed(() => router.route.params.id ?? '');
@@ -310,9 +305,9 @@ export default function BenchLoop() {
           )}
         </>
       ) : null}
-      {SPACE}
-      {nowPhase.get() === 'benchmarking' && cur().entry_id && nowEntry.get() ? <>{entryNow(cur)}</> : null}
-      {SPACE}
+      {' '}
+      {nowPhase.get() === 'benchmarking' && cur().entry_id && nowEntry.get() ? entryNow(cur) : null}
+      {' '}
       {nowPhase.get() === 'labeling' ? <>The teacher labels the pool by itself; nothing it labels is checked against truth.</> : null}
     </p>
   );
@@ -365,7 +360,7 @@ export default function BenchLoop() {
           ) : (
             <span class="faint">{ended.get() ? 'Not run' : 'to come'}</span>
           )}{' '}
-          {g()?.labels ? <>{phoneLabels(g as () => BenchGeneration)}</> : null}
+          {g()?.labels ? phoneLabels(g as () => BenchGeneration) : null}
         </td>
         <td class="hide-sm lbl">{g() ? labelsCell(g as () => BenchGeneration) : <span class="faint">—</span>}</td>
         <td class="hide-md">{g()?.labels ? madeOf(g as () => BenchGeneration) : <span class="faint">{k() === 0 ? 'none' : '—'}</span>}</td>

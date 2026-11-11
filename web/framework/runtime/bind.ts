@@ -99,10 +99,14 @@ export function bindValue(el: Element, sig: Bindable<unknown>): void {
   });
 }
 
-function selectOption(select: HTMLSelectElement, value: unknown): void {
+type SelectEl = HTMLSelectElement & { __value?: unknown };
+
+/** Svelte's `select_option`: selects the option(s) holding `value`; none (index -1) when no option does. */
+function selectOption(select: HTMLSelectElement, value: unknown, mounting = false): void {
   if (select.multiple) {
-    const values = Array.isArray(value) ? value : [];
-    for (const option of select.options) option.selected = values.includes(optionValue(option));
+    // Not an array (or nothing): the selection stays as it is.
+    if (!Array.isArray(value)) return;
+    for (const option of select.options) option.selected = value.includes(optionValue(option));
     return;
   }
   for (const option of select.options) {
@@ -111,35 +115,70 @@ function selectOption(select: HTMLSelectElement, value: unknown): void {
       return;
     }
   }
-  select.selectedIndex = -1;
+  if (!mounting || value !== undefined) select.selectedIndex = -1;
 }
 
 function optionValue(option: HTMLOptionElement): unknown {
   return '__value' in option ? (option as HTMLOptionElement & { __value: unknown }).__value : option.value;
 }
 
-function bindSelect(select: HTMLSelectElement, sig: Bindable<unknown>): void {
+/**
+ * Svelte's `init_select`: when the options change (a list rendering them, an option's value), the select's value is
+ * selected again, so a value set before its option exists is shown once the option arrives, and a value no option
+ * holds keeps nothing selected (the browser would select the first option added).
+ */
+function initSelect(select: SelectEl): void {
+  if (typeof MutationObserver === 'undefined') return;
+  const observer = new MutationObserver(() => {
+    if ('__value' in select) selectOption(select, select.__value);
+  });
+  observer.observe(select, { childList: true, subtree: true, attributes: true, attributeFilter: ['value'] });
+  onCleanup(() => observer.disconnect());
+}
+
+function bindSelect(select: SelectEl, sig: Bindable<unknown>): void {
+  let mounting = true;
   on(select, 'change', () => {
-    if (select.multiple) sig.set([...select.selectedOptions].map(optionValue));
+    let value: unknown;
+    if (select.multiple) value = [...select.selectedOptions].map(optionValue);
     else {
-      const o = select.options[select.selectedIndex];
-      sig.set(o ? optionValue(o) : undefined);
+      // Nothing selected: the first option that is not disabled, as Svelte reads it.
+      const o = select.options[select.selectedIndex] ?? select.querySelector<HTMLOptionElement>('option:not([disabled])');
+      value = o ? optionValue(o) : null;
     }
+    sig.set(value);
+    select.__value = value;
   });
   // After the options are in (a user effect runs after the render effects that insert them), then on every change.
   effect(() => {
-    const value = sig.get();
-    selectOption(select, value);
-    if (value === undefined && !select.multiple) {
+    let value = sig.get();
+    selectOption(select, value, mounting);
+    if (mounting && value === undefined) {
+      // Mounting with no value: the value is what the DOM selected.
       const o = select.options[select.selectedIndex];
-      if (o) untrack(() => sig.set(optionValue(o)));
+      if (o) {
+        value = optionValue(o);
+        untrack(() => sig.set(value));
+      }
     }
+    select.__value = value;
+    mounting = false;
   });
+  initSelect(select);
 }
 
-/** Internal: `<select value={v}>` (one-way): selects the matching option after the options are rendered. */
+/** Internal: `<select value={v}>` (one-way): selects the matching option after the options are rendered, and again when they change. */
 export function selectValue(select: Element, fn: () => unknown): void {
-  effect(() => selectOption(select as HTMLSelectElement, fn()));
+  const el = select as SelectEl;
+  let prev: unknown = {};
+  effect(() => {
+    const value = fn();
+    if (value === prev) return;
+    prev = value;
+    el.value = ((el.__value = value) ?? '') as string;
+    selectOption(el, value);
+  });
+  initSelect(el);
 }
 
 /** Internal: `bind:checked={sig}` on a checkbox. */

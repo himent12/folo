@@ -124,3 +124,45 @@ describe('MediaQuery per instance', () => {
     }
   });
 });
+
+describe('MediaQuery in a computed', () => {
+  it('listens while an effect reads the computed, and stops when the last reader goes (no leak per screen visit)', () => {
+    const real = window.matchMedia;
+    const listeners = new Set<() => void>();
+    let matches = false;
+    window.matchMedia = ((q: string) =>
+      ({
+        media: q,
+        get matches() {
+          return matches;
+        },
+        addEventListener: (_: string, f: () => void) => listeners.add(f),
+        removeEventListener: (_: string, f: () => void) => listeners.delete(f),
+      }) as unknown as MediaQueryList) as typeof window.matchMedia;
+    try {
+      const q = new MediaQuery('(max-width: 767px)');
+      // Read in a computed nothing watches: nothing to listen for.
+      const loose = computed(() => (q.current ? 'phone' : 'wide'));
+      expect(loose.get()).toBe('wide');
+      expect(listeners.size).toBe(0);
+      for (let visit = 0; visit < 5; visit++) {
+        const seen: string[] = [];
+        const dispose = createRoot((d) => {
+          const c = computed(() => (q.current ? 'phone' : 'wide'));
+          effect(() => void seen.push(c.get()));
+          return d;
+        });
+        flush();
+        expect(listeners.size).toBe(1);
+        matches = !matches;
+        for (const f of [...listeners]) f();
+        flush();
+        expect(seen.length).toBe(2);
+        dispose();
+        expect(listeners.size).toBe(0);
+      }
+    } finally {
+      window.matchMedia = real;
+    }
+  });
+});

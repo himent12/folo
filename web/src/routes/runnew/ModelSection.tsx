@@ -21,7 +21,6 @@ import Meta from '$lib/ui/Meta';
 import InfoButton from '$lib/ui/InfoButton';
 import { arches } from './estimate';
 import type { FormErrors } from './jump.fw';
-import { reselect } from './follow';
 import { media } from '$lib/design/tokens';
 
 export interface ModelSectionProps {
@@ -53,8 +52,6 @@ export default function ModelSection(props: ModelSectionProps) {
   // Phones pick the model size from a segmented control; the full specification table folds behind "Compare sizes".
   const phone = new MediaQuery(media.phone, false);
   const aboutOpen = signal(false);
-  // A copied run's weights may be set before the lists that hold them load (see ./follow).
-  reselect('weights', () => weights.get(), () => [props.weightChoices, props.publishedOptions]);
 
   // The model sizes, one specification row each (a table on wide screens; behind "Compare sizes" on phones).
   // One specification row per size, the column header on the same grid (subgrid), so every value sits under its

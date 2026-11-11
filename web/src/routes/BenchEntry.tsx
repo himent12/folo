@@ -16,7 +16,7 @@ import Square from '$icons/square';
 import Target from '$icons/target';
 import Trash from '$icons/trash-2';
 import TriangleAlert from '$icons/triangle-alert';
-import { computed, css, effect, For, Index, MediaQuery, memo, signal } from 'fw';
+import { computed, css, effect, For, Index, MediaQuery, signal } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { LiveBench } from '$lib/api/liveBench';
 import { Resource } from '$lib/api/resource';
@@ -297,54 +297,7 @@ export default function BenchEntryPage() {
     </Panel>
   );
 
-  /**
-   * The result's sections, created in the page's order: a conditional among components is created after the components
-   * beside it (a lazy branch), so the robustness one is made here in its place, and every id (`createUniqueId`) comes in
-   * the legacy page's order.
-   */
-  const sections = (r: () => BenchResult) => {
-    const accuracy = <AccuracySection result={r()} entry={en()} bench={b()} />;
-    const robustness = memo(() =>
-      r().robustness ? (
-        <RobustnessSection result={r()} entry={en()} bench={b()} catalog={catalog.data} />
-      ) : (
-        <Panel title="Robustness" meta="accuracy kept under each condition" id="robustness">
-          <div class="none">
-            <p class="n-title">Not measured</p>
-            <p class="n-why">
-              {axisWhyNot('robustness', en(), b())}{' '}
-              {b().plan.conditions.length ? (
-                <>
-                  {en().contestant.kind === 'external'
-                    ? 'Send its predictions under the plan’s conditions as well (every image at every planned severity) to have this axis.'
-                    : `Add the entry again with “Run the plan’s conditions” on: ${b().plan.conditions.length} conditions, each image again at every severity.`}
-                </>
-              ) : null}
-            </p>
-            <Button size="sm" href={href(`/benchmarks/${b().id}?tab=conditions`)}>
-              See the conditions
-            </Button>
-          </div>
-        </Panel>
-      ),
-    );
-    robustness();
-    const rest = (
-      <>
-        <CalibrationSection result={r()} entry={en()} bench={b()} />
-        <SelfLabelSection result={r()} entry={en()} loop={loop.get()} />
-        <LocalizationSection result={r()} />
-        <ImagesSection bench={b()} entry={en()} bestConf={r().accuracy.best_conf} />
-      </>
-    );
-    return (
-      <>
-        {accuracy}
-        {robustness}
-        {rest}
-      </>
-    );
-  };
+  const r = () => result.data!;
 
   return (
     <>
@@ -470,7 +423,35 @@ export default function BenchEntryPage() {
                 <div class="sections">
                   <ScoreSection entry={en()} bench={b()} result={result.data} rank={rank.get()} />
                   {result.data ? (
-                    sections(() => result.data!)
+                    <>
+                      <AccuracySection result={r()} entry={en()} bench={b()} />
+                      {r().robustness ? (
+                        <RobustnessSection result={r()} entry={en()} bench={b()} catalog={catalog.data} />
+                      ) : (
+                        <Panel title="Robustness" meta="accuracy kept under each condition" id="robustness">
+                          <div class="none">
+                            <p class="n-title">Not measured</p>
+                            <p class="n-why">
+                              {axisWhyNot('robustness', en(), b())}{' '}
+                              {b().plan.conditions.length ? (
+                                <>
+                                  {en().contestant.kind === 'external'
+                                    ? 'Send its predictions under the plan’s conditions as well (every image at every planned severity) to have this axis.'
+                                    : `Add the entry again with “Run the plan’s conditions” on: ${b().plan.conditions.length} conditions, each image again at every severity.`}
+                                </>
+                              ) : null}
+                            </p>
+                            <Button size="sm" href={href(`/benchmarks/${b().id}?tab=conditions`)}>
+                              See the conditions
+                            </Button>
+                          </div>
+                        </Panel>
+                      )}
+                      <CalibrationSection result={r()} entry={en()} bench={b()} />
+                      <SelfLabelSection result={r()} entry={en()} loop={loop.get()} />
+                      <LocalizationSection result={r()} />
+                      <ImagesSection bench={b()} entry={en()} bestConf={r().accuracy.best_conf} />
+                    </>
                   ) : result.error ? (
                     <ErrorState error={result.error} title="Could not load the result" retry={() => result.refresh()} />
                   ) : (

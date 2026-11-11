@@ -159,8 +159,8 @@ function isBound(props: object, key: PropertyKey): boolean {
 
 /**
  * A `$bindable` prop as a signal. Bound by the parent (`bind:value={sig}`): reads and writes go to the parent's
- * signal. Not bound: writes are local, until the parent passes a new value (Svelte's semantics). `fallback` stands in
- * while the value is `undefined`.
+ * signal. Not bound: writes are local, until the parent's value changes (Svelte's semantics: any change, even back to
+ * the value the write was made over). `fallback` stands in while the value is `undefined`.
  */
 export function bindable<T extends object, K extends keyof T>(props: T, key: K, fallback?: Exclude<T[K], undefined>): Signal<Exclude<T[K], undefined>>;
 export function bindable<T extends object, K extends keyof T>(props: T, key: K): Signal<T[K]>;
@@ -178,20 +178,23 @@ export function bindable(props: AnyProps, key: string, fallback?: unknown): Sign
       },
     };
   }
-  const parent = computed(() => props[key]);
-  const local = signal<{ v: unknown; p: unknown } | null>(null, { equals: false });
+  // As Svelte's prop: a local write holds until the parent's value changes, whatever it changes to (A → B → A too).
+  // The parent's value is boxed anew each time what it reads changes, so a write holds while the box it was made over
+  // is the current one.
+  const parent = computed(() => ({ v: props[key] }));
+  const local = signal<{ v: unknown; over: { v: unknown } } | null>(null, { equals: false });
   const get = () => {
     const p = parent.get();
     const l = local.get();
-    if (l !== null && Object.is(l.p, p)) return l.v;
-    return p === undefined ? fallback : p;
+    if (l !== null && l.over === p) return l.v;
+    return p.v === undefined ? fallback : p.v;
   };
   return {
     get,
     peek: () => untrack(get),
     set(v) {
       const next = typeof v === 'function' ? (v as (p: unknown) => unknown)(untrack(get)) : v;
-      local.set({ v: next, p: parent.peek() });
+      local.set({ v: next, over: parent.peek() });
     },
   };
 }

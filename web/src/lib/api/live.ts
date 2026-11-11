@@ -24,7 +24,8 @@ import { AppendLog } from './appendLog';
 import { hub } from './index';
 import type { Epoch, LogLine, Run, RunCloud, Step } from './types';
 
-const MAX_LOGS = 2000;
+/** Log lines a live view keeps (the latest). */
+export const MAX_LOGS = 2000;
 const ACTIVE = ['queued', 'running', 'stopping'];
 /**
  * How long the stream may be down before the view stops calling itself live. EventSource retries a dropped connection

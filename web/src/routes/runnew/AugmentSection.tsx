@@ -74,8 +74,7 @@ export default function AugmentSection(props: AugmentSectionProps) {
   });
   const augChanged = computed(() => augLine.get().filter((it) => it.changed));
 
-  // The Svelte original's `ctl` snippet, as a local component (six consecutive snippet calls would be one text run to
-  // fw's compiler, which renders the first one twice to find out it is not text).
+  // The Svelte original's `ctl` snippet, as a local component.
   const Ctl = (p: { k: AugKey; children: JSX.Element }) => (
     <div
       class="aug-row"

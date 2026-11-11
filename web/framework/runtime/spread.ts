@@ -4,19 +4,27 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { renderEffect } from './core';
-import { applyStyle, applyStyleDirs, clsx, hasSetter, propName, setAttribute, toClass, type ClassValue, type StyleValue } from './dom';
+import { clsx, hasSetter, propName, setAttribute, setStyle, styleParts, toClass, type ClassValue } from './dom';
 import { DELEGATED, on, setDelegated } from './events';
 
 const SKIP = new Set(['children', 'ref', '$$scope']);
 
 /**
  * Internal: applies `props` (an object, or a function returning one) to `el`; `scope` is the file's CSS scope class,
- * `dirs` the element's `class:` directives (kept on when the spread sets `class`).
+ * `dirs` the element's `class:` directives (kept on when the spread sets `class`), `styleDirs` / `styleImportant` its
+ * `style:` directives (applied with the spread's `style`, as Svelte's `set_style`).
  */
-export function spread(el: Element, props: object | (() => object), scope?: string, dirs?: () => Record<string, unknown>, styleDirs?: () => Record<string, unknown>): void {
-  let prevStyleDirs: Record<string, unknown> | undefined;
+export function spread(
+  el: Element,
+  props: object | (() => object),
+  scope?: string,
+  dirs?: () => Record<string, unknown>,
+  styleDirs?: () => Record<string, unknown>,
+  styleImportant?: () => Record<string, unknown>,
+): void {
+  let prevStyles: Record<string, unknown> | undefined;
+  let prevImportant: Record<string, unknown> | undefined;
   let prev: Record<string, unknown> = {};
-  let styleState: StyleValue | object = UNSET;
   const handlers: Record<string, unknown> = {};
   const listening = new Set<string>();
   let classSet = false;
@@ -40,13 +48,7 @@ export function spread(el: Element, props: object | (() => object), scope?: stri
     for (const key in next) {
       if (key === 'class') continue;
       const value = next[key];
-      if (key === 'style') {
-        if (value !== prev.style || styleState === UNSET) {
-          styleState = applyStyle(el, value as StyleValue, styleState);
-          if (prevStyleDirs !== undefined) applyStyleDirs(el, prevStyleDirs, undefined, true);
-        }
-        continue;
-      }
+      if (key === 'style') continue;
       if (value === prev[key] && !(value === undefined && el.hasAttribute(key))) continue;
       if (key[0] === 'o' && key[1] === 'n') {
         let type = key.slice(2);
@@ -91,9 +93,13 @@ export function spread(el: Element, props: object | (() => object), scope?: stri
     }
     prev = next;
     const sd = styleDirs?.();
-    if (sd !== undefined) applyStyleDirs(el, sd, prevStyleDirs, false);
-    prevStyleDirs = sd;
+    const si = styleImportant?.();
+    if ('style' in next || sd !== undefined || si !== undefined) {
+      // No `style` key but directives: `null`, as Svelte forces the call.
+      const [value, styles] = styleParts(next.style === undefined && !('style' in src) ? null : next.style, sd);
+      setStyle(el, value, prevStyles, styles, prevImportant, si);
+      prevStyles = styles;
+      prevImportant = si;
+    }
   });
 }
-
-const UNSET = {};

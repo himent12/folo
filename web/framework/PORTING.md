@@ -188,7 +188,8 @@ const open = bindable(props, 'open', false);   // a signal-like: open.get(), ope
 const value = bindable(props, 'value');
 ```
 When the parent bound it (`bind:open={sig}`), writes go to the parent's signal; when it passed a plain value, writes
-stay local until the parent passes a new value (Svelte's semantics).
+stay local until the parent's value changes, whatever it changes to (Svelte's semantics: A → B → A brings back A, not
+the child's write).
 
 ### Binding a child's prop: `bind:x={signal}` on a component
 
@@ -257,9 +258,12 @@ Svelte's boolean list stringifies (`spellcheck={false}` → `spellcheck="false"`
 options render. A bare attribute (`<div data-notice>`) is present and empty, as in Svelte.
 
 **Text.** Adjacent static text and expressions are one text node, exactly where Svelte makes one
-(`Epoch {a}/{b}`): Chrome shapes each text node on its own, so this keeps glyphs identical. An expression with JSX in
-it (`{x ? <b/> : null}`, a list) is a block and splits the text around it, as an `{#if}` does in Svelte. An
-expression that turns out to render a node or a snippet (`{props.children}`, `{icon()}`) is still rendered as it is.
+(`Epoch {a}/{b}`): Chrome shapes each text node on its own, so this keeps glyphs identical. A block splits the text
+around it, as an `{#if}` or `{@render}` does in Svelte: an expression with JSX in it (`{x ? <b/> : null}`, a list), a
+call of a snippet defined in the file (`{link()}`), a snippet prop (`{props.children}`, `{props.footer}` when the file
+types `footer` as `JSX.Element`), or a conditional with one of those in a branch (`{on ? a() : b()}`). Write them as
+they are, no fragment around them. An expression the compiler cannot see as a block but that renders a node or a
+snippet is still rendered once, where it stands, and the text after it stays one node.
 
 **Dynamic or not?** The compiler makes an expression reactive when it contains a call or a property read. A plain
 identifier or literal is set once. So `title={label}` with `let label` reassigned later does **not** update: make

@@ -63,6 +63,13 @@ describe('shareApi', () => {
     expect(unshare(s)).toBe(api);
   });
 
+  it("passes what a method carries through (a test spy's .mock)", () => {
+    const runs = vi.fn(async () => []);
+    const api = shareApi({ runs } as unknown as Api);
+    void api.runs();
+    expect(vi.mocked(api.runs).mock.calls.length).toBe(1);
+  });
+
   it('aborts the shared request only once every caller has given up', async () => {
     const { api } = counting();
     const s = shareApi(api);

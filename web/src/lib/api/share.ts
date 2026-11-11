@@ -181,7 +181,10 @@ export function shareApi(api: Api): Api {
           }
           return join(entry, signal);
         };
-        f = Object.assign(wrapped, { $of: v });
+        Object.assign(wrapped, { $of: v });
+        // What the method carries besides being called (a test spy's `.mock`, `mockResolvedValue`...) reads through to
+        // it, so `vi.mocked(hub.api.x).mock.calls` sees the calls made through the shared Api.
+        f = new Proxy(wrapped, { get: (t, p) => (p in t ? Reflect.get(t, p) : Reflect.get(method, p, method)) });
         fns.set(prop, f);
       }
       return f;

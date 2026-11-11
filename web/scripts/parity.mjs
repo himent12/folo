@@ -88,7 +88,8 @@ async function serve() {
     await dev.listen();
     server = dev;
   } else {
-    const dist = resolve(root, 'node_modules/.parity-dist');
+    // A build dir of this run's own (in --out), so runs with different --out never wipe each other's build.
+    const dist = resolve(outDir, '.dist');
     const { input, nextError } = await buildApps(root, dist);
     buildNote = nextError;
     server = await preview({ root, logLevel: 'error', build: { outDir: dist }, preview: listen });

@@ -2,72 +2,119 @@
 // four nodes antialias differently from one). The compiler hands the run's parts over: static strings, and a function
 // per expression. One render effect concatenates them into the node's `data`.
 //
-// An expression may also yield a node, a list or a snippet (JSX cannot tell `{label}` from `{props.children}`). The
-// first time a part is not text, the run switches for good to one `insert` per part, placed before the (then empty)
-// text node, so nothing it renders is re-created when another part changes.
+// An expression may also yield a node, a list or a snippet (JSX cannot always tell `{label}` from `{props.footer}`).
+// Then the run splits where Svelte's text sequence would have ended at a `{@render}`: the text before that part stays
+// in the run's node, the part is rendered after it, and the text after it is a run of its own. Nothing is evaluated
+// twice: the effect that found the part becomes that part's own effect, keeping only what the part read, so a change
+// in the text around it never re-creates it.
 
-import { createRoot, getOwner, isReader, renderEffect, type Owner } from './core';
+import { dropSourcesThrough, getOwner, isReader, reader, renderEffect, runWithOwner, signal, sourceMark, untrack, type Owner, type Signal } from './core';
 import { insert } from './dom';
 
 type Part = string | (() => unknown);
 
-/** The run's text, or `null` when a part is not text. */
-function join(parts: Part[]): string | null {
+function isText(v: unknown): boolean {
+  if (v == null) return true;
+  const t = typeof v;
+  return t === 'string' || t === 'number' || t === 'bigint' || t === 'boolean';
+}
+
+function unwrap(v: unknown): unknown {
+  while (isReader(v)) v = v();
+  return v;
+}
+
+function staticText(parts: Part[]): string | null {
   let s = '';
-  for (let i = 0; i < parts.length; i++) {
-    const p = parts[i]!;
-    if (typeof p === 'string') {
-      s += p;
-      continue;
-    }
-    let v = p();
-    while (isReader(v)) v = v();
-    if (v == null || v === true || v === false) continue;
-    const t = typeof v;
-    if (t === 'string' || t === 'number' || t === 'bigint') s += v as string;
-    else return null;
+  for (const p of parts) {
+    if (typeof p !== 'string') return null;
+    s += p;
   }
   return s;
 }
 
-/** Binds `node` (the run's text node) to `parts`; returns false when the run is not text (it was split instead). */
-function bind(node: Text, parts: Part[], owner: Owner | null, canSplit: () => boolean): boolean {
-  let split = false;
-  let alive = true;
-  createRoot((d) => {
-    renderEffect(() => {
-      if (split) return;
-      const s = join(parts);
-      if (s !== null) {
-        if (node.data !== s) node.data = s;
-        return;
+/**
+ * Binds `node` to `parts`. `out` is set while a fragment run is created (its node not in the DOM yet): a part that is
+ * not text, and what follows it, are pushed there, for the fragment to render after `node`.
+ */
+function bind(node: Text, parts: Part[], owner: Owner | null, out: JSX.Element[] | null): void {
+  const fixed = staticText(parts);
+  if (fixed !== null) {
+    node.data = fixed;
+    return;
+  }
+  let at = -1;
+  let content: Signal<unknown> | undefined;
+  let creating = true;
+  renderEffect(() => {
+    if (at >= 0) {
+      // The part's own effect now: what it read changed.
+      const v = (parts[at] as () => unknown)();
+      content!.set(() => v);
+      return;
+    }
+    let s = '';
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i]!;
+      if (typeof p === 'string') {
+        s += p;
+        continue;
       }
-      split = true;
-      // This evaluation's nodes are thrown away (its root goes next); each part gets an insert of its own.
-      queueMicrotask(d);
-      alive = false;
-      node.data = '';
-      if (canSplit()) createRoot(() => parts.forEach((p) => insert(node.parentNode!, p, node)), owner);
-    });
-  }, owner);
-  return alive;
+      const mark = sourceMark();
+      const raw = p();
+      let v = raw;
+      if (isReader(raw)) {
+        // A reader is looked at untracked first: if it renders more than text, the part's effect must not read it.
+        v = untrack(() => unwrap(raw));
+        if (isText(v)) unwrap(raw);
+      }
+      if (isText(v)) {
+        if (v != null && typeof v !== 'boolean') s += v as string;
+        continue;
+      }
+      // Not text: split here.
+      dropSourcesThrough(mark);
+      at = i;
+      content = signal<unknown>(raw);
+      const before = parts.slice(0, i);
+      const after = parts.slice(i + 1);
+      const fragment = out !== null && creating;
+      runWithOwner(owner, () => {
+        bind(node, before, owner, null);
+        const rendered = reader(() => content!.get());
+        const rest = after.length > 0 || !fragment ? document.createTextNode('') : null;
+        if (fragment) {
+          out!.push(rendered as JSX.Element);
+          if (rest !== null) {
+            out!.push(rest);
+            bind(rest, after, owner, out);
+          }
+        } else {
+          const parent = node.parentNode!;
+          parent.insertBefore(rest!, node.nextSibling);
+          insert(parent, rendered, rest);
+          if (after.length > 0) bind(rest!, after, owner, null);
+        }
+      });
+      return;
+    }
+    if (node.data !== s) node.data = s;
+  });
+  creating = false;
 }
 
 /** Internal: a run whose text node is in the template. */
 export function run(node: Text, parts: Part[]): void {
-  bind(node, parts, getOwner(), () => true);
+  bind(node, parts, getOwner(), null);
 }
 
 /**
- * Internal: a run inside a fragment: its text node, or, when a part is not text at creation, the parts themselves (an
- * array `insert` renders). A part that turns non-text later is split in place, before the node, like a template run.
+ * Internal: a run inside a fragment: its text node, or, when a part is not text at creation, the text node followed by
+ * what the split rendered. A part that turns non-text later is split in place, after the node, like a template run.
  */
 export function runNode(parts: Part[]): JSX.Element {
   const node = document.createTextNode('');
-  let created = false;
-  const owner = getOwner();
-  const text = bind(node, parts, owner, () => created && node.parentNode !== null);
-  created = true;
-  return text ? node : (parts as JSX.Element);
+  const out: JSX.Element[] = [];
+  bind(node, parts, getOwner(), out);
+  return out.length === 0 ? node : ([node, ...out] as JSX.Element);
 }
-

@@ -25,7 +25,6 @@ import Meta from '$lib/ui/Meta';
 import DriverReport from '$lib/ui/DriverReport';
 import { optimizerLabel } from '../run/resolved';
 import { CloudPick, LOCAL } from './cloudPick';
-import { follow, reselect } from './follow';
 import { AMP_SPEEDUP } from './estimate';
 import type { AmpBlock } from './amp';
 import type { FormErrors } from './jump.fw';
@@ -86,9 +85,6 @@ export default function TrainingSection(props: TrainingSectionProps) {
   const seed = b('seed');
   const advancedOpen = b('advancedOpen');
   const cloudPick = props.cloudPick;
-  // A copied run's connection or device may be set before its option is listed (see ./follow).
-  reselect('runon', () => cloudPick.target, () => cloudPick.connections.data);
-  reselect('device', () => device.get(), () => props.system.data);
 
   /** What the switch does, with the speed measured for this size (docs/BENCHMARKS.md), where there is one. */
   const ampHint = computed(() => {
@@ -225,7 +221,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
                     <>
                       <Select
                         id="offer"
-                        bind:value={follow(() => cloudPick.offerId ?? '')}
+                        value={cloudPick.offerId ?? ''}
                         onchange={(v) => ((cloudPick.offerId = v), (cloudPick.offerChosen = true))}
                         disabled={!offers()}
                         invalid={!!props.errors.offer}
@@ -359,7 +355,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
             <Switch
               id="amp"
               label="Mixed precision"
-              bind:checked={follow(() => props.ampOn)}
+              checked={props.ampOn}
               onchange={(v) => (amp.set(v), ampRefused.set(null))}
               disabled={!!props.ampBlock}
               describedby={props.ampErr && props.ampOn ? 'amp-error' : props.ampBlock ? 'amp-why' : 'amp-hint'}
@@ -419,7 +415,7 @@ export default function TrainingSection(props: TrainingSectionProps) {
           </Field>
           {/* TrainConfig.head `o2o` (docs/MODEL.md §6.6); the cost measured on the shapes gate (docs/BENCHMARKS.md). */}
           <div class="field sw-field">
-            <Switch id="head" label="End-to-end (no NMS)" bind:checked={follow(() => e2e.get())} onchange={(v) => e2e.set(v)} describedby="head-hint" />
+            <Switch id="head" label="End-to-end (no NMS)" checked={e2e.get()} onchange={(v) => e2e.set(v)} describedby="head-hint" />
             <p class="sw-hint" id="head-hint">
               No NMS step at inference; about 0.015 lower mAP50-95 than NMS on the same model.
             </p>

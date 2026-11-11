@@ -1,7 +1,7 @@
 // Performance of the Studio, legacy (/) against its port (next.html), on the production build.
 //   node scripts/perf.mjs [--app legacy|next|both] [--runs 5] [--out <dir>] [--api <url>] [--only bundle,cold,nav,live,large]
 //       [--long-runs N] [--cycles 20] [--live-secs 15]
-// Builds both entries into node_modules/.perf-dist (as --qa does with .qa-dist), serves them with `vite preview`, and
+// Builds both entries into <out>/.dist (a run's own build), serves them with `vite preview`, and
 // drives Chrome (playwright-core, channel "chrome"; Playwright's Chromium without it) with CDP for the numbers:
 // - bundle: per entry, the JS and CSS its HTML loads at startup (raw, gzip, brotli) and what a cold Overview requests
 //   before its content shows; all emitted JS and CSS; whether the in-browser mock is in the startup JS.
@@ -82,7 +82,8 @@ async function screens() {
 }
 
 // ---------------------------------------------------------------- server and browser
-const dist = resolve(root, 'node_modules/.perf-dist');
+// A build dir of this run's own (in --out), so concurrent runs never wipe each other's build.
+const dist = resolve(outDir, '.dist');
 const { input, nextError } = await buildApps(root, dist);
 const apps = /** @type {App[]} */ (appArg === 'both' ? ['legacy', 'next'] : [appArg]);
 if (apps.includes('next') && !input.next) throw new Error(nextError ?? 'next.html is missing: nothing to measure for --app next');

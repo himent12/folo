@@ -27,6 +27,8 @@ const USER = 64;
 const FRESH = 128;
 /** An owner linked into its parent's child list (disposed with it). */
 const ATTACHED = 256;
+/** A computed that owns a subtree (a memo's branch, a list's rows): see `settleOwners`. */
+const OWNING = 512;
 
 interface Link {
   _s: Source;
@@ -78,6 +80,8 @@ let owner: Owner | null = null;
 /** Bumped on every write; lets an untracked computed skip a check when nothing at all changed. */
 let globalVersion = 0;
 let nextId = 0;
+/** Owning computeds marked stale and not refreshed yet: while any exist, an effect checks its ancestors first. */
+let staleOwning = 0;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Dependency links
@@ -141,6 +145,24 @@ function cleanupSources(target: Target): void {
     node = prev;
   }
   target._sources = head;
+}
+
+/**
+ * Internal (text runs): a position in the running evaluation's reads: the last source read so far, to pass to
+ * `dropSourcesThrough`.
+ */
+export function sourceMark(): unknown {
+  // Every read moves its link to the tail: an unread tail (left from the previous run) means nothing was read yet.
+  const tail = listener?._sources;
+  return tail !== undefined && tail._v !== -1 ? tail : undefined;
+}
+
+/**
+ * Internal (text runs): the running evaluation stops depending on what it read up to `mark` (from `sourceMark`); only
+ * the reads after it stay. A source read both before and after the mark is dropped too (its link is shared).
+ */
+export function dropSourcesThrough(mark: unknown): void {
+  for (let node = mark as Link | undefined; node !== undefined; node = node._ps) node._v = -1;
 }
 
 /** Whether any source of `target` changed since it last ran (pulls computeds up to date on the way). */
@@ -216,6 +238,34 @@ class SignalNode<T> implements Source, Signal<T> {
   }
 }
 
+/** A signal that calls `watch(true)` when it gains its first subscriber and `watch(false)` when it loses the last. */
+class WatchedSignalNode<T> extends SignalNode<T> {
+  _watch: (on: boolean) => void;
+  constructor(value: T, watch: (on: boolean) => void) {
+    super(value, undefined);
+    this._watch = watch;
+  }
+  override _subscribe(node: Link): void {
+    const first = this._targets === undefined;
+    subscribeLink(this, node);
+    if (first && this._targets !== undefined) this._watch(true);
+  }
+  override _unsubscribe(node: Link): void {
+    if (this._targets === undefined) return;
+    unsubscribeLink(this, node);
+    if (this._targets === undefined) this._watch(false);
+  }
+}
+
+/**
+ * Internal: a signal that knows whether anything subscribes to it (an effect, or a computed an effect reads): `watch`
+ * runs with `true` on the first subscriber and `false` when the last one goes. A computed read outside any effect does
+ * not subscribe, so it starts nothing (and so leaks nothing).
+ */
+export function watchedSignal<T>(value: T, watch: (on: boolean) => void): Signal<T> {
+  return new WatchedSignalNode(value, watch);
+}
+
 /** A writable reactive value (port of `$state` for primitives and `$state.raw`). */
 export function signal<T>(value: T, options?: SignalOptions<T>): Signal<T>;
 export function signal<T = undefined>(): Signal<T | undefined>;
@@ -244,6 +294,7 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     this._equals = equals === undefined ? is : equals;
   }
   _refresh(): boolean {
+    if ((this._flags & (NOTIFIED | OWNING)) === (NOTIFIED | OWNING)) staleOwning--;
     this._flags &= ~NOTIFIED;
     if (this._flags & RUNNING) return false;
     // Subscribed and not marked: every source change would have reached it, so it is current.
@@ -293,12 +344,17 @@ class ComputedNode<T> implements Source, Target, ReadSignal<T> {
     if (this._targets === undefined) return;
     unsubscribeLink(this, node);
     if (this._targets === undefined) {
+      if ((this._flags & (NOTIFIED | OWNING)) === (NOTIFIED | OWNING)) {
+        staleOwning--;
+        this._flags = (this._flags & ~NOTIFIED) | OUTDATED;
+      }
       this._flags &= ~TRACKING;
       for (let n = this._sources; n !== undefined; n = n._ns) n._s._unsubscribe(n);
     }
   }
   _notify(): void {
     if (!(this._flags & NOTIFIED)) {
+      if (this._flags & OWNING) staleOwning++;
       this._flags |= OUTDATED | NOTIFIED;
       for (let node = this._targets; node !== undefined; node = node._nt) node._t._notify();
     }
@@ -342,6 +398,30 @@ export class Owner {
   _cleanups: Cleanup | Cleanup[] | null = null;
   _ctx: Map<unknown, unknown> | null = null;
   _flags = 0;
+  /** The computed this subtree is the content of (a memo's branch, a list row), if any. */
+  _m: ComputedNode<unknown> | null = null;
+}
+
+/** Internal: the current owner (a list row's root) is content of `c`, an owning computed (see `settleOwners`). */
+export function ownedBy(c: ReadSignal<unknown>): void {
+  const n = c as ComputedNode<unknown>;
+  if (!(n._flags & OWNING)) n._flags |= OWNING;
+  if (owner !== null) owner._m = n;
+}
+
+/**
+ * Before `node` runs: refreshes the outermost stale computed whose content `node` is in (a branch whose condition
+ * changed, a list whose rows changed), as Svelte runs a block before its children. That may dispose `node`. Effects
+ * are ordered by creation, and a branch is created before the effect that reads it, so without this a branch's effect
+ * could run once more with the state that removes it.
+ */
+function settleOwners(node: Owner): void {
+  for (;;) {
+    let stale: ComputedNode<unknown> | null = null;
+    for (let o = node._parent; o !== null; o = o._parent) if (o._m !== null && o._m._flags & NOTIFIED) stale = o._m;
+    if (stale === null || node._flags & DISPOSED) return;
+    stale._refresh();
+  }
 }
 
 function attach(parent: Owner | null, child: Owner): void {
@@ -496,11 +576,23 @@ export function memo<T>(fn: () => T, options?: SignalOptions<T>): Reader<T> {
   const c = new ComputedNode<T>(() => {
     if (root !== null) dispose(root);
     const r = (root = new Owner());
+    r._m = c as ComputedNode<unknown>;
     attach(parent, r);
     owner = r;
     const v = fn();
     return (typeof v === 'function' && !isReader(v) ? memo(v as () => unknown) : v) as T;
   }, options?.equals);
+  c._flags |= OWNING;
+  // Created now, where it is written, as Svelte creates a block: what it renders comes before what follows it in the
+  // document (component order, `createUniqueId` numbering). Untracked: whoever reads it later subscribes then. An
+  // error is kept for that first read.
+  const prev = listener;
+  listener = undefined;
+  try {
+    c._refresh();
+  } finally {
+    listener = prev;
+  }
   return reader(() => c.get());
 }
 
@@ -584,8 +676,12 @@ class EffectNode extends Owner implements Target {
     }
   }
   _update(): void {
+    if (this._flags & DISPOSED) return;
+    if (staleOwning > 0) {
+      settleOwners(this);
+      if (this._flags & DISPOSED) return;
+    }
     const f = this._flags;
-    if (f & DISPOSED) return;
     this._flags = f & ~NOTIFIED;
     if (f & FRESH || needsToRecompute(this)) this._run();
   }

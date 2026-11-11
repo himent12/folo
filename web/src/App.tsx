@@ -93,6 +93,13 @@ export default function App() {
     { equals: (a, b) => a.path === b.path && a.comp === b.comp },
   );
 
+  /**
+   * Whether the first screen has been created. The shortcuts dialog (it takes a `createUniqueId`) waits for it: the
+   * legacy app creates the screen before it, in document order, so every id a screen and the dialog take comes in the
+   * same sequence here, whenever the screen's chunk arrives. The dialog is closed until asked for, so nothing shows late.
+   */
+  const started = computed(() => screen.get().path !== null);
+
   // Once the first screen is up, the others load in idle time.
   effect(() => {
     if (screen.get().path === null) return;
@@ -138,7 +145,7 @@ export default function App() {
         <TabBar />
       </div>
       <CommandPalette bind:open={paletteOpen} onshortcuts={() => shortcutsOpen.set(true)} />
-      <ShortcutsDialog bind:open={shortcutsOpen} />
+      {started.get() ? <ShortcutsDialog bind:open={shortcutsOpen} /> : null}
       <Toaster />
       <RunWatch />
     </>

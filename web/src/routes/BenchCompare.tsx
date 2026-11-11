@@ -159,7 +159,7 @@ export default function BenchCompare() {
         <>
           {b().has(i) ? <span class="best">best</span> : null}
           {row().fmt(v()!)}{' '}
-          {i > 0 ? <>{diffOf(row, v as () => number, i) ? <span class="dd">{diffOf(row, v as () => number, i)}</span> : null}</> : null}
+          {i > 0 && diffOf(row, v as () => number, i) ? <span class="dd">{diffOf(row, v as () => number, i)}</span> : null}
         </>
       )}
     </td>
@@ -539,7 +539,7 @@ export default function BenchCompare() {
             </span>
           )}
         </For>{' '}
-        {ids.get().length < COMPARE_MAX && candidates.get().length ? <>{adder()}</> : null}
+        {ids.get().length < COMPARE_MAX && candidates.get().length ? adder() : null}
       </div>{' '}
       {shown.get().length < 2 ? (
         <section class="state">

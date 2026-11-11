@@ -25,14 +25,11 @@ export default function DatasetSection(props: DatasetSectionProps) {
 
   return (
     <Panel title="1 · Dataset" id="sec-data">
-      {/* `{#if}{:else}` as two conditionals: a snippet that is one conditional is built twice by fw's `insert` when it
-          flips (reported), and these cards (class strips and all) flip once on every load. */}
       {!props.datasets.data ? (
         <div class="cards" use:balanced={{ n: 3, min: 184, gap: 8 }}>
           <Index each={[0, 1, 2]}>{() => <Skeleton h="88px" r="var(--radius-md)" />}</Index>
         </div>
-      ) : null}
-      {props.datasets.data ? (
+      ) : (
         <>
           {/* Phones: a compact picker and a one-line summary; the cards are for wider screens. */}
           <div class="ds-pick">
@@ -101,7 +98,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
             </For>
           </div>
         </>
-      ) : null}
+      )}
     </Panel>
   );
 }

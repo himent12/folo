@@ -45,7 +45,7 @@ node scripts/perf.mjs --app both --runs 5     # load, memory and CPU, A/B altern
   in the out dir, with the first difference of the two DOM dumps. A state that differs is shot again in both apps
   (`--retries 1`) and passes if any pair matches. `--self` shoots legacy twice (the determinism check). Exit 1 on any
   difference.
-- `perf.mjs` measures the production build (`node_modules/.perf-dist`, `vite preview`, Chrome + CDP): bundle per entry,
+- `perf.mjs` measures the production build (built into `<out>/.dist`, `vite preview`, Chrome + CDP): bundle per entry,
   cold loads of the main screens (FCP, content shown, script/task/layout/style time, long tasks, heap after GC, nodes,
   listeners), hash navigation cycles (with the heap growth), 15 s live on the Run page and Overview (busy %, rAF/s),
   and the dataset grid scrolled end to end. `--api <url>` uses a running `folo serve --mock` instead of `?mock=1`;
