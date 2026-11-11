@@ -4,9 +4,7 @@
 //! A subscriber is inserted inactive and activated after the current effect flush (GPUI's rule: a callback
 //! registered during an effect does not see that effect). Dropping a `Subscription` removes its callback;
 //! `detach` keeps it for the life of the emitter.
-#![allow(dead_code)] // skeleton
-
-use std::{cell::RefCell, collections::BTreeMap, fmt, rc::Rc};
+use std::{cell::RefCell, collections::BTreeMap, fmt, mem, rc::Rc};
 
 /// Callbacks of one kind, keyed by emitter (`EntityId`, `TypeId`, or `()` for app-wide ones).
 pub(crate) struct SubscriberSet<EmitterKey, Callback>(Rc<RefCell<SubscriberSetState<EmitterKey, Callback>>>);
@@ -52,20 +50,98 @@ where
     /// Registers `callback` for `emitter_key`. The returned closure activates it; the subscription removes it.
     pub(crate) fn insert(
         &self,
-        _emitter_key: EmitterKey,
-        _callback: Callback,
+        emitter_key: EmitterKey,
+        callback: Callback,
     ) -> (Subscription, Box<dyn FnOnce()>) {
-        todo!("runtime")
+        let active = Rc::new(std::cell::Cell::new(false));
+        let mut lock = self.0.borrow_mut();
+        let subscriber_id = lock.next_subscriber_id;
+        lock.next_subscriber_id += 1;
+        lock.subscribers
+            .entry(emitter_key.clone())
+            .or_default()
+            .get_or_insert_with(BTreeMap::new)
+            .insert(subscriber_id, Subscriber { active: active.clone(), callback });
+        drop(lock);
+
+        let this = Rc::downgrade(&self.0);
+        let subscription = Subscription::new(move || {
+            let Some(this) = this.upgrade() else { return };
+            // Take the callback out under the borrow and drop it after: dropping a callback can drop
+            // handles whose release touches this set again.
+            let removed = {
+                let mut lock = this.borrow_mut();
+                let Some(subscribers) = lock.subscribers.get_mut(&emitter_key) else { return };
+                match subscribers {
+                    Some(subscribers) => {
+                        let removed = subscribers.remove(&subscriber_id);
+                        if subscribers.is_empty() {
+                            lock.subscribers.remove(&emitter_key);
+                        }
+                        removed
+                    }
+                    // The key's callbacks are being run: remove it when they are put back.
+                    None => {
+                        lock.dropped_subscribers.push((emitter_key, subscriber_id));
+                        None
+                    }
+                }
+            };
+            drop(removed);
+        });
+        (subscription, Box::new(move || active.set(true)))
     }
 
-    /// Removes every callback of `emitter`, returning them (entity release).
-    pub(crate) fn remove(&self, _emitter: &EmitterKey) -> Vec<Callback> {
-        todo!("runtime")
+    /// Removes every callback of `emitter`, returning them (entity release). Inactive ones are dropped.
+    pub(crate) fn remove(&self, emitter: &EmitterKey) -> Vec<Callback> {
+        let subscribers = self.0.borrow_mut().subscribers.remove(emitter);
+        subscribers
+            .flatten()
+            .map(|subscribers| {
+                subscribers
+                    .into_values()
+                    .filter(|subscriber| subscriber.active.get())
+                    .map(|subscriber| subscriber.callback)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
-    /// Calls each active callback of `emitter`; a callback returning `false` is removed.
-    pub(crate) fn retain(&self, _emitter: &EmitterKey, _f: impl FnMut(&mut Callback) -> bool) {
-        todo!("runtime")
+    /// Calls each active callback of `emitter`; a callback returning `false` is removed. Callbacks added
+    /// for `emitter` meanwhile are kept (inactive until activated); ones dropped meanwhile are removed.
+    pub(crate) fn retain(&self, emitter: &EmitterKey, mut f: impl FnMut(&mut Callback) -> bool) {
+        let Some(mut subscribers) =
+            self.0.borrow_mut().subscribers.get_mut(emitter).and_then(|subscribers| subscribers.take())
+        else {
+            return;
+        };
+
+        subscribers
+            .retain(|_, subscriber| if subscriber.active.get() { f(&mut subscriber.callback) } else { true });
+
+        let mut lock = self.0.borrow_mut();
+        if let Some(Some(new_subscribers)) = lock.subscribers.remove(emitter) {
+            subscribers.extend(new_subscribers);
+        }
+        let mut removed = Vec::new();
+        for (dropped_emitter, dropped_id) in mem::take(&mut lock.dropped_subscribers) {
+            if dropped_emitter == *emitter {
+                removed.extend(subscribers.remove(&dropped_id));
+            } else {
+                lock.dropped_subscribers.push((dropped_emitter, dropped_id));
+            }
+        }
+        if !subscribers.is_empty() {
+            lock.subscribers.insert(emitter.clone(), Some(subscribers));
+        }
+        drop(lock);
+        drop(removed);
+    }
+
+    /// Whether `emitter` has any callback (tests).
+    #[cfg(test)]
+    pub(crate) fn has(&self, emitter: &EmitterKey) -> bool {
+        self.0.borrow().subscribers.contains_key(emitter)
     }
 }
 

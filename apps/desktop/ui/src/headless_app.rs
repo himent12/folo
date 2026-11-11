@@ -2,16 +2,20 @@
 //! Owner tag: `"elements"`.
 //!
 //! A frozen-clock screenshot settles like this: `update` builds the state, `run_until_idle` pumps the main
-//! and background queues until both are empty (tasks that wait on timers stay parked: the clock does not
-//! move by itself), then `frame` draws the window if it is dirty and returns the framebuffer. Animations see
-//! the same clock, so a frame is a pure function of the state and the time the test advanced to.
-#![allow(dead_code)] // skeleton
+//! queue and waits for the background jobs (tasks that wait on timers stay parked: the clock does not move
+//! by itself), then `frame` draws the window if it is dirty and returns the framebuffer. Animations see the
+//! same clock, so a frame is a pure function of the state and the time the test advanced to.
 
-use std::{rc::Rc, sync::Arc, time::Duration};
+use std::{
+    rc::Rc,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crate::{
-    AnyWindowHandle, App, AppCell, AssetSource, Framebuffer, Pixels, PlatformInput, Scene, Size,
-    platform::headless::HeadlessPlatform,
+    AnyWindowHandle, App, AppCell, AppContext, AssetSource, Framebuffer, Pixels, PlatformInput,
+    RequestFrameOptions, Scene, Size,
+    platform::headless::{HeadlessDispatcher, HeadlessPlatform},
 };
 
 /// Which text backend headless windows shape with.
@@ -53,12 +57,18 @@ pub struct HeadlessApp {
     pub(crate) app: Rc<AppCell>,
     /// The platform (for its dispatcher and windows).
     pub(crate) platform: Rc<HeadlessPlatform>,
+    /// A copy of the last framebuffer `frame` returned.
+    framebuffer: Framebuffer,
+    /// A copy of the last scene `scene` returned.
+    scene: Scene,
 }
 
 impl HeadlessApp {
     /// A headless app.
-    pub fn new(_options: HeadlessOptions) -> Self {
-        todo!("elements")
+    pub fn new(options: HeadlessOptions) -> Self {
+        let platform = Rc::new(HeadlessPlatform::from_options(options));
+        let app = App::new_app(platform.clone(), Arc::new(()));
+        HeadlessApp { app, platform, framebuffer: Framebuffer::default(), scene: Scene::default() }
     }
 
     /// Sets the asset source.
@@ -67,33 +77,106 @@ impl HeadlessApp {
         self
     }
 
+    /// The dispatcher (its clock, `set_idle_timeout`, `next_timer`).
+    pub fn dispatcher(&self) -> &Arc<HeadlessDispatcher> {
+        self.platform.headless_dispatcher()
+    }
+
+    /// The headless platform (its clipboard, cursor style, prompt answers, opened URLs).
+    pub fn platform(&self) -> &HeadlessPlatform {
+        &self.platform
+    }
+
     /// Runs `f` with the app and flushes its effects.
-    pub fn update<R>(&mut self, _f: impl FnOnce(&mut App) -> R) -> R {
-        todo!("elements")
+    pub fn update<R>(&mut self, f: impl FnOnce(&mut App) -> R) -> R {
+        self.app.update(f)
+    }
+
+    /// Reads the app.
+    pub fn read<R>(&self, f: impl FnOnce(&App) -> R) -> R {
+        f(&self.app.borrow())
     }
 
     /// Pumps the main and background queues until both are empty and no background job is outstanding.
     pub fn run_until_idle(&mut self) {
-        todo!("elements")
+        self.dispatcher().run_until_idle();
     }
 
-    /// Advances the fake clock (due timers run), then `run_until_idle`.
-    pub fn advance_clock(&mut self, _duration: Duration) {
-        todo!("elements")
+    /// Advances the fake clock (due timers run, in order, each followed by a pump), then `run_until_idle`.
+    pub fn advance_clock(&mut self, duration: Duration) {
+        self.dispatcher().advance_clock(duration);
+        self.run_until_idle();
     }
 
-    /// Delivers `input` to `window` as the platform would.
-    pub fn simulate_input(&mut self, _window: AnyWindowHandle, _input: PlatformInput) {
-        todo!("elements")
+    /// The fake clock's time.
+    pub fn now(&self) -> Instant {
+        crate::PlatformDispatcher::now(self.dispatcher().as_ref())
+    }
+
+    /// Delivers `input` to `window` as the platform would, then `run_until_idle`.
+    #[track_caller]
+    pub fn simulate_input(&mut self, window: AnyWindowHandle, input: PlatformInput) {
+        self.app
+            .update(|cx| cx.update_window(window, |_, window, cx| window.dispatch_event(input, cx)))
+            .expect("simulate_input: the window is not open");
+        self.run_until_idle();
+    }
+
+    /// Whether `window` would draw at its next refresh.
+    pub fn is_dirty(&self, window: AnyWindowHandle) -> bool {
+        match self.app.borrow().windows.get(&window.id) {
+            Some(Some(window)) => window.dirty.get(),
+            _ => false,
+        }
     }
 
     /// Draws `window` if it is dirty and returns its framebuffer.
-    pub fn frame(&mut self, _window: AnyWindowHandle) -> &Framebuffer {
-        todo!("elements")
+    #[track_caller]
+    pub fn frame(&mut self, window: AnyWindowHandle) -> &Framebuffer {
+        let framebuffer = &mut self.framebuffer;
+        self.app
+            .update(|cx| {
+                cx.update_window(window, |_, window, cx| {
+                    window.on_request_frame(RequestFrameOptions::default(), cx);
+                    framebuffer.clone_from(&window.framebuffer);
+                })
+            })
+            .expect("frame: the window is not open");
+        &self.framebuffer
     }
 
     /// The last painted display list of `window` (exact assertions on primitives).
-    pub fn scene(&mut self, _window: AnyWindowHandle) -> &Scene {
-        todo!("elements")
+    #[track_caller]
+    pub fn scene(&mut self, window: AnyWindowHandle) -> &Scene {
+        let scene = &mut self.scene;
+        self.app
+            .update(|cx| {
+                cx.update_window(window, |_, window, _| scene.clone_from(&window.rendered_frame.scene))
+            })
+            .expect("scene: the window is not open");
+        &self.scene
+    }
+
+    /// Settles `window` for a frozen-clock screenshot: pumps until idle and draws until two consecutive
+    /// frames are identical (or the window stops being dirty), at most `max_frames` frames. Returns whether
+    /// it settled. The clock does not move.
+    pub fn settle(&mut self, window: AnyWindowHandle, max_frames: usize) -> bool {
+        self.run_until_idle();
+        let mut previous: Option<Framebuffer> = None;
+        for _ in 0..max_frames {
+            let frame = self.frame(window).clone();
+            self.run_until_idle();
+            let same = previous.as_ref() == Some(&frame);
+            if same || !self.is_dirty(window) {
+                return true;
+            }
+            previous = Some(frame);
+        }
+        false
+    }
+
+    /// The open windows, in the order opened.
+    pub fn windows(&self) -> Vec<AnyWindowHandle> {
+        self.app.borrow().windows()
     }
 }

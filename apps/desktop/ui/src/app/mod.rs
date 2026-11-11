@@ -4,16 +4,19 @@
 //! borrow it for their call and run the effect flush before returning. Files: `entity_map.rs` (entities and
 //! handles), `context.rs` (`Context<T>`), `async_app.rs` (`AsyncApp`), `effects.rs` (the effect queue and its
 //! flush), `subscription.rs` (`SubscriberSet`, `Subscription`), `global.rs` (globals), `windows.rs`
-//! (opening, updating and closing windows), `platform_ops.rs` (clipboard, displays, prompts, URLs).
-#![allow(dead_code)] // skeleton
+//! (opening, updating and closing windows), `platform_ops.rs` (clipboard, displays, prompts, URLs),
+//! `observe.rs` (observers, subscriptions and app-level handlers registered on `App`).
 
 mod async_app;
 mod context;
 mod effects;
 mod entity_map;
 mod global;
+mod observe;
 mod platform_ops;
 mod subscription;
+#[cfg(test)]
+mod tests;
 mod windows;
 
 pub use async_app::*;
@@ -26,7 +29,7 @@ pub use subscription::*;
 use std::{
     any::{Any, TypeId},
     cell::{Ref, RefCell, RefMut},
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     rc::{Rc, Weak},
     sync::Arc,
 };
@@ -44,12 +47,16 @@ impl Application {
     /// `FOLO_UI_PLATFORM=winit` and the `winit` feature is on.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        todo!("runtime")
+        let platform = native_text_system()
+            .and_then(default_platform)
+            .unwrap_or_else(|error| panic!("cannot start the platform: {error:#}"));
+        Application(App::new_app(platform, Arc::new(())))
     }
 
     /// An app on the headless platform (tests, `--shot`). Prefer `HeadlessApp`, which also drives it.
-    pub fn headless(_options: crate::HeadlessOptions) -> Self {
-        todo!("runtime")
+    pub fn headless(options: crate::HeadlessOptions) -> Self {
+        let platform = crate::platform::headless::HeadlessPlatform::from_options(options);
+        Application(App::new_app(Rc::new(platform), Arc::new(())))
     }
 
     /// Where `svg()` and other assets load from.
@@ -59,11 +66,37 @@ impl Application {
     }
 
     /// Runs the platform's loop; `on_finish_launching` runs once it is up. Returns when the app quits.
-    pub fn run<F>(self, _on_finish_launching: F)
+    pub fn run<F>(self, on_finish_launching: F)
     where
         F: 'static + FnOnce(&mut App),
     {
-        todo!("runtime")
+        let this = self.0.clone();
+        let platform = self.0.borrow().platform.clone();
+        // GPUI runs this without an update around it; flushing its effects at once reaches the same state
+        // sooner (defers and notifies do not wait for the first event).
+        platform.run(Box::new(move || this.update(on_finish_launching)));
+    }
+}
+
+/// The text backend the real platforms use: DirectWrite on Windows, cosmic-text elsewhere.
+fn native_text_system() -> anyhow::Result<Arc<dyn crate::PlatformTextSystem>> {
+    crate::platform::headless::text_backend(crate::TextBackend::Native)
+}
+
+/// The window backend for this OS: Win32 on Windows (winit when `FOLO_UI_PLATFORM=winit` and the `winit`
+/// feature is on), winit elsewhere.
+fn default_platform(text_system: Arc<dyn crate::PlatformTextSystem>) -> anyhow::Result<Rc<dyn Platform>> {
+    #[cfg(windows)]
+    {
+        #[cfg(feature = "winit")]
+        if std::env::var("FOLO_UI_PLATFORM").is_ok_and(|platform| platform == "winit") {
+            return Ok(Rc::new(crate::platform::winit::WinitPlatform::new(text_system)?));
+        }
+        crate::pending::platform_pending::windows_platform(text_system)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(Rc::new(crate::platform::winit::WinitPlatform::new(text_system)?))
     }
 }
 
@@ -83,6 +116,22 @@ impl AppCell {
     #[track_caller]
     pub fn borrow_mut(&self) -> RefMut<'_, App> {
         self.app.borrow_mut()
+    }
+
+    /// Borrows the app unless it is mutably borrowed.
+    pub(crate) fn try_borrow(&self) -> Option<Ref<'_, App>> {
+        self.app.try_borrow().ok()
+    }
+
+    /// Borrows the app mutably unless it is borrowed already.
+    pub(crate) fn try_borrow_mut(&self) -> Option<RefMut<'_, App>> {
+        self.app.try_borrow_mut().ok()
+    }
+
+    /// Runs `f` with the app, then flushes its effects (the entry point of platform callbacks).
+    #[track_caller]
+    pub fn update<R>(&self, f: impl FnOnce(&mut App) -> R) -> R {
+        self.borrow_mut().update(f)
     }
 }
 
@@ -151,17 +200,68 @@ pub struct App {
     pub(crate) propagate_event: bool,
     /// Set once quit starts.
     pub(crate) quitting: bool,
+    /// Entities notified and not yet flushed (one `Notify` effect each per flush, as GPUI).
+    pub(crate) pending_notifications: HashSet<crate::EntityId>,
+    /// Globals changed and not yet flushed (one effect each per flush, as GPUI).
+    pub(crate) pending_global_notifications: HashSet<TypeId>,
+    /// A notify, global change or refresh asked every window to redraw at the end of this flush.
+    pub(crate) windows_need_refresh: bool,
+    /// The window whose `draw` is running, if any. **`Window::draw` sets it for its duration**: a notify
+    /// meanwhile still runs observers but does not dirty the windows (GPUI's invalidator ignores views that
+    /// notify while their window draws), so a view that notifies in `render` does not redraw forever.
+    pub(crate) drawing_window: Option<WindowId>,
 }
 
 impl App {
     /// Builds the app around a platform (called by `Application::new` / `headless`).
-    pub(crate) fn new_app(_platform: Rc<dyn Platform>, _asset_source: Arc<dyn AssetSource>) -> Rc<AppCell> {
-        todo!("runtime")
+    pub(crate) fn new_app(platform: Rc<dyn Platform>, asset_source: Arc<dyn AssetSource>) -> Rc<AppCell> {
+        let dispatcher = platform.dispatcher();
+        let text_system = Arc::new(TextSystem::new(platform.text_system()));
+        Rc::new_cyclic(|this| AppCell {
+            app: RefCell::new(App {
+                this: this.clone(),
+                platform,
+                text_system,
+                asset_source,
+                background_executor: BackgroundExecutor::new(dispatcher.clone()),
+                foreground_executor: ForegroundExecutor::new(dispatcher),
+                entities: EntityMap::new(),
+                windows: HashMap::new(),
+                window_order: Vec::new(),
+                next_window_id: 1,
+                focus_handles: Arc::new(FocusMap::default()),
+                globals_by_type: HashMap::new(),
+                keymap: Rc::new(RefCell::new(Keymap::default())),
+                global_action_listeners: HashMap::new(),
+                pending_effects: VecDeque::new(),
+                pending_updates: 0,
+                flushing_effects: false,
+                observers: SubscriberSet::new(),
+                event_listeners: SubscriberSet::new(),
+                global_observers: SubscriberSet::new(),
+                quit_observers: SubscriberSet::new(),
+                window_closed_observers: SubscriberSet::new(),
+                propagate_event: true,
+                quitting: false,
+                pending_notifications: HashSet::new(),
+                pending_global_notifications: HashSet::new(),
+                windows_need_refresh: false,
+                drawing_window: None,
+            }),
+        })
     }
 
     /// Runs `f`, then flushes effects if this was the outermost update.
-    pub(crate) fn update<R>(&mut self, _f: impl FnOnce(&mut Self) -> R) -> R {
-        todo!("runtime")
+    pub(crate) fn update<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.pending_updates += 1;
+        let result = f(self);
+        if !self.flushing_effects && self.pending_updates == 1 {
+            self.flushing_effects = true;
+            self.flush_effects();
+            self.flushing_effects = false;
+        }
+        self.pending_updates -= 1;
+        result
     }
 
     /// The background executor.
@@ -175,12 +275,13 @@ impl App {
     }
 
     /// Spawns `f` on the UI thread with an `AsyncApp`.
-    pub fn spawn<AsyncFn, R>(&self, _f: AsyncFn) -> crate::Task<R>
+    pub fn spawn<AsyncFn, R>(&self, f: AsyncFn) -> crate::Task<R>
     where
         AsyncFn: AsyncFnOnce(&mut AsyncApp) -> R + 'static,
         R: 'static,
     {
-        todo!("runtime")
+        let mut cx = self.to_async();
+        self.foreground_executor.spawn(async move { f(&mut cx).await })
     }
 
     /// An `AsyncApp` for this app.
@@ -235,8 +336,10 @@ impl App {
     }
 
     /// Registers `f` to run when a window has closed.
-    pub fn on_window_closed(&self, _on_closed: impl FnMut(&mut App) + 'static) -> Subscription {
-        todo!("runtime")
+    pub fn on_window_closed(&self, on_closed: impl FnMut(&mut App) + 'static) -> Subscription {
+        let (subscription, activate) = self.window_closed_observers.insert((), Box::new(on_closed));
+        activate();
+        subscription
     }
 
     /// Makes a new focus handle.
@@ -246,8 +349,11 @@ impl App {
 
     /// Frees an image's cached copies now (the renderer's resample cache and the window's masks). With no
     /// GPU atlas this only drops cache entries; `current_window` is the window being updated, if any.
-    pub fn drop_image(&mut self, _image: Arc<crate::RenderImage>, _current_window: Option<&mut Window>) {
-        todo!("runtime")
+    ///
+    /// The renderer's caches key images by id, are bounded in bytes and drop what recent frames did not
+    /// draw, so nothing has to be freed eagerly: this releases the caller's reference.
+    pub fn drop_image(&mut self, image: Arc<crate::RenderImage>, _current_window: Option<&mut Window>) {
+        drop(image);
     }
 }
 
@@ -297,19 +403,29 @@ pub trait AppContext {
 impl AppContext for App {
     type Result<T> = T;
 
-    fn new<T: 'static>(&mut self, _build_entity: impl FnOnce(&mut Context<T>) -> T) -> Entity<T> {
-        todo!("runtime")
+    fn new<T: 'static>(&mut self, build_entity: impl FnOnce(&mut Context<T>) -> T) -> Entity<T> {
+        self.update(|cx| {
+            let handle = cx.entities.reserve::<T>();
+            let state = build_entity(&mut Context::new_context(cx, handle.downgrade()));
+            cx.entities.insert(&handle, state);
+            handle
+        })
     }
 
     fn update_entity<T, R>(
         &mut self,
-        _handle: &Entity<T>,
-        _update: impl FnOnce(&mut T, &mut Context<T>) -> R,
+        handle: &Entity<T>,
+        update: impl FnOnce(&mut T, &mut Context<T>) -> R,
     ) -> R
     where
         T: 'static,
     {
-        todo!("runtime")
+        self.update(|cx| {
+            let mut lease = cx.entities.lease(handle);
+            let result = update(lease.state_mut(), &mut Context::new_context(cx, handle.downgrade()));
+            cx.entities.end_lease(lease);
+            result
+        })
     }
 
     fn read_entity<T, R>(&self, handle: &Entity<T>, read: impl FnOnce(&T, &App) -> R) -> R
@@ -319,11 +435,11 @@ impl AppContext for App {
         read(self.entities.read(handle), self)
     }
 
-    fn update_window<T, F>(&mut self, _window: AnyWindowHandle, _f: F) -> anyhow::Result<T>
+    fn update_window<T, F>(&mut self, window: AnyWindowHandle, f: F) -> anyhow::Result<T>
     where
         F: FnOnce(crate::AnyView, &mut Window, &mut App) -> T,
     {
-        todo!("runtime")
+        self.update_window_id(window, f)
     }
 
     fn background_spawn<R>(&self, future: impl Future<Output = R> + Send + 'static) -> crate::Task<R>

@@ -1,5 +1,4 @@
 //! Key contexts (`div().key_context("TextInput")`) and binding context predicates. Owner tag: `"runtime"`.
-#![allow(dead_code)] // skeleton
 
 use smallvec::SmallVec;
 
@@ -11,8 +10,13 @@ pub struct KeyContext(pub(crate) SmallVec<[SharedString; 1]>);
 
 impl KeyContext {
     /// Parses a context: space-separated identifiers (the app passes one).
-    pub fn parse(_source: &str) -> anyhow::Result<Self> {
-        todo!("runtime")
+    pub fn parse(source: &str) -> anyhow::Result<Self> {
+        let mut context = KeyContext::default();
+        for identifier in source.split_whitespace() {
+            anyhow::ensure!(is_identifier(identifier), "invalid key context identifier {identifier:?}");
+            context.add(SharedString::from(identifier.to_string()));
+        }
+        Ok(context)
     }
 
     /// Adds an identifier.
@@ -48,12 +52,30 @@ pub enum KeyBindingContextPredicate {
 
 impl KeyBindingContextPredicate {
     /// Parses a predicate (an identifier; anything else is an error).
-    pub fn parse(_source: &str) -> anyhow::Result<Self> {
-        todo!("runtime")
+    pub fn parse(source: &str) -> anyhow::Result<Self> {
+        let source = source.trim();
+        anyhow::ensure!(
+            is_identifier(source),
+            "unsupported key context predicate {source:?} (only a single identifier is supported)"
+        );
+        Ok(KeyBindingContextPredicate::Identifier(SharedString::from(source.to_string())))
     }
 
-    /// The depth (index into `contexts`, root first) of the deepest context the predicate matches, if any.
-    pub fn depth_of(&self, _contexts: &[KeyContext]) -> Option<usize> {
-        todo!("runtime")
+    /// How deep in `contexts` (root first) the predicate matches: GPUI's `depth_of`, which is the length
+    /// of the shortest prefix of the stack whose last context satisfies the predicate, searched from the
+    /// full stack down (so the deepest matching context, counted from 1). `None` when nothing matches.
+    pub fn depth_of(&self, contexts: &[KeyContext]) -> Option<usize> {
+        match self {
+            KeyBindingContextPredicate::Identifier(name) => {
+                contexts.iter().rposition(|context| context.contains(name)).map(|ix| ix + 1)
+            }
+        }
     }
+}
+
+/// GPUI's identifier grammar: letters, digits, `_` and `-`, not starting with a digit.
+fn is_identifier(source: &str) -> bool {
+    let mut chars = source.chars();
+    chars.next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }

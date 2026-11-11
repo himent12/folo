@@ -1,6 +1,5 @@
 //! Globals: one value per type (`cx.set_global(Theme::new(..))`, `cx.global::<Theme>()`). Owner tag:
 //! `"runtime"`. Setting or updating a global notifies its observers and redraws every window.
-#![allow(dead_code)] // skeleton
 
 use std::any::TypeId;
 
@@ -43,7 +42,16 @@ impl App {
     }
 
     /// Updates the global of type `G` (leased out for the call, so `f` gets the app too).
-    pub fn update_global<G: Global, R>(&mut self, _f: impl FnOnce(&mut G, &mut App) -> R) -> R {
-        todo!("runtime")
+    #[track_caller]
+    pub fn update_global<G: Global, R>(&mut self, f: impl FnOnce(&mut G, &mut App) -> R) -> R {
+        self.update(|cx| {
+            let type_id = TypeId::of::<G>();
+            let mut global =
+                cx.globals_by_type.remove(&type_id).expect("no global of this type has been set");
+            let result = f(global.downcast_mut::<G>().expect("global type"), cx);
+            cx.globals_by_type.insert(type_id, global);
+            cx.push_effect(crate::app::Effect::NotifyGlobalObservers { global_type: type_id });
+            result
+        })
     }
 }

@@ -154,7 +154,8 @@ impl Renderer {
 
 - `PlatformTextSystem` is GPUI's trait (add_fonts, font_id, font_metrics, typographic_bounds, advance,
   glyph_for_char, glyph_raster_bounds, rasterize_glyph, layout_line) plus `glyph_blend() -> GlyphBlend`
-  (the contrast / gamma parameters the renderer applies to glyph masks; identity for the portable backend).
+  (the contrast / gamma parameters the renderer applies to glyph masks; the portable backend gives GPUI's
+  Linux renderer defaults, gamma 1.8 and contrast 1.0, as `shaders.wgsl` applies them).
 - `TextSystem` (app-wide: font ids, metrics, fallback stack) and `WindowTextSystem` (per window: the line
   layout cache that keeps what the previous frame used) expose what the app and the text element call:
   `shape_line`, `shape_text`, `layout_line`, `line_wrapper`, `ShapedLine::{paint, width, x_for_index,

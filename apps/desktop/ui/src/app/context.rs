@@ -2,9 +2,9 @@
 //!
 //! A `Context<T>` exists only inside `Entity<T>::update` / `AppContext::new` (the state is leased out of the
 //! entity map meanwhile); it derefs to `App`.
-#![allow(dead_code)] // skeleton
 
 use std::{
+    any::TypeId,
     future::Future,
     ops::{Deref, DerefMut},
 };
@@ -50,7 +50,8 @@ impl<'a, T: 'static> Context<'a, T> {
         self.entity_state.entity_id()
     }
 
-    /// A strong handle to the entity (panics while it is being built, as GPUI).
+    /// A strong handle to the entity (it works while the entity is being built, as GPUI: the handle is
+    /// reserved before the build closure runs).
     pub fn entity(&self) -> Entity<T> {
         self.weak_entity().upgrade().expect("the entity is being built")
     }
@@ -63,67 +64,88 @@ impl<'a, T: 'static> Context<'a, T> {
     /// Says the entity changed: its observers run at the flush and every window redraws.
     pub fn notify(&mut self) {
         let entity_id = self.entity_id();
-        self.app.push_effect(crate::app::Effect::Notify { emitter: entity_id });
+        self.app.notify(entity_id);
     }
 
     /// Emits `event` to the entity's subscribers (at the flush).
-    pub fn emit<Evt>(&mut self, _event: Evt)
+    pub fn emit<Evt>(&mut self, event: Evt)
     where
         T: EventEmitter<Evt>,
         Evt: 'static,
     {
-        todo!("runtime")
+        let emitter = self.entity_id();
+        self.app.push_effect(crate::app::Effect::Emit {
+            emitter,
+            event_type: TypeId::of::<Evt>(),
+            event: Box::new(event),
+        });
     }
 
     /// Calls `on_event` with each event `entity` emits, while the subscription lives.
     pub fn subscribe<T2, Evt>(
         &mut self,
-        _entity: &Entity<T2>,
-        _on_event: impl FnMut(&mut T, Entity<T2>, &Evt, &mut Context<T>) + 'static,
+        entity: &Entity<T2>,
+        mut on_event: impl FnMut(&mut T, Entity<T2>, &Evt, &mut Context<T>) + 'static,
     ) -> Subscription
     where
         T2: 'static + EventEmitter<Evt>,
         Evt: 'static,
     {
-        todo!("runtime")
+        let this = self.weak_entity();
+        self.app.subscribe_internal(entity, move |emitter, event, cx| {
+            this.update(cx, |this, cx| on_event(this, emitter, event, cx)).is_ok()
+        })
     }
 
     /// Calls `on_notify` whenever `entity` notifies, while the subscription lives.
     pub fn observe<W: 'static>(
         &mut self,
-        _entity: &Entity<W>,
-        _on_notify: impl FnMut(&mut T, Entity<W>, &mut Context<T>) + 'static,
+        entity: &Entity<W>,
+        mut on_notify: impl FnMut(&mut T, Entity<W>, &mut Context<T>) + 'static,
     ) -> Subscription {
-        todo!("runtime")
+        let this = self.weak_entity();
+        self.app.observe_internal(entity, move |observed, cx| {
+            this.update(cx, |this, cx| on_notify(this, observed, cx)).is_ok()
+        })
     }
 
     /// Calls `f` whenever global `G` changes, while the subscription lives.
     pub fn observe_global<G: Global>(
         &mut self,
-        _f: impl FnMut(&mut T, &mut Context<T>) + 'static,
+        mut f: impl FnMut(&mut T, &mut Context<T>) + 'static,
     ) -> Subscription {
-        todo!("runtime")
+        let this = self.weak_entity();
+        self.app.observe_global_internal::<G>(move |cx| this.update(cx, |this, cx| f(this, cx)).is_ok())
     }
 
     /// Calls `on_quit` when the app quits; the quit waits briefly for the returned future.
     pub fn on_app_quit<Fut>(
         &self,
-        _on_quit: impl FnMut(&mut T, &mut Context<T>) -> Fut + 'static,
+        mut on_quit: impl FnMut(&mut T, &mut Context<T>) -> Fut + 'static,
     ) -> Subscription
     where
         Fut: 'static + Future<Output = ()>,
     {
-        todo!("runtime")
+        let this = self.weak_entity();
+        self.app.on_app_quit(move |cx| {
+            let future = this.update(cx, |this, cx| on_quit(this, cx)).ok();
+            async move {
+                if let Some(future) = future {
+                    future.await;
+                }
+            }
+        })
     }
 
     /// Spawns `f` on the UI thread with a weak handle to this entity (GPUI 0.2.2's closure shape:
     /// `cx.spawn(async move |this, cx| ..)`).
-    pub fn spawn<AsyncFn, R>(&self, _f: AsyncFn) -> Task<R>
+    pub fn spawn<AsyncFn, R>(&self, f: AsyncFn) -> Task<R>
     where
         AsyncFn: AsyncFnOnce(WeakEntity<T>, &mut AsyncApp) -> R + 'static,
         R: 'static,
     {
-        todo!("runtime")
+        let this = self.weak_entity();
+        self.app.spawn(async move |cx| f(this, cx).await)
     }
 
     /// Wraps an entity method as an event listener (`.on_click(cx.listener(Self::clicked))`): the listener

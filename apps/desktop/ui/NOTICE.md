@@ -40,5 +40,7 @@ when you adapt another file.
 | `text/line.rs`, `text/paint.rs` | `text_system/line.rs`, `style.rs` (`TextAlign`) |
 | `text/dwrite/mod.rs`, `text/dwrite/fonts.rs`, `text/dwrite/layout.rs`, `text/dwrite/raster.rs` | `platform/windows/direct_write.rs`, `platform/windows/color_text_raster.hlsl` |
 | `text/dwrite/blend.rs` | `platform/windows/directx_renderer.rs` (`get_font_info`, `get_gamma_ratios`), `platform/windows/alpha_correction.hlsl` |
+| `text/portable/fonts.rs`, `text/portable/layout.rs` | `platform/linux/text_system.rs` |
+| `text/portable/raster.rs` | `platform/linux/text_system.rs`, `platform/blade/blade_renderer.rs` (`get_gamma_ratios`) |
 
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.

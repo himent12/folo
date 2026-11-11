@@ -3,16 +3,20 @@
 //!
 //! Tasks are `async-task` runnables: waking one schedules it on its dispatcher queue, so an idle app has no
 //! timer and no thread awake. Dropping a `Task` cancels it; `detach` lets it run to the end.
-#![allow(dead_code)] // skeleton
+//!
+//! A foreground task is an `async_task::spawn_local` task: it is polled only on the thread that spawned it
+//! (the platform runs main-thread runnables there). A task woken after the app is gone just runs: its
+//! `AsyncApp` calls return `Err`, nothing panics.
 
 use std::{
     fmt,
     future::Future,
     marker::PhantomData,
-    pin::Pin,
+    pin::{Pin, pin},
     rc::Rc,
     sync::Arc,
-    task::{Context, Poll},
+    task::{Context, Poll, Wake, Waker},
+    thread::Thread,
     time::{Duration, Instant},
 };
 
@@ -89,21 +93,65 @@ impl BackgroundExecutor {
     }
 
     /// Runs `future` on a background thread.
-    pub fn spawn<R>(&self, _future: impl Future<Output = R> + Send + 'static) -> Task<R>
+    pub fn spawn<R>(&self, future: impl Future<Output = R> + Send + 'static) -> Task<R>
     where
         R: Send + 'static,
     {
-        todo!("runtime")
+        let dispatcher = self.dispatcher.clone();
+        let (runnable, task) = async_task::spawn(future, move |runnable| dispatcher.dispatch(runnable));
+        runnable.schedule();
+        Task(TaskState::Spawned(task))
     }
 
-    /// Resolves after `duration` (through `dispatch_after`; no thread sleeps).
-    pub fn timer(&self, _duration: Duration) -> Task<()> {
-        todo!("runtime")
+    /// Resolves after `duration` (through `dispatch_after`; no thread sleeps). A zero duration is ready
+    /// at once, as GPUI's.
+    pub fn timer(&self, duration: Duration) -> Task<()> {
+        if duration.is_zero() {
+            return Task::ready(());
+        }
+        let dispatcher = self.dispatcher.clone();
+        let (runnable, task) =
+            async_task::spawn(async {}, move |runnable| dispatcher.dispatch_after(duration, runnable));
+        runnable.schedule();
+        Task(TaskState::Spawned(task))
     }
 
     /// The dispatcher's clock (the headless clock in tests).
     pub fn now(&self) -> Instant {
-        todo!("runtime")
+        self.dispatcher.now()
+    }
+
+    /// Polls `future` on this thread until it is ready or `timeout` (real time) has passed; `None` on
+    /// timeout. Nothing else runs on this thread meanwhile (GPUI's
+    /// `block_with_timeout`, used by quit).
+    pub fn block_with_timeout<F: Future>(&self, timeout: Duration, future: F) -> Option<F::Output> {
+        let deadline = Instant::now() + timeout;
+        let waker = Waker::from(Arc::new(ThreadWaker(std::thread::current())));
+        let mut cx = Context::from_waker(&waker);
+        let mut future = pin!(future);
+        loop {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+                return Some(output);
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            std::thread::park_timeout(deadline - now);
+        }
+    }
+}
+
+/// Wakes a thread parked in `block_with_timeout`.
+struct ThreadWaker(Thread);
+
+impl Wake for ThreadWaker {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
     }
 }
 
@@ -114,10 +162,19 @@ impl ForegroundExecutor {
     }
 
     /// Runs `future` on the UI thread.
-    pub fn spawn<R>(&self, _future: impl Future<Output = R> + 'static) -> Task<R>
+    pub fn spawn<R>(&self, future: impl Future<Output = R> + 'static) -> Task<R>
     where
         R: 'static,
     {
-        todo!("runtime")
+        let dispatcher = self.dispatcher.clone();
+        let (runnable, task) =
+            async_task::spawn_local(future, move |runnable| dispatcher.dispatch_on_main_thread(runnable));
+        runnable.schedule();
+        Task(TaskState::Spawned(task))
+    }
+
+    /// The dispatcher's clock.
+    pub fn now(&self) -> Instant {
+        self.dispatcher.now()
     }
 }
