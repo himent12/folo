@@ -53,7 +53,7 @@ import datasets  # noqa: E402
 import folo_api  # noqa: E402
 import run_state  # noqa: E402
 import scorer  # noqa: E402
-from folo_api import Api, ApiError  # noqa: E402,F401  (ApiError: what callers of Matrix catch)
+from folo_api import Api  # noqa: E402
 from run_cleanup import TERMINAL, Ownership, ended  # noqa: E402,F401  (TERMINAL, ended: run_folo's API)
 
 
