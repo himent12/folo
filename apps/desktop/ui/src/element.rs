@@ -5,14 +5,13 @@
 //! An element lives for one frame: built by `render`, then `request_layout` -> `prepaint` -> `paint`, then
 //! dropped. Anything that must survive to the next frame goes in element state keyed by `GlobalElementId`
 //! (`Window::with_element_state`).
-#![allow(dead_code)] // skeleton
 
-use std::{any::Any, fmt, panic, sync::Arc};
+use std::{any::Any, fmt, mem, panic, sync::Arc};
 
 use smallvec::SmallVec;
 
 use crate::{
-    App, AvailableSpace, Bounds, Context, Entity, EntityId, FluentBuilder, FocusHandle, FocusId, Pixels,
+    App, AvailableSpace, Bounds, Context, Style, Entity, EntityId, FluentBuilder, FocusHandle, FocusId, Pixels,
     Point, SharedString, Size, Window,
 };
 
@@ -121,10 +120,12 @@ impl<C: RenderOnce> Element for Component<C> {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        todo!("elements")
+        let mut element = self.component.take().expect("a component renders once").render(window, cx).into_any_element();
+        let layout_id = element.request_layout(window, cx);
+        (layout_id, element)
     }
 
     fn prepaint(
@@ -132,11 +133,11 @@ impl<C: RenderOnce> Element for Component<C> {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        todo!("elements")
+        request_layout.prepaint(window, cx);
     }
 
     fn paint(
@@ -144,12 +145,12 @@ impl<C: RenderOnce> Element for Component<C> {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        request_layout: &mut Self::RequestLayoutState,
         _prepaint: &mut Self::PrepaintState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        todo!("elements")
+        request_layout.paint(window, cx);
     }
 }
 
@@ -256,25 +257,98 @@ impl<E: Element> ElementObject for Drawable<E> {
         &mut self.element
     }
 
-    fn request_layout(&mut self, _window: &mut Window, _cx: &mut App) -> LayoutId {
-        todo!("elements")
+    fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
+        match mem::replace(&mut self.phase, ElementDrawPhase::Painted) {
+            ElementDrawPhase::Start => {
+                let global_id = self.element.id().map(|id| {
+                    window.element_id_stack.push(id);
+                    GlobalElementId(Arc::from(window.element_id_stack.as_slice()))
+                });
+                let (layout_id, request_layout) = self.element.request_layout(global_id.as_ref(), None, window, cx);
+                if global_id.is_some() {
+                    window.element_id_stack.pop();
+                }
+                self.phase = ElementDrawPhase::RequestLayout { layout_id, global_id, request_layout };
+                layout_id
+            }
+            _ => panic!("must call request_layout only once"),
+        }
     }
 
-    fn prepaint(&mut self, _window: &mut Window, _cx: &mut App) {
-        todo!("elements")
+    fn prepaint(&mut self, window: &mut Window, cx: &mut App) {
+        match mem::replace(&mut self.phase, ElementDrawPhase::Painted) {
+            ElementDrawPhase::RequestLayout { layout_id, global_id, mut request_layout }
+            | ElementDrawPhase::LayoutComputed { layout_id, global_id, mut request_layout, .. } => {
+                if let Some(id) = global_id.as_ref().and_then(|global_id| global_id.0.last()) {
+                    window.element_id_stack.push(id.clone());
+                }
+                let bounds = window.layout_bounds(layout_id);
+                let prepaint =
+                    self.element.prepaint(global_id.as_ref(), None, bounds, &mut request_layout, window, cx);
+                if global_id.is_some() {
+                    window.element_id_stack.pop();
+                }
+                self.phase = ElementDrawPhase::Prepaint { global_id, bounds, request_layout, prepaint };
+            }
+            _ => panic!("must call request_layout before prepaint"),
+        }
     }
 
-    fn paint(&mut self, _window: &mut Window, _cx: &mut App) {
-        todo!("elements")
+    fn paint(&mut self, window: &mut Window, cx: &mut App) {
+        match mem::replace(&mut self.phase, ElementDrawPhase::Painted) {
+            ElementDrawPhase::Prepaint { global_id, bounds, mut request_layout, mut prepaint } => {
+                if let Some(id) = global_id.as_ref().and_then(|global_id| global_id.0.last()) {
+                    window.element_id_stack.push(id.clone());
+                }
+                self.element.paint(
+                    global_id.as_ref(),
+                    None,
+                    bounds,
+                    &mut request_layout,
+                    &mut prepaint,
+                    window,
+                    cx,
+                );
+                if global_id.is_some() {
+                    window.element_id_stack.pop();
+                }
+            }
+            _ => panic!("must call prepaint before paint"),
+        }
     }
 
     fn layout_as_root(
         &mut self,
-        _available_space: Size<AvailableSpace>,
-        _window: &mut Window,
-        _cx: &mut App,
+        available_space: Size<AvailableSpace>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Size<Pixels> {
-        todo!("elements")
+        if matches!(self.phase, ElementDrawPhase::Start) {
+            ElementObject::request_layout(self, window, cx);
+        }
+        let layout_id = match mem::replace(&mut self.phase, ElementDrawPhase::Painted) {
+            ElementDrawPhase::RequestLayout { layout_id, global_id, request_layout } => {
+                window.compute_layout(layout_id, available_space, cx);
+                self.phase =
+                    ElementDrawPhase::LayoutComputed { layout_id, global_id, available_space, request_layout };
+                layout_id
+            }
+            ElementDrawPhase::LayoutComputed {
+                layout_id,
+                global_id,
+                available_space: previous_space,
+                request_layout,
+            } => {
+                if available_space != previous_space {
+                    window.compute_layout(layout_id, available_space, cx);
+                }
+                self.phase =
+                    ElementDrawPhase::LayoutComputed { layout_id, global_id, available_space, request_layout };
+                layout_id
+            }
+            _ => panic!("cannot measure after painting"),
+        };
+        window.layout_bounds(layout_id).size
     }
 }
 
@@ -298,8 +372,13 @@ impl AnyElement {
     }
 
     /// Phase 2. Returns the focus handle a child asked to be focused during prepaint, as GPUI does.
-    pub fn prepaint(&mut self, _window: &mut Window, _cx: &mut App) -> Option<FocusHandle> {
-        todo!("elements")
+    pub fn prepaint(&mut self, window: &mut Window, cx: &mut App) -> Option<FocusHandle> {
+        let focus_assigned = window.next_frame.focus.is_some();
+        self.0.prepaint(window, cx);
+        match window.next_frame.focus {
+            Some(focus_id) if !focus_assigned => FocusHandle::for_id(focus_id, &cx.focus_handles),
+            _ => None,
+        }
     }
 
     /// Phase 3.
@@ -320,22 +399,23 @@ impl AnyElement {
     /// Prepaints at `origin` (after a layout), offset from the current element offset.
     pub fn prepaint_at(
         &mut self,
-        _origin: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut App,
+        origin: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<FocusHandle> {
-        todo!("elements")
+        window.with_absolute_element_offset(origin, |window| self.prepaint(window, cx))
     }
 
     /// `layout_as_root` then `prepaint_at(origin)`.
     pub fn prepaint_as_root(
         &mut self,
-        _origin: Point<Pixels>,
-        _available_space: Size<AvailableSpace>,
-        _window: &mut Window,
-        _cx: &mut App,
+        origin: Point<Pixels>,
+        available_space: Size<AvailableSpace>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<FocusHandle> {
-        todo!("elements")
+        self.layout_as_root(available_space, window, cx);
+        window.with_absolute_element_offset(origin, |window| self.prepaint(window, cx))
     }
 }
 
@@ -419,10 +499,10 @@ impl Element for Empty {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        todo!("elements")
+        (window.request_layout(Style::default(), None, cx), ())
     }
 
     fn prepaint(
@@ -479,37 +559,48 @@ impl<E: Element> Element for Option<E> {
 
     fn request_layout(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _window: &mut Window,
-        _cx: &mut App,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        todo!("elements")
+        match self {
+            Some(element) => {
+                let (layout_id, state) = element.request_layout(id, inspector_id, window, cx);
+                (layout_id, Some(state))
+            }
+            None => (window.request_layout(Style::default(), None, cx), None),
+        }
     }
 
     fn prepaint(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Self::PrepaintState {
-        todo!("elements")
+        match (self, request_layout) {
+            (Some(element), Some(state)) => Some(element.prepaint(id, inspector_id, bounds, state, window, cx)),
+            _ => None,
+        }
     }
 
     fn paint(
         &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
-        _window: &mut Window,
-        _cx: &mut App,
+        id: Option<&GlobalElementId>,
+        inspector_id: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        request_layout: &mut Self::RequestLayoutState,
+        prepaint: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        todo!("elements")
+        if let (Some(element), Some(state), Some(prepaint)) = (self, request_layout, prepaint) {
+            element.paint(id, inspector_id, bounds, state, prepaint, window, cx);
+        }
     }
 }
 

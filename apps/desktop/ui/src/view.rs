@@ -3,7 +3,6 @@
 //!
 //! There is no per-view caching: any `notify` redraws the whole window (DESIGN.md, the runtime's rule), so a
 //! view element just renders its entity every frame under `ElementId::View(entity_id)`.
-#![allow(dead_code)] // skeleton
 
 use std::panic;
 
@@ -43,9 +42,9 @@ impl<V: Render> From<Entity<V>> for AnyView {
 }
 
 /// `AnyView::render` for views of type `V`.
-#[allow(clippy::extra_unused_type_parameters)] // skeleton: the body downcasts to `Entity<V>`
-fn render_view<V: Render>(_view: &AnyView, _window: &mut Window, _cx: &mut App) -> AnyElement {
-    todo!("elements")
+fn render_view<V: Render>(view: &AnyView, window: &mut Window, cx: &mut App) -> AnyElement {
+    let view = view.clone().downcast::<V>().unwrap_or_else(|_| panic!("AnyView of the wrong type"));
+    view.update(cx, |view, cx| view.render(window, cx).into_any_element())
 }
 
 impl Element for AnyView {
@@ -65,10 +64,12 @@ impl Element for AnyView {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        todo!("elements")
+        let mut element = (self.render)(self, window, cx);
+        let layout_id = element.request_layout(window, cx);
+        (layout_id, Some(element))
     }
 
     fn prepaint(
@@ -76,11 +77,13 @@ impl Element for AnyView {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
-        _window: &mut Window,
-        _cx: &mut App,
+        request_layout: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        todo!("elements")
+        if let Some(element) = request_layout {
+            element.prepaint(window, cx);
+        }
     }
 
     fn paint(
@@ -88,12 +91,14 @@ impl Element for AnyView {
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
         _bounds: Bounds<Pixels>,
-        _request_layout: &mut Self::RequestLayoutState,
+        request_layout: &mut Self::RequestLayoutState,
         _prepaint: &mut Self::PrepaintState,
-        _window: &mut Window,
-        _cx: &mut App,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        todo!("elements")
+        if let Some(element) = request_layout {
+            element.paint(window, cx);
+        }
     }
 }
 

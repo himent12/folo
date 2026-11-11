@@ -1,7 +1,6 @@
 //! Text input for custom elements: the `InputHandler` trait the window calls, `EntityInputHandler` (what
 //! `src/input.rs` implements on its view) and `ElementInputHandler` (adapts the one to the other).
 //! Owner tag: `"elements"`. Ranges are UTF-16 code units, as GPUI's.
-#![allow(dead_code)] // skeleton
 
 use std::ops::Range;
 
@@ -142,67 +141,69 @@ impl<V: 'static> ElementInputHandler<V> {
 impl<V: EntityInputHandler> InputHandler for ElementInputHandler<V> {
     fn selected_text_range(
         &mut self,
-        _ignore_disabled_input: bool,
-        _window: &mut Window,
-        _cx: &mut App,
+        ignore_disabled_input: bool,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<UTF16Selection> {
-        todo!("elements")
+        self.view.update(cx, |view, cx| view.selected_text_range(ignore_disabled_input, window, cx))
     }
 
-    fn marked_text_range(&mut self, _window: &mut Window, _cx: &mut App) -> Option<Range<usize>> {
-        todo!("elements")
+    fn marked_text_range(&mut self, window: &mut Window, cx: &mut App) -> Option<Range<usize>> {
+        self.view.update(cx, |view, cx| view.marked_text_range(window, cx))
     }
 
     fn text_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
-        _adjusted_range: &mut Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut App,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<String> {
-        todo!("elements")
+        self.view.update(cx, |view, cx| view.text_for_range(range_utf16, adjusted_range, window, cx))
     }
 
     fn replace_text_in_range(
         &mut self,
-        _replacement_range: Option<Range<usize>>,
-        _text: &str,
-        _window: &mut Window,
-        _cx: &mut App,
+        replacement_range: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        todo!("elements")
+        self.view.update(cx, |view, cx| view.replace_text_in_range(replacement_range, text, window, cx))
     }
 
     fn replace_and_mark_text_in_range(
         &mut self,
-        _range_utf16: Option<Range<usize>>,
-        _new_text: &str,
-        _new_selected_range: Option<Range<usize>>,
-        _window: &mut Window,
-        _cx: &mut App,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut App,
     ) {
-        todo!("elements")
+        self.view.update(cx, |view, cx| {
+            view.replace_and_mark_text_in_range(range_utf16, new_text, new_selected_range, window, cx)
+        })
     }
 
-    fn unmark_text(&mut self, _window: &mut Window, _cx: &mut App) {
-        todo!("elements")
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut App) {
+        self.view.update(cx, |view, cx| view.unmark_text(window, cx))
     }
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
-        _window: &mut Window,
-        _cx: &mut App,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<Bounds<Pixels>> {
-        todo!("elements")
+        self.view.update(cx, |view, cx| view.bounds_for_range(range_utf16, self.element_bounds, window, cx))
     }
 
     fn character_index_for_point(
         &mut self,
-        _point: Point<Pixels>,
-        _window: &mut Window,
-        _cx: &mut App,
+        point: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
     ) -> Option<usize> {
-        todo!("elements")
+        self.view.update(cx, |view, cx| view.character_index_for_point(point, window, cx))
     }
 }

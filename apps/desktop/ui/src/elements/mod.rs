@@ -25,6 +25,28 @@ pub use svg::*;
 pub use text::*;
 pub use uniform_list::*;
 
+use crate::{App, Bounds, Pixels, Style, StylePaint, Window};
+
+/// GPUI's `Style::paint`: the shadows and background, then `children`, then the border on top. The colours
+/// take the current element opacity and the current content mask, as GPUI's `Window::paint_quad` does.
+pub(crate) fn paint_style(
+    style: &Style,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+    cx: &mut App,
+    children: impl FnOnce(&mut Window, &mut App),
+) {
+    let paint = StylePaint {
+        rem_size: window.rem_size(),
+        scale_factor: window.scale_factor(),
+        opacity: window.element_opacity.unwrap_or(1.0),
+        content_mask: window.content_mask(),
+    };
+    style.paint_before_children(bounds, &paint, &mut window.next_frame.scene);
+    children(window, cx);
+    style.paint_after_children(bounds, &paint, &mut window.next_frame.scene);
+}
+
 /// Skeleton only: implements `Element` for `$ty` with the given phase states and `todo!($owner)` bodies, and
 /// `IntoElement` as itself. The owner replaces each use with the real impl (the trait fixes the signatures;
 /// the associated types written here are the design).
