@@ -405,8 +405,10 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
     the event), and the moved run gets a `log` line (also in `/logs`). Mock
     mode: runs created through the API share one training slot the same way (the seeded looping run `run_3c02` is
     outside the queue).
-- `DELETE /api/runs/{id}` → `204` (`409 run_active` while `queued`, `running` or `stopping`). Real mode removes the run
-  folder, its weights included, so its models disappear too.
+- `DELETE /api/runs/{id}` → `204` (`409 run_active` while `running` or `stopping`, or `queued` after it had started: a
+  resumed run waiting to continue). A run waiting in the queue that never started leaves the queue and is deleted (the
+  runs behind it move up; Studio's Remove from queue). Real mode removes the run folder, its weights included, so its
+  models disappear too.
 - `GET /api/runs/{id}/metrics?every=1` → `{ "steps": [Step], "epochs": [Epoch] }` (full history, for charts on page
   load; `every=N` keeps every N-th step plus the latest one, to thin long runs). `after_step=<n>` keeps the steps
   with `step > n` and `after_epoch=<m>` the epochs with `epoch > m` (feature `run_cursors`; either or both, applied

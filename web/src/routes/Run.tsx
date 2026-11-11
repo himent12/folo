@@ -16,6 +16,7 @@ import WifiOff from '$icons/wifi-off';
 import TriangleAlert from '$icons/triangle-alert';
 import Copy from '$icons/copy';
 import Play from '$icons/play';
+import RotateCcw from '$icons/rotate-ccw';
 import CloudUpload from '$icons/cloud-upload';
 import { computed, css, effect, For, MediaQuery, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
@@ -46,7 +47,7 @@ import { tooltip } from '$lib/ui/tooltip';
 import ConfigPanel from './run/ConfigPanel';
 import { HEAD_LABEL } from './run/resolved';
 import Logs from './run/Logs';
-import Outcome from './run/Outcome';
+import Outcome, { canContinue } from './run/Outcome';
 import Callout from './run/Callout';
 import { fallbackNotice, runEvalSource, scoresTitle } from '$lib/evaluated';
 import PerClass from './run/PerClass';
@@ -54,7 +55,7 @@ import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
 import RunMetrics from './run/RunMetrics';
 import Samples from './run/Samples';
-import { moveQueued, queueItems, queueWait, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
+import { moveQueued, queueItems, queueWait, REMOVE_LABEL, removeDescription, removeQueued, removeTitle, startHint, startLabel, type Length } from './run/queueActions';
 import { WarningsLog } from './run/warningsLog';
 import { beforeTraining, phaseTitle, phaseWhat, providerName } from '$lib/cloud';
 import { prefs } from '$lib/prefs';
@@ -266,10 +267,24 @@ export default function Run() {
     if (!cur) return;
     busy.set(true);
     try {
+      if (removing.peek()) {
+        // A run that never started is deleted (it leaves the list); a resumed one stops with what it trained.
+        const r = await removeQueued(cur);
+        stopOpen.set(false);
+        toast.success(`Removed ${cur.name} from the queue`);
+        if (r) live.run = r;
+        else router.go('/runs');
+        return;
+      }
       const r = await hub.api.stopRun(cur.id);
       live.run = r;
       stopOpen.set(false);
-      toast.info(`Stopping ${r.name}`, r.cloud && r.epoch === 0 ? 'Its instance is released; nothing had trained yet.' : `The checkpoint from epoch ${r.epoch} is kept.`);
+      // The checkpoint is the last finished epoch's: none before the first one ends.
+      const done = untrack(() => epochsDone.get());
+      toast.info(
+        `Stopping ${r.name}`,
+        r.cloud && r.epoch === 0 ? 'Its instance is released; nothing had trained yet.' : done ? `The checkpoint from epoch ${done} is kept.` : 'No epoch had finished, so nothing is saved.',
+      );
     } catch (e) {
       stopStatus.error(e, removing.peek() ? 'Could not remove the run from the queue' : 'Could not stop the run');
     } finally {
@@ -322,7 +337,11 @@ export default function Run() {
     if (r.status === 'running' || (r.cloud && r.status === 'queued')) out.push({ id: 'run-stop', label: `Stop ${r.name}`, match: ['Stop run'], icon: Square, run: () => stopOpen.set(true) });
     // As the run's banner: anything but out of memory continues from the last checkpoint.
     if (r.status === 'stopped' || (r.status === 'failed' && !isOom(r.error)))
-      out.push({ id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() });
+      out.push(
+        canContinue(r)
+          ? { id: 'run-resume', label: `Resume ${r.name}`, match: ['Resume run'], icon: Play, run: () => void resume() }
+          : { id: 'run-resume', label: `Start ${r.name} again`, match: ['Start again', 'Resume run'], icon: RotateCcw, run: () => void resume() },
+      );
     out.push({ id: 'run-compare', label: `Compare ${r.name}`, match: ['Compare run'], icon: GitCompare, run: () => router.go(`/runs/compare?ids=${r.id}`) });
     out.push({ id: 'run-copy-id', label: 'Copy run id', match: [r.id], icon: Copy, run: () => void copyText(r.id, 'run id') });
     const line = runCli.get();
@@ -339,7 +358,7 @@ export default function Run() {
     try {
       const id = cur.id;
       const r = await live.resume(() => hub.api.resumeRun(id));
-      toast.success(`Resuming ${r.name}`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
+      toast.success(r.epoch > 0 ? `Resuming ${r.name}` : `Starting ${r.name} again`, r.epoch > 0 ? `From the checkpoint of epoch ${r.epoch}.` : 'No epoch had finished, so it starts over.');
     } catch (e) {
       // page-level: as above.
       toast.error(e, 'Could not resume the run');
@@ -660,12 +679,14 @@ export default function Run() {
             title={removing.get() ? removeTitle(R().name) : `Stop ${R().name}?`}
             description={
               removing.get()
-                ? REMOVE_DESCRIPTION
+                ? removeDescription(R())
                 : handover.get()
                   ? 'Its instance is released now; nothing has trained yet.'
-                  : cloud.get()
-                    ? 'Training stops after the current step. The last checkpoint is copied here, saved as a model, and the instance released.'
-                    : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'
+                  : epochsDone.get() === 0
+                    ? `Training stops after the current step. No epoch has finished yet, so nothing is saved${cloud.get() ? ' and the instance is released' : ''}.`
+                    : cloud.get()
+                      ? 'Training stops after the current step. The last checkpoint is copied here, saved as a model, and the instance released.'
+                      : 'Training stops after the current step. The last checkpoint is kept and saved as a model.'
             }
             size="sm"
             status={stopStatus}

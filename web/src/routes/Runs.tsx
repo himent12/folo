@@ -35,7 +35,7 @@ import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
 import { FROM_SCRATCH, origin } from '$lib/lineage';
 import Menu from '$lib/ui/Menu';
 import { hasFeature, queuePlace, withQueueMove } from '$lib/api/queue';
-import { moveQueued, queueItems, REMOVE_DESCRIPTION, REMOVE_LABEL, removeTitle } from './run/queueActions';
+import { moveQueued, queueItems, REMOVE_LABEL, removeDescription, removeQueued, removeTitle } from './run/queueActions';
 import Dialog from '$lib/ui/Dialog';
 import NoValue from '$lib/ui/NoValue';
 import { DialogStatus } from '$lib/ui/feedback';
@@ -98,12 +98,12 @@ export default function Runs() {
   const removeBusy = signal(false);
   /** Its failure shows in the confirm, which stays open; the success toasts once it has closed. */
   const removeStatus = new DialogStatus();
-  async function removeQueued() {
+  async function remove() {
     const r = removing.get();
     if (!r) return;
     removeBusy.set(true);
     try {
-      await hub.api.stopRun(r.id);
+      await removeQueued(r);
       removing.set(null);
       // page-level: the confirm closed on the line above.
       toast.success(`Removed ${r.name} from the queue`);
@@ -569,12 +569,12 @@ export default function Runs() {
         onclose={() => removing.set(null)}
         status={removeStatus}
         title={removing.get() ? removeTitle(removing.get()!.name) : ''}
-        description={REMOVE_DESCRIPTION}
+        description={removing.get() ? removeDescription(removing.get()!) : undefined}
         size="sm"
         footer={() => (
           <>
             <Button onclick={() => removing.set(null)}>Keep it queued</Button>{' '}
-            <Button variant="destructive" icon={X} loading={removeBusy.get()} onclick={removeQueued}>
+            <Button variant="destructive" icon={X} loading={removeBusy.get()} onclick={remove}>
               {REMOVE_LABEL}
             </Button>
           </>

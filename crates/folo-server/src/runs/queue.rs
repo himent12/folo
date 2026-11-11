@@ -20,7 +20,7 @@ impl Runs {
     /// Sends every waiting run its place in the queue (the SSE `queue` event). Called with the queue locked, after
     /// every change to it, so a run's events arrive in the order of the changes, and before the `running` status
     /// of the worker taking it.
-    fn notify_queue(q: &Queue) {
+    pub(super) fn notify_queue(q: &Queue) {
         let waiting = q.runs.len() as u32;
         for (i, e) in q.runs.iter().enumerate() {
             e.send(RunEvent::Queue(QueueEvent { position: i as u32 + 1, waiting }));

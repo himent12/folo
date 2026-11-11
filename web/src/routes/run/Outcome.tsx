@@ -52,6 +52,9 @@ export interface OutcomeProps {
 
 const NONE: string[] = [];
 
+/** A run has a checkpoint to continue from: an epoch finished (`Run.epoch` of an ended run counts finished epochs). */
+export const canContinue = (run: Pick<Run, 'epoch' | 'model_id'>) => run.epoch > 0 || !!run.model_id;
+
 export default function Outcome(props: OutcomeProps) {
   const warnings = () => props.warnings ?? NONE;
   // Out of GPU memory: the same config fails again, so the ways out are smaller settings (a new run), most likely first.
@@ -115,6 +118,12 @@ export default function Outcome(props: OutcomeProps) {
   );
 
   const status = () => props.run.status;
+  /** Resume continues from the last finished epoch's checkpoint; with none (no epoch finished) it starts the run over. */
+  const resumeAction = () => (
+    <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
+      {canContinue(props.run) ? 'Resume' : 'Start again'}
+    </Button>
+  );
 
   return (
     <>
@@ -185,9 +194,7 @@ export default function Outcome(props: OutcomeProps) {
             <>
               {short.get() ? scheduleFix() : null}
               {/* Anything but out of memory can continue from the last checkpoint. */}
-              <Button size="sm" icon={Play} loading={props.resuming ?? false} onclick={props.onresume}>
-                Resume
-              </Button>
+              {resumeAction()}
             </>
           )}
           more={() => (
@@ -248,23 +255,26 @@ export default function Outcome(props: OutcomeProps) {
           )}
         />
       ) : status() === 'stopped' ? (
+        // A run stopped before its first epoch ended has no checkpoint: it says so, and starts again rather than resumes.
         <Callout
           tone="neutral"
           icon={Square}
-          title={`Stopped at epoch ${props.run.epoch}`}
+          title={canContinue(props.run) ? `Stopped at epoch ${props.run.epoch}` : props.run.started ? 'Stopped during its first epoch' : 'Stopped before it started'}
           moreLabel="Why?"
           also={short.get()}
           more={short.get() ? why : undefined}
           actions={() => (
             <>
               {short.get() ? scheduleFix() : null}
-              <Button size="sm" icon={Play} loading={props.resuming ?? false} onclick={props.onresume}>
-                Resume
-              </Button>
+              {resumeAction()}
             </>
           )}
         >
-          The last checkpoint was kept{props.run.model_id ? ' and saved as a model' : ''}.
+          {canContinue(props.run)
+            ? `The last checkpoint was kept${props.run.model_id ? ' and saved as a model' : ''}.`
+            : props.run.started
+              ? 'No epoch had finished, so nothing was saved.'
+              : 'It never trained, so nothing was saved.'}
         </Callout>
       ) : status() === 'queued' && props.waiting ? (
         // The dependency and the start estimate lead; the frames below stay compact until there is data.

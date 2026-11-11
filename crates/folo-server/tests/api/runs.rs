@@ -56,7 +56,7 @@ async fn runs_lifecycle() {
     // Create, stop, delete.
     let ds: DatasetList = ok(&app, get("/api/datasets")).await;
     let cfg = json!({ "dataset_id": ds.datasets[0].id, "arch": "folo-s", "epochs": 5 });
-    let (status, _, b) = send(&app, post_json("/api/runs", cfg)).await;
+    let (status, _, b) = send(&app, post_json("/api/runs", cfg.clone())).await;
     assert_eq!(status, StatusCode::CREATED, "{}", String::from_utf8_lossy(&b));
     let run: Run = serde_json::from_slice(&b).unwrap();
     assert_eq!(run.status, RunStatus::Queued);
@@ -64,6 +64,15 @@ async fn runs_lifecycle() {
     assert_eq!(run.config.batch, 16);
     let list: RunList = ok(&app, get("/api/runs")).await;
     assert_eq!(list.runs[0].id, run.id, "newest first");
+    // A run that waits and never started is removed from the queue and deleted; a running one is refused.
+    let (status, _, _) =
+        send(&app, Request::delete(format!("/api/runs/{}", run.id)).body(Body::empty()).unwrap()).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    err(&app, get(&format!("/api/runs/{}", run.id)), StatusCode::NOT_FOUND, "run_not_found").await;
+    let run: Run = ok(&app, post_json("/api/runs", cfg)).await;
+    // It starts 2 s after it is created and trains 6 s an epoch.
+    store.pass_time(Duration::from_secs(5));
+    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", run.id))).await.status, RunStatus::Running);
     err(
         &app,
         Request::delete(format!("/api/runs/{}", run.id)).body(Body::empty()).unwrap(),

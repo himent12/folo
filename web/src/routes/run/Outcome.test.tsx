@@ -177,6 +177,25 @@ describe('Outcome', () => {
     }
   });
 
+  it('never claims a checkpoint for a run stopped before an epoch finished: Start again, not Resume', () => {
+    const stopped = (started: string | null): Run => ({ ...failed(''), status: 'stopped', error: null, started, epoch: 0, best: null, model_id: null });
+    for (const [started, title, msg] of [
+      ['2026-11-07T06:00:03Z', 'Stopped during its first epoch', 'No epoch had finished, so nothing was saved.'],
+      [null, 'Stopped before it started', 'It never trained, so nothing was saved.'],
+    ] as const) {
+      const r = render(stopped(started));
+      expect(r.target.querySelector('.c-title')?.textContent).toBe(title);
+      expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe(msg);
+      expect(r.labels).toEqual(['Start again']);
+      r.done();
+    }
+    const r = render({ ...stopped('2026-11-07T06:00:03Z'), epoch: 3, model_id: 'm_1' });
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Stopped at epoch 3');
+    expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe('The last checkpoint was kept and saved as a model.');
+    expect(r.labels).toEqual(['Resume']);
+    r.done();
+  });
+
   it('says the warning alone while the run has no outcome yet', () => {
     const r = render(short('running'), vi.fn(), [SHORT, WARMUP]);
     const note = r.target.querySelector<HTMLElement>('[aria-label="Schedule warning"]')!;

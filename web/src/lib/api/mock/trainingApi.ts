@@ -344,8 +344,11 @@ export class MockTrainingApi extends MockServer {
     return this.call(() => {
       const p = this.#profile(id);
       const status = progressAt(p, Date.now()).status;
-      if (status === 'queued' || status === 'running' || status === 'stopping')
+      // A run waiting in the queue that never started leaves it (a cloud run's hand-over is under way: stop it).
+      const waiting = status === 'queued' && !p.cloud;
+      if (!waiting && (status === 'queued' || status === 'running' || status === 'stopping'))
         throw new ApiError(409, 'run_active', `Run ${p.name} is ${status}.`, 'Stop it first.');
+      this.state.queue = this.state.queue.filter((x) => x !== id);
       this.state.runs = this.state.runs.filter((r) => r.id !== id);
     });
   }

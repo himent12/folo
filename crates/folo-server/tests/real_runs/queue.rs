@@ -33,6 +33,16 @@ async fn queue_stop_resume_and_restart() {
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", b.id))).await;
     assert!(logs.lines[0].message.starts_with("queued behind 1"), "{:?}", logs.lines);
 
+    // Deleting a run that waits and never started takes it out of the queue (the one behind moves up) and away.
+    let c: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
+    let d: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
+    assert_eq!((c.queue_position, d.queue_position), (Some(1), Some(2)));
+    assert_eq!(send(&app, delete(&format!("/api/runs/{}", c.id))).await.0, StatusCode::NO_CONTENT);
+    err(&app, get(&format!("/api/runs/{}", c.id)), StatusCode::NOT_FOUND, "run_not_found").await;
+    assert!(!home.join("runs").join(&c.id).exists());
+    assert_eq!(ok::<Run>(&app, get(&format!("/api/runs/{}", d.id))).await.queue_position, Some(1));
+    assert_eq!(send(&app, delete(&format!("/api/runs/{}", d.id))).await.0, StatusCode::NO_CONTENT);
+
     // A running run cannot be deleted; a stop takes effect after the current batch and keeps the checkpoint.
     err(&app, delete(&format!("/api/runs/{}", a.id)), StatusCode::CONFLICT, "run_active").await;
     let stopping: Run = ok(&app, post(&format!("/api/runs/{}/stop", a.id))).await;

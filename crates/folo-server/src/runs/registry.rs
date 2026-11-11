@@ -187,14 +187,23 @@ impl Runs {
         q.runs.iter().position(|e| e.id == id).map(|i| i as u32 + 1)
     }
 
-    /// Deletes a finished run and its folder.
+    /// Deletes a finished run and its folder, or a run waiting in the queue that never started (it leaves the
+    /// queue). A run that trains, stops, is being started or waits to resume is `409 run_active`.
     pub fn delete(&self, id: &str) -> Result<PathBuf> {
+        // Lock order: registry, then the run's state, then the queue (as the worker and `stop` take them).
         let mut list = self.list.write().unwrap();
         let e = list.iter().find(|e| e.id == id).cloned().ok_or_else(|| Error::not_found("run", id))?;
         let mut st = e.state.lock().unwrap();
-        if st.file.run.status.is_active() || st.claimed {
+        let r = &st.file.run;
+        let never_started = r.status == RunStatus::Queued && r.started.is_none() && !st.claimed;
+        if (r.status.is_active() && !never_started) || st.claimed {
             return Err(Error::conflict("run_active", format!("run '{id}' is still active"))
-                .hint("stop it first (POST /api/runs/{id}/stop)"));
+                .hint(format!("stop it first (POST /api/runs/{id}/stop)")));
+        }
+        if never_started {
+            let mut q = self.queue.lock().unwrap();
+            q.runs.retain(|x| x.id != id);
+            Self::notify_queue(&q);
         }
         st.deleted = true;
         list.retain(|x| x.id != id);
