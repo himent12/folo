@@ -35,6 +35,11 @@ use folo_ui::{
 use crate::api::mock::MockBackend;
 use crate::theme::{Mode, Theme};
 
+/// Allocation counts for `--bench-frames` (`cargo build --release --features bench-alloc`).
+#[cfg(feature = "bench-alloc")]
+#[global_allocator]
+static ALLOC: folo_ui::CountingAlloc = folo_ui::CountingAlloc;
+
 mod icons {
     include!(concat!(env!("OUT_DIR"), "/icons.rs"));
 }

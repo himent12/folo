@@ -261,6 +261,7 @@ impl<E: Element> ElementObject for Drawable<E> {
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         match mem::replace(&mut self.phase, ElementDrawPhase::Painted) {
             ElementDrawPhase::Start => {
+                window.frame_times.elements += 1;
                 let global_id = self.element.id().map(|id| {
                     window.element_id_stack.push(id);
                     GlobalElementId(Arc::from(window.element_id_stack.as_slice()))

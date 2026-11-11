@@ -8,6 +8,7 @@
 //! `observe.rs` (observers, subscriptions and app-level handlers registered on `App`).
 
 mod async_app;
+mod bench;
 mod context;
 mod effects;
 mod entity_map;
@@ -22,6 +23,7 @@ pub(crate) mod trace;
 mod windows;
 
 pub use async_app::*;
+pub use bench::CountingAlloc;
 pub use context::*;
 pub(crate) use effects::*;
 pub use entity_map::*;
@@ -42,8 +44,9 @@ use crate::{
 };
 
 /// The app before it runs: `Application::new().with_assets(..).run(|cx| ..)`. With `--shot <png>` on the
-/// command line it runs headless and writes a screenshot instead (`shot.rs`).
-pub struct Application(Rc<AppCell>, Option<shot::Shot>);
+/// command line it runs headless and writes a screenshot instead (`shot.rs`); with `--bench-frames <n>` it
+/// runs headless and prints the frame bench (`bench.rs`).
+pub struct Application(Rc<AppCell>, Option<shot::Shot>, Option<bench::Bench>);
 
 impl Application {
     /// An app on the default platform: the Win32 backend on Windows; winit elsewhere, or on Windows when
@@ -52,6 +55,24 @@ impl Application {
     pub fn new() -> Self {
         trace::mark_start();
         let args: Vec<String> = std::env::args().collect();
+        match bench::BenchArgs::parse(&args) {
+            Ok(Some(request)) => {
+                let platform = crate::platform::headless::HeadlessPlatform::try_from_options(request.options)
+                    .unwrap_or_else(|error| {
+                        eprintln!("folo-ui: --bench-frames: {error:#}");
+                        std::process::exit(2)
+                    });
+                let platform = Rc::new(platform);
+                let app = App::new_app(platform.clone(), Arc::new(()));
+                let bench = bench::Bench { frames: request.frames, options: request.options, platform };
+                return Application(app, None, Some(bench));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                eprintln!("folo-ui: --bench-frames: {error:#}");
+                std::process::exit(2)
+            }
+        }
         match shot::ShotArgs::parse(&args) {
             Ok(Some(request)) => {
                 let platform = crate::platform::headless::HeadlessPlatform::try_from_options(request.options)
@@ -64,6 +85,7 @@ impl Application {
                 return Application(
                     app,
                     Some(shot::Shot { path: request.path, platform, settle_time: request.settle_time }),
+                    None,
                 );
             }
             Ok(None) => {}
@@ -91,13 +113,13 @@ impl Application {
                 app.update(|cx| cx.quit());
             }
         }));
-        Ok(Application(app, None))
+        Ok(Application(app, None, None))
     }
 
     /// An app on the headless platform (tests, `--shot`). Prefer `HeadlessApp`, which also drives it.
     pub fn headless(options: crate::HeadlessOptions) -> Self {
         let platform = crate::platform::headless::HeadlessPlatform::from_options(options);
-        Application(App::new_app(Rc::new(platform), Arc::new(())), None)
+        Application(App::new_app(Rc::new(platform), Arc::new(())), None, None)
     }
 
     /// Where `svg()` and other assets load from.
@@ -112,6 +134,14 @@ impl Application {
         F: 'static + FnOnce(&mut App),
     {
         let this = self.0.clone();
+        if let Some(bench) = self.2 {
+            this.update(on_finish_launching);
+            if let Err(error) = bench.run(this) {
+                eprintln!("folo-ui: --bench-frames: {error:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         if let Some(shot) = self.1 {
             this.update(on_finish_launching);
             if let Err(error) = shot.take(this) {
@@ -138,7 +168,7 @@ fn native_application(text_system: Arc<dyn crate::PlatformTextSystem>) -> anyhow
     #[cfg(any(not(windows), feature = "winit"))]
     if cfg!(not(windows)) || std::env::var("FOLO_UI_PLATFORM").is_ok_and(|platform| platform == "winit") {
         let platform = Rc::new(crate::platform::winit::WinitPlatform::new(text_system)?);
-        return Ok(Application(App::new_app(platform, Arc::new(())), None));
+        return Ok(Application(App::new_app(platform, Arc::new(())), None, None));
     }
     #[cfg(windows)]
     {

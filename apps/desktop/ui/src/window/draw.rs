@@ -61,6 +61,7 @@ impl Window {
         self.tooltip_bounds = None;
         self.frame_times.frame += 1;
         self.frame_times.render_us = 0;
+        self.frame_times.elements = 0;
 
         // The platform's handler is the previous frame's: dropped; this frame's replaces it below.
         self.platform_window.take_input_handler();

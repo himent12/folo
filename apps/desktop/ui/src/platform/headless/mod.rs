@@ -368,7 +368,25 @@ impl PlatformWindow for HeadlessWindow {
     fn on_appearance_changed(&self, _callback: Box<dyn FnMut()>) {}
 
     fn present(&mut self, frame: &Framebuffer, damage: &[Bounds<DevicePixels>]) {
-        self.state.presented.borrow_mut().clone_from(frame);
+        // Only the damage changed since the last present (as a real backend copies it); a new size copies all.
+        let mut presented = self.state.presented.borrow_mut();
+        if presented.width == frame.width && presented.height == frame.height {
+            let width = frame.width as usize;
+            for rect in damage {
+                let (x0, x1) =
+                    (rect.origin.x.0.max(0) as usize, (rect.origin.x.0 + rect.size.width.0) as usize);
+                let (y0, y1) =
+                    (rect.origin.y.0.max(0) as usize, (rect.origin.y.0 + rect.size.height.0) as usize);
+                let x1 = x1.min(width);
+                for y in y0..y1.min(frame.height as usize) {
+                    let row = y * width;
+                    presented.pixels[row + x0..row + x1].copy_from_slice(&frame.pixels[row + x0..row + x1]);
+                }
+            }
+        } else {
+            presented.clone_from(frame);
+        }
+        drop(presented);
         let mut last_damage = self.state.last_damage.borrow_mut();
         last_damage.clear();
         last_damage.extend_from_slice(damage);
