@@ -37,8 +37,11 @@ import LiveRunCard from './overview/LiveRunCard';
 import { modelsMayHaveChanged } from './overview/runChanges';
 import { slotRun } from './overview/slot';
 import { datasetLabel } from './overview/datasetLabel';
+import AlsoRunning from './overview/AlsoRunning';
 import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
+import { hasFeature } from '$lib/api/queue';
+import { LABEL_FEATURE } from '$lib/label';
 
 const total = (d: Dataset) => d.splits.train + d.splits.val + d.splits.test;
 const classCount = (n: number) => `${n} ${n === 1 ? 'class' : 'classes'}`;
@@ -53,6 +56,8 @@ export default function Overview() {
     const list = await hub.api.datasets(s);
     return Promise.all(list.map((d) => hub.api.dataset(d.id, s).catch(() => d)));
   });
+  // Which optional features the server has (labeling, benchmarks): what else Overview can point to.
+  const system = new Resource((s) => hub.api.system(s));
   // The run list the sidebar's live card reads (the shell polls it every 2 s, shell/RunWatch) while it is current, so the
   // Training card and Recent runs never say something the sidebar contradicts; this page's own list when the shell's
   // stopped refreshing.
@@ -129,41 +134,54 @@ export default function Overview() {
     <Page title="Overview">
       {fresh.get() ? (
         // A fresh install: one path forward instead of a page of empty panels.
-        <section class="onboard" aria-labelledby="onboard-title">
-          <div class="ob-head">
-            <h2 id="onboard-title">Train your first detector</h2>{' '}
-            <p>Three steps from a folder of images to boxes on new ones.</p>
-          </div>{' '}
-          <ol class="steps">
-            <li class="on">
-              <span class="n">1</span>{' '}
-              <div>
-                <b>Add a dataset</b>
-                <span>Register a YOLO or COCO folder, or generate a sample set of shapes in seconds.</span>
-              </div>{' '}
-              <div class="ob-actions">
-                <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>
-                  Add dataset
-                </Button>{' '}
-                <Button href={href('/datasets?add=synthetic')}>Generate sample set</Button>
-              </div>
-            </li>{' '}
-            <li>
-              <span class="n">2</span>{' '}
-              <div>
-                <b>Train</b>
-                <span>Pick a model size; loss, mAP and validation samples stream in live.</span>
-              </div>
-            </li>{' '}
-            <li>
-              <span class="n">3</span>{' '}
-              <div>
-                <b>Inspect predictions</b>
-                <span>Drop any image into the Playground and tune confidence and IoU instantly.</span>
-              </div>
-            </li>
-          </ol>
-        </section>
+        <>
+          <section class="onboard" aria-labelledby="onboard-title">
+            <div class="ob-head">
+              <h2 id="onboard-title">Train your first detector</h2>{' '}
+              <p>Three steps from a folder of images to boxes on new ones.</p>
+            </div>{' '}
+            <ol class="steps">
+              <li class="on">
+                <span class="n">1</span>{' '}
+                <div>
+                  <b>Add a dataset</b>
+                  <span>Register a YOLO or COCO folder, or generate a sample set of shapes in seconds.</span>
+                </div>{' '}
+                <div class="ob-actions">
+                  <Button variant="primary" icon={Plus} href={href('/datasets?add=folder')}>
+                    Add dataset
+                  </Button>{' '}
+                  <Button href={href('/datasets?add=synthetic')}>Generate sample set</Button>
+                </div>
+                {hasFeature(system.data, LABEL_FEATURE) ? (
+                  // Label images lives under Datasets: the first step is where people with unlabeled images look for it.
+                  <p class="ob-alt">
+                    Have images but no labels?{' '}
+                    <a class="ob-link" href={href('/datasets/label')}>
+                      Label them with an agent
+                    </a>
+                  </p>
+                ) : null}
+              </li>{' '}
+              <li>
+                <span class="n">2</span>{' '}
+                <div>
+                  <b>Train</b>
+                  <span>Pick a model size; loss, mAP and validation samples stream in live.</span>
+                </div>
+              </li>{' '}
+              <li>
+                <span class="n">3</span>{' '}
+                <div>
+                  <b>Inspect predictions</b>
+                  <span>Drop any image into the Playground and tune confidence and IoU instantly.</span>
+                </div>
+              </li>
+            </ol>
+          </section>{' '}
+          {/* A labeling job can run before there is any dataset (it makes one). */}
+          <AlsoRunning system={system.data} />
+        </>
       ) : down.get() ? (
         // Nothing loaded and every request failed: one recovery block (Retry, Connection settings) in the frame the live
         // card would fill, the page's focal slot, never four panels each saying the server has not answered and never a
@@ -250,6 +268,7 @@ export default function Overview() {
               </Panel>
             )}
           </div>{' '}
+          <AlsoRunning system={system.data} />{' '}
           <div class="cols">
             <div class="col-main">
               <Panel
@@ -635,6 +654,20 @@ css`
     gap: var(--space-2);
     flex-wrap: wrap;
     margin-top: var(--space-1);
+  }
+  .ob-alt {
+    grid-column: 2;
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+  }
+  .ob-link {
+    color: var(--text-primary);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .ob-link:hover {
+    text-decoration-color: var(--text-secondary);
   }
   /* A container query, not a tier: the onboarding card sits in the content column, whose width depends on the sidebar
      as much as on the viewport; three steps need 840 px of it. */

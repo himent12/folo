@@ -148,6 +148,47 @@ describe('Overview', () => {
     expect(card.textContent).not.toMatch(/1 (images|classes)/);
   });
 
+  it('shows a labeling job and a benchmark at work, which are not training runs', async () => {
+    watched.runs = await idleRuns();
+    const api = new MockApi('normal', 0);
+    const [job] = await api.labelJobs();
+    const [bench] = await api.benches();
+    api.labelJobs = async () => [{ ...job!, status: 'running', run: { ...job!.run!, finished: null, total: 40, done: 12 } }];
+    api.benches = async () => [{ ...bench!, active: true }];
+    open(api);
+    const strip = await vi.waitFor(() => {
+      flush();
+      const el = target.querySelector('.activity');
+      if (!el?.textContent?.includes(bench!.name)) throw new Error('still waiting for the strip');
+      return el;
+    });
+    expect(strip.textContent).toContain(job!.name);
+    expect(strip.textContent).toContain('12 of 40 images');
+    expect(strip.querySelector('a')!.getAttribute('href')).toBe(`#/datasets/label/${job!.id}`);
+    // Nothing at work: nothing to show, once both lists have answered.
+    const answers: Promise<unknown>[] = [];
+    api.labelJobs = () => (answers[0] = Promise.resolve([{ ...job!, status: 'idle' as const }]));
+    api.benches = () => (answers[1] = Promise.resolve([{ ...bench!, active: false }]));
+    c!.unmount();
+    target.remove();
+    open(api);
+    await vi.waitFor(() => expect(answers.filter(Boolean)).toHaveLength(2));
+    await Promise.all(answers);
+    flush();
+    expect(target.querySelector('.activity')).toBeNull();
+  });
+
+  it('points people with unlabeled images to Label images from the first step', async () => {
+    open(new MockApi('empty', 0));
+    const link = await vi.waitFor(() => {
+      flush();
+      const a = [...target.querySelectorAll<HTMLAnchorElement>('.onboard a')].find((x) => x.textContent?.includes('Label them with an agent'));
+      if (!a) throw new Error('still waiting for the first-run card');
+      return a;
+    });
+    expect(link.getAttribute('href')).toBe('#/datasets/label');
+  });
+
   it('refetches Best models when a run ends, and not on an unchanged list', async () => {
     const runs = await idleRuns();
     const run = runs.find((r) => r.status === 'completed')!;
