@@ -3,6 +3,7 @@ import Check from '$icons/check';
 import CircleCheck from '$icons/circle-check';
 import FlaskConical from '$icons/flask-conical';
 import PlugZap from '$icons/plug-zap';
+import WifiOff from '$icons/wifi-off';
 import { computed, css, signal } from 'fw';
 import { HttpApi } from '$lib/api/client';
 import { hub } from '$lib/api/index';
@@ -65,11 +66,13 @@ export default function ConnectionPanel() {
   return (
     <Panel title="Connection" id="connection" divided>
       <div class="stack">
-        <div class="status" data-mode={hub.mode}>
+        <div class="status" data-mode={hub.offline ? 'offline' : hub.mode}>
           {/* Demo data is a mode, not a degraded state: the sidebar's neutral flask, never the warning hue. A server
               that answers gets the mark and the word Settings > Cloud gives a working connection (a check in a
               circle, "Connected"), not a ringed dot and "Live". */}
-          {hub.mode === 'mock' ? (
+          {hub.offline ? (
+            <WifiOff class="led-glyph off" size={16} strokeWidth={1.75} aria-hidden="true" />
+          ) : hub.mode === 'mock' ? (
             <FlaskConical class="led-glyph" size={16} strokeWidth={1.75} aria-hidden="true" />
           ) : hub.mode === 'live' ? (
             <CircleCheck class="led-glyph ok" size={16} strokeWidth={1.75} aria-hidden="true" />
@@ -77,7 +80,14 @@ export default function ConnectionPanel() {
             <span class="led" aria-hidden="true"></span>
           )}
           <div class="status-text">
-            {hub.mode === 'live' ? (
+            {hub.offline ? (
+              <>
+                <p class="s-title">Server offline</p>
+                <p class="s-desc">
+                  No answer from <span class="mono">{hub.serverUrl}</span>. Retrying…
+                </p>
+              </>
+            ) : hub.mode === 'live' ? (
               <>
                 <p class="s-title">
                   Connected <span class="mono faint">folo serve {hub.version}</span>
@@ -229,6 +239,9 @@ css`
   }
   .status :global(.led-glyph.ok) {
     color: var(--success-text);
+  }
+  .status :global(.led-glyph.off) {
+    color: var(--danger-text);
   }
   .status-text {
     display: grid;

@@ -7,6 +7,7 @@
  * (a labeling job) passes its `state`, the status with its own word.
  */
 import { computed, css } from 'fw';
+import { hub } from '$lib/api/index';
 import type { Run, RunStatus } from '$lib/api/types';
 import { inHandover, phaseLabel } from '$lib/cloud';
 
@@ -51,9 +52,15 @@ export type StatusBadgeProps = ({ run: RunState; state?: never } | { state: OwnS
   lastKnown?: string;
 };
 
+/** The states that change on their own: while the server is offline, what a badge shows of them is only last known. */
+const LIVE: ReadonlySet<RunStatus> = new Set(['queued', 'running', 'stopping']);
+
 export default function StatusBadge(props: StatusBadgeProps) {
   const status = computed(() => (props.run ? props.run.status : props.state!.status));
   const word = computed(() => props.lastKnown ?? (props.run ? statusWord(props.run) : props.state!.label));
+  // The server stopped answering (`hub.offline`): a live status keeps its word (it is the last one known; the app-wide
+  // notice says why) but turns neutral and still, as a `lastKnown` one does, and its tooltip says so.
+  const held = computed(() => !!props.lastKnown || (hub.offline && LIVE.has(status.get())));
 
   // Each status has its own mark as well as its hue (running and completed are both green-ish): a ringed dot while
   // running, a check when completed, a cross when failed, hollow while queued, a square when stopped.
@@ -62,7 +69,8 @@ export default function StatusBadge(props: StatusBadgeProps) {
       class={`badge ${status.get()} ${props.size ?? 'md'}`}
       class:plain={props.plain ?? false}
       class:alone={props.dotOnly ?? false}
-      class:held={!!props.lastKnown}
+      class:held={held.get()}
+      title={held.get() && !props.lastKnown ? 'Last known status: the server is not answering' : undefined}
     >
       {status.get() === 'completed' ? (
         <svg class="mark" viewBox="0 0 8 8" aria-hidden="true">

@@ -11,6 +11,7 @@
 import { computed, signal } from 'fw';
 import { prefs } from '$lib/prefs';
 import { HttpApi, type Api } from './client';
+import { Reach } from './reach';
 import { shareApi, unshare } from './share';
 import type { Scenario } from './mock/scenario';
 
@@ -53,6 +54,7 @@ class Hub {
   #api = signal<Api>(placeholder());
   #shared = computed(() => shareApi(this.#api.get()));
   #epoch = signal(0);
+  #reach = new Reach();
 
   get mode(): Mode {
     return this.#mode.get();
@@ -79,8 +81,18 @@ class Hub {
   set api(v: Api) {
     this.#api.set(unshare(v));
   }
-  /** The demo's `?scenario=error`: behave like a server that stopped answering. */
-  readonly offline = scenario === 'error';
+  /**
+   * The server in use stopped answering (./reach: a failed request or a dropped stream, confirmed by a health probe,
+   * which repeats until it answers again), or the demo's `?scenario=error`. Live data on screen is then a last known
+   * state, not the current one.
+   */
+  get offline(): boolean {
+    return scenario === 'error' || this.#reach.offline;
+  }
+  /** Bumps each time the server answers again after an outage: Resources in error or holding data refetch. */
+  get back(): number {
+    return this.#reach.back;
+  }
   /** Bumps on every (re)connect so data views refetch. */
   get epoch(): number {
     return this.#epoch.get();
@@ -103,15 +115,17 @@ class Hub {
     const ctrl = new AbortController();
     this.#ctrl = ctrl;
     this.mode = 'connecting';
+    this.#reach.reset(null);
     if (forcedMock) {
       await this.#useMock('forced', attempt);
       return;
     }
-    const http = new HttpApi(prefs.serverUrl);
+    const http = new HttpApi(prefs.serverUrl, this.#reach);
     try {
       const h = await http.health(AbortSignal.any([ctrl.signal, AbortSignal.timeout(2500)]));
       if (attempt !== this.#attempt) return;
       this.api = http;
+      this.#reach.reset((s) => http.health(s));
       this.version = h.version;
       this.reason = null;
       this.mode = 'live';

@@ -8,7 +8,8 @@
 //   reads `data` recomputes, and a changed list keeps its unchanged items (keyed rows stay as they are).
 //
 // Reactive async data for components. Create inside a component's body: the fetcher re-runs whenever a reactive value
-// it reads synchronously changes (route params, filters) and when the API hub reconnects.
+// it reads synchronously changes (route params, filters) and when the API hub reconnects. When the server answers
+// again after an outage (`hub.back`), a Resource that failed retries by itself and one holding data refreshes quietly.
 
 import { effect, signal, untrack } from 'fw';
 import { hub } from './index';
@@ -99,6 +100,17 @@ export class Resource<T> {
         }),
       );
     }
+    // The server is back: what failed meanwhile (an error on screen, data gone stale) or loaded before is refetched, as
+    // Retry or a quiet refresh would (a page left in an error state needs no click to recover).
+    let back = untrack(() => hub.back);
+    effect(() => {
+      const now = hub.back;
+      if (now === back) return;
+      back = now;
+      untrack(() => {
+        if (hub.mode !== 'connecting' && (this.error !== undefined || this.data !== undefined)) void this.refresh();
+      });
+    });
     // Lifetime cleanup, independent of the fetch effect (which returns early while the hub reconnects).
     effect(() => () => {
       this.#seq++;
