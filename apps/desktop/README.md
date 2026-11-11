@@ -117,19 +117,16 @@ or takes focus.
   private desktop (`-Sandbox`, which adds the file dialog): its captures equal the headless shot of the
   same scenario, and hover, clicks, the palette and its text field, Tab and F6 focus, wheel scrolling, a
   slider, a select, tooltips, the New run dialog, a toast, the theme toggle and resizing behave. PASS / FAIL
-  per step, exit 1 on a failure. Copy and paste run only with `-Sandbox -Clipboard`, off by default: they
-  replace your clipboard (a private desktop shares it) for a few seconds. The script saves it first and puts
-  it back however the run ends (a failure, a timeout, Ctrl+C), never over something copied meanwhile; if the
-  PowerShell running the script itself dies in those seconds, what you had copied is gone.
+  per step, exit 1 on a failure. Copy and paste run only with `-Sandbox -Clipboard`, off by default:
+  `-Clipboard` replaces what is on your clipboard with test text and does not put it back (a private desktop
+  shares your clipboard); run it when you have nothing on the clipboard you need. Without `-Clipboard` it
+  never opens the clipboard.
 - `chrome-check.ps1`: the window chrome through window messages: what `WM_NCHITTEST` answers over each caption
   area, the top edge and the page, and a non-client press and release on Maximize, Minimize (restored with
   `SC_RESTORE`, as the taskbar does) and Close; any `-AppArgs "--scenario …"` (an overlay open). Modes:
   `-Offscreen` (never on a display, never active; maximize is the app's off-screen emulation, checked by size),
   `-Sandbox` (on a private desktop), or neither (on your screen, it maximizes).
 - `window-check.ps1`: the whole window chrome (Window check, below); `-Sandbox` on a private desktop.
-- `clip-save.ps1`: saves the clipboard byte for byte and puts it back (interact-check's copy and paste steps;
-  they skip themselves when a format, such as a bitmap handle, cannot be restored exactly, and nothing is put
-  back over something copied meanwhile). `clip-save-test.ps1` tests its logic without touching the clipboard.
 - `drive.ps1`: the window-message driver the checks dot-source: posted mouse and non-client messages, keys
   with their modifiers in the UI thread's key state, a sync, PrintWindow captures. Nothing in it moves the
   cursor, activates a window or injects real input.
@@ -236,7 +233,7 @@ their data; an unreachable server shows the unreachable state. Always give `--se
 
 ```powershell
 tools\window-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe -Sandbox          # private desktop, about a minute
-tools\interact-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe                  # off screen; -Sandbox -Clipboard adds copy and paste
+tools\interact-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe                  # off screen; -Sandbox -Clipboard adds copy and paste (overwrites your clipboard)
 tools\chrome-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe -Offscreen         # or -Sandbox
 ```
 

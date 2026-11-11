@@ -11,14 +11,10 @@
 # touches the cursor, the keyboard or the clipboard of the person at the PC. -Sandbox runs the same on a
 # private desktop (sandbox-run.ps1). The file dialog step runs there; the clipboard steps (copy and
 # paste) run only with -Clipboard as well, because the clipboard is not private: the private desktop
-# shares it with you.
+# shares it with you. Without -Clipboard nothing in this script opens the clipboard.
 #
-# -Clipboard REPLACES YOUR CLIPBOARD for a few seconds. Before the run this script saves every format
-# byte for byte (clip-save.ps1; it skips the steps when a format cannot be restored exactly), and after
-# the run, however the run ended (passed, failed, threw, timed out and was killed, Ctrl+C), it puts it
-# back, unless someone copied something meanwhile (theirs stays). What you had copied is lost if this
-# PowerShell itself dies during those seconds (its window closed, the process killed, the PC going
-# down): the saved copy lives only in its memory. Off by default.
+# -Clipboard (with -Sandbox; off by default) replaces what is on your clipboard with test text and does
+# not put it back. Run it when you have nothing on the clipboard you need.
 #
 # "Equal" means no pixel differs by more than 8 levels (the breathing status dot's pulse; see the GPUI
 # baseline's noise floor). Scratch files go under -Out ($FOLO_TEST_TMP\interact-check by default).
@@ -27,12 +23,10 @@ param(
     [string]$Out = "",
     [string[]]$Only = @(),
     [switch]$Sandbox,
+    # With -Sandbox: also copy and paste. Replaces what is on your clipboard with test text and does not
+    # put it back; run it when you have nothing on the clipboard you need.
     [switch]$Clipboard,
-    [switch]$InSandbox,
-    # Set by the outer run for the sandboxed one: where the clipboard steps record their own changes, and
-    # the clipboard's sequence number when it was saved.
-    [string]$ClipLedger = "",
-    [uint32]$ClipSeq = 0
+    [switch]$InSandbox
 )
 $ErrorActionPreference = "Stop"
 $Exe = (Resolve-Path $Exe).Path
@@ -42,43 +36,9 @@ if ($Clipboard -and -not $Sandbox -and -not $InSandbox) { "NOTE  -Clipboard need
 if ($Sandbox -and -not $InSandbox) {
     $self = $MyInvocation.MyCommand.Path
     $only = if ($Only.Count) { " -Only " + ($Only -join ",") } else { "" }
-    # The clipboard is saved and put back here, outside the sandbox, so a sandboxed run that is killed
-    # (a timeout, Ctrl+C here, which closes its job) still gets it put back. The sandboxed steps write a
-    # ledger of their own changes; [FoloClip]::Decide reads it.
-    $clip = ""
-    if ($Clipboard -and ($Only.Count -eq 0 -or $Only -contains "clipboard")) {
-        . (Join-Path $PSScriptRoot "clip-save.ps1")
-        if (-not (Test-Path $tmp)) { New-Item -ItemType Directory -Force $tmp | Out-Null }
-        $ledger = Join-Path $tmp "interact-check-clip-$PID.txt"
-        Remove-Item -ErrorAction SilentlyContinue $ledger
-        $why = ""
-        $seq0 = [FoloClip]::GetClipboardSequenceNumber()
-        $list0 = [FoloClip]::List()
-        $saved = [FoloClip]::Save([ref]$why)
-        if ($null -eq $saved) { "SKIP  clipboard steps: your clipboard holds a format that could not be put back exactly ($why)" }
-        else { $clip = " -Clipboard -ClipLedger '$ledger' -ClipSeq $seq0" }
-    }
-    $code = 1
-    try {
-        & (Join-Path $PSScriptRoot "sandbox-run.ps1") -TimeoutS 900 -Command "& '$self' -Exe '$Exe' -Out '$Out' -InSandbox$only$clip"
-        $code = $LASTEXITCODE
-    } finally {
-        if ($clip) {
-            $lines = if (Test-Path $ledger) { @(Get-Content -Encoding ascii $ledger) } else { @() }
-            $now = [FoloClip]::GetClipboardSequenceNumber()
-            $verdict = [FoloClip]::Decide($seq0, [string[]]$lines, $now, [FoloClip]::Text())
-            $did = switch ($verdict) {
-                "unchanged" { "untouched" }
-                "restore" { [FoloClip]::Restore($saved, $now) }
-                default { "changed by someone else meanwhile: left as it is" }
-            }
-            $same = [FoloClip]::Same($saved) -and ([FoloClip]::List() -eq $list0)
-            $line = "your clipboard is back byte for byte  $did; formats before '$list0', after '$([FoloClip]::List())'"
-            if ($same) { "PASS  $line" } else { "FAIL  $line"; $code = 1 }
-            Remove-Item -ErrorAction SilentlyContinue $ledger
-        }
-    }
-    exit $code
+    $clip = if ($Clipboard) { " -Clipboard" } else { "" }
+    & (Join-Path $PSScriptRoot "sandbox-run.ps1") -TimeoutS 900 -Command "& '$self' -Exe '$Exe' -Out '$Out' -InSandbox$only$clip"
+    exit $LASTEXITCODE
 }
 . (Join-Path $PSScriptRoot "drive.ps1")
 Add-Type -AssemblyName System.Windows.Forms
@@ -418,42 +378,20 @@ try {
     }
 
     # ---------- 7. clipboard (-Sandbox -Clipboard only): copy from and paste into a text field
-    # The outer run saved the clipboard and puts it back after this run ends, however it ends (see the
-    # header). Each change these steps make is written to the ledger before it is made ("pending <text>")
-    # and once it is confirmed ("owned <sequence number>"), so the outer run knows which change is the
-    # test's own; a change made by anyone else stops the steps and is never overwritten.
+    # These steps replace what is on the clipboard with test text and leave it there (see the header).
     if ((Wants "clipboard") -and $InSandbox -and $Clipboard) {
-        if (-not $ClipLedger) { throw "-Clipboard in the sandbox needs -ClipLedger (the outer run passes it)" }
-        . (Join-Path $PSScriptRoot "clip-save.ps1")
-        $script:clipSeq = $ClipSeq
-        # Makes one clipboard change: refuses if the clipboard is not as the steps left it, records the
-        # change as pending, makes it, waits for the clipboard to hold $text and records it as the test's.
-        # Returns whether it got there; if not, the change is left unconfirmed (the outer run puts the
-        # saved data back only if the clipboard holds exactly $text).
-        function ClipChange([string]$text, [scriptblock]$change) {
-            if ([FoloClip]::GetClipboardSequenceNumber() -ne $script:clipSeq) { throw "someone else changed the clipboard: stopping the clipboard steps" }
-            Add-Content -Encoding ascii $ClipLedger "pending $text"
-            & $change
-            for ($i = 0; $i -lt 50; $i++) {
-                $s1 = [FoloClip]::GetClipboardSequenceNumber()
-                $t = [FoloClip]::Text()
-                if ($s1 -ne $script:clipSeq -and $t -eq $text -and [FoloClip]::GetClipboardSequenceNumber() -eq $s1) {
-                    $script:clipSeq = $s1
-                    Add-Content -Encoding ascii $ClipLedger "owned $s1"
-                    return $true
-                }
-                Start-Sleep -Milliseconds 20
-            }
-            $false
-        }
+        # The clipboard's text, or "" while another program holds it open.
+        function ClipText { try { [System.Windows.Forms.Clipboard]::GetText() } catch { "" } }
         Launch @("--scenario", "overview", "--width", "1280", "--height", "800")
         Learn
         Key 0x4B "ctrl"; Settle 400
         Key 0x41 "ctrl"; Key 0x2E; Keys "runs"; Settle 300
         $runsPanel = Snap
-        $copied = ClipChange "runs" { Key 0x41 "ctrl"; Key 0x43 "ctrl" }
-        Pass "Ctrl+C copies the field's selection" $copied "clipboard '$([FoloClip]::Text())'"
-        if (-not (ClipChange "models" { [System.Windows.Forms.Clipboard]::SetText("models") })) { throw "could not put 'models' on the clipboard" }
+        Key 0x41 "ctrl"; Key 0x43 "ctrl"
+        $copied = ClipText
+        for ($i = 0; $i -lt 50 -and $copied -ne "runs"; $i++) { Start-Sleep -Milliseconds 20; $copied = ClipText }
+        Pass "Ctrl+C copies the field's selection" ($copied -eq "runs") "clipboard '$copied'"
+        [System.Windows.Forms.Clipboard]::SetText("models")
         Key 0x41 "ctrl"; Key 0x2E; Keys "runs"; Key 0x41 "ctrl"; Key 0x56 "ctrl"; Settle 300
         $pasted = Snap
         Key 0x41 "ctrl"; Key 0x2E; Keys "models"; Settle 300
