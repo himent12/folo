@@ -36,6 +36,7 @@ import ClassList from './playground/ClassList';
 import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
 import { BACKEND_NAME, DEFAULTS, FETCH, simulate } from './playground/predict';
+import { ACCEPT, droppedImages, takeImage } from './playground/intake';
 import { keepSession } from './playground/keepSession';
 import { sampleImages } from './playground/samples';
 import { playgroundPath } from './playground/session';
@@ -175,23 +176,14 @@ export default function Playground() {
 
   async function setFile(file: File | Blob, name = file instanceof File ? file.name : 'pasted image') {
     const seq = ++decodeSeq;
-    if (file.type && !file.type.startsWith('image/')) {
-      toast.error(new Error(`${name} is not an image.`), 'Unsupported file');
-      return;
-    }
-    let width = 0;
-    let height = 0;
-    try {
-      const bmp = await createImageBitmap(file);
-      width = bmp.width;
-      height = bmp.height;
-      bmp.close();
-    } catch {
-      if (seq === decodeSeq && !destroyed) toast.error(new Error('That file could not be decoded. Use a JPEG, PNG or WebP.'), 'Unsupported image');
-      return;
-    }
+    // An image the server cannot read (GIF, AVIF...) comes back as a PNG (./playground/intake).
+    const t = await takeImage(file, name);
     if (seq !== decodeSeq || destroyed) return;
-    setSource({ kind: 'file', file, name, url: URL.createObjectURL(file), width, height });
+    if ('error' in t) {
+      toast.error(new Error(t.error), 'Unsupported image');
+      return;
+    }
+    setSource({ kind: 'file', file: t.file, name, url: URL.createObjectURL(t.file), width: t.width, height: t.height });
   }
 
   function clear() {
@@ -229,8 +221,11 @@ export default function Playground() {
   function ondrop(e: DragEvent) {
     e.preventDefault();
     dragging.set(false);
-    const file = e.dataTransfer?.files[0];
-    if (file) void setFile(file);
+    const [file, ...rest] = droppedImages(e.dataTransfer?.files);
+    if (!file) return;
+    void setFile(file);
+    // One image runs at a time: the others are not dropped without a word.
+    if (rest.length) toast.info(`Using ${file.name}`, `The Playground runs one image at a time, so the other ${rest.length === 1 ? 'image was' : `${rest.length} images were`} left out.`);
   }
 
   function ondragover(e: DragEvent) {
@@ -697,7 +692,7 @@ export default function Playground() {
       <input
         ref={(e) => (fileInput = e)}
         type="file"
-        accept="image/*"
+        accept={ACCEPT}
         class="sr-only"
         tabindex={-1}
         aria-hidden="true"

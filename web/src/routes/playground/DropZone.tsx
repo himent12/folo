@@ -10,6 +10,7 @@ import Skeleton from '$lib/ui/Skeleton';
 import Viewfinder from '$lib/ui/Viewfinder';
 import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import { media } from '$lib/design/tokens';
+import { FORMATS } from './intake';
 
 export interface DropZoneProps {
   dragging?: boolean;
@@ -43,10 +44,10 @@ export default function DropZone(props: DropZoneProps) {
           description={() => (
             <>
               {touch() ? (
-                'JPEG, PNG or WebP, from your photos, camera or files.'
+                `${FORMATS} (other images are converted), from your photos, camera or files.`
               ) : (
                 <>
-                  JPEG, PNG or WebP. You can also paste from the clipboard with{' '}
+                  {FORMATS} (other images are converted). You can also paste from the clipboard with{' '}
                   <span class="nowrap">
                     <Kbd keys="Mod+V" />.
                   </span>
