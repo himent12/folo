@@ -12,6 +12,16 @@ use std::sync::Mutex;
 /// The tile edge in device pixels.
 pub const TILE: i32 = 64;
 
+/// The widest and tallest frame drawn (device px): its pixel coordinates fit `i32`, its tile
+/// coordinates `u16` (`Item::tiles`) and its tile count `i32`. A bigger frame is not drawn.
+pub const MAX_SIDE: u32 = 1 << 21;
+
+/// The most entries the tile lists hold in all: a 1 GiB list, far beyond any real frame, and well
+/// inside the `u32` that `offsets`, `start` and the cursors index it with (a few full-frame items on a
+/// big frame are millions of entries, so the bound is on entries, not items). Binning keeps the items,
+/// in painter's order, whose entries fit: the rest are not drawn.
+const MAX_ENTRIES: u64 = 1 << 28;
+
 fn tile_rect(t: usize, cols: i32, width: i32, height: i32) -> IRect {
     let (tx, ty) = (t as i32 % cols, t as i32 / cols);
     IRect::new(tx * TILE, ty * TILE, ((tx + 1) * TILE).min(width), ((ty + 1) * TILE).min(height))
@@ -78,8 +88,18 @@ impl Tiles {
     }
 
     /// Bins `items` (their tile spans lie inside the grid) in `parts` contiguous parts, on `pool`'s
-    /// threads when given: a counting sort, so each tile's list stays in painter's order.
-    pub fn bin(&mut self, items: &[Item], parts: usize, pool: Option<&Pool>) {
+    /// threads when given: a counting sort, so each tile's list stays in painter's order. Returns how
+    /// many items were binned: all of them, unless they make more than `MAX_ENTRIES` entries, when only
+    /// the first items that fit are (the later ones are not drawn).
+    pub fn bin(&mut self, items: &[Item], parts: usize, pool: Option<&Pool>) -> usize {
+        self.bin_within(items, parts, pool, MAX_ENTRIES)
+    }
+
+    /// `bin` with at most `limit` (at most `u32::MAX`) entries in all.
+    fn bin_within(&mut self, items: &[Item], parts: usize, pool: Option<&Pool>, limit: u64) -> usize {
+        debug_assert!(limit <= u32::MAX as u64);
+        // Item indices are stored as `u32`, and so are the per-part counts, which never exceed them.
+        let items = &items[..items.len().min(u32::MAX as usize)];
         let n = self.len();
         let cols = self.cols as usize;
         let parts = parts.clamp(1, items.len().max(1));
@@ -103,15 +123,22 @@ impl Tiles {
         self.offsets.resize(n + 1, 0);
         self.cursor.clear();
         self.cursor.resize(parts * n, 0);
-        let mut run = 0u32;
+        let mut run = 0u64;
         for t in 0..n {
-            self.offsets[t] = run;
+            self.offsets[t] = run as u32;
             for p in 0..parts {
-                self.cursor[p * n + t] = run;
-                run += self.counts[p * n + t];
+                self.cursor[p * n + t] = run as u32;
+                run += self.counts[p * n + t] as u64;
+            }
+            if run > limit {
+                // Too many entries: bin only the first items that fit. (Each count is at most
+                // `u32::MAX`, so `run` cannot wrap before this check.)
+                let fit = fitting_items(items, limit).min(items.len() - 1);
+                return self.bin_within(&items[..fit], parts, pool, limit);
             }
         }
-        self.offsets[n] = run;
+        // Every value stored above is at most `run`, which is at most `limit <= u32::MAX`.
+        self.offsets[n] = run as u32;
         self.list.clear();
         self.list.resize(run as usize, 0);
         // Pass 2: each part writes its items into its own ranges.
@@ -130,14 +157,16 @@ impl Tiles {
                 for ty in y0..y1 {
                     for c in &mut cursor[ty * cols + x0..ty * cols + x1] {
                         // SAFETY: `*c` stays inside this part's range of this tile (pass 1 counted
-                        // exactly these entries), and ranges of different (tile, part) pairs are
-                        // disjoint, so no other thread writes this slot; the list outlives the job.
+                        // exactly these entries, and their total fits `u32` and is the list's length),
+                        // and ranges of different (tile, part) pairs are disjoint, so no other thread
+                        // writes this slot; the list outlives the job.
                         unsafe { list.0.add(*c as usize).write((base + i) as u32) };
                         *c += 1;
                     }
                 }
             }
         });
+        items.len()
     }
 
     /// Cuts each tile's list at its occluder, hashes what remains (with `salt`), and puts the tiles
@@ -268,9 +297,65 @@ impl Tiles {
     }
 }
 
+/// How many of the first `items` have at most `limit` tile entries in all.
+fn fitting_items(items: &[Item], limit: u64) -> usize {
+    let mut total = 0u64;
+    for (i, it) in items.iter().enumerate() {
+        let [x0, y0, x1, y1] = it.tiles.map(u64::from);
+        total += x1.saturating_sub(x0) * y1.saturating_sub(y0);
+        if total > limit {
+            return i;
+        }
+    }
+    items.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An item over tiles `x0..x1` x `y0..y1`.
+    fn item(tiles: [u16; 4]) -> Item {
+        Item { tiles, ..Item::default() }
+    }
+
+    #[test]
+    fn binning_keeps_the_items_whose_entries_fit() {
+        let mut t = Tiles::default();
+        t.resize(64 * 3, 64 * 2);
+        // Six tiles; each item covers all of them, the empty one none.
+        let items = [item([0, 0, 3, 2]), item([0, 0, 0, 0]), item([0, 0, 3, 2]), item([0, 0, 3, 2])];
+        for parts in [1, 2, 4] {
+            // Room for 15 entries: the first three items (12), not the fourth.
+            assert_eq!(t.bin_within(&items, parts, None, 15), 3, "{parts} parts");
+            for tile in 0..t.len() {
+                assert_eq!(&t.list[t.offsets[tile] as usize..t.offsets[tile + 1] as usize], &[0, 2]);
+            }
+            assert_eq!(t.offsets[t.len()], 12);
+            // Exactly at the limit: everything.
+            assert_eq!(t.bin_within(&items, parts, None, 18), 4);
+            assert_eq!(t.list.len(), 18);
+            for tile in 0..t.len() {
+                assert_eq!(&t.list[t.offsets[tile] as usize..t.offsets[tile + 1] as usize], &[0, 2, 3]);
+            }
+        }
+        // No room at all: nothing is binned, every list is empty.
+        assert_eq!(t.bin_within(&items, 1, None, 5), 0);
+        assert!(t.list.is_empty());
+        assert_eq!(t.bin(&items, 2, None), 4);
+    }
+
+    #[test]
+    fn the_entry_count_of_a_huge_frame_is_caught() {
+        // The review's case: 16,384 tiles (8192 x 8192) under 262,144 full-frame items make exactly
+        // 2^32 entries, which wrapped a `u32` total to 0. Counted in `u64`, it is over even a `u32`
+        // limit, and binning keeps the items within `MAX_ENTRIES`.
+        let full = item([0, 0, 128, 128]);
+        let items = vec![full; 262_144];
+        assert_eq!(fitting_items(&items, u32::MAX as u64), 262_143);
+        assert_eq!(fitting_items(&items[..262_143], u32::MAX as u64), 262_143);
+        assert_eq!(fitting_items(&items, MAX_ENTRIES), (MAX_ENTRIES / 16_384) as usize);
+    }
 
     #[test]
     fn damage_merges_runs_and_rows() {

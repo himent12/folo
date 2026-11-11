@@ -520,7 +520,11 @@ impl WindowsWindow {
             appearance,
             offscreen,
         };
-        // SAFETY: the class is registered; `context` outlives the call (WM_NCCREATE reads it).
+        // A unique borrow's pointer, so WM_NCCREATE may write `context.inner` through it; `context`
+        // is not touched again until `CreateWindowExW` has returned.
+        let context_ptr: *mut CreateContext = &raw mut context;
+        // SAFETY: the class is registered; `context` outlives the call (WM_NCCREATE reads and writes
+        // it through `context_ptr`, the only access while the call runs).
         let created = unsafe {
             CreateWindowExW(
                 ex_style,
@@ -534,7 +538,7 @@ impl WindowsWindow {
                 owner,
                 None,
                 Some(module_handle().into()),
-                Some(&context as *const CreateContext as *const _),
+                Some(context_ptr as *const _),
             )
         };
         let this = match context.inner.take() {
@@ -674,7 +678,9 @@ pub(crate) fn module_handle() -> HMODULE {
 unsafe extern "system" fn window_procedure(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_NCCREATE {
         // SAFETY: for WM_NCCREATE lparam is the CREATESTRUCTW whose lpCreateParams is our context,
-        // alive for the whole CreateWindowExW call.
+        // alive for the whole CreateWindowExW call, passed as a pointer with write access
+        // (`WindowsWindow::new`) and not otherwise used while the call runs; WM_NCCREATE comes once
+        // per window, so this is the only reference to it.
         let (cs, context) = unsafe {
             let cs = &*(lparam.0 as *const CREATESTRUCTW);
             (cs, &mut *(cs.lpCreateParams as *mut CreateContext))

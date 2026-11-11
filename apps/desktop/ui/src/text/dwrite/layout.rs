@@ -207,7 +207,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
         glyphrundescription: *const DWRITE_GLYPH_RUN_DESCRIPTION,
         _clientdrawingeffect: Ref<IUnknown>,
     ) -> windows::core::Result<()> {
-        // SAFETY: DirectWrite passes a valid glyph run for the duration of the call.
+        if glyphrun.is_null() || glyphrundescription.is_null() || clientdrawingcontext.is_null() {
+            return Ok(());
+        }
+        // SAFETY: DirectWrite passes a valid glyph run for the duration of the call (not null: above).
         let glyphrun = unsafe { &*glyphrun };
         let glyph_count = glyphrun.glyphCount as usize;
         let Some(font_face) = glyphrun.fontFace.as_ref() else {
@@ -218,6 +221,10 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
         }
         // SAFETY: as above, for the description.
         let desc = unsafe { &*glyphrundescription };
+        // The glyphs, their advances and the cluster map are needed; offsets may be absent (all zero).
+        if glyphrun.glyphIndices.is_null() || glyphrun.glyphAdvances.is_null() || desc.clusterMap.is_null() {
+            return Ok(());
+        }
         // SAFETY: `clientdrawingcontext` is the `RendererContext` `layout_line` passed to `Draw`, alive and
         // not otherwise borrowed while `Draw` runs.
         let context = unsafe { &mut *(clientdrawingcontext as *mut RendererContext) };
@@ -237,16 +244,22 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             },
         };
 
-        // SAFETY: DirectWrite's arrays hold `glyph_count` glyphs and `stringLength` cluster entries.
+        // SAFETY: DirectWrite's arrays hold `glyph_count` glyphs and `stringLength` cluster entries, and
+        // the pointers are not null (checked above; absent offsets give an empty slice).
         let (glyph_ids, glyph_advances, glyph_offsets, cluster_map) = unsafe {
             (
                 std::slice::from_raw_parts(glyphrun.glyphIndices, glyph_count),
                 std::slice::from_raw_parts(glyphrun.glyphAdvances, glyph_count),
-                std::slice::from_raw_parts(glyphrun.glyphOffsets, glyph_count),
+                if glyphrun.glyphOffsets.is_null() {
+                    &[]
+                } else {
+                    std::slice::from_raw_parts(glyphrun.glyphOffsets, glyph_count)
+                },
                 std::slice::from_raw_parts(desc.clusterMap, desc.stringLength as usize),
             )
         };
 
+        let advance_offset = |i: usize| glyph_offsets.get(i).map_or(0.0, |o| o.advanceOffset);
         let cluster_analyzer = ClusterAnalyzer::new(cluster_map, glyph_count);
         let mut utf16_idx = desc.textPosition as usize;
         let mut glyph_idx = 0;
@@ -261,7 +274,7 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
                 let this_glyph_idx = glyph_idx + cluster_glyph_idx;
                 glyphs.push(ShapedGlyph {
                     id,
-                    position: point(px(context.width + glyph_offsets[this_glyph_idx].advanceOffset), px(0.0)),
+                    position: point(px(context.width + advance_offset(this_glyph_idx)), px(0.0)),
                     index: context.index_converter.utf8_ix,
                     is_emoji,
                 });

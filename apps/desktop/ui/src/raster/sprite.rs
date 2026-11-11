@@ -8,7 +8,7 @@
 use super::blend::{ONE, Tint, alpha16, over_pm8, sat};
 use super::geom::IRect;
 use super::target::Target;
-use crate::{AlphaMask, ColorMask, GlyphBlend};
+use crate::{AlphaMask, ColorMask, DevicePixels, GlyphBlend, Size};
 
 fn color_brightness(c: [f32; 3]) -> f32 {
     c[0] * 0.30 + c[1] * 0.59 + c[2] * 0.11
@@ -102,9 +102,16 @@ pub(crate) fn draw_glyph(
     r: IRect,
 ) {
     let r = r.intersect(&mask_rect(origin, mask.size.width.0, mask.size.height.0));
-    if !r.is_empty() {
+    if !r.is_empty() && holds(mask.data.len(), mask.size, 1) {
         draw_mask(t, &mask.data, mask.size.width.0 as usize, origin, lut, tint, r);
     }
+}
+
+/// Whether `len` bytes hold a `size` mask of `bpp` bytes per pixel (the fields are public, so a mask
+/// may claim more pixels than its data has; such a mask is not drawn).
+fn holds(len: usize, size: Size<DevicePixels>, bpp: usize) -> bool {
+    let (w, h) = (size.width.0.max(0) as usize, size.height.0.max(0) as usize);
+    w.checked_mul(h).and_then(|n| n.checked_mul(bpp)).is_some_and(|n| n <= len)
 }
 
 /// The pixels a 1:1 mask of `w` x `h` at `origin` covers.
@@ -180,7 +187,7 @@ pub(crate) fn draw_svg(
     r: IRect,
 ) {
     let w = mask.size.width.0 as usize;
-    if w == 0 || mask.size.height.0 <= 0 {
+    if w == 0 || mask.size.height.0 <= 0 || !holds(mask.data.len(), mask.size, 1) {
         return;
     }
     for y in r.y0..r.y1 {
@@ -215,7 +222,7 @@ fn svg_alpha(lut: &AlphaLut, s: u32) -> u32 {
 /// An emoji: premultiplied BGRA, 1:1, times `opacity` (`0..=ONE`).
 pub(crate) fn draw_color(t: &mut Target, mask: &ColorMask, origin: (i32, i32), opacity: u32, r: IRect) {
     let r = r.intersect(&mask_rect(origin, mask.size.width.0, mask.size.height.0));
-    if r.is_empty() {
+    if r.is_empty() || !holds(mask.data.len(), mask.size, 4) {
         return;
     }
     let w = mask.size.width.0 as usize;
@@ -236,6 +243,31 @@ pub(crate) fn draw_color(t: &mut Target, mask: &ColorMask, origin: (i32, i32), o
 mod tests {
     use super::*;
     use crate::raster::blend::unorm;
+    use crate::size;
+
+    /// A mask whose size claims more pixels than its data has is skipped, not read past its end.
+    #[test]
+    fn a_mask_shorter_than_its_size_is_not_drawn() {
+        let px = |w, h| size(DevicePixels(w), DevicePixels(h));
+        assert!(holds(6, px(3, 2), 1) && holds(24, px(3, 2), 4) && holds(0, px(0, 5), 4));
+        assert!(
+            !holds(5, px(3, 2), 1) && !holds(23, px(3, 2), 4) && !holds(1 << 30, px(i32::MAX, i32::MAX), 4)
+        );
+        let mut pixels = vec![7u32; 64 * 64];
+        let fm = super::super::target::FrameMut::new(&mut pixels, 64);
+        // SAFETY: the one target of this frame, inside it.
+        let mut t = unsafe { fm.target(IRect::new(0, 0, 64, 64)) };
+        let blend = GlyphBlend::IDENTITY;
+        let lut = AlphaLut::glyph([1., 1., 1., 1.], &blend);
+        let tint = Tint::new([1., 1., 1., 1.]);
+        let short = AlphaMask { id: 0, size: px(8, 8), data: vec![255u8; 10].into() };
+        draw_glyph(&mut t, &short, (0, 0), &lut, &tint, IRect::new(0, 0, 64, 64));
+        let ax = Axis::new(0., 8., 8);
+        draw_svg(&mut t, &short, &ax, &ax, &lut, &tint, IRect::new(0, 0, 8, 8));
+        let short = ColorMask { id: 0, size: px(8, 8), data: vec![255u8; 10].into() };
+        draw_color(&mut t, &short, (0, 0), ONE, IRect::new(0, 0, 64, 64));
+        assert!(pixels.iter().all(|&p| p == 7), "nothing drawn");
+    }
 
     /// The table path (integer alpha, integer blend) against the float formula (the shader's maths
     /// and a float blend rounded like a UNORM target), for every mask value and several colours.

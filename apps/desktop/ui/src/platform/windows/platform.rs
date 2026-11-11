@@ -132,6 +132,8 @@ impl WindowsPlatform {
 impl Drop for WindowsPlatform {
     fn drop(&mut self) {
         self.shared.dispatcher.main.clear();
+        // Also when the loop never ran (`run` stops it too; a second call does nothing).
+        self.shared.pacer.shut_down();
         // SAFETY: destroying our message window and undoing OleInitialize, on the same thread.
         unsafe {
             let _ = DestroyWindow(self.shared.message_window());
@@ -162,8 +164,10 @@ impl Platform for WindowsPlatform {
         for callback in self.quit_callbacks.borrow_mut().iter_mut() {
             callback();
         }
-        // Nothing runs main-thread work any more: drop what is queued and let the dispatcher's threads go.
+        // Nothing runs main-thread work any more: drop what is queued and let the dispatcher's threads go,
+        // and stop the frame pacer's thread.
         self.shared.dispatcher.shut_down();
+        self.shared.pacer.shut_down();
     }
 
     fn quit(&self) {
@@ -331,9 +335,12 @@ unsafe extern "system" fn message_window_procedure(
             LRESULT(0)
         }
         WM_FOLO_CALL => {
-            // SAFETY: `post_call` leaked exactly this box for this message.
-            let call = unsafe { Box::from_raw(lparam.0 as *mut Box<dyn FnOnce()>) };
-            call();
+            let call = lparam.0 as *mut Box<dyn FnOnce()>;
+            if !call.is_null() {
+                // SAFETY: `post_call` leaked exactly this box for this message (not null: checked).
+                let call = unsafe { Box::from_raw(call) };
+                call();
+            }
             LRESULT(0)
         }
         WM_FOLO_QUIT => {
