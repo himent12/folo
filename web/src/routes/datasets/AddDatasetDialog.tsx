@@ -17,6 +17,7 @@ import Segmented from '$lib/ui/Segmented';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
 import { noTraining } from '../dataset/health';
+import { datasetsChanged } from './changes';
 import { cleanPath, isFullPath, NAME_RE, nameFromPath, suggestName, uniqueName } from './names';
 
 type Mode = 'folder' | 'synthetic';
@@ -173,6 +174,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const nt = noTraining(ds);
       const count = nt ? `${ds.name} · ${nt.where}, none to train on` : `${ds.name} · ${num(ds.splits.train + ds.splits.val + ds.splits.test)} images`;
       work.set(null);
+      if (!known) datasetsChanged();
       if (!open.peek()) {
         // Dismissed while it ran: wherever the person is now, they stay there; the toast offers the dataset.
         const go = { label: 'Open', run: () => router.go(`/datasets/${ds.id}`) };

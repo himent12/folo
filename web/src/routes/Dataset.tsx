@@ -39,6 +39,7 @@ import ImageGrid from './dataset/ImageGrid';
 import Inspector from './dataset/Inspector';
 import { ImagePager } from './dataset/pager';
 import StatsTab from './dataset/StatsTab';
+import { datasetsChanged } from './datasets/changes';
 
 type Tab = 'images' | 'stats';
 type SplitFilter = 'all' | Split;
@@ -178,6 +179,7 @@ export default function Dataset() {
     deleting.set(true);
     try {
       await hub.api.deleteDataset(dd.id);
+      datasetsChanged();
       confirmDelete.set(false);
       toast.success('Dataset removed', `${dd.name} is no longer registered. Files on disk were not touched.`);
       router.go('/datasets');

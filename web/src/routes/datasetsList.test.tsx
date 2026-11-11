@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// A registered dataset whose folder is gone (moved, renamed, deleted): the list marks it, and its page keeps its
-// name, says what is wrong and can remove it from FOLO.
+// The Datasets list's view of the datasets there are: one whose folder is gone (moved, renamed, deleted) is marked and
+// its page keeps its name and can remove it from FOLO; and the list reads them again when they may have changed.
 import { flush as flushSync, type Component } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +10,7 @@ import { MockApi } from '$lib/api/mock';
 import { parse, router } from '$lib/router';
 import Dataset from './Dataset';
 import Datasets from './Datasets';
+import { datasetsChanged } from './datasets/changes';
 
 let target: HTMLElement;
 let c: { unmount(): void } | undefined;
@@ -76,5 +77,18 @@ describe('a dataset whose folder is missing', () => {
     confirm.click();
     await vi.waitFor(() => expect(go).toHaveBeenCalledWith('/datasets'));
     expect(del).toHaveBeenCalledWith('ds_shapes');
+  });
+});
+
+describe('the Datasets list', () => {
+  it('reads the datasets again after a dataset action in this tab and when the tab comes back', async () => {
+    const list = vi.spyOn(hub.api, 'datasets');
+    open(Datasets, '/datasets');
+    await until(() => target.querySelector('tr[aria-label="fasteners"]'), 'the rows');
+    const calls = list.mock.calls.length;
+    datasetsChanged();
+    await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 1));
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.waitFor(() => expect(list.mock.calls.length).toBe(calls + 2));
   });
 });

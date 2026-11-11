@@ -3,7 +3,7 @@ import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Sparkles from '$icons/sparkles';
 import Tags from '$icons/tags';
-import { computed, css, For, signal, untrack } from 'fw';
+import { computed, css, effect, For, signal, untrack } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import ClassStrip from '$lib/detect/ClassStrip';
@@ -26,6 +26,7 @@ import Meta from '$lib/ui/Meta';
 import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
+import { datasetChanges } from './datasets/changes';
 import { datasetProblem, PROBLEM_LABEL, type ListedDataset } from './datasets/problem';
 
 type Format = 'all' | 'yolo' | 'coco';
@@ -42,6 +43,17 @@ export default function Datasets() {
   const datasets = new Resource(async (s) => {
     const list = await hub.api.datasets(s);
     return Promise.all(list.map((d): Promise<ListedDataset> => hub.api.dataset(d.id, s).catch((e) => ({ ...d, problem: datasetProblem(e) }))));
+  });
+  // The list goes stale otherwise: read it again after a dataset action in this tab, and when the tab comes back (one
+  // added in another tab, by an agent, or a folder moved meanwhile).
+  const seen = datasetChanges.peek();
+  effect(() => {
+    if (datasetChanges.get() !== seen) untrack(() => void datasets.refresh());
+  });
+  effect(() => {
+    const back = () => document.visibilityState === 'visible' && !datasets.loading && void datasets.refresh();
+    document.addEventListener('visibilitychange', back);
+    return () => document.removeEventListener('visibilitychange', back);
   });
 
   // `#/datasets?add=folder|synthetic` opens the dialog (used by the onboarding on an empty Overview).
