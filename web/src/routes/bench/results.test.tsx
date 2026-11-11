@@ -155,6 +155,9 @@ describe("an entry's page", () => {
     expect(document.querySelector('#score')).not.toBeNull();
     expect(document.querySelector('#calibration svg')).toBeNull();
     expect(document.querySelector('#robustness .heat')).toBeNull();
+    // A measured axis takes a larger share than its plan weight, and says which is which.
+    const w = document.querySelector('#score .r[data-axis="accuracy"] .c-w')!.textContent!;
+    expect(w).toMatch(/^weight \d+%\d+% in the plan$/);
   });
 
   it('shows a running entry where it is, and a failed one why', async () => {

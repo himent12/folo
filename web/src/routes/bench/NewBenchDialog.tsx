@@ -292,12 +292,17 @@ css`
   .form :global(.seg) {
     justify-self: start;
   }
-  /* Dataset and split side by side: the split's three choices keep their width, the dataset takes the rest. */
+  /* Dataset and split side by side: the split's three choices keep their width, the dataset takes the rest (the
+     split's hint wraps under its choices rather than widening their column). */
   .pair {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--space-4);
     align-items: start;
+  }
+  .pair :global(.field:last-child .msg) {
+    width: 0;
+    min-width: 100%;
   }
   .form :global(.max) {
     max-width: 160px;

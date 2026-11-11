@@ -119,8 +119,12 @@ export default function ScoreSection(props: ScoreSectionProps) {
                     </span>
                   )}
                   <span class="c-w num" role="cell">
+                    {/* Phones hide the header row: the figure says what it is. */}
+                    <span class="w-word">weight </span>
                     {pct(measured() ? shares.get()[a().axis] : a().weight, 0)}
-                    {measured() && Math.abs(shares.get()[a().axis] - a().weight) > 1e-6 ? <span class="base">of its {pct(a().weight, 0)}</span> : null}
+                    {measured() && Math.abs(shares.get()[a().axis] - a().weight) > 1e-6 ? (
+                      <span class="base">{pct(a().weight, 0)} in the plan</span>
+                    ) : null}
                   </span>
                   <span class="c-pts num" role="cell">
                     {points.get()[a().axis] !== null ? `+${num(points.get()[a().axis], 1)}` : <span class="faint">—</span>}
@@ -284,6 +288,10 @@ css`
     color: var(--text-secondary);
   }
   /* Its catalog weight under the share it took here, when axes were left out. */
+  .w-word {
+    display: none;
+    color: var(--text-tertiary);
+  }
   .base {
     display: block;
     font-size: var(--type-sm-size);
@@ -332,6 +340,9 @@ css`
     }
     .c-sumline {
       grid-column: 1 / span 2;
+    }
+    .w-word {
+      display: inline;
     }
   }
 `;
