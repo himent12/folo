@@ -117,7 +117,7 @@ mod tests {
         assert_eq!(clip_span(1702.5, 1704.), (1702, 1704));
         // Edges snap to 1/256 px first: a clip computed as 1553.5001 (float error in the layout
         // arithmetic) is 1553.5 to the rasterizer and keeps pixel 1553, as the GPUI captures show.
-        assert_eq!(clip_span(1553.500_1, 1555.), (1553, 1555));
+        assert_eq!(clip_span(1553.5001, 1555.), (1553, 1555));
         assert_eq!(raster_span(10.5 + 1. / 512. + 1e-4, 20.5 - 1. / 600.), (11, 20));
         assert_eq!(raster_span(284.999_97, 318.), (285, 318));
         assert_eq!(raster_span(-0.5, -10.5), (-1, -11));

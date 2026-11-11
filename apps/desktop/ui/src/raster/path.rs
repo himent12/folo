@@ -251,7 +251,11 @@ mod tests {
     fn coverage_is_four_samples() {
         let rect = |x1: f32| {
             let c = Contour { points: vec![pt(0., 0.), pt(x1, 0.), pt(x1, 4.), pt(0., 4.)], closed: true };
-            PathMask::new(&PathData::new(vec![c], PathKind::Fill(FillRule::NonZero)), IRect::new(0, 0, 4, 4), OPEN)
+            PathMask::new(
+                &PathData::new(vec![c], PathKind::Fill(FillRule::NonZero)),
+                IRect::new(0, 0, 4, 4),
+                OPEN,
+            )
         };
         // Samples of column 2 sit at x = 2.125, 2.375, 2.625, 2.875.
         for (x1, want) in [(2.1, 0), (2.2, 64), (2.5, 128), (2.7, 191), (2.9, 255)] {

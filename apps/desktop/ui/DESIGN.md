@@ -53,7 +53,8 @@ built against; when code and this file disagree, fix one of them in the same cha
 - **Linux and macOS backend is winit 0.30 + softbuffer** (plus arboard for the clipboard and rfd for file
   dialogs). It also compiles on Windows (feature `winit`) so its shared code runs on the dev machine.
 - **Commodity crates do commodity jobs:** taffy (flexbox maths), resvg/usvg (SVG icons, as GPUI), tiny-skia
-  (path coverage, comes with resvg), cosmic-text, winit, softbuffer, arboard, rfd, image, async-task, smallvec.
+  (comes with resvg), lyon `=1.0.19` (path tessellation and dashing, the versions GPUI 0.2.2 uses, so a path
+  covers the same samples), cosmic-text, winit, softbuffer, arboard, rfd, image, async-task, smallvec.
   Everything else is ours. No new dependency without a line in this file saying why.
 
 ### What GPUI code may be reused
@@ -117,8 +118,8 @@ Painter's order: a primitive is drawn over every earlier one. Each primitive car
   is sampled linearly over the bounds, a glyph is drawn 1:1)
 - `ColorSprite { bounds, clip, mask: Arc<ColorMask>, opacity }` (colour emoji)
 - `Image { bounds, clip, corner_radii, image: Arc<RenderImage>, frame, grayscale, opacity }`
-- `Path { bounds, clip, path: Arc<PathData>, paint: Background }` (fill or stroke, already resolved to
-  contours + fill rule or stroke style by `PathBuilder`)
+- `Path { bounds, clip, path: Arc<PathData>, paint: Background }` (`PathBuilder` makes lyon's triangles,
+  as GPUI; contours with a fill rule or stroke style are also accepted)
 - `Underline { … }` as GPUI's (straight and wavy)
 
 Masks and images are identified by a process-unique `id: u64` assigned at creation; tile hashes use ids, never
@@ -145,8 +146,11 @@ impl Renderer {
   pool: it belongs to the engine). The pool is created the first time it is needed.
 - Quads, borders (solid and dashed), rounded corners and shadows use GPUI's coverage formulas
   (`vendor/gpui/src/platform/windows/shaders.hlsl`) on edge pixels and solid spans inside. Shadows are cached
-  as masks. Images are sampled as a linear GPU sampler would (texel centres), with a cache of resampled
-  copies for images drawn at the same size frame after frame. Path coverage is cached by geometry.
+  as masks. Images are sampled as a linear GPU sampler would (texel centres; past the image's edge GPUI's
+  zeroed atlas), with a cache of resampled copies for images drawn at the same size frame after frame.
+  Paths are sampled as GPUI's 4x MSAA path target (standard pattern, top-left rule, 1/256 px snapping,
+  per-sample clip and overlap counts); their coverage is cached by geometry. Clip edges follow the
+  top-left rule too. `ui/PARITY.md` lists every rule and what still differs.
 - Caches are bounded in bytes and drop what recent frames did not use. Memory is a goal, not an afterthought.
 - Targets on the dev machine (i7-14700KF), release build: a full 1920x1200 frame of a busy screen in under
   4 ms; a frame that changes one small region in under 0.3 ms including binning and hashing.

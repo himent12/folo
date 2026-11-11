@@ -6,8 +6,8 @@
 //! does, so strokes keep lyon's joins (its miter limit, inner joins, folds) to the sample.
 
 use crate::{
-    Background, Bounds, FillRule, LineCap, LineJoin, PathData, Pixels, Point, ScaledPixels, Scene, StylePaint,
-    point, px,
+    Background, Bounds, FillRule, LineCap, LineJoin, PathData, Pixels, Point, ScaledPixels, Scene,
+    StylePaint, point, px,
 };
 use std::fmt::Debug;
 use std::sync::Arc;
@@ -405,7 +405,7 @@ fn built_path(buf: lyon::tessellation::VertexBuffers<lyon::math::Point, u16>) ->
     let mut min = (first.x, first.y);
     let mut max = min;
     let mut triangles = Vec::with_capacity(buf.indices.len());
-    for i in buf.indices.chunks_exact(3) {
+    for i in buf.indices.as_chunks::<3>().0 {
         for &v in i {
             let p = buf.vertices[v as usize];
             min = (min.0.min(p.x), min.1.min(p.y));

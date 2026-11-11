@@ -64,7 +64,7 @@ pub(crate) fn coverage(triangles: &[Point<ScaledPixels>], clip: [f32; 4], rect: 
     let (w, h) = (rect.width().max(0) as usize, rect.height().max(0) as usize);
     let mut bits = vec![0u8; w * h];
     let clip = clip.map(fixed);
-    for t in triangles.chunks_exact(3) {
+    for t in triangles.as_chunks::<3>().0 {
         let mut v = [0; 3].map(|_| (0i64, 0i64));
         for (v, p) in v.iter_mut().zip(t) {
             *v = (fixed(p.x.0), fixed(p.y.0));
