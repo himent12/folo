@@ -1,4 +1,3 @@
-// fw port of AddEntryDialog.svelte.
 /**
  * "Add entry": one contestant's run of the benchmark (docs/BENCH.md, Who can run), three kinds.
  * - A model of this server: its classes against the benchmark's (matched by name; it scores 0 on the ones it lacks),
@@ -40,8 +39,8 @@ import Spinner from '$lib/ui/Spinner';
 import Switch from '$lib/ui/Switch';
 import AgentFields from '../label/AgentFields';
 import type { AgentChoice } from '../label/agentChoice';
-import { modelLabel } from '../label/words.fw';
-import { imagesText } from './words.fw';
+import { modelLabel } from '../label/words';
+import { imagesText } from './words';
 
 export type EntryKind = 'model' | 'agent' | 'external';
 

@@ -1,4 +1,3 @@
-// fw port of Menu.svelte.
 /**
  * An overflow menu: a "⋯" button that opens a short list of actions (links or buttons). Keyboard (WAI-ARIA menu
  * button): Enter, Space or ArrowDown on the button opens it on the first item (ArrowUp on the last); in the list,
@@ -14,7 +13,7 @@ import { computed, createUniqueId, css, defaults, Dynamic, effect, For, MediaQue
 import { media } from '$lib/design/tokens';
 import Button from './Button';
 import Dialog from './Dialog';
-import type { IconType } from './types.fw';
+import type { IconType } from './types';
 
 export interface MenuItem {
   label: string;

@@ -1,4 +1,3 @@
-// fw port of CliCommand.svelte.
 /** The same run from a terminal, under the Summary: the server's command, else Studio's, one flag a line, copyable. */
 import ChevronRight from '$icons/chevron-right';
 import Copy from '$icons/copy';

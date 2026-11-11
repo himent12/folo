@@ -1,4 +1,3 @@
-// fw port of AddDatasetDialog.svelte.
 /** "Add dataset": register a YOLO/COCO folder on the server's disk, or generate a synthetic shapes set. */
 import FolderOpen from '$icons/folder-open';
 import Sparkles from '$icons/sparkles';

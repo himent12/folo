@@ -1,4 +1,3 @@
-// fw port of NotFound.svelte.
 import Crosshair from '$icons/crosshair';
 import { effect } from 'fw';
 import { router, href } from '$lib/router';

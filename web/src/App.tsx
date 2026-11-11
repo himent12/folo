@@ -1,4 +1,4 @@
-// fw port of App.svelte: the shell (sidebar, top bar, tab bar, palette, shortcuts, toasts, run watch) and the screen of
+// The shell (sidebar, top bar, tab bar, palette, shortcuts, toasts, run watch) and the screen of
 // the current route. Each screen is a chunk of its own (./routes.ts): the shell renders at once, a screen when its
 // chunk is there. Moving to a screen whose chunk has not loaded yet keeps the screen on display until it has, then
 // swaps in one step, as `{#key}` does; chunks are fetched ahead (a link hovered, focused or touched, the G of a
@@ -12,7 +12,7 @@ import ConnectionStatus from '$lib/shell/ConnectionStatus';
 // The extension: runWatch.ts (its logic) differs from this file's name only in case.
 import RunWatch from '$lib/shell/RunWatch.tsx';
 import { holdRouteFocus, isNewPage } from '$lib/shell/routeFocus';
-import { installShortcuts } from '$lib/shell/shortcuts.fw';
+import { installShortcuts } from '$lib/shell/shortcuts';
 import ShortcutsDialog from '$lib/shell/ShortcutsDialog';
 import Sidebar from '$lib/shell/Sidebar';
 import SidebarLive from '$lib/shell/SidebarLive';

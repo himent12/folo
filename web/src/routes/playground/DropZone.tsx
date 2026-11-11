@@ -1,4 +1,3 @@
-// fw port of DropZone.svelte.
 /** The Playground's empty state: a viewfinder to drop an image into, plus sample images to try. */
 import Images from '$icons/images';
 import Upload from '$icons/upload';
@@ -9,7 +8,7 @@ import Button from '$lib/ui/Button';
 import Kbd from '$lib/ui/Kbd';
 import Skeleton from '$lib/ui/Skeleton';
 import Viewfinder from '$lib/ui/Viewfinder';
-import { TOUCH_ONLY } from '$lib/shell/shortcuts.fw';
+import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import { media } from '$lib/design/tokens';
 
 export interface DropZoneProps {

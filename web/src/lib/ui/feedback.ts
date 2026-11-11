@@ -1,5 +1,4 @@
-// fw port of feedback.svelte.ts (the same contract, on fw signals and context).
-// Where an action's result is said. The toaster is for page-level events (a run that finished, a page action's
+// // Where an action's result is said. The toaster is for page-level events (a run that finished, a page action's
 // outcome); an action taken inside an open dialog shows its result in that dialog, in its status region
 // (`ui/DialogStatus.svelte`), since the toaster sits outside the modal: behind its scrim and outside its focus trap.
 // `ui/Dialog` keeps one `DialogStatus` and provides it to what it renders; a dialog of its own (the dataset inspector)

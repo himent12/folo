@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 /// <reference types="node" />
-// fw port of the Runs cases of listTables.svelte.test.ts (Models and Datasets are ported with their screens).
+// The Runs list (Models and Datasets: listTables.test.tsx).
 // The list tables at every width: a header cell and the cells under it hide together, so each value sits under its own
 // heading. The responsive column rule is base.css's (loaded here as the app loads it).
 import { readFileSync } from 'node:fs';

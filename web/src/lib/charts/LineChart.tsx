@@ -1,4 +1,3 @@
-// fw port of LineChart.svelte.
 import { scaleLinear, scaleLog } from 'd3-scale';
 import { bindable, computed, createUniqueId, css, cubicOut, defaults, effect, For, MediaQuery, signal, tick, Tween, untrack } from 'fw';
 import { prefs } from '$lib/prefs';

@@ -1,5 +1,4 @@
-// fw port of freshness.svelte.ts (`Now` on an fw signal; the functions are the same).
-// What is current on a screen (DESIGN_DIRECTION §2.8, freshness). Two clocks, never confused: a snapshot's (a list a
+// // What is current on a screen (DESIGN_DIRECTION §2.8, freshness). Two clocks, never confused: a snapshot's (a list a
 // Resource polls; `Resource.stale` and `updated`) and a stream's (the live run's SSE; `LiveRun.lost`). A state that is
 // no longer current says "as of" when it was, and stops its live marks; one that still is stays live.
 

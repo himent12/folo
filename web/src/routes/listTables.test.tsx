@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 /// <reference types="node" />
-// fw port of the Models and Datasets cases of listTables.svelte.test.ts (the Runs cases are in runsList.test.tsx).
+// The Models and Datasets lists (the Runs list is in runsList.test.tsx).
 // The list tables (Models, Datasets) at every width: a header cell and the cells under it hide together, so each
 // value sits under its own heading. The responsive column rule is base.css's (loaded here as the app loads it); the
 // sort headers are ui/SortHeader components, which a page-scoped rule could not reach (round 16's Models at 1024).

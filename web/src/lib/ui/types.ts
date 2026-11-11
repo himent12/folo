@@ -1,5 +1,5 @@
-import type { Component } from 'svelte';
-import type { LucideProps } from '@lucide/svelte';
+// Shared UI types.
+import type { IconComponent } from 'fw';
 
-/** An icon component (lucide or our own), rendered at the size the parent picks. */
-export type IconType = Component<LucideProps>;
+/** An icon component (lucide via `$icons/<name>`, or our own), rendered at the size the parent picks. */
+export type IconType = IconComponent;

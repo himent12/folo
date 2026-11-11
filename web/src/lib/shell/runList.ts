@@ -1,5 +1,4 @@
-// fw port of runList.svelte.ts (the same shared object; its two fields are fw signals behind getters/setters).
-// The run list as the shell polls it (RunWatch, every 2 s): the sidebar's live card reads it, so the shell asks once.
+// // The run list as the shell polls it (RunWatch, every 2 s): the sidebar's live card reads it, so the shell asks once.
 
 import { signal } from 'fw';
 import type { Run } from '$lib/api/types';

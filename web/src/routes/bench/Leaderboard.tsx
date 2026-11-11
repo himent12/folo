@@ -1,4 +1,3 @@
-// fw port of Leaderboard.svelte.
 /**
  * A benchmark's leaderboard (docs/BENCH.md, The score): its entries ranked by score, each with who it is, the score
  * as the row's figure with its five axes at a glance (an axis not measured is an empty dashed slot, not a zero; the
@@ -28,13 +27,13 @@ import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
-import { rowNav } from '$lib/ui/rowNav.fw';
+import { rowNav } from '$lib/ui/rowNav';
 import StatusBadge from '$lib/ui/StatusBadge';
 import { tooltip } from '$lib/ui/tooltip';
 import IntervalPlot from './IntervalPlot';
 import { along, bandEntry, boardOrder, compareHint, COMPARE_MIN, finished, intervalScale, overlaps, ranks, scaleTicks, stale, toggleSelection } from './leaderboard';
 import ScoreAxes from './ScoreAxes';
-import { contestantFacts, costFacts, coverageFacts, entryStatus, partialWhy, progressFacts, progressShare, scoreText, SPEED_HELP, STALE_HELP } from './words.fw';
+import { contestantFacts, costFacts, coverageFacts, entryStatus, partialWhy, progressFacts, progressShare, scoreText, SPEED_HELP, STALE_HELP } from './words';
 
 export interface LeaderboardProps {
   bench: Bench;

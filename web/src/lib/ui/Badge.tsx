@@ -1,4 +1,3 @@
-// fw port of Badge.svelte.
 import { css } from 'fw';
 
 type Tone = 'neutral' | 'accent' | 'success' | 'warning' | 'danger' | 'info' | 'outline';

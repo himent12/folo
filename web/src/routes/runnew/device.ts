@@ -1,5 +1,5 @@
 /** How the form names a device: in its errors, in the Device field's message and in the Summary's Device row. */
-import type { Resource } from '$lib/api/resource.svelte';
+import type { Resource } from '$lib/api/resource';
 import type { SystemInfo } from '$lib/api/types';
 import { deviceName } from '$lib/format';
 

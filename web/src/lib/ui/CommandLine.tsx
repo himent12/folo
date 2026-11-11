@@ -1,4 +1,3 @@
-// fw port of CommandLine.svelte.
 /**
  * A command to run, as one line that never wraps (a shell command broken mid-token, `'vulkan` / `';`, cannot be
  * read or pasted): full width, it scrolls sideways with a fade on the clipped edge (`fadeScroll`), and Copy copies

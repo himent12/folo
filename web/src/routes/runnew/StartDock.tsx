@@ -1,4 +1,3 @@
-// fw port of StartDock.svelte.
 /**
  * Narrow screens: the bar fixed under the form with the run's estimate (opening the Summary sheet) and Start, or the
  * change that fits; it steps aside while the Summary's own Start is on screen.
@@ -19,7 +18,7 @@ import Spinner from '$lib/ui/Spinner';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 import type { ShortRun } from './estimate';
-import { roughBytes, type Shown } from './summary.fw';
+import { roughBytes, type Shown } from './summary';
 
 export interface StartDockProps {
   startVisible: boolean;

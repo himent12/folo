@@ -15,7 +15,7 @@ import { assignSlots, bestAsPrinted, classRows, compareShown, conditionRows, dot
 import { COMPARE_MAX, compareIds, finished, intervalDomain, stale } from '../leaderboard';
 import { BenchResults } from '../results';
 import { cannotBench } from '../support';
-import { compareCaveats, intervalsVerdict, scoreText } from '../words.fw';
+import { compareCaveats, intervalsVerdict, scoreText } from '../words';
 import type { DotKey } from './DotRows';
 
 const SHAPES = ['circle', 'square', 'diamond', 'triangle'] as const;

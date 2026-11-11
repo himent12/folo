@@ -1,4 +1,3 @@
-// fw port of LocalizationSection.svelte.
 /**
  * How tight are its correct boxes? (docs/BENCH.md, Localization): the IoU of every correct detection with its true
  * box, as a histogram in tenths from 0.5 (where a detection starts counting as right) to 1, the mean marked; the axis

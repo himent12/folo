@@ -1,4 +1,3 @@
-// fw port of KpiSummary.svelte.
 /**
  * The model's four headline metrics: one strip of numbers in ink, or (`grid`, phones) a 2 × 2 summary that folds
  * to one line; the ⓘ after the first label opens what they mean.

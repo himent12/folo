@@ -1,4 +1,3 @@
-// fw port of CodeText.svelte.
 /**
  * Prose that may hold code, as the server writes it (`folo train --amp`): each code span in mono, never broken inside
  * a word (DESIGN_DIRECTION 2.3: a command is code, and a fact is never cut), so `--amp` never splits into "-" and

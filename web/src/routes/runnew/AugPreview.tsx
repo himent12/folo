@@ -1,4 +1,3 @@
-// fw port of AugPreview.svelte.
 /**
  * What the augmentation settings do, shown on real images from the dataset: four seeded random draws with the
  * boxes transformed along with the pixels. Focusing one control isolates that augmentation at its configured

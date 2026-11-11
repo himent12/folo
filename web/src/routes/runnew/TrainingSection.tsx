@@ -1,4 +1,3 @@
-// fw port of TrainingSection.svelte.
 /**
  * New run, section 3: epochs, batch and image size, where the run trains (this machine or a cloud connection, its
  * GPU and time limit), the device, mixed precision, and the advanced settings folded under them.
@@ -27,7 +26,7 @@ import { optimizerLabel } from '../run/resolved';
 import { CloudPick, LOCAL } from './cloudPick';
 import { AMP_SPEEDUP } from './estimate';
 import type { AmpBlock } from './amp';
-import type { FormErrors } from './jump.fw';
+import type { FormErrors } from './jump';
 
 export interface TrainingSectionProps {
   epochs?: number;

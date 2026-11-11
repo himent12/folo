@@ -4,10 +4,9 @@
 // `out:fn`, `bind:value|checked|group|open|this|clientWidth|...`, `ref`, `use`, and `style` as a string or an object.
 // Components are typed by their props; any prop `x` may instead be bound with `bind:x={signal}`.
 //
-// svelte/elements is imported as types only: it stays a dev dependency until the last Svelte component is gone, when
-// these declarations get vendored.
+// The attribute types are Svelte 5's svelte/elements, vendored in ./vendor/svelte-elements.d.ts.
 
-import type { SvelteHTMLElements } from 'svelte/elements';
+import type { SvelteHTMLElements } from './vendor/svelte-elements';
 import type { Action, Bindable, Ref } from './runtime/bind';
 import type { StyleValue } from './runtime/dom';
 import type { TransitionFn } from './runtime/transition';

@@ -1,4 +1,3 @@
-// fw port of Stat.svelte.
 /** A labelled metric: small label, big tabular value, optional unit and a secondary line. */
 import { css, defaults } from 'fw';
 import Skeleton from './Skeleton';

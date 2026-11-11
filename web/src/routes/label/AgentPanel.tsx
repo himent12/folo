@@ -1,4 +1,3 @@
-// fw port of AgentPanel.svelte.
 /**
  * The job page's rail: first the run, "Label N images" while some have no labels (naming the agent, model and effort
  * it will use), live progress with Stop while an agent works, and how the last run ended (a failed one with its cause,
@@ -29,7 +28,7 @@ import Callout from '../run/Callout';
 import AgentFields from './AgentFields';
 import type { AgentChoice } from './agentChoice';
 import LastRun from './LastRun';
-import { images, modelLabel, runAgent, toLabel } from './words.fw';
+import { images, modelLabel, runAgent, toLabel } from './words';
 
 export interface AgentPanelProps {
   job: LabelJob;

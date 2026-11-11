@@ -1,4 +1,3 @@
-// fw port of Meta.svelte.
 /**
  * A meta line: its child elements separated by " · " (a tertiary dot with 8 px on each side), the one separator
  * every meta line uses (DESIGN_DIRECTION §2.3). Each child is one item; give it an element of its own (a span),

@@ -1,7 +1,6 @@
-// fw port of Slider.svelte.
 /** A labelled range slider with a live value readout. Native <input type=range>, so keyboard and AT work. */
 import { bindable, computed, createUniqueId, css, defaults } from 'fw';
-import { describedBy, getField } from './field.fw';
+import { describedBy, getField } from './field';
 
 export interface SliderProps {
   label: string;

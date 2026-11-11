@@ -1,4 +1,3 @@
-// fw port of EditCanvas.svelte.
 /**
  * The editor's image: its boxes in the full-size style, the selected one with handles. A press on a box selects and
  * moves it, on a handle resizes it, on empty image draws a new box (in the class used last). Mouse, pen and touch

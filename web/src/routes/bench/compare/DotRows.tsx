@@ -1,4 +1,3 @@
-// fw port of DotRows.svelte.
 /**
  * An aligned dot plot: one row per thing (a condition, a class), one dot per entry on one shared 0–1 scale, so who
  * wins where reads down the rows. Each entry keeps its hue and a shape of its own; a row pointed at (or focused)

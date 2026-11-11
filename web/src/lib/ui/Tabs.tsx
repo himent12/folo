@@ -1,4 +1,3 @@
-// fw port of Tabs.svelte.
 /**
  * Underline tabs for switching views inside a page. Arrow keys move between tabs (WAI-ARIA tabs pattern). The 1 px
  * track spans the whole column the tabs sit in, whatever holds them (a block, a grid cell or a flex row, as Run's

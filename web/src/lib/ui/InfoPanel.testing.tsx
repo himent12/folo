@@ -1,4 +1,3 @@
-// fw port of InfoPanel.test.svelte.
 // A chart panel with its ⓘ in the header, for InfoButton.test.tsx.
 import InfoButton from './InfoButton';
 import Panel from './Panel';

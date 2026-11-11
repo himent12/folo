@@ -1,4 +1,3 @@
-// fw port of Outcome.svelte.
 /**
  * A run's outcome under the header, every state in one pattern (./Callout): icon, title, cause, one action, and a
  * disclosure for the rest. Out of GPU memory says so plainly, with the smaller setting the memory forecast says fits
@@ -25,7 +24,7 @@ import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
 import Button from '$lib/ui/Button';
 import Ident from '$lib/ui/Ident';
-import type { IconType } from '$lib/ui/types.fw';
+import type { IconType } from '$lib/ui/types';
 import Callout from './Callout';
 import { plain, scheduleTitle, shortCause, suggestedEpochs } from './warnings';
 

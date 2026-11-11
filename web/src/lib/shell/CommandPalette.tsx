@@ -1,4 +1,3 @@
-// fw port of CommandPalette.svelte.
 /** Ctrl/Cmd+K: jump anywhere, run any action, find any run, dataset or model. */
 import Activity from '$icons/activity';
 import Box from '$icons/box';
@@ -26,11 +25,11 @@ import Kbd from '$lib/ui/Kbd';
 import { keyPrefs } from '$lib/ui/keyPrefs';
 import Meta from '$lib/ui/Meta';
 import { statusWord } from '$lib/ui/StatusBadge';
-import type { IconType } from '$lib/ui/types.fw';
+import type { IconType } from '$lib/ui/types';
 import { highlight, rank } from './commands';
-import { mainNav, settingsNav } from './nav.fw';
+import { mainNav, settingsNav } from './nav';
 import { pageCommandList, recentIds, rememberRecent } from './pageCommands';
-import { touchOnly as isTouchOnly } from './shortcuts.fw';
+import { touchOnly as isTouchOnly } from './shortcuts';
 import { sidebar } from './sidebarState';
 
 interface Item {

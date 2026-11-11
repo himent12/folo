@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { asOf, etaText } from './freshness.svelte';
+import { asOf, etaText } from './freshness';
 
 const NOW = Date.parse('2026-11-09T12:00:00Z');
 

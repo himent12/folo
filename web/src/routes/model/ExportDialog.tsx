@@ -1,4 +1,3 @@
-// fw port of ExportDialog.svelte.
 /**
  * Export a model to a deployable file: pick a format and run it on the server. The f16 file can then be downloaded
  * to this computer (GET /api/models/{id}/weights?format=f16), under the name the server gave it. Servers that list

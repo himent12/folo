@@ -1,5 +1,4 @@
-// fw port of pager.svelte.ts (the same pager, on fw signals).
-// Paged, cached access to a dataset's image list for one filter (split, class). The virtualised grid asks for the
+// // Paged, cached access to a dataset's image list for one filter (split, class). The virtualised grid asks for the
 // rows it shows; the inspector asks for neighbours and resolves linked image ids. Pages load once and stay cached.
 
 import { signal } from 'fw';

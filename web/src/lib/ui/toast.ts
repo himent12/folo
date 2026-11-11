@@ -1,5 +1,4 @@
-// fw port of toast.svelte.ts (the same store, on fw signals).
-// Toast notifications. `toast.success('Saved')`, `toast.error(err)`; <Toaster /> renders them. The toaster is for
+// // Toast notifications. `toast.success('Saved')`, `toast.error(err)`; <Toaster /> renders them. The toaster is for
 // page-level events; an action taken inside an open dialog reports in the dialog (`ui/feedback.svelte.ts`).
 
 import { signal } from 'fw';

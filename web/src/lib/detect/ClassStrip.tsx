@@ -1,4 +1,3 @@
-// fw port of ClassStrip.svelte.
 /**
  * A stacked bar of class shares in class colours, with 1 px surface gaps between segments, that is one disclosure:
  * "Class balance" (a click, Enter or a tap) opens a compact breakdown, each class's name, box count and share,

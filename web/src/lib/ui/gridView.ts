@@ -1,5 +1,4 @@
-// fw port of gridView.svelte.ts (the same store, on fw signals).
-// How image grids are shown (a dataset's, a labeling job's): boxes on or off and the thumbnail size, one choice for
+// // How image grids are shown (a dataset's, a labeling job's): boxes on or off and the thumbnail size, one choice for
 // every grid, remembered per browser.
 
 import { signal } from 'fw';

@@ -1,4 +1,3 @@
-// fw port of SidebarLive.svelte.
 /**
  * The active training run, always one glance away in the sidebar. A polite live region says when one starts
  * training; its end is a toast (RunWatch), so it is never said twice.

@@ -1,4 +1,3 @@
-// fw port of RunMetrics.svelte.
 /**
  * The run's metrics as one instrument: the epoch progress, a row of KPI tabs (each with its current value) and the one
  * chart the selected tab names. A single run is drawn in ink (primary metric in text.primary, secondary ones

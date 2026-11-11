@@ -1,4 +1,3 @@
-// fw port of SheetHandle.svelte.
 /**
  * The grab handle of a bottom sheet (DESIGN_DIRECTION 12): a 36 × 4 px `line.strong` bar centred 8 px from the sheet's
  * top, on the grab area that `ui/sheetDrag` moves. Decoration for the eye: the drag is a shortcut, and every sheet

@@ -1,4 +1,3 @@
-// fw port of RunWatch.svelte.
 /**
  * Watches the run list for the whole app (every 2 s) and says when a training run ends: a toast with "Open run" when
  * it finishes, fails or runs out of GPU memory (./runWatch). Not on that run's own page, whose banner already says

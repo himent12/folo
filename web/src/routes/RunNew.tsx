@@ -1,4 +1,3 @@
-// fw port of RunNew.svelte.
 import ArrowRight from '$icons/arrow-right';
 import Images from '$icons/images';
 import Play from '$icons/play';
@@ -28,13 +27,13 @@ import { toast } from '$lib/ui/toast';
 import { CloudPick } from './runnew/cloudPick';
 import { arches, autoCloseMosaic, closeMosaicEpochs, defaultImgsz, estimate, shortRun, warmup } from './runnew/estimate';
 import { ampBlockOf } from './runnew/amp';
-import { firstError, formErrors, isInt, landOn, type Jump } from './runnew/jump.fw';
-import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } from './runnew/summary.fw';
-import { trainConfig } from './runnew/config.fw';
-import { deviceLabelOf, deviceMessage } from './runnew/device.fw';
+import { firstError, formErrors, isInt, landOn, type Jump } from './runnew/jump';
+import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } from './runnew/summary';
+import { trainConfig } from './runnew/config';
+import { deviceLabelOf, deviceMessage } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
-import { isPublished, scoreContextOf, startHintOf } from './runnew/weights.fw';
-import { sampleImagesOf, trainSizesOf } from './runnew/trainImages.fw';
+import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
+import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
 import DatasetSection from './runnew/DatasetSection';
 import ModelSection from './runnew/ModelSection';
 import TrainingSection from './runnew/TrainingSection';

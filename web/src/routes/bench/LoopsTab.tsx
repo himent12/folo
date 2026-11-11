@@ -1,4 +1,3 @@
-// fw port of LoopsTab.svelte.
 /**
  * A benchmark's self-improvement loops (docs/BENCH.md, Self-improvement loops): each with its teacher and student,
  * where it stands (what it does for which generation while it runs; a failed one's cause under its name, so a loop
@@ -24,7 +23,7 @@ import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import Panel from '$lib/ui/Panel';
 import StatusBadge from '$lib/ui/StatusBadge';
-import { loopStatus, scoreText, VERDICT } from './words.fw';
+import { loopStatus, scoreText, VERDICT } from './words';
 
 export interface LoopsTabProps {
   bench: Bench;

@@ -1,4 +1,3 @@
-// fw port of DialogStatus.svelte.
 /**
  * A dialog's status region: the result of an action taken in the dialog (a copied path, a download the demo cannot
  * make, a failed stop), said where the person is instead of in the toaster behind the modal. Two live regions that

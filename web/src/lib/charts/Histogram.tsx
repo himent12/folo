@@ -1,4 +1,3 @@
-// fw port of Histogram.svelte.
 /**
  * Vertical bars for a histogram (`edges` + `counts`): each bin is one evenly spaced category named by `binLabel`, and
  * a bar's height is its count, so unequal bins (finer near a threshold, an open-ended last one) read at a glance

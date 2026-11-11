@@ -1,27 +1,27 @@
 # fw — FOLO Studio's UI framework
 
-fw replaces Svelte 5 in FOLO Studio. It is the design that tops js-framework-benchmark (Solid / dom-expressions),
+fw is FOLO Studio's UI framework; it replaced Svelte 5. It is the design that tops js-framework-benchmark (Solid / dom-expressions),
 written for this app: JSX compiled at build time into cloned DOM templates plus one fine-grained binding per dynamic
 part, on a push-pull signal graph. No virtual DOM, no diffing of trees, no per-update allocation in the hot paths.
 Its Svelte-facing surface (attribute names, events, `class:`/`style:`/`bind:`/`use:`/transitions, scoped CSS with
-Svelte's exact selector rewriting) exists so the ~150 components port one-to-one and render pixel-identically.
+Svelte's exact selector rewriting) let the ~150 components port one-to-one: every screen and state of the app rendered
+pixel-identically to the Svelte app before that one was removed (CHANGELOG, "Studio on fw").
 
 - `runtime/` — the runtime, imported as `fw` (`fw/internal` is what compiled code calls).
 - `compiler/` — the Vite plugin: JSX transform (oxc-parser + magic-string, exact source maps), scoped CSS
-  (postcss + postcss-selector-parser, mirrors Svelte 5's analyzer and transformer), `$icons/<name>` lucide modules.
-- `jsx.d.ts`, `icons.d.ts` — JSX types (Svelte's attribute types from svelte/elements, plus fw's directives).
+  (postcss + postcss-selector-parser, mirrors Svelte 5's analyzer and transformer), `$icons/<name>` lucide modules
+  (from `icons/lucide.json`, vendored; `tools/icons.mjs --add` vendors a newly imported icon).
+- `jsx.d.ts`, `icons.d.ts` — JSX types (Svelte 5's element attribute types, vendored in `vendor/`, plus fw's
+  directives).
 - `testing.ts` — `render()` / `flush()` / `fromHTML()` for vitest + happy-dom.
-- `parity/` — the proof page twice (fw and Svelte) and `check.mjs`, the pixel and DOM diff.
-- `bench/` — the js-framework-benchmark operations, fw vs Svelte 5 (`run.mjs`), and the runtime's size (`size.mjs`).
-- `PORTING.md` — how to port a component, construct by construct. **Read it before porting anything.**
+- `bench/` — the js-framework-benchmark operations (`run.mjs`) and the runtime's size (`size.mjs`).
+- `PORTING.md` — every construct, with the Svelte 5 one it replaced. **Read it before writing a component.**
 
 ```sh
-npx vitest run framework/             # runtime, compiler and CSS-parity tests
-npx tsc -p tsconfig.next.json         # types of the fw app and the framework
-node framework/parity/check.mjs       # 0 differing pixels, dark and light, page and open menu
-node framework/bench/run.mjs          # fw vs Svelte 5, Chrome
+npx vitest run framework/             # runtime and compiler tests
+npx tsc -p tsconfig.json              # types of the app and the framework
+node framework/bench/run.mjs          # the benchmark operations, Chrome
 node framework/bench/size.mjs         # runtime size, min + gzip
-npm run dev  →  http://localhost:5173/next.html   (the fw app; index.html stays the Svelte app)
 ```
 
 ## Design
@@ -125,7 +125,7 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
 
 `css\`...\`` in a `.tsx` is extracted at build time, scoped, and served as the virtual module `<file>.fw.css` that the
 file imports after its own imports, as vite-plugin-svelte does, so the bundle has Svelte's cascade order (a file's
-rules after its children's; `parity/css-order.mjs` checks the built order against the Svelte app's). Vite's CSS
+rules after its children's). Vite's CSS
 pipeline does the rest; HMR updates it. The plugin also fails the build on an import that resolves to a file whose
 name differs in case (`$lib/ui/Field` → `field.ts` on a case-insensitive disk). The scoping mirrors Svelte 5's
 `phases/2-analyze/css` and `3-transform/css`: the first scoped compound of a selector gets `.fw-xxxx` (+0-1-0), later
@@ -133,9 +133,10 @@ ones `:where(.fw-xxxx)`, nested rules under a local rule `:where(...)` only, `:g
 trailing `:global` unscoped, `:is/:where/:has` arguments scoped like the selector, `:not` arguments only when complex
 (and nothing nested inside them), `@keyframes` names prefixed (`-global-` opts out) and `animation(-name)` following.
 
-`compiler/css.test.ts` compiles every `<style>` of every `.svelte` file in `web/src` with the Svelte compiler and
-with ours: **171 files, 3,950 selectors, all identical in text and specificity.** By design we keep selectors Svelte
-drops as unused (we do not see the elements); they are scoped, so they cannot match outside the file.
+Until Studio left Svelte, a test compiled every `<style>` of every `.svelte` file of the app with the Svelte compiler
+and with ours: 171 files, 3,950 selectors, all identical in text and specificity. `compiler/css.test.ts` keeps each
+rule of that scoping as Svelte 5 printed it. By design we keep selectors Svelte drops as unused (we do not see the
+elements); they are scoped, so they cannot match outside the file.
 
 The scope class prefix is **`fw-`** (`fw-` + base-36 FNV-1a of the file's path relative to `web/`), e.g. `fw-fyng9x`.
 
@@ -164,7 +165,7 @@ import { ... } from 'fw';
 
 ## Performance
 
-Chrome (stable, headless), production builds of the same table in fw (`bench/main-fw.tsx`) and Svelte 5.57
+Measured before Studio left Svelte. Chrome (stable, headless), production builds of the same table in fw (`bench/main-fw.tsx`) and Svelte 5.57
 (`bench/Bench.svelte`, the js-framework-benchmark keyed Svelte 5 shape), interleaved runs, median of 15. "Script" is
 the framework's work until the DOM is updated; "total" adds the forced style/layout.
 
@@ -209,7 +210,7 @@ Where the time goes, and what keeps it low:
 ## Svelte semantics not matched exactly
 
 - Unused-selector pruning (above). Svelte also scopes only the `:is()` alternatives that match an element; we scope
-  all (no selector of the app is affected: the parity test has zero differences).
+  all (no selector of the app was affected: the scoping comparison had zero differences).
 - `bind:this` is set synchronously at creation (Svelte: after mount); with a signal ref it is cleared synchronously
   when the element goes (Svelte: a microtask later).
 - Outros: `For`/`Show`/`Key`/`Switch` run them; a ternary (`{a ? b : c}`) does not, and an outro is not reversed if

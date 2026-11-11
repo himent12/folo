@@ -1,5 +1,5 @@
 /** What the form reads of a dataset's training images: a few for the augmentation preview, and their sizes. */
-import { hub } from '$lib/api/index.svelte';
+import { hub } from '$lib/api/index';
 import type { DatasetImage } from '$lib/api/types';
 
 /** A few training images with boxes (the augmentation preview's); none without a dataset. */

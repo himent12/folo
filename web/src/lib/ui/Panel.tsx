@@ -1,4 +1,3 @@
-// fw port of Panel.svelte.
 import { createUniqueId, css, defaults, Dynamic } from 'fw';
 import InfoRegion from './InfoRegion';
 import { provideInfoSlot } from './infoSlot';

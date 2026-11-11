@@ -1,4 +1,3 @@
-// fw port of ErrorState.svelte.
 import TriangleAlert from '$icons/triangle-alert';
 import RotateCw from '$icons/rotate-cw';
 import Settings from '$icons/settings';

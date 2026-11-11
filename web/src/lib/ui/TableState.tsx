@@ -1,4 +1,3 @@
-// fw port of TableState.svelte.
 /**
  * An empty or error state in the frame the data would fill (DESIGN_DIRECTION §2.8): one row of a `.table`'s body
  * spanning every column. The table renders no column heads with it (nothing to head) and the list's toolbar stays

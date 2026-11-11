@@ -1,4 +1,3 @@
-// fw port of ClassList.svelte.
 /** The classes found, each row showing or hiding its class (the Classes panel, and its phone disclosure). */
 import Eye from '$icons/eye';
 import EyeOff from '$icons/eye-off';

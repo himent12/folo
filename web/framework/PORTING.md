@@ -1,9 +1,11 @@
-# Porting Svelte 5 → fw
+# fw, construct by construct (from Svelte 5)
 
-How to port a FOLO Studio component from Svelte 5 (`.svelte`) to fw (`.tsx`), construct by construct. Follow it
-mechanically; when something is not covered here, stop and ask rather than invent. The five proof ports are the
-reference: `src/lib/ui/{Button,Badge,Segmented,Menu,Dialog,DialogStatus,Spinner,SheetHandle}.tsx`,
-`src/lib/charts/Sparkline.tsx`, their tests `*.test.tsx`, and `framework/parity/` (pixel-identical twins).
+FOLO Studio was written in Svelte 5 and ported to fw component by component, pixel-identically, before the Svelte app
+was removed. This guide is how that port was done, construct by construct, and it stays the reference for writing fw:
+each Svelte construct beside its fw form (and for porting any Svelte code still to come). The `.svelte` files and the
+parity tooling it mentions (`framework/parity/`, the Svelte twins) are gone; `git log` has them. Good references:
+`src/lib/ui/{Button,Badge,Segmented,Menu,Dialog,DialogStatus,Spinner,SheetHandle}.tsx`, `src/lib/charts/Sparkline.tsx`
+and their tests `*.test.tsx`.
 
 The rule that explains almost everything below: **a component function runs once.** Nothing in its body re-runs.
 Only three places are reactive: JSX expressions (`{...}` children and attribute values), `computed(...)`, and
@@ -43,7 +45,7 @@ property read (`props.x`, `obj.y`).
 
 **Case.** Windows and macOS disks ignore case, and module resolution tries `.ts` before `.tsx`: `$lib/ui/Field`
 would load `field.ts` there (and `Field.tsx` on Linux). Whenever a component has a lowercase twin, import it with
-its extension: `import Field from '$lib/ui/Field.tsx'` (`tsconfig.next.json` allows `.tsx` imports). The fw Vite
+its extension: `import Field from '$lib/ui/Field.tsx'` (`tsconfig.json` allows `.tsx` imports). The fw Vite
 plugin makes this a build error: an import that resolves to a file whose name differs in case from what it asked for
 fails with the fix in the message, so the wrong module is never picked silently.
 
@@ -413,25 +415,17 @@ css`
 `;
 ```
 - The compiler extracts it, scopes it exactly as Svelte 5 does (same `:global`, nesting, `:is/:where/:has/:not`,
-  `@keyframes` and specificity rules; `framework/compiler/css.test.ts` checks every selector of every component of the
-  app against the Svelte compiler), and removes the call. One per file, top level, no `${}`.
+  `@keyframes` and specificity rules; every selector of every component of the app was checked against the Svelte
+  compiler before the switch, `framework/compiler/css.test.ts` keeps the rules), and removes the call. One per file,
+  top level, no `${}`.
 - Inside the template literal escape three things the way JS needs: `` ` `` → `` \` ``, `${` → `\${`, `\` → `\\`
   (CSS comments with backticks are common). The compiler undoes the escapes, so the CSS is what you wrote.
-  `framework/tools/copy-style.cjs` copies a `<style>` block with the escapes done (below).
 - Every element the file's JSX creates gets the file's scope class (`fw-` + a hash of its path); Svelte only adds its
   class to elements a selector matches, which never changes what matches.
 - Unused selectors are kept (Svelte drops them); they cannot match anything outside the file.
 - Cascade order is Svelte's: a file's CSS comes after the CSS of the components it imports, so a parent's rule wins a
   tie of specificity over its child's (`:global(dialog.shortcuts.lg)` over Dialog's `dialog.lg`). Never add a class
-  twice to win a tie: `node framework/parity/css-order.mjs` (after `npm run build`) checks the built order against
-  the Svelte app's.
-
-#### Copying a style block
-
-```sh
-# appends css`...` (escaped) to the end of the .tsx; run once per file
-node framework/tools/copy-style.cjs src/lib/ui/Foo.svelte src/lib/ui/Foo.tsx
-```
+  twice to win a tie.
 
 ## 8. Whitespace (pixel parity!)
 
@@ -537,8 +531,8 @@ unmount();
 
 ## 12. Checking your port
 
-- `npx tsc -p tsconfig.next.json` — zero errors.
+- `npx tsc -p tsconfig.json` — zero errors.
 - `npx vitest run src/path/Foo.test.tsx` — the ported tests pass.
-- Pixel parity: add the component (several states) to `framework/parity/Demo.tsx` **and** the same to `Demo.svelte`,
-  then `node framework/parity/check.mjs` — must print `0 differing pixels` and `DOM: same` for dark and light.
-- `npm run check` (Svelte app still clean) and `npm run build`.
+- Pixel parity of the screens it is on: `node scripts/parity.mjs --run --only <scene>` against the stored shoot
+  (web/README.md).
+- `npm run check` and `npm run build`.

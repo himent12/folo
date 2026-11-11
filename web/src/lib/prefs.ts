@@ -1,5 +1,4 @@
-// fw port of prefs.svelte.ts (the same store, on fw signals: one per preference, so a change re-runs only its readers).
-// User preferences, persisted to localStorage.
+// // User preferences, persisted to localStorage.
 
 import { computed, signal, type Signal } from 'fw';
 import type { LabelAgentId } from './api/types';

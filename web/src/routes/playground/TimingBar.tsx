@@ -1,4 +1,3 @@
-// fw port of TimingBar.svelte.
 /**
  * Where the time of one prediction went: preprocess / inference / postprocess as a stacked bar in neutral shades
  * (the phases are not entities, so they get no hue; inference, the part that matters, is the darkest ink). Each

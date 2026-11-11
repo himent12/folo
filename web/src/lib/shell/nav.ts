@@ -1,10 +1,10 @@
-import Gauge from '@lucide/svelte/icons/gauge';
-import Images from '@lucide/svelte/icons/images';
-import Activity from '@lucide/svelte/icons/activity';
-import Box from '@lucide/svelte/icons/box';
-import Target from '@lucide/svelte/icons/target';
-import ScanSearch from '@lucide/svelte/icons/scan-search';
-import Settings from '@lucide/svelte/icons/settings';
+import Gauge from '$icons/gauge';
+import Images from '$icons/images';
+import Activity from '$icons/activity';
+import Box from '$icons/box';
+import Target from '$icons/target';
+import ScanSearch from '$icons/scan-search';
+import Settings from '$icons/settings';
 import type { IconType } from '$lib/ui/types';
 
 export interface NavItem {

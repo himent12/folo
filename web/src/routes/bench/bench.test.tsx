@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// fw port of bench.svelte.test.ts.
 // The benchmark screens' behaviour against the in-browser mock: what the dialogs ask for and refuse, the plan that is
 // fixed once there are entries (and the edits that are not lost), and the leaderboard's Compare selection.
 import { createRoot, flush as flushSync, type Component } from 'fw';
@@ -17,7 +16,7 @@ import Benchmarks from '../Benchmarks';
 import { AgentChoice } from '../label/agentChoice';
 import AddEntryDialog from './AddEntryDialog';
 import NewBenchDialog from './NewBenchDialog';
-import { FROZEN } from './words.fw';
+import { FROZEN } from './words';
 
 let target: HTMLElement;
 let c: Rendered | undefined;

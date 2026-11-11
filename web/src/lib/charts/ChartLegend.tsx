@@ -1,4 +1,3 @@
-// fw port of ChartLegend.svelte.
 /** A line chart's legend, its readout: each series' swatch, name and value (at the cursor, else its latest). */
 import { css, For } from 'fw';
 import type { Pt } from './downsample';

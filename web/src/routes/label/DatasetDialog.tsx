@@ -1,4 +1,3 @@
-// fw port of DatasetDialog.svelte.
 /**
  * "Create dataset": the job's labeled images written as a YOLO dataset that trains like any other. Says plainly what
  * goes in and what is left out; the name follows the Datasets rules (one click to the nearest valid one).
@@ -16,7 +15,7 @@ import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import Segmented from '$lib/ui/Segmented';
 import { NAME_RE, suggestName } from '../datasets/names';
-import { images } from './words.fw';
+import { images } from './words';
 
 export interface DatasetDialogProps {
   open?: boolean;

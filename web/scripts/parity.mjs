@@ -1,20 +1,17 @@
-// Pixel parity of two shoots: is the port (next.html) a 1:1 copy of the legacy app (/) on every screen and state?
+// Pixel parity of two shoots: does a version of Studio render every screen and state exactly as another did?
 //   node scripts/parity.mjs <dirA> <dirB> [--out <dir>] [--only a,b]
 //       compares every shot by name, pixel for pixel; writes <out>/parity.md, parity.json and diff/<shot>.png
 //       (differences in magenta over a dimmed copy of A). --out defaults to the folder holding <dirB>.
-//   node scripts/parity.mjs --run [--only runs,run-live] [--out D:/folo-build/ui-fast-runtime/parity] [--dev]
-//       [--baseline <legacy shots>] [--jobs N] [--retries 1]
-//       serves the app once (the production build of both entries; --dev: the dev server), shoots both apps with
-//       `shoot.mjs --exact` into <out>/legacy and <out>/next at the same time, and compares them. A state that differs
-//       is shot again in both apps (--retries rounds, default 1, at most 150 states): it passes when any legacy shot
-//       and any next shot of it match, and the report flags it when the legacy app's own shots differ (a timing
-//       residue of the legacy app, not a porting bug). --baseline compares against stored legacy shots (e.g.
-//       D:/folo-build/ui-fast-runtime/baseline) instead of shooting the legacy app again. --self shoots the legacy app
-//       as B too: the determinism check (every state must match itself).
+//   node scripts/parity.mjs --run [--baseline <shots>] [--only runs,run-live] [--out <dir>] [--dev] [--jobs N]
+//       [--retries 1] [--self]
+//       serves the app once (its production build; --dev: the dev server), shoots it with `shoot.mjs --exact` into
+//       <out>/app and compares it with a stored shoot (--baseline, default D:/folo-build/ui-fast-runtime/baseline:
+//       the Svelte app's last shoot, the parity bar the fw app was held to). A state that differs is shot again
+//       (--retries rounds, default 1, at most 150 states) and passes if any of its shots matches. --self shoots the
+//       app twice instead (A = <out>/app-a): the determinism check (every state must match itself).
 // Per shot: identical, N differing pixels and their bounding box, a size mismatch, or missing in A or B (with the
-// shoot's reason: next.html not served yet, a scene's setup that timed out). Per shot, too, the first difference of the
-// two normalized DOM dumps (`<shot>.dom.txt`, see shoot.mjs): why the pixels differ, usually. Exits 1 if any shot
-// differs or is missing.
+// shoot's reason: a scene's setup that timed out). Per shot, too, the first difference of the two normalized DOM dumps
+// (`<shot>.dom.txt`, see shoot.mjs): why the pixels differ, usually. Exits 1 if any shot differs or is missing.
 import { createServer, preview } from 'vite';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -43,8 +40,10 @@ const DEFAULT_OUT = existsSync('D:/') ? 'D:/folo-build/ui-fast-runtime/parity' :
 const MAX_RETRY = 150;
 
 const run = args.includes('--run');
-/** --self: B is the legacy app as well. */
-const bApp = args.includes('--self') ? 'legacy' : 'next';
+/** --self: A is a second shoot of the app. */
+const self = args.includes('--self');
+/** The stored shoot `--run` compares with by default. */
+const DEFAULT_BASELINE = 'D:/folo-build/ui-fast-runtime/baseline';
 /** @type {string} */
 let dirA;
 /** @type {string} */
@@ -53,9 +52,12 @@ let dirB;
 let outDir;
 if (run) {
   outDir = resolve(opt('--out') ?? DEFAULT_OUT);
-  const baseline = opt('--baseline');
-  dirA = baseline ? resolve(baseline) : resolve(outDir, 'legacy');
-  dirB = resolve(outDir, 'next');
+  dirA = self ? resolve(outDir, 'app-a') : resolve(opt('--baseline') ?? DEFAULT_BASELINE);
+  dirB = resolve(outDir, 'app');
+  if (!self && !existsSync(dirA)) {
+    console.error(`no baseline shoot in ${dirA}: pass --baseline <dir> (a folder of shoot.mjs --exact shots), or --self`);
+    process.exit(2);
+  }
 } else {
   if (positional.length !== 2) {
     console.error(
@@ -74,10 +76,8 @@ const shootSecs = {};
 
 /** @type {{ base: string, close(): Promise<void> } | null} */
 let served = null;
-/** Why next.html did not build, or null: then every next state is missing for that reason. @type {string | null} */
-let buildNote = null;
 
-/** Serves the app once: the production build with both entries, or (--dev) the dev server. */
+/** Serves the app once: its production build, or (--dev) the dev server. */
 async function serve() {
   const listen = { host: '127.0.0.1', port: 5198, strictPort: false };
   const t0 = Date.now();
@@ -90,17 +90,16 @@ async function serve() {
   } else {
     // A build dir of this run's own (in --out), so runs with different --out never wipe each other's build.
     const dist = resolve(outDir, '.dist');
-    const { input, nextError } = await buildApps(root, dist);
-    buildNote = nextError;
+    await buildApps(root, dist);
     server = await preview({ root, logLevel: 'error', build: { outDir: dist }, preview: listen });
-    console.log(`built ${Object.keys(input).join(' + ')} in ${Math.round((Date.now() - t0) / 1000)} s`);
+    console.log(`built in ${Math.round((Date.now() - t0) / 1000)} s`);
   }
   return { base: (server.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5198/').replace(/\/$/, ''), close: () => server.close() };
 }
 
 /**
- * Shoots the given apps into their folders at the same time, each with its share of the state pool.
- * @param {{ app: 'legacy' | 'next', dir: string }[]} jobs
+ * Shoots the app into the given folders at the same time, each with its share of the state pool.
+ * @param {{ app: string, dir: string }[]} jobs  `app`: the shoot's name in the log
  * @param {string | undefined} filter shoot.mjs's --only
  * @param {string} label for shootSecs and the log
  */
@@ -116,7 +115,7 @@ async function shootAll(jobs, filter, label) {
       const code = await new Promise((done) => {
         const child = spawn(
           process.execPath,
-          [resolve(root, 'scripts/shoot.mjs'), '--exact', '--app', app, '--base', base, '--out', dir, '--jobs', String(each), ...(filter ? ['--only', filter] : [])],
+          [resolve(root, 'scripts/shoot.mjs'), '--exact', '--base', base, '--out', dir, '--jobs', String(each), ...(filter ? ['--only', filter] : [])],
           { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] },
         );
         const tag = (/** @type {Buffer} */ b) => b.toString().split(/\r?\n/).filter(Boolean).map((l) => `[${label} ${app}] ${l}`).join('\n');
@@ -272,7 +271,6 @@ function compareOne(/** @type {string} */ name, /** @type {ReturnType<typeof lis
   return row;
 }
 
-const baseline = run && !!opt('--baseline');
 const diffDir = resolve(outDir, 'diff');
 let A = listShots(dirA);
 let B = listShots(dirB);
@@ -280,24 +278,16 @@ let B = listShots(dirB);
 let rows = [];
 try {
   if (run) {
-    await shootAll(
-      [...(baseline ? [] : [{ app: /** @type {const} */ ('legacy'), dir: dirA }]), { app: /** @type {'legacy' | 'next'} */ (bApp), dir: dirB }],
-      only,
-      'shoot',
-    );
+    await shootAll([...(self ? [{ app: 'app-a', dir: dirA }] : []), { app: 'app', dir: dirB }], only, 'shoot');
   }
   A = listShots(dirA);
   B = listShots(dirB);
-  if (buildNote && bApp === 'next' && B.missing) {
-    for (const k of Object.keys(B.failed)) if (B.failed[k] === B.missing) B.failed[k] = buildNote;
-    B.missing = buildNote;
-  }
   const all = [...new Set([...A.names, ...B.names, ...Object.keys(A.failed), ...Object.keys(B.failed)])].filter(picked).sort();
   rmSync(diffDir, { recursive: true, force: true });
   mkdirSync(diffDir, { recursive: true });
   rows = all.map((name) => compareOne(name, A, B));
 
-  // Shot again: a state whose shots differ passes when any legacy shot and any next shot of it match.
+  // Shot again: a state whose shots differ passes when any of its shots matches A (or, --self, any A shot).
   const retries = run ? Number(opt('--retries') ?? 1) : 0;
   for (let round = 1; round <= retries; round++) {
     const again = rows.filter((r) => r.result === 'differs' || r.result === 'size').map((r) => r.name);
@@ -307,16 +297,16 @@ try {
       break;
     }
     console.log(`shooting the ${again.length} state(s) that differ again (round ${round})`);
-    const la = resolve(outDir, `legacy-retry${round}`);
-    const nb = resolve(outDir, `next-retry${round}`);
-    await shootAll([{ app: 'legacy', dir: la }, { app: /** @type {'legacy' | 'next'} */ (bApp), dir: nb }], again.join(','), `retry${round}`);
-    const legacyDirs = [dirA, ...Array.from({ length: round }, (_, i) => resolve(outDir, `legacy-retry${i + 1}`))];
-    const nextDirs = [dirB, ...Array.from({ length: round }, (_, i) => resolve(outDir, `next-retry${i + 1}`))];
+    const la = resolve(outDir, `app-a-retry${round}`);
+    const nb = resolve(outDir, `app-retry${round}`);
+    await shootAll([...(self ? [{ app: 'app-a', dir: la }] : []), { app: 'app', dir: nb }], again.join(','), `retry${round}`);
+    const legacyDirs = [dirA, ...(self ? Array.from({ length: round }, (_, i) => resolve(outDir, `app-a-retry${i + 1}`)) : [])];
+    const nextDirs = [dirB, ...Array.from({ length: round }, (_, i) => resolve(outDir, `app-retry${i + 1}`))];
     for (const r of rows) {
       if (!again.includes(r.name)) continue;
       const matched = legacyDirs.some((da) => nextDirs.some((db) => samePixels(da, db, r.name)));
       r.retried = matched ? 'matched' : 'still differs';
-      r.legacyFlaky = !samePixels(dirA, la, r.name);
+      r.legacyFlaky = self && !samePixels(dirA, la, r.name);
       if (matched) {
         r.result = 'identical';
         rmSync(resolve(diffDir, `${r.name}.png`), { force: true });
@@ -374,13 +364,13 @@ if (listed.length) {
   for (const r of listed) {
     const res =
       (r.result === 'size' ? `size ${r.sizeA} vs ${r.sizeB}` : r.result.startsWith('missing') ? `${r.result}: ${r.why}` : 'differs') +
-      (r.legacyFlaky ? ' (legacy differs from itself too)' : '');
+      (r.legacyFlaky ? ' (A differs from itself too)' : '');
     const px = r.pixels ? `${r.pixels} (${((r.share ?? 0) * 100).toFixed(2)}%)` : '';
     md.push(`| ${r.pixels ? `[${r.name}](diff/${r.name}.png)` : r.name} | ${cell(res)} | ${px} | ${fmtBox(r.bbox)} | ${cell(domText(r))} |`);
   }
   md.push('');
 }
-if (flaky.length) md.push(`Legacy shots that differ between two shoots (timing residue in the legacy app): ${flaky.map((r) => r.name).join(', ')}`, '');
+if (flaky.length) md.push(`A's shots that differ between two shoots (timing residue): ${flaky.map((r) => r.name).join(', ')}`, '');
 const domOnly = rows.filter((r) => r.result === 'identical' && r.dom && r.dom !== 'missing');
 if (domOnly.length) {
   md.push('Identical pixels, different DOM:', '');
@@ -389,13 +379,13 @@ if (domOnly.length) {
 }
 writeFileSync(resolve(outDir, 'parity.md'), md.join('\n'));
 
-// A whole app missing (next.html not served yet) is one line, not one per state.
+// A whole shoot missing is one line, not one per state.
 if (A.missing) console.log(`  every state missing in ${basename(dirA)}: ${A.missing}`);
 if (B.missing) console.log(`  every state missing in ${basename(dirB)}: ${B.missing}`);
 for (const r of listed.slice(0, 40)) {
   const what = r.result.startsWith('missing') ? `${r.result} (${r.why})` : r.result === 'size' ? `size ${r.sizeA} vs ${r.sizeB}, ${r.pixels} px` : `${r.pixels} px in ${fmtBox(r.bbox)}`;
   const dom = r.dom && r.dom !== 'missing' ? `\n    DOM line ${r.dom.line} ${r.dom.path}\n      A ${r.dom.a}\n      B ${r.dom.b}` : '';
-  console.log(`  ${r.name}: ${what}${r.legacyFlaky ? ' (legacy differs from itself too)' : ''}${dom}`);
+  console.log(`  ${r.name}: ${what}${r.legacyFlaky ? ' (A differs from itself too)' : ''}${dom}`);
 }
 if (listed.length > 40) console.log(`  … and ${listed.length - 40} more`);
 console.log(

@@ -1,4 +1,3 @@
-// fw port of Dialog.svelte.
 /**
  * Modal dialog on the native <dialog> element: top layer, focus trap, Escape and an inert page come for free.
  * Clicking the backdrop closes it. Results of actions taken inside it (a copy, a failed confirm) show in its own status

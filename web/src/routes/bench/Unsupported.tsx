@@ -1,4 +1,3 @@
-// fw port of Unsupported.svelte.
 /** The benchmark screens on a server without them (./support): what they need, in the page's own frame. */
 import ArrowLeft from '$icons/arrow-left';
 import Target from '$icons/target';

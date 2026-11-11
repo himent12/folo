@@ -244,7 +244,7 @@ by the reviewers and not verified since:
 - The stuck Compare pair header's edge is `line.subtle`; if it still reads as edgeless, it needs a stronger line.
 - Phone Playground's out-of-memory notice is three stacked 44 px buttons (the one remedy layout), taller than before.
 - Sol's round-27 code-review note: the vite client's "ResizeObserver loop completed with undelivered notifications"
-  during `npm run qa` is not attributed (a lead: `dataset/StatsTab.svelte`'s observer, which predates round 27).
+  during `npm run qa` is not attributed (a lead: `dataset/StatsTab.tsx`'s observer, which predates round 27).
 - Sol's round-28 code-review nit: `touchText.test.ts` (now in `sourceRules.test.ts`) builds its DOM with every `class:` directive on, so a 16 px rule
   under a conditional class (`.invalid input`) still satisfies it; the default state is not checked on its own.
 - Lines 1, 6, 7, 11 and 12 were last scored 8; nothing was scored 9 or above on every line by both reviewers.

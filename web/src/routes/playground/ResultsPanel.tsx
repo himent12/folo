@@ -1,4 +1,3 @@
-// fw port of ResultsPanel.svelte.
 /** The detections kept by the thresholds, as a table (each row a way to inspect its box) or the prediction as JSON. */
 import { bindable, css, For, type Signal } from 'fw';
 import type { Prediction } from '$lib/api/types';
@@ -6,7 +5,7 @@ import { classColor } from '$lib/design/tokens';
 import Panel from '$lib/ui/Panel';
 import Tabs from '$lib/ui/Tabs';
 import JsonView from './JsonView';
-import { FETCH, px, score } from './predict.fw';
+import { FETCH, px, score } from './predict';
 import Swatch from './Swatch';
 
 type Det = Prediction['boxes'][number];

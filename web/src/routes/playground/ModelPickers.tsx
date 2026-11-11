@@ -1,4 +1,3 @@
-// fw port of ModelPickers.svelte.
 /**
  * The model to run (its score and what it is on under the select) and where it runs: on the title row from 1024 px
  * up, or (`toolbar`) a toolbar row of their own under the title below that.

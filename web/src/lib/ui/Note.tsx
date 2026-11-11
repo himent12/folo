@@ -1,4 +1,3 @@
-// fw port of Note.svelte.
 /**
  * A note after a value: what the run resolved a setting to beside its request ("0.000833 (requested 0.01)",
  * "AdamW (auto)", "last 7 epochs (requested 10)"). One rendering wherever a value carries a note (Run's Config,

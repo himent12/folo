@@ -1,4 +1,3 @@
-// fw port of NewLoopDialog.svelte.
 /**
  * "New loop" (`POST /api/bench/benchmarks/{id}/loops`, docs/BENCH.md, Self-improvement loops): does a model's own
  * labeling train a better model? The form: the first teacher (a model whose classes are the benchmark's, same names in
@@ -33,7 +32,7 @@ import Input from '$lib/ui/Input';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Switch from '$lib/ui/Switch';
-import { forecastText, labelForecast, labelsText, loopErrorField, loopPlanText, lowerConfidence, teacherEligibility } from './words.fw';
+import { forecastText, labelForecast, labelsText, loopErrorField, loopPlanText, lowerConfidence, teacherEligibility } from './words';
 
 export interface NewLoopDialogProps {
   open?: boolean;

@@ -1,4 +1,3 @@
-// fw port of CompareTable.svelte.
 /**
  * The compared runs side by side: status, best score, precision and recall, then the settings that differ (each read
  * against the baseline run), the identical ones folded. Phones show the baseline and one other run at a time.

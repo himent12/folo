@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hashUrl, parse, section } from './router.svelte';
+import { hashUrl, parse, section } from './router';
 
 describe('router.parse', () => {
   it('maps the root and empty hash to overview', () => {

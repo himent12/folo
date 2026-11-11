@@ -1,4 +1,3 @@
-// fw port of Overview.svelte.
 import ArrowRight from '$icons/arrow-right';
 import Activity from '$icons/activity';
 import Box from '$icons/box';

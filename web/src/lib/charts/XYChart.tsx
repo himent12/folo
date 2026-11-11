@@ -1,4 +1,3 @@
-// fw port of XYChart.svelte.
 /**
  * The plot the benchmark screens draw their results on: lines and dots on two linear scales, with what reading them
  * needs as first-class marks: intervals (whiskers with caps), a band across the plot (a 95% interval every point is

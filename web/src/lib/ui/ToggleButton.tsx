@@ -1,10 +1,9 @@
-// fw port of ToggleButton.svelte.
 /**
  * A small on / off button for a view option of the content under it (an image grid's Boxes): `aria-pressed`, and a
  * neutral pressed look, a stronger edge and primary text (lime is for the primary action, focus and live state).
  */
 import { css, Dynamic } from 'fw';
-import type { IconType } from './types.fw';
+import type { IconType } from './types';
 
 export interface ToggleButtonProps {
   pressed: boolean;

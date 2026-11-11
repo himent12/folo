@@ -1,4 +1,3 @@
-// fw port of AugmentSection.svelte.
 /**
  * New run, section 4: the augmentation settings, folded behind a one-line summary until opened, beside a preview of
  * them on the dataset's own images.
@@ -16,7 +15,7 @@ import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import Slider from '$lib/ui/Slider';
 import AugPreview, { type AugKey } from './AugPreview';
-import type { FormErrors } from './jump.fw';
+import type { FormErrors } from './jump';
 
 export interface AugmentSectionProps {
   augment?: Augment;

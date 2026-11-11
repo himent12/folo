@@ -1,4 +1,3 @@
-// fw port of Samples.svelte.
 /**
  * Evaluation samples (lib/evaluated `scoresTitle`): the same 16 images every epoch, predictions (solid, class colour) over ground truth (dashed,
  * neutral in the thumbnails). Follows the

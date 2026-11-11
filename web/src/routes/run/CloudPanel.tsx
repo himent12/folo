@@ -1,4 +1,3 @@
-// fw port of CloudPanel.svelte.
 /**
  * A cloud run's Cloud panel (docs/CLOUD.md): how far the hand-over is (the phases as done, current and to come, the
  * current one with its transfer), where it runs, what it has cost and the most it can, and when its checkpoint was

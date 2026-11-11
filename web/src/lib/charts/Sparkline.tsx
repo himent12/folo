@@ -1,4 +1,3 @@
-// fw port of Sparkline.svelte.
 /** A tiny trend line for tables and tiles. Decorative: always pair it with the number it summarises. */
 import { scaleLinear } from 'd3-scale';
 import { area, line } from 'd3-shape';

@@ -1,4 +1,3 @@
-// fw port of LossOptions.svelte.
 import ChevronDown from '$icons/chevron-down';
 import Check from '$icons/check';
 import { bindable, createUniqueId, css, effect, For, MediaQuery, signal, tick } from 'fw';

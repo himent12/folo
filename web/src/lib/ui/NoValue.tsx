@@ -1,4 +1,3 @@
-// fw port of NoValue.svelte.
 /**
  * A value that does not exist yet (a queued run's score): the dash in `text.tertiary` at body weight, so it never
  * reads as a minus sign or a value, and named for assistive tech ("no score yet"). Every list cell, row end and KPI

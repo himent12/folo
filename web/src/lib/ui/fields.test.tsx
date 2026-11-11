@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { fromHTML, render as mountFw } from '../../../framework/testing';
 import Field from './Field.tsx';
 import FieldsFixture from './FieldsFixture.testing';
-import { describedBy } from './field.fw';
+import { describedBy } from './field';
 import { undescribedFields } from './fieldA11y';
 import Gate from './Gate';
 import Segmented from './Segmented';

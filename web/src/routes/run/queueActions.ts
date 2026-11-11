@@ -3,15 +3,27 @@
 // run at a time and never interrupts it, so "start" moves a run to the front: it starts when the active run ends
 // (at once only when nothing trains).
 
-import ArrowDown from '@lucide/svelte/icons/arrow-down';
-import ArrowUp from '@lucide/svelte/icons/arrow-up';
-import ChevronsUp from '@lucide/svelte/icons/chevrons-up';
-import X from '@lucide/svelte/icons/x';
+import ArrowDown from '$icons/arrow-down';
+import ArrowUp from '$icons/arrow-up';
+import ChevronsUp from '$icons/chevrons-up';
+import X from '$icons/x';
 import { ApiError } from '$lib/api/client';
-import { hub } from '$lib/api/index.svelte';
+import { hub } from '$lib/api/index';
 import type { QueueRequest, Run } from '$lib/api/types';
-import type { MenuItem } from '$lib/ui/Menu.svelte';
-import { toast } from '$lib/ui/toast.svelte';
+import { toast } from '$lib/ui/toast';
+import type { IconType } from '$lib/ui/types';
+
+/**
+ * ui/Menu's `MenuItem`, by shape: Menu is a .tsx module, which the Svelte app's tsconfig (it checks this .ts file too)
+ * cannot read until the switch.
+ */
+interface MenuItem {
+  label: string;
+  icon?: IconType;
+  href?: string;
+  onclick?: () => void;
+  danger?: boolean;
+}
 
 /** "Start next" while another run trains (the move puts it at the front), "Start now" when the slot is free. */
 export const startLabel = (training: Pick<Run, 'name'> | null | undefined) => (training ? 'Start next' : 'Start now');

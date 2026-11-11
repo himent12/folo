@@ -1,4 +1,3 @@
-// fw port of Throughput.svelte.
 /**
  * Settings › System › Throughput: the speed this server has measured (GET /api/system/throughput), training and
  * prediction rows with their spread, sample count and age; the reference rows (docs/BENCHMARKS.md) are not listed,

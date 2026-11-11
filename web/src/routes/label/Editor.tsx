@@ -1,4 +1,3 @@
-// fw port of Editor.svelte.
 /**
  * One image of a labeling job, to review and correct: its boxes in full size and as a list; select a box (on the
  * image, or in the list), change its class (the list's select, or 1–9), delete it (Delete, Backspace or its button),
@@ -36,7 +35,7 @@ import { tooltip } from '$lib/ui/tooltip';
 import type { AgentChoice } from './agentChoice';
 import { newBox, nudge, sameBoxes, stretch, tidy } from './boxEdit';
 import EditCanvas from './EditCanvas';
-import { imageState } from './words.fw';
+import { imageState } from './words';
 
 export interface EditorProps {
   live: LiveLabelJob;

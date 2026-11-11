@@ -1,7 +1,6 @@
-// fw port of Button.svelte.
 import { computed, css, defaults, Dynamic, splitProps, type ElementProps } from 'fw';
 import Spinner from './Spinner';
-import type { IconType } from './types.fw';
+import type { IconType } from './types';
 
 export interface ButtonProps extends Omit<ElementProps<'button'>, 'children'> {
   /** `danger` is the quiet destructive control on a page; `destructive` is the solid confirm inside a dialog. */

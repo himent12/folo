@@ -1,4 +1,3 @@
-// fw port of DisplayMenu.svelte.
 /**
  * Phones: the image toolbar's "Display" button. It opens a small popover with the boxes switch and the thumbnail
  * size, so the toolbar stays one row; wider screens show both controls inline.

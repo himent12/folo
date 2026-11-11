@@ -1,4 +1,3 @@
-// fw port of Unsupported.svelte.
 /** The labeling screens on a server that cannot label (support.ts): what it needs, in the page's own frame. */
 import ArrowLeft from '$icons/arrow-left';
 import Tags from '$icons/tags';

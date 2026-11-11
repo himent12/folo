@@ -1,4 +1,3 @@
-// fw port of LineEnds.svelte.
 /**
  * What sits at the lines' ends, inside the chart's SVG: each line's end mark (a dot, or how the run ended), the
  * direct labels with their leaders, and the best markers (the hollow ring, its pulse and its focus brackets).

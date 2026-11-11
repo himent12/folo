@@ -1,11 +1,15 @@
-// @vitest-environment happy-dom
 /// <reference types="node" />
-// Source rules whose breach is a bug a person hits and that neither svelte-check, the linters of `npm run check` nor
-// the layout QA can see: each reads the components as written. The sources are read once, for every rule.
+// Source rules whose breach is a bug a person hits and that neither tsc, the linters of `npm run check` nor the layout
+// QA can see: each reads the components as written (`.tsx`, parsed with the compiler's parser). The sources are read
+// once, for every rule.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import { parse } from 'svelte/compiler';
+import { Window } from 'happy-dom';
+import { parseSync } from 'oxc-parser';
 import { describe, expect, it } from 'vitest';
+
+// A DOM to render markup into (the node environment, where the compiler's parser loads natively).
+const document = new Window().document as unknown as Document;
 
 const SRC = resolve(process.cwd(), 'src');
 
@@ -13,63 +17,53 @@ function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
     const p = join(dir, name);
     if (statSync(p).isDirectory()) walk(p, out);
-    else if (/\.(?:svelte|ts)$/.test(name) && !/\.test\.(?:ts|svelte)$/.test(name)) out.push(p);
+    else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name) && !/\.testing\.tsx?$/.test(name)) out.push(p);
   }
   return out;
 }
 
 /** Every component and module of the app (no tests), as its path under src/ and its text. */
 const sources = walk(SRC).map((f) => ({ rel: relative(SRC, f).split(sep).join('/'), text: readFileSync(f, 'utf8') }));
-const components = sources.filter((s) => s.rel.endsWith('.svelte'));
+const components = sources.filter((s) => s.rel.endsWith('.tsx'));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Node = any;
+
+/** Every node of a parsed `.tsx` source, depth first. */
+function* nodes(n: Node): Generator<Node> {
+  if (!n || typeof n !== 'object') return;
+  if (Array.isArray(n)) {
+    for (const x of n) yield* nodes(x);
+    return;
+  }
+  if (typeof n.type === 'string') yield n;
+  for (const k in n) if (k !== 'parent') yield* nodes(n[k]);
+}
+
+const parse = (text: string, file = 'x.tsx') => parseSync(file, text, { sourceType: 'module', lang: 'tsx' } as never).program as Node;
+
+const elementName = (n: Node): string => (n.type === 'JSXIdentifier' ? n.name : n.type === 'JSXMemberExpression' ? `${elementName(n.object)}.${n.property.name}` : n.type === 'JSXNamespacedName' ? `${n.namespace.name}:${n.name.name}` : '');
 
 describe('a cloud run says its phase wherever its status shows', () => {
   // A cloud run in its hand-over is queued with a phase of its own (docs/CLOUD.md); a status rebuilt from `r.status`
   // drops the phase and says "Queued". So every `<StatusBadge>` takes the run whole (`run`) or another thing's own
   // status and word (`state`), and `statusWord` is called on the run, never on an object built in place.
-  interface Node {
-    type?: string;
-    name?: string;
-    start?: number;
-    end?: number;
-    attributes?: Node[];
-    value?: unknown;
-    expression?: Node;
-  }
-
-  function badges(source: string): Node[] {
-    const out: Node[] = [];
-    const seen = new WeakSet<object>();
-    const visit = (n: unknown) => {
-      if (!n || typeof n !== 'object' || seen.has(n)) return;
-      seen.add(n);
-      if (Array.isArray(n)) return n.forEach(visit);
-      const node = n as Node;
-      if (node.type === 'Component' && node.name === 'StatusBadge') out.push(node);
-      for (const v of Object.values(node)) visit(v);
-    };
-    visit(parse(source, { modern: true }).fragment);
-    return out;
-  }
-
-  /** A badge attribute's value as one expression tag (`run={r}`, `{run}`), else undefined (a string, a bare attribute). */
-  function expressionOf(badge: Node, name: string): Node | undefined {
-    const attr = (badge.attributes ?? []).find((a) => a.type === 'Attribute' && a.name === name);
-    const v = attr?.value as Node | Node[] | true | undefined;
-    const tag = Array.isArray(v) ? (v.length === 1 ? v[0] : undefined) : v === true ? undefined : v;
-    return tag?.type === 'ExpressionTag' ? tag : undefined;
-  }
 
   /** Every `<StatusBadge>` not given exactly one of `run` or `state` as an expression that is not an object literal. */
   function rebuilt(source: string): string[] {
-    return badges(source)
-      .filter((b) => {
-        const attrs = b.attributes ?? [];
-        if (attrs.some((a) => a.type === 'SpreadAttribute' || (a.type === 'Attribute' && (a.name === 'status' || a.name === 'label')))) return true;
-        const given = ['run', 'state'].map((name) => expressionOf(b, name)).filter((t) => t !== undefined);
-        const named = attrs.filter((a) => a.type === 'Attribute' && (a.name === 'run' || a.name === 'state'));
-        return named.length !== 1 || given.length !== 1 || given[0]!.expression?.type === 'ObjectExpression';
-      })
-      .map((b) => source.slice(b.start, b.end));
+    const out: string[] = [];
+    for (const n of nodes(parse(source))) {
+      if (n.type !== 'JSXOpeningElement' || elementName(n.name) !== 'StatusBadge') continue;
+      const attrs: Node[] = n.attributes;
+      const named = attrs.filter((a) => a.type === 'JSXAttribute' && (a.name.name === 'run' || a.name.name === 'state'));
+      const bad =
+        attrs.some((a) => a.type === 'JSXSpreadAttribute' || (a.type === 'JSXAttribute' && (a.name.name === 'status' || a.name.name === 'label'))) ||
+        named.length !== 1 ||
+        named[0].value?.type !== 'JSXExpressionContainer' ||
+        named[0].value.expression.type === 'ObjectExpression';
+      if (bad) out.push(source.slice(n.start, n.end));
+    }
+    return out;
   }
 
   const rebuiltWords = (source: string): string[] => [...source.matchAll(/\bstatusWord\(\s*\{[^)]*\)/g)].map((m) => m[0]);
@@ -77,15 +71,16 @@ describe('a cloud run says its phase wherever its status shows', () => {
   it('takes the run whole in every StatusBadge and statusWord', () => {
     const hits: string[] = [];
     for (const { rel, text } of sources) {
-      if (rel.endsWith('.svelte') && text.includes('<StatusBadge')) for (const b of rebuilt(text)) hits.push(`${rel}: ${b}`);
+      if (rel.endsWith('.tsx') && text.includes('<StatusBadge')) for (const b of rebuilt(text)) hits.push(`${rel}: ${b}`);
       for (const w of rebuiltWords(text)) hits.push(`${rel}: ${w}`);
     }
     expect(hits).toEqual([]);
   });
 
   it('tells a run passed whole from one rebuilt without its cloud state', () => {
-    for (const ok of ['<StatusBadge {run} />', '<StatusBadge run={live.run ?? r} plain />', '<StatusBadge plain state={jobStatus(j)} lastKnown={x} />'])
-      expect(rebuilt(ok), ok).toEqual([]);
+    const jsx = (s: string) => `const x = ${s};`;
+    for (const ok of ['<StatusBadge run={run} />', '<StatusBadge run={live.run ?? r} plain />', '<StatusBadge plain state={jobStatus(j)} lastKnown={x} />'])
+      expect(rebuilt(jsx(ok)), ok).toEqual([]);
     for (const bad of [
       '<StatusBadge run={{ status: r.status }} plain />',
       '<StatusBadge plain />',
@@ -95,34 +90,18 @@ describe('a cloud run says its phase wherever its status shows', () => {
       '<StatusBadge plain state={{ status: r.status, label: "Queued" }} />',
       '<StatusBadge run={r} state={st} plain />',
     ])
-      expect(rebuilt(bad), bad).toHaveLength(1);
+      expect(rebuilt(jsx(bad)), bad).toHaveLength(1);
     expect(rebuiltWords('statusWord(x); statusWord({ status: x.status })')).toEqual(['statusWord({ status: x.status })']);
   });
-});
-
-it("keeps the space at a block's edge as {' '}, where Svelte would trim it", () => {
-  // Svelte trims the whitespace a block's content starts or ends with: "served from{#if origin} (" rendered "served from(".
-  const lead = /(?:\{(?:#if|:else if)\s[^{}]*\}|\{:else\}) +[^\s<{]/;
-  const trail = /[^\s>}] +\{(?:\/if|:else if\s[^{}]*|:else|\/each|\/key)\}/;
-  const hits: string[] = [];
-  for (const { rel, text } of components) {
-    text
-      .replace(/<script[\s\S]*?<\/script>/g, (m) => m.replace(/[^\n]/g, ''))
-      .split('\n')
-      .forEach((line, i) => {
-        if (lead.test(line) || trail.test(line)) hits.push(`${rel}:${i + 1}: ${line.trim()}`);
-      });
-  }
-  expect(hits).toEqual([]);
 });
 
 it('never toasts from a component while its modal dialog is open', () => {
   // The toaster sits behind the modal's scrim, outside its focus trap: a toast fired while a dialog is open is missed
   // and cannot be reached. A toast in a component that owns a modal fires once it is closed (`if (!open)`, or an
-  // `…open = false` / `confirm… = false` just above it), or a comment within the 8 lines above says `page-level:` and
-  // why. Results inside a dialog go to its status region (`DialogStatus`, or `feedback()`).
+  // `…open = false` / `confirm… = false` / `….set(false)` just above it), or a comment within the 8 lines above says
+  // `page-level:` and why. Results inside a dialog go to its status region (`DialogStatus`, or `feedback()`).
   const call = /\btoast\.(success|info|error|show)\(/;
-  const closed = /!open\b|\b\w*[oO]pen = false|\bconfirm\w* = false|page-level:/;
+  const closed = /!open\b|\.get\(\)\s*\)\s*return|\b\w*[oO]pen(\.set\(false\)| = false)|\bconfirm\w*(\.set\(false\)| = false)|page-level:/;
   const bad: string[] = [];
   for (const { rel, text } of components) {
     if (!/<Dialog\b|\.showModal\(/.test(text)) continue;
@@ -138,13 +117,21 @@ it('never toasts from a component while its modal dialog is open', () => {
 it('never puts a ClassStrip (a button) inside a link or a label, where a click would also follow or toggle it', () => {
   const bad: string[] = [];
   for (const { rel, text } of components) {
-    for (let at = text.indexOf('<ClassStrip'); at >= 0; at = text.indexOf('<ClassStrip', at + 1)) {
-      const before = text.slice(0, at);
-      for (const tag of ['a', 'label']) {
-        const open = Math.max(before.lastIndexOf(`<${tag} `), before.lastIndexOf(`<${tag}>`));
-        if (open > before.lastIndexOf(`</${tag}>`)) bad.push(`${rel}: <ClassStrip> inside <${tag}>`);
+    if (!text.includes('<ClassStrip')) continue;
+    const walkJsx = (n: Node, inside: string[]) => {
+      if (!n || typeof n !== 'object') return;
+      if (Array.isArray(n)) return n.forEach((x) => walkJsx(x, inside));
+      if (n.type === 'JSXElement') {
+        const name = elementName(n.openingElement.name);
+        if (name === 'ClassStrip') for (const tag of inside) bad.push(`${rel}: <ClassStrip> inside <${tag}>`);
+        const next = name === 'a' || name === 'label' ? [...inside, name] : inside;
+        for (const k in n) if (k !== 'openingElement') walkJsx(n[k], next);
+        return;
       }
-    }
+      // A function in the markup (a row, a snippet) renders where it is written.
+      for (const k in n) walkJsx(n[k], inside);
+    };
+    walkJsx(parse(text, rel), []);
   }
   expect(bad).toEqual([]);
 });
@@ -154,8 +141,9 @@ describe('touch text', () => {
   // the field when it takes focus. Controls inherit 12–14 px elsewhere, so a component that renders an editable
   // `<input>`, `<select>` or `<textarea>` carries an `@media (pointer: coarse)` rule setting that element's font-size to
   // `--type-lg-size` or more. A rule counts only if its selector matches the control as rendered (round 27: a scan of
-  // selector text alone passed `.unused input`): the markup is parsed into a DOM (Svelte's `{…}` reduced to
-  // placeholders, `class:x` applied as classes) and each editable element must `matches()` one of the selectors.
+  // selector text alone passed `.unused input`): the JSX is built into a DOM (the static parts of each `class`, and
+  // `class:x` applied as classes; what a `{…}` renders placed where it stands) and each editable element must
+  // `matches()` one of the selectors.
 
   /** Input types a person types into or picks text in (the rest are toggles, sliders and pickers with no text). */
   const NOT_EDITABLE = /^(checkbox|radio|range|file|color|hidden|button|submit|reset|image)$/;
@@ -187,31 +175,55 @@ describe('touch text', () => {
     );
   }
 
-  /** Every `{…}` group (braces balanced) of a component's markup, replaced by `_`: blocks, expressions, attribute values. */
-  function placeholders(markup: string): string {
-    let out = '';
-    let depth = 0;
-    for (const c of markup) {
-      if (c === '{') {
-        if (depth++ === 0) out += '_';
-      } else if (c === '}') depth = Math.max(0, depth - 1);
-      else if (depth === 0) out += c;
+  /** The static class names an attribute value can give: string literals and template text inside it. */
+  function staticClasses(v: Node): string[] {
+    if (!v) return [];
+    if (v.type === 'Literal' || v.type === 'StringLiteral') return String(v.value).split(/\s+/).filter(Boolean);
+    const out: string[] = [];
+    for (const n of nodes(v)) {
+      if ((n.type === 'Literal' || n.type === 'StringLiteral') && typeof n.value === 'string') out.push(...n.value.split(/\s+/));
+      else if (n.type === 'TemplateElement') out.push(...String(n.value.cooked ?? '').split(/\s+/));
+      // `class={[a, { on: x }]}` (clsx): an object's keys are classes too.
+      else if (n.type === 'Property' && (n.key.type === 'Identifier' || n.key.type === 'Literal')) out.push(String(n.key.name ?? n.key.value));
     }
-    return out;
+    return out.filter((c) => /^[\w-]+$/.test(c));
   }
 
   /**
-   * The editable controls of a component's markup, rendered as a DOM: a component's tag renamed (`<Input>` is not an
-   * `<input>`: HTML parsing lowercases it), a self-closing tag closed (a parser would nest its siblings inside it) and
-   * every `class:x` directive applied as the class `x`.
+   * The editable controls of a component's JSX, rendered as a DOM: a component is an element of its own (`<Input>` is
+   * not an `<input>`), an element gets its static classes and `class:x` directives, and the JSX inside an expression
+   * (a conditional, a list's row) is placed in the element around it.
    */
-  function editables(markup: string): Element[] {
+  function editables(source: string, file = 'x.tsx'): Element[] {
     const root = document.createElement('div');
-    root.innerHTML = placeholders(markup)
-      .replace(/<(\/?)([A-Z][\w.]*|svelte:[\w-]+)/g, '<$1c-$2')
-      .replace(/<([A-Za-z][\w:.-]*)([^<>]*?)\/>/g, '<$1$2></$1>');
-    for (const el of root.querySelectorAll('*'))
-      for (const a of [...el.attributes]) if (a.name.startsWith('class:')) el.classList.add(a.name.slice('class:'.length));
+    const build = (n: Node, parent: Element) => {
+      if (!n || typeof n !== 'object') return;
+      if (Array.isArray(n)) return n.forEach((x) => build(x, parent));
+      if (n.type === 'JSXElement') {
+        const name = elementName(n.openingElement.name);
+        const el = document.createElement(/^[a-z]/.test(name) && !name.includes(':') ? name : `c-${name.replace(/[^\w-]/g, '-')}`);
+        for (const a of n.openingElement.attributes) {
+          if (a.type !== 'JSXAttribute') continue;
+          const an = a.name.type === 'JSXNamespacedName' ? `${a.name.namespace.name}:${a.name.name.name}` : a.name.name;
+          if (an === 'class') el.classList.add(...staticClasses(a.value?.type === 'JSXExpressionContainer' ? a.value.expression : a.value));
+          else if (an.startsWith('class:')) el.classList.add(an.slice('class:'.length));
+          else if (an === 'type' && (a.value?.type === 'Literal' || a.value?.type === 'StringLiteral')) el.setAttribute('type', String(a.value.value));
+        }
+        parent.appendChild(el);
+        build(n.children, el);
+        return;
+      }
+      if (n.type === 'JSXFragment') return build(n.children, parent);
+      for (const k in n) build(n[k], parent);
+    };
+    // The outermost JSX of the module: a component's markup and its snippets.
+    const visit = (n: Node) => {
+      if (!n || typeof n !== 'object') return;
+      if (Array.isArray(n)) return n.forEach(visit);
+      if (n.type === 'JSXElement' || n.type === 'JSXFragment') return build(n, root);
+      for (const k in n) visit(n[k]);
+    };
+    visit(parse(source, file));
     return [...root.querySelectorAll('input, select, textarea')].filter((el) => !(el.tagName === 'INPUT' && NOT_EDITABLE.test(el.getAttribute('type') ?? '')));
   }
 
@@ -224,9 +236,12 @@ describe('touch text', () => {
     }
   }
 
+  /** A component's css`...` (its styles). */
+  const styleOf = (text: string) => /\ncss`([\s\S]*?)`;/.exec(text)?.[1] ?? '';
+
   const covered = (css: string, markup: string) => {
     const sels = touchSelectors(css);
-    return editables(markup).every((el) => sels.some((sel) => matches(el, sel)));
+    return editables(`const x = <>${markup}</>;`).every((el) => sels.some((sel) => matches(el, sel)));
   };
 
   it('every editable control is at least 16 px on a coarse pointer, by a rule that matches it as rendered', () => {
@@ -234,11 +249,8 @@ describe('touch text', () => {
     let seen = 0;
     for (const { rel, text } of components) {
       if (!/<(?:input|select|textarea)\b/.test(text)) continue;
-      const style = /<style[^>]*>([\s\S]*?)<\/style>/.exec(text)?.[1] ?? '';
-      // Markup only: a script's comment may name a tag ("Native <input type=range>").
-      const markup = text.replace(/<(style|script)\b[\s\S]*?<\/\1>/g, '').replace(/<!--[\s\S]*?-->/g, '');
-      const sels = touchSelectors(style);
-      for (const el of editables(markup)) {
+      const sels = touchSelectors(styleOf(text));
+      for (const el of editables(text, rel)) {
         seen++;
         if (!sels.some((sel) => matches(el, sel))) misses.push(`${rel}: <${el.tagName.toLowerCase()}> matches no coarse-pointer rule of --type-lg-size`);
       }
@@ -250,17 +262,18 @@ describe('touch text', () => {
 
   it('counts a rule only when its selector matches the rendered control, at 16 px or more', () => {
     const rule = (sel: string, size = 'lg') => `@media (pointer: coarse) { ${sel} { font-size: var(--type-${size}-size); } }`;
-    const field = '<div class="chips" class:invalid={bad} onclick={(e) => e.x > 1}><input bind:value={q} /></div>';
+    const field = '<div class="chips" class:invalid={bad()} onclick={(e) => e.x > 1}><input bind:value={q} /></div>';
     expect(covered(rule('.chips input'), field)).toBe(true);
     // Round 27's false pass: the right element named under a class nothing renders.
     expect(covered(rule('.unused input'), field)).toBe(false);
-    // A class a directive adds counts; `:global()` is unwrapped.
+    // A class a directive adds counts; `:global()` is unwrapped; a template's static part is a class.
     expect(covered(rule('.invalid input'), field)).toBe(true);
     expect(covered(rule(':global(.chips) input'), field)).toBe(true);
+    expect(covered(rule('.wrap input'), '<div class={`wrap ${size()}`}><input /></div>')).toBe(true);
     expect(covered(rule('.chips input', 'md'), field)).toBe(false);
     expect(covered('@media (pointer: fine) { input { font-size: var(--type-lg-size); } }', field)).toBe(false);
-    // A self-closing component before the control does not swallow it, and a component named Input is not an input.
-    expect(covered(rule('.row > input'), '<div class="row"><Icon size={14} /><input /></div>')).toBe(true);
-    expect(editables('<Input bind:value={q} /><Select /><input type="checkbox" /><input oninput={(e) => go(e)} type="range" />')).toHaveLength(0);
+    // A control inside a conditional is the element's; a component named Input is not an input.
+    expect(covered(rule('.row > input'), '<div class="row"><Icon size={14} />{on() ? <input /> : null}</div>')).toBe(true);
+    expect(editables('const x = <><Input bind:value={q} /><Select /><input type="checkbox" /><input oninput={(e) => go(e)} type="range" /></>;')).toHaveLength(0);
   });
 });

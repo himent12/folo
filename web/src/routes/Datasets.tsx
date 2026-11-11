@@ -1,4 +1,3 @@
-// fw port of Datasets.svelte.
 import Images from '$icons/images';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
@@ -23,7 +22,7 @@ import TableState from '$lib/ui/TableState';
 import Gate from '$lib/ui/Gate';
 import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
 import Meta from '$lib/ui/Meta';
-import { rowNav } from '$lib/ui/rowNav.fw';
+import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
 

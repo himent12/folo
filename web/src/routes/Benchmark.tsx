@@ -1,4 +1,3 @@
-// fw port of Benchmark.svelte.
 import ArrowLeft from '$icons/arrow-left';
 import Copy from '$icons/copy';
 import GitCompare from '$icons/git-compare-arrows';
@@ -49,7 +48,7 @@ import NewLoopDialog from './bench/NewLoopDialog';
 import PlanTab from './bench/PlanTab';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
-import { classesText, entriesText, FINGERPRINT_HELP, FROZEN, imagesText, shortFingerprint, sourceKind, sourcePath } from './bench/words.fw';
+import { classesText, entriesText, FINGERPRINT_HELP, FROZEN, imagesText, shortFingerprint, sourceKind, sourcePath } from './bench/words';
 
 type Tab = 'leaderboard' | 'conditions' | 'loops';
 

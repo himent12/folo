@@ -1,4 +1,3 @@
-// fw port of InspectorRail.svelte.
 /**
  * The inspector's rail: the image's labels (hovering one marks its box, a click zooms to it), the class legend with
  * this image's counts, and the image's facts with its path, shortened in the middle and one click from the clipboard.

@@ -1,4 +1,3 @@
-// fw port of Select.svelte.
 /**
  * A styled native <select>: the platform picker is the most accessible and fastest option on every device. An option
  * may carry a `short` label: the closed select shows it (a model's name), while the open list and the accessible value
@@ -9,7 +8,7 @@
 // button) has too, so two pickers side by side never wear two different marks.
 import ChevronDown from '$icons/chevron-down';
 import { bindable, computed, css, defaults, For, Index } from 'fw';
-import { describedBy, getField } from './field.fw';
+import { describedBy, getField } from './field';
 
 export interface SelectOption<T extends string> {
   value: T;

@@ -2,9 +2,9 @@
 // (everything but Mod+K) can be turned off in Settings (ui/keyPrefs).
 
 import { isTyping } from '$lib/keys';
-import { keyPrefs } from '$lib/ui/keyPrefs.svelte';
-import { sidebar } from './sidebarState.svelte';
-import { router } from '$lib/router.svelte';
+import { keyPrefs } from '$lib/ui/keyPrefs';
+import { sidebar } from './sidebarState';
+import { router } from '$lib/router';
 import { mainNav, settingsNav } from './nav';
 
 export interface ShortcutHandlers {

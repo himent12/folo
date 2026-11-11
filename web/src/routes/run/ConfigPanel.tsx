@@ -1,4 +1,3 @@
-// fw port of ConfigPanel.svelte.
 /**
  * A run's config. With `resolved` (docs/API.md, `Run.resolved`) the settings it trains with are the values shown,
  * the request a note where it differs ("AdamW (auto)", "0.001429 (requested 0.01)"), plus the batch it accumulates,

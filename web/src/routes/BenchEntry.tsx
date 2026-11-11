@@ -1,4 +1,3 @@
-// fw port of BenchEntry.svelte.
 /**
  * One entry of a benchmark (`#/benchmarks/{id}/entries/{entryId}`): its whole result, read top to bottom as
  * docs/BENCH.md's "Reading it" asks (how good is it, why that number, where does it break, can I trust its confidence,
@@ -55,10 +54,10 @@ import SelfLabelSection from './bench/entry/SelfLabelSection';
 import JumpNav from './bench/JumpNav';
 import { ranks, stale } from './bench/leaderboard';
 import NewLoopDialog from './bench/NewLoopDialog';
-import { modelLabel } from './label/words.fw';
+import { modelLabel } from './label/words';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
-import { axisWhyNot, costFacts, coverageFacts, entryStatus, scoreText, SPEED_HELP, teacherEligibility } from './bench/words.fw';
+import { axisWhyNot, costFacts, coverageFacts, entryStatus, scoreText, SPEED_HELP, teacherEligibility } from './bench/words';
 
 const SECTIONS = [
   { id: 'score', label: 'Score' },

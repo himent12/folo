@@ -1,4 +1,3 @@
-// fw port of EstimateFigures.svelte.
 /**
  * The Summary's figures (the rail's, and its phone sheet's): the schedule, the estimated time with what it stands
  * on, a cloud run's cost and limit, GPU memory with its meter, and the warnings right above Start.
@@ -17,7 +16,7 @@ import InfoButton from '$lib/ui/InfoButton';
 import { accumulationText } from '../run/resolved';
 import type { CloudPick } from './cloudPick';
 import type { Estimate, ShortRun, Warmup } from './estimate';
-import { roughBytes, type Shown } from './summary.fw';
+import { roughBytes, type Shown } from './summary';
 
 export interface EstimateFiguresProps {
   where: string;

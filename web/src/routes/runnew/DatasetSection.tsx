@@ -1,4 +1,3 @@
-// fw port of DatasetSection.svelte.
 /** New run, section 1: the dataset, as cards from 768 px up and as a compact select with a one-line summary on phones. */
 import Check from '$icons/check';
 import { bindable, css, For, Index } from 'fw';
@@ -11,7 +10,7 @@ import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
 import Meta from '$lib/ui/Meta';
 import { balanced } from '$lib/ui/balancedGrid';
-import type { FormErrors } from './jump.fw';
+import type { FormErrors } from './jump';
 
 export interface DatasetSectionProps {
   datasets: Resource<Dataset[]>;

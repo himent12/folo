@@ -1,5 +1,4 @@
-// fw port of uploads.svelte.ts (the same Uploads, on fw signals).
-// Adding images to a labeling job, from this browser (uploads in chunks, with progress) or from a folder on the
+// // Adding images to a labeling job, from this browser (uploads in chunks, with progress) or from a folder on the
 // server's machine: what is under way and how the last addition went, shown in place over the images. An upload that
 // stops part way shows what its first requests added as well as why the rest was not sent.
 

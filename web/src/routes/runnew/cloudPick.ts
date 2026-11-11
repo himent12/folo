@@ -1,4 +1,4 @@
-// fw port of cloudPick.svelte.ts (the same Run on state, on fw signals). The derived getters (connection, offers,
+// The derived getters (connection, offers,
 // offer, compute, errors) are memoized: the form reads them many times per change (every error, the review, the
 // figures), where the Svelte original recomputed them on every read.
 // New run's "Run on" (docs/CLOUD.md): this machine or a cloud connection, the connection's offers with one preselected,

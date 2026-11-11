@@ -1,4 +1,3 @@
-// fw port of Sidebar.svelte.
 import PanelLeftClose from '$icons/panel-left-close';
 import PanelLeftOpen from '$icons/panel-left-open';
 import { computed, css, Dynamic, effect, For, signal, untrack } from 'fw';
@@ -8,7 +7,7 @@ import { keyPrefs } from '$lib/ui/keyPrefs';
 import { reducedMotion } from '$lib/ui/motion';
 import { tooltip } from '$lib/ui/tooltip';
 import Logo from './Logo';
-import { mainNav, settingsNav, type NavItem } from './nav.fw';
+import { mainNav, settingsNav, type NavItem } from './nav';
 import { sidebar } from './sidebarState';
 
 export interface SidebarProps {

@@ -1,4 +1,3 @@
-// fw port of RunChips.svelte.
 /**
  * The legend: one card per run (its key, name and value under the cursor, how its line ended and how it started),
  * each a toggle that keeps its run's line in front; on phones, two columns of compact keys and an Edit button.

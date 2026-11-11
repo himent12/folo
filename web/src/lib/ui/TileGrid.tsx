@@ -1,4 +1,3 @@
-// fw port of TileGrid.svelte.
 /**
  * A virtualised grid of image tiles over the window scroll (a dataset's images, a labeling job's): only the rows in
  * view (plus a little overscan) are in the DOM, and `onrange` asks for the items they show. Roving focus: arrows /

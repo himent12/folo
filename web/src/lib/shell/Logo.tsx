@@ -1,4 +1,3 @@
-// fw port of Logo.svelte.
 import { css, defaults } from 'fw';
 
 export interface LogoProps {

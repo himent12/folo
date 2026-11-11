@@ -1,4 +1,3 @@
-// fw port of UploadStatus.svelte.
 /**
  * An addition of images, said where the images are: its progress while files are sent ("Uploading 34 of 120…"), then
  * how it went ("118 added · 2 skipped"), the files left out with their reasons one click away; or why it failed (when

@@ -1,4 +1,3 @@
-// fw port of ImagesArea.svelte.
 /**
  * A labeling job's images: a toolbar (which images, how they show, Add images), the upload in progress or its
  * result, and the virtualised grid. Image files dropped anywhere on it are uploaded. With no images yet, the grid's
@@ -13,7 +12,7 @@ import { computed, createRoot, css, effect, getOwner, Key, MediaQuery, onCleanup
 import type { LabelImage } from '$lib/api/types';
 import { media } from '$lib/design/tokens';
 import { num } from '$lib/format';
-import { TOUCH_ONLY } from '$lib/shell/shortcuts.fw';
+import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import Button from '$lib/ui/Button';
 import EmptyState from '$lib/ui/EmptyState';
 import { gridView } from '$lib/ui/gridView';

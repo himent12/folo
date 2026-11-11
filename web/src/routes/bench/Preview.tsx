@@ -1,4 +1,3 @@
-// fw port of Preview.svelte.
 /**
  * What a condition does to an image of this benchmark: the image unchanged and under the condition, split by a
  * divider the person drags (or moves with the arrow keys), with the true boxes on both sides (a geometric condition

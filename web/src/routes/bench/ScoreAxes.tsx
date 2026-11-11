@@ -1,4 +1,3 @@
-// fw port of ScoreAxes.svelte.
 import { computed, css, For } from 'fw';
 import type { BenchAxisScore } from '$lib/api/types';
 import { AXIS_NAME } from '$lib/bench/rules';

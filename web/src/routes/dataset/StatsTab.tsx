@@ -1,4 +1,3 @@
-// fw port of StatsTab.svelte.
 /**
  * Dataset statistics. Health comes first, only when there are findings: one compact line across the page (each
  * severity's icon and a short summary of its findings, units named; Details at its right end) that opens to every

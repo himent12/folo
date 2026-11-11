@@ -1,4 +1,3 @@
-// fw port of EmptyState.svelte.
 /**
  * An empty state in place of the content it stands for: the small viewfinder mark inline, a one-line title, one
  * useful sentence and one action, starting at the content's left edge. Every empty state uses it, Not found too.
@@ -6,7 +5,7 @@
  */
 import { css, Dynamic } from 'fw';
 import CodeText from './CodeText';
-import type { IconType } from './types.fw';
+import type { IconType } from './types';
 
 export interface EmptyStateProps {
   icon?: IconType;

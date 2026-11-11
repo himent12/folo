@@ -1,7 +1,6 @@
-// fw port of TabBar.svelte.
 import { computed, css, Dynamic, For } from 'fw';
 import { router, section, href } from '$lib/router';
-import { tabNav, tabOf } from './nav.fw';
+import { tabNav, tabOf } from './nav';
 
 export default function TabBar() {
   // A section that lives under a tab (Benchmarks under Models) makes that tab current.

@@ -1,4 +1,3 @@
-// fw port of Inspector.svelte.
 /**
  * Full-size image inspector: zoom (wheel / pinch / + - / double-click) and pan (drag, or Shift + arrows on the
  * focused canvas) over the image with its labels, a label list that highlights boxes, a class legend and image meta.

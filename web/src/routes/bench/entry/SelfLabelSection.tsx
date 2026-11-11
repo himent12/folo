@@ -1,4 +1,3 @@
-// fw port of SelfLabelSection.svelte.
 /**
  * Could it label for itself? (docs/BENCH.md, Self-labeling): the precision of the labels it keeps and the share of all
  * objects they find, against the confidence threshold they are kept from (the 101-point curve); the 90% target as a
@@ -18,7 +17,7 @@ import Button from '$lib/ui/Button';
 import Panel from '$lib/ui/Panel';
 import { labelCurves, labelPointAt } from '../charts';
 import { MIN_LABELS } from '$lib/bench/score';
-import { fine, labelsText, perImageText, READINESS, READINESS_MEANS, selfLabelReading, share, shareApart } from '../words.fw';
+import { fine, labelsText, perImageText, READINESS, READINESS_MEANS, selfLabelReading, share, shareApart } from '../words';
 
 export interface SelfLabelSectionProps {
   result: BenchResult;

@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// fw port of results.svelte.test.ts.
 // The result screens against the in-browser mock: an entry's page in each of its states (complete, an agent's partial
 // one, never reaching 90% precision, running, failed), its failure gallery's paging and large view, the compare page's
 // selection and its states, the new-loop dialog's eligibility and checks, a loop's page, and the leaderboard's scale.
@@ -23,7 +22,7 @@ import CalibrationSection from './entry/CalibrationSection';
 import { GALLERY_PAGE } from './entry/ImagesSection';
 import SelfLabelSection from './entry/SelfLabelSection';
 import NewLoopDialog from './NewLoopDialog';
-import { FROZEN, loopPlanText } from './words.fw';
+import { FROZEN, loopPlanText } from './words';
 
 let target: HTMLElement;
 /** Port of `mount(comp, { target, props })`: the props object is read live (a `deep` one changes them). */

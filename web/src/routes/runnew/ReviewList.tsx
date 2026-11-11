@@ -1,8 +1,7 @@
-// fw port of ReviewList.svelte.
 /** The Summary's settings that shape the run, each row a way back to its control (`jump`). */
 import CircleAlert from '$icons/circle-alert';
 import { css, For } from 'fw';
-import type { FormErrors, Jump } from './jump.fw';
+import type { FormErrors, Jump } from './jump';
 
 export interface ReviewRow {
   key: Jump;

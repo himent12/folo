@@ -1,4 +1,3 @@
-// fw port of Page.svelte.
 /**
  * Standard page frame: title row (title, optional meta line and actions) above the content.
  *

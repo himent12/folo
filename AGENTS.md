@@ -76,7 +76,7 @@ crates/folo-mcp      `folo mcp`: the MCP server (rmcp, stdio) over the server's 
 crates/folo-cli      the `folo` binary (train / val / predict / export / serve / cloud / mcp / doctor)
 crates/folo-wasm     FOLO detectors in the browser (wasm-bindgen; WebGPU or the wasm CPU), docs/WASM.md
 crates/folo-test-support  test-only helpers (a dev-dependency): TestDir / TestFile / ChildGuard, FOLO_TEST_TMP
-web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
+web/                 FOLO Studio (TypeScript + Vite on fw, our own UI framework in web/framework; custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust, its own cargo workspace: the app and ui/ = folo-ui, its UI framework;
                      talks to folo-server over docs/API.md)
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md

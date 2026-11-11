@@ -1,4 +1,3 @@
-// fw port of Versus.svelte.
 /**
  * How fast the engine is, against the incumbent of the same size on the same machine: every row of
  * docs/BENCHMARKS.md's summary where both have a number, including the ones FOLO trails. Values in ink; the lead is a

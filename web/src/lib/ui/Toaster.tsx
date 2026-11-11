@@ -1,4 +1,3 @@
-// fw port of Toaster.svelte.
 // Toasts never take focus: they announce through the live region, and a click on their buttons keeps focus where it
 // was (mousedown is not allowed to move it). A keyboard user can still Tab in; while focus or the pointer is in the
 // stack nothing auto-dismisses, and closing the toast that holds focus hands it back to where the user came from, so

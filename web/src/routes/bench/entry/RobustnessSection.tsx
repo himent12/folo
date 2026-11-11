@@ -1,4 +1,3 @@
-// fw port of RobustnessSection.svelte.
 /**
  * Where it breaks (docs/BENCH.md, Robustness): the plan's conditions × severities as a heat table of accuracy kept
  * (`kept = min(1, mAP under / mAP unchanged)`), the number in every cell and the tone for what was lost, rows from the
@@ -19,7 +18,7 @@ import Panel from '$lib/ui/Panel';
 import { byWorstKept, severityDomain, severityPoints } from '../charts';
 import { heatLabelHigh, heatShare } from '../heat';
 import Preview from '../Preview';
-import { keptText, robustnessReading } from '../words.fw';
+import { keptText, robustnessReading } from '../words';
 
 export interface RobustnessSectionProps {
   result: BenchResult;

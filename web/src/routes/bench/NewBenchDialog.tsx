@@ -1,4 +1,3 @@
-// fw port of NewBenchDialog.svelte.
 /**
  * "New benchmark": a name, what the camera sees and what makes it hard (an agent designing the plan reads it), where
  * the images come from (a dataset's split, or a labeling job's labeled images), and how many at most. It is made
@@ -26,7 +25,7 @@ import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import TextArea from '$lib/ui/TextArea';
 import { toast } from '$lib/ui/toast';
-import { imagesText } from './words.fw';
+import { imagesText } from './words';
 
 const FIX: Record<string, string> = { name: 'Fix the name first', description: 'Shorten the description first', max: 'Fix the image limit first' };
 

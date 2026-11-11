@@ -1,4 +1,3 @@
-// fw port of MatchView.svelte.
 /**
  * An image of an entry with what it found against the truth (docs/BENCH.md, Matching): a right detection is a solid
  * line, a wrong one a solid line with a cross on its corner, a true box nothing found a dashed line; each also in its

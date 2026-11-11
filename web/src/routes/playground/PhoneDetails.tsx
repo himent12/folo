@@ -1,4 +1,3 @@
-// fw port of PhoneDetails.svelte.
 /** Phones with an image: the classes and the timing as two disclosures under the detections, folded until asked for. */
 import ChevronRight from '$icons/chevron-right';
 import { css } from 'fw';

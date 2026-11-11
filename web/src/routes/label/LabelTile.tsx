@@ -1,4 +1,3 @@
-// fw port of LabelTile.svelte.
 /**
  * One image of a labeling job in the grid, in each of its states: waiting (the image alone), with the agent (a live
  * mark), labeled (its boxes, or "No objects" at rest, so a background image never reads as a tile that failed to

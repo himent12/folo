@@ -4,12 +4,12 @@ import { FROM_SCRATCH } from '$lib/lineage';
 import { referenceSource } from '$lib/reference';
 import { basisLine, confidenceLine, referenceBasis, updatedWords } from '$lib/throughput';
 import { HEAD_LABEL, optimizerLabel } from '../run/resolved';
-import type { CloudPick } from './cloudPick.svelte';
+import type { CloudPick } from './cloudPick';
 import { closeMosaicEpochs, type Estimate } from './estimate';
 import type { FormErrors, Jump } from './jump';
 import type { EstimatePhase } from '$lib/api/types';
 import { bytes } from '$lib/format';
-import { prefs } from '$lib/prefs.svelte';
+import { prefs } from '$lib/prefs';
 
 // Estimates are ranges (lib/throughput `timeRange`); memory is one figure, in the app's one size format.
 export const roughBytes = (b: number) => `~${bytes(b, prefs.units)}`;

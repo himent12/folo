@@ -1,4 +1,3 @@
-// fw port of Gate.svelte.
 /**
  * A control that is disabled for a reason ("Server offline", "Select 2–4 runs to compare"). The reason is a tooltip
  * on hover and the control's accessible description, since a disabled button cannot take focus to show it. Render

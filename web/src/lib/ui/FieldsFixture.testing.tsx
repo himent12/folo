@@ -1,4 +1,3 @@
-// fw port of FieldsFixture.test.svelte.
 /** Every shared control inside a Field, with a hint or an error, for `fields.test.tsx`. */
 import { signal } from 'fw';
 import Field from './Field.tsx';

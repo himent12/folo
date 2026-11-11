@@ -1,4 +1,3 @@
-// fw port of Models.svelte.
 import Box from '$icons/box';
 import Plus from '$icons/plus';
 import Search from '$icons/search';
@@ -26,7 +25,7 @@ import SortHeader from '$lib/ui/SortHeader';
 import TableState from '$lib/ui/TableState';
 import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
-import { rowNav } from '$lib/ui/rowNav.fw';
+import { rowNav } from '$lib/ui/rowNav';
 import { media } from '$lib/design/tokens';
 import { unlike, versusYolo26n } from '$lib/benchmarks';
 import { FROM_SCRATCH, origin, originTip, type Origin } from '$lib/lineage';

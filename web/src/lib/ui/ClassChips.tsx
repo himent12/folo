@@ -1,4 +1,3 @@
-// fw port of ClassChips.svelte.
 /**
  * Class names as chips with their class colour, typed into one field: Enter or a comma adds what was typed (so does
  * leaving the field), Backspace in an empty field takes the last one off, × removes one. The enclosing Field's
@@ -7,7 +6,7 @@
 import X from '$icons/x';
 import { bindable, css, For } from 'fw';
 import { classColor } from '$lib/design/tokens';
-import { describedBy, getField } from './field.fw';
+import { describedBy, getField } from './field';
 
 /** `classes` with the names in `raw` (split at commas and line breaks) added, each once, at most `max` in all. */
 export function addClasses(classes: readonly string[], raw: string, max: number): string[] {

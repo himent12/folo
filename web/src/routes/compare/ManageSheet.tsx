@@ -1,4 +1,3 @@
-// fw port of ManageSheet.svelte.
 /** Phones: the legend's management in a bottom sheet: each run with how it started, open and remove, then Add. */
 import X from '$icons/x';
 import ArrowUpRight from '$icons/arrow-up-right';

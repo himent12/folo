@@ -1,4 +1,3 @@
-// fw port of InfoRegion.svelte.
 /**
  * The in-place definition of a chart's ⓘ on phones (./infoSlot): rendered by the frame under the chart's heading,
  * empty (and taking no room) until a `chart` InfoButton opens it.

@@ -1,4 +1,3 @@
-// fw port of results.svelte.ts.
 // The results of finished entries, loaded once each (a finished entry's result never changes): Compare's charts need
 // each entry's whole result. (The leaderboard reads its interval and conditions from `BenchEntry` itself.)
 

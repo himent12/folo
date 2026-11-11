@@ -1,4 +1,3 @@
-// fw port of browser.svelte.ts.
 // Running FOLO models in this browser: folo-wasm (crates/folo-wasm, docs/WASM.md) on WebGPU or the wasm CPU.
 // scripts/build-wasm.(sh|ps1) writes it to web/public/folo-wasm/, which Vite serves as /folo-wasm/. The module is
 // fetched once; each model is loaded once per backend (loading parses and fuses it and, on WebGPU, compiles the

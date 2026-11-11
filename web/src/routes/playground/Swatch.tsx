@@ -1,4 +1,3 @@
-// fw port of Swatch.svelte.
 /** A class's colour mark: the detections table, the picked box's line and the class list. */
 import { css } from 'fw';
 

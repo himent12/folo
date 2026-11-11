@@ -1,4 +1,3 @@
-// fw port of PrCurves.svelte.
 /**
  * Precision-recall curves with the per-class table as their legend. Every class is a 1 px context line
  * (`--chart-context`, >= 3:1 on the panel) and the mean over all classes a heavier line in ink; many classes are a

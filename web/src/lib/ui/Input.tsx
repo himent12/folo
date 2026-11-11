@@ -1,7 +1,6 @@
-// fw port of Input.svelte.
 import { bindable, css, defaults, Dynamic, splitProps, type ElementProps } from 'fw';
-import { describedBy, getField } from './field.fw';
-import type { IconType } from './types.fw';
+import { describedBy, getField } from './field';
+import type { IconType } from './types';
 
 /** `V`: the bound value's type, inferred from `value` / `bind:value` (a `signal('')` binds as a string). */
 export interface InputProps<V extends string | number | null = string | number | null> extends Omit<ElementProps<'input'>, 'value' | 'size'> {

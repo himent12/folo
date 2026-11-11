@@ -1,4 +1,3 @@
-// fw port of Dataset.svelte.
 import ArrowLeft from '$icons/arrow-left';
 import Copy from '$icons/copy';
 import ImageOff from '$icons/image-off';

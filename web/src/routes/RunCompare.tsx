@@ -1,4 +1,3 @@
-// fw port of RunCompare.svelte.
 import GitCompare from '$icons/git-compare-arrows';
 import ChevronRight from '$icons/chevron-right';
 import { computed, css, effect, fade, Key, MediaQuery, signal, untrack } from 'fw';

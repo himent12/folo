@@ -1,4 +1,3 @@
-// fw port of SeriesSwatch.svelte.
 /** A series' key in the legend and the tooltip: a 12 px stroke in its ink and its line's rhythm. */
 import { css } from 'fw';
 import { inkOf, swatchDash, type Series } from './lineSeries';

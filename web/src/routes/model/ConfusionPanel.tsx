@@ -1,4 +1,3 @@
-// fw port of ConfusionPanel.svelte.
 /**
  * What the model confuses and misses: the confusion matrix beside its two ranked lists (each line shows its cell)
  * and how to read it; on phones the lists lead and the matrix is one step away.

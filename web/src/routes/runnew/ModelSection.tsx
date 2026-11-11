@@ -1,4 +1,3 @@
-// fw port of ModelSection.svelte.
 /**
  * New run, section 2: the model size (a specification table; on phones a segmented pick with the table folded
  * behind "Compare sizes") and the weights the run starts from.
@@ -20,7 +19,7 @@ import Ident from '$lib/ui/Ident';
 import Meta from '$lib/ui/Meta';
 import InfoButton from '$lib/ui/InfoButton';
 import { arches } from './estimate';
-import type { FormErrors } from './jump.fw';
+import type { FormErrors } from './jump';
 import { media } from '$lib/design/tokens';
 
 export interface ModelSectionProps {

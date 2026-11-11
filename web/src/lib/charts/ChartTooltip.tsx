@@ -1,4 +1,3 @@
-// fw port of ChartTooltip.svelte.
 /** A line chart's floating tooltip at the cursor: the x title, then each series' swatch, name and value. */
 import { bindable, css, For } from 'fw';
 import type { Pt } from './downsample';

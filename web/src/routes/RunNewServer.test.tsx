@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// fw port of RunNewServer.svelte.test.ts.
 // New run with what the server can do: mixed precision, the end-to-end head, its estimate, its weights and its
 // refusals (the form itself is RunNew.svelte.test.ts, Run on is RunNewCloud.svelte.test.ts).
 import { flush as flushSync, tick } from 'fw';

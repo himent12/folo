@@ -1,4 +1,3 @@
-// fw port of DesignDialog.svelte.
 /**
  * "Design with an agent" (docs/BENCH.md, Designing a plan with an agent): asks Claude Code or Codex once (no tools)
  * for a plan drawn from the catalog, from the benchmark's description, its classes and four of its images. While the
@@ -22,10 +21,10 @@ import Gate from '$lib/ui/Gate';
 import Meta from '$lib/ui/Meta';
 import Spinner from '$lib/ui/Spinner';
 import TextArea from '$lib/ui/TextArea';
-import { modelLabel, usageFacts } from '../label/words.fw';
+import { modelLabel, usageFacts } from '../label/words';
 import AgentFields from '../label/AgentFields';
 import type { AgentChoice } from '../label/agentChoice';
-import { conditionsText } from './words.fw';
+import { conditionsText } from './words';
 
 export interface DesignDialogProps {
   open?: boolean;

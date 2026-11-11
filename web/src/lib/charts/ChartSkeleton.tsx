@@ -1,4 +1,3 @@
-// fw port of ChartSkeleton.svelte.
 /**
  * A line chart while its data loads: the real frame (legend row, gridlines, baseline axis, tick gutters) with only
  * the unknown parts as placeholders, so nothing moves when the chart arrives.

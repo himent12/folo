@@ -1,4 +1,3 @@
-// fw port of PerClass.svelte.
 /**
  * Per-class validation metrics of the latest epoch, with the change since the previous epoch in a column of its own.
  * A class's own metric is AP (AP50-95, AP50); mAP is only their mean.

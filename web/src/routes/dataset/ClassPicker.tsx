@@ -1,4 +1,3 @@
-// fw port of ClassPicker.svelte.
 /**
  * The image filter's class picker: a toolbar button naming the active class that opens a list of classes with their
  * swatches and box counts. One class at a time (the images endpoint filters by a single class). `block` (phones) makes

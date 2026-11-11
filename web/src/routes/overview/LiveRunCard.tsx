@@ -1,4 +1,3 @@
-// fw port of LiveRunCard.svelte.
 import ArrowRight from '$icons/arrow-right';
 import { bindable, computed, css, effect, For, MediaQuery, signal } from 'fw';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';

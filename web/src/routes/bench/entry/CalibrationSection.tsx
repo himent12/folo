@@ -1,4 +1,3 @@
-// fw port of CalibrationSection.svelte.
 /**
  * Can you trust its confidence? (docs/BENCH.md, Calibration): a reliability diagram. Per bin of confidence, the share
  * of its detections that is right against the bin's mean confidence, the diagonal (said = right) as the reference; a
@@ -14,7 +13,7 @@ import { media } from '$lib/design/tokens';
 import { num, pct } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import { binAtConfidence, RELIABILITY_X, reliabilityPoints, reliabilityStrip } from '../charts';
-import { axisWhyNot, calibrationReading } from '../words.fw';
+import { axisWhyNot, calibrationReading } from '../words';
 
 export interface CalibrationSectionProps {
   result: BenchResult;

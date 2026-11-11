@@ -1,10 +1,9 @@
-// fw port of TextArea.svelte.
 /**
  * A multi-line text field (a labeling job's instructions): ui/Input's frame, edge, ring and touch text for several
  * lines. An enclosing Field's hint or error describes it and its error marks it (ui/field).
  */
 import { bindable, css, defaults, splitProps, type ElementProps } from 'fw';
-import { describedBy, getField } from './field.fw';
+import { describedBy, getField } from './field';
 
 export interface TextAreaProps extends Omit<ElementProps<'textarea'>, 'value'> {
   value?: string;

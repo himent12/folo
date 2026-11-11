@@ -1,4 +1,3 @@
-// fw port of Settings.svelte.
 import Check from '$icons/check';
 import ChevronRight from '$icons/chevron-right';
 import CircleCheck from '$icons/circle-check';
@@ -16,7 +15,7 @@ import { bytes } from '$lib/format';
 import { prefs, type ThemePref, type Units } from '$lib/prefs';
 import Page from '$lib/shell/Page';
 import { setCrumbs } from '$lib/shell/crumbs';
-import { showShortcuts } from '$lib/shell/shortcuts.fw';
+import { showShortcuts } from '$lib/shell/shortcuts';
 import { fadeScroll } from '$lib/ui/fadeScroll';
 import Button from '$lib/ui/Button';
 import DriverReport from '$lib/ui/DriverReport';
@@ -27,7 +26,7 @@ import Panel from '$lib/ui/Panel';
 import Remedy from '$lib/ui/Remedy';
 import Segmented from '$lib/ui/Segmented';
 import Switch from '$lib/ui/Switch';
-import type { IconType } from '$lib/ui/types.fw';
+import type { IconType } from '$lib/ui/types';
 import { capabilityRows, deviceSummary, driverReport, type CapState } from './settings/capabilities';
 import ThemePreview from './settings/ThemePreview';
 import Throughput from './settings/Throughput';

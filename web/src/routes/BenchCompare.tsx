@@ -1,4 +1,3 @@
-// fw port of BenchCompare.svelte.
 /**
  * Two to four finished entries of one benchmark side by side and overlaid (`#/benchmarks/{id}/compare?entries=a,b`):
  * what makes them not like for like, said first (fewer images, conditions left out, no confidences, unknown classes);
@@ -38,7 +37,7 @@ import IntervalPlot from './bench/IntervalPlot';
 import { along, COMPARE_MAX, stale } from './bench/leaderboard';
 import { capTicks } from '$lib/charts/domain';
 import Unsupported from './bench/Unsupported';
-import { intervalText, keptText, scoreText } from './bench/words.fw';
+import { intervalText, keptText, scoreText } from './bench/words';
 
 const BIN_MIDS = [0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95];
 const diff = diffAsPrinted;

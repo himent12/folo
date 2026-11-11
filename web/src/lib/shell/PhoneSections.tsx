@@ -1,4 +1,3 @@
-// fw port of PhoneSections.svelte.
 /**
  * Phones: the sections a tab of the tab bar holds, as underline tabs at the top of each one's list (`nav.ts`
  * `tabUnder`). The bar holds five tabs with their names whole at 320 px; a sixth section lives under the tab it

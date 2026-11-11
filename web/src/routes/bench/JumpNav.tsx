@@ -1,4 +1,3 @@
-// fw port of JumpNav.svelte.
 /**
  * A long result page's sections as one sticky strip under the top bar (Settings' jump strip, at every width here: the
  * page is one column of wide charts, so there is no rail to hold them): a tap or Enter scrolls the section's heading

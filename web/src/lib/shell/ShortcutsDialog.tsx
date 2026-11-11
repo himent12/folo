@@ -1,10 +1,9 @@
-// fw port of ShortcutsDialog.svelte.
 import { bindable, computed, css, For } from 'fw';
 import { isApple } from '$lib/keys';
 import Dialog from '$lib/ui/Dialog';
 import Kbd from '$lib/ui/Kbd';
 import { keyPrefs } from '$lib/ui/keyPrefs';
-import { shortcutList } from './shortcuts.fw';
+import { shortcutList } from './shortcuts';
 
 export default function ShortcutsDialog(props: { open?: boolean }) {
   const open = bindable(props, 'open', false);

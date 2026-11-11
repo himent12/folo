@@ -1,4 +1,3 @@
-// fw port of Viewfinder.svelte.
 /**
  * A drop target's frame (the Playground's empty state, an empty labeling job): four corner marks that close in while
  * a file is dragged over it, and its message centred under the live dot, then its actions. It fills the box it is

@@ -1,4 +1,3 @@
-// fw port of Lineage.svelte.
 /**
  * The checkpoint a run started from, named one way on every screen (header, Config, Model's Details, Compare): the
  * model's name (an identifier, so mono through ui/Ident) linked to it, with its server id in the tooltip; a file by

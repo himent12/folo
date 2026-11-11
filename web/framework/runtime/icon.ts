@@ -1,5 +1,5 @@
-// Lucide icons as components. `import X from '$icons/x'` (the compiler's Vite plugin builds the module from
-// @lucide/svelte's own icon data, so the version and the shapes are the ones the Svelte app draws) renders the same
+// Lucide icons as components. `import X from '$icons/x'` (the compiler's Vite plugin builds the module from the
+// icon data vendored in framework/icons/lucide.json, lucide 1.70.0's) renders the same
 // `<svg>` as @lucide/svelte's Icon: same attributes, same order, same classes.
 
 import { renderEffect } from './core';

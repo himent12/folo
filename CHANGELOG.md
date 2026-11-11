@@ -5,6 +5,23 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 
 ## Unreleased
 
+### Studio on fw
+- FOLO Studio no longer runs on Svelte: it runs on **fw**, our own UI framework (`web/framework/`): JSX compiled at
+  build time into cloned DOM templates with one fine-grained binding per dynamic part, on a push-pull signal graph,
+  with Svelte 5's semantics where Studio relied on them (scoped CSS with Svelte's exact selector rewriting, event
+  delegation, `bind:`, transitions, effect and creation order). Every screen and state looks exactly as before: all
+  1193 screenshot states of the Svelte app were matched pixel for pixel, and the DOM too (ids included) except where
+  the Svelte app had a bug (the command palette kept a page's commands after leaving it) or was not deterministic.
+- Faster and lighter, measured on the production build against the Svelte app (`scripts/perf.mjs`, in-browser mock):
+  first paint 36–52% sooner on every main screen, 18–67% less script on a cold load, 21–30% less JS heap, 33–43% fewer
+  DOM nodes, startup JS 58 KB instead of 430 KB gzipped (each screen is a chunk of its own, the first one requested
+  before anything else runs), and on a live run 55% less script per second (83% less on Overview).
+- Each screen's chunk loads when it is first needed (or ahead: a link hovered, the palette opened, idle time).
+- Tooling: `npm run check` is `tsc` (strict) instead of svelte-check, plus the token, contrast, icon and spacing
+  checks; `scripts/parity.mjs` compares a shoot of the app with a stored one, and `scripts/perf.mjs --ref <git ref>`
+  measures the app against another version's build. The lucide icons Studio draws are vendored
+  (`web/framework/icons/lucide.json`); Svelte, svelte-check and @lucide/svelte are no longer dependencies.
+
 ### Pretrained weights
 - The weights releases `weights-v1` (`folo-n-coco`) and `weights-v2` (`folo-n-coco-v2`) are published.
 - **folo-s COCO weights**: `folo-s-coco` and `folo-s-coco-f16` (release `weights-v3`), folo-s trained from scratch

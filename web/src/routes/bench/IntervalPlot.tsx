@@ -1,4 +1,3 @@
-// fw port of IntervalPlot.svelte.
 /**
  * A value and its 95% interval as a dot and whiskers on a scale the whole leaderboard shares (./leaderboard
  * `intervalDomain`), so two rows whose intervals overlap are seen to overlap. `band` draws another interval behind

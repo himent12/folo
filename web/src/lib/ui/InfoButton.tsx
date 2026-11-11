@@ -1,4 +1,3 @@
-// fw port of InfoButton.svelte.
 /**
  * The ⓘ: what a chart's terms, a measure or a set of numbers mean, one tap away. A real button: a tap, a click,
  * Enter or Space opens it (a tooltip alone shows on hover and focus only, so touch could never read it), with

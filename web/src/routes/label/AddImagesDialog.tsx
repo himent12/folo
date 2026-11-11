@@ -1,4 +1,3 @@
-// fw port of AddImagesDialog.svelte.
 /**
  * "Add images": upload files from this device, or add a folder on the server's machine (its images are read in
  * place). An upload closes the dialog at once and shows its progress over the images; a folder is answered here.
@@ -6,7 +5,7 @@
 import FolderOpen from '$icons/folder-open';
 import Upload from '$icons/upload';
 import { bindable, createUniqueId, css, effect, MediaQuery, signal } from 'fw';
-import { TOUCH_ONLY } from '$lib/shell/shortcuts.fw';
+import { TOUCH_ONLY } from '$lib/shell/shortcuts';
 import { media } from '$lib/design/tokens';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';

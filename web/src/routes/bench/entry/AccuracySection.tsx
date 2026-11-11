@@ -1,4 +1,3 @@
-// fw port of AccuracySection.svelte.
 /**
  * Accuracy on the unchanged images (docs/BENCH.md, Accuracy): mAP@0.5:0.95 with its 95% interval drawn on the whole
  * 0–1 scale (honest about where it sits) and read in a line; mAP@0.5 and @0.75; precision, recall and F1 at the
@@ -11,7 +10,7 @@ import type { Bench, BenchEntry, BenchResult } from '$lib/api/types';
 import { unitTop } from '$lib/charts/domain';
 import { atBestF1, metric, num } from '$lib/format';
 import Panel from '$lib/ui/Panel';
-import { intervalReading, intervalText } from '../words.fw';
+import { intervalReading, intervalText } from '../words';
 
 export interface AccuracySectionProps {
   result: BenchResult;

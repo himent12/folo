@@ -1,4 +1,3 @@
-// fw port of MetricStrip.svelte.
 /**
  * The top of the run's metrics: the epoch as a full-width row (count, progress bar with the hatched no-mosaic end, and
  * its caption) over the KPI tabs, each with its current value; the selected tab names the chart under them.

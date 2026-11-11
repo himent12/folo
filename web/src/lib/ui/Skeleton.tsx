@@ -1,4 +1,3 @@
-// fw port of Skeleton.svelte.
 import { css, defaults } from 'fw';
 
 export interface SkeletonProps {

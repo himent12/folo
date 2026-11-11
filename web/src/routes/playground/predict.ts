@@ -1,5 +1,5 @@
 import type { Prediction } from '$lib/api/types';
-import type { Backend } from '$lib/inference/browser.svelte';
+import type { Backend } from '$lib/inference/browser';
 
 // The server is asked once with loose settings and no suppression (IoU 1 keeps every candidate); the controls below
 // re-filter and run NMS in the browser. Suppressing on the server first would lose boxes a looser IoU should keep.

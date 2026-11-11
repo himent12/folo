@@ -1,4 +1,4 @@
-// fw port of index.svelte.ts: the same hub, on fw signals. Two differences, neither visible:
+// The hub (the API in use, live or the mock). Two things about how it loads, neither visible:
 // - The in-browser mock is loaded only when it is used (`?mock=1`, or no server answered): it is a chunk of its own,
 //   never fetched or parsed when a server answers. With `?mock=1` its load starts with this module. Until the first
 //   connect settles, `api` is the server's (a placeholder that, like the Svelte hub's initial mock, says `mock`).

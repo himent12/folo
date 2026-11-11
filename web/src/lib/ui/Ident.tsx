@@ -1,4 +1,3 @@
-// fw port of Ident.svelte.
 /**
  * A model, checkpoint or run identifier: an architecture (`folo-s`), the checkpoint a run started from
  * (`folo-s-coco80`, `best.folo`) or a server id (`r_…`). Always mono, wherever it appears (DESIGN_DIRECTION §2.3);

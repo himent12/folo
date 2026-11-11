@@ -8,7 +8,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "tokens": "node scripts/tokens.mjs",
-    "check": "node scripts/tokens.mjs --check && node ../design/contrast.mjs && svelte-check --tsconfig ./tsconfig.json --fail-on-warnings && tsc -p tsconfig.node.json && node scripts/lint-spacing.mjs",
+    "check": "node scripts/tokens.mjs --check && node ../design/contrast.mjs && node framework/tools/icons.mjs && tsc -p tsconfig.json && tsc -p tsconfig.node.json && node scripts/lint-spacing.mjs",
     "test": "vitest run",
     "shoot": "node scripts/shoot.mjs",
     "smoke": "node scripts/smoke.mjs",
@@ -16,12 +16,9 @@
     "label-smoke": "node scripts/label-smoke.mjs",
     "qa": "node scripts/shoot.mjs --qa",
     "parity": "node scripts/parity.mjs --run",
-    "perf": "node scripts/perf.mjs",
-    "shoot:next": "node scripts/shoot.mjs --app next"
+    "perf": "node scripts/perf.mjs"
   },
   "devDependencies": {
-    "@sveltejs/vite-plugin-svelte": "^7.3.1",
-    "@tsconfig/svelte": "^5.0.8",
     "@types/d3-scale": "^4.0.9",
     "@types/d3-shape": "^3.2.0",
     "@types/node": "^24.19.2",
@@ -34,14 +31,11 @@
     "postcss": "^8.5.32",
     "postcss-selector-parser": "^7.2.0",
     "source-map-js": "^1.2.2",
-    "svelte": "^5.57.3",
-    "svelte-check": "^4.7.8",
     "typescript": "~6.0.3",
     "vite": "^8.3.6",
     "vitest": "^5.1.0"
   },
   "dependencies": {
-    "@lucide/svelte": "^1.70.0",
     "d3-scale": "^4.0.3",
     "d3-shape": "^3.2.1"
   }

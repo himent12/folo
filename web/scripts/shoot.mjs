@@ -10,8 +10,8 @@
 // truncated box, or clipped past its box without one: DESIGN_DIRECTION §2.3, never cut a fact), and every blank section: a selected tab or section picker whose content
 // renders nothing, a page with almost nothing under its header, every control another element paints over, and every
 // select too narrow for its current value. The list prints at the end and goes to qa.txt.
-// --app legacy|next picks the entry page: `/` (the Svelte app, default) or `/next.html` (its port); same scenes, URLs
-// (`?mock=1&<search>#<path>`), viewports and clock, so a scene's two shots are comparable. --exact is what
+// Every state is the app at `/?mock=1&<search>#<path>`, at its viewport and clock, so two shoots (of two versions)
+// compare state by state (scripts/parity.mjs). --exact is what
 // `scripts/parity.mjs` shoots with: the clock paused at FIXED_NOW as for --qa (time moves only by the scenes' runFor),
 // fonts loaded, animations frozen at the shot, scenes in parallel, a normalized DOM (`<shot>.dom.txt`) next to each
 // shot and `shoot.json` (shots, failures). --out <dir> writes there instead of shots/<round>; --base <url> uses a
@@ -34,7 +34,7 @@ import { buildApps } from './entries.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
 /** Flags that take a value: their values are not the round's name. */
-const VALUED = ['--only', '--app', '--out', '--base', '--jobs'];
+const VALUED = ['--only', '--out', '--base', '--jobs'];
 const opt = (/** @type {string} */ flag) => {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : undefined;
@@ -45,11 +45,12 @@ const onlyParts = only ? only.split(',').map((s) => s.trim()).filter(Boolean) : 
 const picked = (/** @type {string} */ name) => !onlyParts.length || onlyParts.some((p) => name.includes(p));
 const qa = args.includes('--qa');
 const exact = args.includes('--exact');
-const app = opt('--app') ?? 'legacy';
-if (app !== 'legacy' && app !== 'next') throw new Error(`--app ${app}: expected legacy or next`);
-/** The entry page of each app; the query and the hash route are the same for both. */
-const ENTRY = { legacy: '/', next: '/next.html' };
-/** CSS scope classes the reports leave out: Svelte's, and the new framework's (FOLO_SCOPE_PREFIX overrides it). */
+/** The app's page. */
+const ENTRY = '/';
+/**
+ * CSS scope classes the DOM dumps leave out: fw's (FOLO_SCOPE_PREFIX overrides it), and the Svelte app's, so the stored
+ * shoots of the Svelte app (D:/folo-build/ui-fast-runtime/baseline) stay comparable.
+ */
 const SCOPE_PREFIXES = ['svelte-', process.env.FOLO_SCOPE_PREFIX ?? 'fw-'];
 const round =
   args.find((a, i) => !a.startsWith('--') && !VALUED.includes(args[i - 1])) ?? new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
@@ -78,14 +79,11 @@ const listen = { host: '127.0.0.1', port: 5199, strictPort: false };
 /** @type {{ resolvedUrls: import('vite').ResolvedServerUrls | null, close(): Promise<void> }} */
 let server;
 const given = opt('--base');
-/** Why next.html did not build (--prod), or null. @type {string | null} */
-let nextError = null;
 if (given) {
   server = { resolvedUrls: { local: [given], network: [] }, close: async () => {} };
 } else if (qa || args.includes('--prod')) {
   const outDir = resolve(root, qa ? 'node_modules/.qa-dist' : 'node_modules/.shoot-dist');
-  // --qa checks the Svelte app alone: index.html is its one entry, whatever vite.config.ts lists.
-  nextError = (await buildApps(root, outDir, { next: !qa })).nextError;
+  await buildApps(root, outDir);
   server = await preview({ root, logLevel: 'error', build: { outDir }, preview: listen });
 } else {
   const dev = await createServer({ root, logLevel: 'error', server: listen });
@@ -93,25 +91,6 @@ if (given) {
   server = dev;
 }
 const base = (server.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5199/').replace(/\/$/, '');
-
-/**
- * Whether the server serves `--app`'s entry page: for next, `/next.html` must answer 200 with a page that is not
- * index.html (a dev or preview server's SPA fallback answers any path with index.html, which would shoot the legacy
- * app under the next app's name).
- * @returns {Promise<string | null>} why not, or null
- */
-async function entryMissing() {
-  if (app === 'legacy') return null;
-  try {
-    const [n, l] = await Promise.all([fetch(`${base}${ENTRY.next}`), fetch(`${base}/`)]);
-    if (!n.ok) return `${ENTRY.next} answers ${n.status}`;
-    const [nt, lt] = await Promise.all([n.text(), l.text()]);
-    if (nt === lt) return `${ENTRY.next} is not served (the server answers it with index.html)`;
-    return null;
-  } catch (e) {
-    return `${ENTRY.next}: ${e instanceof Error ? e.message : e}`;
-  }
-}
 
 if (!qa) {
   if (!only) rmSync(outDir, { recursive: true, force: true });
@@ -208,10 +187,10 @@ async function makeQuiet(page) {
 }
 
 /**
- * The page's DOM, normalized for comparing the two apps (`<shot>.dom.txt`): one line per element (tag, attributes
+ * The page's DOM, normalized for comparing two shoots (`<shot>.dom.txt`): one line per element (tag, attributes
  * sorted, classes sorted without the scope classes, style declarations sorted, the live value / checked state of form
  * fields) and per text run (adjacent text nodes joined, whitespace collapsed, blank runs dropped), indented by depth.
- * Comments (Svelte's anchors) are dropped; `blob:` URLs, which are random, read `blob:*`.
+ * Comments (markers) are dropped; `blob:` URLs, which are random, read `blob:*`.
  * @param {import('playwright-core').Page} page
  */
 async function domDump(page) {
@@ -675,8 +654,8 @@ const fail = (/** @type {string} */ name, /** @type {string} */ why) => {
   failures.push(`${name}: ${why}`);
   failed[name] ??= why;
 };
-/** Why `--app`'s entry page cannot be shot (next.html not there yet), or null. */
-const missing = app === 'next' && nextError ? nextError : await entryMissing();
+/** Why no state can be shot, or null (kept in shoot.json for scripts/parity.mjs). @type {string | null} */
+const missing = null;
 if (missing) console.warn(`${yellow('! missing')} ${missing}: every state fails`);
 /** Overflow (`px` > 0) and blank sections (`px` 0), one list. @type {{ name: string, selector: string, px: number, text: string }[]} */
 const overflows = [];
@@ -722,8 +701,8 @@ async function shoot(scene, theme, vp, touch = false) {
       await page.addInitScript(() => (Math.random = () => 0.5));
       await makeQuiet(page);
     }
-    const res = await page.goto(`${base}${ENTRY[app]}?mock=1${scene.search ? `&${scene.search}` : ''}#${scene.path}`, { waitUntil: 'networkidle' });
-    if (res && !res.ok()) throw new Error(`${ENTRY[app]} answered ${res.status()}`);
+    const res = await page.goto(`${base}${ENTRY}?mock=1${scene.search ? `&${scene.search}` : ''}#${scene.path}`, { waitUntil: 'networkidle' });
+    if (res && !res.ok()) throw new Error(`${ENTRY} answered ${res.status()}`);
     await page.evaluate(() => document.fonts.ready);
     // Let the mock's live run advance a little, deterministically.
     await page.clock.runFor(scene.advance ?? 2000);
@@ -864,7 +843,7 @@ const secs = Math.round((Date.now() - started) / 1000);
 const part = process.env.FOLO_QA_SHARD ? ` (shard ${process.env.FOLO_QA_SHARD})` : '';
 console.log(qa ? `QA: ${count} scene states checked in ${secs} s${part}` : `${count} shots -> ${outDir} (${secs} s)`);
 // What parity.mjs reads: which states were shot and why the others were not.
-if (exact) writeFileSync(resolve(outDir, 'shoot.json'), JSON.stringify({ app, entry: ENTRY[app], base, only: only ?? null, missing, secs, shots: shots.sort(), failed }, null, 1));
+if (exact) writeFileSync(resolve(outDir, 'shoot.json'), JSON.stringify({ entry: ENTRY, base, only: only ?? null, missing, secs, shots: shots.sort(), failed }, null, 1));
 // The QA list (overflow, blank sections and covered controls): printed last, boxed in yellow. The shoot saves it next to the shots and
 // never fails on it; --qa fails on it.
 const report = resolve(outDir, only ? `qa-${only.replace(/[^\w-]+/g, '_')}.txt` : 'qa.txt');

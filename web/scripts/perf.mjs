@@ -1,7 +1,11 @@
-// Performance of the Studio, legacy (/) against its port (next.html), on the production build.
-//   node scripts/perf.mjs [--app legacy|next|both] [--runs 5] [--out <dir>] [--api <url>] [--only bundle,cold,nav,live,large]
+// Performance of the Studio on the production build, alone or against a baseline (another version's build).
+//   node scripts/perf.mjs [--runs 5] [--out <dir>] [--api <url>] [--only bundle,cold,nav,live,large]
 //       [--long-runs N] [--cycles 20] [--live-secs 15]
-// Builds both entries into <out>/.dist (a run's own build), serves them with `vite preview`, and
+//       [--baseline-dist <dir> | --ref <git ref>] [--app app|base|both]
+// The app is built into <out>/.dist (a run's own build). The baseline, `base`, is a built web/dist of another version
+// (--baseline-dist, e.g. D:/folo-build/ui-fast-runtime/legacy-dist: the Svelte app the fw app replaced, whose
+// index.html is that app), or --ref: that git ref's web/ built in a temporary worktree (npm ci, vite build) into
+// <out>/.base-dist. With a baseline, --app defaults to both. Each build is served with `vite preview`, and
 // drives Chrome (playwright-core, channel "chrome"; Playwright's Chromium without it) with CDP for the numbers:
 // - bundle: per entry, the JS and CSS its HTML loads at startup (raw, gzip, brotli) and what a cold Overview requests
 //   before its content shows; all emitted JS and CSS; whether the in-browser mock is in the startup JS.
@@ -19,13 +23,14 @@
 //   its first tiles, then scrolled to the end with the mouse wheel: time, wheel steps, long tasks, the most tiles
 //   mounted at once.
 // --long-runs (default: --runs, at most 2) is how many times nav, live and large run per app.
-// --app both alternates the apps (legacy first, then next first) so a shared machine's load falls on both; the
+// --app both alternates the two (base first, then app first) so a shared machine's load falls on both; the
 // report gives medians, min–max and the change. Data: the in-browser mock (?mock=1); --api <url> proxies /api to a
 // running server instead (e.g. `folo serve --mock --port 7979`), without ?mock=1.
 // Output: perf.json (every sample) and perf.md, in --out (default D:/folo-build/ui-fast-runtime/perf/<timestamp>).
 import { preview } from 'vite';
 import { chromium } from 'playwright-core';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { cpus, totalmem } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,8 +43,11 @@ const opt = (/** @type {string} */ flag) => {
   const i = args.indexOf(flag);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const appArg = opt('--app') ?? 'legacy';
-if (!['legacy', 'next', 'both'].includes(appArg)) throw new Error(`--app ${appArg}: expected legacy, next or both`);
+const baselineDist = opt('--baseline-dist');
+const ref = opt('--ref');
+const appArg = opt('--app') ?? (baselineDist || ref ? 'both' : 'app');
+if (!['app', 'base', 'both'].includes(appArg)) throw new Error(`--app ${appArg}: expected app, base or both`);
+if (appArg !== 'app' && !baselineDist && !ref) throw new Error(`--app ${appArg} needs a baseline: --baseline-dist <dir> or --ref <git ref>`);
 const runs = Math.max(1, Number(opt('--runs') ?? 5));
 const longRuns = Math.max(1, Number(opt('--long-runs') ?? Math.min(runs, 2)));
 const cycles = Math.max(1, Number(opt('--cycles') ?? 20));
@@ -50,8 +58,7 @@ const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
 const outDir = resolve(opt('--out') ?? (existsSync('D:/') ? `D:/folo-build/ui-fast-runtime/perf/${stamp}` : join(root, 'shots/perf', stamp)));
 mkdirSync(outDir, { recursive: true });
 const started = Date.now();
-/** @typedef {'legacy' | 'next'} App */
-const ENTRY = { legacy: '/', next: '/next.html' };
+/** `base`: the baseline build; `app`: this checkout's. @typedef {'base' | 'app'} App */
 const VIEW = { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 };
 
 // ---------------------------------------------------------------- the screens, and what says each one has loaded
@@ -83,18 +90,52 @@ async function screens() {
 
 // ---------------------------------------------------------------- server and browser
 // A build dir of this run's own (in --out), so concurrent runs never wipe each other's build.
-const dist = resolve(outDir, '.dist');
-const { input, nextError } = await buildApps(root, dist);
-const apps = /** @type {App[]} */ (appArg === 'both' ? ['legacy', 'next'] : [appArg]);
-if (apps.includes('next') && !input.next) throw new Error(nextError ?? 'next.html is missing: nothing to measure for --app next');
-const server = await preview({
-  root,
-  logLevel: 'error',
-  build: { outDir: dist },
-  preview: { host: '127.0.0.1', port: 5197, strictPort: false, ...(api ? { proxy: { '/api': { target: api, changeOrigin: true } } } : {}) },
-});
-const base = (server.resolvedUrls?.local[0] ?? 'http://127.0.0.1:5197/').replace(/\/$/, '');
-const url = (/** @type {App} */ app, /** @type {string} */ path) => `${base}${ENTRY[app]}${api ? '' : '?mock=1'}#${path}`;
+const apps = /** @type {App[]} */ (appArg === 'both' ? ['base', 'app'] : [appArg]);
+
+/** Builds `ref`'s web/ in a temporary worktree into <out>/.base-dist; returns that folder. */
+function buildRef(/** @type {string} */ gitRef) {
+  const tree = resolve(outDir, '.base-tree');
+  const into = resolve(outDir, '.base-dist');
+  const git = (/** @type {string[]} */ a) => execFileSync('git', a, { cwd: root, stdio: 'inherit' });
+  rmSync(tree, { recursive: true, force: true });
+  git(['worktree', 'add', '--detach', tree, gitRef]);
+  try {
+    const web = join(tree, 'web');
+    // Vite's build of the app set NODE_ENV=production in this process: the ref's install needs its dev dependencies.
+    const env = { ...process.env };
+    delete env.NODE_ENV;
+    const npm = (/** @type {string[]} */ a) => execFileSync('npm', a, { cwd: web, stdio: 'inherit', shell: process.platform === 'win32', env });
+    npm(['ci', '--include=dev', '--no-audit', '--no-fund']);
+    npm(['exec', '--', 'vite', 'build', '--outDir', into, '--emptyOutDir']);
+  } finally {
+    git(['worktree', 'remove', '--force', tree]);
+  }
+  return into;
+}
+
+/** Each app's build folder. @type {Record<App, string>} */
+const dists = { app: resolve(outDir, '.dist'), base: baselineDist ? resolve(baselineDist) : '' };
+if (apps.includes('app')) await buildApps(root, dists.app);
+if (apps.includes('base') && ref) dists.base = buildRef(ref);
+if (apps.includes('base') && !existsSync(join(dists.base, 'index.html'))) throw new Error(`no index.html in the baseline build ${dists.base}`);
+/** What the baseline is, for the report. */
+const baseLabel = ref ? `\`${ref}\` (built from its web/)` : baselineDist ? `\`${baselineDist}\`` : '';
+
+/** @type {{ close(): Promise<void> }[]} */
+const servers = [];
+/** Each app's server. @type {Record<App, string>} */
+const bases = /** @type {any} */ ({});
+for (const [i, a] of apps.entries()) {
+  const server = await preview({
+    root,
+    logLevel: 'error',
+    build: { outDir: dists[a] },
+    preview: { host: '127.0.0.1', port: 5197 + i * 10, strictPort: false, ...(api ? { proxy: { '/api': { target: api, changeOrigin: true } } } : {}) },
+  });
+  servers.push(server);
+  bases[a] = (server.resolvedUrls?.local[0] ?? `http://127.0.0.1:${5197 + i * 10}/`).replace(/\/$/, '');
+}
+const url = (/** @type {App} */ app, /** @type {string} */ path) => `${bases[app]}/${api ? '' : '?mock=1'}#${path}`;
 
 async function launch() {
   if (process.env.FOLO_SHOOT_BROWSER !== 'chromium') {
@@ -387,8 +428,8 @@ async function large(/** @type {App} */ app) {
 // ---------------------------------------------------------------- bundle
 const gz = (/** @type {Buffer} */ b) => gzipSync(b, { level: 9 }).length;
 const br = (/** @type {Buffer} */ b) => brotliCompressSync(b, { params: { [zc.BROTLI_PARAM_QUALITY]: 11 } }).length;
-/** Sizes of the dist files at these paths (raw, gzip -9, brotli 11). */
-function sizes(/** @type {string[]} */ paths) {
+/** Sizes of the files of build `dist` at these paths (raw, gzip -9, brotli 11). */
+function sizes(/** @type {string} */ dist, /** @type {string[]} */ paths) {
   let raw = 0;
   let g = 0;
   let b = 0;
@@ -404,7 +445,7 @@ function sizes(/** @type {string[]} */ paths) {
 }
 /** What an entry's HTML loads before any code runs: its module script, modulepreloads and stylesheets. */
 function entryFiles(/** @type {App} */ app) {
-  const html = readFileSync(join(dist, app === 'legacy' ? 'index.html' : 'next.html'), 'utf8');
+  const html = readFileSync(join(dists[app], 'index.html'), 'utf8');
   const js = [...html.matchAll(/<script[^>]+type="module"[^>]+src="([^"]+)"/g), ...html.matchAll(/<link[^>]+rel="modulepreload"[^>]+href="([^"]+)"/g)].map((m) => m[1]);
   const css = [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/g)].map((m) => m[1]);
   return { js, css };
@@ -414,19 +455,22 @@ function bundle(/** @type {App} */ app, /** @type {string[]} */ startupUrls) {
   const local = startupUrls.map((u) => new URL(u).pathname);
   const sjs = local.filter((p) => p.endsWith('.js'));
   const scss = local.filter((p) => p.endsWith('.css'));
+  const dist = dists[app];
   // The mock's seeded dataset id: in the startup JS when the mock ships with the app.
   const mockInStartup = sjs.some((p) => existsSync(join(dist, p)) && readFileSync(join(dist, p), 'utf8').includes('ds_fasteners_mini'));
-  return { entryJs: sizes(e.js), entryCss: sizes(e.css), startupJs: sizes(sjs), startupCss: sizes(scss), startupRequests: startupUrls.length, mockInStartup };
+  return { entryJs: sizes(dist, e.js), entryCss: sizes(dist, e.css), startupJs: sizes(dist, sjs), startupCss: sizes(dist, scss), startupRequests: startupUrls.length, mockInStartup };
 }
-function emitted() {
+/** Everything a build emitted (its assets). */
+function emitted(/** @type {App} */ app) {
+  const dist = dists[app];
   const files = readdirSync(join(dist, 'assets'));
   const pick = (/** @type {string} */ ext) => files.filter((f) => f.endsWith(ext)).map((f) => `/assets/${f}`);
-  return { js: sizes(pick('.js')), css: sizes(pick('.css')), wasm: pick('.wasm').reduce((s, f) => s + statSync(join(dist, f)).size, 0) };
+  return { js: sizes(dist, pick('.js')), css: sizes(dist, pick('.css')), wasm: pick('.wasm').reduce((s, f) => s + statSync(join(dist, f)).size, 0) };
 }
 
 // ---------------------------------------------------------------- run
 /** @type {Record<App, any>} */
-const raw = /** @type {any} */ ({ legacy: { cold: {}, nav: [], live: { run: [], overview: [] }, large: [] }, next: { cold: {}, nav: [], live: { run: [], overview: [] }, large: [] } });
+const raw = /** @type {any} */ ({ base: { cold: {}, nav: [], live: { run: [], overview: [] }, large: [] }, app: { cold: {}, nav: [], live: { run: [], overview: [] }, large: [] } });
 /** The order of the apps for round `i`: alternated, so neither always goes first. */
 const orderFor = (/** @type {number} */ i) => (apps.length === 2 && i % 2 === 1 ? [...apps].reverse() : apps);
 const log = (/** @type {string} */ s) => console.log(`[${Math.round((Date.now() - started) / 1000)}s] ${s}`);
@@ -472,7 +516,7 @@ try {
   }
 } finally {
   await browser.close();
-  await server.close();
+  for (const s of servers) await s.close();
 }
 
 // ---------------------------------------------------------------- report
@@ -500,9 +544,9 @@ const change = (/** @type {number[] | undefined} */ a, /** @type {number[] | und
 };
 /** @type {string[]} */
 const md = [];
-const head = ['| metric | legacy | next | change |', '|---|---:|---:|---:|'];
+const head = ['| metric | base | app | change |', '|---|---:|---:|---:|'];
 const row = (/** @type {string} */ name, /** @type {(app: App) => number[] | undefined} */ get, /** @type {number} */ d) =>
-  md.push(`| ${name} | ${apps.includes('legacy') ? cellOf(get('legacy'), d) : '–'} | ${apps.includes('next') ? cellOf(get('next'), d) : '–'} | ${change(get('legacy'), get('next'))} |`);
+  md.push(`| ${name} | ${apps.includes('base') ? cellOf(get('base'), d) : '–'} | ${apps.includes('app') ? cellOf(get('app'), d) : '–'} | ${change(get('base'), get('app'))} |`);
 
 md.push(
   `# Studio perf: ${apps.join(' vs ')}`,
@@ -510,14 +554,14 @@ md.push(
   `${new Date().toISOString()} · ${cpus()[0]?.model ?? '?'} ×${cpus().length}, ${Math.round(totalmem() / 2 ** 30)} GB · Chrome ${chrome} headless · ` +
     `production build (vite preview) · data: ${api ? `server ${api}` : 'in-browser mock (?mock=1)'} · ${runs} cold run(s) per screen, ` +
     `${longRuns} nav/live/large run(s), ${cycles} nav cycles, ${liveSecs} s live · ${Math.round((Date.now() - started) / 1000)} s in all` +
-    `${apps.length === 2 ? ' · apps alternated (legacy first, then next first)' : ''}. Cells: median (min–max). Times in ms.`,
+    `${apps.length === 2 ? ' · alternated (base first, then app first)' : ''}. Cells: median (min–max). Times in ms.`,
   '',
+  ...(apps.includes('base') ? [`base: ${baseLabel}; app: this checkout.`, ''] : []),
 );
-if (nextError) md.push(`next.html did not build: ${nextError}`, '');
 if (failures.length) md.push(`**${failures.length} sample(s) failed** (left out of the numbers):`, '', ...failures.map((f) => `- ${f}`), '');
 
 if (phases.has('bundle') || phases.has('cold')) {
-  const e = emitted();
+  const em = Object.fromEntries(apps.map((a) => [a, emitted(a)]));
   md.push('## Bundle', '', ...head);
   const b = (/** @type {App} */ app, /** @type {(x: any) => number} */ f) => (bundles[app] ? [f(bundles[app])] : undefined);
   const kb = (/** @type {number} */ n) => n / 1024;
@@ -533,8 +577,12 @@ if (phases.has('bundle') || phases.has('cold')) {
   md.push(
     '',
     `In-browser mock in the startup JS: ${apps.map((a) => `${a} ${bundles[a] ? (bundles[a].mockInStartup ? '**yes**' : 'no') : '?'}`).join(', ')}. ` +
-      `All emitted (both apps, shared chunks once): JS ${fmt(e.js.raw / 1024, 1)} KB raw / ${fmt(e.js.gzip / 1024, 1)} gzip / ${fmt(e.js.brotli / 1024, 1)} brotli in ${e.js.files} files; ` +
-      `CSS ${fmt(e.css.raw / 1024, 1)} KB raw / ${fmt(e.css.gzip / 1024, 1)} gzip in ${e.css.files} files.`,
+      `All emitted: ${apps
+        .map((a) => {
+          const e = em[a];
+          return `${a} JS ${fmt(e.js.raw / 1024, 1)} KB raw / ${fmt(e.js.gzip / 1024, 1)} gzip / ${fmt(e.js.brotli / 1024, 1)} brotli in ${e.js.files} files, CSS ${fmt(e.css.raw / 1024, 1)} KB raw / ${fmt(e.css.gzip / 1024, 1)} gzip in ${e.css.files} files`;
+        })
+        .join('; ')}.`,
     '',
   );
 }
@@ -602,7 +650,7 @@ if (phases.has('large')) {
   row('most tiles mounted at once', (a) => g(a, 'maxTiles'), 0);
   md.push('');
 }
-writeFileSync(join(outDir, 'perf.json'), JSON.stringify({ apps, runs, longRuns, cycles, liveSecs, api: api ?? null, screens: SCREENS, bundles, emitted: emitted(), raw }, null, 1));
+writeFileSync(join(outDir, 'perf.json'), JSON.stringify({ apps, runs, longRuns, cycles, liveSecs, api: api ?? null, screens: SCREENS, bundles, emitted: Object.fromEntries(apps.map((a) => [a, emitted(a)])), raw }, null, 1));
 writeFileSync(join(outDir, 'perf.md'), md.join('\n'));
 console.log(md.join('\n'));
 console.log(`\nperf: ${Math.round((Date.now() - started) / 1000)} s -> ${join(outDir, 'perf.md')}`);

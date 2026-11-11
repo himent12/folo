@@ -1,4 +1,3 @@
-// fw port of PlanTab.svelte.
 /**
  * A benchmark's conditions (its plan): the catalog's conditions by group, each on or off, at which severities and how
  * much it counts, with its reason when the plan has one; who designed the plan and why; and a preview of any
@@ -21,7 +20,7 @@ import Switch from '$lib/ui/Switch';
 import { tooltip } from '$lib/ui/tooltip';
 import Callout from '../run/Callout';
 import Preview from './Preview';
-import { FROZEN } from './words.fw';
+import { FROZEN } from './words';
 
 export interface PlanTabProps {
   bench: Bench;

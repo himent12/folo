@@ -1,4 +1,3 @@
-// fw port of JobDialog.svelte.
 /**
  * "New labeling job" (name, classes, instructions for the agent) and "Edit job" (name and classes). Once the job's
  * images have boxes, which refer to classes by their place in the list, the edit form renames and appends classes

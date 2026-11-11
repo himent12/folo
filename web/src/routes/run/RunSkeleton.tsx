@@ -1,4 +1,3 @@
-// fw port of RunSkeleton.svelte.
 /** A run while it loads: the real layout's shapes (header, metrics, the detail row), so nothing jumps when data arrives. */
 import { css, Index } from 'fw';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';

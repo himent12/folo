@@ -1,4 +1,4 @@
-// fw port of pageCommands.svelte.ts (the same registry, on an fw signal). One difference: a page's commands leave the
+// One difference: a page's commands leave the
 // list when the page goes. The Svelte registry keeps them (its cleanup looks for the page's own objects in a list of
 // $state proxies of them, and finds none), so a page left behind still offered its "Stop run" until another page
 // registered commands with the same ids.
@@ -11,7 +11,7 @@ import { effect, signal, untrack } from 'fw';
 import { isTyping } from '$lib/keys';
 import { toast } from '$lib/ui/toast';
 import { keyPrefs } from '$lib/ui/keyPrefs';
-import type { IconType } from '$lib/ui/types.fw';
+import type { IconType } from '$lib/ui/types';
 
 export interface PageCommand {
   id: string;

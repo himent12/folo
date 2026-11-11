@@ -1,4 +1,3 @@
-// fw port of EditBenchDialog.svelte.
 /**
  * "Edit name and description": what a benchmark is called and what it stands for (where the camera is, what makes the
  * job hard). Both can change whatever its entries; the description is what an agent reads when it designs the plan.

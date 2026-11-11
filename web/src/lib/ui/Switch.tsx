@@ -1,10 +1,9 @@
-// fw port of Switch.svelte.
 /**
  * A labelled on/off switch. Its name is the label alone; its own hint, and an enclosing Field's message, are its
  * accessible description (`ui/field`), so a hint is never folded into the name nor left unannounced.
  */
 import { bindable, computed, createUniqueId, css, defaults } from 'fw';
-import { describedBy, getField } from './field.fw';
+import { describedBy, getField } from './field';
 
 export interface SwitchProps {
   checked?: boolean;

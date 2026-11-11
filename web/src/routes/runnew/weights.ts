@@ -1,5 +1,5 @@
 /** The weights a run can start from, in the Start from field's words: which are published, and the field's hint. */
-import type { Resource } from '$lib/api/resource.svelte';
+import type { Resource } from '$lib/api/resource';
 import type { Dataset, Model, Run } from '$lib/api/types';
 import { publishedSummary } from '$lib/published';
 import { scoreContext, scoreMeta, type ScoreContext } from '$lib/scoreSummary';

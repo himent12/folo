@@ -1,4 +1,3 @@
-// fw port of BenchLoop.svelte.
 /**
  * One self-improvement loop (`#/benchmarks/{id}/loops/{loopId}`; docs/BENCH.md, Self-improvement loops): a page of its
  * own, since a loop has a chart, a verdict, each generation's provenance and actions, and a link to it is shared. It
@@ -48,7 +47,7 @@ import Callout from './run/Callout';
 import { generationDomain, generationPoints } from './bench/charts';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
-import { intervalText, labelsLine, LOOP_CAVEAT, loopQuestion, loopStatus, loopSteps, loopVerdictText, progressFacts, scoreText, VERDICT } from './bench/words.fw';
+import { intervalText, labelsLine, LOOP_CAVEAT, loopQuestion, loopStatus, loopSteps, loopVerdictText, progressFacts, scoreText, VERDICT } from './bench/words';
 
 const PLOT = 220;
 const SPLIT_NAME = { train: 'training', val: 'validation', test: 'test' } as const;

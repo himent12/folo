@@ -1,4 +1,3 @@
-// fw port of ScoreBreakdown.svelte.
 /**
  * What a score is made of, one row per axis in the score's order: its name, what it asks, a bar of its value on 0–1
  * in neutral ink, the value, and its share of this score (its weight over the measured axes' weights). An axis not

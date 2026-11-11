@@ -1,4 +1,3 @@
-// fw port of StatusBadge.svelte.
 /**
  * A run's status as its mark and word. Two forms, one rule (DESIGN_DIRECTION 6): the tinted pill is the title form,
  * beside the name of the one run a screen is about (the run page's header, Overview's live card), at most one per

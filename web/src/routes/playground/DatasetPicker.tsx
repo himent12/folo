@@ -1,4 +1,3 @@
-// fw port of DatasetPicker.svelte.
 /**
  * Pick an image from a registered dataset: dataset + split, then a page of thumbnails. A tile is never blank without a
  * reason: while it loads it is the viewfinder skeleton (detect/DatasetImage), and an image with no boxes (a background

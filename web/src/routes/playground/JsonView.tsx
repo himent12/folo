@@ -1,4 +1,3 @@
-// fw port of JsonView.svelte.
 /**
  * Pretty, syntax-tinted JSON with a copy button. From 1024 px every line stays whole (one detection per line, as
  * ./json lays them out): the block scrolls sideways (`data-scrolls`) and fades the edge, right or bottom, that has

@@ -1,10 +1,10 @@
 // The fw Vite plugin: compiles JSX in `.tsx` files (templates + fine-grained bindings), scopes each file's
 // `css\`...\`` as Svelte 5 would and serves it as a CSS module the file imports, and serves lucide icons as
-// `$icons/<name>` modules.
+// `$icons/<name>` modules (lucide's data, vendored in ../icons/lucide.json).
 
-import { createRequire } from 'node:module';
 import { existsSync, readFileSync as read, realpathSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, isAbsolute, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Plugin } from 'vite';
 import { scopeCss } from './css.ts';
 import { transformJsx } from './jsx.ts';
@@ -54,8 +54,8 @@ export function fw(options: FwOptions = {}): Plugin {
   let root = process.cwd();
   const css = new Map<string, string>();
   const include = options.include ?? ((id: string) => id.endsWith('.tsx') && !id.includes('/node_modules/'));
-  const require = createRequire(import.meta.url);
-  let lucideDir: string | undefined;
+  /** The vendored lucide icons (../icons/lucide.json; `node framework/tools/icons.mjs --add` vendors a new one). */
+  let icons: Record<string, unknown> | undefined;
 
   /** The .tsx file a `<file>.fw.css` id belongs to. The import is absolute; a server may hand it back root-relative. */
   const cssFile = (id: string) => {
@@ -101,14 +101,10 @@ export function fw(options: FwOptions = {}): Plugin {
     load(id) {
       if (id.startsWith(ICON)) {
         const name = id.slice(ICON.length);
-        lucideDir ??= join(dirname(require.resolve('@lucide/svelte')), 'icons');
-        // `icons/<name>.js` re-exports the icon's .svelte file (an alias points at another icon's).
-        const entry = read(join(lucideDir, `${name}.js`), 'utf8').match(/from "\.\/([\w-]+)\.svelte"/);
-        if (!entry) throw new Error(`fw: no lucide icon "${name}"`);
-        const src = read(join(lucideDir, `${entry[1]}.svelte`), 'utf8');
-        const m = src.match(/export const __iconData = (\{.*?\});\r?\n/);
-        if (!m) throw new Error(`fw: no icon data in @lucide/svelte/icons/${name}`);
-        return `import { createIcon } from 'fw/icon';\nexport default /*#__PURE__*/ createIcon(${m[1]});\n`;
+        icons ??= JSON.parse(read(fileURLToPath(new URL('../icons/lucide.json', import.meta.url)), 'utf8')) as Record<string, unknown>;
+        const data = icons[name];
+        if (data === undefined) throw new Error(`fw: the lucide icon "${name}" is not vendored: run \`node framework/tools/icons.mjs --add\``);
+        return `import { createIcon } from 'fw/icon';\nexport default /*#__PURE__*/ createIcon(${JSON.stringify(data)});\n`;
       }
       if (id.endsWith(CSS_QUERY)) {
         const file = cssFile(id);

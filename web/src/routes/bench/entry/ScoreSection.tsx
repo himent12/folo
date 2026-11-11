@@ -1,4 +1,3 @@
-// fw port of ScoreSection.svelte.
 /**
  * An entry's score made visible (docs/BENCH.md, The score): the total as the page's one hero number, the partial mark
  * with its reason, then the five axes in the score's order, one row each: what it asks, its value on 0–1 as a bar,
@@ -13,7 +12,7 @@ import { num, pct } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import Skeleton from '$lib/ui/Skeleton';
 import { tooltip } from '$lib/ui/tooltip';
-import { axisPoints, axisRaw, axisWhyNot, partialWhy, roundToTotal, scoreText, sharesNote } from '../words.fw';
+import { axisPoints, axisRaw, axisWhyNot, partialWhy, roundToTotal, scoreText, sharesNote } from '../words';
 
 export interface ScoreSectionProps {
   entry: BenchEntry;

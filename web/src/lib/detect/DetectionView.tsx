@@ -1,4 +1,3 @@
-// fw port of DetectionView.svelte.
 /**
  * An image with detection boxes drawn over it in screen pixels (crisp at any size). Two styles, one per job:
  * - Full size (the inspector, the Playground): a 2 px class-colour stroke wrapped in a dark halo, 1.5 px outside and

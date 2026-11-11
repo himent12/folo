@@ -1,4 +1,3 @@
-// fw port of LastRun.svelte.
 /**
  * How the job's last run ended, as facts: its outcome and counts, the agent and model, and what the agent reported it
  * used; the job's totals too once it has had more than one run.
@@ -7,7 +6,7 @@ import { computed, css, For } from 'fw';
 import type { LabelAgent, LabelJob, LabelRun } from '$lib/api/types';
 import { ago, num } from '$lib/format';
 import Meta from '$lib/ui/Meta';
-import { OUTCOME, runAgent, usageFacts } from './words.fw';
+import { OUTCOME, runAgent, usageFacts } from './words';
 
 export interface LastRunProps {
   job: LabelJob;

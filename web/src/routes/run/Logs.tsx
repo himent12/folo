@@ -1,4 +1,3 @@
-// fw port of Logs.svelte.
 /**
  * Streaming training log: level filter, follow mode (auto-scroll unless you scroll up). The view always starts on a
  * whole entry: following, it pins the last entry to the bottom and, when that would cut the top entry (the wrapped

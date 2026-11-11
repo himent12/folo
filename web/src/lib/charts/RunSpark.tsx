@@ -1,4 +1,3 @@
-// fw port of RunSpark.svelte.
 /** mAP50-95 per epoch for one run, as a sparkline. */
 import { computed, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';

@@ -1,4 +1,3 @@
-// fw port of ThemePreview.svelte.
 /**
  * A tiny Studio window drawn in one theme's colours, whatever the current theme is. The app's CSS variables only
  * describe the active theme, so the colours come straight from the design tokens (design/tokens.json). Drawn in the

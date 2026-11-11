@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// fw port of RunNew.svelte.test.ts.
 import { flush as flushSync, tick } from 'fw';
 import { render } from '../../framework/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

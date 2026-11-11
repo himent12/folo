@@ -1,4 +1,3 @@
-// fw port of ImagesSection.svelte.
 /**
  * What it gets wrong (`GET …/entries/{id}/images`): the entry's images, the worst first by default (most missed + wrong)
  * or in the benchmark's order, each tile the image with truth and detections overlaid (./MatchView: right solid,
@@ -21,7 +20,7 @@ import Segmented from '$lib/ui/Segmented';
 import Skeleton from '$lib/ui/Skeleton';
 import { dominantAspect } from '$lib/ui/TileGrid';
 import MatchView, { type Outcome } from './MatchView';
-import { imagesText } from '../words.fw';
+import { imagesText } from '../words';
 
 /** Images per page of the gallery: a page more each time, so 5000 images never load at once. */
 export const GALLERY_PAGE = 24;

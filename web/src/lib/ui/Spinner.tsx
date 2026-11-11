@@ -1,4 +1,3 @@
-// fw port of Spinner.svelte.
 import { css, defaults } from 'fw';
 
 export default function Spinner(props: { size?: number; label?: string }) {

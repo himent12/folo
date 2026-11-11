@@ -1,4 +1,3 @@
-// fw port of Cloud.svelte.
 /**
  * Settings › Cloud (docs/CLOUD.md): the cloud connections, each with its account, balance and the result of its last
  * check, and the instances FOLO launched with them, so nothing rented can hide. An instance whose termination the

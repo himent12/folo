@@ -1,4 +1,3 @@
-// fw port of ImageGrid.svelte.
 /**
  * A dataset's thumbnails in a virtualised grid (ui/TileGrid): image pages load as their rows come into view. The
  * cells take the dataset's dominant image shape.

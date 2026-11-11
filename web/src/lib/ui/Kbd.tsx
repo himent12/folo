@@ -1,4 +1,3 @@
-// fw port of Kbd.svelte.
 /** Renders a shortcut like "Mod+K" as key caps; Mod is ⌘ on Apple platforms and Ctrl elsewhere. */
 import { computed, css, defaults, Index } from 'fw';
 import { formatKeys } from '$lib/keys';

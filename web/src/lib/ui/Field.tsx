@@ -1,4 +1,3 @@
-// fw port of Field.svelte.
 /**
  * Label + control + hint/error, laid out consistently. The control is the child snippet; pass `for` = its id, and
  * mark the control invalid (`invalid` on Input / Select / Segmented) while `error` is set. The error carries a danger
@@ -12,7 +11,7 @@
 import CircleAlert from '$icons/circle-alert';
 import { computed, createUniqueId, css } from 'fw';
 import CodeText from './CodeText';
-import { setField } from './field.fw';
+import { setField } from './field';
 
 export interface FieldProps {
   label: string;

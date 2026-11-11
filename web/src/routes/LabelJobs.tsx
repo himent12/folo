@@ -1,4 +1,3 @@
-// fw port of LabelJobs.svelte.
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Tags from '$icons/tags';
@@ -21,7 +20,7 @@ import NoValue from '$lib/ui/NoValue';
 import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
-import { rowNav } from '$lib/ui/rowNav.fw';
+import { rowNav } from '$lib/ui/rowNav';
 import Segmented from '$lib/ui/Segmented';
 import Skeleton from '$lib/ui/Skeleton';
 import StatusBadge from '$lib/ui/StatusBadge';
@@ -29,7 +28,7 @@ import TableState from '$lib/ui/TableState';
 import JobDialog from './label/JobDialog';
 import { cannotLabel } from './label/support';
 import Unsupported from './label/Unsupported';
-import { jobStatus, runAgent } from './label/words.fw';
+import { jobStatus, runAgent } from './label/words';
 
 type Filter = 'all' | 'active' | 'idle';
 

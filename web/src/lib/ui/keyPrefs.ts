@@ -1,5 +1,4 @@
-// fw port of keyPrefs.svelte.ts (the same store, on an fw signal).
-// Whether single-character shortcuts are on: N, G then a letter, [, ?, and J / K / X in the lists (WCAG 2.1.4: a
+// // Whether single-character shortcuts are on: N, G then a letter, [, ?, and J / K / X in the lists (WCAG 2.1.4: a
 // keyboard or speech-input user must be able to turn them off). Ctrl / Cmd-K and the arrow keys, Home, End and Enter of
 // a focused component always work. Settings → Keyboard shortcuts switches it; the choice stays in this browser.
 

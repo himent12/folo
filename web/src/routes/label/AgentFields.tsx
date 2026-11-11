@@ -1,4 +1,3 @@
-// fw port of AgentFields.svelte.
 /**
  * Who answers: the agent CLI (Claude Code or Codex, the ones not installed off with how to install them in words),
  * its model and its effort, for the `AgentChoice` they set. Agent labeling's rail and the vision benchmarks' agent

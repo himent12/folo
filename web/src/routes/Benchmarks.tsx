@@ -1,4 +1,3 @@
-// fw port of Benchmarks.svelte.
 import Plus from '$icons/plus';
 import Search from '$icons/search';
 import Target from '$icons/target';
@@ -21,7 +20,7 @@ import Meta from '$lib/ui/Meta';
 import NoValue from '$lib/ui/NoValue';
 import { isOffline, OFFLINE_REASON } from '$lib/ui/offline';
 import Panel from '$lib/ui/Panel';
-import { rowNav } from '$lib/ui/rowNav.fw';
+import { rowNav } from '$lib/ui/rowNav';
 import Segmented from '$lib/ui/Segmented';
 import Skeleton from '$lib/ui/Skeleton';
 import SortHeader from '$lib/ui/SortHeader';
@@ -31,7 +30,7 @@ import { tooltip } from '$lib/ui/tooltip';
 import NewBenchDialog from './bench/NewBenchDialog';
 import { cannotBench } from './bench/support';
 import Unsupported from './bench/Unsupported';
-import { entriesText, entryStatus, imagesText, scoreText, sourceKind } from './bench/words.fw';
+import { entriesText, entryStatus, imagesText, scoreText, sourceKind } from './bench/words';
 
 type Key = 'name' | 'source' | 'images' | 'classes' | 'conditions' | 'entries' | 'leader' | 'created';
 interface Col {

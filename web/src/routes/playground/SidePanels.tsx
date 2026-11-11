@@ -1,4 +1,3 @@
-// fw port of SidePanels.svelte.
 /**
  * The rail beside the image: Thresholds (with what is drawn on the image), Classes and Timing. One column it
  * interleaves with the image's panels; on tablets it is a two-column block under the image, and phones with an
@@ -8,7 +7,7 @@ import { bindable, css } from 'fw';
 import type { Prediction } from '$lib/api/types';
 import Panel from '$lib/ui/Panel';
 import Slider from '$lib/ui/Slider';
-import type { Source } from './source.fw';
+import type { Source } from './source';
 
 export interface SidePanelsProps {
   source: Source | null;

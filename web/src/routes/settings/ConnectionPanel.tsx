@@ -1,4 +1,3 @@
-// fw port of ConnectionPanel.svelte.
 /** Settings › Connection: whether Studio talks to a server or shows demo data, and the server's address (test, save). */
 import Check from '$icons/check';
 import CircleCheck from '$icons/circle-check';

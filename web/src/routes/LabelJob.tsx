@@ -1,4 +1,3 @@
-// fw port of LabelJob.svelte.
 import ArrowLeft from '$icons/arrow-left';
 import Database from '$icons/database';
 import ImagePlus from '$icons/image-plus';
@@ -43,7 +42,7 @@ import { cannotLabel } from './label/support';
 import Unsupported from './label/Unsupported';
 import { Uploads } from './label/uploads';
 import { Instructions } from './label/instructions';
-import { images as imagesText, jobStatus, toLabel } from './label/words.fw';
+import { images as imagesText, jobStatus, toLabel } from './label/words';
 
 /** The loading page's tiles. */
 const TILES = Array.from({ length: 12 }, (_, i) => i);

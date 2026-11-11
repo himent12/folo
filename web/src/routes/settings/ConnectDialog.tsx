@@ -1,4 +1,3 @@
-// fw port of ConnectDialog.svelte.
 /**
  * Settings › Cloud › Connect: a provider and its credentials, the form built from `GET /api/cloud/providers` (one
  * field per `fields` entry, secrets masked), checked with the provider by the server before anything is stored.

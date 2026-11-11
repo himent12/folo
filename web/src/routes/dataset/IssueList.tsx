@@ -1,4 +1,3 @@
-// fw port of IssueList.svelte.
 /**
  * The `folo dataset check` issues, as `file:line`, the message and what a cleanup would do, paged 50 at a time. A
  * severity filter (with the server's counts, where it sends them; left out with `severityFilter={false}` where the

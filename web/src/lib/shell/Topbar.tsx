@@ -1,4 +1,3 @@
-// fw port of Topbar.svelte.
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
 import Monitor from '$icons/monitor';

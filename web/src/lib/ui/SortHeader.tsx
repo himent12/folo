@@ -1,4 +1,3 @@
-// fw port of SortHeader.svelte.
 /**
  * A sortable column header for a `.table`: the label is a button (Enter / Space sort), the mark beside it shows the
  * direction, and the cell carries `aria-sort` while it is the sorted column. Unsorted headers keep the mark's slot

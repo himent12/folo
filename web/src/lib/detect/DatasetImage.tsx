@@ -1,4 +1,3 @@
-// fw port of DatasetImage.svelte.
 /**
  * A dataset image, or a labeling job's (`jobId`), resolved through the API so it works with the mock too, with
  * optional boxes on top. The tile

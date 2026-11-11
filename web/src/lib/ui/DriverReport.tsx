@@ -1,4 +1,3 @@
-// fw port of DriverReport.svelte.
 /**
  * The server's own words about a capability, verbatim, for an issue or a terminal: folded under "Driver report"
  * (closed until asked for, in every state) and copied whole.

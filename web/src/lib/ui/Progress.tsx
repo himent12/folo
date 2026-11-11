@@ -1,4 +1,3 @@
-// fw port of Progress.svelte.
 /** A thin determinate progress bar. `value` is 0..1. */
 import { computed, css, defaults } from 'fw';
 

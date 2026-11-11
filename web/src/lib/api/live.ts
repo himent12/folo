@@ -1,4 +1,4 @@
-// fw port of live.svelte.ts: the same LiveRun, on fw signals. Its steps, epochs and log lines are also exposed as
+// A run kept live (LiveRun, below). Its steps, epochs and log lines are also exposed as
 // append logs (`stepsLog`, `epochsLog`, `logsLog`, ./appendLog) beside the arrays (`steps`, `epochs`, `logs`, the
 // logs' own lists): a chart can process only the steps added since it last looked, after `version` bumped.
 //

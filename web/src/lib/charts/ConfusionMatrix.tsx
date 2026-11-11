@@ -1,4 +1,3 @@
-// fw port of ConfusionMatrix.svelte.
 /**
  * Confusion matrix: rows are true classes, columns predicted, plus a "background" row/column for misses and false
  * positives. Cells are row-normalised and shaded on one sequential luminance ramp in ink (the diagonal is told apart

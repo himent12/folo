@@ -1,4 +1,3 @@
-// fw port of Callout.svelte.
 /**
  * A run banner, one line (web/DESIGN_DIRECTION.md §4.4, the Vercel callout): status icon, title, cause, one action,
  * and a disclosure for the details. Only the icon and the title take the status hue; the cause stays in
@@ -12,7 +11,7 @@
  */
 import { createUniqueId, css, Dynamic, signal } from 'fw';
 import Meta from '$lib/ui/Meta';
-import type { IconType } from '$lib/ui/types.fw';
+import type { IconType } from '$lib/ui/types';
 
 type Tone = 'success' | 'warning' | 'danger' | 'neutral';
 

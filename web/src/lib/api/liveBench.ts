@@ -1,5 +1,4 @@
-// fw port of liveBench.svelte.ts (the same LiveBench, on fw signals).
-// A benchmark kept live (docs/API.md, Vision benchmarks → Events): follows its SSE stream and loads the benchmark, its
+// // A benchmark kept live (docs/API.md, Vision benchmarks → Events): follows its SSE stream and loads the benchmark, its
 // entries and its loops. As for a labeling job (LiveLabelJob), the stream replays nothing but the benchmark, so we
 // subscribe *before* loading and merge the two: an entry or loop event that arrived while the lists were loading is
 // applied over the answer, and a `bench` event over the benchmark. A `bench` event also loads the lists again (coalesced

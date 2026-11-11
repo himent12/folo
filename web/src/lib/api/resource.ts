@@ -1,4 +1,4 @@
-// fw port of resource.svelte.ts: the same Resource, on fw signals, sharing what it can with the other Resources on
+// Resource: data loaded for what is on screen, sharing what it can with the other Resources on
 // screen (./share) without changing what any of them shows or when:
 // - its fetcher runs inside `together`: an identical read another Resource issued in the same turn (a screen mounting,
 //   a reconnect) is the same request;

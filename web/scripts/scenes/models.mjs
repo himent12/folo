@@ -245,7 +245,7 @@ export const modelScenes = [
   },
   {
     // The demo's f16 export: a neutral preview (no success check, no saved file, no Download) whose one primary is
-    // "Connect to a server". A real server's finished export (Download, the path) is ExportDialog.svelte.test.ts's.
+    // "Connect to a server". A real server's finished export (Download, the path) is ExportDialog.test.tsx's.
     name: 'model-export-done',
     path: '/models/m_shapes_s',
     fullPage: false,

@@ -1,5 +1,4 @@
 // @vitest-environment happy-dom
-// fw port of RunNewCloud.svelte.test.ts.
 // New run › Run on (docs/CLOUD.md): this machine or a cloud connection; choosing one reveals its GPU and Stop after,
 // the Summary says where and what it costs, and the config carries `compute` only then and only with the feature.
 import { flush as flushSync, tick } from 'fw';

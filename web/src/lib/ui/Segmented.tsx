@@ -1,9 +1,8 @@
-// fw port of Segmented.svelte.
 /** A segmented control (radio group). Arrow keys move the selection, as in native radio groups. */
 import { bindable, createUniqueId, css, defaults, Dynamic, For } from 'fw';
-import { describedBy, getField } from './field.fw';
+import { describedBy, getField } from './field';
 import { tooltip } from './tooltip';
-import type { IconType } from './types.fw';
+import type { IconType } from './types';
 
 export interface SegmentedOption<T extends string> {
   value: T;

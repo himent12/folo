@@ -1,4 +1,3 @@
-// fw port of Remedy.svelte.
 /**
  * One remediation block, the same wherever something is off and a command turns it on (Settings › System, New
  * run's Mixed precision): the cause in plain text (identifiers in backticks are set as code), the shell the command

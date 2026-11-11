@@ -1,9 +1,15 @@
+// StatusBadge's OwnStatus is restated here (structurally the same), so this module needs no component import.
 // What the labeling screens say about a job, a run and what it cost, one wording everywhere.
 
-import type { LabelAgent, LabelImage, LabelJob, LabelRun, LabelUsage } from '$lib/api/types';
-import type { OwnStatus } from '$lib/ui/StatusBadge.svelte';
+import type { LabelAgent, LabelImage, LabelJob, LabelRun, LabelUsage, RunStatus } from '$lib/api/types';
 import { num, usd } from '$lib/format';
 import { AGENT_NAME } from '$lib/label';
+
+/** StatusBadge's `OwnStatus` (ui/StatusBadge.tsx). */
+interface OwnStatus {
+  status: RunStatus;
+  label: string;
+}
 
 /**
  * A job's status as a status mark (the run status whose mark it shares) and its word: "Labeling" while an agent

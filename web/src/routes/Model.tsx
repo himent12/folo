@@ -1,4 +1,3 @@
-// fw port of Model.svelte.
 import ArrowLeft from '$icons/arrow-left';
 import ChevronDown from '$icons/chevron-down';
 import ChevronRight from '$icons/chevron-right';

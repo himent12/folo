@@ -1,4 +1,3 @@
-// fw port of RunningPanel.svelte.
 /**
  * An entry that has not finished: where it is, live (the benchmark's stream). Queued: its place behind the model
  * entries that run first. Running: the share done, the pass it is on (the unchanged images, or a condition at a
@@ -13,7 +12,7 @@ import type { Bench, BenchCatalog, BenchEntry } from '$lib/api/types';
 import { num } from '$lib/format';
 import Panel from '$lib/ui/Panel';
 import Progress from '$lib/ui/Progress';
-import { progressFacts, progressShare, receiving } from '../words.fw';
+import { progressFacts, progressShare, receiving } from '../words';
 
 export interface RunningPanelProps {
   entry: BenchEntry;

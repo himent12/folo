@@ -1,4 +1,3 @@
-// fw port of OomNote.svelte.
 /** A retry of a run that ran out of GPU memory: what changed since, and whether the forecast says it now fits. */
 import TriangleAlert from '$icons/triangle-alert';
 import { css } from 'fw';
@@ -6,7 +5,7 @@ import type { Run } from '$lib/api/types';
 import { bytes } from '$lib/format';
 import { prefs } from '$lib/prefs';
 import { href } from '$lib/router';
-import { roughBytes } from './summary.fw';
+import { roughBytes } from './summary';
 
 export interface OomNoteProps {
   oomRun: Run;

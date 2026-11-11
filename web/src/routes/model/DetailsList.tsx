@@ -1,4 +1,3 @@
-// fw port of DetailsList.svelte.
 /** The model's details: what it is, how it was trained and stored, its classes, where it came from and its latency. */
 import { bindable, computed, css, For } from 'fw';
 import type { Resource } from '$lib/api/resource';

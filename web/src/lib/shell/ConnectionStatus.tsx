@@ -1,4 +1,3 @@
-// fw port of ConnectionStatus.svelte.
 /** Where the data comes from: the live server or the built-in mock. Links to Settings. */
 import FlaskConical from '$icons/flask-conical';
 import WifiOff from '$icons/wifi-off';

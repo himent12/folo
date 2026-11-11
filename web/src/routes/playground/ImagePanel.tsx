@@ -1,4 +1,3 @@
-// fw port of ImagePanel.svelte.
 /**
  * The image and its boxes: where it came from (the toolbar), what stands between it and its boxes (the notice),
  * the canvas, the thresholds pinned under it on phones and tablets, and its footer with the settings sheet (phones)
@@ -27,8 +26,8 @@ import Panel from '$lib/ui/Panel';
 import Segmented from '$lib/ui/Segmented';
 import Slider from '$lib/ui/Slider';
 import DropZone from './DropZone';
-import { BACKEND_NAME, DEFAULTS, px, score } from './predict.fw';
-import type { Source } from './source.fw';
+import { BACKEND_NAME, DEFAULTS, px, score } from './predict';
+import type { Source } from './source';
 import Swatch from './Swatch';
 
 type Det = Prediction['boxes'][number];

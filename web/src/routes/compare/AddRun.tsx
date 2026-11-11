@@ -1,4 +1,3 @@
-// fw port of AddRun.svelte.
 /** Adds a run to the comparison: a native picker of the runs not in it yet, dressed as a secondary button. */
 import Plus from '$icons/plus';
 import { css, For } from 'fw';

@@ -1,4 +1,3 @@
-// fw port of Playground.svelte.
 import Box from '$icons/box';
 import Check from '$icons/check';
 import Plus from '$icons/plus';
@@ -35,8 +34,8 @@ import ResultsPanel from './playground/ResultsPanel';
 import ClassList from './playground/ClassList';
 import PhoneDetails from './playground/PhoneDetails';
 import SidePanels from './playground/SidePanels';
-import { BACKEND_NAME, DEFAULTS, FETCH, simulate } from './playground/predict.fw';
-import { imageBlob, type Source } from './playground/source.fw';
+import { BACKEND_NAME, DEFAULTS, FETCH, simulate } from './playground/predict';
+import { imageBlob, type Source } from './playground/source';
 
 type RunOn = 'server' | Backend;
 type Seg = 'file' | 'dataset' | 'webcam';
