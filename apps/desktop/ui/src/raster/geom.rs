@@ -59,11 +59,11 @@ pub(crate) fn floor_i32(v: f32) -> i32 {
 /// point before the fill rule; nearest, ties up).
 #[inline(always)]
 fn first_centre_at_or_after(v: f32) -> i32 {
-    let s = v * 256. + 0.5;
-    let i = s as i64;
-    let k = if (i as f32) > s { i - 1 } else { i };
+    // Far outside any frame: clamp so the fixed point fits i32 (NaN stays NaN and becomes 0).
+    const LIMIT: f32 = (1 << 22) as f32;
+    let k = floor_i32(v.clamp(-LIMIT, LIMIT) * 256. + 0.5);
     // ceil((k - 128) / 256): `>>` floors, also for negative values.
-    ((k - 128 + 255) >> 8).clamp(i32::MIN as i64, i32::MAX as i64) as i32
+    (k + 127) >> 8
 }
 
 /// The pixels a GPU rasterizes for an edge from `lo` to `hi`: those whose centre `i + 0.5` lies in
@@ -82,7 +82,9 @@ pub(crate) fn clip_span(lo: f32, hi: f32) -> (i32, i32) {
     raster_span(lo, hi)
 }
 
-/// The pixels a primitive drawn over `bounds` and clipped by `clip` can touch.
+/// The pixels a primitive drawn over `bounds` and clipped by `clip` can touch (what `items::Clips`
+/// computes, keeping the clip's part).
+#[cfg(test)]
 pub(crate) fn pixel_rect(bounds: &Bounds<ScaledPixels>, clip: &Bounds<ScaledPixels>) -> IRect {
     let (bx0, bx1) = raster_span(bounds.origin.x.0, bounds.origin.x.0 + bounds.size.width.0);
     let (by0, by1) = raster_span(bounds.origin.y.0, bounds.origin.y.0 + bounds.size.height.0);
@@ -119,7 +121,7 @@ mod tests {
         assert_eq!(raster_span(10.5 + 1. / 512. + 1e-4, 20.5 - 1. / 600.), (11, 20));
         assert_eq!(raster_span(284.999_97, 318.), (285, 318));
         assert_eq!(raster_span(-0.5, -10.5), (-1, -11));
-        assert_eq!(raster_span(f32::NAN, 1e12), (0, i32::MAX));
+        assert_eq!(raster_span(f32::NAN, 1e12), (0, 1 << 22));
         assert!(IRect::new(0, 0, 4, 4).contains(&IRect::new(1, 1, 4, 4)));
         assert!(!IRect::EMPTY.contains(&IRect::EMPTY));
         for v in [0., 0.5, -0.5, 1.0, -1.0, 2.25, -2.25, 1e9, -1e9, 3e10, f32::MIN_POSITIVE, -0.0] {
