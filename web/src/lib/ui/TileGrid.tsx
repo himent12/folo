@@ -40,6 +40,8 @@ export interface TileGridProps {
   toolbar: string;
   /** A tile's content; `i()` is its item's index (a cell's index changes when the column count does). */
   tile: (i: () => number) => JSX.Element;
+  /** An item to scroll into view and focus, each time a new object is given (where a viewer over the grid closed). */
+  reveal?: { i: number } | null;
 }
 
 const MIN = { s: 112, m: 172, l: 248 } as const;
@@ -124,6 +126,11 @@ export default function TileGrid(props: TileGridProps) {
     await tick();
     el.querySelector<HTMLElement>(`[data-i="${j}"]`)?.focus({ preventScroll: true });
   }
+
+  effect(() => {
+    const r = props.reveal;
+    if (r) untrack(() => void moveTo(r.i));
+  });
 
   function onkeydown(e: KeyboardEvent) {
     const c = cols.peek();

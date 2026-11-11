@@ -14,6 +14,8 @@ export interface ImageGridProps {
   boxes: boolean;
   only: ReadonlySet<number> | null;
   onopen: (index: number, id: string) => void;
+  /** An image to scroll to and focus, each time a new one is given (the one the inspector closed on). */
+  reveal?: { i: number } | null;
 }
 
 const NO_BOXES: never[] = [];
@@ -81,6 +83,7 @@ export default function ImageGrid(props: ImageGridProps) {
       onopen={open}
       onrange={(lo, hi) => props.pager.ensure(lo, hi)}
       toolbar=".ds-toolbar"
+      reveal={props.reveal}
       tile={tile}
     />
   );

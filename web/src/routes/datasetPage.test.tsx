@@ -16,6 +16,9 @@ beforeEach(() => {
   api = new MockApi('normal', 0);
   hub.api = api;
   hub.mode = 'mock';
+  HTMLDialogElement.prototype.showModal ??= function (this: HTMLDialogElement) {
+    this.open = true;
+  };
 });
 
 afterEach(() => {
@@ -26,6 +29,7 @@ afterEach(() => {
 });
 
 function open(path: string) {
+  history.replaceState(history.state, '', `#${path}`);
   router.route = parse(`#${path}`);
   target = document.createElement('div');
   document.body.appendChild(target);
@@ -58,5 +62,38 @@ describe('Dataset page', () => {
     const train = await until(() => [...target.querySelectorAll('a')].find((a) => a.textContent?.includes('Train on this dataset')), 'Train');
     expect(train.getAttribute('href')).toBe('#/runs/new?dataset=ds_shapes');
     expect(target.querySelector('.no-train')).toBeNull();
+  });
+});
+
+describe('Dataset page history', () => {
+  const hash = () => decodeURIComponent(location.hash);
+
+  it('opens an image as a history entry that Back (or Close) takes away, leaving the grid', async () => {
+    open('/datasets/ds_shapes');
+    const cell = await until(() => target.querySelector<HTMLElement>('[data-i="3"]'), 'the grid');
+    const depth = history.length;
+    cell.click();
+    await until(() => hash().includes('image='), 'the image in the URL');
+    expect(history.length).toBe(depth + 1);
+    const back = vi.spyOn(history, 'back');
+    document.querySelector('dialog.insp')!.dispatchEvent(new Event('close'));
+    expect(back).toHaveBeenCalledOnce();
+    await until(() => hash() === '#/datasets/ds_shapes', 'the grid again');
+  });
+
+  it('adds an entry for the first filter only, and Clear goes back to the unfiltered view', async () => {
+    open('/datasets/ds_shapes');
+    await until(() => target.querySelector('[data-i="0"]'), 'the grid');
+    const depth = history.length;
+    const pick = (label: string) => [...target.querySelectorAll<HTMLButtonElement>('.ds-toolbar button')].find((b) => b.textContent?.startsWith(label))!;
+    pick('Val').click();
+    await until(() => hash().includes('split=val'), 'the val filter');
+    pick('Train').click();
+    await until(() => hash().includes('split=train'), 'the train filter');
+    expect(history.length).toBe(depth + 1);
+    const back = vi.spyOn(history, 'back');
+    target.querySelector<HTMLButtonElement>('button[aria-label="Clear filters"]')!.click();
+    expect(back).toHaveBeenCalledOnce();
+    await until(() => hash() === '#/datasets/ds_shapes', 'the unfiltered view');
   });
 });

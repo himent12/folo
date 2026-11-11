@@ -6,7 +6,7 @@ import Scan from '$icons/scan';
 import Trash from '$icons/trash-2';
 import TriangleAlert from '$icons/triangle-alert';
 import X from '$icons/x';
-import { computed, css, effect, Index, Key, MediaQuery, signal } from 'fw';
+import { computed, css, effect, Index, Key, MediaQuery, signal, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
 import type { Split } from '$lib/api/types';
@@ -92,15 +92,40 @@ export default function Dataset() {
   // The header's "Train on this dataset" is this page's create action: the top bar's New run steps aside.
   ownCreateAction();
 
-  /** Replaces query params (null removes one) without adding history entries. */
-  function setQuery(patch: Record<string, string | null>) {
+  // History: opening an image, and the first filter on an unfiltered view, add an entry, so Back closes the image or
+  // undoes the filter instead of leaving the dataset; everything else (stepping through images, changing a filter, a
+  // tab) replaces the entry. A change that comes back to the view an entry was added from goes Back to it, so Close
+  // and Back agree and no entry is left over. `pushedFrom` holds those views (path and query), innermost last;
+  // arriving at one (Back, or that change) drops it.
+  const pushedFrom: string[] = [];
+  const view = (path: string, q: URLSearchParams | string) => `${path}?${q}`;
+  const here = computed(() => view(router.route.path, router.route.query));
+  effect(() => {
+    if (pushedFrom.at(-1) === here.get()) pushedFrom.pop();
+  });
+
+  /** Changes query params (null removes one): `push` adds a history entry, anything else replaces this one. */
+  function setQuery(patch: Record<string, string | null>, push = false) {
+    const before = router.route.query.toString();
     const q = new URLSearchParams(router.route.query);
     for (const [k, v] of Object.entries(patch)) {
       if (v === null) q.delete(k);
       else q.set(k, v);
     }
     const s = q.toString();
-    router.go(`/datasets/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`, { replace: true });
+    if (s === before) return;
+    const at = router.route.path;
+    const path = `/datasets/${encodeURIComponent(id.peek())}${s ? `?${s}` : ''}`;
+    if (push) {
+      pushedFrom.push(view(at, before));
+      router.go(path);
+    } else if (pushedFrom.at(-1) === view(at, s)) history.back();
+    else router.go(path, { replace: true });
+  }
+
+  /** A filter change: the first one on an unfiltered view adds a history entry. */
+  function setFilter(patch: Record<string, string | null>) {
+    setQuery({ ...patch, image: null }, !filtered.peek());
   }
 
   // ---------- image list for the current filter ----------
@@ -191,8 +216,20 @@ export default function Dataset() {
   });
 
   function openImage(_i: number, imageId: string) {
-    setQuery({ image: imageId });
+    setQuery({ image: imageId }, true);
   }
+
+  /** The image the inspector last showed, revealed in the grid when it closes (by Close, Esc or Back). */
+  const reveal = signal<{ i: number } | null>(null);
+  let lastImage: string | null = null;
+  effect(() => {
+    const im = imageParam.get();
+    if (im === null && lastImage !== null) {
+      const i = untrack(() => pager.get()?.indexOf(lastImage!) ?? -1);
+      if (i >= 0) reveal.set({ i });
+    }
+    lastImage = im;
+  });
 
   const moreItems: MenuItem[] = [
     { label: 'Copy path', icon: Copy, onclick: copyPath },
@@ -349,7 +386,7 @@ export default function Dataset() {
               {tab.get() === 'stats' ? (
                 <>
                   {dd().stats ? (
-                    <StatsTab dataset={dd()} stats={dd().stats!} counts={counts.get()} onclass={(c) => setQuery({ tab: null, class: String(c), image: null })} />
+                    <StatsTab dataset={dd()} stats={dd().stats!} counts={counts.get()} onclass={(c) => setQuery({ tab: null, class: String(c), image: null }, !filtered.peek())} />
                   ) : (
                     <Panel>
                       <EmptyState icon={ImageOff} title="No statistics" description="The server did not return statistics for this dataset." />
@@ -367,7 +404,7 @@ export default function Dataset() {
                           size="sm"
                           options={splitOptions.get().map((o) => ({ value: o.value, label: o.value === 'all' ? o.label : `${o.label} · ${o.meta}` }))}
                           value={split.get()}
-                          onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
+                          onchange={(s) => setFilter({ split: s === 'all' ? null : s })}
                         />
                       </span>
                     ) : (
@@ -376,7 +413,7 @@ export default function Dataset() {
                         size="sm"
                         options={splitOptions.get()}
                         value={split.get()}
-                        onchange={(s) => setQuery({ split: s === 'all' ? null : s, image: null })}
+                        onchange={(s) => setFilter({ split: s === 'all' ? null : s })}
                       />
                     )}
                     <ClassPicker
@@ -384,7 +421,7 @@ export default function Dataset() {
                       classes={dd().classes}
                       counts={dd().stats?.class_counts}
                       value={cls.get()}
-                      onchange={(c) => setQuery({ class: c === undefined ? null : String(c), image: null })}
+                      onchange={(c) => setFilter({ class: c === undefined ? null : String(c) })}
                     />
                     {/* Phones, filtered: the count and Clear on a row of their own under the pickers ("1,873 of 2,400"). */}
                     {phone() && filtered.get() ? <span class="break" aria-hidden="true"></span> : null}
@@ -409,7 +446,7 @@ export default function Dataset() {
                       )}
                     </span>
                     {filtered.get() ? (
-                      <button type="button" class="clear" aria-label="Clear filters" onclick={() => setQuery({ split: null, class: null, image: null })}>
+                      <button type="button" class="clear" aria-label="Clear filters" onclick={() => setFilter({ split: null, class: null })}>
                         <X size={12} strokeWidth={2} aria-hidden="true" />
                         Clear
                       </button>
@@ -443,12 +480,12 @@ export default function Dataset() {
                             ? `No ${split.get() === 'all' ? '' : `${split.get()} `}image contains a ${dd().classes[cls.get()!]}.`
                             : `The ${split.get()} split is empty.`
                         }
-                        actions={() => <Button onclick={() => setQuery({ split: null, class: null })}>Clear filters</Button>}
+                        actions={() => <Button onclick={() => setFilter({ split: null, class: null })}>Clear filters</Button>}
                       />
                     </Panel>
                   ) : pager.get() ? (
                     <Key when={pager.get()}>
-                      <ImageGrid pager={pg()} classes={dd().classes} density={density()} boxes={boxes()} only={only.get()} onopen={openImage} />
+                      <ImageGrid pager={pg()} classes={dd().classes} density={density()} boxes={boxes()} only={only.get()} reveal={reveal.get()} onopen={openImage} />
                     </Key>
                   ) : null}
                 </>
