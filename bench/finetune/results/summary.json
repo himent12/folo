@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "created": "2026-11-11T07:53:39Z",
-  "runs": 34,
+  "created": "2026-11-11T08:09:21Z",
+  "runs": 40,
   "groups": [
     {
       "dataset": "bccd",
@@ -577,6 +577,57 @@
       ]
     },
     {
+      "dataset": "medical-pills",
+      "tool": "ultralytics",
+      "model": "yolo26s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.8054161663626852,
+        "min": 0.8018370112587477,
+        "max": 0.8101322404337875,
+        "n": 3,
+        "stdev": 0.004262879932631491
+      },
+      "ap50": {
+        "mean": 0.9977117644131415,
+        "min": 0.9965031217710948,
+        "max": 0.9984875172721434,
+        "n": 3,
+        "stdev": 0.0010606609021472733
+      },
+      "ap75": {
+        "mean": 0.9802785233121991,
+        "min": 0.975625244420411,
+        "max": 0.9877440336620262,
+        "n": 3,
+        "stdev": 0.006530524289891362
+      },
+      "train_wall_s": null,
+      "train_wall_shared_s": {
+        "mean": 276.6003037013579,
+        "min": 266.7159260370536,
+        "max": 295.9839971860638,
+        "n": 3,
+        "stdev": 16.787875028951078
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
       "dataset": "signature",
       "tool": "folo",
       "model": "folo-n",
@@ -722,6 +773,57 @@
         "max": 197.44787911104504,
         "n": 2,
         "stdev": 1.583675551267749
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
+      "dataset": "signature",
+      "tool": "ultralytics",
+      "model": "yolo26s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.9798501317891971,
+        "min": 0.978095099425909,
+        "max": 0.9809405940594059,
+        "n": 3,
+        "stdev": 0.001534747530956272
+      },
+      "ap50": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "ap75": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "train_wall_s": null,
+      "train_wall_shared_s": {
+        "mean": 288.5199040709995,
+        "min": 269.5976838119095,
+        "max": 297.98631669708993,
+        "n": 3,
+        "stdev": 16.38712429825945
       },
       "epochs_run": [
         100
