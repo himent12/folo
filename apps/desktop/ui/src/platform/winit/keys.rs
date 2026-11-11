@@ -30,10 +30,65 @@ pub(crate) struct KeyInput<'a> {
     pub text: Option<&'a str>,
 }
 
+/// Which system's rules decide what a key with modifiers types (what winit reports differs per system).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TextRules {
+    /// AppKit: Option (and Option-Shift) types another character ("ß" for Option-S, which winit reports
+    /// only as the key's `text`: `insertText` commits through the IME only while text is marked);
+    /// Cmd and Ctrl combinations are commands.
+    MacOs,
+    /// Win32: AltGr is Ctrl+Alt. winit hides it on a layout with AltGr when right Alt is held, but left
+    /// Ctrl + left Alt still arrive as Ctrl+Alt, and winit gives them text only where the layout has a
+    /// character for them ("€" for Ctrl+Alt+E on a German layout; none on a US one), as Windows sends
+    /// `WM_CHAR`, which GPUI types.
+    Windows,
+    /// xkb (Linux, BSD): AltGr is Level3, which winit does not report as a modifier, so its characters
+    /// arrive with at most Shift; Ctrl+Alt is a command whose text is the plain character.
+    Xkb,
+}
+
+impl TextRules {
+    /// The rules of the system this is built for.
+    pub(crate) const CURRENT: Self = if cfg!(target_os = "macos") {
+        Self::MacOs
+    } else if cfg!(windows) {
+        Self::Windows
+    } else {
+        Self::Xkb
+    };
+
+    /// Whether a key held with `modifiers` keeps its text as the keystroke's `key_char`.
+    fn has_key_char(self, modifiers: &Modifiers) -> bool {
+        match self {
+            Self::MacOs => !modifiers.control && !modifiers.platform,
+            Self::Windows => !modifiers.control || modifiers.alt,
+            Self::Xkb => !modifiers.control,
+        }
+    }
+
+    /// Whether a key down the app did not handle types its `key_char` with `modifiers` held (the
+    /// keystroke's, so Shift only where it changed a letter).
+    pub(crate) fn types_text(self, modifiers: &Modifiers) -> bool {
+        if modifiers.platform || modifiers.function {
+            return false;
+        }
+        match self {
+            Self::MacOs => !modifiers.control,
+            Self::Windows => modifiers.control == modifiers.alt,
+            Self::Xkb => !modifiers.control && !modifiers.alt,
+        }
+    }
+}
+
 /// The GPUI keystroke for a key press with `modifiers` held.
-pub(crate) fn keystroke(input: KeyInput<'_>, mut modifiers: Modifiers) -> Keystroke {
+pub(crate) fn keystroke(input: KeyInput<'_>, modifiers: Modifiers) -> Keystroke {
+    keystroke_for(TextRules::CURRENT, input, modifiers)
+}
+
+/// [`keystroke`] under `rules`.
+fn keystroke_for(rules: TextRules, input: KeyInput<'_>, mut modifiers: Modifiers) -> Keystroke {
     // On macOS Option changes the character (option-s types "ß"); the key is still "s".
-    let key = if cfg!(target_os = "macos") && modifiers.alt { input.unmodified } else { input.logical };
+    let key = if rules == TextRules::MacOs && modifiers.alt { input.unmodified } else { input.logical };
     let key = key_name(key, input.physical, modifiers.shift);
 
     // Shift is part of a keystroke only where it makes a letter upper case ("shift-a", "shift-tab"), not
@@ -42,12 +97,10 @@ pub(crate) fn keystroke(input: KeyInput<'_>, mut modifiers: Modifiers) -> Keystr
         modifiers.shift = false;
     }
 
-    let produces_text = !modifiers.control && !(cfg!(target_os = "macos") && modifiers.platform);
+    let has_key_char = rules.has_key_char(&modifiers);
     let key_char = input
         .text
-        .filter(|text| {
-            produces_text && text.chars().next().is_some_and(|c| c as u32 >= 32 && c as u32 != 127)
-        })
+        .filter(|text| has_key_char && text.chars().next().is_some_and(|c| c as u32 >= 32 && c as u32 != 127))
         .map(str::to_owned);
 
     Keystroke { modifiers, key, key_char }
@@ -256,6 +309,71 @@ mod tests {
         // A key with no ASCII position keeps its character, lower-cased.
         let x = press(ch("É"), ch("é"), KeyCode::IntlBackslash, Some("É"), "shift");
         assert_eq!((x.key.as_str(), x.modifiers.shift), ("é", true));
+    }
+
+    /// What a key the app did not handle types under `rules`: its `key_char`, if the modifiers type.
+    fn typed(
+        rules: TextRules,
+        logical: Key,
+        unmodified: Key,
+        code: KeyCode,
+        text: &str,
+        mods: &str,
+    ) -> Option<String> {
+        let modifiers = Modifiers {
+            control: mods.contains("ctrl"),
+            alt: mods.contains("alt"),
+            shift: mods.contains("shift"),
+            platform: mods.contains("cmd"),
+            function: false,
+        };
+        let physical = PhysicalKey::Code(code);
+        let input = KeyInput { logical: &logical, unmodified: &unmodified, physical, text: Some(text) };
+        let keystroke = keystroke_for(rules, input, modifiers);
+        keystroke.key_char.filter(|_| rules.types_text(&keystroke.modifiers))
+    }
+
+    #[test]
+    fn option_types_characters_on_macos() {
+        use TextRules::MacOs;
+        // Option-S on a US layout: winit's `text` is "ß" (the event's characters); the key stays "s".
+        let (logical, unmodified) = (ch("ß"), ch("s"));
+        let physical = PhysicalKey::Code(KeyCode::KeyS);
+        let input = KeyInput { logical: &logical, unmodified: &unmodified, physical, text: Some("ß") };
+        let option_s = keystroke_for(MacOs, input, Modifiers { alt: true, ..Modifiers::default() });
+        assert_eq!((option_s.unparse(), option_s.key_char.as_deref()), ("alt-s".into(), Some("ß")));
+        assert_eq!(typed(MacOs, ch("ß"), ch("s"), KeyCode::KeyS, "ß", "alt").as_deref(), Some("ß"));
+        // Option-Shift-2 types "€".
+        assert_eq!(typed(MacOs, ch("€"), ch("2"), KeyCode::Digit2, "€", "alt shift").as_deref(), Some("€"));
+        assert_eq!(typed(MacOs, ch("a"), ch("a"), KeyCode::KeyA, "a", "").as_deref(), Some("a"));
+        // Cmd and Ctrl combinations are commands, with or without Option.
+        assert_eq!(typed(MacOs, ch("s"), ch("s"), KeyCode::KeyS, "s", "cmd"), None);
+        assert_eq!(typed(MacOs, ch("ß"), ch("s"), KeyCode::KeyS, "ß", "cmd alt"), None);
+        assert_eq!(typed(MacOs, ch("s"), ch("s"), KeyCode::KeyS, "s", "ctrl"), None);
+        assert_eq!(typed(MacOs, ch("ß"), ch("s"), KeyCode::KeyS, "ß", "ctrl alt"), None);
+    }
+
+    #[test]
+    fn altgr_types_characters_on_windows_and_xkb() {
+        use TextRules::{Windows, Xkb};
+        // Windows: left Ctrl + left Alt + E on a German layout is AltGr+E, "€" (the key is "e").
+        assert_eq!(typed(Windows, ch("€"), ch("e"), KeyCode::KeyE, "€", "ctrl alt").as_deref(), Some("€"));
+        // AltGr+Q is "@", an ASCII character.
+        assert_eq!(typed(Windows, ch("@"), ch("q"), KeyCode::KeyQ, "@", "ctrl alt").as_deref(), Some("@"));
+        // xkb: AltGr is Level3, not a modifier winit reports; its characters arrive with no modifiers.
+        assert_eq!(typed(Xkb, ch("€"), ch("e"), KeyCode::KeyE, "€", "").as_deref(), Some("€"));
+        assert_eq!(typed(Xkb, ch("{"), ch("7"), KeyCode::Digit7, "{", "").as_deref(), Some("{"));
+        for rules in [Windows, Xkb] {
+            // Plain Alt and Ctrl combinations are commands (winit's text ignores Ctrl: Ctrl+K has "k").
+            assert_eq!(typed(rules, ch("k"), ch("k"), KeyCode::KeyK, "k", "alt"), None, "{rules:?}");
+            assert_eq!(typed(rules, ch("k"), ch("k"), KeyCode::KeyK, "k", "ctrl"), None, "{rules:?}");
+            assert_eq!(typed(rules, ch("K"), ch("k"), KeyCode::KeyK, "K", "ctrl shift"), None, "{rules:?}");
+            assert_eq!(typed(rules, ch("k"), ch("k"), KeyCode::KeyK, "k", "cmd"), None, "{rules:?}");
+            let shift_a = typed(rules, ch("A"), ch("a"), KeyCode::KeyA, "A", "shift");
+            assert_eq!(shift_a.as_deref(), Some("A"), "{rules:?}");
+        }
+        // xkb's Ctrl+Alt is a command chord: its text is the plain character.
+        assert_eq!(typed(Xkb, ch("k"), ch("k"), KeyCode::KeyK, "k", "ctrl alt"), None);
     }
 
     #[test]
