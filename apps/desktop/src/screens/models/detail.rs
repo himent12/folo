@@ -207,27 +207,33 @@ impl FoloApp {
         let kpis = panel(&t)
             .flex()
             .child(
-                div().flex_grow().flex_basis(folo_ui::relative(0.28)).min_w_0().px(px(16.)).py(px(14.)).child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(caption(&t, "mAP50-95"))
-                        .child(
-                            text(ty::X3XL, t.text_primary)
-                                .h(px(ty::X3XL.line))
-                                .tnum()
-                                .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
-                        )
-                        .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().ellipsis().child(
-                            match &head_ds {
-                                Some((d, split)) => {
-                                    format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
-                                }
-                                None => "IoU 0.50–0.95".to_string(),
-                            },
-                        )),
-                ),
+                div()
+                    .flex_grow()
+                    .flex_basis(folo_ui::relative(0.28))
+                    .min_w_0()
+                    .px(px(16.))
+                    .py(px(14.))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(4.))
+                            .child(caption(&t, "mAP50-95"))
+                            .child(
+                                text(ty::X3XL, t.text_primary)
+                                    .h(px(ty::X3XL.line))
+                                    .tnum()
+                                    .child(mm.as_ref().map_or("–".into(), |x| f3(x.map50_95))),
+                            )
+                            .child(text(ty::SM, t.text_tertiary).whitespace_nowrap().ellipsis().child(
+                                match &head_ds {
+                                    Some((d, split)) => {
+                                        format!("IoU 0.50–0.95 · {}", split_label(d, split, None))
+                                    }
+                                    None => "IoU 0.50–0.95".to_string(),
+                                },
+                            )),
+                    ),
             )
             .child(vline(&t))
             .child(tile(small(

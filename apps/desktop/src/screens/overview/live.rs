@@ -251,10 +251,9 @@ impl FoloApp {
             )
             // Progress as a hairline rail across the panel.
             .child(
-                div()
-                    .h(px(2.))
-                    .bg(t.bg_inset)
-                    .child(div().h_full().w(folo_ui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill())),
+                div().h(px(2.)).bg(t.bg_inset).child(
+                    div().h_full().w(folo_ui::relative(r.progress().clamp(0., 1.))).bg(t.accent_fill()),
+                ),
             )
             .child(div().w_full().py(px(card_pad_y)).child(kpis))
             // The chart section is the run page's chart card without its frame: a header row on a

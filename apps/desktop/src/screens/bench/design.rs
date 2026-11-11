@@ -1,7 +1,9 @@
 //! "Design with an agent" beside the plan: the request, then the proposal.
 
 use folo_ui::prelude::FluentBuilder;
-use folo_ui::{AnyElement, Context, Focusable, FontWeight, IntoElement, ParentElement, Styled, Window, div, px};
+use folo_ui::{
+    AnyElement, Context, Focusable, FontWeight, IntoElement, ParentElement, Styled, Window, div, px,
+};
 
 use super::cells::num_cell;
 use super::format::pct;

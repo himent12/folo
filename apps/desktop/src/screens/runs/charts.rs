@@ -360,7 +360,9 @@ impl FoloApp {
                 div()
                     .flex()
                     .gap(px(16.))
-                    .child(div().flex().min_w_0().flex_grow().flex_basis(folo_ui::relative(ga.abs())).child(a))
+                    .child(
+                        div().flex().min_w_0().flex_grow().flex_basis(folo_ui::relative(ga.abs())).child(a),
+                    )
                     .child(div().flex().min_w_0().flex_grow().flex_basis(folo_ui::relative(gb)).child(b))
             }
         };

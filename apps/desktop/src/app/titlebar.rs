@@ -28,25 +28,27 @@ impl FoloApp {
         let crumbs = self.breadcrumbs();
         let maximized = window.is_maximized();
         let fullscreen = window.is_fullscreen();
-        let win_btn =
-            |base: folo_ui::Stateful<folo_ui::Div>, id: &'static str, icon_path: &'static str, close: bool| {
-                base.group(id)
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
-                    .active(|s| s.opacity(0.8))
-                    .child(
-                        folo_ui::svg()
-                            .path(icon_path)
-                            .size(px(10.))
-                            .flex_none()
-                            .text_color(t.text_secondary)
-                            .group_hover(id, move |s| {
-                                s.text_color(if close { t.window_close_text } else { t.text_primary })
-                            }),
-                    )
-            };
+        let win_btn = |base: folo_ui::Stateful<folo_ui::Div>,
+                       id: &'static str,
+                       icon_path: &'static str,
+                       close: bool| {
+            base.group(id)
+                .flex()
+                .items_center()
+                .justify_center()
+                .hover(move |s| if close { s.bg(t.window_close) } else { s.bg(t.bg_hover) })
+                .active(|s| s.opacity(0.8))
+                .child(
+                    folo_ui::svg()
+                        .path(icon_path)
+                        .size(px(10.))
+                        .flex_none()
+                        .text_color(t.text_secondary)
+                        .group_hover(id, move |s| {
+                            s.text_color(if close { t.window_close_text } else { t.text_primary })
+                        }),
+                )
+        };
         let search_fh = self.fh("titlebar-search", cx);
         let search_ring = self.ring(&search_fh, window);
         let min_btn = self.caption_button("win-min", WindowControlArea::Min, fullscreen, cx);
@@ -187,7 +189,11 @@ impl FoloApp {
     /// dimmed crumbs and search field take no clicks under an overlay) and the three buttons,
     /// where `titlebar()` puts them. A press here neither reaches the scrim (which would dismiss
     /// the overlay) nor the page.
-    pub fn caption_controls(&self, window: &Window, cx: &mut Context<Self>) -> folo_ui::Stateful<folo_ui::Div> {
+    pub fn caption_controls(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> folo_ui::Stateful<folo_ui::Div> {
         let fullscreen = window.is_fullscreen();
         titlebar_row()
             .id("caption-controls")

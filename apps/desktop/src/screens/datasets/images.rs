@@ -338,7 +338,10 @@ impl FoloApp {
                                             .bg(folo_ui::linear_gradient(
                                                 180.,
                                                 folo_ui::linear_color_stop(folo_ui::hsla(0., 0., 0., 0.), 0.),
-                                                folo_ui::linear_color_stop(folo_ui::hsla(0., 0., 0., 0.7), 1.),
+                                                folo_ui::linear_color_stop(
+                                                    folo_ui::hsla(0., 0., 0., 0.7),
+                                                    1.,
+                                                ),
                                             ))
                                             .when(!focused, |d| d.invisible())
                                             .group_hover(SharedString::from(key.clone()), |s| s.visible())

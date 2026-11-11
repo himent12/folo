@@ -372,7 +372,11 @@ impl FoloApp {
                     .flex_1()
                     .min_h_0()
                     .bg(t.bg_inset)
-                    .cursor(if zoom > 1.0 { folo_ui::CursorStyle::OpenHand } else { folo_ui::CursorStyle::Arrow })
+                    .cursor(if zoom > 1.0 {
+                        folo_ui::CursorStyle::OpenHand
+                    } else {
+                        folo_ui::CursorStyle::Arrow
+                    })
                     .on_scroll_wheel(cx.listener(move |this, ev: &folo_ui::ScrollWheelEvent, w, cx| {
                         let Some(b) = wheel_cell.get() else { return };
                         let dy = f32::from(ev.delta.pixel_delta(w.line_height()).y);
@@ -396,7 +400,10 @@ impl FoloApp {
                             this.play_drag = Some((ev.position, this.play_pan));
                         }),
                     )
-                    .on_mouse_up(folo_ui::MouseButton::Left, cx.listener(|this, _, _, _| this.play_drag = None))
+                    .on_mouse_up(
+                        folo_ui::MouseButton::Left,
+                        cx.listener(|this, _, _, _| this.play_drag = None),
+                    )
                     .on_mouse_move(cx.listener(move |this, ev: &MouseMoveEvent, _, cx| {
                         if let Some((from, pan0)) = this.play_drag
                             && ev.pressed_button == Some(folo_ui::MouseButton::Left)
