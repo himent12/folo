@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { hub } from '$lib/api/index';
 import { ApiError } from '$lib/api/client';
 import { MockApi } from '$lib/api/mock';
-import type { Bench } from '$lib/api/types';
+import type { Bench, Model } from '$lib/api/types';
 import { parse, router } from '$lib/router';
 import { undescribedFields } from '$lib/ui/fieldA11y';
 import { toast } from '$lib/ui/toast';
@@ -131,9 +131,9 @@ describe('New benchmark', () => {
 });
 
 describe('Add entry', () => {
-  async function dialog(kind: 'model' | 'agent' | 'external', benchId = 'bn_3c90') {
+  async function dialog(kind: 'model' | 'agent' | 'external', benchId = 'bn_3c90', only?: (m: Model) => boolean) {
     const bench: Bench = await hub.api.bench(benchId);
-    const models = await hub.api.models();
+    const models = (await hub.api.models()).filter((m) => !only || only(m));
     const agents = await hub.api.labelAgents();
     const entries = await hub.api.benchEntries(benchId);
     const catalog = await hub.api.benchCatalog();
@@ -165,6 +165,19 @@ describe('Add entry', () => {
     flushSync();
     expect([...document.querySelectorAll('.chip.miss')].map((x) => x.textContent?.replace(/,.*$/, '').trim())).toEqual(['washer', 'screw', 'spring', 'rivet', 'pin', 'bearing']);
     expect(sel.querySelector<HTMLOptionElement>('option[value="m_coco_s"]')?.disabled).toBe(true);
+  });
+
+  it('says when no model knows a class of the benchmark, and how to get one', async () => {
+    await dialog('model', 'bn_3c90', (m) => m.id === 'm_coco_s');
+    const help = document.querySelector('.no-model')!;
+    expect(help.querySelector('.nm-title')?.textContent).toMatch(/^No model here knows bolt, nut, washer, screw or \d+ more$/);
+    expect(help.querySelector<HTMLAnchorElement>('a')?.getAttribute('href')).toMatch(/^#\/runs\/new\?dataset=|^#\/datasets\/label\//);
+    const add = submit();
+    expect(add.disabled).toBe(true);
+    expect(why(add)).toBe('No model knows these classes');
+    [...help.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Use an agent')!.click();
+    flushSync();
+    expect(document.querySelector('.no-model')).toBeNull();
   });
 
   it('starts an agent entry with the defaults', async () => {
