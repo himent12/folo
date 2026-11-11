@@ -2,7 +2,7 @@
 // What the labeling screens say about a job, a run and what it cost, one wording everywhere.
 
 import type { LabelAgent, LabelImage, LabelJob, LabelRun, LabelUsage, RunStatus } from '$lib/api/types';
-import { num, usd } from '$lib/format';
+import { num, sentence, usd } from '$lib/format';
 import { AGENT_NAME, CLASSES_MAX } from '$lib/label';
 
 /** StatusBadge's `OwnStatus` (ui/StatusBadge.tsx). */
@@ -78,10 +78,12 @@ export function usageFacts(u: LabelUsage): string[] {
  */
 export function askOutcome(run: LabelRun, img: LabelImage | undefined): { tone: 'success' | 'info' | 'error'; title: string; detail?: string } | null {
   const failed = `${AGENT_NAME[run.agent]} could not label it again`;
-  if (run.outcome === 'failed') return { tone: 'error', title: failed, detail: [run.error, run.hint].filter(Boolean).join(' ') || undefined };
+  // The status line sets no code: the server's words as plain sentences.
+  const said = (...parts: (string | null | undefined)[]) => parts.flatMap((p) => (p ? [sentence(p, true)] : [])).join(' ') || undefined;
+  if (run.outcome === 'failed') return { tone: 'error', title: failed, detail: said(run.error, run.hint) };
   if (run.outcome === 'stopped') return { tone: 'info', title: 'The run was stopped', detail: 'The image keeps the boxes it had.' };
   if (!img || img.status === 'labeling') return null;
-  if (img.status === 'failed') return { tone: 'error', title: failed, detail: img.error ?? undefined };
+  if (img.status === 'failed') return { tone: 'error', title: failed, detail: said(img.error) };
   return { tone: 'success', title: 'New boxes', detail: imageState(img) };
 }
 
