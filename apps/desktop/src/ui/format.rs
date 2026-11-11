@@ -46,6 +46,18 @@ pub fn queue_wait_text(position: Option<u32>, ahead: Option<(&str, Option<f64>)>
     }
 }
 
+/// A GPU as Overview's system meters name it: its short name, and its memory when the platform
+/// reports it ("RTX 4080 SUPER · 16.0 GiB VRAM"); never "VRAM unknown". Its load is the meter
+/// beside it, when the platform reports one.
+pub fn gpu_label(g: &crate::api::GpuInfo) -> String {
+    if g.memory_bytes > 0 {
+        let (vram, unit) = bytes(g.memory_bytes);
+        format!("{} · {vram} {unit} VRAM", short_gpu(&g.name))
+    } else {
+        short_gpu(&g.name)
+    }
+}
+
 /// A confidence threshold as every surface writes it: "0.31", or "0.314" when the third decimal
 /// carries information (the API's best-F1 grid is 0.001).
 pub fn fmt_conf(c: f32) -> String {
@@ -285,6 +297,19 @@ mod tests {
         assert_eq!(fmt_conf(0.314), "0.314");
         assert_eq!(fmt_conf(0.024), "0.024");
         assert_eq!(fmt_conf(0.35), "0.35");
+    }
+
+    #[test]
+    fn a_gpu_is_named_by_what_is_known() {
+        let g = crate::api::GpuInfo {
+            ordinal: 0,
+            name: "NVIDIA GeForce RTX 4080 SUPER".into(),
+            backend: crate::api::GpuBackend::Vulkan,
+            memory_bytes: 16 << 30,
+            util: None,
+        };
+        assert_eq!(super::gpu_label(&g), "RTX 4080 SUPER · 16.0 GiB VRAM");
+        assert_eq!(super::gpu_label(&crate::api::GpuInfo { memory_bytes: 0, ..g }), "RTX 4080 SUPER");
     }
 
     #[test]

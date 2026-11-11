@@ -22,9 +22,9 @@ pub use cloud::{
     transfer_frac,
 };
 pub use format::{
-    bytes, count_si, counted, device_label, display_path, f3, fmt_aug, fmt_conf, fmt_lr, fmt_scale, int,
-    latency_text, lr_sci, may_overflow, model_storage, operating_conf, plural, pr_caption, queue_text,
-    queue_wait_text, sci, score_delta, share_spare, short_gpu, split_label, waiting_text,
+    bytes, count_si, counted, device_label, display_path, f3, fmt_aug, fmt_conf, fmt_lr, fmt_scale,
+    gpu_label, int, latency_text, lr_sci, may_overflow, model_storage, operating_conf, plural, pr_caption,
+    queue_text, queue_wait_text, sci, score_delta, share_spare, short_gpu, split_label, waiting_text,
 };
 pub use legend::{class_swatch, legend_value, line_swatch, swatch};
 pub use metric::{baseline_lift, detail_line, duration_metric, kv, metric, metric_pair, stat_at, stat_sized};
