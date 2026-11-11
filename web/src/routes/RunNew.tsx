@@ -13,6 +13,7 @@ import { hasFeature } from '$lib/throughput';
 import { href, router } from '$lib/router';
 import { serverCommand, trainCommand } from '$lib/trainCli';
 import { ownCreateAction, setCrumbs } from '$lib/shell/crumbs';
+import { watched } from '$lib/shell/runList';
 import Page from '$lib/shell/Page';
 import Button from '$lib/ui/Button';
 import Dialog from '$lib/ui/Dialog';
@@ -36,6 +37,7 @@ import { clearDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
 import { MAX_RUN_NAME, nameHint, runName, uniqueName } from './runnew/name';
 import WhyLine from './runnew/WhyLine';
 import { START_KEYS, startKeys } from './runnew/startKeys';
+import { aheadLine, aheadOf, startedToast } from './runnew/queue';
 import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
 import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
 import DatasetSection from './runnew/DatasetSection';
@@ -130,6 +132,10 @@ export default function RunNew() {
   const onCloud = computed(() => cloudOn.get() && cloudPick.cloud);
   const models = new Resource((s) => hub.api.models(s));
   const runs = new Resource((s) => hub.api.runs(s));
+  // While another run holds this machine, a new one waits in the queue: the Summary says so and Start reads "Queue run".
+  // The shell's list (polled every 2 s) is the current one; this page's own stands in until it arrives.
+  const ahead = computed(() => aheadOf(watched.runs ?? runs.data, onCloud.get()));
+  const startLabel = computed(() => (ahead.get() ? 'Queue run' : 'Start training'));
   /** Every run's name, so a new one is told apart (runnew/name). */
   const taken = computed(() => new Set((runs.data ?? []).map((r) => r.name)));
   // This server's measured speed (GET /api/system/throughput), where it has one: measured latency in the size table.
@@ -522,13 +528,15 @@ export default function RunNew() {
     // The Summary sheet closes first: the start's result is the page's (a toast, or the Device field's message).
     sumOpen.set(false);
     submitting.set(true);
+    const before = ahead.get();
     try {
       const run = await hub.api.createRun(config.get());
       started = true;
       clearDraft();
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).
-      toast.success(`Started ${run.name}`, `${run.epochs} epochs of ${run.config.arch} on ${dataset.get()?.name}${where}.`);
+      const t = startedToast(run, before);
+      toast.success(t.title, `${t.place ? `${t.place} · ` : ''}${run.epochs} epochs of ${run.config.arch} on ${dataset.get()?.name}${where}.`);
       router.go(`/runs/${run.id}`);
     } catch (err) {
       if (err instanceof ApiError && (err.code === 'device_not_found' || (err.code === 'not_implemented' && device.get().startsWith('gpu:')))) {
@@ -750,13 +758,14 @@ export default function RunNew() {
                 </div>
                 <div class="sum-col">
                   <Figures where="rail" />
+                  {ahead.get() ? <p class="ahead">{aheadLine(ahead.get()!)}</p> : null}
                   <div class="start" ref={startEl}>
                     {noFit.get() && (fix.get() || fixLoading.get()) ? (
                       <Button variant="primary" size="lg" block loading={fixLoading.get()} onclick={() => fix.get() && applyFix(fix.get()!)}>
                         {fix.get() ? `${useLabel(fix.get()!)}${fix.get()!.vram !== undefined ? ` · ${roughBytes(fix.get()!.vram!)}` : ''}` : 'Finding settings that fit'}
                       </Button>
                     ) : null}
-                    <span class="start-tip" use:tooltip={{ text: 'Start training', keys: START_KEYS }}>
+                    <span class="start-tip" use:tooltip={{ text: startLabel.get(), keys: START_KEYS }}>
                       <Button
                         type="submit"
                         variant={noFit.get() ? 'secondary' : 'primary'}
@@ -767,7 +776,7 @@ export default function RunNew() {
                         disabled={!valid.get()}
                         aria-describedby={[showWhy.get() ? 'start-why' : '', noFit.get() ? 'rail-nofit' : ''].filter(Boolean).join(' ') || undefined}
                       >
-                        Start training
+                        {startLabel.get()}
                       </Button>
                     </span>
                     <Why id="start-why" />
@@ -800,6 +809,7 @@ export default function RunNew() {
             applyFix={applyFix}
             submitting={submitting.get()}
             valid={valid.get()}
+            startLabel={startLabel.get()}
           />
 
           {/* Inside the form, so its Start button submits it. */}
@@ -821,7 +831,7 @@ export default function RunNew() {
                       disabled={!valid.get()}
                       aria-describedby={[showWhy.get() ? 'sheet-why' : '', 'sheet-nofit'].filter(Boolean).join(' ')}
                     >
-                      Start training
+                      {startLabel.get()}
                     </Button>
                     <Button variant="primary" loading={fixLoading.get()} onclick={() => fix.get() && applyFix(fix.get()!)}>
                       {fix.get() ? useLabel(fix.get()!) : 'Finding a fit'}
@@ -836,7 +846,7 @@ export default function RunNew() {
                     disabled={!valid.get()}
                     aria-describedby={showWhy.get() ? 'sheet-why' : undefined}
                   >
-                    Start training
+                    {startLabel.get()}
                   </Button>
                 )}
               </>
@@ -845,6 +855,7 @@ export default function RunNew() {
             <div class="sum">
               <Review withName />
               <Figures where="sheet" />
+              {ahead.get() ? <p class="ahead">{aheadLine(ahead.get()!)}</p> : null}
               <Why id="sheet-why" />
             </div>
           </Dialog>
@@ -879,6 +890,13 @@ css`
   }
   .start-tip {
     display: block;
+  }
+  /* What the run waits for: a plain line in the Summary's secondary ink, not a warning (waiting is normal). */
+  .ahead {
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
   }
   .layout :global([data-jumped]) {
     outline: 2px solid var(--focus);

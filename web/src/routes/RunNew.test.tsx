@@ -549,7 +549,8 @@ describe('New run: the keyboard', () => {
     // The Start button's tooltip names the shortcut.
     const tip = target.querySelector('.start .start-tip')!;
     tip.dispatchEvent(new Event('pointerenter'));
-    await until(() => document.getElementById('folo-tooltip')?.textContent?.includes('Start training'), 'the tooltip');
+    const label = tip.querySelector('button')!.textContent!.trim();
+    await until(() => document.getElementById('folo-tooltip')?.textContent?.includes(label), 'the tooltip');
     expect([...document.querySelectorAll('#folo-tooltip kbd')].map((k) => k.textContent)).toEqual(['Ctrl', '↵']);
     press(target.querySelector('input#epochs')!, { ctrlKey: true });
     await until(() => create.mock.calls.length === 1, 'the start');
@@ -588,5 +589,41 @@ describe('New run: the run name', () => {
     type('x'.repeat(65));
     expect(target.querySelector('#name-error')?.textContent).toBe('At most 64 characters (this one has 65).');
     expect(target.querySelector('#start-why')?.textContent).toBe('Run name: At most 64 characters (this one has 65).');
+  });
+});
+
+describe('New run while another run trains', () => {
+  it('says the run will queue, reads "Queue run", and announces it as queued; on a free machine, as started', async () => {
+    const { toast } = await import('$lib/ui/toast');
+    const said = vi.spyOn(toast, 'success');
+    await open();
+    const training = (await api.runs()).find((r) => r.status === 'running' && !r.cloud)!;
+    const line = await until(() => target.querySelector('.summary .ahead'), 'the queue line');
+    const waiting = (await api.runs()).filter((r) => r.queue_position != null).length;
+    expect(line.textContent?.startsWith(`${training.name} is training and ${waiting} runs wait: this run will be 3rd in the queue`)).toBe(true);
+    expect(waiting).toBe(2);
+    expect(target.querySelector('.start button[type="submit"]')?.textContent?.trim()).toBe('Queue run');
+    expect(target.querySelector('.dock button[type="submit"]')?.textContent?.trim()).toBe('Queue run');
+    const run = { ...(await api.run(training.id)), id: 'run_q2', name: 'q-two', status: 'queued' as const, queue_position: waiting + 1 };
+    vi.spyOn(api, 'createRun').mockResolvedValue(run);
+    await start();
+    await until(() => said.mock.calls.length, 'the toast');
+    expect(said.mock.calls[0]![0]).toBe('Queued q-two');
+    expect(said.mock.calls[0]![1]).toMatch(/^3rd in queue · /);
+
+    // Nothing else on this machine: no line, "Start training", and a first place in the queue is a start.
+    vi.mocked(api.createRun).mockResolvedValue({ ...run, queue_position: 1 });
+    unmount(c!);
+    c = undefined;
+    sessionStorage.clear();
+    said.mockClear();
+    const runs = (await api.runs()).filter((r) => !['queued', 'running', 'stopping'].includes(r.status));
+    vi.spyOn(api, 'runs').mockResolvedValue(runs);
+    await open();
+    expect(target.querySelector('.summary .ahead')).toBeNull();
+    expect(target.querySelector('.start button[type="submit"]')?.textContent?.trim()).toBe('Start training');
+    await start();
+    await until(() => said.mock.calls.length, 'the toast');
+    expect(said.mock.calls[0]![0]).toBe('Started q-two');
   });
 });

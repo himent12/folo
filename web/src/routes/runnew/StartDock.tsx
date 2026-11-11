@@ -45,6 +45,8 @@ export interface StartDockProps {
   applyFix: (f: OomFix) => void;
   submitting: boolean;
   valid: boolean;
+  /** "Start training", or "Queue run" while another run holds this machine. */
+  startLabel: string;
 }
 
 export default function StartDock(props: StartDockProps) {
@@ -126,7 +128,7 @@ export default function StartDock(props: StartDockProps) {
           {props.fix ? useLabel(props.fix) : 'Finding a fit'}
         </Button>
       ) : (
-        <span class="start-tip" use:tooltip={{ text: 'Start training', keys: START_KEYS }}>
+        <span class="start-tip" use:tooltip={{ text: props.startLabel, keys: START_KEYS }}>
           <Button
             type="submit"
             variant="primary"
@@ -136,7 +138,7 @@ export default function StartDock(props: StartDockProps) {
             disabled={!props.valid}
             aria-describedby={props.showWhy ? 'dock-why' : undefined}
           >
-            Start training
+            {props.startLabel}
           </Button>
         </span>
       )}

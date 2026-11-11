@@ -69,7 +69,7 @@ try {
   await page.getByLabel('Epochs').first().fill(String(epochs));
   await page.getByRole('radio', { name: '320' }).first().click();
   await shot(page, 'desktop-new-run');
-  await page.getByRole('button', { name: 'Start training' }).first().click();
+  await page.getByRole('button', { name: /^(Start training|Queue run)$/ }).first().click();
   await page.waitForURL(/#\/runs\/run_/, { timeout: 30_000 });
   const runPath = page.url().replace(`${base}/#`, '');
   console.log(`run: ${runPath}`);
