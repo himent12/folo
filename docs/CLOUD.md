@@ -243,6 +243,10 @@ API clients.
   model.
 - A cloud run does not feed this server's throughput table, and its time estimate is the reference machine's
   (docs/BENCHMARKS.md), so the cost estimate is a rough one.
+- The dataset always travels from this machine, at the speed of its uplink: a 174 MB dataset is two minutes from a
+  home line, COCO's 20 GB would be an hour or more of a rented GPU waiting. A worker cannot fetch a public dataset
+  itself yet. For the folo-s COCO weights (examples/coco, 2026-11-11) the pod was therefore set up by hand: COCO
+  straight from cocodataset.org (three minutes in a datacentre) and `folo train` on the pod.
 - A RunPod worker installs the release of this server's version. Until that release is published (or for a
   private repository), give the connection a worker download URL; FOLO says so before it rents anything.
 
