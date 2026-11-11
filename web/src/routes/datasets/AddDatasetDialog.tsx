@@ -4,6 +4,7 @@ import Sparkles from '$icons/sparkles';
 import { bindable, computed, createUniqueId, css, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
+import { duration, num } from '$lib/format';
 import { router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import ClassChips, { addClasses } from '$lib/ui/ClassChips';
@@ -39,7 +40,18 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   const mode = bindable(props, 'mode', 'folder' as Mode);
 
   const uid = createUniqueId();
-  const busy = signal(false);
+  /** The request in flight, if any: it outlives the dialog (closing does not stop the server), so it is not reset. */
+  const work = signal<{ what: string; since: number } | null>(null);
+  const busy = computed(() => !!work.get());
+  /** Seconds since the request started, ticking while it runs (a long generation says it is still going). */
+  const elapsed = signal(0);
+  effect(() => {
+    const w = work.get();
+    if (!w) return;
+    elapsed.set(0);
+    const t = setInterval(() => elapsed.set((Date.now() - w.since) / 1000), 1000);
+    return () => clearInterval(t);
+  });
   const error = signal<unknown>(undefined);
   const touched = signal(false);
 
@@ -111,7 +123,13 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   function reset() {
     error.set(undefined);
     touched.set(false);
-    busy.set(false);
+  }
+
+  /** Closed while the request runs: it goes on in the server, and the answer comes as a toast, never a jump. */
+  function onclose() {
+    // page-level: the dialog has just closed; the request goes on behind it.
+    const w = work.peek();
+    if (w) toast.info(`Still ${w.what[0]!.toLowerCase()}${w.what.slice(1)}`, 'It goes on in the background. A note here will say when it is done.');
   }
 
   async function submit(e: SubmitEvent) {
@@ -123,8 +141,9 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     touched.set(true);
     error.set(undefined);
     if (!valid.get() || busy.get()) return;
-    busy.set(true);
     const m = mode.get();
+    const images = Math.round(sImages.get() ?? 0);
+    work.set({ what: m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${num(images)} images`, since: Date.now() });
     try {
       // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
       const before = m === 'folder' ? (props.known ?? (await hub.api.datasets().catch(() => []))) : [];
@@ -133,20 +152,31 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
           ? await hub.api.createDataset({ name: folderName.get(), path: cleaned.get(), format: format.get() })
           : await hub.api.createSyntheticDataset({
               name: sName.get().trim(),
-              images: Math.round(sImages.get() ?? 0),
+              images,
               classes: classes.get(),
               imgsz: Number(imgsz.get()),
               seed: seed.get() ?? 0,
             });
+      const known = before.some((d) => d.id === ds.id);
+      const title = known ? `Already registered as ${ds.name}` : m === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready';
+      const count = `${ds.name} · ${num(ds.splits.train + ds.splits.val + ds.splits.test)} images`;
+      work.set(null);
+      if (!open.peek()) {
+        // Dismissed while it ran: wherever the person is now, they stay there; the toast offers the dataset.
+        const go = { label: 'Open', run: () => router.go(`/datasets/${ds.id}`) };
+        if (known) toast.info(title, 'That folder is in the list.', go);
+        else toast.success(title, count, go);
+        return;
+      }
       // The dialog closes first: what was added is said over the dataset's page it opens.
       open.set(false);
-      if (before.some((d) => d.id === ds.id)) toast.info(`Already registered as ${ds.name}`, 'That folder is in the list; opening it.');
-      else toast.success(m === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready', `${ds.name} · ${ds.splits.train + ds.splits.val + ds.splits.test} images`);
+      if (known) toast.info(title, 'That folder is in the list; opening it.');
+      else toast.success(title, count);
       router.go(`/datasets/${ds.id}`);
     } catch (err) {
-      error.set(err);
-    } finally {
-      busy.set(false);
+      work.set(null);
+      if (open.peek()) error.set(err);
+      else toast.error(err, m === 'folder' ? 'Could not register the folder' : 'Could not generate the dataset');
     }
   }
 
@@ -157,19 +187,27 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   return (
     <Dialog
       bind:open={open}
+      onclose={onclose}
       title="Add dataset"
       description="Register a folder the server can read, or generate a sample set of shapes to try FOLO."
       footer={() => (
         <>
           {/* What Register still needs, in words (a disabled button's tooltip never shows to touch or the keyboard). A
               field in error says its own reason beside it, so this line is only for what has not been entered yet. */}
-          {missing.get() ? (
+          {work.get() ? (
+            /* What runs, how long it has, and that closing does not stop it (the server has no cancel). The seconds are
+               left out of what a screen reader hears, so it is not read out every second. */
+            <p class="why" role="status">
+              {work.get()!.what}… <span class="num" aria-hidden="true">{duration(elapsed.get())}</span>
+              <span class="then"> Closing this does not stop it.</span>
+            </p>
+          ) : missing.get() ? (
             <p class="why" data-gate-why>
               {missing.get()}
             </p>
           ) : null}{' '}
           <Button variant="ghost" onclick={() => open.set(false)}>
-            Cancel
+            {busy.get() ? 'Close' : 'Cancel'}
           </Button>{' '}
           <Gate reason={reason.get()}>
             {(why) => (
@@ -189,7 +227,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
         </>
       )}
     >
-      <div class="tabs">
+      <div class="tabs" inert={busy.get()}>
         <Tabs
           label="How to add"
           idPrefix={`${uid}-mode`}
@@ -202,86 +240,89 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
         />
       </div>{' '}
       <div id={`${uid}-mode-panel`} class="form" role="tabpanel" aria-labelledby={`${uid}-mode-${mode.get()}`}>
-        <form id={`${uid}-form`} class="panel" onsubmit={submit} novalidate>
-          {mode.get() === 'folder' ? (
-            <>
-              <Field label="Folder" for={`${uid}-path`} error={show(errs.get().path)} hint="Absolute path on the machine running `folo serve`. Files are never modified.">
-                <Input
-                  id={`${uid}-path`}
-                  bind:value={path}
-                  placeholder="e.g. D:/data/my-dataset"
-                  icon={FolderOpen}
-                  class="mono-input"
-                  autocomplete="off"
-                  spellcheck={false}
-                  invalid={!!show(errs.get().path)}
-                />
-              </Field>{' '}
-              <Field
-                label="Name"
-                for={`${uid}-name`}
-                error={show(errs.get().name)}
-                fix={show(errs.get().name) ? nameFix(folderName.get(), (n) => name.set(n)) : null}
-              >
-                <Input
-                  id={`${uid}-name`}
-                  bind:value={name}
-                  placeholder={derivedName.get() || 'my-dataset'}
-                  autocomplete="off"
-                  spellcheck={false}
-                  invalid={!!show(errs.get().name)}
-                />
-              </Field>{' '}
-              <Field label="Format" hint={format.get() === 'auto' ? 'Detects data.yaml (YOLO) or annotations/*.json (COCO).' : undefined}>
-                <Segmented
-                  label="Format"
-                  options={[
-                    { value: 'auto', label: 'Auto-detect' },
-                    { value: 'yolo', label: 'YOLO' },
-                    { value: 'coco', label: 'COCO' },
-                  ]}
-                  bind:value={format}
-                />
-              </Field>
-            </>
-          ) : (
-            <>
-              <Field
-                label="Name"
-                for={`${uid}-sname`}
-                error={show(errs.get().name)}
-                fix={show(errs.get().name) ? nameFix(sName.get(), (n) => sName.set(n)) : null}
-              >
-                <Input id={`${uid}-sname`} bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.get().name)} />
-              </Field>{' '}
-              <Field label="Classes" for={`${uid}-classes`} error={show(errs.get().classes)} hint="Press Enter or comma to add. Up to 16.">
-                <ClassChips id={`${uid}-classes`} bind:classes={classes} bind:draft={classDraft} max={16} placeholder="circle, square, …" />
-              </Field>{' '}
-              <div class="row">
-                <Field label="Images" for={`${uid}-images`} error={show(errs.get().images)}>
-                  <Input id={`${uid}-images`} type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.get().images)} />
+        <form id={`${uid}-form`} onsubmit={submit} novalidate>
+          {/* Locked while the request runs: what is on screen is what was sent. */}
+          <fieldset class="panel" disabled={busy.get()}>
+            {mode.get() === 'folder' ? (
+              <>
+                <Field label="Folder" for={`${uid}-path`} error={show(errs.get().path)} hint="Absolute path on the machine running `folo serve`. Files are never modified.">
+                  <Input
+                    id={`${uid}-path`}
+                    bind:value={path}
+                    placeholder="e.g. D:/data/my-dataset"
+                    icon={FolderOpen}
+                    class="mono-input"
+                    autocomplete="off"
+                    spellcheck={false}
+                    invalid={!!show(errs.get().path)}
+                  />
                 </Field>{' '}
-                <Field label="Seed" for={`${uid}-seed`} error={show(errs.get().seed)}>
-                  <Input id={`${uid}-seed`} type="number" min={0} step={1} bind:value={seed} invalid={!!show(errs.get().seed)} />
+                <Field
+                  label="Name"
+                  for={`${uid}-name`}
+                  error={show(errs.get().name)}
+                  fix={show(errs.get().name) ? nameFix(folderName.get(), (n) => name.set(n)) : null}
+                >
+                  <Input
+                    id={`${uid}-name`}
+                    bind:value={name}
+                    placeholder={derivedName.get() || 'my-dataset'}
+                    autocomplete="off"
+                    spellcheck={false}
+                    invalid={!!show(errs.get().name)}
+                  />
+                </Field>{' '}
+                <Field label="Format" hint={format.get() === 'auto' ? 'Detects data.yaml (YOLO) or annotations/*.json (COCO).' : undefined}>
+                  <Segmented
+                    label="Format"
+                    options={[
+                      { value: 'auto', label: 'Auto-detect' },
+                      { value: 'yolo', label: 'YOLO' },
+                      { value: 'coco', label: 'COCO' },
+                    ]}
+                    bind:value={format}
+                  />
                 </Field>
-              </div>{' '}
-              <Field label="Image size" hint={`Square images, ${imgsz.get()} × ${imgsz.get()} px. 80% train, 20% val.`}>
-                <Segmented
-                  label="Image size"
-                  options={[
-                    { value: '320', label: '320' },
-                    { value: '480', label: '480' },
-                    { value: '640', label: '640' },
-                    { value: '1024', label: '1024' },
-                  ]}
-                  bind:value={imgsz}
-                />
-              </Field>
-            </>
-          )}{' '}
-          {error.get() ? (
-            <ErrorState error={error.get()} title={mode.get() === 'folder' ? 'Could not register this folder' : 'Could not generate the dataset'} compact />
-          ) : null}
+              </>
+            ) : (
+              <>
+                <Field
+                  label="Name"
+                  for={`${uid}-sname`}
+                  error={show(errs.get().name)}
+                  fix={show(errs.get().name) ? nameFix(sName.get(), (n) => sName.set(n)) : null}
+                >
+                  <Input id={`${uid}-sname`} bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.get().name)} />
+                </Field>{' '}
+                <Field label="Classes" for={`${uid}-classes`} error={show(errs.get().classes)} hint="Press Enter or comma to add. Up to 16.">
+                  <ClassChips id={`${uid}-classes`} bind:classes={classes} bind:draft={classDraft} max={16} placeholder="circle, square, …" />
+                </Field>{' '}
+                <div class="row">
+                  <Field label="Images" for={`${uid}-images`} error={show(errs.get().images)}>
+                    <Input id={`${uid}-images`} type="number" min={10} max={20000} step={100} bind:value={sImages} invalid={!!show(errs.get().images)} />
+                  </Field>{' '}
+                  <Field label="Seed" for={`${uid}-seed`} error={show(errs.get().seed)}>
+                    <Input id={`${uid}-seed`} type="number" min={0} step={1} bind:value={seed} invalid={!!show(errs.get().seed)} />
+                  </Field>
+                </div>{' '}
+                <Field label="Image size" hint={`Square images, ${imgsz.get()} × ${imgsz.get()} px. 80% train, 20% val.`}>
+                  <Segmented
+                    label="Image size"
+                    options={[
+                      { value: '320', label: '320' },
+                      { value: '480', label: '480' },
+                      { value: '640', label: '640' },
+                      { value: '1024', label: '1024' },
+                    ]}
+                    bind:value={imgsz}
+                  />
+                </Field>
+              </>
+            )}{' '}
+            {error.get() ? (
+              <ErrorState error={error.get()} title={mode.get() === 'folder' ? 'Could not register this folder' : 'Could not generate the dataset'} compact />
+            ) : null}
+          </fieldset>
         </form>
       </div>
     </Dialog>
@@ -289,6 +330,11 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
 }
 
 css`
+  /* The second sentence under the first: what runs and for how long, then that Close leaves it running. */
+  .then {
+    display: block;
+    color: var(--text-tertiary);
+  }
   .why {
     margin-right: auto;
     align-self: center;
@@ -315,6 +361,10 @@ css`
   .panel {
     display: grid;
     gap: var(--space-4);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
   }
   .row {
     display: grid;

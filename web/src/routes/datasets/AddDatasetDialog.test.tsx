@@ -126,6 +126,28 @@ describe('AddDatasetDialog', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it('locks the form while it generates, and after a dismissal says where the result is instead of jumping to it', async () => {
+    let finish!: () => void;
+    const ds = await hub.api.dataset('ds_shapes');
+    vi.spyOn(hub.api, 'createSyntheticDataset').mockImplementation(() => new Promise((res) => (finish = () => res(ds))));
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic' } });
+    flushSync();
+    document.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+    flushSync();
+    expect(document.querySelector('fieldset')!.disabled).toBe(true);
+    expect(document.querySelector('p[role="status"]')?.textContent).toContain('Generating 1,000 images…');
+    const close = [...document.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === 'Close')!;
+    close.click();
+    flushSync();
+    expect(toast.items.at(-1)).toMatchObject({ tone: 'info', title: 'Still generating 1,000 images' });
+    finish();
+    await vi.waitFor(() => expect(toast.items.at(-1)?.title).toBe('Synthetic dataset ready'));
+    expect(go).not.toHaveBeenCalled();
+    toast.items.at(-1)!.action!.run();
+    expect(go).toHaveBeenCalledWith('/datasets/ds_shapes');
+  });
+
   it('announces a dataset that was not in the list as new', async () => {
     const go = await register('D:/data/shapes', [{ id: 'ds_fasteners' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'success', title: 'Dataset registered' });
