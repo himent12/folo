@@ -80,6 +80,7 @@ web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design sy
 apps/desktop/        FOLO Desktop (Rust, its own cargo workspace: the app and ui/ = folo-ui, its UI framework;
                      talks to folo-server over docs/API.md)
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md
+bench/finetune/      fine-tuning accuracy: folo-n vs yolo26n on small public datasets, one pycocotools scorer
 docs/                QUICKSTART, ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, MCP, FORMAT (.folo), ROADMAP, BOAT,
                      BENCHMARKS, WASM, CLOUD (training on rented or remote GPUs), ...; docs/img holds the README screenshots
 ```

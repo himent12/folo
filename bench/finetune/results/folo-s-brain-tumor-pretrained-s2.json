@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "tool": "folo",
+  "model": "folo-s",
+  "dataset": "brain-tumor",
+  "variant": "pretrained",
+  "seed": 2,
+  "epochs_planned": 100,
+  "epochs_run": 100,
+  "imgsz": 640,
+  "batch": 16,
+  "weights": {
+    "name": "folo-s-coco",
+    "sha256": "a9d7f588aadd62acadb629f50c86038cc7abc07cdb41612a5d90668b32a57e60"
+  },
+  "eval_split": "val",
+  "metrics": {
+    "ap": 0.4720420452415277,
+    "ap50": 0.6450827360262457,
+    "ap75": 0.5746812361293929,
+    "ap_small": 0.3948410530487473,
+    "ap_medium": 0.5196069660360342,
+    "ap_large": 0.56509900990099,
+    "ar1": 0.6604567845947156,
+    "ar10": 0.7551388266905508,
+    "ar100": 0.7551388266905508,
+    "ar_small": 0.6761111111111111,
+    "ar_medium": 0.7840953072085147,
+    "ar_large": 0.6333333333333333,
+    "images": 223,
+    "truths": 241,
+    "detections": 1460,
+    "images_without_detections": 0,
+    "inverted_boxes": 0
+  },
+  "tool_reported": {
+    "map50_95": 0.47204205,
+    "map50": 0.6450827,
+    "source": "folo val of best.folo (FOLO's own metric)",
+    "best_epoch": 44,
+    "train_best_map50_95": 0.47204205
+  },
+  "train_wall_s": 1043.0,
+  "gpu": "NVIDIA A40 (vulkan)",
+  "versions": {
+    "folo_server": "0.1.0",
+    "folo_cli": "folo 0.1.0 (ee846c8829ce 2026-11-11)",
+    "dataset_layout_sha256": "908edcb35303362c5b77b267b7d43171b9c9c989fd5741242d1ca038f183bf26",
+    "resolved": {
+      "optimizer": "adamw",
+      "lr0": 0.001667,
+      "lrf": 0.01,
+      "cos_lr": false,
+      "momentum": 0.9,
+      "betas": [
+        0.9,
+        0.999
+      ],
+      "weight_decay": 0.0005,
+      "batch": 16,
+      "accumulate": 4,
+      "nbs": 64,
+      "optimizer_steps_per_epoch": 14,
+      "warmup_iters": 100,
+      "warmup_epochs": 3.0,
+      "warmup_momentum": 0.8,
+      "warmup_bias_lr": 0.0,
+      "close_mosaic": 10
+    }
+  },
+  "compute": {
+    "where": "cloud",
+    "provider": "runpod",
+    "offer": {
+      "id": "NVIDIA A40@secure",
+      "gpu": "A40",
+      "gpu_count": 1,
+      "vram_bytes": 51539607552,
+      "price_per_hour": 0.59,
+      "region": null,
+      "detail": "Secure Cloud",
+      "availability": "none"
+    },
+    "cost_usd": 0.179,
+    "max_hours": 0.4,
+    "val_device": "cpu"
+  },
+  "created": "2026-11-11T12:43:18Z",
+  "run_id": "run_0833",
+  "detections_file": "D:\\folo-data\\runs-finetune\\folo-s\\folo-s-brain-tumor-pretrained-s2\\detections-val.json"
+}

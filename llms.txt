@@ -3,8 +3,9 @@
 > wgpu/WGSL GPU kernels, a YOLO-style detector (folo-n/s/m/l/x), and training, evaluation and export. It ships one
 > `folo` CLI (every command supports `--json`, with stable exit codes), an HTTP + SSE API (`folo serve`), an MCP
 > server for agents (`folo mcp`), the FOLO Studio web app, the FOLO Desktop native app, and in-browser inference
-> (wasm + WebGPU). Status: v0.1, early. No pretrained weights, no published release yet (build from
-> source).
+> (wasm + WebGPU). Status: v0.1, early. COCO-pretrained weights are published GitHub releases (`folo weights pull
+> folo-n-coco-v2`, folo-n, val2017 AP 0.317; `folo weights pull folo-s-coco`, folo-s, AP 0.416; the repository is
+> private for now, so that needs access to it through `gh`); the 0.1.0 binary release is a draft (build from source).
 
 Fastest path for an agent:
 - **MCP:** `folo mcp --data-dir DIR` (stdio). It has 22 tools: folo_info, list_datasets, get_dataset,
@@ -67,13 +68,14 @@ Fastest path for an agent:
   test
 - [Benchmarks](docs/BENCHMARKS.md): folo-n/s vs Ultralytics yolo26n/s/m on an RTX 4080 SUPER (GPU forward, end to
   end, CPU, training step, memory), with the method, raw numbers and next optimisations. Scripts and raw JSON are
-  in `bench/baselines/`
+  in `bench/baselines/`; fine-tuning accuracy on small datasets (folo-n vs yolo26n and folo-s vs yolo26s, one pycocotools scorer) in
+  `bench/finetune/`
 
 ## Examples
 - [Shapes](examples/shapes/README.md): the convergence gate (folo-n on synthetic shapes at 320 px). It has the
   commands and per-epoch results on CPU (72 min) and GPU (169 s)
-- [COCO](examples/coco/README.md): folo-n pretrained from scratch on COCO 2017 at 640 px, with pycocotools parity and
-  `folo weights`
+- [COCO](examples/coco/README.md): folo-n and folo-s pretrained from scratch on COCO 2017 at 640 px (val2017 AP 0.317
+  and 0.416), with pycocotools parity and `folo weights`
 
 ## Apps
 - [FOLO Studio](web/README.md): the web app (Svelte 5 + TypeScript + Vite). It covers the dev server, checks,

@@ -694,7 +694,14 @@ fn weights_names_export_and_coco_val() {
     let (code, lines, stderr) = folo_with(&["weights", "list", "--json"], Some(&cache));
     assert_eq!(code, 0, "{stderr}");
     let names: Vec<&str> = lines.iter().map(|l| l["name"].as_str().unwrap()).collect();
-    for name in ["folo-n-coco", "folo-n-coco-f16", "folo-n-coco-v2", "folo-n-coco-v2-f16"] {
+    for name in [
+        "folo-n-coco",
+        "folo-n-coco-f16",
+        "folo-n-coco-v2",
+        "folo-n-coco-v2-f16",
+        "folo-s-coco",
+        "folo-s-coco-f16",
+    ] {
         assert!(names.contains(&name), "{name} missing from {names:?}");
     }
     assert!(lines.iter().all(|l| l["cached"] == false));

@@ -1,0 +1,1045 @@
+{
+  "version": 1,
+  "created": "2026-11-11T12:47:43Z",
+  "runs": 52,
+  "groups": [
+    {
+      "dataset": "bccd",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "test",
+      "ap": {
+        "mean": 0.6065575627484278,
+        "min": 0.606060169064872,
+        "max": 0.6074275581606339,
+        "n": 3,
+        "stdev": 0.0007560173747653156
+      },
+      "ap50": {
+        "mean": 0.8834432198018178,
+        "min": 0.8752955611616915,
+        "max": 0.8923704751295826,
+        "n": 3,
+        "stdev": 0.008564111162242866
+      },
+      "ap75": {
+        "mean": 0.6953402986287888,
+        "min": 0.6826026915078623,
+        "max": 0.7159139614844163,
+        "n": 3,
+        "stdev": 0.01798507725784695
+      },
+      "train_wall_s": {
+        "mean": 189.66666666666666,
+        "min": 167.0,
+        "max": 231.0,
+        "n": 3,
+        "stdev": 35.85154575933001
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "bccd",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "scratch",
+      "seeds": [
+        0
+      ],
+      "complete": true,
+      "eval_split": "test",
+      "ap": {
+        "mean": 0.5899079240747659,
+        "min": 0.5899079240747659,
+        "max": 0.5899079240747659,
+        "n": 1,
+        "stdev": null
+      },
+      "ap50": {
+        "mean": 0.8998707076868536,
+        "min": 0.8998707076868536,
+        "max": 0.8998707076868536,
+        "n": 1,
+        "stdev": null
+      },
+      "ap75": {
+        "mean": 0.6726888680509531,
+        "min": 0.6726888680509531,
+        "max": 0.6726888680509531,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_s": {
+        "mean": 210.0,
+        "min": 210.0,
+        "max": 210.0,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "bccd",
+      "tool": "folo",
+      "model": "folo-s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "test",
+      "ap": {
+        "mean": 0.6002984198515899,
+        "min": 0.5969012193254722,
+        "max": 0.6041378370656553,
+        "n": 3,
+        "stdev": 0.003638519723556196
+      },
+      "ap50": {
+        "mean": 0.883659534313891,
+        "min": 0.8761751344388049,
+        "max": 0.8958687751259506,
+        "n": 3,
+        "stdev": 0.010663159113901354
+      },
+      "ap75": {
+        "mean": 0.6953791378105109,
+        "min": 0.6830785240210182,
+        "max": 0.7116532141276157,
+        "n": 3,
+        "stdev": 0.014695901878271226
+      },
+      "train_wall_s": {
+        "mean": 322.0,
+        "min": 294.0,
+        "max": 374.0,
+        "n": 3,
+        "stdev": 45.077710678338576
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "bccd",
+      "tool": "ultralytics",
+      "model": "yolo26n",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "test",
+      "ap": {
+        "mean": 0.6261943216816358,
+        "min": 0.6211931608674228,
+        "max": 0.6338848089933884,
+        "n": 3,
+        "stdev": 0.0067597219466563755
+      },
+      "ap50": {
+        "mean": 0.9108343430717056,
+        "min": 0.9106819643995507,
+        "max": 0.9109803856436001,
+        "n": 3,
+        "stdev": 0.00014931148432009386
+      },
+      "ap75": {
+        "mean": 0.7212795257492282,
+        "min": 0.7059655537260511,
+        "max": 0.7443116836627645,
+        "n": 3,
+        "stdev": 0.02030478306605195
+      },
+      "train_wall_s": {
+        "mean": 216.40327055496164,
+        "min": 216.40327055496164,
+        "max": 216.40327055496164,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_shared_s": {
+        "mean": 280.5594073489774,
+        "min": 277.1882967069978,
+        "max": 283.930517990957,
+        "n": 2,
+        "stdev": 4.767470390147839
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
+      "dataset": "bccd",
+      "tool": "ultralytics",
+      "model": "yolo26s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "test",
+      "ap": {
+        "mean": 0.6207948371044089,
+        "min": 0.6162875927587296,
+        "max": 0.6239159160975696,
+        "n": 3,
+        "stdev": 0.0039986147637482055
+      },
+      "ap50": {
+        "mean": 0.9129481003106455,
+        "min": 0.9082925501725234,
+        "max": 0.919405623566506,
+        "n": 3,
+        "stdev": 0.005771518899111418
+      },
+      "ap75": {
+        "mean": 0.7069503685018984,
+        "min": 0.6889100085760382,
+        "max": 0.724017354803109,
+        "n": 3,
+        "stdev": 0.01757390201226603
+      },
+      "train_wall_s": null,
+      "train_wall_shared_s": {
+        "mean": 501.68794947094284,
+        "min": 501.6434639939107,
+        "max": 501.7584086738061,
+        "n": 3,
+        "stdev": 0.06171746660572011
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
+      "dataset": "brain-tumor",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.45204098029608336,
+        "min": 0.4393116734923633,
+        "max": 0.46046569142293686,
+        "n": 3,
+        "stdev": 0.011214734798814062
+      },
+      "ap50": {
+        "mean": 0.6126222063024711,
+        "min": 0.6047518642426362,
+        "max": 0.6166524746509222,
+        "n": 3,
+        "stdev": 0.006816579538456005
+      },
+      "ap75": {
+        "mean": 0.5286052595324091,
+        "min": 0.5139584667902968,
+        "max": 0.5398979532240182,
+        "n": 3,
+        "stdev": 0.013291039253637964
+      },
+      "train_wall_s": {
+        "mean": 607.6666666666666,
+        "min": 590.0,
+        "max": 628.0,
+        "n": 3,
+        "stdev": 19.139836293274122
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "brain-tumor",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "scratch",
+      "seeds": [
+        0
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.3724908055297145,
+        "min": 0.3724908055297145,
+        "max": 0.3724908055297145,
+        "n": 1,
+        "stdev": null
+      },
+      "ap50": {
+        "mean": 0.5318644389267051,
+        "min": 0.5318644389267051,
+        "max": 0.5318644389267051,
+        "n": 1,
+        "stdev": null
+      },
+      "ap75": {
+        "mean": 0.459882541428559,
+        "min": 0.459882541428559,
+        "max": 0.459882541428559,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_s": {
+        "mean": 555.0,
+        "min": 555.0,
+        "max": 555.0,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "brain-tumor",
+      "tool": "folo",
+      "model": "folo-s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.44668572298822956,
+        "min": 0.4106118945125964,
+        "max": 0.4720420452415277,
+        "n": 3,
+        "stdev": 0.03208682844040757
+      },
+      "ap50": {
+        "mean": 0.604416044701839,
+        "min": 0.5596327119339419,
+        "max": 0.6450827360262457,
+        "n": 3,
+        "stdev": 0.04287349655585043
+      },
+      "ap75": {
+        "mean": 0.5281256063963448,
+        "min": 0.47005788829403583,
+        "max": 0.5746812361293929,
+        "n": 3,
+        "stdev": 0.05325323804273106
+      },
+      "train_wall_s": {
+        "mean": 1046.6666666666667,
+        "min": 1033.0,
+        "max": 1064.0,
+        "n": 3,
+        "stdev": 15.821925715074425
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "brain-tumor",
+      "tool": "ultralytics",
+      "model": "yolo26n",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.43553197706329977,
+        "min": 0.41305609405619814,
+        "max": 0.4588620579837679,
+        "n": 3,
+        "stdev": 0.022914925777533186
+      },
+      "ap50": {
+        "mean": 0.5912237348315972,
+        "min": 0.5635211914619201,
+        "max": 0.6118013461035869,
+        "n": 3,
+        "stdev": 0.024916196060059122
+      },
+      "ap75": {
+        "mean": 0.5068316113904372,
+        "min": 0.47615864117786116,
+        "max": 0.5417287501755322,
+        "n": 3,
+        "stdev": 0.032988520709307495
+      },
+      "train_wall_s": {
+        "mean": 703.640350589063,
+        "min": 703.640350589063,
+        "max": 703.640350589063,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_shared_s": {
+        "mean": 797.6199632855714,
+        "min": 756.8086974450853,
+        "max": 838.4312291260576,
+        "n": 2,
+        "stdev": 57.71584564922934
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
+      "dataset": "brain-tumor",
+      "tool": "ultralytics",
+      "model": "yolo26s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.36661819229598985,
+        "min": 0.3598164307164166,
+        "max": 0.3712748123731547,
+        "n": 3,
+        "stdev": 0.006022860748588156
+      },
+      "ap50": {
+        "mean": 0.5028784036532011,
+        "min": 0.5011436178278833,
+        "max": 0.5048480641995887,
+        "n": 3,
+        "stdev": 0.001863358615822134
+      },
+      "ap75": {
+        "mean": 0.43148331985430327,
+        "min": 0.4265587704664716,
+        "max": 0.43401837007890953,
+        "n": 3,
+        "stdev": 0.004265405758279244
+      },
+      "train_wall_s": null,
+      "train_wall_shared_s": {
+        "mean": 1753.638669014598,
+        "min": 1753.5901800289284,
+        "max": 1753.70263375598,
+        "n": 3,
+        "stdev": 0.05780211452107756
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
+      "dataset": "medical-pills",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.8042432132063787,
+        "min": 0.8010737188529485,
+        "max": 0.8067437991121992,
+        "n": 3,
+        "stdev": 0.002893619086895983
+      },
+      "ap50": {
+        "mean": 0.9953207664663154,
+        "min": 0.9948398976305955,
+        "max": 0.995933360306633,
+        "n": 3,
+        "stdev": 0.0005585058313025534
+      },
+      "ap75": {
+        "mean": 0.9780241255518637,
+        "min": 0.9738931319877593,
+        "max": 0.985772372969322,
+        "n": 3,
+        "stdev": 0.0067150938678630055
+      },
+      "train_wall_s": {
+        "mean": 150.33333333333334,
+        "min": 109.0,
+        "max": 227.0,
+        "n": 3,
+        "stdev": 66.46302230062467
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "medical-pills",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "scratch",
+      "seeds": [
+        0
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.7367867987781572,
+        "min": 0.7367867987781572,
+        "max": 0.7367867987781572,
+        "n": 1,
+        "stdev": null
+      },
+      "ap50": {
+        "mean": 0.9840859975385896,
+        "min": 0.9840859975385896,
+        "max": 0.9840859975385896,
+        "n": 1,
+        "stdev": null
+      },
+      "ap75": {
+        "mean": 0.9288344252838752,
+        "min": 0.9288344252838752,
+        "max": 0.9288344252838752,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_s": {
+        "mean": 102.0,
+        "min": 102.0,
+        "max": 102.0,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "medical-pills",
+      "tool": "folo",
+      "model": "folo-s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.8064995257958091,
+        "min": 0.8061767638321162,
+        "max": 0.8070510032077377,
+        "n": 3,
+        "stdev": 0.0004799027908525072
+      },
+      "ap50": {
+        "mean": 0.9969991236560437,
+        "min": 0.9968566307034599,
+        "max": 0.9972144889576844,
+        "n": 3,
+        "stdev": 0.00018973248791909046
+      },
+      "ap75": {
+        "mean": 0.9769896114925402,
+        "min": 0.9766313323554139,
+        "max": 0.9772836961456807,
+        "n": 3,
+        "stdev": 0.00033088567140850925
+      },
+      "train_wall_s": {
+        "mean": 182.0,
+        "min": 170.0,
+        "max": 196.0,
+        "n": 3,
+        "stdev": 13.114877048604
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "medical-pills",
+      "tool": "ultralytics",
+      "model": "yolo26n",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.8026857622568642,
+        "min": 0.8004472787400974,
+        "max": 0.8059519400631139,
+        "n": 3,
+        "stdev": 0.0028926528887433457
+      },
+      "ap50": {
+        "mean": 0.997816714990924,
+        "min": 0.9975748492078634,
+        "max": 0.9980092654840822,
+        "n": 3,
+        "stdev": 0.0002213670563217028
+      },
+      "ap75": {
+        "mean": 0.9824181132144334,
+        "min": 0.9772979977529201,
+        "max": 0.987528157979561,
+        "n": 3,
+        "stdev": 0.005115087548603654
+      },
+      "train_wall_s": {
+        "mean": 134.94414669205435,
+        "min": 134.94414669205435,
+        "max": 134.94414669205435,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_shared_s": {
+        "mean": 169.14914187398972,
+        "min": 168.8539114809828,
+        "max": 169.44437226699665,
+        "n": 2,
+        "stdev": 0.41751882581514216
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
+      "dataset": "medical-pills",
+      "tool": "ultralytics",
+      "model": "yolo26s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.8054161663626852,
+        "min": 0.8018370112587477,
+        "max": 0.8101322404337875,
+        "n": 3,
+        "stdev": 0.004262879932631491
+      },
+      "ap50": {
+        "mean": 0.9977117644131415,
+        "min": 0.9965031217710948,
+        "max": 0.9984875172721434,
+        "n": 3,
+        "stdev": 0.0010606609021472733
+      },
+      "ap75": {
+        "mean": 0.9802785233121991,
+        "min": 0.975625244420411,
+        "max": 0.9877440336620262,
+        "n": 3,
+        "stdev": 0.006530524289891362
+      },
+      "train_wall_s": null,
+      "train_wall_shared_s": {
+        "mean": 276.6003037013579,
+        "min": 266.7159260370536,
+        "max": 295.9839971860638,
+        "n": 3,
+        "stdev": 16.787875028951078
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
+      "dataset": "signature",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.9892257872403781,
+        "min": 0.9874153204794164,
+        "max": 0.99214322936053,
+        "n": 3,
+        "stdev": 0.0025509461835598866
+      },
+      "ap50": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "ap75": {
+        "mean": 0.9981538003424403,
+        "min": 0.99680637236656,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0016542050229950197
+      },
+      "train_wall_s": {
+        "mean": 211.33333333333334,
+        "min": 184.0,
+        "max": 234.0,
+        "n": 3,
+        "stdev": 25.32455988429677
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "signature",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "scratch",
+      "seeds": [
+        0
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.9200943609757906,
+        "min": 0.9200943609757906,
+        "max": 0.9200943609757906,
+        "n": 1,
+        "stdev": null
+      },
+      "ap50": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 1,
+        "stdev": null
+      },
+      "ap75": {
+        "mean": 0.9678886807599679,
+        "min": 0.9678886807599679,
+        "max": 0.9678886807599679,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_s": {
+        "mean": 181.0,
+        "min": 181.0,
+        "max": 181.0,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "signature",
+      "tool": "folo",
+      "model": "folo-s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.991909476661952,
+        "min": 0.9908345120226308,
+        "max": 0.9938896746817539,
+        "n": 3,
+        "stdev": 0.0017170003853458336
+      },
+      "ap50": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "ap75": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "train_wall_s": {
+        "mean": 251.0,
+        "min": 229.0,
+        "max": 292.0,
+        "n": 3,
+        "stdev": 35.53871128783372
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "signature",
+      "tool": "ultralytics",
+      "model": "yolo26n",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.981781809886359,
+        "min": 0.9749728246634186,
+        "max": 0.9871403269359194,
+        "n": 3,
+        "stdev": 0.006212078664128346
+      },
+      "ap50": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "ap75": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "train_wall_s": {
+        "mean": 155.82087324303575,
+        "min": 155.82087324303575,
+        "max": 155.82087324303575,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_shared_s": {
+        "mean": 196.32805138954427,
+        "min": 195.2082236680435,
+        "max": 197.44787911104504,
+        "n": 2,
+        "stdev": 1.583675551267749
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    },
+    {
+      "dataset": "signature",
+      "tool": "ultralytics",
+      "model": "yolo26s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.9798501317891971,
+        "min": 0.978095099425909,
+        "max": 0.9809405940594059,
+        "n": 3,
+        "stdev": 0.001534747530956272
+      },
+      "ap50": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "ap75": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "train_wall_s": null,
+      "train_wall_shared_s": {
+        "mean": 288.5199040709995,
+        "min": 269.5976838119095,
+        "max": 297.98631669708993,
+        "n": 3,
+        "stdev": 16.38712429825945
+      },
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40"
+      ]
+    }
+  ],
+  "epochs": 100,
+  "ignored_other_epochs": 0
+}

@@ -1,0 +1,184 @@
+[
+  {
+    "name": "bccd",
+    "title": "BCCD blood cells",
+    "domain": "microscopy",
+    "classes": [
+      "RBC",
+      "WBC",
+      "Platelets"
+    ],
+    "source": "https://github.com/Shenggan/BCCD_Dataset",
+    "url": "https://github.com/Shenggan/BCCD_Dataset/archive/d272fb14cdff6e473fafeeeba32aba5f560e9e43.zip",
+    "archive_sha256": "e2ed144a0a2c6dbe351f3ddb09fb8ff2c9ad4f947bdf42b6a52dd4f38a996ba9",
+    "licence": "MIT",
+    "licence_url": "https://github.com/Shenggan/BCCD_Dataset/blob/d272fb14cdff6e473fafeeeba32aba5f560e9e43/LICENSE",
+    "eval_split": "test",
+    "splits": {
+      "train": {
+        "images": 205,
+        "boxes": 2804,
+        "background_images": 0,
+        "boxes_per_class": {
+          "RBC": 2381,
+          "WBC": 214,
+          "Platelets": 209
+        }
+      },
+      "val": {
+        "images": 87,
+        "boxes": 1137,
+        "background_images": 0,
+        "boxes_per_class": {
+          "RBC": 967,
+          "WBC": 87,
+          "Platelets": 83
+        }
+      },
+      "test": {
+        "images": 72,
+        "boxes": 945,
+        "background_images": 0,
+        "boxes_per_class": {
+          "RBC": 805,
+          "WBC": 71,
+          "Platelets": 69
+        }
+      }
+    },
+    "image_sizes": [
+      "640x480"
+    ],
+    "fixes": {
+      "inverted": 2
+    },
+    "notes": "PASCAL VOC XML converted to YOLO; the repository's own ImageSets/Main train / val / test split",
+    "layout_sha256": "67ab1b141b038099bc75408b737638e8e1cda0812611208e76acd90e364e0d1a"
+  },
+  {
+    "name": "brain-tumor",
+    "title": "Brain tumor (MRI)",
+    "domain": "medical imaging",
+    "classes": [
+      "negative",
+      "positive"
+    ],
+    "source": "https://docs.ultralytics.com/datasets/detect/brain-tumor/",
+    "url": "https://github.com/ultralytics/assets/releases/download/v0.0.0/brain-tumor.zip",
+    "archive_sha256": "0710c520add47c5de7d0da78bc206662a0a0b4b26777b582edcb4e6f7660cb0d",
+    "licence": "AGPL-3.0",
+    "licence_url": "https://docs.ultralytics.com/datasets/detect/brain-tumor/",
+    "eval_split": "val",
+    "splits": {
+      "train": {
+        "images": 893,
+        "boxes": 925,
+        "background_images": 15,
+        "boxes_per_class": {
+          "negative": 437,
+          "positive": 488
+        }
+      },
+      "val": {
+        "images": 223,
+        "boxes": 241,
+        "background_images": 0,
+        "boxes_per_class": {
+          "negative": 154,
+          "positive": 87
+        }
+      }
+    },
+    "image_sizes": [
+      "192x256",
+      "224x256",
+      "240x320",
+      "256x256",
+      "320x320",
+      "320x384",
+      "416x512",
+      "448x512",
+      "480x512",
+      "512x512"
+    ],
+    "fixes": {},
+    "notes": "hosted by Ultralytics; train / val only, so scores are on val",
+    "layout_sha256": "908edcb35303362c5b77b267b7d43171b9c9c989fd5741242d1ca038f183bf26"
+  },
+  {
+    "name": "signature",
+    "title": "Signatures on documents",
+    "domain": "documents",
+    "classes": [
+      "signature"
+    ],
+    "source": "https://docs.ultralytics.com/datasets/detect/signature/",
+    "url": "https://github.com/ultralytics/assets/releases/download/v0.0.0/signature.zip",
+    "archive_sha256": "6d7bfafd89bcfffb2fdf21f79df16e1988e30f5aa006b0a27d39b51f3bcae171",
+    "licence": "AGPL-3.0",
+    "licence_url": "https://docs.ultralytics.com/datasets/detect/signature/",
+    "eval_split": "val",
+    "splits": {
+      "train": {
+        "images": 143,
+        "boxes": 143,
+        "background_images": 0,
+        "boxes_per_class": {
+          "signature": 143
+        }
+      },
+      "val": {
+        "images": 35,
+        "boxes": 35,
+        "background_images": 0,
+        "boxes_per_class": {
+          "signature": 35
+        }
+      }
+    },
+    "image_sizes": [
+      "1920x1080"
+    ],
+    "fixes": {},
+    "notes": "hosted by Ultralytics; train / val only, so scores are on val",
+    "layout_sha256": "0754c64b4ae38a405dbcdbf5c8e7ce337c9fc65407183b6768a9d107d91e7bde"
+  },
+  {
+    "name": "medical-pills",
+    "title": "Medical pills",
+    "domain": "industrial / product photos",
+    "classes": [
+      "pill"
+    ],
+    "source": "https://docs.ultralytics.com/datasets/detect/medical-pills/",
+    "url": "https://github.com/ultralytics/assets/releases/download/v0.0.0/medical-pills.zip",
+    "archive_sha256": "3a15abc491af0e91a835a01bca1e437e3818bf957aab26aba19176db6495ceb5",
+    "licence": "AGPL-3.0",
+    "licence_url": "https://docs.ultralytics.com/datasets/detect/medical-pills/",
+    "eval_split": "val",
+    "splits": {
+      "train": {
+        "images": 92,
+        "boxes": 1623,
+        "background_images": 0,
+        "boxes_per_class": {
+          "pill": 1623
+        }
+      },
+      "val": {
+        "images": 23,
+        "boxes": 399,
+        "background_images": 0,
+        "boxes_per_class": {
+          "pill": 399
+        }
+      }
+    },
+    "image_sizes": [
+      "1920x1080"
+    ],
+    "fixes": {},
+    "notes": "hosted by Ultralytics; train / val only, so scores are on val",
+    "layout_sha256": "696f575fc1d34c95f77ae19447594af14a756ae09e97296e1b370005a4b0c1b3"
+  }
+]

@@ -49,6 +49,19 @@ pub const PUBLISHED: &[Published] = &[
         asset: "folo-n-coco-v2-f16.folo",
         about: "folo-n-coco-v2 fused and cast to f16 (folo export): inference only",
     },
+    Published {
+        name: "folo-s-coco",
+        release: "weights-v3",
+        asset: "folo-s-coco.folo",
+        about: "folo-s trained from scratch on COCO train2017 at 640 px, 56 epochs, val2017 AP 0.416 (EMA weights, \
+                f32, unfused: fine-tune or predict); examples/coco",
+    },
+    Published {
+        name: "folo-s-coco-f16",
+        release: "weights-v3",
+        asset: "folo-s-coco-f16.folo",
+        about: "folo-s-coco fused and cast to f16 (folo export): inference only",
+    },
 ];
 
 /// The published weights called `name`.
@@ -95,5 +108,11 @@ mod tests {
         assert_eq!(find("folo-n-coco").map(|p| p.asset), Some("folo-n-coco.folo"));
         assert!(names().contains("folo-n-coco-f16"));
         assert_eq!(find("folo-n-coco-v2").map(|p| p.release), Some("weights-v2"));
+        assert_eq!(
+            find("folo-s-coco").map(|p| (p.release, p.asset)),
+            Some(("weights-v3", "folo-s-coco.folo"))
+        );
+        assert_eq!(find("folo-s-coco-f16").map(|p| p.asset), Some("folo-s-coco-f16.folo"));
+        assert!(names().ends_with("folo-s-coco, folo-s-coco-f16"));
     }
 }

@@ -146,15 +146,24 @@ The tensors that match are loaded. If your dataset's class list differs from the
 are re-initialised, and everything else is kept. As a check: fine-tuning the shapes model above on a new
 `star, ring, heart` dataset reached mAP50 0.32 after 2 epochs, while a from-scratch model is near 0 at that point.
 
-**Pretrained weights.** `folo-n-coco` is folo-n trained on COCO ([examples/coco](../examples/coco/README.md)). It is
-in a **draft** GitHub release for now, so only people with write access to the repository can download it.
-`folo-n-coco-v2` (draft release `weights-v2`) is an interim, slightly better checkpoint (val2017 AP 0.317 against
-0.314) from a longer run that is paused at epoch 62 of 300.
+### Fine-tune from pretrained weights
+
+`folo-n-coco-v2` is folo-n trained from scratch on COCO ([examples/coco](../examples/coco/README.md)): val2017 AP
+0.317, from a 300-epoch run paused at epoch 62 (`folo-n-coco`, AP 0.314 after 50 epochs, is the first one).
+`folo-s-coco` is the larger folo-s, trained from scratch on COCO for 56 epochs: val2017 AP 0.416 (fine-tuning from
+it takes the weights' architecture, folo-s). `folo weights list` shows every published name. Two commands fine-tune
+one on your dataset:
 
 ```sh
-folo weights pull folo-n-coco                                    # into ~/.folo/weights/, checksum verified
-folo train --data my-data --weights folo-n-coco --epochs 20      # takes the weights' architecture (folo-n)
+folo weights pull folo-n-coco-v2                                  # into ~/.folo/weights/, checksum verified
+folo train --data my-data --weights folo-n-coco-v2 --epochs 20    # takes the weights' architecture (folo-n)
 ```
+
+The weights are published GitHub releases, and `folo weights pull` downloads them over plain HTTPS. The repository is
+private for now: then that download is refused and the pull falls back to the GitHub CLI, so until the repository is
+public you need access to it and a logged-in [`gh`](https://cli.github.com) (`gh auth login`). Once it is public,
+the `folo` binary is all it takes. `train` never downloads by itself: without the pull it stops with
+`weights_not_found` and the hint to run `folo weights pull folo-n-coco-v2` first.
 
 Studio and MCP list downloaded published weights as models once pulled (`folo weights pull`), or you can copy a `.folo`
 file into `<data dir>/models/` ([CLI.md, Weights](CLI.md#weights)).

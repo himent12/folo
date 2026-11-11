@@ -207,7 +207,18 @@ pub const CODES: &[Code] = &[
     ),
     c("data_dir_lock_failed", 500, 1, "the data dir's `serve.lock` could not be locked (CLI)"),
     c("mcp_failed", 500, 1, "`folo mcp` stopped with an error (CLI)"),
-    c("gh_failed", 502, 1, "`folo weights pull`: the GitHub CLI is missing or its download failed (CLI)"),
+    c(
+        "download_failed",
+        502,
+        1,
+        "`folo weights pull`: the HTTPS download failed (no network, a timeout, a server error, a cut body); nothing          was installed (CLI)",
+    ),
+    c(
+        "gh_failed",
+        502,
+        1,
+        "`folo weights pull`: the release is not public, and the GitHub CLI fallback is missing or failed (CLI)",
+    ),
     c(
         "checksum_missing",
         502,
