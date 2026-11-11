@@ -1,6 +1,6 @@
 // Adapted from GPUI (Apache-2.0): crates/gpui/src/platform/windows/events.rs
 //! The window procedure's dispatch and the window, paint, frame and mouse messages, with GPUI's
-//! semantics (`vendor/gpui/src/platform/windows/events.rs`). Keys and IME are in `keyboard.rs`, the
+//! semantics (GPUI 0.2.2's `src/platform/windows/events.rs`). Keys and IME are in `keyboard.rs`, the
 //! non-client area (title bar, hit testing, resize frame) in `chrome.rs`.
 
 use super::WM_FOLO_FRAME;

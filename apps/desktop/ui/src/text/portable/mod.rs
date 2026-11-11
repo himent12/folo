@@ -1,6 +1,6 @@
 //! The cosmic-text `PlatformTextSystem` (Linux, macOS, and Windows tests with feature `portable-text`).
 //!
-//! It behaves as GPUI's Linux backend (`vendor/gpui/src/platform/linux/text_system.rs`) with two
+//! It behaves as GPUI's Linux backend (GPUI 0.2.2's `src/platform/linux/text_system.rs`) with two
 //! differences on purpose: the font database starts with only the fonts given to `add_fonts` (system
 //! fonts are loaded the first time a glyph or a family is missing), and nothing depends on the locale, so
 //! the same input gives the same layout and masks on every OS until a fallback is needed.

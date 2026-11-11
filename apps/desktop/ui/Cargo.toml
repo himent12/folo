@@ -36,7 +36,7 @@ usvg = { version = "0.45", default-features = false }
 uuid = { version = "1", features = ["v5"] }
 
 [target.'cfg(windows)'.dependencies]
-# The version wgpu-hal uses, so the app links one copy (apps/desktop/Cargo.toml, gpu-allocator note).
+# The version wgpu-hal uses, so the app links one copy (gpu-allocator, which accepts 0.53 to 0.62, follows).
 windows = { version = "0.62", features = [
     "Wdk_System_SystemServices",
     "Win32_Foundation",

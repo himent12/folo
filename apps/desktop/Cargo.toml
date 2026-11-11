@@ -1,7 +1,7 @@
-# FOLO Desktop: its own cargo workspace so the root workspace and its CI stay GPUI-free.
+# FOLO Desktop: its own cargo workspace, so the root workspace does not build the app or its UI framework.
 [workspace]
 resolver = "3"
-# folo-ui (ui/): the UI framework replacing GPUI (ui/DESIGN.md).
+# folo-ui (ui/): the app's UI framework (ui/README.md).
 members = [".", "ui"]
 
 [package]
@@ -11,7 +11,7 @@ edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/himent12/folo"
-description = "FOLO Desktop: the native GPUI front end for FOLO"
+description = "FOLO Desktop: the native front end for FOLO"
 publish = false
 
 [[bin]]
@@ -24,9 +24,6 @@ folo-ui = { path = "ui" }
 folo-api = { path = "../../crates/folo-api" }
 folo-bench = { path = "../../crates/folo-bench" }
 # Local inference in Playground: folo-vision's predictor, in process, on folo-gpu or the CPU.
-# Cargo.lock: gpu-allocator must use the `windows` crate wgpu-hal uses (0.62 today). Cargo may pick
-# gpui's older `windows` for it (wgpu-hal's DX12 backend then fails to compile); fix the lock entry
-# by hand if an update does that.
 folo-core = { path = "../../crates/folo-core" }
 folo-data = { path = "../../crates/folo-data" }
 folo-gpu = { path = "../../crates/folo-gpu" }
@@ -40,7 +37,7 @@ serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Tie a spawned `folo serve` to the app's lifetime (Job Object, kill on close). `Win32_Security` gates
-# `CreateJobObjectW` (GPUI used to turn it on for us through feature unification).
+# `CreateJobObjectW`.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Time", "Win32_UI_WindowsAndMessaging"] }
 
