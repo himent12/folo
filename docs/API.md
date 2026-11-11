@@ -137,7 +137,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   the same format) returns the existing dataset (still `201`) instead of a duplicate; its `name` is kept.
 - `POST /api/datasets/synthetic` body `{ "name", "images": 1000, "classes": ["circle","square","triangle"], "imgsz": 640, "seed": 0 }`
   → `201 Dataset` with `stats`. Only `name` is required. Generates square JPEG images (folo-data's shapes
-  generator, deterministic in `images`, `classes`, `imgsz` and `seed`) into `<data dir>/datasets/<name>` (the name
+  generator, deterministic in `images`, `classes`, `imgsz` and `seed`; a twentieth of the objects extra-small, so
+  under 10% of the boxes are under 5% of the image side and a sample set passes Studio's health checks) into
+  `<data dir>/datasets/<name>` (the name
   lowercased to `a-z0-9-`, with `-2`, `-3`, ... when taken) and registers them. Images are split 80 / 20 into
   train / val. `classes`: 1 to 8 distinct names; `circle`, `square`, `triangle`, `star`, `ring`, `cross`,
   `hexagon` and `heart` get that shape, every other name the next shape no name has claimed. `400 invalid_body`

@@ -512,3 +512,21 @@ async fn a_missing_folder_stays_listed_and_can_be_unregistered() {
     let list: DatasetList = ok(&app, get("/api/datasets")).await;
     assert!(list.datasets.is_empty());
 }
+
+/// FOLO's own sample set passes FOLO's own health checks: Studio warns when more than 10% of the boxes are under 5%
+/// of the image side (web/src/routes/dataset/health.ts, "tiny boxes"), so a sample set must not open with that.
+#[tokio::test]
+async fn a_sample_set_has_few_tiny_boxes() {
+    let t = TestDir::new("real-synth-tiny");
+    let app = app(&t.join("home"));
+    for imgsz in [640, 1024] {
+        let body = json!({ "name": "shapes-synth", "images": 150, "imgsz": imgsz, "seed": 0 });
+        let ds: Dataset = ok(&app, post_json("/api/datasets/synthetic", body)).await;
+        let h = ds.stats.unwrap().box_size_hist;
+        let total: u64 = h.counts.iter().sum();
+        let tiny: u64 =
+            h.counts.iter().zip(&h.edges[1..]).filter(|(_, e)| **e <= 0.05 + 1e-9).map(|(c, _)| c).sum();
+        let share = tiny as f64 / total as f64;
+        assert!(share < 0.09, "{imgsz} px: {:.1}% tiny boxes", share * 100.0);
+    }
+}

@@ -199,6 +199,9 @@ impl Store for RealStore {
             seed: req.seed,
             vary_aspect: false,
             val_fraction: 0.2,
+            // A sample set passes FOLO's own health checks: Studio warns past 10% tiny boxes, and the generator's
+            // default (a fifth of the objects 8 to 28 px across) makes about 27%. A few small ones stay (about 6%).
+            small_fraction: 0.05,
             ..Default::default()
         };
         let dir = self.claim_dataset_dir(&slug(&req.name, "synthetic"))?;
