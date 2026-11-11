@@ -4,9 +4,9 @@
 use smallvec::SmallVec;
 
 use crate::{
-    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, ParentElement, Pixels, Point, StatefulInteractiveElement, StyleRefinement,
-    Styled, Window, interactive::skips_children, point,
+    AnyElement, App, Bounds, Element, ElementId, GlobalElementId, Hitbox, InspectorElementId,
+    InteractiveElement, Interactivity, IntoElement, LayoutId, ParentElement, Pixels, Point,
+    StatefulInteractiveElement, StyleRefinement, Styled, Window, interactive::skips_children, point,
 };
 
 /// A new `Div`.
@@ -73,12 +73,14 @@ impl Element for Div {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut child_layout_ids = SmallVec::new();
         let children = &mut self.children;
-        let layout_id = self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, cx| {
-            window.with_text_style(style.text_style().cloned(), |window| {
-                child_layout_ids.extend(children.iter_mut().map(|child| child.request_layout(window, cx)));
-                window.request_layout(style, child_layout_ids.iter().copied(), cx)
-            })
-        });
+        let layout_id =
+            self.interactivity.request_layout(global_id, inspector_id, window, cx, |style, window, cx| {
+                window.with_text_style(style.text_style().cloned(), |window| {
+                    child_layout_ids
+                        .extend(children.iter_mut().map(|child| child.request_layout(window, cx)));
+                    window.request_layout(style, child_layout_ids.iter().copied(), cx)
+                })
+            });
         (layout_id, DivFrameState { child_layout_ids })
     }
 
@@ -97,7 +99,8 @@ impl Element for Div {
         } else {
             let mut child_min = point(Pixels::MAX, Pixels::MAX);
             let mut child_max = Point::default();
-            let mut handle_state = self.interactivity.tracked_scroll_handle.as_ref().map(|handle| handle.0.borrow_mut());
+            let mut handle_state =
+                self.interactivity.tracked_scroll_handle.as_ref().map(|handle| handle.0.borrow_mut());
             if let Some(state) = handle_state.as_deref_mut() {
                 state.child_bounds.clear();
             }
@@ -148,13 +151,21 @@ impl Element for Div {
         cx: &mut App,
     ) {
         let children = &mut self.children;
-        self.interactivity.paint(global_id, inspector_id, bounds, prepaint.hitbox.as_ref(), window, cx, |style, window, cx| {
-            if !skips_children(style) {
-                for child in children.iter_mut() {
-                    child.paint(window, cx);
+        self.interactivity.paint(
+            global_id,
+            inspector_id,
+            bounds,
+            prepaint.hitbox.as_ref(),
+            window,
+            cx,
+            |style, window, cx| {
+                if !skips_children(style) {
+                    for child in children.iter_mut() {
+                        child.paint(window, cx);
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 }
 

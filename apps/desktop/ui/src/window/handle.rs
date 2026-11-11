@@ -73,7 +73,9 @@ impl<V: 'static> WindowHandle<V> {
         C: AppContext,
     {
         cx.update_window(self.any_handle, |root, window, cx| {
-            let view = root.downcast::<V>().map_err(|_| anyhow::anyhow!("the window's root view is not a {}", std::any::type_name::<V>()))?;
+            let view = root.downcast::<V>().map_err(|_| {
+                anyhow::anyhow!("the window's root view is not a {}", std::any::type_name::<V>())
+            })?;
             Ok(view.update(cx, |view, cx| update(view, window, cx)))
         })?
     }
@@ -87,7 +89,8 @@ impl<V: 'static> WindowHandle<V> {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("window is being updated"))?;
         let root = window.root.clone().ok_or_else(|| anyhow::anyhow!("window has no root view"))?;
-        root.downcast::<V>().map_err(|_| anyhow::anyhow!("the window's root view is not a {}", std::any::type_name::<V>()))
+        root.downcast::<V>()
+            .map_err(|_| anyhow::anyhow!("the window's root view is not a {}", std::any::type_name::<V>()))
     }
 }
 

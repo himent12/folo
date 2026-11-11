@@ -38,10 +38,9 @@ impl Window {
 
     /// The current content mask (the whole viewport at the root).
     pub fn content_mask(&self) -> ContentMask<Pixels> {
-        self.content_mask_stack
-            .last()
-            .cloned()
-            .unwrap_or_else(|| ContentMask { bounds: Bounds { origin: Point::default(), size: self.viewport_size } })
+        self.content_mask_stack.last().cloned().unwrap_or_else(|| ContentMask {
+            bounds: Bounds { origin: Point::default(), size: self.viewport_size },
+        })
     }
 
     /// Runs `f` with `style` refining the text style (`None` leaves it as is).
@@ -130,8 +129,11 @@ impl Window {
         S: 'static,
     {
         let key = (global_id.clone(), TypeId::of::<S>());
-        let existing =
-            self.next_frame.element_states.remove(&key).or_else(|| self.rendered_frame.element_states.remove(&key));
+        let existing = self
+            .next_frame
+            .element_states
+            .remove(&key)
+            .or_else(|| self.rendered_frame.element_states.remove(&key));
         if let Some(mut boxed) = existing {
             // The box holds an `Option<S>` so it can be reused instead of reallocated.
             let slot = boxed.downcast_mut::<Option<S>>().expect("element state of the requested type");
@@ -290,7 +292,11 @@ impl Window {
 
     /// Records `focus_handle` in Tab order (paint, as GPUI's `tab_stops.insert`).
     pub(crate) fn insert_tab_stop(&mut self, focus_handle: &FocusHandle) {
-        self.next_frame.dispatch_tree.insert_tab_stop(focus_handle.id, focus_handle.tab_index, focus_handle.tab_stop);
+        self.next_frame.dispatch_tree.insert_tab_stop(
+            focus_handle.id,
+            focus_handle.tab_index,
+            focus_handle.tab_stop,
+        );
     }
 
     /// Prevents the default of the event being dispatched (a focusable parent then does not take focus on

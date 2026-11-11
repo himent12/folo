@@ -42,8 +42,16 @@ pub mod raster_pending {
         }
 
         /// Makes `frame` show `scene`; the stand-in reports the whole frame as damaged.
-        pub fn render(&mut self, _scene: &Scene, _glyph: GlyphBlend, frame: &mut Framebuffer) -> Vec<Bounds<DevicePixels>> {
-            vec![Bounds::new(Default::default(), crate::size(DevicePixels(frame.width as i32), DevicePixels(frame.height as i32)))]
+        pub fn render(
+            &mut self,
+            _scene: &Scene,
+            _glyph: GlyphBlend,
+            frame: &mut Framebuffer,
+        ) -> Vec<Bounds<DevicePixels>> {
+            vec![Bounds::new(
+                Default::default(),
+                crate::size(DevicePixels(frame.width as i32), DevicePixels(frame.height as i32)),
+            )]
         }
 
         /// The next frame repaints everything.
@@ -123,6 +131,11 @@ pub mod raster_pending {
         /// How many masks are cached.
         pub fn len(&self) -> usize {
             self.masks.len()
+        }
+
+        /// Whether the cache is empty.
+        pub fn is_empty(&self) -> bool {
+            self.masks.is_empty()
         }
     }
 

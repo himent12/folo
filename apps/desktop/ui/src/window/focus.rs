@@ -100,7 +100,12 @@ impl FocusHandle {
                 Err(actual) => count = actual,
             }
         }
-        Some(FocusHandle { id, handles: handles.clone(), tab_stop: entry.tab_stop, tab_index: entry.tab_index })
+        Some(FocusHandle {
+            id,
+            handles: handles.clone(),
+            tab_stop: entry.tab_stop,
+            tab_index: entry.tab_index,
+        })
     }
 
     /// Makes the handle a Tab stop (or not).

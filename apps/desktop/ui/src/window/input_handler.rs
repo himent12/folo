@@ -11,8 +11,8 @@
 use std::{cell::RefCell, ops::Range, rc::Rc, rc::Weak};
 
 use crate::{
-    AnyWindowHandle, AppCell, Bounds, FocusId, InputHandler, Pixels, PlatformInputHandler, Point, UTF16Selection,
-    window::update_window,
+    AnyWindowHandle, AppCell, Bounds, FocusId, InputHandler, Pixels, PlatformInputHandler, Point,
+    UTF16Selection, window::update_window,
 };
 
 /// An input handler painted this frame, for the element with `focus_id`.
@@ -47,7 +47,10 @@ pub(crate) struct WindowInputHandler {
 }
 
 impl WindowInputHandler {
-    fn with<R>(&mut self, f: impl FnOnce(&mut dyn InputHandler, &mut crate::Window, &mut crate::App) -> R) -> Option<R> {
+    fn with<R>(
+        &mut self,
+        f: impl FnOnce(&mut dyn InputHandler, &mut crate::Window, &mut crate::App) -> R,
+    ) -> Option<R> {
         let handler = self.handler.0.clone();
         update_window(&self.app, self.window, move |window, cx| f(handler.borrow_mut().as_mut(), window, cx))
     }
@@ -55,15 +58,21 @@ impl WindowInputHandler {
 
 impl PlatformInputHandler for WindowInputHandler {
     fn selected_text_range(&mut self, ignore_disabled_input: bool) -> Option<UTF16Selection> {
-        self.with(|handler, window, cx| handler.selected_text_range(ignore_disabled_input, window, cx)).flatten()
+        self.with(|handler, window, cx| handler.selected_text_range(ignore_disabled_input, window, cx))
+            .flatten()
     }
 
     fn marked_text_range(&mut self) -> Option<Range<usize>> {
         self.with(|handler, window, cx| handler.marked_text_range(window, cx)).flatten()
     }
 
-    fn text_for_range(&mut self, range_utf16: Range<usize>, adjusted_range: &mut Option<Range<usize>>) -> Option<String> {
-        self.with(|handler, window, cx| handler.text_for_range(range_utf16, adjusted_range, window, cx)).flatten()
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
+    ) -> Option<String> {
+        self.with(|handler, window, cx| handler.text_for_range(range_utf16, adjusted_range, window, cx))
+            .flatten()
     }
 
     fn replace_text_in_range(&mut self, replacement_range: Option<Range<usize>>, text: &str) {

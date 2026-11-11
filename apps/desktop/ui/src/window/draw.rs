@@ -16,7 +16,8 @@
 use std::time::Instant;
 
 use crate::{
-    AnyElement, App, AvailableSpace, Bounds, IntoElement, Pixels, Point, RequestFrameOptions, Size, Window, point, px,
+    AnyElement, App, AvailableSpace, Bounds, IntoElement, Pixels, Point, RequestFrameOptions, Size, Window,
+    point, px,
     window::{
         input_handler::{SharedInputHandler, WindowInputHandler},
         trace::{micros_since, print_frame, trace_frames},
@@ -96,11 +97,16 @@ impl Window {
     /// End of a draw: input handler to the platform, caches told the frame ended, the frames swapped,
     /// the cursor applied, animation frames requested.
     fn finish_frame(&mut self, cx: &mut App) {
-        if let Some(Some(slot)) = self.next_frame.input_handlers.pop() {
+        if let Some(Some(slot)) = self.next_frame.input_handlers.pop()
+            && Some(slot.focus_id) == self.focus
+        {
             let handler = SharedInputHandler::new(slot.handler);
             self.input_handler = Some(handler.clone());
-            self.platform_window
-                .set_input_handler(Box::new(WindowInputHandler { app: cx.this.clone(), window: self.handle, handler }));
+            self.platform_window.set_input_handler(Box::new(WindowInputHandler {
+                app: cx.this.clone(),
+                window: self.handle,
+                handler,
+            }));
         }
         if let Some(engine) = self.layout_engine.as_mut() {
             engine.clear();
@@ -134,7 +140,8 @@ impl Window {
     /// `GlyphBlend`) and presents the damage, unless it is empty.
     pub(crate) fn present(&mut self) {
         let start = Instant::now();
-        self.damage = self.renderer.render(&self.rendered_frame.scene, self.glyph_blend, &mut self.framebuffer);
+        self.damage =
+            self.renderer.render(&self.rendered_frame.scene, self.glyph_blend, &mut self.framebuffer);
         let rastered = Instant::now();
         self.frame_times.raster_us = micros_since(start);
         if !self.damage.is_empty() {
@@ -148,7 +155,10 @@ impl Window {
     fn present_all(&mut self) {
         let full = Bounds::new(
             Point::default(),
-            crate::size(crate::DevicePixels(self.framebuffer.width as i32), crate::DevicePixels(self.framebuffer.height as i32)),
+            crate::size(
+                crate::DevicePixels(self.framebuffer.width as i32),
+                crate::DevicePixels(self.framebuffer.height as i32),
+            ),
         );
         self.platform_window.present(&self.framebuffer, &[full]);
     }
@@ -237,7 +247,9 @@ impl Window {
                 self.next_frame.dispatch_tree.set_active_node(draw.parent_node);
             }
             if let Some(element) = draw.element.as_mut() {
-                self.with_absolute_element_offset(draw.absolute_offset, |window| element.prepaint(window, cx));
+                self.with_absolute_element_offset(draw.absolute_offset, |window| {
+                    element.prepaint(window, cx)
+                });
             }
         }
         debug_assert!(self.next_frame.deferred_draws.is_empty(), "defer_draw during deferred drawing");

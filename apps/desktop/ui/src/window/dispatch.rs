@@ -229,21 +229,6 @@ impl DispatchTree {
         path
     }
 
-    /// The focus ids on the path from the root to the node of `focus_id`.
-    pub(crate) fn focus_path(&self, focus_id: FocusId) -> SmallVec<[FocusId; 8]> {
-        let mut path = SmallVec::new();
-        let mut current = self.focusable_node_ids.get(&focus_id).copied();
-        while let Some(id) = current {
-            let node = &self.nodes[id.0];
-            if let Some(focus_id) = node.focus_id {
-                path.push(focus_id);
-            }
-            current = node.parent;
-        }
-        path.reverse();
-        path
-    }
-
     /// The key contexts on `dispatch_path` (root first).
     pub(crate) fn context_path(&self, dispatch_path: &[DispatchNodeId]) -> SmallVec<[KeyContext; 4]> {
         dispatch_path.iter().filter_map(|id| self.nodes.get(id.0)?.context.clone()).collect()
@@ -260,7 +245,11 @@ impl DispatchTree {
     }
 
     /// The bindings for `keystroke` under the contexts of `dispatch_path`, best first.
-    pub(crate) fn bindings_for_input(&self, keystroke: &Keystroke, dispatch_path: &[DispatchNodeId]) -> KeyMatch {
+    pub(crate) fn bindings_for_input(
+        &self,
+        keystroke: &Keystroke,
+        dispatch_path: &[DispatchNodeId],
+    ) -> KeyMatch {
         let mut bindings = SmallVec::new();
         if let Some(keymap) = &self.keymap {
             let contexts = self.context_path(dispatch_path);
@@ -281,12 +270,20 @@ impl DispatchTree {
         let anchor = focused.and_then(|id| self.tab_stops.iter().rposition(|stop| stop.focus_id == id));
         let candidates = || (0..self.tab_stops.len()).filter(|ix| self.tab_stops[*ix].tab_stop);
         let found = match (anchor, reverse) {
-            (Some(anchor), false) => candidates().filter(|ix| key(*ix) > key(anchor)).min_by_key(|ix| key(*ix)),
-            (Some(anchor), true) => candidates().filter(|ix| key(*ix) < key(anchor)).max_by_key(|ix| key(*ix)),
+            (Some(anchor), false) => {
+                candidates().filter(|ix| key(*ix) > key(anchor)).min_by_key(|ix| key(*ix))
+            }
+            (Some(anchor), true) => {
+                candidates().filter(|ix| key(*ix) < key(anchor)).max_by_key(|ix| key(*ix))
+            }
             (None, _) => None,
         };
         let found = found.or_else(|| {
-            if reverse { candidates().max_by_key(|ix| key(*ix)) } else { candidates().min_by_key(|ix| key(*ix)) }
+            if reverse {
+                candidates().max_by_key(|ix| key(*ix))
+            } else {
+                candidates().min_by_key(|ix| key(*ix))
+            }
         });
         found.map(|ix| self.tab_stops[ix].focus_id)
     }
@@ -307,7 +304,15 @@ mod tests {
     #[test]
     fn tab_order_follows_tab_index_then_paint_order_and_wraps() {
         // GPUI's `test_tab_handles` order: index 0 handles in paint order, then index 1, then 2.
-        let tree = tree_with(&[(1, 0, true), (2, 1, true), (3, 1, true), (4, 0, false), (5, 2, false), (6, 0, true), (7, 2, true)]);
+        let tree = tree_with(&[
+            (1, 0, true),
+            (2, 1, true),
+            (3, 1, true),
+            (4, 0, false),
+            (5, 2, false),
+            (6, 0, true),
+            (7, 2, true),
+        ]);
         let mut order = Vec::new();
         let mut focused = None;
         for _ in 0..6 {
@@ -345,7 +350,6 @@ mod tests {
         tree.pop_node();
         assert!(tree.node_stack.is_empty());
         assert_eq!(tree.dispatch_path(b).as_slice(), [root, a, b]);
-        assert_eq!(tree.focus_path(FocusId(12)).as_slice(), [FocusId(10), FocusId(12)]);
         assert!(tree.focus_contains(FocusId(10), FocusId(13)));
         assert!(!tree.focus_contains(FocusId(12), FocusId(13)));
 

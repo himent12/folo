@@ -7,8 +7,8 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
 use crate::{
-    AnyTooltip, AnyView, App, AsyncApp, Bounds, DispatchPhase, MouseDownEvent, MouseMoveEvent, Pixels,
-    ScrollWheelEvent, Task, TooltipId, Window,
+    AnyTooltip, App, AsyncApp, Bounds, DispatchPhase, MouseDownEvent, MouseMoveEvent, Pixels,
+    ScrollWheelEvent, Task, TooltipId, Window, interactive::TooltipBuilder,
 };
 
 /// GPUI's `TOOLTIP_SHOW_DELAY`.
@@ -53,7 +53,7 @@ pub(crate) fn set_tooltip_on_window(active_tooltip: &TooltipState, window: &mut 
 pub(crate) fn register_tooltip_mouse_handlers(
     active_tooltip: &TooltipState,
     tooltip_id: Option<TooltipId>,
-    build_tooltip: Rc<dyn Fn(&mut Window, &mut App) -> AnyView>,
+    build_tooltip: TooltipBuilder,
     check_is_hovered: Rc<dyn Fn(&Window) -> bool>,
     check_is_hovered_during_prepaint: Rc<dyn Fn(&Window) -> bool>,
     window: &mut Window,
@@ -94,7 +94,7 @@ pub(crate) fn register_tooltip_mouse_handlers(
 /// the mouse leaves before it fires.
 fn handle_tooltip_mouse_move(
     active_tooltip: &TooltipState,
-    build_tooltip: &Rc<dyn Fn(&mut Window, &mut App) -> AnyView>,
+    build_tooltip: &TooltipBuilder,
     check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
     check_is_hovered_during_prepaint: &Rc<dyn Fn(&Window) -> bool>,
     phase: DispatchPhase,
@@ -126,8 +126,11 @@ fn handle_tooltip_mouse_move(
                 let view = build_tooltip(window, cx);
                 let state = active_tooltip.clone();
                 let check_visible_and_update: crate::interactive::TooltipVisibility =
-                    Rc::new(move |bounds, window, _cx| check_visible_and_update(&state, &check_is_hovered, bounds, window));
-                let tooltip = AnyTooltip { view, mouse_position: window.mouse_position(), check_visible_and_update };
+                    Rc::new(move |bounds, window, _cx| {
+                        check_visible_and_update(&state, &check_is_hovered, bounds, window)
+                    });
+                let tooltip =
+                    AnyTooltip { view, mouse_position: window.mouse_position(), check_visible_and_update };
                 *active_tooltip.borrow_mut() = Some(ActiveTooltip::Visible { tooltip });
                 window.refresh();
             });

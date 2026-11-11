@@ -246,11 +246,6 @@ impl Frame {
         hit_test
     }
 
-    /// The focus path (root first) of the focused element in this frame's dispatch tree.
-    pub(crate) fn focus_path(&self) -> SmallVec<[FocusId; 8]> {
-        self.focus.map(|id| self.dispatch_tree.focus_path(id)).unwrap_or_default()
-    }
-
     /// The cursor this frame asks for under the mouse (GPUI's `Frame::cursor_style`): the last window-wide
     /// request wins over everything; otherwise the last request whose hitbox is hovered.
     pub(crate) fn cursor_style(&self, window: &crate::Window) -> Option<CursorStyle> {

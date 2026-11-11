@@ -4,9 +4,10 @@
 use std::{any::TypeId, fmt::Debug, rc::Rc};
 
 use crate::{
-    DispatchPhase, HitboxBehavior, Overflow, Action, AnyView, App, ClickEvent, DragMoveEvent, ElementId, FocusHandle, Interactivity, KeyContext,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollHandle, ScrollWheelEvent,
-    SharedString, Stateful, StyleRefinement, Window, WindowControlArea,
+    Action, AnyView, App, ClickEvent, DispatchPhase, DragMoveEvent, ElementId, FocusHandle, HitboxBehavior,
+    Interactivity, KeyContext, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Overflow, ScrollHandle, ScrollWheelEvent, SharedString, Stateful, StyleRefinement, Window,
+    WindowControlArea,
 };
 
 /// An element with event listeners and state styles.
@@ -166,11 +167,13 @@ pub trait InteractiveElement: Sized {
         mut self,
         listener: impl Fn(&ScrollWheelEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
-        self.interactivity().scroll_wheel_listeners.push(Box::new(move |event, phase, hitbox, window, cx| {
-            if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
-                listener(event, window, cx)
-            }
-        }));
+        self.interactivity().scroll_wheel_listeners.push(Box::new(
+            move |event, phase, hitbox, window, cx| {
+                if phase == DispatchPhase::Bubble && hitbox.should_handle_scroll(window) {
+                    listener(event, window, cx)
+                }
+            },
+        ));
         self
     }
 
@@ -200,10 +203,7 @@ pub trait InteractiveElement: Sized {
     }
 
     /// Capture-phase key down when the element is on the focus path.
-    fn capture_key_down(
-        mut self,
-        listener: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static,
-    ) -> Self {
+    fn capture_key_down(mut self, listener: impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static) -> Self {
         self.interactivity().key_down_listeners.push(Box::new(move |event, phase, window, cx| {
             if phase == DispatchPhase::Capture {
                 listener(event, window, cx)

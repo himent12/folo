@@ -89,7 +89,9 @@ impl TaffyLayoutEngine {
         measure: NodeMeasureFn,
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
-        LayoutId(self.taffy.new_leaf_with_context(taffy_style, NodeContext { measure }).expect(EXPECT_MESSAGE))
+        LayoutId(
+            self.taffy.new_leaf_with_context(taffy_style, NodeContext { measure }).expect(EXPECT_MESSAGE),
+        )
     }
 
     /// Computes the layout under `id` in `available_space` (measured leaves call back into the window).
@@ -116,10 +118,8 @@ impl TaffyLayoutEngine {
             other => other,
         };
         let available_space = size(scale(available_space.width), scale(available_space.height));
-        let taffy_space = taffy::Size {
-            width: available_space.width.into(),
-            height: available_space.height.into(),
-        };
+        let taffy_space =
+            taffy::Size { width: available_space.width.into(), height: available_space.height.into() };
 
         self.taffy
             .compute_layout_with_measure(
@@ -134,12 +134,18 @@ impl TaffyLayoutEngine {
                         height: known_dimensions.height.map(|e| Pixels(e / scale_factor)),
                     };
                     let unscale = |space: taffy::AvailableSpace| match AvailableSpace::from(space) {
-                        AvailableSpace::Definite(pixels) => AvailableSpace::Definite(Pixels(pixels.0 / scale_factor)),
+                        AvailableSpace::Definite(pixels) => {
+                            AvailableSpace::Definite(Pixels(pixels.0 / scale_factor))
+                        }
                         other => other,
                     };
-                    let available_space = size(unscale(available_space.width), unscale(available_space.height));
+                    let available_space =
+                        size(unscale(available_space.width), unscale(available_space.height));
                     let measured = (node_context.measure)(known_dimensions, available_space, window, cx);
-                    taffy::Size { width: measured.width.0 * scale_factor, height: measured.height.0 * scale_factor }
+                    taffy::Size {
+                        width: measured.width.0 * scale_factor,
+                        height: measured.height.0 * scale_factor,
+                    }
                 },
             )
             .expect(EXPECT_MESSAGE);
@@ -188,7 +194,12 @@ impl Window {
     }
 
     /// Computes the layout under `layout_id` in `available_space`.
-    pub fn compute_layout(&mut self, layout_id: LayoutId, available_space: Size<AvailableSpace>, cx: &mut App) {
+    pub fn compute_layout(
+        &mut self,
+        layout_id: LayoutId,
+        available_space: Size<AvailableSpace>,
+        cx: &mut App,
+    ) {
         // The engine is taken out for the call: measure functions get the window.
         let mut engine = self.layout_engine.take().expect("compute_layout is not re-entrant");
         engine.compute_layout(layout_id, available_space, self, cx);
