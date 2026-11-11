@@ -283,7 +283,7 @@ impl FoloApp {
                     )
                     .child(
                         text(ty::SM, t.text_tertiary)
-                            .child("FOLO Only Looks Once · GPUI · MIT OR Apache-2.0"),
+                            .child("FOLO Only Looks Once · folo-ui · MIT OR Apache-2.0"),
                     ),
             ),
         );
