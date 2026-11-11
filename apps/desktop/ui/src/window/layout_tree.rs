@@ -5,7 +5,7 @@
 //! Each frame the elements add their nodes again (children before parents). A new node whose style, kind,
 //! measure key and children are those of a node of the previous frame (its children reused from that
 //! node's children) takes that node's place: its subtree is the same, so it is *reusable*. A reusable node
-//! keeps the list of every layout request it received last frame with its answer (`records`). This frame,
+//! keeps the list of every layout request it received last frame with its answer (its records). This frame,
 //! while the requests it receives are the same requests in the same order, it answers from the list and
 //! nothing under it runs; the measured nodes under it then replay last frame's measure calls in order, so
 //! their state (the text element keeps its shaped lines there) is what a fresh layout leaves.
@@ -77,23 +77,40 @@ struct Node {
     reused_from: Option<u32>,
     /// The subtree is last frame's: requests are answered from `records` while they match.
     reusable: bool,
-    /// Every request and answer: last frame's while reusable, else this frame's.
-    records: Vec<(LayoutInput, LayoutOutput)>,
-    /// How many of `records` this frame's requests matched.
+    /// Every request and answer (last frame's while reusable, else this frame's), in order: each distinct
+    /// pair once in `answers`, and `requests` indexes them (a node is asked the same thing many times).
+    answers: Vec<(LayoutInput, LayoutOutput)>,
+    requests: Vec<u32>,
+    /// How many of `requests` this frame's requests matched.
     matched: u32,
     /// The measure calls (last frame's while reusable and not measured again).
     invocations: Vec<Invocation>,
     /// The measure function ran (or replayed) this frame.
     measured_now: bool,
-    cache: Cache,
     unrounded: Layout,
     final_layout: Layout,
+}
+
+impl Node {
+    /// Appends a request and its answer to the records.
+    fn record(&mut self, inputs: LayoutInput, output: LayoutOutput) {
+        let k = match self.answers.iter().position(|&(i, o)| i == inputs && o == output) {
+            Some(k) => k,
+            None => {
+                self.answers.push((inputs, output));
+                self.answers.len() - 1
+            }
+        };
+        self.requests.push(k as u32);
+    }
 }
 
 /// The layout tree of one window (see the module docs).
 #[derive(Default)]
 pub(crate) struct LayoutTree {
     nodes: Vec<Node>,
+    /// taffy's per-frame cache of each of this frame's nodes (last frame's are not kept).
+    caches: Vec<Cache>,
     children: Vec<NodeId>,
     /// Last frame's nodes, and their children, while this frame's are added.
     previous: Vec<Node>,
@@ -116,7 +133,14 @@ impl LayoutTree {
         std::mem::swap(&mut self.nodes, &mut self.previous);
         std::mem::swap(&mut self.children, &mut self.previous_children);
         self.nodes.clear();
+        self.caches.clear();
         self.children.clear();
+        // Room for this frame's nodes, about as many as last frame's: without the trim, doubling leaves
+        // up to twice that in each of the two node lists (1.3 KB a node).
+        let room = |len: usize| len + len / 8 + 16;
+        trim(&mut self.nodes, room(self.previous.len()));
+        trim(&mut self.caches, room(self.previous.len()));
+        trim(&mut self.children, room(self.previous_children.len()));
         self.by_sig.clear();
         for (ix, node) in self.previous.iter().enumerate() {
             self.by_sig.entry(node.sig).or_default().push(ix as u32);
@@ -155,11 +179,11 @@ impl LayoutTree {
             sig,
             reused_from: None,
             reusable: false,
-            records: Vec::new(),
+            answers: Vec::new(),
+            requests: Vec::new(),
             matched: 0,
             invocations: Vec::new(),
             measured_now: false,
-            cache: Cache::new(),
             unrounded: Layout::new(),
             final_layout: Layout::new(),
         };
@@ -168,11 +192,13 @@ impl LayoutTree {
             let old = &mut self.previous[prev as usize];
             node.reused_from = Some(prev);
             node.reusable = true;
-            node.records = std::mem::take(&mut old.records);
+            node.answers = std::mem::take(&mut old.answers);
+            node.requests = std::mem::take(&mut old.requests);
             node.invocations = std::mem::take(&mut old.invocations);
             node.unrounded = old.unrounded;
         }
         self.nodes.push(node);
+        self.caches.push(Cache::new());
         id
     }
 
@@ -223,6 +249,25 @@ impl LayoutTree {
         round_layout(&mut view, root);
     }
 
+    /// Bytes the tree holds on the heap (both frames' nodes, children lists and records).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let records = |nodes: &[Node]| -> usize {
+            nodes
+                .iter()
+                .map(|n| {
+                    n.answers.capacity() * std::mem::size_of::<(LayoutInput, LayoutOutput)>()
+                        + n.requests.capacity() * std::mem::size_of::<u32>()
+                        + n.invocations.capacity() * std::mem::size_of::<Invocation>()
+                })
+                .sum()
+        };
+        (self.nodes.capacity() + self.previous.capacity()) * std::mem::size_of::<Node>()
+            + self.caches.capacity() * std::mem::size_of::<Cache>()
+            + (self.children.capacity() + self.previous_children.capacity()) * std::mem::size_of::<NodeId>()
+            + records(&self.nodes)
+            + records(&self.previous)
+    }
+
     /// A node's rounded layout (relative to its parent).
     pub(crate) fn final_layout(&self, id: NodeId) -> &Layout {
         &self.nodes[usize::from(id)].final_layout
@@ -238,6 +283,15 @@ impl LayoutTree {
         let node = &self.nodes[usize::from(id)];
         &self.children[node.first as usize..(node.first + node.count) as usize]
     }
+}
+
+/// Gives back `v`'s capacity beyond `room` (and reserves up to it), keeping steady frames free of
+/// reallocation.
+fn trim<T>(v: &mut Vec<T>, room: usize) {
+    if v.capacity() > room + room / 2 {
+        v.shrink_to(room);
+    }
+    v.reserve_exact(room.saturating_sub(v.len()));
 }
 
 /// The tree with the window, while laying out (what taffy's algorithms run over).
@@ -267,7 +321,7 @@ impl View<'_> {
                 }
             })
         };
-        self.tree.nodes[usize::from(node)].records.push((inputs, output));
+        self.tree.nodes[usize::from(node)].record(inputs, output);
         output
     }
 
@@ -298,10 +352,11 @@ impl View<'_> {
         while let Some(ix) = stack.pop() {
             let node = &mut self.tree.nodes[ix];
             node.reusable = false;
-            node.records.clear();
+            node.answers.clear();
+            node.requests.clear();
             node.matched = 0;
             node.invocations.clear();
-            node.cache.clear();
+            self.tree.caches[ix].clear();
             if unplaced {
                 node.unrounded = Layout::new();
             }
@@ -320,7 +375,7 @@ impl View<'_> {
     fn diverge(&mut self, ix: usize) {
         let node = &self.tree.nodes[ix];
         let answered: SmallVec<[LayoutInput; 8]> =
-            node.records[..node.matched as usize].iter().map(|(inputs, _)| *inputs).collect();
+            node.requests[..node.matched as usize].iter().map(|&k| node.answers[k as usize].0).collect();
         self.reset_subtree(ix, false);
         for inputs in answered {
             self.compute_fresh(NodeId::from(ix), inputs);
@@ -338,7 +393,7 @@ impl View<'_> {
             let node = &self.tree.nodes[ix];
             let mut covers = false;
             if node.reusable {
-                let (matched, len) = (node.matched as usize, node.records.len());
+                let (matched, len) = (node.matched as usize, node.requests.len());
                 if matched > 0 && matched < len {
                     self.diverge(ix);
                     continue;
@@ -485,7 +540,8 @@ impl taffy::LayoutPartialTree for View<'_> {
         let ix = usize::from(node);
         let n = &mut self.tree.nodes[ix];
         if n.reusable {
-            if let Some(&(recorded, output)) = n.records.get(n.matched as usize)
+            if let Some(&k) = n.requests.get(n.matched as usize)
+                && let (recorded, output) = n.answers[k as usize]
                 && recorded == inputs
             {
                 n.matched += 1;
@@ -506,7 +562,7 @@ impl taffy::CacheTree for View<'_> {
         available_space: Size<TaffySpace>,
         run_mode: RunMode,
     ) -> Option<LayoutOutput> {
-        self.tree.nodes[usize::from(node)].cache.get(known_dimensions, available_space, run_mode)
+        self.tree.caches[usize::from(node)].get(known_dimensions, available_space, run_mode)
     }
 
     fn cache_store(
@@ -517,11 +573,11 @@ impl taffy::CacheTree for View<'_> {
         run_mode: RunMode,
         output: LayoutOutput,
     ) {
-        self.tree.nodes[usize::from(node)].cache.store(known_dimensions, available_space, run_mode, output)
+        self.tree.caches[usize::from(node)].store(known_dimensions, available_space, run_mode, output)
     }
 
     fn cache_clear(&mut self, node: NodeId) {
-        self.tree.nodes[usize::from(node)].cache.clear();
+        self.tree.caches[usize::from(node)].clear();
     }
 }
 

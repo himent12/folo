@@ -64,7 +64,12 @@ impl Application {
                     });
                 let platform = Rc::new(platform);
                 let app = App::new_app(platform.clone(), Arc::new(()));
-                let bench = bench::Bench { frames: request.frames, options: request.options, platform };
+                let bench = bench::Bench {
+                    frames: request.frames,
+                    options: request.options,
+                    platform,
+                    heap: [None; 2],
+                };
                 return Application(app, None, Some(bench));
             }
             Ok(None) => {}
@@ -134,8 +139,10 @@ impl Application {
         F: 'static + FnOnce(&mut App),
     {
         let this = self.0.clone();
-        if let Some(bench) = self.2 {
+        if let Some(mut bench) = self.2 {
+            bench.heap = [bench::live_bytes(), None];
             this.update(on_finish_launching);
+            bench.heap[1] = bench::live_bytes();
             if let Err(error) = bench.run(this) {
                 eprintln!("folo-ui: --bench-frames: {error:#}");
                 std::process::exit(1);

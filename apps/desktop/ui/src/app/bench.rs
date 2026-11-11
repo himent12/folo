@@ -30,6 +30,8 @@ const TICK: Duration = Duration::from_nanos(1_000_000_000 / 240);
 pub struct CountingAlloc;
 
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+/// Bytes allocated and not freed (the live heap).
+static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
 static COUNTING: AtomicBool = AtomicBool::new(false);
 
 // SAFETY: every method forwards to `System` with the caller's arguments unchanged; the counter is a
@@ -38,26 +40,36 @@ unsafe impl GlobalAlloc for CountingAlloc {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         COUNTING.store(true, Ordering::Relaxed);
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        LIVE_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract, which `System` shares.
         unsafe { System.alloc(layout) }
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        LIVE_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         // SAFETY: as `alloc`.
         unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        LIVE_BYTES.fetch_sub(layout.size() as u64, Ordering::Relaxed);
         // SAFETY: `ptr` came from this allocator, so from `System`, with `layout`.
         unsafe { System.dealloc(ptr, layout) }
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        LIVE_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
+        LIVE_BYTES.fetch_sub(layout.size() as u64, Ordering::Relaxed);
         // SAFETY: as `dealloc`, and the caller upholds `realloc`'s size contract.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
+}
+
+/// The live heap, when a `CountingAlloc` is installed.
+pub(crate) fn live_bytes() -> Option<u64> {
+    COUNTING.load(Ordering::Relaxed).then(|| LIVE_BYTES.load(Ordering::Relaxed))
 }
 
 /// Allocations so far, when a `CountingAlloc` is installed.
@@ -109,6 +121,8 @@ pub(crate) struct Bench {
     pub(crate) options: HeadlessOptions,
     /// The platform.
     pub(crate) platform: Rc<HeadlessPlatform>,
+    /// The live heap before and after the app's launch callback (with `CountingAlloc`).
+    pub(crate) heap: [Option<u64>; 2],
 }
 
 /// One measured frame.
@@ -174,8 +188,33 @@ impl Bench {
         );
         print_line("full", &full, shaped_full);
         print_line("tick", &ticks, shaped_ticks);
+        print_memory(&harness, window, self.heap);
         Ok(())
     }
+}
+
+/// Prints where the heap is: the whole live heap (with `CountingAlloc`) and the window's big holders.
+fn print_memory(harness: &HeadlessApp, window: crate::AnyWindowHandle, heap: [Option<u64>; 2]) {
+    let mb = |bytes: usize| bytes as f64 / (1 << 20) as f64;
+    let app = harness.app.borrow();
+    let Some(Some(window)) = app.windows.get(&window.id) else { return };
+    let mb_of = |bytes: Option<u64>| bytes.map_or("-".to_string(), |b| format!("{:.1}", mb(b as usize)));
+    let (start, launched, now) = (mb_of(heap[0]), mb_of(heap[1]), mb_of(live_bytes()));
+    let framebuffer = window.framebuffer.pixels.capacity() * 4;
+    let layout = window.layout_engine.as_ref().map_or(0, |engine| engine.tree.heap_bytes());
+    println!(
+        "  memory: heap {now} MB (at start {start}, after the launch callback {launched}) | framebuffer {:.1} MB, renderer caches {:.1} MB, glyph masks {:.1} MB ({}), icon masks {:.1} MB ({}), layout tree {:.1} MB, scenes {:.1} MB",
+        mb(framebuffer),
+        mb(window.renderer.cache_bytes()),
+        mb(window.glyph_masks.bytes()),
+        window.glyph_masks.len(),
+        mb(window.icon_masks.bytes()),
+        window.icon_masks.len(),
+        mb(layout),
+        mb((window.rendered_frame.scene.primitives.capacity()
+            + window.next_frame.scene.primitives.capacity())
+            * std::mem::size_of::<crate::Primitive>()),
+    );
 }
 
 /// Lines the window's text system has shaped so far.
