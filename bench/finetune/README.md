@@ -178,6 +178,18 @@ training pod of another job ($0.57/h) ran alongside: the $0.53 left over would b
   the results were copied off its HTTP port and the pod terminated. A first attempt on a `runpod/pytorch` devel
   image never started its container within 12 minutes (the image pull) and was terminated.
 
+**The small pair** (the same day, the same GPU type, 24 of its 28 runs: no from-scratch controls):
+- folo-s: `run_folo.py --arch folo-s --weights folo-s-coco ...` with `folo-s-coco.folo` (release `weights-v3`)
+  copied into the control plane's `models/` folder, where it lists as a model at once (the run is started from
+  its model id; the server's build predates the published name). 12 pods, $0.980 by FOLO's per-pod estimates
+  ($0.441 for the nine runs of the three small datasets, $0.539 for brain-tumor's three). One seed of
+  brain-tumor was scored in a second invocation: its `folo val` ran out of memory on the control plane's PC
+  while three ran at once, and the runner followed the finished run again without renting anything.
+- yolo26s: `run_ultralytics.py --weights yolo26s.pt` on two `ubuntu:22.04` pods, every run three at a time on
+  one GPU (19 of 46 GB used), so its training times are not comparable and stay out of the table: $0.444 for
+  bccd and brain-tumor (the pod's 45-minute watchdog ended it before the two short datasets ran) and $0.127 for
+  signature and medical-pills on a second pod, by uptime × $0.59/h.
+
 ## The scorer, checked
 
 `crosscheck_coco.py` scores both tools' COCO models on COCO val2017 (all 5,000 images, the original annotations

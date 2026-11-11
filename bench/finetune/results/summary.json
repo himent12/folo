@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "created": "2026-11-11T08:09:21Z",
-  "runs": 40,
+  "created": "2026-11-11T12:47:43Z",
+  "runs": 52,
   "groups": [
     {
       "dataset": "bccd",
@@ -91,6 +91,57 @@
         "max": 210.0,
         "n": 1,
         "stdev": null
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "bccd",
+      "tool": "folo",
+      "model": "folo-s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "test",
+      "ap": {
+        "mean": 0.6002984198515899,
+        "min": 0.5969012193254722,
+        "max": 0.6041378370656553,
+        "n": 3,
+        "stdev": 0.003638519723556196
+      },
+      "ap50": {
+        "mean": 0.883659534313891,
+        "min": 0.8761751344388049,
+        "max": 0.8958687751259506,
+        "n": 3,
+        "stdev": 0.010663159113901354
+      },
+      "ap75": {
+        "mean": 0.6953791378105109,
+        "min": 0.6830785240210182,
+        "max": 0.7116532141276157,
+        "n": 3,
+        "stdev": 0.014695901878271226
+      },
+      "train_wall_s": {
+        "mean": 322.0,
+        "min": 294.0,
+        "max": 374.0,
+        "n": 3,
+        "stdev": 45.077710678338576
       },
       "train_wall_shared_s": null,
       "epochs_run": [
@@ -313,6 +364,57 @@
     },
     {
       "dataset": "brain-tumor",
+      "tool": "folo",
+      "model": "folo-s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.44668572298822956,
+        "min": 0.4106118945125964,
+        "max": 0.4720420452415277,
+        "n": 3,
+        "stdev": 0.03208682844040757
+      },
+      "ap50": {
+        "mean": 0.604416044701839,
+        "min": 0.5596327119339419,
+        "max": 0.6450827360262457,
+        "n": 3,
+        "stdev": 0.04287349655585043
+      },
+      "ap75": {
+        "mean": 0.5281256063963448,
+        "min": 0.47005788829403583,
+        "max": 0.5746812361293929,
+        "n": 3,
+        "stdev": 0.05325323804273106
+      },
+      "train_wall_s": {
+        "mean": 1046.6666666666667,
+        "min": 1033.0,
+        "max": 1064.0,
+        "n": 3,
+        "stdev": 15.821925715074425
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "brain-tumor",
       "tool": "ultralytics",
       "model": "yolo26n",
       "variant": "pretrained",
@@ -521,6 +623,57 @@
     },
     {
       "dataset": "medical-pills",
+      "tool": "folo",
+      "model": "folo-s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.8064995257958091,
+        "min": 0.8061767638321162,
+        "max": 0.8070510032077377,
+        "n": 3,
+        "stdev": 0.0004799027908525072
+      },
+      "ap50": {
+        "mean": 0.9969991236560437,
+        "min": 0.9968566307034599,
+        "max": 0.9972144889576844,
+        "n": 3,
+        "stdev": 0.00018973248791909046
+      },
+      "ap75": {
+        "mean": 0.9769896114925402,
+        "min": 0.9766313323554139,
+        "max": 0.9772836961456807,
+        "n": 3,
+        "stdev": 0.00033088567140850925
+      },
+      "train_wall_s": {
+        "mean": 182.0,
+        "min": 170.0,
+        "max": 196.0,
+        "n": 3,
+        "stdev": 13.114877048604
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "medical-pills",
       "tool": "ultralytics",
       "model": "yolo26n",
       "variant": "pretrained",
@@ -715,6 +868,57 @@
         "max": 181.0,
         "n": 1,
         "stdev": null
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "signature",
+      "tool": "folo",
+      "model": "folo-s",
+      "variant": "pretrained",
+      "seeds": [
+        0,
+        1,
+        2
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.991909476661952,
+        "min": 0.9908345120226308,
+        "max": 0.9938896746817539,
+        "n": 3,
+        "stdev": 0.0017170003853458336
+      },
+      "ap50": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "ap75": {
+        "mean": 1.0,
+        "min": 1.0,
+        "max": 1.0,
+        "n": 3,
+        "stdev": 0.0
+      },
+      "train_wall_s": {
+        "mean": 251.0,
+        "min": 229.0,
+        "max": 292.0,
+        "n": 3,
+        "stdev": 35.53871128783372
       },
       "train_wall_shared_s": null,
       "epochs_run": [

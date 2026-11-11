@@ -159,12 +159,19 @@ def results_table(groups: dict, names: list[str], fm: str, um: str, seeds: int, 
     shared = sorted(
         {k[2] for k, g in groups.items() if k[2] in (fm, um) and g.get("train_wall_shared_s")}
     )
-    if shared:
+    for model in shared:
+        alone = any(k[2] == model and g.get("train_wall_s") for k, g in groups.items())
         lines.append("")
-        lines.append(
-            f"Minutes per run of {', '.join(shared)}: only the runs that had the GPU to themselves (none: blank); "
-            "the others trained side by side with other runs on one GPU (their accuracy counts, their time does not)."
-        )
+        if alone:
+            lines.append(
+                f"Minutes per run of {model}: only the runs that had the GPU to themselves; the others trained side "
+                "by side with other runs on one GPU (their accuracy counts, their time does not)."
+            )
+        else:
+            lines.append(
+                f"Minutes per run of {model}: blank, because every one of its runs trained side by side with other "
+                "runs on one GPU (their accuracy counts, their time does not)."
+            )
     lines.append("")
     return lines
 

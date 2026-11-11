@@ -18,7 +18,9 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
   checkpoint.
 - **Fine-tuning benchmark** (`bench/finetune/`, docs/BENCHMARKS.md, Fine-tuning on small datasets): FOLO's COCO
   weights against Ultralytics' YOLO26 of the same size on four small public datasets, three seeds each, both trained
-  on the same rented GPU type and scored by one pycocotools scorer.
+  on the same rented GPU type and scored by one pycocotools scorer. folo-n is level with YOLO26n on three of them
+  and 0.020 AP behind on BCCD; folo-s is 0.020 behind YOLO26s on BCCD, level on pills, and ahead on signatures
+  (0.012) and brain-tumor (0.080, where YOLO26s does worse than YOLO26n).
 - `folo weights pull` downloads over plain HTTPS first, without credentials (streamed, redirects followed, a stalled
   connection fails after 60 s, a progress line on a terminal), so once the repository is public it needs nothing but
   the `folo` binary. A refused download (`404`: a private repository, a draft, a missing release) falls back to

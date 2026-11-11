@@ -439,12 +439,15 @@ scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed 
 What most users do: fine-tune pretrained weights on a few hundred of their own images. folo-n starts from FOLO's
 COCO weights (`folo-n-coco-v2`, COCO AP 0.317), YOLO26n from Ultralytics' `yolo26n.pt` (COCO AP 0.409, with
 Objects365 pretraining), so FOLO starts from weaker weights and may well lose here; the table says what was
-measured. Harness, datasets and the full protocol: [bench/finetune](../bench/finetune/README.md). The harness
-pairs models by size, so a folo-s against yolo26s table is added the same way once folo-s COCO weights exist.
+measured. Harness, datasets and the full protocol: [bench/finetune](../bench/finetune/README.md). The same matrix
+was then run for the small pair: folo-s from `folo-s-coco` (COCO AP 0.416) against YOLO26s from `yolo26s.pt`
+(published COCO AP 0.480).
 
 - **Protocol**: both tools at their out-of-the-box fine-tuning defaults (`optimizer: auto`, their own augmentation;
   FOLO in f32, Ultralytics with its default AMP), 640 px, batch 16, 100 epochs (both tools' default; neither can
   stop early at its default patience of 100), seeds 0, 1, 2; plus folo-n from scratch (seed 0) as the control.
+  The small pair has no from-scratch control: what was left of the budget went to its 24 fine-tunes, so its table
+  is marked partial (24 of 28 runs).
 - **One scorer**: each run's best checkpoint predicts the evaluation split with its own validation pipeline (conf
   0.001, at most 300 detections, 640 px; FOLO with NMS at IoU 0.7, YOLO26n with its NMS-free head) into COCO
   detections JSON, and pycocotools scores both against one ground truth built from the YOLO labels: AP@[.5:.95] and
@@ -463,6 +466,9 @@ pairs models by size, so a folo-s against yolo26s table is added the same way on
   result files, the rest is 3 runs repeated after a runner bug) and $0.62 for Ultralytics' two pods (by uptime,
   one of them a pod that never started); the from-scratch control of brain-tumor ran a little later than the
   rest, on the same GPU type. bench/finetune/README.md has the accounting and its sources.
+- **The small pair** ran the same day on the same GPU type: folo-s through FOLO's cloud feature again (12 pods,
+  $0.98 by FOLO's per-pod estimates), YOLO26s on two `ubuntu:22.04` pods with all runs three at a time on one GPU
+  ($0.57 by uptime), which is why YOLO26s has no training time in its table.
 
 <!-- finetune:begin -->
 | dataset | domain | licence | classes | train images | train boxes | scored on: images / boxes |
@@ -481,7 +487,18 @@ pairs models by size, so a folo-s against yolo26s table is added the same way on
 | signature | 0.989 (0.987–0.992) | 1.000 (1.000–1.000) | 0.982 (0.975–0.987) | 1.000 (1.000–1.000) | +0.007 | 0.920 | 1.000 | 3.5 | 2.6 |
 | medical-pills | 0.804 (0.801–0.807) | 0.995 (0.995–0.996) | 0.803 (0.800–0.806) | 0.998 (0.998–0.998) | +0.002 | 0.737 | 0.984 | 2.5 | 2.2 |
 
-Minutes per run of yolo26n: only the runs that had the GPU to themselves; the others trained two at a time on one GPU (their accuracy counts, their time does not).
+Minutes per run of yolo26n: only the runs that had the GPU to themselves; the others trained side by side with other runs on one GPU (their accuracy counts, their time does not).
+
+**folo-s against yolo26s, partial**: 24 of the 28 runs of the matrix have been measured.
+
+| dataset | folo-s fine-tuned AP | AP50 | yolo26s fine-tuned AP | AP50 | FOLO − Ultralytics (AP) | folo-s from scratch AP | AP50 | folo-s min / run | yolo26s min / run |
+|---|---|---|---|---|---:|---|---|---:|---:|
+| bccd | 0.600 (0.597–0.604) | 0.884 (0.876–0.896) | 0.621 (0.616–0.624) | 0.913 (0.908–0.919) | -0.020 | not run | not run | 5.4 |  |
+| brain-tumor | 0.447 (0.411–0.472) | 0.604 (0.560–0.645) | 0.367 (0.360–0.371) | 0.503 (0.501–0.505) | +0.080 | not run | not run | 17.4 |  |
+| signature | 0.992 (0.991–0.994) | 1.000 (1.000–1.000) | 0.980 (0.978–0.981) | 1.000 (1.000–1.000) | +0.012 | not run | not run | 4.2 |  |
+| medical-pills | 0.806 (0.806–0.807) | 0.997 (0.997–0.997) | 0.805 (0.802–0.810) | 0.998 (0.997–0.998) | +0.001 | not run | not run | 3.0 |  |
+
+Minutes per run of yolo26s: blank, because every one of its runs trained side by side with other runs on one GPU (their accuracy counts, their time does not).
 
 Trained on: NVIDIA A40; NVIDIA A40 (vulkan).
 <!-- finetune:end -->
@@ -505,6 +522,21 @@ as YOLO26n on three of the four datasets and lost on one:
   is the wall time of `train()` (its label cache and AMP check included); YOLO26n's minutes are of seed 0 alone.
 - Four datasets and three seeds are a small sample: this says FOLO's fine-tuning is competitive on small, simple
   datasets, not that it matches YOLO26n in general (on full COCO it is 0.09 AP behind).
+
+**The small pair** (folo-s from COCO AP 0.416 against YOLO26s from 0.480) reads the same way, with one surprise:
+- **BCCD: YOLO26s is better**, by 0.020 AP (0.600 against 0.621) and 0.029 AP50; the seed ranges do not overlap
+  (folo-s 0.597–0.604, YOLO26s 0.616–0.624). The same loss, by the same margin, as the nano pair.
+- **Brain tumor: folo-s is better, by 0.080 AP** (0.447 against 0.367), and the ranges do not overlap (folo-s
+  0.411–0.472, YOLO26s 0.360–0.371). The gap comes from YOLO26s doing worse here than YOLO26n (0.367 against
+  0.436, all three seeds, same pipeline and scorer; its own per-epoch validation plateaus early), not from
+  folo-s doing better than folo-n (0.447 against 0.452). Why YOLO26s under-fits this dataset at its defaults was
+  not investigated, so this is one dataset's result, not evidence that folo-s fine-tunes better in general.
+- **Signatures: folo-s is 0.012 AP higher** (0.992 against 0.980; ranges 0.991–0.994 and 0.978–0.981) on a
+  saturated set (AP50 1.000 for both, 35 images). **Pills: level** (0.806 against 0.805).
+- **The bigger model buys nothing on these datasets**, for either tool: folo-s is within 0.007 AP of folo-n on all
+  four (0.600 / 0.447 / 0.992 / 0.806 against 0.607 / 0.452 / 0.989 / 0.804), at 1.2 to 1.7 times the training
+  time (3.0 to 17.4 minutes per run against 2.5 to 10.1), and YOLO26s is level with or below YOLO26n. A few
+  hundred images of one to three classes do not use the capacity; a small model is the right choice there.
 
 ## FOLO on the GPU
 
