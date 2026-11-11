@@ -71,6 +71,11 @@ impl HeadlessApp {
         HeadlessApp { app, platform, framebuffer: Framebuffer::default(), scene: Scene::default() }
     }
 
+    /// A harness around an app already built on `platform` (what `--shot` runs).
+    pub(crate) fn from_parts(app: Rc<AppCell>, platform: Rc<HeadlessPlatform>) -> Self {
+        HeadlessApp { app, platform, framebuffer: Framebuffer::default(), scene: Scene::default() }
+    }
+
     /// Sets the asset source.
     pub fn with_assets(self, asset_source: impl AssetSource) -> Self {
         self.app.borrow_mut().asset_source = Arc::new(asset_source);

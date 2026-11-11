@@ -44,7 +44,9 @@ impl<V: Render> From<Entity<V>> for AnyView {
 /// `AnyView::render` for views of type `V`.
 fn render_view<V: Render>(view: &AnyView, window: &mut Window, cx: &mut App) -> AnyElement {
     let view = view.clone().downcast::<V>().unwrap_or_else(|_| panic!("AnyView of the wrong type"));
-    view.update(cx, |view, cx| view.render(window, cx).into_any_element())
+    let element = view.update(cx, |view, cx| view.render(window, cx).into_any_element());
+    crate::app::trace::first_render();
+    element
 }
 
 impl Element for AnyView {

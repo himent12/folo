@@ -14,9 +14,11 @@ mod entity_map;
 mod global;
 mod observe;
 mod platform_ops;
+mod shot;
 mod subscription;
 #[cfg(test)]
 mod tests;
+pub(crate) mod trace;
 mod windows;
 
 pub use async_app::*;
@@ -39,24 +41,37 @@ use crate::{
     Platform, TextSystem, Window, WindowId,
 };
 
-/// The app before it runs: `Application::new().with_assets(..).run(|cx| ..)`.
-pub struct Application(Rc<AppCell>);
+/// The app before it runs: `Application::new().with_assets(..).run(|cx| ..)`. With `--shot <png>` on the
+/// command line it runs headless and writes a screenshot instead (`shot.rs`).
+pub struct Application(Rc<AppCell>, Option<shot::Shot>);
 
 impl Application {
     /// An app on the default platform: the Win32 backend on Windows; winit elsewhere, or on Windows when
     /// `FOLO_UI_PLATFORM=winit` and the `winit` feature is on.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
+        trace::mark_start();
+        let args: Vec<String> = std::env::args().collect();
+        match shot::ShotArgs::parse(&args) {
+            Ok(Some(request)) => {
+                let platform =
+                    Rc::new(crate::platform::headless::HeadlessPlatform::from_options(request.options));
+                let app = App::new_app(platform.clone(), Arc::new(()));
+                return Application(app, Some(shot::Shot { path: request.path, platform }));
+            }
+            Ok(None) => {}
+            Err(error) => panic!("--shot: {error:#}"),
+        }
         let platform = native_text_system()
             .and_then(default_platform)
             .unwrap_or_else(|error| panic!("cannot start the platform: {error:#}"));
-        Application(App::new_app(platform, Arc::new(())))
+        Application(App::new_app(platform, Arc::new(())), None)
     }
 
     /// An app on the headless platform (tests, `--shot`). Prefer `HeadlessApp`, which also drives it.
     pub fn headless(options: crate::HeadlessOptions) -> Self {
         let platform = crate::platform::headless::HeadlessPlatform::from_options(options);
-        Application(App::new_app(Rc::new(platform), Arc::new(())))
+        Application(App::new_app(Rc::new(platform), Arc::new(())), None)
     }
 
     /// Where `svg()` and other assets load from.
@@ -71,6 +86,14 @@ impl Application {
         F: 'static + FnOnce(&mut App),
     {
         let this = self.0.clone();
+        if let Some(shot) = self.1 {
+            this.update(on_finish_launching);
+            if let Err(error) = shot.take(this) {
+                eprintln!("folo-ui: --shot: {error:#}");
+                std::process::exit(1);
+            }
+            return;
+        }
         let platform = self.0.borrow().platform.clone();
         // GPUI runs this without an update around it; flushing its effects at once reaches the same state
         // sooner (defers and notifies do not wait for the first event).
