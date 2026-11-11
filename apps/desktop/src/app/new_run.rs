@@ -1,0 +1,521 @@
+//! The New run dialog's state: opening it (fresh, from a run, or as the kept draft), the config it
+//! makes, the server's estimate for it, and submitting it. `crate::overlays` draws it.
+
+use std::rc::Rc;
+use std::time::Duration;
+
+use gpui::point;
+use gpui::{App, AppContext, Context, Focusable, Window, px};
+
+use crate::api::*;
+use crate::input::{InputEvent, TextInput};
+use crate::store::*;
+use crate::ui::*;
+
+use super::forms::{
+    ARCHS, BATCHES, DEVICES, IMGSZ, NewRunForm, OPTIMIZERS, batch_index, carry_over, parse_epochs, parse_lr,
+};
+use super::{FoloApp, Route, RunFilter};
+
+impl FoloApp {
+    /// The form to keep as a draft when the dialog closes without starting a run: none while a
+    /// submission is pending (that run is being created; keeping it would allow a duplicate).
+    pub(super) fn keep_draft(&mut self, mut f: NewRunForm) -> Option<NewRunForm> {
+        if f.submitting {
+            self.new_run_draft_ds = None;
+            return None;
+        }
+        self.new_run_draft_ds =
+            self.store.datasets.ready().and_then(|d| d.get(f.dataset)).map(|d| d.id.clone());
+        f.error = None;
+        Some(f)
+    }
+
+    pub fn close_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.new_run_draft = self.new_run.take().and_then(|f| self.keep_draft(f));
+        self.restore_focus(window);
+        cx.notify();
+    }
+
+    /// The New run dialog prefilled from an earlier run; `note` explains any adjustment.
+    pub fn open_new_run_from(
+        &mut self,
+        config: &TrainConfig,
+        note: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_new_run(Some(&config.dataset_id), window, cx);
+        let idx = |list: &[u32], v: u32| list.iter().position(|x| *x == v);
+        let name = format!("{}-2", config.name);
+        let cloud_on = self.cloud_on();
+        if let Some(f) = self.new_run.as_mut() {
+            f.arch = ARCHS.iter().position(|a| *a == config.arch).unwrap_or(f.arch);
+            f.epochs = config.epochs as f32;
+            f.batch = batch_index(config.batch);
+            f.imgsz = idx(&IMGSZ, config.imgsz).unwrap_or(f.imgsz);
+            f.device = DEVICES.iter().position(|d| *d == config.device).unwrap_or(0);
+            f.prefill_optimizer(config.optimizer);
+            f.lr0 = config.lr0;
+            let (ei, li) = (f.epochs_input.clone(), f.lr_input.clone());
+            let (ci, cv) = (f.close_input.clone(), config.augment.close_mosaic.to_string());
+            ci.update(cx, |i, cx| i.set_text(cv, cx));
+            let (ev, lv) = (config.epochs.to_string(), format!("{}", config.lr0));
+            ei.update(cx, |i, cx| i.set_text(ev, cx));
+            li.update(cx, |i, cx| i.set_text(lv, cx));
+            f.mosaic = config.augment.mosaic;
+            f.mixup = config.augment.mixup;
+            f.fliplr = config.augment.fliplr;
+            f.close_mosaic = config.augment.close_mosaic as f32;
+            f.scale = config.augment.scale;
+            f.amp = config.amp;
+            f.e2e = config.head == Head::O2o;
+            f.note = note;
+            f.base = Some(config.clone());
+            // A cloud run's connection and offer, when they still exist (checked once the
+            // connections and offers are in), and its time limit as it was.
+            if let Some(c) = config.compute.as_ref().filter(|_| cloud_on) {
+                f.run_on = Some(c.connection_id.clone());
+                f.want_offer = Some(c.offer_id.clone());
+                f.max_hours = c.max_hours;
+                f.hours_edited = true;
+                let (hi, hv) = (f.hours_input.clone(), crate::ui::hours_value(c.max_hours));
+                hi.update(cx, |i, cx| i.set_text(hv, cx));
+            }
+            let input = f.name.clone();
+            input.update(cx, |i, cx| i.set_text(name, cx));
+        }
+        self.sync_compute(cx);
+        cx.notify();
+    }
+
+    pub fn open_new_run(&mut self, dataset: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        // Nothing to train on until the dataset list is in (Ctrl+N included).
+        if self.store.datasets.ready().is_none_or(|d| d.is_empty()) {
+            return;
+        }
+        if self.new_run.is_none() {
+            self.remember_focus(window, cx);
+        }
+        // A plain New run picks up a draft left by Esc or Cancel; one for a specific dataset (or
+        // prefilled from a run) starts fresh.
+        // Its dataset is found again by id; gone (or the list unloaded), the draft is dropped.
+        let draft_ds = self
+            .new_run_draft_ds
+            .take()
+            .and_then(|id| self.store.datasets.ready().and_then(|d| d.iter().position(|d| d.id == id)));
+        if let Some(mut draft) = self.new_run_draft.take()
+            && self.new_run.is_none()
+            && dataset.is_none()
+            && let Some(idx) = draft_ds
+        {
+            draft.dataset = idx;
+            let fh = draft.name.read(cx).focus_handle(cx);
+            self.new_run = Some(draft);
+            window.focus(&fh);
+            cx.notify();
+            return;
+        }
+        let idx =
+            dataset.and_then(|id| self.store.datasets.ready()?.iter().position(|d| d.id == id)).unwrap_or(0);
+        let n = self.store.runs.ready().map_or(0, |r| r.len()) + 1;
+        let ds_name = self
+            .store
+            .datasets
+            .ready()
+            .and_then(|d| d.get(idx))
+            .map_or("shapes".to_string(), |d| d.name.clone());
+        let name = cx.new(|cx| {
+            let mut i = TextInput::new("run name", cx);
+            i.set_text(format!("{ds_name}-s-{n}"), cx);
+            i
+        });
+        let fh = name.read(cx).focus_handle(cx);
+        let epochs_input = cx.new(|cx| {
+            let mut i = TextInput::new("100", cx);
+            i.set_text("100", cx);
+            i
+        });
+        let lr_input = cx.new(|cx| {
+            let mut i = TextInput::new("0.01", cx);
+            i.set_text("0.010", cx);
+            i
+        });
+        let close_input = cx.new(|cx| {
+            let mut i = TextInput::new("10", cx);
+            i.set_text("10", cx);
+            i
+        });
+        let hours_input = cx.new(|cx| {
+            let mut i = TextInput::new("12", cx);
+            i.set_text(crate::ui::hours_value(folo_api::DEFAULT_MAX_HOURS), cx);
+            i
+        });
+        let subs = vec![
+            cx.subscribe(&hours_input, |this: &mut Self, _, ev: &InputEvent, cx| {
+                let InputEvent::Changed(s) = ev;
+                if let Some(f) = this.new_run.as_mut() {
+                    match crate::cloud::parse_hours(s) {
+                        Some(v) => {
+                            // Any other value than the one the form put there is the user's.
+                            if crate::ui::hours_value(v) != crate::ui::hours_value(f.max_hours) {
+                                f.hours_edited = true;
+                            }
+                            f.max_hours = v;
+                            f.hours_invalid = false;
+                        }
+                        None => f.hours_invalid = true,
+                    }
+                    f.compute_error.take_if(|(c, _)| *c == crate::cloud::ComputeField::StopAfter);
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&close_input, |this: &mut Self, _, ev: &InputEvent, cx| {
+                let InputEvent::Changed(s) = ev;
+                if let Some(f) = this.new_run.as_mut() {
+                    f.check_close(s);
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&epochs_input, |this: &mut Self, _, ev: &InputEvent, cx| {
+                let InputEvent::Changed(s) = ev;
+                if let Some(f) = this.new_run.as_mut() {
+                    match parse_epochs(s) {
+                        Some(v) => {
+                            f.epochs = v as f32;
+                            f.epochs_invalid = false;
+                        }
+                        None => f.epochs_invalid = true,
+                    }
+                    // Close mosaic is bounded by the epochs: recheck it against the new count.
+                    let close = f.close_input.read(cx).text();
+                    f.check_close(&close);
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&lr_input, |this: &mut Self, _, ev: &InputEvent, cx| {
+                let InputEvent::Changed(s) = ev;
+                if let Some(f) = this.new_run.as_mut() {
+                    match parse_lr(s) {
+                        Some(v) => {
+                            f.lr0 = v;
+                            f.lr_invalid = false;
+                        }
+                        None => {
+                            f.lr_invalid = true;
+                            // The rate lives under Advanced: keep the group open while it's being
+                            // fixed, so the first valid keystroke doesn't fold the field away.
+                            f.advanced = true;
+                        }
+                    }
+                    cx.notify();
+                }
+            }),
+        ];
+        self.new_run = Some(NewRunForm {
+            name,
+            dataset: idx,
+            arch: 1,
+            epochs: 100.0,
+            batch: batch_index(16),
+            imgsz: 2,
+            device: 0,
+            optimizer: 0,
+            optimizer_unknown: false,
+            lr0: 0.01,
+            mosaic: 1.0,
+            mixup: 0.0,
+            fliplr: 0.5,
+            close_mosaic: 10.0,
+            scale: 0.5,
+            note: None,
+            base: None,
+            epochs_input,
+            lr_input,
+            close_input,
+            close_invalid: false,
+            amp: false,
+            e2e: false,
+            advanced: false,
+            run_on: None,
+            offer: None,
+            max_hours: folo_api::DEFAULT_MAX_HOURS,
+            hours_input,
+            hours_invalid: false,
+            hours_edited: false,
+            compute_error: None,
+            want_offer: None,
+            epochs_invalid: false,
+            lr_invalid: false,
+            _subs: subs,
+            submitting: false,
+            error: None,
+        });
+        window.focus(&fh);
+        cx.notify();
+    }
+
+    /// The New run form as the config it would submit (its name as typed), or None without a
+    /// form or dataset. Submitting and the server's estimate both use it.
+    pub fn form_config(&self, cx: &App) -> Option<TrainConfig> {
+        let form = self.new_run.as_ref()?;
+        let compute = crate::cloud::form_compute(
+            self.cloud_on(),
+            form.run_on.as_deref(),
+            form.offer.as_deref(),
+            form.max_hours,
+        );
+        // On a cloud instance mixed precision is checked when it boots, not against this machine.
+        let amp_ok = compute.is_some() || self.amp_blocked(DEVICES[form.device]).is_none();
+        let ds = self.store.datasets.ready().and_then(|d| d.get(form.dataset))?;
+        Some(carry_over(
+            form.base.as_ref(),
+            TrainConfig {
+                name: form.name.read(cx).text().trim().to_string(),
+                dataset_id: ds.id.clone(),
+                arch: ARCHS[form.arch],
+                epochs: form.epochs.round() as u32,
+                batch: BATCHES[form.batch],
+                imgsz: IMGSZ[form.imgsz],
+                // The worker picks its GPU.
+                device: if compute.is_some() { "auto".into() } else { DEVICES[form.device].into() },
+                optimizer: OPTIMIZERS[form.optimizer],
+                lr0: form.lr0,
+                weights: None,
+                augment: Augment {
+                    mosaic: form.mosaic,
+                    mixup: form.mixup,
+                    fliplr: form.fliplr,
+                    close_mosaic: form.close_mosaic.round() as u32,
+                    scale: form.scale,
+                    ..Augment::default()
+                },
+                seed: 0,
+                // Only where it can run: not the CPU, nor a server that says it can't.
+                amp: form.amp && amp_ok,
+                head: if form.e2e { Head::O2o } else { Head::O2m },
+                compute,
+            },
+        ))
+    }
+
+    /// Why New run can't send its config yet because of its compute choice: a connection chosen
+    /// whose offers are still out, no offer picked, or a Stop after that doesn't parse.
+    pub fn compute_blocked(&self) -> Option<&'static str> {
+        let f = self.new_run.as_ref()?;
+        let conn = f.run_on.as_deref().filter(|_| self.cloud_on())?;
+        if f.hours_invalid {
+            Some("Fix the highlighted fields first")
+        } else if f.offer.is_some() {
+            None
+        } else if self.cloud.offers.get(conn).is_none_or(|l| l.is_loading()) {
+            Some("Loading offers…")
+        } else {
+            Some("Choose a GPU first")
+        }
+    }
+
+    /// Asks the server how long the New run form's config would take (servers with
+    /// `run_estimate`), once per distinct config.
+    pub fn ensure_estimate(&mut self, cx: &mut Context<Self>) {
+        if !self.store.features.iter().any(|f| f == "run_estimate") {
+            return;
+        }
+        // A value being typed that doesn't parse yet: no estimate for the last good one.
+        // Nor for a cloud run without its offer yet (the config would be this machine's).
+        if self.new_run.as_ref().is_some_and(|f| {
+            f.epochs_invalid
+                || f.close_invalid
+                || (f.lr_invalid && f.optimizer != 0)
+                || f.optimizer_blocks().is_some()
+        }) || self.compute_blocked().is_some()
+        {
+            // Cancel a pending ask; an unanswered key would otherwise stay "loading" for good.
+            self.nr_estimate_gen += 1;
+            if matches!(self.nr_estimate, Some((_, Load::Loading))) {
+                self.nr_estimate = None;
+            }
+            return;
+        }
+        let Some(mut config) = self.form_config(cx) else { return };
+        // The name doesn't change the estimate (and an empty one mustn't fail it).
+        config.name = "estimate".into();
+        let key = serde_json::to_string(&config).unwrap_or_default();
+        if self.nr_estimate.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        self.nr_estimate = Some((key.clone(), Load::Loading));
+        self.nr_estimate_gen += 1;
+        let generation = self.nr_estimate_gen;
+        // Settled first (250 ms; at once for the frozen scenes), so a slider drag asks once for
+        // the value it stops on rather than for every step.
+        if self.frozen {
+            self.request_estimate(key, config, cx);
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            this.update(cx, |this, cx| {
+                if this.nr_estimate_gen == generation {
+                    this.request_estimate(key, config, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn request_estimate(&mut self, key: String, config: TrainConfig, cx: &mut Context<Self>) {
+        self.fetch(
+            cx,
+            move |api| api.estimate_run(&config),
+            move |this, r, cx| {
+                if this.nr_estimate.as_ref().is_none_or(|(k, _)| *k != key) {
+                    return;
+                }
+                if let Ok(e) = &r {
+                    this.nr_estimate_last = Some(e.clone());
+                }
+                this.nr_estimate = Some((key, r.map_or_else(Load::Failed, Load::Ready)));
+                // Stop after follows the estimate (until typed).
+                this.sync_compute(cx);
+                cx.notify();
+            },
+        );
+    }
+
+    pub fn submit_new_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let config = self.form_config(cx);
+        let compute_blocked = self.compute_blocked().is_some();
+        let Some(form) = self.new_run.as_mut() else { return };
+        // Auto sets its own rate, so an unparsed rate entry doesn't block it.
+        let lr_invalid = form.lr_invalid && form.optimizer != 0;
+        if form.submitting
+            || form.epochs_invalid
+            || lr_invalid
+            || form.close_invalid
+            || form.optimizer_blocks().is_some()
+            || compute_blocked
+        {
+            return;
+        }
+        let Some(config) = config else { return };
+        if config.name.is_empty() {
+            form.error = Some(ApiError::new("invalid_name", "Give the run a name."));
+            // The error shows at the top of the form, by the Name field: go there.
+            let name_fh = form.name.read(cx).focus_handle(cx);
+            window.focus(&name_fh);
+            self.dialog_scroll.set_offset(point(px(0.), px(0.)));
+            cx.notify();
+            return;
+        }
+        form.submitting = true;
+        // Which form this request belongs to (its name input, kept by a restored draft): the
+        // dialog can be dismissed and another run submitted before this one answers.
+        let form_id = form.name.entity_id();
+        let _ = window;
+        self.fetch(
+            cx,
+            move |api| api.create_run(config),
+            move |this, r, cx| {
+                let mine = this.new_run.as_ref().is_some_and(|f| f.name.entity_id() == form_id);
+                match r {
+                    Ok(run) => {
+                        let id = run.id.clone();
+                        let name = run.name.clone();
+                        if let Some(runs) = this.store.runs.ready_mut() {
+                            runs.insert(0, run);
+                        }
+                        this.subscribe_active(cx);
+                        let run = this.store.run(&id).cloned();
+                        let cloud = run.as_ref().and_then(|r| Some(this.cloud_device(r, r.cloud.as_ref()?)));
+                        let queued = run.is_some_and(|r| r.status == crate::api::RunStatus::Queued);
+                        if let Some(on) = cloud {
+                            // It waits on its instance, not in the queue.
+                            this.toast(
+                                Tone::Accent,
+                                format!("Launching {name}"),
+                                Some(format!("On {on}: the instance starts, then the data uploads.").into()),
+                                cx,
+                            );
+                            this.refresh_instances(cx);
+                        } else if queued {
+                            // The run's page opens next, so the action is the queue it waits in.
+                            this.toast_with(
+                                Tone::Info,
+                                format!("Queued {name}"),
+                                Some("It starts when the current run finishes.".into()),
+                                Some((
+                                    "View queue".into(),
+                                    Rc::new(
+                                        move |this: &mut Self, w: &mut Window, cx: &mut Context<Self>| {
+                                            this.run_filter = RunFilter::Active;
+                                            this.navigate(Route::Runs, w, cx)
+                                        },
+                                    ),
+                                )),
+                                cx,
+                            );
+                        } else {
+                            this.toast(
+                                Tone::Accent,
+                                format!("Training {name}"),
+                                Some("Live metrics stream into the dashboard.".into()),
+                                cx,
+                            );
+                        }
+                        // An earlier, dismissed submission leaves the form now open alone.
+                        if mine {
+                            this.new_run = None;
+                            this.overlay_return = None;
+                            let prev = std::mem::replace(&mut this.route, Route::Run(id));
+                            this.history.push(prev);
+                        }
+                    }
+                    Err(e) => {
+                        if mine && let Some(f) = this.new_run.as_mut() {
+                            f.submitting = false;
+                            // A refused compute choice shows on its control (Run on, GPU, Stop
+                            // after); a GPU that went away or is out of stock gets fresh offers.
+                            match crate::cloud::compute_error_field(&e).filter(|_| f.run_on.is_some()) {
+                                Some(field) => {
+                                    let conn = f.run_on.clone();
+                                    f.compute_error = Some((field, e.message));
+                                    if field == crate::cloud::ComputeField::Gpu
+                                        && let Some(conn) = conn
+                                    {
+                                        this.ensure_offers(&conn, true, cx);
+                                    }
+                                }
+                                None => f.error = Some(e),
+                            }
+                            // The error leads the form: scroll it into view.
+                            this.dialog_scroll.set_offset(point(px(0.), px(0.)));
+                        } else {
+                            // Its form is gone: say so where it can be seen.
+                            this.toast(Tone::Danger, e.message, e.hint.map(Into::into), cx);
+                        }
+                    }
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// Why Mixed precision can't be used for a run on `device` (an entry of `DEVICES`), if it can't:
+    /// the CPU, or the server's own answer (`capabilities.amp`, the message such a run would fail
+    /// with). An older server without capabilities says nothing; the run's failure tells then.
+    pub fn amp_blocked(&self, device: &str) -> Option<String> {
+        if device == "cpu" {
+            return Some("Off on the CPU: it needs a GPU with tensor cores".into());
+        }
+        let caps = self.store.capabilities.as_ref()?;
+        // The tensor cores' own short reason when there is one ("off: <GPU> has no cooperative
+        // matrices", "off (not requested: …)"); else the trainer's full message.
+        (!caps.amp.available).then(|| match (&caps.tensor_cores.reason, &caps.amp.reason) {
+            (Some(tc), _) => format!("Not available: tensor cores {tc}"),
+            (None, Some(amp)) => amp.clone(),
+            (None, None) => "Mixed precision isn't available on this server".into(),
+        })
+    }
+}

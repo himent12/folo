@@ -25,7 +25,7 @@ Keyboard: `Ctrl K` palette · `Ctrl N` new run · `Ctrl O` open image · `Ctrl 1
 
 ## Window
 
-The app draws its own title bar (`titlebar()` in `src/app.rs`) and tells Windows which parts of it are caption
+The app draws its own title bar (`titlebar()` in `src/app/titlebar.rs`) and tells Windows which parts of it are caption
 areas: Minimize, Maximize / Restore and Close, and two drag areas, the title bar's empty space and the sidebar's
 FOLO row (drag to move, double-click to maximize or restore, hover Maximize for the snap layouts). The breadcrumbs
 and the search field in the title bar take their own clicks. The top few pixels (`layout.desktop_resize_edge`)
@@ -77,15 +77,15 @@ src/theme.rs      the active theme (Colors from tokens, dark/light), class palet
 src/api/          Backend trait (the client seam), wire types for docs/API.md, the in-app mock
 src/synth.rs      procedural "shapes" scenes behind the mock's images
 src/local.rs      local inference: folo-vision's Predictor in process, on folo-gpu or the CPU
-src/store.rs      fetched state, live run data (SSE events), the decoded-image cache
-src/bench.rs      vision benchmarks: what the Benchmarks screens hold, the open benchmark's stream, their actions
-src/app.rs        root view: chrome, sidebar, routing, fetching, live event pump, actions
-src/controls.rs   focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
-src/ui.rs         stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
-src/charts.rs     canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram
+src/store/        fetched state, live run data (SSE events), the decoded-image cache
+src/bench/        vision benchmarks: what the Benchmarks screens hold, the open benchmark's stream, their actions
+src/app/          root view: chrome, sidebar, routing, fetching, live event pump, actions
+src/controls/     focusable controls: buttons, segmented, chips, switch, slider, select, tooltip
+src/ui/           stateless pieces: type, panels, badges, metrics, progress, skeletons, empty states
+src/charts/       canvas charts: line (raw + smoothed, area, markers, linked hover), sparkline, histogram
 src/viz.rs        images with detection boxes and label chips (design/README.md box spec)
 src/screens/      one module per screen
-src/overlays.rs   palette, dialogs, image inspector, toasts
+src/overlays/     palette, dialogs, image inspector, toasts
 src/scenario.rs   `--scenario` states for screenshots
 tools/            shoot.ps1 / shoot-all.ps1 (screenshots), window-check.ps1 (the window chrome, real input),
                   chrome-check.ps1 (its hit tests and buttons, by window message), make-icon.ps1 (assets/folo.ico)
@@ -127,7 +127,7 @@ default plan). A benchmark's page has three tabs:
 
 An entry's page shows the score and its axes, accuracy, self-labeling, robustness per condition and severity, per
 class, calibration and localization, then its images worst first with the truth (dashed) and its detections.
-Without the feature the section says so. The built-in demo has three benchmarks (`src/api/mock_bench.rs`, scored by
+Without the feature the section says so. The built-in demo has three benchmarks (`src/api/mock_bench/`, scored by
 `folo-bench` itself); `FOLO_SERVER=… cargo test real_server_bench -- --ignored` checks every benchmark call against
 a real server.
 

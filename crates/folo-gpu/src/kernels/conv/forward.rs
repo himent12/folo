@@ -1,0 +1,128 @@
+//! The forward conv ([`conv2d`]): the direct depthwise kernel, tensor cores for f16, a GEMM for 1×1 convs and
+//! the implicit GEMM (`CONV_MODE` 1) for everything else.
+
+use super::Conv2dDesc;
+use super::depthwise::{DEPTHWISE, DW_VX};
+use crate::DType;
+use crate::context::GpuContext;
+use crate::error::Result;
+use crate::kernels::coop;
+use crate::kernels::gemm::{self, GEMM, TileConfig, base_spec, check_dtype, gemm_params};
+use crate::pipeline::Params;
+
+/// `y = act(conv2d(x, weight) + bias)`. Returns `(OH, OW)`.
+///
+/// `x`: `[N, C_in, H, W]`, `weight`: `[C_out, C_in/groups, KH, KW]`, `bias`: `[C_out]`, `y`: `[N, C_out, OH, OW]`.
+pub fn conv2d(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    x: &wgpu::Buffer,
+    weight: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    y: &wgpu::Buffer,
+) -> Result<(usize, usize)> {
+    conv2d_with_config(ctx, d, x, weight, bias, y, None)
+}
+
+/// [`conv2d`] with an explicit GEMM tile configuration for the GEMM paths (benchmarks and tests).
+pub fn conv2d_with_config(
+    ctx: &GpuContext,
+    d: &Conv2dDesc,
+    x: &wgpu::Buffer,
+    weight: &wgpu::Buffer,
+    bias: Option<&wgpu::Buffer>,
+    y: &wgpu::Buffer,
+    cfg: Option<TileConfig>,
+) -> Result<(usize, usize)> {
+    check_dtype(ctx, d.dtype, "conv2d")?;
+    let (oh, ow) = d.check_buffers(x, weight, bias, y, d.dtype)?;
+    if d.n * d.c_out * oh * ow == 0 {
+        return Ok((oh, ow));
+    }
+
+    if d.is_depthwise() {
+        let spec = d
+            .win
+            .spec()
+            .u32("MULT", (d.c_out / d.c_in) as u32)
+            .bool("HAS_BIAS", bias.is_some())
+            .u32("ACT", d.act.code())
+            .f16(d.dtype == DType::F16);
+        let k = ctx.kernel(&DEPTHWISE, spec)?;
+        let qw = ow.div_ceil(DW_VX as usize);
+        let total = d.n * d.c_out * oh * qw;
+        let p = Params::new()
+            .uz(total)?
+            .uz(d.h)?
+            .uz(d.w)?
+            .uz(oh)?
+            .uz(ow)?
+            .uz(d.c_out)?
+            .f(d.act.alpha())
+            .uz(qw)?;
+        ctx.dispatch(&k, &[x, weight, bias.unwrap_or(ctx.dummy()), y], &p, ctx.grid_1d(total as u64, 256)?)?;
+        return Ok((oh, ow));
+    }
+
+    let (kh, kw) = d.win.kernel;
+    let (k_dim, hw_out) = (d.c_in / d.groups * kh * kw, oh * ow);
+    let cout_g = d.c_out / d.groups;
+    let g = d.gemm_view(oh, ow, bias.is_some());
+
+    // Tensor cores for f16 when the context has them on (an explicit tile config means the regular kernels).
+    if cfg.is_none() && d.dtype == DType::F16 && ctx.tensor_cores() {
+        let bias_buf = bias.unwrap_or(ctx.dummy());
+        let done = if d.is_pointwise() {
+            coop::encode_gemm(ctx, &g, DType::F16, weight, x, bias_buf, y, None)?
+        } else {
+            coop::encode_conv(ctx, d, &g, DType::F16, x, weight, bias_buf, y, None)?
+        };
+        if done {
+            return Ok((oh, ow));
+        }
+    }
+
+    if d.is_pointwise() {
+        let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
+        gemm::gemm_with_config(ctx, &g, weight, x, bias, y, cfg)?;
+        return Ok((oh, ow));
+    }
+
+    // Implicit GEMM.
+    let cfg = cfg.unwrap_or_else(|| gemm::pick_config_conv(ctx, &g));
+    gemm::check_config(ctx, cfg)?;
+    let check = !g.m.is_multiple_of(cfg.bm as usize)
+        || !g.n.is_multiple_of(cfg.bn as usize)
+        || !g.k.is_multiple_of(cfg.bk as usize);
+    let vec_a = k_dim.is_multiple_of(4);
+    let vec_c = hw_out % 4 == 0;
+    let spec = base_spec(&g, cfg)
+        .bool("VEC_A", vec_a)
+        .bool("VEC_B", false)
+        .bool("VEC_C", vec_c)
+        .bool("TRANS_A", false)
+        .bool("TRANS_B", false)
+        .bool("CHECK", check)
+        .u32("CONV_MODE", 1);
+    let mut spec = spec;
+    for (name, v) in [
+        ("KH", kh as u32),
+        ("KW", kw as u32),
+        ("SH", d.win.stride.0 as u32),
+        ("SW", d.win.stride.1 as u32),
+        ("DH", d.win.dilation.0 as u32),
+        ("DW", d.win.dilation.1 as u32),
+    ] {
+        spec = spec.u32(name, v);
+    }
+    let spec = spec.i32("PH", d.win.padding.0 as i32).i32("PW", d.win.padding.1 as i32);
+    let kernel = ctx.kernel(&GEMM, spec)?;
+    let p = gemm_params(&g)?.at(24).uz(d.h)?.uz(d.w)?.uz(oh)?.uz(ow)?;
+    let groups = [
+        hw_out.div_ceil(cfg.bn as usize) as u32,
+        cout_g.div_ceil(cfg.bm as usize) as u32,
+        u32::try_from(d.n * d.groups).unwrap_or(u32::MAX),
+    ];
+    ctx.dispatch(&kernel, &[weight, x, bias.unwrap_or(ctx.dummy()), y], &p, groups)?;
+    Ok((oh, ow))
+}

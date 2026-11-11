@@ -16,7 +16,6 @@ use gpui::{
 };
 
 use crate::api::{ApiError, ImageInfo};
-pub use crate::api::{Label, RunExt, SplitsExt};
 use crate::app::{FoloApp, act};
 use crate::controls::Btn;
 use crate::store::ImgKind;

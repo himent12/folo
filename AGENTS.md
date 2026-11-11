@@ -27,6 +27,11 @@ easy for agents to drive (`--json` everywhere, an MCP server, stable exit codes)
   needs what CI does not have, or a documented manual acceptance run, not for a slow one.
 - **Docs as you go.** Public items get a doc comment. When you change behaviour or an interface, update the matching file
   in `docs/` in the same PR.
+- **No god files.** A source file stays under 1000 lines, every line counted (`bash tools/file-size.sh`, which CI runs
+  on every pull request; vendored code and docs are exempt). Before a file gets there, split it by responsibility
+  into a folder of modules named for what they hold (`runs.rs` → `runs/mod.rs` + `runs/queue.rs`, a route's parts in
+  its folder, an integration test as `tests/api/main.rs` + topic files so it stays one binary), never by line count
+  into `part2` or `misc`.
 - **No secrets in the repo, ever.** Keys live outside the repo (for example `~/.folo/boat.key`). Never print them.
 
 ## Workflow (every change is a PR) — details in docs/PROCESS.md

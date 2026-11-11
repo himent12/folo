@@ -1,0 +1,244 @@
+//! Keyboard focus: a stable handle per control, focus rings and scrolling a focused control into
+//! view, Tab and F6 cycling (trapped inside the topmost overlay), and leaving keyboard mode on a
+//! press.
+
+use std::cell::RefCell;
+
+use gpui::{
+    App, Context, FocusHandle, Focusable, ParentElement, Pixels, ScrollHandle, SharedString, Styled, Window,
+    div, px,
+};
+
+use crate::theme::{Theme, size as tsize};
+
+use super::{FoloApp, Route, Section};
+
+impl FoloApp {
+    // ---------- focus ----------
+
+    /// A stable focus handle for a control key; tab order follows paint order.
+    pub fn fh(&self, key: impl Into<SharedString>, cx: &mut Context<Self>) -> FocusHandle {
+        let key = key.into();
+        self.focus.borrow_mut().entry(key).or_insert_with(|| cx.focus_handle().tab_stop(true)).clone()
+    }
+
+    /// Names the keys of the focused control in the strip under the page (see `key_hint`).
+    pub fn hint_keys(&self, keys: impl Into<SharedString>) {
+        *self.key_hint.borrow_mut() = Some(keys.into());
+    }
+
+    /// Keyboard focus is on this handle and should show a ring.
+    pub fn ring(&self, fh: &FocusHandle, window: &Window) -> bool {
+        self.kb && fh.is_focused(window)
+    }
+
+    pub fn focus_key(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let fh = self.fh(key.to_string(), cx);
+        window.focus(&fh);
+    }
+
+    /// A press leaves keyboard mode (focus rings off). The root listens for presses anywhere, but
+    /// the window chrome hides the root from the hit test (`titlebar-drag`), so it listens too.
+    /// Only a capture-phase listener: it never prevents the press's default.
+    pub(super) fn leave_kb(&self, cx: &mut Context<Self>) -> PressListener {
+        Box::new(cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+            if this.kb {
+                this.kb = false;
+                cx.notify();
+            }
+        }))
+    }
+
+    /// Whether the focused element belongs to the topmost overlay (always true without one).
+    fn focus_in_scope(&self, window: &Window, cx: &App) -> bool {
+        let prefixes: &[&str] = if self.confirm_stop.is_some() {
+            &["stop-", "dialog-close"]
+        } else if self.cloud.disconnect.is_some() {
+            &["cd-", "dialog-close"]
+        } else if self.cloud.terminate.is_some() {
+            &["ct-", "dialog-close"]
+        } else if self.cloud.connect.is_some() {
+            &["cc-", "dialog-close"]
+        } else if self.new_run.is_some() {
+            &["nr-", "dialog-close"]
+        } else if self.synth.is_some() {
+            &["syn-", "dialog-close"]
+        } else if self.inspector.is_some() {
+            &["insp-"]
+        } else if self.palette.is_some() {
+            &[]
+        } else {
+            return true;
+        };
+        let focus = self.focus.borrow();
+        if focus.iter().any(|(k, fh)| prefixes.iter().any(|p| k.starts_with(p)) && fh.is_focused(window)) {
+            return true;
+        }
+        if let Some(f) = &self.new_run
+            && self.confirm_stop.is_none()
+            && [&f.name, &f.epochs_input, &f.lr_input, &f.close_input, &f.hours_input]
+                .iter()
+                .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        {
+            return true;
+        }
+        if let Some(f) = &self.cloud.connect
+            && self.cloud.disconnect.is_none()
+            && self.cloud.terminate.is_none()
+            && f.fields.iter().chain([&f.name]).any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        {
+            return true;
+        }
+        if let Some(f) = &self.synth
+            && [&f.name, &f.images].iter().any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+        {
+            return true;
+        }
+        if let Some(p) = &self.palette {
+            return p.input.read(cx).focus_handle(cx).is_focused(window);
+        }
+        self.inspector.is_some() && self.inspector_focus.is_focused(window)
+    }
+
+    /// Tab / Shift-Tab, trapped inside the topmost overlay.
+    /// F6 / Shift+F6: the sidebar (the current section's item), the search field, then the page
+    /// (its first control). Dialogs and the palette keep focus to themselves.
+    pub(super) fn cycle_region(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal_open() || self.palette.is_some() {
+            return;
+        }
+        let nav = format!(
+            "nav-{}",
+            match self.route.section() {
+                Section::Overview => "Overview",
+                Section::Datasets => "Datasets",
+                Section::Runs => "Runs",
+                Section::Models => "Models",
+                Section::Benchmarks => "Benchmarks",
+                Section::Playground => "Playground",
+                Section::Settings => "Settings",
+            }
+        );
+        // The sidebar region: its navigation and the connection line at its foot.
+        let in_nav = self
+            .focus
+            .borrow()
+            .iter()
+            .any(|(k, f)| (k.starts_with("nav-") || k.as_ref() == "connection") && f.is_focused(window));
+        let in_search = self.fh("titlebar-search", cx).is_focused(window);
+        let at = if in_nav {
+            0
+        } else if in_search {
+            1
+        } else {
+            2
+        };
+        let next = if forward { (at + 1) % 3 } else { (at + 2) % 3 };
+        self.kb = true;
+        match next {
+            0 => window.focus(&self.fh(nav, cx)),
+            1 => window.focus(&self.fh("titlebar-search", cx)),
+            _ => {
+                window.focus(&self.fh("page-region", cx));
+                self.cycle_focus(true, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn cycle_focus(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // The newly focused control scrolls into view inside whichever of these holds it.
+        let containers = if self.inspector.is_some() {
+            vec![self.insp_list_scroll.clone()]
+        } else if self.new_run.is_some() || self.synth.is_some() || self.cloud.connect.is_some() {
+            vec![self.dialog_scroll.clone()]
+        } else if matches!(self.route, Route::Playground) {
+            vec![self.play_side_scroll.clone(), self.page_scroll.clone()]
+        } else {
+            vec![self.page_scroll.clone()]
+        };
+        REVEAL.with(|r| *r.borrow_mut() = Some(containers));
+        cx.notify();
+        for _ in 0..512 {
+            if forward {
+                window.focus_next()
+            } else {
+                window.focus_prev()
+            }
+            if self.focus_in_scope(window, cx) {
+                return;
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// Scroll containers to search after a keyboard focus move, innermost first. The focus ring
+    /// that paints next scrolls its control into view in the first container that holds it.
+    pub(super) static REVEAL: RefCell<Option<Vec<ScrollHandle>>> = const { RefCell::new(None) };
+}
+
+/// Scroll the first candidate container holding `b` (horizontally) so `b` is fully visible,
+/// clear of the edge fades (24 px, so 32 at the top) and of the key-hint strip over the page's
+/// bottom (32 px, so 40 there). Runs once per request.
+fn reveal(b: gpui::Bounds<Pixels>, window: &mut Window) {
+    let Some(handles) = REVEAL.with(|r| r.borrow_mut().take()) else { return };
+    let margin = px(8.);
+    let (top_m, bottom_m) = (px(32.), px(40.));
+    // The innermost clip around the control: only a container that contains it owns the control
+    // (a dialog's fixed header and footer sit outside the scrolling body).
+    let mask = window.content_mask().bounds;
+    let tol = px(1.);
+    for h in handles {
+        let vp = h.bounds();
+        let inside = mask.left() >= vp.left() - tol
+            && mask.right() <= vp.right() + tol
+            && mask.top() >= vp.top() - tol
+            && mask.bottom() <= vp.bottom() + tol;
+        if vp.size.width <= px(0.) || !inside {
+            continue;
+        }
+        let tall = b.size.height + top_m + bottom_m > vp.size.height;
+        let dy = if b.top() - top_m < vp.top() && !tall {
+            b.top() - top_m - vp.top()
+        } else if tall {
+            // Taller than the view (the run page's linked chart group at minimum size): its top
+            // leads. Already in view, it stays; elsewhere, it comes to the top edge, never past.
+            if b.top() < vp.top() || b.top() + margin > vp.bottom() - margin * 4. {
+                b.top() - top_m - vp.top()
+            } else {
+                px(0.)
+            }
+        } else if b.bottom() + bottom_m > vp.bottom() {
+            b.bottom() + bottom_m - vp.bottom()
+        } else {
+            px(0.)
+        };
+        if dy != px(0.) {
+            let off = h.offset();
+            let y = (off.y - dy).clamp(-h.max_offset().height, px(0.));
+            h.set_offset(gpui::point(off.x, y));
+            window.refresh();
+        }
+        return;
+    }
+}
+
+/// Keyboard focus ring: 2 px in the focus colour, 2 px outside the control.
+pub fn focus_ring(t: &Theme, radius: f32) -> gpui::Div {
+    let off = tsize::FOCUS_OFFSET + tsize::FOCUS_RING;
+    div()
+        .absolute()
+        .top(px(-off))
+        .left(px(-off))
+        .right(px(-off))
+        .bottom(px(-off))
+        .rounded(px(radius + off))
+        .border_2()
+        .border_color(t.focus)
+        // Keyboard focus moved here: make sure the control (and its ring) is on screen.
+        .child(gpui::canvas(|b, window, _| reveal(b, window), |_, _, _, _| {}).size_full())
+}
+
+/// A mouse-press listener, as `capture_any_mouse_down` takes it.
+type PressListener = Box<dyn Fn(&gpui::MouseDownEvent, &mut Window, &mut App)>;

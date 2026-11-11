@@ -602,7 +602,10 @@ mod tests {
                 Some(Duration::from_secs(500)),
             )
             .unwrap();
-        assert_eq!(watch_until(&record(&j.id)), Some(now + 500.0 + STARTS_WITHIN_S + own));
+        // The time limit counts from the record's own `created`, a second after `now` when the clock ticked between.
+        let created = parse_rfc3339(&record(&j.id).instance.created).unwrap();
+        assert!((now..=now + 60.0).contains(&created), "{created} after {now}");
+        assert_eq!(watch_until(&record(&j.id)), Some(created + 500.0 + STARTS_WITHIN_S + own));
         let none = ledger.create("cc_1", "p", "run_3", &offer(Some(3.6)), None, None).unwrap();
         assert_eq!(watch_until(&record(&none.id)), None);
 

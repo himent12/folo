@@ -20,7 +20,7 @@ One process owns a data dir at a time (docs/CLI.md, `serve`): when a `folo serve
 Desktop starts one), the embedded mode goes through that server, as `--server` would; with `--confine` it fails
 with `data_dir_in_use` instead. Setup snippets for
 Claude Code and Codex are in the README ([Use FOLO from an agent](../README.md#use-folo-from-an-agent)). The implementation is the
-`folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp.rs`.
+`folo-mcp` crate; the end-to-end tests are `crates/folo-cli/tests/mcp/`.
 
 ## Status
 Implemented: both protocol revisions, all 22 tools with generated input and output schemas, every resource and
@@ -289,7 +289,7 @@ In read-only mode, `train_on_folder` is not listed.
 ```
 
 ## Tests
-`crates/folo-cli/tests/mcp.rs` spawns `folo mcp` and, for **each supported revision**, runs the handshake or discovery (plus,
+`crates/folo-cli/tests/mcp/` spawns `folo mcp` and, for **each supported revision**, runs the handshake or discovery (plus,
 for 2026-07-28, a direct tool call without discovery and an unsupported-version request), both subscription flows, `tools/list`
 (checking the schemas, their size and `additionalProperties: false`), `resources/list`, `prompts/list`, a
 `create_synthetic_dataset` → `train` → `run_status` flow and a subscription to the scripted live run on the mock

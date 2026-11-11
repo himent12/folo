@@ -411,7 +411,7 @@ or inconsistent. IDs group findings by surface:
     docs-site leftovers.
 
 ## Fixed in this PR
-- **ETA** (`crates/folo-vision/src/train/mod.rs`): per mosaic phase, loader waits included, rounded to 0.1 s; unit
+- **ETA** (`crates/folo-vision/src/train/epoch.rs`): per mosaic phase, loader waits included, rounded to 0.1 s; unit
   test `eta_by_mosaic_phase`; docs/API.md's ETA paragraph (X3).
 - **Timings** (`crates/folo-api`): milliseconds serialized to 0.1 µs (`json::round_ms` / `serialize_ms`);
   `predict`'s `mean_timing` uses the same rounding; docs/API.md says so (X5).

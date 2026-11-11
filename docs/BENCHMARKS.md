@@ -309,7 +309,7 @@ BatchNorm + SiLU in training and a conv weight gradient over shifted rows read i
 
 ### Command batching (the merged flush policy)
 
-Two branches changed when the open command batch is submitted (`crates/folo-gpu/src/context.rs`, `bump`): gpu-infer
+Two branches changed when the open command batch is submitted (`crates/folo-gpu/src/context/batch.rs`, `bump`): gpu-infer
 submitted 16 dispatches after an idle wait and doubled the limit per submission up to 1024; gpu-train submitted every
 64. The merge does both: 16 after a wait, doubling up to the flush interval (default 64, `FOLO_GPU_FLUSH_EVERY`).
 Three settings on the merged build, 3 rounds alternated: the default, a fixed 64 (the ramp disabled in a local build),

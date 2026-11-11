@@ -28,13 +28,13 @@ predictions over the dashed labels). **Open every PNG**, at full resolution wher
 (zoom in before calling something clipped).
 
 Also read the source (path in your task) for states screenshots can't show: hover, pressed, focus rings, keyboard
-paths (`src/controls.rs`, `src/app.rs`, `src/overlays.rs`), motion, resizing logic.
+paths (`src/controls/`, `src/app/`, `src/overlays/`), motion, resizing logic.
 
 Known platform limits (don't score these against the app): GPUI has no letter-spacing; the window's own caption buttons
 are drawn by the app.
 
 Keyboard paths that live outside the screen files (check before reporting one missing): the linked run charts, the
-PR chart and the dataset histograms are one Tab stop each through `chart_group` in `src/controls.rs` (← / → step,
+PR chart and the dataset histograms are one Tab stop each through `chart_group` in `src/controls/chart_group.rs` (← / → step,
 Shift = ×10, Home / End, Esc clears, same cursor and legend values as the mouse); every row, chip and button goes
 through `bind` / `bind_ring` (Enter / Space, focus ring).
 

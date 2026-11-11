@@ -5,12 +5,12 @@ WebGPU in the browser (through folo-wasm, see [In the browser](#in-the-browser) 
 the GPU (see [folo-core backend](#folo-core-backend)).
 
 ```
-GpuBackend (backend.rs)        folo-core's Backend: Storage::Device(GpuStorage) for every dtype, views → kernels
+GpuBackend (backend/)          folo-core's Backend: Storage::Device(GpuStorage) for every dtype, views → kernels
 GpuTensor (tensor.rs)          standalone shape + dtype + pooled buffer handle for kernel-level work
    │
 kernels/* (kernels/mod.rs)     one Rust entry point per WGSL kernel; raw wgpu::Buffer + explicit sizes
    │
-GpuContext (context.rs)        adapter, device, queue, buffer pool, pipeline cache, command batch
+GpuContext (context/)          adapter, device, queue, buffer pool, pipeline cache, command batch
 ```
 
 The kernel layer sees neither a `GpuTensor` nor a folo-core tensor: both front ends call it with raw buffers.
@@ -283,7 +283,7 @@ Notes from the tuning runs:
 
 ### Tensor cores (cooperative matrices)
 
-`kernels/coop.rs` runs f16 GEMMs and convolutions on NVIDIA tensor cores through wgpu 30's experimental cooperative
+`kernels/coop/` runs f16 GEMMs and convolutions on NVIDIA tensor cores through wgpu 30's experimental cooperative
 matrices (`EXPERIMENTAL_COOPERATIVE_MATRIX`; WGSL `coop_mat16x16<f16, A>`, `coopLoadT`, `coopMultiplyAdd`,
 `coopStoreT`; `SPV_KHR_cooperative_matrix` on Vulkan). f16 inputs, f32 accumulation, f16 or f32 output, and the
 regular kernels' fused epilogue (`alpha`, row or column bias, any activation).
@@ -495,7 +495,7 @@ println!("{}", loss.item::<f32>()?);                  // the only wait for the G
   or `folo_core::backend::synchronize(dev)`. Uploads flush the open batch; they do not wait. A YOLOv8n-shaped
   forward at batch 1 is 131 dispatches in one submission; forward + backward is about 2 200 dispatches in 3
   submissions.
-- **Semantics.** The CPU backend is the reference and every op is tested against it (`src/tests/backend.rs`, with
+- **Semantics.** The CPU backend is the reference and every op is tested against it (`src/tests/backend/`, with
   the tolerances stated there): stable sigmoid / softplus, Rust's NaN-ignoring `max` / `min`, C `powf`, rounding
   half away from zero, NaN-aware comparisons, first-index ties for max pooling, arg-reductions and top-k. Two
   documented differences: index ops cannot report out-of-range indices without a host round trip, so

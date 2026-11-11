@@ -1,0 +1,335 @@
+//! Text formatting: queue places, confidences, paths, counts, sizes, rates, devices and plurals.
+
+use gpui::prelude::FluentBuilder;
+use gpui::{Div, Hsla, ParentElement, Styled, div, px};
+
+use super::cloud::fmt_transfer;
+use super::text::{StyledExt, text};
+use crate::api::{Run, RunExt};
+use crate::theme::{TypeStep, ty};
+
+/// Tinted label chip, 20 px tall.
+/// A waiting run's place, as every list writes it: "Next to start", "2nd in queue", or (a server
+/// without queue positions) "Waiting to start".
+pub fn queue_text(position: Option<u32>) -> String {
+    match position {
+        Some(1) => "Next to start".to_string(),
+        Some(n) => {
+            let suffix = match (n % 10, n % 100) {
+                (1, x) if x != 11 => "st",
+                (2, x) if x != 12 => "nd",
+                (3, x) if x != 13 => "rd",
+                _ => "th",
+            };
+            format!("{n}{suffix} in queue")
+        }
+        None => "Waiting to start".to_string(),
+    }
+}
+
+/// A confidence threshold as every surface writes it: "0.31", or "0.314" when the third decimal
+/// carries information (the API's best-F1 grid is 0.001).
+pub fn fmt_conf(c: f32) -> String {
+    let three = format!("{c:.3}");
+    if three.ends_with('0') { format!("{c:.2}") } else { three }
+}
+
+/// One inference's total latency as every readout writes it: "6.4 ms", or "6.4 ms simulated" when the
+/// built-in demo simulated it.
+pub fn latency_text(ms: f64, simulated: bool) -> String {
+    if simulated { format!("{ms:.1} ms simulated") } else { format!("{ms:.1} ms") }
+}
+
+/// What a run that hasn't started training waits on, as every list writes it beside its status: a
+/// cloud run's transfer ("1.2 of 4.8 GiB"; "–" before there is one, the status names the phase),
+/// else its place in the training queue.
+pub fn waiting_text(r: &Run) -> String {
+    match r.cloud_pending() {
+        Some(c) => c.progress.as_ref().map_or("–".to_string(), fmt_transfer),
+        None => queue_text(r.queue_position),
+    }
+}
+
+/// A GPU name with its article, as the name is read aloud: "an RTX 4090", "an A100", "a T4" (GPU
+/// names start with initials, read letter by letter).
+pub fn with_article(name: &str) -> String {
+    let an = name.chars().next().is_some_and(|c| "AEFHILMNORSXaeiou".contains(c));
+    format!("{} {name}", if an { "an" } else { "a" })
+}
+
+/// How a model's weights are stored, from its own record (`precision`, `fused`): "f16, fused",
+/// "f32", or `None` when the server doesn't say. Every surface that names it uses this.
+pub fn model_storage(m: &crate::api::Model) -> Option<String> {
+    let p = m.precision?.as_str();
+    Some(if m.fused == Some(true) { format!("{p}, fused") } else { p.to_string() })
+}
+
+/// The data a model was evaluated on, one way everywhere: "shapes-hard · val · 800 images" (the
+/// count when known).
+pub fn split_label(dataset: &str, split: &str, images: Option<u64>) -> String {
+    match images {
+        Some(n) => format!("{dataset} · {split} · {} images", int(n)),
+        None => format!("{dataset} · {split}"),
+    }
+}
+
+/// Where precision and recall were taken, as both pages caption them: the best-F1 confidence when
+/// known, the match rule, and the split ("best F1 · conf 0.31 · IoU 0.50 · val"). A tile whose
+/// chart states the match rule beside it leaves it out (`iou: false`), so the line fits.
+pub fn pr_caption(conf: Option<f32>, split: &str, iou: bool) -> String {
+    let mut s = "best F1".to_string();
+    if let Some(c) = conf {
+        s += &format!(" · conf {}", fmt_conf(c));
+    }
+    if iou {
+        s += " · IoU 0.50";
+    }
+    // A surface that names the split elsewhere (the model page's headline) leaves it out.
+    if !split.is_empty() {
+        s += &format!(" · {split}");
+    }
+    s
+}
+
+/// A filesystem path as the platform writes it (backslashes on Windows).
+pub fn display_path(p: &str) -> String {
+    // URLs and pseudo paths (`mock://shapes`) keep their slashes.
+    if cfg!(windows) && !p.contains("://") { p.replace('/', "\\") } else { p.to_string() }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::display_path;
+
+    #[test]
+    fn urls_keep_slashes() {
+        assert_eq!(display_path("mock://traffic-cams"), "mock://traffic-cams");
+        if cfg!(windows) {
+            assert_eq!(display_path("D:/data/shapes"), r"D:\data\shapes");
+        }
+    }
+}
+
+// ---------- number formatting ----------
+
+/// 4210 → "4,210".
+pub fn int(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// 5_400_000 → "5.1 MiB".
+/// Whether `s` set at `size` px in Geist may be wider than `width` px: a per-glyph estimate that
+/// errs wide (capitals and w / m count as wide), so a name that might be cut gets its full-name tip.
+/// A table's spare width, shared by weight: each column takes `weight` shares of `spare` on top
+/// of its base, up to its cap. What the caps leave stays where the table keeps its gap (before the
+/// numbers), so wide windows fill the columns first rather than open one dead band.
+pub fn share_spare<const N: usize>(spare: f32, cols: [(f32, f32, f32); N]) -> [f32; N] {
+    let weights: f32 = cols.iter().map(|c| c.1).sum();
+    let share = if weights > 0. { spare.max(0.) / weights } else { 0. };
+    // Whole pixels: a fractional column width can leave text measured at one width and laid out
+    // at another.
+    cols.map(|(base, weight, cap)| (base + share * weight).min(cap.max(base)).floor())
+}
+
+pub fn may_overflow(s: &str, size: f32, width: f32) -> bool {
+    let em: f32 = s
+        .chars()
+        .map(|c| match c {
+            'W' | 'M' | 'm' | 'w' => 0.9,
+            c if c.is_uppercase() => 0.7,
+            'i' | 'l' | 'j' | 'I' | '.' | ',' | ':' | ';' | '\'' | '|' | '!' => 0.3,
+            c if c.is_ascii() => 0.58,
+            // CJK and other wide scripts.
+            _ => 1.0,
+        })
+        .sum();
+    em * size > width
+}
+
+pub fn bytes(n: u64) -> (String, &'static str) {
+    // Binary units, as Studio shows them by default (a 16 GiB card reads 16.0, not 17.2).
+    const K: f64 = 1024.;
+    let f = n as f64;
+    if f >= K * K * K {
+        (format!("{:.1}", f / (K * K * K)), "GiB")
+    } else if f >= K * K {
+        (format!("{:.1}", f / (K * K)), "MiB")
+    } else if f >= K {
+        (format!("{:.0}", f / K), "KiB")
+    } else {
+        (n.to_string(), "B")
+    }
+}
+
+/// 2_630_000 → "2.63 M".
+pub fn count_si(n: u64) -> (String, &'static str) {
+    let f = n as f64;
+    if f >= 1e9 {
+        (format!("{:.2}", f / 1e9), "B")
+    } else if f >= 1e6 {
+        (format!("{:.2}", f / 1e6), "M")
+    } else if f >= 1e3 {
+        (format!("{:.1}", f / 1e3), "K")
+    } else {
+        (n.to_string(), "")
+    }
+}
+
+/// A learning rate, one way everywhere: 0.01 and up as typed ("0.01", "0.0125"); below that in
+/// its power of ten ("1.11×10⁻³"), as the learning-rate chart's legend writes it.
+pub fn fmt_lr(v: f64) -> String {
+    // Seven significant digits first: a rate that was an `f32` (0.01 is 0.0099999998 widened)
+    // reads as the value it was typed as.
+    let v = format!("{v:.6e}").parse::<f64>().unwrap_or(v);
+    if v != 0. && v.abs() < 0.01 {
+        return crate::charts::in_pow(v, v.abs().log10().floor() as i32);
+    }
+    let s = format!("{v:.6}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// Text that may hold a power of ten ("lr0 1.11×10⁻³"): the exponent drawn as an 11 px raised
+/// run ("−3") rather than the font's superscript glyphs, which render at 7–8 px. Text without
+/// one is plain `text`.
+pub fn sci(size: TypeStep, color: Hsla, s: String) -> Div {
+    const SUP: &str = "⁻⁰¹²³⁴⁵⁶⁷⁸⁹";
+    // "1.11×10⁻³" in values, "× 10⁻³" in a chart's caption.
+    let found = ["×10", "× 10"].iter().find_map(|p| s.find(p).map(|at| at + p.len()));
+    let Some(head_end) = found else { return text(size, color).tnum().whitespace_nowrap().child(s) };
+    let exp_len: usize = s[head_end..].chars().take_while(|c| SUP.contains(*c)).map(char::len_utf8).sum();
+    if exp_len == 0 {
+        return text(size, color).tnum().whitespace_nowrap().child(s);
+    }
+    let exp: String = s[head_end..head_end + exp_len]
+        .chars()
+        .map(|c| match c {
+            '⁻' => '−',
+            c => char::from_digit(SUP.chars().skip(1).position(|d| d == c).unwrap_or(0) as u32, 10)
+                .unwrap_or('0'),
+        })
+        .collect();
+    div()
+        .flex()
+        // Tops aligned and the exponent's line tight: it sits raised by about a third of the size.
+        .items_start()
+        .whitespace_nowrap()
+        .child(text(size, color).tnum().child(s[..head_end].to_string()))
+        // small: an exponent beside its value, 11 px (the superscript glyphs it replaces are smaller).
+        .child(text(ty::XS, color).line_height(px(ty::XS.size)).tnum().child(exp))
+        .when(head_end + exp_len < s.len(), |d| {
+            d.child(text(size, color).tnum().child(s[head_end + exp_len..].to_string()))
+        })
+}
+
+/// An augmentation strength (mosaic, mixup, flip): two decimals, as New run's sliders show it.
+pub fn fmt_aug(v: f32) -> String {
+    format!("{v:.2}")
+}
+
+/// The scale augmentation's range: "±0.50", as New run's slider shows it.
+pub fn fmt_scale(v: f32) -> String {
+    format!("±{v:.2}")
+}
+
+pub fn f3(v: f32) -> String {
+    format!("{v:.3}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confidences_keep_a_meaningful_third_decimal() {
+        assert_eq!(fmt_conf(0.31), "0.31");
+        assert_eq!(fmt_conf(0.314), "0.314");
+        assert_eq!(fmt_conf(0.024), "0.024");
+        assert_eq!(fmt_conf(0.35), "0.35");
+    }
+
+    #[test]
+    fn queue_places_read_as_ordinals() {
+        assert_eq!(queue_text(Some(1)), "Next to start");
+        assert_eq!(queue_text(Some(2)), "2nd in queue");
+        assert_eq!(queue_text(Some(3)), "3rd in queue");
+        assert_eq!(queue_text(Some(11)), "11th in queue");
+        assert_eq!(queue_text(Some(22)), "22nd in queue");
+        assert_eq!(queue_text(None), "Waiting to start");
+    }
+
+    #[test]
+    fn overflow_is_by_width() {
+        // The inspector's 70 px class column at 12 px: short names fit, eight W's don't.
+        assert!(!may_overflow("hexagon", 12., 70.));
+        assert!(!may_overflow("triangle", 12., 70.));
+        assert!(may_overflow("WWWWWWWW", 12., 70.));
+        assert!(may_overflow("construction vehicle", 12., 70.));
+    }
+
+    #[test]
+    fn formats() {
+        assert_eq!(int(4210), "4,210");
+        assert_eq!(int(999), "999");
+        assert_eq!(int(1_000_000), "1,000,000");
+        assert_eq!(bytes(5_400_000), ("5.1".into(), "MiB"));
+        assert_eq!(bytes(17_171_480_576), ("16.0".into(), "GiB"));
+        assert_eq!(count_si(2_630_000), ("2.63".into(), "M"));
+    }
+}
+
+/// A run's device as shown: "RTX 4080 SUPER · Vulkan" from "NVIDIA GeForce RTX 4080 SUPER (vulkan)".
+pub fn device_label(device: &str) -> String {
+    match device.split_once(" (") {
+        Some((name, rest)) => {
+            let api = rest.trim_end_matches(')');
+            let api = match api {
+                "vulkan" => "Vulkan",
+                "metal" => "Metal",
+                "dx12" => "DirectX 12",
+                "cuda" => "CUDA",
+                other => other,
+            };
+            format!("{} · {api}", short_gpu(name))
+        }
+        None => short_gpu(device),
+    }
+}
+
+/// A GPU name as people say it: vendor marketing prefixes dropped ("NVIDIA GeForce RTX 4080" → "RTX 4080").
+pub fn short_gpu(name: &str) -> String {
+    let mut n = name.trim();
+    for p in ["NVIDIA GeForce ", "NVIDIA ", "AMD ", "Intel(R) "] {
+        n = n.strip_prefix(p).unwrap_or(n);
+    }
+    n.to_string()
+}
+
+/// "1 dataset", "3 datasets".
+pub fn plural(n: usize, noun: &str) -> String {
+    if n == 1 { format!("1 {noun}") } else { format!("{n} {noun}s") }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::fmt_lr;
+
+    #[test]
+    fn rates_read_one_way() {
+        assert_eq!(fmt_lr(0.01), "0.01");
+        assert_eq!(fmt_lr(0.0125), "0.0125");
+        assert_eq!(fmt_lr(0.001111), "1.11×10⁻³");
+        assert_eq!(fmt_lr(0.001), "1.00×10⁻³");
+        assert_eq!(fmt_lr(1e-7), "1.00×10⁻⁷");
+        // An f32 rate widened: 0.01 stays "0.01", not "10.00×10⁻³".
+        assert_eq!(fmt_lr(0.01_f32 as f64), "0.01");
+        assert_eq!(fmt_lr(0.001111_f32 as f64), "1.11×10⁻³");
+    }
+}
