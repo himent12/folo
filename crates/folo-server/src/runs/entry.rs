@@ -23,6 +23,7 @@ impl RunEntry {
                 claimed: false,
                 outcome: None,
                 deleted: false,
+                interrupted: false,
             }),
             tx,
             stop: Arc::new(AtomicBool::new(false)),
@@ -89,8 +90,9 @@ impl RunEntry {
         self.finish_with_code(st, status, error, None);
     }
 
-    /// [`RunEntry::finish`] with the failure's stable error code (`Run.error_code`).
-    fn finish_with_code(
+    /// [`RunEntry::finish`] with the failure's stable error code (`Run.error_code`; [`INTERRUPTED`] for a run the
+    /// server's stop ended).
+    pub(super) fn finish_with_code(
         &self,
         st: &mut RunState,
         status: RunStatus,
@@ -215,6 +217,8 @@ impl RunEntry {
             }
         };
         st.claimed = false;
+        let code =
+            if status == RunStatus::Stopped && st.interrupted { Some(INTERRUPTED.to_string()) } else { code };
         self.finish_with_code(&mut st, status, error, code);
     }
 
@@ -257,6 +261,10 @@ impl RunEntry {
         self.dir.join("metrics.jsonl")
     }
 }
+
+/// `Run.error_code` of a run that ended `stopped` because the server stopped (or restarted) while it trained or
+/// waited, not because a client stopped it.
+pub(crate) const INTERRUPTED: &str = "interrupted";
 
 /// How an execution of a claimed run ended ([`RunEntry::execute`]).
 pub(crate) enum Ended {

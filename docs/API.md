@@ -488,7 +488,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
 // Run
 { "id": "run_7d1e", "name": "shapes-n", "status": "running", "config": TrainConfig, "created": "...",
   // + "error_code": "not_supported" | "training_failed" | ... when failed (folo_api::codes; absent otherwise and from
-  //   older servers), next to "error" (the message); the final `status` event carries it too
+  //   older servers), next to "error" (the message); the final `status` event carries it too. A `stopped` run has
+  //   "interrupted" when the server stopped or restarted while it trained or waited (not a client's stop)
   "started": "..." | null, "finished": null | "...",
   "epoch": 12,             // epoch in progress, 1-based (0 before the first step; the last epoch once finished)
   "epochs": 100,

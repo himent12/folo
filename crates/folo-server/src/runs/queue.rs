@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::store::QueueMove;
 use crate::util::{fnv1a, unique_id, unix_now};
 
-use super::entry::{Ended, status_event};
+use super::entry::{Ended, INTERRUPTED, status_event};
 use super::train::execute;
 use super::{DatasetRef, Queue, RunEntry, RunFile, Runs, now};
 
@@ -272,11 +272,17 @@ impl Runs {
     /// Requests a stop: a queued run stops at once, a running one after its current batch (keeping the last
     /// epoch's checkpoint).
     pub fn stop(&self, id: &str) -> Result<Run> {
+        self.stop_as(id, false)
+    }
+
+    /// [`Runs::stop`]; `interrupted`: the server's shutdown asks, and the run ends with error code `interrupted`.
+    fn stop_as(&self, id: &str, interrupted: bool) -> Result<Run> {
         let e = self.get(id)?;
         let mut st = e.state.lock().unwrap();
         if st.deleted {
             return Err(Error::not_found("run", id));
         }
+        st.interrupted |= interrupted;
         let cloud = st.file.run.config.compute.is_some();
         if cloud && st.file.run.status.is_active() && !st.claimed {
             return Err(followed_elsewhere(id));
@@ -304,6 +310,10 @@ impl Runs {
                 let message = match run.cloud.as_ref().map(|c| c.phase) {
                     Some(p) if cloud && p < CloudPhase::Training => "stop requested; releasing the instance",
                     _ if cloud => "stop requested; the worker stops after its current batch",
+                    _ if interrupted => {
+                        "the server is shutting down: the run stops after the current batch and keeps its last \
+                         checkpoint; resume it from its page in Studio"
+                    }
                     _ => "stop requested; stopping after the current batch",
                 };
                 e.log(LogLevel::Info, message);
@@ -326,12 +336,17 @@ impl Runs {
         for e in queued {
             let mut st = e.state.lock().unwrap();
             if st.file.run.status == RunStatus::Queued && !st.deleted {
-                e.finish(&mut st, RunStatus::Stopped, None);
+                e.finish_with_code(&mut st, RunStatus::Stopped, None, Some(INTERRUPTED.to_string()));
+                drop(st);
+                e.log(
+                    LogLevel::Warn,
+                    "the server stopped while the run waited in the queue; start it from its page in Studio",
+                );
             }
         }
         let active = self.active.lock().unwrap().clone();
         if let Some(e) = active {
-            let _ = self.stop(&e.id);
+            let _ = self.stop_as(&e.id, true);
         }
         if let Some(wait) = wait {
             let t0 = Instant::now();

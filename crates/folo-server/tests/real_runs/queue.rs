@@ -104,6 +104,8 @@ async fn queue_stop_resume_and_restart() {
     s.shutdown();
     let b1 = s.get_run(&b.id).unwrap();
     assert_eq!(b1.status, RunStatus::Stopped);
+    // Interrupted by the server, not stopped by a client: the run says so.
+    assert_eq!(b1.error_code.as_deref(), Some("interrupted"));
     drop(s);
 
     // A run a crashed server left `running` comes back `stopped` (and resumable).
@@ -135,7 +137,9 @@ async fn queue_stop_resume_and_restart() {
     let last: Model = ok(&app, get(&format!("/api/models/{b_last}"))).await;
     assert_eq!(last.metrics, None, "the last epoch's metrics are unknown, not the best epoch's");
     let logs: RunLogs = ok(&app, get(&format!("/api/runs/{}/logs", b.id))).await;
-    assert!(logs.lines.last().unwrap().message.contains("server stopped while the run was running"));
+    assert_eq!(b2.error_code.as_deref(), Some("interrupted"));
+    let line = &logs.lines.last().unwrap().message;
+    assert!(line.contains("server stopped during training") && !line.contains("POST /api"), "{line}");
     let runs: RunList = ok(&app, get("/api/runs")).await;
     assert_eq!(runs.runs.len(), 2);
     let r: Run = ok(&app, resume(json!({ "resume_run_id": b.id }))).await;

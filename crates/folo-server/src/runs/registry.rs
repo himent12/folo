@@ -11,6 +11,7 @@ use folo_api::{LogLevel, Run, RunStatus};
 use crate::error::{Error, Result};
 use crate::throughput::Throughput;
 
+use super::entry::INTERRUPTED;
 use super::history::reconcile;
 use super::{Queue, RunEntry, RunFile, Runs};
 
@@ -51,18 +52,26 @@ impl Runs {
                     let mut st = e.state.lock().unwrap();
                     // An active cloud run trains on its worker without this server: `crate::cloud` follows it again
                     // or ends it.
+                    // One that was stopping had been asked to stop: it ends as a stop, the others as interrupted.
                     if st.file.run.status.is_active() && st.file.run.config.compute.is_none() {
                         let was = st.file.run.status;
                         reconcile(&mut st.file, &e.dir);
-                        e.finish(&mut st, RunStatus::Stopped, None);
+                        let code = (was != RunStatus::Stopping).then(|| INTERRUPTED.to_string());
+                        e.finish_with_code(&mut st, RunStatus::Stopped, None, code);
                         drop(st);
                         e.log(
                             LogLevel::Warn,
-                            format!(
-                                "the server stopped while the run was {}; it is stopped now (resume it with \
-                                 POST /api/runs and resume_run_id)",
-                                serde_json::to_value(was).unwrap().as_str().unwrap_or("active")
-                            ),
+                            match was {
+                                RunStatus::Queued => {
+                                    "the server stopped while the run waited in the queue; start it from its page \
+                                     in Studio"
+                                }
+                                RunStatus::Stopping => "the server stopped while the run was stopping; it is stopped now",
+                                _ => {
+                                    "the server stopped during training; resume the run from its page in Studio (it \
+                                     continues from its last checkpoint)"
+                                }
+                            },
                         );
                     }
                 }

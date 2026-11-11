@@ -93,6 +93,8 @@ struct RunState {
     outcome: Option<(RunStatus, Option<String>, Option<String>)>,
     /// Removed from the registry: every later request treats the run as unknown.
     deleted: bool,
+    /// The server's shutdown stopped the run (not a client): it ends `stopped` with error code `interrupted`.
+    interrupted: bool,
 }
 
 /// One run.

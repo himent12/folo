@@ -56,6 +56,12 @@ const NONE: string[] = [];
 /** A run has a checkpoint to continue from: an epoch finished (`Run.epoch` of an ended run counts finished epochs). */
 export const canContinue = (run: Pick<Run, 'epoch' | 'model_id'>) => run.epoch > 0 || !!run.model_id;
 
+/** A stopped run's title: a stop the server's shutdown or restart made is said as such, never as the user's own stop. */
+function stoppedTitle(run: Run) {
+  if (run.error_code === 'interrupted') return run.started ? 'Interrupted: the server stopped during training' : 'Interrupted: the server stopped before it started';
+  return canContinue(run) ? `Stopped at epoch ${run.epoch}` : run.started ? 'Stopped during its first epoch' : 'Stopped before it started';
+}
+
 export default function Outcome(props: OutcomeProps) {
   const warnings = () => props.warnings ?? NONE;
   // Out of GPU memory: the same config fails again, so the ways out are smaller settings (a new run), most likely first.
@@ -277,7 +283,7 @@ export default function Outcome(props: OutcomeProps) {
         <Callout
           tone="neutral"
           icon={Square}
-          title={canContinue(props.run) ? `Stopped at epoch ${props.run.epoch}` : props.run.started ? 'Stopped during its first epoch' : 'Stopped before it started'}
+          title={stoppedTitle(props.run)}
           moreLabel="Why?"
           also={short.get()}
           more={short.get() ? why : undefined}

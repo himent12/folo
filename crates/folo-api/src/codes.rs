@@ -196,6 +196,12 @@ pub const CODES: &[Code] = &[
     c("cloud_sync_failed", 502, 1, "copying data to or from a cloud worker failed; Run.error_code"),
     c("cloud_instance_lost", 502, 1, "a cloud run's instance is gone before the run ended; Run.error_code"),
     c("shutting_down", 503, 1, "the server is shutting down"),
+    c(
+        "interrupted",
+        503,
+        1,
+        "the server stopped (or restarted) while the run trained or waited; Run.error_code of a stopped run",
+    ),
     c("runtime", 500, 1, "the async runtime could not start (CLI)"),
     c("bind_failed", 500, 1, "`folo serve` could not bind its address (CLI)"),
     c("serve_failed", 500, 1, "`folo serve` stopped with an error (CLI)"),

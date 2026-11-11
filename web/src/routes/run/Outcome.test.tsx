@@ -211,6 +211,19 @@ describe('Outcome', () => {
     r.done();
   });
 
+  it('says a run the server stopped was interrupted, not stopped by the user', () => {
+    const run: Run = { ...failed(''), status: 'stopped', error: null, error_code: 'interrupted', epoch: 2, model_id: 'm_1' };
+    let r = render(run);
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Interrupted: the server stopped during training');
+    expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe('The last checkpoint was kept and saved as a model.');
+    expect(r.labels[0]).toBe('Resume');
+    r.done();
+    r = render({ ...run, started: null, epoch: 0, model_id: null });
+    expect(r.target.querySelector('.c-title')?.textContent).toBe('Interrupted: the server stopped before it started');
+    expect(r.labels).toEqual(['Start again']);
+    r.done();
+  });
+
   it('says the warning alone while the run has no outcome yet', () => {
     const r = render(short('running'), vi.fn(), [SHORT, WARMUP]);
     const note = r.target.querySelector<HTMLElement>('[aria-label="Schedule warning"]')!;
