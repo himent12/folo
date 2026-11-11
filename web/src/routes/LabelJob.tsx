@@ -375,6 +375,7 @@ export default function LabelJob() {
                     choice={choice}
                     bind:instructions={field(instructions, 'text')}
                     instructionsError={instructions.error}
+                    instructionsSaved={instructions.saved}
                     starting={starting.get()}
                     startError={startError.get()}
                     lost={live.lost !== null}

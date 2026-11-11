@@ -247,10 +247,21 @@ describe('the job page', () => {
 
   it('with images to label: the one primary is Label N images', async () => {
     await page('/datasets/label/lb_7c21');
+    // No example text in the instructions box as if it were the job's own.
+    expect(document.querySelector('textarea')?.getAttribute('placeholder')).toBe('None: the agent goes by the class names alone.');
     expect(button('Label 40 images')?.className).toMatch(/primary/);
     expect(primaries()).toHaveLength(1);
     expect(button('Create dataset')?.disabled).toBe(true);
     expect(text()).toMatch(/Create dataset: label an image first/);
+  });
+
+  it('before the first answer of a run: a line that the agent is working, and for how long', async () => {
+    await page('/datasets/label/lb_7c21');
+    button('Label 40 images')!.click();
+    await vi.waitFor(() => {
+      flushSync();
+      expect(document.querySelector('.p-wait')?.textContent).toMatch(/^Claude Code is working on the first images · \d+s$/);
+    });
   });
 
   it('while an agent labels: progress and Stop, no primary', async () => {

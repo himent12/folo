@@ -12,12 +12,18 @@ import { INSTRUCTIONS_MAX } from '$lib/label';
 export class Instructions {
   #text = signal('');
   #error = signal<string | null>(null);
+  #saved = signal(false);
   /** The field's text. */
   get text(): string {
     return this.#text.get();
   }
   set text(v: string) {
     this.#text.set(v);
+    if (v !== this.#taken) this.#saved.set(false);
+  }
+  /** A save of the field's text just went through, and the field holds no edit since: "Saved" beside it. */
+  get saved(): boolean {
+    return this.#saved.get();
   }
   /** Why the text is not saved (too long, or the save failed); null when it is fine. */
   get error(): string | null {
@@ -64,6 +70,7 @@ export class Instructions {
       // What was sent is saved, whatever the field holds by now (an edit typed meanwhile stays an edit).
       this.#taken = text;
       this.error = null;
+      this.#saved.set(this.#text.peek() === text);
       return true;
     } catch (e) {
       this.error = `Not saved: ${e instanceof Error ? e.message : String(e)}`;

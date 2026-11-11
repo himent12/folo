@@ -98,6 +98,25 @@ describe('Instructions', () => {
     expect(ins.error).toBeNull();
   });
 
+  it('says it saved until the next edit, not for a save that an edit overtook', async () => {
+    const { ins, sent } = setup();
+    expect(ins.saved).toBe(false);
+    ins.text = 'A';
+    const saving = ins.save();
+    await settle();
+    sent[0]!.answer.resolve();
+    await saving;
+    expect(ins.saved).toBe(true);
+    ins.text = 'AB';
+    expect(ins.saved).toBe(false);
+    const again = ins.save();
+    await settle();
+    ins.text = 'ABC';
+    sent[1]!.answer.resolve();
+    await again;
+    expect(ins.saved).toBe(false);
+  });
+
   it('takes the server’s text unless the field holds an edit, and saves nothing while a run is active', async () => {
     const { ins, sent } = setup('running');
     ins.sync('new');

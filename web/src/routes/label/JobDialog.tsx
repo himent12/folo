@@ -243,7 +243,7 @@ export default function JobDialog(props: JobDialogProps) {
                 id={`${uid}-instructions`}
                 bind:value={instructions}
                 rows={4}
-                placeholder="Label every car and pedestrian, also partly hidden ones. Ignore reflections and posters."
+                placeholder="e.g. Label every car and pedestrian, also partly hidden ones. Ignore reflections and posters."
                 invalid={!!show(errs.get().instructions)}
               />
             </Field>
