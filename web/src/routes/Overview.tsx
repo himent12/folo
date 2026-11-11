@@ -41,6 +41,7 @@ import Callout from './run/Callout';
 import { asOf, Now } from '$lib/api/freshness';
 
 const total = (d: Dataset) => d.splits.train + d.splits.val + d.splits.test;
+const classCount = (n: number) => `${n} ${n === 1 ? 'class' : 'classes'}`;
 
 export default function Overview() {
   setCrumbs({ label: 'Overview' });
@@ -450,7 +451,7 @@ export default function Overview() {
                                     <span class="m-sub num">
                                       <Meta line>
                                         <Ident value={t().m.arch} />
-                                        <span>{t().m.classes.length} classes</span>
+                                        <span>{classCount(t().m.classes.length)}</span>
                                         <span>{bytes(t().m.bytes, prefs.units)}</span>
                                       </Meta>
                                     </span>
@@ -537,8 +538,8 @@ export default function Overview() {
                               <span class="d-name truncate">{d().name}</span>{' '}
                               <span class="d-nums num">
                                 <Meta line>
-                                  <span>{compact(total(d()))} images</span>
-                                  <span>{d().classes.length} classes</span>
+                                  <span>{`${compact(total(d()))} ${total(d()) === 1 ? 'image' : 'images'}`}</span>
+                                  <span>{classCount(d().classes.length)}</span>
                                 </Meta>
                               </span>
                             </span>

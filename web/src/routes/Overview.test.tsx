@@ -130,6 +130,24 @@ describe('Overview', () => {
     expect(target.querySelector('.live')!.textContent).not.toContain('New run');
   });
 
+  it('counts one class and one image in the singular', async () => {
+    const api = new MockApi('normal', 0);
+    const [first] = await api.datasets();
+    const one = { ...first!, classes: ['part'], splits: { train: 1, val: 0, test: 0 } };
+    api.datasets = async () => [one];
+    api.dataset = async () => one;
+    open(api);
+    const card = await vi.waitFor(() => {
+      flush();
+      const li = target.querySelector('#datasets li.d-card');
+      if (!li) throw new Error('still waiting for the datasets');
+      return li;
+    });
+    expect(card.textContent).toContain('1 image');
+    expect(card.textContent).toContain('1 class');
+    expect(card.textContent).not.toMatch(/1 (images|classes)/);
+  });
+
   it('refetches Best models when a run ends, and not on an unchanged list', async () => {
     const runs = await idleRuns();
     const run = runs.find((r) => r.status === 'completed')!;
