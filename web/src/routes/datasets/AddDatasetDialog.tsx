@@ -21,6 +21,9 @@ import { cleanPath, isFullPath, NAME_RE, suggestName } from './names';
 
 type Mode = 'folder' | 'synthetic';
 
+/** Most classes of a generated set: each class is one of the generator's 8 shapes (docs/API.md). */
+const MAX_SHAPES = 8;
+
 export interface AddDatasetDialogProps {
   open?: boolean;
   mode?: Mode;
@@ -136,7 +139,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
   async function submit(e: SubmitEvent) {
     e.preventDefault();
     if (mode.get() === 'synthetic' && classDraft.get().trim()) {
-      classes.set(addClasses(classes.get(), classDraft.get(), 16));
+      classes.set(addClasses(classes.get(), classDraft.get(), MAX_SHAPES));
       classDraft.set('');
     }
     touched.set(true);
@@ -297,8 +300,8 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
                 >
                   <Input id={`${uid}-sname`} bind:value={sName} autocomplete="off" spellcheck={false} invalid={!!show(errs.get().name)} />
                 </Field>{' '}
-                <Field label="Classes" for={`${uid}-classes`} error={show(errs.get().classes)} hint="Press Enter or comma to add. Up to 16.">
-                  <ClassChips id={`${uid}-classes`} bind:classes={classes} bind:draft={classDraft} max={16} placeholder="circle, square, …" />
+                <Field label="Classes" for={`${uid}-classes`} error={show(errs.get().classes)} hint={classes.get().length >= MAX_SHAPES ? `${MAX_SHAPES} of ${MAX_SHAPES}: one shape each, so no more fit.` : `Press Enter or comma to add. Up to ${MAX_SHAPES}, one shape each.`}>
+                  <ClassChips id={`${uid}-classes`} bind:classes={classes} bind:draft={classDraft} max={MAX_SHAPES} placeholder="circle, square, …" />
                 </Field>{' '}
                 <div class="row">
                   <Field label="Images" for={`${uid}-images`} error={show(errs.get().images)}>

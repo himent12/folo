@@ -155,6 +155,18 @@ describe('AddDatasetDialog', () => {
     expect(toast.items[0]).toMatchObject({ title: 'Dataset registered', detail: 'bccd · all 72 images are in the test split, none to train on' });
   });
 
+  it('takes as many classes as the generator has shapes (8), and says so', () => {
+    c = mount(AddDatasetDialog, { target, props: { open: true, mode: 'synthetic' } });
+    flushSync();
+    const input = document.querySelector<HTMLInputElement>('input[id$="-classes"]')!;
+    input.value = 'star, ring, cross, hexagon, heart, car, dog';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(document.querySelectorAll('.chip')).toHaveLength(8);
+    expect(document.getElementById(input.getAttribute('aria-describedby')!.split(' ')[0]!)?.textContent).toContain('8 of 8');
+  });
+
   it('announces a dataset that was not in the list as new', async () => {
     const go = await register('D:/data/shapes', [{ id: 'ds_fasteners' }]);
     expect(toast.items[0]).toMatchObject({ tone: 'success', title: 'Dataset registered' });
