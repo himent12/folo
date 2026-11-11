@@ -70,6 +70,46 @@ public static class DfwWin {
 }
 "@
 }
+if (-not ("DfwPrint" -as [type])) {
+    Add-Type -ReferencedAssemblies System.Drawing @"
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
+public static class DfwPrint {
+    [StructLayout(LayoutKind.Sequential)] struct BIH { public int biSize, biWidth, biHeight; public short biPlanes, biBitCount; public int biCompression, biSizeImage, x, y, c, i; }
+    [DllImport("user32.dll")] static extern bool PrintWindow(IntPtr h, IntPtr hdc, uint flags);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateCompatibleDC(IntPtr h);
+    [DllImport("gdi32.dll")] static extern bool DeleteDC(IntPtr h);
+    [DllImport("gdi32.dll")] static extern IntPtr CreateDIBSection(IntPtr dc, ref BIH bi, uint usage, out IntPtr bits, IntPtr sec, uint off);
+    [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr o);
+    [DllImport("gdi32.dll")] static extern bool DeleteObject(IntPtr o);
+    [DllImport("gdi32.dll")] static extern bool GdiFlush();
+    // PrintWindow of a w x h client area into a plain GDI DIB section, copied into a Bitmap (as drive.ps1
+    // does). Not through GDI+'s Graphics.GetHdc: that pre-fills its DC with RGB(13, 11, 12) and on
+    // ReleaseHdc keeps the old bitmap wherever a pixel still has that colour, so every drawn pixel of
+    // exactly RGB(13, 11, 12) came back black.
+    public static Bitmap Print(IntPtr h, int w, int hh, uint flags) {
+        var bi = new BIH(); bi.biSize = 40; bi.biWidth = w; bi.biHeight = -hh; bi.biPlanes = 1; bi.biBitCount = 32;
+        IntPtr dc = CreateCompatibleDC(IntPtr.Zero), bits;
+        IntPtr dib = CreateDIBSection(dc, ref bi, 0, out bits, IntPtr.Zero, 0);
+        IntPtr old = SelectObject(dc, dib);
+        PrintWindow(h, dc, flags);
+        GdiFlush();
+        var bmp = new Bitmap(w, hh, PixelFormat.Format32bppRgb);
+        var d = bmp.LockBits(new Rectangle(0, 0, w, hh), ImageLockMode.WriteOnly, PixelFormat.Format32bppRgb);
+        var row = new byte[w * 4];
+        for (int y = 0; y < hh; y++) {
+            Marshal.Copy(bits + y * w * 4, row, 0, row.Length);
+            Marshal.Copy(row, 0, d.Scan0 + y * d.Stride, row.Length);
+        }
+        bmp.UnlockBits(d);
+        SelectObject(dc, old); DeleteObject(dib); DeleteDC(dc);
+        return bmp;
+    }
+}
+"@
+}
 # Per-monitor DPI aware v2, so rectangles and captures are in physical pixels.
 [DfwWin]::SetProcessDpiAwarenessContext([IntPtr]-4) | Out-Null
 Add-Type -AssemblyName System.Drawing

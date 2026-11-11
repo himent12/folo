@@ -51,12 +51,8 @@ try {
     # A capture can come before the first frame (an all-black image): sample a grid of pixels and capture
     # again, up to three times, before giving up.
     for ($try = 0; $try -lt 4; $try++) {
-        $bmp = New-Object System.Drawing.Bitmap $w, $hh
-        $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $hdc = $g.GetHdc()
-        [DfwWin]::PrintWindow($h, $hdc, 3) | Out-Null   # PW_CLIENTONLY | PW_RENDERFULLCONTENT
-        $g.ReleaseHdc($hdc)
-        $g.Dispose()
+        # PW_CLIENTONLY | PW_RENDERFULLCONTENT, into a plain DIB (win.ps1: GDI+'s GetHdc blackens RGB(13,11,12)).
+        $bmp = [DfwPrint]::Print($h, $w, $hh, 3)
         $lit = $false
         for ($y = 8; $y -lt $hh -and -not $lit; $y += [Math]::Max(1, [int]($hh / 12))) {
             for ($x = 8; $x -lt $w; $x += [Math]::Max(1, [int]($w / 12))) {
