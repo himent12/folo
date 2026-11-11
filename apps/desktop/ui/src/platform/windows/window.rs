@@ -59,6 +59,8 @@ pub(crate) struct WindowState {
     pub(crate) hovered: bool,
     pub(crate) click_state: ClickState,
     pub(crate) nc_button_pressed: Option<u32>,
+    /// The buttons pressed in the client area and not yet released (the capture is held while any is).
+    pub(crate) pressed_buttons: Vec<MouseButton>,
     pub(crate) display: WindowsDisplay,
     pub(crate) fullscreen: Option<StyleAndBounds>,
     pub(crate) initial_placement: Option<WindowOpenStatus>,
@@ -614,6 +616,7 @@ fn new_inner(context: &CreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<
         hovered: false,
         click_state: ClickState::new(),
         nc_button_pressed: None,
+        pressed_buttons: Vec::new(),
         display: context.display,
         fullscreen: None,
         initial_placement: None,
