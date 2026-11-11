@@ -105,6 +105,27 @@ describe('ErrorState', () => {
     agent.done();
   });
 
+  it('names what could not be loaded when the screen passes no title, never "this" (shell F11)', () => {
+    for (const [request, title] of [
+      ['GET /api/runs', 'Could not load runs'],
+      ['GET /api/runs/run_1', 'Could not load this run'],
+      ['GET /api/runs/run_1/metrics', "Could not load the run's metrics"],
+      ['GET /api/label/jobs', 'Could not load labeling jobs'],
+      ['GET /api/system', 'Could not load the system information'],
+    ]) {
+      const r = render({ error: new ApiError(500, 'internal', 'boom', null, request) });
+      expect(r.text('.title')).toBe(title);
+      expect([...r.target.querySelectorAll('.code .line')].map((e) => e.textContent)).toEqual(['internal · HTTP 500', request]);
+      r.done();
+    }
+    const write = render({ error: new ApiError(500, 'internal', 'boom', null, 'POST /api/runs') });
+    expect(write.text('.title')).toBe('The server ran into a problem');
+    write.done();
+    const plain = render({ error: new Error('boom') });
+    expect(plain.text('.title')).toBe('Something went wrong');
+    plain.done();
+  });
+
   it('shows no hint when the server had none', () => {
     const r = render({ error: new ApiError(500, 'internal', 'boom', null) });
     expect(r.target.querySelector('.hint')).toBeNull();

@@ -73,11 +73,13 @@ import { BENCH_EVENTS, LABEL_EVENTS, openEventStream, RUN_EVENTS, type EventHand
 import { uploadInChunks, type UploadProgress } from './upload';
 
 export class ApiError extends Error {
+  /** `request`: what was asked, `GET /api/runs` (no query), when known: ErrorState names what could not be loaded. */
   constructor(
     readonly status: number,
     readonly code: string,
     message: string,
     readonly hint?: string | null,
+    readonly request?: string,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -339,13 +341,14 @@ export class HttpApi implements Api {
       init.body = JSON.stringify(body);
       init.headers = { ...init.headers, 'content-type': 'application/json' };
     }
+    const request = `${method} /api${path.split('?')[0]}`;
     let res: Response;
     try {
       res = await fetch(`${this.base}/api${path}`, init);
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') throw e;
       this.reach?.failed();
-      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.');
+      throw new ApiError(0, 'network', 'Cannot reach the FOLO server.', 'Is folo serve running? Check the server URL in Settings.', request);
     }
     this.reach?.ok();
     if (res.status === 204) return undefined as T;
@@ -354,11 +357,11 @@ export class HttpApi implements Api {
     try {
       json = text ? JSON.parse(text) : undefined;
     } catch {
-      throw new ApiError(res.status, 'bad_response', `The server sent a response that is not JSON (HTTP ${res.status}).`);
+      throw new ApiError(res.status, 'bad_response', `The server sent a response that is not JSON (HTTP ${res.status}).`, null, request);
     }
     if (!res.ok) {
       const err = (json as { error?: { code?: string; message?: string; hint?: string } } | undefined)?.error;
-      throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Request failed (HTTP ${res.status}).`, err?.hint);
+      throw new ApiError(res.status, err?.code ?? `http_${res.status}`, err?.message ?? `Request failed (HTTP ${res.status}).`, err?.hint, request);
     }
     return json as T;
   }

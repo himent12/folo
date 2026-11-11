@@ -36,6 +36,52 @@ export function goneOf(error: unknown): (typeof GONE)[string] | null {
   return error instanceof ApiError && error.status === 404 ? (GONE[error.code] ?? null) : null;
 }
 
+/** The collections of docs/API.md, as the error title names them ("Could not load runs") and one of them by id. */
+const LISTS: Record<string, [all: string, one: string]> = {
+  runs: ['runs', 'this run'],
+  models: ['models', 'this model'],
+  datasets: ['datasets', 'this dataset'],
+  jobs: ['labeling jobs', 'this labeling job'],
+  benchmarks: ['benchmarks', 'this benchmark'],
+  entries: ['entries', 'this entry'],
+  loops: ['loops', 'this loop'],
+  images: ['images', 'this image'],
+  connections: ['cloud connections', 'this cloud connection'],
+  instances: ['cloud instances', 'this cloud instance'],
+  providers: ['cloud providers', 'this cloud provider'],
+  offers: ['GPU offers', 'this GPU offer'],
+  agents: ['labeling agents', 'this labeling agent'],
+};
+/** A part of a thing (`/runs/{id}/metrics`) or a page of its own (`/system`), as the title names it. */
+const PARTS: Record<string, string> = {
+  metrics: "the run's metrics",
+  samples: 'the validation samples',
+  logs: 'the log',
+  eval: 'the evaluation',
+  issues: 'the dataset check',
+  system: 'the system information',
+  throughput: 'the throughput table',
+  cli: 'the command',
+  catalog: 'the conditions',
+  result: 'the result',
+  estimate: 'the estimate',
+};
+
+/**
+ * What a failed read was for, from its request (`GET /api/runs/run_1/metrics` → "the run's metrics"), so an error
+ * whose screen passes no title still names what could not be loaded. Null for anything but a read of the API.
+ */
+export function readOf(request: string | undefined): string | null {
+  const m = /^GET \/api\/(.+)$/.exec(request ?? '');
+  if (!m) return null;
+  const parts = m[1]!.split('/');
+  const last = parts[parts.length - 1]!;
+  const before = parts[parts.length - 2];
+  if (LISTS[last]) return LISTS[last][0];
+  if (before && LISTS[before]) return LISTS[before][1];
+  return PARTS[last] ?? `the ${last.replace(/[-_]/g, ' ')}`;
+}
+
 /** A server hint written for agents and API clients (an endpoint, an MCP tool): kept with the details, not shown. */
 const forAgents = (hint: string) => /\b(?:GET|POST|PUT|PATCH|DELETE) \/api\/|\(MCP\)|docs\/API\.md/.test(hint);
 
@@ -57,7 +103,11 @@ export default function ErrorState(props: ErrorStateProps) {
     const g = gone.get();
     if (offline.get()) return "Can't reach the FOLO server";
     if (g) return `${sentence(g.noun).replace(/\.$/, '')} not found`;
-    return props.title ?? 'Could not load this';
+    if (props.title) return props.title;
+    // No title from the screen: what the request was for, else what kind of failure it was (never "this").
+    const what = props.error instanceof ApiError ? readOf(props.error.request) : null;
+    if (what) return `Could not load ${what}`;
+    return props.error instanceof ApiError && props.error.status >= 500 ? 'The server ran into a problem' : 'Something went wrong';
   });
   // Out of GPU memory says so plainly; the driver's report goes with the technical details.
   const oom = computed(() => !offline.get() && isOom(props.error));
@@ -83,6 +133,7 @@ export default function ErrorState(props: ErrorStateProps) {
   const code = computed(() =>
     props.error instanceof ApiError ? `${props.error.code}${props.error.status ? ` · HTTP ${props.error.status}` : ''}` : undefined,
   );
+  const request = computed(() => (props.error instanceof ApiError ? props.error.request : undefined));
   const detail = computed(() => (oom.get() ? oomDetail(raw.get()) : null));
   /**
    * The server's own hint, kept with the details when the screen says what applies here or when it is written for
@@ -117,12 +168,13 @@ export default function ErrorState(props: ErrorStateProps) {
             <CodeText text={hint.get()!} />
           </p>
         ) : null}
-        {code.get() || detail.get() || hiddenHint.get() ? (
+        {code.get() || request.get() || detail.get() || hiddenHint.get() ? (
           <details class="code">
             <summary>Technical details</summary>
             {detail.get() ? <span class="line">{detail.get()}</span> : null}
             {hiddenHint.get() ? <span class="line">{`Server hint: ${hiddenHint.get()}`}</span> : null}
             {code.get() ? <span class="line">{code.get()}</span> : null}
+            {request.get() ? <span class="line">{request.get()}</span> : null}
           </details>
         ) : null}
         {/* The ways out sit under the cause they answer, not at the far edge of the panel: one row of buttons of one
