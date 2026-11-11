@@ -295,6 +295,8 @@ css`
     overflow: visible;
     border-radius: var(--radius-sm);
     touch-action: pan-y;
+    /* A press and drag over the plot reads values; it never selects the tick labels (runs F18). */
+    user-select: none;
   }
   /* The legend row: a fixed 20 px line, so the plot never moves as the readout changes. */
   .readout {
