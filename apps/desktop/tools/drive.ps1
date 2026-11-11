@@ -138,16 +138,35 @@ public static class FoloDrive {
         POINT p = new POINT(); p.X = x; p.Y = y; ClientToScreen(h, ref p);
         Post(h, WM_MOUSEWHEEL, (IntPtr)((delta & 0xFFFF) << 16), Pt(p.X, p.Y)); Sync(h);
     }
+    [StructLayout(LayoutKind.Sequential)] struct GUITHREADINFO { public int cbSize; public uint flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret; }
+    [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO g);
+    // Whether the window's thread is in Windows' modal move / size loop (GUI_INMOVESIZE): a caption or
+    // edge press the app left to Windows starts it. Posted messages cannot end it (it follows the real
+    // mouse): EndMoveSize does, with WM_CANCELMODE.
+    public static bool InMoveSize(IntPtr h) {
+        uint pid; uint t = GetWindowThreadProcessId(h, out pid);
+        var g = new GUITHREADINFO(); g.cbSize = Marshal.SizeOf(g);
+        return GetGUIThreadInfo(t, ref g) && (g.flags & 2) != 0;
+    }
+    public static void EndMoveSize(IntPtr h) { Send(h, 0x1F /* WM_CANCELMODE */, IntPtr.Zero, IntPtr.Zero); }
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+    // Moves / resizes the window as Windows' own move and size loop would (no activation, no z-order).
+    public static void MoveWindow(IntPtr h, int x, int y, int w, int hh) { SetWindowPos(h, IntPtr.Zero, x, y, w, hh, 0x0004 | 0x0010); }
     public static void Leave(IntPtr h) { Post(h, WM_MOUSELEAVE, IntPtr.Zero, IntPtr.Zero); Sync(h); }
     public static int HitTest(IntPtr h, int sx, int sy) {
         Post(h, WM_NCMOUSEMOVE, (IntPtr)1, Pt(sx, sy)); Sync(h);
         return (int)Send(h, WM_NCHITTEST, IntPtr.Zero, Pt(sx, sy));
     }
-    // A non-client press and release (or a double click: the second press is WM_NCLBUTTONDBLCLK).
+    // A non-client press and release (or a double click: the second press is WM_NCLBUTTONDBLCLK). On a
+    // caption (HTCAPTION) or a resize edge the press goes to Windows' move / size loop, which takes the
+    // release itself, so the window never gets WM_NCLBUTTONUP there; here nothing is posted for it, and
+    // a loop the press started is ended (EndMoveSize).
     public static void NcClick(IntPtr h, int sx, int sy, int code, bool dbl) {
         HitTest(h, sx, sy);
         Post(h, WM_NCLBUTTONDOWN, (IntPtr)code, Pt(sx, sy)); Sync(h);
-        Post(h, WM_NCLBUTTONUP, (IntPtr)code, Pt(sx, sy)); Sync(h);
+        bool loopArea = code == 2 || (code >= 10 && code <= 17);
+        if (InMoveSize(h)) EndMoveSize(h);
+        if (!loopArea) { Post(h, WM_NCLBUTTONUP, (IntPtr)code, Pt(sx, sy)); Sync(h); }
         if (dbl) {
             Post(h, WM_NCLBUTTONDBLCLK, (IntPtr)code, Pt(sx, sy)); Sync(h);
             Post(h, WM_NCLBUTTONUP, (IntPtr)code, Pt(sx, sy)); Sync(h);
