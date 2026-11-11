@@ -239,6 +239,28 @@ describe('the labeling editor: keys', () => {
     expect(sent.mock.calls[0]![2]).toEqual([{ class: 0, x1, y1, x2: x1 + side + 1, y2: y1 + side + 10 } satisfies Box]);
   });
 
+  it('keeps working after Save: focus dropped to the page by the disabled button comes back to the editor', async () => {
+    await openEditor('1');
+    click(inEditor('Add box'));
+    click(inEditor('Save'));
+    await vi.waitFor(() => {
+      flushSync();
+      expect(footer()).toMatch(/No changes yet/);
+    });
+    // The browser moves focus off a button that turns disabled: to the body, outside the dialog.
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(key('j', {}, document.body).defaultPrevented).toBe(true);
+    await vi.waitFor(() => expect(router.route.query.get('image')).toBe('2'));
+    expect(document.activeElement).toBe(editor());
+    // Not while another dialog is open over it.
+    const over = document.createElement('dialog');
+    document.body.appendChild(over);
+    over.showModal();
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(key('k', {}, document.body).defaultPrevented).toBe(false);
+    over.remove();
+  });
+
   it('leaves the arrows alone when no box is selected', async () => {
     await openEditor('1');
     expect(key('ArrowRight').defaultPrevented).toBe(false);

@@ -7,7 +7,7 @@
  * link, Back), and closing the tab warns. J / K step through the images in the current filter. "Ask the agent again"
  * runs the agent on this image alone with a note; "Remove image" takes it out of the job. An image the agent has right
  * now cannot be edited, and says so; one that waits for its turn in a run can, and then leaves the run. Its keys work
- * while it is the topmost dialog (shell/pageCommands `dialogKey`).
+ * while it is the topmost dialog (shell/pageCommands `dialogKey`), also after a button that had focus turned disabled.
  */
 import ChevronLeft from '$icons/chevron-left';
 import ChevronRight from '$icons/chevron-right';
@@ -206,7 +206,13 @@ export default function Editor(props: EditorProps) {
 
   const body = signal<HTMLElement>();
   function onkeydown(e: KeyboardEvent) {
-    if (!open.peek() || leaving.peek() || removing.peek() || !dialogKey(e, body.peek()?.closest('dialog'))) return;
+    if (!open.peek() || leaving.peek() || removing.peek()) return;
+    const dialog = body.peek()?.closest('dialog');
+    // A button that turns disabled under focus (Save once saved, Discard, Ask, Next on the last image) drops focus to
+    // the page's body, where no key reaches the dialog: with no other dialog open, the editor takes focus back.
+    const dropped = !!dialog?.open && e.target === document.body && [...document.querySelectorAll('dialog[open]')].every((d) => d === dialog);
+    if (dropped ? e.defaultPrevented || e.metaKey || e.ctrlKey : !dialogKey(e, dialog)) return;
+    if (dropped) dialog!.focus();
     const k = e.key;
     if (k in ARROWS) {
       if (!arrow(e)) return;
