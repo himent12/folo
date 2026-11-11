@@ -5,18 +5,19 @@
 //!
 //! `cargo run -p folo-ui --example winit_smoke --features winit,portable-text`
 
-#[cfg(not(any(not(windows), feature = "winit")))]
+// It draws its text with cosmic-text, so on Windows it needs both features.
+#[cfg(not(any(not(windows), all(feature = "winit", feature = "portable-text"))))]
 fn main() {
-    eprintln!("build with --features winit");
+    eprintln!("build with --features winit,portable-text");
     std::process::exit(2);
 }
 
-#[cfg(any(not(windows), feature = "winit"))]
+#[cfg(any(not(windows), all(feature = "winit", feature = "portable-text")))]
 fn main() {
     smoke::main();
 }
 
-#[cfg(any(not(windows), feature = "winit"))]
+#[cfg(any(not(windows), all(feature = "winit", feature = "portable-text")))]
 mod smoke {
     use folo_ui::text::portable::CosmicTextSystem;
     use folo_ui::winit::WinitPlatform;
