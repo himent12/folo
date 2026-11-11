@@ -25,10 +25,16 @@ impl FrameMut {
     /// A target for `rect`.
     ///
     /// # Safety
-    /// `rect` lies inside the frame, and no other live `Target` overlaps it.
+    /// No other live `Target` overlaps `rect`. (That `rect` lies inside the frame is checked: every
+    /// write through the target relies on it.)
     pub unsafe fn target(&self, rect: IRect) -> Target<'_> {
-        debug_assert!(rect.x0 >= 0 && rect.y0 >= 0 && rect.x1 as usize <= self.stride);
-        debug_assert!((rect.y1.max(0) as usize) * self.stride <= self.len);
+        assert!(
+            rect.x0 >= 0
+                && rect.y0 >= 0
+                && rect.x1 as usize <= self.stride
+                && (rect.y1.max(0) as usize).saturating_mul(self.stride) <= self.len,
+            "tile {rect:?} outside the frame"
+        );
         Target { frame: *self, rect, _owner: PhantomData }
     }
 }

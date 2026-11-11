@@ -66,7 +66,8 @@ impl PathMask {
             return PathMask { rect, data: super::triangles::coverage(&p.triangles, clip, rect) };
         }
         let (w, h) = (rect.width().max(0) as u32, rect.height().max(0) as u32);
-        let empty = || PathMask { rect, data: vec![0; (w * h) as usize] };
+        let len = w as usize * h as usize;
+        let empty = || PathMask { rect, data: vec![0; len] };
         let Some(mut mask) = tiny_skia::Mask::new(w, h) else {
             return empty();
         };
@@ -123,7 +124,7 @@ impl PathMask {
         // GPUI draws paths into a 4x MSAA target (D3D11's standard pattern) and resolves it: a
         // pixel's coverage is the share of its four samples inside the path. Each sample is one
         // aliased fill (centre sampling) of the path moved by minus the sample's offset.
-        let mut samples = vec![0u8; (w * h) as usize];
+        let mut samples = vec![0u8; len];
         for (k, (dx, dy)) in MSAA_4X.into_iter().enumerate() {
             mask.clear();
             let t = tiny_skia::Transform::from_translate(-dx, -dy);

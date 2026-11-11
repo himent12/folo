@@ -174,6 +174,13 @@ impl Renderer {
     ) -> Vec<Bounds<DevicePixels>> {
         let t0 = Instant::now();
         assert_eq!(frame.pixels.len(), frame.width as usize * frame.height as usize, "framebuffer size");
+        if frame.width > tiles::MAX_SIDE || frame.height > tiles::MAX_SIDE {
+            // Far beyond any window: not drawn (the tile maths would not fit its integer types).
+            self.tiles.invalidate();
+            self.dirty.clear();
+            self.stats = RenderStats::default();
+            return Vec::new();
+        }
         self.tiles.resize(frame.width, frame.height);
         if self.tiles.len() == 0 {
             // An empty frame (a minimized or collapsed window): nothing to draw. The grid is empty, so
