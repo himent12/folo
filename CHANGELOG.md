@@ -5,6 +5,19 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 
 ## Unreleased
 
+### Pretrained weights
+- The weights releases `weights-v1` (`folo-n-coco`) and `weights-v2` (`folo-n-coco-v2`) are published.
+- `folo weights pull` downloads over plain HTTPS first, without credentials (streamed, redirects followed, a stalled
+  connection fails after 60 s, a progress line on a terminal), so once the repository is public it needs nothing but
+  the `folo` binary. A refused download (`404`: a private repository, a draft, a missing release) falls back to
+  `gh release download` as before; the repository is private for now, so today a pull still needs access to it
+  through a logged-in `gh`. When `gh` is missing or fails then, one `gh_failed` error says both. No network, a
+  timeout, a server error or a cut download is the new `download_failed`, without a fallback. The checksum and
+  `.folo` checks are unchanged: nothing is installed unless both pass. `--json` adds `via` (`https`, `gh`, `null`).
+- `FOLO_WEIGHTS_BASE_URL` downloads from a mirror (`<base>/<tag>/<file>`), `FOLO_GH` names the GitHub CLI program.
+- The QUICKSTART has the two-command path to a first fine-tune (`folo weights pull folo-n-coco-v2`, then
+  `folo train --weights folo-n-coco-v2`); `train` still never downloads by itself, and its hint says what to run.
+
 ### Vision benchmarks
 - Make a benchmark from your own labeled images and run **any vision model** on it: a FOLO model, Claude Code or
   Codex looking at the images, or predictions from a model that runs anywhere else

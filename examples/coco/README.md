@@ -1,8 +1,8 @@
 # COCO: folo-n pretrained from scratch
 
 folo-n trained **from scratch** on COCO train2017 at 640 px on one RTX 4080 SUPER for **50 epochs** (8.7 h of
-epochs), evaluated on val2017 with FOLO's pycocotools-exact evaluator, and published as `folo-n-coco` (a draft
-release for now, [Publish](#publish)).
+epochs), evaluated on val2017 with FOLO's pycocotools-exact evaluator, and published as `folo-n-coco` (release `weights-v1`,
+[Publish](#publish)): `folo weights pull folo-n-coco`.
 
 **Result: AP 0.314 / AP50 0.455 on val2017** (f32; f16 the same to three decimals), cross-checked number for number
 against pycocotools. Ultralytics' published nano models reach 0.395 (YOLO11n) and 0.409 (YOLO26n). YOLO26n was
@@ -11,7 +11,7 @@ is **50 epochs on COCO alone, from random init**. Data, schedule, recipe and arc
 like-for-like comparison, and how much of the gap each accounts for is not known ([Results](#results-val2017)).
 
 **v2 (interim): AP 0.317 / AP50 0.458** after 62 epochs of a 300-epoch schedule that was paused there, published as
-`folo-n-coco-v2` (draft release `weights-v2`). It can be resumed from its checkpoint
+`folo-n-coco-v2` (release `weights-v2`). It can be resumed from its checkpoint
 ([v2](#v2-a-300-epoch-schedule-paused-at-epoch-62)).
 
 ## Data
@@ -172,9 +172,10 @@ gh release create weights-v1 --draft --repo himent12/folo --title "FOLO pretrain
 | `folo-n-coco.folo` | folo-n, 80 classes, EMA weights, unfused f32: fine-tune or predict | 10,601,456 | `5d5429ae2eb6050363a7f2253449cbe99a1dd2a36e3cd988b2011e2bc6bd5b01` |
 | `folo-n-coco-f16.folo` | the same, BatchNorm fused, f16: inference only | 5,251,088 | `de863020b3542f0c16b94d0c2e9a03b8d5956e339eedaa875db65521de2d5c47` |
 
-The release `weights-v1` is a **draft**: it is not public yet, and its tag is created when it is published. Until
-then, only accounts with write access to the repository can see it. For them, `folo weights pull` already works, since
-`gh release download` finds draft releases by tag for repository writers (checked: both files pull and verify):
+The release `weights-v1` was created as a draft and published on 2026-11-11 (UTC). `folo weights pull` downloads its
+files over plain HTTPS; the repository is private for now, so that is refused and the pull falls back to a logged-in
+`gh` (an account with access to the repository). Once the repository is public, the `folo` binary alone does it
+(checked: the files pull and verify, through `gh` and from a mirror with `FOLO_WEIGHTS_BASE_URL`):
 
 ```sh
 folo weights pull folo-n-coco          # → ~/.folo/weights/folo-n-coco.folo, sha256 verified
@@ -188,9 +189,10 @@ is identical to `best.folo` in f32 (all 12 stats). `folo val --model folo-n-coco
 --coco` matches the f16 row
 to four decimals.
 
-Once the release is published, everyone who can read the repository uses the same commands. Without `folo`:
-`gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`, then
-`sha256sum -c --ignore-missing SHA256SUMS`.
+Without `folo`: `gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`
+(or the release's download URLs, once the repository is public), then `sha256sum -c --ignore-missing SHA256SUMS`. A
+new weights release is created with `--latest=false`, so `releases/latest` stays FOLO's binary release
+([RELEASE.md, Weights releases](../../docs/RELEASE.md#weights-releases)).
 
 ## v2: a 300-epoch schedule, paused at epoch 62
 
@@ -305,8 +307,8 @@ gh release create weights-v2 --draft --repo himent12/folo --title "FOLO pretrain
 | `folo-n-coco-v2.folo` | folo-n, 80 classes, EMA weights of epoch 62, unfused f32: fine-tune or predict | 10,601,456 | `98d27ef83cc9f24e7007aead94018ceb4a38b99bad8a16dc924c74c90f4ae760` |
 | `folo-n-coco-v2-f16.folo` | the same, BatchNorm fused, f16: inference only | 5,251,088 | `95412714ab27afe129a4ef393f852f77209d15e28fa697a9633a697a6cc92af2` |
 
-`weights-v2` is a **draft** release, as `weights-v1` is, and its notes say "interim: 62 of 300 epochs, run paused".
-`folo weights pull folo-n-coco-v2` (and `-f16`) already works for repository writers (checked: both pull and verify).
+`weights-v2` was published with `weights-v1` (2026-11-11, UTC), and its notes say "interim: 62 of 300 epochs, run
+paused". `folo weights pull folo-n-coco-v2` (and `-f16`) pulls and verifies as v1 does.
 The exported files reproduce the `best.folo` numbers above exactly (all 12 stats, f32 and f16).
 
 ### Resume (v2)

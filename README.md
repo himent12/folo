@@ -14,8 +14,9 @@ plus training, evaluation and export. You drive it from one `folo` binary, an HT
   at 640 in Chrome).
 
 > **Status: early (v0.1).** The detector trains and infers on CPU and GPU, and it passes its convergence gate.
-> COCO-pretrained folo-n weights now exist (`folo-n-coco`, val2017 AP 0.314 after 50 epochs from scratch; the interim
-> `folo-n-coco-v2`, AP 0.317 at epoch 62 of a paused 300-epoch run) as **draft** releases, not public yet.
+> COCO-pretrained folo-n weights are published as GitHub releases (`folo-n-coco`, val2017 AP 0.314 after 50 epochs
+> from scratch; the interim `folo-n-coco-v2`, AP 0.317 at epoch 62 of a paused 300-epoch run). The repository is
+> private for now, so `folo weights pull` still needs access to it (through `gh`); once it is public, it needs nothing.
 > See [Project status](#project-status).
 
 ## Why FOLO: the numbers
@@ -234,9 +235,10 @@ What works today (v0.1):
 - folo-n/s/m/l/x, trained from scratch on CPU or GPU, with resume, EMA, mosaic and the usual augmentations. On the
   shapes gate it reaches mAP50 0.980 / mAP50-95 0.896 ([examples/shapes](examples/shapes/README.md)).
 - COCO-pretrained weights: `folo-n-coco`, folo-n trained from scratch on COCO for 50 epochs, val2017 AP 0.314 /
-  AP50 0.455 (pycocotools-exact, [examples/coco](examples/coco/README.md)). It is uploaded as a **draft** GitHub
-  release (`weights-v1`), so for now only repository writers can `folo weights pull` it. `folo-n-coco-v2`
-  (draft release `weights-v2`) is the interim result of a 300-epoch run paused at epoch 62: AP 0.317 / AP50 0.458.
+  AP50 0.455 (pycocotools-exact, [examples/coco](examples/coco/README.md)), in the published release `weights-v1`.
+  `folo-n-coco-v2` (release `weights-v2`) is the interim result of a 300-epoch run paused at epoch 62: AP 0.317 /
+  AP50 0.458. `folo weights pull <name>` downloads them over plain HTTPS; while the repository is private, that is
+  refused and it falls back to a logged-in `gh`.
 - YOLO and COCO datasets: reading, stats, checks and conversion. mAP that matches pycocotools.
 - `val`, `predict` and export to `.folo` (f32 or f16, a safetensors-compatible format) and ONNX (opset 17, f32 or
   f16, optional in-graph decode and dynamic shapes; parity-tested in onnxruntime).
@@ -247,7 +249,8 @@ What works today (v0.1):
   ([CHANGELOG.md](CHANGELOG.md)).
 
 Not yet:
-- public pretrained weights (the release is a draft), or a COCO comparison with the incumbent at equal budget;
+- a public repository (the weights releases are published, but downloading them needs access to the repository until
+  it is public), or a COCO comparison with the incumbent at equal budget;
 - `folo bench`;
 - a macOS build (it needs GitHub-hosted runners, which are unavailable for now).
 

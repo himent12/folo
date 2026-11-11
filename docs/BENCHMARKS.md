@@ -356,9 +356,9 @@ Speed only counts at comparable accuracy, so this section tracks FOLO's accuracy
 
 **COCO val2017** ([examples/coco](../examples/coco/README.md); `folo val --coco`, pycocotools-exact, cross-checked on
 the same detections with pycocotools itself, all 12 stats equal to 6e-16). folo-n trained from scratch for 50 epochs
-(8.7 h on the RTX 4080 SUPER), uploaded as `folo-n-coco` (draft release `weights-v1`). v2 runs the same recipe with
+(8.7 h on the RTX 4080 SUPER), published as `folo-n-coco` (release `weights-v1`). v2 runs the same recipe with
 mixed precision on a 300-epoch schedule; it was **paused after epoch 62** (8.0 h) and its weights at the pause are the
-interim `folo-n-coco-v2` (draft release `weights-v2`):
+interim `folo-n-coco-v2` (release `weights-v2`):
 
 | model | params | training | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
 |---|---:|---|---:|---:|---:|---:|---:|---:|

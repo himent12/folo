@@ -80,7 +80,7 @@ this machine lacks `device_not_found` with the devices it has in the hint, a GPU
 | `dataset check PATH [--format ...] [--fix-dry-run] [--headers-only] [--min-severity error\|warning\|info]` | works | Every problem in a dataset, one issue per bad line / image. Exit 0 when clean, 1 with errors or warnings. |
 | `dataset convert IN OUT --to yolo\|coco [--from auto\|yolo\|coco]` | works | Converts between YOLO and COCO; images are copied unchanged. |
 | `weights list` | works | Every published weights name (see [Weights](#weights)), whether it is downloaded, and its cache path. One record per name with `--json`: `{"name","release","asset","path","cached","about"}`. |
-| `weights pull NAME [--force] [--repo himent12/folo]` | works | Downloads a published weights file from its GitHub release with the GitHub CLI (`gh release download`; the repository is private, so `gh auth login` first), checks its SHA-256 against the release's `SHA256SUMS` and that it opens as a `.folo` file, then moves it into the cache. Already cached: nothing is downloaded unless `--force`. `--json`: `{"event":"done","name","path","downloaded","sha256","bytes"}`. Unknown name: `weights_not_found` (exit 3); `gh` missing or failing: `gh_failed`; bad hash: `checksum_mismatch` (exit 1, nothing installed). |
+| `weights pull NAME [--force] [--repo himent12/folo]` | works | Downloads a published weights file and its release's `SHA256SUMS` over plain HTTPS, without credentials (`https://github.com/<repo>/releases/download/<tag>/<file>`, redirects followed; `$FOLO_WEIGHTS_BASE_URL` downloads `<base>/<tag>/<file>` instead). When that is refused (`404`, as for a private repository's release, a draft or a missing release, or `401`/`403`) it falls back to the GitHub CLI (`gh release download`, which needs `gh auth login` and access to the repository). It checks the SHA-256 against `SHA256SUMS` and that the file opens as a `.folo` file, then moves it into the cache; on any failure nothing is installed. Already cached: nothing is downloaded unless `--force`. `--json`: `{"event":"done","name","path","downloaded","sha256","bytes","via"}` (`via`: `https`, `gh`, or `null` when nothing was downloaded). Unknown name: `weights_not_found` (exit 3); refused and then `gh` missing or failing: `gh_failed` (the message says both); no network, a timeout, a server error or a cut download: `download_failed` (no fallback to `gh`); bad hash: `checksum_mismatch` (exit 1). |
 | `cloud providers\|connect\|connections\|check\|disconnect\|offers\|instances\|terminate [--data-dir DIR]` | works | Cloud compute on the data dir, with or without a server running: see [Cloud](#cloud). |
 | `mcp [--data-dir DIR] [--mock] [--read-only] [--confine] [--server URL [--token SECRET]] [--device auto] [--tensor-cores]` | works | Model Context Protocol server over stdio (MCP 2026-07-28 and 2025-11-25), see `docs/MCP.md`. stdout carries protocol messages only (also with `--json`); logs go to stderr. By default it embeds the real store on `--data-dir` (env `FOLO_DATA_DIR`, default `$FOLO_HOME` or `~/.folo`): datasets, training, models, `val`, `predict` and `export` on the FOLO engine, the same data `folo serve` uses. Embedded, it owns the data dir as `folo serve` does; when a `folo serve` already owns it (FOLO Desktop's, say), it goes through that server as with `--server` (after checking that server's `/api/system` `data_dir` is this one), except with `--confine`, which then fails with `data_dir_in_use`. `--mock` serves mock data, `--server` forwards to a running `folo serve` (`http://` or `https://`; `--token`, env `FOLO_TOKEN`, is the token that server was started with), `--read-only` hides and rejects mutating tools, `--confine` only reads inside `--data-dir`, `--device` (env `FOLO_DEVICE`) is where inference and `val` run, `--tensor-cores` (env `FOLO_GPU_TENSOR_CORES=1`) asks for the GPU's tensor cores as `folo serve --tensor-cores` does (`train` with `"amp": true` needs them; without, it answers `not_supported` before starting anything). Published weights pulled with `folo weights pull` are models (`train { "weights": "folo-n-coco" }`). Exits 0 when the client closes stdin; the runs it started are stopped first (an active run after its current batch, keeping its last checkpoint). Recipes: `docs/AGENT_COOKBOOK.md`. |
 
@@ -244,10 +244,24 @@ while the server runs lists at once; the server reads the same cache (`$FOLO_WEI
 | `folo-n-coco-v2` | `weights-v2` | interim: folo-n from scratch on COCO, epoch 62 of a paused 300-epoch run (EMA, f32, unfused), val2017 AP 0.317 against v1's 0.314. examples/coco/README.md, v2 |
 | `folo-n-coco-v2-f16` | `weights-v2` | the same, fused and cast to f16 (`folo export`): inference only |
 
-`weights-v1` and `weights-v2` are draft releases for now. `gh release download` finds draft releases by tag for
-accounts with write access to the repository, so `folo weights pull` already works for them. Everyone else needs the
-release published first. Without `folo`, `gh release download weights-v1 --repo himent12/folo --pattern 'folo-n-coco*' --pattern SHA256SUMS`
-(or `weights-v2` with `'folo-n-coco-v2*'`) then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
+`weights-v1` and `weights-v2` are published releases. `folo weights pull` downloads their files over plain HTTPS
+first, which is all a public release needs: no `gh`, no account, nothing but the `folo` binary. The repository is
+private for now, so that download answers `404` and the pull falls back to `gh release download`: until the
+repository is public, pulling needs an account with access to it and a logged-in [`gh`](https://cli.github.com)
+(`gh auth login`). A progress line shows on a terminal; a stalled connection fails after 60 s without data.
+
+- `FOLO_WEIGHTS_BASE_URL=<base>` downloads `<base>/<tag>/<file>` (and `<base>/<tag>/SHA256SUMS`) instead of the
+  GitHub release: a mirror is a folder per release tag with the release's files, served over HTTP(S). A file the
+  mirror answers `404` for falls back to `gh` as above.
+- `FOLO_GH=<program>` is the GitHub CLI the fallback runs (default `gh`, looked up on `PATH`).
+
+A command that takes a published name that is not downloaded (`train --weights`, `--model` of `val` / `predict` /
+`export`) does not download it: it stops at once with `weights_not_found` (exit 3) and the hint
+``run `folo weights pull NAME`, then this command again``, so a run never starts on a download it did not ask for. A
+first fine-tune is two commands ([QUICKSTART](QUICKSTART.md#fine-tune-from-pretrained-weights)):
+`folo weights pull folo-n-coco-v2`, then `folo train --data <dataset> --weights folo-n-coco-v2`. Without `folo`,
+`gh release download weights-v2 --repo himent12/folo --pattern 'folo-n-coco-v2*' --pattern SHA256SUMS` (or the
+release URLs, once public) then `sha256sum -c --ignore-missing SHA256SUMS` does the same by hand.
 
 ## Cloud
 

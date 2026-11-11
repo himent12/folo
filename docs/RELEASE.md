@@ -144,6 +144,19 @@ Asset names carry no version, so `https://github.com/himent12/folo/releases/late
 at the newest published release. Every archive has a `<asset>.sha256` (`<hex>  <asset>`, the `sha256sum` format);
 `SHA256SUMS` lists them all.
 
+## Weights releases
+Pretrained weights are releases of their own, tagged `weights-v<n>` and made by hand, not by the workflow (the recipes
+are in examples/coco/README.md, Publish): the `.folo` files and a `SHA256SUMS` (`sha256sum` output) listing them, plus
+an entry per file in `folo_api::weights::PUBLISHED`, which is what `folo weights pull <name>` and `folo weights list`
+read. Create them with `--latest=false` (`gh release create weights-v3 --latest=false ...`, or
+`gh release edit weights-v3 --latest=false` after the fact): otherwise GitHub marks the newest published release
+*Latest*, and `releases/latest/download/...`, the install scripts and `gh release download --pattern install.sh`
+look for FOLO's binaries in the weights release. A published weights release downloads over plain HTTPS
+(`https://github.com/<repo>/releases/download/<tag>/<file>`), which `folo weights pull` tries first; while the
+repository is private that answers `404` and the pull goes through `gh` (docs/CLI.md, Weights). Do not replace a
+published file: caches keep the copy they have (`pull` skips a cached name without `--force`), so a new result is a
+new name.
+
 ## Building a release binary locally
 ```sh
 sh scripts/build-wasm.sh --locked        # web/public/folo-wasm (or: powershell -File scripts\build-wasm.ps1 -Locked)
