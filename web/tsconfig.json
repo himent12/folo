@@ -1,5 +1,6 @@
 {
-  "extends": "@tsconfig/svelte/tsconfig.json",
+  // The app (src/), the framework (framework/: its runtime and tests; the compiler is checked by tsconfig.node.json
+  // through vite.config.ts). JSX is compiled by framework/compiler and typed by framework/jsx.d.ts.
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -14,8 +15,17 @@
     "skipLibCheck": true,
     "resolveJsonModule": true,
     "allowJs": false,
+    "jsx": "preserve",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
     "types": ["vite/client"],
-    "paths": { "$lib": ["./src/lib"], "$lib/*": ["./src/lib/*"] }
+    "paths": {
+      "$lib": ["./src/lib"],
+      "$lib/*": ["./src/lib/*"],
+      "fw": ["./framework/runtime/index.ts"],
+      "fw/*": ["./framework/runtime/*"]
+    }
   },
-  "include": ["src/**/*.ts", "src/**/*.svelte"]
+  "include": ["framework/jsx.d.ts", "framework/icons.d.ts", "framework/runtime/**/*.ts", "framework/runtime/**/*.tsx", "framework/testing.ts", "framework/bench/**/*.tsx", "framework/bench/**/*.ts", "src/**/*.ts", "src/**/*.tsx"],
+  "exclude": ["framework/compiler/**", "framework/bench/vite.config.ts"]
 }

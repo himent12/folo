@@ -321,7 +321,9 @@ The exact block definitions, layer tables, parameter names, head, loss, training
   `--json` (one JSON object per line on stdout, human text on stderr) and uses stable exit codes.
 
 ## Front ends
-- **FOLO Studio** (`web/`): Svelte 5 + TypeScript + Vite, a custom design system (tokens, components) and no UI kit.
+- **FOLO Studio** (`web/`): TypeScript + Vite on fw, our own UI framework (`web/framework/`: JSX compiled to cloned
+  DOM templates with fine-grained signals, scoped CSS; it replaced Svelte 5), a custom design system (tokens,
+  components) and no UI kit.
   Talks only to `docs/API.md`; `web/src/lib/api/` holds the typed client and a dev mock.
 - **FOLO Desktop** (`apps/desktop/`): native Rust app on folo-ui, its own UI framework (below). Same screens and
   design language as Studio. It talks to a local `folo serve` over the same API (it can spawn one), so the engine and

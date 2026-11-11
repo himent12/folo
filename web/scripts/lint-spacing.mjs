@@ -1,6 +1,6 @@
 // Spacing, type and layout lint: the grid, the type scale, the layout tiers and the text-size floor.
 //   node scripts/lint-spacing.mjs      (part of `npm run check`)
-// Scans the <style> blocks of src/**/*.svelte and src/lib/design/base.css for padding / margin / gap / inset /
+// Scans the css`` blocks of src/**/*.tsx (each component's styles) and src/lib/design/base.css for padding / margin / gap / inset /
 // top / right / bottom / left declarations whose px values are off the allowed set below. The sign is ignored, and so
 // are px values inside calc() / min() / max() / clamp() that combine with a var() (e.g. `calc(var(--space-4) - 1px)`).
 // Type sizes come from the scale: a `font-size` in px is flagged (use var(--type-*-size), or em for a size relative to
@@ -39,11 +39,11 @@ const SMALL_REASONS = { 'chart tick': ['xs'], 'image chip': ['xs', 'micro'], 'ke
 
 const locate = (file, line) => (file ? `${relative(root, file).replaceAll('\\', '/')}:${line}` : `line ${line}`);
 
-function* walk(dir, ext = ['.svelte']) {
+function* walk(dir, ext = ['.tsx']) {
   for (const name of readdirSync(dir)) {
     const p = join(dir, name);
     if (statSync(p).isDirectory()) yield* walk(p, ext);
-    else if (ext.some((e) => name.endsWith(e))) yield p;
+    else if (ext.some((e) => name.endsWith(e)) && !/\.test\.tsx$|\.testing\.tsx$/.test(name)) yield p;
   }
 }
 
@@ -163,7 +163,7 @@ export function lintSmallText(text, file, { css = false } = {}) {
   const problems = [];
   const raw = text.split('\n');
   const code = blankComments(text, !css).split('\n');
-  const style = css ? null : text.replace(/<style[^>]*>[\s\S]*?<\/style>/g, (c) => c.replace(/[^\n]/g, ' ')).split('\n');
+  const style = css ? null : blankStyles(text).split('\n');
   const reasons = (k) =>
     [raw[k], k > 0 ? raw[k - 1] : ''].flatMap((l) => [...l.matchAll(/small:\s*([a-z]+(?: [a-z]+)*)/g)].map((r) => r[1]));
   code.forEach((line, k) => {
@@ -184,17 +184,27 @@ export function lintSmallText(text, file, { css = false } = {}) {
   return problems;
 }
 
-/** Lints every Svelte component under src/ (style blocks, script and markup), every TS module and base.css. */
+/** A component's styles: its top-level css`...` block, and (in a test's sample) a `<style>` element. */
+const STYLE = /(^|\n)css`((?:[^`\\]|\\[\s\S])*)`;|<style[^>]*>([\s\S]*?)<\/style>/g;
+
+/** `text` with its styles blanked (line breaks kept). */
+function blankStyles(text) {
+  return text.replace(STYLE, (c) => c.replace(/[^\n]/g, ' '));
+}
+
+/** Lints every component under src/ (its css`` block, script and markup), every TS module and base.css. */
 export function lintAll() {
   const problems = [];
   for (const file of walk(src)) {
     const text = readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
-    for (const m of text.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)) {
-      const startLine = text.slice(0, m.index + m[0].indexOf('>') + 1).split('\n').length;
-      problems.push(...lintCss(m[1], file, startLine), ...lintMedia(m[1], file, startLine));
+    for (const m of text.matchAll(STYLE)) {
+      if (m[2] === undefined) continue;
+      const startLine = text.slice(0, m.index + (m[1] ?? '').length).split('\n').length;
+      // The template's own escapes undone (framework/PORTING.md §7), so the CSS is what was written.
+      const styles = m[2].replace(/\\(`|\\|\$\{)/g, '$1');
+      problems.push(...lintCss(styles, file, startLine), ...lintMedia(styles, file, startLine));
     }
-    const script = text.replace(/<style[^>]*>[\s\S]*?<\/style>/g, (c) => c.replace(/[^\n]/g, ' '));
-    problems.push(...lintScriptMedia(script, file), ...lintSmallText(text, file));
+    problems.push(...lintScriptMedia(blankStyles(text), file), ...lintSmallText(text, file));
   }
   for (const file of walk(src, ['.ts', '.css'])) {
     // Generated tokens define the steps; tests quote them.

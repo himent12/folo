@@ -1,0 +1,329 @@
+/**
+ * A run banner, one line (web/DESIGN_DIRECTION.md §4.4, the Vercel callout): status icon, title, cause, one action,
+ * and a disclosure for the details. Only the icon and the title take the status hue; the cause stays in
+ * text.secondary. Below the laptop tier the actions go under the text (on a row of their own, every callout, never
+ * beside a title they would cut); on phones the cause also wraps under the title, and the actions are the one phone
+ * remedy layout (ui/Button's `.cta-stack`): the lime primary across the callout, then each other way out as a
+ * full-width secondary under it, the disclosure last. An actions snippet that renders nothing leaves no row. Danger and warning callouts are the panel surface with a 2 px status edge, never a tint under the lime
+ * primary. An `also` line under the
+ * first, with its own mark and hue, joins a second finding about the same run (a completed run's outcome, then the
+ * trainer's warning that it was too short to learn), so one run never stacks two banners.
+ */
+import { createUniqueId, css, Dynamic, signal } from 'fw';
+import Meta from '$lib/ui/Meta';
+import type { IconType } from '$lib/ui/types';
+
+type Tone = 'success' | 'warning' | 'danger' | 'neutral';
+
+export interface CalloutProps {
+  tone: Tone;
+  icon: IconType;
+  title: string;
+  role?: 'status' | 'alert' | 'note';
+  label?: string;
+  /** Phones: the first action across the callout. */
+  stack?: boolean;
+  /** Phones: the cause is a summary the page repeats below; it hides and the title stays (the actions, as on every
+   *  callout below 1024 px, take their own row under it). */
+  brief?: boolean;
+  /** Phones too: the cause runs on after the title ("Too short to learn: 125 optimizer steps") instead of under it. */
+  runIn?: boolean;
+  /** The cause, after the title. */
+  children?: JSX.Element;
+  /** Facts after the title instead of a sentence ("Completed in 53m 30s · best mAP50-95 0.604 at epoch 150"): one
+   *  span each, one ui/Meta line with the title, so the separator is the shared one at every width. */
+  facts?: JSX.Element;
+  actions?: JSX.Element;
+  /** What the disclosure opens. */
+  more?: JSX.Element;
+  moreLabel?: string;
+  /** A second line under the first: its own mark and tone, a title and a short cause. The actions serve both. */
+  also?: { icon: IconType; tone: Tone; title: string; msg?: string };
+}
+
+export default function Callout(props: CalloutProps) {
+  const uid = createUniqueId();
+  const open = signal(false);
+
+  return (
+    <div
+      class={`callout ${props.tone}`}
+      class:stack={props.stack ?? false}
+      class:brief={props.brief ?? false}
+      class:run-in={props.runIn ?? false}
+      class:two={!!props.also}
+      role={props.role ?? 'status'}
+      aria-label={props.label}
+    >
+      <Dynamic component={props.icon} size={16} aria-hidden="true" />
+      {props.facts ? (
+        <p class="c-text facts">
+          <Meta>
+            <span class="c-title">{props.title}</span>
+            {props.facts}
+          </Meta>
+        </p>
+      ) : (
+        <p class="c-text">
+          <span class="c-title">{props.title}</span>
+          {props.children ? <span class="c-msg">{props.children}</span> : null}
+        </p>
+      )}
+      {props.also ? (
+        <>
+          <span class={`c-also-mark ${props.also.tone}`} aria-hidden="true">
+            <Dynamic component={props.also.icon} size={16} />
+          </span>
+          <p class={`c-text c-also ${props.also.tone}`}>
+            <span class="c-title">{props.also.title}</span>
+            {props.also.msg ? <span class="c-msg">{props.also.msg}</span> : null}
+          </p>
+        </>
+      ) : null}
+      {props.actions || props.more ? (
+        <div class="c-acts cta-row cta-stack">
+          {props.actions}
+          {props.more ? (
+            <button type="button" class="c-more" aria-expanded={open.get()} aria-controls={`${uid}-more`} onclick={() => open.set(!open.peek())}>
+              {props.moreLabel ?? 'Details'}
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+      {props.more ? (
+        <div class="c-detail" id={`${uid}-more`} hidden={!open.get()}>
+          {props.more}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+css`
+  .callout {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    min-height: 44px;
+    padding: var(--space-2) var(--space-2) var(--space-2) var(--space-4);
+    background: var(--bg-panel);
+    border: 1px solid var(--line-panel);
+    border-radius: var(--radius-lg);
+  }
+  .callout > :global(svg) {
+    flex-shrink: 0;
+  }
+  /* The status shows through the mark and a 2 px edge only: titles and links are ink (DESIGN_DIRECTION §2.6), so a red
+     title never shouts over the cause and an amber one never turns weak in light; the cause reads in text.secondary.
+     A callout that needs action (danger, warning) is a banner: the panel surface with its status's 2 px left edge (the
+     frame's 1 px, recoloured, and 1 px inside it, so nothing moves), never a tinted fill: the fix it offers is often
+     the lime primary, and lime on a red or amber tint reads as neither (round 26). */
+  .danger > :global(svg) {
+    color: var(--danger-text);
+  }
+  .callout.danger {
+    border-left-color: var(--danger-solid);
+    box-shadow: inset 1px 0 0 var(--danger-solid);
+  }
+  .callout.warning {
+    border-left-color: var(--warning-solid);
+    box-shadow: inset 1px 0 0 var(--warning-solid);
+  }
+  .success > :global(svg) {
+    color: var(--success-text);
+  }
+  .neutral > :global(svg) {
+    color: var(--text-tertiary);
+  }
+  .warning > :global(svg) {
+    color: var(--warning-text);
+  }
+  /* The second line's mark takes its own hue; its title is ink and its cause text.secondary, as on the first. */
+  .c-also-mark {
+    display: inline-flex;
+    color: var(--text-tertiary);
+  }
+  .c-also-mark.warning {
+    color: var(--warning-text);
+  }
+  .c-also-mark.danger {
+    color: var(--danger-text);
+  }
+  .c-also-mark.success {
+    color: var(--success-text);
+  }
+  /* Two lines: the actions serve both, on the right across them. */
+  .two .c-acts {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+  .two .c-detail {
+    grid-row: 3;
+  }
+  .c-text {
+    min-width: 0;
+    color: var(--text-secondary);
+    text-wrap: pretty;
+  }
+  .c-title {
+    margin-right: var(--space-2);
+    font-weight: var(--weight-medium);
+    color: var(--text-primary);
+  }
+  .c-msg :global(.num),
+  .facts :global(.num) {
+    color: var(--text-primary);
+  }
+  /* Facts: the title is the line's first item; ui/Meta draws the gap and the dot. */
+  .facts .c-title {
+    margin-right: 0;
+  }
+  .c-acts {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
+  }
+  /* An actions snippet that renders nothing this time (a completed run with no saved model has no Try in Playground)
+     leaves no row: no 12 px gap and no empty button-height strip under the text. */
+  .c-acts:not(:has(*)) {
+    display: none;
+  }
+  /* The disclosure: the system chevron (as in ErrorState) and a quiet label. */
+  .c-more {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    height: var(--control-md);
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-md);
+    font-size: var(--type-sm-size);
+    color: var(--text-secondary);
+    white-space: nowrap;
+  }
+  .c-more::before {
+    content: '';
+    width: 5px;
+    height: 5px;
+    margin: 0 4px 2px 2px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(45deg);
+    transition: transform var(--dur-fast) var(--ease-standard);
+  }
+  .c-more[aria-expanded='true']::before {
+    margin-bottom: -2px;
+    transform: rotate(-135deg);
+  }
+  /* One disclosure style open and closed: the fill is the pointer's hover alone, so a tap (which leaves a sticky
+     :hover on touch) never turns the opened label into a filled pill. */
+  @media (hover: hover) {
+    .c-more:hover {
+      background: var(--bg-hover);
+      color: var(--text-primary);
+    }
+  }
+  .c-detail {
+    grid-column: 2 / -1;
+    min-width: 0;
+    padding-bottom: var(--space-2);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--text-secondary);
+  }
+  .c-detail[hidden] {
+    display: none;
+  }
+  /* The reasons behind Why? and More fixes read at the measure; buttons and the driver's report keep the width. */
+  .c-detail :global(p:not(.d-head)) {
+    max-inline-size: var(--measure);
+  }
+  @media (pointer: coarse) {
+    .c-more {
+      min-height: 44px;
+    }
+  }
+  /* Tablets and phones: the text takes the full width and the actions get a row of their own under it, 12 px below
+     the text and starting at its left edge after the icon column, so a cause never wraps beside its buttons (a narrow
+     column of text next to them) and a title is never cut by a button on its row. Every callout, brief, success and
+     facts ones included; the callout grows a row instead. Laptops and up keep one line. */
+  @media (max-width: 1023px) {
+    .callout {
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: start;
+    }
+    .c-acts {
+      margin-top: var(--space-1);
+    }
+    .callout > :global(svg),
+    .c-also-mark {
+      margin-top: 2px;
+    }
+    .c-acts {
+      grid-column: 2;
+      justify-content: flex-start;
+      flex-wrap: wrap;
+    }
+    .c-detail,
+    .two .c-acts,
+    .two .c-detail {
+      grid-column: 2;
+      grid-row: auto;
+    }
+  }
+  @media (max-width: 767px) {
+    /* Phones: the mark and the title share the first line, the cause wraps under it, the actions under the text. */
+    .callout {
+      grid-template-columns: auto minmax(0, 1fr);
+      align-items: start;
+      padding: var(--space-3);
+    }
+    .callout > :global(svg) {
+      margin-top: 2px;
+    }
+    .c-msg {
+      display: block;
+      margin-top: 2px;
+      font-size: var(--type-sm-size);
+      line-height: var(--type-sm-line);
+    }
+    .run-in .c-msg {
+      display: inline;
+      font-size: inherit;
+      line-height: inherit;
+    }
+    /* The one phone remedy layout (ui/Button's .cta-stack): the buttons across the callout, the primary first, each
+       other way out a full-width secondary under it, 8 px apart; a disclosure alone keeps the text's column. */
+    .c-acts {
+      grid-column: 2;
+      justify-content: flex-start;
+      flex-wrap: wrap;
+      gap: var(--space-2);
+    }
+    .c-acts:has(> :global(.btn)) {
+      grid-column: 1 / -1;
+    }
+    .c-detail {
+      grid-column: 2;
+    }
+    .two .c-acts,
+    .two .c-detail {
+      grid-column: 2;
+      grid-row: auto;
+    }
+    .c-also-mark {
+      margin-top: 2px;
+    }
+    /* The disclosure's body under the stack, across the callout too. */
+    .stack .c-detail {
+      grid-column: 1 / -1;
+    }
+    /* A summary the page repeats below: the title alone keeps its line ("Completed in 53m 30s", never cut), the facts
+       the page shows again hide, and the action stays on its own row under it like every callout's. */
+    .brief .c-msg,
+    .brief .facts :global(.ui-meta > :not(:first-child)) {
+      display: none;
+    }
+  }
+`;

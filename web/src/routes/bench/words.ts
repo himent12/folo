@@ -1,3 +1,4 @@
+// StatusBadge's OwnStatus is restated here (structurally the same), so this module needs no component import.
 // What the benchmark screens say about a benchmark, an entry, a loop and their numbers: one wording everywhere (the
 // leaderboard, the entry's page, the compare page, the palette), in docs/BENCH.md's vocabulary.
 
@@ -21,13 +22,19 @@ import type {
   BenchSource,
   LabelAgent,
   Model,
+  RunStatus,
 } from '$lib/api/types';
 import { AXIS_NAME, TARGET_PRECISION } from '$lib/bench/rules';
 import { MIN_LABELS } from '$lib/bench/score';
-import type { OwnStatus } from '$lib/ui/StatusBadge.svelte';
 import { compact, conf, metric, ms, num, pct, usd } from '$lib/format';
 import { AGENT_NAME } from '$lib/label';
 import { modelLabel, tokens } from '../label/words';
+
+/** StatusBadge's `OwnStatus` (ui/StatusBadge.tsx). */
+interface OwnStatus {
+  status: RunStatus;
+  label: string;
+}
 
 /**
  * The fewest decimals (from `min`, at most `max`) at which `a` and `b` print differently, so a sentence that says one

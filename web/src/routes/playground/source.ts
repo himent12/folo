@@ -1,4 +1,4 @@
-import { hub } from '$lib/api/index.svelte';
+import { hub } from '$lib/api/index';
 import type { Dataset, DatasetImage as Img } from '$lib/api/types';
 
 /** Where the Playground's image comes from: a file (picked, dropped or pasted) or a dataset's image. */

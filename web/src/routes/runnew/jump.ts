@@ -1,5 +1,5 @@
 import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
-import type { CloudPick } from './cloudPick.svelte';
+import type { CloudPick } from './cloudPick';
 import { devWord } from './device';
 
 /** A review row's or a form error's way back to its control (RunNew's `jump`). */

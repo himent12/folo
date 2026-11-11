@@ -1,5 +1,5 @@
 import type { Arch, Augment, Capabilities, Device, Optimizer, TrainConfig } from '$lib/api/types';
-import type { CloudPick } from './cloudPick.svelte';
+import type { CloudPick } from './cloudPick';
 
 /** The run the form describes, as the request (`POST /api/runs`) the estimate, the CLI command and Start send. */
 export function trainConfig(

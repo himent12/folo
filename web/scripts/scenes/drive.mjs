@@ -2,12 +2,26 @@
 // until something shows, and keyboard focus reached with Tab.
 
 /**
+ * Pages shot with `shoot.mjs --exact`, each with its wait for real-time work (image loads, blobs, lazy chunks) to finish.
+ * A wait below calls it before each look, so whether a look sees the page done never depends on how fast the machine
+ * is, and a wait takes the same number of clock steps on every shoot (the live run's progress is a function of them).
+ * @type {WeakMap<import('playwright-core').Page, () => Promise<void>>}
+ */
+export const quietWaits = new WeakMap();
+
+/** Waits for the page's real-time work, when the page has such a wait (--exact). */
+export async function quiet(/** @type {import('playwright-core').Page} */ page) {
+  await quietWaits.get(page)?.();
+}
+
+/**
  * Advances the page's fake clock until `selector` is visible (the mock's latency runs on that clock).
  * @param {import('playwright-core').Page} page
  * @param {string} selector
  */
 export async function until(page, selector, ms = 8000) {
   for (let t = 0; t < ms; t += 250) {
+    await quiet(page);
     if (await page.locator(selector).first().isVisible().catch(() => false)) return;
     await page.clock.runFor(250);
   }
@@ -17,6 +31,7 @@ export async function until(page, selector, ms = 8000) {
 /** Advances the page's clock until `select` holds an option of `value` (options are never "visible"). */
 export async function optionIn(/** @type {import('playwright-core').Page} */ page, select, value, ms = 8000) {
   for (let t = 0; t < ms; t += 250) {
+    await quiet(page);
     if (await page.locator(`${select} option[value="${value}"]`).count()) return;
     await page.clock.runFor(250);
   }
@@ -26,6 +41,7 @@ export async function optionIn(/** @type {import('playwright-core').Page} */ pag
 /** As `until`, also letting real time pass (an image under a condition is drawn on a canvas, in real time). */
 export async function untilDrawn(/** @type {import('playwright-core').Page} */ page, selector, rounds = 80) {
   for (let i = 0; i < rounds; i++) {
+    await quiet(page);
     if (await page.locator(selector).first().isVisible().catch(() => false)) return;
     await page.clock.runFor(250);
     await page.waitForTimeout(100);

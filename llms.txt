@@ -78,7 +78,7 @@ Fastest path for an agent:
   and 0.416), with pycocotools parity and `folo weights`
 
 ## Apps
-- [FOLO Studio](web/README.md): the web app (Svelte 5 + TypeScript + Vite). It covers the dev server, checks,
+- [FOLO Studio](web/README.md): the web app (TypeScript + Vite on fw, its own UI framework in web/framework). It covers the dev server, checks,
   tests, screenshots (`npm run shoot`) and data sources
 - [FOLO Desktop](apps/desktop/README.md): the native app. It covers running it, connecting to `folo serve`,
   `--mock`, `--scenario`, layout and screenshots

@@ -4,7 +4,7 @@
 // off (Settings, ui/keyPrefs) the letters do nothing; the arrows, Home, End and Enter keep working on a focused row.
 
 import { isTyping } from '$lib/keys';
-import { keyPrefs } from './keyPrefs.svelte';
+import { keyPrefs } from './keyPrefs';
 
 export interface RowNavOptions {
   /** X on a focused row (e.g. toggle its Compare selection). */
@@ -37,7 +37,7 @@ const MOVES: Record<string, number | 'first' | 'last'> = { j: 1, ArrowDown: 1, k
 /** The letters among the keys above (and X), which the single-key preference turns off. */
 const LETTERS = new Set(['j', 'k', 'x']);
 
-/** Svelte action for the element holding the rows (a table, or a list). */
+/** Action (`use:rowNav`) for the element holding the rows (a table, or a list). */
 export function rowNav(root: HTMLElement, opts: RowNavOptions = {}) {
   let options = opts;
   let current: HTMLElement | null = null;

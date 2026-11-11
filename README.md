@@ -129,7 +129,7 @@ in-browser module.
 
 ![FOLO Studio: a live training run](docs/img/studio-run-live.webp)
 
-`folo serve` hosts Studio at `http://127.0.0.1:7878` (Svelte 5, our own design system). It has these screens:
+`folo serve` hosts Studio at `http://127.0.0.1:7878` (our own UI framework and design system). It has these screens:
 - **Datasets**: register a YOLO or COCO folder or generate a synthetic one, browse the images with their boxes, and
   see class and box-size statistics and label issues. No labels yet? **Label images** hands a set of unlabeled
   images to Claude Code or Codex on your machine, shows you every box for review and correction, and makes the

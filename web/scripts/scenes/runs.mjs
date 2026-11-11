@@ -198,7 +198,6 @@ export const runScenes = [
       await page.clock.runFor(500);
     },
   },
-  { name: 'runs', path: '/runs' },
   {
     // The waiting runs say their place ("1st in queue", "2nd in queue"); the second's ⋯ opened: Start next, Move up,
     // Remove from queue (the queue's one action set).

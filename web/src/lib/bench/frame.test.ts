@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dominantAspect } from '$lib/ui/TileGrid.svelte';
+import { dominantAspect } from '$lib/ui/TileGrid';
 import { containFit, placeBox } from './frame';
 
 // Real photos are not square (COCO: 640×427, 427×640, panoramas): a benchmark's gallery tile, its large view and the

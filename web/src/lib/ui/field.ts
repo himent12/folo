@@ -1,10 +1,8 @@
 /**
- * The Field → control contract (DESIGN_DIRECTION §2.11, §2.24): a Field's visible hint or error is its control's
- * accessible description. Field publishes the id of the message it shows and whether it is in error; every control
- * (Input, Select, Segmented, Switch, Slider) reads it and merges it into its own `aria-describedby` and `aria-invalid`,
- * so no caller has to wire the ids by hand (`fields.svelte.test.ts`).
+ * The Field → control contract (DESIGN_DIRECTION §2.11, §2.24): a Field sets the context its control reads (its id, its
+ * hint and error ids); `describedBy` joins them.
  */
-import { getContext, setContext } from 'svelte';
+import { getContext, setContext } from 'fw';
 
 export interface FieldContext {
   /** The id of the message the Field shows now: its error while set, else its hint; none without either. */
