@@ -145,7 +145,41 @@ Painter's order: a primitive is drawn over every earlier one. Each primitive car
 - `Underline { … }` as GPUI's (straight and wavy)
 
 Masks and images are identified by a process-unique `id: u64` assigned at creation; tile hashes use ids, never
-pixel bytes. `Scene::clear()` keeps capacity. Element opacity is applied to colours at paint time (as GPUI).
+pixel bytes. `Scene::clear()` keeps capacity. Element opacity is applied to colours at paint time (as GPUI),
+except inside an opacity group (below), where it is applied right after paint by the same multiplications.
+
+## Frames: opacity groups and layout reuse
+
+A full frame is GPUI's pipeline (`window/draw.rs`): render the root view, lay it out with taffy, prepaint,
+paint into a `Scene`, then rasterize and present the damage. Two things keep it cheap without changing a pixel:
+
+- **Opacity groups** (`ui/src/opacity.rs`, `window/paint_animation.rs`, `elements/animation.rs`). An element
+  whose only animated property is its opacity uses `AnimationExt::with_opacity_animation` (the app's breathing
+  status dot, its appear fade and its skeleton shimmer). A full frame paints it once inside an opacity group:
+  its primitives at their base colours, the scene recording which span of primitives belongs to which group
+  (a group nests in the group it starts inside; an element opacity set inside a group becomes a nested group).
+  After paint, `Scene::seal_opacity_groups` keeps the base copies and writes the faded primitives, each colour
+  multiplied by the group's opacity (`parent * outer * factor`) in the same order as element opacity is at paint
+  time, so the pixels are the same bytes. The element registers a paint animation (group, start time,
+  `Animation`, its closure). When a refresh comes and the window is not dirty, `tick_paint_animations`
+  computes every running animation's factor; only if one moved by at least 1/255 (or finished) does it set the
+  factors and re-fade the spans from the base copies (`apply_opacity_groups`), and the renderer repaints only
+  the tiles those primitives touch. No render, layout or paint runs, and every frame shown is the picture of
+  one moment of the animations. A full redraw for any other reason paints the groups again; the elements keep
+  their start times in element state, so the animations go on where they were. The window asks for refreshes
+  while a paint animation runs (a repeating one never finishes). Tests: `window/tests` and the app's
+  `ui/motion_tests.rs` (every frame equals the `with_animation` version's frame at that moment).
+- **Layout reuse** (`window/layout_tree.rs`). The elements still add their layout nodes every frame (children
+  before parents), but into our own node storage running taffy's algorithms, which keeps what the previous frame
+  computed. A new node whose style, kind, measure key (the text element's text and font) and children equal a
+  node of the previous frame takes that node's place and keeps its records: each layout request it received
+  last frame with its answer. While this frame asks the same requests in the same order, they are answered from
+  the records and nothing under the node runs; its measured leaves replay last frame's measure calls in order,
+  so their state (the text element's shaped lines) is what a fresh layout leaves. The first request that
+  differs makes the node diverge: its subtree forgets everything and is laid out from scratch, the requests it
+  already answered included. Every result, every measure call and every final position is therefore exactly
+  what laying out a fresh tree gives (GPUI's behaviour); only the cost differs. Nodes measured without a key
+  are never reused.
 
 ## Renderer contract (`raster`)
 
@@ -234,16 +268,25 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
 - **Pixels.** Every `--scenario` rendered headless at the GPUI captures' sizes and scale (1280 x 800 for all,
   960 x 620 and 1680 x 1050 for the densest, at 1.5) is compared with GPUI 0.2.2's captures, region by
   region: boxes, colours and text at the same pixels. The GPUI captures and the comparison were made outside
-  the repo, on the dev PC. (Placeholder: the parity branch adds its tool and the residual differences here.)
+  the repo, on the dev PC. `apps/desktop/tools/shoot-all.ps1` renders the 98 shots and `tools/parity.py`
+  compares the trees (`ui/PARITY.md`: how, every rule, and every residual difference with its cause). Result,
+  as the percentage of pixels whose largest channel difference exceeds 8 of 255: worst pair 0.0040 %, median
+  0 %, 76 of 98 pairs with no such pixel (62 within 2 levels); the largest single difference is in chart paths
+  (GPUI resolves overlapping paths per MSAA sample). The rest is the breathing status dot's phase, path edge
+  samples, image-atlas neighbours in thumbnails, and 1 level on glyph and icon edges.
 - **Behaviour.** The crate's tests drive the headless platform with synthetic input: layout, text wrapping and
   truncation, hover, focus and keyboard, scrolling, drag and drop, IME ranges, animations on the fake clock,
   the renderer's invariant on random scenes and its exactness against GPUI's formulas. The app's own tests run
   on it too.
-- **The real window** (Windows): `win_smoke` and the app's `tools/chrome-check.ps1` drive an off-screen window
-  with posted messages; `tools/window-check.ps1` drives it with real input when someone can leave the machine
-  alone.
+- **The real window** (Windows): `win_smoke`, and the app's `tools/interact-check.ps1` (its captures equal the
+  headless shot of the same scenario; hover, clicks, keys, focus, scrolling, controls, dialogs, resizing) and
+  `tools/chrome-check.ps1` (the caption areas' hit test and the caption buttons), drive a real window with
+  posted messages, off screen (`FOLO_UI_OFFSCREEN=1`) or on a private desktop nobody sees
+  (`tools/sandbox-run.ps1`); `tools/window-check.ps1 -Sandbox` drives the whole chrome there (maximize, drags,
+  full screen, the remembered window). Without `-Sandbox`, window-check uses real input on the screen.
 - **Cost.** `tools/perf.ps1` measures time to first frame, working set and private bytes, GPU memory, idle CPU
-  and CPU over a live run, off screen; compare two builds back to back on the same machine.
+  and CPU over a live run, off screen; compare two builds back to back on the same machine. `ui/PERF.md` has
+  the numbers against the GPUI build, the frame bench (`tools/bench-frames.sh`) and the renderer bench.
 - **Platforms.** CI runs fmt, clippy and the tests on Windows and Linux, a headless `--shot` on Linux, and
   `tools/cross-check.sh` (check and clippy of the crate for Linux and both macOS targets). Nothing runs on
   macOS.

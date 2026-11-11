@@ -96,18 +96,46 @@ ui/               folo-ui, the UI framework (ui/README.md)
 tools/            developer scripts (below)
 ```
 
-Tools (`tools/`, PowerShell 5.1 unless noted; each has a usage header):
+Tools (`tools/`, PowerShell 5.1 unless noted; each has a usage header). Two of them can take over the screen
+in their default mode: `window-check.ps1` without `-Sandbox` moves the real cursor and takes focus, and
+`chrome-check.ps1` without `-Offscreen` or `-Sandbox` opens a visible window and maximizes it. Every other tool,
+and those two in their `-Sandbox` / `-Offscreen` modes, never shows a window on your desktop, moves the cursor
+or takes focus.
 
-- `shoot.ps1`, `shoot-all.ps1`: headless screenshots (Screenshots, below).
+- `shoot.ps1`: one headless screenshot (`folo-desktop --scenario … --shot`; Screenshots, below).
+- `shoot-all.ps1`: every review scenario headless, in parallel (98 PNGs in a few seconds on a release build),
+  as `<Dir>\<W>x<H>\<scenario>.png`: all scenarios at 1280 x 800, the densest at 960 x 620 and 1680 x 1050.
+- `parity.py` (Python with numpy and Pillow): compares two such trees pixel by pixel (the per-pixel difference
+  is the largest channel difference): per pair the share of pixels above `--tol`, the largest difference, the
+  regions that differ, and a triptych (A | B | difference) for the worst; `summary.md` and `summary.json`.
+  `--fail-pct P` exits 1 above P; an empty comparison or a missing folder exits 2. `ui/PARITY.md` uses it
+  against the GPUI captures.
 - `capture.ps1`, `capture-all.ps1`: the same scenarios captured from the real window, opened off screen
-  (`FOLO_UI_OFFSCREEN=1`) and never focused; what the Win32 backend presents, at the display's scale.
-- `perf.ps1`: start-up, memory, CPU and GPU numbers of a build, off screen, as JSON.
-- `win.ps1`: the Win32 helpers the off-screen tools dot-source (find a process's window, rectangles, capture).
-- `window-check.ps1`, `chrome-check.ps1`: the window chrome (Window check, below).
-  *(Placeholder: the real-window branch updates these and adds `chrome-check-offscreen.ps1` and
-  `interact-check.ps1`; describe them here from their headers when it lands.)*
-- *(Placeholder: `parity.py`, the headless-against-GPUI pixel comparison, comes with the parity branch; describe
-  it here from its header when it lands.)*
+  (`FOLO_UI_OFFSCREEN=1`) and never focused; what the Win32 backend presents, at the display's scale, through
+  PrintWindow into a plain DIB. `capture-all.ps1` writes the same tree as `shoot-all.ps1`, a few at a time.
+- `interact-check.ps1`: drives the real window with window messages only, off screen (default) or on a
+  private desktop (`-Sandbox`, which adds the clipboard steps): its captures equal the headless shot of the
+  same scenario, and hover, clicks, the palette and its text field, Tab and F6 focus, wheel scrolling, a
+  slider, a select, tooltips, the New run dialog, a toast, the theme toggle and resizing behave. PASS / FAIL
+  per step, exit 1 on a failure.
+- `chrome-check.ps1`: the window chrome through window messages: what `WM_NCHITTEST` answers over each caption
+  area, the top edge and the page, and a non-client press and release on Maximize, Minimize (restored with
+  `SC_RESTORE`, as the taskbar does) and Close; any `-AppArgs "--scenario …"` (an overlay open). Modes:
+  `-Offscreen` (never on a display, never active; maximize is the app's off-screen emulation, checked by size),
+  `-Sandbox` (on a private desktop), or neither (on your screen, it maximizes).
+- `window-check.ps1`: the whole window chrome (Window check, below); `-Sandbox` on a private desktop.
+- `drive.ps1`: the window-message driver the checks dot-source: posted mouse and non-client messages, keys
+  with their modifiers in the UI thread's key state, a sync, PrintWindow captures. Nothing in it moves the
+  cursor, activates a window or injects real input.
+- `sandbox-run.ps1`: runs a command or an exe on a private Win32 desktop that is never shown, inside a job
+  object that kills what it started; output in a log printed at the end, exit code the command's (124 on a
+  timeout). The checks' `-Sandbox` modes and `win_smoke`'s sandbox checks use it.
+- `win.ps1`: the Win32 helpers the capture and perf tools dot-source (find a process's window, rectangles,
+  launch with extra environment, the DIB capture).
+- `perf.ps1`: start-up, memory, CPU and GPU numbers of a build, off screen, as JSON (`ui/PERF.md` has them for
+  this build and GPUI's).
+- `bench-frames.sh` (bash): the frame bench (`--bench-frames`: the time and allocations of each frame phase)
+  over the main screens at two window sizes; build with `--features bench-alloc` for allocation counts.
 - `cross-check.sh` (bash): type-checks and lints folo-ui for Linux and both macOS targets.
 - `make-icon.ps1`: draws `assets/folo.ico` from `design/logo.svg` and the tokens.
 - `review-brief.md`: the brief a design reviewer gets with a round's shots.
@@ -179,7 +207,7 @@ add a token instead. folo-ui has no letter-spacing (GPUI had none either, and th
 with `+` (`dataset+light`, `overview+empty`). `folo-desktop --list-scenarios` prints the review set.
 
 ```powershell
-tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (98 PNGs; about 25 s on a release build)
+tools\shoot-all.ps1 -Dir shots\round1      # every scenario + the minimum and wide window sizes (98 PNGs in <W>x<H> folders; a few seconds on a release build)
 tools\shoot.ps1 -Scenario palette -Out shots\palette.png -Width 960 -Height 620
 tools\shoot.ps1 -Scenario none -Out shots\run.png -ExtraArgs "--server http://127.0.0.1:7878 --open run:run_9d9d"   # real data
 ```
@@ -188,8 +216,8 @@ Shots are headless: the scripts run `folo-desktop --scenario … --shot <png>`, 
 platform (no window, no cursor, no focus), settles animations on a fake clock and writes the frame; one takes
 well under a second. `-Width` / `-Height` are the window's logical size and `-Scale` its scale factor, 1.5 by
 default: the dev PC's display, at which every design review has been shot (the PNG is 1920 x 1200 at the default
-1280 x 800). The scripts run `$CARGO_TARGET_DIR/debug/folo-desktop.exe` unless `-Exe` names another build (a
-release one, say).
+1280 x 800). `shoot.ps1` runs `$CARGO_TARGET_DIR/debug/folo-desktop.exe` and `shoot-all.ps1` the release build (the debug one
+if there is none) unless `-Exe` names another.
 
 A real-data shot (`-Scenario none` and `--server URL`, with `--open`) waits for what the screen fetches: the
 harness pumps the app's queues and waits for its background requests before it draws, and a live run's event
@@ -201,24 +229,35 @@ their data; an unreachable server shows the unreachable state. Always give `--se
 ### Window check
 
 ```powershell
-tools\window-check.ps1                     # about a minute; leave the mouse alone
-tools\window-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe
+tools\window-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe -Sandbox          # private desktop, about a minute
+tools\interact-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe                  # off screen; -Sandbox adds the clipboard
+tools\chrome-check.ps1 -Exe D:\folo-build\desktop\release\folo-desktop.exe -Offscreen         # or -Sandbox
 ```
 
-It drives the window chrome with real mouse and keyboard input (Windows only) and prints PASS or FAIL per step:
-the breadcrumbs and search field in the title bar, Maximize / Restore, double-click and drag on both drag areas,
-the top resize edge, Minimize, `F11` on and off, the three buttons in full screen, Close, a title-bar press leaving
-keyboard mode, the window's icon, the buttons and both drags with the palette and with the New run dialog open
-(each still open after them, and dismissed by a click on the dimmed page), and the next launches (maximized, windowed and full screen again at the last size
-and place, also after closing while minimized; a saved place off every display; a corrupt state file). It exits 1 if any step fails. The remembered state goes to `$FOLO_DESKTOP_STATE`, a fresh file
-under `$FOLO_TEST_TMP\window-check` (or `-StateDir`), never the real profile, and the last check proves that. It
-also saves a screenshot of the snap layouts over Maximize there, to look at.
+`window-check.ps1` drives the window chrome and prints PASS or FAIL per step: the breadcrumbs and search field
+in the title bar, Maximize / Restore, double-click and drag on both drag areas, the top resize edge, Minimize,
+`F11` on and off, the three buttons in full screen, Close, a title-bar press leaving keyboard mode, the window's
+icon, the buttons and both drags with the palette and with the New run dialog open (each still open after them,
+and dismissed by a click on the dimmed page), and the next launches (maximized, windowed and full screen again
+at the last size and place, also after closing while minimized; a saved place off every display; a corrupt
+state file). It exits 1 if any step fails. The remembered state goes to `$FOLO_DESKTOP_STATE`, a fresh file
+under `$FOLO_TEST_TMP\window-check` (or `-StateDir`), never the real profile, and the last check proves that.
 
-`tools\chrome-check.ps1 -Exe <build> [-AppArgs "--scenario palette"]` is the quick check that needs no mouse: it
-asks the window what `WM_NCHITTEST` answers over each caption area, the top edge and the page, and posts a
-non-client press and release on Maximize, Minimize and Close. It works when something on the desktop swallows
-injected input (a system prompt), and with any `--scenario` (an overlay open). It does not replace window-check:
-it cannot drag, and it never proves that a real click arrives.
+- With `-Sandbox` it runs on a private desktop nobody sees (`sandbox-run.ps1`) with window messages only
+  (`drive.ps1`): each real action becomes the messages Windows would produce for it (a hit-tested
+  `WM_(NC)LBUTTONDOWN` / `UP`, `WM_NCLBUTTONDBLCLK` for a double click on a caption, keys with their modifiers,
+  `SC_RESTORE` for the taskbar). Two things only Windows does with the real mouse are replaced: a drag on a
+  caption area or the top edge is the press (which the app must leave to Windows) followed by the move or
+  resize Windows' loop would make, so the app's part (the hit test, the press, following the new place) is
+  what is checked; and the snap-layouts flyout over Maximize is not shown.
+- Without it, it uses real mouse and keyboard input on your screen (it moves the pointer and takes focus;
+  leave the machine alone for about a minute), drags for real and saves a screenshot of the snap layouts
+  over Maximize under the state folder.
+
+`chrome-check.ps1` is the quick check of the same caption areas through messages alone: what `WM_NCHITTEST`
+answers over each caption area, the top edge and the page, and a non-client press and release on Maximize,
+Minimize and Close, with any `--scenario` (an overlay open). It cannot drag. `interact-check.ps1` covers the
+page itself (Tools, above). All three find the window by its process and kill what they start by PID.
 
 `shots/` is gitignored. Design reviews score the shots against `REVIEW_RUBRIC.md`; `HILLCLIMB.md` logs each round.
 
