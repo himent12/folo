@@ -275,6 +275,10 @@ fn a_file_drop_reaches_on_drop_and_drag_moves_see_the_paths() {
 /// release outside the window (`platform/windows/events.rs`, `cancel_presses`), where a real release
 /// lands when the button comes up elsewhere: it clicks nothing and drops nothing, although the pointer is
 /// still over the element pressed, and what ends a press wherever it is released still runs.
+/// This proves what the window does with that outside release; it supplies the release itself, so it
+/// passes without the Win32 backend's cancellation too. The backend's part (a lost capture, `WM_CANCELMODE`
+/// or deactivation reported as that release) is proved by `platform/windows/tests.rs`,
+/// `a_cancelled_press_does_not_click`.
 #[test]
 fn a_cancelled_press_clicks_and_drops_nothing_and_ends_drags() {
     let events = log();

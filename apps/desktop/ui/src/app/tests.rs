@@ -597,3 +597,37 @@ fn a_waiting_main_thread_task_is_dropped_with_the_app_and_its_late_wake_elsewher
     assert_eq!(drops.get(), 1);
     assert!(dispatcher.upgrade().is_none(), "nothing keeps the dispatcher alive");
 }
+
+/// The same with a late wake that does reach the task: it keeps a clone of its waker, which another
+/// thread uses after the app is gone. The wake schedules its runnable there, after the shutdown, where it
+/// is dropped without a panic (it holds nothing of the future, already dropped on the main thread), and
+/// the last waker gone, nothing keeps the dispatcher alive.
+#[test]
+fn a_waiting_main_thread_task_woken_by_its_own_waker_after_the_app_is_gone_is_harmless() {
+    let mut app = app();
+    let dispatcher = Arc::downgrade(app.dispatcher());
+    let drops = Rc::new(Cell::new(0));
+    let waker = Arc::new(std::sync::Mutex::new(None::<std::task::Waker>));
+    let slot = waker.clone();
+    app.update(|cx| {
+        let tracked = Tracked(drops.clone());
+        cx.spawn(async move |_| {
+            std::future::poll_fn(|cx| {
+                *slot.lock().unwrap() = Some(cx.waker().clone());
+                std::task::Poll::<()>::Pending
+            })
+            .await;
+            drop(tracked);
+        })
+        .detach()
+    });
+    app.run_until_idle();
+    let waker = waker.lock().unwrap().take().expect("the task was polled and keeps waiting");
+    drop(app);
+    assert_eq!(drops.get(), 1, "the waiting task's state is dropped with the app");
+    assert!(dispatcher.upgrade().is_some(), "its waker still holds the dispatcher");
+    let waking = std::thread::spawn(move || waker.wake());
+    assert!(waking.join().is_ok(), "no panic off the main thread");
+    assert_eq!(drops.get(), 1);
+    assert!(dispatcher.upgrade().is_none(), "nothing keeps the dispatcher alive");
+}

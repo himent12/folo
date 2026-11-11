@@ -270,10 +270,12 @@ impl<F: Future + 'static> Future for ForegroundFuture<F> {
         let Some(taken) = taken else { return Poll::Pending };
         let mut future = *taken.downcast::<Pin<Box<F>>>().expect("a foreground future of its own type");
         let poll = future.as_mut().poll(cx);
+        // What is left to drop comes out of the closure: dropping a future runs its destructors, which may
+        // spawn or end foreground tasks.
         let left = FOREGROUND.with_borrow_mut(|r| {
             if poll.is_ready() {
                 r.remove(dispatcher, id);
-                return None;
+                return Some(future);
             }
             match r.tasks.get_mut(&dispatcher).and_then(|tasks| tasks.get_mut(&id)) {
                 Some(slot) => {
@@ -303,5 +305,97 @@ impl<F> Drop for ForegroundFuture<F> {
             .flatten();
         // Outside the borrow.
         drop(future);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::headless::HeadlessDispatcher;
+    use std::cell::Cell;
+
+    /// A foreground future that finishes on its first poll (or never) and whose destructor spawns another
+    /// foreground task, which records that it ran; the spawned task's own state counts its drop.
+    struct SpawnsOnDrop {
+        executor: ForegroundExecutor,
+        ready: bool,
+        ran: Rc<Cell<bool>>,
+        dropped: Rc<Cell<bool>>,
+    }
+
+    impl Future for SpawnsOnDrop {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+            if self.ready { Poll::Ready(()) } else { Poll::Pending }
+        }
+    }
+
+    impl Drop for SpawnsOnDrop {
+        fn drop(&mut self) {
+            let (ran, dropped) = (self.ran.clone(), DropFlag(self.dropped.clone()));
+            self.executor
+                .spawn(async move {
+                    let _dropped = dropped;
+                    ran.set(true);
+                })
+                .detach();
+        }
+    }
+
+    struct DropFlag(Rc<Cell<bool>>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    /// The dispatcher, the future, and the flags "the spawned task ran" and "its state was dropped".
+    type Setup = (Arc<HeadlessDispatcher>, SpawnsOnDrop, Rc<Cell<bool>>, Rc<Cell<bool>>);
+
+    fn setup(ready: bool) -> Setup {
+        let dispatcher = Arc::new(HeadlessDispatcher::new());
+        let (ran, dropped) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
+        let executor = ForegroundExecutor::new(dispatcher.clone());
+        let future = SpawnsOnDrop { executor, ready, ran: ran.clone(), dropped: dropped.clone() };
+        (dispatcher, future, ran, dropped)
+    }
+
+    /// A finished future is dropped outside the registry's borrow: its destructor may spawn a foreground
+    /// task, which then runs (it used to be dropped under the borrow, and the spawn panicked).
+    #[test]
+    fn a_future_that_spawns_when_dropped_after_finishing_does_not_panic() {
+        let (dispatcher, future, ran, dropped) = setup(true);
+        let executor = ForegroundExecutor::new(dispatcher.clone());
+        executor.spawn(future).detach();
+        dispatcher.run_until_idle();
+        assert!(ran.get() && dropped.get(), "the task its destructor spawned ran");
+    }
+
+    /// The same when the task is cancelled (its `Task` dropped) while it waits.
+    #[test]
+    fn a_future_that_spawns_when_dropped_on_cancel_does_not_panic() {
+        let (dispatcher, future, ran, dropped) = setup(false);
+        let executor = ForegroundExecutor::new(dispatcher.clone());
+        let task = executor.spawn(future);
+        dispatcher.run_until_idle();
+        drop(task);
+        dispatcher.run_until_idle();
+        assert!(ran.get() && dropped.get(), "the task its destructor spawned ran");
+    }
+
+    /// And when the dispatcher shuts down while it waits: the task its destructor spawns is dropped, never
+    /// run, and nothing is left in the registry.
+    #[test]
+    fn a_future_that_spawns_when_dropped_at_shut_down_does_not_panic() {
+        let (dispatcher, future, ran, dropped) = setup(false);
+        let executor = ForegroundExecutor::new(dispatcher.clone());
+        executor.spawn(future).detach();
+        dispatcher.run_until_idle();
+        dispatcher.shut_down();
+        assert!(!ran.get() && dropped.get(), "the task its destructor spawned was dropped, not run");
+        let key = dispatcher_key(&*dispatcher);
+        assert!(FOREGROUND.with_borrow(|r| !r.tasks.contains_key(&key)), "the registry holds nothing of it");
     }
 }
