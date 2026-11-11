@@ -555,3 +555,38 @@ describe('New run: the keyboard', () => {
     await until(() => create.mock.calls.length === 1, 'the start');
   });
 });
+
+describe('New run: the run name', () => {
+  const name = () => target.querySelector<HTMLInputElement>('input#name')!;
+  const type = (v: string) => {
+    name().value = v;
+    name().dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+  };
+  const hint = () => target.querySelector('#name-hint')?.textContent;
+
+  it('turns spaces into dashes on leaving the field, saying so while typing, and starts with the tidy name', async () => {
+    await open();
+    type('my first run');
+    expect(hint()).toBe('Saved as my-first-run: letters, digits, dot, dash and underscore.');
+    expect(target.querySelector('#name-error')).toBeNull();
+    name().dispatchEvent(new Event('blur'));
+    flushSync();
+    expect(name().value).toBe('my-first-run');
+    expect(hint()).toBeUndefined();
+    const create = vi.spyOn(api, 'createRun');
+    type('my second run');
+    await start();
+    expect(create.mock.calls[0]![0].name).toBe('my-second-run');
+  });
+
+  it('warns about a name another run has, and refuses one over 64 characters', async () => {
+    await open();
+    const other = (await api.runs())[0]!.name;
+    type(other);
+    expect(hint()).toBe(`A run called ${other} already exists. Pick another name to tell them apart.`);
+    type('x'.repeat(65));
+    expect(target.querySelector('#name-error')?.textContent).toBe('At most 64 characters (this one has 65).');
+    expect(target.querySelector('#start-why')?.textContent).toBe('Run name: At most 64 characters (this one has 65).');
+  });
+});

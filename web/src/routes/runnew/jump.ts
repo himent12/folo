@@ -1,6 +1,7 @@
 import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
 import type { CloudPick } from './cloudPick';
 import { devWord } from './device';
+import { MAX_RUN_NAME, runName } from './name';
 
 /** A review row's or a form error's way back to its control (RunNew's `jump`). */
 export type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close' | 'runon' | 'offer' | 'hours';
@@ -75,8 +76,16 @@ export function formErrors(
   cloudOn: boolean,
   cloudPick: CloudPick,
 ): FormErrors {
+  const n = runName(name);
   return {
-    name: !name.trim() ? 'Give the run a name.' : /[^\w.-]/.test(name.trim()) ? 'Letters, digits, dot, dash and underscore only.' : null,
+    // Other characters become dashes (runnew/name), so only an empty or a long name is wrong.
+    name: !name.trim()
+      ? 'Give the run a name.'
+      : !n
+        ? 'Use letters or digits.'
+        : n.length > MAX_RUN_NAME
+          ? `At most ${MAX_RUN_NAME} characters (this one has ${n.length}).`
+          : null,
     epochs: !isInt(epochs, 1, 10000) ? 'A whole number from 1 to 10,000.' : null,
     lr0: !(typeof lr0 === 'number' && lr0 > 0 && lr0 < 10) ? 'Greater than 0 and below 10.' : null,
     seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,

@@ -94,6 +94,13 @@ async fn runs_lifecycle() {
     let bad = json!({ "dataset_id": ds.datasets[0].id, "imgsz": 100 });
     let e = err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;
     assert!(e.message.contains("imgsz"));
+    // Run names are at most 64 characters, as dataset names are: 64 is fine, 65 is not.
+    let long = json!({ "dataset_id": ds.datasets[0].id, "name": "x".repeat(65) });
+    let e = err(&app, post_json("/api/runs", long), StatusCode::BAD_REQUEST, "invalid_config").await;
+    assert_eq!(e.message, "name: must be at most 64 characters");
+    let fits = json!({ "dataset_id": ds.datasets[0].id, "name": "é".repeat(64) });
+    let fits: Run = ok(&app, post_json("/api/runs", fits)).await;
+    assert_eq!(fits.name.chars().count(), 64);
     // An optimizer this build does not know decodes (Optimizer::Unknown) but is refused, not trained with.
     let bad = json!({ "dataset_id": ds.datasets[0].id, "optimizer": "lion" });
     let e = err(&app, post_json("/api/runs", bad), StatusCode::BAD_REQUEST, "invalid_config").await;

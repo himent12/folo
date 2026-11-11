@@ -478,7 +478,8 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "compute": null }            // or { "connection_id": "cc_1f2e", "offer_id": "NVIDIA GeForce RTX 4090@secure",
                                // "max_hours": 12, "disk_gb": null }: train on a cloud connection (Cloud runs,
                                // above). Left out of the object when null; missing means this machine
-// An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: epochs 1..=10000,
+// An empty name becomes "<dataset name>-<arch suffix>", e.g. "shapes-1k-n". Limits: name at most 64 characters
+// (as a dataset's; longer is `400 invalid_config`), epochs 1..=10000,
 // batch 1..=1024, imgsz a multiple of 32 in 32..=4096 (real mode trains at 64 or more), 0 < lr0 < 10.
 // POST /api/runs also takes "resume_run_id": "run_…" (see above); it is not part of Run.config.
 // Real mode maps TrainConfig onto the trainer's config (docs/MODEL.md §8.1): the other recipe keys keep their

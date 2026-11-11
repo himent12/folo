@@ -33,6 +33,7 @@ import { deviceLabelOf, deviceMessage } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
 import { serverEstimate } from './runnew/serverEstimate';
 import { clearDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
+import { MAX_RUN_NAME, nameHint, runName, uniqueName } from './runnew/name';
 import WhyLine from './runnew/WhyLine';
 import { START_KEYS, startKeys } from './runnew/startKeys';
 import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
@@ -129,6 +130,8 @@ export default function RunNew() {
   const onCloud = computed(() => cloudOn.get() && cloudPick.cloud);
   const models = new Resource((s) => hub.api.models(s));
   const runs = new Resource((s) => hub.api.runs(s));
+  /** Every run's name, so a new one is told apart (runnew/name). */
+  const taken = computed(() => new Set((runs.data ?? []).map((r) => r.name)));
   // This server's measured speed (GET /api/system/throughput), where it has one: measured latency in the size table.
   const tp = new Resource((s) => (hasFeature(system.data, 'throughput') ? hub.api.throughput(s).catch(() => null) : Promise.resolve(null)));
 
@@ -139,7 +142,8 @@ export default function RunNew() {
   const prefilled = signal(!fromId || !!own);
   effect(() => {
     const r = source.data;
-    if (!r || untrack(() => prefilled.get())) return;
+    // The runs too (or their error), so the copy's name is a new one.
+    if (!r || (!runs.data && !runs.error) || untrack(() => prefilled.get())) return;
     const c = r.config;
     // A retry's fix comes in the query (?batch=, ?imgsz=, ?arch=, ?device=; see $lib/oom) and wins over the run's.
     // A value the trainer would reject is ignored (the run's own stays), never offered with Start enabled.
@@ -164,7 +168,7 @@ export default function RunNew() {
     cloudPick.prefill(c.compute, r.cloud?.offer.gpu ?? 'GPU');
     augment.set(deep(structuredClone(c.augment)));
     closeEdited.set(true);
-    name.set(`${c.name}-retry`);
+    name.set(uniqueName(`${runName(c.name)}-retry`, taken.get()));
     nameEdited.set(true);
     prefilled.set(true);
   });
@@ -253,12 +257,12 @@ export default function RunNew() {
   }
   const gpu = computed(() => system.data?.gpus[0]);
 
-  // The suggested name is unique among existing runs (dataset-size, then -2, -3, …), so runs stay tellable apart.
+  // The suggested name is unique among existing runs (dataset-size, then -2, -3, …), so runs stay tellable apart; a
+  // name typed over it that is taken gets a warning under the field (runnew/name).
   effect(() => {
-    const base = `${dataset.get()?.name ?? 'run'}-${arch.get().replace('folo-', '')}`;
-    const taken = new Set((runs.data ?? []).map((r) => r.name));
-    let auto = base;
-    for (let k = 2; taken.has(auto); k++) auto = `${base}-${k}`;
+    // The dataset's part gives way first, so a long dataset name keeps the size (and a few numbers) in the limit.
+    const ds = runName(dataset.get()?.name ?? '').slice(0, MAX_RUN_NAME - 4) || 'run';
+    const auto = uniqueName(`${ds}-${arch.get().replace('folo-', '')}`, taken.get());
     if (!untrack(() => nameEdited.get())) name.set(auto);
   });
 
@@ -591,7 +595,7 @@ export default function RunNew() {
 
   // The Svelte original's snippets, as local components.
   const Review = (p: { withName: boolean }) => (
-    <ReviewList withName={p.withName} name={name.get()} errors={errors.get()} review={review.get()} jump={jump} />
+    <ReviewList withName={p.withName} name={runName(name.get())} errors={errors.get()} review={review.get()} jump={jump} />
   );
 
   const Figures = (p: { where: string }) => (
@@ -728,11 +732,15 @@ export default function RunNew() {
                   full-width summary (below 960 px) sets them side by side. */}
               <div class="sum">
                 <div class="sum-col">
-                  <Field label="Run name" for="name" error={errors.get().name}>
+                  <Field label="Run name" for="name" error={errors.get().name} hint={nameHint(name.get(), taken.get(), nameEdited.get()) ?? undefined}>
                     <Input
                       id="name"
                       bind:value={name}
                       oninput={() => nameEdited.set(true)}
+                      onblur={() => {
+                        const n = runName(name.get());
+                        if (n && n !== name.get()) name.set(n);
+                      }}
                       invalid={!!errors.get().name}
                       spellcheck="false"
                       autocomplete="off"

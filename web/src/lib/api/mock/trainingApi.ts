@@ -149,6 +149,8 @@ export class MockTrainingApi extends MockServer {
   createRun(body: TrainConfig): Promise<Run> {
     return this.call(() => {
       const ds = this.spec(body.dataset_id);
+      // The real server's cap (docs/API.md, TrainConfig), as long as a dataset's name.
+      if ([...body.name].length > 64) throw new ApiError(400, 'invalid_config', 'name: must be at most 64 characters');
       const c = this.#withWeights(body);
       const cloud = this.#compute(c);
       if (cloud) return this.#createCloudRun(c, ds, cloud);

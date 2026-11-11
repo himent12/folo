@@ -209,6 +209,13 @@ describe('mock API: PR #69 behaviour', () => {
     expect((await api.system()).gpus.map((g) => g.ordinal)).toEqual([0]);
   });
 
+  it('refuses a run name over 64 characters, as the server does', async () => {
+    const api = new MockApi('normal', 0);
+    const c = (await api.run('run_c19a')).config;
+    await expect(api.createRun({ ...c, name: 'x'.repeat(65) })).rejects.toMatchObject({ status: 400, code: 'invalid_config' });
+    await expect(api.createRun({ ...c, name: 'x'.repeat(64) })).resolves.toMatchObject({ name: 'x'.repeat(64) });
+  });
+
   it('returns the registered dataset for a folder that is already registered', async () => {
     const api = new MockApi('normal', 0);
     const before = (await api.datasets()).length;
