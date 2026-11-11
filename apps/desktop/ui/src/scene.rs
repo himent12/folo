@@ -412,7 +412,7 @@ pub struct GlyphBlend {
 }
 
 impl GlyphBlend {
-    /// No correction (the portable and fixed text backends).
+    /// No correction (the fixed text backend).
     pub const IDENTITY: GlyphBlend =
         GlyphBlend { gamma_ratios: [0.; 4], grayscale_enhanced_contrast: 0., apply: false };
 
