@@ -154,3 +154,62 @@ impl IDropTarget_Impl for DropTarget_Impl {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ::windows::Win32::Foundation::{HGLOBAL, TRUE};
+    use ::windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, STGMEDIUM, STGMEDIUM_0};
+    use ::windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+    use ::windows::Win32::UI::Shell::{DROPFILES, SHCreateDataObject};
+    use std::mem::ManuallyDrop;
+
+    /// A shell data object holding `paths` as `CF_HDROP` (what Explorer hands a drop target).
+    fn data_object(paths: &[&str]) -> IDataObject {
+        let mut wide: Vec<u16> = Vec::new();
+        for p in paths {
+            wide.extend(p.encode_utf16());
+            wide.push(0);
+        }
+        wide.push(0);
+        let header = std::mem::size_of::<DROPFILES>();
+        // SAFETY: a movable block big enough for the header and the strings, filled while locked; the
+        // data object takes it over (fRelease).
+        unsafe {
+            let block = GlobalAlloc(GMEM_MOVEABLE, header + wide.len() * 2).unwrap();
+            let at = GlobalLock(block) as *mut u8;
+            at.cast::<DROPFILES>().write(DROPFILES { pFiles: header as u32, fWide: TRUE, ..Default::default() });
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), at.add(header).cast::<u16>(), wide.len());
+            let _ = GlobalUnlock(block);
+            let data: IDataObject = SHCreateDataObject(None, None, None).unwrap();
+            let format = FORMATETC {
+                cfFormat: CF_HDROP.0,
+                ptd: std::ptr::null_mut(),
+                dwAspect: DVASPECT_CONTENT.0,
+                lindex: -1,
+                tymed: TYMED_HGLOBAL.0 as u32,
+            };
+            let medium = STGMEDIUM {
+                tymed: TYMED_HGLOBAL.0 as u32,
+                u: STGMEDIUM_0 { hGlobal: HGLOBAL(block.0) },
+                pUnkForRelease: ManuallyDrop::new(None),
+            };
+            data.SetData(&format, &medium, true).unwrap();
+            data
+        }
+    }
+
+    #[test]
+    fn a_drop_of_files_gives_their_paths() {
+        // SAFETY: COM for this test thread, released at the end.
+        unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok().unwrap() };
+        let paths = [r"C:\images\a.png", r"D:\data\ünïcødé bild.jpg"];
+        let got = dropped_paths(&data_object(&paths)).expect("CF_HDROP is there");
+        assert_eq!(got.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>(), paths);
+        // SAFETY: an empty shell data object.
+        let empty: IDataObject = unsafe { SHCreateDataObject(None, None, None) }.unwrap();
+        assert!(dropped_paths(&empty).is_none(), "no CF_HDROP, no paths");
+        // SAFETY: pairs the CoInitializeEx above.
+        unsafe { CoUninitialize() };
+    }
+}

@@ -396,6 +396,34 @@ try {
         }
     }
 
+    # ---------- 8. the file dialog (private desktop only: it is a real, visible window)
+    if ((Wants "filedialog") -and $InSandbox) {
+        Launch @("--scenario", "overview", "--width", "1280", "--height", "800")
+        Learn
+        $plain = Snap
+        Key 0x4F "ctrl"
+        $dlg = [IntPtr]::Zero
+        for ($i = 0; $i -lt 100 -and $dlg -eq [IntPtr]::Zero; $i++) {
+            Start-Sleep -Milliseconds 50
+            $line = [FoloDrive]::List([uint32]$script:p.Id) | Where-Object { $_ -match "^\d+ #32770 " } | Select-Object -First 1
+            if ($line) { $dlg = [IntPtr][long]($line.Split(" ")[0]) }
+        }
+        Pass "Ctrl+O shows the open dialog" ($dlg -ne [IntPtr]::Zero) "$line"
+        if ($dlg -ne [IntPtr]::Zero) {
+            # The app's loop keeps running under the dialog's: the live demo's dot keeps animating.
+            $a = Cap; Settle 600; $b = Cap
+            $live = [FoloDrive]::Count([FoloDrive]::LiveMask($a, $b, 0))
+            Pass "frames keep coming while it is up" ($live -gt 0) "$live px changed in 600 ms"
+            [FoloDrive]::Post($dlg, [FoloDrive]::WM_CLOSE, [IntPtr]::Zero, [IntPtr]::Zero)
+            $gone = $false
+            for ($i = 0; $i -lt 60 -and -not $gone; $i++) { Start-Sleep -Milliseconds 50; $gone = -not [FoloDrive]::IsWindow($dlg) }
+            Settle 400
+            Pass "Cancel closes it; the app is as before" ($gone -and (Alive) -and (Same $plain (Snap))) ""
+            Key 0x4B "ctrl"; Settle 500
+            Pass "and still takes keys (Ctrl+K opens the palette)" (-not (Same $plain (Snap))) ""
+        }
+    }
+
     # ---------- close: WM_CLOSE ends the app cleanly
     if (Wants "close") {
         Launch @("--mock", "--width", "1280", "--height", "800")
