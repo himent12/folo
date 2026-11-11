@@ -646,7 +646,7 @@ export default function Playground() {
   const timingBody = () => (
     <>
       {pred.get() ? (
-        <TimingBar timing={pred.get()!.timing} device={deviceText.get()} />
+        <TimingBar timing={pred.get()!.timing} device={deviceText.get()} cold={pred.get()!.cold} />
       ) : predicting.get() ? (
         <div class="t-sk">
           <Skeleton h="28px" w="50%" />

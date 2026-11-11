@@ -296,3 +296,19 @@ describe('Playground: a failure is said once', () => {
     expect(toast.items).toEqual([]);
   });
 });
+
+describe('Playground: a cold first prediction', () => {
+  it("says the first call's time includes loading the model, and the next one does not", async () => {
+    await run('normal', 'm_hard_s');
+    const note = await until(() => target.querySelector('p.cold'), 'the cold note');
+    expect(note.textContent).toBe('Includes loading the model: the next image runs faster.');
+    // A first call's rate would be the warm-up's: none is given.
+    expect(note.parentElement!.querySelector('.rate')).toBeNull();
+    // The model is warm now: the next call is not cold.
+    const api = hub.api as MockApi;
+    const ds = (await api.datasets())[0]!;
+    const img = (await api.datasetImages(ds.id, { split: 'val', limit: 2 })).images[1]!;
+    const p = await api.predict({ kind: 'dataset', dataset_id: ds.id, image_id: img.id }, { model_id: 'm_hard_s' });
+    expect(p.cold).toBeUndefined();
+  });
+});

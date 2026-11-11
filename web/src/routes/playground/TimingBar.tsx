@@ -7,7 +7,7 @@ import { computed, css, For } from 'fw';
 import type { Timing } from '$lib/api/types';
 import { ms, num } from '$lib/format';
 
-export default function TimingBar(props: { timing: Timing; device: string }) {
+export default function TimingBar(props: { timing: Timing; device: string; cold?: boolean }) {
   const parts = computed(() => [
     { key: 'pre', label: 'Preprocess', what: 'decode, resize', v: props.timing.preprocess_ms, color: 'var(--text-tertiary)' },
     { key: 'inf', label: 'Inference', what: 'the model', v: props.timing.inference_ms, color: 'var(--text-primary)' },
@@ -24,8 +24,10 @@ export default function TimingBar(props: { timing: Timing; device: string }) {
           {split.get()[0]}
           <span class="unit">{split.get()[1]}</span>
         </span>
-        <span class="rate num">{num(1000 / total.get(), 0)} img/s</span>
+        {/* A first call's rate is the warm-up's, not the model's: none is given for it. */}
+        {props.cold ? null : <span class="rate num">{num(1000 / total.get(), 0)} img/s</span>}
       </div>
+      {props.cold ? <p class="cold">Includes loading the model: the next image runs faster.</p> : null}
       <div
         class="bar"
         role="img"
@@ -60,6 +62,11 @@ css`
   .timing {
     display: grid;
     gap: var(--space-3);
+  }
+  .cold {
+    margin-top: calc(-1 * var(--space-2));
+    color: var(--text-tertiary);
+    font-size: var(--type-sm-size);
   }
   .head {
     display: flex;

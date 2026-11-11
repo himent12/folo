@@ -216,6 +216,7 @@ impl MockBackend {
                 total_ms: (pre + inf + post) as f64,
             },
             device: "gpu:0".into(),
+            cold: false,
         })
     }
 }

@@ -232,6 +232,7 @@ fn run(
         boxes: out.scored_boxes(p.classes()),
         timing: timing.to_api(),
         device: format!("local:{name}"),
+        cold: false,
     })
 }
 

@@ -547,8 +547,12 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   { "model_id": "m_31aa", "image": { "width": 1280, "height": 720 },
     "boxes": [ScoredBox],                       // highest score first
     "timing": { "preprocess_ms": 0.8, "inference_ms": 3.1, "postprocess_ms": 0.2, "total_ms": 4.1 },
-    "device": "gpu:0" }
+    "device": "gpu:0",
+    "cold": true }                              // only on a model's first prediction since it was loaded
   ```
+  `cold` (absent when false) marks the model's first prediction since the server loaded it: its `timing` includes the
+  warm-up (GPU kernels compiled, buffers allocated), so it is not what the next call takes. Such a call is never a
+  throughput sample (`GET /api/system/throughput` measures warm calls only).
   `conf` and `iou` must be in `0..=1`, `max_det >= 1`. Uploads up to 64 MiB; JPEG, PNG, BMP and WebP are accepted.
   `timing` values (here, in `folo predict --json` and in MCP) are milliseconds rounded to 0.1 µs (4 decimals).
   Boxes only use the model's classes: on a dataset image, ground-truth classes the model does not know (by name) are

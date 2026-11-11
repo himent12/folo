@@ -460,6 +460,7 @@ impl Store for RealStore {
             boxes: pred.scored_boxes(p.classes()),
             timing,
             device: p.device().to_string(),
+            cold: !warm,
         })
     }
 
