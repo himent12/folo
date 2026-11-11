@@ -93,7 +93,12 @@ pub(crate) struct ImageDraw {
 }
 
 impl ImageDraw {
-    pub fn new(copy: std::sync::Arc<ImageCopy>, origin: (i32, i32), opacity: f32, img: &crate::Image) -> Self {
+    pub fn new(
+        copy: std::sync::Arc<ImageCopy>,
+        origin: (i32, i32),
+        opacity: f32,
+        img: &crate::Image,
+    ) -> Self {
         let r = &img.corner_radii;
         ImageDraw {
             copy,
@@ -155,7 +160,12 @@ impl ImageDraw {
                     continue;
                 }
                 let x = r.x0 + i as i32;
-                let d = quad_sdf([x as f32 + 0.5, y as f32 + 0.5], self.bounds_origin, self.bounds_size, &self.radii);
+                let d = quad_sdf(
+                    [x as f32 + 0.5, y as f32 + 0.5],
+                    self.bounds_origin,
+                    self.bounds_size,
+                    &self.radii,
+                );
                 let m = ((self.opacity as f32) * sat(0.5 - d) + 0.5) as u32;
                 if m != 0 {
                     row[i] = over_pm8(row[i], al, (s >> 16) & 0xff, (s >> 8) & 0xff, s & 0xff, m);

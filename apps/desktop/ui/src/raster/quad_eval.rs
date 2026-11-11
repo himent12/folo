@@ -7,7 +7,8 @@ use super::blend::{rgba, sat};
 use super::gradient::Paint;
 use crate::{BorderStyle, Quad};
 
-const M_PI_F: f32 = 3.141_592_7;
+/// HLSL's `M_PI_F` (3.141592653f) is this `f32`.
+const M_PI_F: f32 = std::f32::consts::PI;
 /// The SDF threshold for including a pixel (half a pixel).
 const AA: f32 = 0.5;
 
@@ -137,7 +138,8 @@ impl QuadShader {
         let r = pick_corner_radius(c2p, &self.radii);
         let [w_t, w_r, w_b, w_l] = self.widths;
         let border = [if c2p[0] < 0. { w_l } else { w_r }, if c2p[1] < 0. { w_t } else { w_b }];
-        let reduced = [if border[0] == 0. { -AA } else { border[0] }, if border[1] == 0. { -AA } else { border[1] }];
+        let reduced =
+            [if border[0] == 0. { -AA } else { border[0] }, if border[1] == 0. { -AA } else { border[1] }];
         let ctp = [c2p[0].abs() - half[0], c2p[1].abs() - half[1]];
         let cctp = [ctp[0] + r, ctp[1] + r];
         let near_rounded = cctp[0] >= 0. && cctp[1] >= 0.;
@@ -180,7 +182,15 @@ impl QuadShader {
     }
 
     /// The dash pattern's alpha (border_style == 1).
-    fn dash(&self, the_point: [f32; 2], c2p: [f32; 2], cctp: [f32; 2], near: bool, r: f32, unrounded: bool) -> f32 {
+    fn dash(
+        &self,
+        the_point: [f32; 2],
+        c2p: [f32; 2],
+        cctp: [f32; 2],
+        near: bool,
+        r: f32,
+        unrounded: bool,
+    ) -> f32 {
         let size = self.size;
         let (dash_length_per_width, dash_gap_per_width) = (2.0f32, 1.0f32);
         let dash_period_per_width = dash_length_per_width + dash_gap_per_width;
@@ -264,7 +274,11 @@ impl QuadShader {
             dash_alpha(t, dash_period, dash_length, dash_velocity, AA)
         } else if unrounded {
             let dash_gap = max_t - dash_length;
-            if dash_gap > 0.0 { dash_alpha(t, dash_length + dash_gap, dash_length, dash_velocity, AA) } else { 1.0 }
+            if dash_gap > 0.0 {
+                dash_alpha(t, dash_length + dash_gap, dash_length, dash_velocity, AA)
+            } else {
+                1.0
+            }
         } else {
             1.0
         }

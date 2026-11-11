@@ -166,7 +166,8 @@ mod tests {
 
     #[test]
     fn blends_round_like_a_unorm_target() {
-        let colours = [[1., 0.5, 0.25, 0.5], [0.2, 0.4, 0.6, 0.1], [0.9, 0.9, 0.9, 0.99], [0.3, 0.7, 0.1, 1.]];
+        let colours =
+            [[1., 0.5, 0.25, 0.5], [0.2, 0.4, 0.6, 0.1], [0.9, 0.9, 0.9, 0.99], [0.3, 0.7, 0.1, 1.]];
         let dsts = [0x000000, 0xffffff, 0x123456, 0x80ff01];
         for c in colours {
             for d in dsts {

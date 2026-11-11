@@ -32,7 +32,15 @@ fn mask_cache_holds_its_budget_under_churn() {
     // `None` is not cached.
     let mut calls = 0;
     for _ in 0..2 {
-        assert!(cache.get_or_insert_with(&7, || { calls += 1; Ok(None) }).unwrap().is_none());
+        assert!(
+            cache
+                .get_or_insert_with(&7, || {
+                    calls += 1;
+                    Ok(None)
+                })
+                .unwrap()
+                .is_none()
+        );
     }
     assert_eq!(calls, 2);
 }
@@ -40,7 +48,11 @@ fn mask_cache_holds_its_budget_under_churn() {
 #[test]
 fn mask_cache_drops_idle_entries() {
     let mut cache: MaskCache<u32> = MaskCache::with_budget(1 << 30, 3);
-    cache.get_or_insert_with(&1, || Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(4, 4), vec![0u8; 16])))))).unwrap();
+    cache
+        .get_or_insert_with(&1, || {
+            Ok(Some(Mask::Alpha(Arc::new(AlphaMask::new(dsize(4, 4), vec![0u8; 16])))))
+        })
+        .unwrap();
     for _ in 0..5 {
         cache.end_frame();
     }

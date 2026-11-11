@@ -70,7 +70,8 @@ fn icon_masks(rng: &mut Rng) -> Vec<Arc<AlphaMask>> {
     (0..8)
         .map(|_| {
             let s = 48;
-            let d: Vec<u8> = (0..s * s).map(|_| if rng.i(0, 3) == 0 { 0 } else { rng.i(0, 256) as u8 }).collect();
+            let d: Vec<u8> =
+                (0..s * s).map(|_| if rng.i(0, 3) == 0 { 0 } else { rng.i(0, 256) as u8 }).collect();
             Arc::new(AlphaMask::new(size(DevicePixels(s), DevicePixels(s)), d))
         })
         .collect()
@@ -89,7 +90,13 @@ fn images(rng: &mut Rng, n: usize) -> Vec<Arc<RenderImage>> {
         .collect()
 }
 
-fn quad(b: Bounds<ScaledPixels>, clip: Bounds<ScaledPixels>, bg: Hsla, border: Option<Hsla>, radius: f32) -> Quad {
+fn quad(
+    b: Bounds<ScaledPixels>,
+    clip: Bounds<ScaledPixels>,
+    bg: Hsla,
+    border: Option<Hsla>,
+    radius: f32,
+) -> Quad {
     Quad {
         bounds: b,
         clip,
@@ -110,12 +117,27 @@ struct Assets {
 
 /// Pushes a run of `n` glyphs from `x` on baseline `y`.
 #[allow(clippy::too_many_arguments)]
-fn glyphs(s: &mut Scene, a: &Assets, rng: &mut Rng, x: f32, y: f32, n: usize, clip: Bounds<ScaledPixels>, color: Hsla) {
+fn glyphs(
+    s: &mut Scene,
+    a: &Assets,
+    rng: &mut Rng,
+    x: f32,
+    y: f32,
+    n: usize,
+    clip: Bounds<ScaledPixels>,
+    color: Hsla,
+) {
     let mut gx = x.round();
     for _ in 0..n {
         let m = a.glyphs[rng.i(0, a.glyphs.len() as i32) as usize].clone();
         let (mw, mh) = (m.size.width.0 as f32, m.size.height.0 as f32);
-        s.push_mono_sprite(MonoSprite { bounds: rect(gx, (y - mh).round(), mw, mh), clip, color, mask: m, kind: SpriteKind::Glyph });
+        s.push_mono_sprite(MonoSprite {
+            bounds: rect(gx, (y - mh).round(), mw, mh),
+            clip,
+            color,
+            mask: m,
+            kind: SpriteKind::Glyph,
+        });
         gx += mw - 1.;
     }
 }
@@ -128,11 +150,12 @@ fn busy_scene(a: &Assets, w: f32, h: f32, scroll: f32, hover: bool) -> Scene {
     let mut s = Scene::new();
     let mut rng = Rng(1234);
     let frame = rect(0., 0., w, h);
-    let text = [hsla(0., 0., 0.92, 1.), hsla(0., 0., 0.62, 1.), hsla(0.58, 0.8, 0.65, 1.), hsla(0., 0., 0.45, 1.)];
+    let text =
+        [hsla(0., 0., 0.92, 1.), hsla(0., 0., 0.62, 1.), hsla(0.58, 0.8, 0.65, 1.), hsla(0., 0., 0.45, 1.)];
     let panel = hsla(0.62, 0.1, 0.12, 1.);
     let border = hsla(0., 0., 1., 0.08);
     let (title_h, side_w) = (40. * SCALE, 240. * SCALE);
-    let insp_w = (280. * w / 1920.).round();
+    let insp_w = (200. * w / 1920.).round();
     s.push_quad(quad(frame, frame, hsla(0.62, 0.12, 0.09, 1.), None, 0.));
     // Title bar: tabs and buttons.
     s.push_quad(quad(rect(0., 0., w, title_h), frame, hsla(0.62, 0.12, 0.07, 1.), None, 0.));
@@ -152,7 +175,13 @@ fn busy_scene(a: &Assets, w: f32, h: f32, scroll: f32, hover: bool) -> Scene {
     let mut k = 0;
     while y + 40. < h {
         if k % 6 == 0 {
-            s.push_quad(quad(rect(8., y, side_w - 16., 6. * 42. + 30.), side, panel, Some(border), 8. * SCALE));
+            s.push_quad(quad(
+                rect(8., y, side_w - 16., 6. * 42. + 30.),
+                side,
+                panel,
+                Some(border),
+                8. * SCALE,
+            ));
             glyphs(&mut s, a, &mut rng, 20., y + 22., 12, side, text[3]);
             y += 30.;
         }
@@ -223,7 +252,7 @@ fn busy_scene(a: &Assets, w: f32, h: f32, scroll: f32, hover: bool) -> Scene {
         glyphs(&mut s, a, &mut rng, ix + 30., by + 27., 12, insp, text[0]);
     }
     let charts = ((w * h) / (1920. * 1200.) * 8.).round() as usize;
-    let chart_cols = (insp_w / 280.).floor().max(1.) as usize;
+    let chart_cols = (insp_w / 200.).floor().max(1.) as usize;
     let chart_w = insp_w / chart_cols as f32 - 16.;
     let chart_h = (h - title_h - 170.) / (charts as f32 / chart_cols as f32).ceil() - 12.;
     for c in 0..charts {
@@ -247,10 +276,25 @@ fn busy_scene(a: &Assets, w: f32, h: f32, scroll: f32, hover: bool) -> Scene {
         for bar in 0..60 {
             let bh = 4. + rng.f() * 24.;
             let bx = cx + 8. + bar as f32 * (chart_w - 16.) / 60.;
-            s.push_quad(quad(rect(bx, cy + chart_h - 8. - bh, 2., bh), insp, hsla(0.55, 0.6, 0.45, 0.8), None, 0.));
+            s.push_quad(quad(
+                rect(bx, cy + chart_h - 8. - bh, 2., bh),
+                insp,
+                hsla(0.55, 0.6, 0.45, 0.8),
+                None,
+                0.,
+            ));
         }
         for l in 0..10 {
-            glyphs(&mut s, a, &mut rng, cx + 10. + l as f32 * (chart_w - 20.) / 10., cy + chart_h - 10., 4, insp, text[3]);
+            glyphs(
+                &mut s,
+                a,
+                &mut rng,
+                cx + 10. + l as f32 * (chart_w - 20.) / 10.,
+                cy + chart_h - 10.,
+                4,
+                insp,
+                text[3],
+            );
         }
         for l in 0..3 {
             glyphs(&mut s, a, &mut rng, cx + 12., cy + 44. + l as f32 * 20., 20, insp, text[1]);
@@ -301,7 +345,10 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
     let base = busy_scene(a, wf, hf, 0., false);
     let hover = busy_scene(a, wf, hf, 0., true);
     let (q, g, i, sh, p) = count(&base);
-    println!("\n{name}: {w}x{h} at scale {SCALE}: {} primitives ({q} quads, {g} sprites, {i} images, {sh} shadows, {p} paths)", base.len());
+    println!(
+        "\n{name}: {w}x{h} at scale {SCALE}: {} primitives ({q} quads, {g} sprites, {i} images, {sh} shadows, {p} paths)",
+        base.len()
+    );
     let blend = GlyphBlend::new([0.149_355_4, -0.226_006_7, 0.026_559_83, -0.034_591_47], 1.0);
     let iters = 40;
     let mut fb = Framebuffer::new(w, h);
@@ -312,7 +359,12 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
     pool.render(&base, blend, &mut fb);
     let cold = t.elapsed();
     let st = pool.stats().clone();
-    println!("  cold first frame (pool):     {}  (prepare {}, raster {})", ms(cold), ms(st.prepare), ms(st.raster));
+    println!(
+        "  cold first frame (pool):     {}  (prepare {}, raster {})",
+        ms(cold),
+        ms(st.prepare),
+        ms(st.raster)
+    );
 
     let mut one = Renderer::with_threads(1);
     let mut fb1 = Framebuffer::new(w, h);
@@ -330,7 +382,13 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
         (median(v), last.unwrap())
     };
     let (d, st) = full(&mut one, &mut fb1);
-    println!("  full repaint, 1 thread:      {}  (bin+hash {}, prepare {}, raster {})", ms(d), ms(st.bin_hash), ms(st.prepare), ms(st.raster));
+    println!(
+        "  full repaint, 1 thread:      {}  (bin+hash {}, prepare {}, raster {})",
+        ms(d),
+        ms(st.bin_hash),
+        ms(st.prepare),
+        ms(st.raster)
+    );
     let (d, st) = full(&mut pool, &mut fb);
     println!(
         "  full repaint, pool ({}):      {}  (bin+hash {}, prepare {}, raster {}; {} tiles)",
@@ -355,7 +413,12 @@ fn run(name: &str, w: u32, h: u32, a: &Assets) {
         bi.push(pool.stats().bin);
         assert!(d.is_empty());
     }
-    println!("  bin + hash:                  {}  (resolve {}, bin {})", ms(median(bh)), ms(median(rs)), ms(median(bi)));
+    println!(
+        "  bin + hash:                  {}  (resolve {}, bin {})",
+        ms(median(bh)),
+        ms(median(rs)),
+        ms(median(bi))
+    );
     println!("  unchanged frame:             {}", ms(median(v)));
 
     // One 200x40 region changes (a button's hover colour).
@@ -403,7 +466,8 @@ fn breakdown(a: &Assets) {
     fn plain(q: &Quad) -> bool {
         q.corner_radii == Corners::default() && q.border_widths == Edges::default()
     }
-    let kinds: [(&str, fn(&Primitive) -> bool); 9] = [
+    type Keep = fn(&Primitive) -> bool;
+    let kinds: [(&str, Keep); 9] = [
         ("all", |_| true),
         ("quads", |p| matches!(p, Primitive::Quad(_))),
         ("plain", |p| matches!(p, Primitive::Quad(q) if plain(q))),
@@ -414,8 +478,10 @@ fn breakdown(a: &Assets) {
         ("shadows", |p| matches!(p, Primitive::Shadow(_))),
         ("paths", |p| matches!(p, Primitive::Path(_))),
     ];
-    println!("
-4K breakdown, full repaint on 1 thread (median of 15):");
+    println!(
+        "
+4K breakdown, full repaint on 1 thread (median of 15):"
+    );
     for (name, keep) in kinds {
         let mut s = Scene::new();
         s.primitives = base.primitives.iter().filter(|p| keep(p)).cloned().collect();
@@ -439,7 +505,12 @@ fn main() {
     if arg == "breakdown" {
         let mut rng = Rng(7);
         let paths = (0..32).map(|_| (0..500).map(|i| (i as f32 / 499., rng.f())).collect()).collect();
-        let a = Assets { glyphs: glyph_masks(&mut rng), icons: icon_masks(&mut rng), images: images(&mut rng, 96), paths };
+        let a = Assets {
+            glyphs: glyph_masks(&mut rng),
+            icons: icon_masks(&mut rng),
+            images: images(&mut rng, 96),
+            paths,
+        };
         breakdown(&a);
         return;
     }
@@ -455,7 +526,12 @@ fn main() {
                 .collect()
         })
         .collect();
-    let a = Assets { glyphs: glyph_masks(&mut rng), icons: icon_masks(&mut rng), images: images(&mut rng, 96), paths };
+    let a = Assets {
+        glyphs: glyph_masks(&mut rng),
+        icons: icon_masks(&mut rng),
+        images: images(&mut rng, 96),
+        paths,
+    };
     if arg != "4k" && arg != "breakdown" {
         run("1080p", 1920, 1200, &a);
     }

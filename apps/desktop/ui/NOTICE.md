@@ -22,5 +22,7 @@ when you adapt another file.
 | `scene.rs` | `scene.rs` (`BorderStyle`, primitive field names) |
 | `image.rs` | `assets.rs` (`RenderImage`) |
 | `text/types.rs` | `text_system.rs`, `text_system/line_layout.rs`, `text_system/font_features.rs`, `text_system/font_fallbacks.rs`, `style.rs` (`UnderlineStyle`, `StrikethroughStyle`), `platform.rs` (`PlatformTextSystem`) |
+| `raster/quad_eval.rs`, `raster/gradient.rs`, `raster/shadow.rs`, `raster/image.rs`, `raster/path.rs` (underlines) | `platform/windows/shaders.hlsl` (quad, gradient, Oklab, shadow, polychrome sprite and underline fragment maths) |
+| `raster/sprite.rs` | `platform/windows/alpha_correction.hlsl` (glyph contrast and gamma correction) |
 
 The Apache License 2.0 text is in the repository root, `LICENSE-APACHE`.

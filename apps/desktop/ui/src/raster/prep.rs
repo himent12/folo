@@ -14,16 +14,27 @@ use super::quad_eval::QuadShader;
 use super::shadow::{self, ShadowKey, ShadowMask, ShadowShape};
 use super::sprite::{AlphaLut, Axis, draw_color, draw_glyph, draw_svg};
 use super::target::Target;
-use crate::{Background, BackgroundTag, GlyphBlend, Hsla, Image, Path, PathData, Primitive, RenderImage, Shadow, SpriteKind};
+use crate::{
+    Background, BackgroundTag, GlyphBlend, Hsla, Image, Path, PathData, Primitive, RenderImage, Shadow,
+    SpriteKind,
+};
 use std::sync::Arc;
 
 /// An item whose preparation needed the caches.
 pub(crate) enum Prep {
     /// A gradient quad (its colour table is cached).
     Quad(Box<QuadPrep>),
-    Shadow { mask: Arc<ShadowMask>, origin: (i32, i32), tint: Tint, alpha: u32 },
+    Shadow {
+        mask: Arc<ShadowMask>,
+        origin: (i32, i32),
+        tint: Tint,
+        alpha: u32,
+    },
     Image(Box<ImageDraw>),
-    Path { mask: Arc<PathMask>, paint: Box<PathPaint> },
+    Path {
+        mask: Arc<PathMask>,
+        paint: Box<PathPaint>,
+    },
 }
 
 /// Byte budgets of the renderer's caches.
@@ -77,7 +88,11 @@ impl Caches {
 
     /// The bytes every cache holds.
     pub fn bytes(&self) -> usize {
-        self.shadows.bytes() + self.paths.bytes() + self.images.bytes() + self.luts.bytes() + self.gradients.bytes()
+        self.shadows.bytes()
+            + self.paths.bytes()
+            + self.images.bytes()
+            + self.luts.bytes()
+            + self.gradients.bytes()
     }
 
     fn gradient(&mut self, bg: &Background, p: &Paint) -> GradientSpan {
@@ -134,7 +149,8 @@ impl GlyphTables {
                     b(g[3]),
                     b(blend.grayscale_enhanced_contrast),
                 ];
-                let lut = caches.luts.get_or_insert_with(&key, || (Arc::new(AlphaLut::glyph(c, blend)), 1024 + 64));
+                let lut =
+                    caches.luts.get_or_insert_with(&key, || (Arc::new(AlphaLut::glyph(c, blend)), 1024 + 64));
                 self.tables.push((lut, Tint::new(c)));
                 self.colors.push(color);
                 self.tables.len() as u32 - 1
@@ -267,7 +283,7 @@ fn path_prep(p: &Path, mask: Arc<PathMask>, caches: &mut Caches) -> Prep {
         PathPaint::Gradient(caches.gradient(&p.paint, &paint))
     } else {
         let c = rgba(p.paint.solid);
-        PathPaint::Solid(AlphaLut::coverage(c[3]), Tint::new(c))
+        PathPaint::Solid(Box::new(AlphaLut::coverage(c[3])), Tint::new(c))
     };
     Prep::Path { mask, paint: Box::new(paint) }
 }
@@ -275,7 +291,13 @@ fn path_prep(p: &Path, mask: Arc<PathMask>, caches: &mut Caches) -> Prep {
 /// Prepares `prim` for drawing: the work that needs the caches (shadow masks, image copies, path
 /// coverage, gradient and glyph tables). Everything else is cheap and done by each tile itself.
 /// A cache miss comes back as a `Job`. `frame` is the frame rectangle (masks never exceed it).
-pub(crate) fn prepare(prim: &Primitive, caches: &mut Caches, glyphs: &mut GlyphTables, blend: &GlyphBlend, frame: IRect) -> Prepared {
+pub(crate) fn prepare(
+    prim: &Primitive,
+    caches: &mut Caches,
+    glyphs: &mut GlyphTables,
+    blend: &GlyphBlend,
+    frame: IRect,
+) -> Prepared {
     match prim {
         Primitive::Quad(q) => {
             if q.background.tag != BackgroundTag::LinearGradient {
@@ -317,7 +339,14 @@ pub(crate) fn prepare(prim: &Primitive, caches: &mut Caches, glyphs: &mut GlyphT
 
 /// Draws `prim`'s pixels inside `r` (its rectangle cut to the tile). `prep` is what `prepare` made
 /// for it (`None` for lazy items), `glyphs` the frame's glyph tables.
-pub(crate) fn draw(t: &mut Target, prim: &Primitive, prep: Option<&Prep>, glyph: u32, glyphs: &[(Arc<AlphaLut>, Tint)], r: IRect) {
+pub(crate) fn draw(
+    t: &mut Target,
+    prim: &Primitive,
+    prep: Option<&Prep>,
+    glyph: u32,
+    glyphs: &[(Arc<AlphaLut>, Tint)],
+    r: IRect,
+) {
     if let Some(p) = prep {
         match p {
             Prep::Quad(q) => q.draw(t, r),
@@ -336,9 +365,18 @@ pub(crate) fn draw(t: &mut Target, prim: &Primitive, prep: Option<&Prep>, glyph:
         Primitive::Quad(q) => {
             let rr = &q.corner_radii;
             let w = &q.border_widths;
-            let simple = [rr.top_left, rr.top_right, rr.bottom_right, rr.bottom_left, w.top, w.right, w.bottom, w.left]
-                .iter()
-                .all(|v| v.0 == 0.);
+            let simple = [
+                rr.top_left,
+                rr.top_right,
+                rr.bottom_right,
+                rr.bottom_left,
+                w.top,
+                w.right,
+                w.bottom,
+                w.left,
+            ]
+            .iter()
+            .all(|v| v.0 == 0.);
             if simple && q.background.tag == BackgroundTag::Solid {
                 fill(t, &Src::new(rgba(q.background.solid)), r);
             } else {

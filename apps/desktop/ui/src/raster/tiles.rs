@@ -6,8 +6,8 @@ use super::geom::IRect;
 use super::hash::{finish, mix};
 use super::items::Item;
 use super::pool::{Pool, for_each};
-use std::sync::Mutex;
 use crate::{Bounds, DevicePixels, point, size};
+use std::sync::Mutex;
 
 /// The tile edge in device pixels.
 pub const TILE: i32 = 64;
@@ -116,8 +116,13 @@ impl Tiles {
         self.list.resize(run as usize, 0);
         // Pass 2: each part writes its items into its own ranges.
         let list = ListPtr(self.list.as_mut_ptr());
-        let tasks: Vec<_> =
-            self.cursor.chunks_mut(n).zip(items.chunks(chunk)).enumerate().map(|(p, (c, it))| (p * chunk, c, it)).collect();
+        let tasks: Vec<_> = self
+            .cursor
+            .chunks_mut(n)
+            .zip(items.chunks(chunk))
+            .enumerate()
+            .map(|(p, (c, it))| (p * chunk, c, it))
+            .collect();
         for_each(pool, tasks, &|(base, cursor, items): (usize, &mut [u32], &[Item])| {
             let list = &list;
             for (i, it) in items.iter().enumerate() {
@@ -137,7 +142,14 @@ impl Tiles {
 
     /// Cuts each tile's list at its occluder, hashes what remains (with `salt`), and puts the tiles
     /// whose hash changed into `dirty`, ascending. Tiles are split into `parts` ranges for `pool`.
-    pub fn diff(&mut self, items: &[Item], salt: u64, dirty: &mut Vec<u32>, parts: usize, pool: Option<&Pool>) {
+    pub fn diff(
+        &mut self,
+        items: &[Item],
+        salt: u64,
+        dirty: &mut Vec<u32>,
+        parts: usize,
+        pool: Option<&Pool>,
+    ) {
         let n = self.len();
         let chunk = n.div_ceil(parts.max(1)).max(1);
         let found = Mutex::new(Vec::new());
@@ -151,9 +163,16 @@ impl Tiles {
             .enumerate()
             .map(|(k, ((h, s), o))| (k * chunk, h, s, o))
             .collect();
-        for_each(pool, tasks, &|(first, hashes, start, occluded): (usize, &mut [Option<u64>], &mut [u32], &mut [bool])| {
+        for_each(pool, tasks, &|(first, hashes, start, occluded): (
+            usize,
+            &mut [Option<u64>],
+            &mut [u32],
+            &mut [bool],
+        )| {
             let mut mine = Vec::new();
-            for (j, ((hash, start), occ)) in hashes.iter_mut().zip(start.iter_mut()).zip(occluded.iter_mut()).enumerate() {
+            for (j, ((hash, start), occ)) in
+                hashes.iter_mut().zip(start.iter_mut()).zip(occluded.iter_mut()).enumerate()
+            {
                 let t = first + j;
                 let rect = tile_rect(t, cols, width, height);
                 let (b, e) = (offsets[t] as usize, offsets[t + 1] as usize);
@@ -218,7 +237,10 @@ impl Tiles {
                 ty = row;
             }
             let mut j = i;
-            while j + 1 < dirty.len() && dirty[j + 1] as i32 == dirty[j] as i32 + 1 && dirty[j + 1] as i32 / self.cols == row {
+            while j + 1 < dirty.len()
+                && dirty[j + 1] as i32 == dirty[j] as i32 + 1
+                && dirty[j + 1] as i32 / self.cols == row
+            {
                 j += 1;
             }
             let a = self.rect(t as usize);
@@ -237,7 +259,10 @@ impl Tiles {
         done.append(&mut next_open);
         done.into_iter()
             .map(|r| {
-                Bounds::new(point(DevicePixels(r.x0), DevicePixels(r.y0)), size(DevicePixels(r.width()), DevicePixels(r.height())))
+                Bounds::new(
+                    point(DevicePixels(r.x0), DevicePixels(r.y0)),
+                    size(DevicePixels(r.width()), DevicePixels(r.height())),
+                )
             })
             .collect()
     }
@@ -253,7 +278,8 @@ mod tests {
         t.resize(64 * 4, 64 * 3 + 10);
         // Tiles (1,0) (2,0) (1,1) (2,1) form one block; (0,3) is a partial bottom tile.
         let d = t.damage(&[1, 2, 5, 6, 12]);
-        let r: Vec<_> = d.iter().map(|b| (b.origin.x.0, b.origin.y.0, b.size.width.0, b.size.height.0)).collect();
+        let r: Vec<_> =
+            d.iter().map(|b| (b.origin.x.0, b.origin.y.0, b.size.width.0, b.size.height.0)).collect();
         assert_eq!(r.len(), 2, "{r:?}");
         assert!(r.contains(&(64, 0, 128, 128)));
         assert!(r.contains(&(0, 192, 64, 10)));

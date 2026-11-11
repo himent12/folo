@@ -106,7 +106,7 @@ impl PathMask {
 
 /// How a path is painted over its coverage.
 pub(crate) enum PathPaint {
-    Solid(AlphaLut, Tint),
+    Solid(Box<AlphaLut>, Tint),
     Gradient(GradientSpan),
 }
 

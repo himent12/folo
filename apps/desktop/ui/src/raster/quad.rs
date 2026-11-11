@@ -286,4 +286,3 @@ pub(crate) fn opaque_core(q: &Quad, rect: IRect) -> IRect {
     let y1 = (o.y.0 + s.height.0 - t(r.bottom_left.0.max(r.bottom_right.0), w.bottom.0)).floor();
     IRect::new(x0 as i32, y0 as i32, x1 as i32, y1 as i32).intersect(&rect)
 }
-

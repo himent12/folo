@@ -31,7 +31,6 @@ mod tiles;
 pub use cache::{Mask, MaskCache};
 pub use tiles::TILE as TILE_SIZE;
 
-
 use crate::{Bounds, DevicePixels, Framebuffer, GlyphBlend, Primitive, Scene};
 use geom::IRect;
 use items::Item;
@@ -158,7 +157,12 @@ impl Renderer {
 
     /// Makes `frame` show `scene`. Returns the rectangles that changed (device px, tile-aligned,
     /// merged). `frame` must be the buffer the previous call drew, or the call must follow `invalidate`.
-    pub fn render(&mut self, scene: &Scene, glyph: GlyphBlend, frame: &mut Framebuffer) -> Vec<Bounds<DevicePixels>> {
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        glyph: GlyphBlend,
+        frame: &mut Framebuffer,
+    ) -> Vec<Bounds<DevicePixels>> {
         let t0 = Instant::now();
         assert_eq!(frame.pixels.len(), frame.width as usize * frame.height as usize, "framebuffer size");
         self.tiles.resize(frame.width, frame.height);
@@ -210,18 +214,19 @@ impl Renderer {
                     continue;
                 }
                 self.mark[i] = self.stamp;
-                self.slot[i] = match prep::prepare(&prims[i], &mut self.caches, &mut self.glyphs, &glyph, frame_rect) {
-                    Prepared::Lazy => LAZY,
-                    Prepared::Glyph(g) => GLYPH | g,
-                    Prepared::Item(p) => {
-                        self.preps.push(p);
-                        self.preps.len() as u32 - 1
-                    }
-                    Prepared::Pending(job) => {
-                        jobs.push((i, job));
-                        LAZY
-                    }
-                };
+                self.slot[i] =
+                    match prep::prepare(&prims[i], &mut self.caches, &mut self.glyphs, &glyph, frame_rect) {
+                        Prepared::Lazy => LAZY,
+                        Prepared::Glyph(g) => GLYPH | g,
+                        Prepared::Item(p) => {
+                            self.preps.push(p);
+                            self.preps.len() as u32 - 1
+                        }
+                        Prepared::Pending(job) => {
+                            jobs.push((i, job));
+                            LAZY
+                        }
+                    };
             }
         }
         // Cache misses (shadow masks, resampled images, path coverage) are made on the pool.
@@ -374,6 +379,10 @@ fn cut(mut r: IRect, c: &IRect) -> IRect {
 /// What the glyph blend contributes to every tile hash (a new blend repaints everything).
 fn blend_salt(b: &GlyphBlend) -> u64 {
     let mut h = hash::mix(0x7a11, b.apply as u64);
-    h = hash::mix_f2(hash::mix_f2(h, b.gamma_ratios[0], b.gamma_ratios[1]), b.gamma_ratios[2], b.gamma_ratios[3]);
+    h = hash::mix_f2(
+        hash::mix_f2(h, b.gamma_ratios[0], b.gamma_ratios[1]),
+        b.gamma_ratios[2],
+        b.gamma_ratios[3],
+    );
     hash::finish(hash::mix(h, b.grayscale_enhanced_contrast.to_bits() as u64))
 }

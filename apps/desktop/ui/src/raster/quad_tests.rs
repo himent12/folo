@@ -7,8 +7,8 @@ use super::quad::{QuadPrep, opaque_core};
 use super::quad_eval::QuadShader;
 use super::target::FrameMut;
 use crate::{
-    Background, BorderStyle, Bounds, Corners, Edges, Hsla, Quad, ScaledPixels, hsla, linear_color_stop, linear_gradient,
-    point, size,
+    Background, BorderStyle, Bounds, Corners, Edges, Hsla, Quad, ScaledPixels, hsla, linear_color_stop,
+    linear_gradient, point, size,
 };
 use std::sync::Arc;
 
@@ -41,9 +41,14 @@ fn random_quad(rng: &mut Rng, gradient: bool) -> Quad {
     let y = rng.pick(&[2.0, 2.5, 3.1, 4.6]);
     let w = rng.f(4., 90.);
     let h = rng.f(4., 70.);
-    let r = |rng: &mut Rng| if rng.next() % 3 == 0 { 0. } else { rng.pick(&[1.5, 3.0, 4.5, 6.0, 9.0, 12.0, 30.0]) };
-    let bw = |rng: &mut Rng| if rng.next() % 2 == 0 { 0. } else { rng.pick(&[1.0, 1.5, 2.0, 3.0, 0.75]) };
-    let color = |rng: &mut Rng| -> Hsla { hsla(rng.f(0., 1.), rng.f(0., 1.), rng.f(0., 1.), rng.pick(&[1.0, 0.5, 0.9, 0.2])) };
+    let r = |rng: &mut Rng| {
+        if rng.next().is_multiple_of(3) { 0. } else { rng.pick(&[1.5, 3.0, 4.5, 6.0, 9.0, 12.0, 30.0]) }
+    };
+    let bw =
+        |rng: &mut Rng| if rng.next().is_multiple_of(2) { 0. } else { rng.pick(&[1.0, 1.5, 2.0, 3.0, 0.75]) };
+    let color = |rng: &mut Rng| -> Hsla {
+        hsla(rng.f(0., 1.), rng.f(0., 1.), rng.f(0., 1.), rng.pick(&[1.0, 0.5, 0.9, 0.2]))
+    };
     let background: Background = if gradient {
         linear_gradient(rng.f(0., 360.), linear_color_stop(color(rng), 0.), linear_color_stop(color(rng), 1.))
     } else {
@@ -54,7 +59,12 @@ fn random_quad(rng: &mut Rng, gradient: bool) -> Quad {
         clip: Bounds::new(point(px(0.), px(0.)), size(px(200.), px(200.))),
         background,
         border_color: color(rng),
-        corner_radii: Corners { top_left: px(r(rng)), top_right: px(r(rng)), bottom_right: px(r(rng)), bottom_left: px(r(rng)) },
+        corner_radii: Corners {
+            top_left: px(r(rng)),
+            top_right: px(r(rng)),
+            bottom_right: px(r(rng)),
+            bottom_left: px(r(rng)),
+        },
         border_widths: Edges { top: px(bw(rng)), right: px(bw(rng)), bottom: px(bw(rng)), left: px(bw(rng)) },
         border_style: BorderStyle::Solid,
     }
@@ -109,7 +119,9 @@ fn reference(q: &Quad, bg: u32) -> Vec<u32> {
 fn max_diff(a: &[u32], b: &[u32]) -> u32 {
     a.iter()
         .zip(b)
-        .map(|(&x, &y)| (0..3).map(|c| ((x >> (c * 8)) & 0xff).abs_diff((y >> (c * 8)) & 0xff)).max().unwrap())
+        .map(|(&x, &y)| {
+            (0..3).map(|c| ((x >> (c * 8)) & 0xff).abs_diff((y >> (c * 8)) & 0xff)).max().unwrap()
+        })
         .max()
         .unwrap_or(0)
 }

@@ -7,8 +7,8 @@ use super::blend::{Src, rgba, sat};
 use crate::{Background, BackgroundTag, ColorSpace};
 use std::sync::Arc;
 
-/// The HLSL `M_PI_F`.
-const M_PI_F: f32 = 3.141_592_7;
+/// HLSL's `M_PI_F` (3.141592653f) is this `f32`.
+const M_PI_F: f32 = std::f32::consts::PI;
 
 // GPUI's shader names these the other way round; the maths is copied as it is.
 fn srgb_to_linear(c: f32) -> f32 {

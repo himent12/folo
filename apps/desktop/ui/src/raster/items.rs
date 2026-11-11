@@ -30,7 +30,10 @@ fn mix_bounds(h: u64, b: &Bounds<ScaledPixels>) -> u64 {
 
 #[inline]
 fn mix_rect(h: u64, r: &IRect) -> u64 {
-    mix(mix(h, (r.x0 as u32 as u64) << 32 | r.y0 as u32 as u64), (r.x1 as u32 as u64) << 32 | r.y1 as u32 as u64)
+    mix(
+        mix(h, (r.x0 as u32 as u64) << 32 | r.y0 as u32 as u64),
+        (r.x1 as u32 as u64) << 32 | r.y1 as u32 as u64,
+    )
 }
 
 #[inline]
@@ -98,7 +101,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 (rect, opaque_core(q, rect), h)
             }
             Primitive::Shadow(s) => {
-                if s.color.a <= 0. || !(s.blur_radius.0 > 0.) {
+                if s.color.a <= 0. || s.blur_radius.0.is_nan() || s.blur_radius.0 <= 0. {
                     // A zero blur divides by zero in the shader: NaN alpha, which draws nothing.
                     continue;
                 }
@@ -128,7 +131,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 (rect, IRect::EMPTY, h)
             }
             Primitive::ColorSprite(s) => {
-                if !(s.opacity > 0.) {
+                if s.opacity.is_nan() || s.opacity <= 0. {
                     continue;
                 }
                 let rect = pixel_rect(&s.bounds, &s.clip).intersect(&frame);
@@ -141,7 +144,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 (rect, IRect::EMPTY, h)
             }
             Primitive::Image(m) => {
-                if !(m.opacity > 0.) {
+                if m.opacity.is_nan() || m.opacity <= 0. {
                     continue;
                 }
                 let rect = pixel_rect(&m.bounds, &m.clip).intersect(&frame);

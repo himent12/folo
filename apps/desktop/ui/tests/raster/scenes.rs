@@ -24,7 +24,7 @@ impl Rng {
     }
 
     pub fn chance(&mut self, n: u64) -> bool {
-        self.next() % n == 0
+        self.next().is_multiple_of(n)
     }
 
     pub fn pick<T: Copy>(&mut self, v: &[T]) -> T {
@@ -65,11 +65,22 @@ pub struct Assets {
 impl Assets {
     pub fn new(rng: &mut Rng) -> Self {
         let alpha = |rng: &mut Rng, w: i32, h: i32| {
-            let data: Vec<u8> = (0..w * h).map(|_| if rng.chance(3) { 0 } else { rng.i(0, 256) as u8 }).collect();
+            let data: Vec<u8> =
+                (0..w * h).map(|_| if rng.chance(3) { 0 } else { rng.i(0, 256) as u8 }).collect();
             Arc::new(AlphaMask::new(dsize(w, h), data))
         };
-        let glyphs = (0..12).map(|_| { let (w, h) = (rng.i(2, 16), rng.i(3, 20)); alpha(rng, w, h) }).collect();
-        let icons = (0..4).map(|_| { let s = rng.i(8, 40); alpha(rng, s, s) }).collect();
+        let glyphs = (0..12)
+            .map(|_| {
+                let (w, h) = (rng.i(2, 16), rng.i(3, 20));
+                alpha(rng, w, h)
+            })
+            .collect();
+        let icons = (0..4)
+            .map(|_| {
+                let s = rng.i(8, 40);
+                alpha(rng, s, s)
+            })
+            .collect();
         let emoji = (0..3)
             .map(|_| {
                 let (w, h) = (rng.i(6, 20), rng.i(6, 20));
@@ -93,9 +104,17 @@ fn color(rng: &mut Rng) -> Hsla {
 
 fn background(rng: &mut Rng) -> Background {
     match rng.i(0, 10) {
-        0 => linear_gradient(rng.f(0., 360.), linear_color_stop(color(rng), rng.f(0., 0.4)), linear_color_stop(color(rng), rng.f(0.6, 1.))),
-        1 => linear_gradient(rng.f(0., 360.), linear_color_stop(color(rng), 0.), linear_color_stop(color(rng), 1.))
-            .color_space(ColorSpace::Oklab),
+        0 => linear_gradient(
+            rng.f(0., 360.),
+            linear_color_stop(color(rng), rng.f(0., 0.4)),
+            linear_color_stop(color(rng), rng.f(0.6, 1.)),
+        ),
+        1 => linear_gradient(
+            rng.f(0., 360.),
+            linear_color_stop(color(rng), 0.),
+            linear_color_stop(color(rng), 1.),
+        )
+        .color_space(ColorSpace::Oklab),
         2 => pattern_slash(color(rng), rng.f(1., 4.), rng.f(1., 6.)),
         _ => color(rng).into(),
     }
@@ -127,8 +146,18 @@ pub fn primitive(rng: &mut Rng, a: &Assets, w: f32, h: f32) -> Primitive {
                 clip: c,
                 background: background(rng),
                 border_color: color(rng),
-                corner_radii: Corners { top_left: sp(r(rng)), top_right: sp(r(rng)), bottom_right: sp(r(rng)), bottom_left: sp(r(rng)) },
-                border_widths: Edges { top: sp(bw(rng)), right: sp(bw(rng)), bottom: sp(bw(rng)), left: sp(bw(rng)) },
+                corner_radii: Corners {
+                    top_left: sp(r(rng)),
+                    top_right: sp(r(rng)),
+                    bottom_right: sp(r(rng)),
+                    bottom_left: sp(r(rng)),
+                },
+                border_widths: Edges {
+                    top: sp(bw(rng)),
+                    right: sp(bw(rng)),
+                    bottom: sp(bw(rng)),
+                    left: sp(bw(rng)),
+                },
                 border_style: if rng.chance(6) { BorderStyle::Dashed } else { BorderStyle::Solid },
             })
         }
@@ -152,7 +181,13 @@ pub fn primitive(rng: &mut Rng, a: &Assets, w: f32, h: f32) -> Primitive {
         11 => {
             let m = a.icons[rng.i(0, a.icons.len() as i32) as usize].clone();
             let s = (m.size.width.0 as f32 / 2.).ceil();
-            Primitive::MonoSprite(MonoSprite { bounds: rect(x.round(), y.round(), s, s), clip: c, color: color(rng), mask: m, kind: SpriteKind::Svg })
+            Primitive::MonoSprite(MonoSprite {
+                bounds: rect(x.round(), y.round(), s, s),
+                clip: c,
+                color: color(rng),
+                mask: m,
+                kind: SpriteKind::Svg,
+            })
         }
         12 => {
             let m = a.emoji[rng.i(0, a.emoji.len() as i32) as usize].clone();
@@ -166,7 +201,11 @@ pub fn primitive(rng: &mut Rng, a: &Assets, w: f32, h: f32) -> Primitive {
         13 => {
             let img = a.images[rng.i(0, a.images.len() as i32) as usize].clone();
             let s = img.size(0);
-            let (iw, ih) = if rng.chance(2) { (s.width.0 as f32, s.height.0 as f32) } else { (rng.f(4., 80.).round(), rng.f(4., 60.).round()) };
+            let (iw, ih) = if rng.chance(2) {
+                (s.width.0 as f32, s.height.0 as f32)
+            } else {
+                (rng.f(4., 80.).round(), rng.f(4., 60.).round())
+            };
             Primitive::Image(Image {
                 bounds: rect(x.floor(), y.floor(), iw, ih),
                 clip: c,
@@ -179,7 +218,8 @@ pub fn primitive(rng: &mut Rng, a: &Assets, w: f32, h: f32) -> Primitive {
         }
         14 => {
             let n = rng.i(3, 12);
-            let points: Vec<_> = (0..n).map(|_| point(sp(x + rng.f(0., 80.)), sp(y + rng.f(0., 60.)))).collect();
+            let points: Vec<_> =
+                (0..n).map(|_| point(sp(x + rng.f(0., 80.)), sp(y + rng.f(0., 60.)))).collect();
             let kind = if rng.chance(2) {
                 PathKind::Fill(if rng.chance(2) { FillRule::NonZero } else { FillRule::EvenOdd })
             } else {
@@ -191,7 +231,11 @@ pub fn primitive(rng: &mut Rng, a: &Assets, w: f32, h: f32) -> Primitive {
                 clip: c,
                 path: Arc::new(PathData::new(vec![Contour { points, closed }], kind)),
                 paint: if rng.chance(3) {
-                    linear_gradient(180., linear_color_stop(color(rng), 0.), linear_color_stop(color(rng), 1.))
+                    linear_gradient(
+                        180.,
+                        linear_color_stop(color(rng), 0.),
+                        linear_color_stop(color(rng), 1.),
+                    )
                 } else {
                     color(rng).into()
                 },
@@ -250,7 +294,8 @@ pub fn mutate(rng: &mut Rng, a: &Assets, s: &Scene, w: f32, h: f32) -> Scene {
                 // Move a quad by a whole or a fractional step.
                 let i = rng.i(0, n as i32) as usize;
                 if let Primitive::Quad(q) = &mut out.primitives[i] {
-                    q.bounds.origin.x = sp(f64::from(q.bounds.origin.x.round()) as f32 + rng.pick(&[1., 0.5, -3.]));
+                    q.bounds.origin.x =
+                        sp(f64::from(q.bounds.origin.x.round()) as f32 + rng.pick(&[1., 0.5, -3.]));
                 }
             }
             _ => {

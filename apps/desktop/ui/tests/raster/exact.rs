@@ -51,7 +51,8 @@ fn white() -> Hsla {
 
 #[test]
 fn integer_aligned_opaque_quad_is_exact() {
-    let fb = render(vec![Primitive::Quad(quad(rect(10., 20., 30., 15.), rgb(0x336699)))], GlyphBlend::IDENTITY);
+    let fb =
+        render(vec![Primitive::Quad(quad(rect(10., 20., 30., 15.), rgb(0x336699)))], GlyphBlend::IDENTITY);
     for y in 0..H {
         for x in 0..W {
             let inside = (10..40).contains(&x) && (20..35).contains(&y);
@@ -145,6 +146,7 @@ fn blending_rounds_like_the_gpu() {
     }
 }
 
+#[allow(clippy::excessive_precision)]
 fn oklab(c: [f32; 3]) -> [f32; 3] {
     let lin = c.map(|v| v.powf(1. / 2.2));
     let l = (0.4122214708 * lin[0] + 0.5363325363 * lin[1] + 0.0514459929 * lin[2]).cbrt();
@@ -157,6 +159,7 @@ fn oklab(c: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+#[allow(clippy::excessive_precision)]
 fn from_oklab(c: [f32; 3]) -> [f32; 3] {
     let l = c[0] + 0.3963377774 * c[1] + 0.2158037573 * c[2];
     let m = c[0] - 0.1055613458 * c[1] - 0.0638541728 * c[2];
@@ -175,8 +178,9 @@ fn gradient_ends_and_middle_in_both_colour_spaces() {
     // 90 degrees runs left to right; 101 px wide so pixel 50's centre is t = 0.5 exactly.
     let (c0, c1) = ([1., 0., 0.], [0., 0., 1.]);
     for space in [ColorSpace::Srgb, ColorSpace::Oklab] {
-        let g = linear_gradient(90., linear_color_stop(rgb(0xff0000), 0.), linear_color_stop(rgb(0x0000ff), 1.))
-            .color_space(space);
+        let g =
+            linear_gradient(90., linear_color_stop(rgb(0xff0000), 0.), linear_color_stop(rgb(0x0000ff), 1.))
+                .color_space(space);
         let fb = render(vec![Primitive::Quad(quad(rect(0., 0., 101., 20.), g))], GlyphBlend::IDENTITY);
         for x in [0u32, 50, 100] {
             let t = (x as f32 + 0.5) / 101.;
@@ -197,7 +201,13 @@ fn glyph_masks_with_and_without_correction() {
     let values = [0u8, 1, 64, 128, 200, 255];
     let mask = Arc::new(AlphaMask::new(dsize(values.len() as i32, 1), values.to_vec()));
     let sprite = |color: Hsla| {
-        Primitive::MonoSprite(MonoSprite { bounds: rect(4., 4., 6., 1.), clip: full(), color, mask: mask.clone(), kind: SpriteKind::Glyph })
+        Primitive::MonoSprite(MonoSprite {
+            bounds: rect(4., 4., 6., 1.),
+            clip: full(),
+            color,
+            mask: mask.clone(),
+            kind: SpriteKind::Glyph,
+        })
     };
     // Plain alpha: white over black gives the mask value.
     let fb = render(vec![sprite(white())], GlyphBlend::IDENTITY);
@@ -251,7 +261,13 @@ fn svg_mask_at_two_to_one_is_the_2x2_average() {
     let data: Vec<u8> = (0..16 * 16).map(|_| rng.i(0, 256) as u8).collect();
     let mask = Arc::new(AlphaMask::new(dsize(16, 16), data.clone()));
     let fb = render(
-        vec![Primitive::MonoSprite(MonoSprite { bounds: rect(10., 20., 8., 8.), clip: full(), color: white(), mask, kind: SpriteKind::Svg })],
+        vec![Primitive::MonoSprite(MonoSprite {
+            bounds: rect(10., 20., 8., 8.),
+            clip: full(),
+            color: white(),
+            mask,
+            kind: SpriteKind::Svg,
+        })],
         GlyphBlend::new([0.1, -0.1, 0.05, -0.05], 1.0),
     );
     for y in 0..8usize {
@@ -276,6 +292,39 @@ fn clips_keep_pixel_centres_on_their_edges() {
         }
     }
     // Wholly outside the frame: nothing, no panic.
-    let fb = render(vec![Primitive::Quad(quad(rect(-500., -500., 100., 100.), white()))], GlyphBlend::IDENTITY);
+    let fb =
+        render(vec![Primitive::Quad(quad(rect(-500., -500., 100., 100.), white()))], GlyphBlend::IDENTITY);
     assert!(fb.pixels.iter().all(|&p| p == 0));
+}
+
+#[test]
+fn rounded_image_corners_and_opacity_follow_the_sdf() {
+    let mut rng = Rng(31);
+    let img = image(&mut rng, 40, 30, false);
+    let (ox, oy, w, h, r, opacity) = (10.0f32, 12.0f32, 40.0f32, 30.0f32, 8.0f32, 0.75f32);
+    let fb = render(
+        vec![Primitive::Image(Image {
+            bounds: rect(ox, oy, w, h),
+            clip: full(),
+            corner_radii: Corners::all(sp(r)),
+            image: img.clone(),
+            frame: 0,
+            grayscale: false,
+            opacity,
+        })],
+        GlyphBlend::IDENTITY,
+    );
+    let bytes = img.as_bytes(0).unwrap();
+    for y in 0..30u32 {
+        for x in 0..40u32 {
+            // Distance to the rounded rectangle (negative inside), at the pixel centre.
+            let (px, py) = (ox + x as f32 + 0.5, oy + y as f32 + 0.5);
+            let (cx, cy) = ((px - (ox + w / 2.)).abs() - w / 2. + r, (py - (oy + h / 2.)).abs() - h / 2. + r);
+            let d = if cx > 0. && cy > 0. { (cx * cx + cy * cy).sqrt() - r } else { cx.max(cy) - r };
+            let a = opacity * (0.5 - d).clamp(0., 1.);
+            let i = ((y * 40 + x) * 4) as usize;
+            let want = [bytes[i + 2], bytes[i + 1], bytes[i]].map(|c| c as f32 * a);
+            near(fb.pixel(10 + x, 12 + y), want, &format!("({x}, {y})"));
+        }
+    }
 }

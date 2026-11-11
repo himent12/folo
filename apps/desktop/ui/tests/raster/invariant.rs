@@ -24,7 +24,10 @@ fn fresh(s: &Scene, threads: usize) -> Framebuffer {
 fn covered(damage: &[Bounds<DevicePixels>], x: u32, y: u32) -> bool {
     damage.iter().any(|b| {
         let (x, y) = (x as i32, y as i32);
-        x >= b.origin.x.0 && y >= b.origin.y.0 && x < b.origin.x.0 + b.size.width.0 && y < b.origin.y.0 + b.size.height.0
+        x >= b.origin.x.0
+            && y >= b.origin.y.0
+            && x < b.origin.x.0 + b.size.width.0
+            && y < b.origin.y.0 + b.size.height.0
     })
 }
 
@@ -46,7 +49,11 @@ fn incremental_equals_fresh_for_every_thread_count() {
                 s = mutate(&mut rng, &assets, &s, W as f32, H as f32);
             }
             let want = fresh(&s, 1);
-            assert_eq!(fresh(&s, 4).pixels, want.pixels, "seed {seed} step {step}: fresh renders differ by thread count");
+            assert_eq!(
+                fresh(&s, 4).pixels,
+                want.pixels,
+                "seed {seed} step {step}: fresh renders differ by thread count"
+            );
             for (r, fb) in incr.iter_mut().zip(fbs.iter_mut()) {
                 let before = fb.pixels.clone();
                 let damage = r.render(&s, blend(), fb);
@@ -55,18 +62,27 @@ fn incremental_equals_fresh_for_every_thread_count() {
                     for x in 0..W {
                         let i = (y * W + x) as usize;
                         if before[i] != fb.pixels[i] {
-                            assert!(covered(&damage, x, y), "seed {seed} step {step}: ({x}, {y}) changed outside the damage");
+                            assert!(
+                                covered(&damage, x, y),
+                                "seed {seed} step {step}: ({x}, {y}) changed outside the damage"
+                            );
                         }
                     }
                 }
                 // Damage is tile-aligned and inside the frame.
                 for b in &damage {
                     assert!(b.origin.x.0 % 64 == 0 && b.origin.y.0 % 64 == 0);
-                    assert!(b.origin.x.0 + b.size.width.0 <= W as i32 && b.origin.y.0 + b.size.height.0 <= H as i32);
+                    assert!(
+                        b.origin.x.0 + b.size.width.0 <= W as i32
+                            && b.origin.y.0 + b.size.height.0 <= H as i32
+                    );
                 }
                 // The same scene again: nothing to do.
                 let again = r.render(&s.clone(), blend(), fb);
-                assert!(again.is_empty(), "seed {seed} step {step}: unchanged scene returned damage {again:?}");
+                assert!(
+                    again.is_empty(),
+                    "seed {seed} step {step}: unchanged scene returned damage {again:?}"
+                );
                 assert_eq!(fb.pixels, want.pixels);
             }
         }

@@ -8,7 +8,8 @@ use super::geom::IRect;
 use super::quad_eval::pick_corner_radius;
 use super::target::Target;
 
-const M_PI_F: f32 = 3.141_592_7;
+/// HLSL's `M_PI_F` (3.141592653f) is this `f32`.
+const M_PI_F: f32 = std::f32::consts::PI;
 
 /// What a shadow mask depends on (all as `f32` bits): size, radii, blur, and the offset of the mask's
 /// first pixel from the box centre; plus the mask's size in pixels.

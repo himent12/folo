@@ -30,7 +30,12 @@ fn apply_alpha_correction(a: f32, b: f32, g: [f32; 4]) -> f32 {
 }
 
 /// `apply_contrast_and_gamma_correction` from GPUI's `alpha_correction.hlsl`.
-pub(crate) fn apply_contrast_and_gamma_correction(sample: f32, c: [f32; 3], contrast: f32, gamma: [f32; 4]) -> f32 {
+pub(crate) fn apply_contrast_and_gamma_correction(
+    sample: f32,
+    c: [f32; 3],
+    contrast: f32,
+    gamma: [f32; 4],
+) -> f32 {
     let enhanced = light_on_dark_contrast(contrast, c);
     let brightness = color_brightness(c);
     apply_alpha_correction(enhance_contrast(sample, enhanced), brightness, gamma)
@@ -41,7 +46,12 @@ pub(crate) fn apply_contrast_and_gamma_correction(sample: f32, c: [f32; 3], cont
 pub(crate) fn glyph_alpha_f32(m: u8, c: [f32; 4], blend: &GlyphBlend) -> f32 {
     let s = m as f32 / 255.;
     let a = if blend.apply {
-        apply_contrast_and_gamma_correction(s, [c[0], c[1], c[2]], blend.grayscale_enhanced_contrast, blend.gamma_ratios)
+        apply_contrast_and_gamma_correction(
+            s,
+            [c[0], c[1], c[2]],
+            blend.grayscale_enhanced_contrast,
+            blend.gamma_ratios,
+        )
     } else {
         s
     };
@@ -64,7 +74,15 @@ impl AlphaLut {
 }
 
 /// Blits the part of `mask` (at `origin`, 1:1) inside `r`: look up, skip zero, blend.
-pub(crate) fn draw_mask(t: &mut Target, mask: &[u8], mask_w: usize, origin: (i32, i32), lut: &AlphaLut, tint: &Tint, r: IRect) {
+pub(crate) fn draw_mask(
+    t: &mut Target,
+    mask: &[u8],
+    mask_w: usize,
+    origin: (i32, i32),
+    lut: &AlphaLut,
+    tint: &Tint,
+    r: IRect,
+) {
     let x0 = (r.x0 - origin.0) as usize;
     let n = (r.x1 - r.x0) as usize;
     for y in r.y0..r.y1 {
@@ -80,7 +98,14 @@ pub(crate) fn draw_mask(t: &mut Target, mask: &[u8], mask_w: usize, origin: (i32
 }
 
 /// A glyph: 1:1, its bounds are device-pixel aligned.
-pub(crate) fn draw_glyph(t: &mut Target, mask: &AlphaMask, origin: (i32, i32), lut: &AlphaLut, tint: &Tint, r: IRect) {
+pub(crate) fn draw_glyph(
+    t: &mut Target,
+    mask: &AlphaMask,
+    origin: (i32, i32),
+    lut: &AlphaLut,
+    tint: &Tint,
+    r: IRect,
+) {
     let r = r.intersect(&mask_rect(origin, mask.size.width.0, mask.size.height.0));
     if !r.is_empty() {
         draw_mask(t, &mask.data, mask.size.width.0 as usize, origin, lut, tint, r);
@@ -137,7 +162,15 @@ fn sample(mask: &[u8], w: usize, ax: (usize, usize, u32), ay: (usize, usize, u32
 }
 
 /// An SVG icon: the mask (often 2x) is sampled linearly over the sprite's bounds; plain alpha.
-pub(crate) fn draw_svg(t: &mut Target, mask: &AlphaMask, ax: &Axis, ay: &Axis, alpha: u32, tint: &Tint, r: IRect) {
+pub(crate) fn draw_svg(
+    t: &mut Target,
+    mask: &AlphaMask,
+    ax: &Axis,
+    ay: &Axis,
+    alpha: u32,
+    tint: &Tint,
+    r: IRect,
+) {
     let w = mask.size.width.0 as usize;
     if w == 0 || mask.size.height.0 <= 0 {
         return;
@@ -171,7 +204,7 @@ pub(crate) fn draw_color(t: &mut Target, mask: &ColorMask, origin: (i32, i32), o
         let start = ((y - origin.1) as usize * w + x0) * 4;
         let src = &mask.data[start..start + (r.x1 - r.x0) as usize * 4];
         let row = t.row(y, r.x0, r.x1);
-        for (p, s) in row.iter_mut().zip(src.chunks_exact(4)) {
+        for (p, s) in row.iter_mut().zip(src.as_chunks::<4>().0) {
             if s[3] != 0 {
                 *p = over_pm8(*p, s[3] as u32, s[2] as u32, s[1] as u32, s[0] as u32, opacity);
             }
@@ -193,8 +226,13 @@ mod tests {
             GlyphBlend::new([0.1, -0.1, 0.05, -0.05], 0.5),
             GlyphBlend::IDENTITY,
         ];
-        let colours =
-            [[1., 1., 1., 1.], [0., 0., 0., 1.], [0.9, 0.3, 0.2, 0.8], [0.45, 0.5, 0.55, 0.6], [0.2, 0.6, 1., 1.]];
+        let colours = [
+            [1., 1., 1., 1.],
+            [0., 0., 0., 1.],
+            [0.9, 0.3, 0.2, 0.8],
+            [0.45, 0.5, 0.55, 0.6],
+            [0.2, 0.6, 1., 1.],
+        ];
         let dsts = [0x00_00_00u32, 0xff_ff_ff, 0x20_24_28, 0xe0_d8_d0];
         for blend in &blends {
             for c in colours {
@@ -207,11 +245,15 @@ mod tests {
                     assert!((lut.0[m as usize] as f32 / ONE as f32 - a).abs() <= 1. / 65536., "{m} {c:?}");
                     for d in dsts {
                         let ch = [(d >> 16) & 0xff, (d >> 8) & 0xff, d & 0xff];
-                        let want: [u32; 3] = std::array::from_fn(|i| unorm(c[i] * a + ch[i] as f32 / 255. * (1. - a)));
+                        let want: [u32; 3] =
+                            std::array::from_fn(|i| unorm(c[i] * a + ch[i] as f32 / 255. * (1. - a)));
                         let p = if m == 0 { d } else { tint.over(d, lut.0[m as usize]) };
                         let got = [(p >> 16) & 0xff, (p >> 8) & 0xff, p & 0xff];
                         for i in 0..3 {
-                            assert!(want[i].abs_diff(got[i]) <= 1, "m {m} c {c:?} dst {d:#x}: {want:?} vs {got:?}");
+                            assert!(
+                                want[i].abs_diff(got[i]) <= 1,
+                                "m {m} c {c:?} dst {d:#x}: {want:?} vs {got:?}"
+                            );
                         }
                     }
                 }
