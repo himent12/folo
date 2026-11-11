@@ -146,20 +146,21 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
     document.body.appendChild(target);
     router.route = parse('#/playground?model=m_shapes_s');
     c = mount(Playground, { target });
-    return until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+    await until(() => target.querySelector('.model-pick'), 'the model picker');
+    return target.querySelector('[role="radiogroup"][aria-label="Run the model on"]');
   }
   const option = (g: Element, name: string) => [...g.querySelectorAll<HTMLButtonElement>('button')].find((b) => b.textContent?.trim() === name)!;
 
-  it('offers WebGPU and CPU off, with the reason, where the build has none', async () => {
-    const g = await open('no-wasm');
-    await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
-    expect(option(g, 'Server').disabled).toBe(false);
-    expect(option(g, 'WebGPU').disabled).toBe(true);
-    expect(target.querySelector('.runon')?.getAttribute('aria-describedby')).toBe('runon-note');
+  // models F14: options this build can never use are not shown (it runs on the server, and nothing needs saying).
+  it('offers no browser choice where the build has none, and says nothing about it', async () => {
+    await open('no-wasm');
+    await until(() => !target.querySelector('.runon'), 'the Run on choice to go');
+    expect(target.textContent).not.toContain('in-browser runtime');
   });
 
   it('offers the CPU where the build has it', async () => {
-    const g = await open('normal');
+    await open('normal');
+    const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
     await until(() => target.querySelector('select, .model-pick'), 'the pickers');
     await new Promise((r) => setTimeout(r, 50));
     flushSync();
@@ -185,12 +186,10 @@ describe('Playground without the in-browser runtime (DOGFOOD-3 S5)', () => {
       document.body.appendChild(target);
       router.route = parse('#/playground?model=m_shapes_s');
       c = mount(Playground, { target });
-      const g = await until(() => target.querySelector('[role="radiogroup"][aria-label="Run the model on"]'), 'Run on');
+      await until(() => target.querySelector('.model-pick'), 'the model picker');
       expect((await api.system()).features).toContain('web_wasm');
-      await until(() => option(g, 'CPU').disabled, 'the CPU choice to turn off');
+      await until(() => !target.querySelector('.runon'), 'the Run on choice to go');
       expect(fetch).toHaveBeenCalledWith(expect.stringContaining('folo-wasm/folo_wasm_bg.wasm'), { method: 'HEAD' });
-      expect(option(g, 'WebGPU').disabled).toBe(true);
-      expect(target.querySelector('#runon-note')?.textContent).toBe('No in-browser runtime');
     } finally {
       vi.unstubAllGlobals();
       resetWasmProbe();

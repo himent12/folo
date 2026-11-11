@@ -184,6 +184,16 @@ describe('Models: groups by evaluation dataset and split (lib/scoreSummary)', ()
     expect(mark('fasteners-n-f16')).toBe('joint best');
   });
 
+  it("says where to put a .folo file to import it, with the server's own folder when it gives its data dir", async () => {
+    const api = new MockApi('empty', 0);
+    const system = api.system.bind(api);
+    api.system = async () => ({ ...(await system()), data_dir: 'D:/folo-data' });
+    await open(Models, '/models', api);
+    const state = await table('table.models', (t) => !!t.querySelector('tr.state')?.textContent?.includes('D:/folo-data'), 'the empty state');
+    expect(state.querySelector('tr.state')!.textContent).toContain('To import a .folo file, copy it into D:/folo-data/models on the server');
+    expect(target.querySelector('header')?.textContent).toContain('To import a .folo file');
+  });
+
   it("marks a run's last checkpoint that is its best epoch as the same weights, not a joint best", async () => {
     const api = new MockApi('normal', 0);
     const [models, runs] = [api.models.bind(api), api.runs.bind(api)];

@@ -275,7 +275,8 @@ export default function Playground() {
   effect(() => {
     if (browserOff.get() && untrack(() => runOn.get()) !== 'server') runOn.set('server');
   });
-  const runOnNote = computed(() => (browserOff.get() ? 'No in-browser runtime' : !webgpu ? 'No WebGPU in this browser' : null));
+  // A build without the runtime offers the server alone, so there is no choice to explain (ModelPickers hides it).
+  const runOnNote = computed(() => (!browserOff.get() && !webgpu ? 'No WebGPU in this browser' : null));
   /** .folo files the user picked, by model id. */
   const localWeights = signal(new Map<string, File>());
   /** The server cannot send this model's file: ask for it. */

@@ -86,6 +86,9 @@ export default function Models() {
   const runs = new Resource((s) => hub.api.runs(s));
   refreshOnModelsChange(runs);
   const datasets = new Resource((s) => hub.api.datasets(s));
+  // Where imported .folo files go, for the empty state (the server's data dir, when it says; the mock has none).
+  const system = new Resource((s) => hub.api.system(s));
+  const modelsDir = computed(() => (system.data?.data_dir ? `\`${system.data.data_dir}/models\`` : "the models folder of the server's data directory"));
   // This server's measured speed, for the engine benchmarks' "Measured on this server" lines (null on older servers).
   const throughput = new Resource((s) => loadThroughput(hub.api, s));
   const benchHere = computed(() => [measuredLatency(throughput.data, 'folo-n'), measuredTraining(throughput.data, 'folo-n')].filter(Boolean).length);
@@ -260,7 +263,12 @@ export default function Models() {
     <Page
       title="Models"
       // One fixed line: the counts live at the list's end, so nothing here changes as the list loads.
-      sub={() => <span>Trained, published and imported weights, ranked within each evaluation dataset and split.</span>}
+      sub={() => (
+        <span>
+          Trained, published and imported weights, ranked within each evaluation dataset and split. To import a .folo file, put it in the models
+          folder of the server's data directory.
+        </span>
+      )}
       // Phones: one line, so the list starts 16 px under it.
       subPhone={() => <span>Ranked per dataset and split.</span>}
     >
@@ -351,7 +359,7 @@ export default function Models() {
                   <EmptyState
                     icon={Box}
                     title="No models yet"
-                    description="A training run saves its best weights here when it finishes."
+                    description={`A training run saves its best weights here when it finishes. To import a .folo file, copy it into ${modelsDir.get()} on the server's machine.`}
                     // The page's only action (its header has none), so primary.
                     actions={() => (
                       <Button variant="primary" icon={Plus} href={href('/runs/new')}>
