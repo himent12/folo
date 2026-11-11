@@ -203,8 +203,7 @@ fn lay_out(window: &mut crate::Window, cx: &mut crate::App, layouts: &[f32]) -> 
             },
         ));
     }
-    let mut style = Style::default();
-    style.display = crate::Display::Flex;
+    let style = Style { display: crate::Display::Flex, ..Style::default() };
     let root = window.request_layout(style, leaves.iter().copied(), cx);
     for width in layouts {
         let space = size(AvailableSpace::Definite(px(*width)), AvailableSpace::MinContent);

@@ -108,7 +108,7 @@ fn tree(way: Way) -> AnyElement {
         .child(animated(
             way,
             "appear",
-            Animation::new(Duration::from_millis(160)).with_easing(move |t| ease(t)),
+            Animation::new(Duration::from_millis(160)).with_easing(ease),
             appear,
             panel,
         ))
