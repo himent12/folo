@@ -31,6 +31,7 @@ clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+ureq = { workspace = true, features = ["rustls"] }
 
 [dev-dependencies]
 folo-test-support.workspace = true

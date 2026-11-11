@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "tool": "folo",
+  "model": "folo-s",
+  "dataset": "medical-pills",
+  "variant": "pretrained",
+  "seed": 1,
+  "epochs_planned": 100,
+  "epochs_run": 100,
+  "imgsz": 640,
+  "batch": 16,
+  "weights": {
+    "name": "folo-s-coco",
+    "sha256": "a9d7f588aadd62acadb629f50c86038cc7abc07cdb41612a5d90668b32a57e60"
+  },
+  "eval_split": "val",
+  "metrics": {
+    "ap": 0.8062708103475733,
+    "ap50": 0.9969262513069866,
+    "ap75": 0.9772836961456807,
+    "ap_small": null,
+    "ap_medium": 0.3004410287576072,
+    "ap_large": 0.811725730669147,
+    "ar1": 0.050626566416040096,
+    "ar10": 0.5000000000000001,
+    "ar100": 0.8411027568922307,
+    "ar_small": null,
+    "ar_medium": 0.6571428571428571,
+    "ar_large": 0.8443877551020409,
+    "images": 23,
+    "truths": 399,
+    "detections": 974,
+    "images_without_detections": 0,
+    "inverted_boxes": 0
+  },
+  "tool_reported": {
+    "map50_95": 0.8052406,
+    "map50": 0.99692625,
+    "source": "folo val of best.folo (FOLO's own metric)",
+    "best_epoch": 64,
+    "train_best_map50_95": 0.8052406
+  },
+  "train_wall_s": 170.0,
+  "gpu": "NVIDIA A40 (vulkan)",
+  "versions": {
+    "folo_server": "0.1.0",
+    "folo_cli": "folo 0.1.0 (ee846c8829ce 2026-11-11)",
+    "dataset_layout_sha256": "696f575fc1d34c95f77ae19447594af14a756ae09e97296e1b370005a4b0c1b3",
+    "resolved": {
+      "optimizer": "adamw",
+      "lr0": 0.002,
+      "lrf": 0.01,
+      "cos_lr": false,
+      "momentum": 0.9,
+      "betas": [
+        0.9,
+        0.999
+      ],
+      "weight_decay": 0.0005,
+      "batch": 16,
+      "accumulate": 4,
+      "nbs": 64,
+      "optimizer_steps_per_epoch": 2,
+      "warmup_iters": 60,
+      "warmup_epochs": 3.0,
+      "warmup_momentum": 0.8,
+      "warmup_bias_lr": 0.0,
+      "close_mosaic": 10
+    }
+  },
+  "compute": {
+    "where": "cloud",
+    "provider": "runpod",
+    "offer": {
+      "id": "NVIDIA A40@secure",
+      "gpu": "A40",
+      "gpu_count": 1,
+      "vram_bytes": 51539607552,
+      "price_per_hour": 0.59,
+      "region": null,
+      "detail": "Secure Cloud",
+      "availability": "low"
+    },
+    "cost_usd": 0.0333,
+    "max_hours": 0.5,
+    "val_device": "cpu"
+  },
+  "created": "2026-11-11T12:14:56Z",
+  "run_id": "run_308b",
+  "detections_file": "D:\\folo-data\\runs-finetune\\folo-s\\folo-s-medical-pills-pretrained-s1\\detections-val.json"
+}

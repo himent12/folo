@@ -5,6 +5,33 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
 
 ## Unreleased
 
+### Pretrained weights
+- The weights releases `weights-v1` (`folo-n-coco`) and `weights-v2` (`folo-n-coco-v2`) are published.
+- **folo-s COCO weights**: `folo-s-coco` and `folo-s-coco-f16` (release `weights-v3`), folo-s trained from scratch
+  on COCO train2017 for 56 epochs on one rented GPU, val2017 **AP 0.416 / AP50 0.580** (pycocotools-exact,
+  cross-checked with pycocotools; f16 the same), 0.05–0.06 AP behind the published YOLO11s / YOLO26s
+  ([examples/coco](examples/coco/README.md#folo-s-56-epochs-on-a-rented-gpu)). `folo weights pull folo-s-coco`.
+- **MuSGD validated at scale**: that run is the first in which `auto` resolved to MuSGD (rule 3: lr0 0.01,
+  momentum 0.9, warmup_bias_lr 0) at full scale; it trained without a non-finite batch. One run with no SGD twin:
+  it shows the recipe works, not how much it gains over SGD on full COCO.
+- The 300-epoch folo-n COCO run stays paused at epoch 62 (`folo-n-coco-v2`, AP 0.317); it can be resumed from its
+  checkpoint.
+- **Fine-tuning benchmark** (`bench/finetune/`, docs/BENCHMARKS.md, Fine-tuning on small datasets): FOLO's COCO
+  weights against Ultralytics' YOLO26 of the same size on four small public datasets, three seeds each, both trained
+  on the same rented GPU type and scored by one pycocotools scorer. folo-n is level with YOLO26n on three of them
+  and 0.020 AP behind on BCCD; folo-s is 0.020 behind YOLO26s on BCCD, level on pills, and ahead on signatures
+  (0.012) and brain-tumor (0.080, where YOLO26s does worse than YOLO26n).
+- `folo weights pull` downloads over plain HTTPS first, without credentials (streamed, redirects followed, a stalled
+  connection fails after 60 s, a progress line on a terminal), so once the repository is public it needs nothing but
+  the `folo` binary. A refused download (`404`: a private repository, a draft, a missing release) falls back to
+  `gh release download` as before; the repository is private for now, so today a pull still needs access to it
+  through a logged-in `gh`. When `gh` is missing or fails then, one `gh_failed` error says both. No network, a
+  timeout, a server error or a cut download is the new `download_failed`, without a fallback. The checksum and
+  `.folo` checks are unchanged: nothing is installed unless both pass. `--json` adds `via` (`https`, `gh`, `null`).
+- `FOLO_WEIGHTS_BASE_URL` downloads from a mirror (`<base>/<tag>/<file>`), `FOLO_GH` names the GitHub CLI program.
+- The QUICKSTART has the two-command path to a first fine-tune (`folo weights pull folo-n-coco-v2`, then
+  `folo train --weights folo-n-coco-v2`); `train` still never downloads by itself, and its hint says what to run.
+
 ### Vision benchmarks
 - Make a benchmark from your own labeled images and run **any vision model** on it: a FOLO model, Claude Code or
   Codex looking at the images, or predictions from a model that runs anywhere else
@@ -36,7 +63,7 @@ All notable changes to FOLO. Versions follow [Semantic Versioning](https://semve
   step is 25% faster and `predict_batch` 32–47%; batch-1 latency is unchanged.
 - **`--optimizer musgd`** (Ultralytics 8.4's MuSGD: a Muon-orthogonalised update plus SGD) and two `auto` rule
   changes: rule 2 floors the AdamW LR of short runs at 0.001 (80-class runs from scratch learned almost nothing at
-  the old 0.000119), rule 3 picks MuSGD for runs over 10,000 iterations (its +0.031 AP over SGD on the COCO proxy was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run; a long COCO run under rule 3 is the follow-up). Checkpoints resume with the rule they were
+  the old 0.000119), rule 3 picks MuSGD for runs over 10,000 iterations (its +0.031 AP over SGD on the COCO proxy was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself had not been validated by a run when this merged; the folo-s COCO run under Pretrained weights, above, has since run it at full scale). Checkpoints resume with the rule they were
   started with (`TrainConfig.auto_rule`; a missing field is rule 1), so resumed runs keep their optimizer;
   `--set auto_rule=2` keeps SGD for a new long run. `--set KEY=VALUE` sets any `train` config key.
 - The data loader defaults to up to 16 workers (was 8); the next epoch's loader starts once the previous epoch has taken
@@ -163,8 +190,8 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
 - GPU training end to end with the loss and assigner on the device (#46); mixed-precision training, `--amp`, on
   tensor cores with dynamic loss scaling (#101).
 - COCO 2017 support with 6x less loader memory, a pycocotools-exact COCOeval and `folo weights` to pull pretrained
-  weights (#72); `folo-n-coco`, val2017 AP 0.314 / AP50 0.455 after 50 epochs from scratch, in the draft release
-  `weights-v1` (#128).
+  weights (#72); `folo-n-coco`, val2017 AP 0.314 / AP50 0.455 after 50 epochs from scratch, in the release
+  `weights-v1` (#128; a draft when 0.1.0 was cut, published on 2026-11-11).
 - Short-run schedules, timing split and other dogfooding fixes (#69, #99).
 
 ### Inference and export
@@ -211,4 +238,5 @@ Headline numbers, folo-n against Ultralytics yolo26n on an RTX 4080 SUPER and an
 - No macOS build: the macOS job needs GitHub-hosted runners, which are unavailable for this repository, so
   `install.sh` stops on macOS. Build from source there.
 - The repository is private: the install scripts need a token (`GH_TOKEN`, `GITHUB_TOKEN` or a logged-in `gh`).
-- `weights-v1` (`folo-n-coco`) is still a draft release, so only repository writers can `folo weights pull` it.
+- `weights-v1` (`folo-n-coco`) was a draft release, so only repository writers could `folo weights pull` it. It
+  was published on 2026-11-11 (Unreleased, Pretrained weights).

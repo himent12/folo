@@ -1,9 +1,10 @@
 //! `folo weights`: published pretrained weights, downloaded from a GitHub release into a local cache, and the
 //! name → path resolution behind `folo train --weights <name>` and `--model <name>` (docs/CLI.md, Weights).
 
+mod download;
+
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -24,7 +25,7 @@ fn not_downloaded(p: &Published, path: &Path) -> CliError {
         "weights_not_found",
         format!("weights `{}` are not downloaded ({} does not exist)", p.name, folo_api::json::path(path)),
     )
-    .hint(format!("run `folo weights pull {}`", p.name))
+    .hint(format!("run `folo weights pull {}`, then this command again", p.name))
 }
 
 /// A `.folo` path as given, or the cached file of a published name. An existing file always wins, so a local
@@ -120,7 +121,7 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
         let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
         out.record(&json!({
             "event": "done", "name": p.name, "path": folo_api::json::path(&dest), "downloaded": false,
-            "sha256": sha, "bytes": bytes,
+            "sha256": sha, "bytes": bytes, "via": null,
         }));
         out.human(format!(
             "{} is already downloaded: {} (--force downloads it again)",
@@ -137,24 +138,9 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
     std::fs::create_dir_all(&tmp)
         .map_err(|e| io(&format!("cannot create {}", folo_api::json::path(&tmp)), e))?;
     let result = (|| {
-        out.human(format!("downloading {} from {} release {} ...", p.asset, args.repo, p.release));
-        let status = Command::new("gh")
-            .args(["release", "download", p.release, "--repo", &args.repo, "--pattern", p.asset, "--pattern", SUMS])
-            .arg("--dir")
-            .arg(&tmp)
-            .status()
-            .map_err(|e| {
-                CliError::new(ExitCode::Runtime, "gh_failed", format!("could not run the GitHub CLI `gh`: {e}"))
-                    .hint("install it from https://cli.github.com and run `gh auth login` (the repository is private)")
-            })?;
-        if !status.success() {
-            return Err(CliError::new(
-                ExitCode::Runtime,
-                "gh_failed",
-                format!("`gh release download {} --repo {}` failed ({status})", p.release, args.repo),
-            )
-            .hint("check `gh auth status` and that you can see the repository's releases"));
-        }
+        let base = download::base_url(&args.repo);
+        out.human(format!("downloading {} ({}) from {base}/{} ...", p.asset, p.name, p.release));
+        let via = download::release_files(&base, &args.repo, p.release, &[SUMS, p.asset], &tmp, out)?;
         let file = tmp.join(p.asset);
         let sums =
             std::fs::read_to_string(tmp.join(SUMS)).map_err(|e| io(&format!("release has no {SUMS}"), e))?;
@@ -177,20 +163,21 @@ fn pull(args: WeightsPullArgs, out: Out) -> Result<(), CliError> {
         let _ = std::fs::remove_file(&dest);
         std::fs::rename(&file, &dest)
             .map_err(|e| io(&format!("cannot move into {}", folo_api::json::path(&dest)), e))?;
-        Ok(got)
+        Ok((got, via))
     })();
     let _ = std::fs::remove_dir_all(&tmp);
-    let sha = result?;
+    let (sha, via) = result?;
     let bytes = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     out.record(&json!({
         "event": "done", "name": p.name, "path": folo_api::json::path(&dest), "downloaded": true, "sha256": sha,
-        "bytes": bytes,
+        "bytes": bytes, "via": via.name(),
     }));
     out.human(format!(
-        "{} → {} ({:.1} MB, sha256 {sha} verified)",
+        "{} → {} ({:.1} MB, sha256 {sha} verified, via {})",
         p.name,
         folo_api::json::path(&dest),
-        bytes as f64 / 1e6
+        bytes as f64 / 1e6,
+        via.name()
     ));
     Ok(())
 }

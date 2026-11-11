@@ -55,7 +55,8 @@ with a pre-release suffix (`0.2.0-rc.1`) makes a pre-release.
    - the notes: edit them into the release notes (highlights, benchmarks, known issues; from the CHANGELOG section),
      `gh release edit v0.2.0 --notes-file notes.md`. A re-run of the workflow for the draft keeps them;
    - optionally download an archive and run the [checks below](#checking-a-build).
-5. **Publish**: `gh release edit v0.2.0 --draft=false` (or "Publish release" on GitHub). Only now do
+5. **Publish**: `gh release edit v0.2.0 --draft=false --latest` (or "Publish release" on GitHub, with "Set as the
+   latest release" ticked; [Weights releases](#weights-releases) says why the flag matters). Only now do
    `releases/latest/download/...` and the install scripts (`scripts/install.sh`, `scripts/install.ps1`) see it.
    Check with a fresh install: `sh scripts/install.sh --dir /tmp/folo-check && /tmp/folo-check/folo --version`.
 
@@ -143,6 +144,33 @@ not the SPA fallback). The desktop build must answer `--version` with the releas
 Asset names carry no version, so `https://github.com/himent12/folo/releases/latest/download/<asset>` always points
 at the newest published release. Every archive has a `<asset>.sha256` (`<hex>  <asset>`, the `sha256sum` format);
 `SHA256SUMS` lists them all.
+
+## Weights releases
+Pretrained weights are releases of their own, tagged `weights-v<n>` and made by hand, not by the workflow (the recipes
+are in examples/coco/README.md, Publish): the `.folo` files and a `SHA256SUMS` (`sha256sum` output) listing them, plus
+an entry per file in `folo_api::weights::PUBLISHED`, which is what `folo weights pull <name>` and `folo weights list`
+read. Create them with `--latest=false` (`gh release create weights-v3 --latest=false ...`, or
+`gh release edit weights-v3 --latest=false` after the fact): otherwise GitHub marks the newest published release
+*Latest*, and `releases/latest/download/...`, the install scripts and `gh release download --pattern install.sh`
+look for FOLO's binaries in the weights release. A published weights release downloads over plain HTTPS
+(`https://github.com/<repo>/releases/download/<tag>/<file>`), which `folo weights pull` tries first; while the
+repository is private that answers `404` and the pull goes through `gh` (docs/CLI.md, Weights). Do not replace a
+published file: caches keep the copy they have (`pull` skips a cached name without `--force`), so a new result is a
+new name.
+
+| tag | names | published |
+|---|---|---|
+| `weights-v1` | `folo-n-coco`, `folo-n-coco-f16` | 2026-11-11 (created as a draft) |
+| `weights-v2` | `folo-n-coco-v2`, `folo-n-coco-v2-f16` | 2026-11-11 (created as a draft) |
+| `weights-v3` | `folo-s-coco`, `folo-s-coco-f16` | 2026-11-11 |
+
+All three carry `--latest=false`.
+
+**Known issue: "latest" is a weights release.** The app release `v0.1.0` is still a draft, and no published release
+is marked latest, so GitHub picks one: today that is `weights-v2`. Until an app release is published and marked
+latest, `releases/latest/download/...` and `install.sh` without `--version` do not find the binaries. The fix
+is one flag for whoever publishes `v0.1.0`: `gh release edit v0.1.0 --draft=false --latest` (publish it with
+`--latest`).
 
 ## Building a release binary locally
 ```sh

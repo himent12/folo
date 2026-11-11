@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "tool": "ultralytics",
+  "model": "yolo26s",
+  "dataset": "bccd",
+  "variant": "pretrained",
+  "seed": 0,
+  "epochs_planned": 100,
+  "epochs_run": 100,
+  "imgsz": 640,
+  "batch": 16,
+  "weights": {
+    "name": "yolo26s.pt",
+    "sha256": "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b"
+  },
+  "eval_split": "test",
+  "metrics": {
+    "ap": 0.6221810024569275,
+    "ap50": 0.9111461271929069,
+    "ap75": 0.7079237421265481,
+    "ap_small": 0.3506445644564456,
+    "ap_medium": 0.5118480525164181,
+    "ap_large": 0.476016379291181,
+    "ar1": 0.4046522613944536,
+    "ar10": 0.6605991504583053,
+    "ar100": 0.7281767902098581,
+    "ar_small": 0.5857142857142856,
+    "ar_medium": 0.6558077623651393,
+    "ar_large": 0.5350394251087377,
+    "images": 72,
+    "truths": 945,
+    "detections": 3192,
+    "images_without_detections": 0,
+    "inverted_boxes": 0
+  },
+  "tool_reported": {
+    "map50_95": 0.6197347956482787,
+    "map50": 0.9121027761722426,
+    "source": "ultralytics val of best.pt"
+  },
+  "train_wall_s": 501.7584086738061,
+  "gpu": "NVIDIA A40",
+  "versions": {
+    "ultralytics": "8.4.198",
+    "torch": "2.5.1+cu124",
+    "cuda": "12.4",
+    "python": "3.10.12",
+    "dataset_layout_sha256": "67ab1b141b038099bc75408b737638e8e1cda0812611208e76acd90e364e0d1a"
+  },
+  "compute": {
+    "where": "runpod NVIDIA A40 secure",
+    "device": "0",
+    "concurrent_jobs": 3,
+    "patience": 100,
+    "amp": true
+  },
+  "created": "2026-11-11T07:47:15Z",
+  "detections_file": "/workspace/finetune/work/runs/yolo26s-bccd-pretrained-s0/detections-test.json",
+  "run_dir": "/workspace/finetune/work/runs/yolo26s-bccd-pretrained-s0"
+}

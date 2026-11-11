@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "tool": "ultralytics",
+  "model": "yolo26s",
+  "dataset": "brain-tumor",
+  "variant": "pretrained",
+  "seed": 2,
+  "epochs_planned": 100,
+  "epochs_run": 100,
+  "imgsz": 640,
+  "batch": 16,
+  "weights": {
+    "name": "yolo26s.pt",
+    "sha256": "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b"
+  },
+  "eval_split": "val",
+  "metrics": {
+    "ap": 0.3598164307164166,
+    "ap50": 0.5011436178278833,
+    "ap75": 0.4265587704664716,
+    "ap_small": 0.24269850216533784,
+    "ap_medium": 0.3971272112813949,
+    "ap_large": 0.6048844884488448,
+    "ar1": 0.6385766532318256,
+    "ar10": 0.743969249141663,
+    "ar100": 0.743969249141663,
+    "ar_small": 0.6633333333333333,
+    "ar_medium": 0.7667271407837445,
+    "ar_large": 0.6833333333333333,
+    "images": 223,
+    "truths": 241,
+    "detections": 1165,
+    "images_without_detections": 0,
+    "inverted_boxes": 0
+  },
+  "tool_reported": {
+    "map50_95": 0.35867989722786114,
+    "map50": 0.5011559743116523,
+    "source": "ultralytics val of best.pt"
+  },
+  "train_wall_s": 1753.5901800289284,
+  "gpu": "NVIDIA A40",
+  "versions": {
+    "ultralytics": "8.4.198",
+    "torch": "2.5.1+cu124",
+    "cuda": "12.4",
+    "python": "3.10.12",
+    "dataset_layout_sha256": "908edcb35303362c5b77b267b7d43171b9c9c989fd5741242d1ca038f183bf26"
+  },
+  "compute": {
+    "where": "runpod NVIDIA A40 secure",
+    "device": "0",
+    "concurrent_jobs": 3,
+    "patience": 100,
+    "amp": true
+  },
+  "created": "2026-11-11T07:38:45Z",
+  "detections_file": "/workspace/finetune/work/runs/yolo26s-brain-tumor-pretrained-s2/detections-val.json",
+  "run_dir": "/workspace/finetune/work/runs/yolo26s-brain-tumor-pretrained-s2"
+}

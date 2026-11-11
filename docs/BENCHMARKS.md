@@ -356,9 +356,12 @@ Speed only counts at comparable accuracy, so this section tracks FOLO's accuracy
 
 **COCO val2017** ([examples/coco](../examples/coco/README.md); `folo val --coco`, pycocotools-exact, cross-checked on
 the same detections with pycocotools itself, all 12 stats equal to 6e-16). folo-n trained from scratch for 50 epochs
-(8.7 h on the RTX 4080 SUPER), uploaded as `folo-n-coco` (draft release `weights-v1`). v2 runs the same recipe with
+(8.7 h on the RTX 4080 SUPER), published as `folo-n-coco` (release `weights-v1`). v2 runs the same recipe with
 mixed precision on a 300-epoch schedule; it was **paused after epoch 62** (8.0 h) and its weights at the pause are the
-interim `folo-n-coco-v2` (draft release `weights-v2`):
+interim `folo-n-coco-v2` (release `weights-v2`). folo-s was trained from scratch for **56 epochs** with AMP on one
+rented RTX PRO 4000 Blackwell (9.5 h of epochs, about $5.60 for the pod), published as `folo-s-coco` (release `weights-v3`):
+
+*Nano*
 
 | model | params | training | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
@@ -369,17 +372,35 @@ interim `folo-n-coco-v2` (draft release `weights-v2`):
 | YOLO11n (Ultralytics, published) | 2.6 M | Ultralytics recipe (not given on its model page) | 0.395 | | | | | |
 | YOLO26n (Ultralytics, published) | 2.4 M | 150 epochs Objects365-v1, then 245 epochs COCO, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.409 (e2e 0.401) | | | | | |
 
-**This is not like for like:** YOLO26n's number comes from more data (Objects365 pretraining), a longer schedule and a
-tuned recipe (YOLO11n's is not documented on its model page), and the architectures differ. The gap cannot be split
-into those causes. The FOLO run ended
-at its schedule's floor, not at a plateau: mAP50-95 rose every epoch, by 0.0009 per epoch over the last five. The
-longer v2 schedule passed v1 at epoch 58 and was still gaining about 0.0008 per epoch when it was paused at epoch 62,
-before its learning-rate decay and close-mosaic phases; the remaining 238 epochs (about 29 h) have not been run, so
-what the full schedule reaches is not known. Until a long run exists, FOLO's accuracy on full COCO is **behind the
-published nano models by 0.08–0.09 AP** (v2 interim; 0.08–0.10 for v1), and the speed rows above should be read with
-that in mind. **The published 0.314 / 0.317 are unchanged by the hill-climb**: both checkpoints were trained with
-SGD before it, and the trainer changes below (the `auto` rule, MuSGD) only show at full scale once a long COCO run is
-redone with them.
+*Small*
+
+| model | params | training | AP | AP50 | AP75 | AP_S | AP_M | AP_L |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| **folo-s, f32** | 9.5 M | **56 epochs from scratch**, FOLO trainer, `auto` → MuSGD (rule 3), AMP | **0.416** | 0.580 | 0.452 | 0.229 | 0.459 | 0.584 |
+| folo-s, f16 (`--half`) | 9.5 M | the same weights, fused f16 file | 0.416 | 0.580 | 0.452 | 0.229 | 0.460 | 0.584 |
+| YOLO11s (Ultralytics, published) | 9.4 M | Ultralytics recipe (not given on its model page) | 0.470 | | | | | |
+| YOLO26s (Ultralytics, published) | 9.5 M | Objects365 pretraining, a long COCO schedule, evolved hyperparameters ([paper](https://arxiv.org/abs/2606.03748)) | 0.480 | | | | | |
+
+**This is not like for like:** YOLO26's numbers come from more data (Objects365 pretraining), a longer schedule and a
+tuned recipe (YOLO11's is not documented on its model pages), and the architectures differ. The gaps cannot be split
+into those causes, and no equal-budget COCO comparison has been run.
+
+- **folo-n.** v1 ended at its schedule's floor, not at a plateau: mAP50-95 rose every epoch, by 0.0009 per epoch over
+  the last five. The longer v2 schedule passed v1 at epoch 58 and was still gaining about 0.0008 per epoch when it
+  was paused at epoch 62, before its learning-rate decay and close-mosaic phases. **It is still paused**: all
+  training for this round ran on rented GPUs with a fixed budget of about $9, and the remaining 238 epochs (about
+  29 h on the RTX 4080 SUPER, 25–45 h on what $9 rents) did not fit next to folo-s and the fine-tuning benchmark, so
+  the owner left it paused. It can be resumed from its checkpoint
+  ([examples/coco, Resume (v2)](../examples/coco/README.md#resume-v2)); what the full schedule reaches is not known.
+  folo-n is **0.08–0.09 AP behind the published nano models** (v2 interim; 0.08–0.10 for v1).
+- **folo-s.** 56 epochs (103,544 optimizer steps, 9.49 h of epochs on a 140 W card) reach **AP 0.416 / AP50 0.580**,
+  **0.05–0.06 AP behind YOLO11s / YOLO26s** and above both published nano models. That is the epoch budget's floor,
+  not a plateau: internal mAP50-95 rose in every one of the 56 epochs, and the last six gains (0.0007 to 0.0001)
+  shrank with the linear decay to `lr0 · lrf`, not at a healthy learning rate.
+
+The speed rows above should be read with these gaps in mind. **The folo-n 0.314 / 0.317 are unchanged by the
+hill-climb**: both checkpoints were trained with SGD before it. folo-s is the first full-scale run with the
+hill-climb's trainer (the `auto` rule, MuSGD).
 
 **Equal budget on a COCO proxy** (the hill-climb's learn agent, [hill/learn.md](hill/learn.md)): 20,000 train2017 /
 2,000 val2017 images pre-shrunk to 320 px (all 80 classes), folo-n against Ultralytics 8.4.198 YOLO11n, both from
@@ -404,8 +425,121 @@ scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed 
 - **MuSGD** (rule 3): the reference's `auto` choice since 8.4 for runs over 10,000 iterations (full COCO), now
   implemented in folo-nn (docs/MODEL.md §8.2) and `auto`'s long-run choice. +0.031 AP over SGD on the proxy (ten
   times the seed noise), level with the reference's own MuSGD, at about 17% more step time; it passes SGD's 20-epoch
-  AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
-  paused 300-epoch COCO run keeps SGD.
+  AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3
+  ships momentum 0.9 and warmup_bias_lr 0 (the proxy's 6,260 iterations and the shapes gate resolve AdamW). **The
+  shipped rule-3 recipe has since run once at full scale** (2026-11-11): the folo-s COCO run above resolved `auto` to
+  MuSGD (103,544 optimizer steps > 10,000; lr0 0.01, momentum 0.9, warmup_bias_lr 0), trained 56 epochs under AMP
+  without a non-finite batch (44 of 103,544 steps skipped for gradient overflow) and reached AP 0.416. That shows the
+  rule-3 recipe works at scale. It is one run with no SGD twin at that scale, so it does not show how much MuSGD gains
+  over SGD on full COCO. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
+  paused 300-epoch folo-n COCO run keeps SGD.
+
+### Fine-tuning on small datasets
+
+What most users do: fine-tune pretrained weights on a few hundred of their own images. folo-n starts from FOLO's
+COCO weights (`folo-n-coco-v2`, COCO AP 0.317), YOLO26n from Ultralytics' `yolo26n.pt` (COCO AP 0.409, with
+Objects365 pretraining), so FOLO starts from weaker weights and may well lose here; the table says what was
+measured. Harness, datasets and the full protocol: [bench/finetune](../bench/finetune/README.md). The same matrix
+was then run for the small pair: folo-s from `folo-s-coco` (COCO AP 0.416) against YOLO26s from `yolo26s.pt`
+(published COCO AP 0.480).
+
+- **Protocol**: both tools at their out-of-the-box fine-tuning defaults (`optimizer: auto`, their own augmentation;
+  FOLO in f32, Ultralytics with its default AMP), 640 px, batch 16, 100 epochs (both tools' default; neither can
+  stop early at its default patience of 100), seeds 0, 1, 2; plus folo-n from scratch (seed 0) as the control.
+  The small pair has no from-scratch control: what was left of the budget went to its 24 fine-tunes, so its table
+  is marked partial (24 of 28 runs).
+- **One scorer**: each run's best checkpoint predicts the evaluation split with its own validation pipeline (conf
+  0.001, at most 300 detections, 640 px; FOLO with NMS at IoU 0.7, YOLO26n with its NMS-free head) into COCO
+  detections JSON, and pycocotools scores both against one ground truth built from the YOLO labels: AP@[.5:.95] and
+  AP50, mean and min–max over the seeds. Neither tool's self-reported mAP is compared.
+- **The scorer is checked** on COCO val2017 (5,000 images, original annotations): folo-n-coco-v2 scores 0.31682
+  there, exactly what `folo val --coco` reports; yolo26n scores 0.4080 against its published 0.409 (Ultralytics'
+  own metric says 0.4023, computed differently).
+- BCCD is scored on its test split, the other three (which have no test split) on val. The evaluation splits are
+  small (23 to 223 images), so differences of a few hundredths are within the seed spread; the min–max shows it.
+- **Where it ran** (2026-11-11): every run on one GPU type, an NVIDIA A40 (48 GB) rented from RunPod's Secure Cloud.
+  FOLO through its own cloud feature (docs/CLOUD.md), one pod per run, the Linux build of commit `ee846c88`, f32 on
+  Vulkan; `folo val` of the copied-back `best.folo` on the CPU of the control plane. Ultralytics 8.4.198 with torch
+  2.5.1+cu124 on one `ubuntu:22.04` pod (NVIDIA driver 595.91): seed 0 of every dataset alone on the GPU, seeds 1
+  and 2 two at a time (to fit the budget), which changes no number but their training time. The whole matrix
+  cost about $1.55 of A40 time: $0.93 for FOLO's 19 pods (FOLO's own per-pod estimates; $0.856 of it is in the
+  result files, the rest is 3 runs repeated after a runner bug) and $0.62 for Ultralytics' two pods (by uptime,
+  one of them a pod that never started); the from-scratch control of brain-tumor ran a little later than the
+  rest, on the same GPU type. bench/finetune/README.md has the accounting and its sources.
+- **The small pair** ran the same day on the same GPU type: folo-s through FOLO's cloud feature again (12 pods,
+  $0.98 by FOLO's per-pod estimates), YOLO26s on two `ubuntu:22.04` pods with all runs three at a time on one GPU
+  ($0.57 by uptime), which is why YOLO26s has no training time in its table.
+
+<!-- finetune:begin -->
+| dataset | domain | licence | classes | train images | train boxes | scored on: images / boxes |
+|---|---|---|---:|---:|---:|---|
+| [BCCD blood cells](https://github.com/Shenggan/BCCD_Dataset) | microscopy | MIT | 3 | 205 | 2804 | test: 72 / 945 |
+| [Brain tumor (MRI)](https://docs.ultralytics.com/datasets/detect/brain-tumor/) | medical imaging | AGPL-3.0 | 2 | 893 | 925 | val: 223 / 241 |
+| [Signatures on documents](https://docs.ultralytics.com/datasets/detect/signature/) | documents | AGPL-3.0 | 1 | 143 | 143 | val: 35 / 35 |
+| [Medical pills](https://docs.ultralytics.com/datasets/detect/medical-pills/) | industrial / product photos | AGPL-3.0 | 1 | 92 | 1623 | val: 23 / 399 |
+
+**folo-n against yolo26n**: all 28 runs of the matrix measured.
+
+| dataset | folo-n fine-tuned AP | AP50 | yolo26n fine-tuned AP | AP50 | FOLO − Ultralytics (AP) | folo-n from scratch AP | AP50 | folo-n min / run | yolo26n min / run |
+|---|---|---|---|---|---:|---|---|---:|---:|
+| bccd | 0.607 (0.606–0.607) | 0.883 (0.875–0.892) | 0.626 (0.621–0.634) | 0.911 (0.911–0.911) | -0.020 | 0.590 | 0.900 | 3.2 | 3.6 |
+| brain-tumor | 0.452 (0.439–0.460) | 0.613 (0.605–0.617) | 0.436 (0.413–0.459) | 0.591 (0.564–0.612) | +0.017 | 0.372 | 0.532 | 10.1 | 11.7 |
+| signature | 0.989 (0.987–0.992) | 1.000 (1.000–1.000) | 0.982 (0.975–0.987) | 1.000 (1.000–1.000) | +0.007 | 0.920 | 1.000 | 3.5 | 2.6 |
+| medical-pills | 0.804 (0.801–0.807) | 0.995 (0.995–0.996) | 0.803 (0.800–0.806) | 0.998 (0.998–0.998) | +0.002 | 0.737 | 0.984 | 2.5 | 2.2 |
+
+Minutes per run of yolo26n: only the runs that had the GPU to themselves; the others trained side by side with other runs on one GPU (their accuracy counts, their time does not).
+
+**folo-s against yolo26s, partial**: 24 of the 28 runs of the matrix have been measured.
+
+| dataset | folo-s fine-tuned AP | AP50 | yolo26s fine-tuned AP | AP50 | FOLO − Ultralytics (AP) | folo-s from scratch AP | AP50 | folo-s min / run | yolo26s min / run |
+|---|---|---|---|---|---:|---|---|---:|---:|
+| bccd | 0.600 (0.597–0.604) | 0.884 (0.876–0.896) | 0.621 (0.616–0.624) | 0.913 (0.908–0.919) | -0.020 | not run | not run | 5.4 |  |
+| brain-tumor | 0.447 (0.411–0.472) | 0.604 (0.560–0.645) | 0.367 (0.360–0.371) | 0.503 (0.501–0.505) | +0.080 | not run | not run | 17.4 |  |
+| signature | 0.992 (0.991–0.994) | 1.000 (1.000–1.000) | 0.980 (0.978–0.981) | 1.000 (1.000–1.000) | +0.012 | not run | not run | 4.2 |  |
+| medical-pills | 0.806 (0.806–0.807) | 0.997 (0.997–0.997) | 0.805 (0.802–0.810) | 0.998 (0.997–0.998) | +0.001 | not run | not run | 3.0 |  |
+
+Minutes per run of yolo26s: blank, because every one of its runs trained side by side with other runs on one GPU (their accuracy counts, their time does not).
+
+Trained on: NVIDIA A40; NVIDIA A40 (vulkan).
+<!-- finetune:end -->
+
+**Reading.** Despite the weaker starting point (COCO AP 0.317 against 0.409), folo-n fine-tuned to the same accuracy
+as YOLO26n on three of the four datasets and lost on one:
+- **BCCD (blood cells): YOLO26n is better**, by 0.020 AP (0.607 against 0.626) and 0.028 AP50, and the seed ranges
+  do not overlap (folo-n 0.606–0.607, YOLO26n 0.621–0.634). This is the dataset with the most objects per image
+  (about 14, small and touching), where the stronger pretraining is most likely to show.
+- **Brain tumor (MRI): level.** folo-n's mean is 0.017 higher, but YOLO26n's seeds spread over 0.413–0.459 and
+  folo-n's over 0.439–0.460, so the difference is inside the noise of three seeds on 223 images.
+- **Signatures and pills: level.** Pills differ by 0.002 AP, inside the seed spread. On signatures folo-n's mean is
+  0.007 higher and its three seeds are all above YOLO26n's, but only just (the closest pair is 0.9874 against
+  0.9871), and the set is saturated for both (AP50 1.000, AP 0.98–0.99 on 35 images): this dataset cannot tell the
+  two apart.
+- **What the pretrained weights buy** (folo-n from scratch, one seed, the same 100 epochs): 0.017 AP on BCCD,
+  0.067 on pills, 0.069 on signatures and 0.080 on brain-tumor. From-scratch training on these small sets gets
+  surprisingly close, which says as much about the datasets (few classes, large or regular objects) as about the
+  weights.
+- **Training time** is close: folo-n (f32 on Vulkan) took 0.9 to 1.4 times as long per run as YOLO26n (AMP on
+  CUDA) on the small sets and less on brain-tumor (10.1 against 11.7 minutes). The two clocks are not identical:
+  FOLO's runs from the cloud run's `started` to `finished` (it includes copying the checkpoints back), Ultralytics'
+  is the wall time of `train()` (its label cache and AMP check included); YOLO26n's minutes are of seed 0 alone.
+- Four datasets and three seeds are a small sample: this says FOLO's fine-tuning is competitive on small, simple
+  datasets, not that it matches YOLO26n in general (on full COCO it is 0.09 AP behind).
+
+**The small pair** (folo-s from COCO AP 0.416 against YOLO26s from 0.480) reads the same way, with one surprise:
+- **BCCD: YOLO26s is better**, by 0.020 AP (0.600 against 0.621) and 0.029 AP50; the seed ranges do not overlap
+  (folo-s 0.597–0.604, YOLO26s 0.616–0.624). The same loss, by the same margin, as the nano pair.
+- **Brain tumor: folo-s is better, by 0.080 AP** (0.447 against 0.367), and the ranges do not overlap (folo-s
+  0.411–0.472, YOLO26s 0.360–0.371). The gap comes from YOLO26s doing worse here than YOLO26n (0.367 against
+  0.436, all three seeds, same pipeline and scorer; its own per-epoch validation plateaus early), not from
+  folo-s doing better than folo-n (0.447 against 0.452). Why YOLO26s under-fits this dataset at its defaults was
+  not investigated, so this is one dataset's result, not evidence that folo-s fine-tunes better in general.
+- **Signatures: folo-s is 0.012 AP higher** (0.992 against 0.980; ranges 0.991–0.994 and 0.978–0.981) on a
+  saturated set (AP50 1.000 for both, 35 images). **Pills: level** (0.806 against 0.805).
+- **The bigger model brought no consistent accuracy gain in these four default-recipe comparisons**, for either
+  tool: folo-s is within 0.007 AP of folo-n on all four (0.600 / 0.447 / 0.992 / 0.806 against 0.607 / 0.452 /
+  0.989 / 0.804), at 1.2 to 1.7 times the training time (3.0 to 17.4 minutes per run against 2.5 to 10.1), and
+  YOLO26s is level with or below YOLO26n. Why was not investigated (the datasets are small and have one to three
+  classes; no recipe was tuned per size).
 
 ## FOLO on the GPU
 
@@ -915,9 +1049,9 @@ By expected gain, from the leftovers of the hill-climb notebooks (each has the m
 3. **A persistent pipeline cache**: the first epoch on the GPU is mostly pipeline compilation (4–15 s), and the
    merged build's first f32 epoch is 4 s slower than `main`'s ([The trainer](#the-trainer-row-10)).
 4. **MuSGD step cost** (about 17% of the step): one fused Newton–Schulz kernel per column bucket instead of about 15
-   dispatches per conv weight per step; then the full-scale check, a long COCO run under `auto` rule 3 (the first run of the shipped rule-3 recipe:
-   momentum 0.9, warmup_bias_lr 0), and the AdamW
-   floor at 0.002 behind the shapes gate ([hill/learn.md](hill/learn.md)).
+   dispatches per conv weight per step; then MuSGD's gain over SGD at full scale (the folo-s COCO run showed the
+   shipped rule-3 recipe works, [Accuracy](#accuracy), but had no SGD twin), and the AdamW floor at 0.002 behind the
+   shapes gate ([hill/learn.md](hill/learn.md)).
 5. **f32 GEMMs and weight gradients**: split-K or stream-K for the 40 px-and-below layers of the forward, a
    transposed formulation for `C_in·9 ≫ C_out` weight gradients, a direct reduction for the tensor-core stem weight
    gradient (`N = 27` on a 16×256 tile, 1.7 ms per AMP step), and the f16 weight copies written by the optimizer

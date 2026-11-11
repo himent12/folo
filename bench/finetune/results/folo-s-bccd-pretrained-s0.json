@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "tool": "folo",
+  "model": "folo-s",
+  "dataset": "bccd",
+  "variant": "pretrained",
+  "seed": 0,
+  "epochs_planned": 100,
+  "epochs_run": 100,
+  "imgsz": 640,
+  "batch": 16,
+  "weights": {
+    "name": "folo-s-coco",
+    "sha256": "a9d7f588aadd62acadb629f50c86038cc7abc07cdb41612a5d90668b32a57e60"
+  },
+  "eval_split": "test",
+  "metrics": {
+    "ap": 0.5998562031636423,
+    "ap50": 0.8789346933769172,
+    "ap75": 0.6830785240210182,
+    "ap_small": 0.4727879930850228,
+    "ap_medium": 0.44826186318003836,
+    "ap_large": 0.46276764769736894,
+    "ar1": 0.412051244666064,
+    "ar10": 0.651959097580653,
+    "ar100": 0.723511892611709,
+    "ar_small": 0.6,
+    "ar_medium": 0.6450154126383634,
+    "ar_large": 0.5318336169967852,
+    "images": 72,
+    "truths": 945,
+    "detections": 5744,
+    "images_without_detections": 0,
+    "inverted_boxes": 0
+  },
+  "tool_reported": {
+    "map50_95": 0.5994724,
+    "map50": 0.8789347,
+    "source": "folo val of best.folo (FOLO's own metric)",
+    "best_epoch": 53,
+    "train_best_map50_95": 0.6081758
+  },
+  "train_wall_s": 298.0,
+  "gpu": "NVIDIA A40 (vulkan)",
+  "versions": {
+    "folo_server": "0.1.0",
+    "folo_cli": "folo 0.1.0 (ee846c8829ce 2026-11-11)",
+    "dataset_layout_sha256": "67ab1b141b038099bc75408b737638e8e1cda0812611208e76acd90e364e0d1a",
+    "resolved": {
+      "optimizer": "adamw",
+      "lr0": 0.001429,
+      "lrf": 0.01,
+      "cos_lr": false,
+      "momentum": 0.9,
+      "betas": [
+        0.9,
+        0.999
+      ],
+      "weight_decay": 0.0005,
+      "batch": 16,
+      "accumulate": 4,
+      "nbs": 64,
+      "optimizer_steps_per_epoch": 4,
+      "warmup_iters": 100,
+      "warmup_epochs": 3.0,
+      "warmup_momentum": 0.8,
+      "warmup_bias_lr": 0.0,
+      "close_mosaic": 10
+    }
+  },
+  "compute": {
+    "where": "cloud",
+    "provider": "runpod",
+    "offer": {
+      "id": "NVIDIA A40@secure",
+      "gpu": "A40",
+      "gpu_count": 1,
+      "vram_bytes": 51539607552,
+      "price_per_hour": 0.59,
+      "region": null,
+      "detail": "Secure Cloud",
+      "availability": "none"
+    },
+    "cost_usd": 0.0554,
+    "max_hours": 0.5,
+    "val_device": "cpu"
+  },
+  "created": "2026-11-11T12:14:42Z",
+  "run_id": "run_a172",
+  "detections_file": "D:\\folo-data\\runs-finetune\\folo-s\\folo-s-bccd-pretrained-s0\\detections-test.json"
+}

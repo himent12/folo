@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "tool": "ultralytics",
+  "model": "yolo26s",
+  "dataset": "medical-pills",
+  "variant": "pretrained",
+  "seed": 2,
+  "epochs_planned": 100,
+  "epochs_run": 100,
+  "imgsz": 640,
+  "batch": 16,
+  "weights": {
+    "name": "yolo26s.pt",
+    "sha256": "646f8bc3fe0a656803d95c294f7852321748cb29d13466a1af8862e2db384a1b"
+  },
+  "eval_split": "val",
+  "metrics": {
+    "ap": 0.8042792473955203,
+    "ap50": 0.9965031217710948,
+    "ap75": 0.975625244420411,
+    "ap_small": null,
+    "ap_medium": 0.3064720609992034,
+    "ap_large": 0.8076042926503051,
+    "ar1": 0.05187969924812029,
+    "ar10": 0.5017543859649122,
+    "ar100": 0.8403508771929824,
+    "ar_small": null,
+    "ar_medium": 0.6285714285714286,
+    "ar_large": 0.8441326530612245,
+    "images": 23,
+    "truths": 399,
+    "detections": 1016,
+    "images_without_detections": 0,
+    "inverted_boxes": 0
+  },
+  "tool_reported": {
+    "map50_95": 0.8015061915481674,
+    "map50": 0.9921674536881063,
+    "source": "ultralytics val of best.pt"
+  },
+  "train_wall_s": 266.7159260370536,
+  "gpu": "NVIDIA A40",
+  "versions": {
+    "ultralytics": "8.4.198",
+    "torch": "2.5.1+cu124",
+    "cuda": "12.4",
+    "python": "3.10.12",
+    "dataset_layout_sha256": "696f575fc1d34c95f77ae19447594af14a756ae09e97296e1b370005a4b0c1b3"
+  },
+  "compute": {
+    "where": "runpod NVIDIA A40 secure",
+    "device": "0",
+    "concurrent_jobs": 3,
+    "patience": 100,
+    "amp": true
+  },
+  "created": "2026-11-11T08:07:31Z",
+  "detections_file": "/workspace/finetune/work/runs/yolo26s-medical-pills-pretrained-s2/detections-val.json",
+  "run_dir": "/workspace/finetune/work/runs/yolo26s-medical-pills-pretrained-s2"
+}
