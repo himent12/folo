@@ -119,10 +119,15 @@ describe('Settings › Cloud', () => {
     await until(() => target.querySelector('#cloud header .btn'), 'Connect');
     button(target, 'Connect')!.click();
     const d = await until(() => dialog()?.querySelector('input[type="password"]') && dialog(), 'the dialog');
-    // Required fields are checked on submit, the message naming the field.
+    const key = d.querySelector<HTMLInputElement>('input[type="password"]')!;
+    // The key is what to type first: it has focus on open; the worker URL is marked optional (shell F18).
+    await until(() => document.activeElement === key, 'focus on the key');
+    expect([...d.querySelectorAll('label')].map(text)).toEqual(expect.arrayContaining(['API key', 'Worker download URL Optional']));
+    key.blur();
+    // Required fields are checked on submit, the message naming the field, and focus goes to it.
     d.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
     await until(() => text(d.querySelector('.msg.error')) === 'Enter the API key.', 'the required message');
-    const key = d.querySelector<HTMLInputElement>('input[type="password"]')!;
+    await until(() => document.activeElement === key, 'focus on the field in error');
     expect(key.getAttribute('autocomplete')).toBe('off');
     type(key, 'rpa_bad_SECRET_0042');
     d.querySelector('form')!.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
@@ -156,7 +161,7 @@ describe('Settings › Cloud', () => {
     type(d.querySelector<HTMLInputElement>('input[type="password"]')!, 'rpa_typed_first');
     [...d.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => text(r) === 'Remote FOLO server')!.click();
     flushSync();
-    expect([...d.querySelectorAll('label')].map(text)).toEqual(expect.arrayContaining(['Server URL', 'Token', 'Name']));
+    expect([...d.querySelectorAll('label')].map(text)).toEqual(expect.arrayContaining(['Server URL', 'Token Optional', 'Name Optional']));
     [...d.querySelectorAll<HTMLButtonElement>('[role="radio"]')].find((r) => text(r) === 'RunPod')!.click();
     flushSync();
     expect(d.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe('');

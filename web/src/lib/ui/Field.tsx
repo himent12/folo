@@ -23,6 +23,8 @@ export interface FieldProps {
   aside?: JSX.Element;
   /** A one-click correction shown after the error: `label` is the whole button text ("Try my-dataset"). */
   fix?: { label: string; apply: () => void } | null;
+  /** The value may stay empty: a quiet "Optional" after the label, so it does not read as a peer of required ones. */
+  optional?: boolean;
 }
 
 export default function Field(props: FieldProps) {
@@ -40,7 +42,10 @@ export default function Field(props: FieldProps) {
   return (
     <div class="field" class:invalid={!!props.error}>
       <div class="top">
-        <label for={props.for}>{props.label}</label>
+        <label for={props.for}>
+          {props.label}
+          {props.optional ? <span class="optional"> Optional</span> : null}
+        </label>
         {props.aside ? <span class="aside">{props.aside}</span> : null}
       </div>
       {props.children}
@@ -86,6 +91,12 @@ css`
   }
   .aside {
     font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+  }
+  .optional {
+    margin-left: var(--space-1);
+    font-size: var(--type-sm-size);
+    font-weight: var(--weight-regular);
     color: var(--text-tertiary);
   }
   /* Helper text keeps a readable measure (DESIGN_DIRECTION §2.3: ≤ 60 characters a line). */
