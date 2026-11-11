@@ -9,12 +9,35 @@ Five workflows check the code, one per part of the repo. A pull request runs onl
 | `web.yml` | `web/`, `design/` | `check`: `npm ci`, `npm run check`, `npm test`. `qa (1/3)` to `qa (3/3)`: `npm run qa`, the layout checks on the production build (blank sections, overflow, covered controls and cut selects at tablet and phone sizes, web/DESIGN_DIRECTION.md §6; the runner's Chrome, else Playwright's headless Chromium), a third of the states each (`FOLO_QA_SHARD`) |
 | `site.yml` | every pull request (the Markdown links to files all over the repo; about 20 s) | `bash tools/file-size.sh` (no source file of 1000 lines or more, AGENTS.md), then the docs site: `npm ci && npm run check && npm run build` in `site/`, which fails on a broken link, anchor or image in the Markdown (site/README.md) |
 | `wasm.yml` | `crates/folo-wasm/` and the crates it depends on, `Cargo.toml`, `Cargo.lock`, `scripts/build-wasm.sh` | the browser build: `cargo clippy --target wasm32-unknown-unknown -p folo-wasm` and `scripts/build-wasm.sh` with the wasm-bindgen CLI matching `Cargo.lock` (docs/WASM.md) |
-| `desktop.yml` | `apps/desktop/`, `design/`, the crates the app builds and the root `Cargo.toml` they inherit from | FOLO Desktop on Windows: fmt, clippy, its tests, the vendored GPUI patch test and the temp-dir hygiene test |
+| `desktop.yml` | `apps/desktop/` (the app and folo-ui), `design/`, the crates the app builds and the root `Cargo.toml` they inherit from | FOLO Desktop and folo-ui (below). `desktop (windows)`: fmt, clippy and the tests of both, again for folo-ui with its portable-text and winit features, and the temp-dir hygiene test. `desktop (linux)`: clippy and the tests, a headless screenshot, and folo-ui type-checked for macOS |
 
 ONNX export parity (docs/CLI.md, ONNX export) is part of `cargo test --workspace`: `crates/folo-cli/tests/onnx.rs`
 runs the exported graphs in onnxruntime and skips without a Python. `rust (linux)` gives it one (a Python 3.12 venv
 with pinned `onnx`, `onnxruntime` and `numpy`, kept between runs on a self-hosted runner) and sets
 `FOLO_ONNX_REQUIRED=1`, so there the test fails instead of skipping when the venv is broken.
+
+## FOLO Desktop
+`desktop.yml` checks the desktop workspace (`apps/desktop`: the app and `ui/`, folo-ui) with `--workspace`, since a
+bare `cargo test` there builds only the app.
+
+- **`desktop (windows)`**, where the app ships: `cargo fmt --check`; clippy of the workspace; clippy of folo-ui with
+  `--features portable-text,winit,test-support` (the cosmic-text backend the deterministic text tests use, and
+  the winit backend, both opt-in on Windows); the tests of the workspace and of folo-ui with those features,
+  through `tools/test-tmp.sh`; and the temp-dir hygiene test (ci.yml does not run for a change to the app alone).
+- **`desktop (linux)`**: clippy and the tests of the workspace on Linux, where the winit backend and cosmic-text are
+  plain dependencies. Every test is headless, so no display is needed. Building needs no system package: wayland
+  and Xlib are loaded at run time (`wayland-sys` and `tiny-xlib` on their `dlopen` features; pkg-config is only
+  asked for the library folder and may be missing), `drm-sys` ships its bindings, and the only C code (ring, for
+  the HTTP client's TLS) needs the runner's C compiler. Then a smoke test: `folo-desktop --scenario overview
+  --shot <png>` must exit 0 and write a 1280 x 800 PNG, which runs the whole UI stack (runtime, layout,
+  cosmic-text, the renderer) on the headless platform.
+- **macOS, in the Linux job:** `tools/cross-check.sh` with `CROSS_TARGETS="aarch64-apple-darwin
+  x86_64-apple-darwin"` runs `cargo check` and `cargo clippy -D warnings` on folo-ui for both targets. This proves
+  that folo-ui (the winit backend and cosmic-text on macOS, AppKit through objc2) type-checks and lints for macOS.
+  It does not prove that it links or runs there: nothing is linked or run on macOS, and no macOS runner is used.
+  The app crate is not checked for macOS: ring (the HTTP client's TLS) compiles C for the target in its build
+  script, so `cargo check -p folo-desktop --target aarch64-apple-darwin` needs a C compiler for macOS. On the
+  Windows dev PC it fails there (`failed to find tool "cc"`); a Linux runner has no macOS SDK either.
 
 ## Keeping CI fast
 - **Tests are quick or they are not in the suite.** A test trains the smallest model on a handful of small images
@@ -37,7 +60,8 @@ Tests make their scratch folders with `folo_test_support::TestDir` (`crates/folo
 `folo-<tag>-<pid>-<n>` folder under `FOLO_TEST_TMP` when that is set, else the system temp dir, removed when the guard
 drops, also when the test panics. A spawned `folo serve` / `folo train` / `folo mcp` sits in a `ChildGuard` that kills
 it first, since Windows cannot delete files a running process holds open. `crates/folo-test-support/tests/hygiene.rs`
-fails on any `std::env::temp_dir()` in a crate's `src/` or `tests/` (and in `apps/desktop/src`), so a new test cannot
+fails on any `std::env::temp_dir()` in a crate's `src/` or `tests/` (and in `apps/desktop/src`, and folo-ui's `src/`,
+`tests/` and `examples/`), so a new test cannot
 bypass the guard by accident. (Before this, `cargo test --workspace` runs left `folo-*` folders behind; 3,209 of them,
 about 20 GB, once filled the dev PC's C: drive.)
 

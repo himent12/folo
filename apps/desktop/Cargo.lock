@@ -1058,6 +1058,7 @@ dependencies = [
  "arboard",
  "async-task",
  "cosmic-text",
+ "folo-test-support",
  "image",
  "parking_lot",
  "resvg",

@@ -95,27 +95,15 @@ fn renderer_caches_hold_their_budget_under_image_churn() {
     assert!(peak <= budget + (1 << 20), "peak {peak}");
 }
 
-/// Removes a scratch file when dropped, also when the test fails.
-struct Scratch(std::path::PathBuf);
-
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 #[test]
 fn png_round_trip() {
-    // Scratch files go under FOLO_TEST_TMP when it is set (docs/CI.md, Test temp dirs).
-    let dir =
-        std::env::var_os("FOLO_TEST_TMP").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    let file = Scratch(dir.join(format!("folo-raster-png-{}.png", std::process::id())));
+    // Under FOLO_TEST_TMP, removed on drop (docs/CI.md, Test temp dirs).
+    let file = folo_test_support::TestFile::new("raster-png", "frame.png");
     let mut fb = Framebuffer::new(5, 3);
     for (i, p) in fb.pixels.iter_mut().enumerate() {
         *p = (i as u32 * 0x0012_3457) & 0x00ff_ffff;
     }
-    folo_ui::raster::debug::write_png(&fb, &file.0).unwrap();
-    let back = folo_ui::raster::debug::read_png(&file.0).unwrap();
+    folo_ui::raster::debug::write_png(&fb, file.path()).unwrap();
+    let back = folo_ui::raster::debug::read_png(file.path()).unwrap();
     assert_eq!(back, fb);
 }

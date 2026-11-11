@@ -1,7 +1,8 @@
 //! Temp-dir hygiene across the workspace: tests and test helpers make their scratch folders with
 //! `folo_test_support::TestDir` (removed on drop, under `FOLO_TEST_TMP`), never with `std::env::temp_dir()` directly,
 //! which is how thousands of `folo-*` folders once piled up in %TEMP%. The binaries do not write to the temp dir
-//! either. Benchmarks (`benches/`) are not run by `cargo test` and are not checked.
+//! either. FOLO Desktop's sources (`apps/desktop/src`, and folo-ui's `src`, `tests` and `examples`) are scanned too.
+//! Benchmarks (`benches/`) are not run by `cargo test` and are not checked.
 
 use std::path::{Path, PathBuf};
 
@@ -31,6 +32,10 @@ fn nothing_but_test_support_uses_the_system_temp_dir() {
         }
     }
     rust_files(&crates.join("../apps/desktop/src"), &mut files);
+    // folo-ui, FOLO Desktop's UI framework: its tests and examples write PNGs too.
+    for sub in ["src", "tests", "examples"] {
+        rust_files(&crates.join("../apps/desktop/ui").join(sub), &mut files);
+    }
     assert!(files.len() > 100, "{} files", files.len());
     let mut bad = Vec::new();
     for f in &files {

@@ -86,6 +86,10 @@ arboard = "3"
 # The xdg-desktop-portal backend (no GTK).
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 
+[dev-dependencies]
+# Test temp files under FOLO_TEST_TMP, removed on drop (docs/CI.md, Test temp dirs).
+folo-test-support = { path = "../../../crates/folo-test-support" }
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

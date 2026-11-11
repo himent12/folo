@@ -223,8 +223,9 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
 
 ## How it is verified
 
-- **The app builds on folo-ui alone.** `apps/desktop` has no `gpui` dependency and no vendored copy; the
-  only GPUI left is the attribution in `NOTICE.md` and the files' first lines.
+- **The app builds on folo-ui alone.** `apps/desktop` has no `gpui` dependency and no vendored copy. GPUI is
+  named only as the specification (comments saying which GPUI rule or formula a piece matches) and in the
+  attribution (`NOTICE.md` and the adapted files' first lines).
 - **Pixels.** Every `--scenario` rendered headless at the GPUI captures' sizes and scale (1280 x 800 for all,
   960 x 620 and 1680 x 1050 for the densest, at 1.5) is compared with GPUI 0.2.2's captures, region by
   region: boxes, colours and text at the same pixels. The GPUI captures and the comparison were made outside

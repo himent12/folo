@@ -1,7 +1,7 @@
 name: desktop
-# FOLO Desktop (GPUI) is its own cargo workspace and a slow build, so it only runs when the app, the design
-# tokens it is generated from, the wire types it shares, or the engine crates it runs locally change, and on every
-# push to main.
+# FOLO Desktop (the app and folo-ui, its UI framework) is its own cargo workspace and a slow build, so it only runs
+# when the app, the design tokens it is generated from, the wire types it shares, or the engine crates it runs
+# locally change, and on every push to main. `apps/desktop/**` covers folo-ui (`apps/desktop/ui`).
 on:
   pull_request:
     paths:
@@ -20,6 +20,7 @@ on:
       - Cargo.toml
       - .cargo/**
       - tools/ci-retry.sh
+      - tools/test-tmp.sh
       - .github/workflows/desktop.yml
   push:
     branches: [main]
@@ -28,10 +29,13 @@ concurrency:
   cancel-in-progress: true
 env:
   CARGO_TERM_COLOR: always
-# Runners: see ci.yml. RUNS_ON_WINDOWS holds a JSON runs-on value; unset falls back to GitHub-hosted Windows.
+# Runners: see ci.yml. RUNS_ON_WINDOWS / RUNS_ON_LINUX hold a JSON runs-on value; unset falls back to GitHub-hosted.
+# The workspace has two members (the app and ui/): `--workspace` selects both, since a bare `cargo test` in a
+# workspace whose root is a package builds only that package.
 jobs:
   desktop:
-    # Builds on Windows, where it ships first.
+    name: desktop (windows)
+    # Where it ships: the Win32 backend and DirectWrite text are built and tested here.
     runs-on: ${{ fromJSON(vars.RUNS_ON_WINDOWS || '"windows-latest"') }}
     timeout-minutes: 30
     defaults:
@@ -60,24 +64,95 @@ jobs:
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
-        run: bash ../../tools/ci-retry.sh cargo clippy --all-targets -- -D warnings
+        run: bash ../../tools/ci-retry.sh cargo clippy --workspace --all-targets -- -D warnings
+      # folo-ui's portable text backend (cosmic-text, what the deterministic text tests use) and the winit backend,
+      # which on Windows are opt-in features.
+      - name: clippy (folo-ui, portable-text + winit)
+        shell: bash
+        env:
+          ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
+        run: >-
+          bash ../../tools/ci-retry.sh
+          cargo clippy -p folo-ui --all-targets --features portable-text,winit,test-support -- -D warnings
       # No separate `cargo build`: clippy type-checks every target and the tests compile and link the same code.
+      # tools/test-tmp.sh points FOLO_TEST_TMP and the temp dir at a fresh folder and fails the step if the tests
+      # left a `folo-*` entry there (docs/CI.md, Test temp dirs).
       - name: test
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
-        run: bash ../../tools/ci-retry.sh cargo test
-      # The vendored GPUI's one patch (README.md, "Vendored GPUI"): truncated, then untruncated, measures keep runs
-      # that cover the text on character boundaries. Built from the vendor's own manifest and lock.
-      - name: vendored GPUI patch test
+        run: bash ../../tools/ci-retry.sh bash ../../tools/test-tmp.sh cargo test --workspace
+      - name: test (folo-ui, portable-text + winit)
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
-        run: bash ../../tools/ci-retry.sh cargo test --manifest-path vendor/gpui/Cargo.toml --lib folo_truncation
-      # The workspace's temp-dir hygiene test (docs/CI.md, Test temp dirs) also scans apps/desktop/src, and ci.yml
-      # does not run for a change to the app alone.
+        run: >-
+          bash ../../tools/ci-retry.sh bash ../../tools/test-tmp.sh
+          cargo test -p folo-ui --features portable-text,winit,test-support
+      # The workspace's temp-dir hygiene test (docs/CI.md, Test temp dirs) also scans apps/desktop/src and
+      # apps/desktop/ui, and ci.yml does not run for a change to the app alone.
       - name: temp-dir hygiene
         shell: bash
         env:
           ATTEMPTS: ${{ runner.environment == 'self-hosted' && '2' || '1' }}
         run: bash ../../tools/ci-retry.sh cargo test --manifest-path ../../Cargo.toml -p folo-test-support --test hygiene
+
+  linux:
+    name: desktop (linux)
+    # The winit + softbuffer backend and cosmic-text are plain dependencies here, and every test is headless (no
+    # display). No system package is needed to build: wayland and Xlib are loaded at run time (their `dlopen`
+    # features), and the one C dependency (ring) needs only the C compiler the runner has.
+    runs-on: ${{ fromJSON(vars.RUNS_ON_LINUX || '"ubuntu-latest"') }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: apps/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      # As in ci.yml: a persistent target dir on a self-hosted runner, emptied when the runner has under 20 GB free.
+      - name: persistent target dir (self-hosted)
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          target="$HOME/gha/folo-desktop-target"
+          free="$(df --output=avail -BG "$HOME" | tail -1 | tr -dc 0-9)"
+          if [ -d "$target" ] && [ "${free:-0}" -lt 20 ]; then
+            echo "::warning::${free} GB free on $(hostname): removing $target ($(du -sh "$target" | cut -f1))"
+            rm -rf "$target"
+          fi
+          echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          workspaces: apps/desktop
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test
+        run: bash ../../tools/test-tmp.sh cargo test --workspace
+      # The app renders a scenario on folo-ui's headless platform and writes a PNG: the whole UI stack (runtime,
+      # layout, cosmic-text, the renderer) on Linux, without a display.
+      - name: headless screenshot
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/overview.png"
+          rm -f "$out"
+          cargo run --quiet -- --scenario overview --shot "$out"
+          python3 - "$out" <<'EOF'
+          import struct, sys
+          head = open(sys.argv[1], 'rb').read(24)
+          assert head[:8] == b'\x89PNG\r\n\x1a\n', 'not a PNG'
+          width, height = struct.unpack('>II', head[16:24])
+          assert (width, height) == (1280, 800), f'{width}x{height}, expected 1280x800'
+          print(f'{sys.argv[1]}: a {width}x{height} PNG')
+          EOF
+      # macOS: folo-ui type-checked and linted for both macOS targets (tools/cross-check.sh; Linux is covered
+      # above). Nothing is linked or run on macOS. The app itself is not checked for macOS: its HTTP client's TLS
+      # (ring) compiles C for the target in its build script, which needs a macOS C toolchain (docs/CI.md).
+      - name: macOS check (folo-ui)
+        env:
+          CROSS_TARGETS: aarch64-apple-darwin x86_64-apple-darwin
+        run: bash tools/cross-check.sh
