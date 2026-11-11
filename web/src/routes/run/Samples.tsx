@@ -24,6 +24,9 @@ export interface SamplesProps {
   epochsDone: number;
   /** "Validation samples", or the split they are really from ("Training-split samples", lib/evaluated `scoresTitle`). */
   title?: string;
+  /** The run's history failed to load (so `epochsDone` is unknown): an error with Retry, not "appear after…". */
+  error?: unknown;
+  retry?: () => void;
 }
 
 export default function Samples(props: SamplesProps) {
@@ -130,7 +133,9 @@ export default function Samples(props: SamplesProps) {
             </div>
           </div>
         ) : null}
-        {props.epochsDone === 0 ? (
+        {props.error !== undefined ? (
+          <ErrorState error={props.error} title="Could not load the samples" retry={props.retry} compact />
+        ) : props.epochsDone === 0 ? (
           <p class="none">Samples appear after the first validation pass.</p>
         ) : samples.error && !samples.data ? (
           <ErrorState error={samples.error} retry={() => samples.refresh()} compact />

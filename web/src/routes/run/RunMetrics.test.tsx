@@ -58,3 +58,21 @@ describe('the run chart on phones', () => {
     unmount(c);
   });
 });
+
+describe('the run chart when the history failed to load', () => {
+  it('says so with Retry, never "Waiting for the first validation…"', () => {
+    let retried = 0;
+    const c = render(
+      () => (
+        <RunMetrics run={run} steps={new AppendLog<Step>()} epochs={new AppendLog<Epoch>()} version={0} loading={false} error={new Error('HTTP 500')} retry={() => retried++} />
+      ),
+      target,
+    );
+    flushSync();
+    expect(target.textContent).toContain("Could not load this run's metrics");
+    expect(target.textContent).not.toMatch(/Waiting for the first|after the first epoch/);
+    [...target.querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Retry')!.click();
+    expect(retried).toBe(1);
+    unmount(c);
+  });
+});

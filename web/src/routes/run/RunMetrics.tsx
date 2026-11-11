@@ -18,6 +18,7 @@ import InfoButton from '$lib/ui/InfoButton';
 import InfoRegion from '$lib/ui/InfoRegion';
 import { provideInfoSlot } from '$lib/ui/infoSlot';
 import Button from '$lib/ui/Button';
+import ErrorState from '$lib/ui/ErrorState';
 import ChartSkeleton from '$lib/charts/ChartSkeleton';
 import { BestPulse, CompleteFocus } from '$lib/charts/bestPulse';
 import { scoresTitle, type EvalSource } from '$lib/evaluated';
@@ -128,6 +129,9 @@ export interface RunMetricsProps {
   queued?: boolean;
   /** What the epochs' scores are on (lib/evaluated `runEvalSource`): the titles name the split when it is not validation. */
   evalOn?: EvalSource | null;
+  /** The run's history failed to load: the panel says so with Retry, never "Waiting for the first validation…". */
+  error?: unknown;
+  retry?: () => void;
 }
 
 export default function RunMetrics(props: RunMetricsProps) {
@@ -524,7 +528,11 @@ export default function RunMetrics(props: RunMetricsProps) {
 
   return (
     <section class="metrics" aria-label="Run metrics" data-tip-bounds>
-      {queued() && narrow() ? (
+      {props.error !== undefined ? (
+        <div class="failed">
+          <ErrorState error={props.error} title="Could not load this run's metrics" retry={props.retry} compact />
+        </div>
+      ) : queued() && narrow() ? (
         // Phones, queued: one line until there is something to chart; the banner above says when it starts.
         <button type="button" class="pending" aria-expanded={queuedOpen.get()} aria-controls="run-metrics-body" onclick={() => queuedOpen.set(!queuedOpen.peek())}>
           <span class="p-t">Metrics appear when training starts</span>
@@ -534,7 +542,7 @@ export default function RunMetrics(props: RunMetricsProps) {
           </span>
         </button>
       ) : null}
-      {!queuedFold.get() ? (
+      {props.error === undefined && !queuedFold.get() ? (
         <div class="metrics-body" id="run-metrics-body">
           <MetricStrip
             run={props.run}
@@ -671,6 +679,9 @@ css`
     border: 1px solid var(--line-panel);
     border-radius: var(--radius-lg);
     min-width: 0;
+  }
+  .failed {
+    padding: var(--space-4);
   }
   .unit {
     line-height: 1;

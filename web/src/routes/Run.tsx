@@ -104,6 +104,9 @@ export default function Run() {
     return live.steps.length;
   });
   const queuedOnly = computed(() => status.get() === 'queued' && stepCount.get() === 0);
+  /** The run loaded but its history (metrics) did not: its panels say so with Retry instead of "after the first epoch". */
+  const historyError = computed(() => (run.get() ? live.error : undefined));
+  const retryHistory = () => live.retry();
 
   // A cloud run (docs/CLOUD.md): where it runs, said by its provider's name ("RunPod · RTX 4090"), and its hand-over
   // in the waiting state's place while nothing trains yet.
@@ -609,6 +612,8 @@ export default function Run() {
                   loading={live.loading}
                   queued={queuedOnly.get()}
                   evalOn={evalOn.get()}
+                  error={historyError.get()}
+                  retry={retryHistory}
                 />
 
                 {/* Evidence on the left (what the model sees, what the trainer says); reference in a rail on the right,
@@ -640,15 +645,22 @@ export default function Run() {
                 >
                   <div class="main-col">
                     <div class="part" data-part="samples">
-                      <Samples runId={R().id} classes={classes.get()} epochsDone={epochsDone.get()} title={`${scoresTitle(evalOn.get())} samples`} />
+                      <Samples
+                        runId={R().id}
+                        classes={classes.get()}
+                        epochsDone={epochsDone.get()}
+                        title={`${scoresTitle(evalOn.get())} samples`}
+                        error={historyError.get()}
+                        retry={retryHistory}
+                      />
                     </div>
                     <div class="part" data-part="logs">
-                      <Logs log={live.logsLog} version={live.version} live={active.get()} />
+                      <Logs log={live.logsLog} version={live.version} live={active.get()} error={historyError.get()} retry={retryHistory} />
                     </div>
                   </div>
                   <aside class="rail" aria-label="Per-class results and config">
                     <div class="part" data-part="classes">
-                      <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact />
+                      <PerClass classes={classes.get()} epochs={live.epochs} version={live.version} loading={live.loading} compact error={historyError.get()} retry={retryHistory} />
                     </div>
                     {cloud.get() ? (
                       <div class="part" data-part="cloud">
