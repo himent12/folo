@@ -6,16 +6,28 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The clipboard, opened on first use and kept (on X11 the owner must stay alive to serve pastes).
+/// The clipboard, opened on first use and kept (on X11 the owner must stay alive to serve pastes). On
+/// Linux arboard uses Wayland's data-control protocol when the compositor offers it, else X11.
 #[derive(Default)]
-pub(crate) struct Clipboard(Option<arboard::Clipboard>);
+pub(crate) struct Clipboard {
+    clipboard: Option<arboard::Clipboard>,
+    /// Whether a failure to open it was reported (once; later uses retry quietly).
+    reported: bool,
+}
 
 impl Clipboard {
     fn get(&mut self) -> Option<&mut arboard::Clipboard> {
-        if self.0.is_none() {
-            self.0 = arboard::Clipboard::new().ok();
+        if self.clipboard.is_none() {
+            match arboard::Clipboard::new() {
+                Ok(clipboard) => self.clipboard = Some(clipboard),
+                Err(error) => {
+                    if !std::mem::replace(&mut self.reported, true) {
+                        super::log_error(&format!("no clipboard: {error}"));
+                    }
+                }
+            }
         }
-        self.0.as_mut()
+        self.clipboard.as_mut()
     }
 
     pub fn write(&mut self, item: ClipboardItem) {
