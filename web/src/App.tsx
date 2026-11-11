@@ -2,11 +2,13 @@
 // the current route. Each screen is a chunk of its own (./routes.ts): the shell renders at once, a screen when its
 // chunk is there. Moving to a screen whose chunk has not loaded yet keeps the screen on display until it has, then
 // swaps in one step, as `{#key}` does; chunks are fetched ahead (a link hovered, focused or touched, the G of a
-// shortcut, the palette opening, idle time after startup), so that wait is rarely there at all.
-import { computed, css, Dynamic, effect, Key, onMount, signal, tick, untrack, type Component } from 'fw';
+// shortcut, the palette opening, idle time after startup), so that wait is rarely there at all. The screen kept on
+// display keeps its route too (`router.holdWhile`): it never reads the route of the screen to come. A chunk that fails
+// to load shows an error with Retry (ScreenError), and the screen once any later try brings it in.
+import { computed, css, Dynamic, effect, Key, onCleanup, onMount, signal, tick, untrack, type Component } from 'fw';
 import { hub } from '$lib/api/index';
 import { prefs } from '$lib/prefs';
-import { router } from '$lib/router';
+import { router, type Route } from '$lib/router';
 import CommandPalette from '$lib/shell/CommandPalette';
 import ConnectionStatus from '$lib/shell/ConnectionStatus';
 // The extension: runWatch.ts (its logic) differs from this file's name only in case.
@@ -19,8 +21,9 @@ import SidebarLive from '$lib/shell/SidebarLive';
 import TabBar from '$lib/shell/TabBar';
 import Topbar from '$lib/shell/Topbar';
 import Toaster from '$lib/ui/Toaster';
-import { preload, preloadAll, preloadHref, screenOf } from './routes';
+import { screens as appScreens, type Screens } from './routes';
 import NotFound from './routes/NotFound';
+import ScreenError from './ScreenError';
 
 type Screen = { path: string | null; comp: Component<Record<string, never>> | null };
 
@@ -29,11 +32,15 @@ const NONE: Screen = { path: null, comp: null };
 const IDLE_PRELOAD_MS = 1000;
 
 
-export default function App() {
+export interface AppProps {
+  /** The screens' chunks (tests pass their own); default: the app's (./routes.ts). */
+  screens?: Screens;
+}
+
+export default function App(props: AppProps) {
+  const screens = untrack(() => props.screens) ?? appScreens;
   const paletteOpen = signal(false);
   const shortcutsOpen = signal(false);
-  /** Bumps when a screen's chunk arrives. */
-  const arrived = signal(0);
 
   effect(() => {
     document.documentElement.dataset.theme = prefs.resolvedTheme;
@@ -46,9 +53,9 @@ export default function App() {
       shortcuts: () => shortcutsOpen.set(true),
     });
     // Fetch a screen's chunk ahead: a link to it hovered, focused or touched; every screen on a "go to" G.
-    const intent = (e: Event) => preloadHref((e.target as Element | null)?.closest?.('a[href^="#/"]')?.getAttribute('href'));
+    const intent = (e: Event) => screens.preloadHref((e.target as Element | null)?.closest?.('a[href^="#/"]')?.getAttribute('href'));
     const onkey = (e: KeyboardEvent) => {
-      if (e.key === 'g' || e.key === 'G') preloadAll();
+      if (e.key === 'g' || e.key === 'G') screens.preloadAll();
     };
     document.addEventListener('pointerover', intent, { passive: true });
     document.addEventListener('focusin', intent);
@@ -65,25 +72,30 @@ export default function App() {
 
   // The palette may lead anywhere.
   effect(() => {
-    if (paletteOpen.get()) preloadAll();
+    if (paletteOpen.get()) screens.preloadAll();
   });
 
-  /** What `main` shows: the current route's screen once its chunk is there, else the one shown until then. */
+  /** Whether the URL's route `to` waits for its screen's chunk (neither loaded nor failed yet). */
+  const waiting = (to: Route) => to.name !== 'not-found' && screens.screenOf(to.name) === undefined && !screens.failure(to.name);
+  /** A route whose chunk could not be loaded: the error, with Retry. */
+  const failed: Component<Record<string, never>> = () => <ScreenError screens={screens} />;
+
+  /** What `main` shows: the screen of the route on display once its chunk is there, else the one shown until then. */
   let last: Screen = NONE;
+  // Until then the route on display (`router.route`, what screens read) stays the one of the screen on display; with
+  // none on display yet (startup), it follows the URL.
+  onCleanup(router.holdWhile((to) => last.path !== null && waiting(to)));
   const screen = computed(
     () => {
+      // The URL's route: its chunk is fetched (a failed one is tried again by Retry, or by any other request).
+      const to = router.location;
+      if (to.name !== 'not-found' && waiting(to)) void screens.preload(to.name).catch(() => {});
       const r = router.route;
-      arrived.get();
-      const comp = r.name === 'not-found' ? NotFound : screenOf(r.name);
-      if (comp === undefined) {
-        const name = r.name as Exclude<typeof r.name, 'not-found'>;
-        void preload(name).then(
-          () => arrived.set((n) => n + 1),
-          () => {},
-        );
-        return last;
-      }
-      return (last = { path: r.path, comp });
+      if (r.name === 'not-found') return (last = { path: r.path, comp: NotFound });
+      const comp = screens.screenOf(r.name);
+      if (comp !== undefined) return (last = { path: r.path, comp });
+      if (screens.failure(r.name)) return (last = { path: r.path, comp: failed });
+      return last;
     },
     { equals: (a, b) => a.path === b.path && a.comp === b.comp },
   );
@@ -100,8 +112,8 @@ export default function App() {
     if (screen.get().path === null) return;
     const t = setTimeout(() => {
       const idle = (globalThis as { requestIdleCallback?: (f: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
-      if (idle) idle(preloadAll, { timeout: 5000 });
-      else preloadAll();
+      if (idle) idle(() => screens.preloadAll(), { timeout: 5000 });
+      else screens.preloadAll();
     }, IDLE_PRELOAD_MS);
     return () => clearTimeout(t);
   });

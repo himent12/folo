@@ -1,9 +1,9 @@
 // Control flow: Show ({#if}), For ({#each} with a key), Index ({#each} without one), Switch/Match ({#if}/{:else if}),
 // Key ({#key}), Dynamic (<svelte:element> / a component chosen at runtime), Portal.
 
-import { createRoot, computed, getOwner, isReader, memo, owning, reader, signal, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
+import { createRoot, computed, getOwner, isReader, memo, onCleanup, owning, reader, renderEffect, signal, untrack, type Owner, type ReadSignal, type Reader, type Signal } from './core';
 import { createComponent, splitProps } from './component';
-import { insert } from './dom';
+import { insert, insertExpression, removeInserted } from './dom';
 import { spread } from './spread';
 import { inBranch, leaveBranch, type Branch } from './transition';
 
@@ -130,9 +130,13 @@ export function For<T>(props: ForProps<T>): JSX.Element {
 
   const mapped: ReadSignal<JSX.Element[]> = computed(
     () => {
+      // The list's length and entries (and the keys) are read tracked, so a `deep()` array changed in place (`push`,
+      // `list[i] = x`) updates the rows; building, updating and dropping rows is untracked.
       const list = props.each || [];
+      const n = list.length;
+      const keys = new Array<unknown>(n);
+      for (let j = 0; j < n; j++) keys[j] = keyFn ? keyFn(list[j]!, j) : list[j];
       return untrack(() => {
-        const n = list.length;
         if (n === 0) {
           for (const r of rows) drop(r);
           rows = [];
@@ -146,8 +150,6 @@ export function For<T>(props: ForProps<T>): JSX.Element {
           fallback.dispose();
           fallback = null;
         }
-        const keys = new Array<unknown>(n);
-        for (let j = 0; j < n; j++) keys[j] = keyFn ? keyFn(list[j]!, j) : list[j];
         const next = new Array<Row<T>>(n);
         if (rows.length === 0) {
           for (let j = 0; j < n; j++) next[j] = make(list[j]!, j, keys[j]);
@@ -235,14 +237,17 @@ export function Index<T>(props: IndexProps<T>): JSX.Element {
   let ran = false;
   const mapped: ReadSignal<JSX.Element[]> = computed(
     () => {
+      // Length and entries tracked (a `deep()` array changed in place updates the rows), the rows' upkeep untracked.
       const list = props.each || [];
+      const n = list.length;
+      const items = new Array<T>(n);
+      for (let i = 0; i < n; i++) items[i] = list[i]!;
       return untrack(() => {
-        const n = list.length;
-        for (let i = 0; i < Math.min(n, rows.length); i++) rows[i]!.sig.set(() => list[i]!);
+        for (let i = 0; i < Math.min(n, rows.length); i++) rows[i]!.sig.set(() => items[i]!);
         for (let i = rows.length; i < n; i++) {
           rows.push(
             createRoot((dispose) => {
-                      const sig = signal<T>(list[i]!);
+              const sig = signal<T>(items[i]!);
               const b: Branch = { t: null };
               return { sig, dispose, b, value: settle(inBranch(b, ran, () => fn(() => sig.get(), i))) };
             }, parent),
@@ -374,11 +379,19 @@ export function Dynamic<P>(props: DynamicProps<P>): JSX.Element {
 // ---------------------------------------------------------------------------------------------------------------------
 // Portal
 
-/** Renders its children into `mount` (default `document.body`) instead of in place; removed with its owner. */
+/**
+ * Renders its children into `mount` (default `document.body`) instead of in place, after what the mount holds; its
+ * nodes leave the mount with its owner (what else the mount holds stays).
+ */
 export function Portal(props: { mount?: Node; children: JSX.Element }): JSX.Element {
   const mount = props.mount ?? document.body;
   const owner: Owner | null = getOwner();
-  createRoot(() => insert(mount, () => props.children, null), owner);
+  createRoot(() => {
+    // `insert(mount, () => props.children, null)`, keeping what it rendered for the removal.
+    let current: unknown = [];
+    renderEffect<unknown>((c) => (current = insertExpression(mount, props.children, c, null, false, true)), current);
+    onCleanup(() => removeInserted(current));
+  }, owner);
   return undefined;
 }
 

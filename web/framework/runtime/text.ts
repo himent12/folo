@@ -7,8 +7,12 @@
 // in the run's node, the part is rendered after it, and the text after it is a run of its own. Nothing is evaluated
 // twice: the effect that found the part becomes that part's own effect, keeping only what the part read, so a change
 // in the text around it never re-creates it.
+//
+// A run in a template is inside an element: what a split renders goes in beside it. A run in a fragment has no element
+// of its own, and the insert that holds the fragment knows only the nodes it was given: such a run is a reader of its
+// nodes, which a split (at creation or later) extends, so that insert places, moves and removes them all.
 
-import { dropSourcesThrough, getOwner, isReader, reader, renderEffect, runWithOwner, signal, sourceMark, untrack, type Owner, type Signal } from './core';
+import { dropSourcesThrough, getOwner, isReader, reader, renderEffect, runWithOwner, signal, sourceMark, untrack, type Owner, type Reader, type Signal } from './core';
 import { insert } from './dom';
 
 type Part = string | (() => unknown);
@@ -33,11 +37,18 @@ function staticText(parts: Part[]): string | null {
   return s;
 }
 
+/** A fragment run's nodes, in order: its text node, then what splits added (each split's part, then its own run). */
+interface Nodes {
+  list: JSX.Element[];
+  /** Set once the run has been created: a split after that tells the insert holding the run. */
+  sig: Signal<JSX.Element> | null;
+}
+
 /**
- * Binds `node` to `parts`. `out` is set while a fragment run is created (its node not in the DOM yet): a part that is
- * not text, and what follows it, are pushed there, for the fragment to render after `node`.
+ * Binds `node` to `parts`. `nodes` is set for a fragment run: a part that is not text, and a run for what follows it,
+ * are placed after `node` in that list (and so rendered by the insert that holds the fragment).
  */
-function bind(node: Text, parts: Part[], owner: Owner | null, out: JSX.Element[] | null): void {
+function bind(node: Text, parts: Part[], owner: Owner | null, nodes: Nodes | null): void {
   const fixed = staticText(parts);
   if (fixed !== null) {
     node.data = fixed;
@@ -45,7 +56,6 @@ function bind(node: Text, parts: Part[], owner: Owner | null, out: JSX.Element[]
   }
   let at = -1;
   let content: Signal<unknown> | undefined;
-  let creating = true;
   renderEffect(() => {
     if (at >= 0) {
       // The part's own effect now: what it read changed.
@@ -78,29 +88,27 @@ function bind(node: Text, parts: Part[], owner: Owner | null, out: JSX.Element[]
       content = signal<unknown>(raw);
       const before = parts.slice(0, i);
       const after = parts.slice(i + 1);
-      const fragment = out !== null && creating;
       runWithOwner(owner, () => {
-        bind(node, before, owner, null);
+        bind(node, before, owner, nodes);
         const rendered = reader(() => content!.get());
-        const rest = after.length > 0 || !fragment ? document.createTextNode('') : null;
-        if (fragment) {
-          out!.push(rendered as JSX.Element);
-          if (rest !== null) {
-            out!.push(rest);
-            bind(rest, after, owner, out);
-          }
+        if (nodes !== null) {
+          const rest = after.length > 0 ? document.createTextNode('') : null;
+          const added: JSX.Element[] = rest !== null ? [rendered as JSX.Element, rest] : [rendered as JSX.Element];
+          nodes.list.splice(nodes.list.indexOf(node) + 1, 0, ...added);
+          if (rest !== null) bind(rest, after, owner, nodes);
+          nodes.sig?.set(nodes.list.slice());
         } else {
+          const rest = document.createTextNode('');
           const parent = node.parentNode!;
-          parent.insertBefore(rest!, node.nextSibling);
+          parent.insertBefore(rest, node.nextSibling);
           insert(parent, rendered, rest);
-          if (after.length > 0) bind(rest!, after, owner, null);
+          if (after.length > 0) bind(rest, after, owner, null);
         }
       });
       return;
     }
     if (node.data !== s) node.data = s;
   });
-  creating = false;
 }
 
 /** Internal: a run whose text node is in the template. */
@@ -109,12 +117,20 @@ export function run(node: Text, parts: Part[]): void {
 }
 
 /**
- * Internal: a run inside a fragment: its text node, or, when a part is not text at creation, the text node followed by
- * what the split rendered. A part that turns non-text later is split in place, after the node, like a template run.
+ * Internal: a run inside a fragment: its text node, or, when one of its parts may render more than text, a reader of
+ * its nodes (the text node, then what splits rendered, at creation or later), for the insert that holds the fragment.
  */
 export function runNode(parts: Part[]): JSX.Element {
   const node = document.createTextNode('');
-  const out: JSX.Element[] = [];
-  bind(node, parts, getOwner(), out);
-  return out.length === 0 ? node : ([node, ...out] as JSX.Element);
+  if (staticText(parts) !== null) {
+    bind(node, parts, null, null);
+    return node;
+  }
+  const nodes: Nodes = { list: [node], sig: null };
+  bind(node, parts, getOwner(), nodes);
+  const sig = (nodes.sig = signal<JSX.Element>(nodes.list.length === 1 ? node : (nodes.list.slice() as JSX.Element)));
+  const read = reader(() => sig.get()) as Reader<JSX.Element> & { $$run?: 1 };
+  // Marked, so a branch leaving with an outro keeps these nodes until it ends (transition.ts, `collect`).
+  read.$$run = 1;
+  return read as unknown as JSX.Element;
 }

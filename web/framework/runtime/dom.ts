@@ -153,6 +153,20 @@ export function insertExpression(parent: Node, value: unknown, current: Current,
 }
 
 /**
+ * Internal: takes what an insert rendered (`current`, as `insertExpression` returned it) out of the DOM at once, for an
+ * insert whose parent stays (a portal's mount). Outros are not waited for: what ran them is gone with the insert.
+ */
+export function removeInserted(current: Current): void {
+  while (typeof current === 'function') current = current();
+  const nodes = Array.isArray(current) ? (current as unknown[]) : [current];
+  for (const n of nodes) {
+    if (!(n instanceof Node)) continue;
+    setLeave(n, undefined);
+    n.parentNode?.removeChild(n);
+  }
+}
+
+/**
  * Flattens `value` into nodes; returns true when it holds functions (reactive parts) that were not resolved. Before
  * resolving (`unwrap` false), a snippet in the array is wrapped in a memo once, so the array's effect only reads.
  */

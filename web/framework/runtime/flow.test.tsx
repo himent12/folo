@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import { For, Index, Key, Match, Show, Switch, effect, flush, onCleanup, signal } from 'fw';
+import { For, Index, Key, Match, Portal, Show, Switch, deep, effect, flush, onCleanup, signal } from 'fw';
 import { render } from '../testing';
 
 const text = (el: Element) => el.textContent;
@@ -270,6 +270,101 @@ describe('Index', () => {
     flush();
     expect(text(container)).toBe('0q');
     unmount();
+  });
+});
+
+describe('lists of a deep() array', () => {
+  it('For and Index follow in-place mutations (push, index writes, splice)', () => {
+    const list = deep(['a']);
+    const { container, unmount } = render(() => (
+      <div>
+        <ul>
+          <For each={list}>{(x) => <li>{x()}</li>}</For>
+        </ul>
+        <ol>
+          <Index each={list}>{(x) => <li>{x()}</li>}</Index>
+        </ol>
+      </div>
+    ));
+    const ul = container.querySelector('ul')!;
+    const ol = container.querySelector('ol')!;
+    list.push('b');
+    flush();
+    expect(text(ul)).toBe('ab');
+    expect(text(ol)).toBe('ab');
+    list[0] = 'c';
+    flush();
+    expect(text(ul)).toBe('cb');
+    expect(text(ol)).toBe('cb');
+    list.splice(0, 1);
+    flush();
+    expect(text(ul)).toBe('b');
+    expect(text(ol)).toBe('b');
+    unmount();
+  });
+
+  it('a keyed For follows a key read from a deep() row', () => {
+    const list = deep([{ id: 1, name: 'a' }]);
+    const made = vi.fn();
+    const { container, unmount } = render(() => (
+      <ul>
+        <For each={list} key={(r) => r.id}>
+          {(r) => {
+            made();
+            return <li>{r().name}</li>;
+          }}
+        </For>
+      </ul>
+    ));
+    list[0]!.id = 2;
+    flush();
+    expect(made).toHaveBeenCalledTimes(2);
+    expect(text(container)).toBe('a');
+    unmount();
+  });
+});
+
+describe('Portal', () => {
+  it('takes its nodes out of the mount when it goes', () => {
+    const m = document.body.appendChild(document.createElement('div'));
+    const { unmount } = render(() => (
+      <Portal mount={m}>
+        <b>portal</b>
+      </Portal>
+    ));
+    expect(m.textContent).toBe('portal');
+    unmount();
+    expect(m.textContent).toBe('');
+    m.remove();
+  });
+
+  it("removes exactly its own nodes, keeping the mount's other content, also when a branch hides it", () => {
+    const m = document.body.appendChild(document.createElement('div'));
+    m.append('before ');
+    const shown = signal(true);
+    const label = signal('one');
+    const { unmount } = render(() => (
+      <Show when={shown.get()}>
+        <Portal mount={m}>
+          <b>{label.get()}</b>
+          <i>{label.get()}</i>
+        </Portal>
+      </Show>
+    ));
+    m.append(' after');
+    expect(m.textContent).toBe('before oneone after');
+    label.set('two');
+    flush();
+    expect(m.textContent).toBe('before twotwo after');
+    shown.set(false);
+    flush();
+    expect(m.textContent).toBe('before  after');
+    shown.set(true);
+    flush();
+    expect(m.textContent).toBe('before  aftertwotwo');
+    unmount();
+    expect(m.textContent).toBe('before  after');
+    m.remove();
   });
 });
 

@@ -74,7 +74,12 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
   where Svelte's text sequence would end: the text before it stays in the run's node, the part is rendered after it,
   the text after it is a run of its own. Nothing is evaluated twice: the run's binding becomes the part's own,
   keeping only what the part read (a source read both by the part and by the text before it is the one exception).
+  A run in a fragment (no element of its own to put the split's nodes in) is a reader of its nodes, so the insert
+  holding the fragment places, moves and removes what a split adds, also a split that happens later.
 - Booleans on attributes follow Svelte: dropped on false only for its boolean attributes, stringified otherwise.
+- A DOM property given as an expression, even a literal (`checked={true}`, `<option value={1}>`, whose `__value`
+  keeps the number), is set as the property, as Svelte does, and so is a property no template attribute sets
+  (`indeterminate`, `muted`, `defaultValue`...); other static values are written in the template.
 
 ### Reactivity (`runtime/core.ts`)
 
@@ -108,7 +113,8 @@ const _tmpl$1 = _$template('<tr><td class="col-md-1"></td><td class="col-md-4"><
   the longest increasing subsequence of old positions stays and only the rest moves (`insertBefore`, as Svelte;
   focus is put back where it was: Chrome's `moveBefore` leaves a moved node's descendants unstyled after a later
   attribute change). `For` maps rows by key (an item replaced under the same key updates the row in place),
-  `Index` by position.
+  `Index` by position. Both read the list's length and entries (and `For` its keys) tracked, so a `deep()` array
+  changed in place (`push`, `list[i] = x`) updates them; creating and disposing rows is untracked.
 - Events: Svelte 5's delegated set (click, input, keydown, pointer*, ...) goes through one listener per type on each
   render root and the document, walking the event path with Svelte's propagation algorithm; others use
   `addEventListener`.

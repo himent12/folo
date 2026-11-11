@@ -122,6 +122,63 @@ describe('branches re-created in document order', () => {
 });
 
 describe('text runs', () => {
+  it('a fragment run whose part turns into a node later leaves nothing behind when its branch goes', () => {
+    const v = signal<JSX.Element>('text');
+    const shown = signal(true);
+    const { container, unmount } = render(() => (
+      <div>
+        <Show when={shown.get()}>
+          <>start {v.get()} end</>
+        </Show>
+        <i>last</i>
+      </div>
+    ));
+    const div = container.querySelector('div')!;
+    expect(div.textContent).toBe('start text endlast');
+    const b = document.createElement('b');
+    b.textContent = 'bold';
+    v.set(b);
+    flush();
+    expect(html(div)).toBe('start <b>bold</b> end<i>last</i>');
+    shown.set(false);
+    flush();
+    expect(html(div)).toBe('<i>last</i>');
+    shown.set(true);
+    flush();
+    expect(div.textContent).toBe('start bold endlast');
+    v.set('plain');
+    flush();
+    expect(div.textContent).toBe('start plain endlast');
+    shown.set(false);
+    flush();
+    expect(html(div)).toBe('<i>last</i>');
+    unmount();
+  });
+
+  it('a late split in a For row moves with its row', () => {
+    const rows = signal(['x', 'y', 'z']);
+    const v = signal<JSX.Element>('t');
+    const { container, unmount } = render(() => (
+      <p>
+        <For each={rows.get()}>{(r) => <>{r()}:{v.get()};</>}</For>
+      </p>
+    ));
+    const p = container.querySelector('p')!;
+    expect(p.textContent).toBe('x:t;y:t;z:t;');
+    // A snippet: each row renders a <b> of its own (`set` takes a function as an updater).
+    const snippet = () => <b>B</b>;
+    v.set(() => snippet);
+    flush();
+    expect(p.textContent).toBe('x:B;y:B;z:B;');
+    rows.set(['z', 'x', 'y']);
+    flush();
+    expect(p.textContent).toBe('z:B;x:B;y:B;');
+    rows.set([]);
+    flush();
+    expect(p.textContent).toBe('');
+    unmount();
+  });
+
   it('static text between blocks and a run keeps its own nodes (no template merge)', () => {
     const a = signal(true);
     const b = signal(true);

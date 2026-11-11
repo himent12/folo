@@ -1,7 +1,7 @@
 // // A tiny hash router. Hash URLs (`#/runs/run_7d1e`) work behind any static file server, including `folo serve`; a
 // path URL (`/runs/run_7d1e`) is moved to its hash route on load.
 
-import { signal } from 'fw';
+import { computed, signal } from 'fw';
 
 export type RouteName =
   | 'overview'
@@ -141,12 +141,45 @@ const posOf = (state: unknown): number | null => {
  * router travels back to the page that holds it, and travels on again when the page lets go.
  */
 class Router {
-  #route = signal<Route>(parse(typeof location === 'undefined' ? '' : location.hash));
+  /** The URL's route. */
+  #location = signal<Route>(parse(typeof location === 'undefined' ? '' : location.hash));
+  /** While it says so for the URL's route, `route` stays the route on display (see `holdWhile`). */
+  #hold = signal<((to: Route) => boolean) | null>(null);
+  #shown: Route = this.#location.peek();
+  #route = computed(() => {
+    const to = this.#location.get();
+    const hold = this.#hold.get();
+    if (hold === null || !hold(to)) this.#shown = to;
+    return this.#shown;
+  });
+
+  /**
+   * The route on display: what every page reads (its params, its query). It follows the URL, except while a hold
+   * (`holdWhile`) keeps it on the page still on screen: a page never reads a route it is not showing.
+   */
   get route(): Route {
     return this.#route.get();
   }
+  /** Sets the URL's route (tests; the router itself navigates with `go`). */
   set route(v: Route) {
-    this.#route.set(v);
+    this.#location.set(v);
+    if (this.#hold.peek() === null) this.#shown = v;
+  }
+  /** The URL's route, ahead of `route` while a hold keeps the page on display (App: the next screen's chunk loading). */
+  get location(): Route {
+    return this.#location.get();
+  }
+
+  /**
+   * Keeps `route` on the route on display while `hold(to)` is true for the URL's route `to` (reactive: `route` moves on
+   * once it turns false). App holds it while the next screen's chunk loads, so the screen on display, kept until then,
+   * goes on reading its own route. Returns the removal.
+   */
+  holdWhile(hold: (to: Route) => boolean): () => void {
+    this.#hold.set(() => hold);
+    return () => {
+      if (this.#hold.peek() === hold) this.#hold.set(null);
+    };
   }
   #guards = new Set<NavigationGuard>();
   /** The place of the entry the app is on. */
@@ -230,7 +263,7 @@ class Router {
     // An entry without a place is taken for a new one, right after this one (it can also be one from before the
     // app kept places, anywhere in the history: `#travel` copes). Nothing moved: the second event of a move.
     const pos = known ?? this.#pos + 1;
-    if (pos === this.#pos && hash === hashOf(this.route)) return;
+    if (pos === this.#pos && hash === hashOf(this.location)) return;
     const from = this.#pos;
     // A new entry is made again (the held one was left behind); an old one is travelled to.
     const proceed = () => this.#settled(() => (known === null ? this.#navigate(hash) : this.#travel(pos, true)));
@@ -253,7 +286,7 @@ class Router {
     // through, the URL is taken as it is. On the way back to the page that holds one, the entry was not where the
     // router thought (it came from before the app kept places): the page stays all the same, written over the
     // entry the tab is on, so that a held navigation is never gone through with.
-    const page = hashOf(this.route);
+    const page = hashOf(this.location);
     const timer = setTimeout(() => {
       this.#travelling = null;
       if (on) {

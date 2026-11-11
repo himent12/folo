@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { describe, expect, it, vi } from 'vitest';
-import { Dynamic, effect, flush, mergeProps, onCleanup, signal, splitProps, type Signal } from 'fw';
+import { createRoot, Dynamic, effect, flush, mergeProps, onCleanup, signal, splitProps, type Signal } from 'fw';
+import { spread } from 'fw/internal';
 import { render } from '../testing';
 
 const html = (el: Element) => el.innerHTML.replace(/<!---->/g, '');
@@ -190,6 +191,66 @@ describe('attributes', () => {
     b.click();
     expect(click).toHaveBeenCalledOnce();
     unmount();
+  });
+
+  it('a spread listener outlives updates of other keys, takes a new handler, and goes with its key', () => {
+    const h = vi.fn();
+    const h2 = vi.fn();
+    const props = signal<Record<string, unknown>>({ onfocus: h, title: 'one' });
+    const { container, unmount } = render(() => <input {...props.get()} />);
+    const input = container.querySelector('input')!;
+    const focus = () => input.dispatchEvent(new FocusEvent('focus'));
+    focus();
+    props.set({ onfocus: h, title: 'two' });
+    flush();
+    expect(input.title).toBe('two');
+    focus();
+    expect(h).toHaveBeenCalledTimes(2);
+    props.set({ onfocus: h2, title: 'two' });
+    flush();
+    focus();
+    expect(h).toHaveBeenCalledTimes(2);
+    expect(h2).toHaveBeenCalledTimes(1);
+    props.set({ title: 'three' });
+    flush();
+    focus();
+    expect(h2).toHaveBeenCalledTimes(1);
+    props.set({ onfocus: h, title: 'three' });
+    flush();
+    focus();
+    expect(h).toHaveBeenCalledTimes(3);
+    unmount();
+    focus();
+    expect(h).toHaveBeenCalledTimes(3);
+    expect(h2).toHaveBeenCalledTimes(1);
+  });
+
+  it('a spread class that goes away is removed; the scope class and class: directives stay', () => {
+    const props = signal<Record<string, unknown>>({ class: 'old', title: 't' });
+    const active = signal(true);
+    const el = document.createElement('div');
+    const dispose = createRoot((d) => {
+      spread(el, () => props.get(), 'fw-scope', () => ({ active: active.get() }));
+      return d;
+    });
+    expect(el.className).toBe('old fw-scope active');
+    props.set({ title: 't' });
+    flush();
+    expect(el.className).toBe('fw-scope active');
+    props.set({ class: 'new' });
+    flush();
+    expect(el.className).toBe('new fw-scope active');
+    props.set({});
+    active.set(false);
+    flush();
+    expect(el.className).toBe('fw-scope');
+    const bare = document.createElement('div');
+    const p2 = signal<Record<string, unknown>>({ class: 'old' });
+    createRoot(() => spread(bare, () => p2.get()));
+    p2.set({});
+    flush();
+    expect(bare.hasAttribute('class')).toBe(false);
+    dispose();
   });
 });
 
@@ -495,6 +556,47 @@ describe('Svelte attribute and prop semantics', () => {
     expect(b.style.color).toBe('navy');
     expect(b.style.left).toBe('1px');
     r.unmount();
+    unmount();
+  });
+
+  it('<option value={1}> keeps the number: a select bound to 1 selects it', () => {
+    const v = signal<number>(1);
+    const { container, unmount } = render(() => (
+      <div>
+        <select bind:value={v}>
+          <option value={0}>zero</option>
+          <option value={1}>one</option>
+        </select>
+        <select value={1}>
+          <option value={0}>zero</option>
+          <option value={1}>one</option>
+        </select>
+      </div>
+    ));
+    flush();
+    const [bound, oneWay] = container.querySelectorAll('select');
+    expect(bound!.selectedIndex).toBe(1);
+    expect(oneWay!.selectedIndex).toBe(1);
+    bound!.selectedIndex = 0;
+    bound!.dispatchEvent(new Event('change'));
+    expect(v.get()).toBe(0);
+    unmount();
+  });
+
+  it('property-only values are set when static too (indeterminate, checked, muted, defaultValue)', () => {
+    const { container, unmount } = render(() => (
+      <div>
+        <input type="checkbox" indeterminate={true} />
+        <input type="checkbox" class="c" checked={true} />
+        <input class="d" defaultValue="dv" />
+        <video muted />
+      </div>
+    ));
+    expect(container.querySelector('input')!.indeterminate).toBe(true);
+    expect(container.querySelector<HTMLInputElement>('.c')!.checked).toBe(true);
+    expect(container.querySelector<HTMLInputElement>('.d')!.defaultValue).toBe('dv');
+    expect(container.querySelector<HTMLInputElement>('.d')!.hasAttribute('defaultvalue')).toBe(false);
+    expect(container.querySelector('video')!.muted).toBe(true);
     unmount();
   });
 });

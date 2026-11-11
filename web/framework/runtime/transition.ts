@@ -106,6 +106,8 @@ export function inBranch<T>(b: Branch | null, introOk: boolean, fn: () => T): T 
 function collect(value: unknown, out: Node[]): void {
   if (value instanceof Node) out.push(value);
   else if (Array.isArray(value)) for (const v of value) collect(v, out);
+  // A fragment's text run (text.ts): its nodes are the fragment's own.
+  else if (typeof value === 'function' && (value as { $$run?: 1 }).$$run === 1) collect(untrack(value as () => unknown), out);
 }
 
 /**

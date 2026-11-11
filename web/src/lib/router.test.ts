@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { hashUrl, parse, section } from './router';
+import { signal } from 'fw';
+import { hashUrl, parse, router, section } from './router';
 
 describe('router.parse', () => {
   it('maps the root and empty hash to overview', () => {
@@ -98,5 +99,23 @@ describe('hashUrl (a path URL opened directly, DOGFOOD-3 S5)', () => {
   it('works under a base path', () => {
     expect(hashUrl({ pathname: '/studio/runs', search: '', hash: '' }, '/studio/')).toBe('/studio/#/runs');
     expect(hashUrl({ pathname: '/other/runs', search: '', hash: '' }, '/studio/')).toBeNull();
+  });
+});
+
+describe('router.holdWhile (the screen on display keeps its route while the next one loads)', () => {
+  it('keeps `route` on the shown route while the hold says so, `location` on the URL, and lets go reactively', () => {
+    router.route = parse('#/runs/run_a');
+    const ready = signal(false);
+    const release = router.holdWhile((to) => to.name === 'model' && !ready.get());
+    router.route = parse('#/models/model_b');
+    expect(router.location.params.id).toBe('model_b');
+    expect(router.route.params.id).toBe('run_a');
+    ready.set(true);
+    expect(router.route.params.id).toBe('model_b');
+    router.route = parse('#/runs/run_c');
+    expect(router.route.params.id).toBe('run_c');
+    release();
+    router.route = parse('#/');
+    expect(router.route.name).toBe('overview');
   });
 });

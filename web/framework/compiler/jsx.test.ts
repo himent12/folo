@@ -101,9 +101,21 @@ describe('expressions', () => {
 
   it('booleans on non-boolean attributes stringify, as Svelte; boolean attributes drop on false', () => {
     const code = compile('const x = <input spellcheck={false} aria-hidden={true} disabled={false} readonly={true} data-x />;');
-    expect(templates(code)).toEqual(['<input readonly data-x>']);
+    // A DOM property given as an expression is set as the property, not written in the template (Svelte).
+    expect(templates(code)).toEqual(['<input data-x>']);
     expect(code).toContain('_$setAttribute(_el$1, "spellcheck", false)');
     expect(code).toContain('_$setAttribute(_el$1, "aria-hidden", true)');
+    expect(code).toContain('_el$1.readOnly = (true);');
+    expect(code).toContain('_el$1.disabled = (false);');
+  });
+
+  it('static values only a property holds are set from JS (indeterminate, muted, defaultValue, <option value={1}>)', () => {
+    const code = compile('const x = <div><input indeterminate={true} /><video muted /><input defaultValue="d" /><option value={1} /><option value="a" /></div>;');
+    expect(templates(code)).toEqual(['<div><input><video></video><input><option></option><option value="a"></option></div>']);
+    expect(code).toMatch(/_el\$\d+\.indeterminate = \(true\);/);
+    expect(code).toMatch(/_el\$\d+\.muted = true;/);
+    expect(code).toMatch(/_el\$\d+\.defaultValue = "d";/);
+    expect(code).toMatch(/_\$setValue\(_el\$\d+, \(1\)\);/);
   });
 
   it('style={...} with style: directives on one element', () => {

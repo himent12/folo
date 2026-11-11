@@ -8,9 +8,10 @@
 // Loading: the current route's chunk is fetched at startup; any other is fetched when a link to it is hovered,
 // focused or touched (`preloadHref`, App), when the G of a "go to" shortcut is pressed or the palette opens
 // (`preloadAll`), and in idle time after the first screen has shown. A route whose chunk is not there yet keeps the
-// screen on display until it is (App).
+// screen on display, with the route it shows, until it is (App, `router.holdWhile`); one whose chunk failed to load
+// shows an error with Retry, and its screen as soon as any later try brings the chunk in.
 
-import type { Component } from 'fw';
+import { signal, untrack, type Component, type Signal } from 'fw';
 import { parse, type RouteName } from '$lib/router';
 
 /** Every route but not-found (App renders that one itself), and the file under src/routes/ (no extension) for it. */
@@ -35,55 +36,97 @@ export const ROUTES: Record<Exclude<RouteName, 'not-found'>, string> = {
   settings: 'Settings',
 };
 
-type ScreenModule = { default: Component<Record<string, never>> };
+export type ScreenModule = { default: Component<Record<string, never>> };
+export type ScreenName = Exclude<RouteName, 'not-found'>;
+type ScreenComponent = Component<Record<string, never>>;
+
+/** A screen's chunk as App sees it: loaded (its component), or failed (the error of the last try). */
+interface ScreenState {
+  comp?: ScreenComponent;
+  failed?: { error: unknown };
+}
+
+/**
+ * The screens' chunks, each loaded once on demand. Whether a chunk has loaded or failed is reactive: App (and the
+ * router's hold on the displayed route) read it, so whichever request brings a chunk in (App's own, a link hovered, a
+ * Retry), the screen shows; a failure shows an error until a later try succeeds.
+ */
+export class Screens {
+  readonly #loaderOf: (name: ScreenName) => (() => Promise<ScreenModule>) | undefined;
+  readonly #states = new Map<ScreenName, Signal<ScreenState>>();
+  readonly #loading = new Map<ScreenName, Promise<ScreenComponent | null>>();
+
+  /** `loaderOf(name)`: the import of the route's chunk, or undefined when the route has no screen. */
+  constructor(loaderOf: (name: ScreenName) => (() => Promise<ScreenModule>) | undefined) {
+    this.#loaderOf = loaderOf;
+  }
+
+  #state(name: ScreenName): Signal<ScreenState> {
+    let s = this.#states.get(name);
+    if (s === undefined) this.#states.set(name, (s = signal<ScreenState>({})));
+    return s;
+  }
+
+  /**
+   * The screen of a route: its component when loaded, null when the route has no screen (the shell alone), undefined
+   * while its chunk has not loaded (call `preload`). Reactive.
+   */
+  screenOf(name: ScreenName): ScreenComponent | null | undefined {
+    if (!this.#loaderOf(name)) return null;
+    return this.#state(name).get().comp;
+  }
+
+  /** Why a route's chunk could not be loaded, while it could not (a later successful load clears it). Reactive. */
+  failure(name: ScreenName): { error: unknown } | undefined {
+    if (!this.#loaderOf(name)) return undefined;
+    const s = this.#state(name).get();
+    return s.comp ? undefined : s.failed;
+  }
+
+  /**
+   * Loads a route's chunk (once; again after a failure); resolves with its component, or null when the route has no
+   * screen. Its state changes only when the import settles, never synchronously (App calls this from a computed).
+   */
+  preload(name: ScreenName): Promise<ScreenComponent | null> {
+    let p = this.#loading.get(name);
+    if (p) return p;
+    const load = this.#loaderOf(name);
+    p = load
+      ? load().then(
+          (m) => {
+            this.#state(name).set({ comp: m.default });
+            return m.default;
+          },
+          (e: unknown) => {
+            // A failed fetch (offline, a deploy replaced the chunk) is tried again on the next request.
+            this.#loading.delete(name);
+            if (!untrack(() => this.#state(name).get().comp)) this.#state(name).set({ failed: { error: e } });
+            throw e;
+          },
+        )
+      : Promise.resolve(null);
+    this.#loading.set(name, p);
+    return p;
+  }
+
+  /** Preloads the screen an app link (`#/runs/run_7d1e`) leads to; anything else is ignored. */
+  preloadHref(href: string | null | undefined): void {
+    if (!href || !href.startsWith('#/')) return;
+    const name = parse(href).name;
+    if (name !== 'not-found') void this.preload(name).catch(() => {});
+  }
+
+  /** Preloads every screen (a keyboard jump or the palette may lead anywhere; idle time after startup). */
+  preloadAll(): void {
+    for (const name of Object.keys(ROUTES) as ScreenName[]) void this.preload(name).catch(() => {});
+  }
+}
 
 /** The screens that exist (ported), by file: each a chunk of its own. */
 const files = import.meta.glob<ScreenModule>(['./routes/*.tsx', '!./routes/*.test.tsx', '!./routes/*.testing.tsx', '!./routes/NotFound.tsx']);
 
-type ScreenName = Exclude<RouteName, 'not-found'>;
+/** The app's screens. */
+export const screens = new Screens((name) => files[`./routes/${ROUTES[name]}.tsx`]);
 
-const loaded = new Map<ScreenName, Component<Record<string, never>>>();
-const loading = new Map<ScreenName, Promise<Component<Record<string, never>> | null>>();
-
-const loaderOf = (name: ScreenName) => files[`./routes/${ROUTES[name]}.tsx`];
-
-/**
- * The screen of a route: its component when loaded, null when the route has no screen yet (not ported: the shell
- * alone), undefined while its chunk has not loaded (call `preload`).
- */
-export function screenOf(name: ScreenName): Component<Record<string, never>> | null | undefined {
-  const c = loaded.get(name);
-  if (c) return c;
-  return loaderOf(name) ? undefined : null;
-}
-
-/** Loads a route's chunk (once); resolves with its component, or null when the route has no screen. */
-export function preload(name: ScreenName): Promise<Component<Record<string, never>> | null> {
-  let p = loading.get(name);
-  if (p) return p;
-  const load = loaderOf(name);
-  p = load
-    ? load().then(
-        (m) => (loaded.set(name, m.default), m.default),
-        (e) => {
-          // A failed fetch (offline, a deploy replaced the chunk) is tried again on the next request.
-          loading.delete(name);
-          throw e;
-        },
-      )
-    : Promise.resolve(null);
-  loading.set(name, p);
-  return p;
-}
-
-/** Preloads the screen an app link (`#/runs/run_7d1e`) leads to; anything else is ignored. */
-export function preloadHref(href: string | null | undefined): void {
-  if (!href || !href.startsWith('#/')) return;
-  const name = parse(href).name;
-  if (name !== 'not-found') void preload(name).catch(() => {});
-}
-
-/** Preloads every screen (a keyboard jump or the palette may lead anywhere; idle time after startup). */
-export function preloadAll(): void {
-  for (const name of Object.keys(ROUTES) as ScreenName[]) void preload(name).catch(() => {});
-}
+/** Loads a route's chunk (see `Screens.preload`). */
+export const preload = (name: ScreenName) => screens.preload(name);

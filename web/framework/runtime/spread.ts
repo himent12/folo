@@ -1,9 +1,11 @@
 // `{...props}` on an element (port of Svelte's `set_attributes`): every key is applied as Svelte would, reactively;
-// keys that disappear are removed.
+// keys that disappear are removed. A listener the spread adds (a non-delegated `on<type>`) belongs to the element, not
+// to a run of the spread's effect: added once per key, it calls the key's current handler, and goes when the key does
+// (or the element).
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { renderEffect } from './core';
+import { onCleanup, renderEffect, runWithOwner } from './core';
 import { clsx, hasSetter, propName, setAttribute, setStyle, styleParts, toClass, type ClassValue } from './dom';
 import { DELEGATED, on, setDelegated } from './events';
 
@@ -26,7 +28,12 @@ export function spread(
   let prevImportant: Record<string, unknown> | undefined;
   let prev: Record<string, unknown> = {};
   const handlers: Record<string, unknown> = {};
-  const listening = new Set<string>();
+  /** The listeners added, by key: each removed when its key goes, all when the element does. */
+  const listeners = new Map<string, () => void>();
+  onCleanup(() => {
+    for (const off of listeners.values()) off();
+    listeners.clear();
+  });
   let classSet = false;
   renderEffect(() => {
     const src = (typeof props === 'function' ? (props as () => object)() : props) as Record<string, unknown>;
@@ -35,8 +42,8 @@ export function spread(
     for (const key in prev) if (!(key in next)) next[key] = undefined;
     const d = dirs?.();
     if (!classSet || 'class' in next || d !== undefined) {
-      // The scope class (and directives) stay on even without a `class` key.
-      const value = next.class === undefined ? prev.class : next.class;
+      // A `class` key that went is `undefined` here: its classes go, the scope class and directives stay on.
+      const value = next.class;
       if (!classSet || value !== prev.class || d !== undefined) {
         const c = toClass(clsx(value as ClassValue), scope, d);
         if (c === null) el.removeAttribute('class');
@@ -58,11 +65,18 @@ export function spread(
           setDelegated(el, type, value);
         } else {
           handlers[key] = value;
-          if (value != null && !listening.has(key)) {
-            listening.add(key);
-            on(el, type, function (this: EventTarget, e: Event) {
+          const off = listeners.get(key);
+          if (value == null) {
+            if (off !== undefined) {
+              off();
+              listeners.delete(key);
+            }
+          } else if (off === undefined) {
+            // Owned by the spread (above), not by this run of its effect, which a change of any key ends.
+            const listener = function (this: EventTarget, e: Event) {
               (handlers[key] as ((this: EventTarget, e: Event) => unknown) | undefined)?.call(this, e);
-            }, capture ? { capture: true } : undefined);
+            };
+            listeners.set(key, runWithOwner(null, () => on(el, type, listener, capture ? { capture: true } : undefined)));
           }
         }
         continue;

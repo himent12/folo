@@ -23,7 +23,9 @@ what `?mock=1` forces and what screenshots use, so they are deterministic.
 - `src/lib/design/` generated tokens + base CSS · `src/lib/ui/` components · `src/lib/shell/` app chrome ·
   `src/lib/charts/` SVG/canvas charts · `src/lib/api/` typed client + dev mock · `src/routes/` screens (each a chunk of
   its own, `src/routes.ts`).
-- Routing is hash based (`#/runs/run_7d1e`) so any static server works.
+- Routing is hash based (`#/runs/run_7d1e`) so any static server works. Screens read `router.route`, the route on
+  display: while the next screen's chunk loads, the screen still shown keeps its own route (`router.location` is the
+  URL's); a chunk that fails to load shows an error with Retry (`src/ScreenError.tsx`).
 - Components are `.tsx` files: JSX with HTML attribute names, a `css\`...\`` block of scoped styles. How to write one:
   `framework/README.md` (design, API) and `framework/PORTING.md` (every construct, with its Svelte origin).
 - Icons: `import X from '$icons/x'` (lucide). Their data is vendored in `framework/icons/lucide.json`;

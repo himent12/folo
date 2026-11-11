@@ -67,6 +67,13 @@ const PROPS: Record<string, string> = {
   textcontent: 'textContent', innertext: 'innerText',
 };
 
+/**
+ * Properties a template attribute does not set (no content attribute, or one that is not the property): set from
+ * JS even when static (Svelte's NON_STATIC_PROPERTIES `muted`, `defaultValue`, `defaultChecked`, and those with no
+ * attribute at all).
+ */
+const TEMPLATE_CANNOT_SET = new Set(['indeterminate', 'muted', 'volume', 'defaultValue', 'defaultChecked', 'srcObject', 'innerHTML', 'textContent', 'innerText']);
+
 /** Svelte's DOM_BOOLEAN_ATTRIBUTES: present when true, absent when false. Other attributes stringify booleans. */
 const BOOLEAN_ATTRS = new Set([
   'allowfullscreen', 'async', 'autofocus', 'autoplay', 'checked', 'controls', 'default', 'disabled', 'formnovalidate',
@@ -426,6 +433,15 @@ class Compiler {
   }
 }
 
+/**
+ * Whether a static attribute is set as its DOM property from JS rather than written in the template: as Svelte, a
+ * property given as an expression (`checked={true}`, `<option value={1}>`), and a property no template attribute sets.
+ */
+function propOnly(a: Node, name: string, svg: boolean): boolean {
+  const prop = svg ? undefined : PROPS[name.toLowerCase()];
+  return prop !== undefined && (a.value?.type === 'JSXExpressionContainer' || TEMPLATE_CANNOT_SET.has(prop));
+}
+
 function wrapParen(c: Chunk[]): Chunk[] {
   return ['(', ...c, ')'];
 }
@@ -499,6 +515,7 @@ class Template {
       }
       if (name.startsWith('on') || name === 'ref' || name === 'use' || name === 'key') continue;
       if (name === 'style' && this.hasStyleDirectives(opening)) continue;
+      if (propOnly(a, name, svg)) continue;
       if (tag === 'select' && name === 'value') continue;
       if (tag === 'textarea' && name === 'value') continue;
       const v = this.staticValue(a);
@@ -755,7 +772,9 @@ class Template {
       }
       if (sv !== undefined && !(tag === 'textarea' && name === 'value')) {
         if (needsGroupValue && name === 'value') groupValue ??= `() => ${JSON.stringify(sv)}`;
-        continue;
+        // In the template, unless only the property holds it (`indeterminate={true}`; `<option value={1}>`, whose
+        // `__value` keeps the number a bound select compares with).
+        if (!propOnly(a, name, svg)) continue;
       }
       if (needsGroupValue && name === 'value') {
         groupValue = accessor(expr);
