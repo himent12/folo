@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "created": "2026-11-11T03:23:17Z",
-  "runs": 27,
+  "created": "2026-11-11T03:35:27Z",
+  "runs": 28,
   "groups": [
     {
       "dataset": "bccd",
@@ -199,6 +199,55 @@
         "max": 628.0,
         "n": 3,
         "stdev": 19.139836293274122
+      },
+      "train_wall_shared_s": null,
+      "epochs_run": [
+        100
+      ],
+      "epochs_planned": [
+        100
+      ],
+      "gpus": [
+        "NVIDIA A40 (vulkan)"
+      ]
+    },
+    {
+      "dataset": "brain-tumor",
+      "tool": "folo",
+      "model": "folo-n",
+      "variant": "scratch",
+      "seeds": [
+        0
+      ],
+      "complete": true,
+      "eval_split": "val",
+      "ap": {
+        "mean": 0.3724908055297145,
+        "min": 0.3724908055297145,
+        "max": 0.3724908055297145,
+        "n": 1,
+        "stdev": null
+      },
+      "ap50": {
+        "mean": 0.5318644389267051,
+        "min": 0.5318644389267051,
+        "max": 0.5318644389267051,
+        "n": 1,
+        "stdev": null
+      },
+      "ap75": {
+        "mean": 0.459882541428559,
+        "min": 0.459882541428559,
+        "max": 0.459882541428559,
+        "n": 1,
+        "stdev": null
+      },
+      "train_wall_s": {
+        "mean": 555.0,
+        "min": 555.0,
+        "max": 555.0,
+        "n": 1,
+        "stdev": null
       },
       "train_wall_shared_s": null,
       "epochs_run": [
