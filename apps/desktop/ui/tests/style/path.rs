@@ -134,3 +134,22 @@ fn paint_path_scales_clips_and_fades() {
     paint_path(&mut scene, &cx, &PathBuilder::fill().build().unwrap(), red());
     assert_eq!(scene.len(), 2);
 }
+
+#[test]
+fn degenerate_dash_arrays_end() {
+    // All zero: GPUI's loop never ends; zero-length dashes draw nothing.
+    let path = polyline(&[(0., 0.), (10., 0.)], 1., &[0., 0.]);
+    assert!(path.triangles.is_empty(), "{path:?}");
+    let path = polyline(&[(0., 0.), (10., 0.)], 1., &[0.]);
+    assert!(path.triangles.is_empty(), "{path:?}");
+    // Zero "on" dashes with a gap draw nothing; zero gaps draw the whole line.
+    assert!(polyline(&[(0., 0.), (10., 0.)], 1., &[0., 2.]).triangles.is_empty());
+    assert!((area(&polyline(&[(0., 0.), (10., 0.)], 1., &[2., 0.])) - 10.).abs() < 1e-3);
+    // Negative and non-finite lengths are rejected.
+    for bad in [[-1., 2.], [f32::NAN, 2.], [f32::INFINITY, 1.], [1., f32::NEG_INFINITY]] {
+        let mut b = PathBuilder::stroke(px(1.)).dash_array(&bad.map(px));
+        b.move_to(p(0., 0.));
+        b.line_to(p(10., 0.));
+        assert!(b.build().is_err(), "{bad:?}");
+    }
+}

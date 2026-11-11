@@ -343,7 +343,10 @@ fn tessellate_fill(path: &lyon::path::Path, options: &FillOptions) -> anyhow::Re
 }
 
 /// GPUI's `tessellate_stroke`: dashes cut along the whole path with lyon's measurements (each "on"
-/// dash its own subpath), then stroked.
+/// dash its own subpath), then stroked. A negative or non-finite dash length is an error. GPUI's loop
+/// never ends when a whole period adds nothing to the position (all lengths zero, or too small for
+/// `f32` at that length); here the cutting stops there, so an all-zero pattern draws nothing, which is
+/// what GPUI's endless zero-length dashes would draw.
 fn tessellate_stroke(
     dash_array: Option<Vec<Pixels>>,
     path: &lyon::path::Path,
@@ -353,12 +356,19 @@ fn tessellate_stroke(
     use lyon::tessellation::{BuffersBuilder, StrokeTessellator, StrokeVertex, VertexBuffers};
     let dashed;
     let path = if let Some(dash_array) = dash_array {
+        if dash_array.iter().any(|d| !d.0.is_finite() || d.0 < 0.) {
+            anyhow::bail!("dash lengths must be finite and not negative: {dash_array:?}");
+        }
         let measurements = PathMeasurements::from_path(path, 0.01);
         let mut sampler = measurements.create_sampler(path, SampleType::Normalized);
         let mut builder = lyon::path::Path::builder();
         let total_length = sampler.length();
+        if total_length.is_infinite() {
+            anyhow::bail!("dashing a path of infinite length");
+        }
         let mut pos = 0.;
         let mut dash_index = 0;
+        let mut period_start = pos;
         while pos < total_length && !dash_array.is_empty() {
             let dash_length = dash_array[dash_index % dash_array.len()].0;
             let next_pos = (pos + dash_length).min(total_length);
@@ -367,6 +377,12 @@ fn tessellate_stroke(
             }
             pos = next_pos;
             dash_index += 1;
+            if dash_index % dash_array.len() == 0 {
+                if pos == period_start {
+                    break;
+                }
+                period_start = pos;
+            }
         }
         dashed = builder.build();
         &dashed
