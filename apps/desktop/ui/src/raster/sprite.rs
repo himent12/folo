@@ -66,11 +66,6 @@ impl AlphaLut {
     pub fn glyph(c: [f32; 4], blend: &GlyphBlend) -> Self {
         AlphaLut(std::array::from_fn(|m| alpha16(glyph_alpha_f32(m as u8, c, blend))))
     }
-
-    /// Plain coverage times `alpha` (paths).
-    pub fn coverage(alpha: f32) -> Self {
-        AlphaLut(std::array::from_fn(|m| alpha16(m as f32 / 255. * sat(alpha))))
-    }
 }
 
 /// Blits the part of `mask` (at `origin`, 1:1) inside `r`: look up, skip zero, blend.

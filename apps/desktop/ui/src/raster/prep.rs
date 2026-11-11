@@ -198,7 +198,7 @@ fn is_plain(q: &Quad) -> bool {
 pub(crate) enum Job {
     Shadow(ShadowKey, ShadowShape),
     Image(ImageKey, Arc<RenderImage>, usize, bool, [f32; 4]),
-    Path((u64, IRect), Arc<PathData>),
+    Path((u64, IRect), Arc<PathData>, [f32; 4]),
 }
 
 /// What a job made.
@@ -216,7 +216,7 @@ impl Job {
             Job::Image(key, image, frame, grayscale, dst) => {
                 Made::Image(Arc::new(ImageCopy::new(image, *frame, *grayscale, key.w, key.h, *dst)))
             }
-            Job::Path(key, path) => Made::Path(Arc::new(PathMask::new(path, key.1))),
+            Job::Path(key, path, clip) => Made::Path(Arc::new(PathMask::new(path, key.1, *clip))),
         }
     }
 
@@ -231,7 +231,7 @@ impl Job {
                 caches.images.insert(key, copy.clone(), copy.bytes());
                 image_prep(m, copy, frame)
             }
-            (Job::Path(key, _), Made::Path(mask), Primitive::Path(p)) => {
+            (Job::Path(key, ..), Made::Path(mask), Primitive::Path(p)) => {
                 caches.paths.insert(key, mask.clone(), mask.bytes());
                 path_prep(p, mask, caches)
             }
@@ -297,12 +297,21 @@ fn image_prep(m: &Image, copy: Arc<ImageCopy>, frame: IRect) -> Prep {
     Prep::Image(Box::new(ImageDraw::new(copy, origin, m.opacity, m)))
 }
 
-/// The path's coverage key: its geometry and its mask rectangle (bounds inside the frame).
+/// The path's coverage key: its geometry and clip (triangles are clipped per sample), and its mask
+/// rectangle (bounds inside the frame).
 fn path_key(p: &Path, frame: IRect) -> (u64, IRect) {
     let b = &p.bounds;
     let (x0, x1) = raster_span(b.origin.x.0, b.origin.x.0 + b.size.width.0);
     let (y0, y1) = raster_span(b.origin.y.0, b.origin.y.0 + b.size.height.0);
-    (geometry_hash(&p.path), IRect::new(x0, y0, x1, y1).intersect(&frame))
+    let [cx0, cy0, cx1, cy1] = path_clip(p);
+    let h = finish(mix_f2(mix_f2(geometry_hash(&p.path), cx0, cy0), cx1, cy1));
+    (h, IRect::new(x0, y0, x1, y1).intersect(&frame))
+}
+
+/// The path's clip as `[x0, y0, x1, y1]`.
+fn path_clip(p: &Path) -> [f32; 4] {
+    let c = &p.clip;
+    [c.origin.x.0, c.origin.y.0, c.origin.x.0 + c.size.width.0, c.origin.y.0 + c.size.height.0]
 }
 
 fn path_prep(p: &Path, mask: Arc<PathMask>, caches: &mut Caches) -> Prep {
@@ -312,7 +321,7 @@ fn path_prep(p: &Path, mask: Arc<PathMask>, caches: &mut Caches) -> Prep {
         PathPaint::Gradient(caches.gradient(&p.paint, &paint))
     } else {
         let c = rgba(p.paint.solid);
-        PathPaint::Solid(Box::new(AlphaLut::coverage(c[3])), Tint::new(c))
+        PathPaint::Solid(Box::new(super::path::sample_lut(c[3])), Tint::new(c))
     };
     Prep::Path { mask, paint: Box::new(paint) }
 }
@@ -363,7 +372,7 @@ pub(crate) fn prepare(
             let key = path_key(p, frame);
             match caches.paths.get(&key) {
                 Some(mask) => Prepared::Item(path_prep(p, mask, caches)),
-                None => Prepared::Pending(Job::Path(key, p.path.clone())),
+                None => Prepared::Pending(Job::Path(key, p.path.clone(), path_clip(p))),
             }
         }
     }

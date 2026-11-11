@@ -302,22 +302,30 @@ impl ColorMask {
     }
 }
 
-/// A path's geometry, already flattened by `PathBuilder`: contours of device-pixel points, filled
-/// with a rule or stroked with a style.
+/// A path's geometry in device pixels: triangles (what `PathBuilder` makes: lyon's tessellation, as
+/// GPUI draws paths), or contours filled with a rule or stroked with a style.
 #[derive(Debug)]
 pub struct PathData {
     /// Process-unique id (path coverage is cached by it).
     pub id: u64,
-    /// The contours.
+    /// The contours (empty for `PathKind::Triangles`).
     pub contours: Vec<Contour>,
-    /// Fill or stroke.
+    /// Fill, stroke, or triangles.
     pub kind: PathKind,
+    /// For `PathKind::Triangles`: three points per triangle.
+    pub triangles: Vec<Point<ScaledPixels>>,
 }
 
 impl PathData {
     /// Wraps the geometry with a new id.
     pub fn new(contours: Vec<Contour>, kind: PathKind) -> Self {
-        Self { id: next_id(), contours, kind }
+        Self { id: next_id(), contours, kind, triangles: Vec::new() }
+    }
+
+    /// Triangles (three points each) with a new id.
+    pub fn from_triangles(triangles: Vec<Point<ScaledPixels>>) -> Self {
+        debug_assert_eq!(triangles.len() % 3, 0);
+        Self { id: next_id(), contours: Vec::new(), kind: PathKind::Triangles, triangles }
     }
 }
 
@@ -337,6 +345,9 @@ pub enum PathKind {
     Fill(FillRule),
     /// Stroked with a style.
     Stroke(StrokeStyle),
+    /// The union of `PathData::triangles`, each rasterized as the GPU does (GPUI's path pipeline:
+    /// 4x MSAA, the top-left rule, vertices snapped to 1/256 px).
+    Triangles,
 }
 
 /// Which points are inside a filled path.

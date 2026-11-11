@@ -27,6 +27,7 @@ mod shadow;
 mod sprite;
 mod target;
 mod tiles;
+mod triangles;
 
 pub use cache::{Mask, MaskCache};
 pub use tiles::TILE as TILE_SIZE;

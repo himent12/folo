@@ -2,12 +2,13 @@
 //! Paths (4x multisampled coverage, as GPUI's path target, from tiny-skia's aliased fills, cached by
 //! geometry) and underlines (straight and wavy).
 
-use super::blend::{ONE, Src, Tint, sat};
+use super::blend::{ONE, Src, Tint, alpha16, sat};
 use super::geom::IRect;
 use super::gradient::GradientSpan;
 use super::hash::{finish, mix, mix_f2};
 use super::sprite::{AlphaLut, draw_mask};
 use super::target::Target;
+use super::triangles::COUNT_MAX;
 use crate::{FillRule, LineCap, LineJoin, PathData, PathKind, Underline};
 
 /// A hash of everything about a path's geometry that affects its coverage.
@@ -21,6 +22,12 @@ pub(crate) fn geometry_hash(p: &PathData) -> u64 {
     }
     match &p.kind {
         PathKind::Fill(rule) => h = mix(h, *rule as u64),
+        PathKind::Triangles => {
+            h = mix(h, 0x7e1 | (p.triangles.len() as u64) << 12);
+            for pt in &p.triangles {
+                h = mix_f2(h, pt.x.0, pt.y.0);
+            }
+        }
         PathKind::Stroke(s) => {
             h = mix_f2(h, s.width.0, s.miter_limit);
             h = mix(h, 16 | (s.cap as u64) << 8 | (s.join as u64) << 4);
@@ -53,8 +60,11 @@ impl PathMask {
         self.data.len() + 64
     }
 
-    /// Rasterizes `p` over `rect`.
-    pub fn new(p: &PathData, rect: IRect) -> Self {
+    /// Rasterizes `p` over `rect`; triangles keep only the samples inside `clip` (`[x0, y0, x1, y1]`).
+    pub fn new(p: &PathData, rect: IRect, clip: [f32; 4]) -> Self {
+        if p.kind == PathKind::Triangles {
+            return PathMask { rect, data: super::triangles::coverage(&p.triangles, clip, rect) };
+        }
         let (w, h) = (rect.width().max(0) as u32, rect.height().max(0) as u32);
         let empty = || PathMask { rect, data: vec![0; (w * h) as usize] };
         let Some(mut mask) = tiny_skia::Mask::new(w, h) else {
@@ -84,6 +94,7 @@ impl PathMask {
                     FillRule::EvenOdd => tiny_skia::FillRule::EvenOdd,
                 },
             ),
+            PathKind::Triangles => unreachable!("triangles are rasterized above"),
             PathKind::Stroke(s) => {
                 let stroke = tiny_skia::Stroke {
                     width: s.width.0,
@@ -112,16 +123,16 @@ impl PathMask {
         // GPUI draws paths into a 4x MSAA target (D3D11's standard pattern) and resolves it: a
         // pixel's coverage is the share of its four samples inside the path. Each sample is one
         // aliased fill (centre sampling) of the path moved by minus the sample's offset.
-        let mut sum = vec![0u16; (w * h) as usize];
-        for (dx, dy) in MSAA_4X {
+        let mut samples = vec![0u8; (w * h) as usize];
+        for (k, (dx, dy)) in MSAA_4X.into_iter().enumerate() {
             mask.clear();
             let t = tiny_skia::Transform::from_translate(-dx, -dy);
             mask.fill_path(&path, rule, false, t);
-            for (s, &m) in sum.iter_mut().zip(mask.data()) {
-                *s += (m != 0) as u16;
+            for (s, &m) in samples.iter_mut().zip(mask.data()) {
+                *s |= ((m != 0) as u8) << (2 * k);
             }
         }
-        PathMask { rect, data: sum.into_iter().map(|n| QUARTERS[n as usize]).collect() }
+        PathMask { rect, data: samples }
     }
 }
 
@@ -129,8 +140,29 @@ impl PathMask {
 const MSAA_4X: [(f32, f32); 4] =
     [(-2. / 16., -6. / 16.), (6. / 16., -2. / 16.), (-6. / 16., 2. / 16.), (2. / 16., 6. / 16.)];
 
-/// The mask byte for 0..=4 covered samples (the resolve's 8-bit UNORM rounding of `n / 4`).
-const QUARTERS: [u8; 5] = [0, 64, 128, 191, 255];
+/// The resolved coverage (`0..=255`) of each mask byte: the share of its samples covered, as the
+/// resolve's 8-bit UNORM rounding of `n / 4`.
+pub(crate) fn coverage_of(b: u8) -> u8 {
+    const QUARTERS: [u8; 5] = [0, 64, 128, 191, 255];
+    QUARTERS[(0..4).filter(|k| (b >> (2 * k)) & COUNT_MAX != 0).count()]
+}
+
+/// The alpha (`0..=ONE`) a solid paint of alpha `a` leaves for each mask byte, as GPUI's path target
+/// computes it: each triangle over a sample blends `a` over it (premultiplied, ONE / INV_SRC_ALPHA),
+/// the sample stored as 8-bit UNORM after each, and the resolve averages the four samples and
+/// rounds to 8 bits again.
+pub(crate) fn sample_lut(a: f32) -> AlphaLut {
+    let a = sat(a);
+    // The sample's 8-bit alpha after 0..=3 blends.
+    let mut level = [0u32; 4];
+    for n in 1..4 {
+        level[n] = ((a + level[n - 1] as f32 / 255. * (1. - a)) * 255. + 0.5) as u32;
+    }
+    AlphaLut(std::array::from_fn(|b| {
+        let sum: u32 = (0..4).map(|k| level[(b >> (2 * k)) & COUNT_MAX as usize]).sum();
+        alpha16(((sum + 2) / 4) as f32 / 255.)
+    }))
+}
 
 /// How a path is painted over its coverage.
 pub(crate) enum PathPaint {
@@ -151,7 +183,7 @@ pub(crate) fn draw(t: &mut Target, mask: &PathMask, paint: &PathPaint, r: IRect)
                 let row = t.row(y, r.x0, r.x1);
                 for ((x, p), &m) in (r.x0..r.x1).zip(row.iter_mut()).zip(src) {
                     if m != 0 {
-                        *p = scaled(g.at(x, y), m as u32).over(*p);
+                        *p = scaled(g.at(x, y), coverage_of(m) as u32).over(*p);
                     }
                 }
             }
@@ -207,6 +239,8 @@ mod tests {
     use super::*;
     use crate::{Contour, LineCap, LineJoin, PathData, PathKind, ScaledPixels, StrokeStyle, point};
 
+    const OPEN: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
+
     fn pt(x: f32, y: f32) -> crate::Point<ScaledPixels> {
         point(ScaledPixels(x), ScaledPixels(y))
     }
@@ -217,14 +251,29 @@ mod tests {
     fn coverage_is_four_samples() {
         let rect = |x1: f32| {
             let c = Contour { points: vec![pt(0., 0.), pt(x1, 0.), pt(x1, 4.), pt(0., 4.)], closed: true };
-            PathMask::new(&PathData::new(vec![c], PathKind::Fill(FillRule::NonZero)), IRect::new(0, 0, 4, 4))
+            PathMask::new(&PathData::new(vec![c], PathKind::Fill(FillRule::NonZero)), IRect::new(0, 0, 4, 4), OPEN)
         };
         // Samples of column 2 sit at x = 2.125, 2.375, 2.625, 2.875.
         for (x1, want) in [(2.1, 0), (2.2, 64), (2.5, 128), (2.7, 191), (2.9, 255)] {
             let m = rect(x1);
-            assert_eq!(m.data[4 + 1], 255, "{x1}");
-            assert_eq!(m.data[4 + 2], want, "{x1}");
+            assert_eq!(coverage_of(m.data[4 + 1]), 255, "{x1}");
+            assert_eq!(coverage_of(m.data[4 + 2]), want, "{x1}");
         }
+    }
+
+    /// A sample under two triangles of a translucent paint blends twice; the resolve rounds.
+    #[test]
+    fn overlaps_blend_per_sample() {
+        let lut = sample_lut(0.4);
+        let a = |b: u8| (lut.0[b as usize] as f32 / ONE as f32 * 255.).round() as u32;
+        assert_eq!(a(0), 0);
+        assert_eq!(a(0b01_01_01_01), 102);
+        // 0.4 + 0.4 * 0.6 = 0.64 (163/255 after rounding).
+        assert_eq!(a(0b10_10_10_10), 163);
+        // Two samples once, two twice: (102 + 102 + 163 + 163) / 4 = 132.5 -> 133.
+        assert_eq!(a(0b10_10_01_01), 133);
+        let opaque = sample_lut(1.);
+        assert_eq!(opaque.0[0b00_01_00_11], alpha16(128. / 255.));
     }
 
     /// lyon's miter limit 4 keeps a miter up to a ratio `1 / sin(angle / 2)` of 8: a 10-degree
@@ -242,7 +291,7 @@ mod tests {
                 miter_limit: 4.,
                 dash: None,
             });
-            let m = PathMask::new(&PathData::new(vec![c], kind), IRect::new(0, 0, 60, 400));
+            let m = PathMask::new(&PathData::new(vec![c], kind), IRect::new(0, 0, 60, 400), OPEN);
             // The lowest covered row in the spike's column.
             (0..400).rev().find(|&y| m.data[y * 60 + 30] != 0).unwrap() as f32
         };
