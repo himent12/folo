@@ -1,11 +1,9 @@
-import ArrowRight from '$icons/arrow-right';
 import Images from '$icons/images';
 import Play from '$icons/play';
-import CircleAlert from '$icons/circle-alert';
 import { computed, css, deep, effect, signal, tick, untrack } from 'fw';
 import { ApiError, hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
-import type { Arch, Augment, DatasetImage, Optimizer, RunEstimate, TrainConfig } from '$lib/api/types';
+import type { Arch, Augment, DatasetImage, Optimizer, TrainConfig } from '$lib/api/types';
 import { modelChoices, scoreMeta } from '$lib/scoreSummary';
 import { sentence } from '$lib/format';
 import { hasCloud } from '$lib/cloud';
@@ -32,6 +30,8 @@ import { cloudCostOf, closeMosaicShown, reviewRows, roughBytes, shownEstimate } 
 import { trainConfig } from './runnew/config';
 import { deviceLabelOf, deviceMessage } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
+import { serverEstimate } from './runnew/serverEstimate';
+import WhyLine from './runnew/WhyLine';
 import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
 import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
 import DatasetSection from './runnew/DatasetSection';
@@ -364,61 +364,13 @@ export default function RunNew() {
     ),
   );
 
-  // The server's estimate (POST /api/runs/estimate, feature `run_estimate`): the first asked at once, every later one
-  // 300 ms after the settings stop changing, whether or not the last one was answered (a slow or failing server is not
-  // asked once per keystroke); the last answer stays up meanwhile. Its errors are the form's own (a missing device,
-  // weights of another size), already said at their fields: the reference figures stand in.
   const canEstimate = computed(() => hasFeature(system.data, 'run_estimate'));
-  const served = signal<{ key: string; est: RunEstimate } | null>(null);
-  /** Whether the latest request is still out: set by the run of the effect that owns it, cleared by every other. */
-  const estimating = signal(false);
-  /** Whether an estimate has been asked for yet (not state: it only sets the next one's delay). */
-  let asked = false;
-  /** The latest request's number: an answer to an older (cancelled) one never touches the state. */
-  let estSeq = 0;
-  // The name is part of the request: the server's command (`cli`) names the run.
   const estKey = computed(() => JSON.stringify(config.get()));
-  effect(() => {
-    const key = estKey.get();
-    const c = config.get();
-    const body = { ...c, name: c.name || 'estimate' };
-    const seq = ++estSeq;
-    // No request for these settings (none possible, or the answer is already in): none is pending either, even where
-    // the one this replaced (since cancelled) was.
-    if (!canEstimate.get() || !dataset.get() || !isInt(epochs.get(), 1, 10000) || errors.get().close || (onCloud.get() && !cloudPick.compute)) {
-      served.set(null);
-      estimating.set(false);
-      return;
-    }
-    if (untrack(() => served.get()?.key) === key) {
-      estimating.set(false);
-      return;
-    }
-    const ctrl = new AbortController();
-    estimating.set(true);
-    const t = setTimeout(
-      () => {
-        asked = true;
-        hub.api.estimateRun(body, ctrl.signal).then(
-          (e) => {
-            if (ctrl.signal.aborted || seq !== estSeq) return;
-            served.set({ key, est: e });
-            estimating.set(false);
-          },
-          () => {
-            if (ctrl.signal.aborted || seq !== estSeq) return;
-            served.set(null);
-            estimating.set(false);
-          },
-        );
-      },
-      asked ? 300 : 0,
-    );
-    return () => {
-      clearTimeout(t);
-      ctrl.abort();
-    };
-  });
+  const { served, estimating } = serverEstimate(
+    config,
+    estKey,
+    () => canEstimate.get() && !!dataset.get() && isInt(epochs.get(), 1, 10000) && !errors.get().close && (!onCloud.get() || !!cloudPick.compute),
+  );
   const closeEff = computed(() => closeMosaicShown(errors.get(), served.get(), estKey.get(), augment.get(), epochs.get()));
   /**
    * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so
@@ -626,28 +578,8 @@ export default function RunNew() {
     />
   );
 
-  // Why Start is off, as a way to the field that needs changing (the field may be far away). The mark in front carries
-  // the danger hue; the link itself is ink, since danger never means navigation.
-  const WhyLine = (p: { id: string; cls?: string }) => (
-    <>
-      {showWhy.get() && why.get() ? (
-        <p class={`why ${p.cls ?? ''}`} id={p.id} role={p.id === 'start-why' ? 'status' : undefined}>
-          <CircleAlert size={14} strokeWidth={2} aria-hidden="true" />
-          <button
-            type="button"
-            class="why-go"
-            onclick={() => {
-              const w = why.get();
-              if (w) void jump(w.key);
-            }}
-          >
-            {why.get()?.text}
-            <ArrowRight size={12} strokeWidth={2} aria-hidden="true" />
-          </button>
-        </p>
-      ) : null}
-    </>
-  );
+  /** Why Start is off, as a way to that field (runnew/WhyLine). */
+  const Why = (p: { id: string; cls?: string }) => <WhyLine id={p.id} cls={p.cls} why={showWhy.get() ? why.get() : null} jump={jump} />;
 
   return (
     <Page title="New training run" sub={() => <span>Pick data and a model size; the defaults are tuned to work well. Everything else is optional.</span>}>
@@ -782,7 +714,7 @@ export default function RunNew() {
                     >
                       Start training
                     </Button>
-                    <WhyLine id="start-why" />
+                    <Why id="start-why" />
                   </div>
                   <CliCommand cliParts={cliParts.get()} cli={cli.get()} cliPlaceholder={cliPlaceholder.get()} />
                 </div>
@@ -794,7 +726,7 @@ export default function RunNew() {
             startVisible={startVisible.get()}
             showWhy={showWhy.get()}
             why={why.get()}
-            whyLine={(id, cls) => <WhyLine id={id} cls={cls} />}
+            whyLine={(id, cls) => <Why id={id} cls={cls} />}
             bind:sumOpen={sumOpen}
             shown={shown.get()}
             estReady={estReady.get()}
@@ -857,7 +789,7 @@ export default function RunNew() {
             <div class="sum">
               <Review withName />
               <Figures where="sheet" />
-              <WhyLine id="sheet-why" />
+              <Why id="sheet-why" />
             </div>
           </Dialog>
         </form>
@@ -889,53 +821,6 @@ css`
     gap: var(--space-4);
     min-width: 0;
   }
-  .why {
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-2);
-    margin-top: var(--space-2);
-    font-size: var(--type-sm-size);
-    line-height: var(--type-sm-line);
-    color: var(--text-primary);
-  }
-  .why > :global(svg) {
-    flex-shrink: 0;
-    margin-top: 2px;
-    color: var(--danger-solid);
-  }
-  /* The reason Start is off leads to the field: an ink link, underlined, the arrow in tertiary. */
-  .why-go {
-    display: inline;
-    min-width: 0;
-    color: inherit;
-    text-align: left;
-    text-decoration: underline;
-    text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
-    text-underline-offset: 3px;
-    border-radius: var(--radius-xs);
-  }
-  .why-go:hover {
-    text-decoration-color: currentColor;
-  }
-  .why-go :global(svg) {
-    display: inline;
-    margin-left: var(--space-1);
-    vertical-align: -1px;
-    color: var(--text-tertiary);
-  }
-  @media (pointer: coarse) {
-    .why {
-      align-items: center;
-    }
-    .why > :global(svg) {
-      margin-top: 0;
-    }
-    .why-go {
-      display: inline-block;
-      min-height: 44px;
-      padding-block: var(--space-3);
-    }
-  }
   .layout :global([data-jumped]) {
     outline: 2px solid var(--focus);
     outline-offset: 4px;
@@ -950,12 +835,6 @@ css`
   @media (max-width: 1023px) {
     .layout {
       padding-bottom: 64px;
-    }
-    /* The reason sits on the dock's left, where the estimate would be. */
-    .dock-why {
-      flex: 1;
-      min-width: 0;
-      margin-top: 0;
     }
     .layout {
       grid-template-columns: minmax(0, 1fr);
