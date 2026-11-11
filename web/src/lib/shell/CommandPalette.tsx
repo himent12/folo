@@ -8,6 +8,7 @@ import PanelLeft from '$icons/panel-left';
 import Plus from '$icons/plus';
 import ScanSearch from '$icons/scan-search';
 import Search from '$icons/search';
+import SettingsIcon from '$icons/settings';
 import SunMoon from '$icons/sun-moon';
 import Tags from '$icons/tags';
 import Target from '$icons/target';
@@ -56,6 +57,17 @@ interface Item {
   status?: RunStatus;
   run: () => void;
 }
+
+/** Settings' sections (routes/Settings: `?section=`), with what each holds, as people may look for it. */
+const SETTINGS_SECTIONS: { id: string; label: string; match: string[] }[] = [
+  { id: 'connection', label: 'Connection', match: ['Server URL', 'Server address', 'folo serve'] },
+  { id: 'cloud', label: 'Cloud', match: ['Cloud compute', 'Connect a cloud', 'RunPod', 'Rented GPU'] },
+  { id: 'appearance', label: 'Appearance', match: ['Theme', 'Dark theme', 'Light theme'] },
+  { id: 'units', label: 'Units', match: ['Memory units', 'GiB', 'GB'] },
+  { id: 'shortcuts', label: 'Keyboard shortcuts', match: ['Single-key shortcuts'] },
+  { id: 'system', label: 'System', match: ['GPU', 'Device', 'Driver', 'Throughput'] },
+  { id: 'about', label: 'About', match: ['Version'] },
+];
 
 export interface CommandPaletteProps {
   open?: boolean;
@@ -146,17 +158,31 @@ export default function CommandPalette(props: CommandPaletteProps) {
         icon: SunMoon,
         run: () => prefs.cycleTheme(),
       },
-      {
-        id: 'sidebar',
-        group: 'Actions',
-        label: sidebar.collapsed ? 'Expand sidebar' : 'Collapse sidebar',
-        keys: '[',
-        icon: PanelLeft,
-        run: () => sidebar.toggle(),
-      },
-      // Touch-only devices have no keys to look up.
-      ...(touchOnly ? [] : [{ id: 'shortcuts', group: 'Actions', label: 'Keyboard shortcuts', keys: '?', icon: Keyboard, run: () => props.onshortcuts() }]),
+      // Touch-only devices have no keys to look up, and a phone or tablet held in the hand no sidebar to fold.
+      ...(touchOnly
+        ? []
+        : [
+            {
+              id: 'sidebar',
+              group: 'Actions',
+              label: sidebar.collapsed ? 'Expand sidebar' : 'Collapse sidebar',
+              keys: '[',
+              icon: PanelLeft,
+              run: () => sidebar.toggle(),
+            },
+            { id: 'shortcuts', group: 'Actions', label: 'Keyboard shortcuts', keys: '?', icon: Keyboard, run: () => props.onshortcuts() },
+          ]),
     ];
+    // Settings' sections, by name and by what they hold ("cloud", "theme", "server URL"): for a query only.
+    const settings: Item[] = SETTINGS_SECTIONS.filter((x) => !(touchOnly && x.id === 'shortcuts')).map((x) => ({
+      id: `settings-${x.id}`,
+      group: 'Settings',
+      label: x.label,
+      match: x.match,
+      scoped: true,
+      icon: SettingsIcon,
+      run: go(`/settings?section=${x.id}`),
+    }));
     const r: Item[] = runs.get().map((x) => ({
       id: `run-${x.id}`,
       group: 'Runs',
@@ -225,6 +251,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
       ...page,
       ...nav,
       ...actions,
+      ...settings,
       ...onEntity,
       ...r.map((i) => ({ ...i, scoped: !idle(i) })),
       ...d.map((i) => ({ ...i, scoped: true })),
@@ -250,11 +277,12 @@ export default function CommandPalette(props: CommandPaletteProps) {
 
   const grouped = computed(() => {
     const out: { group: string; items: { item: Item; n: number }[] }[] = [];
-    results.get().forEach((item, n) => {
-      const g = out.find((x) => x.group === item.group);
-      if (g) g.items.push({ item, n });
-      else out.push({ group: item.group, items: [{ item, n }] });
-    });
+    // Groups in the order of their best result, except that an action about an entity ("New run on shapes-five") never
+    // puts its group above the entities' own: those groups take their place from their other results, or come last.
+    const all = results.get();
+    for (const item of [...all.filter((i) => !i.describes), ...all.filter((i) => i.describes)])
+      if (!out.some((x) => x.group === item.group)) out.push({ group: item.group, items: [] });
+    all.forEach((item, n) => out.find((x) => x.group === item.group)!.items.push({ item, n }));
     // Keep numbering in visual order.
     let n = 0;
     for (const g of out) for (const it of g.items) it.n = n++;
@@ -343,9 +371,11 @@ export default function CommandPalette(props: CommandPaletteProps) {
             spellcheck="false"
             autocomplete="off"
           />
-          <span class="esc">
-            <Kbd keys="Escape" subtle />
-          </span>
+          {!touchOnly ? (
+            <span class="esc">
+              <Kbd keys="Escape" subtle />
+            </span>
+          ) : null}
           <button class="close" type="button" aria-label="Close" onclick={() => el.close()}>
             <X size={18} />
           </button>
@@ -392,7 +422,7 @@ export default function CommandPalette(props: CommandPaletteProps) {
                           {hint(x)}
                         </span>
                         {/* Every hint here is a single key: none while those are off (Settings). */}
-                        {x().item.keys && keyPrefs.singleKeys ? <Kbd keys={x().item.keys ?? ''} subtle /> : null}
+                        {x().item.keys && keyPrefs.singleKeys && !touchOnly ? <Kbd keys={x().item.keys ?? ''} subtle /> : null}
                       </li>
                     );
                   }}
@@ -404,18 +434,21 @@ export default function CommandPalette(props: CommandPaletteProps) {
         <p class="sr-only" role="status" aria-live="polite" data-testid="palette-count">
           {said.get()}
         </p>
-        <footer>
-          <span>
-            <Kbd keys="ArrowUp" subtle />
-            <Kbd keys="ArrowDown" subtle /> move
-          </span>
-          <span>
-            <Kbd keys="Enter" subtle /> open
-          </span>
-          <span>
-            <Kbd keys="Escape" subtle /> close
-          </span>
-        </footer>
+        {/* The keys that drive the list, for a keyboard: a touch-only device has none. */}
+        {!touchOnly ? (
+          <footer>
+            <span>
+              <Kbd keys="ArrowUp" subtle />
+              <Kbd keys="ArrowDown" subtle /> move
+            </span>
+            <span>
+              <Kbd keys="Enter" subtle /> open
+            </span>
+            <span>
+              <Kbd keys="Escape" subtle /> close
+            </span>
+          </footer>
+        ) : null}
       </div>
     </dialog>
   );
@@ -466,7 +499,9 @@ css`
     flex-direction: column;
     max-height: min(560px, 70vh);
   }
+  /* The search row and the footer keep their height whatever the list holds: only the list gives (shell F9). */
   .search {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -564,6 +599,7 @@ css`
     color: var(--text-tertiary);
   }
   footer {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     gap: var(--space-4);

@@ -190,6 +190,13 @@ css`
       display: none;
     }
   }
+  /* Touch, where it is an icon: a 44 px target like the theme and settings buttons beside it (shell F17). */
+  @media (max-width: 1023px) and (pointer: coarse) {
+    .search {
+      width: 44px;
+      height: 44px;
+    }
+  }
   @media (max-width: 767px) {
     .topbar {
       padding: 0 var(--space-2) 0 var(--space-4);
