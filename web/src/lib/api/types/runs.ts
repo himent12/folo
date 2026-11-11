@@ -72,6 +72,11 @@ export interface Run {
   queue_position?: number | null;
   /** Where a cloud run (`config.compute`) executes and how far it is; missing for every other run. */
   cloud?: RunCloud;
+  /**
+   * The dataset as it was when the run was created, so the run still names it (and its classes) once the dataset is
+   * removed; `classes` is empty for runs from before they were recorded. Missing from older servers.
+   */
+  dataset?: { name: string; classes: string[] };
 }
 
 /** `Run.resolved` (docs/API.md): the settings a run actually trains with. */

@@ -499,6 +499,9 @@ test keeps the sources in line with it). Messages that wrap a driver report are 
   "eta_s": 1840 | null,    // null unless queued / running / stopping
   "best": { "epoch": 11, "map50_95": 0.61 } | null, "device": "NVIDIA GeForce RTX 4080 SUPER (vulkan)",
   "model_id": null | "m_31aa",  // set once the run completed, or stopped after at least one validated epoch
+  "dataset": { "name": "shapes-1k", "classes": ["circle", "square"] },  // the dataset as it was when the run was
+                           // created, so the run still names it once the dataset is removed (`classes` empty for runs
+                           // from before they were recorded; absent in mock mode and from older servers)
   "error": null | "...",
   "queue_position": null | 2,   // 1-based place in the training queue while the run waits there (1 starts next)
   "resolved": null | ResolvedTrain,   // what the trainer resolved `config` to (below); null until it is built

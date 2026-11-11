@@ -70,7 +70,10 @@ export class MockTrainingApi extends MockServer {
   /** A run snapshot with its place in the queue. */
   #toRun(p: RunProfile, now: number): Run {
     const i = this.state.queue.indexOf(p.id);
-    return { ...toRun(p, now), queue_position: i < 0 ? null : i + 1 };
+    // The dataset as the run was created on it (docs/API.md, Run.dataset): it still names it once removed.
+    p.datasetName ??= this.state.datasets.find((d) => d.id === p.config.dataset_id)?.name;
+    const dataset = p.datasetName ? { dataset: { name: p.datasetName, classes: p.classNames } } : {};
+    return { ...toRun(p, now), queue_position: i < 0 ? null : i + 1, ...dataset };
   }
 
   /** Logs `message` for run `id`: kept for `/logs` and sent to its live subscribers. */
@@ -412,7 +415,8 @@ export class MockTrainingApi extends MockServer {
       const done = Math.floor(progressAt(p, Date.now()).done);
       // `epoch` is 1-based like the API; `e` indexes the run model (0-based).
       const e = Math.max(0, Math.min(done - 1, (epoch ?? done) - 1));
-      const ds = this.spec(p.config.dataset_id);
+      // The samples are the run's: they outlive its dataset's registration, as on a real server.
+      const ds = this.state.datasets.find((d) => d.id === p.config.dataset_id) ?? specs.find((d) => d.id === p.config.dataset_id) ?? this.spec(p.config.dataset_id);
       const quality = done > 0 ? epochAt(p, e).val.map50_95 : 0;
       const samples: Sample[] = [];
       // A fixed set of up to 16 validation images, spread evenly over the split; a dataset with no validation images

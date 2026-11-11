@@ -158,6 +158,8 @@ impl Runs {
             resolved: None,
             queue_position: None,
             cloud,
+            // Filled in from `dataset` by `RunEntry::new`.
+            dataset: None,
         };
         let file = RunFile { run, dataset, weights, val_offset, epochs_done: 0, last_metrics: None };
         let entry = Arc::new(RunEntry::new(id, dir, file));

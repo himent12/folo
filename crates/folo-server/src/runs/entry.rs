@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use folo_api::{BestEpoch, LogLevel, LogLine, ModelMetrics, Run, RunCloud, RunEvent, RunStatus, StatusEvent};
+use folo_api::{
+    BestEpoch, LogLevel, LogLine, ModelMetrics, Run, RunCloud, RunDataset, RunEvent, RunStatus, StatusEvent,
+};
 use tokio::sync::broadcast;
 
 use crate::index::write_atomic;
@@ -12,8 +14,14 @@ use crate::index::write_atomic;
 use super::{DatasetRef, EVENT_BUFFER, RunEntry, RunFile, RunState, TAIL_STEPS, append_line, now};
 
 impl RunEntry {
-    pub(super) fn new(id: String, dir: PathBuf, file: RunFile) -> RunEntry {
+    pub(super) fn new(id: String, dir: PathBuf, mut file: RunFile) -> RunEntry {
         let (tx, _) = broadcast::channel(EVENT_BUFFER);
+        // The dataset it was created on names it in the API, also once that dataset is removed (older run.json files
+        // have its name but no classes).
+        let d = &file.dataset;
+        file.run
+            .dataset
+            .get_or_insert_with(|| RunDataset { name: d.name.clone(), classes: d.classes.clone() });
         RunEntry {
             id,
             dir,

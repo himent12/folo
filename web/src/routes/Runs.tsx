@@ -202,7 +202,7 @@ export default function Runs() {
         if (!groups[filter.get()].includes(r.status)) return false;
         const q = query.get().trim().toLowerCase();
         if (!q) return true;
-        return `${r.name} ${r.config.arch} ${dsName.get().get(r.config.dataset_id) ?? ''} ${r.id}`.toLowerCase().includes(q);
+        return `${r.name} ${r.config.arch} ${dsName.get().get(r.config.dataset_id) ?? r.dataset?.name ?? ''} ${r.id}`.toLowerCase().includes(q);
       }),
       sortKey.get(),
       sortDir.get(),
@@ -447,7 +447,7 @@ export default function Runs() {
                             </a>{' '}
                             <span class="sub ctx">
                               <Meta line>
-                                <span>{dsName.get().get(r().config.dataset_id) ?? r().config.dataset_id}</span>
+                                <span>{dsName.get().get(r().config.dataset_id) ?? r().dataset?.name ?? r().config.dataset_id}</span>
                                 <Ident value={r().config.arch} />
                                 <span>
                                   from <Lineage origin={from.get()} link={false} scratch="scratch" />
@@ -458,7 +458,7 @@ export default function Runs() {
                           <td use:tooltip={failureCause(r())}>
                             <StatusBadge run={r()} plain />
                           </td>
-                          <td class="hide-xl muted">{dsName.get().get(r().config.dataset_id) ?? r().config.dataset_id}</td>
+                          <td class="hide-xl muted">{dsName.get().get(r().config.dataset_id) ?? r().dataset?.name ?? r().config.dataset_id}</td>
                           <td class="hide-xl">
                             <Ident value={r().config.arch} class="muted" />
                           </td>
@@ -535,7 +535,7 @@ export default function Runs() {
             menuSlot={menuSlot.get()}
             items={rowItems}
             placeOf={placeOf}
-            datasetName={(id) => dsName.get().get(id) ?? id}
+            datasetName={(r) => dsName.get().get(r.config.dataset_id) ?? r.dataset?.name ?? r.config.dataset_id}
             now={now.get()}
           />
         </Panel>{' '}

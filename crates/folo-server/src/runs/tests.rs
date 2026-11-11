@@ -39,6 +39,7 @@ fn a_step_cursor_never_skips_a_step() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
     let step = |s: u64| -> Step {
@@ -86,12 +87,14 @@ fn enqueue_after_shutdown_refuses_and_stops_the_run() {
         resolved: None,
         queue_position: None,
         cloud: None,
+        dataset: None,
     };
     let dataset = DatasetRef {
         id: "ds_1".into(),
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let file = RunFile { run, dataset, weights: None, val_offset: 0, epochs_done: 0, last_metrics: None };
     std::fs::create_dir_all(dir.join("run_late")).unwrap();
@@ -143,6 +146,7 @@ fn a_run_stopped_before_it_is_queued_stays_out_of_the_queue() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let e = runs.register(config.clone(), dataset, None, None, 0, "cpu".into(), None).unwrap();
     runs.stop(e.id()).unwrap();
@@ -169,6 +173,7 @@ fn listed_queue_positions_are_one_snapshot() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let ids: Vec<String> = (0..4).map(|i| format!("run_q{i}")).collect();
     for id in &ids {
@@ -193,6 +198,7 @@ fn listed_queue_positions_are_one_snapshot() {
             resolved: None,
             queue_position: None,
             cloud: None,
+            dataset: None,
         };
         let file = RunFile {
             run,
@@ -297,6 +303,7 @@ fn a_failed_run_names_the_epoch_it_failed_in() {
         name: "d".into(),
         path: "nowhere".into(),
         format: DatasetFormat::Yolo,
+        classes: vec![],
     };
     let e = runs.register(config, dataset, None, None, 0, "cpu".into(), None).unwrap();
     let loss = r#""loss":{"box":1,"cls":1,"dfl":1,"total":3},"lr":0.01,"imgs_per_s":1,"eta_s":1"#;

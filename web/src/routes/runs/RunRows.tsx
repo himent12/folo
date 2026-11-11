@@ -37,7 +37,8 @@ export interface RunRowsProps {
   menuSlot: boolean;
   items: (r: Run) => MenuItem[];
   placeOf: (r: Run) => number | null;
-  datasetName: (id: string) => string;
+  /** The name of a run's dataset (as recorded with the run once it is removed). */
+  datasetName: (r: Run) => string;
   /** The clock relative times read (it ticks). */
   now: number;
 }
@@ -108,7 +109,7 @@ export default function RunRows(props: RunRowsProps) {
                             <span>
                               {r().epoch}/{r().epochs}
                             </span>
-                            {!props.choosing ? <span>{props.datasetName(r().config.dataset_id)}</span> : null}
+                            {!props.choosing ? <span>{props.datasetName(r())}</span> : null}
                           </Meta>
                         </span>
                       </span>{' '}

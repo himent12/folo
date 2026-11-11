@@ -87,7 +87,17 @@ export default function Run() {
     const c = config.get();
     return c ? datasets.data?.find((d) => d.id === c.dataset_id) : undefined;
   });
-  const classes = computed(() => dataset.get()?.classes ?? NO_CLASSES);
+  // A run whose dataset was removed still names it and its classes: as recorded with the run (Run.dataset), for older
+  // runs its model's class names; the per-class table says "class 0" only when none of them knows.
+  const recorded = computed(() => run.get()?.dataset);
+  /** The datasets are in and the run's is not among them: it was removed. */
+  const datasetGone = computed(() => !!datasets.data && !dataset.get());
+  const datasetName = computed(() => dataset.get()?.name ?? recorded.get()?.name);
+  const modelClasses = computed(() => {
+    const id = run.get()?.model_id;
+    return id ? models.data?.find((m) => m.id === id)?.classes : undefined;
+  });
+  const classes = computed(() => dataset.get()?.classes ?? (recorded.get()?.classes.length ? recorded.get()!.classes : modelClasses.get()) ?? NO_CLASSES);
   // A dataset with no validation images trains and validates on its training split (docs/API.md, Split fallback): the
   // page says so once, as the Model page does, and its titles name that split rather than "Validation".
   const evalOn = computed(() => runEvalSource(dataset.get()));
@@ -327,7 +337,7 @@ export default function Run() {
   const later = computed(() => [
     { name: 'Metrics', what: 'mAP, precision and recall, loss, LR and throughput, by epoch' },
     { name: 'Samples', what: `Predictions on 16 ${scoresTitle(evalOn.get()).toLowerCase()} images after every epoch` },
-    { name: 'Per class', what: `AP for each of ${dataset.get()?.classes.length ?? 'its'} classes` },
+    { name: 'Per class', what: `AP for each of ${classes.get().length || 'its'} classes` },
     { name: 'Logs', what: "The trainer's output, live" },
   ]);
 
@@ -449,9 +459,14 @@ export default function Run() {
               // the size and batch step out (Config has them), below 1024 the time joins the status row and, on a line
               // with the precision or head items, the device steps out too. Phones keep the dataset, model and lineage.
               <Meta class={config.get()!.amp || config.get()!.head === 'o2o' ? 'run-meta extra' : 'run-meta'}>
-                <a class="link" href={href(`/datasets/${config.get()!.dataset_id}`)}>
-                  {dataset.get()?.name ?? config.get()!.dataset_id}
-                </a>
+                {datasetGone.get() ? (
+                  // Removed from FOLO: its name as recorded, no link to a page that is gone.
+                  <span title="This dataset is no longer registered in FOLO">{datasetName.get() ?? 'Removed dataset'} (removed)</span>
+                ) : (
+                  <a class="link" href={href(`/datasets/${config.get()!.dataset_id}`)}>
+                    {datasetName.get() ?? config.get()!.dataset_id}
+                  </a>
+                )}
                 <Ident value={config.get()!.arch} />
                 {/* Phones: size, batch and device are in the Config section; the id is in the URL. */}
                 <span class="cfg num size">{config.get()!.imgsz} px</span>
@@ -526,7 +541,7 @@ export default function Run() {
               waitingIcon={handover.get() && beforeTraining(handover.get()!.phase) ? CloudUpload : undefined}
               waitingActions={canStart.get() ? startNext : undefined}
               warnings={warnings.get()}
-              datasetName={dataset.get()?.name}
+              datasetName={datasetName.get()}
               system={system.data ?? (system.error ? null : undefined)}
             />
 
@@ -542,7 +557,7 @@ export default function Run() {
               // show the config's essentials, the rest folded (the work before the reference).
               <div class="waiting">
                 <div class="w-main">
-                  <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={dataset.get()?.name} weights={lineage.get()} essential={phone.current} cli={runCli.get()} />
+                  <ConfigPanel config={config.get()!} resolved={resolved.get()} datasetName={datasetName.get()} weights={lineage.get()} essential={phone.current} cli={runCli.get()} />
                 </div>
                 <div class="w-side">
                   {cloud.get() ? <CloudPanel cloud={cloud.get()!} provider={provider.get()} /> : null}
@@ -603,6 +618,7 @@ export default function Run() {
                       <Samples
                         runId={R().id}
                         classes={classes.get()}
+                        datasetGone={datasetGone.get()}
                         epochsDone={epochsDone.get()}
                         title={`${scoresTitle(evalOn.get())} samples`}
                         error={historyError.get()}
@@ -629,7 +645,7 @@ export default function Run() {
                       <ConfigPanel
                         config={config.get()!}
                         resolved={resolved.get()}
-                        datasetName={dataset.get()?.name}
+                        datasetName={datasetName.get()}
                         weights={lineage.get()}
                         compact={!stacked.current || phone.current}
                         cli={runCli.get()}

@@ -3,6 +3,7 @@
  * neutral in the thumbnails). Follows the
  * latest epoch while the run is live; pick any earlier epoch to see how detections improved.
  */
+import ImageOff from '$icons/image-off';
 import { computed, css, effect, For, Index, MediaQuery, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import { Resource } from '$lib/api/resource';
@@ -27,6 +28,8 @@ export interface SamplesProps {
   /** The run's history failed to load (so `epochsDone` is unknown): an error with Retry, not "appear after…". */
   error?: unknown;
   retry?: () => void;
+  /** The run's dataset was removed: its images are gone, and the tiles say so (nothing to retry). */
+  datasetGone?: boolean;
 }
 
 export default function Samples(props: SamplesProps) {
@@ -137,6 +140,8 @@ export default function Samples(props: SamplesProps) {
           <ErrorState error={props.error} title="Could not load the samples" retry={props.retry} compact />
         ) : props.epochsDone === 0 ? (
           <p class="none">Samples appear after the first validation pass.</p>
+        ) : samples.error && !samples.data && props.datasetGone ? (
+          <p class="none">The dataset was removed, so its sample images are gone.</p>
         ) : samples.error && !samples.data ? (
           <ErrorState error={samples.error} retry={() => samples.refresh()} compact />
         ) : !samples.data ? (
@@ -157,17 +162,24 @@ export default function Samples(props: SamplesProps) {
                     }}
                     aria-label={`Open sample ${s().image_id}: ${hits(s())} predictions, ${s().truth.length} ground-truth boxes`}
                   >
-                    <DatasetImage
-                      datasetId={s().dataset_id}
-                      imageId={s().image_id}
-                      width={s().width}
-                      height={s().height}
-                      thumb={384}
-                      boxes={preds(s())}
-                      truth={truth(s())}
-                      classes={props.classes}
-                      compact
-                    />
+                    {props.datasetGone ? (
+                      <span class="gone">
+                        <ImageOff size={16} strokeWidth={1.75} aria-hidden="true" />
+                        The dataset was removed
+                      </span>
+                    ) : (
+                      <DatasetImage
+                        datasetId={s().dataset_id}
+                        imageId={s().image_id}
+                        width={s().width}
+                        height={s().height}
+                        thumb={384}
+                        boxes={preds(s())}
+                        truth={truth(s())}
+                        classes={props.classes}
+                        compact
+                      />
+                    )}
                     <span class="count num">
                       {hits(s())}
                       <span class="faint">/{s().truth.length}</span>
@@ -191,7 +203,9 @@ export default function Samples(props: SamplesProps) {
         description={open.get() ? `${hits(open.get()!)} predictions ≥ ${conf.get().toFixed(2)} · ${open.get()!.truth.length} ground-truth boxes` : undefined}
         size="lg"
       >
-        {open.get() ? (
+        {open.get() && props.datasetGone ? (
+          <p class="none">The dataset was removed, so this image is gone; the counts above are from the run.</p>
+        ) : open.get() ? (
           <div class="big" style:aspect-ratio={`${open.get()!.width} / ${open.get()!.height}`}>
             <DatasetImage
               datasetId={open.get()!.dataset_id}
@@ -336,6 +350,20 @@ css`
   /* The state-height rule (DESIGN_DIRECTION §2.8): the header, then one compact line with the panel's padding. */
   .none {
     color: var(--text-tertiary);
+  }
+  .gone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-1);
+    width: 100%;
+    height: 100%;
+    padding: var(--space-2);
+    font-size: var(--type-sm-size);
+    color: var(--text-tertiary);
+    text-align: center;
+    background: var(--bg-inset);
   }
   .big {
     width: 100%;

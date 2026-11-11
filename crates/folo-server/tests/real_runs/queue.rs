@@ -23,6 +23,8 @@ async fn queue_stop_resume_and_restart() {
 
     // One run at a time: the second waits in the queue, and stopping it there is immediate.
     let a: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
+    // The run records its dataset's name and classes, so it still names them once the dataset is removed.
+    assert_eq!(a.dataset, Some(RunDataset { name: ds.name.clone(), classes: ds.classes.clone() }));
     let b: Run = ok(&app, post_json("/api/runs", tiny(&ds, 2))).await;
     let mut sse = Events::open(&app, &a.id).await;
     sse.until_epoch().await;

@@ -160,7 +160,7 @@ impl RealStore {
     /// The registered dataset `id` as a run / eval reference.
     pub(super) fn dataset_ref(&self, e: &Entry) -> DatasetRef {
         let r = e.reg();
-        DatasetRef { id: r.id, name: r.name, path: r.path, format: r.format }
+        DatasetRef { id: r.id, name: r.name, path: r.path, format: r.format, classes: r.classes }
     }
 
     /// A new, empty folder `datasets/<base>` (`-2`, `-3`, ... when taken) for a dataset this server writes.
