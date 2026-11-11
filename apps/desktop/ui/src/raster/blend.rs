@@ -54,6 +54,9 @@ pub(crate) struct Src {
 }
 
 impl Src {
+    /// Draws nothing.
+    pub const NOOP: Src = Src { r: 0, g: 0, b: 0, inv: ONE, packed: 0 };
+
     /// From the shader's output: straight colour and alpha.
     #[inline]
     pub fn new(c: [f32; 4]) -> Self {
@@ -117,12 +120,11 @@ impl Tint {
         Tint { r, g, b, packed: pack((r + h) >> 8, (g + h) >> 8, (b + h) >> 8) }
     }
 
-    /// `self` at alpha `a` (`0..=ONE`) over `dst`.
+    /// `self` at alpha `a` (`0..=ONE`) over `dst`. Branch-free: alpha 0 gives `dst` and alpha `ONE`
+    /// gives `packed` through the same formula.
     #[inline(always)]
     pub fn over(&self, dst: u32, a: u32) -> u32 {
-        if a >= ONE {
-            return self.packed;
-        }
+        debug_assert!(a <= ONE);
         // Cq * a + (d << 8) * (ONE - a) <= 65280 * 65536: fits in u32 with the rounding term.
         let ia = ONE - a;
         let h = 1 << 23;

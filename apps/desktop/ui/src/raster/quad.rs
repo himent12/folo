@@ -38,7 +38,14 @@ pub(crate) struct QuadPrep {
     split_y: i32,
     /// The solid background.
     bg: Src,
+    /// Per corner (tl, tr, br, bl): squared distances from the corner circle's centre within which a
+    /// pixel is certainly the background, and beyond which it is certainly untouched.
+    inside2: [f32; 4],
+    outside2: [f32; 4],
 }
+
+/// Slack for the corner shortcuts, far above the rounding of the shader's own maths.
+const EPS: f32 = 1e-2;
 
 /// Distance of a pixel centre's coordinate past the quad's edge on its side (`ctp`), and whether it
 /// is in the low half (left / top).
@@ -107,10 +114,53 @@ impl QuadPrep {
             QuadMode::Bands
         };
         let bg = Src::new(sh.paint.solid);
-        QuadPrep { sh, mode, fx0, fx1, split_x, fy0, fy1, split_y, bg }
+        // A corner's borders (x side, y side): left/right then top/bottom.
+        let sides = [(w_l, w_t), (w_r, w_t), (w_r, w_b), (w_l, w_b)];
+        let mut inside2 = [-1.; 4];
+        let mut outside2 = [f32::INFINITY; 4];
+        for (k, &(bx, by)) in sides.iter().enumerate() {
+            let r = sh.radii[k];
+            if r <= 0. {
+                continue;
+            }
+            outside2[k] = (r + AA + EPS) * (r + AA + EPS);
+            let (rx, ry) = (reduced(bx), reduced(by));
+            let inner = r - rx.max(0.) - AA - EPS;
+            if rx == ry && inner > 0. {
+                inside2[k] = inner * inner;
+            }
+        }
+        QuadPrep { sh, mode, fx0, fx1, split_x, fy0, fy1, split_y, bg, inside2, outside2 }
     }
 
+    /// The shader's output at a pixel as a blendable source. Inside a rounded corner, pixels well
+    /// inside the inner edge are the background and pixels past the outer edge are untouched (the
+    /// shader's own branches, decided from the distance to the corner's centre); only the ring
+    /// between runs the shader.
     fn eval(&self, x: i32, y: i32) -> Src {
+        if matches!(self.mode, QuadMode::Bands) {
+            let sh = &self.sh;
+            let half = [sh.size[0] / 2., sh.size[1] / 2.];
+            let c2p = [x as f32 + 0.5 - sh.origin[0] - half[0], y as f32 + 0.5 - sh.origin[1] - half[1]];
+            let k = match (c2p[0] < 0., c2p[1] < 0.) {
+                (true, true) => 0,
+                (false, true) => 1,
+                (false, false) => 2,
+                (true, false) => 3,
+            };
+            let r = sh.radii[k];
+            let cx = c2p[0].abs() - half[0] + r;
+            let cy = c2p[1].abs() - half[1] + r;
+            if r > 0. && cx >= 0. && cy >= 0. {
+                let d2 = cx * cx + cy * cy;
+                if d2 >= self.outside2[k] {
+                    return Src::NOOP;
+                }
+                if d2 <= self.inside2[k] {
+                    return self.bg;
+                }
+            }
+        }
         Src::new(self.sh.eval(x, y))
     }
 
@@ -236,3 +286,4 @@ pub(crate) fn opaque_core(q: &Quad, rect: IRect) -> IRect {
     let y1 = (o.y.0 + s.height.0 - t(r.bottom_left.0.max(r.bottom_right.0), w.bottom.0)).floor();
     IRect::new(x0 as i32, y0 as i32, x1 as i32, y1 as i32).intersect(&rect)
 }
+

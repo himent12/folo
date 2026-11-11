@@ -40,17 +40,31 @@ impl IRect {
     }
 }
 
+/// `v.ceil() as i32` without a libm call (SSE2 has no rounding instruction); saturates like `as`.
+#[inline(always)]
+pub(crate) fn ceil_i32(v: f32) -> i32 {
+    let i = v as i32;
+    if (i as f32) < v { i.saturating_add(1) } else { i }
+}
+
+/// `v.floor() as i32`, likewise.
+#[inline(always)]
+pub(crate) fn floor_i32(v: f32) -> i32 {
+    let i = v as i32;
+    if (i as f32) > v { i.saturating_sub(1) } else { i }
+}
+
 /// The pixels a GPU rasterizes for an edge from `lo` to `hi`: those whose centre `i + 0.5` lies in
 /// `[lo, hi)` (the top-left fill rule).
 #[inline]
 pub(crate) fn raster_span(lo: f32, hi: f32) -> (i32, i32) {
-    ((lo - 0.5).ceil() as i32, (hi - 0.5).ceil() as i32)
+    (ceil_i32(lo - 0.5), ceil_i32(hi - 0.5))
 }
 
 /// The pixels a clip rectangle keeps: those whose centre has a clip distance `>= 0` to both edges.
 #[inline]
 pub(crate) fn clip_span(lo: f32, hi: f32) -> (i32, i32) {
-    ((lo - 0.5).ceil() as i32, ((hi - 0.5).floor() as i32).saturating_add(1))
+    (ceil_i32(lo - 0.5), floor_i32(hi - 0.5).saturating_add(1))
 }
 
 /// The pixels a primitive drawn over `bounds` and clipped by `clip` can touch.
@@ -84,5 +98,9 @@ mod tests {
         assert_eq!(clip_span(10.5, 20.5), (10, 21));
         assert!(IRect::new(0, 0, 4, 4).contains(&IRect::new(1, 1, 4, 4)));
         assert!(!IRect::EMPTY.contains(&IRect::EMPTY));
+        for v in [0., 0.5, -0.5, 1.0, -1.0, 2.25, -2.25, 1e9, -1e9, 3e10, f32::MIN_POSITIVE, -0.0] {
+            assert_eq!(ceil_i32(v), v.ceil() as i32, "{v}");
+            assert_eq!(floor_i32(v), v.floor() as i32, "{v}");
+        }
     }
 }

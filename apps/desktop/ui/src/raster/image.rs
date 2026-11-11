@@ -4,7 +4,7 @@
 //! blitted with opacity and rounded-corner coverage.
 
 use super::blend::{ONE, alpha16, over_pm8, sat};
-use super::geom::IRect;
+use super::geom::{IRect, ceil_i32, floor_i32};
 use super::quad_eval::quad_sdf;
 use super::sprite::Axis;
 use super::target::Target;
@@ -105,54 +105,60 @@ impl ImageDraw {
         }
     }
 
-    /// Whether pixel (`x`, `y`) lies in a rounded corner's box, where coverage needs the SDF.
-    fn in_corner(&self, x: i32, y: i32) -> bool {
-        let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+    /// The columns `a..b` of row `y` whose coverage is 1 (outside the rounded corners' boxes); the
+    /// pixels left and right of them need the SDF.
+    fn plain_columns(&self, y: i32, r: &IRect) -> (i32, i32) {
         let [ox, oy] = self.bounds_origin;
         let [w, h] = self.bounds_size;
-        let left = px < ox + w / 2.;
+        let py = y as f32 + 0.5;
         let top = py < oy + h / 2.;
-        let r = match (left, top) {
-            (true, true) => self.radii[0],
-            (false, true) => self.radii[1],
-            (false, false) => self.radii[2],
-            (true, false) => self.radii[3],
-        };
-        if r <= 0. {
-            return false;
-        }
-        let dx = if left { px - ox } else { ox + w - px };
+        let (rl, rr) = if top { (self.radii[0], self.radii[1]) } else { (self.radii[3], self.radii[2]) };
         let dy = if top { py - oy } else { oy + h - py };
-        dx < r + 1. && dy < r + 1.
+        let mut a = r.x0;
+        let mut b = r.x1;
+        if rl > 0. && dy < rl + 1. {
+            a = ceil_i32(ox + rl + 0.5).clamp(r.x0, r.x1);
+        }
+        if rr > 0. && dy < rr + 1. {
+            b = (floor_i32(ox + w - rr - 1.5) + 1).clamp(a, r.x1);
+        }
+        (a, b)
     }
 
     pub fn draw(&self, t: &mut Target, r: IRect) {
         let rounded = self.radii.iter().any(|&v| v > 0.);
         let x0 = (r.x0 - self.origin.0) as usize;
         let n = (r.x1 - r.x0) as usize;
+        let copy = self.opacity >= ONE && self.copy.opaque;
         for y in r.y0..r.y1 {
             let start = (y - self.origin.1) as usize * self.copy.w + x0;
             let src = &self.copy.px[start..start + n];
             let row = t.row(y, r.x0, r.x1);
-            if self.opacity >= ONE && self.copy.opaque && !rounded {
-                for (p, &s) in row.iter_mut().zip(src) {
+            let (a, b) = if rounded { self.plain_columns(y, &r) } else { (r.x0, r.x1) };
+            let (ia, ib) = ((a - r.x0) as usize, (b - r.x0) as usize);
+            if copy {
+                for (p, &s) in row[ia..ib].iter_mut().zip(&src[ia..ib]) {
                     *p = s & 0x00ff_ffff;
                 }
-                continue;
+            } else {
+                for (p, &s) in row[ia..ib].iter_mut().zip(&src[ia..ib]) {
+                    let al = s >> 24;
+                    if al != 0 {
+                        *p = over_pm8(*p, al, (s >> 16) & 0xff, (s >> 8) & 0xff, s & 0xff, self.opacity);
+                    }
+                }
             }
-            for ((x, p), &s) in (r.x0..r.x1).zip(row.iter_mut()).zip(src) {
-                let a = s >> 24;
-                if a == 0 {
+            for i in (0..ia).chain(ib..n) {
+                let s = src[i];
+                let al = s >> 24;
+                if al == 0 {
                     continue;
                 }
-                let m = if rounded && self.in_corner(x, y) {
-                    let d = quad_sdf([x as f32 + 0.5, y as f32 + 0.5], self.bounds_origin, self.bounds_size, &self.radii);
-                    ((self.opacity as f32) * sat(0.5 - d) + 0.5) as u32
-                } else {
-                    self.opacity
-                };
+                let x = r.x0 + i as i32;
+                let d = quad_sdf([x as f32 + 0.5, y as f32 + 0.5], self.bounds_origin, self.bounds_size, &self.radii);
+                let m = ((self.opacity as f32) * sat(0.5 - d) + 0.5) as u32;
                 if m != 0 {
-                    *p = over_pm8(*p, a, (s >> 16) & 0xff, (s >> 8) & 0xff, s & 0xff, m);
+                    row[i] = over_pm8(row[i], al, (s >> 16) & 0xff, (s >> 8) & 0xff, s & 0xff, m);
                 }
             }
         }

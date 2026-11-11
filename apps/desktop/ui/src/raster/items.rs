@@ -6,10 +6,12 @@ use super::geom::{IRect, clip_rect, pixel_rect};
 use super::hash::{finish, mix, mix_f2};
 use super::path::geometry_hash;
 use super::quad::opaque_core;
+use super::tiles::TILE;
 use crate::{Background, BackgroundTag, Bounds, Corners, Hsla, Primitive, ScaledPixels};
 
-/// One primitive, resolved for binning.
-#[derive(Clone, Copy, Debug)]
+/// One primitive, resolved for binning (items are indexed like the scene's primitives; one that
+/// draws nothing has an empty rectangle and tile span).
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Item {
     /// The pixels it may write (bounds, clip and frame intersected).
     pub rect: IRect,
@@ -17,10 +19,8 @@ pub(crate) struct Item {
     pub opaque: IRect,
     /// Everything that affects its pixels, hashed.
     pub sig: u64,
-    /// Its index in the scene.
-    pub prim: u32,
-    /// Kind-specific data computed here (a path's geometry hash).
-    pub aux: u64,
+    /// The tiles it touches: columns `tiles[0]..tiles[2]`, rows `tiles[1]..tiles[3]`.
+    pub tiles: [u16; 4],
 }
 
 #[inline]
@@ -71,11 +71,13 @@ pub(crate) fn shadow_bounds(b: &Bounds<ScaledPixels>, blur: f32) -> Bounds<Scale
     out
 }
 
-/// Resolves `prims` into `out` (cleared first), dropping primitives that draw nothing inside `frame`.
-pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut Vec<Item>) {
-    out.clear();
-    for (i, p) in prims.iter().enumerate() {
-        let (rect, opaque, sig, aux) = match p {
+/// Resolves `prims` into `out` (one item each); primitives that draw nothing inside `frame` get
+/// `Item::default()`.
+pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
+    debug_assert_eq!(prims.len(), out.len());
+    for (p, out) in prims.iter().zip(out.iter_mut()) {
+        *out = Item::default();
+        let (rect, opaque, sig) = match p {
             Primitive::Quad(q) => {
                 let border = q.border_color.a > 0. && q.border_widths.any(|w| w.0 > 0.);
                 if invisible(&q.background) && !border {
@@ -93,7 +95,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut Vec<Item>) {
                 let w = &q.border_widths;
                 h = mix_f2(mix_f2(h, w.top.0, w.right.0), w.bottom.0, w.left.0);
                 h = mix(h, q.border_style as u64);
-                (rect, opaque_core(q, rect), h, 0)
+                (rect, opaque_core(q, rect), h)
             }
             Primitive::Shadow(s) => {
                 if s.color.a <= 0. || !(s.blur_radius.0 > 0.) {
@@ -109,7 +111,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut Vec<Item>) {
                 h = mix_corners(h, &s.corner_radii);
                 h = mix_hsla(h, &s.color);
                 h = mix(h, s.blur_radius.0.to_bits() as u64);
-                (rect, IRect::EMPTY, h, 0)
+                (rect, IRect::EMPTY, h)
             }
             Primitive::MonoSprite(s) => {
                 if s.color.a <= 0. {
@@ -123,7 +125,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut Vec<Item>) {
                 h = mix_bounds(h, &s.bounds);
                 h = mix_hsla(h, &s.color);
                 h = mix(h, s.mask.id << 1 | (s.kind == crate::SpriteKind::Svg) as u64);
-                (rect, IRect::EMPTY, h, 0)
+                (rect, IRect::EMPTY, h)
             }
             Primitive::ColorSprite(s) => {
                 if !(s.opacity > 0.) {
@@ -136,7 +138,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut Vec<Item>) {
                 let mut h = mix_rect(4, &rect);
                 h = mix_bounds(h, &s.bounds);
                 h = mix(mix(h, s.mask.id), s.opacity.to_bits() as u64);
-                (rect, IRect::EMPTY, h, 0)
+                (rect, IRect::EMPTY, h)
             }
             Primitive::Image(m) => {
                 if !(m.opacity > 0.) {
@@ -152,7 +154,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut Vec<Item>) {
                 h = mix(h, m.image.id.0);
                 h = mix(h, m.frame as u64 | (m.grayscale as u64) << 63);
                 h = mix(h, m.opacity.to_bits() as u64);
-                (rect, IRect::EMPTY, h, 0)
+                (rect, IRect::EMPTY, h)
             }
             Primitive::Path(p) => {
                 if invisible(&p.paint) {
@@ -170,7 +172,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut Vec<Item>) {
                 h = mix_bounds(h, &p.clip);
                 h = mix(h, geometry);
                 h = mix_background(h, &p.paint);
-                (rect, IRect::EMPTY, h, geometry)
+                (rect, IRect::EMPTY, h)
             }
             Primitive::Underline(u) => {
                 if u.color.a <= 0. {
@@ -184,9 +186,12 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut Vec<Item>) {
                 h = mix_bounds(h, &u.bounds);
                 h = mix_hsla(h, &u.color);
                 h = mix(h, u.thickness.0.to_bits() as u64 | (u.wavy as u64) << 32);
-                (rect, IRect::EMPTY, h, 0)
+                (rect, IRect::EMPTY, h)
             }
         };
-        out.push(Item { rect, opaque, sig: finish(sig), prim: i as u32, aux });
+        // Rectangles are inside the frame: non-negative.
+        let t = TILE - 1;
+        let tiles = [rect.x0 >> 6, rect.y0 >> 6, (rect.x1 + t) >> 6, (rect.y1 + t) >> 6].map(|v| v as u16);
+        *out = Item { rect, opaque, sig: finish(sig), tiles };
     }
 }

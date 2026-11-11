@@ -1,5 +1,5 @@
-//! Preparing the items that dirty tiles draw (colours converted, tables and masks fetched from the
-//! caches or made), and drawing one prepared item into a tile.
+//! Preparing the items that dirty tiles draw (masks and tables fetched from the caches or made), and
+//! drawing one item into a tile.
 
 use super::blend::{Src, Tint, alpha16, fill_span, rgba};
 use super::cache::ByteCache;
@@ -7,28 +7,23 @@ use super::geom::{IRect, raster_span};
 use super::gradient::{GradientSpan, Paint};
 use super::hash::{finish, mix, mix_f2};
 use super::image::{ImageCopy, ImageDraw, ImageKey};
-use super::items::{Item, shadow_bounds};
-use super::path::{PathMask, PathPaint, draw as draw_path, draw_underline};
+use super::items::shadow_bounds;
+use super::path::{PathMask, PathPaint, draw as draw_path, draw_underline, geometry_hash};
 use super::quad::QuadPrep;
 use super::quad_eval::QuadShader;
-use super::shadow::{self, ShadowMask, ShadowShape};
+use super::shadow::{self, ShadowKey, ShadowMask, ShadowShape};
 use super::sprite::{AlphaLut, Axis, draw_color, draw_glyph, draw_svg};
 use super::target::Target;
-use crate::{Background, BackgroundTag, GlyphBlend, Hsla, Primitive, SpriteKind};
+use crate::{Background, BackgroundTag, GlyphBlend, Hsla, Image, Path, PathData, Primitive, RenderImage, Shadow, SpriteKind};
 use std::sync::Arc;
 
-/// An item ready to draw.
+/// An item whose preparation needed the caches.
 pub(crate) enum Prep {
-    /// An unrounded, unbordered quad with a solid background (or a straight underline).
-    Fill(Src),
+    /// A gradient quad (its colour table is cached).
     Quad(Box<QuadPrep>),
     Shadow { mask: Arc<ShadowMask>, origin: (i32, i32), tint: Tint, alpha: u32 },
-    Glyph { lut: Arc<AlphaLut>, tint: Tint },
-    Svg { ax: Axis, ay: Axis, alpha: u32, tint: Tint },
-    Color { opacity: u32 },
     Image(Box<ImageDraw>),
     Path { mask: Arc<PathMask>, paint: Box<PathPaint> },
-    Underline([f32; 4]),
 }
 
 /// Byte budgets of the renderer's caches.
@@ -99,40 +94,54 @@ impl Caches {
     }
 }
 
-/// Glyph tables keyed by (colour, blend); consecutive glyphs mostly share one.
-pub(crate) struct LutMemo {
-    last: Option<(Hsla, Arc<AlphaLut>, Tint)>,
+/// The glyph tables a frame uses, one per (colour, blend); glyph items point into it. Consecutive
+/// glyphs mostly share a colour, so lookups compare with the last one first.
+#[derive(Default)]
+pub(crate) struct GlyphTables {
+    pub tables: Vec<(Arc<AlphaLut>, Tint)>,
+    colors: Vec<Hsla>,
+    last: Option<(Hsla, u32)>,
 }
 
-impl LutMemo {
-    pub fn new() -> Self {
-        LutMemo { last: None }
+impl GlyphTables {
+    pub fn clear(&mut self) {
+        self.tables.clear();
+        self.colors.clear();
+        self.last = None;
     }
 
-    fn get(&mut self, caches: &mut Caches, color: Hsla, blend: &GlyphBlend) -> (Arc<AlphaLut>, Tint) {
-        if let Some((c, lut, tint)) = &self.last
-            && *c == color
+    /// The index of the table for `color`.
+    fn index(&mut self, caches: &mut Caches, color: Hsla, blend: &GlyphBlend) -> u32 {
+        if let Some((c, i)) = self.last
+            && c == color
         {
-            return (lut.clone(), *tint);
+            return i;
         }
-        let c = rgba(color);
-        let b = |v: f32| v.to_bits();
-        let g = blend.gamma_ratios;
-        let key = [
-            b(c[0]),
-            b(c[1]),
-            b(c[2]),
-            b(c[3]),
-            b(g[0]) ^ blend.apply as u32,
-            b(g[1]),
-            b(g[2]),
-            b(g[3]),
-            b(blend.grayscale_enhanced_contrast),
-        ];
-        let lut = caches.luts.get_or_insert_with(&key, || (Arc::new(AlphaLut::glyph(c, blend)), 1024 + 64));
-        let tint = Tint::new(c);
-        self.last = Some((color, lut.clone(), tint));
-        (lut, tint)
+        let i = match self.colors.iter().position(|c| *c == color) {
+            Some(i) => i as u32,
+            None => {
+                let c = rgba(color);
+                let b = |v: f32| v.to_bits();
+                let g = blend.gamma_ratios;
+                let key = [
+                    b(c[0]),
+                    b(c[1]),
+                    b(c[2]),
+                    b(c[3]),
+                    b(g[0]) ^ blend.apply as u32,
+                    b(g[1]),
+                    b(g[2]),
+                    b(g[3]),
+                    b(blend.grayscale_enhanced_contrast),
+                ];
+                let lut = caches.luts.get_or_insert_with(&key, || (Arc::new(AlphaLut::glyph(c, blend)), 1024 + 64));
+                self.tables.push((lut, Tint::new(c)));
+                self.colors.push(color);
+                self.tables.len() as u32 - 1
+            }
+        };
+        self.last = Some((color, i));
+        i
     }
 }
 
@@ -140,149 +149,237 @@ fn origin_of(b: &crate::Bounds<crate::ScaledPixels>) -> (i32, i32) {
     (raster_span(b.origin.x.0, 0.).0, raster_span(b.origin.y.0, 0.).0)
 }
 
-/// Prepares `item` of `prims`. `frame` is the frame rectangle (masks never exceed it).
-pub(crate) fn prepare(
-    item: &Item,
-    prims: &[Primitive],
-    caches: &mut Caches,
-    memo: &mut LutMemo,
-    blend: &GlyphBlend,
-    frame: IRect,
-) -> Prep {
-    match &prims[item.prim as usize] {
-        Primitive::Quad(q) => {
-            let r = &q.corner_radii;
-            let w = &q.border_widths;
-            let simple = [r.top_left, r.top_right, r.bottom_right, r.bottom_left, w.top, w.right, w.bottom, w.left]
-                .iter()
-                .all(|v| v.0 == 0.);
-            if simple && q.background.tag == BackgroundTag::Solid {
-                return Prep::Fill(Src::new(rgba(q.background.solid)));
+/// What `prepare` made for an item: nothing (prepared in the tile), a glyph table index, a prepared
+/// item, or a job for a cache miss (`Job::run` on any thread, then `Job::finish`).
+pub(crate) enum Prepared {
+    Lazy,
+    Glyph(u32),
+    Item(Prep),
+    Pending(Job),
+}
+
+/// A cache miss to fill: the expensive part of preparing a shadow, an image or a path.
+pub(crate) enum Job {
+    Shadow(ShadowKey, ShadowShape),
+    Image(ImageKey, Arc<RenderImage>, usize, bool, [f32; 4]),
+    Path((u64, IRect), Arc<PathData>),
+}
+
+/// What a job made.
+pub(crate) enum Made {
+    Shadow(Arc<ShadowMask>),
+    Image(Arc<ImageCopy>),
+    Path(Arc<PathMask>),
+}
+
+impl Job {
+    /// The expensive part: shadow mask, resampled image or path coverage. Needs no cache.
+    pub fn run(&self) -> Made {
+        match self {
+            Job::Shadow(_, shape) => Made::Shadow(Arc::new(shape.render())),
+            Job::Image(key, image, frame, grayscale, dst) => {
+                Made::Image(Arc::new(ImageCopy::new(image, *frame, *grayscale, key.w, key.h, *dst)))
             }
-            let sh = QuadShader::new(q);
-            let grad = (q.background.tag == BackgroundTag::LinearGradient).then(|| caches.gradient(&q.background, &sh.paint));
-            Prep::Quad(Box::new(QuadPrep::new(sh, grad)))
+            Job::Path(key, path) => Made::Path(Arc::new(PathMask::new(path, key.1))),
         }
-        Primitive::Shadow(s) => {
-            let drawn = shadow_bounds(&s.bounds, s.blur_radius.0);
-            let (x0, x1) = raster_span(drawn.origin.x.0, drawn.origin.x.0 + drawn.size.width.0);
-            let (y0, y1) = raster_span(drawn.origin.y.0, drawn.origin.y.0 + drawn.size.height.0);
-            // The mask covers the drawn pixels inside the frame.
-            let m = IRect::new(x0, y0, x1, y1).intersect(&frame);
-            let half = [s.bounds.size.width.0 / 2., s.bounds.size.height.0 / 2.];
-            let center = [s.bounds.origin.x.0 + half[0], s.bounds.origin.y.0 + half[1]];
-            let r = &s.corner_radii;
-            let shape = ShadowShape {
-                half,
-                radii: [r.top_left.0, r.top_right.0, r.bottom_right.0, r.bottom_left.0],
-                blur: s.blur_radius.0,
-                offset: [m.x0 as f32 - center[0], m.y0 as f32 - center[1]],
-                w: m.width(),
-                h: m.height(),
-            };
-            let mask = caches.shadows.get_or_insert_with(&shape.key(), || {
-                let mask = Arc::new(shape.render());
-                let bytes = mask.bytes();
-                (mask, bytes)
-            });
-            let c = rgba(s.color);
-            Prep::Shadow { mask, origin: (m.x0, m.y0), tint: Tint::new(c), alpha: alpha16(c[3]) }
-        }
-        Primitive::MonoSprite(s) => match s.kind {
-            SpriteKind::Glyph => {
-                let (lut, tint) = memo.get(caches, s.color, blend);
-                Prep::Glyph { lut, tint }
+    }
+
+    /// Caches what `run` made and prepares `prim` with it.
+    pub fn finish(self, made: Made, prim: &Primitive, caches: &mut Caches, frame: IRect) -> Prep {
+        match (self, made, prim) {
+            (Job::Shadow(key, _), Made::Shadow(mask), Primitive::Shadow(s)) => {
+                caches.shadows.insert(key, mask.clone(), mask.bytes());
+                shadow_prep(s, mask, frame)
             }
-            SpriteKind::Svg => {
-                let c = rgba(s.color);
-                let b = &s.bounds;
-                Prep::Svg {
-                    ax: Axis::new(b.origin.x.0, b.size.width.0, s.mask.size.width.0),
-                    ay: Axis::new(b.origin.y.0, b.size.height.0, s.mask.size.height.0),
-                    alpha: alpha16(c[3]),
-                    tint: Tint::new(c),
-                }
+            (Job::Image(key, ..), Made::Image(copy), Primitive::Image(m)) => {
+                caches.images.insert(key, copy.clone(), copy.bytes());
+                image_prep(m, copy)
             }
-        },
-        Primitive::ColorSprite(s) => Prep::Color { opacity: alpha16(s.opacity) },
-        Primitive::Image(m) => {
-            let b = &m.bounds;
-            let (x0, x1) = raster_span(b.origin.x.0, b.origin.x.0 + b.size.width.0);
-            let (y0, y1) = raster_span(b.origin.y.0, b.origin.y.0 + b.size.height.0);
-            let dst = [b.origin.x.0 - x0 as f32, b.origin.y.0 - y0 as f32, b.size.width.0, b.size.height.0];
-            let key = ImageKey {
-                id: m.image.id.0,
-                frame: m.frame,
-                grayscale: m.grayscale,
-                w: x1 - x0,
-                h: y1 - y0,
-                bits: dst.map(f32::to_bits),
-            };
-            let copy = caches.images.get_or_insert_with(&key, || {
-                let c = Arc::new(ImageCopy::new(&m.image, m.frame, m.grayscale, x1 - x0, y1 - y0, dst));
-                let bytes = c.bytes();
-                (c, bytes)
-            });
-            Prep::Image(Box::new(ImageDraw::new(copy, (x0, y0), m.opacity, m)))
-        }
-        Primitive::Path(p) => {
-            let b = &p.bounds;
-            let (x0, x1) = raster_span(b.origin.x.0, b.origin.x.0 + b.size.width.0);
-            let (y0, y1) = raster_span(b.origin.y.0, b.origin.y.0 + b.size.height.0);
-            let rect = IRect::new(x0, y0, x1, y1).intersect(&frame);
-            let mask = caches.paths.get_or_insert_with(&(item.aux, rect), || {
-                let m = Arc::new(PathMask::new(&p.path, rect));
-                let bytes = m.bytes();
-                (m, bytes)
-            });
-            let paint = if p.paint.tag == BackgroundTag::LinearGradient {
-                let cb = p.bounds.intersect(&p.clip);
-                let paint = Paint::new(
-                    &p.paint,
-                    [cb.origin.x.0, cb.origin.y.0],
-                    [cb.size.width.0, cb.size.height.0],
-                );
-                PathPaint::Gradient(caches.gradient(&p.paint, &paint))
-            } else {
-                let c = rgba(p.paint.solid);
-                PathPaint::Solid(AlphaLut::coverage(c[3]), Tint::new(c))
-            };
-            Prep::Path { mask, paint: Box::new(paint) }
-        }
-        Primitive::Underline(u) => {
-            let c = rgba(u.color);
-            if u.wavy { Prep::Underline(c) } else { Prep::Fill(Src::new(c)) }
+            (Job::Path(key, _), Made::Path(mask), Primitive::Path(p)) => {
+                caches.paths.insert(key, mask.clone(), mask.bytes());
+                path_prep(p, mask, caches)
+            }
+            _ => unreachable!("a job finishes with what it made, for its own primitive"),
         }
     }
 }
 
-/// Draws a prepared item's pixels inside `r` (its rectangle cut to the tile).
-pub(crate) fn draw(t: &mut Target, prep: &Prep, prim: &Primitive, r: IRect) {
-    match (prep, prim) {
-        (Prep::Fill(s), _) => {
-            if s.inv == 0 {
-                for y in r.y0..r.y1 {
-                    t.row(y, r.x0, r.x1).fill(s.packed);
+/// The shadow's mask rectangle (its drawn pixels inside the frame) and shape.
+fn shadow_shape(s: &Shadow, frame: IRect) -> (IRect, ShadowShape) {
+    let drawn = shadow_bounds(&s.bounds, s.blur_radius.0);
+    let (x0, x1) = raster_span(drawn.origin.x.0, drawn.origin.x.0 + drawn.size.width.0);
+    let (y0, y1) = raster_span(drawn.origin.y.0, drawn.origin.y.0 + drawn.size.height.0);
+    let m = IRect::new(x0, y0, x1, y1).intersect(&frame);
+    let half = [s.bounds.size.width.0 / 2., s.bounds.size.height.0 / 2.];
+    let center = [s.bounds.origin.x.0 + half[0], s.bounds.origin.y.0 + half[1]];
+    let r = &s.corner_radii;
+    let shape = ShadowShape {
+        half,
+        radii: [r.top_left.0, r.top_right.0, r.bottom_right.0, r.bottom_left.0],
+        blur: s.blur_radius.0,
+        offset: [m.x0 as f32 - center[0], m.y0 as f32 - center[1]],
+        w: m.width(),
+        h: m.height(),
+    };
+    (m, shape)
+}
+
+fn shadow_prep(s: &Shadow, mask: Arc<ShadowMask>, frame: IRect) -> Prep {
+    let m = shadow_shape(s, frame).0;
+    let c = rgba(s.color);
+    Prep::Shadow { mask, origin: (m.x0, m.y0), tint: Tint::new(c), alpha: alpha16(c[3]) }
+}
+
+/// The image's pixel rectangle origin and its cache key.
+fn image_key(m: &Image) -> ((i32, i32), ImageKey, [f32; 4]) {
+    let b = &m.bounds;
+    let (x0, x1) = raster_span(b.origin.x.0, b.origin.x.0 + b.size.width.0);
+    let (y0, y1) = raster_span(b.origin.y.0, b.origin.y.0 + b.size.height.0);
+    let dst = [b.origin.x.0 - x0 as f32, b.origin.y.0 - y0 as f32, b.size.width.0, b.size.height.0];
+    let key = ImageKey {
+        id: m.image.id.0,
+        frame: m.frame,
+        grayscale: m.grayscale,
+        w: x1 - x0,
+        h: y1 - y0,
+        bits: dst.map(f32::to_bits),
+    };
+    ((x0, y0), key, dst)
+}
+
+fn image_prep(m: &Image, copy: Arc<ImageCopy>) -> Prep {
+    let (origin, ..) = image_key(m);
+    Prep::Image(Box::new(ImageDraw::new(copy, origin, m.opacity, m)))
+}
+
+/// The path's coverage key: its geometry and its mask rectangle (bounds inside the frame).
+fn path_key(p: &Path, frame: IRect) -> (u64, IRect) {
+    let b = &p.bounds;
+    let (x0, x1) = raster_span(b.origin.x.0, b.origin.x.0 + b.size.width.0);
+    let (y0, y1) = raster_span(b.origin.y.0, b.origin.y.0 + b.size.height.0);
+    (geometry_hash(&p.path), IRect::new(x0, y0, x1, y1).intersect(&frame))
+}
+
+fn path_prep(p: &Path, mask: Arc<PathMask>, caches: &mut Caches) -> Prep {
+    let paint = if p.paint.tag == BackgroundTag::LinearGradient {
+        let cb = p.bounds.intersect(&p.clip);
+        let paint = Paint::new(&p.paint, [cb.origin.x.0, cb.origin.y.0], [cb.size.width.0, cb.size.height.0]);
+        PathPaint::Gradient(caches.gradient(&p.paint, &paint))
+    } else {
+        let c = rgba(p.paint.solid);
+        PathPaint::Solid(AlphaLut::coverage(c[3]), Tint::new(c))
+    };
+    Prep::Path { mask, paint: Box::new(paint) }
+}
+
+/// Prepares `prim` for drawing: the work that needs the caches (shadow masks, image copies, path
+/// coverage, gradient and glyph tables). Everything else is cheap and done by each tile itself.
+/// A cache miss comes back as a `Job`. `frame` is the frame rectangle (masks never exceed it).
+pub(crate) fn prepare(prim: &Primitive, caches: &mut Caches, glyphs: &mut GlyphTables, blend: &GlyphBlend, frame: IRect) -> Prepared {
+    match prim {
+        Primitive::Quad(q) => {
+            if q.background.tag != BackgroundTag::LinearGradient {
+                return Prepared::Lazy;
+            }
+            let sh = QuadShader::new(q);
+            let grad = caches.gradient(&q.background, &sh.paint);
+            Prepared::Item(Prep::Quad(Box::new(QuadPrep::new(sh, Some(grad)))))
+        }
+        Primitive::Shadow(s) => {
+            let (_, shape) = shadow_shape(s, frame);
+            let key = shape.key();
+            match caches.shadows.get(&key) {
+                Some(mask) => Prepared::Item(shadow_prep(s, mask, frame)),
+                None => Prepared::Pending(Job::Shadow(key, shape)),
+            }
+        }
+        Primitive::MonoSprite(s) => match s.kind {
+            SpriteKind::Glyph => Prepared::Glyph(glyphs.index(caches, s.color, blend)),
+            SpriteKind::Svg => Prepared::Lazy,
+        },
+        Primitive::ColorSprite(_) | Primitive::Underline(_) => Prepared::Lazy,
+        Primitive::Image(m) => {
+            let (_, key, dst) = image_key(m);
+            match caches.images.get(&key) {
+                Some(copy) => Prepared::Item(image_prep(m, copy)),
+                None => Prepared::Pending(Job::Image(key, m.image.clone(), m.frame, m.grayscale, dst)),
+            }
+        }
+        Primitive::Path(p) => {
+            let key = path_key(p, frame);
+            match caches.paths.get(&key) {
+                Some(mask) => Prepared::Item(path_prep(p, mask, caches)),
+                None => Prepared::Pending(Job::Path(key, p.path.clone())),
+            }
+        }
+    }
+}
+
+/// Draws `prim`'s pixels inside `r` (its rectangle cut to the tile). `prep` is what `prepare` made
+/// for it (`None` for lazy items), `glyphs` the frame's glyph tables.
+pub(crate) fn draw(t: &mut Target, prim: &Primitive, prep: Option<&Prep>, glyph: u32, glyphs: &[(Arc<AlphaLut>, Tint)], r: IRect) {
+    if let Some(p) = prep {
+        match p {
+            Prep::Quad(q) => q.draw(t, r),
+            Prep::Shadow { mask, origin, tint, alpha } => shadow::draw(t, mask, *origin, tint, *alpha, r),
+            Prep::Image(d) => d.draw(t, r),
+            Prep::Path { mask, paint } => {
+                let r = r.intersect(&mask.rect);
+                if !r.is_empty() {
+                    draw_path(t, mask, paint, r);
                 }
+            }
+        }
+        return;
+    }
+    match prim {
+        Primitive::Quad(q) => {
+            let rr = &q.corner_radii;
+            let w = &q.border_widths;
+            let simple = [rr.top_left, rr.top_right, rr.bottom_right, rr.bottom_left, w.top, w.right, w.bottom, w.left]
+                .iter()
+                .all(|v| v.0 == 0.);
+            if simple && q.background.tag == BackgroundTag::Solid {
+                fill(t, &Src::new(rgba(q.background.solid)), r);
             } else {
-                for y in r.y0..r.y1 {
-                    fill_span(t.row(y, r.x0, r.x1), s);
-                }
+                QuadPrep::new(QuadShader::new(q), None).draw(t, r);
             }
         }
-        (Prep::Quad(q), _) => q.draw(t, r),
-        (Prep::Shadow { mask, origin, tint, alpha }, _) => shadow::draw(t, mask, *origin, tint, *alpha, r),
-        (Prep::Glyph { lut, tint }, Primitive::MonoSprite(s)) => draw_glyph(t, &s.mask, origin_of(&s.bounds), lut, tint, r),
-        (Prep::Svg { ax, ay, alpha, tint }, Primitive::MonoSprite(s)) => draw_svg(t, &s.mask, ax, ay, *alpha, tint, r),
-        (Prep::Color { opacity }, Primitive::ColorSprite(s)) => draw_color(t, &s.mask, origin_of(&s.bounds), *opacity, r),
-        (Prep::Image(d), _) => d.draw(t, r),
-        (Prep::Path { mask, paint }, _) => {
-            let r = r.intersect(&mask.rect);
-            if !r.is_empty() {
-                draw_path(t, mask, paint, r);
+        Primitive::MonoSprite(s) => match s.kind {
+            SpriteKind::Glyph => {
+                let (lut, tint) = &glyphs[glyph as usize];
+                draw_glyph(t, &s.mask, origin_of(&s.bounds), lut, tint, r);
+            }
+            SpriteKind::Svg => {
+                let c = rgba(s.color);
+                let b = &s.bounds;
+                let ax = Axis::new(b.origin.x.0, b.size.width.0, s.mask.size.width.0);
+                let ay = Axis::new(b.origin.y.0, b.size.height.0, s.mask.size.height.0);
+                draw_svg(t, &s.mask, &ax, &ay, alpha16(c[3]), &Tint::new(c), r);
+            }
+        },
+        Primitive::ColorSprite(s) => draw_color(t, &s.mask, origin_of(&s.bounds), alpha16(s.opacity), r),
+        Primitive::Underline(u) => {
+            let c = rgba(u.color);
+            if u.wavy {
+                draw_underline(t, u, c, r);
+            } else {
+                fill(t, &Src::new(c), r);
             }
         }
-        (Prep::Underline(c), Primitive::Underline(u)) => draw_underline(t, u, *c, r),
-        _ => {}
+        // Prepared kinds always have a `Prep`.
+        Primitive::Shadow(_) | Primitive::Image(_) | Primitive::Path(_) => {}
+    }
+}
+
+fn fill(t: &mut Target, s: &Src, r: IRect) {
+    if s.inv == 0 {
+        for y in r.y0..r.y1 {
+            t.row(y, r.x0, r.x1).fill(s.packed);
+        }
+    } else if !s.is_noop() {
+        for y in r.y0..r.y1 {
+            fill_span(t.row(y, r.x0, r.x1), s);
+        }
     }
 }

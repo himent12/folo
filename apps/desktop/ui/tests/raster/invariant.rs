@@ -110,3 +110,24 @@ fn a_new_glyph_blend_repaints() {
     Renderer::with_threads(1).render(&s, GlyphBlend::IDENTITY, &mut want);
     assert_eq!(fb.pixels, want.pixels);
 }
+
+#[test]
+fn big_scenes_take_the_parallel_front_end_identically() {
+    // Over 6000 primitives: resolve, bin and hash run in parts on the pool.
+    let mut rng = Rng(2024);
+    let assets = Assets::new(&mut rng);
+    let mut s = scene(&mut rng, &assets, 6500, W as f32, H as f32);
+    let mut one = Renderer::with_threads(1);
+    let mut many = Renderer::with_threads(6);
+    let (mut a, mut b) = (Framebuffer::new(W, H), Framebuffer::new(W, H));
+    for step in 0..3 {
+        if step > 0 {
+            s = mutate(&mut rng, &assets, &s, W as f32, H as f32);
+        }
+        let da = one.render(&s, blend(), &mut a);
+        let db = many.render(&s, blend(), &mut b);
+        assert_eq!(a.pixels, b.pixels, "step {step}");
+        assert_eq!(da, db, "step {step}: damage differs");
+        assert_eq!(fresh(&s, 1).pixels, a.pixels, "step {step}");
+    }
+}

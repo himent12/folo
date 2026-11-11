@@ -93,6 +93,25 @@ impl Pool {
     }
 }
 
+/// Runs `f` on every task: on `pool`'s threads (and the caller) when given, else on the caller.
+pub(crate) fn for_each<T: Send>(pool: Option<&Pool>, tasks: Vec<T>, f: &(dyn Fn(T) + Sync)) {
+    match pool {
+        Some(pool) if tasks.len() > 1 => {
+            let queue = Mutex::new(tasks);
+            pool.run(&|| {
+                loop {
+                    let task = queue.lock().unwrap_or_else(|e| e.into_inner()).pop();
+                    match task {
+                        Some(t) => f(t),
+                        None => break,
+                    }
+                }
+            });
+        }
+        _ => tasks.into_iter().for_each(f),
+    }
+}
+
 fn worker(shared: &Shared) {
     let mut seen = 0;
     loop {
