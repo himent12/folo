@@ -81,6 +81,8 @@ const summary = (label: string) => {
 };
 
 beforeEach(() => {
+  // New run keeps a draft for the tab (runnew/draft): every test starts from a fresh tab.
+  sessionStorage.clear();
   hub.mode = 'mock';
   target = document.createElement('div');
   document.body.appendChild(target);
@@ -184,6 +186,8 @@ describe('New run › Run on', () => {
     expect(target.querySelector<HTMLInputElement>('input#hours')!.value).toBe('2');
     unmount(c!);
     c = undefined;
+    // In a new tab: the same link again in this one restores its draft (runnew/draft).
+    sessionStorage.clear();
 
     api = new MockApi('normal', 0);
     const real = api.cloudOffers.bind(api);

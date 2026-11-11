@@ -31,6 +31,7 @@ import { trainConfig } from './runnew/config';
 import { deviceLabelOf, deviceMessage } from './runnew/device';
 import { oomChangesOf } from './runnew/retry';
 import { serverEstimate } from './runnew/serverEstimate';
+import { clearDraft, readDraft, saveDraft, type Draft } from './runnew/draft';
 import WhyLine from './runnew/WhyLine';
 import { isPublished, scoreContextOf, startHintOf } from './runnew/weights';
 import { sampleImagesOf, trainSizesOf } from './runnew/trainImages';
@@ -51,8 +52,15 @@ export default function RunNew() {
 
   const q = untrack(() => router.route.query);
   const defaults: Augment = { mosaic: 1, mixup: 0, hsv: [0.015, 0.7, 0.4], fliplr: 0.5, scale: 0.5, translate: 0.1, close_mosaic: 10 };
+  const fromId = q.get('from');
+  // The tab's draft (runnew/draft): whole when it was made under this link (Back, a reload), else under the fields this
+  // link sets. A copy of a run (?from=) sets them all, so it starts from the run, not the draft.
+  const query = q.toString();
+  const stored = readDraft();
+  const own = stored?.query === query ? stored : null;
+  const draft = own ?? (fromId ? null : stored);
 
-  const datasetId = signal<string>(q.get('dataset') ?? '');
+  const datasetId = signal<string>((own ? own.datasetId : q.get('dataset')) ?? draft?.datasetId ?? '');
   // The dock repeats the summary's Start button for narrow screens; it steps aside while that button is on screen.
   const startEl = signal<HTMLElement>();
   const startVisible = signal(false);
@@ -63,32 +71,32 @@ export default function RunNew() {
     io.observe(el);
     return () => io.disconnect();
   });
-  const arch = signal<Arch>('folo-s');
+  const arch = signal<Arch>(draft?.arch ?? 'folo-s');
   /** Number inputs bind `null` when cleared (the form's errors say so). */
-  const epochs = signal<number>(100);
-  const batch = signal('16');
+  const epochs = signal<number>(draft ? (draft.epochs as number) : 100);
+  const batch = signal(draft?.batch ?? '16');
   const IMGSZ = IMGSZ_STEPS.map(String);
   // ?imgsz= (e.g. from a dataset's "Train at 960 px" health finding) preselects a supported size. Until one is chosen
   // (there, by hand or by a retry) the size follows the dataset (see `defaultImgsz`).
-  const queryImgsz = IMGSZ.includes(q.get('imgsz') ?? '');
-  const imgsz = signal(queryImgsz ? q.get('imgsz')! : '640');
-  const imgszChosen = signal(queryImgsz);
-  const device = signal<string>('auto');
-  const optimizer = signal<Optimizer>('auto');
+  const queryImgsz = !own && IMGSZ.includes(q.get('imgsz') ?? '');
+  const imgsz = signal(queryImgsz ? q.get('imgsz')! : (draft?.imgsz ?? '640'));
+  const imgszChosen = signal(queryImgsz || !!draft?.imgszChosen);
+  const device = signal<string>(draft?.device ?? 'auto');
+  const optimizer = signal<Optimizer>(draft?.optimizer ?? 'auto');
   /** Mixed precision as asked for; what the run gets is `ampOn` (off where the server cannot train that way). */
-  const amp = signal(false);
+  const amp = signal(draft?.amp ?? false);
   /** The end-to-end head (TrainConfig.head `o2o`, docs/MODEL.md §6.6): predicts without NMS. */
-  const e2e = signal(false);
-  const lr0 = signal(0.01);
-  const seed = signal(0);
-  const weights = signal<string>('none');
-  const name = signal('');
-  const nameEdited = signal(false);
+  const e2e = signal(draft?.e2e ?? false);
+  const lr0 = signal(draft ? (draft.lr0 as number) : 0.01);
+  const seed = signal(draft ? (draft.seed as number) : 0);
+  const weights = signal<string>(draft?.weights ?? 'none');
+  const name = signal(draft?.name ?? '');
+  const nameEdited = signal(draft?.nameEdited ?? false);
   // Edited in place by the controls (a `deep` object, as Svelte's `$state`), replaced whole by a prefill or Defaults.
-  const augment = signal<Augment>(deep(structuredClone(defaults)));
+  const augment = signal<Augment>(deep(structuredClone({ ...defaults, ...draft?.augment })));
   // Close mosaic follows the epoch count (default 10, never more than half the run, the trainer's own cap) until it is
   // set by hand; the trainer caps a hand-set value the same way, so a short run always trains with mosaic.
-  const closeEdited = signal(false);
+  const closeEdited = signal(draft?.closeEdited ?? false);
   effect(() => {
     const e = epochs.get();
     if (closeEdited.get() || !Number.isFinite(e) || e < 1) return;
@@ -98,9 +106,9 @@ export default function RunNew() {
   const submitting = signal(false);
   /** The short-run warning's reasons, folded behind its "Why?". */
   const shortWhy = signal(false);
-  const advancedOpen = signal(false);
+  const advancedOpen = signal(draft?.advancedOpen ?? false);
   /** The augmentation settings fold behind a one-line summary at every width until opened. */
-  const augOpen = signal(false);
+  const augOpen = signal(draft?.augOpen ?? false);
   /** Below 960 px the dock opens the summary as a sheet, so the run can be reviewed without scrolling down. */
   const sumOpen = signal(false);
 
@@ -111,6 +119,7 @@ export default function RunNew() {
   const system = new Resource((s) => hub.api.system(s));
   // Run on (servers with the `cloud` feature): this machine or a cloud connection, its GPU and the time limit.
   const cloudPick = new CloudPick(() => system.data);
+  if (draft) cloudPick.restore(draft.cloud);
   const cloudOn = computed(() => hasCloud(system.data));
   /** A connection is chosen: the run trains on its GPU, not this machine's. */
   const onCloud = computed(() => cloudOn.get() && cloudPick.cloud);
@@ -121,9 +130,9 @@ export default function RunNew() {
 
   // Prefill from an earlier run (?from=run_x, e.g. "Retry with batch 32"). Loaded through the hub, so it waits for
   // the real server instead of asking the mock that answers before the connection settles.
-  const fromId = q.get('from');
   const source = new Resource((s) => (fromId ? hub.api.run(fromId, s) : Promise.resolve(null)));
-  const prefilled = signal(!fromId);
+  // A draft of this same link already holds the copy, and the edits since.
+  const prefilled = signal(!fromId || !!own);
   effect(() => {
     const r = source.data;
     if (!r || untrack(() => prefilled.get())) return;
@@ -163,9 +172,40 @@ export default function RunNew() {
     }
   });
 
+  // The first dataset until one is picked; also in place of a draft's dataset that has since been removed.
   effect(() => {
     const list = datasets.data;
-    if (list?.length && !untrack(() => datasetId.get())) datasetId.set(list[0]!.id);
+    const id = untrack(() => datasetId.get());
+    if (list?.length && (!id || (id === draft?.datasetId && !list.some((d) => d.id === id)))) datasetId.set(list[0]!.id);
+  });
+
+  // The draft follows every edit, once the form holds what the link asked for; a start clears it (below).
+  let started = false;
+  effect(() => {
+    const d: Draft = {
+      query,
+      datasetId: datasetId.get(),
+      arch: arch.get(),
+      epochs: epochs.get(),
+      batch: batch.get(),
+      imgsz: imgsz.get(),
+      imgszChosen: imgszChosen.get(),
+      device: device.get(),
+      optimizer: optimizer.get(),
+      amp: amp.get(),
+      e2e: e2e.get(),
+      lr0: lr0.get(),
+      seed: seed.get(),
+      weights: weights.get(),
+      name: name.get(),
+      nameEdited: nameEdited.get(),
+      augment: { ...augment.get(), hsv: [...augment.get().hsv] as Augment['hsv'] },
+      closeEdited: closeEdited.get(),
+      advancedOpen: advancedOpen.get(),
+      augOpen: augOpen.get(),
+      cloud: cloudPick.draft,
+    };
+    if (prefilled.get() && !started) saveDraft(d);
   });
 
   const dataset = computed(() => datasets.data?.find((d) => d.id === datasetId.get()));
@@ -476,6 +516,8 @@ export default function RunNew() {
     submitting.set(true);
     try {
       const run = await hub.api.createRun(config.get());
+      started = true;
+      clearDraft();
       const where = run.cloud ? `, at ${cloudPick.provider} on ${run.cloud.offer.gpu}` : '';
       // page-level: the sheet is closed (above).
       toast.success(`Started ${run.name}`, `${run.epochs} epochs of ${run.config.arch} on ${dataset.get()?.name}${where}.`);

@@ -58,6 +58,8 @@ async function start() {
 }
 
 beforeEach(() => {
+  // New run keeps a draft for the tab (runnew/draft): every test starts from a fresh tab.
+  sessionStorage.clear();
   api = new MockApi('gpu-unplugged', 0);
   // The augmentation preview's images are drawn on a canvas, which this DOM does not have.
   api.imageUrl = async () => 'data:,';
@@ -479,5 +481,52 @@ describe('New run from a link', () => {
   it("takes the epochs a short run's warning suggests", async () => {
     await open('?from=run_a2f0&epochs=40');
     await until(() => target.querySelector<HTMLInputElement>('input#epochs')?.value === '40', 'epochs 40');
+  });
+});
+
+describe('New run: the draft', () => {
+  const type = (id: string, v: string) => {
+    const el = target.querySelector<HTMLInputElement>(`input#${id}`)!;
+    el.value = v;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+  };
+  const field = (id: string) => target.querySelector<HTMLInputElement>(`input#${id}`)!.value;
+  const dataset = () => target.querySelector<HTMLInputElement>('input[name="dataset"]:checked')?.value;
+  const reopen = async (query = '') => {
+    unmount(c!);
+    c = undefined;
+    await open(query);
+  };
+
+  it('keeps what was typed for the tab: leaving and coming back restores it, and a start clears it', async () => {
+    await open();
+    type('name', 'my-draft');
+    type('epochs', '7');
+    await reopen();
+    expect(field('name')).toBe('my-draft');
+    expect(field('epochs')).toBe('7');
+    vi.spyOn(api, 'createRun');
+    await start();
+    await until(() => router.route.path.startsWith('/runs/run_'), 'the new run');
+    await reopen();
+    expect(field('name')).not.toBe('my-draft');
+    expect(field('epochs')).toBe('100');
+  });
+
+  it("lets a link set its own fields over the draft, and restores that link's own draft whole", async () => {
+    await open();
+    type('epochs', '7');
+    const first = dataset();
+    expect(first).not.toBe('ds_shapes');
+    // "Train on this dataset": the link's dataset, the draft's epochs.
+    await reopen('?dataset=ds_shapes');
+    expect(dataset()).toBe('ds_shapes');
+    expect(field('epochs')).toBe('7');
+    // Another dataset picked under that link: Back to it (or a reload) finds the pick, not the link's.
+    target.querySelector<HTMLInputElement>(`input[name="dataset"][value="${first}"]`)!.click();
+    flushSync();
+    await reopen('?dataset=ds_shapes');
+    expect(dataset()).toBe(first);
   });
 });

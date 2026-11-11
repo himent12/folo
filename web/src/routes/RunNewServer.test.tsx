@@ -59,6 +59,8 @@ async function start() {
 }
 
 beforeEach(() => {
+  // New run keeps a draft for the tab (runnew/draft): every test starts from a fresh tab.
+  sessionStorage.clear();
   api = new MockApi('gpu-unplugged', 0);
   // The augmentation preview's images are drawn on a canvas, which this DOM does not have.
   api.imageUrl = async () => 'data:,';
