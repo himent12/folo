@@ -8,10 +8,14 @@ the breathing status dot and ±1 inside some thumbnails).
 ## Measuring
 
 ```
-tools\shot-all.ps1 -Dir <dir>                      # the 98 pairs, headless, ~5 s (release build)
+tools\shoot-all.ps1 -Dir <dir>                     # the 98 pairs, headless, a few seconds (release build)
 python tools\parity.py --a <gpui shots> --b <dir> --out <report> --tol 8   # and --tol 2
 FOLO_UI_SCENE_DUMP=<file> folo-desktop --scenario <s> ... --shot <png>     # the glyph blend + every primitive
+tools\capture-all.ps1 -Dir <dir> -Exe <gpui exe>    # recapture the reference (real windows, off screen)
 ```
+
+Both trees use `<W>x<H>/<scenario>.png`. `parity.py` exits 2 when a folder is missing or the trees share no PNG,
+so a `--fail-pct` gate cannot pass on nothing.
 
 ## Result (98 pairs, % of pixels whose largest channel difference exceeds the tolerance)
 
@@ -19,6 +23,15 @@ FOLO_UI_SCENE_DUMP=<file> folo-desktop --scenario <s> ... --shot <png>     # the
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | before (`desktop/framework` 891f8ba9) | 0.8135 | 0.1349 | 0.1834 | 0 | 1.2698 | 0.2835 | 0 | 231 |
 | now | 0.0040 | 0.0000 | 0.0001 | 71 | 0.0132 | 0.0000 | 62 | 102 |
+| final (`desktop/fw-finish`, merged) | 0.0040 | 0.0000 | 0.0001 | 71 | 0.0132 | 0.0000 | 62 | 102 |
+| final, against the recaptured reference | 0.0040 | 0.0000 | 0.0001 | 76 | 0.0179 | 0.0000 | 68 | 102 |
+
+The recaptured reference (`D:/folo-build/dfw-finish-shots/gpui-dib-all`, 2026-11-11) is the GPUI build captured
+again with the fixed `capture.ps1` (U, below). Against it the six pairs whose only difference was the capture
+artifact are clean; one pair (`1280x800/toast`) picks up the breathing dot's phase instead (D, 9 levels), and the
+status dots of the others land at other phases (the worst % > 2 is a dot). Every final number above is for the
+merged `desktop/framework` with the review fixes (57b3718f) plus this branch; its 98 shots are byte for byte
+those of `desktop/framework` at ceda8f5f, and five renders of the matrix are byte-identical.
 
 ## The rules, as GPUI's DX11 renderer applies them
 
@@ -58,7 +71,7 @@ Each is read from GPUI's source (GPUI 0.2.2's `src/platform/windows/shaders.hlsl
 
 ## What still differs, and why it stays
 
-Causes in the table: **D** status dot, **P** paths, **I** image atlas neighbours, **U** unexplained,
+Causes in the table: **D** status dot, **P** paths, **I** image atlas neighbours, **U** the old captures' GDI+ artifact (explained below; "recaptured" gives % > 8 / % > 2 / max against the fixed captures),
 **-** nothing above 2 levels. Every pair also has 1-level differences (cause T).
 
 - **D, the breathing status dot** (9x9 or 12x12 px, up to 10 levels). It pulses on a 2400 ms repeating
@@ -77,9 +90,15 @@ Causes in the table: **D** status dot, **P** paths, **I** image atlas neighbours
 - **I, thumbnail edges** (1680x1050 overview, one column at an image's edge, up to 21 levels): small images
   share an atlas, and the sampler reads the neighbouring tile's texels (etagere's packing and the load order
   decide which) where we read transparent black. Large images (inspector, playground) match within 2.
-- **U, under detection-box outlines** (dataset, datasets, inspector: 1 to 6 pixels each, 13 levels): GPUI's
-  pixel is pure black where the 0.8-alpha outline lies over an image pixel we both draw alike elsewhere;
-  stable across GPUI's runs. Not explained.
+- **U, under detection-box outlines: explained, a capture artifact** (dataset, datasets, inspector: 1 to 6
+  pixels each, 13 levels). The GPUI captures were taken through GDI+'s `Graphics.GetHdc`, which pre-fills its
+  DC with RGB(13, 11, 12) and on `ReleaseHdc` keeps the bitmap's old pixel wherever a pixel still has that
+  colour: every pixel GPUI drew in exactly RGB(13, 11, 12) came back black. That colour is the 0.8-alpha outline
+  over those image pixels. `capture.ps1` now prints into a plain DIB (as `drive.ps1` does); recaptured that way,
+  the GPUI build matches ours within 2 levels in all six pairs (dataset at 1280 and 960, dataset+light, datasets,
+  inspector, inspector+light), and the old captures differ from the new ones only at those pixels (and at one
+  pixel of `1680x1050/overview`). The per-pair table keeps the numbers against the original captures and gives
+  the recaptured ones in the cause column.
 - **T, 1 level on text and icon edges** (every pair, never above 2): GPUI samples glyph and icon masks
   through a LINEAR sampler at interpolated atlas coordinates; the GPU's 8-bit filter weights and the
   interpolation error pull 1/256 (sometimes 2/256) of a neighbouring texel into about 29 % of glyph pixels
@@ -87,26 +106,26 @@ Causes in the table: **D** status dot, **P** paths, **I** image atlas neighbours
   2/256 bleed from its left, right, upper or lower texel). The direction depends on where each glyph's tile
   sits in GPUI's atlas, so it is not reproducible; it never exceeds 1 level on text.
 
-## Per pair (final run; "before" is the `desktop/framework` build this work started from)
+## Per pair (against the original captures; the final build gives the same numbers; "before" is the `desktop/framework` build the parity work started from)
 
 | pair | before % > 8 | % > 8 | % > 2 | max | cause |
 |---|---:|---:|---:|---:|---|
 | 960x620/run-live | 0.4105 | 0.0040 | 0.0072 | 57 | DP |
 | 1680x1050/overview | 0.1317 | 0.0023 | 0.0122 | 59 | DIP |
 | 1280x800/run-failed | 0.4068 | 0.0009 | 0.0012 | 102 | P |
-| 960x620/dataset | 0.1641 | 0.0007 | 0.0007 | 13 | U |
+| 960x620/dataset | 0.1641 | 0.0007 | 0.0007 | 13 | U (recaptured: 0 / 0 / 1) |
 | 960x620/run-cloud+training | 0.3802 | 0.0004 | 0.0116 | 57 | DP |
 | 960x620/run-live+charts-focus | 0.4163 | 0.0004 | 0.0072 | 57 | DP |
 | 1280x800/run-done | 0.6105 | 0.0003 | 0.0132 | 57 | P |
 | 1280x800/run-cloud+training+light | 0.2990 | 0.0003 | 0.0131 | 55 | DP |
 | 1280x800/run-cloud+released | 0.4615 | 0.0003 | 0.0101 | 59 | P |
-| 1280x800/dataset+light | 0.0828 | 0.0003 | 0.0003 | 13 | U |
-| 1280x800/dataset | 0.0934 | 0.0003 | 0.0003 | 13 | U |
+| 1280x800/dataset+light | 0.0828 | 0.0003 | 0.0003 | 13 | U (recaptured: 0 / 0 / 2) |
+| 1280x800/dataset | 0.0934 | 0.0003 | 0.0003 | 13 | U (recaptured: 0 / 0 / 2) |
 | 1280x800/run-live | 0.3351 | 0.0001 | 0.0057 | 58 | DP |
 | 1280x800/run-live+hover | 0.3276 | 0.0001 | 0.0057 | 58 | DP |
 | 1280x800/run-live+light | 0.3459 | 0.0001 | 0.0055 | 54 | DP |
 | 1280x800/stop-confirm+light | 0.1726 | 0.0001 | 0.0042 | 33 | DP |
-| 1280x800/datasets | 0.1115 | 0.0001 | 0.0001 | 13 | U |
+| 1280x800/datasets | 0.1115 | 0.0001 | 0.0001 | 13 | U (recaptured: 0 / 0 / 2) |
 | 1280x800/stop-confirm | 0.0762 | 0.0001 | 0.0001 | 20 | P |
 | 1280x800/run-cloud+training | 0.2910 | 0.0001 | 0.0109 | 57 | DP |
 | 1280x800/model+light | 0.2260 | 0.0001 | 0.0001 | 52 | P |
@@ -114,8 +133,8 @@ Causes in the table: **D** status dot, **P** paths, **I** image atlas neighbours
 | 1680x1050/run-cloud+training | 0.2264 | 0.0001 | 0.0054 | 59 | DP |
 | 1280x800/run-done+sample-focus | 0.8135 | 0.0000 | 0.0077 | 53 | P |
 | 1280x800/run-live+charts-focus | 0.3400 | 0.0000 | 0.0053 | 36 | DP |
-| 1280x800/inspector+light | 0.3513 | 0.0000 | 0.0000 | 13 | U |
-| 1280x800/inspector | 0.3538 | 0.0000 | 0.0000 | 13 | U |
+| 1280x800/inspector+light | 0.3513 | 0.0000 | 0.0000 | 13 | U (recaptured: 0 / 0 / 2) |
+| 1280x800/inspector | 0.3538 | 0.0000 | 0.0000 | 13 | U (recaptured: 0 / 0 / 2) |
 | 1680x1050/run-live | 0.2204 | 0.0000 | 0.0073 | 53 | DP |
 | 1680x1050/model | 0.2571 | 0.0000 | 0.0000 | 55 | P |
 | 1280x800/overview+cloud | 0.1424 | 0.0000 | 0.0083 | 5 | D |
@@ -189,3 +208,21 @@ Causes in the table: **D** status dot, **P** paths, **I** image atlas neighbours
 | 960x620/run-cloud+syncing | 0.1368 | 0.0000 | 0.0000 | 1 | - |
 | 960x620/settings+cloud+trouble | 0.2604 | 0.0000 | 0.0000 | 2 | - |
 | 960x620/settings+cloud | 0.2499 | 0.0000 | 0.0000 | 2 | - |
+
+## The Settings credit line
+
+Settings ends with "FOLO Only Looks Once · folo-ui · MIT OR Apache-2.0" (it said GPUI): the one intended pixel
+change of the finish. It sits below the fold in every review scenario, so it touches none of the 98 pairs (all
+byte-identical before and after). A 1280 x 2600 render of `settings` shows it: 1866 pixels change, all in that
+line (x 680-908, y 2192-2208 at 1.5).
+
+## Deterministic shots
+
+`run-done+bottom` and `run-done+sample-focus` used to flip between two pictures from run to run with the same
+exe: the scroll thumb's 800 ms after a scroll was timed on the wall clock, so a `--shot` that took longer than
+800 ms of real time hid the thumb and a faster one showed it (a pre-fix build, rendered 20 times in parallel,
+gave one image 9 times and the other 11). It is timed on the executor's clock now (the fake clock under
+`--shot`), so the picture depends only on the fake time the shot advanced to; `src/ui/scroll_tests.rs` fails on
+the wall clock. Both shots render byte-identical 20 times out of 20 (in sequence and 20 at once), and five renders
+of the whole matrix are byte-identical. A thumb that lies wholly outside its clip now paints nothing and asks for
+no frames (it changes no pixel; the shots are byte-identical).

@@ -43,6 +43,14 @@ bins the scene into tiles, hashes each tile's primitives, rasterizes only the ti
 window's `Framebuffer`, and the platform presents those rectangles. A window draws only when something made it
 dirty, at most once per display refresh; while nothing changes there is no timer and the process sleeps.
 
+Two things keep a frame cheap without changing a pixel (`DESIGN.md`, Frames). The layout tree keeps what the
+previous frame computed (`window/layout_tree.rs`): a subtree whose nodes, styles and texts are unchanged answers
+the same layout requests from last frame's records instead of running taffy again, so the result is exactly a
+fresh layout's. And an element that only animates its opacity (`with_opacity_animation`: the breathing status
+dot, fades, shimmers) is painted once inside an opacity group (`opacity.rs`, `window/paint_animation.rs`); at
+each refresh the window re-fades that group's primitives in the scene and repaints only their tiles, with no
+render, layout or paint.
+
 ## Build, test, bench
 
 From `apps/desktop` (the crate is a member of that workspace). On the dev machine, set `CARGO_TARGET_DIR` and
@@ -87,7 +95,7 @@ cargo run -p folo-ui --example text_probe -- <lines.txt> <out-dir> [scale]  # Di
 
 | Platform | Backend | What is verified |
 | --- | --- | --- |
-| Windows | Win32 (`platform/windows`), DirectWrite text | built, linted and tested in CI; the app runs and ships here; real-window checks off screen (`win_smoke`, `apps/desktop/tools`) |
+| Windows | Win32 (`platform/windows`), DirectWrite text | built, linted and tested in CI; the app runs and ships here; headless shots within 0.004 % of the GPUI app's pixels (`PARITY.md`); real-window checks with posted messages, off screen and on a private desktop (`win_smoke`; the app's `interact-check.ps1`, `chrome-check.ps1`, `window-check.ps1 -Sandbox`, copy and paste included); cost against GPUI in `PERF.md` |
 | Linux | winit + softbuffer, cosmic-text | CI builds the app, runs every test (all headless) and renders a headless `--shot`; no window has been opened on Linux |
 | macOS | winit + softbuffer, cosmic-text | type-checked and linted for `aarch64-apple-darwin` and `x86_64-apple-darwin` by `tools/cross-check.sh` (in CI too); nothing is linked or run on macOS |
 

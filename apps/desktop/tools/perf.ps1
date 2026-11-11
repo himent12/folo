@@ -4,13 +4,14 @@
 # Usage: tools\perf.ps1 -Label main -Out perf\main.json [-Exe path] [-Launches 12] [-SettleS 6] [-LoadS 30]
 #        [-RunId run_a19f] [-DatasetId ds_8f2c]
 # -Exe defaults to $CARGO_TARGET_DIR\debug\folo-desktop.exe; measure a release build. A run takes about three
-# minutes. The numbers swing with the machine's load: compare two builds measured back to back.
+# and a half minutes. The numbers swing with the machine's load: compare two builds measured back to back.
 # Measures:
 #   startup  -Launches launches of --mock; median and min of first-render / first-frame / window-visible
 #            (the first launch is the cold one, reported apart and left out of the stats);
 #   memory   after -SettleS s on overview, datasets, dataset:<id>, run:<id> (live): working set, private
 #            bytes, peak working set, threads, handles, GPU dedicated and shared memory (sum of instances);
-#   load     over -LoadS s on settings (static) and run:<id> (the mock's simulator keeps it updating):
+#   load     over -LoadS s on settings (static), run:<id> (the mock's simulator keeps it updating) and the
+#            frozen `--scenario run-live` (the same page, no new data: what its animations cost):
 #            process CPU seconds (kernel + user), average GPU engine utilization (sum of engines);
 #   context  logical cores, display refresh rate, total CPU and the busiest other processes.
 param(
@@ -165,7 +166,7 @@ foreach ($k in $states.Keys) {
 }
 
 # ---------- CPU and GPU load ----------
-$loadStates = [ordered]@{ static_settings = @("--mock", "--open", "settings"); run_live = @("--mock", "--open", "run:$RunId") }
+$loadStates = [ordered]@{ static_settings = @("--mock", "--open", "settings"); run_live = @("--mock", "--open", "run:$RunId"); run_live_frozen = @("--scenario", "run-live") }
 $result.load = [ordered]@{}
 foreach ($k in $loadStates.Keys) {
     $p = Launch $loadStates[$k] @{} "load-$k"

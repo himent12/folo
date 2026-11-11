@@ -124,6 +124,9 @@ or takes focus.
   `-Offscreen` (never on a display, never active; maximize is the app's off-screen emulation, checked by size),
   `-Sandbox` (on a private desktop), or neither (on your screen, it maximizes).
 - `window-check.ps1`: the whole window chrome (Window check, below); `-Sandbox` on a private desktop.
+- `clip-save.ps1`: saves the clipboard byte for byte and puts it back (interact-check's copy and paste steps;
+  they skip themselves when a format, such as a bitmap handle, cannot be restored exactly, and nothing is put
+  back over something copied meanwhile).
 - `drive.ps1`: the window-message driver the checks dot-source: posted mouse and non-client messages, keys
   with their modifiers in the UI thread's key state, a sync, PrintWindow captures. Nothing in it moves the
   cursor, activates a window or injects real input.

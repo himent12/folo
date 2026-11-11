@@ -275,8 +275,10 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
   the repo, on the dev PC. `apps/desktop/tools/shoot-all.ps1` renders the 98 shots and `tools/parity.py`
   compares the trees (`ui/PARITY.md`: how, every rule, and every residual difference with its cause). Result,
   as the percentage of pixels whose largest channel difference exceeds 8 of 255: worst pair 0.0040 %, median
-  0 %, 76 of 98 pairs with no such pixel (62 within 2 levels); the largest single difference is in chart paths
-  (GPUI resolves overlapping paths per MSAA sample). The rest is the breathing status dot's phase, path edge
+  0 %, mean 0.0001 %; 71 of 98 pairs have no such pixel, and 62 none above 2 levels. Against GPUI captures
+  retaken without the old capture script's GDI+ artifact (it blackened every RGB(13, 11, 12) pixel), 76 and 68.
+  The largest single difference (102 levels, one pixel) is in chart paths (GPUI resolves overlapping paths per
+  MSAA sample). The rest is the breathing status dot's phase, path edge
   samples, image-atlas neighbours in thumbnails, and 1 level on glyph and icon edges.
 - **Behaviour.** The crate's tests drive the headless platform with synthetic input: layout, text wrapping and
   truncation, hover, focus and keyboard, scrolling, drag and drop, IME ranges, animations on the fake clock,
