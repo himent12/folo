@@ -18,6 +18,12 @@ publish = false
 name = "folo-desktop"
 path = "src/main.rs"
 
+# On Windows, the Linux / macOS backend for a check on the dev machine: build with `--features winit,portable-text`
+# and run with FOLO_UI_PLATFORM=winit (folo-ui's features; always on elsewhere).
+[features]
+winit = ["folo-ui/winit"]
+portable-text = ["folo-ui/portable-text"]
+
 [dependencies]
 folo-ui = { path = "ui" }
 # The API types shared with folo-server and the CLI (root workspace, by path).
