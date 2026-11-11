@@ -57,7 +57,10 @@ impl Application {
                 let platform =
                     Rc::new(crate::platform::headless::HeadlessPlatform::from_options(request.options));
                 let app = App::new_app(platform.clone(), Arc::new(()));
-                return Application(app, Some(shot::Shot { path: request.path, platform }));
+                return Application(
+                    app,
+                    Some(shot::Shot { path: request.path, platform, settle_time: request.settle_time }),
+                );
             }
             Ok(None) => {}
             Err(error) => panic!("--shot: {error:#}"),

@@ -44,7 +44,10 @@ impl<V: Render> From<Entity<V>> for AnyView {
 /// `AnyView::render` for views of type `V`.
 fn render_view<V: Render>(view: &AnyView, window: &mut Window, cx: &mut App) -> AnyElement {
     let view = view.clone().downcast::<V>().unwrap_or_else(|_| panic!("AnyView of the wrong type"));
+    let start = std::time::Instant::now();
     let element = view.update(cx, |view, cx| view.render(window, cx).into_any_element());
+    let micros = start.elapsed().as_micros().min(u128::from(u32::MAX)) as u32;
+    window.frame_times.render_us = window.frame_times.render_us.saturating_add(micros);
     crate::app::trace::first_render();
     element
 }

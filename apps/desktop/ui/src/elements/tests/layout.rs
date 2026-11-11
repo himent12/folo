@@ -205,3 +205,14 @@ fn a_repeating_animation_wraps() {
     let eased = Animation::new(Duration::from_millis(100)).with_easing(|t| t * t);
     assert_eq!(crate::elements::animation::progress(&eased, Duration::from_millis(50)).0, 0.25);
 }
+
+#[test]
+fn a_view_that_notifies_in_render_does_not_redraw_forever() {
+    let (mut app, window) = open(|_, cx| {
+        cx.notify();
+        div().size_full().into_any_element()
+    });
+    draw(&mut app, window);
+    app.run_until_idle();
+    assert!(!app.is_dirty(window), "GPUI ignores a view's notify while its window draws");
+}

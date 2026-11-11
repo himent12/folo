@@ -136,7 +136,9 @@ impl Platform for HeadlessPlatform {
         let state = Rc::new(HeadlessWindowState {
             size: Cell::new(self.size),
             scale_factor: self.scale_factor,
-            mouse_position: Cell::new(Point::default()),
+            // Outside the window until input moves it (as a real window the mouse is not over): nothing
+            // starts hovered.
+            mouse_position: Cell::new(crate::point(crate::px(-10_000.), crate::px(-10_000.))),
             modifiers: Cell::new(Modifiers::default()),
             frame_requested: Cell::new(false),
             callbacks: RefCell::new(HeadlessCallbacks::default()),

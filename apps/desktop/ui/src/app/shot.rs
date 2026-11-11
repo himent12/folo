@@ -3,12 +3,15 @@
 //!
 //! `Application::new` reads the process arguments, so the app needs no code for it: `--shot <png>` with
 //! `--width` / `--height` (logical px, default 1280 x 800, the app's defaults), `--scale` (default 1) and
-//! `--text portable` (cosmic-text instead of the platform's text backend). Settling: the app's launch
-//! callback runs, the queues are pumped until idle (background jobs included; the clock stays frozen), and
-//! frames are drawn until two in a row are identical or the window stops being dirty, at most
-//! `MAX_SETTLE_FRAMES`. The PNG is `width * scale` x `height * scale` pixels.
+//! `--text portable` (cosmic-text instead of the platform's text backend) and `--shot-time <ms>`. Settling:
+//! the app's launch callback runs, the queues are pumped until idle (background jobs included), then frames
+//! are drawn while the fake clock moves in 50 ms steps until the window stops asking for frames (one-shot
+//! fades have finished) or `--shot-time` has passed (default 2200 ms, the delay `tools/shoot.ps1` waited
+//! before capturing GPUI: repeating pulses and shimmers are caught at that time). The app's frozen
+//! scenarios run no timers of their own, so only animations see the clock move. The PNG is
+//! `width * scale` x `height * scale` pixels.
 
-use std::{path::PathBuf, rc::Rc};
+use std::{path::PathBuf, rc::Rc, time::Duration};
 
 use anyhow::{Context as _, Result, anyhow};
 
@@ -17,8 +20,8 @@ use crate::{
     px, size,
 };
 
-/// The most frames a screenshot draws while settling.
-const MAX_SETTLE_FRAMES: usize = 30;
+/// The fake-clock step while settling.
+const SETTLE_STEP: Duration = Duration::from_millis(50);
 
 /// A `--shot` request from the command line.
 pub(crate) struct ShotArgs {
@@ -26,6 +29,8 @@ pub(crate) struct ShotArgs {
     pub(crate) path: PathBuf,
     /// The headless window's size, scale and text backend.
     pub(crate) options: HeadlessOptions,
+    /// How long animations may run before the capture.
+    pub(crate) settle_time: Duration,
 }
 
 impl ShotArgs {
@@ -43,7 +48,10 @@ impl ShotArgs {
         };
         let scale_factor = number("--scale", 1.0)?;
         anyhow::ensure!(scale_factor > 0.0, "--scale must be positive");
+        let settle_ms = number("--shot-time", 2200.0)?;
+        anyhow::ensure!(settle_ms >= 0.0, "--shot-time must not be negative");
         Ok(Some(ShotArgs {
+            settle_time: Duration::from_millis(settle_ms as u64),
             path: PathBuf::from(path),
             options: HeadlessOptions {
                 size: size(px(number("--width", 1280.0)?), px(number("--height", 800.0)?)),
@@ -60,6 +68,8 @@ pub(crate) struct Shot {
     pub(crate) path: PathBuf,
     /// The platform (for its dispatcher).
     pub(crate) platform: Rc<HeadlessPlatform>,
+    /// How long animations may run before the capture.
+    pub(crate) settle_time: Duration,
 }
 
 impl Shot {
@@ -68,9 +78,7 @@ impl Shot {
         let mut harness = HeadlessApp::from_parts(app, self.platform);
         harness.run_until_idle();
         let window = *harness.windows().first().context("the app opened no window")?;
-        if !harness.settle(window, MAX_SETTLE_FRAMES) {
-            eprintln!("folo-ui: --shot did not settle in {MAX_SETTLE_FRAMES} frames; writing the last one");
-        }
+        harness.settle_advancing(window, self.settle_time, SETTLE_STEP);
         let frame = harness.frame(window).clone();
         write_png(&self.path, &frame)
     }

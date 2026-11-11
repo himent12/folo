@@ -10,6 +10,8 @@ pub struct FrameTimes {
     pub frame: u64,
     /// Rendering the views and building the element and layout trees (`render` + `request_layout`).
     pub build_us: u32,
+    /// The views' `render` calls alone (part of `build_us`).
+    pub render_us: u32,
     /// Computing the layout (taffy, measure functions).
     pub layout_us: u32,
     /// Prepaint: bounds, hitboxes, dispatch nodes, scroll offsets, deferred draws and the tooltip.
@@ -57,9 +59,10 @@ pub(crate) fn micros_since(start: Instant) -> u32 {
 /// Prints `times` as one line to stderr.
 pub(crate) fn print_frame(times: &FrameTimes) {
     eprintln!(
-        "folo-ui frame {}: build {} layout {} prepaint {} paint {} finish {} raster {} present {} = {} us ({} prims, {} hitboxes)",
+        "folo-ui frame {}: build {} (render {}) layout {} prepaint {} paint {} finish {} raster {} present {} = {} us ({} prims, {} hitboxes)",
         times.frame,
         times.build_us,
+        times.render_us,
         times.layout_us,
         times.prepaint_us,
         times.paint_us,

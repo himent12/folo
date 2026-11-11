@@ -60,6 +60,7 @@ impl Window {
         self.drawing = true;
         self.tooltip_bounds = None;
         self.frame_times.frame += 1;
+        self.frame_times.render_us = 0;
 
         // The platform's handler is the previous frame's: dropped; this frame's replaces it below.
         self.platform_window.take_input_handler();
@@ -69,6 +70,8 @@ impl Window {
             self.drawing = false;
             return;
         };
+        // A notify while this frame is built does not dirty the windows again (`App::drawing_window`).
+        let outer_drawing = cx.drawing_window.replace(self.handle.id);
         let mut root_element = root.into_any_element();
         root_element.request_layout(self, cx);
         let built = Instant::now();
@@ -96,6 +99,7 @@ impl Window {
         self.frame_times.paint_us = micros_since(prepainted);
 
         self.finish_frame(cx);
+        cx.drawing_window = outer_drawing;
         drop(root_element);
         drop(tooltip_element);
         self.frame_times.finish_us = micros_since(painted);

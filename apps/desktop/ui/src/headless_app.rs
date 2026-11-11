@@ -180,6 +180,28 @@ impl HeadlessApp {
         false
     }
 
+    /// Settles `window` for a screenshot of the app as a person would see it a moment after launch: frames
+    /// are drawn while the fake clock advances in `step`s, until the window stops asking for frames (every
+    /// one-shot animation has finished) or `max_time` has passed (a repeating animation never finishes; it
+    /// is shown at that time). Returns whether it went idle. Timers the app set fire as the clock passes
+    /// them (the app's frozen scenarios set none).
+    pub fn settle_advancing(&mut self, window: AnyWindowHandle, max_time: Duration, step: Duration) -> bool {
+        self.run_until_idle();
+        let mut elapsed = Duration::ZERO;
+        loop {
+            self.frame(window);
+            self.run_until_idle();
+            if !self.is_dirty(window) {
+                return true;
+            }
+            if elapsed >= max_time {
+                return false;
+            }
+            self.advance_clock(step);
+            elapsed += step;
+        }
+    }
+
     /// The open windows, in the order opened.
     pub fn windows(&self) -> Vec<AnyWindowHandle> {
         self.app.borrow().windows()
