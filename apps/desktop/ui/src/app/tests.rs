@@ -424,3 +424,100 @@ fn global_actions_dispatch_capture_then_bubble() {
     });
     assert_eq!(*log.borrow(), ["second", "first"], "bubble runs the last registered first");
 }
+
+#[test]
+fn quit_from_an_update_of_an_entity_with_an_app_quit_handler() {
+    let mut app = app();
+    let counter: Entity<Counter> = app.update(|cx| {
+        cx.new(|cx: &mut Context<Counter>| {
+            let mut c = Counter::default();
+            c.subs.push(cx.on_app_quit(|this, _| {
+                this.count += 1;
+                async {}
+            }));
+            c
+        })
+    });
+    // The handler leases `counter`, which this update holds: shutdown waits for the update to end.
+    app.update(|cx| counter.update(cx, |_, cx| cx.quit()));
+    assert_eq!(app.read(|cx| counter.read(cx).count), 1);
+    assert!(app.platform().quit_requested.get());
+}
+
+/// A root view that registers an `on_app_quit` handler, as the app's does.
+struct QuitView {
+    quits: Rc<Cell<usize>>,
+    _sub: Option<Subscription>,
+}
+
+impl crate::Render for QuitView {
+    fn render(&mut self, _: &mut crate::Window, _: &mut Context<Self>) -> impl crate::IntoElement {
+        crate::div()
+    }
+}
+
+#[test]
+fn closing_the_last_window_quits_through_on_window_closed() {
+    // The app's path: `on_window_closed(|cx| cx.quit())` and the platform closes the window. Shutdown runs
+    // once; the root view's own handler does not, since the view is released with its window (as on GPUI,
+    // whose shutdown runs after the loop has ended).
+    let mut app = app();
+    let (view_quits, app_quits) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+    app.update(|cx| {
+        let view_quits = view_quits.clone();
+        cx.open_window(crate::WindowOptions::default(), move |_, cx| {
+            cx.new(move |cx: &mut Context<QuitView>| {
+                let sub = cx.on_app_quit(|this, _| {
+                    this.quits.set(this.quits.get() + 1);
+                    async {}
+                });
+                QuitView { quits: view_quits, _sub: Some(sub) }
+            })
+        })
+        .expect("open a window");
+        let app_quits = app_quits.clone();
+        cx.on_app_quit(move |_| {
+            app_quits.set(app_quits.get() + 1);
+            async {}
+        })
+        .detach();
+        cx.on_window_closed(|cx| cx.quit()).detach();
+    });
+    let close = app.platform().windows.borrow()[0].callbacks.borrow_mut().close.take();
+    close.expect("the window registered on_close")();
+    assert_eq!((app_quits.get(), view_quits.get()), (1, 0));
+    assert!(app.read(|cx| cx.windows().is_empty()));
+    assert!(app.platform().quit_requested.get());
+}
+
+#[test]
+fn quit_polls_every_app_quit_future_together() {
+    // The first future waits for what the second sends: awaited one after another, neither finishes.
+    let mut app = app();
+    let (tx, rx) = crate::oneshot::channel::<()>();
+    let done = Rc::new(Cell::new(false));
+    app.update(|cx| {
+        let (mut rx, done) = (Some(rx), done.clone());
+        cx.on_app_quit(move |_| {
+            let (rx, done) = (rx.take(), done.clone());
+            async move {
+                if let Some(rx) = rx {
+                    done.set(rx.await.is_ok());
+                }
+            }
+        })
+        .detach();
+        let mut tx = Some(tx);
+        cx.on_app_quit(move |_| {
+            let tx = tx.take();
+            async move {
+                if let Some(tx) = tx {
+                    tx.send(()).ok();
+                }
+            }
+        })
+        .detach();
+    });
+    app.update(|cx| cx.quit());
+    assert!(done.get(), "the first quit future saw the second's signal");
+}
