@@ -62,6 +62,7 @@ import CloudPanel from './run/CloudPanel';
 import { isOom } from '$lib/oom';
 import { copyText, pageCommands, type PageCommand } from '$lib/shell/pageCommands';
 import RunSkeleton from './run/RunSkeleton';
+import DeleteRun from './run/DeleteRun';
 
 type Section = 'samples' | 'classes' | 'logs' | 'cloud' | 'config';
 const NO_CLASSES: string[] = [];
@@ -259,7 +260,6 @@ export default function Run() {
   // A confirm that fails says so in its dialog, which stays open for Retry (the toaster sits behind the modal); one
   // that succeeds closes it and the page says what happened.
   const stopStatus = new DialogStatus();
-  const deleteStatus = new DialogStatus();
 
   async function stop() {
     const cur = run.peek();
@@ -272,22 +272,6 @@ export default function Run() {
       toast.info(`Stopping ${r.name}`, r.cloud && r.epoch === 0 ? 'Its instance is released; nothing had trained yet.' : `The checkpoint from epoch ${r.epoch} is kept.`);
     } catch (e) {
       stopStatus.error(e, removing.peek() ? 'Could not remove the run from the queue' : 'Could not stop the run');
-    } finally {
-      busy.set(false);
-    }
-  }
-
-  async function remove() {
-    const cur = run.peek();
-    if (!cur) return;
-    busy.set(true);
-    try {
-      await hub.api.deleteRun(cur.id);
-      deleteOpen.set(false);
-      toast.success(`Deleted ${cur.name}`, 'Checkpoints on disk were left in place.');
-      router.go('/runs');
-    } catch (e) {
-      deleteStatus.error(e, 'Could not delete the run');
     } finally {
       busy.set(false);
     }
@@ -694,21 +678,7 @@ export default function Run() {
               </>
             )}
           />
-          <Dialog
-            bind:open={deleteOpen}
-            title={`Delete ${R().name}?`}
-            description="Removes the run and its metric history from Studio. Checkpoint files on disk are not touched."
-            size="sm"
-            status={deleteStatus}
-            footer={() => (
-              <>
-                <Button onclick={() => deleteOpen.set(false)}>Cancel</Button>
-                <Button variant="destructive" icon={Trash} loading={busy.get()} onclick={remove}>
-                  Delete run
-                </Button>
-              </>
-            )}
-          />
+          <DeleteRun run={deleteOpen.get() ? R() : null} models={models.data} onclose={() => deleteOpen.set(false)} ondeleted={() => router.go('/runs')} />
         </>
       )}
     </>
