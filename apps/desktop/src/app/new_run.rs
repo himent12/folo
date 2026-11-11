@@ -429,7 +429,18 @@ impl FoloApp {
                         this.subscribe_active(cx);
                         let run = this.store.run(&id).cloned();
                         let cloud = run.as_ref().and_then(|r| Some(this.cloud_device(r, r.cloud.as_ref()?)));
-                        let queued = run.is_some_and(|r| r.status == crate::api::RunStatus::Queued);
+                        // The server answers `queued` first even when it trains at once: say
+                        // "Queued" only when it waits behind another run.
+                        let runs = this.store.runs.ready().map(|r| r.as_slice()).unwrap_or_default();
+                        let wait = run.as_ref().filter(|r| waits_to_start(r, runs)).map(|r| {
+                            match (r.queue_position, training_now(runs, &r.id)) {
+                                (Some(p), _) if p > 1 => {
+                                    format!("{}: it starts after the runs ahead of it.", queue_text(Some(p)))
+                                }
+                                (_, Some(a)) => format!("It starts when {} finishes.", a.name),
+                                _ => "It starts when the current run finishes.".to_string(),
+                            }
+                        });
                         if let Some(on) = cloud {
                             // It waits on its instance, not in the queue.
                             this.toast(
@@ -439,12 +450,12 @@ impl FoloApp {
                                 cx,
                             );
                             this.refresh_instances(cx);
-                        } else if queued {
+                        } else if let Some(wait) = wait {
                             // The run's page opens next, so the action is the queue it waits in.
                             this.toast_with(
                                 Tone::Info,
                                 format!("Queued {name}"),
-                                Some("It starts when the current run finishes.".into()),
+                                Some(wait.into()),
                                 Some((
                                     "View queue".into(),
                                     Rc::new(
@@ -459,7 +470,7 @@ impl FoloApp {
                         } else {
                             this.toast(
                                 Tone::Accent,
-                                format!("Training {name}"),
+                                format!("Started {name}"),
                                 Some("Live metrics stream into the dashboard.".into()),
                                 cx,
                             );

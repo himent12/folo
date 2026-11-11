@@ -11,6 +11,12 @@ use crate::ui::*;
 
 use super::{Action, FoloApp, Inspector, Palette, Toast};
 
+/// How long a toast shows before it leaves by itself (not counting time hovered or focused): a
+/// toast with an action gets long enough to read it and reach the button.
+pub(super) fn toast_ttl(has_action: bool) -> Duration {
+    Duration::from_millis(if has_action { 12_000 } else { 4200 })
+}
+
 impl FoloApp {
     pub fn toast(
         &mut self,
@@ -32,12 +38,13 @@ impl FoloApp {
     ) {
         self.toast_seq += 1;
         let id = self.toast_seq;
-        // Toasts with an action stay until used or dismissed; others expire, but not while hovered.
-        let expires = action.is_none();
+        // Every toast expires, none while hovered or focused; one with an action stays longer, so
+        // there is time to use it.
+        let ttl = toast_ttl(action.is_some());
         self.toasts.push(Toast { id, tone, title: title.into(), body, action });
-        // Over three, the oldest passive toast goes first: one with an action waits for its action
-        // or a dismissal (the stack folds them) unless five are waiting. The focused toast stays,
-        // and so does the one just added (it would vanish unseen).
+        // Over three, the oldest passive toast goes first: one with an action stays for its action
+        // (the stack folds them) unless five are waiting. The focused toast stays, and so does the
+        // one just added (it would vanish unseen).
         while self.toasts.len() > 3 {
             let keep = |t: &Toast| t.id != id && Some(t.id) != self.toast_focus;
             let gone = self
@@ -48,9 +55,9 @@ impl FoloApp {
             let Some(i) = gone else { break };
             self.toasts.remove(i);
         }
-        if !self.frozen && expires {
+        if !self.frozen {
             cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(Duration::from_millis(4200)).await;
+                cx.background_executor().timer(ttl).await;
                 loop {
                     let hovered = this
                         .update(cx, |this, _| {
@@ -215,5 +222,14 @@ impl FoloApp {
             self.navigate(p, window, cx);
         }
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn every_toast_expires_and_action_toasts_last_longer() {
+        let (plain, action) = (super::toast_ttl(false), super::toast_ttl(true));
+        assert!(action > plain && action.as_secs() >= 10 && action.as_secs() <= 15, "{action:?}");
     }
 }

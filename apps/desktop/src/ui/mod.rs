@@ -23,7 +23,8 @@ pub use cloud::{
 };
 pub use format::{
     bytes, count_si, device_label, display_path, f3, fmt_aug, fmt_conf, fmt_lr, fmt_scale, int, latency_text,
-    may_overflow, model_storage, plural, pr_caption, sci, share_spare, short_gpu, split_label, waiting_text,
+    may_overflow, model_storage, plural, pr_caption, queue_text, sci, share_spare, short_gpu, split_label,
+    waiting_text,
 };
 pub use legend::{class_swatch, legend_value, line_swatch, swatch};
 pub use metric::{baseline_lift, detail_line, duration_metric, kv, metric, metric_pair, stat_at, stat_sized};

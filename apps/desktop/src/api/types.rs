@@ -242,6 +242,30 @@ impl RunExt for Run {
     }
 }
 
+/// The run on this machine that holds the training device (running or stopping), other than
+/// `except`. Cloud runs train elsewhere and never hold it.
+pub fn training_now<'a>(runs: &'a [Run], except: &str) -> Option<&'a Run> {
+    runs.iter().find(|r| {
+        r.id != except && r.cloud.is_none() && matches!(r.status, RunStatus::Running | RunStatus::Stopping)
+    })
+}
+
+/// Whether a run the server just accepted waits for others rather than training at once.
+/// `POST /api/runs` answers `queued` either way (docs/API.md), so its status alone can't say: it
+/// waits behind a place past the first, a run holding the device, or (a server without queue
+/// places, or a run whose trainer is being built) another queued run on this machine.
+pub fn waits_to_start(run: &Run, runs: &[Run]) -> bool {
+    run.status == RunStatus::Queued
+        && (run.queue_position.is_some_and(|p| p > 1)
+            || training_now(runs, &run.id).is_some()
+            || runs.iter().any(|r| {
+                r.id != run.id
+                    && r.cloud.is_none()
+                    && r.status == RunStatus::Queued
+                    && r.queue_position.is_none()
+            }))
+}
+
 pub trait SplitsExt {
     fn total(&self) -> u64;
 }
@@ -271,5 +295,38 @@ mod tests {
         assert_eq!(run.status, RunStatus::Running);
         assert_eq!(run.best.as_ref().unwrap().epoch, 11);
         assert!((run.progress() - 340.0 / 5000.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_new_run_waits_only_behind_another() {
+        let json = r#"{ "id": "run_a", "name": "a", "status": "queued", "queue_position": 1,
+          "config": { "name": "a", "dataset_id": "ds", "arch": "folo-n", "epochs": 10, "batch": 16,
+            "imgsz": 320, "device": "auto", "optimizer": "auto", "lr0": 0.01, "weights": null,
+            "augment": { "mosaic": 1.0, "mixup": 0.0, "hsv": [0.015, 0.7, 0.4], "fliplr": 0.5,
+              "scale": 0.5, "translate": 0.1, "close_mosaic": 10 }, "seed": 0 },
+          "created": "2026-11-08T06:00:00Z", "started": null, "finished": null, "epoch": 0,
+          "epochs": 10, "step": 0, "steps_per_epoch": 0, "eta_s": null, "best": null,
+          "device": "", "model_id": null, "error": null }"#;
+        let new: Run = serde_json::from_str(json).unwrap();
+        let other = |id: &str, status: RunStatus, place: Option<u32>| Run {
+            id: id.into(),
+            status,
+            queue_position: place,
+            ..new.clone()
+        };
+        let done = other("run_d", RunStatus::Completed, None);
+        // The server's first answer is always `queued`, at the front: with nothing else on the
+        // device it trains at once.
+        assert!(!waits_to_start(&new, &[new.clone(), done.clone()]));
+        // Behind a run that trains, or one whose trainer is being built.
+        let busy = other("run_b", RunStatus::Running, None);
+        assert!(waits_to_start(&new, &[new.clone(), busy.clone()]));
+        assert_eq!(training_now(&[new.clone(), busy], "run_a").map(|r| r.id.as_str()), Some("run_b"));
+        assert!(waits_to_start(&new, &[new.clone(), other("run_c", RunStatus::Queued, None)]));
+        // Past the first place.
+        let second = Run { queue_position: Some(2), ..new.clone() };
+        assert!(waits_to_start(&second, std::slice::from_ref(&second)));
+        // A run that already trains (a later status) never "waits".
+        assert!(!waits_to_start(&Run { status: RunStatus::Running, ..new.clone() }, &[new, done]));
     }
 }
