@@ -376,6 +376,29 @@ class Runners(unittest.TestCase):
         self.assertEqual(scr["compute"], {"connection_id": "c"})
         self.assertEqual((scr["arch"], scr["device"]), ("folo-s", "auto"))  # a cloud run trains on its pod's GPU
 
+    def test_reap_touches_only_its_own_runs(self):
+        class FakeApi:
+            def __init__(self):
+                self.deleted = []
+
+            def get(self, path):
+                return {"instances": [
+                    {"id": "ci_mine", "name": "a", "run_id": "run_mine", "status": "running"},
+                    {"id": "ci_other", "name": "b", "run_id": "run_other", "status": "running"},
+                    {"id": "ci_old", "name": "c", "run_id": "run_mine", "status": "terminated"},
+                ]}
+
+            def call(self, method, path):
+                self.deleted.append(path)
+
+        m = run_folo.Matrix.__new__(run_folo.Matrix)
+        m.api = FakeApi()
+        m.log = lambda msg: None
+        m.reap(set())  # nothing of its own: nothing is touched (it once meant "every live instance")
+        self.assertEqual(m.api.deleted, [])
+        m.reap({"run_mine"})
+        self.assertEqual(m.api.deleted, ["/api/cloud/instances/ci_mine"])
+
     def test_wall_seconds(self):
         run = {"started": "2026-11-10T10:00:00Z", "finished": "2026-11-10T10:02:30.5Z"}
         self.assertAlmostEqual(run_folo.wall_seconds(run), 150.5)

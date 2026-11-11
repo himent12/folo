@@ -156,6 +156,15 @@ def results_table(groups: dict, names: list[str], fm: str, um: str, seeds: int, 
         f"{um} min / run",
     ]
     lines.append(table(head, rows, "lllllrllrr"))
+    shared = sorted(
+        {k[2] for k, g in groups.items() if k[2] in (fm, um) and g.get("train_wall_shared_s")}
+    )
+    if shared:
+        lines.append("")
+        lines.append(
+            f"Minutes per run of {', '.join(shared)}: only the runs that had the GPU to themselves; the others "
+            "trained two at a time on one GPU (their accuracy counts, their time does not)."
+        )
     lines.append("")
     return lines
 

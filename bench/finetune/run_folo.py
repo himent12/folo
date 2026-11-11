@@ -176,6 +176,7 @@ class Matrix:
         self.lock = threading.Lock()
         self.dataset_ids: dict[str, str] = {}
         self.spent: dict[str, float] = {}  # run id -> cloud cost so far
+        self.finished: set[str] = set()  # run ids that completed (their cost is a full run's)
         self.base: dict | None = None  # the --weights model as the server lists it (pretrained variant)
 
     def base_model(self) -> dict:
@@ -203,6 +204,26 @@ class Matrix:
     def spent_usd(self) -> float:
         with self.lock:
             return sum(self.spent.values())
+
+    def budget_allows_launch(self) -> bool:
+        """--budget-usd is checked before each launch against what is spent plus what the active runs and this one
+        will still cost: each projected at the mean cost of the finished cloud runs (--run-cost-usd until one has
+        finished). Active runs are never stopped for it (a stopped run's money is lost); --budget-hard-usd does that."""
+        if self.args.budget_usd is None:
+            return True
+        with self.lock:
+            done = [c for rid, c in self.spent.items() if rid in self.finished]
+            per_run = sum(done) / len(done) if done else self.args.run_cost_usd
+            active = [rid for rid in self.active if rid not in self.finished]
+            spent_active = sum(self.spent.get(rid, 0.0) for rid in active)
+            projected = sum(self.spent.values()) + sum(max(0.0, per_run - self.spent.get(rid, 0.0)) for rid in active) + per_run
+        ok = projected <= self.args.budget_usd
+        if not ok:
+            self.log(
+                f"budget: ${sum(self.spent.values()):.3f} spent (${spent_active:.3f} on {len(active)} active runs), "
+                f"${projected:.3f} projected with one more run at ${per_run:.3f} > ${self.args.budget_usd:.2f}"
+            )
+        return ok
 
     def dataset_id(self, name: str) -> str:
         with self.lock:
@@ -255,11 +276,14 @@ class Matrix:
                     last_line = line
                 done = run["status"] in TERMINAL and (not cloud or cloud.get("phase") == "released")
                 if done:
+                    if run["status"] == "completed":
+                        with self.lock:
+                            self.finished.add(rid)
                     return run
                 if self.stop.is_set():
                     raise KeyboardInterrupt
-                if self.args.budget_usd is not None and self.spent_usd() > self.args.budget_usd:
-                    self.log(f"budget of ${self.args.budget_usd:.2f} spent (${self.spent_usd():.2f}): stopping")
+                if self.args.budget_hard_usd is not None and self.spent_usd() > self.args.budget_hard_usd:
+                    self.log(f"hard budget of ${self.args.budget_hard_usd:.2f} spent (${self.spent_usd():.2f}): stopping")
                     self.stop.set()
                     raise KeyboardInterrupt
                 time.sleep(self.args.poll_s)
@@ -348,21 +372,30 @@ class Matrix:
         if self.stop.is_set():
             return "skipped"
         run = self.find_run(key)
-        if run is None:
-            if self.args.budget_usd is not None and self.spent_usd() >= self.args.budget_usd:
-                self.log(f"{key.stem}: not started, budget spent")
-                return "skipped"
-            ds_id = self.dataset_id(key.dataset)
-            run = self.api.post("/api/runs", train_config(key, ds_id, self.args, self.compute))
-            with self.lock:
-                self.active[run["id"]] = key.stem
-            self.log(f"{key.stem}: started {run['id']}")
-            if self.stop.is_set():  # a stop that came while the run was being created: stop_active may have missed it
-                self.api.post(f"/api/runs/{run['id']}/stop")
-        else:
-            self.log(f"{key.stem}: following {run['id']} ({run['status']})")
-        self.state.set(key.stem, run["id"])
-        run = self.follow(run, key)
+        for attempt in range(self.args.refused_retries + 1):
+            if run is None:
+                if not self.budget_allows_launch():
+                    self.log(f"{key.stem}: not started: the budget would not cover it")
+                    return "skipped"
+                ds_id = self.dataset_id(key.dataset)
+                run = self.api.post("/api/runs", train_config(key, ds_id, self.args, self.compute))
+                with self.lock:
+                    self.active[run["id"]] = key.stem
+                self.log(f"{key.stem}: started {run['id']}")
+                if self.stop.is_set():  # a stop that came while the run was being created: stop_active may have missed it
+                    self.api.post(f"/api/runs/{run['id']}/stop")
+            else:
+                self.log(f"{key.stem}: following {run['id']} ({run['status']})")
+            self.state.set(key.stem, run["id"])
+            run = self.follow(run, key)
+            # No capacity for the offer right now: nothing was rented, so wait and ask again.
+            if run["status"] == "failed" and run.get("error_code") == "cloud_refused" and attempt < self.args.refused_retries:
+                self.log(f"{key.stem}: refused ({run.get('error')}); trying again in {self.args.refused_wait_s:.0f} s")
+                if self.stop.wait(self.args.refused_wait_s):
+                    return "interrupted"
+                run = None
+                continue
+            break
         if run["status"] != "completed" or not run.get("model_id"):
             self.log(f"{key.stem}: {run['status']} ({run.get('error_code')}: {run.get('error')})")
             return run["status"]
@@ -403,6 +436,10 @@ class Matrix:
         self.reap(set(active))
 
     def reap(self, run_ids: set[str]) -> None:
+        """Terminate the live instances of `run_ids` (runs this process started or followed), never anyone else's:
+        another runner, Studio or a person may have cloud runs on the same server."""
+        if not run_ids:
+            return
         try:
             instances = self.api.get("/api/cloud/instances")["instances"]
         except ApiError:
@@ -410,7 +447,7 @@ class Matrix:
         for inst in instances:
             if inst["status"] in ("terminated", "lost"):
                 continue
-            if inst.get("run_id") in run_ids or not run_ids:
+            if inst.get("run_id") in run_ids:
                 self.log(f"instance {inst['id']} ({inst['name']}) is {inst['status']}: terminating")
                 try:
                     self.api.call("DELETE", f"/api/cloud/instances/{inst['id']}")
@@ -455,7 +492,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-hours", type=float, default=0.5, help="time limit of each cloud run")
     ap.add_argument("--disk-gb", type=int, default=None)
     ap.add_argument("--parallel", type=int, default=1, help="runs followed side by side (cloud: pods at once)")
-    ap.add_argument("--budget-usd", type=float, default=None, help="stop when the cloud runs' cost passes this")
+    ap.add_argument(
+        "--budget-usd",
+        type=float,
+        default=None,
+        help="launch no run that the cloud budget would not cover (spent + active runs + this one, projected)",
+    )
+    ap.add_argument(
+        "--budget-hard-usd", type=float, default=None, help="stop the active runs when the cloud cost passes this"
+    )
+    ap.add_argument("--run-cost-usd", type=float, default=0.15, help="projected cost of a run until one has finished")
+    ap.add_argument("--refused-retries", type=int, default=40, help="launches refused for capacity are retried")
+    ap.add_argument("--refused-wait-s", type=float, default=60)
     ap.add_argument("--folo", default="folo", help="the folo binary for val")
     ap.add_argument("--val-device", default="auto")
     ap.add_argument("--poll-s", type=float, default=10)
@@ -479,6 +527,9 @@ def main(argv: list[str] | None = None) -> int:
     if "pretrained" in variants:
         m.base_model()  # fail before anything starts on a wrong --weights / --arch
     todo = [k for k in keys if not k.result_path(m.results).is_file()]
+    # Runs already active on the server (a restart) are followed first, before anything new is launched.
+    live = {r["id"] for r in m.api.get("/api/runs")["runs"] if r["status"] not in TERMINAL}
+    todo.sort(key=lambda k: m.state.get(k.stem) not in live)
     for k in keys:
         if k not in todo:
             m.log(f"{k.stem}: done already, skipped")
