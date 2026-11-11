@@ -79,6 +79,7 @@ crates/folo-test-support  test-only helpers (a dev-dependency): TestDir / TestFi
 web/                 FOLO Studio (Svelte 5 + TypeScript + Vite, custom design system, no UI kit)
 apps/desktop/        FOLO Desktop (Rust + GPUI, its own cargo workspace; talks to folo-server over docs/API.md)
 bench/baselines/     incumbent (Ultralytics) benchmark scripts + raw results; numbers and FOLO targets in docs/BENCHMARKS.md
+bench/finetune/      fine-tuning accuracy: folo-n vs yolo26n on small public datasets, one pycocotools scorer
 docs/                QUICKSTART, ARCHITECTURE, MODEL (detector spec), API (HTTP contract), CLI, MCP, FORMAT (.folo), ROADMAP, BOAT,
                      BENCHMARKS, WASM, CLOUD (training on rented or remote GPUs), ...; docs/img holds the README screenshots
 ```

@@ -407,6 +407,44 @@ scratch on the same files, 320 px, 20 epochs, real batch 64, AMP, mosaic closed 
   AP at about epoch 13. That was measured with `--optimizer musgd` at momentum 0.937 and warmup_bias_lr 0.1; rule 3 ships momentum 0.9 and warmup_bias_lr 0, and no measured run has resolved `auto` to MuSGD (the proxy's 6,260 iterations and the shapes gate resolve AdamW), so the shipped rule-3 recipe itself has not been validated by a run. Old checkpoints resume with the rule they started with (`TrainConfig.auto_rule`), so the
   paused 300-epoch COCO run keeps SGD.
 
+### Fine-tuning on small datasets
+
+What most users do: fine-tune pretrained weights on a few hundred of their own images. folo-n starts from FOLO's
+COCO weights (`folo-n-coco-v2`, COCO AP 0.317), YOLO26n from Ultralytics' `yolo26n.pt` (COCO AP 0.409, with
+Objects365 pretraining), so FOLO starts from weaker weights and may well lose here; the table says what was
+measured. Harness, datasets and the full protocol: [bench/finetune](../bench/finetune/README.md).
+
+- **Protocol**: both tools at their out-of-the-box fine-tuning defaults (`optimizer: auto`, their own augmentation;
+  FOLO in f32, Ultralytics with its default AMP), 640 px, batch 16, 100 epochs (both tools' default; neither can
+  stop early at its default patience of 100), seeds 0, 1, 2; plus folo-n from scratch (seed 0) as the control.
+- **One scorer**: each run's best checkpoint predicts the evaluation split with its own validation pipeline (conf
+  0.001, at most 300 detections, 640 px; FOLO with NMS at IoU 0.7, YOLO26n with its NMS-free head) into COCO
+  detections JSON, and pycocotools scores both against one ground truth built from the YOLO labels: AP@[.5:.95] and
+  AP50, mean and min–max over the seeds. Neither tool's self-reported mAP is compared.
+- **The scorer is checked** on COCO val2017 (5,000 images, original annotations): folo-n-coco-v2 scores 0.31682
+  there, exactly what `folo val --coco` reports; yolo26n scores 0.4080 against its published 0.409 (Ultralytics'
+  own metric says 0.4023, computed differently).
+- BCCD is scored on its test split, the other three (which have no test split) on val. The evaluation splits are
+  small (23 to 223 images), so differences of a few hundredths are within the seed spread; the min–max shows it.
+
+<!-- finetune:begin -->
+| dataset | domain | licence | classes | train images | train boxes | scored on: images / boxes |
+|---|---|---|---:|---:|---:|---|
+| [BCCD blood cells](https://github.com/Shenggan/BCCD_Dataset) | microscopy | MIT | 3 | 205 | 2804 | test: 72 / 945 |
+| [Brain tumor (MRI)](https://docs.ultralytics.com/datasets/detect/brain-tumor/) | medical imaging | AGPL-3.0 | 2 | 893 | 925 | val: 223 / 241 |
+| [Signatures on documents](https://docs.ultralytics.com/datasets/detect/signature/) | documents | AGPL-3.0 | 1 | 143 | 143 | val: 35 / 35 |
+| [Medical pills](https://docs.ultralytics.com/datasets/detect/medical-pills/) | industrial / product photos | AGPL-3.0 | 1 | 92 | 1623 | val: 23 / 399 |
+
+**No 100-epoch run has been measured yet**: the table below is empty until the matrix (28 runs) has run.
+
+| dataset | folo-n fine-tuned AP | AP50 | yolo26n fine-tuned AP | AP50 | FOLO − Ultralytics (AP) | folo-n from scratch AP | AP50 | folo-n min / run | yolo26n min / run |
+|---|---|---|---|---|---:|---|---|---:|---:|
+| bccd | not run | not run | not run | not run |  | not run | not run |  |  |
+| brain-tumor | not run | not run | not run | not run |  | not run | not run |  |  |
+| signature | not run | not run | not run | not run |  | not run | not run |  |  |
+| medical-pills | not run | not run | not run | not run |  | not run | not run |  |  |
+<!-- finetune:end -->
+
 ## FOLO on the GPU
 
 `cargo bench -p folo-vision --bench gpu` ([`crates/folo-vision/benches/gpu.rs`](../crates/folo-vision/benches/gpu.rs);

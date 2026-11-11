@@ -68,7 +68,8 @@ Fastest path for an agent:
   test
 - [Benchmarks](docs/BENCHMARKS.md): folo-n/s vs Ultralytics yolo26n/s/m on an RTX 4080 SUPER (GPU forward, end to
   end, CPU, training step, memory), with the method, raw numbers and next optimisations. Scripts and raw JSON are
-  in `bench/baselines/`
+  in `bench/baselines/`; fine-tuning accuracy on small datasets (folo-n vs yolo26n, one pycocotools scorer) in
+  `bench/finetune/`
 
 ## Examples
 - [Shapes](examples/shapes/README.md): the convergence gate (folo-n on synthetic shapes at 320 px). It has the
