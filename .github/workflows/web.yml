@@ -52,7 +52,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
-      # The QA uses the runner's Chrome (ubuntu-latest and the boat.dev runners have one); without one, Playwright's
+      # The QA uses the runner's Chrome (ubuntu-latest has one); without one, Playwright's
       # headless Chromium, downloaded once per playwright-core version (cached on GitHub-hosted runners, kept in
       # ~/.cache/ms-playwright on self-hosted ones), with its system libraries where sudo needs no password.
       - name: browser for the QA

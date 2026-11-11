@@ -101,8 +101,8 @@ release goes out with whatever desktop build succeeded.
 
 ## Runners
 The Linux and Windows jobs use the runners of `ci.yml` (docs/CI.md): the repository variables `RUNS_ON_LINUX` and
-`RUNS_ON_WINDOWS` (JSON `runs-on` values) select FOLO's self-hosted runners, a boat.dev Ubuntu 24.04 sandbox and the
-dev PC. When a variable is unset they fall back to GitHub-hosted runners: `ubuntu-22.04` for the Linux CLI build and
+`RUNS_ON_WINDOWS` (JSON `runs-on` values) select self-hosted runners. Windows is set, to the dev PC; Linux is unset.
+When a variable is unset the jobs run on GitHub-hosted runners: `ubuntu-22.04` for the Linux CLI build and
 the Linux install test, `ubuntu-latest` for the other Linux jobs, `windows-latest` for Windows. The `plan` job
 writes the chosen `runs-on` into each CLI matrix entry, and its summary lists them.
 
@@ -121,11 +121,11 @@ writes the chosen `runs-on` into each CLI matrix entry, and its summary lists th
   wasm-bindgen-cli at the `Cargo.lock` version (`taiki-e/install-action`, checksummed), binaryen's `wasm-opt`
   (pinned and checksummed) and Node 22 (`actions/setup-node`). They rely on the runner for `bash`, `curl`, `tar`,
   `sha256sum`, `jq` (Linux), `objdump` (Linux), `docker` (Linux: the Ubuntu 22.04 build and check, with network
-  access for apt and crates.io) and `gh` (Linux, the `release` job); the boat sandboxes and the hosted images have them. Windows zips are written with Windows' own
+  access for apt and crates.io) and `gh` (Linux, the `release` job); the hosted images have them. Windows zips are written with Windows' own
   `tar.exe` (bsdtar), so 7-Zip is not needed.
 - **glibc 2.35.** The Linux CLI is linked inside an `ubuntu:22.04` container (pinned by digest; `gcc` and
   `libc6-dev` from apt, the job's Rust toolchain mounted read-only, cargo running as the runner's user), so it gets
-  Ubuntu 22.04's glibc whatever the runner runs. Linked on the 24.04 sandboxes, std's weak `pidfd_spawnp` /
+  Ubuntu 22.04's glibc whatever the runner runs. Linked on Ubuntu 24.04, std's weak `pidfd_spawnp` /
   `pidfd_getpid` imports carry a `GLIBC_2.39` version, and the loader then prints ``weak version `GLIBC_2.39' not
   found`` on every start on older systems. Two checks hold the line: the `cli` job fails when `objdump -T` shows any
   symbol version above 2.35 (weak ones included), and `install-test` runs the installed binary in `ubuntu:22.04` and
@@ -134,7 +134,7 @@ writes the chosen `runs-on` into each CLI matrix entry, and its summary lists th
   self-hosted dev PC when rustc crashes (docs/CI.md, Unstable self-hosted Windows host).
 - **Isolation.** The CLI smoke test and the install test use a throwaway `FOLO_HOME` in `$RUNNER_TEMP`, so they
   never read the runner account's own `~/.folo` (on the dev PC, the developer's). The `release` job runs with a
-  `contents: write` token on the self-hosted Linux runner; docs/CI.md, Security, applies.
+  `contents: write` token on the Linux runner; if that is ever a self-hosted one, docs/CI.md, Security, applies.
 
 Each CLI build is smoke-tested before packaging: `folo --version`; `folo doctor --json` must report the embedded
 Studio (`web_source: embedded`) with folo-wasm in it (`web_folo_wasm: true`); `folo serve --mock --port 0` must

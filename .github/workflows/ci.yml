@@ -19,7 +19,6 @@ on:
       - "!.github/workflows/wasm.yml"
       - "!.github/workflows/desktop.yml"
       - "!.github/workflows/release.yml"
-      - "!.github/workflows/runners.yml"
       - web/package.json
       - web/package-lock.json
       - web/src/lib/trainCli.fixtures.json
@@ -34,8 +33,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
-# Runners: repo variables RUNS_ON_LINUX / RUNS_ON_WINDOWS hold a JSON runs-on value. They point at FOLO's self-hosted
-# runners (a boat.dev sandbox and the dev PC, see docs/CI.md); delete a variable to fall back to GitHub-hosted runners.
+# Runners: repo variables RUNS_ON_LINUX / RUNS_ON_WINDOWS hold a JSON runs-on value for self-hosted runners; an
+# unset one means GitHub-hosted. Linux is GitHub-hosted (RUNS_ON_LINUX unset) and Windows is the dev PC (docs/CI.md).
 jobs:
   rust:
     strategy:
