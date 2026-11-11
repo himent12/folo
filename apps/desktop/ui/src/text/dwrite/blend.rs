@@ -99,7 +99,7 @@ mod tests {
     }
 
     #[test]
-    fn correction_keeps_the_ends_and_darkens_dark_text_edges() {
+    fn correction_keeps_the_ends_and_matches_the_shader() {
         let ratios = gamma_ratios(1.8);
         for color in [[0., 0., 0.], [1., 1., 1.]] {
             assert_eq!(apply_contrast_and_gamma_correction(0.0, color, 1.0, ratios), 0.0);
