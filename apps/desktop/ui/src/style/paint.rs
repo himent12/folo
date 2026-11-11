@@ -185,8 +185,10 @@ impl Style {
         }
     }
 
-    /// The content mask for this element's children: `None` when both axes overflow visibly; otherwise
-    /// `bounds`, inset by the border widths when the border color is visible, on each hidden axis.
+    /// The content mask for this element's children (GPUI's `overflow_mask`): `None` when both axes overflow
+    /// visibly. Otherwise, with `inner` being `bounds` inset by the border widths when the border color is
+    /// visible: both axes hidden give `inner`; one axis hidden gives `inner`'s range on the *visible* axis and
+    /// the full `bounds` range on the hidden one (GPUI's arithmetic, kept as is).
     pub fn overflow_mask(&self, bounds: Bounds<Pixels>, rem_size: Pixels) -> Option<ContentMask<Pixels>> {
         let x_visible = self.overflow.x == Overflow::Visible;
         let y_visible = self.overflow.y == Overflow::Visible;
