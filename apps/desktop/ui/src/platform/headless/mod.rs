@@ -393,6 +393,11 @@ impl PlatformWindow for HeadlessWindow {
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {}
+
+    fn inserts_key_text(&self) -> bool {
+        // Synthetic keys are the only text input here.
+        true
+    }
 }
 
 /// The `PlatformTextSystem` for a headless text backend.

@@ -75,6 +75,7 @@ impl Window {
             self.dispatch_key_event(key_event, cx);
             if let PlatformInput::KeyDown(key_down) = &event
                 && cx.propagate_event
+                && self.platform_window.inserts_key_text()
             {
                 self.insert_text_for_key(key_down, cx);
             }
@@ -222,9 +223,10 @@ impl Window {
 
     /// Sends the key's text to the focused input handler (`replace_text_in_range(None, text)`) when no
     /// listener or binding handled the key, the key types text (`key_char`) and no modifier other than
-    /// shift is held (GPUI's platforms do this; the window does it so every backend and the headless
-    /// harness behave the same). The key then counts as handled, so the platform does not translate it
-    /// again.
+    /// shift is held. Only on a platform without text input of its own
+    /// (`PlatformWindow::inserts_key_text`, the headless one): Win32 and winit type through the OS
+    /// (`WM_CHAR` and the IME, winit's text and IME events), as GPUI's platforms do. The key then
+    /// counts as handled.
     pub(crate) fn insert_text_for_key(&mut self, event: &KeyDownEvent, cx: &mut App) {
         let keystroke = &event.keystroke;
         let modifiers = keystroke.modifiers;
