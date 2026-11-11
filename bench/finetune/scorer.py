@@ -28,8 +28,22 @@ def check_detections(gt: dict, dets: list[dict]) -> None:
     if bad_cat:
         raise ValueError(f"detection category ids {sorted(bad_cat)} are not in the ground truth {sorted(cat_ids)}")
     for d in dets:
-        if len(d["bbox"]) != 4 or d["bbox"][2] < 0 or d["bbox"][3] < 0:
-            raise ValueError(f"malformed bbox {d['bbox']} (want [x, y, w, h] with w, h >= 0)")
+        if len(d["bbox"]) != 4:
+            raise ValueError(f"malformed bbox {d['bbox']} (want [x, y, w, h])")
+
+
+def degenerate_to_empty(dets: list[dict]) -> tuple[list[dict], int]:
+    """Detections with a negative width or height (an inverted box: an under-trained YOLO26 head emits some) as
+    zero-size boxes at the same place and score, so they stay what they are, false positives that overlap nothing,
+    instead of whatever pycocotools makes of a negative area. Returns the detections and how many were changed."""
+    out, n = [], 0
+    for d in dets:
+        x, y, w, h = d["bbox"]
+        if w < 0 or h < 0:
+            d = {**d, "bbox": [x, y, max(0.0, w), max(0.0, h)]}
+            n += 1
+        out.append(d)
+    return out, n
 
 
 def ultralytics_to_gt(records: list[dict], gt: dict, class_map: list[int]) -> list[dict]:
@@ -64,6 +78,7 @@ def score(gt: dict, dets: list[dict]) -> dict:
     from pycocotools.cocoeval import COCOeval
 
     check_detections(gt, dets)
+    dets, inverted = degenerate_to_empty(dets)
     gt = dict(gt)
     gt.setdefault("info", {})
     gt.setdefault("licenses", [])
@@ -73,6 +88,7 @@ def score(gt: dict, dets: list[dict]) -> dict:
         "truths": len(gt["annotations"]),
         "detections": len(dets),
         "images_without_detections": len({im["id"] for im in gt["images"]} - {d["image_id"] for d in dets}),
+        "inverted_boxes": inverted,  # scored as zero-size false positives (degenerate_to_empty)
     }
     if not dets:
         return {**{k: 0.0 for k in keys}, **base}

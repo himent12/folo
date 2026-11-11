@@ -142,6 +142,11 @@ def _stat(values: list[float]) -> dict | None:
     }
 
 
+def shared(r: dict) -> bool:
+    """The run trained side by side with others on one GPU."""
+    return ((r.get("compute") or {}).get("concurrent_jobs") or 1) > 1
+
+
 def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
     """Group runs by (dataset, tool, model, variant): AP / AP50 / AP75 / training time over seeds, with which seeds
     are present, and `complete` once `expected_seeds` seeds are (1 for the scratch control)."""
@@ -165,7 +170,10 @@ def summarize(results: list[dict], expected_seeds: int = 3) -> dict:
                 "ap": _stat(metric("ap")),
                 "ap50": _stat(metric("ap50")),
                 "ap75": _stat(metric("ap75")),
-                "train_wall_s": _stat([r["train_wall_s"] for r in rs if r.get("train_wall_s") is not None]),
+                # Training time of runs that had their GPU to themselves; runs trained side by side on one GPU
+                # (`compute.concurrent_jobs` > 1) are counted apart, since they share it.
+                "train_wall_s": _stat([r["train_wall_s"] for r in rs if r.get("train_wall_s") is not None and not shared(r)]),
+                "train_wall_shared_s": _stat([r["train_wall_s"] for r in rs if r.get("train_wall_s") is not None and shared(r)]),
                 "epochs_run": sorted({r.get("epochs_run") for r in rs if r.get("epochs_run") is not None}),
                 "epochs_planned": sorted({r.get("epochs_planned") for r in rs if r.get("epochs_planned") is not None}),
                 "gpus": sorted({r.get("gpu") for r in rs if r.get("gpu")}),

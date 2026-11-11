@@ -465,10 +465,11 @@ def main(argv: list[str] | None = None) -> int:
     args.token = args.token or os.environ.get("FOLO_TOKEN")
     names = [s.name for s in datasets.pick(args.datasets)]
     variants = [v.strip() for v in args.variants.split(",") if v.strip()]
+    # Variant by variant in the order given, seed-major: a matrix cut short (a spent budget) still has every dataset.
     keys = []
-    for name in names:
-        for v in variants:
-            for seed in common.parse_seeds(args.seeds if v == "pretrained" else args.scratch_seeds):
+    for v in variants:
+        for seed in common.parse_seeds(args.seeds if v == "pretrained" else args.scratch_seeds):
+            for name in names:
                 keys.append(common.RunKey("folo", args.arch, name, v, seed))
     if args.compute and args.device not in (None, "auto"):
         raise SystemExit("--device is for local runs; a cloud run trains on its pod's GPU (device auto)")

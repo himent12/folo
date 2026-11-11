@@ -198,6 +198,8 @@ def run_one(args) -> None:
         compute={
             "where": args.compute_label or platform.node(),
             "device": str(args.device),
+            # Runs trained side by side on the GPU (--jobs): their train_wall_s is not a dedicated run's.
+            "concurrent_jobs": args.jobs,
             "patience": patience,
             # Ultralytics' default amp=True, which it turns off itself on the CPU or when its AMP check fails.
             "amp": bool(getattr(model.trainer, "amp", False)),
@@ -225,6 +227,12 @@ def main(argv: list[str] | None = None) -> int:
         "--device", required=True, help="Ultralytics device: 0 (the first GPU, on a pod), cpu (smoke runs on a shared PC)"
     )
     ap.add_argument("--workers", type=int, default=None, help="data loader workers (default: Ultralytics' 8)")
+    ap.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="runs trained side by side on the one GPU (their training times are then shared, and recorded so)",
+    )
     ap.add_argument("--fetch", action="store_true", help="fetch the datasets into --data-root first")
     ap.add_argument("--compute-label", default=None, help="where this runs, for the result files (e.g. runpod RTX 4090)")
     ap.add_argument("--one", action="store_true", help=argparse.SUPPRESS)
@@ -241,24 +249,49 @@ def main(argv: list[str] | None = None) -> int:
     if args.fetch:
         for name in names:
             datasets.fetch(datasets.SPECS[name], Path(args.data_root))
-    failed = []
-    for name in names:
-        for seed in seeds:
+    # Seed-major, so a matrix cut short still has every dataset.
+    todo = []
+    for seed in seeds:
+        for name in names:
             key = common.RunKey("ultralytics", model_name(weights), name, "pretrained", seed)
             if key.result_path(Path(args.results)).is_file():
                 print(f"{key.stem}: done already, skipped", flush=True)
                 continue
             cmd = [sys.executable, str(Path(__file__).resolve()), "--one", "--dataset", name, "--seed", str(seed)]
-            for opt in ("data_root", "work_dir", "results", "epochs", "imgsz", "batch", "device", "workers", "compute_label"):
+            for opt in ("data_root", "work_dir", "results", "epochs", "imgsz", "batch", "device", "workers", "compute_label", "jobs"):
                 val = getattr(args, opt)
                 if val is not None:
                     cmd += [f"--{opt.replace('_', '-')}", str(val)]
             cmd += ["--weights", str(weights)]
-            print(f"{key.stem}: training", flush=True)
-            rc = subprocess.call(cmd)
+            todo.append((key, cmd))
+    failed = []
+    running: list[tuple] = []
+    logs = Path(args.work_dir) / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+
+    def reap() -> None:
+        for item in list(running):
+            key, proc, log = item
+            rc = proc.poll()
+            if rc is None:
+                continue
+            running.remove(item)
+            log.close()
+            tail = (logs / f"{key.stem}.log").read_text(errors="replace").strip().splitlines()[-1:]
+            print(f"{key.stem}: {'done' if rc == 0 else f'failed (exit {rc})'} {tail[0] if tail else ''}", flush=True)
             if rc != 0:
-                print(f"{key.stem}: failed (exit {rc})", flush=True)
                 failed.append(key.stem)
+
+    for key, cmd in todo:
+        while len(running) >= max(1, args.jobs):
+            reap()
+            time.sleep(2)
+        print(f"{key.stem}: training ({args.jobs} at a time)", flush=True)
+        log = open(logs / f"{key.stem}.log", "w")
+        running.append((key, subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT), log))
+    while running:
+        reap()
+        time.sleep(2)
     if failed:
         print(f"failed: {failed}", flush=True)
     return 1 if failed else 0

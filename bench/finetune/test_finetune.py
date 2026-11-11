@@ -182,6 +182,29 @@ class Scorer(unittest.TestCase):
         with self.assertRaises(ValueError):
             scorer.check_detections(self.GT, [{"image_id": 1, "category_id": 0, "bbox": [0, 0, 1, 1], "score": 1}])
 
+    def test_inverted_boxes_become_empty_false_positives(self):
+        dets = [
+            {"image_id": 1, "category_id": 1, "bbox": [10, 10, -5, 20], "score": 0.9},
+            {"image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "score": 0.5},
+        ]
+        out, n = scorer.degenerate_to_empty(dets)
+        self.assertEqual(n, 1)
+        self.assertEqual(out[0]["bbox"], [10, 10, 0.0, 20])
+        self.assertEqual((out[0]["score"], out[1]), (0.9, dets[1]))
+        self.assertEqual(dets[0]["bbox"], [10, 10, -5, 20])  # the input is not changed
+
+    @unittest.skipUnless(HAS_COCO, "needs pycocotools")
+    def test_inverted_box_counts_as_a_false_positive(self):
+        dets = [
+            {"image_id": 1, "category_id": 1, "bbox": [10, 10, -20, 20], "score": 0.9},  # ranks first, matches nothing
+            {"image_id": 1, "category_id": 1, "bbox": [10, 10, 20, 20], "score": 0.5},
+            {"image_id": 2, "category_id": 2, "bbox": [50, 50, 30, 30], "score": 0.8},
+        ]
+        s = scorer.score(self.GT, dets)
+        self.assertEqual(s["inverted_boxes"], 1)
+        self.assertLess(s["ap"], 1.0)
+        self.assertGreater(s["ap"], 0.5)
+
     @unittest.skipUnless(HAS_COCO, "needs pycocotools")
     def test_score_perfect_half_and_empty(self):
         perfect = [
@@ -249,6 +272,17 @@ class Results(unittest.TestCase):
         self.assertAlmostEqual(u["mean"], 0.5)
         self.assertEqual((u["min"], u["max"], u["n"]), (0.4, 0.6, 3))
         self.assertEqual(g[("folo", "pretrained")]["seeds"], [0, 1])
+
+    def test_shared_gpu_times_are_kept_apart(self):
+        alone = result("ultralytics", "bccd", "pretrained", 0, 0.5, wall=100.0)
+        alone["compute"] = {"concurrent_jobs": 1}
+        a = result("ultralytics", "bccd", "pretrained", 1, 0.5, wall=180.0)
+        b = result("ultralytics", "bccd", "pretrained", 2, 0.5, wall=190.0)
+        a["compute"] = b["compute"] = {"concurrent_jobs": 2}
+        (g,) = common.summarize([alone, a, b])["groups"]
+        self.assertEqual((g["train_wall_s"]["mean"], g["train_wall_s"]["n"]), (100.0, 1))
+        self.assertEqual((g["train_wall_shared_s"]["mean"], g["train_wall_shared_s"]["n"]), (185.0, 2))
+        self.assertEqual(g["ap"]["n"], 3)  # accuracy counts every seed
 
     def test_load_results_skips_other_json(self):
         with tempfile.TemporaryDirectory() as t:
