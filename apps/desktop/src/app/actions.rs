@@ -6,10 +6,11 @@ use folo_ui::{AppContext, Context, Focusable, Window};
 
 use crate::api::*;
 use crate::input::TextInput;
+use crate::store::Load;
 use crate::ui::*;
 
 use super::forms::{SYNTH_CLASSES, SYNTH_IMGSZ, SynthForm, parse_images};
-use super::{FoloApp, Route, ServerMode, act};
+use super::{DeleteTarget, FoloApp, Route, ServerMode, act};
 
 impl FoloApp {
     // ---------- actions ----------
@@ -263,6 +264,84 @@ impl FoloApp {
                 }
             },
         );
+    }
+
+    /// Deletes what the confirmation named; on success its page (if open) gives way to the list.
+    pub fn delete_confirmed(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.confirm_delete.take() else { return };
+        let name = match &target {
+            DeleteTarget::Run(id) => self.store.run(id).map_or(id.clone(), |r| r.name.clone()),
+            DeleteTarget::Dataset(id) => {
+                self.store.dataset_summary(id).map_or(id.clone(), |d| d.name.clone())
+            }
+        };
+        let call = target.clone();
+        self.fetch(
+            cx,
+            move |api| match &call {
+                DeleteTarget::Run(id) => api.delete_run(id),
+                DeleteTarget::Dataset(id) => api.delete_dataset(id),
+            },
+            move |this, r, cx| match r {
+                Ok(()) => {
+                    let body = match &target {
+                        DeleteTarget::Run(id) => {
+                            this.forget_run(id);
+                            None
+                        }
+                        DeleteTarget::Dataset(id) => {
+                            this.forget_dataset(id);
+                            Some("Its files are still on disk.".into())
+                        }
+                    };
+                    this.toast(Tone::Info, format!("Deleted {name}"), body, cx);
+                }
+                Err(e) => {
+                    this.toast(Tone::Danger, format!("Couldn't delete {name}"), Some(e.message.into()), cx)
+                }
+            },
+        );
+        cx.notify();
+    }
+
+    /// Drops a deleted run (and the models it made, fetched again) from what the app holds, and
+    /// leaves its page for the list.
+    fn forget_run(&mut self, id: &str) {
+        if let Some(runs) = self.store.runs.ready_mut() {
+            runs.retain(|r| r.id != id);
+        }
+        self.store.run_data.remove(id);
+        self.store.samples.remove(id);
+        self.store.logs.remove(id);
+        let made: Vec<String> = self
+            .store
+            .models
+            .ready()
+            .into_iter()
+            .flatten()
+            .filter(|m| m.run_id.as_deref() == Some(id))
+            .map(|m| m.id.clone())
+            .collect();
+        if self.play_model.as_ref().is_some_and(|m| made.contains(m)) {
+            self.play_model = None;
+            self.play_pred = Load::Idle;
+        }
+        self.store.models = Load::Idle;
+        if matches!(&self.route, Route::Run(r) if r == id) {
+            self.route_pending = Some(Route::Runs);
+        }
+    }
+
+    /// Drops an unregistered dataset from what the app holds, and leaves its page for the list.
+    fn forget_dataset(&mut self, id: &str) {
+        if let Some(list) = self.store.datasets.ready_mut() {
+            list.retain(|d| d.id != id);
+        }
+        self.store.dataset.remove(id);
+        self.store.images.remove(id);
+        if matches!(&self.route, Route::Dataset(d) if d == id) {
+            self.route_pending = Some(Route::Datasets);
+        }
     }
 
     pub fn stop_run(&mut self, id: String, cx: &mut Context<Self>) {

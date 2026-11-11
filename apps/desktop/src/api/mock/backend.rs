@@ -99,7 +99,12 @@ impl Backend for MockBackend {
         if self.empty {
             return Ok(Vec::new());
         }
-        Ok(self.datasets.iter().map(|d| Dataset { stats: None, ..d.ds.clone() }).collect())
+        Ok(self
+            .datasets
+            .iter()
+            .filter(|d| !self.is_removed(&d.ds.id))
+            .map(|d| Dataset { stats: None, ..d.ds.clone() })
+            .collect())
     }
 
     fn dataset(&self, id: &str) -> ApiResult<Dataset> {
@@ -175,7 +180,12 @@ impl Backend for MockBackend {
         if self.empty {
             return Ok(Vec::new());
         }
-        Ok(self.models.clone())
+        Ok(self
+            .models
+            .iter()
+            .filter(|m| !m.run_id.as_ref().is_some_and(|r| self.is_removed(r)))
+            .cloned()
+            .collect())
     }
 
     fn model_eval(&self, id: &str) -> ApiResult<ModelEval> {
@@ -328,6 +338,29 @@ impl Backend for MockBackend {
         // The demo queues one run at a time: every move leaves it first.
         f.run.queue_position = Some(1);
         Ok(f.run.clone())
+    }
+
+    fn delete_run(&self, id: &str) -> ApiResult<()> {
+        self.check()?;
+        let mut runs = self.runs.lock().unwrap();
+        let i = runs
+            .iter()
+            .position(|f| f.run.id == id)
+            .ok_or_else(|| ApiError::new("run_not_found", format!("No run {id}")))?;
+        if Self::snapshot(&runs[i]).status.is_active() {
+            return Err(ApiError::new("run_active", format!("run '{id}' is still active"))
+                .with_hint(format!("stop it first: POST /api/runs/{id}/stop")));
+        }
+        runs.remove(i);
+        self.removed.lock().unwrap().insert(id.to_string());
+        Ok(())
+    }
+
+    fn delete_dataset(&self, id: &str) -> ApiResult<()> {
+        self.check()?;
+        self.fixture(id)?;
+        self.removed.lock().unwrap().insert(id.to_string());
+        Ok(())
     }
 
     fn stop_run(&self, id: &str) -> ApiResult<Run> {

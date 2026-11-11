@@ -171,6 +171,15 @@ pub fn act(f: impl Fn(&mut FoloApp, &mut Window, &mut Context<FoloApp>) + 'stati
     Rc::new(f)
 }
 
+/// What the delete confirmation is about.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum DeleteTarget {
+    /// A run that is not active: its folder, weights and models go.
+    Run(String),
+    /// A dataset: unregistered, its files stay.
+    Dataset(String),
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RunFilter {
     All,
@@ -401,6 +410,7 @@ pub struct FoloApp {
     /// The window is below 1120 px wide (16 px page gutters); set each render.
     pub narrow: bool,
     pub confirm_stop: Option<String>,
+    pub confirm_delete: Option<DeleteTarget>,
     /// The server's estimate for the New run form's config, keyed by that config (servers with
     /// `run_estimate`); the last good answer stands while a changed config is out.
     pub nr_estimate: Option<(String, Load<crate::api::RunEstimate>)>,
@@ -581,6 +591,7 @@ impl FoloApp {
             restore_pending: false,
             narrow: false,
             confirm_stop: None,
+            confirm_delete: None,
             nr_estimate: None,
             nr_estimate_last: None,
             throughput: Load::Idle,

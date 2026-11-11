@@ -53,6 +53,8 @@ pub const ALL: &[&str] = &[
     "new-run+light",
     "stop-confirm",
     "stop-confirm+light",
+    "delete-confirm",
+    "delete-confirm+dataset",
     "models",
     "model",
     "model+light",
@@ -204,6 +206,18 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
             }
         }
         "run-failed" => app.route = Route::Run("run_e4f0".into()),
+        // The delete confirmation, over a finished run's page (`+dataset`: over a dataset's).
+        "delete-confirm" => {
+            let target = if s.has("dataset") {
+                app.route = Route::Dataset("ds_3b91".into());
+                crate::app::DeleteTarget::Dataset("ds_3b91".into())
+            } else {
+                app.route = Route::Run("run_52e8".into());
+                crate::app::DeleteTarget::Run("run_52e8".into())
+            };
+            app.store.models = app.store.api.models().into();
+            app.ask_delete(target, window, cx);
+        }
         "new-run" => {
             app.route = Route::Runs;
             app.run_filter = RunFilter::All;

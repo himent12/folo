@@ -10,7 +10,7 @@ use folo_ui::{
 
 use super::duration_of;
 use crate::api::{Run, RunExt, RunStatus, time};
-use crate::app::{FoloApp, Route, act};
+use crate::app::{DeleteTarget, FoloApp, Route, act};
 use crate::charts::sparkline;
 use crate::controls::Btn;
 use crate::screens::{detail_header, loading_rows, page_header};
@@ -201,6 +201,30 @@ impl FoloApp {
             }
             RunStatus::Stopping => {}
         }
+        // Delete leads the actions (the way forward stays last): a run still active says why not.
+        let delete = if r.status.is_active() {
+            self.button_disabled(
+                "run-delete",
+                "Delete",
+                Btn::Secondary,
+                Some("icons/trash-2.svg"),
+                "Stop it first: an active run can't be deleted",
+                window,
+                cx,
+            )
+        } else {
+            let target = DeleteTarget::Run(r.id.clone());
+            self.button(
+                "run-delete",
+                "Delete",
+                Btn::Secondary,
+                Some("icons/trash-2.svg"),
+                window,
+                cx,
+                act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
+            )
+        };
+        actions.insert(0, delete.into_any_element());
         let title = div()
             .flex()
             .items_center()

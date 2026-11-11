@@ -84,6 +84,7 @@ impl FoloApp {
         self.new_run.is_some()
             || self.synth.is_some()
             || self.confirm_stop.is_some()
+            || self.confirm_delete.is_some()
             || self.inspector.is_some()
             || self.cloud.connect.is_some()
             || self.cloud.disconnect.is_some()

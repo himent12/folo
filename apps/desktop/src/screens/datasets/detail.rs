@@ -108,6 +108,18 @@ impl FoloApp {
                 act(move |this, w, cx| this.open_new_run(Some(&did), w, cx)),
             )
             .into_any_element();
+        let target = crate::app::DeleteTarget::Dataset(ds.id.clone());
+        let delete = self
+            .button(
+                "ds-delete",
+                "Delete",
+                Btn::Secondary,
+                Some("icons/trash-2.svg"),
+                window,
+                cx,
+                act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
+            )
+            .into_any_element();
         let path = ds.path.clone();
         let reveal = self
             .button(
@@ -155,7 +167,7 @@ impl FoloApp {
             &t,
             title,
             if short { div() } else { path_el() },
-            vec![reveal.into_any_element(), train.into_any_element()],
+            vec![delete, reveal.into_any_element(), train.into_any_element()],
         );
 
         if ds.stats.as_ref().is_some_and(|s| s.broken_labels > 0) {

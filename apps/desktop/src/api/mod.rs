@@ -102,6 +102,11 @@ pub trait Backend: Send + Sync + 'static {
     fn run(&self, id: &str) -> ApiResult<Run>;
     fn create_run(&self, config: TrainConfig) -> ApiResult<Run>;
     fn stop_run(&self, id: &str) -> ApiResult<Run>;
+    /// Deletes a run that is not active (`DELETE /api/runs/{id}`; `409 run_active` while queued,
+    /// running or stopping): its folder and weights, so its models go too.
+    fn delete_run(&self, id: &str) -> ApiResult<()>;
+    /// Unregisters a dataset (`DELETE /api/datasets/{id}`); its files are never deleted.
+    fn delete_dataset(&self, id: &str) -> ApiResult<()>;
     /// The `folo train` command that trains a run's config on the server's machine
     /// (`GET /api/runs/{id}/cli`, servers with `run_cli`).
     fn run_cli(&self, _id: &str) -> ApiResult<CliCommand> {

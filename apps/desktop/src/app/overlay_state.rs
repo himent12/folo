@@ -146,6 +146,16 @@ impl FoloApp {
         cx.notify();
     }
 
+    /// Ask before deleting a run or a dataset; the safe choice has focus.
+    pub fn ask_delete(&mut self, target: super::DeleteTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.remember_focus(window, cx);
+        self.palette = None;
+        self.confirm_delete = Some(target);
+        let fh = self.fh("del-cancel", cx);
+        window.focus(&fh);
+        cx.notify();
+    }
+
     pub fn open_inspector(
         &mut self,
         dataset: String,
@@ -202,6 +212,9 @@ impl FoloApp {
             self.export_open = false;
         } else if self.palette.is_some() {
             self.close_palette(window, cx);
+        } else if self.confirm_delete.is_some() {
+            self.confirm_delete = None;
+            self.restore_focus(window);
         } else if self.confirm_stop.is_some() {
             self.confirm_stop = None;
             self.restore_focus(window);

@@ -105,6 +105,14 @@ impl Backend for HttpBackend {
         self.post_empty(&format!("/runs/{}/stop", seg(id)))
     }
 
+    fn delete_run(&self, id: &str) -> ApiResult<()> {
+        self.delete(&format!("/runs/{}", seg(id)))
+    }
+
+    fn delete_dataset(&self, id: &str) -> ApiResult<()> {
+        self.delete(&format!("/datasets/{}", seg(id)))
+    }
+
     fn run_cli(&self, id: &str) -> ApiResult<CliCommand> {
         self.get(&format!("/runs/{}/cli", seg(id)))
     }

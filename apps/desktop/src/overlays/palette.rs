@@ -106,6 +106,27 @@ impl FoloApp {
                 }),
             });
         }
+        // The open page's run or dataset can be deleted from here too (a run once it isn't active).
+        let page_delete =
+            match &self.route {
+                Route::Run(id) => self.store.run(id).filter(|r| !r.status.is_active()).map(|r| {
+                    (r.name.clone(), crate::app::DeleteTarget::Run(id.clone()), "run and its models")
+                }),
+                Route::Dataset(id) => self.store.dataset_summary(id).map(|d| {
+                    (d.name.clone(), crate::app::DeleteTarget::Dataset(id.clone()), "dataset; its files stay")
+                }),
+                _ => None,
+            };
+        if let Some((name, target, detail)) = page_delete {
+            items.push(PaletteItem {
+                group: "Actions",
+                icon: "icons/trash-2.svg",
+                title: format!("Delete {name}"),
+                detail: detail.into(),
+                keys: &[],
+                action: act(move |this, w, cx| this.ask_delete(target.clone(), w, cx)),
+            });
+        }
         for (name, icon_path, route, keys) in nav {
             items.push(PaletteItem {
                 group: "Go to",

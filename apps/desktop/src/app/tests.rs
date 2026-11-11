@@ -157,3 +157,44 @@ fn a_dialog_forgets_could_not_reach_once_the_server_answers() {
         assert!(this.nr_estimate.is_none(), "the estimate is asked for again");
     });
 }
+
+#[test]
+fn deleting_a_run_or_a_dataset_leaves_its_page_for_the_list() {
+    use super::{DeleteTarget, Route};
+    let (mut app, window) = open();
+    // A finished run, from its page: it and its models go, and the page gives way to Runs.
+    drive(&mut app, window, |this, w, cx| {
+        this.navigate(Route::Run("run_52e8".into()), w, cx);
+        this.ask_delete(DeleteTarget::Run("run_52e8".into()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, cx| this.ensure_core(cx));
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.confirm_delete.is_none());
+        assert!(this.store.run("run_52e8").is_none());
+        assert_eq!(this.route_pending, Some(Route::Runs));
+        let models = this.store.models.ready().unwrap();
+        assert!(models.iter().all(|m| m.run_id.as_deref() != Some("run_52e8")), "its models went with it");
+        assert!(this.toasts.iter().any(|t| t.title.starts_with("Deleted")));
+    });
+    // An active run is refused (409 run_active) and stays.
+    drive(&mut app, window, |this, w, cx| {
+        this.ask_delete(DeleteTarget::Run("run_a19f".into()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.run("run_a19f").is_some());
+        assert!(this.toasts.iter().any(|t| t.title.starts_with("Couldn't delete")));
+    });
+    // A dataset is unregistered.
+    drive(&mut app, window, |this, w, cx| {
+        this.route_pending = None;
+        this.navigate(Route::Dataset("ds_3b91".into()), w, cx);
+        this.ask_delete(DeleteTarget::Dataset("ds_3b91".into()), w, cx);
+        this.delete_confirmed(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(this.store.dataset_summary("ds_3b91").is_none());
+        assert_eq!(this.route_pending, Some(Route::Datasets));
+    });
+}
