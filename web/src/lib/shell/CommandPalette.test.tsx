@@ -89,6 +89,24 @@ describe('CommandPalette actions on entities', () => {
 
 });
 
+describe('CommandPalette: labeling jobs and loops', () => {
+  it('finds a labeling job and a loop by name, like a benchmark, and opens them', async () => {
+    const go = vi.spyOn(router, 'go').mockImplementation(() => {});
+    await openWith('warehouse-bins', '#pi-label-lb_7c21');
+    const job = document.getElementById('pi-label-lb_7c21')!;
+    expect(job.querySelector('.label')?.textContent?.trim()).toBe('warehouse-bins');
+    expect(job.textContent).toMatch(/0 of 40 images labeled/);
+    job.click();
+    expect(go).toHaveBeenCalledWith('/datasets/label/lb_7c21');
+    unmount(c!);
+    c = undefined;
+    const loop = (await Promise.all((await hub.api.benches()).map((b) => hub.api.benchLoops(b.id)))).flat()[0]!;
+    await openWith(loop.name, `#pi-loop-${loop.id}`);
+    document.getElementById(`pi-loop-${loop.id}`)!.click();
+    expect(go).toHaveBeenLastCalledWith(`/benchmarks/${loop.bench_id}/loops/${loop.id}`);
+  });
+});
+
 describe('CommandPalette with no query', () => {
   const key = (input: HTMLElement, k: string) => {
     input.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
