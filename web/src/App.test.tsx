@@ -100,10 +100,13 @@ describe('a screen whose chunk fails to load', () => {
     expect(main().querySelector('.title')?.textContent).toBe('Could not load this screen');
     expect(main().textContent).toContain('Failed to fetch dynamically imported module');
     const retry = [...main().querySelectorAll('button')].find((b) => b.textContent?.trim() === 'Retry')!;
+    retry.focus();
     retry.click();
     await until(() => main().querySelector('.fake'), 'the models page');
     expect(tries).toBe(2);
     expect(main().querySelector('[role="alert"]')).toBeNull();
+    // The focused Retry is gone with the error: focus moves into the recovered screen, not to the body.
+    await until(() => document.activeElement !== document.body && main().contains(document.activeElement), 'focus in the screen');
   });
 
   it('shows the screen once a later preload (a link hovered) brings the chunk in', async () => {
