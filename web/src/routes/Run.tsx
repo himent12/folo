@@ -295,16 +295,16 @@ export default function Run() {
   /**
    * The header's ⋯ (DESIGN_DIRECTION §13, one action set): the header shows one secondary, Compare (in the menu on
    * phones), and a running run's state action, Stop; the rest is here, the destructive action last on every detail
-   * page (Remove from queue for a waiting run, Delete run for a finished one), each behind its confirm dialog. Try model
-   * is here only for a run that did not complete: a completed run's callout offers Try in Playground.
+   * page (Remove from queue for a waiting run, Delete run for a finished one), each behind its confirm dialog. A run
+   * with a model has Open model and Try in Playground here whatever its status, as its callout does.
    */
   const menuItems = (compare: boolean): MenuItem[] => {
     const r = run.get();
     if (!r) return [];
     const out: MenuItem[] = compare ? [{ label: 'Compare', icon: GitCompare, href: href(`/runs/compare?ids=${r.id}`) }] : [];
     if (r.model_id) {
-      if (r.status !== 'completed') out.push({ label: 'Try model', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
       out.push({ label: 'Open model', icon: Box, href: href(`/models/${r.model_id}`) });
+      out.push({ label: 'Try in Playground', icon: ScanSearch, href: href(`/playground?model=${r.model_id}`) });
     }
     // The queue's one action set (`queueItems`), whole, as on the Runs list: the open menu covers the callout's Start
     // next, so the menu never relies on it. Remove from queue last.

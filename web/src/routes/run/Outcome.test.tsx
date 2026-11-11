@@ -160,21 +160,36 @@ describe('Outcome', () => {
     const titles = [...c.querySelectorAll('.c-title')].map((t) => t.textContent);
     expect(titles).toEqual(['Completed in 16m 00s', 'Too short to learn:']);
     expect(c.querySelector('.c-also .c-msg')?.textContent?.trim()).toBe('125 optimizer steps');
-    // The fix is the one action (no Playground for a model that learned nothing); the reasons behind Why?.
-    expect(r.labels).toEqual(['Train 8 epochs', 'Why?']);
+    // The fix leads; the model's hand-off stays beside it; the reasons behind Why?.
+    expect(r.labels).toEqual(['Train 8 epochs', 'Open model', 'Try in Playground', 'Why?']);
     expect(r.buttons[0]?.getAttribute('href')).toBe('#/runs/new?from=run_a2f0&epochs=8');
+    expect(r.buttons[1]?.getAttribute('href')).toBe('#/models/m_1');
+    expect(r.buttons[2]?.getAttribute('href')).toBe('#/playground?model=m_1');
     expect(c.querySelector('.c-detail')?.textContent ?? '').not.toMatch(/lr0|warmup_epochs/);
     r.done();
   });
 
   it('keeps the same one-callout pattern for a stopped or failed short run, with Resume beside the fix', () => {
-    for (const status of ['stopped', 'failed'] as const) {
+    for (const [status, labels] of [
+      ['stopped', ['Train 8 epochs', 'Resume', 'Open model', 'Try in Playground', 'Why?']],
+      ['failed', ['Train 8 epochs', 'Resume', 'Why?']],
+    ] as const) {
       const r = render(short(status), vi.fn(), [SHORT]);
       expect(r.target.querySelectorAll('.callout')).toHaveLength(1);
       expect(r.target.querySelector('.c-also .c-title')?.textContent).toBe('Too short to learn:');
-      expect(r.labels).toEqual(['Train 8 epochs', 'Resume', 'Why?']);
+      expect(r.labels).toEqual(labels);
       r.done();
     }
+  });
+
+  it('hands a completed run on to its model and the Playground, the Playground left out only at mAP exactly 0', () => {
+    const done = (map50_95: number): Run => ({ ...short('completed'), best: { epoch: 5, map50_95 } });
+    let r = render(done(0.073));
+    expect(r.labels).toEqual(['Open model', 'Try in Playground']);
+    r.done();
+    r = render(done(0));
+    expect(r.labels).toEqual(['Open model']);
+    r.done();
   });
 
   it('never claims a checkpoint for a run stopped before an epoch finished: Start again, not Resume', () => {
@@ -192,7 +207,7 @@ describe('Outcome', () => {
     const r = render({ ...stopped('2026-11-07T06:00:03Z'), epoch: 3, model_id: 'm_1' });
     expect(r.target.querySelector('.c-title')?.textContent).toBe('Stopped at epoch 3');
     expect(r.target.querySelector('.c-msg')?.textContent?.trim()).toBe('The last checkpoint was kept and saved as a model.');
-    expect(r.labels).toEqual(['Resume']);
+    expect(r.labels).toEqual(['Resume', 'Open model', 'Try in Playground']);
     r.done();
   });
 

@@ -8,6 +8,7 @@
  * words behind "Why?"; never a toast. Once the run has an outcome, that line joins the outcome's callout as its second
  * line ("Completed in 30s · best …", then "Too short to learn: …"), so one run never stacks two banners.
  */
+import Box from '$icons/box';
 import CircleCheck from '$icons/circle-check';
 import Clock from '$icons/clock';
 import Play from '$icons/play';
@@ -118,6 +119,26 @@ export default function Outcome(props: OutcomeProps) {
   );
 
   const status = () => props.run.status;
+  /**
+   * The hand-off of a run with a model, beside its result whatever else the callout says (a too-short warning keeps
+   * it): Open model, and Try in Playground unless the model scored exactly 0 (nothing to see there).
+   */
+  const handOff = () => (
+    <>
+      {props.run.model_id ? (
+        <>
+          <Button size="sm" icon={Box} href={href(`/models/${props.run.model_id}`)}>
+            Open model
+          </Button>
+          {props.run.best?.map50_95 !== 0 ? (
+            <Button size="sm" icon={ScanSearch} href={href(`/playground?model=${props.run.model_id}`)}>
+              Try in Playground
+            </Button>
+          ) : null}
+        </>
+      ) : null}
+    </>
+  );
   /** Resume continues from the last finished epoch's checkpoint; with none (no epoch finished) it starts the run over. */
   const resumeAction = () => (
     <Button size="sm" icon={canContinue(props.run) ? Play : RotateCcw} loading={props.resuming ?? false} onclick={props.onresume}>
@@ -214,8 +235,8 @@ export default function Outcome(props: OutcomeProps) {
           {props.run.error}
         </Callout>
       ) : status() === 'completed' && short.get() ? (
-        // A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its action
-        // (trying a model that learned nothing in the Playground is not the next step).
+        // A run that completed but was too short to learn: the outcome and the warning in one callout, the fix its first
+        // action, the model's hand-off after it.
         <Callout
           tone="success"
           icon={CircleCheck}
@@ -227,7 +248,12 @@ export default function Outcome(props: OutcomeProps) {
               best mAP50-95 <span class="num">{metric(props.run.best?.map50_95)}</span> at epoch {props.run.best?.epoch ?? 0}
             </span>
           )}
-          actions={scheduleFix}
+          actions={() => (
+            <>
+              {scheduleFix()}
+              {handOff()}
+            </>
+          )}
           more={why}
         />
       ) : status() === 'completed' ? (
@@ -244,15 +270,7 @@ export default function Outcome(props: OutcomeProps) {
               <span>saved as a model</span>
             </>
           )}
-          actions={() => (
-            <>
-              {props.run.model_id ? (
-                <Button size="sm" icon={ScanSearch} href={href(`/playground?model=${props.run.model_id}`)}>
-                  Try in Playground
-                </Button>
-              ) : null}
-            </>
-          )}
+          actions={handOff}
         />
       ) : status() === 'stopped' ? (
         // A run stopped before its first epoch ended has no checkpoint: it says so, and starts again rather than resumes.
@@ -267,6 +285,7 @@ export default function Outcome(props: OutcomeProps) {
             <>
               {short.get() ? scheduleFix() : null}
               {resumeAction()}
+              {handOff()}
             </>
           )}
         >
