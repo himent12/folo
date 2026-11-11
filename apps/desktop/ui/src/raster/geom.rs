@@ -54,20 +54,37 @@ pub(crate) fn floor_i32(v: f32) -> i32 {
     if (i as f32) > v { i.saturating_sub(1) } else { i }
 }
 
+/// The first pixel whose centre `i + 0.5` is at or right of the edge `v`, with `v` first snapped to the
+/// rasterizer's 1/256 px grid (D3D11 converts vertex positions, clipped ones included, to 16.8 fixed
+/// point before the fill rule; nearest, ties up).
+#[inline(always)]
+fn first_centre_at_or_after(v: f32) -> i32 {
+    // Far outside any frame: clamp so the fixed point fits i32 (NaN stays NaN and becomes 0).
+    const LIMIT: f32 = (1 << 22) as f32;
+    let k = floor_i32(v.clamp(-LIMIT, LIMIT) * 256. + 0.5);
+    // ceil((k - 128) / 256): `>>` floors, also for negative values.
+    (k + 127) >> 8
+}
+
 /// The pixels a GPU rasterizes for an edge from `lo` to `hi`: those whose centre `i + 0.5` lies in
-/// `[lo, hi)` (the top-left fill rule).
+/// `[lo, hi)` (the top-left fill rule), the edges snapped to 1/256 px as the rasterizer does.
 #[inline]
 pub(crate) fn raster_span(lo: f32, hi: f32) -> (i32, i32) {
-    (ceil_i32(lo - 0.5), ceil_i32(hi - 0.5))
+    (first_centre_at_or_after(lo), first_centre_at_or_after(hi))
 }
 
-/// The pixels a clip rectangle keeps: those whose centre has a clip distance `>= 0` to both edges.
+/// The pixels a clip rectangle keeps. GPUI clips with `SV_ClipDistance`, which clips the triangles
+/// themselves, so the clipped edges are rasterized like any other: a centre exactly on the left or
+/// top edge is kept, one exactly on the right or bottom edge is not (the top-left fill rule). A 1.5 px
+/// border side clipped to `[384, 385.5)` covers pixel 384 only, as in the GPUI captures.
 #[inline]
 pub(crate) fn clip_span(lo: f32, hi: f32) -> (i32, i32) {
-    (ceil_i32(lo - 0.5), floor_i32(hi - 0.5).saturating_add(1))
+    raster_span(lo, hi)
 }
 
-/// The pixels a primitive drawn over `bounds` and clipped by `clip` can touch.
+/// The pixels a primitive drawn over `bounds` and clipped by `clip` can touch (what `items::Clips`
+/// computes, keeping the clip's part).
+#[cfg(test)]
 pub(crate) fn pixel_rect(bounds: &Bounds<ScaledPixels>, clip: &Bounds<ScaledPixels>) -> IRect {
     let (bx0, bx1) = raster_span(bounds.origin.x.0, bounds.origin.x.0 + bounds.size.width.0);
     let (by0, by1) = raster_span(bounds.origin.y.0, bounds.origin.y.0 + bounds.size.height.0);
@@ -94,8 +111,17 @@ mod tests {
         assert_eq!(raster_span(10.5, 20.5), (10, 20));
         assert_eq!(raster_span(10.6, 20.4), (11, 20));
         assert_eq!(clip_span(10., 20.), (10, 20));
-        // A clip keeps a centre exactly on either edge.
-        assert_eq!(clip_span(10.5, 20.5), (10, 21));
+        // A clip keeps a centre exactly on its left edge and drops one on its right edge.
+        assert_eq!(clip_span(10.5, 20.5), (10, 20));
+        assert_eq!(clip_span(384., 385.5), (384, 385));
+        assert_eq!(clip_span(1702.5, 1704.), (1702, 1704));
+        // Edges snap to 1/256 px first: a clip computed as 1553.5001 (float error in the layout
+        // arithmetic) is 1553.5 to the rasterizer and keeps pixel 1553, as the GPUI captures show.
+        assert_eq!(clip_span(1553.5001, 1555.), (1553, 1555));
+        assert_eq!(raster_span(10.5 + 1. / 512. + 1e-4, 20.5 - 1. / 600.), (11, 20));
+        assert_eq!(raster_span(284.999_97, 318.), (285, 318));
+        assert_eq!(raster_span(-0.5, -10.5), (-1, -11));
+        assert_eq!(raster_span(f32::NAN, 1e12), (0, 1 << 22));
         assert!(IRect::new(0, 0, 4, 4).contains(&IRect::new(1, 1, 4, 4)));
         assert!(!IRect::EMPTY.contains(&IRect::EMPTY));
         for v in [0., 0.5, -0.5, 1.0, -1.0, 2.25, -2.25, 1e9, -1e9, 3e10, f32::MIN_POSITIVE, -0.0] {

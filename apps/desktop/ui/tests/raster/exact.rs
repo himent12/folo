@@ -280,14 +280,16 @@ fn svg_mask_at_two_to_one_is_the_2x2_average() {
 }
 
 #[test]
-fn clips_keep_pixel_centres_on_their_edges() {
+fn clips_follow_the_top_left_rule() {
     let mut q = quad(full(), white());
     q.clip = rect(10.5, 20., 10., 5.25);
     let fb = render(vec![Primitive::Quad(q)], GlyphBlend::IDENTITY);
-    // Columns whose centre lies in [10.5, 20.5]: 10..=20; rows with centre in [20, 25.25]: 20..=24.
+    // GPUI's clip distances clip the triangles, so the rasterizer's rule applies: columns whose centre
+    // lies in [10.5, 20.5): 10..=19 (centre 10.5 on the left edge in, 20.5 on the right edge out);
+    // rows with centre in [20, 25.25): 20..=24.
     for y in 0..H {
         for x in 0..W {
-            let inside = (10..=20).contains(&x) && (20..=24).contains(&y);
+            let inside = (10..=19).contains(&x) && (20..=24).contains(&y);
             assert_eq!(fb.pixel(x, y) != 0, inside, "({x}, {y})");
         }
     }

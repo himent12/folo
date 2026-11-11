@@ -38,7 +38,7 @@ impl FoloApp {
             .child(
                 folo_ui::canvas(
                     |_, _, _| (),
-                    move |_, _, window, _| crate::ui::paint_thumb(&t, &paint, hot, window),
+                    move |_, _, window, cx| crate::ui::paint_thumb(&t, &paint, hot, window, cx),
                 )
                 .size_full(),
             )

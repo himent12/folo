@@ -1,7 +1,6 @@
 use folo_ui::{
-    Bounds, BuiltPath, ContentMask, FillRule, LineCap, LineJoin, PathBuilder, PathContour, PathKind,
-    PathMode, Pixels, Point, Primitive, Scene, StylePaint, linear_color_stop, linear_gradient, paint_path,
-    point, px, red, size,
+    Bounds, BuiltPath, ContentMask, PathBuilder, PathKind, Pixels, Point, Primitive, Scene, StylePaint,
+    linear_color_stop, linear_gradient, paint_path, point, px, red, size,
 };
 
 fn p(x: f32, y: f32) -> Point<Pixels> {
@@ -20,65 +19,92 @@ fn polyline(points: &[(f32, f32)], width: f32, dash: &[f32]) -> BuiltPath {
     b.build().unwrap()
 }
 
-#[test]
-fn a_stroked_polyline_keeps_its_points_and_lyons_defaults() {
-    let path = polyline(&[(0., 0.), (10., 0.), (10., 10.)], 2., &[]);
-    assert_eq!(
-        path.contours,
-        vec![PathContour { points: vec![p(0., 0.), p(10., 0.), p(10., 10.)], closed: false }]
-    );
-    assert_eq!(
-        path.mode,
-        PathMode::Stroke { width: px(2.), cap: LineCap::Butt, join: LineJoin::Miter, miter_limit: 4. }
-    );
-    // Butt caps add nothing past the ends; the right-angle miter reaches (11, -1).
-    assert_eq!(path.bounds, Bounds::from_corners(p(0., -1.), p(11., 10.)));
+/// The area the triangles cover, counting overlaps (lyon's fills do not overlap).
+fn area(path: &BuiltPath) -> f32 {
+    path.triangles
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|t| {
+            let (a, b, c) = (t[0], t[1], t[2]);
+            let (abx, aby) = (f32::from(b.x - a.x), f32::from(b.y - a.y));
+            let (acx, acy) = (f32::from(c.x - a.x), f32::from(c.y - a.y));
+            (abx * acy - aby * acx).abs() / 2.
+        })
+        .sum()
+}
+
+fn xs(path: &BuiltPath) -> Vec<f32> {
+    let mut v: Vec<f32> = path.triangles.iter().map(|q| f32::from(q.x)).collect();
+    v.sort_by(f32::total_cmp);
+    v.dedup();
+    v
 }
 
 #[test]
-fn a_closed_fill_is_one_closed_contour_with_lyons_even_odd_rule() {
+fn a_stroked_polyline_is_lyons_tessellation_with_its_defaults() {
+    let path = polyline(&[(0., 0.), (10., 0.), (10., 10.)], 2., &[]);
+    assert_eq!(path.triangles.len() % 3, 0);
+    // Butt caps add nothing past the ends; the right-angle miter (lyon's default join) reaches
+    // (11, -1); the bounds are the vertices' box, as GPUI's `Path::bounds`.
+    assert!(path.triangles.contains(&p(11., -1.)));
+    assert_eq!(path.bounds, Bounds::from_corners(p(0., -1.), p(11., 10.)));
+    // Two 10 x 2 bands (overlapping in a 1 x 1 square) plus the miter's 1 x 1 corner, no overlap.
+    assert!((area(&path) - 40.).abs() < 1e-3, "{}", area(&path));
+}
+
+#[test]
+fn fills_are_lyons_with_its_even_odd_rule() {
+    // Two overlapping squares: even-odd leaves their overlap out.
+    let mut b = PathBuilder::fill();
+    for (x, y) in [(0., 0.), (2., 2.)] {
+        b.move_to(p(x, y));
+        for q in [p(x + 4., y), p(x + 4., y + 4.), p(x, y + 4.)] {
+            b.line_to(q);
+        }
+        b.close();
+    }
+    let path = b.build().unwrap();
+    assert!((area(&path) - (16. + 16. - 2. * 4.)).abs() < 1e-3, "{}", area(&path));
+    assert_eq!(path.bounds, Bounds::new(p(0., 0.), size(px(6.), px(6.))));
+
+    // After `close` the current point is the contour's start; a lone segment fills nothing.
     let mut b = PathBuilder::fill();
     b.move_to(p(0., 0.));
     for q in [p(4., 0.), p(4., 4.), p(0., 4.)] {
         b.line_to(q);
     }
     b.close();
-    // After `close` the current point is the contour's start: a `line_to` starts a new contour there.
     b.line_to(p(2., 8.));
     let path = b.build().unwrap();
-    assert_eq!(path.mode, PathMode::Fill(FillRule::EvenOdd));
-    assert_eq!(path.contours.len(), 2);
-    assert_eq!(
-        path.contours[0],
-        PathContour { points: vec![p(0., 0.), p(4., 0.), p(4., 4.), p(0., 4.)], closed: true }
-    );
-    assert_eq!(path.contours[1].points, vec![p(0., 0.), p(2., 8.)]);
-    assert_eq!(path.bounds, Bounds::new(p(0., 0.), size(px(4.), px(8.))));
+    assert!((area(&path) - 16.).abs() < 1e-3);
+    assert_eq!(path.bounds, Bounds::new(p(0., 0.), size(px(4.), px(4.))));
 }
 
 #[test]
-fn dashes_cut_the_whole_path_into_open_contours() {
+fn dashes_cut_the_whole_path_as_gpui_does() {
     let path = polyline(&[(0., 0.), (10., 0.)], 1., &[3., 2.]);
-    let dashes: Vec<_> = path.contours.iter().map(|c| (c.points.clone(), c.closed)).collect();
-    assert_eq!(dashes, vec![(vec![p(0., 0.), p(3., 0.)], false), (vec![p(5., 0.), p(8., 0.)], false)]);
+    assert_eq!(xs(&path), vec![0., 3., 5., 8.]);
+    assert!((area(&path) - 6.).abs() < 1e-3);
 
-    // An odd list repeats ([3] is [3, 3]); a dash crossing a corner keeps the corner point.
+    // An odd list repeats ([6] is [6, 6]); the second dash runs from (4, 8) to (4, 10).
     let path = polyline(&[(0., 0.), (4., 0.), (4., 10.)], 1., &[6.]);
-    let points: Vec<_> = path.contours.iter().map(|c| c.points.clone()).collect();
-    assert_eq!(points, vec![vec![p(0., 0.), p(4., 0.), p(4., 2.)], vec![p(4., 8.), p(4., 10.)]]);
+    let second: Vec<_> = path.triangles.iter().filter(|q| f32::from(q.y) > 7.).collect();
+    assert!(!second.is_empty());
+    let ys: Vec<f32> = second.iter().map(|q| f32::from(q.y)).collect();
+    assert!(ys.iter().all(|&y| (y - 8.).abs() < 1e-3 || (y - 10.).abs() < 1e-3), "{ys:?}");
 }
 
 #[test]
-fn curves_flatten_within_tolerance_and_end_on_their_end_point() {
+fn curves_flatten_within_tolerance() {
     let mut b = PathBuilder::stroke(px(1.));
     b.move_to(p(0., 0.));
     b.curve_to(p(20., 0.), p(10., 10.));
     let path = b.build().unwrap();
-    let pts = &path.contours[0].points;
-    assert!(pts.len() > 4, "flattened into several segments");
-    assert_eq!(*pts.last().unwrap(), p(20., 0.));
-    // The curve's apex is at (10, 5); every flattened point lies on or under it.
-    assert!(pts.iter().all(|q| f32::from(q.y) <= 5.0 + 1e-4));
+    assert!(path.triangles.len() > 12, "several segments");
+    // The curve's apex is at (10, 5); the stroke reaches half a width past it, the tolerance more.
+    let max_y = path.triangles.iter().map(|q| f32::from(q.y)).fold(f32::MIN, f32::max);
+    assert!((5.4..5.6).contains(&max_y), "{max_y}");
 }
 
 #[test]
@@ -95,9 +121,9 @@ fn paint_path_scales_clips_and_fades() {
     let Primitive::Path(prim) = &scene.primitives[0] else { panic!("a path") };
     assert_eq!(prim.bounds, path.bounds.scale(1.5));
     assert_eq!(prim.paint, red().opacity(0.5).into());
-    let PathKind::Stroke(stroke) = &prim.path.kind else { panic!("a stroke") };
-    assert_eq!((stroke.width, stroke.dash.is_none()), (px(2.).scale(1.5), true));
-    assert_eq!(prim.path.contours[0].points, vec![p(0., 0.).scale(1.5), p(10., 0.).scale(1.5)]);
+    assert_eq!(prim.path.kind, PathKind::Triangles);
+    let scaled: Vec<_> = path.triangles.iter().map(|q| q.scale(1.5)).collect();
+    assert_eq!(prim.path.triangles, scaled);
 
     // Gradients pass through; a path outside the mask is skipped; an empty path paints nothing.
     let gradient = linear_gradient(180., linear_color_stop(red(), 0.), linear_color_stop(red(), 1.));

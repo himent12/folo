@@ -196,14 +196,18 @@ impl QuadShader {
         let dash_period_per_width = dash_length_per_width + dash_gap_per_width;
         let dv_numerator = 1.0 / dash_period_per_width;
         let [w_t, w_r, w_b, w_l] = self.widths;
-        let (t, mut max_t, dash_velocity);
+        let (t, max_t, dash_velocity);
         if unrounded {
             let is_horizontal = cctp[0] < cctp[1];
             let dashed_border = [w_b.max(w_t), w_r.max(w_l)];
             let bw = if is_horizontal { dashed_border[0] } else { dashed_border[1] };
             dash_velocity = dv_numerator / bw;
             t = (if is_horizontal { the_point[0] } else { the_point[1] }) * dash_velocity;
-            max_t = (if is_horizontal { size[0] } else { size[1] }) * dash_velocity;
+            // `max_t * dash_velocity - dash_length` below: fxc contracts it into one `mad`, which the GPU
+            // runs fused (a 21 px side of a 1.5 px dashed border has 4 dashes in the GPUI captures;
+            // rounded twice it is 3.9999998 and gets 3).
+            let side = if is_horizontal { size[0] } else { size[1] };
+            max_t = side.mul_add(dash_velocity, -(dash_length_per_width / dash_period_per_width));
         } else {
             let [r_tl, r_tr, r_br, r_bl] = self.radii;
             let dv = |w: f32| if w <= 0. { 0. } else { dv_numerator / w };
@@ -265,9 +269,6 @@ impl QuadShader {
             }
         }
         let dash_length = dash_length_per_width / dash_period_per_width;
-        if unrounded {
-            max_t -= dash_length;
-        }
         if max_t >= 1.0 {
             let dash_count = max_t.floor();
             let dash_period = max_t / dash_count;

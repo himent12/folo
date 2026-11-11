@@ -54,7 +54,8 @@ same change. `README.md` is how to build, test and run it.
 - **Linux and macOS backend is winit 0.30 + softbuffer** (plus arboard for the clipboard and rfd for file
   dialogs). It also compiles on Windows (feature `winit`) so its shared code runs on the dev machine.
 - **Commodity crates do commodity jobs:** taffy (flexbox maths), resvg/usvg (SVG icons, as GPUI), tiny-skia
-  (path coverage, comes with resvg), cosmic-text, winit, softbuffer, arboard, rfd, image, async-task, smallvec.
+  (comes with resvg), lyon `=1.0.19` (path tessellation and dashing, the versions GPUI 0.2.2 uses, so a path
+  covers the same samples), cosmic-text, winit, softbuffer, arboard, rfd, image, async-task, smallvec.
   Everything else is ours. No new dependency without a line in this file saying why.
 
 ### What GPUI code may be reused
@@ -134,12 +135,13 @@ Painter's order: a primitive is drawn over every earlier one. Each primitive car
 
 - `Quad { bounds, clip, background: Background, border_color, corner_radii, border_widths, border_style }`
 - `Shadow { bounds, clip, corner_radii, color, blur_radius }`
-- `MonoSprite { bounds, clip, color, mask: Arc<AlphaMask>, kind: Glyph | Svg }` (a glyph gets the text
-  backend's contrast / gamma correction, an SVG mask is plain alpha)
+- `MonoSprite { bounds, clip, color, mask: Arc<AlphaMask>, kind: Glyph | Svg }` (both get the text
+  backend's contrast / gamma correction, as GPUI's one monochrome sprite shader applies it; an SVG mask
+  is sampled linearly over the bounds, a glyph is drawn 1:1)
 - `ColorSprite { bounds, clip, mask: Arc<ColorMask>, opacity }` (colour emoji)
 - `Image { bounds, clip, corner_radii, image: Arc<RenderImage>, frame, grayscale, opacity }`
-- `Path { bounds, clip, path: Arc<PathData>, paint: Background }` (fill or stroke, already resolved to
-  contours + fill rule or stroke style by `PathBuilder`)
+- `Path { bounds, clip, path: Arc<PathData>, paint: Background }` (`PathBuilder` makes lyon's triangles,
+  as GPUI; contours with a fill rule or stroke style are also accepted)
 - `Underline { … }` as GPUI's (straight and wavy)
 
 Masks and images are identified by a process-unique `id: u64` assigned at creation; tile hashes use ids, never
@@ -172,8 +174,11 @@ usually needs a small part); `raster::MaskCache` (the window's glyph and icon ma
   pool: it belongs to the engine). The pool is created the first time it is needed.
 - Quads, borders (solid and dashed), rounded corners and shadows use GPUI's coverage formulas
   (GPUI 0.2.2's `src/platform/windows/shaders.hlsl`) on edge pixels and solid spans inside. Shadows are cached
-  as masks. Images are sampled as a linear GPU sampler would (texel centres), with a cache of resampled
-  copies for images drawn at the same size frame after frame. Path coverage is cached by geometry.
+  as masks. Images are sampled as a linear GPU sampler would (texel centres; past the image's edge GPUI's
+  zeroed atlas), with a cache of resampled copies for images drawn at the same size frame after frame.
+  Paths are sampled as GPUI's 4x MSAA path target (standard pattern, top-left rule, 1/256 px snapping,
+  per-sample clip and overlap counts); their coverage is cached by geometry. Clip edges follow the
+  top-left rule too. `ui/PARITY.md` lists every rule and what still differs.
 - Caches are bounded in bytes and drop what recent frames did not use. Memory is a goal, not an afterthought.
 - Targets on the dev machine (i7-14700KF), release build: a full 1920x1200 frame of a busy screen in under
   4 ms; a frame that changes one small region in under 0.3 ms including binning and hashing.

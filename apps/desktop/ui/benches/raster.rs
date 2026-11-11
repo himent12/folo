@@ -299,17 +299,22 @@ fn busy_scene(a: &Assets, w: f32, h: f32, scroll: f32, hover: bool) -> Scene {
         for l in 0..3 {
             glyphs(&mut s, a, &mut rng, cx + 12., cy + 44. + l as f32 * 20., 20, insp, text[1]);
         }
-        let pts: Vec<_> = a.paths[c % a.paths.len()]
-            .iter()
-            .map(|&(x, y)| point(sp(cx + 8. + x * (chart_w - 16.)), sp(cy + 30. + y * (chart_h - 70.))))
-            .collect();
+        // As the app builds a chart line: `PathBuilder` in logical px (lyon's triangles), scaled.
+        let mut b = PathBuilder::stroke(px(1.5));
+        for (i, &(x, y)) in a.paths[c % a.paths.len()].iter().enumerate() {
+            let x = (cx + 8. + x * (chart_w - 16.)) / SCALE;
+            let y = (cy + 30. + y * (chart_h - 70.)) / SCALE;
+            if i == 0 {
+                b.move_to(point(px(x), px(y)));
+            } else {
+                b.line_to(point(px(x), px(y)));
+            }
+        }
+        let built = b.build().expect("a chart line tessellates").scale(SCALE);
         s.push_path(Path {
-            bounds: rect(cx, cy + 26., chart_w, chart_h - 60.),
+            bounds: built.bounds,
             clip: insp,
-            path: Arc::new(PathData::new(
-                vec![Contour { points: pts, closed: false }],
-                PathKind::Stroke(StrokeStyle { width: sp(1.5 * SCALE), ..Default::default() }),
-            )),
+            path: Arc::new(built.to_path_data()),
             paint: hsla(0.55, 0.8, 0.6, 1.).into(),
         });
     }

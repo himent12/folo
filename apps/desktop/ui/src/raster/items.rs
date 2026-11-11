@@ -2,7 +2,7 @@
 //! the rectangle it certainly covers with one opaque colour (for occlusion), and a signature hashing
 //! every field that affects its pixels (ids for masks, images and paths, never their bytes).
 
-use super::geom::{IRect, clip_rect, pixel_rect};
+use super::geom::{IRect, clip_rect, raster_span};
 use super::hash::{finish, mix, mix_f2};
 use super::path::geometry_hash;
 use super::quad::opaque_core;
@@ -74,10 +74,37 @@ pub(crate) fn shadow_bounds(b: &Bounds<ScaledPixels>, blur: f32) -> Bounds<Scale
     out
 }
 
+/// The pixels primitives may write: their bounds' pixels inside their clip's and the frame's. Runs of
+/// primitives share a clip, so the last clip's pixel rectangle is kept.
+struct Clips {
+    frame: IRect,
+    last: Option<([u32; 4], IRect)>,
+}
+
+impl Clips {
+    /// `pixel_rect(bounds, clip)` inside the frame.
+    #[inline]
+    fn rect(&mut self, bounds: &Bounds<ScaledPixels>, clip: &Bounds<ScaledPixels>) -> IRect {
+        let key = [clip.origin.x.0, clip.origin.y.0, clip.size.width.0, clip.size.height.0].map(f32::to_bits);
+        let clip = match self.last {
+            Some((k, r)) if k == key => r,
+            _ => {
+                let r = clip_rect(clip).intersect(&self.frame);
+                self.last = Some((key, r));
+                r
+            }
+        };
+        let (x0, x1) = raster_span(bounds.origin.x.0, bounds.origin.x.0 + bounds.size.width.0);
+        let (y0, y1) = raster_span(bounds.origin.y.0, bounds.origin.y.0 + bounds.size.height.0);
+        IRect::new(x0, y0, x1, y1).intersect(&clip)
+    }
+}
+
 /// Resolves `prims` into `out` (one item each); primitives that draw nothing inside `frame` get
 /// `Item::default()`.
 pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
     debug_assert_eq!(prims.len(), out.len());
+    let mut clips = Clips { frame, last: None };
     for (p, out) in prims.iter().zip(out.iter_mut()) {
         *out = Item::default();
         let (rect, opaque, sig) = match p {
@@ -86,7 +113,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 if invisible(&q.background) && !border {
                     continue;
                 }
-                let rect = pixel_rect(&q.bounds, &q.clip).intersect(&frame);
+                let rect = clips.rect(&q.bounds, &q.clip);
                 if rect.is_empty() {
                     continue;
                 }
@@ -105,7 +132,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                     // A zero blur divides by zero in the shader: NaN alpha, which draws nothing.
                     continue;
                 }
-                let rect = pixel_rect(&shadow_bounds(&s.bounds, s.blur_radius.0), &s.clip).intersect(&frame);
+                let rect = clips.rect(&shadow_bounds(&s.bounds, s.blur_radius.0), &s.clip);
                 if rect.is_empty() {
                     continue;
                 }
@@ -120,7 +147,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 if s.color.a <= 0. {
                     continue;
                 }
-                let rect = pixel_rect(&s.bounds, &s.clip).intersect(&frame);
+                let rect = clips.rect(&s.bounds, &s.clip);
                 if rect.is_empty() {
                     continue;
                 }
@@ -134,7 +161,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 if s.opacity.is_nan() || s.opacity <= 0. {
                     continue;
                 }
-                let rect = pixel_rect(&s.bounds, &s.clip).intersect(&frame);
+                let rect = clips.rect(&s.bounds, &s.clip);
                 if rect.is_empty() {
                     continue;
                 }
@@ -147,7 +174,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 if m.opacity.is_nan() || m.opacity <= 0. {
                     continue;
                 }
-                let rect = pixel_rect(&m.bounds, &m.clip).intersect(&frame);
+                let rect = clips.rect(&m.bounds, &m.clip);
                 if rect.is_empty() {
                     continue;
                 }
@@ -163,7 +190,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 if invisible(&p.paint) {
                     continue;
                 }
-                let rect = pixel_rect(&p.bounds, &p.clip).intersect(&frame);
+                let rect = clips.rect(&p.bounds, &p.clip);
                 if rect.is_empty() {
                     continue;
                 }
@@ -181,7 +208,7 @@ pub(crate) fn resolve(prims: &[Primitive], frame: IRect, out: &mut [Item]) {
                 if u.color.a <= 0. {
                     continue;
                 }
-                let rect = pixel_rect(&u.bounds, &u.clip).intersect(&frame);
+                let rect = clips.rect(&u.bounds, &u.clip);
                 if rect.is_empty() {
                     continue;
                 }
