@@ -77,7 +77,8 @@ export class Uploads {
     this.error = undefined;
     this.result = null;
     await this.#apply(() => hub.api.importLabelImages(this.jobId(), path));
-    const answer = this.result;
+    // Read again: the addition set it (TypeScript still sees the null set above).
+    const answer = this.#result.peek();
     if (answer && !answer.added.length) this.result = null;
     return answer;
   }
