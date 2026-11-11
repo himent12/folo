@@ -2,6 +2,7 @@ import type { Arch, Augment, Dataset, Model } from '$lib/api/types';
 import type { CloudPick } from './cloudPick';
 import { devWord } from './device';
 import { MAX_RUN_NAME, runName } from './name';
+import { num } from '$lib/format';
 
 /** A review row's or a form error's way back to its control (RunNew's `jump`). */
 export type Jump = 'name' | 'data' | 'model' | 'epochs' | 'batch' | 'imgsz' | 'device' | 'amp' | 'weights' | 'opt' | 'lr0' | 'seed' | 'head' | 'close' | 'runon' | 'offer' | 'hours';
@@ -54,6 +55,17 @@ export function jumpTarget(key: Jump): HTMLElement | null {
   }
 }
 
+/**
+ * A dataset with nothing in its train split cannot be trained on (the server refuses it): where its images are
+ * instead, "No training images (72 in test)."
+ */
+export function noTrainImages(dataset: Dataset): string | null {
+  const s = dataset.splits;
+  if (s.train > 0) return null;
+  const rest = [s.val ? `${num(s.val)} in val` : '', s.test ? `${num(s.test)} in test` : ''].filter(Boolean).join(', ');
+  return rest ? `No training images (${rest}).` : 'No images to train on.';
+}
+
 /** Number inputs bind `null` when cleared; accept only finite whole numbers in range. */
 export const isInt = (v: unknown, lo: number, hi: number) => typeof v === 'number' && Number.isInteger(v) && v >= lo && v <= hi;
 
@@ -90,7 +102,7 @@ export function formErrors(
     lr0: !(typeof lr0 === 'number' && lr0 > 0 && lr0 < 10) ? 'Greater than 0 and below 10.' : null,
     seed: !isInt(seed, 0, 2 ** 32 - 1) ? 'A whole number, 0 or more.' : null,
     close: !isInt(augment.close_mosaic, 0, Number.isFinite(epochs) ? epochs : 0) ? 'A whole number up to the epoch count.' : null,
-    dataset: !dataset ? 'Pick a dataset.' : null,
+    dataset: !dataset ? 'Pick a dataset.' : noTrainImages(dataset),
     weights: weights !== 'none' && picked?.arch !== arch ? 'Pick weights of the same model size.' : null,
     // The field says what to pick; the line beside Start only names the problem and leads there.
     device: deviceErr && !onCloud ? `${devWord(device)} is not available.` : null,

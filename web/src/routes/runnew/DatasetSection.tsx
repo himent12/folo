@@ -1,5 +1,6 @@
 /** New run, section 1: the dataset, as cards from 768 px up and as a compact select with a one-line summary on phones. */
 import Check from '$icons/check';
+import CircleAlert from '$icons/circle-alert';
 import { bindable, css, For, Index } from 'fw';
 import type { Resource } from '$lib/api/resource';
 import type { Dataset } from '$lib/api/types';
@@ -11,6 +12,8 @@ import Skeleton from '$lib/ui/Skeleton';
 import Meta from '$lib/ui/Meta';
 import { balanced } from '$lib/ui/balancedGrid';
 import type { FormErrors } from './jump';
+
+const classes = (n: number) => `${n} ${n === 1 ? 'class' : 'classes'}`;
 
 export interface DatasetSectionProps {
   datasets: Resource<Dataset[]>;
@@ -44,7 +47,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
                 <Meta>
                   <span>{num(props.dataset.splits.train)} train</span>
                   <span>{num(props.dataset.splits.val)} val</span>
-                  <span>{props.dataset.classes.length} classes</span>
+                  <span>{classes(props.dataset.classes.length)}</span>
                   <span>{props.dataset.format}</span>
                 </Meta>
               </p>
@@ -55,6 +58,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
             role="radiogroup"
             aria-label="Dataset"
             aria-invalid={props.errors.dataset ? 'true' : undefined}
+            aria-describedby={props.errors.dataset ? 'dataset-error' : undefined}
             use:balanced={{ n: props.datasets.data!.length, min: 184, gap: 8 }}
           >
             <For each={props.datasets.data!} key={(d) => d.id}>
@@ -82,7 +86,7 @@ export default function DatasetSection(props: DatasetSectionProps) {
                         <Meta>
                           <span>{compact(d().splits.train)} train</span>
                           <span>{compact(d().splits.val)} val</span>
-                          <span>{d().classes.length} classes</span>
+                          <span>{classes(d().classes.length)}</span>
                         </Meta>
                       </span>
                     </label>
@@ -96,6 +100,16 @@ export default function DatasetSection(props: DatasetSectionProps) {
               }}
             </For>
           </div>
+          {/* Said at the picker, not only beside Start: a dataset with no train split cannot be trained on. */}
+          {props.errors.dataset ? (
+            <p class="ds-error" id="dataset-error" role="alert">
+              <CircleAlert size={14} strokeWidth={1.75} aria-hidden="true" />
+              <span>
+                {props.errors.dataset}
+                {props.dataset ? ' Training needs images in a train split: pick another dataset, or add training images to this one.' : ''}
+              </span>
+            </p>
+          ) : null}
         </>
       )}
     </Panel>
@@ -103,6 +117,21 @@ export default function DatasetSection(props: DatasetSectionProps) {
 }
 
 css`
+  /* As Field's error line: the danger icon and text, one readable measure. */
+  .ds-error {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-1);
+    margin-top: var(--space-2);
+    max-inline-size: var(--measure);
+    font-size: var(--type-sm-size);
+    line-height: var(--type-sm-line);
+    color: var(--danger-text);
+  }
+  .ds-error > :global(svg) {
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
   /* As many cards across as fit at 184 px, never one alone on a row (ui/balancedGrid sets --cols): four datasets are
      one row on a desktop and 2 × 2 on a laptop or tablet, never 3 + 1. */
   .cards {

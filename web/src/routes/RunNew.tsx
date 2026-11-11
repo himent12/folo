@@ -389,6 +389,11 @@ export default function RunNew() {
     ),
   );
   const valid = computed(() => prefilled.get() && Object.values(errors.get()).every((e) => e === null));
+  /**
+   * Settings no estimate can stand for: no dataset, or one with nothing to train on. The Summary shows dashes (never
+   * "0 optimizer steps" or "under 1 min"), no memory verdict, and the server is not asked.
+   */
+  const noFigures = computed(() => !!errors.get().dataset || !isInt(epochs.get(), 1, 10000) || !!errors.get().close);
   /** The first problem, named by its field (shown beside a disabled Start, as a way to that field). */
   const why = computed(() => firstError(errors.get()));
   const showWhy = computed(() => !valid.get() && !!why.get() && prefilled.get());
@@ -420,11 +425,7 @@ export default function RunNew() {
 
   const canEstimate = computed(() => hasFeature(system.data, 'run_estimate'));
   const estKey = computed(() => JSON.stringify(config.get()));
-  const { served, estimating } = serverEstimate(
-    config,
-    estKey,
-    () => canEstimate.get() && !!dataset.get() && isInt(epochs.get(), 1, 10000) && !errors.get().close && (!onCloud.get() || !!cloudPick.compute),
-  );
+  const { served, estimating } = serverEstimate(config, estKey, () => canEstimate.get() && !noFigures.get() && (!onCloud.get() || !!cloudPick.compute));
   const closeEff = computed(() => closeMosaicShown(errors.get(), served.get(), estKey.get(), augment.get(), epochs.get()));
   /**
    * Whether the figures shown answer earlier settings: the last answer stays up while the request for these is out, so
@@ -448,7 +449,7 @@ export default function RunNew() {
    * `danger` (likely won't fit), within 10% of it `warning` (tight; lib/oom's headroom), else neutral.
    */
   const vramLevel = computed(() =>
-    !memShown.get() || !gpuMem.get() ? null : vramPct.get() > 1 ? ('danger' as const) : vramPct.get() > 0.9 ? ('warning' as const) : null,
+    !memShown.get() || !gpuMem.get() || noFigures.get() ? null : vramPct.get() > 1 ? ('danger' as const) : vramPct.get() > 0.9 ? ('warning' as const) : null,
   );
   const noFit = computed(() => vramLevel.get() === 'danger');
   /**
@@ -609,6 +610,7 @@ export default function RunNew() {
   const Figures = (p: { where: string }) => (
     <EstimateFigures
       where={p.where}
+      blocked={!!errors.get().dataset}
       estReady={estReady.get()}
       sched={sched.get()}
       batchN={batchN.get()}

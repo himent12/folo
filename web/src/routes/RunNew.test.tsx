@@ -627,3 +627,25 @@ describe('New run while another run trains', () => {
     expect(said.mock.calls[0]![0]).toBe('Started q-two');
   });
 });
+
+describe('New run on a dataset with no training images', () => {
+  it('says so at the picker, keeps Start off with the reason, and shows no figures', async () => {
+    const real = api.dataset.bind(api);
+    vi.spyOn(api, 'dataset').mockImplementation(async (id) => {
+      const d = await real(id);
+      return id === 'ds_shapes' ? { ...d, splits: { train: 0, val: 0, test: 72 } } : d;
+    });
+    const asked = vi.spyOn(api, 'estimateRun');
+    await open('?dataset=ds_shapes');
+    await until(() => target.querySelector('#dataset-error'), 'the dataset error');
+    expect(target.querySelector('#dataset-error')!.textContent).toBe(
+      'No training images (72 in test). Training needs images in a train split: pick another dataset, or add training images to this one.',
+    );
+    expect(target.querySelector('#start-why')?.textContent).toBe('Dataset: No training images (72 in test).');
+    expect([...target.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].every((b) => b.disabled)).toBe(true);
+    // No "0 optimizer steps / epoch" or "under 1 min": dashes, and the server is not asked.
+    const est = target.querySelector('.summary .est')!;
+    expect([...est.querySelectorAll('dd')].map((d) => d.textContent)).toEqual(['—no estimate', '—no estimate']);
+    expect(asked.mock.calls.filter(([c]) => c.dataset_id === 'ds_shapes')).toHaveLength(0);
+  });
+});

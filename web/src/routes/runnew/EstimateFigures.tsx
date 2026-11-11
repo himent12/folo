@@ -13,6 +13,7 @@ import { timeRange } from '$lib/throughput';
 import Skeleton from '$lib/ui/Skeleton';
 import Spinner from '$lib/ui/Spinner';
 import InfoButton from '$lib/ui/InfoButton';
+import NoValue from '$lib/ui/NoValue';
 import { accumulationText } from '../run/resolved';
 import type { CloudPick } from './cloudPick';
 import type { Estimate, ShortRun, Warmup } from './estimate';
@@ -20,6 +21,8 @@ import { roughBytes, type Shown } from './summary';
 
 export interface EstimateFiguresProps {
   where: string;
+  /** Settings no figure can stand for (a dataset with nothing to train on): dashes, never 0 steps or "under 1 min". */
+  blocked: boolean;
   estReady: boolean;
   sched: Warmup;
   batchN: number;
@@ -62,7 +65,18 @@ export default function EstimateFigures(props: EstimateFiguresProps) {
 
   return (
     <>
-      {!props.estReady ? (
+      {props.blocked ? (
+        <dl class="est">
+          <dt>Schedule</dt>
+          <dd class="num">
+            <NoValue label="no estimate" />
+          </dd>
+          <dt>Est. time</dt>
+          <dd class="num">
+            <NoValue label="no estimate" />
+          </dd>
+        </dl>
+      ) : !props.estReady ? (
         <dl class="est" aria-busy="true">
           <dt>Schedule</dt>
           <dd class="num">
