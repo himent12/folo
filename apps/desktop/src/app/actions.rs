@@ -160,7 +160,8 @@ impl FoloApp {
         .detach();
     }
 
-    /// A new dataset from the server: list it first and say so, with a way to open it.
+    /// A new dataset from the server: list it where the server lists it and say so, with a way to
+    /// open it.
     fn dataset_added(&mut self, ds: crate::api::Dataset, verb: &str, cx: &mut Context<Self>) {
         let (id, name) = (ds.id.clone(), ds.name.clone());
         let body = format!("{} · {}", counted(ds.splits.total(), "image", "images"), ds.classes.join(", "));
@@ -169,11 +170,7 @@ impl FoloApp {
         // Unknown while the list isn't loaded: neither "added" nor "already added" is claimed then.
         let existed = self.store.datasets.ready().map(|l| l.iter().any(|d| d.id == ds.id));
         if let Some(list) = self.store.datasets.ready_mut() {
-            if let Some(slot) = list.iter_mut().find(|d| d.id == ds.id) {
-                *slot = ds;
-            } else {
-                list.insert(0, ds);
-            }
+            upsert_dataset(list, ds);
         }
         self.toast_with(
             if existed == Some(true) { Tone::Info } else { Tone::Accent },
@@ -422,5 +419,33 @@ impl FoloApp {
                 Err(e) => this.toast(Tone::Danger, "Export failed", Some(e.message.into()), cx),
             },
         );
+    }
+}
+
+/// Puts a dataset the server answered with into the list in the server's order (oldest first,
+/// docs/API.md: a new one last), or replaces it in place when it is already there, so the list
+/// reads the same now and after a restart.
+fn upsert_dataset(list: &mut Vec<crate::api::Dataset>, ds: crate::api::Dataset) {
+    match list.iter_mut().find(|d| d.id == ds.id) {
+        Some(slot) => *slot = ds,
+        None => list.push(ds),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::api::Backend;
+
+    #[test]
+    fn a_new_dataset_goes_where_the_server_lists_it() {
+        let api = crate::api::mock::MockBackend::new(4200, true);
+        let all = api.datasets().unwrap();
+        let mut list = all[..2].to_vec();
+        super::upsert_dataset(&mut list, all[2].clone());
+        let ids: Vec<&str> = list.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, [&all[0].id, &all[1].id, &all[2].id].map(String::as_str));
+        // Added again (a folder registered twice): replaced where it is.
+        super::upsert_dataset(&mut list, crate::api::Dataset { name: "again".into(), ..all[0].clone() });
+        assert_eq!((list.len(), list[0].name.as_str()), (3, "again"));
     }
 }
