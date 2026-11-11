@@ -74,9 +74,9 @@ impl FoloApp {
         let images = parse_images(&f.images.read(cx).text());
         let (Some(images), false) = (images, name.is_empty()) else {
             f.error = Some(if name.is_empty() {
-                "Give the dataset a name.".into()
+                ApiError::new("invalid_name", "Give the dataset a name.")
             } else {
-                "Images: a whole number from 1 to 100,000.".into()
+                ApiError::new("invalid_body", "Images: a whole number from 1 to 100,000.")
             });
             cx.notify();
             return;
@@ -109,7 +109,7 @@ impl FoloApp {
                     Err(e) if mine => {
                         if let Some(f) = this.synth.as_mut() {
                             f.submitting = false;
-                            f.error = Some(e.message);
+                            f.error = Some(e);
                         }
                     }
                     // Its dialog is gone (dismissed, or another one open): say so instead.

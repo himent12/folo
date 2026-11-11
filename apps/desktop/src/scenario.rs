@@ -29,6 +29,7 @@ pub const ALL: &[&str] = &[
     "overview+loading",
     "overview+empty",
     "overview+error",
+    "overview+lost",
     "palette",
     "palette+light",
     "datasets",
@@ -402,6 +403,13 @@ pub fn apply(app: &mut FoloApp, s: &Spec, window: &mut Window, cx: &mut Context<
         app.focus_key(key, window, cx);
         // Enough frames for the async lists (samples, the eval) to land and lay out.
         app.reveal_pending = 90;
+    }
+    // `+lost`: the server stopped answering mid-session (the banner over the page, Overview's strip).
+    if s.has("lost") {
+        let down =
+            crate::api::ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7878");
+        app.store.health = Load::Failed(down.clone());
+        app.store.system = Load::Failed(down);
     }
     let _ = Load::<()>::Idle;
 }

@@ -92,7 +92,7 @@ pub struct SynthForm {
     pub imgsz: usize,
     pub classes: usize,
     pub submitting: bool,
-    pub error: Option<String>,
+    pub error: Option<ApiError>,
 }
 
 /// The name New run suggests: the dataset, the architecture's letter and the run's number

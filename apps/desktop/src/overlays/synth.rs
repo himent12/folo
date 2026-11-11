@@ -119,7 +119,7 @@ impl FoloApp {
                         .items_center()
                         .gap(px(8.))
                         .child(icon("icons/circle-alert.svg", 14., t.danger_solid))
-                        .child(text(ty::SM, t.danger_text).child(e)),
+                        .child(text(ty::SM, t.danger_text).child(e.message)),
                 )
             });
         let cancel = self.button(

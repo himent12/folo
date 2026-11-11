@@ -135,3 +135,25 @@ fn a_runs_filter_does_not_wait_for_the_next_visit() {
     });
     assert_eq!(filter(&mut app), RunFilter::All);
 }
+
+#[test]
+fn a_dialog_forgets_could_not_reach_once_the_server_answers() {
+    use crate::api::ApiError;
+    use crate::store::Load;
+    let (mut app, window) = open();
+    let down = ApiError::new("server_unreachable", "Could not reach folo serve at 127.0.0.1:7926");
+    drive(&mut app, window, |this, w, cx| {
+        this.open_new_run(None, w, cx);
+        this.new_run.as_mut().unwrap().error = Some(down.clone());
+        this.nr_estimate = Some(("key".into(), Load::Failed(down.clone())));
+        this.store.health = Load::Failed(down.clone());
+        // The 2 s refresh, now answered.
+        this.store.system = Load::Idle;
+        this.ensure_core(cx);
+    });
+    drive(&mut app, window, |this, _, _| {
+        assert!(!this.store.unreachable());
+        assert!(this.new_run.as_ref().unwrap().error.is_none(), "the stale error is gone");
+        assert!(this.nr_estimate.is_none(), "the estimate is asked for again");
+    });
+}

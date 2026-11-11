@@ -98,7 +98,11 @@ impl FoloApp {
                     {
                         this.store.gpu_util.push_back(g);
                     }
+                    let was_down = this.store.unreachable();
                     this.store.note_reachability(r.as_ref().err());
+                    if was_down && !this.store.unreachable() {
+                        this.reconnected(cx);
+                    }
                     // Back after being unreachable: check its health now, not in 2 s.
                     if this.store.health.needs_fetch() {
                         this.ensure_core(cx);

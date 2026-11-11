@@ -57,6 +57,39 @@ impl FoloApp {
         self.retry_all(cx);
     }
 
+    /// The server answers again after it was unreachable: an open dialog's "could not reach"
+    /// error is out of date (its next try may well work), and the estimate is asked for again.
+    pub fn reconnected(&mut self, cx: &mut Context<Self>) {
+        let stale = |e: &Option<ApiError>| e.as_ref().is_some_and(|e| e.code == "server_unreachable");
+        if let Some(f) = self.new_run.as_mut()
+            && stale(&f.error)
+        {
+            f.error = None;
+        }
+        if matches!(&self.nr_estimate, Some((_, Load::Failed(e))) if e.code == "server_unreachable") {
+            // The dialog asks again on its next frame.
+            self.nr_estimate = None;
+        }
+        if let Some(f) = self.synth.as_mut()
+            && stale(&f.error)
+        {
+            f.error = None;
+        }
+        for e in [
+            self.bench.new_bench.as_mut().map(|f| &mut f.error),
+            self.bench.new_loop.as_mut().map(|f| &mut f.error),
+            self.bench.design.as_mut().map(|f| &mut f.error),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if stale(e) {
+                *e = None;
+            }
+        }
+        cx.notify();
+    }
+
     /// Connect to a running `folo serve`, or start a local `folo serve` (the real engine, bare
     /// until datasets and runs are added) when `spawn` is on; when the data dir already has a server,
     /// connect to that one instead. If neither is reachable, stay on the HTTP backend so the
