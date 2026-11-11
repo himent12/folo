@@ -18,6 +18,7 @@ import Lineage from '$lib/ui/Lineage';
 import Meta from '$lib/ui/Meta';
 // The head and precision in the words Run's Config and Compare use.
 import { HEAD_LABEL, PRECISION_LABEL } from '../run/resolved';
+import { weightsEpoch } from './weightsEpoch';
 
 export interface DetailsListProps {
   m: Model;
@@ -42,6 +43,8 @@ export interface DetailsListProps {
  * measured. It is a benchmark of the architecture, never this model's own timing, and is labelled as such.
  */
 const latency = (m: Model): number | undefined => e2eMs[m.arch];
+/** Bytes per parameter of the FOLO f16 export (as the Export dialog estimates it). */
+const F16_BYTES_PER_PARAM = 2.03;
 
 export default function DetailsList(props: DetailsListProps) {
   const aboutOpen = bindable(props, 'aboutOpen');
@@ -94,6 +97,12 @@ export default function DetailsList(props: DetailsListProps) {
           </div>
         </>
       ) : null}
+      {weightsEpoch(m(), props.run) ? (
+        <div class="kv">
+          <dt>Weights from</dt>
+          <dd class="num">{weightsEpoch(m(), props.run)}</dd>
+        </div>
+      ) : null}
       {props.stored ? (
         <div class="kv">
           <dt>Stored as</dt>
@@ -102,7 +111,14 @@ export default function DetailsList(props: DetailsListProps) {
       ) : null}
       <div class="kv">
         <dt>File size</dt>
-        <dd class="num">{bytes(m().bytes, prefs.units)}</dd>
+        {/* A training checkpoint (it has a training record) also holds the optimizer state and the averaged weights:
+            say why it is bigger than what Export writes. */}
+        <dd class="evald">
+          <span class="num">{bytes(m().bytes, prefs.units)}</span>
+          {m().trained_with && !m().fused ? (
+            <span class="faint">training checkpoint with optimizer state; exported as FOLO f16, about {bytes(m().params * F16_BYTES_PER_PARAM, prefs.units)}</span>
+          ) : null}
+        </dd>
       </div>
       <div class="kv wide">
         <dt>Classes</dt>

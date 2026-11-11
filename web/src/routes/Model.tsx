@@ -39,6 +39,7 @@ import { MODEL_SECTIONS, sectionShown, type ModelSection } from './model/section
 import { media } from '$lib/design/tokens';
 import KpiSummary from './model/KpiSummary';
 import DetailsList from './model/DetailsList';
+import { weightsEpoch } from './model/weightsEpoch';
 import ConfusionPanel from './model/ConfusionPanel';
 
 export default function Model() {
@@ -215,6 +216,7 @@ export default function Model() {
               {run()?.name ?? m().run_id}
             </a>
           </span>
+          {weightsEpoch(m(), run()) ? <span>{weightsEpoch(m(), run())}</span> : null}
           {lineageNote()}
         </>
       ) : m().source === 'published' ? (

@@ -19,6 +19,7 @@ import ErrorState from '$lib/ui/ErrorState';
 import Input from '$lib/ui/Input';
 import Panel from '$lib/ui/Panel';
 import Versus from './models/Versus';
+import { isLast } from './model/weightsEpoch';
 import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select';
 import Skeleton from '$lib/ui/Skeleton';
@@ -90,6 +91,11 @@ export default function Models() {
   const benchHere = computed(() => [measuredLatency(throughput.data, 'folo-n'), measuredTraining(throughput.data, 'folo-n')].filter(Boolean).length);
 
   const runById = computed(() => new Map<string, Run>((runs.data ?? []).map((r) => [r.id, r])));
+  /** A run's `-last` model when the run's best epoch was its last: the same weights as its `-best` (model/weightsEpoch). */
+  const sameAsBest = (m: Model) => {
+    const r = isLast(m) && m.run_id ? runById.get().get(m.run_id) : undefined;
+    return !!r && r.status === 'completed' && r.best?.epoch === r.epochs;
+  };
   const sourceName = (m: Model) => (m.run_id ? (runById.get().get(m.run_id)?.name ?? m.run_id) : '');
   const modelById = computed(() => new Map<string, Model>((models.data ?? []).map((m) => [m.id, m])));
   /** The model a trained model was fine-tuned from (its run's starting weights); null for imported weights. */
@@ -192,8 +198,10 @@ export default function Models() {
     const decimals = new Map<string, number>();
     for (const g of groups.get()) {
       if (!g.ranked || g.rows.length < 2) continue;
-      const m = bestMark(g.rows.map((r) => r.metrics?.map50_95));
+      // A run's last checkpoint that is its best epoch is the same weights: it is not a second contender.
+      const m = bestMark(g.rows.map((r) => (sameAsBest(r) ? null : r.metrics?.map50_95)));
       for (const i of m.best) marks.set(g.rows[i]!.id, bestWord(m));
+      for (const r of g.rows) if (sameAsBest(r)) marks.set(r.id, 'same as best');
       if (m.decimals > 3) for (const r of g.rows) decimals.set(r.id, m.decimals);
     }
     return { marks, decimals };
@@ -241,7 +249,12 @@ export default function Models() {
     </>
   );
 
-  const bestText = (m: () => Model) => (best.get().marks.has(m().id) ? <span class="best">{best.get().marks.get(m().id)}</span> : null);
+  const bestText = (m: () => Model) =>
+    best.get().marks.has(m().id) ? (
+      <span class="best" title={sameAsBest(m()) ? 'Best and last are the same epoch: the same weights' : undefined}>
+        {best.get().marks.get(m().id)}
+      </span>
+    ) : null;
 
   return (
     <Page
