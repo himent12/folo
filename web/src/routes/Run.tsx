@@ -193,7 +193,12 @@ export default function Run() {
     return all?.known ? `about ${timeRange(all.lo, all.hi)}` : inFront.get().length > 1 ? 'lengths not known yet' : 'length not known yet';
   });
   /** Start next is a move only when something is in front (or nothing trains, and it starts at once). */
-  const canStart = computed(() => place.get() !== null && (place.get()! > 1 || !ahead.get()));
+  const canStart = computed(() => place.get() !== null && (place.get()! > 1 || !ahead.get()) && !starting.get());
+  /**
+   * Nothing trains and the run is at the front of the queue (or the worker has taken it off): the worker is reading
+   * its dataset and building its model, until the server reports it `running`.
+   */
+  const starting = computed(() => !cloud.get() && status.get() === 'queued' && !!others.data && !ahead.get() && (place.get() ?? 1) === 1);
 
   /** Moves this run in the queue: the new order at once (here and in the queue list), the old one back on a refusal. */
   async function move(req: QueueRequest) {
@@ -389,6 +394,8 @@ export default function Run() {
       <>
         {handover.get() ? (
           phaseWhat(handover.get()!, provider.get(), prefs.units)
+        ) : starting.get() ? (
+          'Preparing data and building the model…'
         ) : place.get() !== null && place.get()! > 1 ? (
           // Behind other waiting runs: when it should start, then each run in front with its own time in brackets, in
           // queue order (what trains now, then the waiting ones), so the sum is checkable. A run whose length the server
@@ -537,7 +544,9 @@ export default function Run() {
               resuming={resuming.get()}
               onresume={resume}
               waiting={queuedOnly.get() ? waiting : undefined}
-              waitingTitle={handover.get() ? phaseTitle(handover.get()!, provider.get()) : place.get() !== null ? queuePlace(place.get()!) : undefined}
+              waitingTitle={
+                handover.get() ? phaseTitle(handover.get()!, provider.get()) : starting.get() ? 'Starting' : place.get() !== null ? queuePlace(place.get()!) : undefined
+              }
               waitingIcon={handover.get() && beforeTraining(handover.get()!.phase) ? CloudUpload : undefined}
               waitingActions={canStart.get() ? startNext : undefined}
               warnings={warnings.get()}

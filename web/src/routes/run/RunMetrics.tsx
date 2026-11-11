@@ -36,7 +36,7 @@ import Segmented from '$lib/ui/Segmented';
 import Select from '$lib/ui/Select.tsx';
 import { media } from '$lib/design/tokens';
 import MetricStrip, { type Tab, type TabDef } from './MetricStrip';
-import { EpochSeries, joinExtents, StepSeries, type Extent } from './metricSeries';
+import { EpochSeries, joinExtents, liveHorizon, StepSeries, type Extent } from './metricSeries';
 
 const CHART_KEY = 'folo.run.chartOpen';
 /**
@@ -213,7 +213,13 @@ export default function RunMetrics(props: RunMetricsProps) {
     const le = lastEpoch.get();
     return Math.max(ls ? ls.step / spe : 0, le ? le.epoch : 0);
   });
-  const xDomain = computed(() => runHorizon(observed.get(), props.run.epochs, horizon.get()), { equals: (a, b) => a[0] === b[0] && a[1] === b[1] });
+  // While the run trains, "So far" grows in steps (./metricSeries liveHorizon), so the axis holds still.
+  // The first epoch carries the start (loading, compiling the GPU pipelines): its time left swings by minutes. The ETA
+  // shows once an epoch has finished, or halfway through a one-epoch run.
+  const etaReady = computed(() => !!lastEpoch.get() || (props.run.epochs === 1 && observed.get() >= 0.5));
+  const xDomain = computed(() => (live.get() ? liveHorizon : runHorizon)(observed.get(), props.run.epochs, horizon.get()), {
+    equals: (a, b) => a[0] === b[0] && a[1] === b[1],
+  });
   const epochTitle = (x: number) => `Epoch ${x.toFixed(x % 1 === 0 ? 0 : 1)}`;
 
   /**
@@ -553,6 +559,7 @@ export default function RunMetrics(props: RunMetricsProps) {
             closeId={closeId}
             closeText={closeText.get()}
             elapsed={elapsed.get()}
+            etaReady={etaReady.get()}
             tabs={tabs.get()}
             bind:tab={tab}
             unitOf={unitOf}
@@ -637,6 +644,10 @@ export default function RunMetrics(props: RunMetricsProps) {
                   // A tab swap fades the new chart in over 160 ms (0 under reduced motion, ui/motion).
                   <Key when={tab.get()}>
                     <div class="swap" in:fade={{ duration: motion(160) }}>
+                      {/* No point yet: the legend's row is held empty, so the plot does not drop when it appears. */}
+                      {!queued() && !series.get().some((x) => x.points.length > 0 && !x.ghost && !x.context && !x.lower) ? (
+                        <div class="legend-slot" aria-hidden="true"></div>
+                      ) : null}
                       <LineChart
                         series={series.get()}
                         height={height.get()}
@@ -887,5 +898,9 @@ css`
   /* The fading wrapper of a swapped chart: it takes the chart's place in the layout. */
   .swap {
     min-width: 0;
+  }
+  /* The legend's line and the chart's gap under it (lib/charts LineChart, ChartLegend). */
+  .legend-slot {
+    height: calc(var(--type-sm-line) + var(--space-2));
   }
 `;
