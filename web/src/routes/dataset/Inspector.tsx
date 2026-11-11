@@ -23,6 +23,7 @@ import Spinner from '$lib/ui/Spinner';
 import { tooltip } from '$lib/ui/tooltip';
 import type { ImagePager } from './pager';
 import { stem } from './imagePath';
+import { count } from './count';
 import InspectorRail from './InspectorRail';
 
 export interface InspectorProps {
@@ -376,7 +377,7 @@ export default function Inspector(props: InspectorProps) {
           role="group"
           aria-roledescription="image viewer"
           tabindex={0}
-          aria-label={img.get() ? `${stem(im().file)} with ${im().boxes.length} labelled boxes` : 'Loading image'}
+          aria-label={img.get() ? `${stem(im().file)} with ${count(im().boxes.length, 'labelled box', 'labelled boxes')}` : 'Loading image'}
           aria-describedby="insp-keys"
           onkeydown={onviewportkey}
           onpointerdown={onpointerdown}

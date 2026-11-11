@@ -5,7 +5,7 @@ import Tags from '$icons/tags';
 import { bindable, computed, createUniqueId, css, effect, signal } from 'fw';
 import { hub } from '$lib/api/index';
 import type { CreateDataset } from '$lib/api/types';
-import { duration, num } from '$lib/format';
+import { duration } from '$lib/format';
 import { href, router } from '$lib/router';
 import Button from '$lib/ui/Button';
 import ClassChips, { addClasses } from '$lib/ui/ClassChips';
@@ -18,6 +18,7 @@ import Segmented from '$lib/ui/Segmented';
 import Tabs from '$lib/ui/Tabs';
 import { toast } from '$lib/ui/toast';
 import { noTraining } from '../dataset/health';
+import { count } from '../dataset/count';
 import { datasetsChanged } from './changes';
 import { isUnlabeled } from './problem';
 import { cleanPath, isFullPath, NAME_RE, nameFromPath, suggestName, uniqueName } from './names';
@@ -156,7 +157,7 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
     if (!valid.get() || busy.get()) return;
     const m = mode.get();
     const images = Math.round(sImages.get() ?? 0);
-    work.set({ what: m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${num(images)} images`, since: Date.now() });
+    work.set({ what: m === 'folder' ? `Reading ${folderName.get()}` : `Generating ${count(images, 'image')}`, since: Date.now() });
     try {
       // Registering a folder that is already registered answers with that dataset (docs/API.md), not a copy.
       const before = m === 'folder' ? (props.known ?? fetched.peek() ?? (await hub.api.datasets().catch(() => []))) : [];
@@ -174,20 +175,20 @@ export default function AddDatasetDialog(props: AddDatasetDialogProps) {
       const title = known ? `Already registered as ${ds.name}` : m === 'folder' ? 'Dataset registered' : 'Synthetic dataset ready';
       // Where the images went, when none can train (a COCO test file registered alone puts them all in test).
       const nt = noTraining(ds);
-      const count = nt ? `${ds.name} · ${nt.where}, none to train on` : `${ds.name} · ${num(ds.splits.train + ds.splits.val + ds.splits.test)} images`;
+      const detail = nt ? `${ds.name} · ${nt.where}, none to train on` : `${ds.name} · ${count(ds.splits.train + ds.splits.val + ds.splits.test, 'image')}`;
       work.set(null);
       if (!known) datasetsChanged();
       if (!open.peek()) {
         // Dismissed while it ran: wherever the person is now, they stay there; the toast offers the dataset.
         const go = { label: 'Open', run: () => router.go(`/datasets/${ds.id}`) };
         if (known) toast.info(title, 'That folder is in the list.', go);
-        else toast.success(title, count, go);
+        else toast.success(title, detail, go);
         return;
       }
       // The dialog closes first: what was added is said over the dataset's page it opens.
       open.set(false);
       if (known) toast.info(title, 'That folder is in the list; opening it.');
-      else toast.success(title, count);
+      else toast.success(title, detail);
       router.go(`/datasets/${ds.id}`);
     } catch (err) {
       work.set(null);

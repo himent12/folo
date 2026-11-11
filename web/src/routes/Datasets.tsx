@@ -26,6 +26,7 @@ import Meta from '$lib/ui/Meta';
 import { rowNav } from '$lib/ui/rowNav';
 import AddDatasetDialog from './datasets/AddDatasetDialog';
 import { imageCount } from './dataset/health';
+import { count } from './dataset/count';
 import { datasetChanges } from './datasets/changes';
 import { datasetProblem, PROBLEM_LABEL, type ListedDataset } from './datasets/problem';
 
@@ -302,8 +303,8 @@ export default function Datasets() {
                         <span class="name truncate">{d().name}</span>{' '}
                         <span class="m-meta m-total num">
                           <Meta>
-                            <span>{num(imageCount(d()))} images</span>
-                            <span>{d().classes.length} classes</span>
+                            <span>{count(imageCount(d()), 'image')}</span>
+                            <span>{count(d().classes.length, 'class')}</span>
                           </Meta>
                         </span>{' '}
                         <span class="m-meta num">
@@ -359,8 +360,8 @@ export default function Datasets() {
                 {shown.get().length < datasets.data.length ? `${shown.get().length} of ${datasets.data.length}` : shown.get().length}{' '}
                 {datasets.data.length === 1 ? 'dataset' : 'datasets'}
               </span>{' '}
-              <span>{num(totals.get().images)} images</span>{' '}
-              <span>{num(totals.get().boxes)} boxes</span>
+              <span>{count(totals.get().images, 'image')}</span>{' '}
+              <span>{count(totals.get().boxes, 'box')}</span>
             </Meta>
           </p>
         ) : null}

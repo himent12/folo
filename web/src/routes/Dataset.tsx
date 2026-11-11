@@ -31,6 +31,7 @@ import type { Density } from '$lib/ui/TileGrid';
 import { toast } from '$lib/ui/toast';
 import ToggleButton from '$lib/ui/ToggleButton';
 import ClassPicker from './dataset/ClassPicker';
+import { count } from './dataset/count';
 import DisplayMenu from './dataset/DisplayMenu';
 import { findingCount, findingLabel, healthChecks, imageCount, noTraining } from './dataset/health';
 import ImageGrid from './dataset/ImageGrid';
@@ -294,8 +295,8 @@ export default function Dataset() {
                   <span class="meta-sm num">
                     <Meta line>
                       <span class="faint">{dd().format}</span>
-                      <span>{num(total.get())} images</span>
-                      <span>{dd().classes.length} classes</span>
+                      <span>{count(total.get(), 'image')}</span>
+                      <span>{count(dd().classes.length, 'class')}</span>
                     </Meta>
                   </span>
                 ) : (
@@ -307,7 +308,7 @@ export default function Dataset() {
                     <span class="num">{num(dd().splits.train)} train</span>
                     <span class="num">{num(dd().splits.val)} val</span>
                     <span class="num">{num(dd().splits.test)} test</span>
-                    <span class="num">{dd().classes.length} classes</span>
+                    <span class="num">{count(dd().classes.length, 'class')}</span>
                     <span class="faint">added {ago(dd().created)}</span>
                   </Meta>
                 )}
@@ -420,10 +421,10 @@ export default function Dataset() {
                         </>
                       ) : filtered.get() ? (
                         <>
-                          {matched()} of {num(total.get())} images
+                          {matched()} of {count(total.get(), 'image')}
                         </>
                       ) : (
-                        <>{num(total.get())} images</>
+                        <>{count(total.get(), 'image')}</>
                       )}
                     </span>
                     {filtered.get() ? (
