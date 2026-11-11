@@ -22,7 +22,10 @@ use crate::{
 };
 
 /// The fake-clock step while settling.
-const SETTLE_STEP: Duration = Duration::from_millis(50);
+pub(crate) const SETTLE_STEP: Duration = Duration::from_millis(50);
+
+/// How long animations may run before the capture, by default.
+pub(crate) const SETTLE_TIME: Duration = Duration::from_millis(2200);
 
 /// A `--shot` request from the command line.
 pub(crate) struct ShotArgs {
@@ -49,7 +52,7 @@ impl ShotArgs {
         };
         let scale_factor = number("--scale", 1.0)?;
         anyhow::ensure!(scale_factor > 0.0, "--scale must be positive");
-        let settle_ms = number("--shot-time", 2200.0)?;
+        let settle_ms = number("--shot-time", SETTLE_TIME.as_millis() as f32)?;
         anyhow::ensure!(settle_ms >= 0.0, "--shot-time must not be negative");
         Ok(Some(ShotArgs {
             settle_time: Duration::from_millis(settle_ms as u64),

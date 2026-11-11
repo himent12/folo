@@ -5,7 +5,7 @@
 //! Performance: the window keeps two frames (`rendered_frame`, `next_frame`) and swaps them after each draw;
 //! `Frame::clear` empties every list but keeps its capacity, so a steady-state frame allocates nothing a
 //! reused `Vec` avoids. Element states are moved, not cloned, from the previous frame when touched again.
-use std::{any::Any, collections::HashMap};
+use std::any::Any;
 
 use smallvec::SmallVec;
 
@@ -158,8 +158,10 @@ pub(crate) struct DeferredDraw {
     pub(crate) absolute_offset: crate::Point<Pixels>,
 }
 
-/// Element state kept across frames, by element id path and state type.
-pub(crate) type ElementStateMap = HashMap<(GlobalElementId, std::any::TypeId), Box<dyn Any>>;
+/// Element state kept across frames, by element id path and state type (the path's hash is precomputed;
+/// the Fx hasher mixes it with the type's).
+pub(crate) type ElementStateMap =
+    crate::text::fx_hash::FxHashMap<(GlobalElementId, std::any::TypeId), Box<dyn Any>>;
 
 /// Everything one paint produced.
 pub(crate) struct Frame {
@@ -185,6 +187,8 @@ pub(crate) struct Frame {
     pub(crate) window_control_hitboxes: Vec<WindowControlHitbox>,
     /// `deferred` elements, drawn after the tree.
     pub(crate) deferred_draws: Vec<DeferredDraw>,
+    /// Opacity animations that tick without a redraw (`paint_animation.rs`).
+    pub(crate) paint_animations: Vec<crate::window::PaintAnimation>,
 }
 
 impl Frame {
@@ -192,7 +196,7 @@ impl Frame {
     pub(crate) fn new() -> Self {
         Frame {
             focus: None,
-            element_states: HashMap::new(),
+            element_states: Default::default(),
             hitboxes: Vec::new(),
             mouse_listeners: Vec::new(),
             dispatch_tree: DispatchTree::new(),
@@ -202,6 +206,7 @@ impl Frame {
             tooltip_requests: Vec::new(),
             window_control_hitboxes: Vec::new(),
             deferred_draws: Vec::new(),
+            paint_animations: Vec::new(),
         }
     }
 
@@ -219,6 +224,7 @@ impl Frame {
         self.tooltip_requests.clear();
         self.window_control_hitboxes.clear();
         self.deferred_draws.clear();
+        self.paint_animations.clear();
     }
 
     /// Hit tests `position` against this frame's hitboxes (GPUI's `Frame::hit_test`): topmost first, each

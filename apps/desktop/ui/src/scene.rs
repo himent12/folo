@@ -20,6 +20,12 @@ fn next_id() -> u64 {
 pub struct Scene {
     /// The primitives, in painter's order.
     pub primitives: Vec<Primitive>,
+    /// Opacity groups (`opacity.rs`): factors faded into spans of `primitives`, changeable after paint.
+    pub opacity_groups: Vec<crate::OpacityGroup>,
+    /// The spans of `primitives` painted inside a group, each with its innermost group.
+    pub(crate) group_spans: Vec<crate::opacity::GroupSpan>,
+    /// The spans' primitives at their base colours (no group factor), in span order.
+    pub(crate) group_base: Vec<Primitive>,
 }
 
 impl Scene {
@@ -31,6 +37,9 @@ impl Scene {
     /// Removes every primitive, keeping the capacity.
     pub fn clear(&mut self) {
         self.primitives.clear();
+        self.opacity_groups.clear();
+        self.group_spans.clear();
+        self.group_base.clear();
     }
 
     /// Appends any primitive.

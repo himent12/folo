@@ -18,6 +18,10 @@ publish = false
 name = "folo-desktop"
 path = "src/main.rs"
 
+[features]
+# Counts allocations for `--bench-frames` (folo-ui's frame bench); off in every shipped build.
+bench-alloc = []
+
 [dependencies]
 folo-ui = { path = "ui" }
 # The API types shared with folo-server and the CLI (root workspace, by path).

@@ -6,7 +6,7 @@
 //! dropped. Anything that must survive to the next frame goes in element state keyed by `GlobalElementId`
 //! (`Window::with_element_state`).
 
-use std::{any::Any, fmt, mem, panic, sync::Arc};
+use std::{any::Any, fmt, hash::Hash, mem, panic, sync::Arc};
 
 use smallvec::SmallVec;
 
@@ -261,9 +261,10 @@ impl<E: Element> ElementObject for Drawable<E> {
     fn request_layout(&mut self, window: &mut Window, cx: &mut App) -> LayoutId {
         match mem::replace(&mut self.phase, ElementDrawPhase::Painted) {
             ElementDrawPhase::Start => {
+                window.frame_times.elements += 1;
                 let global_id = self.element.id().map(|id| {
                     window.element_id_stack.push(id);
-                    GlobalElementId(Arc::from(window.element_id_stack.as_slice()))
+                    GlobalElementId::new(window.element_id_stack.as_slice())
                 });
                 let (layout_id, request_layout) =
                     self.element.request_layout(global_id.as_ref(), None, window, cx);
@@ -683,10 +684,34 @@ impl From<(SharedString, usize)> for ElementId {
     }
 }
 
-/// The path of element ids from the root view to an element: the key of its state across frames. One hash
-/// of a short inline path per lookup.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct GlobalElementId(pub(crate) Arc<[ElementId]>);
+/// The path of element ids from the root view to an element: the key of its state across frames. The
+/// path is hashed once, when the id is made; lookups hash that one word (`Hash` writes it) and compare the
+/// paths only when the hashes are equal.
+#[derive(Clone, Debug, Default)]
+pub struct GlobalElementId(pub(crate) Arc<[ElementId]>, u64);
+
+impl GlobalElementId {
+    /// The id of the element at the end of `path`.
+    pub(crate) fn new(path: &[ElementId]) -> Self {
+        let mut hasher = crate::text::fx_hash::FxHasher::default();
+        path.hash(&mut hasher);
+        GlobalElementId(Arc::from(path), std::hash::Hasher::finish(&hasher))
+    }
+}
+
+impl PartialEq for GlobalElementId {
+    fn eq(&self, other: &Self) -> bool {
+        self.1 == other.1 && (Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0)
+    }
+}
+
+impl Eq for GlobalElementId {}
+
+impl std::hash::Hash for GlobalElementId {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u64(self.1);
+    }
+}
 
 /// GPUI's inspector id. We have no inspector: a unit type the `Element` trait still passes (as `None`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]

@@ -3,7 +3,7 @@
 
 #[cfg(any(test, feature = "test-support"))]
 mod fixed;
-mod fx_hash;
+pub(crate) mod fx_hash;
 mod layout_cache;
 mod line;
 mod line_layout;

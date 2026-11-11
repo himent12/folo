@@ -8,8 +8,9 @@
 //! back are those divided by the scale factor, with parent origins added (cached per node). Available
 //! space and measure results cross the seam scaled the same way.
 //!
-//! Performance: the taffy tree is cleared, not rebuilt, each frame (its node storage keeps capacity), and
-//! so are the bounds cache and the child id buffer; measure functions are boxed once per measured node.
+//! Performance: the tree (`layout_tree.rs`) runs taffy's algorithms over its own nodes and keeps last
+//! frame's results, so a subtree that did not change is answered from them instead of laid out again,
+//! with exactly the results a fresh layout gives; measure functions are boxed once per measured node.
 
 use std::collections::{HashMap, HashSet};
 
@@ -17,22 +18,13 @@ use smallvec::SmallVec;
 
 use crate::{App, AvailableSpace, Bounds, LayoutId, Pixels, Point, Size, Style, Window, point, size};
 
-/// A measure function for a leaf whose size depends on its content (text, `canvas` with a size).
-pub(crate) type NodeMeasureFn =
-    Box<dyn FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>>;
+use super::layout_tree::LayoutTree;
+pub(crate) use super::layout_tree::{MeasureKey, Measured};
 
-/// The context taffy keeps per measured node.
-pub(crate) struct NodeContext {
-    /// The measure function.
-    pub(crate) measure: NodeMeasureFn,
-}
-
-const EXPECT_MESSAGE: &str = "taffy layout errors are avoided by construction";
-
-/// The window's taffy tree and the bounds it computed this frame.
+/// The window's layout tree and the bounds it computed this frame.
 pub(crate) struct TaffyLayoutEngine {
-    /// The tree.
-    pub(crate) taffy: taffy::TaffyTree<NodeContext>,
+    /// The tree (it keeps last frame's results for the subtrees that did not change).
+    pub(crate) tree: LayoutTree,
     /// Absolute bounds already computed this frame, by node.
     pub(crate) absolute_layout_bounds: HashMap<LayoutId, Bounds<Pixels>>,
     /// Roots computed this frame (so `compute_layout` runs once per root and available space).
@@ -44,19 +36,17 @@ pub(crate) struct TaffyLayoutEngine {
 impl TaffyLayoutEngine {
     /// An empty engine (taffy's rounding on, as GPUI).
     pub(crate) fn new() -> Self {
-        let mut taffy = taffy::TaffyTree::new();
-        taffy.enable_rounding();
         TaffyLayoutEngine {
-            taffy,
+            tree: LayoutTree::default(),
             absolute_layout_bounds: HashMap::new(),
             computed_layouts: HashSet::new(),
             child_buffer: Vec::new(),
         }
     }
 
-    /// Empties the tree for the next frame, keeping capacity.
+    /// Starts the next frame: this frame's nodes become the ones the next frame can reuse.
     pub(crate) fn clear(&mut self) {
-        self.taffy.clear();
+        self.tree.clear();
         self.absolute_layout_bounds.clear();
         self.computed_layouts.clear();
     }
@@ -72,26 +62,19 @@ impl TaffyLayoutEngine {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
         self.child_buffer.clear();
         self.child_buffer.extend(children.into_iter().map(|id| id.0));
-        let node = if self.child_buffer.is_empty() {
-            self.taffy.new_leaf(taffy_style)
-        } else {
-            self.taffy.new_with_children(taffy_style, &self.child_buffer)
-        };
-        LayoutId(node.expect(EXPECT_MESSAGE))
+        LayoutId(self.tree.add(taffy_style, &self.child_buffer, None))
     }
 
-    /// Adds a leaf measured by `measure`.
+    /// Adds a leaf measured by `measured`.
     pub(crate) fn request_measured_layout(
         &mut self,
         style: &Style,
         rem_size: Pixels,
         scale_factor: f32,
-        measure: NodeMeasureFn,
+        measured: Measured,
     ) -> LayoutId {
         let taffy_style = style.to_taffy(rem_size, scale_factor);
-        LayoutId(
-            self.taffy.new_leaf_with_context(taffy_style, NodeContext { measure }).expect(EXPECT_MESSAGE),
-        )
+        LayoutId(self.tree.add(taffy_style, &[], Some(measured)))
     }
 
     /// Computes the layout under `id` in `available_space` (measured leaves call back into the window).
@@ -108,7 +91,7 @@ impl TaffyLayoutEngine {
             stack.push(id);
             while let Some(id) = stack.pop() {
                 self.absolute_layout_bounds.remove(&id);
-                stack.extend(self.taffy.children(id.0).expect(EXPECT_MESSAGE).into_iter().map(LayoutId));
+                stack.extend(self.tree.children(id.0).iter().copied().map(LayoutId));
             }
         }
 
@@ -120,35 +103,7 @@ impl TaffyLayoutEngine {
         let available_space = size(scale(available_space.width), scale(available_space.height));
         let taffy_space =
             taffy::Size { width: available_space.width.into(), height: available_space.height.into() };
-
-        self.taffy
-            .compute_layout_with_measure(
-                id.0,
-                taffy_space,
-                |known_dimensions, available_space, _id, node_context, _style| {
-                    let Some(node_context) = node_context else {
-                        return taffy::Size::ZERO;
-                    };
-                    let known_dimensions = Size {
-                        width: known_dimensions.width.map(|e| Pixels(e / scale_factor)),
-                        height: known_dimensions.height.map(|e| Pixels(e / scale_factor)),
-                    };
-                    let unscale = |space: taffy::AvailableSpace| match AvailableSpace::from(space) {
-                        AvailableSpace::Definite(pixels) => {
-                            AvailableSpace::Definite(Pixels(pixels.0 / scale_factor))
-                        }
-                        other => other,
-                    };
-                    let available_space =
-                        size(unscale(available_space.width), unscale(available_space.height));
-                    let measured = (node_context.measure)(known_dimensions, available_space, window, cx);
-                    taffy::Size {
-                        width: measured.width.0 * scale_factor,
-                        height: measured.height.0 * scale_factor,
-                    }
-                },
-            )
-            .expect(EXPECT_MESSAGE);
+        self.tree.compute(id.0, taffy_space, window, cx);
     }
 
     /// A node's bounds relative to the root it was computed under: taffy's rounded device pixels divided by
@@ -157,12 +112,12 @@ impl TaffyLayoutEngine {
         if let Some(bounds) = self.absolute_layout_bounds.get(&id) {
             return *bounds;
         }
-        let layout = self.taffy.layout(id.0).expect(EXPECT_MESSAGE);
+        let layout = self.tree.final_layout(id.0);
         let mut bounds = Bounds {
             origin: point(Pixels(layout.location.x / scale_factor), Pixels(layout.location.y / scale_factor)),
             size: size(Pixels(layout.size.width / scale_factor), Pixels(layout.size.height / scale_factor)),
         };
-        if let Some(parent) = self.taffy.parent(id.0) {
+        if let Some(parent) = self.tree.parent(id.0) {
             bounds.origin += self.layout_bounds(LayoutId(parent), scale_factor).origin;
         }
         self.absolute_layout_bounds.insert(id, bounds);
@@ -188,9 +143,26 @@ impl Window {
     where
         F: FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels> + 'static,
     {
+        let measured = Measured { measure: Box::new(measure), key: None, reset: None };
         let rem_size = self.rem_size();
         let scale_factor = self.scale_factor();
-        self.layout_engine_mut().request_measured_layout(&style, rem_size, scale_factor, Box::new(measure))
+        self.layout_engine_mut().request_measured_layout(&style, rem_size, scale_factor, measured)
+    }
+
+    /// `request_measured_layout` for a measure function whose results depend only on `key` and the requests
+    /// (so the node can be reused next frame); `reset` forgets the state measuring leaves behind.
+    pub(crate) fn request_keyed_measured_layout(
+        &mut self,
+        style: Style,
+        key: MeasureKey,
+        reset: impl Fn() + 'static,
+        measure: impl FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
+        + 'static,
+    ) -> LayoutId {
+        let measured = Measured { measure: Box::new(measure), key: Some(key), reset: Some(Box::new(reset)) };
+        let rem_size = self.rem_size();
+        let scale_factor = self.scale_factor();
+        self.layout_engine_mut().request_measured_layout(&style, rem_size, scale_factor, measured)
     }
 
     /// Computes the layout under `layout_id` in `available_space`.

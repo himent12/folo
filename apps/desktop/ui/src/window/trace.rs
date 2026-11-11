@@ -28,6 +28,8 @@ pub struct FrameTimes {
     pub primitives: u32,
     /// Hitboxes in the frame.
     pub hitboxes: u32,
+    /// Elements laid out this frame (every `AnyElement` that ran `request_layout`).
+    pub elements: u32,
 }
 
 impl FrameTimes {
@@ -59,7 +61,7 @@ pub(crate) fn micros_since(start: Instant) -> u32 {
 /// Prints `times` as one line to stderr.
 pub(crate) fn print_frame(times: &FrameTimes) {
     eprintln!(
-        "folo-ui frame {}: build {} (render {}) layout {} prepaint {} paint {} finish {} raster {} present {} = {} us ({} prims, {} hitboxes)",
+        "folo-ui frame {}: build {} (render {}) layout {} prepaint {} paint {} finish {} raster {} present {} = {} us ({} prims, {} elements, {} hitboxes)",
         times.frame,
         times.build_us,
         times.render_us,
@@ -71,6 +73,7 @@ pub(crate) fn print_frame(times: &FrameTimes) {
         times.present_us,
         times.total_us(),
         times.primitives,
+        times.elements,
         times.hitboxes,
     );
 }
