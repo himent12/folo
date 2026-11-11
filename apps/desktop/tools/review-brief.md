@@ -40,7 +40,7 @@ Shift = ×10, Home / End, Esc clears, same cursor and legend values as the mouse
 through `bind` / `bind_ring` (Enter / Space, focus ring).
 
 Settled decisions (reviewers have argued both ways; the current choice stays unless it causes a defect, so spend
-your issues elsewhere): Settings is capped at 880 px, left-aligned; the run KPI strip keeps fixed gaps rather than
+your issues elsewhere): Settings is capped at 880 px and centred in the page, its header with it; the run KPI strip keeps fixed gaps rather than
 spreading tiles; "close mosaic" is named on the top-row charts only; the learning-rate power of ten sits in the card
 caption; the selected detection box and its chip take accent.solid (design/README's selection rule), not a class colour
 with an extra ring, and the other boxes' outlines drop to 30 % (the same rule; their chips stay opaque and readable); the chart
@@ -57,7 +57,7 @@ power ("0.10×10⁻³"), so a card has one power and the value still reads alone
 New run's section heads stay 14 px semibold and the dialog title is 20 px semibold above them (one round asked for
 larger heads, the next said they outweighed the title). The run page's "Precision / Recall" card and the model page's
 "Precision–recall" card are different charts: two metrics over epochs, and one curve of precision against recall.
-Their names differ on purpose. The first-run Overview is capped at 1040 px and left-aligned like Settings. One round said the uncapped
+Their names differ on purpose. The first-run Overview is capped at 1040 px and left-aligned. One round said the uncapped
 cards stretched three short steps across 1,600 px, the next asked them to fill a wide window. The Playground rail's sliders
 are inline rows ("label · slider · value") for every model, so the rail never reflows when the model changes (asked for
 in round 44; round 47 asked for stacked rows again). New run's End-to-end and Mixed precision rows keep to the left column, their

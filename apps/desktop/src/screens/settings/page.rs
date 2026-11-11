@@ -15,7 +15,8 @@ use crate::theme::{Mode, radius, theme, ty};
 use crate::ui::*;
 
 /// The settings column's widest: wide enough not to read as a narrow form, close enough that a
-/// label and its control (right edge) stay one glance apart on big windows.
+/// label and its control (right edge) stay one glance apart on big windows. The column, and the
+/// page header with it, is centred in the page.
 pub(super) const COLUMN_MAX: f32 = 880.;
 
 impl FoloApp {
@@ -30,7 +31,11 @@ impl FoloApp {
                 "Connection, this machine's speed, appearance and keyboard shortcuts."
             },
             vec![],
-        );
+        )
+        // The header sits on the column's edges, so the two centre together.
+        .w_full()
+        .max_w(px(COLUMN_MAX))
+        .mx_auto();
         let row = |title: &str, help: AnyElement, control: AnyElement| {
             div()
                 .w_full()
@@ -287,13 +292,15 @@ impl FoloApp {
                     ),
             ),
         );
-        // A readable column, left-aligned: labels stay near their controls at any window width.
+        // A readable column, centred in the page: labels stay near their controls at any window
+        // width, and a wide window's spare room falls evenly on both sides.
         let body = div()
             .flex()
             .flex_col()
             .gap(px(16.))
             .w_full()
             .max_w(px(COLUMN_MAX))
+            .mx_auto()
             .child(connection)
             // Where work runs, both: this server, then the compute it can rent or reach.
             .when(self.cloud_on(), |d| {
