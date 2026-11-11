@@ -9,7 +9,9 @@
 #   PASSES      space-separated <seeds>:<jobs> passes, run in order (default "0,1,2:1": every seed, one run at a
 #               time). "0:1 1,2:2" trains seed 0 alone (clean training times) and seeds 1 and 2 two at a time on
 #               the GPU (cheaper; their times are recorded as shared).
-#   EPOCHS (100), DATASETS (all), WEIGHTS (yolo26n.pt; yolo26s.pt for an s row), ULTRALYTICS_VERSION (8.4.198),
+#   ORDER       seed (default) or dataset: run_ultralytics.py --order; "dataset" with DATASETS listing the longest
+#               dataset first keeps the long runs from finishing alone at the end of a --jobs pass.
+#   EPOCHS (100), DATASETS (all, in this order), WEIGHTS (yolo26n.pt; yolo26s.pt for an s row), ULTRALYTICS_VERSION (8.4.198),
 #   WORKERS (Ultralytics' default), LABEL (where it runs, for the result files; default "pod <GPU name>"),
 #   SERVE_PORT (when set, OUT_DIR is served over HTTP on that port from the start, so log.txt can be followed and
 #               results.tgz downloaded; the pod is terminated from outside).
@@ -39,7 +41,8 @@ for pass in ${PASSES:-0,1,2:1}; do
     python3 "$HERE/run_ultralytics.py" \
         --data-root "$OUT/data" --work-dir "$OUT/work" --results "$OUT/results" \
         --weights "$OUT/weights/${WEIGHTS:-yolo26n.pt}" --download-weights --device 0 \
-        --seeds "${pass%%:*}" --jobs "${pass##*:}" --epochs "${EPOCHS:-100}" ${DATASETS:+--datasets "$DATASETS"} \
+        --seeds "${pass%%:*}" --jobs "${pass##*:}" --order "${ORDER:-seed}" --epochs "${EPOCHS:-100}" \
+        ${DATASETS:+--datasets "$DATASETS"} \
         ${WORKERS:+--workers "$WORKERS"} --compute-label "${LABEL:-pod $GPU}" || echo "some runs failed (see above)"
 done
 

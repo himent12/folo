@@ -215,6 +215,13 @@ def run_one(args) -> None:
     print(f"{key.stem}: AP {metrics['ap']:.4f} AP50 {metrics['ap50']:.4f} in {train_wall:.0f} s", flush=True)
 
 
+def run_order(seeds: list[int], names: list[str], order: str) -> list[tuple[int, str]]:
+    """The (seed, dataset) pairs in the order they are trained: seed-major or dataset-major (--order)."""
+    if order == "dataset":
+        return [(seed, name) for name in names for seed in seeds]
+    return [(seed, name) for seed in seeds for name in names]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Fine-tune Ultralytics YOLO26n on the benchmark datasets")
     ap.add_argument("--data-root", required=True, help="folder of datasets.py fetch")
@@ -237,6 +244,14 @@ def main(argv: list[str] | None = None) -> int:
         default=1,
         help="runs trained side by side on the one GPU (their training times are then shared, and recorded so)",
     )
+    ap.add_argument(
+        "--order",
+        choices=("seed", "dataset"),
+        default="seed",
+        help="seed: every dataset's seed 0, then seed 1, ... (a matrix cut short still has every dataset); dataset: "
+        "every seed of the first --datasets entry, then the next (with the longest dataset first and --jobs > 1, the "
+        "long runs share the GPU at the start instead of finishing alone at the end)",
+    )
     ap.add_argument("--fetch", action="store_true", help="fetch the datasets into --data-root first")
     ap.add_argument("--compute-label", default=None, help="where this runs, for the result files (e.g. runpod RTX 4090)")
     ap.add_argument("--one", action="store_true", help=argparse.SUPPRESS)
@@ -254,21 +269,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.fetch:
         for name in names:
             datasets.fetch(datasets.SPECS[name], Path(args.data_root))
-    # Seed-major, so a matrix cut short still has every dataset.
     todo = []
-    for seed in seeds:
-        for name in names:
-            key = common.RunKey("ultralytics", model_name(weights), name, "pretrained", seed)
-            if key.result_path(Path(args.results)).is_file():
-                print(f"{key.stem}: done already, skipped", flush=True)
-                continue
-            cmd = [sys.executable, str(Path(__file__).resolve()), "--one", "--dataset", name, "--seed", str(seed)]
-            for opt in ("data_root", "work_dir", "results", "epochs", "imgsz", "batch", "device", "workers", "compute_label", "jobs"):
-                val = getattr(args, opt)
-                if val is not None:
-                    cmd += [f"--{opt.replace('_', '-')}", str(val)]
-            cmd += ["--weights", str(weights)]
-            todo.append((key, cmd))
+    for seed, name in run_order(seeds, names, args.order):
+        key = common.RunKey("ultralytics", model_name(weights), name, "pretrained", seed)
+        if key.result_path(Path(args.results)).is_file():
+            print(f"{key.stem}: done already, skipped", flush=True)
+            continue
+        cmd = [sys.executable, str(Path(__file__).resolve()), "--one", "--dataset", name, "--seed", str(seed)]
+        for opt in ("data_root", "work_dir", "results", "epochs", "imgsz", "batch", "device", "workers", "compute_label", "jobs"):
+            val = getattr(args, opt)
+            if val is not None:
+                cmd += [f"--{opt.replace('_', '-')}", str(val)]
+        cmd += ["--weights", str(weights)]
+        todo.append((key, cmd))
     failed = []
     running: list[tuple] = []
     logs = Path(args.work_dir) / "logs"

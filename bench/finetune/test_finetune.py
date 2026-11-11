@@ -569,6 +569,17 @@ class Runners(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 run_ultralytics.ensure_weights(Path(t) / "missing.pt", True)  # only yolo26<size>.pt is downloaded
 
+    def test_run_order(self):
+        names = ["brain-tumor", "bccd"]
+        self.assertEqual(
+            run_ultralytics.run_order([0, 1], names, "seed"),
+            [(0, "brain-tumor"), (0, "bccd"), (1, "brain-tumor"), (1, "bccd")],
+        )
+        self.assertEqual(
+            run_ultralytics.run_order([0, 1], names, "dataset"),
+            [(0, "brain-tumor"), (1, "brain-tumor"), (0, "bccd"), (1, "bccd")],
+        )
+
     def test_epochs_in_results_csv(self):
         with tempfile.TemporaryDirectory() as t:
             p = Path(t) / "results.csv"
