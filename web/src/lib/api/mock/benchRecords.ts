@@ -137,8 +137,8 @@ export function fingerprintOf(b: Pick<MBench, 'images' | 'plan' | 'seed'>): stri
 }
 
 /**
- * An agent entry's default name, as the server makes it (crates/folo-server/src/bench/mod.rs): the agent's name with its
- * model in parentheses, `Claude Code (haiku)`, `Codex (gpt-6.1-sol)`; the agent's name alone without a model.
+ * An agent entry's default name, as the server makes it (crates/folo-server/src/bench/entries.rs): the agent's name
+ * with its model in parentheses, `Claude Code (haiku)`, `Codex (gpt-6.1-sol)`; the agent's name alone without a model.
  */
 export const agentEntryName = (agent: 'claude' | 'codex', model: string | null) => (model ? `${AGENT_NAME[agent]} (${model})` : AGENT_NAME[agent]);
 

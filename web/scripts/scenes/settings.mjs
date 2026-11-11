@@ -1,5 +1,4 @@
-// Settings: Connection, System (tensor cores, GPU pool, throughput, the driver report) and shortcuts; with them the
-// published weights as models.
+// Settings: Connection, System (tensor cores, GPU pool, throughput, the driver report) and Cloud.
 
 import { until } from './drive.mjs';
 
@@ -7,6 +6,7 @@ import { until } from './drive.mjs';
 
 /** @type {Scene[]} */
 export const settingsScenes = [
+  { name: 'settings', path: '/settings', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
   {
     // Connection says what it means ("Using demo data", "Leave blank to use this server"); the mechanics are folded.
     name: 'settings-connection-details',
@@ -53,19 +53,6 @@ export const settingsScenes = [
     },
   },
   {
-    // Server PR #140: published weights listed as models, their own group ("Published weights") after the datasets.
-    name: 'models-published',
-    path: '/models',
-    viewports: ['desktop', 'laptop', 'mobile'],
-  },
-  {
-    // The published weights' page: "published weights" in its meta line, its Source what they are.
-    name: 'model-published',
-    path: '/models/folo-n-coco',
-    fullPage: true,
-    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
-  },
-  {
     // The server's own words opened under Driver report: wrapped prose in a well, copyable whole.
     name: 'settings-system-report',
     path: '/settings?section=system',
@@ -105,18 +92,88 @@ export const settingsScenes = [
       await page.mouse.move(0, 0);
     },
   },
+  // ---- Cloud compute (docs/CLOUD.md): Settings › Cloud ----
   {
-    // Single-key shortcuts turned off in Settings; the dialog (from the Settings button) says so.
-    name: 'shortcuts-off',
-    touch: false,
-    path: '/settings',
+    // One connection and a cloud run training on its rented RTX 4090: the instance running, its cost so far and when it
+    // stops; the shapes-m run's instance ended, quiet.
+    name: 'settings-cloud',
+    path: '/settings?section=cloud',
+    search: 'scenario=cloud-training',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile', 'small'],
+    setup: async (page) => {
+      await until(page, '#cloud-instances .st:visible');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // No connection yet: "No cloud connected" and the one way to connect.
+    name: 'settings-cloud-empty',
+    path: '/settings?section=cloud',
+    search: 'scenario=cloud-none',
     fullPage: false,
-    themes: ['light'],
     viewports: ['desktop', 'mobile'],
     setup: async (page) => {
-      await page.getByRole('switch', { name: /Single-key shortcuts/ }).click({ force: true });
-      await page.getByRole('button', { name: 'Show shortcuts' }).click();
-      await page.locator('dialog[open]').waitFor();
+      await until(page, '#cloud .empty');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // The key was revoked: the check's reason in the danger ink, Check again, and an instance whose termination is not
+    // confirmed said as a problem above the list, with the pod to look for in the provider's console.
+    name: 'settings-cloud-trouble',
+    path: '/settings?section=cloud',
+    search: 'scenario=cloud-trouble',
+    fullPage: true,
+    viewports: ['desktop', 'laptop', 'tablet', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#cloud-instances .callout');
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Connect: RunPod chosen, the form empty, the key masked, "Where to find it" beside its label.
+    name: 'settings-cloud-connect',
+    path: '/settings?section=cloud',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile', 'small'],
+    setup: async (page) => {
+      await until(page, '#cloud header .btn');
+      await page.locator('#cloud header .btn').click();
+      await page.locator('dialog[open] input[type="password"]').waitFor();
+      await page.clock.runFor(300);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // Connect to a remote FOLO server: its sentence names the command to run there, in mono and never broken inside a
+    // flag; the token is optional.
+    name: 'settings-cloud-connect-remote',
+    path: '/settings?section=cloud',
+    fullPage: false,
+    viewports: ['desktop', 'tablet', 'mobile', 'small'],
+    setup: async (page) => {
+      await until(page, '#cloud header .btn');
+      await page.locator('#cloud header .btn').click();
+      await page.locator('dialog[open]').getByRole('radio', { name: 'Remote FOLO server' }).click();
+      await page.locator('dialog[open] input[type="password"]').waitFor();
+      await page.clock.runFor(300);
+      await page.mouse.move(0, 0);
+    },
+  },
+  {
+    // A key RunPod rejects: said at the key's field, nowhere else.
+    name: 'settings-cloud-connect-rejected',
+    path: '/settings?section=cloud',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await until(page, '#cloud header .btn');
+      await page.locator('#cloud header .btn').click();
+      await page.locator('dialog[open] input[type="password"]').fill('rpa_bad_0f3c9a71');
+      await page.locator('dialog[open] button[type="submit"]').click();
+      await until(page, 'dialog[open] .msg.error');
+      await page.mouse.move(0, 0);
     },
   },
 ];

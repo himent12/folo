@@ -7,35 +7,34 @@
 // `touch: false` keeps a scene out of --qa's coarse-pointer pass over phone states: a scene about a keyboard feature
 // (shortcuts) or one that sets up touch itself (the touch hint).
 
-import { runScenes, runPageScenes, runsQueueScenes, runsSelectionScenes } from './scenes/runs.mjs';
+import { overviewScenes } from './scenes/overview.mjs';
+import { datasetScenes } from './scenes/datasets.mjs';
+import { runScenes } from './scenes/runs.mjs';
 import { runNewScenes } from './scenes/runNew.mjs';
 import { runCompareScenes } from './scenes/runCompare.mjs';
-import { datasetScenes } from './scenes/datasets.mjs';
 import { modelScenes } from './scenes/models.mjs';
 import { playgroundScenes } from './scenes/playground.mjs';
-import { stateScenes } from './scenes/states.mjs';
 import { settingsScenes } from './scenes/settings.mjs';
-import { cloudScenes } from './scenes/cloud.mjs';
 import { labelScenes } from './scenes/label.mjs';
 import { benchScenes } from './scenes/bench.mjs';
+import { shellScenes } from './scenes/shell.mjs';
+import { stateScenes } from './scenes/states.mjs';
 
-// One module per screen or area under ./scenes/ (the steps they share in ./scenes/drive.mjs). The order below is the
-// order the scenes were written in; keep it: the shoot lists them in it, and --qa splits its states over CI's runners
-// by position (FOLO_QA_SHARD).
+// One module per screen under ./scenes/ (the steps they share in ./scenes/drive.mjs); the server's empty, loading,
+// error and stale states of every screen are in ./scenes/states.mjs, the app's chrome in ./scenes/shell.mjs. Order
+// only decides which CI shard checks which state (FOLO_QA_SHARD=i/n takes every n-th), and shots are named by scene.
 /** @type {Scene[]} */
 export const scenes = [
+  ...overviewScenes,
+  ...datasetScenes,
   ...runScenes,
   ...runNewScenes,
   ...runCompareScenes,
-  ...runPageScenes,
-  ...datasetScenes,
-  ...runsQueueScenes,
   ...modelScenes,
   ...playgroundScenes,
-  ...stateScenes,
   ...settingsScenes,
-  ...runsSelectionScenes,
-  ...cloudScenes,
   ...labelScenes,
   ...benchScenes,
+  ...shellScenes,
+  ...stateScenes,
 ];

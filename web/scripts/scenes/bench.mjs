@@ -9,12 +9,6 @@ export const benchScenes = [
   // ---------- vision benchmarks ----------
   // The list: four benchmarks, one fresh, one running an entry.
   { name: 'bench-list', path: '/benchmarks', viewports: ['desktop', 'laptop', 'tablet', 'mobile'], setup: async (page, { vp }) => until(page, vp === 'mobile' ? '.rows li a' : 'table.benches tbody tr[data-row]') },
-  { name: 'bench-list-empty', path: '/benchmarks', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
-  // Loading (the skeletons have the loaded page's geometry) and a server that stopped answering.
-  { name: 'bench-list-loading', path: '/benchmarks', search: 'scenario=loading', viewports: ['desktop', 'mobile'] },
-  { name: 'bench-list-error', path: '/benchmarks', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
-  { name: 'bench-board-loading', path: '/benchmarks/bn_3c90', search: 'scenario=loading', viewports: ['desktop', 'mobile'] },
-  { name: 'bench-board-error', path: '/benchmarks/bn_3c90', search: 'scenario=error', viewports: ['desktop', 'mobile'] },
   {
     // New benchmark, filled in: a name, what the camera sees, a dataset's validation split.
     name: 'bench-new-dialog',
@@ -372,16 +366,12 @@ export const benchScenes = [
       await page.mouse.move(0, 0);
     },
   },
-
   // Compare: two entries, four (an agent and a model that knows two classes among them: not like for like), and a
   // link with one entry left.
   { name: 'bench-compare', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f103', viewports: ['desktop', 'laptop', 'mobile'], setup: async (page) => until(page, '.pair svg[aria-roledescription=chart]') },
   { name: 'bench-compare-4', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f102,be_f104,be_f106', viewports: ['desktop', 'tablet', 'mobile'], setup: async (page) => until(page, '.pair svg[aria-roledescription=chart]') },
   { name: 'bench-compare-4-full', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_f102,be_f104,be_f106', fullPage: true, viewports: ['mobile'], setup: async (page) => until(page, '.pair svg[aria-roledescription=chart]') },
   { name: 'bench-compare-one', path: '/benchmarks/bn_3c90/compare?entries=be_f101,be_gone', viewports: ['desktop', 'mobile'] },
-
-  // Phones: Benchmarks under the Models tab, a strip of the two at the top of each list; picking entries to compare.
-  { name: 'bench-nav-models', path: '/models', viewports: ['mobile'], setup: async (page) => until(page, 'nav.sections a') },
   {
     name: 'bench-board-pick',
     path: '/benchmarks/bn_3c90',

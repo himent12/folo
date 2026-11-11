@@ -96,35 +96,6 @@ export {
 export type { BenchImg, MBench, MEntry, MLoop, BenchHost } from './benchRecords';
 
 export class MockBench extends MockBenchState {
-  // MockBenchState's private members these endpoints use (MockBenchState.shared), under their names there.
-  get #benches() {
-    return this.shared.benches();
-  }
-  set #benches(benches: MBench[]) {
-    this.shared.setBenches(benches);
-  }
-  get #entries() {
-    return this.shared.entries();
-  }
-  set #entries(entries: MEntry[]) {
-    this.shared.setEntries(entries);
-  }
-  get #loops() {
-    return this.shared.loops();
-  }
-  set #loops(loops: MLoop[]) {
-    this.shared.setLoops(loops);
-  }
-  #bench = this.shared.bench;
-  #entry = this.shared.entry;
-  #loop = this.shared.loop;
-  #entriesOf = this.shared.entriesOf;
-  #status = this.shared.status;
-  #passes = this.shared.passes;
-  #finish = this.shared.finish;
-  #advanceLoop = this.shared.advanceLoop;
-  #emit = this.shared.emit;
-
   #urls = new Map<string, Promise<string>>();
 
   // ---------- benchmarks ----------
@@ -200,12 +171,12 @@ export class MockBench extends MockBenchState {
   }
 
   update(id: string, body: UpdateBench, now: number): Bench {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
     this.#checkFields(body);
     if (body.plan) {
       // Frozen only by an entry that finished or is under way: a failed or stopped one graded nothing to keep comparable.
-      const n = this.#entriesOf(b).filter((e) => planFreezes(this.#status(e, now))).length;
+      const n = this.entriesOf(b).filter((e) => planFreezes(this.status(e, now))).length;
       if (n) throw new ApiError(409, 'bench_frozen', `${b.name} has ${n} finished or running ${n === 1 ? 'entry' : 'entries'}: its plan is fixed so they stay comparable.`, 'Delete those entries, or make a new benchmark with the plan you want.');
       this.#checkPlan(body.plan);
     }
@@ -213,23 +184,23 @@ export class MockBench extends MockBenchState {
     if (body.description !== undefined) b.description = body.description;
     if (body.plan) b.plan = clonePlan(body.plan);
     const out = this.toBench(b);
-    this.#emit(b.id, (h) => h.bench?.(out));
+    this.emit(b.id, (h) => h.bench?.(out));
     return out;
   }
 
   delete(id: string, now: number) {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    if (this.#entriesOf(b).some((e) => isEntryActive(this.toEntry(e, now))) || this.#loops.some((l) => l.benchId === b.id && !l.end))
+    if (this.entriesOf(b).some((e) => isEntryActive(this.toEntry(e, now))) || this.state.loops.some((l) => l.benchId === b.id && !l.end))
       throw new ApiError(409, 'bench_active', `An entry or a loop of ${b.name} is running.`, 'Stop it first, or wait for it to finish.');
-    this.#benches = this.#benches.filter((x) => x !== b);
-    this.#entries = this.#entries.filter((e) => e.benchId !== b.id);
-    this.#loops = this.#loops.filter((l) => l.benchId !== b.id);
+    this.state.benches = this.state.benches.filter((x) => x !== b);
+    this.state.entries = this.state.entries.filter((e) => e.benchId !== b.id);
+    this.state.loops = this.state.loops.filter((l) => l.benchId !== b.id);
   }
 
   /** The agent's proposal: one call, answered `delay` ms later by the caller. */
   design(id: string, body: DesignBench, now: number): BenchDesign {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
     if (body.agent !== 'claude' && body.agent !== 'codex')
       throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(body.agent)}\`, expected \`claude\` or \`codex\``);
@@ -251,7 +222,7 @@ export class MockBench extends MockBenchState {
   // ---------- images ----------
 
   images(id: string, q: BenchImagesQuery, now: number): BenchImagePage {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
     this.#checkCondition(q.condition, q.severity);
     const offset = Math.max(0, q.offset ?? 0);
@@ -272,7 +243,7 @@ export class MockBench extends MockBenchState {
 
   /** The image's URL: rendered, then changed by the condition, as a blob. */
   imageUrl(benchId: string, imageId: string, o: BenchImageOptions): Promise<string> {
-    const b = this.#bench(benchId);
+    const b = this.bench(benchId);
     this.#checkCondition(o.condition, o.severity);
     const im = b.images.find((x) => x.id === imageId);
     if (!im) return Promise.reject(new ApiError(404, 'bench_image_not_found', `${b.name} has no image ${imageId}.`));
@@ -298,15 +269,15 @@ export class MockBench extends MockBenchState {
   // ---------- entries ----------
 
   entries(id: string, now: number): BenchEntry[] {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    return rankEntries(this.#entriesOf(b).map((e) => this.toEntry(e, now)));
+    return rankEntries(this.entriesOf(b).map((e) => this.toEntry(e, now)));
   }
 
   entry(id: string, entryId: string, now: number): BenchEntry {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    return this.toEntry(this.#entry(b, entryId), now);
+    return this.toEntry(this.entryOf(b, entryId), now);
   }
 
   /** A model entry's skill on a benchmark: its own validation score where it was trained on the same data. */
@@ -330,7 +301,7 @@ export class MockBench extends MockBenchState {
   }
 
   start(id: string, body: StartBenchEntry, now: number): BenchEntry {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
     this.#startError(b, body);
     const c = body.contestant;
@@ -361,7 +332,7 @@ export class MockBench extends MockBenchState {
         usage: null,
         speed: { device: 'gpu:0', ms_per_image: MS_PER_IMAGE[m.arch] ?? 5 },
       };
-      e.duration = images * this.#passes(e, b).length * (MS_PER_PASS[m.arch] ?? 5);
+      e.duration = images * this.passes(e, b).length * (MS_PER_PASS[m.arch] ?? 5);
     } else if (c.kind === 'agent') {
       if (c.agent !== 'claude' && c.agent !== 'codex') throw new ApiError(422, 'invalid_body', `field \`agent\`: unknown variant \`${String(c.agent)}\``);
       const agent = this.host.agents().find((a) => a.id === c.agent);
@@ -386,7 +357,7 @@ export class MockBench extends MockBenchState {
         usage: null,
         speed: null,
       };
-      const passes = this.#passes(e, b).length;
+      const passes = this.passes(e, b).length;
       e.duration = Math.ceil((images * passes) / PER_CALL[c.agent]!) * CALL_MS;
       e.usage = agentUsage(c.agent, model, effort, images * passes, b.description, `${b.id}:${e.id}`);
     } else if (c.open) {
@@ -434,19 +405,19 @@ export class MockBench extends MockBenchState {
         speed: null,
       };
       this.addEntry(e);
-      this.#finish(e, now);
+      this.finish(e, now);
       const out = this.toEntry(e, now);
-      this.#emit(b.id, (h) => h.entry?.(out));
+      this.emit(b.id, (h) => h.entry?.(out));
       const bench = this.toBench(b);
-      this.#emit(b.id, (h) => h.bench?.(bench));
+      this.emit(b.id, (h) => h.bench?.(bench));
       return out;
     }
     this.addEntry(e);
     this.advance(now);
     const out = this.toEntry(e, now);
-    this.#emit(b.id, (h) => h.entry?.(out));
+    this.emit(b.id, (h) => h.entry?.(out));
     const bench = this.toBench(b);
-    this.#emit(b.id, (h) => h.bench?.(bench));
+    this.emit(b.id, (h) => h.bench?.(bench));
     return out;
   }
 
@@ -456,8 +427,8 @@ export class MockBench extends MockBenchState {
   }
 
   #open(b: MBench, entryId: string, now: number): MEntry & { open: NonNullable<MEntry['open']> } {
-    const e = this.#entry(b, entryId);
-    if (!e.open) throw new ApiError(409, 'bench_entry_not_open', `${e.name} is not an open external entry (it is ${this.#status(e, now)}).`, 'Create one with `contestant.open: true`.');
+    const e = this.entryOf(b, entryId);
+    if (!e.open) throw new ApiError(409, 'bench_entry_not_open', `${e.name} is not an open external entry (it is ${this.status(e, now)}).`, 'Create one with `contestant.open: true`.');
     return e as MEntry & { open: NonNullable<MEntry['open']> };
   }
 
@@ -467,7 +438,7 @@ export class MockBench extends MockBenchState {
    * most OPEN_BOXES_MAX boxes.
    */
   sendPredictions(id: string, entryId: string, predictions: BenchPrediction[], now: number): BenchEntry {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
     const e = this.#open(b, entryId, now);
     const fresh: BenchPrediction[] = [];
@@ -494,13 +465,13 @@ export class MockBench extends MockBenchState {
     e.open.boxes = boxes;
     e.open.lastPart = now;
     const out = this.toEntry(e, now);
-    this.#emit(b.id, (h) => h.entry?.(out));
+    this.emit(b.id, (h) => h.entry?.(out));
     return out;
   }
 
   /** Scores an open external entry; what is missing is named and it stays open. */
   finishEntry(id: string, entryId: string, now: number): BenchEntry {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
     const e = this.#open(b, entryId, now);
     const check = checkPredictions(e.open.records, this.#ctx(b, e.scored));
@@ -509,18 +480,18 @@ export class MockBench extends MockBenchState {
     e.conditionsRun = check.summary.conditions.length < b.plan.conditions.length ? check.summary.conditions : null;
     e.skill = externalSkill(b, e.open.records, e.scored);
     (e as MEntry).open = null;
-    this.#finish(e, now);
+    this.finish(e, now);
     const out = this.toEntry(e, now);
-    this.#emit(b.id, (h) => h.entry?.(out));
+    this.emit(b.id, (h) => h.entry?.(out));
     const bench = this.toBench(b);
-    this.#emit(b.id, (h) => h.bench?.(bench));
+    this.emit(b.id, (h) => h.bench?.(bench));
     return out;
   }
 
   result(id: string, entryId: string, now: number): BenchResult {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    const e = this.#entry(b, entryId);
+    const e = this.entryOf(b, entryId);
     if (e.end?.status !== 'done' || !e.result) throw this.#notDone(e, now);
     const r = e.result;
     return {
@@ -534,13 +505,13 @@ export class MockBench extends MockBenchState {
   }
 
   #notDone(e: MEntry, now: number) {
-    return new ApiError(409, 'bench_entry_not_done', `${e.name} is ${this.#status(e, now)}, not done.`, 'Results are there once the entry is done.');
+    return new ApiError(409, 'bench_entry_not_done', `${e.name} is ${this.status(e, now)}, not done.`, 'Results are there once the entry is done.');
   }
 
   entryImages(id: string, entryId: string, q: BenchEntryImagesQuery, now: number): BenchEntryImagePage {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    const e = this.#entry(b, entryId);
+    const e = this.entryOf(b, entryId);
     if (e.end?.status !== 'done' || !e.result) throw this.#notDone(e, now);
     if (q.sort && q.sort !== 'order' && q.sort !== 'worst') throw new ApiError(400, 'invalid_query', `unknown sort \`${q.sort}\`: order or worst`);
     const missing = new Set(e.missing);
@@ -562,19 +533,19 @@ export class MockBench extends MockBenchState {
   }
 
   stopEntry(id: string, entryId: string, now: number): BenchEntry {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    const e = this.#entry(b, entryId);
-    const status = this.#status(e, now);
+    const e = this.entryOf(b, entryId);
+    const status = this.status(e, now);
     if (!isEntryActive({ status })) throw new ApiError(409, 'bench_entry_not_active', `${e.name} is ${status}: nothing to stop.`);
     if (e.open) {
       // An open external entry: what it received is discarded and it ends stopped, on the leaderboard until deleted.
       e.end = { status: 'stopped', at: now, error: null, hint: null };
       e.open = null;
       const out = this.toEntry(e, now);
-      this.#emit(b.id, (h) => h.entry?.(out));
+      this.emit(b.id, (h) => h.entry?.(out));
       const bench = this.toBench(b);
-      this.#emit(b.id, (h) => h.bench?.(bench));
+      this.emit(b.id, (h) => h.bench?.(bench));
       return out;
     }
     if (status === 'queued') {
@@ -582,40 +553,40 @@ export class MockBench extends MockBenchState {
       e.end = { status: 'stopped', at: now, error: null, hint: null };
     } else if (e.stopAt === null) e.stopAt = now + STOP_MS;
     const out = this.toEntry(e, now);
-    this.#emit(b.id, (h) => h.entry?.(out));
+    this.emit(b.id, (h) => h.entry?.(out));
     return out;
   }
 
   deleteEntry(id: string, entryId: string, now: number) {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    const e = this.#entry(b, entryId);
-    if (isEntryActive({ status: this.#status(e, now) })) throw new ApiError(409, 'bench_entry_active', `${e.name} is running.`, 'Stop it first.');
-    const loop = this.#loops.find((l) => !l.end && l.generations.some((g) => g.entry_id === e.id));
+    const e = this.entryOf(b, entryId);
+    if (isEntryActive({ status: this.status(e, now) })) throw new ApiError(409, 'bench_entry_active', `${e.name} is running.`, 'Stop it first.');
+    const loop = this.state.loops.find((l) => !l.end && l.generations.some((g) => g.entry_id === e.id));
     if (loop) throw new ApiError(409, 'bench_entry_in_loop', `The loop ${loop.name} uses ${e.name}.`, 'Wait for the loop to end, or stop it.');
-    this.#entries = this.#entries.filter((x) => x !== e);
-    this.#emit(b.id, (h) => h.removed?.({ id: e.id }));
+    this.state.entries = this.state.entries.filter((x) => x !== e);
+    this.emit(b.id, (h) => h.removed?.({ id: e.id }));
     const bench = this.toBench(b);
-    this.#emit(b.id, (h) => h.bench?.(bench));
+    this.emit(b.id, (h) => h.bench?.(bench));
   }
 
   // ---------- loops ----------
 
   loops(id: string, now: number): BenchLoop[] {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    return this.#loops.filter((l) => l.benchId === b.id).sort((x, y) => y.createdAt - x.createdAt).map((l) => this.toLoop(l));
+    return this.state.loops.filter((l) => l.benchId === b.id).sort((x, y) => y.createdAt - x.createdAt).map((l) => this.toLoop(l));
   }
 
   loop(id: string, loopId: string, now: number): BenchLoop {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    return this.toLoop(this.#loop(b, loopId));
+    return this.toLoop(this.loopOf(b, loopId));
   }
 
   /** `fixedId`: the seed's loop that runs as the demo opens has a stable id, so it can be linked (./benchSeed). */
   startLoop(id: string, body: StartBenchLoop, now: number, fixedId?: string): BenchLoop {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
     const m = this.host.models().find((x) => x.id === body.teacher);
     if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${body.teacher}.`);
@@ -662,34 +633,34 @@ export class MockBench extends MockBenchState {
       lastEmit: 0,
     };
     this.addLoop(l);
-    this.#advanceLoop(l, b, now);
+    this.advanceLoop(l, b, now);
     const out = this.toLoop(l);
-    this.#emit(b.id, (h) => h.loop?.(out));
+    this.emit(b.id, (h) => h.loop?.(out));
     return out;
   }
 
   stopLoop(id: string, loopId: string, now: number): BenchLoop {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    const l = this.#loop(b, loopId);
+    const l = this.loopOf(b, loopId);
     if (l.end) throw new ApiError(409, 'bench_loop_not_active', `${l.name} has ended.`);
     if (l.stopAt === null) {
       l.stopAt = now + STOP_MS;
-      const e = l.step?.entryId ? this.#entries.find((x) => x.id === l.step!.entryId) : undefined;
+      const e = l.step?.entryId ? this.state.entries.find((x) => x.id === l.step!.entryId) : undefined;
       if (e && !e.end) this.stopEntry(b.id, e.id, now);
     }
     const out = this.toLoop(l);
-    this.#emit(b.id, (h) => h.loop?.(out));
+    this.emit(b.id, (h) => h.loop?.(out));
     return out;
   }
 
   deleteLoop(id: string, loopId: string, now: number) {
-    const b = this.#bench(id);
+    const b = this.bench(id);
     this.advance(now);
-    const l = this.#loop(b, loopId);
+    const l = this.loopOf(b, loopId);
     if (!l.end) throw new ApiError(409, 'bench_loop_active', `${l.name} is running.`, 'Stop it first.');
-    this.#loops = this.#loops.filter((x) => x !== l);
-    this.#emit(b.id, (h) => h.removed?.({ id: l.id }));
+    this.state.loops = this.state.loops.filter((x) => x !== l);
+    this.emit(b.id, (h) => h.removed?.({ id: l.id }));
   }
 }
 

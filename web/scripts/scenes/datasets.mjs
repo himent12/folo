@@ -1,5 +1,5 @@
-// Datasets: the list and Add dataset (with keyboard focus on fields, New run's too), a dataset's stats, health and
-// images, the image inspector, and the toast of a run that finished meanwhile.
+// Datasets: the list (class balance, Add dataset and its focus rings, errors and filtering) and a dataset's page (stats,
+// health, issues, the histogram, images, display options and the inspector).
 
 import { until, tabTo } from './drive.mjs';
 
@@ -7,7 +7,20 @@ import { until, tabTo } from './drive.mjs';
 
 /** @type {Scene[]} */
 export const datasetScenes = [
-  { name: 'datasets-empty', path: '/datasets', search: 'scenario=empty' },
+  { name: 'datasets', path: '/datasets', viewports: ['desktop', 'laptop', 'mobile'] },
+  {
+    // A class-balance strip is one disclosure: opened, each class's name, box count and share, largest first.
+    name: 'datasets-class-balance',
+    path: '/datasets',
+    viewports: ['desktop', 'mobile'],
+    fullPage: false,
+    setup: async (page) => {
+      const strip = page.locator('.cs-btn:visible').first();
+      await strip.waitFor();
+      await strip.click();
+      await page.mouse.move(0, 0);
+    },
+  },
   {
     name: 'datasets-add',
     path: '/datasets',
@@ -29,31 +42,6 @@ export const datasetScenes = [
       await page.locator('dialog[open]').waitFor();
       await page.getByRole('tab', { name: 'Generate sample set' }).click();
       await tabTo(page, 'dialog[open] .chips input');
-    },
-  },
-  {
-    name: 'run-new-focus-field',
-    path: '/runs/new',
-    fullPage: false,
-    viewports: ['desktop', 'mobile'],
-    setup: async (page) => {
-      await until(page, 'input#name');
-      await page.locator('input#name').focus();
-      await page.keyboard.press('Shift+Tab');
-      await tabTo(page, 'input#name');
-    },
-  },
-  {
-    name: 'run-new-focus-select',
-    path: '/runs/new',
-    fullPage: false,
-    viewports: ['desktop'],
-    setup: async (page) => {
-      await until(page, 'select#weights');
-      await page.locator('select#weights').focus();
-      await page.keyboard.press('Shift+Tab');
-      await tabTo(page, 'select#weights');
-      await page.evaluate(() => window.scrollTo(0, 0));
     },
   },
   { name: 'dataset-stats', path: '/datasets/ds_shapes_hard?tab=stats', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
@@ -117,19 +105,6 @@ export const datasetScenes = [
       // The readout row switches from the total to the bin.
       await page.locator('#ds-size .readout.at').waitFor({ state: 'visible', timeout: 3000 });
       await page.clock.runFor(300);
-    },
-  },
-  {
-    // The watched run finished while another page was open: a toast says so, with "Open run" (no timer: it has an
-    // action). Mock scenario `finishing`: the live run's last epoch lands 3 s after load.
-    name: 'toast-run-finished',
-    path: '/models',
-    search: 'scenario=finishing',
-    fullPage: false,
-    viewports: ['desktop', 'mobile'],
-    setup: async (page) => {
-      await until(page, 'text=finished training', 12000);
-      await page.mouse.move(0, 0);
     },
   },
   {
@@ -259,6 +234,53 @@ export const datasetScenes = [
       // (and on touch there is none to keep).
       await page.mouse.move(0, 0);
       await page.waitForTimeout(300);
+    },
+  },
+  {
+    // Invalid fields: the danger edge, the danger focus ring on the focused one, and the message with its icon.
+    name: 'datasets-add-invalid',
+    path: '/datasets',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      await page.getByRole('button', { name: 'Add dataset' }).first().click();
+      await page.locator('dialog[open]').waitFor();
+      // Register stays disabled until there is a folder path; a name the server would refuse is checked on submit,
+      // and Register is then gated on it ("Fix the name first") until the name is fixed.
+      await page.locator('dialog[open] input[placeholder="e.g. D:/data/my-dataset"]').fill('D:/data/my dataset');
+      await page.locator('dialog[open] input[id$="-name"]').fill('my dataset!');
+      await page.locator('dialog[open] button[type="submit"]').click();
+      await page.locator('dialog[open] input[aria-invalid="true"]').first().focus();
+    },
+  },
+  {
+    name: 'datasets-nomatch',
+    path: '/datasets',
+    themes: ['light'],
+    viewports: ['desktop'],
+    setup: async (page) => {
+      await until(page, 'input[aria-label="Filter datasets"]');
+      await page.fill('input[aria-label="Filter datasets"]', 'zebra');
+    },
+  },
+  {
+    // Thumbnails still loading: a raised fill with faint viewfinder corners, not a flat dark photo.
+    name: 'dataset-images-loading',
+    path: '/datasets/ds_fasteners',
+    fullPage: false,
+    viewports: ['desktop', 'mobile'],
+    setup: async (page) => {
+      // Hold every image at "loading" (a src that never arrives), then ask the grid for a fresh set of thumbnails.
+      await page.locator('.cell img.loaded').first().waitFor();
+      await page.evaluate(() => {
+        Object.defineProperty(HTMLImageElement.prototype, 'src', { set() {}, get: () => '', configurable: true });
+        const set = Element.prototype.setAttribute;
+        Element.prototype.setAttribute = function (name, value) {
+          if (!(this instanceof HTMLImageElement && name === 'src')) set.call(this, name, value);
+        };
+      });
+      await page.goto(page.url().replace('ds_fasteners', 'ds_shapes_hard'));
+      await until(page, '.dsimg[aria-busy="true"] .cover');
     },
   },
 ];

@@ -80,32 +80,13 @@ export type { Scenario } from './scenario';
 export { capabilities } from './scenario';
 
 export class MockApi extends MockTrainingApi implements Api {
-  // MockServer's private members these endpoints use (MockServer.shared), under their names there.
-  get #t0() {
-    return this.shared.t0();
-  }
-  get #datasets() {
-    return this.shared.datasets();
-  }
-  get #label() {
-    return this.shared.label();
-  }
-  get #bench() {
-    return this.shared.bench();
-  }
-  #call = this.shared.call;
-  #spec = this.shared.spec;
-  #noRoute = this.shared.noRoute;
-  #labeling = this.shared.labeling;
-  #benching = this.shared.benching;
-
   // ---------- agent labeling ----------
 
   /** A labeling call: `folo serve --mock` answers 501, an older server has no such route. */
   async #labelCall<T>(path: string, fn: () => T | Promise<T>, latency?: number): Promise<T> {
-    return this.#call(() => {
-      if (this.scenario === 'no-throughput') throw this.#noRoute(path);
-      if (!this.#labeling()) throw new ApiError(501, 'not_implemented', 'Agent labeling needs a real server.', 'Start folo serve without --mock to label images.');
+    return this.call(() => {
+      if (this.scenario === 'no-throughput') throw this.noRoute(path);
+      if (!this.labeling()) throw new ApiError(501, 'not_implemented', 'Agent labeling needs a real server.', 'Start folo serve without --mock to label images.');
       return fn();
     }, latency);
   }
@@ -115,91 +96,91 @@ export class MockApi extends MockTrainingApi implements Api {
   }
 
   labelJobs(): Promise<LabelJob[]> {
-    return this.#labelCall('GET /api/label/jobs', () => this.#label.jobs(Date.now()));
+    return this.#labelCall('GET /api/label/jobs', () => this.state.label.jobs(Date.now()));
   }
 
   labelJob(id: string): Promise<LabelJob> {
-    return this.#labelCall(`GET /api/label/jobs/${id}`, () => this.#label.job(id, Date.now()));
+    return this.#labelCall(`GET /api/label/jobs/${id}`, () => this.state.label.job(id, Date.now()));
   }
 
   createLabelJob(body: CreateLabelJob): Promise<LabelJob> {
-    return this.#labelCall('POST /api/label/jobs', () => this.#label.create(body, Date.now()), 300);
+    return this.#labelCall('POST /api/label/jobs', () => this.state.label.create(body, Date.now()), 300);
   }
 
   updateLabelJob(id: string, body: UpdateLabelJob): Promise<LabelJob> {
-    return this.#labelCall(`PUT /api/label/jobs/${id}`, () => this.#label.update(id, body, Date.now()));
+    return this.#labelCall(`PUT /api/label/jobs/${id}`, () => this.state.label.update(id, body, Date.now()));
   }
 
   deleteLabelJob(id: string): Promise<void> {
-    return this.#labelCall(`DELETE /api/label/jobs/${id}`, () => this.#label.delete(id, Date.now()));
+    return this.#labelCall(`DELETE /api/label/jobs/${id}`, () => this.state.label.delete(id, Date.now()));
   }
 
   labelImages(jobId: string, q: LabelImagesQuery = {}): Promise<LabelImagePage> {
-    return this.#labelCall(`GET /api/label/jobs/${jobId}/images`, () => this.#label.images(jobId, q, Date.now()), 90);
+    return this.#labelCall(`GET /api/label/jobs/${jobId}/images`, () => this.state.label.images(jobId, q, Date.now()), 90);
   }
 
   addLabelImages(jobId: string, files: File[], onprogress?: (p: UploadProgress) => void): Promise<LabelImagesAdded> {
     // One request per chunk, as the server takes them (lib/api/upload): progress moves as a real upload's does.
     return this.#labelCall(`POST /api/label/jobs/${jobId}/images`, async () => {
       const send = async (chunk: File[]) => {
-        const part = await this.#label.upload(jobId, chunk, Date.now());
+        const part = await this.state.label.upload(jobId, chunk, Date.now());
         if (this.latency > 0) await sleep(this.latency * 2);
         return part;
       };
-      return (await uploadInChunks(files, send, onprogress)) ?? { added: [], skipped: [], job: this.#label.job(jobId, Date.now()) };
+      return (await uploadInChunks(files, send, onprogress)) ?? { added: [], skipped: [], job: this.state.label.job(jobId, Date.now()) };
     });
   }
 
   importLabelImages(jobId: string, path: string): Promise<LabelImagesAdded> {
-    return this.#labelCall(`POST /api/label/jobs/${jobId}/images`, () => this.#label.importPath(jobId, path, Date.now()), 500);
+    return this.#labelCall(`POST /api/label/jobs/${jobId}/images`, () => this.state.label.importPath(jobId, path, Date.now()), 500);
   }
 
   updateLabelImage(jobId: string, imageId: string, boxes: Box[]): Promise<LabelImage> {
-    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.#label.updateImage(jobId, imageId, boxes, Date.now()));
+    return this.#labelCall(`PUT /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.updateImage(jobId, imageId, boxes, Date.now()));
   }
 
   deleteLabelImage(jobId: string, imageId: string): Promise<void> {
-    return this.#labelCall(`DELETE /api/label/jobs/${jobId}/images/${imageId}`, () => this.#label.deleteImage(jobId, imageId, Date.now()));
+    return this.#labelCall(`DELETE /api/label/jobs/${jobId}/images/${imageId}`, () => this.state.label.deleteImage(jobId, imageId, Date.now()));
   }
 
   startLabeling(jobId: string, body: StartLabeling): Promise<LabelJob> {
-    return this.#labelCall(`POST /api/label/jobs/${jobId}/start`, () => this.#label.start(jobId, body, Date.now()), 200);
+    return this.#labelCall(`POST /api/label/jobs/${jobId}/start`, () => this.state.label.start(jobId, body, Date.now()), 200);
   }
 
   stopLabeling(jobId: string): Promise<LabelJob> {
-    return this.#labelCall(`POST /api/label/jobs/${jobId}/stop`, () => this.#label.stop(jobId, Date.now()));
+    return this.#labelCall(`POST /api/label/jobs/${jobId}/stop`, () => this.state.label.stop(jobId, Date.now()));
   }
 
   labelLogs(jobId: string, limit = 500): Promise<{ lines: LogLine[] }> {
-    return this.#labelCall(`GET /api/label/jobs/${jobId}/logs`, () => this.#label.logs(jobId, limit, Date.now()), 120);
+    return this.#labelCall(`GET /api/label/jobs/${jobId}/logs`, () => this.state.label.logs(jobId, limit, Date.now()), 120);
   }
 
   createLabelDataset(jobId: string, body: LabelDatasetRequest): Promise<Dataset> {
     return this.#labelCall(
       `POST /api/label/jobs/${jobId}/dataset`,
       () => {
-        const spec = this.#label.dataset(jobId, body, this.#datasets.map((d) => d.name), Date.now());
-        this.#datasets.unshift(spec);
-        return toDataset(spec, this.#t0, true);
+        const spec = this.state.label.dataset(jobId, body, this.state.datasets.map((d) => d.name), Date.now());
+        this.state.datasets.unshift(spec);
+        return toDataset(spec, this.state.t0, true);
       },
       700,
     );
   }
 
   async labelImageUrl(jobId: string, imageId: string, thumb?: number): Promise<string> {
-    return this.#label.imageUrl(jobId, imageId, thumb);
+    return this.state.label.imageUrl(jobId, imageId, thumb);
   }
 
   labelEvents(jobId: string, h: LabelEventHandlers): () => void {
-    if (this.scenario === 'loading' || this.scenario === 'error' || !this.#labeling()) {
+    if (this.scenario === 'loading' || this.scenario === 'error' || !this.labeling()) {
       if (this.scenario === 'error') setTimeout(() => h.connection?.('reconnecting'), 500);
       return () => {};
     }
-    const unsub = this.#label.subscribe(jobId, h);
+    const unsub = this.state.label.subscribe(jobId, h);
     const t0 = setTimeout(() => {
       h.connection?.('open');
       try {
-        h.job?.(this.#label.job(jobId, Date.now()));
+        h.job?.(this.state.label.job(jobId, Date.now()));
       } catch {
         // A job deleted meanwhile: its stream has nothing to say.
       }
@@ -207,12 +188,12 @@ export class MockApi extends MockTrainingApi implements Api {
     let dropped = false;
     const timer = setInterval(() => {
       // `stale`: the server stops, its stream with it.
-      if (this.scenario === 'stale' && Date.now() - this.#t0 > STALE_AFTER) {
+      if (this.scenario === 'stale' && Date.now() - this.state.t0 > STALE_AFTER) {
         if (!dropped) h.connection?.('reconnecting');
         dropped = true;
         return;
       }
-      this.#label.tick(jobId, Date.now());
+      this.state.label.tick(jobId, Date.now());
     }, 250);
     return () => {
       clearTimeout(t0);
@@ -228,16 +209,16 @@ export class MockApi extends MockTrainingApi implements Api {
   #benchState(): MockBench {
     if (!this.#benchSeeded) {
       this.#benchSeeded = true;
-      if (this.scenario !== 'empty') seedBenches(this.#bench, this.#t0, { loopAtGen0: this.scenario === 'bench-loop-gen0', failedOnly: this.scenario === 'bench-failed-only' });
+      if (this.scenario !== 'empty') seedBenches(this.state.bench, this.state.t0, { loopAtGen0: this.scenario === 'bench-loop-gen0', failedOnly: this.scenario === 'bench-failed-only' });
     }
-    return this.#bench;
+    return this.state.bench;
   }
 
   /** A benchmark call: `folo serve --mock` answers 501, an older server has no such route. */
   async #benchCall<T>(path: string, fn: (b: MockBench) => T | Promise<T>, latency?: number): Promise<T> {
-    return this.#call(() => {
-      if (this.scenario === 'no-throughput') throw this.#noRoute(path);
-      if (!this.#benching()) throw new ApiError(501, 'not_implemented', 'Vision benchmarks need a real server.', 'Start folo serve without --mock to make benchmarks.');
+    return this.call(() => {
+      if (this.scenario === 'no-throughput') throw this.noRoute(path);
+      if (!this.benching()) throw new ApiError(501, 'not_implemented', 'Vision benchmarks need a real server.', 'Start folo serve without --mock to make benchmarks.');
       return fn(this.#benchState());
     }, latency);
   }
@@ -345,7 +326,7 @@ export class MockApi extends MockTrainingApi implements Api {
   }
 
   benchEvents(id: string, h: BenchEventHandlers): () => void {
-    if (this.scenario === 'loading' || this.scenario === 'error' || !this.#benching() || this.scenario === 'no-throughput') {
+    if (this.scenario === 'loading' || this.scenario === 'error' || !this.benching() || this.scenario === 'no-throughput') {
       if (this.scenario === 'error') setTimeout(() => h.connection?.('reconnecting'), 500);
       return () => {};
     }
@@ -361,7 +342,7 @@ export class MockApi extends MockTrainingApi implements Api {
     }, 30);
     let dropped = false;
     const timer = setInterval(() => {
-      if (this.scenario === 'stale' && Date.now() - this.#t0 > STALE_AFTER) {
+      if (this.scenario === 'stale' && Date.now() - this.state.t0 > STALE_AFTER) {
         if (!dropped) h.connection?.('reconnecting');
         dropped = true;
         return;
@@ -412,7 +393,7 @@ export class MockApi extends MockTrainingApi implements Api {
       let boxes: Scored[];
       const quality = (m.metrics?.map50_95 ?? 0.5) + 0.12;
       if (input.kind === 'dataset') {
-        const s = this.#spec(input.dataset_id);
+        const s = this.spec(input.dataset_id);
         const img = image(s, imageIndex(input.image_id));
         width = img.width;
         height = img.height;

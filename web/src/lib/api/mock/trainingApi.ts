@@ -62,57 +62,6 @@ const AMP_HINT =
   "FOLO_GPU_TENSOR_CORES=1) on a GPU that has them; GET /api/system's `capabilities.amp` says when amp is available";
 
 export class MockTrainingApi extends MockServer {
-  // MockServer's private members these endpoints use (MockServer.shared), under their names there.
-  get #t0() {
-    return this.shared.t0();
-  }
-  get #runs() {
-    return this.shared.runs();
-  }
-  set #runs(runs: RunProfile[]) {
-    this.shared.setRuns(runs);
-  }
-  get #nextId() {
-    return this.shared.nextId();
-  }
-  set #nextId(id: number) {
-    this.shared.setNextId(id);
-  }
-  get #queue() {
-    return this.shared.queue();
-  }
-  set #queue(queue: string[]) {
-    this.shared.setQueue(queue);
-  }
-  get #throughput() {
-    return this.shared.throughput();
-  }
-  get #created() {
-    return this.shared.created();
-  }
-  get #connections() {
-    return this.shared.connections();
-  }
-  set #connections(connections: CloudConnection[]) {
-    this.shared.setConnections(connections);
-  }
-  get #cloudOn() {
-    return this.shared.cloudOn();
-  }
-  set #unplugged(unplugged: boolean) {
-    this.shared.setUnplugged(unplugged);
-  }
-  set #ampRefused(refused: boolean) {
-    this.shared.setAmpRefused(refused);
-  }
-  #call = this.shared.call;
-  #schedule = this.shared.schedule;
-  #spec = this.shared.spec;
-  #noRoute = this.shared.noRoute;
-  #gpus = this.shared.gpus;
-  #capabilities = this.shared.capabilities;
-  #models = this.shared.models;
-
   /** Live subscribers per run, for log lines of actions outside a run's timeline (queue moves). */
   #subs = new Map<string, Set<RunEventHandlers>>();
   /** Those log lines, kept for `/logs`. */
@@ -120,7 +69,7 @@ export class MockTrainingApi extends MockServer {
 
   /** A run snapshot with its place in the queue. */
   #toRun(p: RunProfile, now: number): Run {
-    const i = this.#queue.indexOf(p.id);
+    const i = this.state.queue.indexOf(p.id);
     return { ...toRun(p, now), queue_position: i < 0 ? null : i + 1 };
   }
 
@@ -132,7 +81,7 @@ export class MockTrainingApi extends MockServer {
   }
 
   #profile(id: string): RunProfile {
-    const p = this.#runs.find((r) => r.id === id);
+    const p = this.state.runs.find((r) => r.id === id);
     if (!p) throw new ApiError(404, 'run_not_found', `No run with id ${id}.`);
     return p;
   }
@@ -140,14 +89,14 @@ export class MockTrainingApi extends MockServer {
   // ---------- runs ----------
 
   runs(): Promise<Run[]> {
-    return this.#call(() => {
+    return this.call(() => {
       const now = Date.now();
-      return this.#runs.map((p) => this.#toRun(p, now)).sort((a, b) => b.created.localeCompare(a.created));
+      return this.state.runs.map((p) => this.#toRun(p, now)).sort((a, b) => b.created.localeCompare(a.created));
     });
   }
 
   run(id: string): Promise<Run> {
-    return this.#call(() => this.#toRun(this.#profile(id), Date.now()));
+    return this.call(() => this.#toRun(this.#profile(id), Date.now()));
   }
 
   /**
@@ -156,7 +105,7 @@ export class MockTrainingApi extends MockServer {
    */
   #withWeights(c: TrainConfig): TrainConfig {
     if (!c.weights) return c;
-    const m = this.#models().find((x) => x.id === c.weights);
+    const m = this.allModels().find((x) => x.id === c.weights);
     if (!m) throw new ApiError(404, 'model_not_found', `No model with id ${c.weights}.`);
     return { ...c, arch: m.arch };
   }
@@ -168,8 +117,8 @@ export class MockTrainingApi extends MockServer {
   #checkAmp(c: TrainConfig) {
     if (!c.amp) return;
     // `amp-refused`: the server was restarted without tensor cores since the page asked.
-    if (this.scenario === 'amp-refused') this.#ampRefused = true;
-    const caps = this.#capabilities();
+    if (this.scenario === 'amp-refused') this.state.ampRefused = true;
+    const caps = this.capabilities();
     if (c.device !== 'cpu' && caps.amp.available) return;
     const reason =
       c.device === 'cpu'
@@ -184,35 +133,35 @@ export class MockTrainingApi extends MockServer {
    * files, as on folo-server's mock).
    */
   #cli(c: TrainConfig): CliCommand {
-    const ds = this.#spec(c.dataset_id);
-    const m = c.weights ? this.#models().find((x) => x.id === c.weights) : undefined;
+    const ds = this.spec(c.dataset_id);
+    const m = c.weights ? this.allModels().find((x) => x.id === c.weights) : undefined;
     const cmd = trainCommand(c, ds.path, m && m.source !== 'published' ? { ...m, path: `D:/folo/models/${m.name}.folo` } : m);
     return { cli: cmd.line, argv: ['folo', ...cmd.argv] };
   }
 
   runCli(id: string): Promise<CliCommand> {
-    return this.#call(() => {
-      if (this.scenario === 'no-throughput') throw this.#noRoute(`GET /api/runs/${id}/cli`);
+    return this.call(() => {
+      if (this.scenario === 'no-throughput') throw this.noRoute(`GET /api/runs/${id}/cli`);
       return this.#cli(this.#profile(id).config);
     }, 80);
   }
 
   createRun(body: TrainConfig): Promise<Run> {
-    return this.#call(() => {
-      const ds = this.#spec(body.dataset_id);
+    return this.call(() => {
+      const ds = this.spec(body.dataset_id);
       const c = this.#withWeights(body);
       const cloud = this.#compute(c);
       if (cloud) return this.#createCloudRun(c, ds, cloud);
       // `gpu-unplugged`: the second adapter goes away as soon as a run asks for it.
-      if (this.scenario === 'gpu-unplugged' && c.device === 'gpu:1') this.#unplugged = true;
+      if (this.scenario === 'gpu-unplugged' && c.device === 'gpu:1') this.state.unplugged = true;
       const gpu = /^gpu:(\d+)$/.exec(c.device);
-      if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(c.device);
+      if (gpu && !this.gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(c.device);
       // The real server's body error for a head it does not know (serde: `o2m` or `o2o`; missing means `o2m`).
       if (c.head !== undefined && c.head !== 'o2m' && c.head !== 'o2o')
         throw new ApiError(400, 'invalid_body', `field \`head\`: unknown variant \`${String(c.head)}\`, expected \`o2m\` or \`o2o\``);
       this.#checkAmp(c);
       const now = Date.now();
-      const id = `run_${(hash(c.name + now + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
+      const id = `run_${(hash(c.name + now + this.state.nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
       const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);
       const p: RunProfile = withResolved({
         id,
@@ -227,29 +176,29 @@ export class MockTrainingApi extends MockServer {
         tau: Math.max(4, c.epochs / 7),
         imgsPerS: [520, 320, 170, 130, 70][sizeIdx] ?? 200,
         createdAt: now,
-        // Queued: the worker starts it once the training slot is free (#schedule).
+        // Queued: the worker starts it once the training slot is free (MockServer.schedule).
         startedAt: null,
         modelId: `m_${id.slice(4)}`,
         device: c.device === 'cpu' ? 'cpu (AMD Ryzen 9 7950X)' : DEVICE,
       }, ds.splits.train);
-      this.#runs.unshift(p);
-      this.#created.add(p.id);
-      this.#queue.push(p.id);
-      this.#schedule(now);
+      this.state.runs.unshift(p);
+      this.state.created.add(p.id);
+      this.state.queue.push(p.id);
+      this.schedule(now);
       return this.#toRun(p, now);
     }, 300);
   }
 
   estimateRun(body: TrainConfig): Promise<RunEstimate> {
-    return this.#call(() => {
-      if (this.scenario === 'no-throughput') throw this.#noRoute('POST /api/runs/estimate');
+    return this.call(() => {
+      if (this.scenario === 'no-throughput') throw this.noRoute('POST /api/runs/estimate');
       // The same checks as POST /api/runs; nothing is created.
-      const ds = this.#spec(body.dataset_id);
+      const ds = this.spec(body.dataset_id);
       const gpu = /^gpu:(\d+)$/.exec(body.device);
-      if (gpu && !this.#gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(body.device);
+      if (gpu && !this.gpus().some((g) => g.ordinal === Number(gpu[1]))) throw this.#noDevice(body.device);
       const c = this.#withWeights(body);
       const cloud = this.#compute(c, false);
-      const est = { ...this.#throughput.estimate(c, ds.splits.train, ds.splits.val, cloud?.offer.gpu), cli: this.#cli(c).cli };
+      const est = { ...this.state.throughput.estimate(c, ds.splits.train, ds.splits.val, cloud?.offer.gpu), cli: this.#cli(c).cli };
       const price = cloud?.offer.price_per_hour;
       if (!cloud || price === null || price === undefined) return est;
       // docs/API.md, `RunEstimate.cost`: the price over the training time (booting and the upload come on top).
@@ -275,7 +224,7 @@ export class MockTrainingApi extends MockServer {
    */
   #compute(c: TrainConfig, refuse = true): { conn: CloudConnection; offer: CloudOffer; hours: number } | null {
     const want = c.compute;
-    if (!want || !this.#cloudOn) return null;
+    if (!want || !this.state.cloudOn) return null;
     const conn = this.#connection(want.connection_id);
     if (conn.status === 'error') throw new ApiError(422, 'cloud_auth_failed', conn.error ?? `${conn.name} rejected the credentials`, 'Check the connection in Settings › Cloud.');
     const offer = this.#offersOf(conn).find((o) => o.id === want.offer_id);
@@ -294,7 +243,7 @@ export class MockTrainingApi extends MockServer {
    */
   #createCloudRun(c: TrainConfig, ds: MockDatasetSpec, cloud: { conn: CloudConnection; offer: CloudOffer; hours: number }): Run {
     const now = Date.now();
-    const id = `run_${(hash(c.name + now + this.#nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
+    const id = `run_${(hash(c.name + now + this.state.nextId++) & 0xffff).toString(16).padStart(4, '0')}`;
     const nonce = (hash(`${id}:nonce`) & 0xffff).toString(16).padStart(4, '0');
     const sizeIdx = ['folo-n', 'folo-s', 'folo-m', 'folo-l', 'folo-x'].indexOf(c.arch);
     const provisions = PROVIDERS.find((x) => x.id === cloud.conn.provider)?.provisions ?? false;
@@ -336,14 +285,14 @@ export class MockTrainingApi extends MockServer {
       },
       ds.splits.train,
     );
-    this.#runs.unshift(p);
-    this.#created.add(p.id);
+    this.state.runs.unshift(p);
+    this.state.created.add(p.id);
     return this.#toRun(p, now);
   }
 
   /** `404 device_not_found` in the real server's words. */
   #noDevice(device: string): ApiError {
-    const gpus = this.#gpus();
+    const gpus = this.gpus();
     return new ApiError(
       404,
       'device_not_found',
@@ -354,14 +303,14 @@ export class MockTrainingApi extends MockServer {
 
   /** Like `folo serve --mock`: resuming needs real checkpoints. */
   resumeRun(id: string): Promise<Run> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#profile(id);
       throw new ApiError(501, 'not_implemented', 'Resuming runs needs a real server.', 'Start folo serve without --mock to resume from checkpoints.');
     }, 200);
   }
 
   stopRun(id: string): Promise<Run> {
-    return this.#call(() => {
+    return this.call(() => {
       const p = this.#profile(id);
       const now = Date.now();
       const { done, status } = progressAt(p, now);
@@ -381,7 +330,7 @@ export class MockTrainingApi extends MockServer {
       }
       // A run that waits leaves the queue and stops at once; its trainer was never built.
       const waiting = status === 'queued';
-      this.#queue = this.#queue.filter((x) => x !== p.id);
+      this.state.queue = this.state.queue.filter((x) => x !== p.id);
       const startedAt = loopStart(p, now);
       p.startedAt = startedAt;
       p.loop = false;
@@ -392,26 +341,26 @@ export class MockTrainingApi extends MockServer {
   }
 
   deleteRun(id: string): Promise<void> {
-    return this.#call(() => {
+    return this.call(() => {
       const p = this.#profile(id);
       const status = progressAt(p, Date.now()).status;
       if (status === 'queued' || status === 'running' || status === 'stopping')
         throw new ApiError(409, 'run_active', `Run ${p.name} is ${status}.`, 'Stop it first.');
-      this.#runs = this.#runs.filter((r) => r.id !== id);
+      this.state.runs = this.state.runs.filter((r) => r.id !== id);
     });
   }
 
   /** POST /api/runs/{id}/queue, with the real server's errors and log lines (docs/API.md). */
   moveRun(id: string, req: QueueRequest): Promise<Run> {
-    return this.#call(() => {
+    return this.call(() => {
       const p = this.#profile(id);
       const action = 'action' in req;
       const position = 'position' in req;
       if (action === position || (position && !(Number.isInteger(req.position) && req.position >= 1)))
         throw new ApiError(400, 'invalid_body', 'give exactly one of `action` and `position` (a place from 1)');
       const now = Date.now();
-      const from = this.#queue.indexOf(id);
-      const order = applyQueueMove(this.#queue, id, req);
+      const from = this.state.queue.indexOf(id);
+      const order = applyQueueMove(this.state.queue, id, req);
       if (!order) {
         const status = progressAt(p, now).status;
         throw new ApiError(
@@ -421,12 +370,12 @@ export class MockTrainingApi extends MockServer {
           'only runs waiting in the queue (with a queue_position) can be moved',
         );
       }
-      this.#queue = order;
+      this.state.queue = order;
       const start = action && req.action === 'start';
       // `start` on a free slot: the worker takes it now.
-      if (start) this.#schedule(now);
-      const to = this.#queue.indexOf(id);
-      const place = `${to + 1} of ${this.#queue.length}`;
+      if (start) this.schedule(now);
+      const to = this.state.queue.indexOf(id);
+      const place = `${to + 1} of ${this.state.queue.length}`;
       this.#note(
         id,
         start
@@ -442,7 +391,7 @@ export class MockTrainingApi extends MockServer {
   }
 
   runMetrics(id: string, _signal?: AbortSignal, every = 4): Promise<RunMetrics> {
-    return this.#call(() => {
+    return this.call(() => {
       const p = this.#profile(id);
       const now = Date.now();
       // A looping run's history restarts with each loop.
@@ -455,12 +404,12 @@ export class MockTrainingApi extends MockServer {
   }
 
   runSamples(id: string, epoch?: number): Promise<RunSamples> {
-    return this.#call(() => {
+    return this.call(() => {
       const p = this.#profile(id);
       const done = Math.floor(progressAt(p, Date.now()).done);
       // `epoch` is 1-based like the API; `e` indexes the run model (0-based).
       const e = Math.max(0, Math.min(done - 1, (epoch ?? done) - 1));
-      const ds = this.#spec(p.config.dataset_id);
+      const ds = this.spec(p.config.dataset_id);
       const quality = done > 0 ? epochAt(p, e).val.map50_95 : 0;
       const samples: Sample[] = [];
       // A fixed set of up to 16 validation images, spread evenly over the split; a dataset with no validation images
@@ -504,8 +453,8 @@ export class MockTrainingApi extends MockServer {
     subs.add(h);
     // The run's place in the queue and how many wait, as last reported (the snapshot carries the first one).
     const place = () => {
-      const i = this.#queue.indexOf(id);
-      return i < 0 ? null : { position: i + 1, waiting: this.#queue.length };
+      const i = this.state.queue.indexOf(id);
+      return i < 0 ? null : { position: i + 1, waiting: this.state.queue.length };
     };
     let lastPlace = JSON.stringify(place());
     let last = progressAt(p, Date.now());
@@ -525,12 +474,12 @@ export class MockTrainingApi extends MockServer {
     const timer = setInterval(() => {
       const now = Date.now();
       // `stale`: the server stops, its stream with it (EventSource then reports each failed retry).
-      if (this.scenario === 'stale' && now - this.#t0 > STALE_AFTER) {
+      if (this.scenario === 'stale' && now - this.state.t0 > STALE_AFTER) {
         if (!dropped) h.connection?.('reconnecting');
         dropped = true;
         return;
       }
-      this.#schedule(now);
+      this.schedule(now);
       // A `queue` event whenever the place or the count changed (docs/API.md: state, not changes); before `running`.
       const q = place();
       if (JSON.stringify(q) !== lastPlace) {
@@ -588,7 +537,7 @@ export class MockTrainingApi extends MockServer {
   }
 
   runLogs(id: string, limit = 500): Promise<RunLogs> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#profile(id);
       return { lines: this.#logHistory(id).slice(-Math.max(1, Math.min(5000, Math.floor(limit)))) };
     }, 120);
@@ -596,7 +545,7 @@ export class MockTrainingApi extends MockServer {
 
   /** Log lines so far for a run, reconstructed from its profile and the clock. */
   #logHistory(id: string): LogLine[] {
-    const p = this.#runs.find((r) => r.id === id);
+    const p = this.state.runs.find((r) => r.id === id);
     const notes = this.#notes.get(id) ?? [];
     if (!p) return [...notes];
     const now = Date.now();
@@ -615,11 +564,11 @@ export class MockTrainingApi extends MockServer {
 
   /** A server without the `cloud` feature (`cloud-off`, older ones): `/api/cloud` is an unknown route. */
   #cloudRoute(path: string) {
-    if (!this.#cloudOn) throw this.#noRoute(path);
+    if (!this.state.cloudOn) throw this.noRoute(path);
   }
 
   #connection(id: string): CloudConnection {
-    const c = this.#connections.find((x) => x.id === id);
+    const c = this.state.connections.find((x) => x.id === id);
     if (!c) throw new ApiError(404, 'connection_not_found', `no cloud connection '${id}'`, 'GET /api/cloud/connections lists them.');
     return c;
   }
@@ -631,7 +580,7 @@ export class MockTrainingApi extends MockServer {
   /** Every instance the mock's cloud runs launched, as at `now`: the live ones first, then the newest. */
   #instances(now: number): { instance: CloudInstance; run: RunProfile }[] {
     const out: { instance: CloudInstance; run: RunProfile }[] = [];
-    for (const p of this.#runs) {
+    for (const p of this.state.runs) {
       const instance = p.cloud ? instanceAt(p.cloud, p.id, trainEnd(p), now) : null;
       if (instance) out.push({ instance, run: p });
     }
@@ -640,16 +589,16 @@ export class MockTrainingApi extends MockServer {
   }
 
   cloudProviders(): Promise<CloudProvider[]> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#cloudRoute('GET /api/cloud/providers');
       return structuredClone(PROVIDERS);
     }, 60);
   }
 
   cloudConnections(): Promise<CloudConnection[]> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#cloudRoute('GET /api/cloud/connections');
-      return structuredClone(this.#connections);
+      return structuredClone(this.state.connections);
     }, 80);
   }
 
@@ -658,7 +607,7 @@ export class MockTrainingApi extends MockServer {
    * folo-server's mock. The secrets are kept as their hint only; the provider takes a moment to answer.
    */
   connectCloud(body: ConnectCloud): Promise<CloudConnection> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#cloudRoute('POST /api/cloud/connections');
       const provider = PROVIDERS.find((x) => x.id === body.provider);
       if (!provider) throw new ApiError(404, 'provider_not_found', `no cloud provider '${body.provider}'`, 'GET /api/cloud/providers lists them.');
@@ -674,13 +623,13 @@ export class MockTrainingApi extends MockServer {
           provider.id === 'remote' ? `the server at ${host} rejected the token` : `${provider.name} rejected this API key`,
           provider.id === 'remote' ? 'Use the token the server was started with (`folo serve --token`).' : 'Create a key with read and write access to pods: RunPod console → Settings → API Keys.',
         );
-      const taken = new Set(this.#connections.map((c) => c.name));
+      const taken = new Set(this.state.connections.map((c) => c.name));
       let name = body.name?.trim() || provider.name;
       for (let k = 2; !body.name?.trim() && taken.has(name); k++) name = `${provider.name} ${k}`;
       const local = /^(localhost|127\.|\[::1\]|10\.|192\.168\.)/i.test(host);
       const now = Date.now();
       const conn: CloudConnection = {
-        id: `cc_${(hash(`${name}:${now}:${this.#nextId++}`) & 0xffff).toString(16).padStart(4, '0')}`,
+        id: `cc_${(hash(`${name}:${now}:${this.state.nextId++}`) & 0xffff).toString(16).padStart(4, '0')}`,
         provider: provider.id,
         name,
         created: new Date(now).toISOString(),
@@ -697,14 +646,14 @@ export class MockTrainingApi extends MockServer {
           provider.fields.filter((f) => value(f.key)).map((f) => [f.key, f.secret ? secretHint(value(f.key)) : value(f.key)]),
         ),
       };
-      this.#connections.push(conn);
+      this.state.connections.push(conn);
       return structuredClone(conn);
     }, 1200);
   }
 
   /** `POST …/check`: the stored credentials again; the revoked key of `cloud-trouble` still fails (as `200`). */
   checkCloudConnection(id: string): Promise<CloudConnection> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#cloudRoute(`POST /api/cloud/connections/${id}/check`);
       const c = this.#connection(id);
       c.checked = new Date().toISOString();
@@ -713,12 +662,12 @@ export class MockTrainingApi extends MockServer {
   }
 
   disconnectCloud(id: string): Promise<void> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#cloudRoute(`DELETE /api/cloud/connections/${id}`);
       const c = this.#connection(id);
       const now = Date.now();
       const live = this.#instances(now).find(({ instance }) => instance.connection_id === id && instance.status !== 'terminated' && instance.status !== 'lost');
-      const active = this.#runs.find((p) => p.cloud?.connectionId === id && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
+      const active = this.state.runs.find((p) => p.cloud?.connectionId === id && ['queued', 'running', 'stopping'].includes(progressAt(p, now).status));
       if (live || active)
         throw new ApiError(
           409,
@@ -726,12 +675,12 @@ export class MockTrainingApi extends MockServer {
           live ? `${c.name} has a live instance, ${live.instance.name}` : `${c.name} has an active run, ${active!.name}`,
           'Terminate its instances, or wait for its runs to end, then disconnect it.',
         );
-      this.#connections = this.#connections.filter((x) => x.id !== id);
+      this.state.connections = this.state.connections.filter((x) => x.id !== id);
     }, 300);
   }
 
   cloudOffers(id: string): Promise<CloudOfferList> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#cloudRoute(`GET /api/cloud/connections/${id}/offers`);
       const c = this.#connection(id);
       if (c.status === 'error') throw new ApiError(422, 'cloud_auth_failed', c.error ?? `${c.name} rejected the credentials`, 'Check the connection in Settings › Cloud.');
@@ -740,7 +689,7 @@ export class MockTrainingApi extends MockServer {
   }
 
   cloudInstances(): Promise<CloudInstance[]> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#cloudRoute('GET /api/cloud/instances');
       return this.#instances(Date.now()).map((x) => x.instance);
     }, 100);
@@ -752,7 +701,7 @@ export class MockTrainingApi extends MockServer {
    * keeps failing (`cloud-trouble`) stays `terminating` with its error.
    */
   terminateCloudInstance(id: string): Promise<CloudInstance> {
-    return this.#call(() => {
+    return this.call(() => {
       this.#cloudRoute(`DELETE /api/cloud/instances/${id}`);
       const now = Date.now();
       const hit = this.#instances(now).find((x) => x.instance.id === id);

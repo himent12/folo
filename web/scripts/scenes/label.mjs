@@ -15,7 +15,6 @@ async function tiles(/** @type {import('playwright-core').Page} */ page, /** @ty
 export const labelScenes = [
   // ---------- Agent labeling (Datasets › Label images) ----------
   { name: 'label-jobs', path: '/datasets/label', viewports: ['desktop', 'laptop', 'tablet', 'mobile'] },
-  { name: 'label-jobs-empty', path: '/datasets/label', search: 'scenario=empty', viewports: ['desktop', 'mobile'] },
   {
     // The New labeling job dialog, filled in: two classes as chips, instructions for the agent.
     name: 'label-new-dialog',
