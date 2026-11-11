@@ -3,7 +3,7 @@
 
 import type { LabelAgent, LabelImage, LabelJob, LabelRun, LabelUsage, RunStatus } from '$lib/api/types';
 import { num, usd } from '$lib/format';
-import { AGENT_NAME } from '$lib/label';
+import { AGENT_NAME, CLASSES_MAX } from '$lib/label';
 
 /** StatusBadge's `OwnStatus` (ui/StatusBadge.tsx). */
 interface OwnStatus {
@@ -21,6 +21,13 @@ export function jobStatus(job: LabelJob): OwnStatus {
   if (job.status === 'stopping') return { status: 'stopping', label: 'Stopping' };
   if (job.run?.outcome === 'failed' && toLabel(job) > 0) return { status: 'failed', label: 'Last run failed' };
   return { status: 'queued', label: 'Idle' };
+}
+
+/** What an addition of class names could not take: "Only 80 classes fit: c81 and c82 were not added." */
+export function leftOutText(names: readonly string[]): string {
+  const shown = names.length > 4 ? [...names.slice(0, 3), `${num(names.length - 3)} more`] : names;
+  const list = shown.length > 1 ? `${shown.slice(0, -1).join(', ')} and ${shown.at(-1)}` : (shown[0] ?? '');
+  return `Only ${num(CLASSES_MAX)} classes fit: ${list} ${names.length === 1 ? 'was' : 'were'} not added.`;
 }
 
 /** The images an unscoped run labels: those without labels (pending and failed). */

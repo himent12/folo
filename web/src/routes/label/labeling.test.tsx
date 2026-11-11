@@ -82,6 +82,16 @@ describe('New labeling job', () => {
     expect(why(submitButton())).toBe('Fix the classes first');
   });
 
+  it('says which pasted classes did not fit under the limit', () => {
+    open(JobDialog, { open: true });
+    const input = document.querySelector<HTMLInputElement>('input[id$="-classes"]')!;
+    type(input, Array.from({ length: 82 }, (_, i) => `c${i + 1}`).join(', '));
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    flushSync();
+    expect(document.querySelectorAll('.chip')).toHaveLength(80);
+    expect(document.getElementById(input.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Only 80 classes fit: c81 and c82 were not added.');
+  });
+
   it('creates the job and opens its page', async () => {
     const go = vi.spyOn(router, 'go').mockImplementation(() => {});
     open(JobDialog, { open: true });

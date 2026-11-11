@@ -20,6 +20,7 @@ import Gate from '$lib/ui/Gate';
 import Input from '$lib/ui/Input';
 import TextArea from '$lib/ui/TextArea';
 import { toast } from '$lib/ui/toast';
+import { leftOutText } from './words';
 
 export interface JobDialogProps {
   open?: boolean;
@@ -47,6 +48,8 @@ export default function JobDialog(props: JobDialogProps) {
   const name = signal('');
   const classes = signal<string[]>([]);
   const draft = signal('');
+  /** The names the last addition could not take: past the limit of classes. */
+  const leftOut = signal<string[]>([]);
   const instructions = signal('');
 
   // Every opening (or another job) starts from the job as it is (or blank); a change of the job while it is open (an
@@ -60,6 +63,7 @@ export default function JobDialog(props: JobDialogProps) {
       name.set(job?.name ?? '');
       classes.set(job ? [...job.classes] : []);
       draft.set('');
+      leftOut.set([]);
       instructions.set('');
       error.set(undefined);
       touched.set(false);
@@ -201,12 +205,18 @@ export default function JobDialog(props: JobDialogProps) {
           </Field>
         ) : (
           <>
-            <Field label="Classes" for={`${uid}-classes`} error={show(errs.get().classes)} hint={`Press Enter or comma to add. Up to ${CLASSES_MAX}.`}>
+            <Field
+              label="Classes"
+              for={`${uid}-classes`}
+              error={show(errs.get().classes)}
+              hint={leftOut.get().length ? leftOutText(leftOut.get()) : `Press Enter or comma to add. Up to ${CLASSES_MAX}.`}
+            >
               <ClassChips
                 id={`${uid}-classes`}
                 bind:classes={classes}
                 bind:draft={draft}
                 max={CLASSES_MAX}
+                onleftout={(names) => leftOut.set(names)}
                 placeholder="car, person, …"
                 invalid={!!show(errs.get().classes)}
               />
