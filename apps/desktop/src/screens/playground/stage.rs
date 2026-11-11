@@ -308,7 +308,7 @@ impl FoloApp {
                                     .child(text(ty::SM, t.text_tertiary).flex_none().child("/"))
                                 })
                                 .child(
-                                    // A long file name ends in "…" at its known budget, as GPUI needs.
+                                    // A long file name ends in "…" at its known budget, as truncation needs.
                                     // What the toolbar shed shows on hover and on keyboard focus.
                                     self.disclose(
                                         div().id("play-file-name"),

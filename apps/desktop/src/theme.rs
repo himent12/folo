@@ -2,7 +2,7 @@
 //!
 //! `build.rs` turns the token file into [`tokens`]: a `Colors` struct per theme plus the type
 //! scale, spacing, radii, sizes and motion constants. This module adds the runtime pieces: the
-//! current mode as a GPUI global, colour helpers and the class palette.
+//! current mode as a folo-ui global, colour helpers and the class palette.
 
 use folo_ui::{App, BoxShadow, Global, Hsla, Rgba, point, px};
 

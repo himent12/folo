@@ -29,7 +29,7 @@ impl ThumbGeo {
     }
 }
 
-/// Paint the thumb (GPUI draws none), so overflow is visible.
+/// Paint the thumb (folo-ui draws none), so overflow is visible.
 pub fn paint_thumb(t: &Theme, handle: &ScrollHandle, hot: bool, window: &mut folo_ui::Window) {
     let Some(g) = ThumbGeo::of(handle) else { return };
     // An overlay thumb: shown while dragged, while the pointer is over its area, and for a moment

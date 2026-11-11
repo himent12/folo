@@ -1,4 +1,4 @@
-//! Generates the GPUI token tables from `design/tokens.json`, the design system shared with FOLO
+//! Generates the theme's token tables from `design/tokens.json`, the design system shared with FOLO
 //! Studio. Output: `$OUT_DIR/tokens.rs`, included by `src/theme.rs`.
 //!
 //! Colours become `Hsla` fields of a `Colors` struct (one constructor per theme; both themes must
@@ -47,7 +47,7 @@ fn main() {
     );
     std::fs::write(out_dir.join("icons.rs"), table).unwrap();
 
-    // The Windows app icon (taskbar, Alt-Tab, Explorer): GPUI loads icon resource 1 from the
+    // The Windows app icon (taskbar, Alt-Tab, Explorer): folo-ui loads icon resource 1 from the
     // executable. link.exe takes a compiled resource file as an input, so the .ico becomes a .res
     // here, in plain Rust: no resource compiler or extra crate needed.
     let ico = manifest.join("assets/folo.ico");

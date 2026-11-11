@@ -67,7 +67,7 @@ impl FoloApp {
                     // The crumbs' 4 px pads put their text on the page gutter.
                     .pl(px(self.gutter() - 4.))
                     .window_control_area(WindowControlArea::Drag)
-                    // A caption press goes to GPUI first and only reaches Windows (drag, double-click
+                    // A caption press goes to the app first and only reaches Windows (drag, double-click
                     // maximize, the caption buttons) if nothing prevents its default. The focus-tracked
                     // root would (focusing itself does), so the chrome hides the root from the hit
                     // test. The crumbs above it still take their own clicks. Hidden from the root, it
@@ -148,7 +148,7 @@ impl FoloApp {
     }
 
     /// A caption button's hit area, `layout.desktop_caption_button` wide and the title bar's
-    /// height: Minimize, Maximize / Restore or Close for Windows. In full screen GPUI reports no
+    /// height: Minimize, Maximize / Restore or Close for Windows. In full screen folo-ui reports no
     /// caption areas, so Windows doesn't act on it: it takes its own click then. Only then, since
     /// otherwise the caption press already acts (on mouse up) and a click handler would act a
     /// second time. `titlebar()` draws on it; `caption_controls` uses it bare.

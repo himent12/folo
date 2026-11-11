@@ -76,7 +76,7 @@ impl FoloApp {
                     .child(help),
             )
             .child(control)
-            // Wraps rather than truncating: GPUI only ellipsizes against a known width, so a
+            // Wraps rather than truncating: text only ellipsizes against a known width, so a
             // w_full note would hard-clip mid-word in a narrow rail.
             .child(text(ty::SM, t.text_tertiary).w_full().whitespace_normal().child(note))
             .into_any_element()

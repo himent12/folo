@@ -28,7 +28,7 @@ impl FoloApp {
         let beside = self.tables_beside(window);
         let list_w = if beside { content - (SIDE_W + 40.) - 16. } else { content };
         // 8 px of slack on every budget: a row exactly as wide as its slot can overflow it by a
-        // rounding error, and GPUI then lays the whole page out at its min-content width (the
+        // rounding error, and the layout then puts the whole page at its min-content width (the
         // hero chart collapsed to its axis labels at 1680).
         const SLACK: f32 = 8.;
         let full = list_w >= 918. + SLACK;
@@ -38,7 +38,7 @@ impl FoloApp {
         let meta_w = if full { 180. } else { 150. };
         // Stacked, width past the set's need goes to the name, arch · dataset and
         // progress (2 : 1 : 1, to their caps); only what's left opens before the numbers. Beside
-        // Best model the set stays as is: widened there, GPUI 0.2.2 laid the page out at its
+        // Best model the set stays as is: widened there, the layout puts the page at its
         // min-content width (the hero chart collapsed to its axis at 1680).
         let spare = if beside { 0. } else { list_w - SLACK - if full { 918. } else { 798. } };
         let [name_w, meta_w, prog_w] =

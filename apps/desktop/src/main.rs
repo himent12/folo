@@ -1,4 +1,4 @@
-//! FOLO Desktop: the native GPUI front end for FOLO.
+//! FOLO Desktop: the native front end for FOLO, on folo-ui (`ui/`).
 //!
 //! `folo-desktop [--server URL | --mock] [--open SCREEN] [--scenario NAME] [--width W --height H]
 //! [--theme dark|light]`; `--help` and `--version` print and exit (see [`USAGE`]).

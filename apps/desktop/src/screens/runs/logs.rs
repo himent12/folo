@@ -228,7 +228,7 @@ impl FoloApp {
 /// A log message as shown: Windows paths with `/`, split into its " · " fields, each but the
 /// first led by its dot (a wrapped line starts "· mAP50 0.745" instead of ending on "·").
 /// Rows lay the fields out unbroken in a wrapping row, so a long entry breaks between fields,
-/// never inside "mAP50 0.745" (GPUI's wrapper breaks before any non-word character, so a
+/// never inside "mAP50 0.745" (the line wrapper breaks before any non-word character, so a
 /// no-break space can't hold a pair together).
 fn log_fields(s: &str) -> Vec<String> {
     let s = slash_paths(s);

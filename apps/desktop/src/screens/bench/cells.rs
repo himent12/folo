@@ -5,7 +5,7 @@ use folo_ui::{FontWeight, IntoElement, ParentElement, SharedString, Styled, Wind
 use crate::theme::{Theme, ty};
 use crate::ui::*;
 
-/// A name and its badges on one line `width` px wide. GPUI truncates text only against a width it
+/// A name and its badges on one line `width` px wide. folo-ui truncates text only against a width it
 /// knows, so the name gets one: its own width, or what the badges leave of the line.
 pub(super) fn name_with_badges(
     t: &Theme,

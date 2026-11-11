@@ -159,7 +159,7 @@ impl FoloApp {
                     )
                     .child(
                         // A known width (the legend row is 220 px: 14 swatch, 68 name, 70 P, 44 AP50
-                        // and three 8 px gaps), so long class names end in "…" (GPUI truncates against
+                        // and three 8 px gaps), so long class names end in "…" (text truncates against
                         // the pre-shrink width). A pinned class ends its slot with a pin, the columns
                         // after it unmoved.
                         div()

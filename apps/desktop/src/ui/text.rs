@@ -32,7 +32,7 @@ pub fn text(s: TypeStep, color: Hsla) -> Div {
     div().font_family(crate::theme::SANS).step(s).text_color(color)
 }
 
-/// A group heading (palette groups, form sections). Sentence case: GPUI has no letter-spacing, and
+/// A group heading (palette groups, form sections). Sentence case: folo-ui has no letter-spacing, and
 /// untracked capitals look cramped next to sentence-case titles.
 pub fn overline(t: &Theme, label: &str) -> Div {
     text(ty::SM, t.text_tertiary).font_weight(FontWeight::MEDIUM).child(label.to_string())
@@ -55,7 +55,7 @@ pub fn rich(t: &Theme, s: TypeStep, color: Hsla, content: &str) -> Div {
             continue;
         }
         let code = i % 2 == 1;
-        // No-break spaces keep a code span together where they can, but GPUI's wrapper can still
+        // No-break spaces keep a code span together where they can, but the line wrapper can still
         // break at one, so a command that must stay whole belongs on its own chip line.
         let seg =
             if code { format!("\u{a0}{}\u{a0}", part.replace(' ', "\u{a0}")) } else { part.to_string() };
@@ -92,7 +92,7 @@ pub fn inline_link(t: &Theme, label: impl Into<SharedString>) -> Div {
         .child(icon("icons/chevron-right.svg", 12., t.text_secondary))
 }
 
-/// Truncation that ends in "…" wherever the element sits. GPUI 0.2.2's `truncate()` measures
+/// Truncation that ends in "…" wherever the element sits. folo-ui's `truncate()` measures
 /// no-wrap text once at its unbounded width and keeps that, so a flex-sized text clips without
 /// an ellipsis; wrapping text clamped to one line re-measures at each width and truncates there.
 /// Every truncated text uses this (a test keeps `.truncate()` out).

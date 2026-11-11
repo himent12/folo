@@ -1,4 +1,4 @@
-//! Charts painted with GPUI canvas primitives: line charts (raw + smoothed series, gradient
+//! Charts painted with folo-ui canvas primitives: line charts (raw + smoothed series, gradient
 //! areas, markers, hover crosshair with a readout), sparklines and histograms.
 //!
 //! Charts are plain functions of their data. Hover state is owned by the caller: the chart reports

@@ -134,7 +134,7 @@ impl FoloApp {
             .items_center()
             .gap(px(10.))
             .min_w_0()
-            // A long name gives way (ellipsis, full name on hover) before the actions do; GPUI
+            // A long name gives way (ellipsis, full name on hover) before the actions do; text
             // truncates against a known width, so it's capped by the window's.
             .child(
                 div()
